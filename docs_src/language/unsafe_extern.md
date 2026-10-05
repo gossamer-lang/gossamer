@@ -1,6 +1,6 @@
 # `lang::unsafe_extern`
 
-`unsafe extern "C" { fn strlen(text: [u8]) -> usize }` declares C functions, called inside `unsafe { }` (GT0097), and `type Name` declares a C type reached only as `ffi::Ptr<Name>` (GT0104). Parameters are scalars, `ffi::Ptr` and `Option<ffi::Ptr>`, out-parameters (`&mut` a scalar or pointer), C function pointers written `Fn(..) -> R` and filled with a named function, slices of scalars, and `#[repr(C)]` structs; results are scalars and pointers (GT0098). `std::ffi` reads and writes foreign memory by copy inside `unsafe` (GT0103), allocates from the C allocator, and holds callback context in `ffi::Handle`. Every call is foreign and unsafe whatever it does, clears and captures `errno` for `ffi::last_errno()` and `ffi::last_os_error()`, and when it blocks lets another worker start the goroutines waiting on its own; `#[link(name, search)]`, `#[link_name]`, and `#[cfg]` choose the library, symbol, and platform. A project refuses native code with `ffi = false` in `project.toml` (the default is `true`), and then a declaration in the project or a dependency is GT0102.
+`unsafe extern "C" { fn strlen(text: [u8]) -> usize }` declares C functions, called inside `unsafe { }` (GT0097), and `type Name` declares a C type reached only as `ffi::Ptr<Name>` (GT0104). Parameters are scalars, `ffi::Ptr` and `Option<ffi::Ptr>`, out-parameters (`&mut` a scalar or pointer), C function pointers written `Fn(..) -> R` and filled with a named function, slices of scalars or structs, and `#[repr(C)]` structs and `ffi::Union`s by value; results are scalars, pointers, and structs (GT0098). `#[export]` makes a free function a C symbol (GT0113), `[lib] kind` builds a C library and header from the exports, and `[native]` compiles a package's own C sources. `std::ffi` reads and writes foreign memory by copy inside `unsafe` (GT0103), allocates from the C allocator, and holds callback context in `ffi::Handle`. Every call is foreign and unsafe whatever it does, clears and captures `errno` for `ffi::last_errno()` and `ffi::last_os_error()`, and when it blocks lets another worker start the goroutines waiting on its own; `#[link(name, search)]`, `#[link_name]`, and `#[cfg]` choose the library, symbol, and platform. A project refuses native code with `ffi = false` in `project.toml` (the default is `true`), and then a declaration in the project or a dependency is GT0102.
 
 <!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
 
@@ -87,10 +87,17 @@ the standard library's own declarations (`std::term`) are never refused.
 | `Fn(A..) -> R` | a C function pointer, filled with a named function |
 | `[T]` of scalars (a `Vec`, a fixed array, a window) | a pointer to the first element, read-only |
 | `&mut [T]` | a pointer whose writes come back |
-| a `#[repr(C)]` struct of plain data | a pointer to a read-only copy in C layout |
-| `&mut` such a struct | a pointer whose writes come back |
+| a `#[repr(C)]` struct of plain data, or an `ffi::Union` | the struct by value, as C passes it |
+| `&mut` such a struct | a `T *` whose writes come back |
+| `[S]` or `&mut [S]` of such structs | a pointer to their C-layout elements, `&mut` writes copied back |
 
-A result is a scalar, `()`, `Ptr<T>`, or `Option<Ptr<T>>`. A `Ptr` result that
+A result is a scalar, `()`, `Ptr<T>`, `Option<Ptr<T>>`, or a `#[repr(C)]`
+struct. A struct crosses in registers, on the stack, or through a pointer to a
+copy, as the target's C calling convention says, so `poll(&mut fds, ..)`,
+`writev(fd, iov, ..)`, and a function returning `struct timespec` are declared
+the way their C headers read. A project whose `gossamer-version` predates 0.67
+gets GT0112 for a by-value struct parameter, which used to cross as a pointer;
+`gos check --fix` rewrites it to `&mut`. A `Ptr` result that
 comes back `NULL` raises GX0013, so declare `Option<Ptr<T>>` wherever the C API
 can answer `NULL`. A pointer a Gossamer argument crosses as is valid for the
 call only.
@@ -196,10 +203,34 @@ fields) lives in C memory: allocate it with `ffi::alloc`, pass the `Ptr`, and
 `ffi::read` it back. A `Ptr` read out of C memory carries whatever address C
 stored, `NULL` included; `p.address() == 0` tests for it.
 
+## Unions, layout, and globals
+
+`ffi::Union<(i64, f64)>` is a C union of the listed members: `Union::new(v)` or
+`Union::zeroed()` builds one, `u.get::<f64>()` reads it as a member, and
+`u.set(v)` writes one. `ffi::size_of::<T>()`, `align_of::<T>()`, and
+`offset_of::<T>("field.path")` answer C layout while compiling (GT0109 for a
+path naming no field). A C global is declared `static NAME: T` in the extern
+block and reached through `ffi::addr_of(NAME)`:
+
+<!-- fragment -->
+```gossamer
+unsafe extern "C" {
+    static mut opterr: ffi::c_int
+}
+
+unsafe { ffi::write(ffi::addr_of(opterr), 0) }
+```
+
+`unsafe { ffi::View::new(p, len) }` reads and writes C memory in place, with
+`v[i]`, `v.set(i, x)`, `v.slice(lo, hi)`, `v.fill(x)`, `v.copy_from(xs)`, and
+`v.to_vec()`, each access bounds-checked; `ffi::atomic_load`, `atomic_store`,
+`atomic_swap`, `atomic_compare_exchange`, and `atomic_fetch_add` and its
+siblings change a shared 32- or 64-bit integer atomically.
+
 ## Callbacks
 
-A C function pointer parameter is written `Fn(A..) -> R` with scalar and
-pointer types. Pass a top-level function of exactly that signature by name;
+A C function pointer parameter is written `Fn(A..) -> R` with scalar, pointer,
+and `#[repr(C)]` struct types. Pass a top-level function of exactly that signature by name;
 state it needs travels through the library's `void *` argument as an
 `ffi::Handle`:
 
@@ -224,11 +255,13 @@ fn main() {
 }
 ```
 
-- A callback runs on the thread whose foreign call invokes it: during that call
-  (`qsort`, `sqlite3_exec`), or during a later call that runs one the library
-  stored (`glfwPollEvents`, `gtk_main`, `DispatchMessage`). A callback a library
-  runs on a thread of its own ends the program with GX0015, without running.
-- A panic inside a callback is held until the foreign call that ran it returns,
+- A callback runs on the thread that invokes it: during a foreign call
+  (`qsort`, `sqlite3_exec`), during a later call that runs one the library
+  stored (`glfwPollEvents`, `gtk_main`, `DispatchMessage`), or on a thread the
+  library started (an audio callback, a worker pool). On a library's thread,
+  blocking calls block that thread and a panic ends the program with its
+  report.
+- A panic inside a callback a foreign call ran is held until that call returns,
   then raised there; it never unwinds through C frames. Meanwhile the callback
   answers zero.
 - A callback may allocate, call foreign functions, and block. It spawns only
@@ -263,6 +296,11 @@ let doubler = unsafe { ffi::fn_from_ptr::<Fn(ffi::c_int) -> ffi::c_int>(address)
 println(doubler(21))
 ```
 
+`ffi::fn_addr(f)` goes the other way: the C entry of the top-level function
+`f`, as a `Ptr<c_void>` for the function-pointer field of an ops table or a
+registration array (`luaL_Reg`, `sqlite3_module`). `Ptr::null()` fills a field
+C leaves empty.
+
 ## Linking a library
 
 `#[link(name = "z")]` links `libz` (on Windows `z.lib`, loading `z.dll`). A
@@ -283,14 +321,59 @@ program finds a shared library the way the platform does (`LD_LIBRARY_PATH`,
 program that links a library of its own links dynamically, since a static musl
 binary cannot load the platform's glibc libraries.
 
+## C sources of your own
+
+A package compiles C it carries with a `[native]` table in `project.toml`:
+
+```toml
+[native]
+sources = ["csrc/shim.c"]
+include = ["csrc/include"]
+defines = { LEVEL = "2" }
+```
+
+Declarations without `#[link]` reach its functions, under `gos run` and in a
+built binary alike, and a dependency's sources come with it. The compiler is
+`GOS_CC`, then `CC`, then the platform's (`gos env` shows which); objects are
+cached under `.gos-cache/native/` and rebuilt when a source, a header it
+includes, or the compiler changes. A fixed-arity shim here is how a program
+calls a variadic C function.
+
+## Calling Gossamer from C
+
+`#[export]` makes a free function a C symbol, under its own name or the one
+given:
+
+<!-- fragment -->
+```gossamer
+#[export("calc_add")]
+fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+```
+
+With `[lib] kind = ["staticlib", "cdylib"]` in `project.toml`, `gos build`
+writes `lib<name>.a`, the shared library, and `include/<name>.h`. C may call an
+export from any of its threads. A host that registered `runtime::at_exit`
+hooks calls `<name>_shutdown()` before it exits. An export's types follow the
+callback rules; a method, a generic or `comptime` function, `main`, or a
+malformed or repeated symbol is GT0113.
+
+## Generating declarations
+
+`gos bindgen --c include/lib.h --link lib -o src/lib_sys.gos` runs `clang`
+over a header and writes the extern block, structs, unions, constants, and
+callback types for it. Pointers to scalars become slices (`const char *` is
+`[u8]`), other pointers `Option<ffi::Ptr<T>>`, and `--target`, repeated, writes
+`#[cfg]` where targets differ.
+
 ## Not supported
 
-Pointer arithmetic (`read_at` and `write_at` index arrays), a separate
+Pointer arithmetic (`read_at`, `write_at`, and `View` index arrays), a separate
 `const T *` type, the address of a Gossamer value beyond one call, closures as
-C function pointers, ownership annotations, unions and bitfields (a byte-array
-field read with `read_at` models them), variadic functions (a fixed-arity C
-shim calls them), struct results by value, Gossamer code on a thread a library
-starts, and C++.
+C function pointers, ownership annotations, bitfields (an integer field with
+shifts models them), variadic functions (a fixed-arity shim in `[native]`
+sources calls them), and C++.
 
 ## errno and blocking
 
@@ -343,6 +426,11 @@ worker starts to run every goroutine that has not yet started.
 - A callback type with a parameter or result that has no C form is `GT0107`.
 - A closure, or a function of another signature, passed as a callback is
   `GT0108`.
+- A layout query naming no field is `GT0109`; a union member it does not list,
+  without a C layout, or listed twice is `GT0110`; a foreign static named other
+  than through `ffi::addr_of` is `GT0111`.
+- A by-value struct parameter in a project older than 0.67 is `GT0112`.
+- An `#[export]` the C ABI cannot carry is `GT0113`.
 - Any other `extern` form is `GP0016`.
 
 <!-- compile_fail GT0097 -->

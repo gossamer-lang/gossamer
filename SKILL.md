@@ -177,7 +177,7 @@ extend(&mut items)     // items is now #[1, 2, 1]
 - Integers answer `checked_add`, `saturating_sub`, `overflowing_mul`, `pow`,
   `rem_euclid`, `signum`, `abs_diff`, `isqrt`, `count_ones`; a `char`
   answers `is_alphabetic`, `is_ascii_digit`, `to_digit(radix)`,
-  `char::from_u32`. Limits: `i64::MAX`, `u8::MIN`, `f64::EPSILON`, `f64::NAN`.
+  `char::from_u32`; floats answer `mul_add` (one rounding). Limits: `i64::MAX`, `u8::MIN`, `f64::EPSILON`, `f64::NAN`.
 
 **Types**
 - `bool char i8..i64 u8..u64 isize usize f32 f64 String [T] [T; N] (A, B)
@@ -324,7 +324,9 @@ Discover signatures with `hover` / `gos doc std::<module>`. Areas:
 
 - Core: `fmt io env fs path os process time context flag errors bytes
   bufio`. `process::run(prog, args)` executes without a shell;
-  `process::spawn_piped` drives a child's stdio. `time::Instant`,
+  `Command::new(p).arg(a).stdout(Stdio::Piped).spawn()?` (after
+  `use std::process::{Command, Stdio}`; also `env`, `dir`, `status`,
+  `output`) answers a `Child` that reads, writes, and waits. `time::Instant`,
   `Duration`, `time::Time` (an instant with its UTC offset, RFC 3339).
   `fs::read_dir` entries carry `is_file`, `size`, `path` - do not re-query.
 - Text: `strings strconv utf8 unicode regex`.
@@ -397,10 +399,23 @@ tests/          # integration tests
   type, reached as `ffi::Ptr<Handle>` (`Option<Ptr<..>>` where C may answer
   NULL). Parameters are scalars, pointers, out-parameters (`&mut i32`,
   `&mut Option<Ptr<T>>` for `T **`), callbacks `Fn(..) -> R` filled with a
-  named `fn`, `[T]` / `&mut [T]` of scalars, and `#[repr(C)]` structs.
+  named `fn` (any thread may run one), `[T]` / `&mut [T]` of scalars or
+  structs, `#[repr(C)]` structs and `ffi::Union<(A, B)>` by value (`&mut S`
+  for `S *`); a struct is a result too. `static NAME: T` in the block is a C
+  global, reached as `ffi::addr_of(NAME)`.
   Memory through a `Ptr` is copied inside `unsafe`: `ffi::read`, `write`,
   `read_at`, `read_bytes`, `read_cstr`, `alloc` / `free`. Callback context is
-  an `ffi::Handle::new(value)` passed as `h.as_ptr()`. `#[link(name = "z",
+  an `ffi::Handle::new(value)` passed as `h.as_ptr()`; `ffi::fn_addr(f)`
+  fills a function-pointer field, `ffi::View::new(p, n)` reads C memory in
+  place. `gos bindgen --c lib.h` writes the declarations for a header.
+- C the package carries goes under `[native] sources = [..]` (`include`,
+  `defines`); declarations without `#[link]` reach it on every tier.
+- `#[export]` / `#[export("sym")]` on a free `fn` makes a C symbol;
+  `[lib] kind = ["staticlib", "cdylib"]` builds the archive, shared library,
+  and `include/<name>.h` (which also declares `<name>_shutdown()`).
+- `[features]` (`default`, `dep:x`, `x/feat`), `optional = true` and
+  `features = [..]` on a dependency, `#[cfg(feature = "f")]` on items and
+  `use`, `--features a,b` / `--no-default-features` on every command. `#[link(name = "z",
   search = "dir")]`, `#[link_name = "sym"]`, and `#[cfg]` per platform;
   `ffi::last_errno()` (C `errno`) and `ffi::last_os_error()` (`GetLastError`
   on Windows); `gos check --target TRIPLE` checks another platform's

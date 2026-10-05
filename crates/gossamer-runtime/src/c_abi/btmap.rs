@@ -461,6 +461,31 @@ pub unsafe extern "C" fn gos_rt_arr_format_i64(p: *const i64, len: i64) -> *mut 
     })
 }
 
+/// Renders a flat `[u64; N]` raw buffer: one 8-byte word per element, read
+/// as unsigned.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_arr_format_u64(p: *const u64, len: i64) -> *mut c_char {
+    ffi_entry!(std::ptr::null_mut(), {
+        if p.is_null() || len <= 0 {
+            return alloc_cstring(b"[]");
+        }
+        let len_usize = len.max(0) as usize;
+        let mut out = String::with_capacity(2 + len_usize * 4);
+        out.push('[');
+        for i in 0..len_usize {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            // SAFETY: `p` is non-null (checked above) and addresses `len` words (C-ABI contract),
+            // and `i` is below `len`.
+            let n = unsafe { p.add(i).read_unaligned() };
+            out.push_str(&crate::builtins::format_uint(n));
+        }
+        out.push(']');
+        alloc_cstring(out.as_bytes())
+    })
+}
+
 /// Renders a flat `[f64; N]` raw buffer. Layout: each element is
 /// stored at an 8-byte stride; we read the raw word as f64.
 #[unsafe(no_mangle)]
@@ -480,6 +505,31 @@ pub unsafe extern "C" fn gos_rt_arr_format_f64(p: *const f64, len: i64) -> *mut 
             // contract), and `i` is below `len`.
             let n = unsafe { p.add(i).read_unaligned() };
             out.push_str(&crate::builtins::format_float_debug(n));
+        }
+        out.push(']');
+        alloc_cstring(out.as_bytes())
+    })
+}
+
+/// Renders a flat `[f32; N]` raw buffer: each element is an 8-byte slot
+/// holding the value as an `f64`, spelled with single-precision digits.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_arr_format_f32(p: *const f64, len: i64) -> *mut c_char {
+    ffi_entry!(std::ptr::null_mut(), {
+        if p.is_null() || len <= 0 {
+            return alloc_cstring(b"[]");
+        }
+        let len_usize = len.max(0) as usize;
+        let mut out = String::with_capacity(2 + len_usize * 6);
+        out.push('[');
+        for i in 0..len_usize {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            // SAFETY: `p` is non-null (checked above) and addresses `len` slots (C-ABI
+            // contract), and `i` is below `len`.
+            let n = unsafe { p.add(i).read_unaligned() };
+            out.push_str(&crate::builtins::format_f32_debug(n));
         }
         out.push(']');
         alloc_cstring(out.as_bytes())

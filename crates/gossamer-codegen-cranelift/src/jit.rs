@@ -2753,11 +2753,13 @@ fn foreign_libraries(bodies: &[Body]) -> Vec<String> {
                     rvalue: gossamer_mir::Rvalue::CallIntrinsic { name, .. },
                     ..
                 } = &stmt.kind
-                    && let Some(call) = gossamer_mir::ForeignCall::parse(name)
-                    && !call.library.is_empty()
-                    && !libraries.iter().any(|known| known == call.library)
+                    && let Some(library) = gossamer_mir::ForeignCall::parse(name)
+                        .map(|call| call.library)
+                        .or_else(|| gossamer_mir::ForeignStatic::parse(name).map(|g| g.library))
+                    && !library.is_empty()
+                    && !libraries.iter().any(|known| known == library)
                 {
-                    libraries.push(call.library.to_string());
+                    libraries.push(library.to_string());
                 }
             }
         }

@@ -44,7 +44,53 @@ impl Parser<'_> {
             alias,
             list,
             module: self.mod_stack.clone(),
+            cfg: None,
         }
+    }
+
+    /// Whether the cursor is at attributes followed by `use`.
+    pub(crate) fn at_attributed_use(&self) -> bool {
+        let mut index = 0;
+        let mut saw_attribute = false;
+        loop {
+            let at_hash = matches!(self.peek_nth(index).kind, TokenKind::Punct(Punct::Hash));
+            if !at_hash || !self.peek_nth_is_punct(index + 1, Punct::LBracket) {
+                break;
+            }
+            saw_attribute = true;
+            index += 2;
+            let mut depth = 1;
+            while depth > 0 {
+                match self.peek_nth(index).kind {
+                    TokenKind::Punct(Punct::LBracket) => depth += 1,
+                    TokenKind::Punct(Punct::RBracket) => depth -= 1,
+                    TokenKind::Eof => return false,
+                    _ => {}
+                }
+                index += 1;
+            }
+        }
+        saw_attribute && matches!(self.peek_nth(index).kind, TokenKind::Keyword(Keyword::Use))
+    }
+
+    /// `#[cfg(..)] use ..`: the declaration with the conjunction of its
+    /// `cfg` attributes. Other attributes on an import mean nothing and are
+    /// dropped.
+    pub(crate) fn parse_attributed_use(&mut self) -> UseDecl {
+        let attrs = self.parse_attrs();
+        let conditions: Vec<String> = attrs
+            .outer
+            .iter()
+            .filter(|attr| attr.is_named("cfg"))
+            .filter_map(|attr| attr.tokens.clone())
+            .collect();
+        let mut decl = self.parse_use_decl();
+        decl.cfg = match conditions.as_slice() {
+            [] => None,
+            [one] => Some(one.clone()),
+            many => Some(format!("all({})", many.join(", "))),
+        };
+        decl
     }
 
     fn parse_project_use_target(&mut self) -> UseTarget {

@@ -2414,7 +2414,11 @@ impl<'a> Builder<'a> {
             peeled = *inner;
         }
         match self.tcx.kind_of(peeled) {
-            TyKind::Int(IntTy::U64 | IntTy::Usize) => Some(vec![1]),
+            // An unsigned integer orders as one: a narrow one stored at its
+            // own width widens without a sign.
+            TyKind::Int(IntTy::U8 | IntTy::U16 | IntTy::U32 | IntTy::U64 | IntTy::Usize) => {
+                Some(vec![1])
+            }
             TyKind::Int(_) | TyKind::Duration | TyKind::Instant => Some(vec![0]),
             TyKind::Float(_) => Some(vec![2]),
             TyKind::Bool => Some(vec![3]),

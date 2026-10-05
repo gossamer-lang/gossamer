@@ -328,11 +328,15 @@ pub(super) fn lower_intrinsic_call_io_math(
                     }
                     PrintKind::ArrI64(_)
                     | PrintKind::ArrF64(_)
+                    | PrintKind::ArrF32(_)
+                    | PrintKind::ArrU64(_)
                     | PrintKind::ArrBool(_)
                     | PrintKind::ArrString(_) => {
                         let (helper, len) = match kind {
                             PrintKind::ArrI64(n) => ("gos_rt_arr_format_i64", n),
                             PrintKind::ArrF64(n) => ("gos_rt_arr_format_f64", n),
+                            PrintKind::ArrF32(n) => ("gos_rt_arr_format_f32", n),
+                            PrintKind::ArrU64(n) => ("gos_rt_arr_format_u64", n),
                             PrintKind::ArrBool(n) => ("gos_rt_arr_format_bool", n),
                             PrintKind::ArrString(n) => ("gos_rt_arr_format_string", n),
                             _ => unreachable!(),

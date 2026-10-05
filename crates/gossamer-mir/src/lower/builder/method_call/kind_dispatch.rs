@@ -463,12 +463,8 @@ impl<'a> Builder<'a> {
             | "gos_rt_bheap_min_pop_f64"
             | "gos_rt_bheap_min_peek_i64" => ty,
             "gos_rt_bheap_is_empty" => self.tcx.bool_ty(),
-            // `Child::read_line() -> Option<String>`; `wait` returns
-            // `Result<i64, errors::Error>`. Pinned so the while-let /
-            // match extraction reads the packed enum correctly.
-            "gos_rt_child_read_line" | "gos_rt_stream_next_line" => self.option_string_adt_ty(),
+            "gos_rt_stream_next_line" => self.option_string_adt_ty(),
             "gos_rt_stream_read_line" => self.result_i64_error_adt_ty(),
-            "gos_rt_child_read_stdout" => self.tcx.string_ty(),
             "gos_rt_option_unwrap"
             | "gos_rt_result_unwrap"
             | "gos_rt_result_unwrap_or"
@@ -501,20 +497,9 @@ impl<'a> Builder<'a> {
                 .unwrap_or_else(|| self.tcx.int_ty(gossamer_types::IntTy::I64));
                 self.option_payload_adt_ty(payload)
             }
-            "gos_rt_child_write_stdin" | "gos_rt_child_kill" => self.tcx.bool_ty(),
-            "gos_rt_child_close_stdin" => self.tcx.unit(),
             "gos_rt_signal_wait" => self.tcx.bool_ty(),
             "gos_rt_signal_try_wait" => self.tcx.bool_ty(),
             "gos_rt_signal_stop" => self.tcx.unit(),
-            "gos_rt_child_wait" => {
-                let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
-                let err_ty = self.tcx.dyn_error_ty();
-                let substs = gossamer_types::Substs::from_types([i64_ty, err_ty]);
-                self.tcx.intern(gossamer_types::TyKind::Adt {
-                    def: gossamer_resolve::DefId::local(u32::MAX),
-                    substs,
-                })
-            }
             // `VecDeque<T>::pop_front` / `pop_back` / `peek_front` /
             // `peek_back` return `Option<T>`. Recover the element from the
             // deque's sole generic so a `VecDeque<String>` binds its
@@ -1238,12 +1223,6 @@ impl<'a> Builder<'a> {
             (Some("net::UdpSocket"), "recv_from") => Some("gos_rt_udp_recv_from"),
             (Some("net::UdpSocket"), "local_addr") => Some("gos_rt_udp_local_addr"),
             (Some("net::UdpSocket"), "close") => Some("gos_rt_udp_close"),
-            (Some("process::Child"), "write_stdin") => Some("gos_rt_child_write_stdin"),
-            (Some("process::Child"), "close_stdin") => Some("gos_rt_child_close_stdin"),
-            (Some("process::Child"), "read_line") => Some("gos_rt_child_read_line"),
-            (Some("process::Child"), "read_stdout") => Some("gos_rt_child_read_stdout"),
-            (Some("process::Child"), "wait") => Some("gos_rt_child_wait"),
-            (Some("process::Child"), "kill") => Some("gos_rt_child_kill"),
             (Some("io::Stream"), "write_byte") => Some("gos_rt_stream_write_byte"),
             (Some("io::Stream"), "write_byte_array" | "write_bytes") => {
                 Some("gos_rt_stream_write_byte_array")

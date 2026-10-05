@@ -46,7 +46,7 @@ use toolchain::{
     find_llc, find_opt, host_triple, integrated_clang_path, invoke_llc_pipeline, llvm_pass_options,
     llvm_target_triple_for, mcpu_target, pipeline_tmp_dir, target_arch_from_triple,
 };
-pub(crate) use toolchain::{target_has_preserve_most, target_is_windows};
+pub(crate) use toolchain::{target_c_abi, target_has_preserve_most, target_is_windows};
 
 /// LLVM IR strings that must appear in the module header but are
 /// not emitted through `declare_rt()`: LLVM built-in intrinsics,
@@ -570,6 +570,36 @@ pub fn set_cache_dir(dir: PathBuf) {
 /// override makes them target-aware at the single chokepoint.
 static TARGET_TRIPLE_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+static LIBRARY_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Builds a library named `name` rather than a program: the module that
+/// defines the `#[export]` entries also defines `<name>_shutdown`, which
+/// runs the library's `runtime::at_exit` hooks when its host calls it.
+pub fn set_library_name(name: String) {
+    let _ = LIBRARY_NAME.set(name);
+}
+
+/// `define <name>_shutdown`, for the chunk holding the export entries of a
+/// library build.
+fn library_shutdown_entry(bodies: &[&Body]) -> Option<String> {
+    let name = LIBRARY_NAME.get()?;
+    bodies
+        .iter()
+        .any(|body| body.name == gossamer_mir::FFI_EXPORTS_FN)
+        .then(|| {
+            let linkage = if target_is_windows() {
+                "dllexport"
+            } else {
+                "dso_local"
+            };
+            format!(
+                "declare void @gos_rt_library_shutdown()\n\
+                 define {linkage} void @\"{name}_shutdown\"() {{\n  \
+                 call void @gos_rt_library_shutdown()\n  ret void\n}}\n"
+            )
+        })
+}
+
 /// Configures the LLVM target triple for subsequent builds. No effect
 /// once a build has begun reading the triple.
 pub fn set_target_triple(triple: String) {
@@ -905,6 +935,7 @@ fn render_chunk_module(
     imports: &[usize],
     ctx: &ModuleCtx<'_>,
 ) -> Result<String, BuildError> {
+    let _exports = crate::lower::ExportScope::enter(ctx.all_bodies);
     let string_pool =
         std::rc::Rc::new(std::cell::RefCell::new(crate::lower::StringPool::default()));
 
@@ -1115,6 +1146,11 @@ fn render_chunk_module(
             }
             writeln!(out).unwrap();
         }
+    }
+
+    let chunk_bodies: Vec<&Body> = chunk_indices.iter().map(|&i| &ctx.all_bodies[i]).collect();
+    if let Some(entry) = library_shutdown_entry(&chunk_bodies) {
+        out.push_str(&entry);
     }
 
     // C `@main` shim lives in the chunk that owns `main`. Emitted whether
@@ -1469,6 +1505,7 @@ fn render_module_to_path(
         None => "module.body".to_string(),
     });
 
+    let _exports = crate::lower::ExportScope::enter(bodies);
     let mut fn_name_by_def: std::collections::HashMap<u32, String> =
         std::collections::HashMap::new();
     let mut param_tys_by_name: std::collections::HashMap<String, Vec<gossamer_types::Ty>> =
@@ -1588,6 +1625,10 @@ fn render_module_to_path(
         }
     }
 
+    let all: Vec<&Body> = bodies.iter().collect();
+    if let Some(entry) = library_shutdown_entry(&all) {
+        body_w.write_all(entry.as_bytes())?;
+    }
     if let Some(user_main) = bodies.iter().find(|b| b.name == "main") {
         let ret_ty = user_main.local_ty(gossamer_mir::Local::RETURN);
         let ret_is_unit = matches!(tcx.kind(ret_ty), Some(gossamer_types::TyKind::Unit));

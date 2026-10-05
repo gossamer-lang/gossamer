@@ -418,6 +418,45 @@ impl<'a> Lowerer<'a> {
             self.emit_named_call("gos_rt_math_abs_i64", args, destination, target)?;
             return Ok(());
         }
+        // Counting trailing zeros is one instruction; `Mask::first_set`
+        // reaches it once per hit in a scanning loop.
+        if !program_fn && name == "gos_rt_bits_trailing_zeros" && args.len() == 1 {
+            let raw = self.lower_operand(&args[0])?;
+            let ty = self.operand_llvm_ty(&args[0]);
+            let word = self.coerce_llvm_value(&raw, &ty, "i64");
+            self.runtime_refs
+                .insert("declare i64 @llvm.cttz.i64(i64, i1)".to_string());
+            let count = self.fresh();
+            writeln!(
+                self.out,
+                "  {count} = call i64 @llvm.cttz.i64(i64 {word}, i1 false)"
+            )
+            .unwrap();
+            let dest_ty_mir = self.place_leaf_ty(destination);
+            if !is_unit(self.tcx, dest_ty_mir) {
+                let dest_ty = render_ty(self.tcx, dest_ty_mir);
+                let value = self.coerce_llvm_value(&count, "i64", &dest_ty);
+                self.store_value_to_place(destination, &dest_ty, &value);
+            }
+            emit_terminator_branch(&mut self.out, target);
+            return Ok(());
+        }
+        // A fused multiply-add is one instruction; a call per use would
+        // dominate the lane loops `Simd::mul_add` lowers to.
+        if !program_fn
+            && matches!(name.as_str(), "gos_rt_f64_mul_add" | "gos_rt_f32_mul_add")
+            && args.len() == 3
+        {
+            let value = self.inline_mul_add(name == "gos_rt_f32_mul_add", args)?;
+            let dest_ty_mir = self.place_leaf_ty(destination);
+            if !is_unit(self.tcx, dest_ty_mir) {
+                let dest_ty = render_ty(self.tcx, dest_ty_mir);
+                let value = self.coerce_llvm_value(&value, "double", &dest_ty);
+                self.store_value_to_place(destination, &dest_ty, &value);
+            }
+            emit_terminator_branch(&mut self.out, target);
+            return Ok(());
+        }
         // Recognise `math::*` calls and emit a direct
         // LLVM intrinsic invocation instead of routing
         // through an undefined `@"math::sqrt"` symbol. These

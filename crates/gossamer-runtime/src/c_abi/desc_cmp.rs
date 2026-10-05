@@ -751,11 +751,36 @@ unsafe fn compare_vec_in(
         if b.is_null() { 0 } else { unsafe { (*b).len } },
     );
     let shared = la.min(lb);
+    // SAFETY: `elem_desc` addresses the element descriptor inside `tags`.
+    let elem_tag = unsafe { *tags.add(elem_desc) };
     for i in 0..shared {
         // SAFETY: `i` is below `a`'s length.
         let ea = unsafe { elem_addr(a, i) };
         // SAFETY: `i` is below `b`'s length.
         let eb = unsafe { elem_addr(b, i) };
+        // A vector of narrow scalars stores each at its own width, which a
+        // comparison of whole words would read past.
+        // SAFETY: `a` and `b` are live vecs with element `i` (checked above).
+        let (wa, wb) = unsafe { ((*a).elem_bytes, (*b).elem_bytes) };
+        if (wa < 8 || wb < 8) && matches!(elem_tag, 0 | 1 | 3 | 4) {
+            let signed = elem_tag == 0;
+            // SAFETY: `ea` and `eb` address one element of their vec's width.
+            let (va, vb) =
+                unsafe { (narrow_scalar(ea, wa, signed), narrow_scalar(eb, wb, signed)) };
+            // SAFETY: `va` and `vb` are words on the stack.
+            let ord = unsafe {
+                compare_flat_in(
+                    mode,
+                    elem_tag,
+                    (&raw const va).cast(),
+                    (&raw const vb).cast(),
+                )
+            };
+            if ord != 0 {
+                return ord;
+            }
+            continue;
+        }
         let mut c = elem_desc;
         let ord =
             // SAFETY: `ea` and `eb` are elements laid out as `elem_desc` describes.
@@ -765,6 +790,26 @@ unsafe fn compare_vec_in(
         }
     }
     ord_code(la.cmp(&lb))
+}
+
+/// The scalar of `width` bytes at `at`, widened to a word: sign-extended
+/// when `signed`, zero-extended otherwise.
+///
+/// # Safety
+/// `at` addresses `width` readable bytes.
+unsafe fn narrow_scalar(at: *const u8, width: u32, signed: bool) -> i64 {
+    // SAFETY: `at` addresses `width` bytes (contract).
+    unsafe {
+        match (width, signed) {
+            (1, true) => i64::from(at.cast::<i8>().read_unaligned()),
+            (1, false) => i64::from(at.read_unaligned()),
+            (2, true) => i64::from(at.cast::<i16>().read_unaligned()),
+            (2, false) => i64::from(at.cast::<u16>().read_unaligned()),
+            (4, true) => i64::from(at.cast::<i32>().read_unaligned()),
+            (4, false) => i64::from(at.cast::<u32>().read_unaligned()),
+            _ => at.cast::<i64>().read_unaligned(),
+        }
+    }
 }
 
 unsafe fn elem_addr(v: *const GosVec, idx: i64) -> *const u8 {

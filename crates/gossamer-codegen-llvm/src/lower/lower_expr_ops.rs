@@ -1164,6 +1164,56 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
+    /// `x * a + b` rounded once: `llvm.fma` at double width, or for an
+    /// `f32` at single width between a truncation and a widening, which are
+    /// exact on values an `f32` holds.
+    pub(crate) fn inline_mul_add(
+        &mut self,
+        single: bool,
+        args: &[Operand],
+    ) -> Result<String, BuildError> {
+        let mut values = Vec::with_capacity(3);
+        for arg in args {
+            let raw = self.lower_operand(arg)?;
+            let ty = self.operand_llvm_ty(arg);
+            values.push(if ty == "double" {
+                raw
+            } else {
+                self.coerce_llvm_value(&raw, &ty, "double")
+            });
+        }
+        if !single {
+            self.runtime_refs
+                .insert("declare double @llvm.fma.f64(double, double, double)".to_string());
+            let out = self.fresh();
+            writeln!(
+                self.out,
+                "  {out} = call double @llvm.fma.f64(double {}, double {}, double {})",
+                values[0], values[1], values[2]
+            )
+            .unwrap();
+            return Ok(out);
+        }
+        self.runtime_refs
+            .insert("declare float @llvm.fma.f32(float, float, float)".to_string());
+        let mut narrow = Vec::with_capacity(3);
+        for value in &values {
+            let n = self.fresh();
+            writeln!(self.out, "  {n} = fptrunc double {value} to float").unwrap();
+            narrow.push(n);
+        }
+        let fused = self.fresh();
+        writeln!(
+            self.out,
+            "  {fused} = call float @llvm.fma.f32(float {}, float {}, float {})",
+            narrow[0], narrow[1], narrow[2]
+        )
+        .unwrap();
+        let out = self.fresh();
+        writeln!(self.out, "  {out} = fpext float {fused} to double").unwrap();
+        Ok(out)
+    }
+
     /// Single-arg LLVM math intrinsic dispatch: emits the call
     /// + result store + outgoing terminator branch.
     pub(crate) fn lower_math_intrinsic(

@@ -57,12 +57,33 @@ pub(crate) fn read_entry_unit(file: &Path) -> Result<EntryUnit> {
     let resolved =
         std::path::absolute(resolve_gos_source(file)).unwrap_or_else(|_| resolve_gos_source(file));
     let entry = fs::read_to_string(&resolved).map_err(|err| friendly_io_error(err, &resolved))?;
+    install_features(&resolved)?;
     let (source, origins) = gossamer_pkg::bundle::bundle_entry_source_traced(&resolved, entry);
     Ok(EntryUnit {
         source,
         entry: resolved,
         origins,
     })
+}
+
+static FEATURE_REQUEST: parking_lot::Mutex<Option<gossamer_pkg::features::FeatureRequest>> =
+    parking_lot::Mutex::new(None);
+
+/// Records the features the command line asks for.
+pub(crate) fn set_feature_request(request: gossamer_pkg::features::FeatureRequest) {
+    *FEATURE_REQUEST.lock() = Some(request);
+}
+
+/// Resolves the features of `entry`'s program from the command line's
+/// request and installs them for the bundler (which optional dependencies
+/// it includes) and for `#[cfg(feature = "..")]`.
+pub(crate) fn install_features(entry: &Path) -> Result<()> {
+    let request = FEATURE_REQUEST.lock().clone().unwrap_or_default();
+    let resolved = gossamer_pkg::features::resolve(entry, &request)
+        .map_err(|err| anyhow!("features: {err}"))?;
+    gossamer_pkg::features::install(&resolved);
+    gossamer_ast::cfg::set_package_features(resolved.per_package);
+    Ok(())
 }
 
 /// Registers every file `unit` was assembled from and records which of

@@ -34,6 +34,7 @@ pub mod comptime_fold;
 pub mod doc;
 pub mod loaders;
 mod main_stack;
+pub mod native_sources;
 pub mod paths;
 pub mod repl;
 pub mod repl_handles;

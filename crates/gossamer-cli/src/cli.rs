@@ -41,6 +41,14 @@ pub(crate) struct Cli {
     /// by taking the more restrictive of the two.
     #[arg(long = "comptime-io", global = true, value_enum, value_name = "LEVEL")]
     comptime_io: Option<ComptimeIoArg>,
+    /// Features of the project to build with, beside its `default` ones:
+    /// `--features sqlite,trace`. Each turns on what its `[features]` entry
+    /// lists.
+    #[arg(long, global = true, value_delimiter = ',', value_name = "FEATURES")]
+    features: Vec<String>,
+    /// Builds without the project's `default` features.
+    #[arg(long = "no-default-features", global = true)]
+    no_default_features: bool,
     /// Subcommand to dispatch; omit to start the REPL.
     #[command(subcommand)]
     command: Option<Command>,
@@ -386,7 +394,8 @@ enum Command {
         check: bool,
     },
     /// Scaffold a `#[gos_module]` binding skeleton from a Rust
-    /// source file. Walks the supplied file's `pub fn` items,
+    /// source file, or with `--c` write Gossamer declarations for a C
+    /// header. Walks the supplied file's `pub fn` items,
     /// classifies each by whether its signature uses types the
     /// binding ABI supports (`String`, `i64`, `bool`, `Vec<T>`,
     /// `Option<T>`, `Result<T, E>`, tuples, `Bytes`, user structs
@@ -395,16 +404,40 @@ enum Command {
     /// signatures use unsupported types are emitted as `///
     /// Unsupported` comments so the binding author sees the gap.
     Bindgen {
-        /// Path to the Rust source file or crate root to scan.
+        /// Path to the Rust source file or crate root to scan, or with
+        /// `--c` the C header to read.
         input: PathBuf,
         /// Output directory for the scaffolded binding crate.
-        /// Defaults to `./.gos-bindings/<crate-name>/`.
-        #[arg(long)]
+        /// Defaults to `./.gos-bindings/<crate-name>/`. With `--c`, the
+        /// `.gos` file to write; standard output when omitted.
+        #[arg(long, short = 'o')]
         output: Option<PathBuf>,
         /// Gossamer-side module path to use. Defaults to the
         /// crate-name with `-` replaced by `_`.
         #[arg(long)]
         module: Option<String>,
+        /// Read `input` as a C header (with clang) and write Gossamer
+        /// declarations for it: an `unsafe extern "C"` block, `#[repr(C)]`
+        /// structs, `ffi::Union` aliases, opaque types, and constants.
+        #[arg(long)]
+        c: bool,
+        /// With `--c`, a target triple to read the header for; repeat it to
+        /// write per-target `#[cfg]` where the declarations differ.
+        #[arg(long = "target")]
+        targets: Vec<String>,
+        /// With `--c`, the declarations to keep, as `*` globs (`git_*`);
+        /// without one, those declared in the header's own directory tree.
+        #[arg(long)]
+        allow: Vec<String>,
+        /// With `--c`, an include directory.
+        #[arg(long = "include", short = 'I')]
+        include: Vec<PathBuf>,
+        /// With `--c`, a preprocessor definition, `NAME` or `NAME=VALUE`.
+        #[arg(long = "define", short = 'D')]
+        define: Vec<String>,
+        /// With `--c`, the library the `#[link(name = ..)]` attribute names.
+        #[arg(long)]
+        link: Option<String>,
     },
     /// Emit an item listing derived from doc comments / signatures.
     Doc {
@@ -683,6 +716,9 @@ enum Command {
         /// Remove legacy build cache entries.
         #[arg(long)]
         build_cache: bool,
+        /// Remove objects and libraries compiled from `[native]` sources.
+        #[arg(long)]
+        native: bool,
         /// Remove every toolchain cache class.
         #[arg(long)]
         all: bool,
@@ -730,6 +766,10 @@ enum Command {
 pub(crate) fn run() -> ExitCode {
     let cli = parse_cli();
     crate::comptime_fold::set_command_line_level(cli.comptime_io.map(ComptimeIoArg::level));
+    crate::paths::set_feature_request(gossamer_pkg::features::FeatureRequest {
+        features: cli.features.clone(),
+        no_default: cli.no_default_features,
+    });
     match dispatch(cli.command, cli.verbose, cli.execute) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
@@ -1254,7 +1294,27 @@ fn dispatch(
             input,
             output,
             module,
-        }) => cmd::bindgen::run(&input, output.as_deref(), module.as_deref()),
+            c,
+            targets,
+            allow,
+            include,
+            define,
+            link,
+        }) => {
+            if c {
+                cmd::bindgen_c::run(&cmd::bindgen_c::Options {
+                    header: input,
+                    targets,
+                    allow,
+                    include,
+                    define,
+                    link,
+                    output,
+                })
+            } else {
+                cmd::bindgen::run(&input, output.as_deref(), module.as_deref())
+            }
+        }
         Some(Command::Doc {
             file,
             html,
@@ -1387,6 +1447,7 @@ fn dispatch(
             runners,
             packages,
             build_cache,
+            native,
             all,
         }) => {
             use gossamer_driver::cache_maintenance::CacheClass;
@@ -1400,6 +1461,7 @@ fn dispatch(
                     (runners, CacheClass::Runners),
                     (packages, CacheClass::Packages),
                     (build_cache, CacheClass::Build),
+                    (native, CacheClass::Native),
                 ] {
                     if enabled {
                         classes.push(class);

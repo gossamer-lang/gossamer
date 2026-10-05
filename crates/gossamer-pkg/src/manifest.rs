@@ -29,6 +29,15 @@ pub struct Manifest {
     /// name derived from the final segment of its id, so two packages
     /// sharing that segment need one of these to coexist.
     pub dependency_modules: BTreeMap<String, String>,
+    /// The features each dependency is built with and whether it is
+    /// optional, keyed by project id; a dependency absent here is required
+    /// and builds with its default features.
+    pub dependency_features: BTreeMap<String, DependencyFeatures>,
+    /// `[features]` - each feature this package offers, with the features,
+    /// `dep:<id>` optional dependencies, and `<id>/<feature>` dependency
+    /// features it turns on. `default` lists those a build gets unless it
+    /// asks otherwise.
+    pub features: BTreeMap<String, Vec<String>>,
     /// `[registries]` map keyed by DNS prefix.
     pub registries: BTreeMap<String, String>,
     /// `[trusted-publishers]` map from package id to the hex Ed25519
@@ -47,6 +56,51 @@ pub struct Manifest {
     /// convention only applies when no `[[bin]]` is declared
     /// either.
     pub lib: Option<LibTarget>,
+    /// `[native]` table - C and assembly sources the package compiles
+    /// with the target's C compiler and links like a `#[link]` library.
+    pub native: Option<NativeSpec>,
+}
+
+/// How a dependency's features are chosen: `features = [..]`,
+/// `default-features = false`, and `optional = true` in its inline table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencyFeatures {
+    /// Features turned on in the dependency.
+    pub features: Vec<String>,
+    /// Whether the dependency's `default` features are on.
+    pub default_features: bool,
+    /// Whether the dependency is built only when a `dep:<id>` member of an
+    /// enabled feature names it.
+    pub optional: bool,
+}
+
+impl Default for DependencyFeatures {
+    fn default() -> Self {
+        Self {
+            features: Vec::new(),
+            default_features: true,
+            optional: false,
+        }
+    }
+}
+
+/// `[native]` table: the C and assembly sources a package carries.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeSpec {
+    /// `native.sources` - `.c`, `.s`, and `.S` files, relative to the
+    /// manifest directory.
+    pub sources: Vec<String>,
+    /// `native.include` - include directories, relative to the manifest
+    /// directory.
+    pub include: Vec<String>,
+    /// `native.defines` - preprocessor definitions; an empty value defines
+    /// the name with no value.
+    pub defines: BTreeMap<String, String>,
+    /// `native.flags` - further compiler flags, passed as written.
+    pub flags: Vec<String>,
+    /// `native.feature` - the package feature the sources belong to; the
+    /// sources compile only when it is enabled.
+    pub feature: Option<String>,
 }
 
 /// One `[[bin]]` entry.
@@ -67,6 +121,32 @@ pub struct LibTarget {
     /// `lib.path` - relative to manifest dir. Defaults to
     /// `src/lib.gos`.
     pub path: Option<String>,
+    /// `lib.kind` - the native artifacts `gos build` writes for the
+    /// library's `#[export]` functions. Empty for a library only other
+    /// Gossamer packages use.
+    pub kind: Vec<LibKind>,
+}
+
+/// A native artifact a `[lib]` target builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LibKind {
+    /// A static archive a C build links: `lib<name>.a`, or `<name>.lib` on
+    /// Windows.
+    Staticlib,
+    /// A shared library a C program links or loads: `lib<name>.so`,
+    /// `lib<name>.dylib`, or `<name>.dll`.
+    Cdylib,
+}
+
+impl LibKind {
+    /// The manifest spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Staticlib => "staticlib",
+            Self::Cdylib => "cdylib",
+        }
+    }
 }
 
 /// `[project]` table contents.
@@ -223,6 +303,9 @@ pub enum ManifestError {
         /// Human-readable expected type.
         expected: &'static str,
     },
+    /// A `[lib] kind` the toolchain does not build.
+    #[error("unknown lib.kind {0:?}; write \"staticlib\", \"cdylib\", or both")]
+    UnknownLibKind(String),
     /// A line could not be parsed.
     #[error("malformed line {line_no}: {line}")]
     Malformed {
@@ -352,6 +435,8 @@ impl Manifest {
                     | "rust-bindings"
                     | "bin"
                     | "lib"
+                    | "native"
+                    | "features"
             ) {
                 return Err(ManifestError::Malformed {
                     line_no: 0,
@@ -441,12 +526,24 @@ impl Manifest {
         };
         let mut deps: BTreeMap<String, DependencySpec> = BTreeMap::new();
         let mut dep_modules: BTreeMap<String, String> = BTreeMap::new();
+        let mut dep_features: BTreeMap<String, DependencyFeatures> = BTreeMap::new();
         if let Some(table) = optional_toml_table(root, "dependencies")? {
             for (key, value) in table {
                 deps.insert(key.clone(), parse_dependency_toml(value, key)?);
                 if let Some(module) = parse_dependency_module(value, key)? {
                     dep_modules.insert(key.clone(), module);
                 }
+                if let Some(chosen) = parse_dependency_features(value, key)? {
+                    dep_features.insert(key.clone(), chosen);
+                }
+            }
+        }
+        let mut features: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        if let Some(table) = optional_toml_table(root, "features")? {
+            for key in table.keys() {
+                let members = optional_toml_string_array(table, key, &format!("features.{key}"))?
+                    .unwrap_or_default();
+                features.insert(key.clone(), members);
             }
         }
 
@@ -492,6 +589,7 @@ impl Manifest {
                 Ok::<_, ManifestError>(LibTarget {
                     name: optional_toml_str(raw, "name", "lib.name")?,
                     path: optional_toml_str(raw, "path", "lib.path")?,
+                    kind: parse_lib_kinds(raw.get("kind"))?,
                 })
             })
             .transpose()?;
@@ -523,11 +621,14 @@ impl Manifest {
             },
             dependencies: deps,
             dependency_modules: dep_modules,
+            dependency_features: dep_features,
+            features,
             registries,
             trusted_publishers,
             rust_bindings,
             bins: bins_parsed,
             lib: lib_parsed,
+            native: parse_native(root)?,
         })
     }
 
@@ -606,14 +707,23 @@ impl Manifest {
         if !self.project.ffi {
             out.push_str("ffi = false\n");
         }
+        self.render_source_tables(&mut out);
+        self.render_targets(&mut out);
+        self.render_build_tables(&mut out);
+        out
+    }
+
+    /// `[dependencies]`, `[registries]`, `[trusted-publishers]`, and `[rust-bindings]`.
+    fn render_source_tables(&self, out: &mut String) {
         if !self.dependencies.is_empty() {
             out.push_str("\n[dependencies]\n");
             for (id, spec) in &self.dependencies {
                 let module = self.dependency_modules.get(id).map(String::as_str);
+                let chosen = self.dependency_features.get(id);
                 out.push_str(&format!(
                     "{} = {}\n",
                     render_table_key(id),
-                    render_dependency(spec, module)
+                    render_dependency(spec, module, chosen)
                 ));
             }
         }
@@ -635,6 +745,10 @@ impl Manifest {
                 out.push_str(&format!("{name} = {}\n", render_rust_binding(spec)));
             }
         }
+    }
+
+    /// The `[[bin]]` and `[lib]` targets.
+    fn render_targets(&self, out: &mut String) {
         for bin in &self.bins {
             out.push_str(&format!("\n[[bin]]\nname = {}\n", quoted(&bin.name)));
             if let Some(path) = &bin.path {
@@ -649,8 +763,46 @@ impl Manifest {
             if let Some(path) = &lib.path {
                 out.push_str(&format!("path = {}\n", quoted(path)));
             }
+            if !lib.kind.is_empty() {
+                let kinds: Vec<String> = lib.kind.iter().map(|k| quoted(k.as_str())).collect();
+                out.push_str(&format!("kind = [{}]\n", kinds.join(", ")));
+            }
         }
-        out
+    }
+
+    /// `[features]` and `[native]`.
+    fn render_build_tables(&self, out: &mut String) {
+        if !self.features.is_empty() {
+            out.push_str("\n[features]\n");
+            for (name, members) in &self.features {
+                out.push_str(&format!(
+                    "{} = {}\n",
+                    render_table_key(name),
+                    quoted_list(members)
+                ));
+            }
+        }
+        if let Some(native) = &self.native {
+            out.push_str("\n[native]\n");
+            out.push_str(&format!("sources = {}\n", quoted_list(&native.sources)));
+            if !native.include.is_empty() {
+                out.push_str(&format!("include = {}\n", quoted_list(&native.include)));
+            }
+            if !native.defines.is_empty() {
+                let pairs: Vec<String> = native
+                    .defines
+                    .iter()
+                    .map(|(name, value)| format!("{} = {}", quoted(name), quoted(value)))
+                    .collect();
+                out.push_str(&format!("defines = {{ {} }}\n", pairs.join(", ")));
+            }
+            if !native.flags.is_empty() {
+                out.push_str(&format!("flags = {}\n", quoted_list(&native.flags)));
+            }
+            if let Some(feature) = &native.feature {
+                out.push_str(&format!("feature = {}\n", quoted(feature)));
+            }
+        }
     }
 }
 
@@ -889,6 +1041,95 @@ fn optional_toml_string_array(
         .map(Some)
 }
 
+/// The `[native]` table, when the manifest has one.
+fn parse_native(root: &toml::Table) -> Result<Option<NativeSpec>, ManifestError> {
+    let Some(table) = optional_toml_table(root, "native")? else {
+        return Ok(None);
+    };
+    for key in table.keys() {
+        if !matches!(
+            key.as_str(),
+            "sources" | "include" | "defines" | "flags" | "feature"
+        ) {
+            return Err(ManifestError::Malformed {
+                line_no: 0,
+                line: format!("unknown key `{key}` in [native]"),
+            });
+        }
+    }
+    let sources =
+        optional_toml_string_array(table, "sources", "native.sources")?.unwrap_or_default();
+    if sources.is_empty() {
+        return Err(ManifestError::WrongType {
+            field: "native.sources".to_string(),
+            expected: "non-empty array of source paths",
+        });
+    }
+    let mut defines = BTreeMap::new();
+    if let Some(value) = table.get("defines") {
+        let Some(entries) = value.as_table() else {
+            return Err(ManifestError::WrongType {
+                field: "native.defines".to_string(),
+                expected: "table of strings",
+            });
+        };
+        for (name, value) in entries {
+            let value = value.as_str().ok_or_else(|| ManifestError::WrongType {
+                field: format!("native.defines.{name}"),
+                expected: "string",
+            })?;
+            defines.insert(name.clone(), value.to_string());
+        }
+    }
+    Ok(Some(NativeSpec {
+        sources,
+        include: optional_toml_string_array(table, "include", "native.include")?
+            .unwrap_or_default(),
+        defines,
+        flags: optional_toml_string_array(table, "flags", "native.flags")?.unwrap_or_default(),
+        feature: optional_toml_str(table, "feature", "native.feature")?,
+    }))
+}
+
+/// `[lib] kind`: one kind as a string or several as an array, each listed
+/// once.
+fn parse_lib_kinds(value: Option<&toml::Value>) -> Result<Vec<LibKind>, ManifestError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let names: Vec<&str> = match value {
+        toml::Value::String(one) => vec![one.as_str()],
+        toml::Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                item.as_str().ok_or_else(|| ManifestError::WrongType {
+                    field: format!("lib.kind[{i}]"),
+                    expected: "string",
+                })
+            })
+            .collect::<Result<_, _>>()?,
+        _ => {
+            return Err(ManifestError::WrongType {
+                field: "lib.kind".to_string(),
+                expected: "string or array of strings",
+            });
+        }
+    };
+    let mut kinds = Vec::with_capacity(names.len());
+    for name in names {
+        let kind = match name {
+            "staticlib" => LibKind::Staticlib,
+            "cdylib" => LibKind::Cdylib,
+            other => return Err(ManifestError::UnknownLibKind(other.to_string())),
+        };
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    Ok(kinds)
+}
+
 fn parse_bins(value: Option<&toml::Value>) -> Result<Vec<BinTarget>, ManifestError> {
     let Some(value) = value else {
         return Ok(Vec::new());
@@ -980,6 +1221,37 @@ fn parse_dependency_toml(value: &toml::Value, key: &str) -> Result<DependencySpe
     Ok(DependencySpec::Inline(InlineDependency::Tarball {
         url,
         sha256,
+    }))
+}
+
+/// Reads a dependency's `features`, `default-features`, and `optional`
+/// keys, or `None` when it sets none of them.
+fn parse_dependency_features(
+    value: &toml::Value,
+    key: &str,
+) -> Result<Option<DependencyFeatures>, ManifestError> {
+    let Some(table) = value.as_table() else {
+        return Ok(None);
+    };
+    let flag = |name: &str, default: bool| -> Result<bool, ManifestError> {
+        match table.get(name) {
+            None => Ok(default),
+            Some(value) => value.as_bool().ok_or_else(|| ManifestError::WrongType {
+                field: format!("{key}.{name}"),
+                expected: "boolean",
+            }),
+        }
+    };
+    let features = optional_toml_string_array(table, "features", &format!("{key}.features"))?;
+    let default_features = flag("default-features", true)?;
+    let optional = flag("optional", false)?;
+    if features.is_none() && default_features && !optional {
+        return Ok(None);
+    }
+    Ok(Some(DependencyFeatures {
+        features: features.unwrap_or_default(),
+        default_features,
+        optional,
     }))
 }
 
@@ -1130,7 +1402,11 @@ fn is_valid_binding_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-fn render_dependency(spec: &DependencySpec, module: Option<&str>) -> String {
+fn render_dependency(
+    spec: &DependencySpec,
+    module: Option<&str>,
+    chosen: Option<&DependencyFeatures>,
+) -> String {
     let mut parts = match spec {
         DependencySpec::Registry(requirement) => return quoted(&requirement.to_string()),
         DependencySpec::Inline(InlineDependency::Git { url, reference }) => {
@@ -1151,6 +1427,17 @@ fn render_dependency(spec: &DependencySpec, module: Option<&str>) -> String {
     };
     if let Some(module) = module {
         parts.push(format!("module = {}", quoted(module)));
+    }
+    if let Some(chosen) = chosen {
+        if !chosen.features.is_empty() {
+            parts.push(format!("features = {}", quoted_list(&chosen.features)));
+        }
+        if !chosen.default_features {
+            parts.push("default-features = false".to_string());
+        }
+        if chosen.optional {
+            parts.push("optional = true".to_string());
+        }
     }
     format!("{{ {} }}", parts.join(", "))
 }

@@ -124,12 +124,45 @@ impl Parser<'_> {
         let visibility = self.parse_visibility();
         if self.at_keyword(Keyword::Unsafe)
             && matches!(self.peek_nth(1).kind, TokenKind::Keyword(Keyword::Extern))
-            && matches!(self.peek_nth(2).kind, TokenKind::StringLit)
-            && self.peek_nth_is_punct(3, Punct::LBrace)
+            && ((matches!(self.peek_nth(2).kind, TokenKind::StringLit)
+                && self.peek_nth_is_punct(3, Punct::LBrace))
+                || self.peek_nth_is_punct(2, Punct::LBrace))
         {
             return self.parse_extern_block(start_span, &attrs);
         }
+        if self.at_keyword(Keyword::Extern)
+            && matches!(self.peek_nth(1).kind, TokenKind::StringLit)
+            && matches!(self.peek_nth(2).kind, TokenKind::Keyword(Keyword::Fn))
+        {
+            return vec![self.parse_extern_fn_definition(start_span, attrs, visibility)];
+        }
         vec![self.parse_item_after(start_span, attrs, visibility)]
+    }
+
+    /// `extern "C" fn name(..) { .. }`: GP0016 with the rewrite to
+    /// `#[export] fn`, which takes a lone `#[no_mangle]` before it along. The
+    /// function itself is parsed as written, so the rest of it still checks.
+    fn parse_extern_fn_definition(
+        &mut self,
+        start_span: gossamer_lex::Span,
+        attrs: Attrs,
+        visibility: Visibility,
+    ) -> Item {
+        let extern_span = self.peek_span();
+        self.bump(); // `extern`
+        let abi_span = self.peek_span();
+        self.bump(); // the ABI string
+        let lone_no_mangle = attrs.inner.is_empty()
+            && matches!(attrs.outer.as_slice(), [only] if only.is_word("no_mangle"))
+            && visibility == Visibility::Inherited;
+        let from = if lone_no_mangle {
+            start_span
+        } else {
+            extern_span
+        };
+        let span = self.join(from, abi_span);
+        self.record(ParseError::ExternFnDefinition, span);
+        self.parse_item_after(start_span, attrs, visibility)
     }
 
     /// `unsafe extern "C" { fn name(params) -> ret ... }`: each declaration
@@ -140,13 +173,22 @@ impl Parser<'_> {
         block_attrs: &Attrs,
     ) -> Vec<Item> {
         self.bump(); // `unsafe`
+        let extern_span = self.peek_span();
         self.bump(); // `extern`
-        let abi_span = self.peek_span();
-        let abi = self.slice(abi_span).trim_matches('"').to_string();
-        self.bump();
-        if !matches!(abi.as_str(), "C" | "system") {
-            self.record(ParseError::ExternReserved, abi_span);
-        }
+        let abi = if self.at_punct(Punct::LBrace) {
+            // The ABI is written out; the block is read as `"C"` so its
+            // declarations are still checked.
+            self.record(ParseError::ExternReserved, extern_span);
+            "C".to_string()
+        } else {
+            let abi_span = self.peek_span();
+            let abi = self.slice(abi_span).trim_matches('"').to_string();
+            self.bump();
+            if !matches!(abi.as_str(), "C" | "system") {
+                self.record(ParseError::ExternReserved, abi_span);
+            }
+            abi
+        };
         self.expect_punct(Punct::LBrace, "to open the extern block");
         let mut items = Vec::new();
         while !self.at_eof() && !self.at_punct(Punct::RBrace) {
@@ -157,6 +199,10 @@ impl Parser<'_> {
             let visibility = self.parse_visibility();
             if self.at_keyword(Keyword::Type) {
                 items.push(self.parse_foreign_type(item_start, attrs, visibility));
+                continue;
+            }
+            if self.at_keyword(Keyword::Static) {
+                items.push(self.parse_foreign_static(item_start, attrs, visibility));
                 continue;
             }
             if !self.at_keyword(Keyword::Fn) {
@@ -206,6 +252,7 @@ impl Parser<'_> {
                 // A trailing `;` separates items on one line.
             } else if !self.at_attribute_start()
                 && !self.at_keyword(Keyword::Type)
+                && !self.at_keyword(Keyword::Static)
                 && !self.at_keyword(Keyword::Pub)
             {
                 self.record(ParseError::ExternItemShape, generics_or_body);
@@ -227,6 +274,51 @@ impl Parser<'_> {
         Item::new(id, span, attrs, visibility, ItemKind::Struct(decl))
     }
 
+    /// `static [mut] NAME: T` inside an extern block: a C global, declared
+    /// as a static carrying [`gossamer_ast::FOREIGN_STATIC_ATTR`] whose
+    /// initializer is a placeholder; the program reaches it only through
+    /// `ffi::addr_of`.
+    fn parse_foreign_static(
+        &mut self,
+        item_start: gossamer_lex::Span,
+        mut attrs: Attrs,
+        visibility: Visibility,
+    ) -> Item {
+        self.bump(); // `static`
+        let mutability = if self.eat_keyword(Keyword::Mut) {
+            Mutability::Mutable
+        } else {
+            Mutability::Immutable
+        };
+        let name = self.parse_ident_required("foreign static name");
+        self.expect_punct(Punct::Colon, "after the foreign static's name");
+        let ty = self.parse_type();
+        if self.at_punct(Punct::Eq) {
+            self.record(ParseError::ExternItemShape, self.peek_span());
+            self.bump();
+            let _ = self.parse_expr();
+        }
+        self.eat_punct(Punct::Semi);
+        let message = self.alloc_literal_expr(gossamer_ast::Literal::String(
+            "a foreign static has no Gossamer value; reach it with `ffi::addr_of`".to_string(),
+        ));
+        let placeholder = self.expand_format_macro("panic", vec![message]);
+        let span = self.join(item_start, self.last_span());
+        let value = Expr::new(self.alloc_id(), span, placeholder);
+        attrs.outer.push(Attribute {
+            path: gossamer_ast::PathExpr::single(gossamer_ast::FOREIGN_STATIC_ATTR),
+            tokens: None,
+        });
+        let decl = StaticDecl {
+            mutability,
+            name,
+            ty,
+            value,
+        };
+        let id = self.alloc_id();
+        Item::new(id, span, attrs, visibility, ItemKind::Static(decl))
+    }
+
     pub(crate) fn parse_item(&mut self) -> Item {
         let start_span = self.peek_span();
         let attrs = self.parse_attrs();
@@ -245,9 +337,14 @@ impl Parser<'_> {
         if synthesized {
             self.synthesized_depth = self.synthesized_depth.saturating_add(1);
         }
-        let kind = self.parse_item_kind(visibility);
+        let mut kind = self.parse_item_kind(visibility);
         if synthesized {
             self.synthesized_depth = self.synthesized_depth.saturating_sub(1);
+        }
+        // A function's attributes are its declaration's, wherever it sits:
+        // a method and an extern-block function carry them the same way.
+        if let ItemKind::Fn(decl) = &mut kind {
+            decl.attrs = attrs.clone();
         }
         let end_span = self.last_span();
         let span = self.join(start_span, end_span);
@@ -1384,6 +1481,11 @@ impl Parser<'_> {
                 // disappears and `json::Value` references inside
                 // the module fail to resolve.
                 let use_decl = self.parse_use_decl();
+                self.hoisted_uses.push(use_decl);
+                continue;
+            }
+            if self.at_attributed_use() {
+                let use_decl = self.parse_attributed_use();
                 self.hoisted_uses.push(use_decl);
                 continue;
             }

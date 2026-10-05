@@ -35,6 +35,17 @@ impl Lowerer<'_> {
                 ty: self.declared_or_init_ty(decl.ty.id, decl.value.id),
                 mutable: matches!(decl.mutability, Mutability::Mutable),
                 value: self.lower_expr(&decl.value),
+                foreign: item
+                    .attrs
+                    .has_word(gossamer_ast::FOREIGN_STATIC_ATTR)
+                    .then(|| {
+                        (
+                            item.attrs
+                                .link_name()
+                                .unwrap_or_else(|| decl.name.name.clone()),
+                            item.attrs.link_library().unwrap_or_default(),
+                        )
+                    }),
             }),
             // An ADT declared inside a module carries its qualified name as
             // its identity, matching what the type checker registers. Every
@@ -187,6 +198,7 @@ impl Lowerer<'_> {
             origin: FnOrigin::of(decl),
             foreign_link: decl.attrs.link_library(),
             foreign_symbol: decl.attrs.link_name(),
+            export_symbol: decl.attrs.export_symbol(&decl.name.name),
         }
     }
 

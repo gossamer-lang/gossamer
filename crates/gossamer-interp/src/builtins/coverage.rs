@@ -100,6 +100,12 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
          (`stdlib_builtins/cohort.rs`)",
     ),
     (
+        "gos_rt_command_*",
+        "`process::Command` is standard-library source that declares these in an \
+         `unsafe extern` block, so the VM calls them through `__gos_ffi_call` and \
+         the runtime's symbol table, as it calls any foreign function",
+    ),
+    (
         "gos_rt_concat_*",
         "the VM builds formatted text with its `format` / `__concat` builtins, which \
          render each piece through `Display`; these shims are the compiled tiers' \
@@ -300,6 +306,12 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
     (
         "gos_rt_len_is_zero",
         "the VM answers `is_empty` through each collection value's length",
+    ),
+    (
+        "gos_rt_library_shutdown",
+        "only a C library built from `#[export]` functions has a host that calls \
+         `<name>_shutdown()`; a program the VM runs reaches its `at_exit` hooks \
+         through the VM's own exit path",
     ),
     (
         "gos_rt_main_*",

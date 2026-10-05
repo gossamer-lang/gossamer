@@ -178,6 +178,22 @@ impl Attrs {
         (!value.is_empty()).then(|| value.to_string())
     }
 
+    /// The C symbol an `#[export]` or `#[export("symbol")]` attribute gives
+    /// the function `name`: the quoted symbol, or `name` itself.
+    #[must_use]
+    pub fn export_symbol(&self, name: &str) -> Option<String> {
+        let attr = self.outer.iter().find(|attr| attr.is_named("export"))?;
+        let Some(tokens) = attr.tokens.as_deref() else {
+            return Some(name.to_string());
+        };
+        let value = tokens.trim().trim_matches('"').trim();
+        Some(if value.is_empty() {
+            name.to_string()
+        } else {
+            value.to_string()
+        })
+    }
+
     /// Returns `true` when `#[allow(lint)]` or `#![allow(lint)]` names
     /// `lint` among its comma-separated arguments.
     #[must_use]
@@ -393,6 +409,16 @@ pub struct FnDecl {
 /// `unsafe extern` block: a C type with no Gossamer layout, reachable only
 /// through `ffi::Ptr`.
 pub const FOREIGN_TYPE_ATTR: &str = "__gos_foreign_type";
+
+/// The attribute the parser puts on a `static NAME: T` declared inside an
+/// `unsafe extern` block: a C global the program reaches only through
+/// `ffi::addr_of`, whose initializer is a placeholder nothing evaluates.
+pub const FOREIGN_STATIC_ATTR: &str = "__gos_foreign_static";
+
+/// The function a program's heap statics are built in, at the unit root:
+/// `main` calls it first, and a library runs it before its first exported
+/// function does.
+pub const STATIC_INIT_FN: &str = "__gos_static_init";
 
 /// A single function parameter.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

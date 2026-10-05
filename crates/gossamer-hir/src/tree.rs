@@ -87,6 +87,9 @@ pub struct HirFn {
     /// The C symbol a foreign function's `#[link_name = "..."]` names, when
     /// it differs from the function's own name.
     pub foreign_symbol: Option<String>,
+    /// The C symbol an `#[export]` attribute gives the function, which a
+    /// native build defines as a C-ABI entry running it.
+    pub export_symbol: Option<String>,
 }
 
 /// Whether a function was written as a `fn` item or synthesized from a
@@ -150,6 +153,10 @@ pub struct HirStatic {
     pub mutable: bool,
     /// Initializer expression.
     pub value: HirExpr,
+    /// For a C global declared in an `unsafe extern` block, its symbol and
+    /// the library `#[link]` names (`""` for none); its initializer is a
+    /// placeholder nothing evaluates.
+    pub foreign: Option<(String, String)>,
 }
 
 /// Lowered struct/enum declaration.

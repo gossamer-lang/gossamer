@@ -8,15 +8,20 @@
 //! |---|---|
 //! | a class character | a scalar of that C class ([`gossamer_types::c_class_width`]) |
 //! | `p` or `P` and a class | a slice of scalars: a pointer to its first element, read-only or written back |
-//! | `r` or `R` | a `#[repr(C)]` struct or a fixed array: a pointer to a C-layout copy, read-only or written back |
+//! | `r` or `R` | a fixed array, or `&mut` a `#[repr(C)]` struct: a pointer to a C-layout copy, read-only or written back |
+//! | `s(layout)` | a `#[repr(C)]` struct by value, its layout as `gossamer_abi::c_aggregate::CLayout` spells it |
 //!
-//! The result is a class character, or `v` for none. An aggregate
-//! parameter's leaves are spelled separately by [`foreign_layouts`].
+//! The result is a class character, `v` for none, or `s(layout)` for a
+//! struct, which the call returns into one more, final argument: a
+//! one-element array of the struct, written back. An aggregate parameter's
+//! leaves are spelled separately by [`foreign_layouts`].
 //!
 //! An `ffi::Ptr`, an `Option<ffi::Ptr>`, and a C function pointer cross as
 //! the address class `L`; an out-parameter (`&mut` a scalar or a pointer
 //! form) crosses as `R`, a one-element array the boundary pass in
-//! `foreign_boundary` fills and reads back.
+//! `foreign_boundary` fills and reads back. A slice of `#[repr(C)]` structs
+//! crosses as `L` too: the boundary pass copies it into C memory and passes
+//! that address.
 
 use gossamer_types::{CStep, FnSig, IntTy, Mutbl, Ty, TyCtxt, TyKind};
 
@@ -26,6 +31,8 @@ use crate::tree::{FnOrigin, HirFn};
 pub(crate) const PTR_TYPE: &str = "__gos_ffi_Ptr";
 /// The registered name of the injected `ffi::Handle` struct.
 pub(crate) const HANDLE_TYPE: &str = "__gos_ffi_Handle";
+/// The registered name of the injected `ffi::View` struct.
+pub(crate) const VIEW_TYPE: &str = "__gos_ffi_View";
 
 /// How a value crosses the C boundary.
 #[derive(Debug, Clone)]
@@ -58,6 +65,12 @@ pub(crate) fn ptr_elem(tcx: &TyCtxt, ty: Ty) -> Option<Ty> {
 pub(crate) fn option_payload(tcx: &TyCtxt, ty: Ty) -> Option<Ty> {
     let (name, args) = adt_parts(tcx, ty)?;
     (name == "Option").then(|| args.first().copied()).flatten()
+}
+
+/// The element type of `ty` when it is `ffi::View<T>`.
+pub(crate) fn view_elem(tcx: &TyCtxt, ty: Ty) -> Option<Ty> {
+    let (name, args) = adt_parts(tcx, ty)?;
+    (name == VIEW_TYPE).then(|| args.first().copied()).flatten()
 }
 
 /// The value type of `ty` when it is `ffi::Handle<T>`.
@@ -132,9 +145,38 @@ pub fn foreign_signature(tcx: &TyCtxt, decl: &HirFn) -> Option<String> {
     match decl.ret {
         None => sig.push('v'),
         Some(ret) if matches!(tcx.kind_of(ret), TyKind::Unit) => sig.push('v'),
-        Some(ret) => sig.push(value_class(tcx, ret)?),
+        Some(ret) => match value_class(tcx, ret) {
+            Some(class) => sig.push(class),
+            None => sig.push_str(&by_value_spelling(tcx, ret)?),
+        },
     }
     Some(sig)
+}
+
+/// `s(layout)`: how the `#[repr(C)]` struct `ty` crosses by value.
+pub(crate) fn by_value_spelling(tcx: &TyCtxt, ty: Ty) -> Option<String> {
+    if !matches!(tcx.kind_of(ty), TyKind::Adt { .. }) {
+        return None;
+    }
+    let layout = tcx.plain_layout(ty)?;
+    let leaves = tcx.c_abi_leaves(ty)?;
+    tcx.c_leaves(ty)?;
+    let layout = gossamer_abi::c_aggregate::CLayout {
+        size: layout.size,
+        align: layout.align,
+        leaves: leaves
+            .into_iter()
+            .map(|(offset, class)| gossamer_abi::c_aggregate::CLeafClass { offset, class })
+            .collect(),
+    };
+    Some(format!("s({})", layout.render()))
+}
+
+/// The struct a foreign function `decl` answers by value, if it does.
+pub(crate) fn struct_result(tcx: &TyCtxt, ret: Option<Ty>) -> Option<Ty> {
+    let ret = ret?;
+    (value_class(tcx, ret).is_none() && matches!(tcx.kind_of(ret), TyKind::Adt { .. }))
+        .then_some(ret)
 }
 
 /// The type a parameter passes, with a `&` or `&mut` peeled, and whether its
@@ -146,9 +188,26 @@ fn peeled(tcx: &TyCtxt, ty: Ty) -> (Ty, bool) {
     }
 }
 
+/// The element type of `ty` (or of the slice under its reference) when it is
+/// a slice of plain-data aggregates, which cross as a copy in C memory.
+pub(crate) fn aggregate_slice_elem(tcx: &TyCtxt, ty: Ty) -> Option<(Ty, bool)> {
+    let (inner, writable) = peeled(tcx, ty);
+    let TyKind::Slice(elem) = tcx.kind_of(inner) else {
+        return None;
+    };
+    let elem = *elem;
+    (tcx.c_scalar_class(elem).is_none() && tcx.c_leaves(elem).is_some()).then_some((elem, writable))
+}
+
 fn param_spelling(tcx: &TyCtxt, ty: Ty) -> Option<String> {
     if let Some(class) = value_class(tcx, ty) {
         return Some(class.to_string());
+    }
+    if aggregate_slice_elem(tcx, ty).is_some() {
+        return Some("L".to_string());
+    }
+    if let Some(spelling) = by_value_spelling(tcx, ty) {
+        return Some(spelling);
     }
     let (inner, writable) = peeled(tcx, ty);
     if writable && classify_value(tcx, inner).is_some() {
@@ -174,6 +233,9 @@ fn param_spelling(tcx: &TyCtxt, ty: Ty) -> Option<String> {
 /// one-element array it is staged in.
 #[must_use]
 pub fn foreign_layouts(tcx: &TyCtxt, decl: &HirFn) -> String {
+    // A struct result comes back through a one-element array of it.
+    let holder =
+        struct_result(tcx, decl.ret).map(|ret| element_layout(tcx, ret, "i0.").unwrap_or_default());
     decl.params
         .iter()
         .map(|param| {
@@ -191,6 +253,7 @@ pub fn foreign_layouts(tcx: &TyCtxt, decl: &HirFn) -> String {
             }
             aggregate_layout(tcx, inner).unwrap_or_default()
         })
+        .chain(holder)
         .collect::<Vec<_>>()
         .join("|")
 }
@@ -198,6 +261,12 @@ pub fn foreign_layouts(tcx: &TyCtxt, decl: &HirFn) -> String {
 /// The C layout of the plain-data struct or fixed array `ty`, spelled as
 /// [`foreign_layouts`] spells one parameter's.
 pub(crate) fn aggregate_layout(tcx: &TyCtxt, ty: Ty) -> Option<String> {
+    element_layout(tcx, ty, "")
+}
+
+/// [`aggregate_layout`] with every leaf's steps after `prefix`: the layout of
+/// `ty` as the first element of an array (`i0.`).
+fn element_layout(tcx: &TyCtxt, ty: Ty, prefix: &str) -> Option<String> {
     let (size, leaves) = tcx.c_leaves(ty)?;
     let leaves: Vec<String> = leaves
         .iter()
@@ -210,7 +279,7 @@ pub(crate) fn aggregate_layout(tcx: &TyCtxt, ty: Ty) -> Option<String> {
                     CStep::Index(i) => format!("i{i}"),
                 })
                 .collect();
-            format!("{}@{}:{}", steps.join("."), leaf.offset, leaf.class)
+            format!("{prefix}{}@{}:{}", steps.join("."), leaf.offset, leaf.class)
         })
         .collect();
     Some(format!("{size};{}", leaves.join(",")))

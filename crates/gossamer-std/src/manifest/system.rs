@@ -342,7 +342,7 @@ pub const FFI: StdModule = StdModule {
         StdItem {
             name: "Ptr",
             kind: StdItemKind::Type,
-            doc: "`Ptr<T>`: a non-null address of a `T` in memory Gossamer does not manage, as a foreign function takes or answers it; `Option<Ptr<T>>` is the nullable form. Holding, copying, comparing, storing, and sending one is safe; every access through it is `unsafe`. `p.cast::<U>()`, `p.address()`, and `unsafe { Ptr::from_address(n) }` (`None` for 0).",
+            doc: "`Ptr<T>`: a non-null address of a `T` in memory Gossamer does not manage, as a foreign function takes or answers it; `Option<Ptr<T>>` is the nullable form. Holding, copying, comparing, storing, and sending one is safe; every access through it is `unsafe`. `p.cast::<U>()`, `p.address()`, `p.is_null()`, `unsafe { Ptr::from_address(n) }` (`None` for 0), and `Ptr::null()`, the NULL a `#[repr(C)]` struct field holds where C expects one (a table's terminating entry), which a `Ptr` copied out of C memory may be too.",
         },
         StdItem {
             name: "Handle",
@@ -380,6 +380,76 @@ pub const FFI: StdModule = StdModule {
             doc: "`size_of::<T>() -> i64`: the bytes a `T` occupies in C layout.",
         },
         StdItem {
+            name: "align_of",
+            kind: StdItemKind::Function,
+            doc: "`align_of::<T>() -> i64`: the alignment, in bytes, of a `T` in C layout.",
+        },
+        StdItem {
+            name: "offset_of",
+            kind: StdItemKind::Function,
+            doc: "`offset_of::<T>(\"field.path\") -> i64`: the byte offset of a field, or a field of a field, inside the `#[repr(C)]` struct `T`; the path is a string literal checked at compile time (GT0109).",
+        },
+        StdItem {
+            name: "addr_of",
+            kind: StdItemKind::Function,
+            doc: "`addr_of(NAME) -> Ptr<T>`: the address of the C global `static NAME: T` an `unsafe extern` block declares, read and written with `ffi::read` and `ffi::write`; a foreign static is reached no other way (GT0111).",
+        },
+        StdItem {
+            name: "View",
+            kind: StdItemKind::Type,
+            doc: "`View<T>`: `len` values of `T` in foreign memory, read and written in place. `unsafe { View::new(p, len) }` vouches that `p` addresses that many; `v.len()`, `v.get(i)` and `v[i]`, `v.set(i, value)`, `v.slice(lo, hi)`, `v.to_vec()`, `v.copy_from(values)`, `v.fill(value)`, and `v.ptr()` follow, each access bounds-checked against the length.",
+        },
+        StdItem {
+            name: "atomic_load",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { atomic_load(p) }`: the 32- or 64-bit integer at `p`, read atomically (sequentially consistent); an address not aligned to the integer's width panics.",
+        },
+        StdItem {
+            name: "atomic_store",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { atomic_store(p, value) }`: stores `value` at `p` atomically.",
+        },
+        StdItem {
+            name: "atomic_swap",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { atomic_swap(p, value) }`: stores `value` at `p` atomically and answers the value it replaced.",
+        },
+        StdItem {
+            name: "atomic_compare_exchange",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { atomic_compare_exchange(p, current, new) } -> Result<T, T>`: stores `new` at `p` when it holds `current`, atomically; `Ok` with the old value when it did, `Err` with the value found when it did not.",
+        },
+        StdItem {
+            name: "atomic_fetch_add",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { atomic_fetch_add(p, value) }`: adds `value` to the integer at `p` atomically, wrapping, and answers the value before.",
+        },
+        StdItem {
+            name: "atomic_fetch_sub",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { atomic_fetch_sub(p, value) }`: subtracts `value` atomically, wrapping, and answers the value before.",
+        },
+        StdItem {
+            name: "atomic_fetch_and",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { atomic_fetch_and(p, value) }`: ands `value` in atomically and answers the value before.",
+        },
+        StdItem {
+            name: "atomic_fetch_or",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { atomic_fetch_or(p, value) }`: ors `value` in atomically and answers the value before.",
+        },
+        StdItem {
+            name: "atomic_fetch_xor",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { atomic_fetch_xor(p, value) }`: xors `value` in atomically and answers the value before.",
+        },
+        StdItem {
+            name: "Union",
+            kind: StdItemKind::Type,
+            doc: "`Union<(A, B, ..)>`: a C union of the listed members, sized and aligned for the largest, as a `#[repr(C)]` field, a pointee, or a foreign argument. `Union::new(v)`, `Union::zeroed()`, `u.get::<T>()`, and `u.set(v)` take and give the leading bytes as a member type (GT0110 for any other type).",
+        },
+        StdItem {
             name: "free",
             kind: StdItemKind::Function,
             doc: "`unsafe { free(p) }`: frees memory the platform C allocator handed out (`alloc`, `to_c_bytes`, or a library's `malloc`).",
@@ -403,6 +473,11 @@ pub const FFI: StdModule = StdModule {
             name: "to_c_bytes",
             kind: StdItemKind::Function,
             doc: "`unsafe { to_c_bytes(bytes) }`: a C-allocated copy of `bytes`, for native code to keep; free it or hand it to a library that takes it over.",
+        },
+        StdItem {
+            name: "fn_addr",
+            kind: StdItemKind::Function,
+            doc: "`fn_addr(f) -> Ptr<c_void>`: the C function pointer for the named top-level function `f`, whose parameters and result have C forms (GT0107, GT0108 otherwise): a value for a function-pointer field of a C struct (an ops table, a `luaL_Reg` array). Native code calls it as it calls a callback.",
         },
         StdItem {
             name: "fn_from_ptr",
@@ -943,9 +1018,19 @@ pub const PROCESS: StdModule = StdModule {
     summary: "Canonical process control and child-process API; std::os::exec is compatibility-only.",
     items: &[
         StdItem {
+            name: "Command",
+            kind: StdItemKind::Type,
+            doc: "Builder for a child process: `Command::new(program)` then `arg` / `args`, `env` / `env_remove` / `env_clear`, `dir`, `stdin` / `stdout` / `stderr` (a `Stdio`), `new_process_group`, and on POSIX `new_session` and `controlling_terminal(fd)`; `spawn() -> Result<Child, errors::Error>`, `output() -> Result<Output, errors::Error>` (stdout and stderr read at once, so neither pipe stalls the child), and `status() -> Result<i64, errors::Error>`. Rust's `std::process::Command`, Go's `exec.Cmd`.",
+        },
+        StdItem {
+            name: "Stdio",
+            kind: StdItemKind::Type,
+            doc: "Where a child's standard stream goes: `Stdio::Inherit` (this process's), `Stdio::Null`, `Stdio::Piped` (read or written through the `Child`), or `Stdio::File(f)` for an open `fs::File`.",
+        },
+        StdItem {
             name: "Child",
             kind: StdItemKind::Type,
-            doc: "Handle to a still-running child supporting wait / kill.",
+            doc: "A running child: `id`, `write_stdin` / `write_stdin_bytes` / `close_stdin`, `read_line` / `read_stdout` / `read_stderr` and the `read_stdout_line` / `read_stderr_line` / `read_stdout_chunk(max)` / `read_stderr_chunk(max)` forms (each stream may be drained from its own goroutine), `wait`, `wait_timeout(ms)`, `kill`, and on POSIX `signal(sig)` and `kill_group(sig)` for a child started in its own process group or session. A child that has ended answers 128 plus the signal number when a signal ended it.",
         },
         StdItem {
             name: "run",

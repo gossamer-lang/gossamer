@@ -1366,6 +1366,50 @@ impl<'tcx> FnBuilder<'tcx> {
         Ok(result)
     }
 
+    /// `a & b`, `a | b`, and `a ^ b` on `bool`s: both sides evaluated, as a
+    /// bitwise operator evaluates them, then combined - `^` as `!=`, the
+    /// others by keeping the left value unless it decides nothing.
+    pub(crate) fn compile_bool_bitwise(
+        &mut self,
+        op: HirBinaryOp,
+        lhs: &HirExpr,
+        rhs: &HirExpr,
+    ) -> RuntimeResult<Reg> {
+        let lhs_reg = self.compile_expr(lhs)?;
+        let rhs_reg = self.compile_expr(rhs)?;
+        let result = self.alloc_reg();
+        if op == HirBinaryOp::BitXor {
+            self.emit(Op::Ne {
+                dst: result,
+                lhs: lhs_reg,
+                rhs: rhs_reg,
+            });
+            return Ok(result);
+        }
+        self.emit(Op::Move {
+            dst: result,
+            src: lhs_reg,
+        });
+        let branch_idx = if op == HirBinaryOp::BitAnd {
+            self.emit(Op::BranchIfNot {
+                cond: result,
+                target: 0,
+            })
+        } else {
+            self.emit(Op::BranchIf {
+                cond: result,
+                target: 0,
+            })
+        };
+        self.emit(Op::Move {
+            dst: result,
+            src: rhs_reg,
+        });
+        let after = self.cur_idx();
+        self.patch_jump(branch_idx, after);
+        Ok(result)
+    }
+
     /// [`Self::try_compile_inplace_vec_stmt`] for a Vec reached through a
     /// field or an index rooted at a local (`st.tables[t].slots.resize(n, 0)`).
     /// The Vec is grown where it lies, each level on the way made unique from

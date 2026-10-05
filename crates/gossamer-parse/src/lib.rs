@@ -43,9 +43,14 @@ pub fn parse_source_file(source: &str, file: FileId) -> (SourceFile, Vec<ParseDi
     let mut parser = Parser::new(source, file);
     let file_attrs = parser.parse_file_attrs_public();
     let mut uses = Vec::new();
-    while parser.at_keyword_public(Keyword::Use) {
-        let use_decl = parser.parse_use_decl();
-        uses.push(use_decl);
+    loop {
+        if parser.at_keyword_public(Keyword::Use) {
+            uses.push(parser.parse_use_decl());
+        } else if parser.at_attributed_use() {
+            uses.push(parser.parse_attributed_use());
+        } else {
+            break;
+        }
     }
     let mut items = Vec::new();
     let mut top_level_stmts = Vec::new();
@@ -83,6 +88,7 @@ pub fn parse_source_file(source: &str, file: FileId) -> (SourceFile, Vec<ParseDi
     source_file.top_level_stmts = top_level_stmts;
     source_file.next_node_id = next_node_id;
     source_file.named_args = named_args;
+    gossamer_ast::cfg::apply_package_features(&mut source_file);
     let diagnostics = parser.take_diagnostics();
     (source_file, diagnostics)
 }

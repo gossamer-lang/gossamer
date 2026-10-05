@@ -123,6 +123,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../gossamer-codegen-llvm/src/emit.rs");
     println!("cargo:rerun-if-changed=../gossamer-codegen-llvm/src/lower");
     println!("cargo:rerun-if-changed=../gossamer-abi/src/registry.rs");
+    println!("cargo:rerun-if-changed=../gossamer-parse/src/autoderive/stdlib_wrappers.rs");
     println!("cargo:rerun-if-env-changed=GOS_RUNTIME_LIB");
     println!("cargo:rerun-if-env-changed=GOSSAMER_SKIP_DISPATCH_PARITY");
     println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
@@ -471,6 +472,11 @@ fn check_dispatch_parity(workspace_root: &Path) {
     // symbols used by both LLVM and Cranelift backends. It replaces the
     // old RUNTIME_DECLARATIONS string array, so the scanner must include it.
     let abi_registry = read_text(workspace_root.join("crates/gossamer-abi/src/registry.rs"));
+    // The standard library's Gossamer source declares some runtime entries in
+    // `unsafe extern "C"` blocks; every tier reaches those through the
+    // foreign-call path.
+    let stdlib_wrappers =
+        read_text(workspace_root.join("crates/gossamer-parse/src/autoderive/stdlib_wrappers.rs"));
 
     let defined = extract_runtime_definitions(&c_abi);
     let mut referenced: BTreeSet<String> = BTreeSet::new();
@@ -479,6 +485,7 @@ fn check_dispatch_parity(workspace_root: &Path) {
     referenced.extend(extract_referenced_symbols(&llvm_emit));
     referenced.extend(extract_referenced_symbols(&llvm_lower));
     referenced.extend(extract_referenced_symbols(&abi_registry));
+    referenced.extend(extract_referenced_symbols(&stdlib_wrappers));
 
     let allowed: BTreeSet<String> = KNOWN_UNUSED_RUNTIME_SYMBOLS
         .iter()

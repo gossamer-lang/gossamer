@@ -24,6 +24,8 @@ pub enum CacheClass {
     Build,
     /// Stamps recording the inputs a linked binary was produced from.
     LinkStamps,
+    /// Objects and libraries compiled from packages' `[native]` sources.
+    Native,
 }
 
 impl CacheClass {
@@ -37,6 +39,7 @@ impl CacheClass {
             Self::Packages => "packages",
             Self::Build => "build",
             Self::LinkStamps => "link-stamps",
+            Self::Native => "native",
         }
     }
 
@@ -50,6 +53,7 @@ impl CacheClass {
             Self::Packages,
             Self::Build,
             Self::LinkStamps,
+            Self::Native,
         ]
     }
 
@@ -61,6 +65,7 @@ impl CacheClass {
             Self::Frontend => Some("frontend"),
             Self::Ir => Some("ir-cache"),
             Self::LinkStamps => Some("link-stamps"),
+            Self::Native => Some("native"),
             Self::Runners | Self::Packages | Self::Build => None,
         }
     }
@@ -172,7 +177,7 @@ impl CachePolicy {
             CacheClass::Runners => 10 * 1024 * 1024 * 1024,
             CacheClass::Ir => 5 * 1024 * 1024 * 1024,
             CacheClass::Frontend => 1024 * 1024 * 1024,
-            CacheClass::Packages | CacheClass::Build => 2 * 1024 * 1024 * 1024,
+            CacheClass::Packages | CacheClass::Build | CacheClass::Native => 2 * 1024 * 1024 * 1024,
             CacheClass::LinkStamps => 64 * 1024 * 1024,
         };
         let name = format!(

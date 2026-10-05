@@ -100,6 +100,71 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::ffi",
+        name: "atomic_load",
+        signature: "fn atomic_load<T>(p: ffi::Ptr<T>) -> T",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "atomic_store",
+        signature: "fn atomic_store<T>(p: ffi::Ptr<T>, value: T) -> ()",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "atomic_swap",
+        signature: "fn atomic_swap<T>(p: ffi::Ptr<T>, value: T) -> T",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "atomic_compare_exchange",
+        signature: "fn atomic_compare_exchange<T>(p: ffi::Ptr<T>, current: T, new: T) -> Result<T, T>",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "atomic_fetch_add",
+        signature: "fn atomic_fetch_add<T>(p: ffi::Ptr<T>, value: T) -> T",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "atomic_fetch_sub",
+        signature: "fn atomic_fetch_sub<T>(p: ffi::Ptr<T>, value: T) -> T",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "atomic_fetch_and",
+        signature: "fn atomic_fetch_and<T>(p: ffi::Ptr<T>, value: T) -> T",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "atomic_fetch_or",
+        signature: "fn atomic_fetch_or<T>(p: ffi::Ptr<T>, value: T) -> T",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "atomic_fetch_xor",
+        signature: "fn atomic_fetch_xor<T>(p: ffi::Ptr<T>, value: T) -> T",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "fn_addr",
+        signature: "fn fn_addr<F>(f: F) -> ffi::Ptr<ffi::c_void>",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "align_of",
+        signature: "fn align_of<T>() -> i64",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "offset_of",
+        signature: "fn offset_of<T>(field: String) -> i64",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "addr_of",
+        signature: "fn addr_of<T>(symbol: T) -> ffi::Ptr<T>",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
         name: "free",
         signature: "fn free<T>(p: ffi::Ptr<T>)",
     },

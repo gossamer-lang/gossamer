@@ -518,6 +518,24 @@ impl<'a> Lowerer<'a> {
         if let Some(inlined) = self.try_inline_result_carrier(name, args, &dest_ty)? {
             return Ok(inlined);
         }
+        if name == "gos_rt_bits_trailing_zeros" && args.len() == 1 {
+            let raw = self.lower_operand(&args[0])?;
+            let ty = self.operand_llvm_ty(&args[0]);
+            let word = self.coerce_llvm_value(&raw, &ty, "i64");
+            self.runtime_refs
+                .insert("declare i64 @llvm.cttz.i64(i64, i1)".to_string());
+            let count = self.fresh();
+            writeln!(
+                self.out,
+                "  {count} = call i64 @llvm.cttz.i64(i64 {word}, i1 false)"
+            )
+            .unwrap();
+            return Ok(self.coerce_llvm_value(&count, "i64", &dest_ty));
+        }
+        if matches!(name, "gos_rt_f64_mul_add" | "gos_rt_f32_mul_add") && args.len() == 3 {
+            let value = self.inline_mul_add(name == "gos_rt_f32_mul_add", args)?;
+            return Ok(self.coerce_llvm_value(&value, "double", &dest_ty));
+        }
         // Pull canonical parameter types from the runtime registry
         // when the symbol is registered. This sidesteps two related
         // miscompiles: (a) a Unit / `void` operand becoming a `void`
@@ -934,6 +952,7 @@ impl<'a> Lowerer<'a> {
             }
             RawIntrinsic::Foreign => return self.lower_foreign_call(name, args, dest_local),
             RawIntrinsic::ForeignCallback => return self.lower_foreign_callback(name, dest_local),
+            RawIntrinsic::ForeignStatic => return self.lower_foreign_static(name, dest_local),
             RawIntrinsic::Runtime => {
                 // Generic runtime-call intrinsic: emit a regular
                 // call against the named runtime symbol. Mirrors

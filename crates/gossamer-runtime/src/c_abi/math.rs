@@ -392,6 +392,19 @@ pub extern "C" fn gos_rt_f32_to_bits(x: f64) -> i64 {
     i64::from((x as f32).to_bits())
 }
 
+/// `f64::mul_add(x, a, b) -> f64`: `x * a + b` with one rounding.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_f64_mul_add(x: f64, a: f64, b: f64) -> f64 {
+    x.mul_add(a, b)
+}
+
+/// `f32::mul_add(x, a, b) -> f32`: `x * a + b` with one rounding to single
+/// precision, which a double-width product rounded twice would not give.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_f32_mul_add(x: f64, a: f64, b: f64) -> f64 {
+    f64::from((x as f32).mul_add(a as f32, b as f32))
+}
+
 /// `f32::from_bits(b) -> f32`: the binary32 value the low 32 bits of `b`
 /// encode, widened to the 64-bit float slot without further rounding.
 #[unsafe(no_mangle)]

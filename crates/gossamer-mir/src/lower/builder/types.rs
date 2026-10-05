@@ -1465,11 +1465,6 @@ impl<'a> Builder<'a> {
             "UnixListener" => Some("net::UnixListener"),
             "File" => Some("fs::File"),
             "OpenOptions" => Some("fs::OpenOptions"),
-            // A piped child handle extracted from
-            // `process::spawn_piped(..)`'s Ok payload; routes
-            // `write_stdin` / `read_line` / `wait` / ... to the
-            // child shims.
-            "Child" => Some("process::Child"),
             "Stream" => Some("io::Stream"),
             "Notifier" => Some("signal::Notifier"),
             _ => None,

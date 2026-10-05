@@ -42,6 +42,12 @@ impl TypeChecker<'_> {
             {
                 self.opaque_types.insert(def);
             }
+            if let ItemKind::Static(decl) = &item.kind
+                && item.attrs.has_word(gossamer_ast::FOREIGN_STATIC_ATTR)
+                && let Some(def) = self.resolutions.definition_of(item.id)
+            {
+                self.foreign_statics.insert(def, decl.name.name.clone());
+            }
             match &item.kind {
                 ItemKind::Fn(decl) => self.register_fn_sig(item.id, decl, item.span),
                 ItemKind::Impl(decl) => {
@@ -116,6 +122,9 @@ impl TypeChecker<'_> {
         self.user_type_decls.insert(name.to_string());
         let identity = qualified_type_name(module_path, name);
         self.user_type_decls.insert(identity.clone());
+        if module_path.is_empty() {
+            self.root_type_names.insert(name.to_string());
+        }
         if let Some(def) = self.resolutions.definition_of(item_id) {
             self.adt_def_by_name.insert(identity, def);
             self.adt_def_by_name.entry(name.to_string()).or_insert(def);
@@ -855,8 +864,10 @@ impl TypeChecker<'_> {
             .into_iter()
             .find(|candidate| self.user_type_decls.contains(candidate))
             .unwrap_or_else(|| bare.clone());
-        if identity == bare {
-            return Some(vec![bare]);
+        // The bare name also reaches a module's type, unless a type of that
+        // very name is declared at the root, whose methods it would replace.
+        if identity == bare || self.root_type_names.contains(&bare) {
+            return Some(vec![identity]);
         }
         Some(vec![identity, bare])
     }
@@ -1483,7 +1494,10 @@ impl TypeChecker<'_> {
             std::mem::replace(&mut self.current_impl_where, decl.where_clause.clone());
         for impl_item in &decl.items {
             match impl_item {
-                ImplItem::Fn(fn_decl) => self.check_fn(fn_decl),
+                ImplItem::Fn(fn_decl) => {
+                    self.reject_method_export(fn_decl);
+                    self.check_fn(fn_decl);
+                }
                 ImplItem::Const { ty, value, .. } => {
                     let annotated = self.type_from_ast(ty);
                     let init = self.check_expr_expecting(value, Expectation::HasType(annotated));
@@ -1507,7 +1521,10 @@ impl TypeChecker<'_> {
         let prev_trait = self.current_trait_name.replace(decl.name.name.clone());
         for trait_item in &decl.items {
             match trait_item {
-                TraitItem::Fn(fn_decl) => self.check_fn(fn_decl),
+                TraitItem::Fn(fn_decl) => {
+                    self.reject_method_export(fn_decl);
+                    self.check_fn(fn_decl);
+                }
                 TraitItem::Const { ty, default, .. } => {
                     let annotated = self.type_from_ast(ty);
                     if let Some(value) = default {
@@ -1554,7 +1571,10 @@ impl TypeChecker<'_> {
     pub(super) fn check_item_inner(&mut self, item: &Item) {
         match &item.kind {
             ItemKind::Fn(decl) if decl.extern_abi.is_some() => self.check_foreign_decl(item, decl),
-            ItemKind::Fn(decl) => self.check_fn(decl),
+            ItemKind::Fn(decl) => {
+                self.check_export_decl(decl);
+                self.check_fn(decl);
+            }
             ItemKind::Impl(decl) => self.check_impl(decl),
             ItemKind::Trait(decl) => self.check_trait(decl),
             ItemKind::Const(decl) => {
@@ -1594,6 +1614,9 @@ impl TypeChecker<'_> {
                 }
                 let init = self.check_expr_expecting(&decl.value, Expectation::HasType(annotated));
                 self.unify(annotated, init, decl.value.span);
+                if item.attrs.has_word(gossamer_ast::FOREIGN_STATIC_ATTR) {
+                    self.check_foreign_static_decl(item, &decl.name.name, annotated, decl.ty.span);
+                }
             }
             // Field types name the declaration's own generic parameters, so
             // they are read inside its scope, as its registration read them.
@@ -1785,6 +1808,122 @@ impl TypeChecker<'_> {
 }
 
 impl TypeChecker<'_> {
+    /// GT0113 for an `#[export]` on a method, which C has no receiver for.
+    fn reject_method_export(&mut self, decl: &FnDecl) {
+        if decl.attrs.export_symbol(&decl.name.name).is_some() {
+            self.emit_export_error(decl, "a method has no C symbol; export a free function");
+        }
+    }
+
+    /// Checks an `#[export]` function: a free, non-generic function under a
+    /// C identifier no other export uses, whose parameters and result the C
+    /// ABI carries.
+    fn check_export_decl(&mut self, decl: &FnDecl) {
+        let name = decl.name.name.clone();
+        let Some(symbol) = decl.attrs.export_symbol(&name) else {
+            return;
+        };
+        if gossamer_resolve::cfg_target_family() == "wasm" {
+            self.emit(
+                TypeError::Foreign(crate::ForeignError::OnWasm { name: name.clone() }),
+                decl.span,
+            );
+            return;
+        }
+        let is_identifier = symbol
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && symbol
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !is_identifier {
+            let why = format!("the symbol `{symbol}` is not a C identifier");
+            self.emit_export_error(decl, &why);
+            return;
+        }
+        if symbol == "main" {
+            self.emit_export_error(decl, "the symbol `main` is the C program's entry");
+            return;
+        }
+        if !decl.generics.params.is_empty() {
+            self.emit_export_error(decl, "a generic function has no single C entry");
+            return;
+        }
+        if decl.is_comptime {
+            self.emit_export_error(decl, "a `comptime fn` runs while compiling");
+            return;
+        }
+        if let Some(other) = self.export_symbols.get(&symbol).cloned() {
+            let why = format!("`{other}` already exports the symbol `{symbol}`");
+            self.emit_export_error(decl, &why);
+            return;
+        }
+        self.export_symbols.insert(symbol, name);
+        for param in &decl.params {
+            let FnParam::Typed { ty, .. } = param else {
+                self.emit_export_error(decl, "a method has no C symbol; export a free function");
+                return;
+            };
+            let lowered = self.type_from_ast(ty);
+            if !self.c_value_ok(lowered) {
+                let why = format!(
+                    "the parameter type `{}` has no C representation",
+                    self.render_public_ty(lowered)
+                );
+                self.emit_export_error(decl, &why);
+            }
+        }
+        if let Some(ret) = &decl.ret {
+            let lowered = self.type_from_ast(ret);
+            if !matches!(self.tcx.kind_of(lowered), TyKind::Unit) && !self.c_value_ok(lowered) {
+                let why = format!(
+                    "the result type `{}` has no C representation",
+                    self.render_public_ty(lowered)
+                );
+                self.emit_export_error(decl, &why);
+            }
+        }
+    }
+
+    fn emit_export_error(&mut self, decl: &FnDecl, why: &str) {
+        self.emit(
+            TypeError::Foreign(crate::ForeignError::Export {
+                name: decl.name.name.clone(),
+                why: why.to_string(),
+            }),
+            decl.span,
+        );
+    }
+
+    /// Checks a C global declared `static NAME: T` in an extern block: `T`
+    /// has a C layout, and the declaration is not active on wasm32.
+    fn check_foreign_static_decl(
+        &mut self,
+        item: &Item,
+        name: &str,
+        ty: Ty,
+        ty_span: gossamer_lex::Span,
+    ) {
+        if gossamer_resolve::cfg_target_family() == "wasm" {
+            self.emit(
+                TypeError::Foreign(crate::ForeignError::OnWasm {
+                    name: name.to_string(),
+                }),
+                item.span,
+            );
+        }
+        if let Some(pointee) = self.pointee_problem(ty) {
+            self.emit(
+                TypeError::Foreign(crate::ForeignError::PointerTarget {
+                    ty: pointee,
+                    context: format!("the foreign static `{name}` cannot be reached through it"),
+                }),
+                ty_span,
+            );
+        }
+    }
+
     /// Checks a function declared in an `unsafe extern "C"` block: every
     /// parameter and the return type must have a C representation, and no
     /// effect attribute may claim anything about the native body.
@@ -1907,7 +2046,18 @@ impl TypeChecker<'_> {
             }
             None => {}
         }
-        if !matches!(self.tcx.kind(ret), Some(TyKind::Unit)) && !self.foreign_scalar(ret) {
+        let plain_struct = match self.tcx.kind(ret).cloned() {
+            Some(TyKind::Adt { def, substs }) => {
+                (self.repr_c_structs.contains(&def)
+                    || self.tcx.union_members(def, &substs).is_some())
+                    && self.tcx.c_leaves(ret).is_some()
+            }
+            _ => false,
+        };
+        if !matches!(self.tcx.kind(ret), Some(TyKind::Unit))
+            && !self.foreign_scalar(ret)
+            && !plain_struct
+        {
             let ty = self.render_public_ty(ret);
             self.emit(
                 TypeError::Foreign(crate::ForeignError::SignatureType {
@@ -1915,8 +2065,8 @@ impl TypeChecker<'_> {
                     position: "the return type".to_string(),
                     ty,
                     why: "a foreign function answers `()`, a scalar (an integer up to 64 \
-                          bits, `bool`, `f32`, or `f64`), an `ffi::Ptr`, or an \
-                          `Option<ffi::Ptr>`"
+                          bits, `bool`, `f32`, or `f64`), an `ffi::Ptr`, an \
+                          `Option<ffi::Ptr>`, or a `#[repr(C)]` plain-data struct"
                         .to_string(),
                 }),
                 span,
@@ -1993,13 +2143,21 @@ impl TypeChecker<'_> {
         match self.tcx.kind(inner).cloned() {
             Some(TyKind::Slice(elem)) => {
                 let elem = self.infer.resolve(self.tcx, elem);
-                if self.foreign_scalar(elem) {
+                let plain_struct = match self.tcx.kind(elem).cloned() {
+                    Some(TyKind::Adt { def, substs }) => {
+                        (self.repr_c_structs.contains(&def)
+                            || self.tcx.union_members(def, &substs).is_some())
+                            && self.tcx.c_leaves(elem).is_some()
+                    }
+                    _ => false,
+                };
+                if self.foreign_scalar(elem) || plain_struct {
                     None
                 } else {
                     Some(
                         "a slice crosses the C boundary as a pointer to its first element, so \
-                         its elements are scalars: integers up to 64 bits, `bool`, `f32`, or \
-                         `f64`"
+                         its elements are scalars (integers up to 64 bits, `bool`, `f32`, or \
+                         `f64`) or `#[repr(C)]` plain-data structs"
                             .to_string(),
                     )
                 }
@@ -2010,25 +2168,35 @@ impl TypeChecker<'_> {
                 } else {
                     Some(
                         "a struct crosses the C boundary only when every field is plain data \
-                         with a C type: integers up to 64 bits, `bool`, `f32`, `f64`, fixed \
+                         with a C type: integers up to 64 bits, `bool`, `f32`, `f64`, \
+                         `ffi::Ptr` (`Ptr::null()` where C expects NULL), `ffi::Union`, fixed \
                          arrays of those, and other such `#[repr(C)]` structs"
                             .to_string(),
                     )
                 }
+            }
+            // A union crosses by value as C passes one: classified over
+            // every member's bytes.
+            Some(TyKind::Adt { def, substs })
+                if self.tcx.union_members(def, &substs).is_some()
+                    && self.tcx.c_leaves(inner).is_some() =>
+            {
+                None
             }
             Some(TyKind::Adt { .. }) => {
                 Some("declare the struct `#[repr(C)]` so its fields take the C layout".to_string())
             }
             _ if mutable => Some(
                 "a `&mut` parameter is `&mut` a scalar, an `ffi::Ptr`, or an \
-                 `Option<ffi::Ptr>` (an out-parameter), `&mut [T]` of scalars, or `&mut` a \
-                 `#[repr(C)]` plain-data struct"
+                 `Option<ffi::Ptr>` (an out-parameter), `&mut [T]` of scalars or structs, or \
+                 `&mut` a `#[repr(C)]` plain-data struct (a pointer whose writes come back)"
                     .to_string(),
             ),
             _ => Some(
                 "a parameter is a scalar (an integer up to 64 bits, `bool`, `f32`, `f64`), an \
                  `ffi::Ptr` or `Option<ffi::Ptr>`, a C function type `fn(..) -> R`, a slice \
-                 `[T]` of scalars, a `#[repr(C)]` plain-data struct, or `&mut` one of these"
+                 `[T]` of scalars or `#[repr(C)]` structs, a `#[repr(C)]` plain-data struct \
+                 (passed by value), or `&mut` one of these"
                     .to_string(),
             ),
         }

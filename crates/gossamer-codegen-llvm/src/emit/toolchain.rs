@@ -1087,6 +1087,18 @@ pub(crate) fn target_is_windows() -> bool {
     host_triple().contains("windows")
 }
 
+/// The C calling convention by-value structs follow on the target being
+/// built, or `None` for a target with no lowering for them.
+pub(crate) fn target_c_abi() -> Option<gossamer_abi::c_aggregate::CAbi> {
+    let triple = host_triple();
+    let os = if triple.contains("windows") {
+        "windows"
+    } else {
+        "unix"
+    };
+    gossamer_abi::c_aggregate::CAbi::for_target(target_arch_from_triple(&triple), os)
+}
+
 #[cfg(test)]
 mod host_triple_tests {
     use super::{

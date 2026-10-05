@@ -2432,7 +2432,12 @@
 <tr>
 <td><code>last_errno</code></td>
 <td><code>fn last_errno() -&gt; i64</code></td>
-<td><code>last_errno() -&gt; i64</code>: the <code>errno</code> (on Windows, <code>GetLastError</code>) the goroutine's most recent foreign call left, captured before anything else could change it.</td>
+<td><code>last_errno() -&gt; i64</code>: the C <code>errno</code> the goroutine's most recent foreign call left, cleared just before the call and captured before anything else could change it, so a call that does not set it answers 0.</td>
+</tr>
+<tr>
+<td><code>last_os_error</code></td>
+<td><code>fn last_os_error() -&gt; i64</code></td>
+<td><code>last_os_error() -&gt; i64</code>: the operating-system error code the goroutine's most recent foreign call left: <code>GetLastError</code> on Windows, <code>errno</code> elsewhere. Cleared just before the call, so a call that does not set it answers 0.</td>
 </tr>
 <tr>
 <td><code>c_void</code></td>
@@ -2442,7 +2447,7 @@
 <tr>
 <td><code>Ptr</code></td>
 <td><code>type Ptr</code></td>
-<td><code>Ptr&lt;T&gt;</code>: a non-null address of a <code>T</code> in memory Gossamer does not manage, as a foreign function takes or answers it; <code>Option&lt;Ptr&lt;T&gt;&gt;</code> is the nullable form. Holding, copying, comparing, storing, and sending one is safe; every access through it is <code>unsafe</code>. <code>p.cast::&lt;U&gt;()</code>, <code>p.address()</code>, and <code>unsafe { Ptr::from_address(n) }</code> (<code>None</code> for 0).</td>
+<td><code>Ptr&lt;T&gt;</code>: a non-null address of a <code>T</code> in memory Gossamer does not manage, as a foreign function takes or answers it; <code>Option&lt;Ptr&lt;T&gt;&gt;</code> is the nullable form. Holding, copying, comparing, storing, and sending one is safe; every access through it is <code>unsafe</code>. <code>p.cast::&lt;U&gt;()</code>, <code>p.address()</code>, <code>p.is_null()</code>, <code>unsafe { Ptr::from_address(n) }</code> (<code>None</code> for 0), and <code>Ptr::null()</code>, the NULL a <code>#[repr(C)]</code> struct field holds where C expects one (a table's terminating entry), which a <code>Ptr</code> copied out of C memory may be too.</td>
 </tr>
 <tr>
 <td><code>Handle</code></td>
@@ -2480,6 +2485,76 @@
 <td><code>size_of::&lt;T&gt;() -&gt; i64</code>: the bytes a <code>T</code> occupies in C layout.</td>
 </tr>
 <tr>
+<td><code>align_of</code></td>
+<td><code>fn align_of&lt;T&gt;() -&gt; i64</code></td>
+<td><code>align_of::&lt;T&gt;() -&gt; i64</code>: the alignment, in bytes, of a <code>T</code> in C layout.</td>
+</tr>
+<tr>
+<td><code>offset_of</code></td>
+<td><code>fn offset_of&lt;T&gt;(field: String) -&gt; i64</code></td>
+<td><code>offset_of::&lt;T&gt;("field.path") -&gt; i64</code>: the byte offset of a field, or a field of a field, inside the <code>#[repr(C)]</code> struct <code>T</code>; the path is a string literal checked at compile time (GT0109).</td>
+</tr>
+<tr>
+<td><code>addr_of</code></td>
+<td><code>fn addr_of&lt;T&gt;(symbol: T) -&gt; ffi::Ptr&lt;T&gt;</code></td>
+<td><code>addr_of(NAME) -&gt; Ptr&lt;T&gt;</code>: the address of the C global <code>static NAME: T</code> an <code>unsafe extern</code> block declares, read and written with <code>ffi::read</code> and <code>ffi::write</code>; a foreign static is reached no other way (GT0111).</td>
+</tr>
+<tr>
+<td><code>View</code></td>
+<td><code>type View</code></td>
+<td><code>View&lt;T&gt;</code>: <code>len</code> values of <code>T</code> in foreign memory, read and written in place. <code>unsafe { View::new(p, len) }</code> vouches that <code>p</code> addresses that many; <code>v.len()</code>, <code>v.get(i)</code> and <code>v[i]</code>, <code>v.set(i, value)</code>, <code>v.slice(lo, hi)</code>, <code>v.to_vec()</code>, <code>v.copy_from(values)</code>, <code>v.fill(value)</code>, and <code>v.ptr()</code> follow, each access bounds-checked against the length.</td>
+</tr>
+<tr>
+<td><code>atomic_load</code></td>
+<td><code>fn atomic_load&lt;T&gt;(p: ffi::Ptr&lt;T&gt;) -&gt; T</code></td>
+<td><code>unsafe { atomic_load(p) }</code>: the 32- or 64-bit integer at <code>p</code>, read atomically (sequentially consistent); an address not aligned to the integer's width panics.</td>
+</tr>
+<tr>
+<td><code>atomic_store</code></td>
+<td><code>fn atomic_store&lt;T&gt;(p: ffi::Ptr&lt;T&gt;, value: T) -&gt; ()</code></td>
+<td><code>unsafe { atomic_store(p, value) }</code>: stores <code>value</code> at <code>p</code> atomically.</td>
+</tr>
+<tr>
+<td><code>atomic_swap</code></td>
+<td><code>fn atomic_swap&lt;T&gt;(p: ffi::Ptr&lt;T&gt;, value: T) -&gt; T</code></td>
+<td><code>unsafe { atomic_swap(p, value) }</code>: stores <code>value</code> at <code>p</code> atomically and answers the value it replaced.</td>
+</tr>
+<tr>
+<td><code>atomic_compare_exchange</code></td>
+<td><code>fn atomic_compare_exchange&lt;T&gt;(p: ffi::Ptr&lt;T&gt;, current: T, new: T) -&gt; Result&lt;T, T&gt;</code></td>
+<td><code>unsafe { atomic_compare_exchange(p, current, new) } -&gt; Result&lt;T, T&gt;</code>: stores <code>new</code> at <code>p</code> when it holds <code>current</code>, atomically; <code>Ok</code> with the old value when it did, <code>Err</code> with the value found when it did not.</td>
+</tr>
+<tr>
+<td><code>atomic_fetch_add</code></td>
+<td><code>fn atomic_fetch_add&lt;T&gt;(p: ffi::Ptr&lt;T&gt;, value: T) -&gt; T</code></td>
+<td><code>unsafe { atomic_fetch_add(p, value) }</code>: adds <code>value</code> to the integer at <code>p</code> atomically, wrapping, and answers the value before.</td>
+</tr>
+<tr>
+<td><code>atomic_fetch_sub</code></td>
+<td><code>fn atomic_fetch_sub&lt;T&gt;(p: ffi::Ptr&lt;T&gt;, value: T) -&gt; T</code></td>
+<td><code>unsafe { atomic_fetch_sub(p, value) }</code>: subtracts <code>value</code> atomically, wrapping, and answers the value before.</td>
+</tr>
+<tr>
+<td><code>atomic_fetch_and</code></td>
+<td><code>fn atomic_fetch_and&lt;T&gt;(p: ffi::Ptr&lt;T&gt;, value: T) -&gt; T</code></td>
+<td><code>unsafe { atomic_fetch_and(p, value) }</code>: ands <code>value</code> in atomically and answers the value before.</td>
+</tr>
+<tr>
+<td><code>atomic_fetch_or</code></td>
+<td><code>fn atomic_fetch_or&lt;T&gt;(p: ffi::Ptr&lt;T&gt;, value: T) -&gt; T</code></td>
+<td><code>unsafe { atomic_fetch_or(p, value) }</code>: ors <code>value</code> in atomically and answers the value before.</td>
+</tr>
+<tr>
+<td><code>atomic_fetch_xor</code></td>
+<td><code>fn atomic_fetch_xor&lt;T&gt;(p: ffi::Ptr&lt;T&gt;, value: T) -&gt; T</code></td>
+<td><code>unsafe { atomic_fetch_xor(p, value) }</code>: xors <code>value</code> in atomically and answers the value before.</td>
+</tr>
+<tr>
+<td><code>Union</code></td>
+<td><code>type Union</code></td>
+<td><code>Union&lt;(A, B, ..)&gt;</code>: a C union of the listed members, sized and aligned for the largest, as a <code>#[repr(C)]</code> field, a pointee, or a foreign argument. <code>Union::new(v)</code>, <code>Union::zeroed()</code>, <code>u.get::&lt;T&gt;()</code>, and <code>u.set(v)</code> take and give the leading bytes as a member type (GT0110 for any other type).</td>
+</tr>
+<tr>
 <td><code>free</code></td>
 <td><code>fn free&lt;T&gt;(p: ffi::Ptr&lt;T&gt;)</code></td>
 <td><code>unsafe { free(p) }</code>: frees memory the platform C allocator handed out (<code>alloc</code>, <code>to_c_bytes</code>, or a library's <code>malloc</code>).</td>
@@ -2503,6 +2578,11 @@
 <td><code>to_c_bytes</code></td>
 <td><code>fn to_c_bytes(bytes: [u8]) -&gt; ffi::Ptr&lt;u8&gt;</code></td>
 <td><code>unsafe { to_c_bytes(bytes) }</code>: a C-allocated copy of <code>bytes</code>, for native code to keep; free it or hand it to a library that takes it over.</td>
+</tr>
+<tr>
+<td><code>fn_addr</code></td>
+<td><code>fn fn_addr&lt;F&gt;(f: F) -&gt; ffi::Ptr&lt;ffi::c_void&gt;</code></td>
+<td><code>fn_addr(f) -&gt; Ptr&lt;c_void&gt;</code>: the C function pointer for the named top-level function <code>f</code>, whose parameters and result have C forms (GT0107, GT0108 otherwise): a value for a function-pointer field of a C struct (an ops table, a <code>luaL_Reg</code> array). Native code calls it as it calls a callback.</td>
 </tr>
 <tr>
 <td><code>fn_from_ptr</code></td>

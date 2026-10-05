@@ -4869,7 +4869,7 @@ fn a_struct_literal_that_never_names_its_const_generic_reports_gt0088() {
 
 #[test]
 fn a_simd_lane_type_outside_the_supported_set_reports_gt0089() {
-    let source = "fn main() {\n    let v: Simd<i16, 4> = Simd::splat(1)\n    let _ = v\n}\n";
+    let source = "fn main() {\n    let v: Simd<char, 4> = Simd::splat('a')\n    let _ = v\n}\n";
     let d = diagnostics_for(source);
     assert!(has_code(&d, "GT0089"), "{d:?}");
 }
@@ -5014,5 +5014,34 @@ fn type_arguments_on_the_type_segment_instantiate_an_associated_function() {
         accepted.diagnostics.is_empty(),
         "{:?}",
         accepted.diagnostics
+    );
+}
+
+#[test]
+fn a_method_turbofish_instantiates_the_methods_own_type_parameters() {
+    let source = "struct W<T> { v: T }\n\
+                  impl<T> W<T> {\n    fn conv<U>(self) -> Vec<U> { #[] }\n}\n\
+                  struct Plain { v: i64 }\n\
+                  impl Plain {\n    fn conv<U>(self) -> Vec<U> { #[] }\n}\n\
+                  fn main() {\n\
+                  \x20   let w = W { v: 1 }\n\
+                  \x20   let x: Vec<i64> = w.conv::<String>()\n\
+                  \x20   let p = Plain { v: 2 }\n\
+                  \x20   let y: Vec<i64> = p.conv::<f64>()\n\
+                  }\n";
+    let checked = run(source);
+    let mismatches = checked
+        .diagnostics
+        .iter()
+        .filter(|d| matches!(d.error, TypeError::TypeMismatch { .. }))
+        .count();
+    assert_eq!(mismatches, 2, "{:?}", checked.diagnostics);
+    let agreeing = run(&source
+        .replace("Vec<i64> = w", "Vec<String> = w")
+        .replace("Vec<i64> = p", "Vec<f64> = p"));
+    assert!(
+        agreeing.diagnostics.is_empty(),
+        "{:?}",
+        agreeing.diagnostics
     );
 }

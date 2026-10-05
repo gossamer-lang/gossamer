@@ -62,6 +62,11 @@ impl<'tcx> FnBuilder<'tcx> {
         self.next_reg = mark.0.max(self.escaped_reference_reg_floor);
         self.next_float_reg = mark.1;
         self.next_int_reg = mark.2;
+        // A register given back holds whatever the next region stores in it,
+        // so what is recorded about its current value no longer holds.
+        let floor = self.next_reg;
+        self.flat_int_locals.retain(|reg| *reg < floor);
+        self.flat_float_locals.retain(|reg| *reg < floor);
     }
 
     pub(crate) fn push_scope(&mut self) {
@@ -437,5 +442,41 @@ impl<'tcx> FnBuilder<'tcx> {
             }
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet};
+
+    use gossamer_types::TyCtxt;
+
+    use super::super::{ConstValues, FnBuilder};
+
+    #[test]
+    fn a_register_given_back_carries_no_array_kind() {
+        let tcx = TyCtxt::new();
+        let (layouts, wrappers, inline, shareable, tys) = (
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let consts = ConstValues::new();
+        let (muts, impls, statics) = (HashSet::new(), HashSet::new(), HashSet::new());
+        let mut builder = FnBuilder::new(
+            "region", &tcx, &layouts, &wrappers, &inline, &shareable, &tys, &consts, &muts, &impls,
+            &statics, None, None,
+        );
+        let mark = builder.register_mark();
+        let bytes = builder.alloc_reg();
+        let floats = builder.alloc_reg();
+        builder.flat_int_locals.insert(bytes);
+        builder.flat_float_locals.insert(floats);
+        builder.restore_register_mark(mark);
+        assert_eq!(builder.alloc_reg(), bytes);
+        assert!(!builder.flat_int_locals.contains(&bytes));
+        assert!(!builder.flat_float_locals.contains(&floats));
     }
 }

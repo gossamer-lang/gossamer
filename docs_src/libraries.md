@@ -68,6 +68,51 @@ path = "src/main.gos"
 [lib]
 name = "widget"
 path = "src/lib.gos"
+# Optional: also build a C library from the `#[export]` functions - a
+# static archive, a shared library, and `include/widget.h`.
+kind = ["staticlib", "cdylib"]
+
+# Optional: C sources this package compiles and links (see Foreign code).
+[native]
+sources = ["csrc/shim.c"]
+include = ["csrc/include"]
+
+# Optional: build-time features, read by `#[cfg(feature = "..")]`.
+[features]
+default = ["json"]
+json = []
+```
+
+## Features
+
+A feature turns on code marked `#[cfg(feature = "name")]`, in an item or a
+`use`. An entry under `[features]` lists what it turns on in turn: another
+feature of the project, `dep:<dependency>` for an optional dependency, or
+`<dependency>/<feature>` for a dependency's own feature.
+
+```toml
+[features]
+default = ["json"]
+json = []
+compress = ["dep:zstd_gos", "codec/fast"]
+
+[dependencies]
+zstd_gos = { git = "https://github.com/example/zstd-gos", optional = true }
+codec = { path = "../codec", features = ["simd"], default-features = false }
+```
+
+`default` is on unless `--no-default-features` is given, and `--features
+compress,json` turns on more, on every command (`gos run`, `gos build`,
+`gos test`, `gos check`). Features add up across the graph: a dependency
+builds with every feature any dependent asks for, and each package's
+`#[cfg(feature = ..)]` reads its own features. An optional dependency joins
+the build only while a feature names it, so its `use` carries the same
+`#[cfg]`:
+
+<!-- fragment -->
+```gossamer
+#[cfg(feature = "compress")]
+use zstd_gos
 ```
 
 A dependency is keyed by the project id it publishes under, or - when its
@@ -274,7 +319,13 @@ fn main() { println("{}", native::shout("hello")) }
 
 C functions need no crate: an `unsafe extern "C"` block declares them
 directly ([Foreign functions](language/unsafe_extern.md)); a project
-refuses them with `ffi = false` under `[project]`. The switch covers
+refuses them with `ffi = false` under `[project]`. C the package carries
+itself is listed under `[native]` and compiled with the target's C compiler
+(`GOS_CC`, then `CC`), cached under `.gos-cache/native/`, and linked into
+`gos run` and `gos build` alike; a `feature` key in the table compiles it only
+with that feature. `gos bindgen --c header.h` writes the declarations for a C
+header, and `#[export]` with `[lib] kind` goes the other way, building a C
+library from Gossamer functions. The switch covers
 dependencies too: a library that declares C functions fails to build
 inside a project that refuses native code (GT0102). [Calling
 Rust](rust_bindings.md) has the full instructions: the type

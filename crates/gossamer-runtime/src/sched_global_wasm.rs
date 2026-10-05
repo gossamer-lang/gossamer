@@ -137,6 +137,13 @@ pub fn adjust_channel_waiters(_entering: bool) {}
 /// program, and reports nothing, so it records nothing.
 pub fn mark_program_entered() {}
 
+/// Whether a program's `main` has started. The playground is only ever a
+/// program, never a library a host calls into.
+#[must_use]
+pub fn program_entered() -> bool {
+    true
+}
+
 /// Reports a deadlock before blocking. Inert on wasm: a channel operation
 /// that cannot complete immediately goes on to [`park`], which diverges with
 /// the documented "blocking not supported" message. That message names the

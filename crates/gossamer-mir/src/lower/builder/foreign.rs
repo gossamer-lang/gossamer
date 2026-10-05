@@ -14,8 +14,8 @@ use gossamer_types::{CLeaf, FloatTy, IntTy, Ty, TyKind, c_class_signed, c_class_
 
 use super::Builder;
 use crate::ir::{
-    ConstValue, ForeignCall, ForeignCallback, ForeignParam, Local, Operand, Place, Projection,
-    Rvalue,
+    ConstValue, ForeignCall, ForeignCallback, ForeignParam, ForeignStatic, Local, Operand, Place,
+    Projection, Rvalue,
 };
 
 /// A struct or array argument packed for the call.
@@ -48,7 +48,9 @@ impl Builder<'_> {
         let (symbol, signature, library) =
             (literal(symbol)?, literal(signature)?, literal(library)?);
         let declared = ForeignCall::intrinsic_name(symbol, signature, library);
-        let params = ForeignCall::parse(declared)?.param_list();
+        let declared_call = ForeignCall::parse(declared)?;
+        let params = declared_call.param_list();
+        let returns_struct = declared_call.ret_layout.is_some();
         let ret = signature.rsplit_once('>')?.1;
         let mut spelling = String::with_capacity(signature.len());
         let mut operands = Vec::with_capacity(rest.len());
@@ -63,9 +65,18 @@ impl Builder<'_> {
         } else {
             rest
         };
+        // A struct result comes back through the final argument, a
+        // one-element array the backend writes and the call reads back.
+        let (rest, holder) = if returns_struct {
+            let (holder, rest) = rest.split_last()?;
+            (rest, Some(holder))
+        } else {
+            (rest, None)
+        };
         for (param, arg) in params.iter().zip(rest) {
             let aggregate = match param {
                 ForeignParam::Struct { writable } => Some(*writable),
+                ForeignParam::ByValue(_) => Some(false),
                 ForeignParam::Slice { writable, .. } if self.is_fixed_array_arg(arg) => {
                     Some(*writable)
                 }
@@ -76,7 +87,10 @@ impl Builder<'_> {
                 let (size, leaves) = self.tcx.c_leaves(inner_ty)?;
                 let buffer = self.pack_foreign_aggregate(&place, &leaves, size, span);
                 operands.push(Operand::Copy(Place::local(buffer)));
-                spelling.push(if writable { 'R' } else { 'r' });
+                match param {
+                    ForeignParam::ByValue(_) => spelling.push_str(&param.spelling()),
+                    _ => spelling.push(if writable { 'R' } else { 'r' }),
+                }
                 packed.push(Packed {
                     buffer,
                     place,
@@ -91,10 +105,24 @@ impl Builder<'_> {
                     spelling.push(if *writable { 'P' } else { 'p' });
                     spelling.push(*elem);
                 }
-                ForeignParam::Struct { .. } => unreachable!("packed above"),
+                ForeignParam::Struct { .. } | ForeignParam::ByValue(_) => {
+                    unreachable!("packed above")
+                }
             }
             let local = self.lower_expr(arg)?;
             operands.push(Operand::Copy(Place::local(local)));
+        }
+        if let Some(holder) = holder {
+            let (inner_ty, place) = self.foreign_aggregate_place(holder)?;
+            let (size, leaves) = self.tcx.c_leaves(inner_ty)?;
+            let buffer = self.pack_foreign_aggregate(&place, &leaves, size, span);
+            operands.push(Operand::Copy(Place::local(buffer)));
+            packed.push(Packed {
+                buffer,
+                place,
+                leaves,
+                writable: true,
+            });
         }
         let name = ForeignCall::intrinsic_name(symbol, &format!("{spelling}>{ret}"), library);
         let dest = self.fresh(ty);
@@ -130,7 +158,24 @@ impl Builder<'_> {
     ) -> Option<Local> {
         let runtime = match intrinsic {
             FfiIntrinsic::Runtime(runtime) => runtime,
-            FfiIntrinsic::Callback => return self.lower_ffi_callback(args, ty, span),
+            FfiIntrinsic::Callback => return self.lower_ffi_callback(args, ty, false, span),
+            FfiIntrinsic::Export => return self.lower_ffi_callback(args, ty, true, span),
+            FfiIntrinsic::Symbol => {
+                let [symbol, library] = args else {
+                    return None;
+                };
+                let name = ForeignStatic::intrinsic_name(literal(symbol)?, literal(library)?);
+                let dest = self.fresh(ty);
+                self.emit_assign(
+                    Place::local(dest),
+                    Rvalue::CallIntrinsic {
+                        name,
+                        args: Vec::new(),
+                    },
+                    span,
+                );
+                return Some(dest);
+            }
         };
         let mut operands = Vec::with_capacity(args.len());
         for arg in args {
@@ -150,8 +195,15 @@ impl Builder<'_> {
     }
 
     /// `__gos_ffi_callback(adapter, signature, name)`: the address of a C-ABI
-    /// entry the backend generates for `adapter`.
-    fn lower_ffi_callback(&mut self, args: &[HirExpr], ty: Ty, span: Span) -> Option<Local> {
+    /// entry the backend generates for `adapter`. `__gos_ffi_export(adapter,
+    /// signature, symbol)` is the same entry defined externally as `symbol`.
+    fn lower_ffi_callback(
+        &mut self,
+        args: &[HirExpr],
+        ty: Ty,
+        exported: bool,
+        span: Span,
+    ) -> Option<Local> {
         let [adapter, signature, name] = args else {
             return None;
         };
@@ -159,8 +211,11 @@ impl Builder<'_> {
             return None;
         };
         let adapter = segments.last()?.name.as_str();
-        let intrinsic =
-            ForeignCallback::intrinsic_name(literal(signature)?, adapter, literal(name)?);
+        let intrinsic = if exported {
+            ForeignCallback::export_intrinsic_name(literal(signature)?, adapter, literal(name)?)
+        } else {
+            ForeignCallback::intrinsic_name(literal(signature)?, adapter, literal(name)?)
+        };
         let dest = self.fresh(ty);
         // The adapter's name as an operand keeps its body reachable.
         self.emit_assign(
@@ -370,6 +425,10 @@ pub(crate) enum FfiIntrinsic {
     Runtime(&'static str),
     /// The address of a generated C-ABI entry for a callback adapter.
     Callback,
+    /// An external C-ABI entry for an `#[export]` function's adapter.
+    Export,
+    /// The address of a C global.
+    Symbol,
 }
 
 impl FfiIntrinsic {
@@ -382,6 +441,17 @@ impl FfiIntrinsic {
             gossamer_hir::FFI_HANDLE_STORE => Self::Runtime("gos_rt_ffi_handle_store"),
             gossamer_hir::FFI_HANDLE_RELEASE => Self::Runtime("gos_rt_ffi_handle_release"),
             gossamer_hir::FFI_CALLBACK => Self::Callback,
+            gossamer_hir::FFI_EXPORT => Self::Export,
+            gossamer_hir::FFI_SYMBOL => Self::Symbol,
+            gossamer_hir::FFI_LOAD_INT => Self::Runtime("gos_rt_ffi_load_int"),
+            gossamer_hir::FFI_LOAD_FLOAT => Self::Runtime("gos_rt_ffi_load_float"),
+            gossamer_hir::FFI_STORE_INT => Self::Runtime("gos_rt_ffi_store_int"),
+            gossamer_hir::FFI_STORE_FLOAT => Self::Runtime("gos_rt_ffi_store_float"),
+            gossamer_hir::FFI_VIEW_CHECK => Self::Runtime("gos_rt_ffi_view_check"),
+            gossamer_hir::FFI_VIEW_RANGE_CHECK => Self::Runtime("gos_rt_ffi_view_range_check"),
+            gossamer_hir::FFI_VIEW_LEN_CHECK => Self::Runtime("gos_rt_ffi_view_len_check"),
+            gossamer_hir::FFI_ATOMIC_RMW => Self::Runtime("gos_rt_ffi_atomic_rmw"),
+            gossamer_hir::FFI_ATOMIC_CAS => Self::Runtime("gos_rt_ffi_atomic_cas"),
             _ => return None,
         })
     }

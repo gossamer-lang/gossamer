@@ -137,32 +137,6 @@ pub const HANDLE_SIGNATURES: &[(&str, &str, &str)] = &[
         "fn try_recv<T>(self: Receiver<T>) -> Option<T>",
     ),
     (
-        "Child",
-        "close_stdin",
-        "fn close_stdin(self: process::Child) -> ()",
-    ),
-    ("Child", "kill", "fn kill(self: process::Child) -> bool"),
-    (
-        "Child",
-        "read_line",
-        "fn read_line(self: process::Child) -> Option<String>",
-    ),
-    (
-        "Child",
-        "read_stdout",
-        "fn read_stdout(self: process::Child) -> String",
-    ),
-    (
-        "Child",
-        "wait",
-        "fn wait(self: process::Child) -> Result<i64, errors::Error>",
-    ),
-    (
-        "Child",
-        "write_stdin",
-        "fn write_stdin(self: process::Child, text: String) -> bool",
-    ),
-    (
         "Client",
         "delete",
         "fn delete(self: http::Client, url: String) -> http::Request",

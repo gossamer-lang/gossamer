@@ -763,6 +763,11 @@ pub(crate) fn instance_field_tys(tcx: &mut TyCtxt, def: DefId, substs: &Substs) 
     if let Some(fields) = tcx.struct_fields_instance(def, substs) {
         return Some(fields.to_vec());
     }
+    // A union's one field is its bytes, sized by its members.
+    if let Some(bytes) = tcx.union_bytes_ty(def, substs) {
+        tcx.register_struct_fields_inst(def, substs.clone(), vec![bytes]);
+        return Some(vec![bytes]);
+    }
     let decl = tcx.struct_field_tys(def)?.to_vec();
     let subst_tys: Vec<Option<Ty>> = substs
         .as_slice()

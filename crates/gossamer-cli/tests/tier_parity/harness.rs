@@ -326,6 +326,8 @@ const SPECS: &[Spec] = &[
     // Lane vectors: wrapping integer lanes, width-wrapped shifts, NaN and
     // signed-zero min/max, and a fixed reduction tree agree on every tier.
     spec("feature-testing-examples/simd_lanes.gos"),
+    spec("feature-testing-examples/simd_bytes.gos"),
+    spec("feature-testing-examples/simd_surface.gos"),
     // A const generic lane kernel folds in the same tree at every lane count,
     // and a `[T; N]` result is released by the caller that receives it.
     spec("feature-testing-examples/simd_const_generic_kernels.gos"),
@@ -1418,6 +1420,7 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/json_set_update.gos"),
     spec("feature-testing-examples/json_value_constructors.gos"),
     spec("feature-testing-examples/option_result_chain_methods.gos"),
+    spec("feature-testing-examples/process_command.gos"),
     spec("feature-testing-examples/process_spawn_piped.gos"),
     spec("feature-testing-examples/method_dispatch_collision.gos"),
     spec("feature-testing-examples/module_qualified_enum_ctor.gos"),

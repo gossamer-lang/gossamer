@@ -5,6 +5,7 @@
 //! dispatch-consistency verifier) all derive their declarations from
 //! this registry instead of maintaining parallel string arrays.
 
+pub mod c_aggregate;
 /// Reference-counting type-meta ABI (kind tags + blob layout) shared by
 /// the MIR lowerer and the runtime.
 pub mod format_pad;

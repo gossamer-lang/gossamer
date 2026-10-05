@@ -2344,9 +2344,19 @@
 </thead>
 <tbody>
 <tr>
+<td><code>Command</code></td>
+<td><code>type Command</code></td>
+<td>Builder for a child process: <code>Command::new(program)</code> then <code>arg</code> / <code>args</code>, <code>env</code> / <code>env_remove</code> / <code>env_clear</code>, <code>dir</code>, <code>stdin</code> / <code>stdout</code> / <code>stderr</code> (a <code>Stdio</code>), <code>new_process_group</code>, and on POSIX <code>new_session</code> and <code>controlling_terminal(fd)</code>; <code>spawn() -&gt; Result&lt;Child, errors::Error&gt;</code>, <code>output() -&gt; Result&lt;Output, errors::Error&gt;</code> (stdout and stderr read at once, so neither pipe stalls the child), and <code>status() -&gt; Result&lt;i64, errors::Error&gt;</code>. Rust's <code>std::process::Command</code>, Go's <code>exec.Cmd</code>.</td>
+</tr>
+<tr>
+<td><code>Stdio</code></td>
+<td><code>type Stdio</code></td>
+<td>Where a child's standard stream goes: <code>Stdio::Inherit</code> (this process's), <code>Stdio::Null</code>, <code>Stdio::Piped</code> (read or written through the <code>Child</code>), or <code>Stdio::File(f)</code> for an open <code>fs::File</code>.</td>
+</tr>
+<tr>
 <td><code>Child</code></td>
 <td><code>type Child</code></td>
-<td>Handle to a still-running child supporting wait / kill.</td>
+<td>A running child: <code>id</code>, <code>write_stdin</code> / <code>write_stdin_bytes</code> / <code>close_stdin</code>, <code>read_line</code> / <code>read_stdout</code> / <code>read_stderr</code> and the <code>read_stdout_line</code> / <code>read_stderr_line</code> / <code>read_stdout_chunk(max)</code> / <code>read_stderr_chunk(max)</code> forms (each stream may be drained from its own goroutine), <code>wait</code>, <code>wait_timeout(ms)</code>, <code>kill</code>, and on POSIX <code>signal(sig)</code> and <code>kill_group(sig)</code> for a child started in its own process group or session. A child that has ended answers 128 plus the signal number when a signal ended it.</td>
 </tr>
 <tr>
 <td><code>run</code></td>

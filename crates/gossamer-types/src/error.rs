@@ -2201,9 +2201,9 @@ impl TypeDiagnostic {
             }
             TypeError::SimdShape { .. } => {
                 out = out.with_note(
-                    "`Simd<T, N>` takes `f32`, `f64`, `i32`, `i64`, `u8`, or `u32` lanes, \
-                     `N` of 2, 4, 8, or 16 (16 for `u8`, `i32`, and `u32`); `Mask<N>` is the \
-                     `bool`-laned form a lane comparison answers",
+                    "`Simd<T, N>` takes `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, \
+                     `f32`, or `f64` lanes, `N` of 2, 4, 8, or 16 (16 for the lanes of 32 bits \
+                     or fewer); `Mask<N>` is the `bool`-laned form a lane comparison answers",
                 );
             }
             TypeError::ConstGenericNotInferred {
@@ -2721,7 +2721,7 @@ mod tests {
 }
 
 /// A rule of `unsafe extern "C"` declarations, foreign memory, or callbacks
-/// broken: GT0097 through GT0108.
+/// broken: GT0097 through GT0112.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ForeignError {
     /// A function declared in an `unsafe extern "C"` block is called outside
@@ -2839,6 +2839,58 @@ pub enum ForeignError {
         /// What was passed instead.
         found: String,
     },
+    /// `ffi::offset_of` whose field path is not a string literal, or names
+    /// no field of the `#[repr(C)]` struct.
+    #[error("`ffi::offset_of::<{ty}>` cannot locate `{path}`: {why}")]
+    OffsetOfField {
+        /// The struct type.
+        ty: String,
+        /// The path as written, or `..` for a non-literal.
+        path: String,
+        /// What is wrong with it.
+        why: String,
+    },
+    /// An `ffi::Union` member list or operation that has no C meaning.
+    #[error("`{union}` {why}")]
+    UnionMember {
+        /// The union type.
+        union: String,
+        /// What is wrong.
+        why: String,
+    },
+    /// A foreign static named anywhere but as the argument of
+    /// `ffi::addr_of`, or `ffi::addr_of` given anything else.
+    #[error("{what}")]
+    ForeignStatic {
+        /// The use, as the report names it.
+        what: String,
+    },
+    /// A plain `#[repr(C)]` struct parameter in a project whose
+    /// `gossamer-version` predates 0.67, where such a parameter passed a
+    /// pointer; it passes the struct by value now.
+    #[error(
+        "`{param}` of `{name}` passes the `#[repr(C)]` struct `{ty}` by value as of 0.67; it passed a pointer to a copy before"
+    )]
+    LegacyByValue {
+        /// The foreign function's name.
+        name: String,
+        /// The parameter's name.
+        param: String,
+        /// The struct's name.
+        ty: String,
+        /// The manifest whose `gossamer-version` predates 0.67.
+        manifest: String,
+    },
+    /// An `#[export]` function C cannot call: a parameter or result the C
+    /// ABI does not carry, a method or generic function, a malformed
+    /// symbol, or a symbol two exports share.
+    #[error("`{name}` cannot be exported: {why}")]
+    Export {
+        /// The function's name.
+        name: String,
+        /// What keeps it from C.
+        why: String,
+    },
 }
 
 /// The library a foreign declaration belongs to.
@@ -2886,6 +2938,11 @@ impl ForeignError {
             Self::NotPortable { .. } => "foreign-not-portable",
             Self::CallbackSignature { .. } => "foreign-callback-signature",
             Self::CallbackArgument { .. } => "foreign-callback-argument",
+            Self::OffsetOfField { .. } => "foreign-offset-of-field",
+            Self::UnionMember { .. } => "foreign-union-member",
+            Self::ForeignStatic { .. } => "foreign-static-use",
+            Self::LegacyByValue { .. } => "foreign-legacy-by-value",
+            Self::Export { .. } => "foreign-export",
         }
     }
 
@@ -2905,6 +2962,11 @@ impl ForeignError {
             Self::NotPortable { .. } => "GT0106",
             Self::CallbackSignature { .. } => "GT0107",
             Self::CallbackArgument { .. } => "GT0108",
+            Self::OffsetOfField { .. } => "GT0109",
+            Self::UnionMember { .. } => "GT0110",
+            Self::ForeignStatic { .. } => "GT0111",
+            Self::LegacyByValue { .. } => "GT0112",
+            Self::Export { .. } => "GT0113",
         }
     }
 
@@ -2962,6 +3024,30 @@ impl ForeignError {
                      `ffi::Handle`",
                 )
             }
+            Self::OffsetOfField { .. } => out.with_help(
+                "name a field of the `#[repr(C)]` struct as a string literal, with `.` between \
+                 nested fields: `ffi::offset_of::<Outer>(\"inner.count\")`",
+            ),
+            Self::UnionMember { .. } => out.with_help(
+                "list the C members as a tuple, `ffi::Union<(i32, f64, Point)>`, each a scalar, \
+                 an `ffi::Ptr`, a fixed array, or a `#[repr(C)]` struct; `new`, `get`, and `set` \
+                 take one of those types",
+            ),
+            Self::ForeignStatic { .. } => out.with_help(
+                "a C global declared `static NAME: T` in an `unsafe extern` block is reached \
+                 through its address: `unsafe { ffi::read(ffi::addr_of(NAME)) }`",
+            ),
+            Self::LegacyByValue { ty, manifest, .. } => out.with_help(format!(
+                "if the C function takes `const {ty} *` or `{ty} *`, declare the parameter \
+                 `&mut {ty}` and pass `&mut` the value (`gos check --fix` writes both); if it \
+                 takes the struct by value, raise `gossamer-version` in `{manifest}` to 0.67.0"
+            )),
+            Self::Export { .. } => out.with_help(
+                "an exported function is a free, non-generic `fn` whose parameters and result \
+                 are scalars, `ffi::Ptr`, `Option<ffi::Ptr>`, or `#[repr(C)]` plain-data \
+                 structs; a buffer crosses as an `ffi::Ptr` and a length, read through \
+                 `ffi::View::new`",
+            ),
         }
     }
 }

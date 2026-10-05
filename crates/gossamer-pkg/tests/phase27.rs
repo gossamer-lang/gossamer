@@ -369,3 +369,59 @@ fn ambiguous_inline_dependency_is_rejected() {
     assert!(matches!(err, ManifestError::AmbiguousDependency(ref id) if id == "x.y/z"));
     let _: InlineDependency; // ensure type re-export compiles
 }
+
+#[test]
+fn native_sources_and_library_kinds_round_trip_through_render() {
+    let source = r#"[project]
+id = "example.com/sqlite"
+version = "0.1.0"
+
+[lib]
+kind = ["staticlib", "cdylib"]
+
+[native]
+sources = ["csrc/sqlite3.c", "csrc/shim.c"]
+include = ["csrc"]
+defines = { SQLITE_THREADSAFE = "1", SQLITE_OMIT_LOAD_EXTENSION = "" }
+flags = ["-O2"]
+"#;
+    let manifest = Manifest::parse(source).unwrap();
+    let native = manifest.native.as_ref().expect("the [native] table");
+    assert_eq!(native.sources, vec!["csrc/sqlite3.c", "csrc/shim.c"]);
+    assert_eq!(native.include, vec!["csrc"]);
+    assert_eq!(
+        native.defines.get("SQLITE_THREADSAFE").map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
+        native
+            .defines
+            .get("SQLITE_OMIT_LOAD_EXTENSION")
+            .map(String::as_str),
+        Some("")
+    );
+    assert_eq!(native.flags, vec!["-O2"]);
+    let lib = manifest.lib.as_ref().expect("the [lib] table");
+    assert_eq!(
+        lib.kind,
+        vec![
+            gossamer_pkg::LibKind::Staticlib,
+            gossamer_pkg::LibKind::Cdylib
+        ]
+    );
+    let reparsed = Manifest::parse(&manifest.render()).unwrap();
+    assert_eq!(reparsed, manifest);
+}
+
+#[test]
+fn a_native_table_without_sources_or_with_an_unknown_key_is_refused() {
+    let base = "[project]\nid = \"example.com/x\"\nversion = \"0.1.0\"\n\n[native]\n";
+    assert!(Manifest::parse(&format!("{base}include = [\"c\"]\n")).is_err());
+    assert!(Manifest::parse(&format!("{base}sources = [\"a.c\"]\nlibs = [\"z\"]\n")).is_err());
+    assert!(
+        Manifest::parse(
+            "[project]\nid = \"example.com/x\"\nversion = \"0.1.0\"\n\n[lib]\nkind = \"dll\"\n"
+        )
+        .is_err()
+    );
+}

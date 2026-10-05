@@ -106,6 +106,11 @@ pub struct UseDecl {
     /// is anchored at the module it was written in, so the anchor travels
     /// with it.
     pub module: Vec<String>,
+    /// The `#[cfg(..)]` expression written before the declaration, which
+    /// keeps it only where it holds (an optional dependency's import, a
+    /// platform's).
+    #[serde(default)]
+    pub cfg: Option<String>,
 }
 
 impl UseDecl {
@@ -119,6 +124,7 @@ impl UseDecl {
             alias: None,
             list: None,
             module: Vec::new(),
+            cfg: None,
         }
     }
 }

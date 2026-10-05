@@ -203,6 +203,7 @@ pub(crate) fn use_decl_module_with_list(segments: &[&str], list: Vec<UseListEntr
         alias: None,
         list: Some(list),
         module: Vec::new(),
+        cfg: None,
     }
 }
 

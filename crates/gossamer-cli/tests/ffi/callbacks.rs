@@ -167,28 +167,80 @@ fn main() {
 }
 
 #[test]
-fn a_callback_on_a_thread_the_library_started_is_gx0015() {
+fn a_callback_runs_on_a_thread_the_library_started() {
     let project = Project::new(
         "callback-thread",
         &fixture_program(
-            r#"
+            r"
 fn on_event(value: ffi::c_int, ctx: Ptr<ffi::c_void>) {
-    println(f"ran {value}")
+    let c: Ptr<Counter> = ctx.cast()
+    unsafe { counter_add(c, value) }
 }
 
 fn main() {
     let c = unsafe { counter_new(0) }
     unsafe { set_handler(on_event, c.cast()) }
     unsafe { fire_on_thread(5) }
+    unsafe { fire_on_thread(7) }
+    println(unsafe { counter_get(c) })
+}
+",
+        ),
+    );
+    project.expect_everywhere("12");
+}
+
+#[test]
+fn callbacks_run_on_several_library_threads_at_once() {
+    let project = Project::new(
+        "callback-threads",
+        &fixture_program(
+            r#"
+#[link(name = "gosffi", search = "native")]
+unsafe extern "C" {
+    fn run_threads(f: Fn(ffi::c_int, Option<Ptr<ffi::c_void>>) -> ffi::c_int, ctx: Option<Ptr<ffi::c_void>>, threads: ffi::c_int, count: ffi::c_int) -> i64
+}
+
+fn double(value: ffi::c_int, ctx: Option<Ptr<ffi::c_void>>) -> ffi::c_int {
+    value * 2
+}
+
+fn main() {
+    println(unsafe { run_threads(double, None, 4, 1000) })
+}
+"#,
+        ),
+    );
+    // Twice the sum of 0..4000.
+    project.expect_everywhere("15996000");
+}
+
+#[test]
+fn a_panic_in_a_callback_on_a_library_thread_ends_the_program() {
+    let project = Project::new(
+        "callback-thread-panic",
+        &fixture_program(
+            r#"
+fn on_event(value: ffi::c_int, ctx: Ptr<ffi::c_void>) {
+    panic(f"event {value} failed")
+}
+
+fn main() {
+    unsafe { set_handler(on_event, ffi::Handle::new(0).as_ptr()) }
+    unsafe { fire_on_thread(5) }
     println("not reached")
 }
 "#,
         ),
     );
-    project.expect_fault_everywhere(101, &["GX0015", "on_event"]);
+    project.expect_fault_everywhere(101, &["GX0005", "event 5 failed"]);
     for tier in crate::support::TIERS {
         let out = project.run_on(tier);
-        assert!(!out.stdout.contains("ran 5"), "{tier:?}:\n{}", out.all());
+        assert!(
+            !out.stdout.contains("not reached"),
+            "{tier:?}:\n{}",
+            out.all()
+        );
     }
 }
 

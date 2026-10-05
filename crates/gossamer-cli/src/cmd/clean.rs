@@ -54,6 +54,7 @@ pub(crate) fn run(options: Options) -> Result<()> {
         classes.extend([
             gossamer_driver::cache_maintenance::CacheClass::Frontend,
             gossamer_driver::cache_maintenance::CacheClass::Ir,
+            gossamer_driver::cache_maintenance::CacheClass::Native,
         ]);
     }
     // `gos clean` keeps reaching every root it always has; `gos cache` is

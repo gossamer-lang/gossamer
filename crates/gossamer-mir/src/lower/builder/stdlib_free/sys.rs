@@ -457,26 +457,6 @@ impl<'a> Builder<'a> {
             // `process::run_inherit(prog, args) -> Result<i64, errors::Error>`:
             // the child's exit code, run on this process's own stdio.
             "process::run_inherit" => ("gos_rt_exec_run_inherit", self.result_i64_error_ty()),
-            // `process::spawn_piped(prog, args) -> Result<Child, errors::Error>`.
-            // The Ok payload is the opaque piped-child handle (the
-            // `Child` sentinel Adt), so method dispatch on the
-            // extracted binding routes through the `process::Child`
-            // runtime kind.
-            "exec::spawn_piped" | "os::exec::spawn_piped" | "process::spawn_piped" => {
-                let child_def = gossamer_resolve::DefId::local(u32::MAX - 8);
-                self.tcx.register_def_name(child_def, "Child");
-                let child_ty = self.tcx.intern(gossamer_types::TyKind::Adt {
-                    def: child_def,
-                    substs: gossamer_types::Substs::new(),
-                });
-                let err_ty = self.tcx.dyn_error_ty();
-                let substs = gossamer_types::Substs::from_types([child_ty, err_ty]);
-                let result_ty = self.tcx.intern(gossamer_types::TyKind::Adt {
-                    def: gossamer_resolve::DefId::local(u32::MAX),
-                    substs,
-                });
-                ("gos_rt_exec_spawn_piped", result_ty)
-            }
             // `exec::kill(pid) -> bool` - best-effort SIGTERM.
             "exec::kill" | "os::exec::kill" | "process::kill" => {
                 ("gos_rt_exec_kill", self.tcx.bool_ty())

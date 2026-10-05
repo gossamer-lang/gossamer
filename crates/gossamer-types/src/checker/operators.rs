@@ -1574,6 +1574,15 @@ impl TypeChecker<'_> {
                 output,
             }));
             self.check_expr_expecting(rhs, Expectation::HasType(expected))
+        } else if op != BinaryOp::PipeGt
+            && matches!(
+                self.tcx.kind(self.infer.resolve(self.tcx, lhs_ty)),
+                Some(TyKind::Simd { .. })
+            )
+        {
+            // A lane-wise operator's right operand is a vector of the left's
+            // type, which a `Simd::splat` there takes its lanes from.
+            self.check_expr_expecting(rhs, Expectation::HasType(lhs_ty))
         } else {
             self.check_expr(rhs)
         }
@@ -2587,6 +2596,12 @@ impl TypeChecker<'_> {
 
     pub(super) fn join_branch_tys(&mut self, a: Ty, b: Ty, span: Span) -> Ty {
         self.unify(a, b, span);
+        // A branch that never finishes answers nothing; the `if` has the
+        // type of the one that does.
+        let a_res = self.infer.resolve(self.tcx, a);
+        if matches!(self.tcx.kind(a_res), Some(TyKind::Never)) {
+            return b;
+        }
         a
     }
 

@@ -1496,12 +1496,6 @@ impl<'a> Builder<'a> {
             (Some("net::UdpSocket"), "recv_from") => Some("gos_rt_udp_recv_from"),
             (Some("net::UdpSocket"), "local_addr") => Some("gos_rt_udp_local_addr"),
             (Some("net::UdpSocket"), "close") => Some("gos_rt_udp_close"),
-            (Some("process::Child"), "write_stdin") => Some("gos_rt_child_write_stdin"),
-            (Some("process::Child"), "close_stdin") => Some("gos_rt_child_close_stdin"),
-            (Some("process::Child"), "read_line") => Some("gos_rt_child_read_line"),
-            (Some("process::Child"), "read_stdout") => Some("gos_rt_child_read_stdout"),
-            (Some("process::Child"), "wait") => Some("gos_rt_child_wait"),
-            (Some("process::Child"), "kill") => Some("gos_rt_child_kill"),
             (Some("io::Stream"), "write_byte") => Some("gos_rt_stream_write_byte"),
             (Some("io::Stream"), "write_byte_array" | "write_bytes") => {
                 Some("gos_rt_stream_write_byte_array")

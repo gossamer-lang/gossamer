@@ -88,6 +88,12 @@ terminal_size = "0.4"
 syn = { version = "2", features = ["full", "extra-traits"] }
 quote = "1"
 which = { workspace = true }
+serde_json = { workspace = true }
+# `[native]` sources compile with the target's C compiler, found the way
+# Cargo build scripts find it; a Windows DLL's exports are read from its
+# objects.
+cc = "1"
+object = { version = "0.39", default-features = false, features = ["read"] }
 
 gossamer-std = { workspace = true }
 
@@ -109,10 +115,8 @@ webpki-roots = "1"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 
 # The terminal tests drive a program through a pseudo-terminal.
-# The FFI suite compiles its C fixture library with the platform compiler.
-[target.'cfg(windows)'.dev-dependencies]
-cc = "1"
-
+# The FFI suite compiles its C fixture library with the platform compiler,
+# through the `cc` dependency above.
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
 

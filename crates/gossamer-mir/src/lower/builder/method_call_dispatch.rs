@@ -1098,22 +1098,8 @@ impl<'a> Builder<'a> {
             // via the str c-pointer path) instead of an i64
             // (printed as a raw pointer numeral).
             "gos_rt_http_stream_next_line" => self.option_string_adt_ty(),
-            // `Child::read_line() -> Option<String>` - same pin as
-            // the HTTP stream's line reader.
-            "gos_rt_child_read_line" | "gos_rt_stream_next_line" => self.option_string_adt_ty(),
+            "gos_rt_stream_next_line" => self.option_string_adt_ty(),
             "gos_rt_stream_read_line" => self.result_i64_error_adt_ty(),
-            "gos_rt_child_read_stdout" => self.tcx.string_ty(),
-            "gos_rt_child_write_stdin" | "gos_rt_child_kill" => self.tcx.bool_ty(),
-            // `Child::wait() -> Result<i64, errors::Error>`.
-            "gos_rt_child_wait" => {
-                let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
-                let err_ty = self.tcx.dyn_error_ty();
-                let substs = gossamer_types::Substs::from_types([i64_ty, err_ty]);
-                self.tcx.intern(TyKind::Adt {
-                    def: gossamer_resolve::DefId::local(u32::MAX),
-                    substs,
-                })
-            }
             // `ResponseStream::next_chunk(max) -> Option<[u8]>`.
             // Pin the dest so `while let Some(chunk) = ...` binds
             // `chunk: Vec<u8>` and the payload extraction /

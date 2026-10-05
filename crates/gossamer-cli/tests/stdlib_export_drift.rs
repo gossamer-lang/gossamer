@@ -8,6 +8,8 @@
 /// Public members implemented by parse-time injected Gossamer wrappers rather
 /// than direct interpreter registrations.
 const SOURCE_VISIBLE_VIA_REWRITE: &[&str] = &[
+    "exec::spawn_piped",
+    "os::exec::spawn_piped",
     "path::Path",
     "path::Path::as_str",
     "path::Path::extension",
@@ -19,6 +21,7 @@ const SOURCE_VISIBLE_VIA_REWRITE: &[&str] = &[
     "path::Path::parent",
     "path::Path::starts_with",
     "path::Path::stem",
+    "process::spawn_piped",
     "time::CivilResolution::Fold",
     "time::CivilResolution::Gap",
     "time::CivilResolution::Unique",
@@ -112,7 +115,7 @@ fn is_primitive_scalar_method(name: &str) -> bool {
     let Some((owner, method)) = name.split_once("::") else {
         return false;
     };
-    matches!(owner, "f32" | "f64") && matches!(method, "to_bits" | "from_bits")
+    matches!(owner, "f32" | "f64") && matches!(method, "to_bits" | "from_bits" | "mul_add")
 }
 
 /// Every registered `module::fn` must name a member the canonical
@@ -235,12 +238,25 @@ const MANIFEST_IMPL_VIA_REWRITE: &[&str] = &[
     "ffi::write_at",
     "ffi::alloc",
     "ffi::size_of",
+    "ffi::align_of",
+    "ffi::offset_of",
+    "ffi::addr_of",
+    "ffi::atomic_load",
+    "ffi::atomic_store",
+    "ffi::atomic_swap",
+    "ffi::atomic_compare_exchange",
+    "ffi::atomic_fetch_add",
+    "ffi::atomic_fetch_sub",
+    "ffi::atomic_fetch_and",
+    "ffi::atomic_fetch_or",
+    "ffi::atomic_fetch_xor",
     "ffi::free",
     "ffi::read_bytes",
     "ffi::read_cstr",
     "ffi::write_bytes",
     "ffi::to_c_bytes",
     "ffi::fn_from_ptr",
+    "ffi::fn_addr",
     "os::fd::wait_readable",
     "os::fd::wait_writable",
     "term::enter_raw",
@@ -248,6 +264,10 @@ const MANIFEST_IMPL_VIA_REWRITE: &[&str] = &[
     "term::read_input",
     "term::resized",
     "term::size",
+    // `rewrite_stdlib_struct_surface` maps `spawn_piped` to the injected
+    // `process::Command` wrapper source (PROCESS_COMMAND_WRAPPERS).
+    "os::exec::spawn_piped",
+    "process::spawn_piped",
 ];
 
 #[test]

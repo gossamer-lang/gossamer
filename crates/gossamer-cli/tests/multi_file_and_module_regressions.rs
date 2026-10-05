@@ -4210,3 +4210,43 @@ fn a_test_module_checks_as_the_module_around_it() {
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(out.trim(), "2");
 }
+
+#[test]
+fn a_module_type_sharing_a_root_types_name_keeps_its_own_order() {
+    // The root and `geo` each declare `Point`, and each orders its own:
+    // the compiler-written comparison of one must not reach the other's.
+    let dir = write_project(
+        "same-name-order",
+        "example.com/samename",
+        &[
+            (
+                "src/geo.gos",
+                "pub struct Point { x: i64 }\n\n\
+                 pub fn ordered() -> Vec<Point> {\n\
+                 \x20   let mut ps = #[Point { x: 9 }, Point { x: 3 }]\n\
+                 \x20   ps.sort()\n\
+                 \x20   ps\n\
+                 }\n",
+            ),
+            (
+                "src/main.gos",
+                "use geo\n\n\
+                 struct Point { x: i64 }\n\n\
+                 fn main() {\n\
+                 \x20   let mut ps = #[Point { x: 2 }, Point { x: 1 }]\n\
+                 \x20   ps.sort()\n\
+                 \x20   println(ps)\n\
+                 \x20   println(geo::ordered())\n\
+                 \x20   println(Point { x: 1 } < Point { x: 2 })\n\
+                 }\n",
+            ),
+        ],
+    );
+    let expected = "#[Point { x: 1 }, Point { x: 2 }]\n#[Point { x: 3 }, Point { x: 9 }]\ntrue\n";
+    let (out, err, code) = project_run_vm(&dir);
+    assert_eq!(code, Some(0), "vm failed: {err}");
+    assert_eq!(out, expected);
+    let (out, err, code) = project_build_run(&dir, "samename");
+    assert_eq!(code, Some(0), "native failed: {err}");
+    assert_eq!(out, expected);
+}

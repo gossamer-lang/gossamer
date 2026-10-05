@@ -604,7 +604,7 @@ impl TypeChecker<'_> {
             self.check_chunk_receiver(receiver, receiver_ty, args);
         }
         if let Some(ty) = self
-            .check_simd_method(method, receiver_ty, args, call_span)
+            .check_simd_method(method, receiver_ty, args, generics, call_span)
             .or_else(|| self.check_parallel_adapter(method, receiver_ty, args, receiver.span))
         {
             return ty;
@@ -706,8 +706,9 @@ impl TypeChecker<'_> {
         {
             return ty;
         }
+        let explicit = self.turbofish_types(generics);
         let method_substs =
-            self.check_user_method_args(resolved, (method, call_span), args, &arg_tys);
+            self.check_user_method_args(resolved, (method, call_span), args, &arg_tys, &explicit);
         if method == "where_eq"
             && args.len() == 2
             && let Some(TyKind::Adt { def, .. }) = self.tcx.kind(resolved)
@@ -728,9 +729,13 @@ impl TypeChecker<'_> {
         {
             return ret;
         }
-        if let Some(ret) =
-            self.own_generic_method_ret(resolved, method, (args, &arg_tys), (arg_count, call_span))
-        {
+        if let Some(ret) = self.own_generic_method_ret(
+            resolved,
+            method,
+            (args, &arg_tys),
+            (arg_count, call_span),
+            &explicit,
+        ) {
             return ret;
         }
         // A generic-instantiation receiver (`Wrap<f64>`) types the call
@@ -818,6 +823,9 @@ impl TypeChecker<'_> {
         arg_count: usize,
         span: Span,
     ) -> Ty {
+        if let Some(ty) = self.float_mul_add_method_ret(method, resolved, args) {
+            return ty;
+        }
         if let Some(ty) = self.float_bits_method_ret(method, resolved, arg_count) {
             return ty;
         }
@@ -1045,8 +1053,34 @@ impl TypeChecker<'_> {
             (["f64"], "from_bits") => Some(self.tcx.float_ty(FloatTy::F64)),
             (["f32"], "to_bits") => Some(self.tcx.int_ty(IntTy::U32)),
             (["f32"], "from_bits") => Some(self.tcx.float_ty(FloatTy::F32)),
+            (["f64"], "mul_add") => Some(self.tcx.float_ty(FloatTy::F64)),
+            (["f32"], "mul_add") => Some(self.tcx.float_ty(FloatTy::F32)),
             _ => None,
         }
+    }
+
+    /// `x.mul_add(a, b)` on a float receiver: `x * a + b` rounded once, in
+    /// the receiver's own width, with both arguments of that type.
+    pub(super) fn float_mul_add_method_ret(
+        &mut self,
+        method: &str,
+        resolved: Ty,
+        args: &[Expr],
+    ) -> Option<Ty> {
+        if method != "mul_add" || args.len() != 2 {
+            return None;
+        }
+        let float = matches!(self.tcx.kind(resolved), Some(TyKind::Float(_)))
+            || (matches!(self.tcx.kind(resolved), Some(TyKind::Var(_)))
+                && self.infer.is_float_literal_var(self.tcx, resolved));
+        if !float {
+            return None;
+        }
+        for arg in args {
+            let got = self.check_expr_expecting(arg, Expectation::HasType(resolved));
+            self.unify(resolved, got, arg.span);
+        }
+        Some(resolved)
     }
 
     /// `x.to_bits()` on a float receiver: the method spelling of
@@ -2510,6 +2544,7 @@ impl TypeChecker<'_> {
         method: &str,
         (args, arg_tys): (&[Expr], &[Ty]),
         (arity, span): (usize, Span),
+        explicit: &[Ty],
     ) -> Option<Ty> {
         let (owner, sig) = match self.tcx.kind(resolved) {
             Some(TyKind::Adt { def, substs }) if substs.types().is_empty() => {
@@ -2522,21 +2557,45 @@ impl TypeChecker<'_> {
             }
             _ => None,
         }?;
-        Some(self.instantiate_own_generic_call(&sig, (&owner, method, span), args, arg_tys))
+        Some(self.instantiate_own_generic_call(
+            &sig,
+            (&owner, method, span),
+            (args, arg_tys),
+            explicit,
+        ))
     }
 
-    /// Checks one call to a method whose own type parameters each take a
-    /// fresh variable at the call, and answers its return with them
-    /// substituted. `args` are the declared parameters' arguments, without a
-    /// receiver.
+    /// The types a turbofish (`::<A, B>`) names, in order; its const
+    /// arguments are read elsewhere.
+    pub(super) fn turbofish_types(&mut self, generics: &[AstGenericArg]) -> Vec<Ty> {
+        generics
+            .iter()
+            .filter_map(|arg| match arg {
+                AstGenericArg::Type(ty) => Some(self.type_from_ast(ty)),
+                AstGenericArg::Const(_) => None,
+            })
+            .collect()
+    }
+
+    /// Checks one call to a method whose own type parameters each take the
+    /// type the call's turbofish names in their position, or a fresh
+    /// variable, and answers its return with them substituted. `args` are
+    /// the declared parameters' arguments, without a receiver.
     pub(super) fn instantiate_own_generic_call(
         &mut self,
         sig: &OwnGenericMethodSig,
         (owner, method, span): (&str, &str, Span),
-        args: &[Expr],
-        arg_tys: &[Ty],
+        (args, arg_tys): (&[Expr], &[Ty]),
+        explicit: &[Ty],
     ) -> Ty {
-        let vars: Vec<Ty> = (0..sig.generics).map(|_| self.fresh()).collect();
+        let vars: Vec<Ty> = (0..sig.generics)
+            .map(|position| {
+                explicit
+                    .get(position)
+                    .copied()
+                    .unwrap_or_else(|| self.fresh())
+            })
+            .collect();
         let params: Vec<Ty> = sig
             .params
             .iter()
@@ -2564,18 +2623,33 @@ impl TypeChecker<'_> {
         (method, span): (&str, Span),
         args: &[Expr],
         arg_tys: &[Ty],
+        explicit: &[Ty],
     ) -> Vec<Ty> {
         let Some(params) = self.user_method_params_for(receiver_ty, method) else {
             return Vec::new();
         };
         // The receiver's type arguments are already in `params`; what is left
-        // is the method's own, which this call's arguments instantiate.
+        // is the method's own, which this call's turbofish names or its
+        // arguments instantiate. The method's own take the positions after
+        // the impl block's.
+        let impl_slots = match self
+            .tcx
+            .kind(self.infer.resolve(self.tcx, receiver_ty))
+            .cloned()
+        {
+            Some(TyKind::Adt { substs, .. }) => self.adt_subst_vectors(&substs).0.len(),
+            _ => 0,
+        };
         let slots = params
             .iter()
             .map(|param| self.param_slots(*param))
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(impl_slots + explicit.len());
         let mut bound = vec![None; slots];
+        for (position, ty) in explicit.iter().enumerate() {
+            bound[impl_slots + position] = Some(*ty);
+        }
         for (param, arg_ty) in params.iter().zip(arg_tys) {
             self.bind_type_params(*param, *arg_ty, &mut bound);
         }

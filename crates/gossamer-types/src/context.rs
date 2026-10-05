@@ -22,6 +22,10 @@ pub struct PlainLayout {
     pub field_offsets: Vec<u32>,
 }
 
+/// The registered name of the injected `ffi::Union` struct, whose layout is
+/// its members' rather than its declared field's.
+pub const UNION_TYPE_NAME: &str = "__gos_ffi_Union";
+
 /// The storage layout of a struct whose fields narrower than a word sit at
 /// their own width: see [`TyCtxt::packed_layout`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -688,6 +692,12 @@ impl TyCtxt {
                 if def.local >= u32::MAX - 16 || visiting.contains(&def) {
                     return None;
                 }
+                if let Some(members) = self.union_members(def, &substs) {
+                    visiting.push(def);
+                    let layout = self.union_layout_within(&members, visiting);
+                    visiting.pop();
+                    return layout;
+                }
                 let fields = self.adt_field_tys(def, &substs)?;
                 visiting.push(def);
                 let layout = self.plain_record_layout(fields, visiting);
@@ -696,6 +706,62 @@ impl TyCtxt {
             }
             _ => None,
         }
+    }
+
+    /// The member types of `ffi::Union<M>` when `def` is that struct: the
+    /// elements of the tuple `M`, or `M` alone.
+    #[must_use]
+    pub fn union_members(
+        &self,
+        def: gossamer_resolve::DefId,
+        substs: &crate::Substs,
+    ) -> Option<Vec<Ty>> {
+        if self.def_name(def)? != UNION_TYPE_NAME {
+            return None;
+        }
+        let members = *substs.types().first()?;
+        Some(match self.kind_of(members) {
+            TyKind::Tuple(items) => items.clone(),
+            _ => vec![members],
+        })
+    }
+
+    /// A union's layout: as large and as aligned as its largest and most
+    /// aligned member, every member at offset 0.
+    fn union_layout_within(
+        &self,
+        members: &[Ty],
+        visiting: &mut Vec<gossamer_resolve::DefId>,
+    ) -> Option<PlainLayout> {
+        let mut size = 0u32;
+        let mut align = 1u32;
+        for member in members {
+            let layout = self.plain_layout_within(*member, visiting)?;
+            size = size.max(layout.size);
+            align = align.max(layout.align);
+        }
+        Some(PlainLayout {
+            size: size.next_multiple_of(align),
+            align,
+            field_offsets: vec![0],
+        })
+    }
+
+    /// The field type of the `ffi::Union<M>` instantiation `(def, substs)`:
+    /// its bytes, `[u8; size]`. `None` when `def` is not the union or a
+    /// member has no C layout.
+    pub fn union_bytes_ty(
+        &mut self,
+        def: gossamer_resolve::DefId,
+        substs: &crate::Substs,
+    ) -> Option<Ty> {
+        let members = self.union_members(def, substs)?;
+        let layout = self.union_layout_within(&members, &mut vec![def])?;
+        let byte = self.int_ty(IntTy::U8);
+        Some(self.intern(TyKind::Array {
+            elem: byte,
+            len: crate::ArrayLen::Concrete(layout.size as usize),
+        }))
     }
 
     /// Fields laid out one after another at their own alignment.

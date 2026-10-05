@@ -119,11 +119,16 @@ pub(crate) fn load_and_check_with_sf(
             outcome.diagnostics.len()
         ));
     }
-    let links = gossamer_driver::foreign_link_libraries(&outcome.checked.sf);
+    let links = gossamer_driver::foreign_link_libraries(&outcome.checked.sf, usize::MAX);
     let entry = std::path::Path::new(map.file_name(file_id));
-    gossamer_runtime::c_abi::ffi::set_library_search_dirs(crate::paths::foreign_search_dirs(
-        entry, &links,
-    ));
+    let search = crate::paths::foreign_search_dirs(entry, &links);
+    // A program that declares no foreign function of its own calls nothing
+    // a `[native]` source defines.
+    if links.declares_foreign {
+        let native = crate::native_sources::shared_libraries(entry, &links.libraries, &search)?;
+        gossamer_runtime::c_abi::ffi::set_native_libraries(native);
+    }
+    gossamer_runtime::c_abi::ffi::set_library_search_dirs(search);
     let gossamer_driver::CheckedFrontend {
         sf,
         resolutions,

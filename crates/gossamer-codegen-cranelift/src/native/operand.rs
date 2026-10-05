@@ -191,8 +191,15 @@ pub(super) enum PrintKind {
     /// `[i64; N]` flat-buffer literal (no GosVec header). Formatted
     /// via `gos_rt_arr_format_i64(ptr, len)`.
     ArrI64(i64),
+    /// `[u64; N]` / `[usize; N]` flat-buffer literal: the same words read
+    /// as unsigned, so an element at or above `i64::MAX` renders as its own
+    /// decimal.
+    ArrU64(i64),
     /// `[f64; N]` flat-buffer literal.
     ArrF64(i64),
+    /// `[f32; N]` flat-buffer literal: the same `f64` slots, rendered with
+    /// single-precision digits.
+    ArrF32(i64),
     /// `[bool; N]` flat-buffer literal.
     ArrBool(i64),
     /// `[String; N]` flat-buffer literal.
@@ -588,8 +595,9 @@ fn container_ctor_format_symbol(ctor: &str) -> Option<&'static str> {
 }
 
 /// Whether `ty` holds an `f32` anywhere a rendering walks: a sequence
-/// element, a tuple field, a map key or value, or a carrier payload. A lane
-/// vector renders as its own lanes and is not one of them.
+/// element, a tuple field, a map key or value, or a carrier payload. A fixed
+/// array or lane vector of `f32` lanes renders through its own kind and is
+/// not one of them.
 fn holds_f32(tcx: &TyCtxt, ty: gossamer_types::Ty) -> bool {
     match tcx.kind_of(ty) {
         TyKind::Float(gossamer_types::FloatTy::F32) => true,
@@ -638,7 +646,12 @@ pub(super) fn operand_print_kind(body: &Body, tcx: &TyCtxt, operand: &Operand) -
             // An `f32` inside a sequence, tuple, map, or carrier renders
             // through a leaf tag only the descriptor walk carries, which this
             // tier does not emit, so such a body runs on the VM.
-            if !matches!(tcx.kind_of(ty), TyKind::Float(_)) && holds_f32(tcx, ty) {
+            let flat_f32 = matches!(
+                tcx.kind_of(ty),
+                TyKind::Array { elem, .. } | TyKind::Simd { elem, .. }
+                    if matches!(tcx.kind_of(*elem), TyKind::Float(gossamer_types::FloatTy::F32))
+            );
+            if !matches!(tcx.kind_of(ty), TyKind::Float(_)) && !flat_f32 && holds_f32(tcx, ty) {
                 return PrintKind::Unsupported("a value holding an f32");
             }
             // A container renders through its own runtime shim whether the
@@ -734,12 +747,9 @@ pub(super) fn operand_print_kind(body: &Body, tcx: &TyCtxt, operand: &Operand) -
                 TyKind::Array { elem, len } | TyKind::Simd { elem, lanes: len } => {
                     let n = i64::try_from(len.to_usize()).unwrap_or(0);
                     match tcx.kind_of(*elem) {
-                        // A `u64` / `usize` slot printed as a signed word
-                        // would spell a value at or above `i64::MAX` negative.
-                        TyKind::Int(IntTy::U64 | IntTy::Usize) => {
-                            PrintKind::Unsupported("unsigned array")
-                        }
+                        TyKind::Int(IntTy::U64 | IntTy::Usize) => PrintKind::ArrU64(n),
                         TyKind::Int(_) => PrintKind::ArrI64(n),
+                        TyKind::Float(gossamer_types::FloatTy::F32) => PrintKind::ArrF32(n),
                         TyKind::Float(_) => PrintKind::ArrF64(n),
                         TyKind::Bool => PrintKind::ArrBool(n),
                         TyKind::String => PrintKind::ArrString(n),

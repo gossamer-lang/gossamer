@@ -1064,10 +1064,11 @@ and no supertrait method inheritance through the bound.
 ### 3.10a Lane vectors
 
 `Simd<T, N>` is a fixed-width vector of `N` lanes of one scalar type, and
-`Mask<N>` is its `bool` form. Both are prelude types. The lane type is `f32`,
-`f64`, `i32`, `i64`, `u8`, or `u32`; `N` is 2, 4, or 8, and also 16 for `u8`,
-`i32`, `u32`, and `Mask`. Any other lane type or count, and any operation the
-lane type does not define, reports `GT0089`.
+`Mask<N>` is its `bool` form. Both are prelude types. The lane type is `i8`,
+`u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, or `f64`; `N` is 2,
+4, or 8, and also 16 for lanes of 32 bits or fewer and for `Mask`. Any other
+lane type or count, and any operation the lane type does not define, reports
+`GT0089`.
 
 A vector is built with `Simd::from_array([..])`, which takes `N` from the
 array's length; `Simd::splat(v)`, whose lane count comes from the type the
@@ -1075,19 +1076,53 @@ context expects; or `Simd::load(xs, offset)`, which reads `N` lanes of a `Vec`,
 slice, or fixed array and also takes `N` from the expected type.
 `v.store(&mut xs, offset)` writes the lanes back. A load or store checks its
 whole window once and panics with the same message on every tier when the
-window reaches past either end, before any lane moves.
+window reaches past either end, before any lane moves. `Simd::load_or(xs,
+offset, fill)` never panics: a lane whose index lies outside `xs` is `fill`,
+so a loop reads the tail of a sequence with the same code as its body.
+`v.store_prefix(&mut xs, offset, n)` writes the first `n` lanes, each write
+checked. `Simd::gather(xs, indices)` reads `xs[indices[i]]` into lane `i`,
+each read checked.
 
 `+`, `-`, and `*` apply lane by lane to float and integer lanes, `/` to float
 lanes, `+%`, `-%`, `*%`, `<<`, and `>>` to integer lanes, and `&`, `|`, and `^`
 to integer lanes and masks. Both operands share one vector type, which the
-result has too. The methods are `to_array`, `min`, `max`, `abs`, `sqrt` (float
-lanes), `lanes_eq`, `lanes_lt`, and `lanes_le` (each answering a `Mask<N>`),
-`reduce_sum`, `reduce_min`, `reduce_max`, `reduce_and` and `reduce_or` (integer
-lanes and masks), and, on a mask, `select(if_true, if_false)`. `reduce_sum`
-folds its lanes in one fixed pairing order. A function may be generic over the
-lane count, `fn dot<const N: usize>(a: Simd<f64, N>, b: Simd<f64, N>) -> f64`,
-and every operation answers the same bits on the bytecode VM, the Cranelift
-JIT, and the LLVM AOT tiers.
+result has too.
+
+The methods on a vector:
+
+- `to_array`, `min`, `max`, `abs`, and `sqrt` (float lanes).
+- `lanes_eq`, `lanes_ne`, `lanes_lt`, `lanes_le`, `lanes_gt`, and `lanes_ge`,
+  each answering a `Mask<N>`.
+- `reduce_sum`, `reduce_min`, `reduce_max`, and, on integer lanes,
+  `reduce_and` and `reduce_or`. `reduce_sum` folds its lanes in one fixed
+  pairing order.
+- On integer lanes, `saturating_add` and `saturating_sub` (clamped to the
+  lane type's range) and `abs_diff` (answering the unsigned lane type of
+  the same width). On float lanes, `mul_add(a, b)`, which computes
+  `v * a + b` with one rounding.
+- `cast::<U>()` converts each lane as `as` does (§3.1); `to_bits` answers the
+  lanes' bits as the unsigned lane type of their width, and
+  `Simd::from_bits(v)` reverses it.
+- `widen_low` and `widen_high` convert the low or high half of the lanes to
+  the lane type of twice the width, answering `N / 2` lanes;
+  `a.narrow(b)` converts the lanes of `a` and then `b` to the lane type of
+  half the width, answering `2 * N` lanes, with integers clamped to the
+  narrower range and floats rounded.
+- `v.swizzle([i, ..])` answers the lanes the literal indices name, and
+  `a.concat_swizzle(b, [i, ..])` picks from the `2 * N` lanes of `a` then
+  `b`; an index list's length is the result's lane count, and an index out
+  of range is `GT0089`. `a.interleave(b)` answers the lanes of `a` and `b`
+  alternating, as two vectors of `N`. On `u8` lanes, `v.swizzle_dyn(idx)`
+  answers `v[idx[i]]` in lane `i`, and zero where `idx[i]` is `N` or more.
+
+The methods on a mask: `select(if_true, if_false)`, `reduce_and`,
+`reduce_or`, `any`, `all`, `to_bitmask` (a `u64` with lane `i` at bit `i`),
+`Mask::from_bitmask(bits)`, and `first_set` (the lowest set lane as an
+`Option<i64>`).
+
+A function may be generic over the lane count, `fn dot<const N: usize>(a:
+Simd<f64, N>, b: Simd<f64, N>) -> f64`, and every operation answers the same
+bits on the bytecode VM, the Cranelift JIT, and the LLVM AOT tiers.
 
 ### 3.11 Dynamic dispatch
 
@@ -2052,8 +2087,39 @@ Every other key is optional.
 Optional keys include `project.output` (binary name override),
 `project.entry` (path to the entry source, relative to the manifest
 directory), which overrides convention-based entry resolution, and
-`project.ffi` (a boolean, default `false`), which lets the program call
-native code through `unsafe extern` declarations (§12).
+`project.ffi` (a boolean, default `true`), which with `false` refuses
+native code reached through `unsafe extern` declarations (§12).
+
+`[lib] kind = ["staticlib", "cdylib"]` builds the project as a C library
+(§12.1), and `[native]` lists C sources the package compiles (§12.2).
+
+Features select code at build time:
+
+```toml
+[features]
+default = ["tls"]
+tls = []
+fast = ["simd-kernels/avx", "dep:simd-kernels"]
+
+[dependencies]
+"example.com/simd-kernels" = { path = "../kernels", optional = true }
+"example.com/codec" = { version = "^1.0.0", features = ["zstd"], default-features = false }
+```
+
+Each entry under `[features]` names the features it turns on: another of
+the project's own, `dep:<dependency>` for an optional dependency, or
+`<dependency>/<feature>` for a dependency's feature, a dependency named by
+its id or its module name. `default` lists the features on unless
+`--no-default-features` is given, and `--features a,b` turns more on; an
+unknown feature is an error. Features are additive across the graph: a
+dependency builds with every feature any dependent asks of it. An optional
+dependency is part of the build only while a feature names it.
+
+`#[cfg(feature = "name")]` on an item or a `use` is settled for each
+package by that package's own features, so a dependency's `feature =
+"tls"` reads the dependency's `tls`, not the project's. A `[native]` table
+with `feature = "name"` compiles its sources only while that feature is
+on.
 
 ### 6.5 Project identifiers
 
@@ -2788,16 +2854,25 @@ because not every path has one.
 
 **`std::process`** - running other programs. `run(prog, args)` executes
 directly with no shell and returns `Result<{stdout, stderr, code},
-String>`. `spawn_piped(prog, args) -> Result<Child, errors::Error>`
-drives an interactive child through `write_stdin`, `close_stdin`,
-`read_line`, `read_stdout`, `wait`, and `kill`.
+String>`. `Command::new(prog)` builds a child: `arg`, `args`, `env`,
+`env_remove`, `env_clear`, `dir`, `stdin` / `stdout` / `stderr` (each
+`Stdio::Inherit`, `Stdio::Null`, `Stdio::Piped`, or `Stdio::File(file)`),
+`new_process_group`, and, on POSIX systems, `new_session` and
+`controlling_terminal(fd)`; `spawn` answers a `Child`, `status` waits for
+the exit code, and `output` collects both output streams.
+`spawn_piped(prog, args)` is `Command` with every stream piped. A `Child`
+writes and closes its standard input (`write_stdin`, `write_stdin_bytes`,
+`close_stdin`), reads each output stream whole, by line, or by chunk
+(`read_stdout`, `read_stdout_line`, `read_stdout_chunk`, the `stderr`
+forms, and `read_line`), and `wait`s, `wait_timeout`s, `kill`s, and
+`signal`s it or its group (`kill_group`). Each stream has its own lock, so
+two goroutines drain stdout and stderr at once.
 `run_inherit(prog, args) -> Result<i64, errors::Error>` runs the child on
 this process's own standard streams, a terminal included, and answers its
 exit code once it ends (an editor a terminal program hands the screen
 to). Also `spawn`, `pipeline_run`, `wait_timeout`, `kill_group`,
 `signal`, `id`, `exit`, and `abort`. Every wait for a child parks the
-goroutine rather than holding a worker. There is no `Command` builder;
-that shape belongs to the Rust bindings, not to Gossamer.
+goroutine rather than holding a worker.
 
 **`std::env`** - the process environment. `args`, `program_name`, `var`,
 `set_var`, `unset_var`, `current_dir`, `set_current_dir`, `home_dir`,
@@ -3266,14 +3341,18 @@ Rules:
   declarations (`std::term`) are part of the toolchain and are never
   refused.
 - **Declarations.** An `unsafe extern "C"` (or `"system"`) block holds
-  body-less, non-generic `fn` declarations and `type Name` foreign types.
+  body-less, non-generic `fn` declarations, `type Name` foreign types, and
+  `static NAME: T` (or `static mut`) C globals.
   `#[link(name = "lib")]` names a library beyond the platform C library
   (and, on Windows, `kernel32`), and `#[link(name = "lib", search =
   "dir")]` adds a directory to search for it, relative to the root of the
   package that declares it; `#[link_name = "symbol"]` names a C symbol
   that differs from the Gossamer name; `#[cfg(...)]` selects declarations
-  per target. Every other `extern` form, `#[no_mangle] extern "C" fn`
-  included, is `GP0016`. On Linux, a release build of a program that links
+  per target; besides `target_os`, `target_arch`, `target_family`, `unix`,
+  and `windows`, `#[cfg]` knows `target_env` (`gnu`, `musl`, `msvc`),
+  `target_pointer_width`, and `target_endian`. Every other `extern` form is
+  `GP0016`; for `#[no_mangle] extern "C" fn` it carries a `gos check --fix`
+  rewrite to `#[export] fn` (below). On Linux, a release build of a program that links
   a library of its own links dynamically against the platform's C
   library, since a static musl binary cannot load glibc libraries.
 - **Calls.** A foreign function is called only inside `unsafe { }`
@@ -3286,13 +3365,20 @@ Rules:
   back; a C function pointer, written `Fn(A..) -> R`; a slice `[T]` of
   scalars, which crosses as a pointer to its first element, and
   `&mut [T]`, whose writes come back, windows (`&mut buf[2..6]`) and fixed
-  arrays included; a `#[repr(C)]` struct of plain data, which crosses as a
-  pointer to a read-only C-layout copy; and `&mut` such a struct, whose
-  writes come back. Any other type is `GT0098`; a foreign type by value is
-  `GT0104`; a pointee without a C layout is `GT0105`.
-- **Return types.** A scalar, `()`, `ffi::Ptr<T>`, or `Option<ffi::Ptr<T>>`.
-  A bare `Ptr` result that is NULL raises `GX0013`. A struct result is not
-  passed; an out-parameter or C-allocated memory carries one.
+  arrays included; a `#[repr(C)]` struct of plain data or an `ffi::Union`,
+  which crosses by value under the target's C calling convention (System V
+  x86-64, Win64, AAPCS64, RISC-V LP64D: in registers, on the stack, or
+  through a pointer to a copy, as C passes it); `&mut` such a struct, a
+  `T *` whose writes come back; and a slice `[S]` or `&mut [S]` of such
+  structs, which crosses as a pointer to their C-layout elements, with
+  `&mut` writes copied back. Any other type is `GT0098`; a foreign type by
+  value is `GT0104`; a pointee without a C layout is `GT0105`. In a project
+  whose `gossamer-version` predates 0.67, a by-value struct parameter is
+  `GT0112`, since such a parameter once crossed as a pointer; `gos check
+  --fix` writes `&mut` at the declaration and every call.
+- **Return types.** A scalar, `()`, `ffi::Ptr<T>`, `Option<ffi::Ptr<T>>`, or
+  a `#[repr(C)]` struct, returned as the convention says. A bare `Ptr`
+  result that is NULL raises `GX0013`.
 - **Foreign types.** `type Name` in an extern block declares a C type
   whose layout stays in the library. It has no Gossamer value: it is
   never constructed, read, or passed by value (`GT0104`), only reached as
@@ -3310,6 +3396,19 @@ Rules:
   NULL included; `address() == 0` tests for it. A `Ptr` or `Handle` may not
   be a `comptime` result or be serialized (`GT0106`): an address means
   nothing after compilation or in another process.
+- **Unions.** `ffi::Union<(A, B, ..)>` is a C union of the listed member
+  types, sized and aligned for the largest, usable as a `#[repr(C)]`
+  field, a pointee, and a parameter. `Union::new(v)` and
+  `Union::zeroed()` build one; `u.get::<T>()` reads and `u.set(v)` writes
+  the leading bytes as a listed member type. A type the union does not
+  list, a member without a C layout, or a member listed twice is `GT0110`.
+- **Layout.** `ffi::size_of::<T>()`, `align_of::<T>()`, and
+  `offset_of::<T>("field.path")` answer a type's C size and alignment and a
+  field's byte offset, settled while compiling; a type without a C layout
+  is `GT0105`, and a path that names no field is `GT0109`.
+- **Globals.** A `static NAME: T` declared in an extern block is reached
+  only through `ffi::addr_of(NAME) -> Ptr<T>`, then read and written with
+  `ffi::read` and `ffi::write`; naming it any other way is `GT0111`.
 - **Foreign memory.** Inside `unsafe { }`: `ffi::read::<T>(p)` and
   `read_at(p, i)` copy a `T` out; `write(p, v)` and `write_at(p, i, v)`
   copy one in; `read_bytes(p, n)` and `read_cstr(p)` copy bytes or a
@@ -3321,17 +3420,28 @@ Rules:
   Gossamer memory is never addressable beyond the call it is passed to;
   memory C keeps comes from `alloc` or the library. Nothing is freed
   automatically: the program frees what it owns, with the library's own
-  function or `ffi::free`, and `defer` scopes it.
+  function or `ffi::free`, and `defer` scopes it. `unsafe { View::new(p,
+  len) }` reads and writes `len` values in place instead of copying:
+  `v.get(i)` and `v[i]`, `v.set(i, value)`, `v.slice(lo, hi)`,
+  `v.fill(value)`, `v.copy_from(values)`, and `v.to_vec()`, each access
+  bounds-checked with the same panic on every tier. `ffi::atomic_load`,
+  `atomic_store`, `atomic_swap`, `atomic_compare_exchange`, and
+  `atomic_fetch_add` / `sub` / `and` / `or` / `xor` change a 32- or 64-bit
+  integer in foreign memory atomically (sequentially consistent); an
+  address not aligned to the integer's width panics.
 - **Callbacks.** A parameter of type `Fn(A..) -> R`, whose parameters and
-  result are scalars, `Ptr`, or `Option<Ptr>` (`GT0107` otherwise), takes
+  result are scalars, `Ptr`, `Option<Ptr>`, or `#[repr(C)]` structs by
+  value (`GT0107` otherwise), takes
   a top-level function of exactly that signature, by name (`GT0108` for a
   closure or another signature). Native code reaches it through a C-ABI
-  entry generated for it. A callback runs only on the thread whose foreign
-  call invokes it, during that call or during a later call that runs a
-  registered callback (an event loop); one invoked on any other thread
-  ends the program with `GX0015` without running. A panic inside a
-  callback is held, the callback answers zero, and the panic resumes when
-  the foreign call that ran it returns, so it never unwinds through C. A
+  entry generated for it. A callback runs on whatever thread invokes it:
+  the thread of the foreign call that runs it, or a thread the library
+  started (an audio or event thread, a worker pool), during a call or
+  after the call that registered it. On a library's thread, blocking calls
+  block that thread, and a panic ends the program with its report. A panic
+  inside a callback run by a Gossamer goroutine's foreign call is held,
+  the callback answers zero, and the panic resumes when that foreign call
+  returns, so it never unwinds through C. A
   callback may allocate, call foreign functions, and block like any
   foreign call; it spawns only inside a `cohort` (`GT0086`). State a
   callback needs travels through its `void *` argument as an
@@ -3346,7 +3456,10 @@ Rules:
   `std::sync`.
 - **Function pointers.** `unsafe { ffi::fn_from_ptr::<Fn(A..) -> R>(p) }`
   is a callable for the native function at `p` (a `dlsym` or
-  `GetProcAddress` result) with that C signature.
+  `GetProcAddress` result) with that C signature. `ffi::fn_addr(f)` answers
+  the C entry of the named top-level function `f` as a `Ptr<c_void>`, for
+  the function-pointer fields of an ops table or a registration array;
+  `Ptr::null()` and `p.is_null()` spell the NULL such a field may hold.
 - **Borrowing.** A slice or struct argument is valid for the call only;
   native code may not keep the pointer.
 - **Effects.** Every foreign call is unsafe and foreign, whatever the
@@ -3381,14 +3494,92 @@ Rules:
 `c_void`, `Handle`, and the memory operations above. `std::term` (§10) is
 written in Gossamer over this surface.
 
-Not supported, by design: pointer arithmetic (`read_at` and `write_at`
-index arrays), a `const T *` type of its own (C does not enforce it, and
-`[T]` already expresses read-only Gossamer memory), the address of a
-Gossamer value beyond a call, closures as C function pointers, ownership
-annotations, unions and bitfields (a byte-array field with `read_at`
-models them), variadic functions (a fixed-arity C shim calls them), struct
-results by value, running Gossamer code on a thread a library starts, and
-C++.
+Not supported, by design: pointer arithmetic (`read_at`, `write_at`, and
+`View` index arrays), a `const T *` type of its own (C does not enforce
+it, and `[T]` already expresses read-only Gossamer memory), the address of
+a Gossamer value beyond a call, closures as C function pointers, ownership
+annotations, bitfields (an integer field with shifts models them),
+variadic functions (a fixed-arity C shim calls them), and C++.
+
+### 12.1 Exporting functions
+
+`#[export]` on a free function makes it a C function under its own name,
+and `#[export("symbol")]` under another:
+
+```gossamer
+#[repr(C)]
+struct Point {
+    x: f64
+    y: f64
+}
+
+#[export("geo_distance")]
+fn distance(a: Point, b: Point) -> f64 {
+    ((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y)).sqrt()
+}
+```
+
+An exported function's parameters and result follow the callback rules: a
+type with no C form, a method, a generic or `comptime` function, `main`, a
+symbol that is not a C identifier, or two exports of one symbol is
+`GT0113`. C may call an export from any thread, the host's main thread or
+threads of its own, concurrently; each call runs on the calling thread.
+The library's static initialisers run once, before its first call
+completes, and standard output is flushed after every call.
+
+A project whose manifest says
+
+```toml
+[lib]
+kind = ["staticlib", "cdylib"]
+```
+
+builds as a library: `gos build` writes the static archive
+(`lib<name>.a`, or `<name>.lib` with MSVC) holding the program and the
+runtime it needs, the shared library (`lib<name>.so`, `lib<name>.dylib`,
+or `<name>.dll`) with only the exports visible, and `include/<name>.h`
+with a prototype for every export and a definition of every `#[repr(C)]`
+struct and union they reach. The header also declares
+`void <name>_shutdown(void)`, which runs what `runtime::at_exit`
+registered; a host that registers exit hooks calls it before it exits.
+An export that panics ends the host process with the panic's report.
+
+### 12.2 Native sources
+
+A package carries C of its own in a `[native]` table:
+
+```toml
+[native]
+sources = ["csrc/shim.c"]
+include = ["csrc/include"]
+defines = { LEVEL = "2" }
+flags = ["-O2"]
+```
+
+The sources compile with the target's C compiler: `GOS_CC`, then `CC`,
+then the platform's default (MSVC `cl` from an installed Visual Studio on
+Windows); `gos env` prints the one it found. Their functions are reached
+by `unsafe extern` declarations without `#[link]`, from native builds and
+from `gos run` alike, and a dependency's `[native]` sources come with it.
+Objects are cached under `.gos-cache/native/` and recompiled when a
+source, any header it includes, the compiler, its arguments, or the target
+changes; `gos clean --native` removes them. A source that does not compile
+stops the build with the compiler's output.
+
+### 12.3 Generating declarations
+
+`gos bindgen --c header.h` reads a C header through `clang` and writes the
+Gossamer declarations for it: functions in an `unsafe extern "C"` block,
+`#[repr(C)]` structs, unions as `ffi::Union<(..)>` aliases, opaque types,
+globals as `static`, enums and number and string macros as constants, and callback typedefs as
+`Fn(..)` parameters; a variadic function is left as a comment. A parameter pointing at scalars becomes a slice
+(`[T]` for `const T *`, `&mut [T]` otherwise, `[u8]` for `char`), and any
+other pointer `Option<ffi::Ptr<T>>`. Declarations from the header's own
+directory tree are kept, with every type they reach; `--allow 'git_*'`
+keeps others by name. `-I` and `-D` pass include directories and
+definitions, `--link` names the library for `#[link]`, and `--target`,
+repeated, reads the header for each target and writes `#[cfg]` where the
+declarations differ.
 
 The `[rust-bindings]` section of `project.toml` remains the way to call
 Rust code. A Rust crate registers its entry points with
@@ -3411,11 +3602,14 @@ interpreter. Types crossing that boundary use the `gossamer-binding` ABI
 #[cfg(target_os = "linux")]
 #[link(name = "z")]
 #[link_name = "symbol"]
+#[export("symbol")]
 #[test]
 ```
 
 `#[cfg(...)]` is resolved for the target a build produces: `gos build
---target` and `gos check --target` name it, and the host is the default.
+--target` and `gos check --target` name it, and the host is the default;
+`feature = "name"` reads the declaring package's features (§6.4).
+`#[export]` makes a free function a C symbol (§12.1).
 
 Only a curated set is recognized (unknown attributes warn rather than
 error for forward-compatibility).
@@ -3629,7 +3823,9 @@ location. Project-native IR objects use `.gos-cache/ir-cache/`. These cache
 locations are performance details and may be removed with `gos clean`. Use
 `gos cache` to inspect every active root and `gos cache --prune` to remove
 entries older than 30 days or beyond the `GOS_CACHE_MAX_BYTES` total budget
-(20 GiB by default). `gos clean --all` also clears Rust-binding runners,
+(20 GiB by default). Objects compiled from `[native]` sources live under
+`.gos-cache/native/`, and `gos clean --native` removes only those.
+`gos clean --all` also clears Rust-binding runners,
 package sources, and legacy build artifacts.
 
 ### 16.6 Subcommands
@@ -3648,8 +3844,13 @@ package sources, and legacy build artifacts.
   ordering. Rust bindings are retained independently.
 - `gos cache` - show cache classes and roots; `--path` prints paths only and
   `--prune` applies retention policy (`--dry-run` reports without deletion).
+- `gos bindgen --c HEADER` - write Gossamer declarations for a C header
+  (§12.3).
 - `gos vendor` - copy deps into `./vendor/`.
 - `gos doc` - generate HTML documentation.
+
+Every subcommand takes `--features a,b` and `--no-default-features`
+(§6.4).
 
 ### 16.7 Reproducibility
 

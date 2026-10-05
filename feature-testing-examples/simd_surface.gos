@@ -1,0 +1,49 @@
+// The portable `Simd` operations 0.67 adds: narrow and wide lane types,
+// saturating and absolute-difference arithmetic, fused multiply-add, lane
+// casts and bit reinterpretation, widening and saturating narrowing,
+// constant and run-time shuffles, interleaving, mask bitmasks, and the
+// tail-handling loads, stores, and gathers. Every tier prints the same lanes.
+fn main() {
+    let a: Simd<i8, 16> = Simd::from_array([100, -100, 5, -5, 127, -128, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+    let b: Simd<i8, 16> = Simd::splat(50)
+    println(f"sat+ {a.saturating_add(b)}")
+    println(f"sat- {a.saturating_sub(b)}")
+    println(f"absdiff {a.abs_diff(b)}")
+    let u: Simd<u8, 16> = Simd::from_array([0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 250, 255])
+    let t: Simd<u8, 16> = Simd::splat(20)
+    println(f"usat- {u.saturating_sub(t)} usat+ {u.saturating_add(t)}")
+    let m = u.lanes_gt(t)
+    println(f"mask {m.to_bitmask()} any {m.any()} all {m.all()} first {m.first_set()}")
+    let back: Mask<16> = Mask::from_bitmask(m.to_bitmask())
+    println(f"round {back.to_bitmask() == m.to_bitmask()}")
+    let rev = u.swizzle([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0])
+    println(f"rev {rev}")
+    let table: Simd<u8, 16> = Simd::from_array([100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115])
+    let idx: Simd<u8, 16> = Simd::from_array([3, 0, 15, 16, 200, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+    println(f"dyn {table.swizzle_dyn(idx)}")
+    let x: Simd<f32, 4> = Simd::from_array([1.5, -2.25, 3.0, 0.1])
+    println(f"cast {x.cast::<i32>()} bits {x.to_bits()}")
+    let fb: Simd<f32, 4> = Simd::from_bits(x.to_bits())
+    println(f"from_bits {fb}")
+    println(f"fma {x.mul_add(Simd::splat(10.0), Simd::splat(-1.0))}")
+    let w: Simd<i16, 8> = Simd::from_array([300, -300, 127, -129, 5, 6, 7, 8])
+    println(f"narrow {w.narrow(w)}")
+    println(f"widen {a.widen_low()} {a.widen_high()}")
+    let p: Simd<i32, 4> = Simd::from_array([1, 2, 3, 4])
+    let q: Simd<i32, 4> = Simd::from_array([5, 6, 7, 8])
+    let lo, hi = p.interleave(q)
+    println(f"interleave {lo} {hi} concat {p.concat_swizzle(q, [7, 0, 5, 2])}")
+    let xs = #[1, 2, 3, 4, 5, 6]
+    let tail: Simd<i64, 4> = Simd::load_or(xs, 4, -1)
+    println(f"load_or {tail}")
+    let mut out = #[0, 0, 0, 0, 0, 0]
+    p.cast::<i64>().store_prefix(&mut out, 3, 3)
+    println(f"prefix {out}")
+    let gi: Simd<i32, 4> = Simd::from_array([5, 0, 2, 2])
+    let g = Simd::gather(xs, gi)
+    println(f"gather {g}")
+    let sh: Simd<u16, 8> = Simd::from_array([1, 2, 3, 4, 5, 6, 7, 8])
+    println(f"shift {sh << Simd::from_array([0, 1, 2, 3, 4, 5, 6, 17])}")
+    let big: Simd<u64, 2> = Simd::from_array([1, 2])
+    println(f"u64 {big + big} ne {sh.lanes_ne(Simd::splat(3))} ge {p.lanes_ge(Simd::splat(3))}")
+}

@@ -231,6 +231,8 @@ pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
             if let Some(mangled) = match public_type {
                 "Ptr" => Some("__gos_ffi_Ptr"),
                 "Handle" => Some("__gos_ffi_Handle"),
+                "Union" => Some("__gos_ffi_Union"),
+                "View" => Some("__gos_ffi_View"),
                 _ => None,
             } {
                 // `ffi::Handle::<T>::from_ptr` names the handle's type on the
@@ -1126,6 +1128,17 @@ pub fn inject_synthetic_uses(sf: &mut SourceFile, file: FileId) {
                 ));
             }
         }
+    }
+    // `process::Stdio::File` carries an `fs::File`.
+    let has_command = sf.items.iter().any(|item| {
+        matches!(&item.kind, ItemKind::Fn(decl) if decl.name.name == "__gos_process_spawn_piped")
+    });
+    if has_command && !already_imports(&sf.uses, &["std", "fs"]) {
+        sf.uses.push(UseDecl::simple(
+            NodeId::DUMMY,
+            dummy_span,
+            UseTarget::Module(ModulePath::from_names(["std", "fs"])),
+        ));
     }
     // The `__gos_http_*` request/response-security wrappers compose http,
     // crypto, encoding, bytes, strings, and net::url primitives by their

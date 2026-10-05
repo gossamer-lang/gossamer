@@ -737,10 +737,38 @@ pub(crate) fn mangle_fn_name(name: &str) -> std::borrow::Cow<'_, str> {
     // interposes libc's `getenv` and the runtime's `gos_rt_os_env` ->
     // `std::env::var` -> `getenv` path recurses into the user function until
     // the stack overflows. `gosu_<name>` cannot collide with any of these.
-    if shadows_c_runtime_symbol(name) {
+    // An `#[export]` entry owns its C symbol, so a function the program
+    // also names that way is renamed the same way.
+    if shadows_c_runtime_symbol(name) || EXPORT_SYMBOLS.with(|set| set.borrow().contains(name)) {
         return Cow::Owned(format!("gosu_{name}"));
     }
     Cow::Borrowed(name)
+}
+
+thread_local! {
+    /// The C symbols the module being rendered defines as `#[export]`
+    /// entries; see [`ExportScope`].
+    static EXPORT_SYMBOLS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Holds the export symbols of the program being rendered for
+/// [`mangle_fn_name`] on this thread, which renders serially, until dropped.
+pub(crate) struct ExportScope;
+
+impl ExportScope {
+    /// Records the export symbols of `bodies`.
+    pub(crate) fn enter(bodies: &[gossamer_mir::Body]) -> Self {
+        let symbols = gossamer_mir::export_symbols(bodies);
+        EXPORT_SYMBOLS.with(|set| *set.borrow_mut() = symbols.into_iter().collect());
+        Self
+    }
+}
+
+impl Drop for ExportScope {
+    fn drop(&mut self) {
+        EXPORT_SYMBOLS.with(|set| set.borrow_mut().clear());
+    }
 }
 
 /// True when `name` matches a libc / system symbol the statically-linked

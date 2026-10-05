@@ -34,6 +34,9 @@ pub use language_version::{parse_gossamer_version, toolchain_version};
 #[cfg(not(target_arch = "wasm32"))]
 pub mod advisory;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod features;
+
 /// Project source bundling: assembling an entry file plus its sibling
 /// modules and path dependencies into one compilation unit. Reads the
 /// project layout from disk, so it is native-only.
@@ -91,8 +94,8 @@ pub use id::{ProjectId, ProjectIdError};
 pub use lockfile::{LOCKFILE_FILENAME, LOCKFILE_HEADER, LockedEntry, Lockfile, LockfileError};
 #[cfg(not(target_arch = "wasm32"))]
 pub use manifest::{
-    DependencySpec, GitRef, InlineDependency, Manifest, ManifestError, ProjectTable,
-    RustBindingSpec, find_manifest,
+    DependencyFeatures, DependencySpec, GitRef, InlineDependency, LibKind, LibTarget, Manifest,
+    ManifestError, NativeSpec, ProjectTable, RustBindingSpec, find_manifest,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use publish::{

@@ -1285,6 +1285,7 @@ impl TypeChecker<'_> {
         }
         self.check_overlapping_mutable_call_args(args);
         self.check_foreign_call_site(callee);
+        self.note_addr_of_argument(callee, args);
         if matches!(callee.kind, ExprKind::Path(_)) {
             self.callee_path_nodes.insert(callee.id);
         }
@@ -1300,7 +1301,7 @@ impl TypeChecker<'_> {
         self.check_exponent_placeholder(callee, args);
         self.check_callback_arguments(callee, args, &arg_tys);
         let ret = self.check_call_inner(callee, args, callee_ty, &arg_tys, expected);
-        self.check_ffi_operation(callee, &arg_tys, ret);
+        self.check_ffi_operation(callee, args, &arg_tys, ret);
         ret
     }
 

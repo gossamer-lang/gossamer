@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0109]: `ffi::offset_of::<T>(path)` cannot locate the field. The path is a - here
+--- framed ---
+error[GT0109]: `ffi::offset_of::<T>(path)` cannot locate the field. The path is a
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

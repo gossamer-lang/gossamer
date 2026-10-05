@@ -104,6 +104,8 @@ fn install_math_builtins(globals: &mut Vec<(&'static str, Value)>) {
         ("f64::from_bits", builtin_f64_from_bits as BuiltinFn),
         ("f32::to_bits", builtin_f32_to_bits as BuiltinFn),
         ("f32::from_bits", builtin_f32_from_bits as BuiltinFn),
+        ("f64::mul_add", builtin_f64_mul_add as BuiltinFn),
+        ("f32::mul_add", builtin_f32_mul_add as BuiltinFn),
         ("__gos_wrapping_add", builtin_i64_wrapping_add as BuiltinFn),
         ("__gos_wrapping_sub", builtin_i64_wrapping_sub as BuiltinFn),
         ("__gos_wrapping_mul", builtin_i64_wrapping_mul as BuiltinFn),
@@ -553,7 +555,6 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
         &[
             ("run", builtin_exec_run),
             ("spawn", builtin_exec_spawn),
-            ("spawn_piped", builtin_exec_spawn_piped),
             ("kill", builtin_exec_kill),
             ("signal", builtin_exec_signal),
             ("kill_group", builtin_exec_kill_group),
@@ -567,7 +568,6 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
         &[
             ("run", builtin_exec_run),
             ("spawn", builtin_exec_spawn),
-            ("spawn_piped", builtin_exec_spawn_piped),
             ("kill", builtin_exec_kill),
             ("signal", builtin_exec_signal),
             ("kill_group", builtin_exec_kill_group),
@@ -583,7 +583,6 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
             ("run_in", builtin_exec_run_in),
             ("run_inherit", builtin_exec_run_inherit),
             ("spawn", builtin_exec_spawn),
-            ("spawn_piped", builtin_exec_spawn_piped),
             ("kill", builtin_exec_kill),
             ("signal", builtin_exec_signal),
             ("kill_group", builtin_exec_kill_group),
@@ -595,19 +594,6 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
         ],
         globals,
     );
-    // `process::Child` piped-handle methods, dispatched by the
-    // receiver struct's qualified name like `WaitGroup::*`.
-    for (name, call) in [
-        ("Child::write_stdin", builtin_child_write_stdin as BuiltinFn),
-        ("Child::close_stdin", builtin_child_close_stdin),
-        ("Child::read_line", builtin_child_read_line),
-        ("Child::read_stdout", builtin_child_read_stdout),
-        ("Child::wait", builtin_child_wait),
-        ("Child::kill", builtin_child_kill),
-    ] {
-        let leaked: &'static str = name;
-        globals.push((leaked, builtin(leaked, call)));
-    }
     install_module(
         "signal",
         &[
@@ -662,6 +648,50 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
         gossamer_hir::FFI_NULL_RESULT,
         builtin(gossamer_hir::FFI_NULL_RESULT, crate::ffi_call::builtin_ffi_null_result),
     ));
+    globals.push((
+        gossamer_hir::FFI_SYMBOL,
+        builtin(gossamer_hir::FFI_SYMBOL, crate::ffi_call::builtin_ffi_symbol),
+    ));
+    for (name, f) in [
+        (
+            gossamer_hir::FFI_LOAD_INT,
+            crate::ffi_call::memory::builtin_load_int as fn(&[Value]) -> RuntimeResult<Value>,
+        ),
+        (
+            gossamer_hir::FFI_LOAD_FLOAT,
+            crate::ffi_call::memory::builtin_load_float,
+        ),
+        (
+            gossamer_hir::FFI_STORE_INT,
+            crate::ffi_call::memory::builtin_store_int,
+        ),
+        (
+            gossamer_hir::FFI_STORE_FLOAT,
+            crate::ffi_call::memory::builtin_store_float,
+        ),
+        (
+            gossamer_hir::FFI_VIEW_CHECK,
+            crate::ffi_call::memory::builtin_view_check,
+        ),
+        (
+            gossamer_hir::FFI_VIEW_RANGE_CHECK,
+            crate::ffi_call::memory::builtin_view_range_check,
+        ),
+        (
+            gossamer_hir::FFI_VIEW_LEN_CHECK,
+            crate::ffi_call::memory::builtin_view_len_check,
+        ),
+        (
+            gossamer_hir::FFI_ATOMIC_RMW,
+            crate::ffi_call::memory::builtin_atomic_rmw,
+        ),
+        (
+            gossamer_hir::FFI_ATOMIC_CAS,
+            crate::ffi_call::memory::builtin_atomic_cas,
+        ),
+    ] {
+        globals.push((name, builtin(name, f)));
+    }
     globals.push((
         gossamer_hir::FFI_HANDLE_PIN,
         builtin(gossamer_hir::FFI_HANDLE_PIN, crate::ffi_call::handles::builtin_pin),

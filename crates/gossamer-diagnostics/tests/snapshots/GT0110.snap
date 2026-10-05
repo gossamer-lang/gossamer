@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0110]: An `ffi::Union<(A, B, ..)>` is a C union of its listed members. Each - here
+--- framed ---
+error[GT0110]: An `ffi::Union<(A, B, ..)>` is a C union of its listed members. Each
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

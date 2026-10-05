@@ -139,6 +139,34 @@ fn builtin_f64_from_bits(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Float(f64::from_bits(bits)))
 }
 
+/// The float argument at `index`, `0.0` when it is missing.
+fn float_arg(args: &[Value], index: usize) -> f64 {
+    match args.get(index) {
+        Some(Value::Float(x)) => *x,
+        Some(Value::Int(n)) => *n as f64,
+        _ => 0.0,
+    }
+}
+
+/// `f64::mul_add(x, a, b) -> f64`: `x * a + b` with one rounding.
+pub(crate) fn builtin_f64_mul_add(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Float(gossamer_runtime::c_abi::gos_rt_f64_mul_add(
+        float_arg(args, 0),
+        float_arg(args, 1),
+        float_arg(args, 2),
+    )))
+}
+
+/// `f32::mul_add(x, a, b) -> f32`: `x * a + b` with one single-precision
+/// rounding.
+pub(crate) fn builtin_f32_mul_add(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Float(gossamer_runtime::c_abi::gos_rt_f32_mul_add(
+        float_arg(args, 0),
+        float_arg(args, 1),
+        float_arg(args, 2),
+    )))
+}
+
 /// `f32::to_bits(x) -> u32`: the binary32 encoding of `x` rounded to
 /// single precision, since every float occupies a 64-bit slot.
 fn builtin_f32_to_bits(args: &[Value]) -> RuntimeResult<Value> {

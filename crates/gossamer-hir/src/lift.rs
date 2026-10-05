@@ -715,6 +715,7 @@ impl Lifter {
             origin: FnOrigin::LiftedClosure,
             foreign_link: None,
             foreign_symbol: None,
+            export_symbol: None,
         };
         self.lifted.push(HirItem {
             id: self.ids.next(),
@@ -823,6 +824,7 @@ impl Lifter {
             origin: FnOrigin::LiftedClosure,
             foreign_link: None,
             foreign_symbol: None,
+            export_symbol: None,
         };
         self.lifted.push(HirItem {
             id: self.ids.next(),

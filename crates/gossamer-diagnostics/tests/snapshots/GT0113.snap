@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0113]: A function marked `#[export]` or `#[export("symbol")]` cannot be - here
+--- framed ---
+error[GT0113]: A function marked `#[export]` or `#[export("symbol")]` cannot be
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

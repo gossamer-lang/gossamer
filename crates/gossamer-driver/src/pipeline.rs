@@ -55,19 +55,32 @@ pub struct ForeignLinks {
     /// dependency that declares it (`None` for the program's own project),
     /// whose root it is relative to.
     pub search: Vec<(Option<String>, String)>,
+    /// Whether the program or a dependency declares a foreign function of
+    /// its own, beyond the standard library's.
+    pub declares_foreign: bool,
 }
 
 /// The libraries and search directories `#[link(..)]` names on the
-/// program's active foreign function declarations.
+/// program's active foreign function declarations. A declaration starting
+/// before `program_end` is the program's own (see
+/// `gossamer_parse::autoderive::program_source_end`).
 #[must_use]
-pub fn foreign_link_libraries(sf: &SourceFile) -> ForeignLinks {
-    fn walk(items: &[gossamer_ast::Item], dependency: Option<&str>, out: &mut ForeignLinks) {
+pub fn foreign_link_libraries(sf: &SourceFile, program_end: usize) -> ForeignLinks {
+    fn walk(
+        items: &[gossamer_ast::Item],
+        dependency: Option<&str>,
+        program_end: usize,
+        out: &mut ForeignLinks,
+    ) {
         for item in items {
             if !gossamer_resolve::item_is_active(&item.attrs) {
                 continue;
             }
             match &item.kind {
                 gossamer_ast::ItemKind::Fn(decl) if decl.extern_abi.is_some() => {
+                    if (item.span.start as usize) < program_end {
+                        out.declares_foreign = true;
+                    }
                     if let Some(library) = item.attrs.link_library()
                         && !out.libraries.contains(&library)
                     {
@@ -89,14 +102,14 @@ pub fn foreign_link_libraries(sf: &SourceFile) -> ForeignLinks {
                         .outer
                         .iter()
                         .find_map(|attr| attr.string_argument("dependency"));
-                    walk(inner, declared.or(dependency), out);
+                    walk(inner, declared.or(dependency), program_end, out);
                 }
                 _ => {}
             }
         }
     }
     let mut out = ForeignLinks::default();
-    walk(&sf.items, None, &mut out);
+    walk(&sf.items, None, program_end, &mut out);
     out
 }
 
@@ -344,9 +357,13 @@ fn lower_to_mir_reporting_prune(
     // the free functions nothing reaches, so specialisation and every
     // pass after it walk a program the size of what it actually
     // compiles. The second pass runs on the finished graph, where every
-    // name is final. A native build produces an executable, so its one
-    // root is the entry.
-    let roots = [ENTRY_BODY.to_string()];
+    // name is final. The roots are the entry, the `#[export]` entries a
+    // library's host calls, and the heap-static builds those run first.
+    let roots = [
+        ENTRY_BODY.to_string(),
+        gossamer_hir::FFI_EXPORTS_FN.to_string(),
+        gossamer_ast::STATIC_INIT_FN.to_string(),
+    ];
     let early = gossamer_mir::prune_scoped(
         &mut bodies,
         &roots,

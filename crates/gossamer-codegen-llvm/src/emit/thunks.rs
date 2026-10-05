@@ -336,7 +336,13 @@ pub(super) fn collect_sret_bodies(
                 && crate::lower::sret_return_bytes(tcx, body.local_ty(gossamer_mir::Local::RETURN))
                     .is_some()
         })
-        .map(|body| body.name.clone())
+        // A direct call names the body by the symbol it is emitted as, which
+        // differs from its MIR name where that would shadow a C symbol.
+        .flat_map(|body| {
+            let symbol = crate::lower::mangle_fn_name(&body.name);
+            let renamed = (symbol != body.name.as_str()).then(|| symbol.into_owned());
+            std::iter::once(body.name.clone()).chain(renamed)
+        })
         .collect()
 }
 
@@ -668,11 +674,14 @@ pub(super) fn validate_global_decl_shape(g: &str) -> Result<()> {
     let valid = trimmed.starts_with('@')
         || trimmed.starts_with('$')
         || trimmed.starts_with("declare ")
-        || trimmed.starts_with("define internal ");
+        || trimmed.starts_with("define internal ")
+        // An `#[export]` entry: the library's external interface.
+        || trimmed.starts_with("define dso_local ")
+        || trimmed.starts_with("define dllexport ");
     if !valid {
         return Err(anyhow!(
             "llvm backend: malformed module-level entry (expected `@symbol = ...`, \
-             `$comdat = ...`, `declare ...`, or `define internal ...`, got: {snippet:?}). This is the same shape regression that \
+             `$comdat = ...`, `declare ...`, or `define internal|dso_local|dllexport ...`, got: {snippet:?}). This is the same shape regression that \
              caused the 2026-04-28 / 2026-04-30 silent Cranelift-fallback incidents.",
             snippet = if trimmed.len() > 80 {
                 &trimmed[..80]

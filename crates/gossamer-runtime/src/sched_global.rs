@@ -784,6 +784,11 @@ impl Drop for ExternalActor {
 /// goroutine. Reporting stays off until a program says the process is one.
 static PROGRAM_ENTERED: AtomicBool = AtomicBool::new(false);
 
+/// Whether a program's `main` has started.
+pub fn program_entered() -> bool {
+    PROGRAM_ENTERED.load(Ordering::Acquire)
+}
+
 /// Marks the process as a running Gossamer program. Called from the entry
 /// shim a compiled binary emits, and from nowhere else.
 pub fn mark_program_entered() {
@@ -1162,17 +1167,31 @@ mod tests {
         let started = std::sync::Arc::clone(&read_started);
         let done = std::sync::Arc::clone(&read_done);
         let _ = spawn(Box::new(move || {
-            let args = vec!["-c".to_string(), "sleep 0.2; printf done".to_string()];
-            let handle = crate::c_abi::piped_child_spawn("sh", &args).expect("spawn shell");
+            use crate::c_abi::command::{
+                gos_rt_command_read, gos_rt_command_spawn, gos_rt_command_take, gos_rt_command_wait,
+            };
+            let mut spec = Vec::new();
+            for (tag, text) in [(b'P', "sh"), (b'A', "-c"), (b'A', "sleep 0.2; printf done")] {
+                spec.push(tag);
+                spec.extend_from_slice(&u32::try_from(text.len()).unwrap().to_le_bytes());
+                spec.extend_from_slice(text.as_bytes());
+            }
+            let stdio = [1i64, 2, 1, -1, -1, -1];
+            // SAFETY: `spec` and `stdio` are live locals of the stated sizes.
+            let handle = unsafe {
+                gos_rt_command_spawn(spec.as_ptr(), spec.len() as u64, stdio.as_ptr(), 0, -1)
+            };
+            assert!(handle > 0, "spawn shell");
             started.store(true, Ordering::Release);
-            assert_eq!(
-                crate::c_abi::piped_child_read_stdout(handle).as_deref(),
-                Some("done")
-            );
-            assert_eq!(
-                crate::c_abi::piped_child_wait(handle).expect("wait shell"),
-                0
-            );
+            let len = gos_rt_command_read(handle, 1, 2, 0);
+            let mut text = vec![0u8; usize::try_from(len).expect("read the shell")];
+            // SAFETY: `text` holds `len` bytes.
+            unsafe { gos_rt_command_take(handle, 1, text.as_mut_ptr(), text.len() as u64) };
+            assert_eq!(text, b"done");
+            let mut code = -1;
+            // SAFETY: `code` is a live local.
+            assert_eq!(unsafe { gos_rt_command_wait(handle, -1, &raw mut code) }, 1);
+            assert_eq!(code, 0);
             done.store(true, Ordering::Release);
         }));
 

@@ -2850,7 +2850,7 @@ impl Parser<'_> {
     ///
     /// Rust-style format macros require a literal first argument so their
     /// positional placeholders can be checked during parsing.
-    fn expand_format_macro(&mut self, macro_name: &str, args: Vec<Expr>) -> ExprKind {
+    pub(crate) fn expand_format_macro(&mut self, macro_name: &str, args: Vec<Expr>) -> ExprKind {
         let (first, rest) = match args.split_first() {
             Some((first, rest)) => (first.clone(), rest.to_vec()),
             None => {
@@ -3112,7 +3112,7 @@ impl Parser<'_> {
         }
     }
 
-    fn alloc_literal_expr(&mut self, lit: Literal) -> Expr {
+    pub(crate) fn alloc_literal_expr(&mut self, lit: Literal) -> Expr {
         let id = self.alloc_id();
         let span = self.last_span();
         Expr::new(id, span, ExprKind::Literal(lit))

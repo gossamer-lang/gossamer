@@ -300,7 +300,6 @@ const NAME_CAPABILITIES: &[(&str, Capability)] = &[
     ("os::exec::run", Capability::Exec),
     ("os::exec::signal", Capability::Exec),
     ("os::exec::spawn", Capability::Exec),
-    ("os::exec::spawn_piped", Capability::Exec),
     ("os::exec::wait_timeout", Capability::Exec),
     ("os::signal::on", Capability::Exec),
     ("os::signal::stop", Capability::Exec),
@@ -732,7 +731,7 @@ mod comptime_gate_tests {
             Some(Capability::Write)
         );
         assert_eq!(
-            denied("spawn_piped", ComptimeIo::Confined),
+            denied("wait_timeout", ComptimeIo::Confined),
             Some(Capability::Exec)
         );
         assert_eq!(

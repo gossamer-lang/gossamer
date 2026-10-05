@@ -627,6 +627,66 @@ impl Vm {
         );
     }
 
+    /// A runner that calls into this program on a thread it did not start,
+    /// with a `Vm` built on that thread from this one's shared program, as a
+    /// goroutine worker's is, and kept for the thread's later calls.
+    pub(crate) fn foreign_thread_runner(&self) -> crate::value::ForeignThreadRunner {
+        struct Program {
+            globals: Arc<rustc_hash::FxHashMap<&'static str, crate::vm::Global>>,
+            mir_bodies: Option<Arc<Vec<gossamer_mir::Body>>>,
+            tcx_snapshot: Option<Arc<gossamer_types::TyCtxt>>,
+            enum_shape_defs: Option<Arc<std::collections::HashMap<u32, u32>>>,
+            enum_shape_handles: Option<Arc<Vec<Arc<crate::value::NativeEnumShape>>>>,
+            struct_shape_defs: Option<Arc<std::collections::HashMap<u32, u32>>>,
+            struct_shape_handles: Option<Arc<Vec<Arc<crate::value::NativeStructShape>>>>,
+            jit_eager_names: Arc<std::collections::HashSet<String>>,
+            jit_cache_key: Option<Arc<str>>,
+        }
+        let program = parking_lot::Mutex::new(Program {
+            globals: Arc::clone(&self.globals),
+            mir_bodies: self.mir_bodies.borrow().clone(),
+            tcx_snapshot: self.tcx_snapshot.borrow().clone(),
+            enum_shape_defs: self.enum_shape_defs.borrow().clone(),
+            enum_shape_handles: self.enum_shape_handles.borrow().clone(),
+            struct_shape_defs: self.struct_shape_defs.borrow().clone(),
+            struct_shape_handles: self.struct_shape_handles.borrow().clone(),
+            jit_eager_names: Arc::clone(&self.jit_eager_names.borrow()),
+            jit_cache_key: self.jit_cache_key.borrow().clone(),
+        });
+        Arc::new(move |callee: &Value, args: Vec<Value>| {
+            thread_local! {
+                static FOREIGN_VM: std::cell::RefCell<Option<Vm>> =
+                    const { std::cell::RefCell::new(None) };
+            }
+            FOREIGN_VM.with(|cell| {
+                let mut slot = cell.borrow_mut();
+                let program = program.lock();
+                let reusable = slot
+                    .as_ref()
+                    .is_some_and(|vm| Arc::ptr_eq(&vm.globals, &program.globals));
+                if !reusable {
+                    *slot = Some(Vm::with_globals(
+                        Arc::clone(&program.globals),
+                        program.mir_bodies.clone(),
+                        program.tcx_snapshot.clone(),
+                        program.enum_shape_defs.clone(),
+                        program.enum_shape_handles.clone(),
+                        program.struct_shape_defs.clone(),
+                        program.struct_shape_handles.clone(),
+                        Arc::clone(&program.jit_eager_names),
+                        program.jit_cache_key.clone(),
+                    ));
+                }
+                drop(program);
+                let vm = slot.as_mut().expect("the thread's Vm was just built");
+                let running: &Vm = vm;
+                let result = running.with_active_trace(|| running.dispatch_call(callee, args));
+                vm.reset_after_task();
+                result
+            })
+        })
+    }
+
     /// How a spawned goroutine is filed in the diagnostic registry:
     /// the callee's own source-level name and definition site, which is what
     /// the compiled tier's profile shows for the same spawn.

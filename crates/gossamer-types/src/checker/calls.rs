@@ -1002,11 +1002,16 @@ impl TypeChecker<'_> {
             return self.reject_unknown_struct_assoc_fn(&type_name, &method, callee.span);
         };
         let skip = usize::from(receiver_form);
+        let explicit = path
+            .segments
+            .last()
+            .map(|segment| self.turbofish_types(&segment.generics))
+            .unwrap_or_default();
         Some(self.instantiate_own_generic_call(
             &sig,
             (&type_name, &method, callee.span),
-            &args[skip..],
-            &arg_tys[skip..],
+            (&args[skip..], &arg_tys[skip..]),
+            &explicit,
         ))
     }
 

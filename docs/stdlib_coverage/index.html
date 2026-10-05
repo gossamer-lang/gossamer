@@ -2541,7 +2541,7 @@ evidence visible.</p>
 <tr>
 <td><code>std::ffi</code></td>
 <td>experimental</td>
-<td style="text-align: right;">33</td>
+<td style="text-align: right;">49</td>
 <td>none</td>
 <td>none</td>
 <td>none</td>
@@ -2568,7 +2568,7 @@ evidence visible.</p>
 <tr>
 <td><code>std::process</code></td>
 <td>shipped</td>
-<td style="text-align: right;">14</td>
+<td style="text-align: right;">16</td>
 <td>none</td>
 <td>none</td>
 <td>none</td>
@@ -4674,7 +4674,85 @@ evidence is linked to that canonical item path yet.</p>
 <td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
 </tr>
 <tr>
+<td><code>std::ffi::Union</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::View</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::addr_of</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::align_of</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
 <td><code>std::ffi::alloc</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::atomic_compare_exchange</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::atomic_fetch_add</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::atomic_fetch_and</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::atomic_fetch_or</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::atomic_fetch_sub</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::atomic_fetch_xor</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::atomic_load</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::atomic_store</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::atomic_swap</code></td>
 <td>Function</td>
 <td>experimental</td>
 <td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
@@ -4770,6 +4848,12 @@ evidence is linked to that canonical item path yet.</p>
 <td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
 </tr>
 <tr>
+<td><code>std::ffi::fn_addr</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
 <td><code>std::ffi::fn_from_ptr</code></td>
 <td>Function</td>
 <td>experimental</td>
@@ -4789,6 +4873,18 @@ evidence is linked to that canonical item path yet.</p>
 </tr>
 <tr>
 <td><code>std::ffi::last_errno</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::last_os_error</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::offset_of</code></td>
 <td>Function</td>
 <td>experimental</td>
 <td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
@@ -7897,6 +7993,18 @@ evidence is linked to that canonical item path yet.</p>
 </tr>
 <tr>
 <td><code>std::process::Child</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_run_inherit.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
+</tr>
+<tr>
+<td><code>std::process::Command</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_run_inherit.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
+</tr>
+<tr>
+<td><code>std::process::Stdio</code></td>
 <td>Type</td>
 <td>experimental</td>
 <td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_run_inherit.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>

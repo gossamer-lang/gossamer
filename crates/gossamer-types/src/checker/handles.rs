@@ -251,12 +251,6 @@ pub(super) const HANDLE_METHODS: &[(&str, &str, &[Shape], Shape)] = &[
         Shape::ResultI64,
     ),
     ("io::Stream", "read_to_string", &[], Shape::Str),
-    ("Child", "write_stdin", &[Shape::Str], Shape::Bool),
-    ("Child", "close_stdin", &[], Shape::Unit),
-    ("Child", "read_line", &[], Shape::OptStr),
-    ("Child", "read_stdout", &[], Shape::Str),
-    ("Child", "wait", &[], Shape::ResultI64),
-    ("Child", "kill", &[], Shape::Bool),
 ];
 
 /// The owner a type-qualified path names in [`HANDLE_METHODS`]: the display

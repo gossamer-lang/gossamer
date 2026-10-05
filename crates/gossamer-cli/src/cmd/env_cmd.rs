@@ -44,10 +44,12 @@ pub(crate) fn run() {
             )
         })
         .collect();
+    let native_cc = crate::native_sources::compiler_description();
     let mut pairs: Vec<(&str, &str)> = vec![
         ("gos_version", env!("CARGO_PKG_VERSION")),
         ("runtime_lib", &runtime),
         ("cc", &cc),
+        ("native_cc", &native_cc),
     ];
     pairs.extend(llvm.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     pairs.extend([

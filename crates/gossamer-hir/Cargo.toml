@@ -12,6 +12,7 @@ description = "High-level IR for the Gossamer compiler."
 workspace = true
 
 [dependencies]
+gossamer-abi = { workspace = true }
 gossamer-ast = { workspace = true }
 gossamer-lex = { workspace = true }
 gossamer-pkg = { workspace = true }

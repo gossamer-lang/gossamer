@@ -1,0 +1,53 @@
+// Gossamer declarations for `shapes.h`, written by `gos bindgen --c`.
+// Regenerate them rather than editing by hand. A parameter pointing at
+// scalars crosses as a slice (`[T]` for `const T *`, `&mut [T]` otherwise,
+// `u8` for `char`); other pointers are `Option<ffi::Ptr<T>>`.
+
+use std::ffi
+
+pub const SHAPES_VERSION: i64 = 3
+pub const SHAPES_NAME: String = "shapes"
+pub const SHAPES_FLAG: u64 = 0x10
+pub const SHAPES_SCALE: f64 = 1.5
+
+#[repr(C)]
+pub struct shapes_point {
+    pub x: i32
+    pub y: i32
+}
+
+#[repr(C)]
+pub struct shapes_box {
+    pub min: shapes_point
+    pub max: shapes_point
+}
+
+pub type shapes_label_anon1 = ffi::Union<(i32, f32)>
+#[repr(C)]
+pub struct shapes_label {
+    pub tag: [u8; 4]
+    pub text: ffi::Ptr<ffi::c_char>
+    pub measure: ffi::Ptr<ffi::c_void>
+    pub weight: shapes_label_anon1
+}
+
+pub type shapes_value = ffi::Union<(i64, f64)>
+pub type shapes_kind = ffi::c_int
+pub const SHAPES_CIRCLE: ffi::c_int = 0
+pub const SHAPES_SQUARE: ffi::c_int = 4
+pub const SHAPES_TRIANGLE: ffi::c_int = 5
+
+#[link(name = "shapes")]
+unsafe extern "C" {
+    pub type shapes_registry
+    pub static shapes_created: ffi::c_int
+    pub fn shapes_area(box: shapes_box) -> i32
+    pub fn shapes_grow(box: shapes_box, by: i32) -> shapes_box
+    pub fn shapes_open(name: [u8], capacity: ffi::size_t) -> Option<ffi::Ptr<shapes_registry>>
+    pub fn shapes_name_len(registry: Option<ffi::Ptr<shapes_registry>>) -> ffi::size_t
+    pub fn shapes_each(registry: Option<ffi::Ptr<shapes_registry>>, visit: Fn(Option<ffi::Ptr<ffi::c_void>>, i32) -> ffi::c_int, context: Option<ffi::Ptr<ffi::c_void>>) -> ffi::c_int
+    pub fn shapes_value_real(value: shapes_value) -> f64
+    pub fn shapes_close(registry: Option<ffi::Ptr<shapes_registry>>)
+    // `shapes_printf` takes a variable argument list; call it through a fixed-arity C shim
+    // in `[native]` sources.
+}

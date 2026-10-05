@@ -113,6 +113,17 @@ impl<'tcx> FnBuilder<'tcx> {
                 kind: RegKind::Value,
             });
         }
+        if matches!(
+            op,
+            HirBinaryOp::BitAnd | HirBinaryOp::BitOr | HirBinaryOp::BitXor
+        ) && matches!(self.tcx.kind(self.unwrap_ref(lhs.ty)), Some(TyKind::Bool))
+        {
+            let reg = self.compile_bool_bitwise(op, lhs, rhs)?;
+            return Ok(TypedReg {
+                reg,
+                kind: RegKind::Value,
+            });
+        }
         if let Some(reg) = self.try_compile_described_comparison(op, lhs, rhs)? {
             return Ok(TypedReg {
                 reg,

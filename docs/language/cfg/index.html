@@ -2313,7 +2313,7 @@
 
 
 <h1 id="langcfg"><code>lang::cfg</code><a class="headerlink" href="#langcfg" title="Permanent link">&para;</a></h1>
-<p>Conditional compilation attribute, resolved for the target a build produces (<code>gos build --target</code>, <code>gos check --target</code>) rather than the host.</p>
+<p>Conditional compilation attribute, resolved for the target a build produces (<code>gos build --target</code>, <code>gos check --target</code>) rather than the host; <code>feature = "name"</code> reads the declaring package's <code>[features]</code>, and <code>#[cfg]</code> applies to a <code>use</code> too.</p>
 
 
 

@@ -52,7 +52,7 @@ pub use checker::{
     is_vec_only_sequence_method, iterator_adapter_is_lazy, iterator_receiver_accepts_method,
     typecheck_source_file, typecheck_source_file_for_repl_inspection,
 };
-pub use context::{PackedLayout, PlainLayout, TyCtxt};
+pub use context::{PackedLayout, PlainLayout, TyCtxt, UNION_TYPE_NAME};
 pub use error::{ForeignError, ForeignLibrary, NotDisplayableClass, TypeDiagnostic, TypeError};
 pub use exhaustiveness::{ExhaustivenessDiagnostic, ExhaustivenessError, check_exhaustiveness};
 pub use foreign_layout::{CLeaf, CStep, c_class_signed, c_class_width};

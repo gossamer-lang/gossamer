@@ -1317,11 +1317,12 @@ impl Lowerer<'_> {
                         ty: narrow,
                     };
                 }
-                // `x.to_bits()` is the method spelling of
-                // `f64::to_bits(x)`; routing it to the associated form
-                // keeps one lowering for both spellings on every tier.
-                if name.name == "to_bits"
-                    && args.is_empty()
+                // `x.to_bits()` and `x.mul_add(a, b)` are the method
+                // spellings of `f64::to_bits(x)` and `f64::mul_add(x, a, b)`;
+                // routing them to the associated form keeps one lowering for
+                // both spellings on every tier.
+                if ((name.name == "to_bits" && args.is_empty())
+                    || (name.name == "mul_add" && args.len() == 2))
                     && let Some(owner) = self.float_receiver_width(receiver.id)
                 {
                     let span = expr.span;
@@ -1335,9 +1336,11 @@ impl Lowerer<'_> {
                             def: None,
                         },
                     };
+                    let mut lowered = vec![self.lower_expr(receiver)];
+                    lowered.extend(args.iter().map(|arg| self.lower_expr(arg)));
                     return HirExprKind::Call {
                         callee: Box::new(callee),
-                        args: vec![self.lower_expr(receiver)],
+                        args: lowered,
                     };
                 }
                 // A map or set traverses eagerly, and the compiled tiers reach

@@ -74,4 +74,8 @@ impl NativeDispatch for VmDispatch<'_> {
         self.vm.spawn_native_task(task);
         true
     }
+
+    fn foreign_thread_runner(&self) -> Option<crate::value::ForeignThreadRunner> {
+        Some(self.vm.foreign_thread_runner())
+    }
 }

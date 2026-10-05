@@ -355,6 +355,24 @@ pub(super) fn emit_per_arg_print(
                 print_str,
                 intrinsics,
             )?,
+            PrintKind::ArrU64(len) => emit_arr_print(
+                module,
+                builder,
+                "gos_rt_arr_format_u64",
+                value,
+                len,
+                print_str,
+                intrinsics,
+            )?,
+            PrintKind::ArrF32(len) => emit_arr_print(
+                module,
+                builder,
+                "gos_rt_arr_format_f32",
+                value,
+                len,
+                print_str,
+                intrinsics,
+            )?,
             PrintKind::ArrBool(len) => emit_arr_print(
                 module,
                 builder,
@@ -911,11 +929,15 @@ pub(super) fn emit_args_to_concat_string(
             }
             PrintKind::ArrI64(_)
             | PrintKind::ArrF64(_)
+            | PrintKind::ArrF32(_)
+            | PrintKind::ArrU64(_)
             | PrintKind::ArrBool(_)
             | PrintKind::ArrString(_) => {
                 let (helper, len) = match kind {
                     PrintKind::ArrI64(n) => ("gos_rt_arr_format_i64", n),
                     PrintKind::ArrF64(n) => ("gos_rt_arr_format_f64", n),
+                    PrintKind::ArrF32(n) => ("gos_rt_arr_format_f32", n),
+                    PrintKind::ArrU64(n) => ("gos_rt_arr_format_u64", n),
                     PrintKind::ArrBool(n) => ("gos_rt_arr_format_bool", n),
                     PrintKind::ArrString(n) => ("gos_rt_arr_format_string", n),
                     _ => unreachable!(),

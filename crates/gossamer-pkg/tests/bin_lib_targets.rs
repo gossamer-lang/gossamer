@@ -57,6 +57,7 @@ path = "src/lib.gos"
         Some(LibTarget {
             name: Some("widget".to_string()),
             path: Some("src/lib.gos".to_string()),
+            kind: Vec::new(),
         })
     );
     assert!(m.has_explicit_targets());

@@ -1508,10 +1508,22 @@ pub trait NativeDispatch {
         let _ = task;
         false
     }
+    /// A way to call into this program from a thread it did not start, with
+    /// an interpreter of that thread's own; `None` for an implementor with
+    /// no program to share.
+    fn foreign_thread_runner(&self) -> Option<ForeignThreadRunner> {
+        None
+    }
 }
 
 /// A builtin's share of work, run on a pool worker with a dispatch of its own.
 pub type NativeTask = Box<dyn FnOnce(&mut dyn NativeDispatch) + Send>;
+
+/// Calls `callee(args)` on the calling thread with an interpreter of its
+/// own, sharing the program's globals: how native code on a thread the
+/// program did not start reaches a callback.
+pub type ForeignThreadRunner =
+    Arc<dyn Fn(&Value, Vec<Value>) -> RuntimeResult<Value> + Send + Sync>;
 
 /// What a spawned dispatch invokes.
 #[derive(Debug, Clone)]

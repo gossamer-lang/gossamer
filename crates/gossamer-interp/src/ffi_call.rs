@@ -45,9 +45,18 @@ pub(crate) fn native_ffi_call(
     };
     let malformed =
         || RuntimeError::Type(format!("__gos_ffi_call: malformed signature `{signature}`"));
-    let (params, ret) = signature.as_str().split_once('>').ok_or_else(malformed)?;
+    let (params, ret_spelling) = signature.as_str().split_once('>').ok_or_else(malformed)?;
     let params = gossamer_mir::foreign_params(params).ok_or_else(malformed)?;
-    let ret = ret.chars().next().ok_or_else(malformed)?;
+    let ret_struct = match ret_spelling.strip_prefix("s(") {
+        Some(inner) => Some(
+            inner
+                .strip_suffix(')')
+                .and_then(gossamer_abi::c_aggregate::CLayout::parse)
+                .ok_or_else(malformed)?,
+        ),
+        None => None,
+    };
+    let ret = ret_spelling.chars().next().ok_or_else(malformed)?;
     let mut layouts: Vec<&str> = layouts.as_str().split('|').collect();
     let (target, call_args) = if symbol.as_str() == gossamer_hir::FFI_INDIRECT_SYMBOL {
         // A call through an address carries the address first.
@@ -68,14 +77,22 @@ pub(crate) fn native_ffi_call(
     } else {
         (resolve(symbol.as_str(), library.as_str())?, call_args)
     };
-    if params.len() != call_args.len() {
+    // A struct result comes back through one more, final argument.
+    let expected = params.len() + usize::from(ret_struct.is_some());
+    if expected != call_args.len() {
         return Err(RuntimeError::Arity {
-            expected: params.len(),
+            expected,
             found: call_args.len(),
         });
     }
+    let signature = Signature {
+        params: &params,
+        layouts: &layouts,
+        ret,
+        ret_struct,
+    };
     callbacks::with_active(dispatch, || {
-        call(symbol.as_str(), target, &params, &layouts, ret, call_args)
+        call(symbol.as_str(), target, &signature, call_args)
     })
 }
 
@@ -159,16 +176,65 @@ fn parse_layout(text: &str) -> Option<(usize, Vec<Leaf>)> {
     Some((size, parsed))
 }
 
+/// A routed call's signature, as the call site spelled it.
+struct Signature<'a> {
+    params: &'a [ForeignParam],
+    layouts: &'a [&'a str],
+    ret: char,
+    /// The layout of a struct result, which the final argument receives.
+    ret_struct: Option<gossamer_abi::c_aggregate::CLayout>,
+}
+
+/// The C buffer for the struct argument `value` laid out by `layout` (a
+/// `foreign_layouts` entry), written back to `cell` when it is given.
+fn struct_buffer(
+    symbol: &str,
+    index: usize,
+    layout: &str,
+    value: &Value,
+    cell: Option<Arc<ThreadConfinedCell>>,
+) -> RuntimeResult<Buffer> {
+    let (size, leaves) = parse_layout(layout).ok_or_else(|| {
+        RuntimeError::Type(format!(
+            "foreign function `{symbol}`: malformed layout for parameter {}",
+            index + 1
+        ))
+    })?;
+    let mut bytes = vec![0u8; size.max(1)];
+    for leaf in &leaves {
+        let scalar = leaf_value(value, &leaf.steps)?;
+        let word = scalar_word(symbol, leaf.class, &scalar)?;
+        write_class(&mut bytes[leaf.offset..], leaf.class, word);
+    }
+    Ok(Buffer {
+        bytes,
+        write_back: cell.map(|c| (c, Shape::Leaves(leaves))),
+    })
+}
+
 fn call(
     symbol: &str,
     target: usize,
-    params: &[ForeignParam],
-    layouts: &[&str],
-    ret: char,
+    signature: &Signature<'_>,
     args: &[Value],
 ) -> RuntimeResult<Value> {
+    let Signature {
+        params,
+        layouts,
+        ret,
+        ..
+    } = *signature;
+    // A signature moving a struct by value takes a stub planned for the
+    // host's calling convention.
+    let plan = (signature.ret_struct.is_some()
+        || params
+            .iter()
+            .any(|param| matches!(param, ForeignParam::ByValue(_))))
+    .then(|| platform::plan(params, signature.ret_struct.as_ref(), ret))
+    .transpose()?;
     let mut buffers: Vec<Buffer> = Vec::new();
     let mut kinds = Vec::with_capacity(args.len());
+    let mut stub_params = Vec::with_capacity(args.len());
     let mut words = Vec::with_capacity(args.len());
     // Which word holds which buffer's address, filled once `buffers` stops
     // growing so no address moves after it is taken.
@@ -178,12 +244,21 @@ fn call(
             Value::MutCell(cell) => (cell.lock().clone(), Some(Arc::clone(cell))),
             other => (other.clone(), None),
         };
-        match *param {
-            ForeignParam::Scalar(class) => {
+        match param {
+            ForeignParam::ByValue(_) => {
+                let layout = layouts.get(index).copied().unwrap_or_default();
+                buffer_slots.push((words.len(), buffers.len()));
+                buffers.push(struct_buffer(symbol, index, layout, &value, None)?);
+                words.push(0);
+                kinds.push(platform::pointer_kind());
+                stub_params.push(platform::struct_param(plan.as_ref(), index)?);
+                continue;
+            }
+            &ForeignParam::Scalar(class) => {
                 kinds.push(platform::kind(class).ok_or_else(|| unknown_class(symbol, class))?);
                 words.push(scalar_word(symbol, class, &value)?);
             }
-            ForeignParam::Slice { elem, writable } => {
+            &ForeignParam::Slice { elem, writable } => {
                 kinds.push(platform::pointer_kind());
                 let bytes = pack_elements(symbol, elem, &value)?;
                 buffer_slots.push((words.len(), buffers.len()));
@@ -195,37 +270,59 @@ fn call(
                 });
                 words.push(0);
             }
-            ForeignParam::Struct { writable } => {
+            &ForeignParam::Struct { writable } => {
                 kinds.push(platform::pointer_kind());
                 let layout = layouts.get(index).copied().unwrap_or_default();
-                let (size, leaves) = parse_layout(layout).ok_or_else(|| {
-                    RuntimeError::Type(format!(
-                        "foreign function `{symbol}`: malformed layout for parameter {}",
-                        index + 1
-                    ))
-                })?;
-                let mut bytes = vec![0u8; size];
-                for leaf in &leaves {
-                    let scalar = leaf_value(&value, &leaf.steps)?;
-                    let word = scalar_word(symbol, leaf.class, &scalar)?;
-                    write_class(&mut bytes[leaf.offset..], leaf.class, word);
-                }
                 buffer_slots.push((words.len(), buffers.len()));
-                buffers.push(Buffer {
-                    bytes,
-                    write_back: cell
-                        .filter(|_| writable)
-                        .map(|c| (c, Shape::Leaves(leaves))),
-                });
+                buffers.push(struct_buffer(
+                    symbol,
+                    index,
+                    layout,
+                    &value,
+                    cell.filter(|_| writable),
+                )?);
                 words.push(0);
             }
         }
+        if let Some(kind) = kinds.last() {
+            stub_params.push(platform::scalar_param(*kind));
+        }
+    }
+    // A struct result is written to the buffer the final argument holds.
+    if signature.ret_struct.is_some() {
+        let holder = args.get(params.len()).ok_or_else(|| RuntimeError::Arity {
+            expected: params.len() + 1,
+            found: args.len(),
+        })?;
+        let (value, cell) = match holder {
+            Value::MutCell(cell) => (cell.lock().clone(), Some(Arc::clone(cell))),
+            other => (other.clone(), None),
+        };
+        let layout = layouts.get(params.len()).copied().unwrap_or_default();
+        buffer_slots.push((words.len(), buffers.len()));
+        buffers.push(struct_buffer(symbol, params.len(), layout, &value, cell)?);
+        words.push(0);
     }
     for (word, buffer) in buffer_slots {
         words[word] = platform::buffer_address(&mut buffers[buffer].bytes);
     }
-    let ret_kind = platform::kind(ret).ok_or_else(|| unknown_class(symbol, ret))?;
-    let result = platform::invoke(target, &kinds, ret_kind, &words)?;
+    let result = if let Some(plan) = &plan {
+        platform::invoke_struct(target, &stub_params, plan, ret, &words)?
+    } else {
+        let ret_kind = platform::kind(ret).ok_or_else(|| unknown_class(symbol, ret))?;
+        platform::invoke(target, &kinds, ret_kind, &words)?
+    };
+    write_back(buffers)?;
+    Ok(match ret {
+        'v' | 's' => Value::Unit,
+        'L' => Value::Uint(result),
+        class => scalar_value(class, result),
+    })
+}
+
+/// Copies each writable buffer the call filled back into the `&mut`
+/// argument it came from.
+fn write_back(buffers: Vec<Buffer>) -> RuntimeResult<()> {
     for buffer in buffers {
         let Some((cell, shape)) = buffer.write_back else {
             continue;
@@ -251,11 +348,7 @@ fn call(
         }
         *cell.lock() = value;
     }
-    Ok(match ret {
-        'v' => Value::Unit,
-        'L' => Value::Uint(result),
-        class => scalar_value(class, result),
-    })
+    Ok(())
 }
 
 fn unknown_class(symbol: &str, class: char) -> RuntimeError {
@@ -372,10 +465,79 @@ fn set_leaf(value: &mut Value, steps: &[Step], scalar: Value) -> RuntimeResult<(
 
 #[cfg(not(target_arch = "wasm32"))]
 mod platform {
-    use gossamer_codegen_cranelift::ffi_trampoline::{FfiKind, trampoline};
+    use gossamer_abi::c_aggregate::{CAbi, CArg, CLayout, CallPlan, plan_call};
+    use gossamer_codegen_cranelift::ffi_trampoline::{
+        FfiKind, StubParam, StubRet, struct_trampoline, trampoline,
+    };
+    use gossamer_mir::ForeignParam;
     use gossamer_runtime::c_abi::ffi::{ffi_leave_capture, gos_rt_ffi_enter, resolve_symbol};
 
     use crate::value::{RuntimeError, RuntimeResult};
+
+    /// The host's plan for a signature that moves a struct by value.
+    pub(super) fn plan(
+        params: &[ForeignParam],
+        ret_struct: Option<&CLayout>,
+        ret: char,
+    ) -> RuntimeResult<CallPlan> {
+        let abi = CAbi::host().ok_or_else(|| {
+            RuntimeError::Panic(
+                "a struct passed by value has no lowering on this platform".to_string(),
+            )
+        })?;
+        let args: Vec<CArg> = params
+            .iter()
+            .map(|param| match param {
+                ForeignParam::Scalar(class) => CArg::Scalar(*class),
+                ForeignParam::Slice { .. } | ForeignParam::Struct { .. } => CArg::Scalar('L'),
+                ForeignParam::ByValue(layout) => CArg::Aggregate(layout.clone()),
+            })
+            .collect();
+        let ret = match (ret, ret_struct) {
+            ('v', _) => None,
+            (_, Some(layout)) => Some(CArg::Aggregate(layout.clone())),
+            (class, None) => Some(CArg::Scalar(class)),
+        };
+        Ok(plan_call(abi, &args, ret.as_ref()))
+    }
+
+    pub(super) fn scalar_param(kind: FfiKind) -> StubParam {
+        StubParam::Scalar(kind)
+    }
+
+    /// The stub parameter for struct argument `index` under `plan`.
+    pub(super) fn struct_param(plan: Option<&CallPlan>, index: usize) -> RuntimeResult<StubParam> {
+        plan.and_then(|plan| plan.params.get(index))
+            .map(|arg| StubParam::Struct(arg.clone()))
+            .ok_or_else(|| RuntimeError::Panic("a struct argument has no call plan".to_string()))
+    }
+
+    pub(super) fn invoke_struct(
+        target: usize,
+        params: &[StubParam],
+        plan: &CallPlan,
+        ret: char,
+        words: &[u64],
+    ) -> RuntimeResult<u64> {
+        let stub_ret = if ret == 's' {
+            StubRet::Struct(plan.ret.clone())
+        } else {
+            StubRet::Scalar(kind(ret).ok_or_else(|| {
+                RuntimeError::Type(format!("foreign call: unknown result class `{ret}`"))
+            })?)
+        };
+        let routine = struct_trampoline(params, &stub_ret)
+            .map_err(|e| RuntimeError::Panic(format!("foreign call trampoline: {e}")))?;
+        gos_rt_ffi_enter();
+        // SAFETY: the routine was generated for exactly these parameters and
+        // this result; `words` holds one word per parameter (a struct's being
+        // the address of its bytes) and, for a struct result, the address of
+        // its buffer, each outliving the call.
+        #[allow(unsafe_code)]
+        let result = unsafe { routine(target as *const u8, words.as_ptr()) };
+        ffi_leave_capture();
+        Ok(result)
+    }
 
     pub(super) fn resolve(symbol: &str, libraries: &[String]) -> Option<usize> {
         resolve_symbol(symbol, libraries).map(|addr| addr as usize)
@@ -452,9 +614,40 @@ mod platform {
     }
 
     pub(super) fn invoke(_: usize, _: &[char], _: char, _: &[u64]) -> RuntimeResult<u64> {
-        Err(RuntimeError::Panic(
-            "foreign functions are not available on wasm32".to_string(),
-        ))
+        Err(unavailable())
+    }
+
+    fn unavailable() -> RuntimeError {
+        RuntimeError::Panic("foreign functions are not available on wasm32".to_string())
+    }
+
+    pub(super) fn plan(
+        _: &[gossamer_mir::ForeignParam],
+        _: Option<&gossamer_abi::c_aggregate::CLayout>,
+        _: char,
+    ) -> RuntimeResult<gossamer_abi::c_aggregate::CallPlan> {
+        Err(unavailable())
+    }
+
+    pub(super) fn scalar_param(kind: char) -> char {
+        kind
+    }
+
+    pub(super) fn struct_param(
+        _: Option<&gossamer_abi::c_aggregate::CallPlan>,
+        _: usize,
+    ) -> RuntimeResult<char> {
+        Err(unavailable())
+    }
+
+    pub(super) fn invoke_struct(
+        _: usize,
+        _: &[char],
+        _: &gossamer_abi::c_aggregate::CallPlan,
+        _: char,
+        _: &[u64],
+    ) -> RuntimeResult<u64> {
+        Err(unavailable())
     }
 }
 
@@ -481,9 +674,18 @@ pub(crate) mod callbacks {
         static PENDING: RefCell<Option<RuntimeError>> = const { RefCell::new(None) };
     }
 
-    /// Registered callbacks by slot: the adapter, and the program's function
-    /// name for reports.
-    static SLOTS: Mutex<Vec<(String, Value, String)>> = Mutex::new(Vec::new());
+    /// A registered callback: its key, the adapter, the program's function
+    /// name for reports, and how to run it on a thread the program did not
+    /// start.
+    struct Slot {
+        key: String,
+        adapter: Value,
+        name: String,
+        runner: Option<crate::value::ForeignThreadRunner>,
+    }
+
+    /// Registered callbacks by slot.
+    static SLOTS: Mutex<Vec<Slot>> = Mutex::new(Vec::new());
 
     /// Runs `call` with `dispatch` as the interpreter callbacks on this
     /// thread re-enter, then reports a fault one raised.
@@ -507,19 +709,29 @@ pub(crate) mod callbacks {
 
     /// The slot of the callback that runs `adapter` for the function
     /// `name`, registering it on first use.
-    fn slot(adapter: &Value, key: &str, name: &str) -> u64 {
+    fn slot(
+        adapter: &Value,
+        key: &str,
+        name: &str,
+        runner: Option<crate::value::ForeignThreadRunner>,
+    ) -> u64 {
         let mut slots = SLOTS.lock();
-        if let Some(index) = slots.iter().position(|(k, _, _)| k == key) {
+        if let Some(index) = slots.iter().position(|slot| slot.key == key) {
             return index as u64;
         }
-        slots.push((key.to_string(), adapter.clone(), name.to_string()));
+        slots.push(Slot {
+            key: key.to_string(),
+            adapter: adapter.clone(),
+            name: name.to_string(),
+            runner,
+        });
         (slots.len() - 1) as u64
     }
 
     /// `__gos_ffi_callback(adapter, signature, name)`: the address of a
     /// C-ABI entry that runs `adapter` on this interpreter.
     pub(crate) fn native_ffi_callback(
-        _dispatch: &mut dyn NativeDispatch,
+        dispatch: &mut dyn NativeDispatch,
         args: &[Value],
     ) -> RuntimeResult<Value> {
         let [adapter, Value::String(signature), Value::String(name)] = args else {
@@ -528,7 +740,12 @@ pub(crate) mod callbacks {
             ));
         };
         let key = format!("{name}:{signature}");
-        let slot = slot(adapter, &key, name.as_str());
+        let slot = slot(
+            adapter,
+            &key,
+            name.as_str(),
+            dispatch.foreign_thread_runner(),
+        );
         platform::entry_address(signature.as_str(), slot).map(|addr| Value::Uint(addr as u64))
     }
 
@@ -538,15 +755,19 @@ pub(crate) mod callbacks {
     // wasm32 builds no trampoline, so nothing there calls it.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) extern "C" fn entry(slot: u64, words: *const u64) -> u64 {
-        let (adapter, name) = {
+        let (adapter, name, runner) = {
             let slots = SLOTS.lock();
-            let Some((_, adapter, name)) = slots.get(slot as usize) else {
+            let Some(registered) = slots.get(slot as usize) else {
                 return 0;
             };
-            (adapter.clone(), name.clone())
+            (
+                registered.adapter.clone(),
+                registered.name.clone(),
+                registered.runner.clone(),
+            )
         };
         let Some(dispatch) = ACTIVE.with(|active| active.borrow().last().copied()) else {
-            gossamer_runtime::c_abi::ffi::foreign_thread_callback(&name);
+            return on_foreign_thread(runner.as_ref(), &adapter, &name, words);
         };
         if PENDING.with(|pending| pending.borrow().is_some()) {
             return 0;
@@ -572,6 +793,43 @@ pub(crate) mod callbacks {
             Err(fault) => {
                 PENDING.with(|pending| *pending.borrow_mut() = Some(fault));
                 0
+            }
+        }
+    }
+
+    /// Runs a callback native code invoked on a thread outside the program's
+    /// foreign calls, on that thread with an interpreter of its own; a fault
+    /// there has no foreign call to resume in, so it ends the program with
+    /// the report a compiled program prints.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn on_foreign_thread(
+        runner: Option<&crate::value::ForeignThreadRunner>,
+        adapter: &Value,
+        name: &str,
+        words: *const u64,
+    ) -> u64 {
+        let Some(runner) = runner else {
+            return 0;
+        };
+        gossamer_runtime::c_abi::ffi::attach_foreign_thread();
+        let run = std::panic::AssertUnwindSafe(|| runner(adapter, vec![Value::Int(words as i64)]));
+        let outcome = std::panic::catch_unwind(run).unwrap_or_else(|_| {
+            Err(RuntimeError::Panic(format!(
+                "the callback `{name}` failed inside the interpreter"
+            )))
+        });
+        match outcome {
+            Ok(Value::Int(word)) => word as u64,
+            Ok(Value::Uint(word)) => word,
+            Ok(_) => 0,
+            Err(fault) => {
+                use std::io::Write as _;
+                crate::flush_runtime_stdout();
+                crate::run_exit_hooks();
+                let mut err = std::io::stderr();
+                let _ = writeln!(err, "{fault}");
+                let _ = err.flush();
+                std::process::exit(101);
             }
         }
     }
@@ -603,6 +861,9 @@ pub(crate) mod callbacks {
             let malformed =
                 || RuntimeError::Type(format!("callback: malformed signature `{signature}`"));
             let (params, ret) = signature.split_once('>').ok_or_else(malformed)?;
+            if signature.contains("s(") {
+                return struct_entry_address(params, ret, slot).ok_or_else(malformed)?;
+            }
             let params = params
                 .chars()
                 .map(kind)
@@ -611,6 +872,72 @@ pub(crate) mod callbacks {
             let ret = ret.chars().next().and_then(kind).ok_or_else(malformed)?;
             reverse_trampoline(&params, ret, super::entry, slot)
                 .map_err(|e| RuntimeError::Panic(format!("callback trampoline: {e}")))
+        }
+
+        /// The entry for a callback that takes or answers a struct by value,
+        /// planned for the host's calling convention; `None` for a malformed
+        /// signature.
+        fn struct_entry_address(
+            params: &str,
+            ret: &str,
+            slot: u64,
+        ) -> Option<RuntimeResult<usize>> {
+            use gossamer_abi::c_aggregate::{CAbi, CArg, CLayout, plan_call};
+            use gossamer_codegen_cranelift::ffi_trampoline::{
+                StubParam, StubRet, reverse_struct_trampoline,
+            };
+            use gossamer_mir::ForeignParam;
+
+            let params = gossamer_mir::foreign_params(params)?;
+            let ret_struct = match ret.strip_prefix("s(") {
+                Some(inner) => Some(CLayout::parse(inner.strip_suffix(')')?)?),
+                None => None,
+            };
+            let Some(abi) = CAbi::host() else {
+                return Some(Err(RuntimeError::Panic(
+                    "a struct passed by value has no lowering on this platform".to_string(),
+                )));
+            };
+            let mut args = Vec::with_capacity(params.len());
+            let mut sizes = Vec::with_capacity(params.len() + 1);
+            for param in &params {
+                match param {
+                    ForeignParam::Scalar(class) => {
+                        args.push(CArg::Scalar(*class));
+                        sizes.push(8);
+                    }
+                    ForeignParam::ByValue(layout) => {
+                        sizes.push(layout.size);
+                        args.push(CArg::Aggregate(layout.clone()));
+                    }
+                    ForeignParam::Slice { .. } | ForeignParam::Struct { .. } => return None,
+                }
+            }
+            let ret_arg = match (&ret_struct, ret.chars().next()?) {
+                (Some(layout), _) => {
+                    sizes.push(layout.size);
+                    Some(CArg::Aggregate(layout.clone()))
+                }
+                (None, 'v') => None,
+                (None, class) => Some(CArg::Scalar(class)),
+            };
+            let plan = plan_call(abi, &args, ret_arg.as_ref());
+            let mut stub_params = Vec::with_capacity(params.len());
+            for (param, arg_plan) in params.iter().zip(&plan.params) {
+                stub_params.push(match param {
+                    ForeignParam::Scalar(class) => StubParam::Scalar(kind(*class)?),
+                    _ => StubParam::Struct(arg_plan.clone()),
+                });
+            }
+            let stub_ret = if ret_struct.is_some() {
+                StubRet::Struct(plan.ret.clone())
+            } else {
+                StubRet::Scalar(kind(ret.chars().next()?)?)
+            };
+            Some(
+                reverse_struct_trampoline(&stub_params, &stub_ret, &sizes, super::entry, slot)
+                    .map_err(|e| RuntimeError::Panic(format!("callback trampoline: {e}"))),
+            )
         }
     }
 
@@ -701,6 +1028,17 @@ pub(crate) mod handles {
     }
 }
 
+/// `__gos_ffi_symbol(symbol, library)`: the address of a C global, looked up
+/// in `library` and then the process, as a foreign function's is.
+pub(crate) fn builtin_ffi_symbol(args: &[Value]) -> RuntimeResult<Value> {
+    let [Value::String(symbol), Value::String(library)] = args else {
+        return Err(RuntimeError::Type(
+            "__gos_ffi_symbol: a symbol and a library".to_string(),
+        ));
+    };
+    resolve(symbol.as_str(), library.as_str()).map(|addr| Value::Uint(addr as u64))
+}
+
 /// `__gos_ffi_null_result(symbol)`: GX0013.
 pub(crate) fn builtin_ffi_null_result(args: &[Value]) -> RuntimeResult<Value> {
     let symbol = match args.first() {
@@ -711,4 +1049,137 @@ pub(crate) fn builtin_ffi_null_result(args: &[Value]) -> RuntimeResult<Value> {
         code: "GX0013",
         message: gossamer_runtime::c_abi::ffi::null_result_message(&symbol),
     })
+}
+
+/// Foreign memory access on the bytecode tier: the runtime's own loads,
+/// stores, atomics, and `ffi::View` bounds checks, which the compiled tiers
+/// call directly.
+pub(crate) mod memory {
+    use crate::value::{RuntimeError, RuntimeResult, Value};
+
+    fn int(args: &[Value], index: usize) -> RuntimeResult<i64> {
+        match args.get(index) {
+            Some(Value::Int(n)) => Ok(*n),
+            Some(Value::Uint(n)) => Ok(*n as i64),
+            Some(Value::Bool(b)) => Ok(i64::from(*b)),
+            Some(Value::Char(c)) => Ok(i64::from(u32::from(*c))),
+            other => Err(RuntimeError::Type(format!(
+                "foreign memory: argument {} is not an integer: {other:?}",
+                index + 1
+            ))),
+        }
+    }
+
+    fn float(args: &[Value], index: usize) -> RuntimeResult<f64> {
+        match args.get(index) {
+            Some(Value::Float(f)) => Ok(*f),
+            Some(Value::Int(n)) => Ok(*n as f64),
+            other => Err(RuntimeError::Type(format!(
+                "foreign memory: argument {} is not a float: {other:?}",
+                index + 1
+            ))),
+        }
+    }
+
+    /// `__gos_ffi_load_int(address, class)`.
+    pub(crate) fn builtin_load_int(args: &[Value]) -> RuntimeResult<Value> {
+        let (addr, class) = (int(args, 0)? as u64, int(args, 1)?);
+        // SAFETY: the program's `unsafe` block vouches for the address.
+        #[allow(unsafe_code)]
+        let value = unsafe { gossamer_runtime::c_abi::ffi::load_int(addr, class) };
+        Ok(Value::Int(value))
+    }
+
+    /// `__gos_ffi_load_float(address, class)`.
+    pub(crate) fn builtin_load_float(args: &[Value]) -> RuntimeResult<Value> {
+        let (addr, class) = (int(args, 0)? as u64, int(args, 1)?);
+        // SAFETY: the program's `unsafe` block vouches for the address.
+        #[allow(unsafe_code)]
+        let value = unsafe { gossamer_runtime::c_abi::ffi::load_float(addr, class) };
+        Ok(Value::Float(value))
+    }
+
+    /// `__gos_ffi_store_int(address, class, value)`.
+    pub(crate) fn builtin_store_int(args: &[Value]) -> RuntimeResult<Value> {
+        let (addr, class, value) = (int(args, 0)? as u64, int(args, 1)?, int(args, 2)?);
+        // SAFETY: the program's `unsafe` block vouches for the address.
+        #[allow(unsafe_code)]
+        unsafe {
+            gossamer_runtime::c_abi::ffi::store_int(addr, class, value);
+        }
+        Ok(Value::Unit)
+    }
+
+    /// `__gos_ffi_store_float(address, class, value)`.
+    pub(crate) fn builtin_store_float(args: &[Value]) -> RuntimeResult<Value> {
+        let (addr, class, value) = (int(args, 0)? as u64, int(args, 1)?, float(args, 2)?);
+        // SAFETY: the program's `unsafe` block vouches for the address.
+        #[allow(unsafe_code)]
+        unsafe {
+            gossamer_runtime::c_abi::ffi::store_float(addr, class, value);
+        }
+        Ok(Value::Unit)
+    }
+
+    /// `__gos_ffi_view_check(index, len)`.
+    pub(crate) fn builtin_view_check(args: &[Value]) -> RuntimeResult<Value> {
+        let (index, len) = (int(args, 0)?, int(args, 1)?);
+        if index < 0 || index >= len {
+            return Err(RuntimeError::Panic(
+                gossamer_runtime::c_abi::ffi::view_index_message(index, len),
+            ));
+        }
+        Ok(Value::Unit)
+    }
+
+    /// `__gos_ffi_view_range_check(lo, hi, len)`.
+    pub(crate) fn builtin_view_range_check(args: &[Value]) -> RuntimeResult<Value> {
+        let (lo, hi, len) = (int(args, 0)?, int(args, 1)?, int(args, 2)?);
+        if lo < 0 || lo > hi || hi > len {
+            return Err(RuntimeError::Panic(
+                gossamer_runtime::c_abi::ffi::view_range_message(lo, hi, len),
+            ));
+        }
+        Ok(Value::Unit)
+    }
+
+    /// `__gos_ffi_view_len_check(len, found)`.
+    pub(crate) fn builtin_view_len_check(args: &[Value]) -> RuntimeResult<Value> {
+        let (len, found) = (int(args, 0)?, int(args, 1)?);
+        if found != len {
+            return Err(RuntimeError::Panic(
+                gossamer_runtime::c_abi::ffi::view_len_message(len, found),
+            ));
+        }
+        Ok(Value::Unit)
+    }
+
+    /// `__gos_ffi_atomic_rmw(address, op, width, value)`.
+    pub(crate) fn builtin_atomic_rmw(args: &[Value]) -> RuntimeResult<Value> {
+        let (addr, op, width, value) = (
+            int(args, 0)? as u64,
+            int(args, 1)?,
+            int(args, 2)?,
+            int(args, 3)?,
+        );
+        // SAFETY: the program's `unsafe` block vouches for the address.
+        #[allow(unsafe_code)]
+        let result = unsafe { gossamer_runtime::c_abi::ffi::atomic_rmw(addr, op, width, value) };
+        result.map(Value::Int).map_err(RuntimeError::Panic)
+    }
+
+    /// `__gos_ffi_atomic_cas(address, width, expected, new)`.
+    pub(crate) fn builtin_atomic_cas(args: &[Value]) -> RuntimeResult<Value> {
+        let (addr, width, expected, new) = (
+            int(args, 0)? as u64,
+            int(args, 1)?,
+            int(args, 2)?,
+            int(args, 3)?,
+        );
+        // SAFETY: the program's `unsafe` block vouches for the address.
+        #[allow(unsafe_code)]
+        let result =
+            unsafe { gossamer_runtime::c_abi::ffi::atomic_cas(addr, width, expected, new) };
+        result.map(Value::Int).map_err(RuntimeError::Panic)
+    }
 }

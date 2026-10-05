@@ -67,11 +67,6 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ),
     (
         "ffi.rs",
-        "gos_rt_ffi_callback_run",
-        "the backend emits a callback's name as NUL-terminated constant data",
-    ),
-    (
-        "ffi.rs",
         "gos_rt_ffi_strlen",
         "`ffi::read_cstr` measures a C string in memory a foreign library owns",
     ),

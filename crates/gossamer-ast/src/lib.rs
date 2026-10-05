@@ -38,11 +38,11 @@ pub use gossamer_abi::format_pad::{
 };
 pub use items::{
     AssocBinding, Attribute, Attrs, BINARY_SEARCH_PREFIX, ConstDecl, EnumDecl, EnumRepr,
-    EnumVariant, FOREIGN_TYPE_ATTR, FnDecl, FnParam, GenericParam, Generics, ImplDecl, ImplItem,
-    Item, ItemKind, ModBody, ModDecl, OPERATOR_METHOD_PREFIX, PARTITION_POINT_PREFIX, Receiver,
-    STRUCTURAL_COMPARATOR_PREFIX, StaticDecl, StructBody, StructDecl, StructField, TraitBound,
-    TraitDecl, TraitItem, TupleField, TypeAliasDecl, USER_COMPARATOR_PREFIX, WhereClause,
-    WherePredicate,
+    EnumVariant, FOREIGN_STATIC_ATTR, FOREIGN_TYPE_ATTR, FnDecl, FnParam, GenericParam, Generics,
+    ImplDecl, ImplItem, Item, ItemKind, ModBody, ModDecl, OPERATOR_METHOD_PREFIX,
+    PARTITION_POINT_PREFIX, Receiver, STATIC_INIT_FN, STRUCTURAL_COMPARATOR_PREFIX, StaticDecl,
+    StructBody, StructDecl, StructField, TraitBound, TraitDecl, TraitItem, TupleField,
+    TypeAliasDecl, USER_COMPARATOR_PREFIX, WhereClause, WherePredicate,
 };
 pub use node_id::{NodeId, NodeIdGenerator};
 pub use path::{Path, Segment};

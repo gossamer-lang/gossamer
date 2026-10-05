@@ -16,6 +16,9 @@ use super::Printer;
 impl Printer {
     /// Renders a `use` declaration.
     pub fn print_use_decl(&mut self, decl: &UseDecl) {
+        if let Some(cfg) = &decl.cfg {
+            self.write(&format!("#[cfg({cfg})]\n"));
+        }
         self.write("use ");
         self.write_use_target(&decl.target);
         if let Some(entries) = &decl.list {

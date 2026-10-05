@@ -9,6 +9,7 @@ pub(crate) mod attr_walk;
 pub(crate) mod audit_cmd;
 pub(crate) mod bench;
 pub(crate) mod bindgen;
+pub(crate) mod bindgen_c;
 pub(crate) mod build;
 pub(crate) mod cache;
 pub(crate) mod check;

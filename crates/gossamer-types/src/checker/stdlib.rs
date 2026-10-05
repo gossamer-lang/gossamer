@@ -18,9 +18,13 @@ impl TypeChecker<'_> {
     pub(super) fn checked_simd_ty(&mut self, elem: Ty, lanes: crate::ArrayLen, span: Span) -> Ty {
         let elem = self.infer.resolve(self.tcx, elem);
         let takes_sixteen = match self.tcx.kind(elem) {
-            Some(TyKind::Float(_) | TyKind::Int(IntTy::I64)) => false,
+            Some(TyKind::Float(_) | TyKind::Int(IntTy::I64 | IntTy::U64)) => false,
             Some(
-                TyKind::Int(IntTy::U8 | IntTy::I32 | IntTy::U32) | TyKind::Bool | TyKind::Var(_),
+                TyKind::Int(
+                    IntTy::I8 | IntTy::U8 | IntTy::I16 | IntTy::U16 | IntTy::I32 | IntTy::U32,
+                )
+                | TyKind::Bool
+                | TyKind::Var(_),
             ) => true,
             _ => {
                 let ty = self.render_public_ty(elem);
@@ -63,7 +67,10 @@ impl TypeChecker<'_> {
         }
     }
 
-    /// `Simd::from_array(a)`, `Simd::splat(v)`, and `Simd::load(xs, offset)`.
+    /// The vector constructors: `Simd::from_array(a)`, `Simd::splat(v)`,
+    /// `Simd::load(xs, offset)`, `Simd::load_or(xs, offset, fill)`,
+    /// `Simd::gather(xs, indices)`, `Simd::from_bits(v)`, and
+    /// `Mask::from_bitmask(bits)`.
     pub(super) fn simd_ctor_ret(
         &mut self,
         last: &str,
@@ -72,94 +79,165 @@ impl TypeChecker<'_> {
         expected: Expectation,
         span: Span,
     ) -> Option<Ty> {
-        match (last, arg_tys) {
-            ("from_array", [array]) => {
-                let array = self.infer.resolve(self.tcx, *array);
-                let (elem, len) = match self.tcx.kind(array).cloned() {
-                    Some(TyKind::Array { elem, len }) => (elem, len),
-                    // A bracket literal names its lanes by its length; it is
-                    // the fixed array the vector is laid out as.
-                    Some(TyKind::Vec(elem)) => {
-                        let Some(ExprKind::Array(gossamer_ast::ArrayExpr::List(items))) =
-                            args.first().map(|arg| &arg.kind)
-                        else {
-                            self.emit(
-                                TypeError::SimdShape {
-                                    reason: "`Simd::from_array` takes a fixed array such as `[1.0, 2.0, 3.0, 4.0]`".to_string(),
-                                },
-                                span,
-                            );
-                            return Some(self.tcx.error_ty());
-                        };
-                        let len = crate::ArrayLen::Concrete(items.len());
-                        let fixed = self.tcx.intern(TyKind::Array { elem, len });
-                        if let Some(arg) = args.first() {
-                            self.record(arg.id, fixed);
-                        }
-                        (elem, len)
-                    }
-                    _ => {
-                        self.emit(
-                            TypeError::SimdShape {
-                                reason: "`Simd::from_array` takes a fixed array such as `[1.0, 2.0, 3.0, 4.0]`".to_string(),
-                            },
-                            span,
-                        );
-                        return Some(self.tcx.error_ty());
-                    }
-                };
-                Some(self.checked_simd_ty(elem, len, span))
-            }
+        Some(match (last, arg_tys) {
+            ("from_array", [array]) => self.simd_from_array(args, *array, span),
             ("load", [source, offset]) => {
-                let want = match expected {
-                    Expectation::HasType(ty) => self.infer.resolve(self.tcx, ty),
-                    _ => self.tcx.error_ty(),
-                };
-                let Some(TyKind::Simd { elem, .. }) = self.tcx.kind(want).cloned() else {
-                    self.emit(
-                        TypeError::SimdShape {
-                            reason: "`Simd::load` takes its lane count from the annotated type"
-                                .to_string(),
-                        },
-                        span,
-                    );
-                    return Some(self.tcx.error_ty());
-                };
-                let Some(source_elem) = self.simd_window_elem(*source) else {
-                    self.emit(
-                        TypeError::SimdShape {
-                            reason: "`Simd::load` reads lanes from a `Vec<T>`, `[T]`, or `[T; N]`"
-                                .to_string(),
-                        },
-                        span,
-                    );
-                    return Some(self.tcx.error_ty());
-                };
-                self.unify(elem, source_elem, span);
-                let i64_ty = self.tcx.int_ty(IntTy::I64);
-                self.unify(i64_ty, *offset, span);
-                Some(want)
+                self.simd_load_ret("load", expected, *source, *offset, None, span)
             }
-            ("splat", [value]) => {
-                let want = match expected {
-                    Expectation::HasType(ty) => self.infer.resolve(self.tcx, ty),
-                    _ => self.tcx.error_ty(),
+            ("load_or", [source, offset, fill]) => {
+                self.simd_load_ret("load_or", expected, *source, *offset, Some(*fill), span)
+            }
+            ("from_bitmask", [bits]) => {
+                let want = self.expected_ty(expected);
+                let is_mask = matches!(
+                    self.tcx.kind(want).cloned(),
+                    Some(TyKind::Simd { elem, .. }) if matches!(self.tcx.kind(elem), Some(TyKind::Bool))
+                );
+                if !is_mask {
+                    return Some(self.simd_shape_error(
+                        "`Mask::from_bitmask` takes its lane count from the annotated type",
+                        span,
+                    ));
+                }
+                let u64_ty = self.tcx.int_ty(IntTy::U64);
+                self.unify(u64_ty, *bits, span);
+                want
+            }
+            ("from_bits", [bits]) => {
+                let want = self.expected_ty(expected);
+                let Some(TyKind::Simd { elem, lanes }) = self.tcx.kind(want).cloned() else {
+                    return Some(self.simd_shape_error(
+                        "`Simd::from_bits` takes its lane type from the annotated type",
+                        span,
+                    ));
                 };
+                let elem = self.infer.resolve(self.tcx, elem);
+                let unsigned = self.unsigned_lane(elem);
+                let source = self.tcx.intern(TyKind::Simd {
+                    elem: unsigned,
+                    lanes,
+                });
+                self.unify(source, *bits, span);
+                want
+            }
+            ("gather", [source, indices]) => self.simd_gather(*source, *indices, span),
+            ("splat", [value]) => {
+                let want = self.expected_ty(expected);
                 if let Some(TyKind::Simd { elem, .. }) = self.tcx.kind(want).cloned() {
                     self.unify(elem, *value, span);
                     return Some(want);
                 }
-                self.emit(
-                    TypeError::SimdShape {
-                        reason: "`Simd::splat` takes its lane count from the annotated type"
-                            .to_string(),
-                    },
+                self.simd_shape_error(
+                    "`Simd::splat` takes its lane count from the annotated type",
                     span,
-                );
-                Some(self.tcx.error_ty())
+                )
             }
-            _ => None,
+            _ => return None,
+        })
+    }
+
+    /// The type the context expects, resolved, or the error type without one.
+    fn expected_ty(&mut self, expected: Expectation) -> Ty {
+        match expected {
+            Expectation::HasType(ty) => self.infer.resolve(self.tcx, ty),
+            _ => self.tcx.error_ty(),
         }
+    }
+
+    /// Reports GT0089 with `reason` and answers the error type.
+    fn simd_shape_error(&mut self, reason: &str, span: Span) -> Ty {
+        self.emit(
+            TypeError::SimdShape {
+                reason: reason.to_string(),
+            },
+            span,
+        );
+        self.tcx.error_ty()
+    }
+
+    /// `Simd::from_array(a)`: the lanes and their count from a fixed array.
+    fn simd_from_array(&mut self, args: &[Expr], array: Ty, span: Span) -> Ty {
+        const TAKES: &str = "`Simd::from_array` takes a fixed array such as `[1.0, 2.0, 3.0, 4.0]`";
+        let array = self.infer.resolve(self.tcx, array);
+        let (elem, len) = match self.tcx.kind(array).cloned() {
+            Some(TyKind::Array { elem, len }) => (elem, len),
+            // A bracket literal names its lanes by its length; it is the
+            // fixed array the vector is laid out as.
+            Some(TyKind::Vec(elem)) => {
+                let Some(ExprKind::Array(gossamer_ast::ArrayExpr::List(items))) =
+                    args.first().map(|arg| &arg.kind)
+                else {
+                    return self.simd_shape_error(TAKES, span);
+                };
+                let len = crate::ArrayLen::Concrete(items.len());
+                let fixed = self.tcx.intern(TyKind::Array { elem, len });
+                if let Some(arg) = args.first() {
+                    self.record(arg.id, fixed);
+                }
+                (elem, len)
+            }
+            _ => return self.simd_shape_error(TAKES, span),
+        };
+        self.checked_simd_ty(elem, len, span)
+    }
+
+    /// `Simd::load(xs, offset)` and `Simd::load_or(xs, offset, fill)`: the
+    /// vector type the context expects, its lanes read from a sequence.
+    fn simd_load_ret(
+        &mut self,
+        name: &str,
+        expected: Expectation,
+        source: Ty,
+        offset: Ty,
+        fill: Option<Ty>,
+        span: Span,
+    ) -> Ty {
+        let want = self.expected_ty(expected);
+        let Some(TyKind::Simd { elem, .. }) = self.tcx.kind(want).cloned() else {
+            return self.simd_shape_error(
+                &format!("`Simd::{name}` takes its lane count from the annotated type"),
+                span,
+            );
+        };
+        if let Some(source_elem) = self.simd_window_elem(source) {
+            self.unify(elem, source_elem, span);
+        } else {
+            let error = self.simd_shape_error(
+                &format!("`Simd::{name}` reads lanes from a `Vec<T>`, `[T]`, or `[T; N]`"),
+                span,
+            );
+            if fill.is_none() {
+                return error;
+            }
+        }
+        let i64_ty = self.tcx.int_ty(IntTy::I64);
+        self.unify(i64_ty, offset, span);
+        if let Some(fill) = fill {
+            self.unify(elem, fill, span);
+        }
+        want
+    }
+
+    /// `Simd::gather(xs, indices)`: one lane of `xs` per index lane.
+    fn simd_gather(&mut self, source: Ty, indices: Ty, span: Span) -> Ty {
+        let Some(source_elem) = self.simd_window_elem(source) else {
+            return self.simd_shape_error(
+                "`Simd::gather` reads lanes from a `Vec<T>`, `[T]`, or `[T; N]`",
+                span,
+            );
+        };
+        let indices = self.infer.resolve(self.tcx, indices);
+        let Some(TyKind::Simd { elem: index, lanes }) = self.tcx.kind(indices).cloned() else {
+            return self.simd_shape_error(
+                "`Simd::gather` takes its indices as a `Simd` of integers",
+                span,
+            );
+        };
+        if !matches!(self.tcx.kind(index), Some(TyKind::Int(_) | TyKind::Var(_))) {
+            self.simd_shape_error("`Simd::gather` indices are integer lanes", span);
+        }
+        let source_elem = self.infer.resolve(self.tcx, source_elem);
+        self.checked_simd_ty(source_elem, lanes, span)
     }
 
     /// The type of `lhs <op> rhs` when either operand is a lane vector and the
@@ -234,6 +312,7 @@ impl TypeChecker<'_> {
         method: &str,
         receiver_ty: Ty,
         args: &[Expr],
+        generics: &[gossamer_ast::GenericArg],
         span: Span,
     ) -> Option<Ty> {
         let mut recv = self.infer.resolve(self.tcx, receiver_ty);
@@ -249,7 +328,49 @@ impl TypeChecker<'_> {
         let int = matches!(self.tcx.kind(elem_res), Some(TyKind::Int(_)))
             || self.infer.is_integer_constrained_var(self.tcx, elem_res);
         let mask = matches!(self.tcx.kind(elem_res), Some(TyKind::Bool));
-        let ret = match (method, args.len()) {
+        let r = SimdReceiver {
+            recv,
+            elem,
+            elem_res,
+            lanes,
+            float,
+            int,
+            mask,
+        };
+        if let Some(ret) = self.simd_lane_method(method, r, args, span) {
+            return Some(ret);
+        }
+        if let Some(ret) = self.simd_reshape_method(method, r, args, generics, span) {
+            return Some(ret);
+        }
+        if let Some(ret) = self.simd_store_method(method, r, args) {
+            return Some(ret);
+        }
+        for arg in args {
+            self.check_expr(arg);
+        }
+        let ty = self.render_public_ty(recv);
+        Some(self.simd_shape_error(&format!("`{ty}` has no method `{method}`"), span))
+    }
+
+    /// Lane-wise arithmetic, comparisons, reductions, and mask terminals.
+    fn simd_lane_method(
+        &mut self,
+        method: &str,
+        r: SimdReceiver,
+        args: &[Expr],
+        span: Span,
+    ) -> Option<Ty> {
+        let SimdReceiver {
+            recv,
+            elem,
+            elem_res,
+            lanes,
+            float,
+            int,
+            mask,
+        } = r;
+        Some(match (method, args.len()) {
             ("to_array", 0) => self.tcx.intern(TyKind::Array { elem, len: lanes }),
             ("min" | "max", 1) if !mask => {
                 let got = self.check_expr_expecting(&args[0], Expectation::HasType(recv));
@@ -258,7 +379,9 @@ impl TypeChecker<'_> {
             }
             ("abs", 0) if !mask => recv,
             ("sqrt", 0) if float => recv,
-            ("lanes_eq" | "lanes_lt" | "lanes_le", 1) if !mask => {
+            ("lanes_eq" | "lanes_lt" | "lanes_le" | "lanes_gt" | "lanes_ge" | "lanes_ne", 1)
+                if !mask =>
+            {
                 let got = self.check_expr_expecting(&args[0], Expectation::HasType(recv));
                 self.unify(recv, got, args[0].span);
                 let bool_ty = self.tcx.bool_ty();
@@ -268,7 +391,12 @@ impl TypeChecker<'_> {
                 })
             }
             ("select", 2) if mask => {
-                let a = self.check_expr(&args[0]);
+                // Both choices are vectors of the mask's lane count, which a
+                // `Simd::splat` among them takes its lanes from.
+                let lane = self.fresh();
+                let picked = self.tcx.intern(TyKind::Simd { elem: lane, lanes });
+                let a = self.check_expr_expecting(&args[0], Expectation::HasType(picked));
+                self.unify(picked, a, args[0].span);
                 let b = self.check_expr_expecting(&args[1], Expectation::HasType(a));
                 self.unify(a, b, args[1].span);
                 let a_res = self.infer.resolve(self.tcx, a);
@@ -287,6 +415,158 @@ impl TypeChecker<'_> {
                     }
                 }
             }
+            ("reduce_sum" | "reduce_min" | "reduce_max", 0) if !mask => elem,
+            ("reduce_and" | "reduce_or", 0) if int || mask => elem,
+            ("saturating_add" | "saturating_sub", 1) if int => {
+                let got = self.check_expr_expecting(&args[0], Expectation::HasType(recv));
+                self.unify(recv, got, args[0].span);
+                recv
+            }
+            ("abs_diff", 1) if int => {
+                let got = self.check_expr_expecting(&args[0], Expectation::HasType(recv));
+                self.unify(recv, got, args[0].span);
+                let unsigned = self.unsigned_lane(elem_res);
+                self.tcx.intern(TyKind::Simd {
+                    elem: unsigned,
+                    lanes,
+                })
+            }
+            ("mul_add", 2) if float => {
+                for arg in args {
+                    let got = self.check_expr_expecting(arg, Expectation::HasType(recv));
+                    self.unify(recv, got, arg.span);
+                }
+                recv
+            }
+            ("to_bitmask", 0) if mask => self.tcx.int_ty(IntTy::U64),
+            ("any" | "all", 0) if mask => self.tcx.bool_ty(),
+            ("first_set", 0) if mask => {
+                if self.concrete_lanes(lanes, span).is_none() {
+                    return Some(self.tcx.error_ty());
+                }
+                let i64_ty = self.tcx.int_ty(IntTy::I64);
+                self.option_adt_ty(i64_ty)
+            }
+            _ => return None,
+        })
+    }
+
+    /// Conversions and shuffles: lane casts and bits, widening, narrowing,
+    /// swizzles, and interleaving.
+    fn simd_reshape_method(
+        &mut self,
+        method: &str,
+        r: SimdReceiver,
+        args: &[Expr],
+        generics: &[gossamer_ast::GenericArg],
+        span: Span,
+    ) -> Option<Ty> {
+        let SimdReceiver {
+            recv,
+            elem,
+            elem_res,
+            lanes,
+            float,
+            int,
+            mask,
+        } = r;
+        Some(match (method, args.len()) {
+            ("cast", 0) if !mask => {
+                let targets = self.turbofish_types(generics);
+                let Some(target) = targets.first().copied() else {
+                    return Some(
+                        self.simd_shape_error(
+                            "`cast` names its lane type: `v.cast::<f32>()`",
+                            span,
+                        ),
+                    );
+                };
+                self.checked_simd_ty(target, lanes, span)
+            }
+            ("to_bits", 0) if !mask => {
+                let unsigned = self.unsigned_lane(elem_res);
+                self.tcx.intern(TyKind::Simd {
+                    elem: unsigned,
+                    lanes,
+                })
+            }
+            ("widen_low" | "widen_high", 0) if !mask => {
+                let Some(wide) = self.widened_lane(elem_res) else {
+                    let ty = self.render_public_ty(elem_res);
+                    self.emit(
+                        TypeError::SimdShape {
+                            reason: format!("`{ty}` lanes have no wider lane type"),
+                        },
+                        span,
+                    );
+                    return Some(self.tcx.error_ty());
+                };
+                let Some(half) = self.concrete_lanes(lanes, span).map(|n| n / 2) else {
+                    return Some(self.tcx.error_ty());
+                };
+                self.checked_simd_ty(wide, crate::ArrayLen::Concrete(half), span)
+            }
+            ("narrow", 1) if int || float => {
+                let got = self.check_expr_expecting(&args[0], Expectation::HasType(recv));
+                self.unify(recv, got, args[0].span);
+                let Some(narrow) = self.narrowed_lane(elem_res) else {
+                    let ty = self.render_public_ty(elem_res);
+                    self.emit(
+                        TypeError::SimdShape {
+                            reason: format!("`{ty}` lanes have no narrower lane type"),
+                        },
+                        span,
+                    );
+                    return Some(self.tcx.error_ty());
+                };
+                let Some(double) = self.concrete_lanes(lanes, span).map(|n| n * 2) else {
+                    return Some(self.tcx.error_ty());
+                };
+                self.checked_simd_ty(narrow, crate::ArrayLen::Concrete(double), span)
+            }
+            ("swizzle", 1) => {
+                let Some(source) = self.concrete_lanes(lanes, span) else {
+                    return Some(self.tcx.error_ty());
+                };
+                let Some(count) = self.swizzle_indices(&args[0], source) else {
+                    return Some(self.tcx.error_ty());
+                };
+                self.checked_simd_ty(elem, crate::ArrayLen::Concrete(count), span)
+            }
+            ("concat_swizzle", 2) => {
+                let got = self.check_expr_expecting(&args[0], Expectation::HasType(recv));
+                self.unify(recv, got, args[0].span);
+                let Some(source) = self.concrete_lanes(lanes, span) else {
+                    return Some(self.tcx.error_ty());
+                };
+                let Some(count) = self.swizzle_indices(&args[1], source * 2) else {
+                    return Some(self.tcx.error_ty());
+                };
+                self.checked_simd_ty(elem, crate::ArrayLen::Concrete(count), span)
+            }
+            ("interleave", 1) => {
+                let got = self.check_expr_expecting(&args[0], Expectation::HasType(recv));
+                self.unify(recv, got, args[0].span);
+                if self.concrete_lanes(lanes, span).is_none() {
+                    return Some(self.tcx.error_ty());
+                }
+                self.tcx.intern(TyKind::Tuple(vec![recv, recv]))
+            }
+            ("swizzle_dyn", 1)
+                if matches!(self.tcx.kind(elem_res), Some(TyKind::Int(IntTy::U8))) =>
+            {
+                let got = self.check_expr_expecting(&args[0], Expectation::HasType(recv));
+                self.unify(recv, got, args[0].span);
+                recv
+            }
+            _ => return None,
+        })
+    }
+
+    /// `store` and `store_prefix`, writing lanes into a sequence.
+    fn simd_store_method(&mut self, method: &str, r: SimdReceiver, args: &[Expr]) -> Option<Ty> {
+        let SimdReceiver { elem, mask, .. } = r;
+        Some(match (method, args.len()) {
             ("store", 2) if !mask => {
                 let target = self.check_expr(&args[0]);
                 let target = self.infer.resolve(self.tcx, target);
@@ -312,23 +592,147 @@ impl TypeChecker<'_> {
                 self.unify(i64_ty, offset, args[1].span);
                 self.tcx.unit()
             }
-            ("reduce_sum" | "reduce_min" | "reduce_max", 0) if !mask => elem,
-            ("reduce_and" | "reduce_or", 0) if int || mask => elem,
-            _ => {
-                for arg in args {
-                    self.check_expr(arg);
+            ("store_prefix", 3) if !mask => {
+                let target = self.check_expr(&args[0]);
+                let target = self.infer.resolve(self.tcx, target);
+                let writable = match self.tcx.kind(target).cloned() {
+                    Some(TyKind::Ref {
+                        mutability: crate::Mutbl::Mut,
+                        inner,
+                    }) => self.simd_window_elem(inner),
+                    _ => None,
+                };
+                match writable {
+                    Some(target_elem) => self.unify(elem, target_elem, args[0].span),
+                    None => self.emit(
+                        TypeError::SimdShape {
+                            reason: "`store_prefix` writes its lanes through `&mut` a `Vec<T>`, `[T]`, or `[T; N]`"
+                                .to_string(),
+                        },
+                        args[0].span,
+                    ),
                 }
-                let ty = self.render_public_ty(recv);
+                let i64_ty = self.tcx.int_ty(IntTy::I64);
+                for arg in &args[1..] {
+                    let got = self.check_expr_expecting(arg, Expectation::HasType(i64_ty));
+                    self.unify(i64_ty, got, arg.span);
+                }
+                self.tcx.unit()
+            }
+            _ => return None,
+        })
+    }
+
+    /// The lane count `lanes` when it is a literal, reporting one an
+    /// operation needs but a const generic leaves open.
+    fn concrete_lanes(&mut self, lanes: crate::ArrayLen, span: Span) -> Option<usize> {
+        match lanes {
+            crate::ArrayLen::Concrete(count) => Some(count),
+            crate::ArrayLen::Param(_) => {
                 self.emit(
                     TypeError::SimdShape {
-                        reason: format!("`{ty}` has no method `{method}`"),
+                        reason: "this operation needs a literal lane count".to_string(),
                     },
                     span,
                 );
-                self.tcx.error_ty()
+                None
             }
+        }
+    }
+
+    /// The count of a swizzle's index list `arg`: an array literal of
+    /// integer literals, each below `source`, the lanes it picks from.
+    fn swizzle_indices(&mut self, arg: &Expr, source: usize) -> Option<usize> {
+        self.check_expr(arg);
+        let (ExprKind::FixedArray(ArrayExpr::List(items))
+        | ExprKind::Array(ArrayExpr::List(items))) = &arg.kind
+        else {
+            self.emit(
+                TypeError::SimdShape {
+                    reason: "a swizzle's lanes are a literal list of indices: `[3, 2, 1, 0]`"
+                        .to_string(),
+                },
+                arg.span,
+            );
+            return None;
         };
-        Some(ret)
+        for item in items {
+            let index = match &item.kind {
+                ExprKind::Literal(Literal::Int(text)) => text
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse::<usize>()
+                    .ok(),
+                _ => None,
+            };
+            match index {
+                Some(index) if index < source => {}
+                Some(index) => {
+                    self.emit(
+                        TypeError::SimdShape {
+                            reason: format!(
+                                "lane {index} is past the {source} lanes a swizzle picks from"
+                            ),
+                        },
+                        item.span,
+                    );
+                    return None;
+                }
+                None => {
+                    self.emit(
+                        TypeError::SimdShape {
+                            reason: "a swizzle index is an integer literal".to_string(),
+                        },
+                        item.span,
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(items.len())
+    }
+
+    /// The unsigned lane of `elem`'s width: the lane a bit pattern or an
+    /// absolute difference is.
+    fn unsigned_lane(&mut self, elem: Ty) -> Ty {
+        let int = match self.tcx.kind(elem) {
+            Some(TyKind::Int(IntTy::I8 | IntTy::U8)) => IntTy::U8,
+            Some(TyKind::Int(IntTy::I16 | IntTy::U16)) => IntTy::U16,
+            Some(TyKind::Int(IntTy::I32 | IntTy::U32) | TyKind::Float(crate::FloatTy::F32)) => {
+                IntTy::U32
+            }
+            _ => IntTy::U64,
+        };
+        self.tcx.int_ty(int)
+    }
+
+    /// The lane twice as wide as `elem`, keeping its signedness.
+    fn widened_lane(&mut self, elem: Ty) -> Option<Ty> {
+        Some(match self.tcx.kind(elem)? {
+            TyKind::Int(IntTy::I8) => self.tcx.int_ty(IntTy::I16),
+            TyKind::Int(IntTy::U8) => self.tcx.int_ty(IntTy::U16),
+            TyKind::Int(IntTy::I16) => self.tcx.int_ty(IntTy::I32),
+            TyKind::Int(IntTy::U16) => self.tcx.int_ty(IntTy::U32),
+            TyKind::Int(IntTy::I32) => self.tcx.int_ty(IntTy::I64),
+            TyKind::Int(IntTy::U32) => self.tcx.int_ty(IntTy::U64),
+            TyKind::Float(crate::FloatTy::F32) => self.tcx.float_ty(crate::FloatTy::F64),
+            _ => return None,
+        })
+    }
+
+    /// The lane half as wide as `elem`, keeping its signedness.
+    fn narrowed_lane(&mut self, elem: Ty) -> Option<Ty> {
+        Some(match self.tcx.kind(elem)? {
+            TyKind::Int(IntTy::I16) => self.tcx.int_ty(IntTy::I8),
+            TyKind::Int(IntTy::U16) => self.tcx.int_ty(IntTy::U8),
+            TyKind::Int(IntTy::I32) => self.tcx.int_ty(IntTy::I16),
+            TyKind::Int(IntTy::U32) => self.tcx.int_ty(IntTy::U16),
+            TyKind::Int(IntTy::I64) => self.tcx.int_ty(IntTy::I32),
+            TyKind::Int(IntTy::U64) => self.tcx.int_ty(IntTy::U32),
+            TyKind::Float(crate::FloatTy::F64) => self.tcx.float_ty(crate::FloatTy::F32),
+            _ => return None,
+        })
     }
 
     /// `Simd<T, N>`, or `Mask<N>` for a lane vector of `bool`.
@@ -1561,28 +1965,9 @@ impl TypeChecker<'_> {
         Some(self.tcx.intern(TyKind::Vec(elem)))
     }
 
-    /// Return types of the `process` and `signal` calls that answer a named
-    /// runtime handle.
+    /// Return types of the `signal` calls that answer a named runtime
+    /// handle.
     pub(super) fn process_signal_ret_ty(&mut self, module: &[&str], last: &str) -> Option<Ty> {
-        // `process::spawn_piped(prog, args) -> Result<Child, errors::Error>`.
-        // The Ok payload is the named `Child` sentinel Adt so the
-        // extracted binder carries the `process::Child` runtime kind
-        // and its method calls dispatch to the child shims on every
-        // tier.
-        if matches!(
-            module,
-            ["process" | "exec"] | ["os", "exec"] | ["std", "process"] | ["std", "os", "exec"]
-        ) && last == "spawn_piped"
-        {
-            let child_def = gossamer_resolve::DefId::local(u32::MAX - 8);
-            self.tcx.register_def_name(child_def, "Child");
-            let child_ty = self.tcx.intern(TyKind::Adt {
-                def: child_def,
-                substs: crate::Substs::new(),
-            });
-            let err = self.tcx.dyn_error_ty();
-            return Some(self.result_adt_ty(child_ty, err));
-        }
         if !matches!(
             module,
             ["signal"] | ["os", "signal"] | ["std", "os", "signal"]
@@ -3243,4 +3628,17 @@ impl TypeChecker<'_> {
             _ => None,
         }
     }
+}
+
+/// A lane vector receiver as its methods are typed: the vector type, its
+/// lane type before and after resolution, its lane count, and its lane class.
+#[derive(Clone, Copy)]
+struct SimdReceiver {
+    recv: Ty,
+    elem: Ty,
+    elem_res: Ty,
+    lanes: crate::ArrayLen,
+    float: bool,
+    int: bool,
+    mask: bool,
 }

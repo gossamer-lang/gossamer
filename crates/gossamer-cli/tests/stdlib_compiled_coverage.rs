@@ -55,6 +55,12 @@ const COMPILED_VIA_SPECIAL_MECHANISM: &[&str] = &[
     "process::pipeline_run",
     "process::run",
     "process::run_in",
+    // `spawn_piped` builds a `process::Command` with every stream piped, in
+    // the injected wrapper source, over the `gos_rt_command_*` entries every
+    // tier calls as foreign functions.
+    "exec::spawn_piped",
+    "os::exec::spawn_piped",
+    "process::spawn_piped",
     // The middleware wrappers are lowered by `lower_middleware_kind`
     // (`stdlib_free.rs`), which binds the inner handler's serve address into a
     // `GosMiddleware` handle from a name-to-kind table rather than matching a

@@ -256,6 +256,17 @@ pub fn wait_exit(pid: i64, timeout: Option<Duration>) -> Result<Option<i64>, Str
     exit_wait::wait(pid, timeout)
 }
 
+/// Waits for the child `pid` to end, for at most `timeout` (forever when
+/// `None`), without reaping it: answers whether it ended. The caller reaps
+/// it, so the id keeps naming it until then.
+///
+/// # Errors
+///
+/// `pid` is not a child of this process, or the platform reports a failure.
+pub(crate) fn wait_until_exited(pid: i64, timeout: Option<Duration>) -> Result<bool, String> {
+    exit_wait::until_exited(pid, timeout)
+}
+
 /// Runs `program` with `args` on the program's own standard input, output,
 /// and error, and answers its exit code once it ends; the calling goroutine
 /// parks meanwhile. A child ended by a signal reports 128 plus the signal
@@ -280,7 +291,7 @@ pub fn run_inherit(program: &str, args: Vec<String>) -> Result<i64, String> {
 
 /// The exit code a finished child reports, 128 plus the signal number for
 /// one a signal ended on Unix.
-fn status_code(status: std::process::ExitStatus) -> i64 {
+pub(crate) fn status_code(status: std::process::ExitStatus) -> i64 {
     if let Some(code) = status.code() {
         return i64::from(code);
     }
@@ -346,6 +357,34 @@ mod exit_wait {
             }
             if rc == 0 {
                 return Ok(None);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(format!("process::wait({pid}): {error}"));
+            }
+        }
+    }
+
+    pub(super) fn until_exited(pid: i64, timeout: Option<Duration>) -> Result<bool, String> {
+        let pid = libc::pid_t::try_from(pid).map_err(|_| format!("process::wait: {pid}"))?;
+        if let Some(timeout) = timeout {
+            return exited_within(pid, timeout);
+        }
+        loop {
+            // SAFETY: an all-zero `siginfo_t` is a valid value of the C type.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // SAFETY: `info` is a live local; `WNOWAIT` leaves the child
+            // waitable.
+            let rc = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &raw mut info,
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            };
+            if rc == 0 {
+                return Ok(true);
             }
             let error = std::io::Error::last_os_error();
             if error.kind() != std::io::ErrorKind::Interrupted {
@@ -464,6 +503,12 @@ mod exit_wait {
         PROCESS_SYNCHRONIZE, WaitForSingleObject,
     };
 
+    /// A Windows process is never reaped: its handle answers the exit code
+    /// for as long as one is open.
+    pub(super) fn until_exited(pid: i64, timeout: Option<Duration>) -> Result<bool, String> {
+        wait(pid, timeout).map(|code| code.is_some())
+    }
+
     pub(super) fn wait(pid: i64, timeout: Option<Duration>) -> Result<Option<i64>, String> {
         let pid = u32::try_from(pid).map_err(|_| format!("process::wait: {pid}"))?;
         let ms = timeout.map_or(INFINITE, |t| {
@@ -512,6 +557,13 @@ mod exit_wait {
 
 #[cfg(not(any(unix, windows)))]
 mod exit_wait {
+    pub(super) fn until_exited(
+        _pid: i64,
+        _timeout: Option<std::time::Duration>,
+    ) -> Result<bool, String> {
+        Err("process::wait: processes are not available on this target".to_string())
+    }
+
     pub(super) fn wait(
         _pid: i64,
         _timeout: Option<std::time::Duration>,
@@ -540,186 +592,6 @@ fn terminate_pid(pid: u32) -> i64 {
     }
 }
 
-// ---------------------------------------------------------------
-// Interactive piped children (`process::spawn_piped`).
-//
-// A spawned child's stdin/stdout are held in a process-global
-// registry keyed by an opaque i64 handle; the `Child` methods take
-// the handle. Reads go through a BufReader so `read_line` is
-// incremental. The registry entry is removed at `wait`.
-// ---------------------------------------------------------------
-
-/// One live piped child: the process plus its retained pipe ends.
-struct PipedChild {
-    child: std::process::Child,
-    stdin: Option<std::process::ChildStdin>,
-    stdout: Option<std::io::BufReader<std::process::ChildStdout>>,
-}
-
-static PIPED_CHILDREN: parking_lot::Mutex<Option<std::collections::HashMap<i64, PipedChild>>> =
-    parking_lot::Mutex::new(None);
-static NEXT_CHILD_HANDLE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
-
-fn with_piped_child<R>(handle: i64, f: impl FnOnce(&mut PipedChild) -> R) -> Option<R> {
-    let mut table = PIPED_CHILDREN.lock();
-    table
-        .get_or_insert_with(Default::default)
-        .get_mut(&handle)
-        .map(f)
-}
-
-fn take_piped_child(handle: i64) -> Option<PipedChild> {
-    PIPED_CHILDREN
-        .lock()
-        .get_or_insert_with(Default::default)
-        .remove(&handle)
-}
-
-fn restore_piped_child(handle: i64, child: PipedChild) {
-    PIPED_CHILDREN
-        .lock()
-        .get_or_insert_with(Default::default)
-        .insert(handle, child);
-}
-
-/// Spawns `prog` with piped stdin/stdout (stderr nulled) and returns
-/// the opaque registry handle. Shared by the C-ABI shims and the
-/// interpreter builtins so mixed VM/JIT execution sees one registry.
-pub fn piped_child_spawn(prog: &str, args: &[String]) -> Result<i64, String> {
-    let prog = prog.to_owned();
-    let args = args.to_vec();
-    match crate::sched_global::run_blocking("child-spawn", move || {
-        let mut command = std::process::Command::new(prog);
-        command.args(args);
-        command.stdin(std::process::Stdio::piped());
-        command.stdout(std::process::Stdio::piped());
-        command.stderr(std::process::Stdio::null());
-        command.spawn()
-    }) {
-        Ok(Ok(mut child)) => {
-            let stdin = child.stdin.take();
-            let stdout = child.stdout.take().map(std::io::BufReader::new);
-            let handle = NEXT_CHILD_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            PIPED_CHILDREN
-                .lock()
-                .get_or_insert_with(Default::default)
-                .insert(
-                    handle,
-                    PipedChild {
-                        child,
-                        stdin,
-                        stdout,
-                    },
-                );
-            Ok(handle)
-        }
-        Ok(Err(e)) => Err(format!("process::spawn_piped: {e}")),
-        Err(e) => Err(e),
-    }
-}
-
-/// Writes `bytes` to the child's stdin; false after `close_stdin`,
-/// on a reaped handle, or when the pipe is broken.
-pub fn piped_child_write_stdin(handle: i64, bytes: &[u8]) -> bool {
-    use std::io::Write;
-    let Some(mut child) = take_piped_child(handle) else {
-        return false;
-    };
-    let bytes = bytes.to_vec();
-    let wrote = crate::sched_global::run_blocking("child-stdin-write", move || {
-        let wrote = child
-            .stdin
-            .as_mut()
-            .is_some_and(|w| w.write_all(&bytes).and_then(|()| w.flush()).is_ok());
-        (child, wrote)
-    });
-    match wrote {
-        Ok((child, wrote)) => {
-            restore_piped_child(handle, child);
-            wrote
-        }
-        // A worker creation failure or panic leaves the child unavailable. This
-        // is preferable to retaining the registry lock across an unbounded
-        // pipe write, and matches the existing false-on-I/O-error contract.
-        Err(_) => false,
-    }
-}
-
-/// Drops the child's stdin write end so it sees EOF.
-pub fn piped_child_close_stdin(handle: i64) {
-    with_piped_child(handle, |pc| {
-        pc.stdin = None;
-    });
-}
-
-/// Next stdout line without its trailing newline; `None` at EOF or
-/// on a reaped handle.
-pub fn piped_child_read_line(handle: i64) -> Option<String> {
-    use std::io::BufRead;
-    let mut child = take_piped_child(handle)?;
-    let result = crate::sched_global::run_blocking("child-stdout-read-line", move || {
-        let line = child.stdout.as_mut().and_then(|reader| {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => None,
-                Ok(_) => {
-                    while line.ends_with('\n') || line.ends_with('\r') {
-                        line.pop();
-                    }
-                    Some(line)
-                }
-            }
-        });
-        (child, line)
-    });
-    match result {
-        Ok((child, line)) => {
-            restore_piped_child(handle, child);
-            line
-        }
-        Err(_) => None,
-    }
-}
-
-/// Drains the child's stdout to EOF.
-pub fn piped_child_read_stdout(handle: i64) -> Option<String> {
-    use std::io::Read;
-    let mut child = take_piped_child(handle)?;
-    let result = crate::sched_global::run_blocking("child-stdout-read-all", move || {
-        let text = child.stdout.as_mut().and_then(|reader| {
-            let mut buf = String::new();
-            reader.read_to_string(&mut buf).ok().map(|_| buf)
-        });
-        (child, text)
-    });
-    match result {
-        Ok((child, text)) => {
-            restore_piped_child(handle, child);
-            text
-        }
-        Err(_) => None,
-    }
-}
-
-/// Closes stdin, reaps the child, and removes the registry entry.
-pub fn piped_child_wait(handle: i64) -> Result<i64, String> {
-    let entry = take_piped_child(handle);
-    let Some(mut pc) = entry else {
-        return Err("process::Child::wait: unknown or reaped handle".to_string());
-    };
-    pc.stdin = None;
-    match crate::sched_global::run_blocking("child-wait", move || pc.child.wait()) {
-        Ok(Ok(status)) => Ok(i64::from(status.code().unwrap_or(-1))),
-        Ok(Err(e)) => Err(format!("process::Child::wait: {e}")),
-        Err(e) => Err(e),
-    }
-}
-
-/// Best-effort terminate; the handle stays until `wait` reaps it.
-pub fn piped_child_kill(handle: i64) -> bool {
-    with_piped_child(handle, |pc| pc.child.kill().is_ok()).unwrap_or(false)
-}
-
 /// Reads the flat `Vec<String>` argv convention every child-process entry
 /// point takes.
 ///
@@ -730,92 +602,6 @@ pub(crate) unsafe fn argv_strings(args: *mut GosVec) -> Vec<String> {
     // SAFETY: this `unsafe fn`'s caller passes `args` null or a live `Vec<String>`.
     unsafe { crate::c_abi::vec::StrVecView::of(args) }
         .map_or_else(Vec::new, |argv| argv.texts().collect())
-}
-
-fn err_result(msg: String) -> i128 {
-    let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    gos_rt_result_new(1, err as i64)
-}
-
-/// `process::spawn_piped(prog, args) -> Result<Child, errors::Error>`.
-/// The Ok payload is the opaque child handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_exec_spawn_piped(prog: *const c_char, args: *mut GosVec) -> i128 {
-    ffi_entry!(0i128, {
-        if prog.is_null() {
-            return err_result("process::spawn_piped: program is null".to_string());
-        }
-        // SAFETY: `prog` is a String argument from compiled code, null or a live string body for the whole call.
-        let prog_str = unsafe { crate::c_abi::gos_str_arg_string(prog) };
-        // SAFETY: `args` is this shim's argument, as `argv_strings` requires (C-ABI contract).
-        match piped_child_spawn(&prog_str, &unsafe { argv_strings(args) }) {
-            Ok(handle) => gos_rt_result_new(0, handle),
-            Err(msg) => err_result(msg),
-        }
-    })
-}
-
-/// `child.write_stdin(s) -> bool`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_child_write_stdin(handle: i64, s: *const c_char) -> i64 {
-    ffi_entry!(0, {
-        let bytes = if s.is_null() {
-            Vec::new()
-        } else {
-            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
-            unsafe { crate::c_abi::gos_str_arg_bytes(s) }.to_vec()
-        };
-        i64::from(piped_child_write_stdin(handle, &bytes))
-    })
-}
-
-/// `child.close_stdin()`.
-#[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_child_close_stdin(handle: i64) -> i64 {
-    ffi_entry!(0, {
-        piped_child_close_stdin(handle);
-        0
-    })
-}
-
-/// `child.read_line() -> Option<String>`.
-#[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_child_read_line(handle: i64) -> i128 {
-    ffi_entry!(1i128, {
-        match piped_child_read_line(handle) {
-            Some(line) => {
-                let ptr = alloc_cstring(line.as_bytes()) as i64;
-                gos_rt_result_new(0, ptr)
-            }
-            None => 1i128,
-        }
-    })
-}
-
-/// `child.read_stdout() -> String`.
-#[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_child_read_stdout(handle: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
-        let text = piped_child_read_stdout(handle).unwrap_or_default();
-        alloc_cstring(text.as_bytes())
-    })
-}
-
-/// `child.wait() -> Result<i64, errors::Error>`.
-#[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_child_wait(handle: i64) -> i128 {
-    ffi_entry!(0i128, {
-        match piped_child_wait(handle) {
-            Ok(code) => gos_rt_result_new(0, code),
-            Err(msg) => err_result(msg),
-        }
-    })
-}
-
-/// `child.kill() -> bool`.
-#[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_child_kill(handle: i64) -> i64 {
-    ffi_entry!(0, { i64::from(piped_child_kill(handle)) })
 }
 
 #[cfg(test)]

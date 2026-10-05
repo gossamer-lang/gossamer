@@ -140,41 +140,7 @@ fn synthesize_stdlib_wrappers(source: &str) -> String {
     if (mentions_path(source, "x509::") && from_std("x509")) || item_imported(X509_WRAPPERS) {
         stdlib_wrappers.push_str(X509_WRAPPERS);
     }
-    if (source.contains("fs::metadata") && from_std("fs")) || item_imported(FS_METADATA_WRAPPERS) {
-        stdlib_wrappers.push_str(FS_METADATA_WRAPPERS);
-    }
-    if item_imported(FS_DIR_WRAPPERS)
-        || (FS_DIR_MARKERS.iter().any(|m| source.contains(m))
-            && (from_std("fs") || from_std("path")))
-    {
-        stdlib_wrappers.push_str(FS_DIR_WRAPPERS);
-    }
-    if item_imported(PROCESS_WRAPPERS)
-        || (PROCESS_MARKERS.iter().any(|m| source.contains(m))
-            && (from_std("process") || from_std("exec")))
-    {
-        stdlib_wrappers.push_str(PROCESS_WRAPPERS);
-    }
-    if (mentions_path(source, "ffi::") && from_std("ffi")) || item_imported(FFI_WRAPPERS) {
-        stdlib_wrappers.push_str(FFI_WRAPPERS);
-    }
-    let wants_term =
-        (mentions_path(source, "term::") && from_std("term")) || item_imported(TERM_WRAPPERS);
-    if wants_term || (mentions_path(source, "fd::") && from_std("fd")) || item_imported(FD_WRAPPERS)
-    {
-        stdlib_wrappers.push_str(FD_WRAPPERS);
-    }
-    if wants_term {
-        stdlib_wrappers.push_str(TERM_WRAPPERS);
-    }
-    if (mentions_path(source, "signal::SIG") && from_std("signal"))
-        || item_imported(SIGNAL_WRAPPERS)
-    {
-        stdlib_wrappers.push_str(SIGNAL_WRAPPERS);
-    }
-    if (source.contains("path::Path") && from_std("path")) || item_imported(PATH_WRAPPERS) {
-        stdlib_wrappers.push_str(PATH_WRAPPERS);
-    }
+    system_wrappers(source, &from_std, &item_imported, &mut stdlib_wrappers);
     if source.contains("Http2Config") {
         stdlib_wrappers.push_str(HTTP2_CONFIG_WRAPPERS);
     }
@@ -218,6 +184,59 @@ fn synthesize_stdlib_wrappers(source: &str) -> String {
         stdlib_wrappers.push_str(TIME_TIME_WRAPPERS);
     }
     stdlib_wrappers
+}
+
+/// The wrapper sets for the host-facing modules `source` reaches: file
+/// metadata and directory walks, processes and commands, foreign memory,
+/// descriptors and the terminal, signals, and paths.
+fn system_wrappers(
+    source: &str,
+    from_std: &impl Fn(&str) -> bool,
+    item_imported: &impl Fn(&str) -> bool,
+    out: &mut String,
+) {
+    if (source.contains("fs::metadata") && from_std("fs")) || item_imported(FS_METADATA_WRAPPERS) {
+        out.push_str(FS_METADATA_WRAPPERS);
+    }
+    if item_imported(FS_DIR_WRAPPERS)
+        || (FS_DIR_MARKERS.iter().any(|m| source.contains(m))
+            && (from_std("fs") || from_std("path")))
+    {
+        out.push_str(FS_DIR_WRAPPERS);
+    }
+    let wants_command = item_imported(PROCESS_COMMAND_WRAPPERS)
+        || (PROCESS_COMMAND_MARKERS.iter().any(|m| source.contains(m))
+            && (from_std("process") || from_std("exec")));
+    if wants_command
+        || item_imported(PROCESS_WRAPPERS)
+        || (PROCESS_MARKERS.iter().any(|m| source.contains(m))
+            && (from_std("process") || from_std("exec")))
+    {
+        out.push_str(PROCESS_WRAPPERS);
+    }
+    if wants_command {
+        out.push_str(PROCESS_COMMAND_WRAPPERS);
+    }
+    if (mentions_path(source, "ffi::") && from_std("ffi")) || item_imported(FFI_WRAPPERS) {
+        out.push_str(FFI_WRAPPERS);
+    }
+    let wants_term =
+        (mentions_path(source, "term::") && from_std("term")) || item_imported(TERM_WRAPPERS);
+    if wants_term || (mentions_path(source, "fd::") && from_std("fd")) || item_imported(FD_WRAPPERS)
+    {
+        out.push_str(FD_WRAPPERS);
+    }
+    if wants_term {
+        out.push_str(TERM_WRAPPERS);
+    }
+    if (mentions_path(source, "signal::SIG") && from_std("signal"))
+        || item_imported(SIGNAL_WRAPPERS)
+    {
+        out.push_str(SIGNAL_WRAPPERS);
+    }
+    if (source.contains("path::Path") && from_std("path")) || item_imported(PATH_WRAPPERS) {
+        out.push_str(PATH_WRAPPERS);
+    }
 }
 
 /// Real-struct + wrapper source for `std::encoding::pem`. The
@@ -674,6 +693,14 @@ impl<T> __gos_ffi_Ptr<T> {
         self.__addr
     }
 
+    fn null() -> __gos_ffi_Ptr<T> {
+        unsafe { __gos_ffi_Ptr { __addr: 0 } }
+    }
+
+    fn is_null(self) -> bool {
+        self.__addr == 0
+    }
+
     fn from_address(addr: u64) -> Option<__gos_ffi_Ptr<T>> {
         if addr == 0 {
             None
@@ -727,6 +754,134 @@ fn __gos_ffi_size_of<T>() -> i64 {
     panic("ffi::size_of is lowered at its call site")
 }
 
+fn __gos_ffi_align_of<T>() -> i64 {
+    panic("ffi::align_of is lowered at its call site")
+}
+
+fn __gos_ffi_offset_of<T>(field: String) -> i64 {
+    panic("ffi::offset_of is lowered at its call site")
+}
+
+fn __gos_ffi_addr_of<T>(symbol: T) -> __gos_ffi_Ptr<T> {
+    panic("ffi::addr_of is lowered at its call site")
+}
+
+fn __gos_ffi_atomic_load<T>(p: __gos_ffi_Ptr<T>) -> T {
+    panic("ffi::atomic_load is lowered at its call site")
+}
+
+fn __gos_ffi_atomic_store<T>(p: __gos_ffi_Ptr<T>, value: T) {
+    panic("ffi::atomic_store is lowered at its call site")
+}
+
+fn __gos_ffi_atomic_swap<T>(p: __gos_ffi_Ptr<T>, value: T) -> T {
+    panic("ffi::atomic_swap is lowered at its call site")
+}
+
+fn __gos_ffi_atomic_compare_exchange<T>(p: __gos_ffi_Ptr<T>, current: T, new: T) -> Result<T, T> {
+    panic("ffi::atomic_compare_exchange is lowered at its call site")
+}
+
+fn __gos_ffi_atomic_fetch_add<T>(p: __gos_ffi_Ptr<T>, value: T) -> T {
+    panic("ffi::atomic_fetch_add is lowered at its call site")
+}
+
+fn __gos_ffi_atomic_fetch_sub<T>(p: __gos_ffi_Ptr<T>, value: T) -> T {
+    panic("ffi::atomic_fetch_sub is lowered at its call site")
+}
+
+fn __gos_ffi_atomic_fetch_and<T>(p: __gos_ffi_Ptr<T>, value: T) -> T {
+    panic("ffi::atomic_fetch_and is lowered at its call site")
+}
+
+fn __gos_ffi_atomic_fetch_or<T>(p: __gos_ffi_Ptr<T>, value: T) -> T {
+    panic("ffi::atomic_fetch_or is lowered at its call site")
+}
+
+fn __gos_ffi_atomic_fetch_xor<T>(p: __gos_ffi_Ptr<T>, value: T) -> T {
+    panic("ffi::atomic_fetch_xor is lowered at its call site")
+}
+
+struct __gos_ffi_View<T> { __addr: u64, __len: i64 }
+
+impl<T> __gos_ffi_View<T> {
+    fn new(p: __gos_ffi_Ptr<T>, len: i64) -> __gos_ffi_View<T> {
+        unsafe { __gos_ffi_View { __addr: p.__addr, __len: len } }
+    }
+
+    fn len(&self) -> i64 {
+        self.__len
+    }
+
+    fn is_empty(&self) -> bool {
+        self.__len == 0
+    }
+
+    fn ptr(&self) -> __gos_ffi_Ptr<T> {
+        unsafe { __gos_ffi_Ptr { __addr: self.__addr } }
+    }
+
+    fn get(&self, index: i64) -> T {
+        panic("ffi::View::get is lowered at its call site")
+    }
+
+    fn index(&self, index: i64) -> T {
+        panic("ffi::View indexing is lowered at its call site")
+    }
+
+    fn set(&self, index: i64, value: T) {
+        panic("ffi::View::set is lowered at its call site")
+    }
+
+    fn slice(&self, lo: i64, hi: i64) -> __gos_ffi_View<T> {
+        panic("ffi::View::slice is lowered at its call site")
+    }
+
+    fn to_vec(&self) -> Vec<T> {
+        panic("ffi::View::to_vec is lowered at its call site")
+    }
+
+    fn copy_from(&self, values: [T]) {
+        panic("ffi::View::copy_from is lowered at its call site")
+    }
+
+    fn fill(&self, value: T) {
+        panic("ffi::View::fill is lowered at its call site")
+    }
+
+    fn fmt(&self) -> String {
+        f"View(0x{self.__addr:x}, {self.__len})"
+    }
+
+    fn to_string(&self) -> String {
+        f"View(0x{self.__addr:x}, {self.__len})"
+    }
+
+    fn eq(&self, other: __gos_ffi_View<T>) -> bool {
+        self.__addr == other.__addr && self.__len == other.__len
+    }
+}
+
+struct __gos_ffi_Union<M> { __bytes: [u8; 0] }
+
+impl<M> __gos_ffi_Union<M> {
+    fn new<T>(value: T) -> __gos_ffi_Union<M> {
+        panic("ffi::Union::new is lowered at its call site")
+    }
+
+    fn zeroed() -> __gos_ffi_Union<M> {
+        panic("ffi::Union::zeroed is lowered at its call site")
+    }
+
+    fn get<T>(self) -> T {
+        panic("ffi::Union::get is lowered at its call site")
+    }
+
+    fn set<T>(&mut self, value: T) {
+        panic("ffi::Union::set is lowered at its call site")
+    }
+}
+
 fn __gos_ffi_free<T>(p: __gos_ffi_Ptr<T>) {
     unsafe { gos_rt_ffi_free(p.__addr) }
 }
@@ -751,6 +906,10 @@ fn __gos_ffi_to_c_bytes(bytes: [u8]) -> __gos_ffi_Ptr<u8> {
     let copy: __gos_ffi_Ptr<u8> = unsafe { __gos_ffi_alloc(bytes.len()) }
     unsafe { __gos_ffi_write_bytes(copy, bytes) }
     copy
+}
+
+fn __gos_ffi_fn_addr<F>(f: F) -> __gos_ffi_Ptr<__gos_ffi_c_void> {
+    panic("ffi::fn_addr is lowered at its call site")
 }
 
 fn __gos_ffi_fn_from_ptr<F>(p: __gos_ffi_Ptr<__gos_ffi_c_void>) -> F {
@@ -974,7 +1133,7 @@ unsafe extern "C" {
     #[link_name = "tcgetattr"]
     fn __gos_term_tcgetattr(fd: i32, attrs: &mut __gos_term_Termios) -> i32
     #[link_name = "tcsetattr"]
-    fn __gos_term_tcsetattr(fd: i32, action: i32, attrs: __gos_term_Termios) -> i32
+    fn __gos_term_tcsetattr(fd: i32, action: i32, attrs: &mut __gos_term_Termios) -> i32
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -986,7 +1145,8 @@ struct __gos_term_RawMode {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl __gos_term_RawMode {
     fn restore(&self) {
-        let _ = unsafe { __gos_term_tcsetattr(self.fd, __gos_term_TCSAFLUSH, self.saved) }
+        let mut saved = self.saved
+        let _ = unsafe { __gos_term_tcsetattr(self.fd, __gos_term_TCSAFLUSH, &mut saved) }
     }
 }
 
@@ -1028,7 +1188,7 @@ fn __gos_term_enter_raw(fd: i64 = 0) -> Result<__gos_term_RawMode, errors::Error
     attrs.cflag = (attrs.cflag & !__gos_term_CSIZE_PARENB) | __gos_term_CS8
     attrs.cc[__gos_term_VMIN] = 1
     attrs.cc[__gos_term_VTIME] = 0
-    if unsafe { __gos_term_tcsetattr(fd, __gos_term_TCSAFLUSH, attrs) } != 0 {
+    if unsafe { __gos_term_tcsetattr(fd, __gos_term_TCSAFLUSH, &mut attrs) } != 0 {
         return Err(__gos_term_os_error("enter_raw"))
     }
     let mode = __gos_term_RawMode { fd: fd, saved: saved }
@@ -1227,6 +1387,349 @@ fn __gos_process_pipeline_run(commands: Vec<String>) -> Result<__gos_process_Out
     Ok(__gos_process_Output { stdout: stdout, stderr: stderr, code: code })
 }
 ";
+
+/// `std::process::Command`, `Stdio`, and `Child`, written in Gossamer over
+/// the runtime's `gos_rt_command_*` entries, so every tier runs the same
+/// code. `spawn_piped` is a `Command` with piped stdin and stdout.
+const PROCESS_COMMAND_WRAPPERS: &str = r#"
+enum __gos_process_Stdio {
+    Inherit,
+    Null,
+    Piped,
+    File(fs::File),
+}
+
+struct __gos_process_Command {
+    __program: String,
+    __spec: Vec<u8>,
+    __stdin: __gos_process_Stdio,
+    __stdout: __gos_process_Stdio,
+    __stderr: __gos_process_Stdio,
+    __flags: i64,
+    __ctty: i64,
+}
+
+struct __gos_process_Child {
+    __handle: i64,
+    __pid: i64,
+}
+
+fn __gos_process_record(mut spec: Vec<u8>, tag: u8, text: String) -> Vec<u8> {
+    let bytes = text.bytes()
+    let n = bytes.len()
+    spec.push(tag)
+    spec.push((n & 255) as u8)
+    spec.push((n >> 8 & 255) as u8)
+    spec.push((n >> 16 & 255) as u8)
+    spec.push((n >> 24 & 255) as u8)
+    for byte in bytes {
+        spec.push(byte)
+    }
+    spec
+}
+
+fn __gos_process_stdio_mode(stdio: __gos_process_Stdio) -> Result<(i64, i64), errors::Error> {
+    match stdio {
+        __gos_process_Stdio::Inherit => Ok((0, -1)),
+        __gos_process_Stdio::Null => Ok((1, -1)),
+        __gos_process_Stdio::Piped => Ok((2, -1)),
+        __gos_process_Stdio::File(file) => Ok((3, file.fd()?)),
+    }
+}
+
+fn __gos_process_command_error(code: i64) -> errors::Error {
+    let mut empty = #[0u8; 0]
+    let len = unsafe { gos_rt_command_error(code, &mut empty, 0) } as i64
+    let mut text = #[0u8; len]
+    unsafe { gos_rt_command_error(code, &mut text, len as u64) }
+    match String::from_utf8(text) {
+        Ok(message) => errors::new(message),
+        Err(e) => errors::wrap(e, "process::Command"),
+    }
+}
+
+impl __gos_process_Command {
+    fn new(program: String) -> __gos_process_Command {
+        __gos_process_Command {
+            __program: program,
+            __spec: __gos_process_record(#[], 80u8, program),
+            __stdin: __gos_process_Stdio::Inherit,
+            __stdout: __gos_process_Stdio::Inherit,
+            __stderr: __gos_process_Stdio::Inherit,
+            __flags: 0,
+            __ctty: -1,
+        }
+    }
+
+    fn arg(self, arg: String) -> __gos_process_Command {
+        let mut next = self
+        next.__spec = __gos_process_record(next.__spec, 65u8, arg)
+        next
+    }
+
+    fn args(self, args: [String]) -> __gos_process_Command {
+        let mut next = self
+        for arg in args {
+            next.__spec = __gos_process_record(next.__spec, 65u8, arg)
+        }
+        next
+    }
+
+    fn env(self, key: String, value: String) -> __gos_process_Command {
+        let mut next = self
+        next.__spec = __gos_process_record(next.__spec, 69u8, f"{key}={value}")
+        next
+    }
+
+    fn env_remove(self, key: String) -> __gos_process_Command {
+        let mut next = self
+        next.__spec = __gos_process_record(next.__spec, 82u8, key)
+        next
+    }
+
+    fn env_clear(self) -> __gos_process_Command {
+        let mut next = self
+        next.__spec = __gos_process_record(next.__spec, 67u8, "")
+        next
+    }
+
+    fn dir(self, dir: String) -> __gos_process_Command {
+        let mut next = self
+        next.__spec = __gos_process_record(next.__spec, 68u8, dir)
+        next
+    }
+
+    fn stdin(self, stdio: __gos_process_Stdio) -> __gos_process_Command {
+        let mut next = self
+        next.__stdin = stdio
+        next
+    }
+
+    fn stdout(self, stdio: __gos_process_Stdio) -> __gos_process_Command {
+        let mut next = self
+        next.__stdout = stdio
+        next
+    }
+
+    fn stderr(self, stdio: __gos_process_Stdio) -> __gos_process_Command {
+        let mut next = self
+        next.__stderr = stdio
+        next
+    }
+
+    fn new_process_group(self) -> __gos_process_Command {
+        let mut next = self
+        next.__flags = next.__flags | 1
+        next
+    }
+
+    fn new_session(self) -> __gos_process_Command {
+        let mut next = self
+        next.__flags = next.__flags | 2
+        next
+    }
+
+    fn controlling_terminal(self, fd: i64) -> __gos_process_Command {
+        let mut next = self
+        next.__ctty = fd
+        next
+    }
+
+    fn spawn(&self) -> Result<__gos_process_Child, errors::Error> {
+        let in_mode, in_fd = __gos_process_stdio_mode(self.__stdin)?
+        let out_mode, out_fd = __gos_process_stdio_mode(self.__stdout)?
+        let err_mode, err_fd = __gos_process_stdio_mode(self.__stderr)?
+        let stdio = #[in_mode, out_mode, err_mode, in_fd, out_fd, err_fd]
+        let spec = self.__spec
+        let handle = unsafe {
+            gos_rt_command_spawn(spec, spec.len() as u64, stdio, self.__flags, self.__ctty)
+        }
+        if handle < 0 {
+            return Err(__gos_process_command_error(handle))
+        }
+        let pid = unsafe { gos_rt_command_pid(handle) }
+        Ok(__gos_process_Child { __handle: handle, __pid: pid })
+    }
+
+    fn status(&self) -> Result<i64, errors::Error> {
+        self.spawn()?.wait()
+    }
+
+    fn output(&self) -> Result<__gos_process_Output, errors::Error> {
+        let mut piped = self.stdout(__gos_process_Stdio::Piped).stderr(__gos_process_Stdio::Piped)
+        let inherits_stdin = match piped.__stdin {
+            __gos_process_Stdio::Inherit => true,
+            _ => false,
+        }
+        if inherits_stdin {
+            piped = piped.stdin(__gos_process_Stdio::Null)
+        }
+        let child = piped.spawn()?
+        let mut code = 0
+        let done = unsafe { gos_rt_command_collect(child.__handle, &mut code) }
+        if done < 0 {
+            return Err(__gos_process_command_error(done))
+        }
+        let stdout = child.__take_text(1)?
+        let stderr = child.__take_text(2)?
+        Ok(__gos_process_Output { stdout: stdout, stderr: stderr, code: code })
+    }
+}
+
+impl __gos_process_Child {
+    fn id(&self) -> i64 {
+        self.__pid
+    }
+
+    fn __read(&self, stream: i64, mode: i64, max: i64) -> Result<Option<Vec<u8>>, errors::Error> {
+        let len = unsafe { gos_rt_command_read(self.__handle, stream, mode, max) }
+        if len == -1 {
+            return Ok(None)
+        }
+        if len < 0 {
+            return Err(__gos_process_command_error(len))
+        }
+        let mut bytes = #[0u8; len]
+        unsafe { gos_rt_command_take(self.__handle, stream, &mut bytes, len as u64) }
+        Ok(Some(bytes))
+    }
+
+    fn __take_text(&self, stream: i64) -> Result<String, errors::Error> {
+        let len = unsafe { gos_rt_command_pending(self.__handle, stream) } as i64
+        let mut bytes = #[0u8; len]
+        unsafe { gos_rt_command_take(self.__handle, stream, &mut bytes, len as u64) }
+        String::from_utf8(bytes).map_err(|e| errors::wrap(e, "process::Child"))
+    }
+
+    fn __text(&self, stream: i64, mode: i64) -> Result<Option<String>, errors::Error> {
+        match self.__read(stream, mode, 0)? {
+            Some(bytes) => Ok(Some(String::from_utf8(bytes).map_err(|e| errors::wrap(e, "process::Child"))?)),
+            None => Ok(None),
+        }
+    }
+
+    fn write_stdin(&self, text: String) -> bool {
+        self.write_stdin_bytes(text.bytes()).is_ok()
+    }
+
+    fn write_stdin_bytes(&self, data: [u8]) -> Result<(), errors::Error> {
+        let done = unsafe { gos_rt_command_write(self.__handle, data, data.len() as u64) }
+        if done < 0 {
+            return Err(__gos_process_command_error(done))
+        }
+        Ok(())
+    }
+
+    fn close_stdin(&self) {
+        unsafe { gos_rt_command_close(self.__handle, 0) }
+    }
+
+    fn read_line(&self) -> Option<String> {
+        self.__text(1, 1).unwrap_or(None)
+    }
+
+    fn read_stdout(&self) -> String {
+        self.__text(1, 2).unwrap_or(None).unwrap_or("")
+    }
+
+    fn read_stderr(&self) -> String {
+        self.__text(2, 2).unwrap_or(None).unwrap_or("")
+    }
+
+    fn read_stdout_line(&self) -> Result<Option<String>, errors::Error> {
+        self.__text(1, 1)
+    }
+
+    fn read_stderr_line(&self) -> Result<Option<String>, errors::Error> {
+        self.__text(2, 1)
+    }
+
+    fn read_stdout_chunk(&self, max: i64) -> Result<Option<Vec<u8>>, errors::Error> {
+        self.__read(1, 0, max)
+    }
+
+    fn read_stderr_chunk(&self, max: i64) -> Result<Option<Vec<u8>>, errors::Error> {
+        self.__read(2, 0, max)
+    }
+
+    fn wait(&self) -> Result<i64, errors::Error> {
+        let mut code = 0
+        let done = unsafe { gos_rt_command_wait(self.__handle, -1, &mut code) }
+        if done < 0 {
+            return Err(__gos_process_command_error(done))
+        }
+        Ok(code)
+    }
+
+    fn wait_timeout(&self, ms: i64) -> Result<Option<i64>, errors::Error> {
+        let mut code = 0
+        let done = unsafe { gos_rt_command_wait(self.__handle, ms, &mut code) }
+        if done < 0 {
+            return Err(__gos_process_command_error(done))
+        }
+        if done == 0 {
+            return Ok(None)
+        }
+        Ok(Some(code))
+    }
+
+    fn kill(&self) -> bool {
+        unsafe { gos_rt_command_kill(self.__handle, 9, 0) } == 0
+    }
+
+    fn signal(&self, signal: i64) -> Result<(), errors::Error> {
+        let done = unsafe { gos_rt_command_kill(self.__handle, signal, 0) }
+        if done < 0 {
+            return Err(__gos_process_command_error(done))
+        }
+        Ok(())
+    }
+
+    fn kill_group(&self, signal: i64 = 15) -> Result<(), errors::Error> {
+        let done = unsafe { gos_rt_command_kill(self.__handle, signal, 1) }
+        if done < 0 {
+            return Err(__gos_process_command_error(done))
+        }
+        Ok(())
+    }
+}
+
+fn __gos_process_spawn_piped(program: String, args: Vec<String>) -> Result<__gos_process_Child, errors::Error> {
+    __gos_process_Command::new(program)
+        .args(args)
+        .stdin(__gos_process_Stdio::Piped)
+        .stdout(__gos_process_Stdio::Piped)
+        .stderr(__gos_process_Stdio::Null)
+        .spawn()
+}
+
+#[cfg(not(target_family = "wasm"))]
+unsafe extern "C" {
+    fn gos_rt_command_spawn(spec: [u8], len: u64, stdio: [i64], flags: i64, ctty: i64) -> i64
+    fn gos_rt_command_error(code: i64, dst: &mut [u8], cap: u64) -> u64
+    fn gos_rt_command_pid(handle: i64) -> i64
+    fn gos_rt_command_write(handle: i64, src: [u8], len: u64) -> i64
+    fn gos_rt_command_close(handle: i64, stream: i64)
+    fn gos_rt_command_read(handle: i64, stream: i64, mode: i64, max: i64) -> i64
+    fn gos_rt_command_take(handle: i64, stream: i64, dst: &mut [u8], cap: u64) -> u64
+    fn gos_rt_command_pending(handle: i64, stream: i64) -> u64
+    fn gos_rt_command_wait(handle: i64, timeout_ms: i64, code: &mut i64) -> i64
+    fn gos_rt_command_kill(handle: i64, signal: i64, group: i64) -> i64
+    fn gos_rt_command_collect(handle: i64, code: &mut i64) -> i64
+}
+"#;
+
+/// Spellings that reach [`PROCESS_COMMAND_WRAPPERS`].
+const PROCESS_COMMAND_MARKERS: &[&str] = &[
+    "process::Command",
+    "process::Stdio",
+    "process::Child",
+    "process::spawn_piped",
+    "exec::Command",
+    "exec::Stdio",
+    "exec::Child",
+    "exec::spawn_piped",
+];
 
 /// Spellings that reach the `process` wrappers: the `process` module and
 /// its older `exec` / `os::exec` names.

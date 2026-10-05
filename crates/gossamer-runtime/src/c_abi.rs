@@ -240,6 +240,7 @@ pub mod bzip2_codec;
 pub mod chan;
 pub mod cohort;
 pub mod combinator;
+pub mod command;
 pub mod concat;
 pub mod container_heap;
 pub mod context;

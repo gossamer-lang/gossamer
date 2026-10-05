@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0112]: A foreign function in a project whose `gossamer-version` predates 0.67 - here
+--- framed ---
+error[GT0112]: A foreign function in a project whose `gossamer-version` predates 0.67
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

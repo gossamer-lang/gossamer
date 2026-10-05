@@ -893,27 +893,8 @@ struct Mentions {
 }
 
 fn scan(source: &str) -> Mentions {
-    let mut map = SourceMap::new();
-    let file = map.add_file("<primitive-surface-scan>", String::new());
-    let mut lexer = Lexer::new(source, file);
     let mut tokens = Vec::new();
-    loop {
-        let token = lexer.next_token();
-        if token.kind == TokenKind::Eof {
-            break;
-        }
-        if matches!(
-            token.kind,
-            TokenKind::Whitespace | TokenKind::LineComment | TokenKind::BlockComment
-        ) {
-            continue;
-        }
-        let text = source
-            .get(token.span.start as usize..token.span.end as usize)
-            .unwrap_or("")
-            .to_string();
-        tokens.push((token.kind, text));
-    }
+    code_tokens(source, &mut tokens);
     let mut called = HashSet::new();
     let mut defined = HashSet::new();
     let mut i = 0;
@@ -959,6 +940,37 @@ fn scan(source: &str) -> Mentions {
         i += 1;
     }
     Mentions { called, defined }
+}
+
+/// The tokens of `source` that are code: an f-string's interpolations are
+/// code too, so their tokens follow the literal's.
+fn code_tokens(source: &str, tokens: &mut Vec<(TokenKind, String)>) {
+    let mut map = SourceMap::new();
+    let file = map.add_file("<primitive-surface-scan>", String::new());
+    let mut lexer = Lexer::new(source, file);
+    loop {
+        let token = lexer.next_token();
+        if token.kind == TokenKind::Eof {
+            break;
+        }
+        if matches!(
+            token.kind,
+            TokenKind::Whitespace | TokenKind::LineComment | TokenKind::BlockComment
+        ) {
+            continue;
+        }
+        let text = source
+            .get(token.span.start as usize..token.span.end as usize)
+            .unwrap_or("")
+            .to_string();
+        if token.kind == TokenKind::FStringLit {
+            // `f"text {expr} text"`: the text between the quotes, read as
+            // code; the literal pieces only add names nothing calls.
+            let inner = text.trim_start_matches('f').trim_matches('"').to_string();
+            code_tokens(&inner, tokens);
+        }
+        tokens.push((token.kind, text));
+    }
 }
 
 /// The self type of the `impl` header starting at `at` when it is a bare

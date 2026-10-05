@@ -4921,6 +4921,45 @@ pub(super) fn index_set_value(b: &mut Value, raw: i64, new_value: Value) -> Runt
                 }
             }
         }
+        // An array of structs whose fields are all floats keeps them flat,
+        // `stride` per element; a whole element is stored field by field.
+        Value::FloatArray(fa) if fa.stride > 0 => {
+            let stride = fa.stride as usize;
+            let len = fa.data.len() / stride;
+            if raw < 0 || raw as usize >= len {
+                return Err(crate::vm::index_oob_panic(raw, len));
+            }
+            let Value::Struct(element) = &new_value else {
+                return Err(RuntimeError::Type(format!(
+                    "IndexSet on a `{}` array expects a `{}` value, not `{new_value}`",
+                    fa.name, fa.name
+                )));
+            };
+            let inner = Arc::make_mut(fa);
+            let base = raw as usize * stride;
+            let names = Arc::clone(&inner.field_names);
+            let data = Arc::make_mut(&mut inner.data);
+            for (slot, name) in names.iter().enumerate() {
+                let field = element
+                    .fields
+                    .iter()
+                    .find(|entry| {
+                        let field: &str = entry.0;
+                        field == name.as_str()
+                    })
+                    .map(|(_, value)| value);
+                data[base + slot] = match field {
+                    Some(Value::Float(f)) => *f,
+                    Some(Value::Int(n)) => *n as f64,
+                    _ => {
+                        return Err(RuntimeError::Type(format!(
+                            "IndexSet on a `{}` array: field `{name}` is not a float",
+                            fa.name
+                        )));
+                    }
+                };
+            }
+        }
         _ => {
             return Err(RuntimeError::Type(format!(
                 "value of kind `{b}` is not indexable"

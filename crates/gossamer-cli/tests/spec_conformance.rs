@@ -198,6 +198,53 @@ extern "C" fn exported(x: i32) -> i32 { x + 1 }
     let (ok, _stdout, stderr) = run_check("spec_12_no_mangle", src);
     assert!(!ok);
     assert!(stderr.contains("GP0016"), "got: {stderr}");
+    assert!(stderr.contains("write `#[export]`"), "got: {stderr}");
+}
+
+#[test]
+fn spec_12_check_fix_rewrites_an_extern_fn_definition_to_export() {
+    let src = "#[no_mangle]\nextern \"C\" fn exported(x: i32) -> i32 { x + 1 }\n\
+               fn main() { println(exported(2)) }\n";
+    let path = write_temp_file("spec_12_export_fix", src);
+    let mut cmd = Command::new(gos_binary());
+    cmd.arg("check").arg("--fix").arg(&path);
+    let out = run_with_timeout(cmd, Duration::from_secs(30));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let fixed = std::fs::read_to_string(&path).expect("read the fixed source");
+    assert!(
+        fixed.starts_with("#[export] fn exported(x: i32) -> i32"),
+        "--fix wrote:\n{fixed}"
+    );
+}
+
+#[test]
+fn a_function_renamed_off_a_c_symbol_answers_its_struct_natively() {
+    let src = r#"
+struct Triple { a: i64, b: i64, c: i64 }
+
+fn getenv(k: i64) -> Triple {
+    Triple { a: k, b: k * 2, c: k * 3 }
+}
+
+fn main() {
+    let t = getenv(4)
+    println(f"{t.a} {t.b} {t.c}")
+}
+"#;
+    for release in [false, true] {
+        let stem = if release {
+            "renamed_sret_release"
+        } else {
+            "renamed_sret_debug"
+        };
+        let (ok, stdout, stderr) = build_and_run_program(stem, src, release);
+        assert!(ok, "release={release}: {stderr}");
+        assert_eq!(stdout.trim(), "4 8 12", "release={release}");
+    }
 }
 
 #[test]

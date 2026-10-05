@@ -39,6 +39,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow};
 
 use crate::loaders::profile_rss_stage;
+
+mod c_header;
+mod library;
 use crate::main_stack::WINDOWS_MAIN_STACK_RESERVE;
 use crate::paths::{
     default_unit_name, platform_exe_name, read_entry_unit, resolve_entry_arg, resolve_output_path,
@@ -228,24 +231,15 @@ fn output_path(
     resolve_output_path(file, unit_name, release, target_is_windows)
 }
 
-fn run(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
-    let target = request.target;
-    let opts = request.link;
-    let release = opts.release;
-    let out_dir = request.out_dir.as_deref();
-    let timings = request.timings;
-    let explain_profile = request.explain_profile;
-    let started = Instant::now();
-    let mut build_timings = BuildTimings::default();
-    warn_if_pgo_profile_is_stale(file);
-    // Resolve `--target`. `None` or the host triple takes the host
-    // build path. A registered, Linux-target triple cross-builds
-    // through the same `try_native_build` pipeline; the codegen target
-    // override makes the `-mtriple` passed to opt/llc, the i128 ABI
-    // marshalling, and the incremental object-cache key all follow the
-    // requested triple.
+/// Resolves `--target`. `None` or the host triple takes the host
+/// build path. A registered, Linux-target triple cross-builds
+/// through the same `try_native_build` pipeline; the codegen target
+/// override makes the `-mtriple` passed to opt/llc, the i128 ABI
+/// marshalling, and the incremental object-cache key all follow the
+/// requested triple.
+fn cross_target(target: Option<&str>) -> Result<Option<&str>> {
     let host = gossamer_driver::TargetTriple::host();
-    let cross_target = match target {
+    Ok(match target {
         Some(triple) if triple != host.as_str() => {
             // Reject unknown triples here so the error is a clean parse
             // failure, not a linker blow-up.
@@ -266,7 +260,20 @@ fn run(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
             Some(triple)
         }
         _ => None,
-    };
+    })
+}
+
+fn run(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
+    let target = request.target;
+    let opts = request.link;
+    let release = opts.release;
+    let out_dir = request.out_dir.as_deref();
+    let timings = request.timings;
+    let explain_profile = request.explain_profile;
+    let started = Instant::now();
+    let mut build_timings = BuildTimings::default();
+    warn_if_pgo_profile_is_stale(file);
+    let cross_target = cross_target(target)?;
 
     if explain_profile {
         let planned_target = resolve_link_target(cross_target);
@@ -274,6 +281,9 @@ fn run(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
         print_profile_plan(&planned_target, opts, static_musl);
     }
 
+    if let Some(library) = library::target_for(file)? {
+        return library::build(file, request, &library);
+    }
     let unit_name = default_unit_name(file);
     // `cross_target` is `Some` only for a validated `*-linux-*` triple (see
     // above), so a cross build's produced binary is never Windows even when
@@ -309,6 +319,7 @@ fn run(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
         table,
         tcx,
         comptime_inputs,
+        program_end,
     } = validate_source(
         file,
         source,
@@ -323,22 +334,28 @@ fn run(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
         table,
         tcx,
     };
+    let paths = BuildPaths {
+        unit_name: &unit_name,
+        input: file,
+        out: &out_path,
+    };
     let outcome = try_native_build(
-        &unit_name,
-        file,
-        &out_path,
+        &paths,
         opts,
         cross_target,
         checked,
+        program_end,
         &mut build_timings,
     )
     .map_err(|err| anyhow!("build: {}", err.user_message()))?;
+    let mut recorded_inputs = comptime_inputs;
+    recorded_inputs.extend(outcome.native_inputs.iter().cloned());
     store_successful_build(
         &stamp_path,
         &out_path,
         &build_key,
         &outcome,
-        &comptime_inputs,
+        &recorded_inputs,
     );
     report_artifact(&outcome, &out_path);
     if timings {
@@ -502,6 +519,8 @@ fn build_artifact_key(
         hash.update(bytes);
     };
     add("version", BUILD_STAMP_VERSION.as_bytes());
+    // The target and the features each package builds with.
+    add("cfg", gossamer_resolve::cfg_target_key().as_bytes());
     add("source", source.as_bytes());
     add("entry", file.to_string_lossy().as_bytes());
     add("output", out_path.to_string_lossy().as_bytes());
@@ -540,8 +559,10 @@ fn build_artifact_key(
     // These variables cover LLVM selection and tuning, link-driver changes,
     // PGO, deployment targeting, and externally supplied runtime/bindings.
     for name in [
+        "AR",
         "CC",
         "CFLAGS",
+        "GOS_CC",
         "GOS_BUILD_CACHE",
         "GOS_LLC",
         "GOS_LLVM_CLANG",
@@ -639,6 +660,7 @@ fn load_unchanged_build(
     }
     let size = fs::metadata(out_path).ok()?.len();
     Some(NativeBuildOutcome {
+        native_inputs: Vec::new(),
         size,
         note: format!("{note}, unchanged"),
     })
@@ -738,6 +760,7 @@ fn validate_source(
     // program, and the stamp has to be able to tell.
     let comptime_inputs = gossamer_runtime::comptime_inputs::take();
     timings.comptime = phase_started.elapsed();
+    let program_end = gossamer_parse::autoderive::program_source_end(&augmented);
     let mut map = gossamer_lex::SourceMap::new();
     let file_id = map.add_file(file.to_string_lossy().into_owned(), augmented);
     crate::paths::register_unit_origins(&mut map, file_id, origins.0, origins.1);
@@ -793,6 +816,7 @@ fn validate_source(
         table,
         tcx,
         comptime_inputs,
+        program_end,
     })
 }
 
@@ -806,11 +830,16 @@ struct ValidatedSource {
     /// belong to the build's input set even though nothing in the
     /// source names them.
     comptime_inputs: Vec<PathBuf>,
+    /// Where the program's own text ends in the checked source.
+    program_end: usize,
 }
 
 struct NativeBuildOutcome {
     size: u64,
     note: String,
+    /// The `[native]` sources and headers the build compiled, which the
+    /// up-to-date stamp records beside the comptime inputs.
+    native_inputs: Vec<PathBuf>,
 }
 
 /// Why the native-build path bailed. Each variant carries a pre-
@@ -1175,37 +1204,66 @@ fn extra_link_archives(
     Ok(extra_archives)
 }
 
+/// Compiles the `[native]` sources of the program at `input_path` for
+/// `target` and puts their archives ahead of the libraries the program's
+/// declarations name, which that C may call. Answers the files the
+/// compilation read.
+fn link_native_sources(
+    input_path: &Path,
+    target: Option<&str>,
+    libraries: &mut NativeLinks,
+) -> std::result::Result<Vec<PathBuf>, NativeBuildError> {
+    let native = crate::native_sources::archives(input_path, target)
+        .map_err(|err| NativeBuildError::BackendFailed(format!("{err:#}")))?;
+    for (index, archive) in native.archives.into_iter().enumerate() {
+        libraries.search.insert(index, archive.dir);
+        libraries.libraries.insert(index, archive.name);
+    }
+    Ok(native.inputs)
+}
+
+/// The program a native build compiles: its unit name, entry file, and the
+/// executable it writes.
+struct BuildPaths<'a> {
+    unit_name: &'a str,
+    input: &'a PathBuf,
+    out: &'a PathBuf,
+}
+
 fn try_native_build(
-    unit_name: &str,
-    input_path: &PathBuf,
-    out_path: &PathBuf,
+    paths: &BuildPaths<'_>,
     opts: LinkOptions,
     target: Option<&str>,
     checked: gossamer_driver::CheckedFrontend,
+    program_end: usize,
     timings: &mut BuildTimings,
 ) -> std::result::Result<NativeBuildOutcome, NativeBuildError> {
     let lt = resolve_link_target(target);
-    let links = gossamer_driver::foreign_link_libraries(&checked.sf);
-    let libraries = NativeLinks {
-        search: crate::paths::foreign_search_dirs(input_path, &links),
+    let links = gossamer_driver::foreign_link_libraries(&checked.sf, program_end);
+    let links_declares_foreign = links.declares_foreign;
+    let mut libraries = NativeLinks {
+        search: crate::paths::foreign_search_dirs(paths.input, &links),
         libraries: links.libraries,
     };
-    let tmp_dir =
-        std::env::temp_dir().join(format!("gos-build-{}-{}", std::process::id(), unit_name));
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "gos-build-{}-{}",
+        std::process::id(),
+        paths.unit_name
+    ));
     fs::create_dir_all(&tmp_dir)
         .map_err(|err| NativeBuildError::Io(anyhow!("creating {}: {err}", tmp_dir.display())))?;
     // Decide the final link shape before codegen. LLVM's tiny-copy policy is
     // intentionally scoped to static musl, where it was measured; macOS,
     // Windows, and dynamic Linux keep LLVM's normal loop idiom recognition.
-    // The C libraries a program names are the platform's glibc shared
-    // objects, which a static musl link cannot take, so a host release that
-    // links one takes the dynamic link; a musl target asked for by name
-    // stays static.
+    // A program's own foreign declarations are resolved for the C library
+    // `gos run` calls into (`target_env`), the platform's shared one, which a
+    // static musl link would replace; such a host release takes the dynamic
+    // link. A musl target asked for by name stays static.
     let static_musl =
-        lt.env == TargetEnv::Musl || (opts.want_static_musl() && libraries.libraries.is_empty());
+        lt.env == TargetEnv::Musl || (opts.want_static_musl() && !links_declares_foreign);
     let phase_started = Instant::now();
     let (object_paths, object_triple) = emit_native_objects(
-        unit_name,
+        paths.unit_name,
         &tmp_dir,
         opts.release,
         static_musl,
@@ -1224,7 +1282,17 @@ fn try_native_build(
         find_runtime_lib()?
     };
     let pgo = pgo_link_config();
-    let extra_archives = extra_link_archives(input_path, opts, static_musl, &lt, &pgo)?;
+    let extra_archives = extra_link_archives(paths.input, opts, static_musl, &lt, &pgo)?;
+    let native_inputs = if links_declares_foreign {
+        let native_target = if static_musl {
+            Some(musl_triple_for_arch(lt.arch))
+        } else {
+            lt.is_cross.then_some(lt.triple.as_str())
+        };
+        link_native_sources(paths.input, native_target, &mut libraries)?
+    } else {
+        Vec::new()
+    };
     if std::env::var_os("GOS_LINK_VERBOSE").is_some() {
         eprintln!("gos build: runtime lib: {}", runtime_lib.display());
         eprintln!("gos build: objects: {object_paths:?}");
@@ -1234,7 +1302,7 @@ fn try_native_build(
     // refuse non-Linux cross targets earlier). Key it off the host
     // build env so a Windows-GNU `gos` keeps the mingw `link_posix`
     // path it uses today.
-    ensure_output_dir(out_path)?;
+    ensure_output_dir(paths.out)?;
     let phase_started = Instant::now();
     let link_result = if !lt.is_cross && cfg!(all(windows, target_env = "msvc")) {
         link_windows_msvc(
@@ -1242,7 +1310,7 @@ fn try_native_build(
             &runtime_lib,
             &extra_archives,
             &libraries,
-            out_path,
+            paths.out,
             opts,
         )
     } else if static_musl {
@@ -1252,7 +1320,7 @@ fn try_native_build(
             &runtime_lib,
             &extra_archives,
             &libraries,
-            out_path,
+            paths.out,
             opts,
         )
     } else {
@@ -1262,7 +1330,7 @@ fn try_native_build(
             &runtime_lib,
             &extra_archives,
             &libraries,
-            out_path,
+            paths.out,
             opts,
         )
     };
@@ -1275,14 +1343,15 @@ fn try_native_build(
     if !keep_artifacts {
         let _ = fs::remove_dir_all(&tmp_dir);
     }
-    let _ = input_path;
+    let _ = paths.input;
     link_result.map(|()| {
         if let Some(profile_path) = pgo.collect_path.as_deref() {
-            print_pgo_collect_instructions(out_path, profile_path);
+            print_pgo_collect_instructions(paths.out, profile_path);
         }
         NativeBuildOutcome {
-            size: fs::metadata(out_path).map_or(0, |m| m.len()),
+            size: fs::metadata(paths.out).map_or(0, |m| m.len()),
             note: artifact_note(object_triple.as_deref(), static_musl, &pgo),
+            native_inputs,
         }
     })
 }
@@ -1997,20 +2066,7 @@ fn link_windows_msvc(
     for library in &libraries.libraries {
         cmd.arg(format!("{library}.lib"));
     }
-    for lib in [
-        "advapi32.lib",
-        "bcrypt.lib",
-        "kernel32.lib",
-        "ntdll.lib",
-        "userenv.lib",
-        "ws2_32.lib",
-        "synchronization.lib",
-        "dbghelp.lib",
-        "msvcrt.lib",
-        "ucrt.lib",
-        "vcruntime.lib",
-        "legacy_stdio_definitions.lib",
-    ] {
+    for lib in MSVC_SYSTEM_LIBRARIES {
         cmd.arg(lib);
     }
     trace_link_command(&cmd);
@@ -2026,6 +2082,22 @@ fn link_windows_msvc(
         ))),
     }
 }
+
+/// The Windows import libraries the runtime's objects call into.
+const MSVC_SYSTEM_LIBRARIES: [&str; 12] = [
+    "advapi32.lib",
+    "bcrypt.lib",
+    "kernel32.lib",
+    "ntdll.lib",
+    "userenv.lib",
+    "ws2_32.lib",
+    "synchronization.lib",
+    "dbghelp.lib",
+    "msvcrt.lib",
+    "ucrt.lib",
+    "vcruntime.lib",
+    "legacy_stdio_definitions.lib",
+];
 
 #[cfg(not(windows))]
 fn link_windows_msvc(
@@ -2262,6 +2334,7 @@ mod tests {
         let stamp = root.join("app.stamp");
         std::fs::write(&output, b"binary").expect("write output");
         let outcome = super::NativeBuildOutcome {
+            native_inputs: Vec::new(),
             size: 6,
             note: "test link".to_string(),
         };
@@ -2292,6 +2365,7 @@ mod tests {
         std::fs::write(&output, b"binary").expect("write output");
         std::fs::write(&embedded, b"level = \"standard\"\n").expect("write embedded asset");
         let outcome = super::NativeBuildOutcome {
+            native_inputs: Vec::new(),
             size: 6,
             note: "test link".to_string(),
         };
@@ -2329,6 +2403,7 @@ mod tests {
         let absent = root.join("override.toml");
         std::fs::write(&output, b"binary").expect("write output");
         let outcome = super::NativeBuildOutcome {
+            native_inputs: Vec::new(),
             size: 6,
             note: "test link".to_string(),
         };

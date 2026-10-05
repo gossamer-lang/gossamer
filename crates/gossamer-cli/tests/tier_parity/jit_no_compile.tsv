@@ -324,7 +324,6 @@ feature-testing-examples/pipe_closure_step.gos	no hot body
 feature-testing-examples/pipe_operator_precedence.gos	no hot body
 feature-testing-examples/process_run_in.gos	no hot body
 feature-testing-examples/process_spawn_pipe.gos	bytecode-only local
-feature-testing-examples/process_spawn_piped.gos	bytecode-only local
 feature-testing-examples/question_mark_error_conversion.gos	entry shape
 feature-testing-examples/range_pipeline_iter.gos	no hot body
 feature-testing-examples/rc_tree_teardown.gos	admission gate

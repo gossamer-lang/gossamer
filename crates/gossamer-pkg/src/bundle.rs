@@ -198,6 +198,15 @@ pub fn collect_path_deps_with_modules(
         modules.insert(id.clone(), module.clone());
     }
     for (key, spec) in &manifest.dependencies {
+        // An optional dependency is part of the program only when an
+        // enabled feature turns it on.
+        let optional = manifest
+            .dependency_features
+            .get(key)
+            .is_some_and(|chosen| chosen.optional);
+        if optional && !crate::features::optional_dependency_included(key) {
+            continue;
+        }
         let Some(spelled) = dependency_path(spec).map_or_else(
             || prepared_dependency_root(manifest_dir, key, spec),
             |rel| Some(manifest_dir.join(rel)),

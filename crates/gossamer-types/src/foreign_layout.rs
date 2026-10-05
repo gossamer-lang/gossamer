@@ -86,6 +86,50 @@ impl TyCtxt {
         Some((layout.size, leaves))
     }
 
+    /// Every scalar of the plain-data `ty` a calling convention classifies,
+    /// as `(offset, class)` sorted by offset. A union lists each member's
+    /// scalars at its own offset, so entries may share bytes.
+    #[must_use]
+    pub fn c_abi_leaves(&self, ty: Ty) -> Option<Vec<(u32, char)>> {
+        let mut leaves = Vec::new();
+        self.collect_abi_leaves(ty, 0, &mut leaves)?;
+        leaves.sort_by_key(|(offset, _)| *offset);
+        Some(leaves)
+    }
+
+    fn collect_abi_leaves(&self, ty: Ty, offset: u32, leaves: &mut Vec<(u32, char)>) -> Option<()> {
+        if let Some(class) = self.c_scalar_class(ty) {
+            leaves.push((offset, class));
+            return Some(());
+        }
+        match self.kind_of(ty) {
+            TyKind::Array { elem, len } => {
+                let elem = *elem;
+                let count = u32::try_from(len.to_usize()).ok()?;
+                let stride = self.plain_layout(elem)?.size;
+                for index in 0..count {
+                    self.collect_abi_leaves(elem, offset + index * stride, leaves)?;
+                }
+                Some(())
+            }
+            TyKind::Adt { def, substs } => {
+                if let Some(members) = self.union_members(*def, substs) {
+                    for member in members {
+                        self.collect_abi_leaves(member, offset, leaves)?;
+                    }
+                    return Some(());
+                }
+                let fields = self.adt_field_tys(*def, &substs.clone())?.to_vec();
+                let layout = self.plain_layout(ty)?;
+                for (field, field_offset) in fields.iter().zip(layout.field_offsets.iter()) {
+                    self.collect_abi_leaves(*field, offset + field_offset, leaves)?;
+                }
+                Some(())
+            }
+            _ => None,
+        }
+    }
+
     fn collect_c_leaves(
         &self,
         ty: Ty,
@@ -110,6 +154,30 @@ impl TyCtxt {
                 for index in 0..count {
                     steps.push(CStep::Index(index));
                     self.collect_c_leaves(elem, offset + index * stride, steps, leaves)?;
+                    steps.pop();
+                }
+                Some(())
+            }
+            TyKind::Adt { def, substs } if self.union_members(*def, substs).is_some() => {
+                // A union crosses as its bytes; which member they hold is the
+                // program's business.
+                let size = self.plain_layout(ty)?.size;
+                let byte = self.struct_field_tys(*def)?.first().and_then(|bytes| {
+                    match self.kind_of(*bytes) {
+                        TyKind::Array { elem, .. } => Some(*elem),
+                        _ => None,
+                    }
+                })?;
+                for index in 0..size {
+                    steps.push(CStep::Field(0));
+                    steps.push(CStep::Index(index));
+                    leaves.push(CLeaf {
+                        steps: steps.clone(),
+                        offset: offset + index,
+                        class: 'C',
+                        ty: byte,
+                    });
+                    steps.pop();
                     steps.pop();
                 }
                 Some(())

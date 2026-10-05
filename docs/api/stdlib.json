@@ -3673,7 +3673,83 @@
       "name": "std::ffi::Ptr",
       "kind": "type",
       "signature": null,
-      "description": "`Ptr<T>`: a non-null address of a `T` in memory Gossamer does not manage, as a foreign function takes or answers it; `Option<Ptr<T>>` is the nullable form. Holding, copying, comparing, storing, and sending one is safe; every access through it is `unsafe`. `p.cast::<U>()`, `p.address()`, and `unsafe { Ptr::from_address(n) }` (`None` for 0).",
+      "description": "`Ptr<T>`: a non-null address of a `T` in memory Gossamer does not manage, as a foreign function takes or answers it; `Option<Ptr<T>>` is the nullable form. Holding, copying, comparing, storing, and sending one is safe; every access through it is `unsafe`. `p.cast::<U>()`, `p.address()`, `p.is_null()`, `unsafe { Ptr::from_address(n) }` (`None` for 0), and `Ptr::null()`, the NULL a `#[repr(C)]` struct field holds where C expects one (a table's terminating entry), which a `Ptr` copied out of C memory may be too.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-Union",
+      "name": "std::ffi::Union",
+      "kind": "type",
+      "signature": null,
+      "description": "`Union<(A, B, ..)>`: a C union of the listed members, sized and aligned for the largest, as a `#[repr(C)]` field, a pointee, or a foreign argument. `Union::new(v)`, `Union::zeroed()`, `u.get::<T>()`, and `u.set(v)` take and give the leading bytes as a member type (GT0110 for any other type).",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-View",
+      "name": "std::ffi::View",
+      "kind": "type",
+      "signature": null,
+      "description": "`View<T>`: `len` values of `T` in foreign memory, read and written in place. `unsafe { View::new(p, len) }` vouches that `p` addresses that many; `v.len()`, `v.get(i)` and `v[i]`, `v.set(i, value)`, `v.slice(lo, hi)`, `v.to_vec()`, `v.copy_from(values)`, `v.fill(value)`, and `v.ptr()` follow, each access bounds-checked against the length.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-addr-of",
+      "name": "std::ffi::addr_of",
+      "kind": "function",
+      "signature": "fn addr_of<T>(symbol: T) -> ffi::Ptr<T>",
+      "description": "`addr_of(NAME) -> Ptr<T>`: the address of the C global `static NAME: T` an `unsafe extern` block declares, read and written with `ffi::read` and `ffi::write`; a foreign static is reached no other way (GT0111).",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-align-of",
+      "name": "std::ffi::align_of",
+      "kind": "function",
+      "signature": "fn align_of<T>() -> i64",
+      "description": "`align_of::<T>() -> i64`: the alignment, in bytes, of a `T` in C layout.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -3693,6 +3769,177 @@
       "kind": "function",
       "signature": "fn alloc<T>(count: i64) -> ffi::Ptr<T>",
       "description": "`unsafe { alloc::<T>(count) }`: zeroed room for `count` values of `T` from the platform C allocator, freed with `free` or by a library that takes it over.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-atomic-compare-exchange",
+      "name": "std::ffi::atomic_compare_exchange",
+      "kind": "function",
+      "signature": "fn atomic_compare_exchange<T>(p: ffi::Ptr<T>, current: T, new: T) -> Result<T, T>",
+      "description": "`unsafe { atomic_compare_exchange(p, current, new) } -> Result<T, T>`: stores `new` at `p` when it holds `current`, atomically; `Ok` with the old value when it did, `Err` with the value found when it did not.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-atomic-fetch-add",
+      "name": "std::ffi::atomic_fetch_add",
+      "kind": "function",
+      "signature": "fn atomic_fetch_add<T>(p: ffi::Ptr<T>, value: T) -> T",
+      "description": "`unsafe { atomic_fetch_add(p, value) }`: adds `value` to the integer at `p` atomically, wrapping, and answers the value before.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-atomic-fetch-and",
+      "name": "std::ffi::atomic_fetch_and",
+      "kind": "function",
+      "signature": "fn atomic_fetch_and<T>(p: ffi::Ptr<T>, value: T) -> T",
+      "description": "`unsafe { atomic_fetch_and(p, value) }`: ands `value` in atomically and answers the value before.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-atomic-fetch-or",
+      "name": "std::ffi::atomic_fetch_or",
+      "kind": "function",
+      "signature": "fn atomic_fetch_or<T>(p: ffi::Ptr<T>, value: T) -> T",
+      "description": "`unsafe { atomic_fetch_or(p, value) }`: ors `value` in atomically and answers the value before.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-atomic-fetch-sub",
+      "name": "std::ffi::atomic_fetch_sub",
+      "kind": "function",
+      "signature": "fn atomic_fetch_sub<T>(p: ffi::Ptr<T>, value: T) -> T",
+      "description": "`unsafe { atomic_fetch_sub(p, value) }`: subtracts `value` atomically, wrapping, and answers the value before.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-atomic-fetch-xor",
+      "name": "std::ffi::atomic_fetch_xor",
+      "kind": "function",
+      "signature": "fn atomic_fetch_xor<T>(p: ffi::Ptr<T>, value: T) -> T",
+      "description": "`unsafe { atomic_fetch_xor(p, value) }`: xors `value` in atomically and answers the value before.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-atomic-load",
+      "name": "std::ffi::atomic_load",
+      "kind": "function",
+      "signature": "fn atomic_load<T>(p: ffi::Ptr<T>) -> T",
+      "description": "`unsafe { atomic_load(p) }`: the 32- or 64-bit integer at `p`, read atomically (sequentially consistent); an address not aligned to the integer's width panics.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-atomic-store",
+      "name": "std::ffi::atomic_store",
+      "kind": "function",
+      "signature": "fn atomic_store<T>(p: ffi::Ptr<T>, value: T) -> ()",
+      "description": "`unsafe { atomic_store(p, value) }`: stores `value` at `p` atomically.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-atomic-swap",
+      "name": "std::ffi::atomic_swap",
+      "kind": "function",
+      "signature": "fn atomic_swap<T>(p: ffi::Ptr<T>, value: T) -> T",
+      "description": "`unsafe { atomic_swap(p, value) }`: stores `value` at `p` atomically and answers the value it replaced.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -3992,6 +4239,25 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-ffi-fn-addr",
+      "name": "std::ffi::fn_addr",
+      "kind": "function",
+      "signature": "fn fn_addr<F>(f: F) -> ffi::Ptr<ffi::c_void>",
+      "description": "`fn_addr(f) -> Ptr<c_void>`: the C function pointer for the named top-level function `f`, whose parameters and result have C forms (GT0107, GT0108 otherwise): a value for a function-pointer field of a C struct (an ops table, a `luaL_Reg` array). Native code calls it as it calls a callback.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-ffi-fn-from-ptr",
       "name": "std::ffi::fn_from_ptr",
       "kind": "function",
@@ -4053,7 +4319,45 @@
       "name": "std::ffi::last_errno",
       "kind": "function",
       "signature": "fn last_errno() -> i64",
-      "description": "`last_errno() -> i64`: the `errno` (on Windows, `GetLastError`) the goroutine's most recent foreign call left, captured before anything else could change it.",
+      "description": "`last_errno() -> i64`: the C `errno` the goroutine's most recent foreign call left, cleared just before the call and captured before anything else could change it, so a call that does not set it answers 0.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-last-os-error",
+      "name": "std::ffi::last_os_error",
+      "kind": "function",
+      "signature": "fn last_os_error() -> i64",
+      "description": "`last_os_error() -> i64`: the operating-system error code the goroutine's most recent foreign call left: `GetLastError` on Windows, `errno` elsewhere. Cleared just before the call, so a call that does not set it answers 0.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-offset-of",
+      "name": "std::ffi::offset_of",
+      "kind": "function",
+      "signature": "fn offset_of<T>(field: String) -> i64",
+      "description": "`offset_of::<T>(\"field.path\") -> i64`: the byte offset of a field, or a field of a field, inside the `#[repr(C)]` struct `T`; the path is a string literal checked at compile time (GT0109).",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -13895,7 +14199,45 @@
       "name": "std::process::Child",
       "kind": "type",
       "signature": null,
-      "description": "Handle to a still-running child supporting wait / kill.",
+      "description": "A running child: `id`, `write_stdin` / `write_stdin_bytes` / `close_stdin`, `read_line` / `read_stdout` / `read_stderr` and the `read_stdout_line` / `read_stderr_line` / `read_stdout_chunk(max)` / `read_stderr_chunk(max)` forms (each stream may be drained from its own goroutine), `wait`, `wait_timeout(ms)`, `kill`, and on POSIX `signal(sig)` and `kill_group(sig)` for a child started in its own process group or session. A child that has ended answers 128 plus the signal number when a signal ended it.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdprocess",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-process-Command",
+      "name": "std::process::Command",
+      "kind": "type",
+      "signature": null,
+      "description": "Builder for a child process: `Command::new(program)` then `arg` / `args`, `env` / `env_remove` / `env_clear`, `dir`, `stdin` / `stdout` / `stderr` (a `Stdio`), `new_process_group`, and on POSIX `new_session` and `controlling_terminal(fd)`; `spawn() -> Result<Child, errors::Error>`, `output() -> Result<Output, errors::Error>` (stdout and stderr read at once, so neither pipe stalls the child), and `status() -> Result<i64, errors::Error>`. Rust's `std::process::Command`, Go's `exec.Cmd`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdprocess",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-process-Stdio",
+      "name": "std::process::Stdio",
+      "kind": "type",
+      "signature": null,
+      "description": "Where a child's standard stream goes: `Stdio::Inherit` (this process's), `Stdio::Null`, `Stdio::Piped` (read or written through the `Child`), or `Stdio::File(f)` for an open `fs::File`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",

@@ -1,0 +1,74 @@
+// process::Command: arguments, an added environment variable, separate
+// stdout and stderr, exit codes, a piped stdin, a timeout, and a kill.
+// `sort` and the platform shell exist on Linux, macOS, and Windows.
+use std::process
+use std::process::{Command, Stdio}
+
+#[cfg(target_family = "windows")]
+fn shell(script: String) -> Command {
+    Command::new("cmd").args(#["/c", script])
+}
+
+#[cfg(not(target_family = "windows"))]
+fn shell(script: String) -> Command {
+    Command::new("sh").args(#["-c", script])
+}
+
+#[cfg(target_family = "windows")]
+fn greeting_script() -> String {
+    "echo %GREETING%"
+}
+
+#[cfg(not(target_family = "windows"))]
+fn greeting_script() -> String {
+    "echo $GREETING"
+}
+
+#[cfg(target_family = "windows")]
+fn sleeper() -> Command {
+    Command::new("ping").args(#["-n", "30", "127.0.0.1"]).stdout(Stdio::Null)
+}
+
+#[cfg(not(target_family = "windows"))]
+fn sleeper() -> Command {
+    Command::new("sleep").arg("30")
+}
+
+fn main() {
+    match shell("echo out&& echo err 1>&2&& exit 3").output() {
+        Ok(out) => println(f"output: [{out.stdout.trim()}] [{out.stderr.trim()}] {out.code}")
+        Err(e) => println(f"output error: {e}")
+    }
+    match shell(greeting_script()).env("GREETING", "hello").output() {
+        Ok(out) => println(f"env: {out.stdout.trim()}")
+        Err(e) => println(f"env error: {e}")
+    }
+    match shell("exit 5").stdout(Stdio::Null).status() {
+        Ok(code) => println(f"status: {code}")
+        Err(e) => println(f"status error: {e}")
+    }
+    match Command::new("sort").stdin(Stdio::Piped).stdout(Stdio::Piped).spawn() {
+        Ok(child) => {
+            child.write_stdin("pear\napple\nmango\n")
+            child.close_stdin()
+            let mut lines = #[]
+            while let Ok(Some(line)) = child.read_stdout_line() {
+                lines.push(line)
+            }
+            println(f"sorted: {lines} {child.wait().is_ok()}")
+        }
+        Err(e) => println(f"sort error: {e}")
+    }
+    match sleeper().spawn() {
+        Ok(child) => {
+            let early = child.wait_timeout(50)
+            println(f"running: {early}")
+            println(f"killed: {child.kill()} {child.wait().is_ok()}")
+        }
+        Err(e) => println(f"sleeper error: {e}")
+    }
+    match Command::new("no-such-program-anywhere").spawn() {
+        Ok(_) => println("missing program started")
+        Err(_) => println("missing program: an error")
+    }
+}

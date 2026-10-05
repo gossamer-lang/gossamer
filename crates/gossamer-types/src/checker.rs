@@ -737,6 +737,9 @@ struct TypeChecker<'a> {
     closure_captures: Vec<HashMap<Box<str>, HashSet<String>>>,
     /// Functions declared in an `unsafe extern "C"` block, with their names.
     foreign_fns: HashMap<DefId, String>,
+    /// The C symbol of each `#[export]` function checked so far, with the
+    /// function that claimed it.
+    export_symbols: HashMap<String, String>,
     /// Structs declared `#[repr(C)]`, which may cross the C boundary.
     repr_c_structs: HashSet<DefId>,
     /// Foreign types declared `type Name` in an extern block, which have no
@@ -746,6 +749,15 @@ struct TypeChecker<'a> {
     /// body's inference has settled: `(operation, report name, span, argument
     /// types, result type)`.
     pending_ffi_types: Vec<(&'static str, &'static str, gossamer_lex::Span, Vec<Ty>, Ty)>,
+    /// C globals declared `static NAME: T` in an extern block, with their
+    /// names.
+    foreign_statics: HashMap<DefId, String>,
+    /// The argument expressions of `ffi::addr_of` calls, the one place a
+    /// foreign static may be named.
+    addr_of_args: HashSet<NodeId>,
+    /// Layout queries and union operations checked once the enclosing body's
+    /// inference has settled.
+    pending_ffi_layouts: Vec<foreign::PendingLayout>,
     /// How many `unsafe { }` blocks enclose the expression being checked.
     unsafe_depth: u32,
     /// Read checks paused for the current context.
@@ -1045,6 +1057,8 @@ struct TypeChecker<'a> {
     /// Adts the checker synthesizes (`Result`, `Option`, `http::Response`,
     /// `VecDeque`).
     user_type_decls: std::collections::HashSet<String>,
+    /// Types declared at the unit root, whose identity is their bare name.
+    root_type_names: std::collections::HashSet<String>,
     /// For every method name defined in a user `impl` block (inherent or
     /// trait impl) or declared on a trait, the set of user type names
     /// that own it. Lets [`Self::maybe_reject_unknown_adt_method`] reject
@@ -1230,8 +1244,12 @@ impl<'a> TypeChecker<'a> {
             reference_origins: vec![HashMap::new()],
             closure_captures: vec![HashMap::new()],
             pending_ffi_types: Vec::new(),
+            foreign_statics: HashMap::new(),
+            addr_of_args: HashSet::new(),
+            pending_ffi_layouts: Vec::new(),
             opaque_types: HashSet::new(),
             foreign_fns: HashMap::new(),
+            export_symbols: HashMap::new(),
             repr_c_structs: HashSet::new(),
             unsafe_depth: 0,
             suppressed: SuppressedReadChecks::default(),
@@ -1299,6 +1317,7 @@ impl<'a> TypeChecker<'a> {
             callee_path_nodes: std::collections::HashSet::new(),
             import_targets: HashMap::new(),
             user_type_decls: std::collections::HashSet::new(),
+            root_type_names: std::collections::HashSet::new(),
             user_method_owners: HashMap::new(),
             user_fn_names: std::collections::HashSet::new(),
             deferred_shared_payloads: Vec::new(),

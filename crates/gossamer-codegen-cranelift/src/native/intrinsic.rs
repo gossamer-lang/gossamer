@@ -145,6 +145,9 @@ pub(super) struct IntrinsicContext {
     /// The C function each foreign-call intrinsic name calls, declared before
     /// the parallel phase.
     pub(super) foreign: HashMap<&'static str, FuncId>,
+    /// The C global each foreign-static intrinsic name addresses, declared
+    /// before the parallel lowering phase.
+    pub(super) foreign_data: HashMap<&'static str, DataId>,
     /// The runtime's yield-request byte, which loop preemption polls read,
     /// declared before the parallel phase.
     pub(super) preempt_requested: Option<DataId>,
@@ -264,6 +267,7 @@ impl IntrinsicContext {
             strings: HashMap::new(),
             externs: HashMap::new(),
             foreign: HashMap::new(),
+            foreign_data: HashMap::new(),
             preempt_requested: None,
             rc_metas: HashMap::new(),
             tuple_tags: HashMap::new(),
@@ -578,6 +582,20 @@ pub(super) fn lower_intrinsic_call(
     destination: &gossamer_mir::Place,
     intrinsics: &mut IntrinsicContext,
 ) -> Result<bool> {
+    if gossamer_mir::ForeignStatic::parse(name).is_some() {
+        if !destination.projection.is_empty() {
+            bail!("native codegen: a foreign static's destination cannot have projections");
+        }
+        foreign::lower_foreign_static(
+            module,
+            builder,
+            locals,
+            name,
+            destination.local,
+            intrinsics,
+        )?;
+        return Ok(true);
+    }
     if gossamer_mir::ForeignCallback::parse(name).is_some() {
         if !destination.projection.is_empty() {
             bail!("native codegen: a callback address's destination cannot have projections");

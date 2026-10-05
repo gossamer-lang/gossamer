@@ -9096,7 +9096,7 @@ pub const FEATURE_STATUS: &[FeatureStatus] = &[
     ),
     lang(
         "lang::simd",
-        "Fixed-width lane vectors: `Simd<T, N>` over `f32`, `f64`, `i32`, `i64`, `u8`, or `u32` and its `bool` form `Mask<N>`. Lane-wise arithmetic and bitwise operators, lane comparisons, `select`, reductions, and `Simd::load` / `store` over a window checked once, with the same bits on every tier (GT0089).",
+        "Fixed-width lane vectors: `Simd<T, N>` over `i8` through `u64`, `f32`, or `f64` and its `bool` form `Mask<N>`. Lane-wise arithmetic and bitwise operators, saturating and fused operations, lane comparisons, bitmasks, conversions, shuffles, `select`, reductions, gathers, and windows over a sequence, with the same bits on every tier (GT0089).",
     ),
     lang(
         "lang::cohort",
@@ -9131,11 +9131,11 @@ pub const FEATURE_STATUS: &[FeatureStatus] = &[
     ),
     lang(
         "lang::cfg",
-        "Conditional compilation attribute, resolved for the target a build produces (`gos build --target`, `gos check --target`) rather than the host.",
+        "Conditional compilation attribute, resolved for the target a build produces (`gos build --target`, `gos check --target`) rather than the host; `feature = \"name\"` reads the declaring package's `[features]`, and `#[cfg]` applies to a `use` too.",
     ),
     lang(
         "lang::unsafe_extern",
-        "`unsafe extern \"C\" { fn strlen(text: [u8]) -> usize }` declares C functions, called inside `unsafe { }` (GT0097), and `type Name` declares a C type reached only as `ffi::Ptr<Name>` (GT0104). Parameters are scalars, `ffi::Ptr` and `Option<ffi::Ptr>`, out-parameters (`&mut` a scalar or pointer), C function pointers written `Fn(..) -> R` and filled with a named function, slices of scalars, and `#[repr(C)]` structs; results are scalars and pointers (GT0098). `std::ffi` reads and writes foreign memory by copy inside `unsafe` (GT0103), allocates from the C allocator, and holds callback context in `ffi::Handle`. Every call is foreign and unsafe whatever it does, clears and captures `errno` for `ffi::last_errno()` and `ffi::last_os_error()`, and when it blocks lets another worker start the goroutines waiting on its own; `#[link(name, search)]`, `#[link_name]`, and `#[cfg]` choose the library, symbol, and platform. A project refuses native code with `ffi = false` in `project.toml` (the default is `true`), and then a declaration in the project or a dependency is GT0102.",
+        "`unsafe extern \"C\" { fn strlen(text: [u8]) -> usize }` declares C functions, called inside `unsafe { }` (GT0097), and `type Name` declares a C type reached only as `ffi::Ptr<Name>` (GT0104). Parameters are scalars, `ffi::Ptr` and `Option<ffi::Ptr>`, out-parameters (`&mut` a scalar or pointer), C function pointers written `Fn(..) -> R` and filled with a named function, slices of scalars or structs, and `#[repr(C)]` structs and `ffi::Union`s by value; results are scalars, pointers, and structs (GT0098). `#[export]` makes a free function a C symbol (GT0113), `[lib] kind` builds a C library and header from the exports, and `[native]` compiles a package's own C sources. `std::ffi` reads and writes foreign memory by copy inside `unsafe` (GT0103), allocates from the C allocator, and holds callback context in `ffi::Handle`. Every call is foreign and unsafe whatever it does, clears and captures `errno` for `ffi::last_errno()` and `ffi::last_os_error()`, and when it blocks lets another worker start the goroutines waiting on its own; `#[link(name, search)]`, `#[link_name]`, and `#[cfg]` choose the library, symbol, and platform. A project refuses native code with `ffi = false` in `project.toml` (the default is `true`), and then a declaration in the project or a dependency is GT0102.",
     ),
     lang(
         "lang::attribute",

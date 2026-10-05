@@ -966,6 +966,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#unions-layout-and-globals" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Unions, layout, and globals
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#callbacks" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -1003,6 +1014,39 @@
     <span class="md-ellipsis">
 
         Linking a library
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#c-sources-of-your-own" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        C sources of your own
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#calling-gossamer-from-c" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Calling Gossamer from C
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#generating-declarations" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Generating declarations
 
     </span>
   </a>
@@ -2544,6 +2588,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#unions-layout-and-globals" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Unions, layout, and globals
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#callbacks" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -2581,6 +2636,39 @@
     <span class="md-ellipsis">
 
         Linking a library
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#c-sources-of-your-own" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        C sources of your own
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#calling-gossamer-from-c" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Calling Gossamer from C
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#generating-declarations" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Generating declarations
 
     </span>
   </a>
@@ -2638,7 +2726,7 @@
 
 
 <h1 id="langunsafe_extern"><code>lang::unsafe_extern</code><a class="headerlink" href="#langunsafe_extern" title="Permanent link">&para;</a></h1>
-<p><code>unsafe extern "C" { fn strlen(text: [u8]) -&gt; usize }</code> declares C functions, called inside <code>unsafe { }</code> (GT0097), and <code>type Name</code> declares a C type reached only as <code>ffi::Ptr&lt;Name&gt;</code> (GT0104). Parameters are scalars, <code>ffi::Ptr</code> and <code>Option&lt;ffi::Ptr&gt;</code>, out-parameters (<code>&amp;mut</code> a scalar or pointer), C function pointers written <code>Fn(..) -&gt; R</code> and filled with a named function, slices of scalars, and <code>#[repr(C)]</code> structs; results are scalars and pointers (GT0098). <code>std::ffi</code> reads and writes foreign memory by copy inside <code>unsafe</code> (GT0103), allocates from the C allocator, and holds callback context in <code>ffi::Handle</code>. Every call is foreign and unsafe whatever it does, captures <code>errno</code> for <code>ffi::last_errno()</code>, and when it blocks lets another worker start the goroutines waiting on its own; <code>#[link(name, search)]</code>, <code>#[link_name]</code>, and <code>#[cfg]</code> choose the library, symbol, and platform. A project refuses native code with <code>ffi = false</code> in <code>project.toml</code> (the default is <code>true</code>), and then a declaration in the project or a dependency is GT0102.</p>
+<p><code>unsafe extern "C" { fn strlen(text: [u8]) -&gt; usize }</code> declares C functions, called inside <code>unsafe { }</code> (GT0097), and <code>type Name</code> declares a C type reached only as <code>ffi::Ptr&lt;Name&gt;</code> (GT0104). Parameters are scalars, <code>ffi::Ptr</code> and <code>Option&lt;ffi::Ptr&gt;</code>, out-parameters (<code>&amp;mut</code> a scalar or pointer), C function pointers written <code>Fn(..) -&gt; R</code> and filled with a named function, slices of scalars or structs, and <code>#[repr(C)]</code> structs and <code>ffi::Union</code>s by value; results are scalars, pointers, and structs (GT0098). <code>#[export]</code> makes a free function a C symbol (GT0113), <code>[lib] kind</code> builds a C library and header from the exports, and <code>[native]</code> compiles a package's own C sources. <code>std::ffi</code> reads and writes foreign memory by copy inside <code>unsafe</code> (GT0103), allocates from the C allocator, and holds callback context in <code>ffi::Handle</code>. Every call is foreign and unsafe whatever it does, clears and captures <code>errno</code> for <code>ffi::last_errno()</code> and <code>ffi::last_os_error()</code>, and when it blocks lets another worker start the goroutines waiting on its own; <code>#[link(name, search)]</code>, <code>#[link_name]</code>, and <code>#[cfg]</code> choose the library, symbol, and platform. A project refuses native code with <code>ffi = false</code> in <code>project.toml</code> (the default is <code>true</code>), and then a declaration in the project or a dependency is GT0102.</p>
 <!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
 
 <h2 id="declaring-and-calling">Declaring and calling<a class="headerlink" href="#declaring-and-calling" title="Permanent link">&para;</a></h2>
@@ -2735,16 +2823,26 @@ the standard library's own declarations (<code>std::term</code>) are never refus
 <td>a pointer whose writes come back</td>
 </tr>
 <tr>
-<td>a <code>#[repr(C)]</code> struct of plain data</td>
-<td>a pointer to a read-only copy in C layout</td>
+<td>a <code>#[repr(C)]</code> struct of plain data, or an <code>ffi::Union</code></td>
+<td>the struct by value, as C passes it</td>
 </tr>
 <tr>
 <td><code>&amp;mut</code> such a struct</td>
-<td>a pointer whose writes come back</td>
+<td>a <code>T *</code> whose writes come back</td>
+</tr>
+<tr>
+<td><code>[S]</code> or <code>&amp;mut [S]</code> of such structs</td>
+<td>a pointer to their C-layout elements, <code>&amp;mut</code> writes copied back</td>
 </tr>
 </tbody>
 </table>
-<p>A result is a scalar, <code>()</code>, <code>Ptr&lt;T&gt;</code>, or <code>Option&lt;Ptr&lt;T&gt;&gt;</code>. A <code>Ptr</code> result that
+<p>A result is a scalar, <code>()</code>, <code>Ptr&lt;T&gt;</code>, <code>Option&lt;Ptr&lt;T&gt;&gt;</code>, or a <code>#[repr(C)]</code>
+struct. A struct crosses in registers, on the stack, or through a pointer to a
+copy, as the target's C calling convention says, so <code>poll(&amp;mut fds, ..)</code>,
+<code>writev(fd, iov, ..)</code>, and a function returning <code>struct timespec</code> are declared
+the way their C headers read. A project whose <code>gossamer-version</code> predates 0.67
+gets GT0112 for a by-value struct parameter, which used to cross as a pointer;
+<code>gos check --fix</code> rewrites it to <code>&amp;mut</code>. A <code>Ptr</code> result that
 comes back <code>NULL</code> raises GX0013, so declare <code>Option&lt;Ptr&lt;T&gt;&gt;</code> wherever the C API
 can answer <code>NULL</code>. A pointer a Gossamer argument crosses as is valid for the
 call only.</p>
@@ -2863,36 +2961,57 @@ frees with <code>ffi::free</code>. A struct the library fills (an out-struct wit
 fields) lives in C memory: allocate it with <code>ffi::alloc</code>, pass the <code>Ptr</code>, and
 <code>ffi::read</code> it back. A <code>Ptr</code> read out of C memory carries whatever address C
 stored, <code>NULL</code> included; <code>p.address() == 0</code> tests for it.</p>
+<h2 id="unions-layout-and-globals">Unions, layout, and globals<a class="headerlink" href="#unions-layout-and-globals" title="Permanent link">&para;</a></h2>
+<p><code>ffi::Union&lt;(i64, f64)&gt;</code> is a C union of the listed members: <code>Union::new(v)</code> or
+<code>Union::zeroed()</code> builds one, <code>u.get::&lt;f64&gt;()</code> reads it as a member, and
+<code>u.set(v)</code> writes one. <code>ffi::size_of::&lt;T&gt;()</code>, <code>align_of::&lt;T&gt;()</code>, and
+<code>offset_of::&lt;T&gt;("field.path")</code> answer C layout while compiling (GT0109 for a
+path naming no field). A C global is declared <code>static NAME: T</code> in the extern
+block and reached through <code>ffi::addr_of(NAME)</code>:</p>
+<!-- fragment -->
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="k">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">opterr</span>: <span class="nc">ffi</span>::<span class="n">c_int</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="p">}</span>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ffi</span>::<span class="n">write</span><span class="p">(</span><span class="n">ffi</span>::<span class="n">addr_of</span><span class="p">(</span><span class="n">opterr</span><span class="p">),</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p><code>unsafe { ffi::View::new(p, len) }</code> reads and writes C memory in place, with
+<code>v[i]</code>, <code>v.set(i, x)</code>, <code>v.slice(lo, hi)</code>, <code>v.fill(x)</code>, <code>v.copy_from(xs)</code>, and
+<code>v.to_vec()</code>, each access bounds-checked; <code>ffi::atomic_load</code>, <code>atomic_store</code>,
+<code>atomic_swap</code>, <code>atomic_compare_exchange</code>, and <code>atomic_fetch_add</code> and its
+siblings change a shared 32- or 64-bit integer atomically.</p>
 <h2 id="callbacks">Callbacks<a class="headerlink" href="#callbacks" title="Permanent link">&para;</a></h2>
-<p>A C function pointer parameter is written <code>Fn(A..) -&gt; R</code> with scalar and
-pointer types. Pass a top-level function of exactly that signature by name;
+<p>A C function pointer parameter is written <code>Fn(A..) -&gt; R</code> with scalar, pointer,
+and <code>#[repr(C)]</code> struct types. Pass a top-level function of exactly that signature by name;
 state it needs travels through the library's <code>void *</code> argument as an
 <code>ffi::Handle</code>:</p>
-<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">ffi</span>
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">ffi</span>::<span class="n">Ptr</span>
-<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>
-<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="k">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">qsort</span><span class="p">(</span><span class="n">base</span>: <span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="p">[</span><span class="kt">i32</span><span class="p">],</span><span class="w"> </span><span class="n">count</span>: <span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">size</span>: <span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">compare</span>: <span class="nb">Fn</span><span class="p">(</span><span class="n">Ptr</span><span class="o">&lt;</span><span class="n">ffi</span>::<span class="n">c_void</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">Ptr</span><span class="o">&lt;</span><span class="n">ffi</span>::<span class="n">c_void</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">ffi</span>::<span class="n">c_int</span><span class="p">)</span>
-<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="p">}</span>
-<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>
-<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="k">fn</span> <span class="nf">ascending</span><span class="p">(</span><span class="n">a</span>: <span class="nc">Ptr</span><span class="o">&lt;</span><span class="n">ffi</span>::<span class="n">c_void</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">b</span>: <span class="nc">Ptr</span><span class="o">&lt;</span><span class="n">ffi</span>::<span class="n">c_void</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">ffi</span>::<span class="n">c_int</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">x</span>: <span class="kt">i32</span> <span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ffi</span>::<span class="n">read</span><span class="p">(</span><span class="n">a</span><span class="p">.</span><span class="n">cast</span><span class="p">())</span><span class="w"> </span><span class="p">}</span>
-<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">y</span>: <span class="kt">i32</span> <span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ffi</span>::<span class="n">read</span><span class="p">(</span><span class="n">b</span><span class="p">.</span><span class="n">cast</span><span class="p">())</span><span class="w"> </span><span class="p">}</span>
-<a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">-</span><span class="mi">1</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">}</span>
-<a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a><span class="p">}</span>
-<a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a>
-<a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">xs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="cp">#[5i32, 1, 4]</span>
-<a id="__codelineno-7-16" name="__codelineno-7-16" href="#__codelineno-7-16"></a><span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">qsort</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">xs</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span><span class="w"> </span><span class="n">ascending</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
-<a id="__codelineno-7-17" name="__codelineno-7-17" href="#__codelineno-7-17"></a><span class="w">    </span><span class="n">println</span><span class="p">(</span><span class="n">xs</span><span class="p">)</span><span class="w">  </span><span class="c1">// #[1, 4, 5]</span>
-<a id="__codelineno-7-18" name="__codelineno-7-18" href="#__codelineno-7-18"></a><span class="p">}</span>
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">ffi</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">ffi</span>::<span class="n">Ptr</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="k">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">qsort</span><span class="p">(</span><span class="n">base</span>: <span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="p">[</span><span class="kt">i32</span><span class="p">],</span><span class="w"> </span><span class="n">count</span>: <span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">size</span>: <span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">compare</span>: <span class="nb">Fn</span><span class="p">(</span><span class="n">Ptr</span><span class="o">&lt;</span><span class="n">ffi</span>::<span class="n">c_void</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">Ptr</span><span class="o">&lt;</span><span class="n">ffi</span>::<span class="n">c_void</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">ffi</span>::<span class="n">c_int</span><span class="p">)</span>
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="p">}</span>
+<a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a>
+<a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a><span class="k">fn</span> <span class="nf">ascending</span><span class="p">(</span><span class="n">a</span>: <span class="nc">Ptr</span><span class="o">&lt;</span><span class="n">ffi</span>::<span class="n">c_void</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">b</span>: <span class="nc">Ptr</span><span class="o">&lt;</span><span class="n">ffi</span>::<span class="n">c_void</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">ffi</span>::<span class="n">c_int</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">x</span>: <span class="kt">i32</span> <span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ffi</span>::<span class="n">read</span><span class="p">(</span><span class="n">a</span><span class="p">.</span><span class="n">cast</span><span class="p">())</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">y</span>: <span class="kt">i32</span> <span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ffi</span>::<span class="n">read</span><span class="p">(</span><span class="n">b</span><span class="p">.</span><span class="n">cast</span><span class="p">())</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">-</span><span class="mi">1</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a><span class="p">}</span>
+<a id="__codelineno-8-13" name="__codelineno-8-13" href="#__codelineno-8-13"></a>
+<a id="__codelineno-8-14" name="__codelineno-8-14" href="#__codelineno-8-14"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-8-15" name="__codelineno-8-15" href="#__codelineno-8-15"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">xs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="cp">#[5i32, 1, 4]</span>
+<a id="__codelineno-8-16" name="__codelineno-8-16" href="#__codelineno-8-16"></a><span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">qsort</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">xs</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span><span class="w"> </span><span class="n">ascending</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-8-17" name="__codelineno-8-17" href="#__codelineno-8-17"></a><span class="w">    </span><span class="n">println</span><span class="p">(</span><span class="n">xs</span><span class="p">)</span><span class="w">  </span><span class="c1">// #[1, 4, 5]</span>
+<a id="__codelineno-8-18" name="__codelineno-8-18" href="#__codelineno-8-18"></a><span class="p">}</span>
 </code></pre></div>
 <ul>
-<li>A callback runs on the thread whose foreign call invokes it: during that call
-  (<code>qsort</code>, <code>sqlite3_exec</code>), or during a later call that runs one the library
-  stored (<code>glfwPollEvents</code>, <code>gtk_main</code>, <code>DispatchMessage</code>). A callback a library
-  runs on a thread of its own ends the program with GX0015, without running.</li>
-<li>A panic inside a callback is held until the foreign call that ran it returns,
+<li>A callback runs on the thread that invokes it: during a foreign call
+  (<code>qsort</code>, <code>sqlite3_exec</code>), during a later call that runs one the library
+  stored (<code>glfwPollEvents</code>, <code>gtk_main</code>, <code>DispatchMessage</code>), or on a thread the
+  library started (an audio callback, a worker pool). On a library's thread,
+  blocking calls block that thread and a panic ends the program with its
+  report.</li>
+<li>A panic inside a callback a foreign call ran is held until that call returns,
   then raised there; it never unwinds through C frames. Meanwhile the callback
   answers zero.</li>
 <li>A callback may allocate, call foreign functions, and block. It spawns only
@@ -2936,50 +3055,91 @@ handle does not synchronize: goroutines that change one value guard it with
 <p>A native function a library hands back (<code>dlsym</code>, <code>GetProcAddress</code>) becomes a
 callable with its C signature:</p>
 <!-- fragment -->
-<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="kd">let</span><span class="w"> </span><span class="n">doubler</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ffi</span>::<span class="n">fn_from_ptr</span>::<span class="o">&lt;</span><span class="nb">Fn</span><span class="p">(</span><span class="n">ffi</span>::<span class="n">c_int</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">ffi</span>::<span class="n">c_int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">address</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
-<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="n">println</span><span class="p">(</span><span class="n">doubler</span><span class="p">(</span><span class="mi">21</span><span class="p">))</span>
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="kd">let</span><span class="w"> </span><span class="n">doubler</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ffi</span>::<span class="n">fn_from_ptr</span>::<span class="o">&lt;</span><span class="nb">Fn</span><span class="p">(</span><span class="n">ffi</span>::<span class="n">c_int</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">ffi</span>::<span class="n">c_int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">address</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="n">println</span><span class="p">(</span><span class="n">doubler</span><span class="p">(</span><span class="mi">21</span><span class="p">))</span>
 </code></pre></div>
+<p><code>ffi::fn_addr(f)</code> goes the other way: the C entry of the top-level function
+<code>f</code>, as a <code>Ptr&lt;c_void&gt;</code> for the function-pointer field of an ops table or a
+registration array (<code>luaL_Reg</code>, <code>sqlite3_module</code>). <code>Ptr::null()</code> fills a field
+C leaves empty.</p>
 <h2 id="linking-a-library">Linking a library<a class="headerlink" href="#linking-a-library" title="Permanent link">&para;</a></h2>
 <p><code>#[link(name = "z")]</code> links <code>libz</code> (on Windows <code>z.lib</code>, loading <code>z.dll</code>). A
 library vendored with the project names its directory, relative to the root of
 the package that declares it:</p>
 <!-- fragment -->
-<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="cp">#[link(name = </span><span class="s">&quot;engine&quot;</span><span class="cp">, search = </span><span class="s">&quot;native&quot;</span><span class="cp">)]</span>
-<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="k">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">engine_version</span><span class="p">()</span><span class="w"> </span>-&gt; <span class="nc">ffi</span>::<span class="n">c_int</span>
-<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="p">}</span>
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="cp">#[link(name = </span><span class="s">&quot;engine&quot;</span><span class="cp">, search = </span><span class="s">&quot;native&quot;</span><span class="cp">)]</span>
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="k">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">engine_version</span><span class="p">()</span><span class="w"> </span>-&gt; <span class="nc">ffi</span>::<span class="n">c_int</span>
+<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="p">}</span>
 </code></pre></div>
 <p><code>gos run</code> loads it from there, and <code>gos build</code> links it from there; a built
 program finds a shared library the way the platform does (<code>LD_LIBRARY_PATH</code>,
 <code>DYLD_LIBRARY_PATH</code>, or beside the <code>.exe</code>). On Linux, a release build of a
 program that links a library of its own links dynamically, since a static musl
 binary cannot load the platform's glibc libraries.</p>
+<h2 id="c-sources-of-your-own">C sources of your own<a class="headerlink" href="#c-sources-of-your-own" title="Permanent link">&para;</a></h2>
+<p>A package compiles C it carries with a <code>[native]</code> table in <code>project.toml</code>:</p>
+<div class="language-toml highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="k">[native]</span>
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="n">sources</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;csrc/shim.c&quot;</span><span class="p">]</span>
+<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="n">include</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;csrc/include&quot;</span><span class="p">]</span>
+<a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a><span class="n">defines</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">LEVEL</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">&quot;2&quot;</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>Declarations without <code>#[link]</code> reach its functions, under <code>gos run</code> and in a
+built binary alike, and a dependency's sources come with it. The compiler is
+<code>GOS_CC</code>, then <code>CC</code>, then the platform's (<code>gos env</code> shows which); objects are
+cached under <code>.gos-cache/native/</code> and rebuilt when a source, a header it
+includes, or the compiler changes. A fixed-arity shim here is how a program
+calls a variadic C function.</p>
+<h2 id="calling-gossamer-from-c">Calling Gossamer from C<a class="headerlink" href="#calling-gossamer-from-c" title="Permanent link">&para;</a></h2>
+<p><code>#[export]</code> makes a free function a C symbol, under its own name or the one
+given:</p>
+<!-- fragment -->
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="cp">#[export(</span><span class="s">&quot;calc_add&quot;</span><span class="cp">)]</span>
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="k">fn</span> <span class="nf">add</span><span class="p">(</span><span class="n">a</span>: <span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="n">b</span>: <span class="kt">i64</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i64</span> <span class="p">{</span>
+<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="w">    </span><span class="n">a</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">b</span>
+<a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a><span class="p">}</span>
+</code></pre></div>
+<p>With <code>[lib] kind = ["staticlib", "cdylib"]</code> in <code>project.toml</code>, <code>gos build</code>
+writes <code>lib&lt;name&gt;.a</code>, the shared library, and <code>include/&lt;name&gt;.h</code>. C may call an
+export from any of its threads. A host that registered <code>runtime::at_exit</code>
+hooks calls <code>&lt;name&gt;_shutdown()</code> before it exits. An export's types follow the
+callback rules; a method, a generic or <code>comptime</code> function, <code>main</code>, or a
+malformed or repeated symbol is GT0113.</p>
+<h2 id="generating-declarations">Generating declarations<a class="headerlink" href="#generating-declarations" title="Permanent link">&para;</a></h2>
+<p><code>gos bindgen --c include/lib.h --link lib -o src/lib_sys.gos</code> runs <code>clang</code>
+over a header and writes the extern block, structs, unions, constants, and
+callback types for it. Pointers to scalars become slices (<code>const char *</code> is
+<code>[u8]</code>), other pointers <code>Option&lt;ffi::Ptr&lt;T&gt;&gt;</code>, and <code>--target</code>, repeated, writes
+<code>#[cfg]</code> where targets differ.</p>
 <h2 id="not-supported">Not supported<a class="headerlink" href="#not-supported" title="Permanent link">&para;</a></h2>
-<p>Pointer arithmetic (<code>read_at</code> and <code>write_at</code> index arrays), a separate
+<p>Pointer arithmetic (<code>read_at</code>, <code>write_at</code>, and <code>View</code> index arrays), a separate
 <code>const T *</code> type, the address of a Gossamer value beyond one call, closures as
-C function pointers, ownership annotations, unions and bitfields (a byte-array
-field read with <code>read_at</code> models them), variadic functions (a fixed-arity C
-shim calls them), struct results by value, Gossamer code on a thread a library
-starts, and C++.</p>
+C function pointers, ownership annotations, bitfields (an integer field with
+shifts models them), variadic functions (a fixed-arity shim in <code>[native]</code>
+sources calls them), and C++.</p>
 <h2 id="errno-and-blocking">errno and blocking<a class="headerlink" href="#errno-and-blocking" title="Permanent link">&para;</a></h2>
-<p>Every call captures <code>errno</code> (on Windows, <code>GetLastError</code>) before anything else
-runs, into the calling goroutine's own slot:</p>
-<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">ffi</span>
-<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>
-<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="cp">#[cfg(unix)]</span>
-<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="k">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">close</span><span class="p">(</span><span class="n">fd</span>: <span class="kt">i32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i32</span>
-<a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a><span class="p">}</span>
-<a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a>
-<a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="cp">#[cfg(unix)]</span>
-<a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">close</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a><span class="w">        </span><span class="n">println</span><span class="p">(</span><span class="s">f&quot;errno </span><span class="si">{</span><span class="n">ffi</span>::<span class="n">last_errno</span><span class="p">()</span><span class="si">}</span><span class="s">&quot;</span><span class="p">)</span><span class="w">  </span><span class="c1">// errno 9</span>
-<a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a><span class="w">    </span><span class="p">}</span>
-<a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a><span class="p">}</span>
-<a id="__codelineno-10-14" name="__codelineno-10-14" href="#__codelineno-10-14"></a>
-<a id="__codelineno-10-15" name="__codelineno-10-15" href="#__codelineno-10-15"></a><span class="cp">#[cfg(windows)]</span>
-<a id="__codelineno-10-16" name="__codelineno-10-16" href="#__codelineno-10-16"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span>
+<p>Every call starts with <code>errno</code> cleared (on Windows, the thread's last error
+too) and captures both before anything else runs, into the calling
+goroutine's own slot. <code>ffi::last_errno()</code> reads the C <code>errno</code>, so a call that
+succeeds without setting it answers 0; <code>ffi::last_os_error()</code> reads the
+operating system's code, which is <code>GetLastError</code> on Windows and <code>errno</code>
+elsewhere:</p>
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">ffi</span>
+<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>
+<a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a><span class="cp">#[cfg(unix)]</span>
+<a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a><span class="k">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">close</span><span class="p">(</span><span class="n">fd</span>: <span class="kt">i32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i32</span>
+<a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a><span class="p">}</span>
+<a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a>
+<a id="__codelineno-13-8" name="__codelineno-13-8" href="#__codelineno-13-8"></a><span class="cp">#[cfg(unix)]</span>
+<a id="__codelineno-13-9" name="__codelineno-13-9" href="#__codelineno-13-9"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-13-10" name="__codelineno-13-10" href="#__codelineno-13-10"></a><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">close</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-13-11" name="__codelineno-13-11" href="#__codelineno-13-11"></a><span class="w">        </span><span class="n">println</span><span class="p">(</span><span class="s">f&quot;errno </span><span class="si">{</span><span class="n">ffi</span>::<span class="n">last_errno</span><span class="p">()</span><span class="si">}</span><span class="s">&quot;</span><span class="p">)</span><span class="w">  </span><span class="c1">// errno 9</span>
+<a id="__codelineno-13-12" name="__codelineno-13-12" href="#__codelineno-13-12"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-13-13" name="__codelineno-13-13" href="#__codelineno-13-13"></a><span class="p">}</span>
+<a id="__codelineno-13-14" name="__codelineno-13-14" href="#__codelineno-13-14"></a>
+<a id="__codelineno-13-15" name="__codelineno-13-15" href="#__codelineno-13-15"></a><span class="cp">#[cfg(windows)]</span>
+<a id="__codelineno-13-16" name="__codelineno-13-16" href="#__codelineno-13-16"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span>
 </code></pre></div>
 <p>A call that blocks needs no annotation. Its worker is marked as inside a system
 call, and once the call has lasted a millisecond while goroutines wait, another
@@ -3003,16 +3163,21 @@ worker starts to run every goroutine that has not yet started.</p>
 <li>A callback type with a parameter or result that has no C form is <code>GT0107</code>.</li>
 <li>A closure, or a function of another signature, passed as a callback is
   <code>GT0108</code>.</li>
+<li>A layout query naming no field is <code>GT0109</code>; a union member it does not list,
+  without a C layout, or listed twice is <code>GT0110</code>; a foreign static named other
+  than through <code>ffi::addr_of</code> is <code>GT0111</code>.</li>
+<li>A by-value struct parameter in a project older than 0.67 is <code>GT0112</code>.</li>
+<li>An <code>#[export]</code> the C ABI cannot carry is <code>GT0113</code>.</li>
 <li>Any other <code>extern</code> form is <code>GP0016</code>.</li>
 </ul>
 <!-- compile_fail GT0097 -->
-<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="k">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">abs</span><span class="p">(</span><span class="n">x</span>: <span class="kt">i32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i32</span>
-<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="p">}</span>
-<a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>
-<a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a><span class="w">    </span><span class="n">println</span><span class="p">(</span><span class="n">abs</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">))</span>
-<a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a><span class="p">}</span>
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="k">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">abs</span><span class="p">(</span><span class="n">x</span>: <span class="kt">i32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i32</span>
+<a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a><span class="p">}</span>
+<a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a>
+<a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a><span class="w">    </span><span class="n">println</span><span class="p">(</span><span class="n">abs</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">))</span>
+<a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a><span class="p">}</span>
 </code></pre></div>
 
 

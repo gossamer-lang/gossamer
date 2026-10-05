@@ -1,7 +1,9 @@
 #![allow(missing_docs)]
 
 //! The C boundary end to end: `unsafe extern` declarations, `ffi::Ptr` and
-//! foreign types, out-parameters, foreign memory, callbacks, handles, the
+//! foreign types, out-parameters, foreign memory, callbacks, handles,
+//! `#[export]` functions and the libraries built from them, `[native]` C
+//! sources, the
 //! `ffi = false` refusal, the diagnostics, and real C libraries, each run on
 //! the bytecode VM, the JIT, and a native build against a C fixture library
 //! the suite compiles.
@@ -10,16 +12,26 @@ mod common;
 
 #[path = "ffi/acceptance.rs"]
 mod acceptance;
+#[path = "ffi/byvalue.rs"]
+mod byvalue;
 #[path = "ffi/callbacks.rs"]
 mod callbacks;
 #[path = "ffi/compile_fail.rs"]
 mod compile_fail;
 #[path = "ffi/errno.rs"]
 mod errno;
+#[path = "ffi/exports.rs"]
+mod exports;
+#[path = "ffi/fnptrs.rs"]
+mod fnptrs;
 #[path = "ffi/handles.rs"]
 mod handles;
+#[path = "ffi/layout.rs"]
+mod layout;
 #[path = "ffi/memory.rs"]
 mod memory;
+#[path = "ffi/native.rs"]
+mod native;
 #[path = "ffi/opaque.rs"]
 mod opaque;
 #[path = "ffi/opt_in.rs"]
@@ -28,5 +40,9 @@ mod opt_in;
 mod out_params;
 #[path = "ffi/scheduling.rs"]
 mod scheduling;
+#[path = "ffi/slices.rs"]
+mod slices;
 #[path = "ffi/support.rs"]
 mod support;
+#[path = "ffi/views.rs"]
+mod views;

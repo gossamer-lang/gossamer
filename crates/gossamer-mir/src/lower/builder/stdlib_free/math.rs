@@ -25,6 +25,14 @@ impl<'a> Builder<'a> {
                 "gos_rt_f32_from_bits",
                 self.tcx.float_ty(gossamer_types::FloatTy::F32),
             ),
+            "f64::mul_add" => (
+                "gos_rt_f64_mul_add",
+                self.tcx.float_ty(gossamer_types::FloatTy::F64),
+            ),
+            "f32::mul_add" => (
+                "gos_rt_f32_mul_add",
+                self.tcx.float_ty(gossamer_types::FloatTy::F32),
+            ),
             // 0.10.0 - math::bits::* scalar primitives previously
             // VM-only. The carrying add/sub/mul/div (tuple returns)
             // stay on the VM until aggregate-return ABI lands.

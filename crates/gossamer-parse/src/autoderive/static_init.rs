@@ -25,18 +25,6 @@ pub(crate) fn initialize_heap_mut_statics(sf: &mut SourceFile) {
         calls.push(path);
     }
     sf.next_node_id = next_id;
-    let Some(entry) = sf.items.iter_mut().find_map(|item| match &mut item.kind {
-        ItemKind::Fn(decl) if decl.name.name == "main" => match decl.body.as_deref_mut() {
-            Some(Expr {
-                kind: ExprKind::Block(block),
-                ..
-            }) => Some(block),
-            _ => None,
-        },
-        _ => None,
-    }) else {
-        return;
-    };
     let mut next = sf.next_node_id;
     let mut id = || {
         let n = NodeId::from_raw(next);
@@ -79,9 +67,76 @@ pub(crate) fn initialize_heap_mut_statics(sf: &mut SourceFile) {
             },
         });
     }
-    prologue.append(&mut entry.stmts);
-    entry.stmts = prologue;
+    // The builds run in one function: `main` calls it first, and a library
+    // runs it before its first exported function does.
+    let init_name = STATIC_INIT_FN.to_string();
+    add_init_fn(&mut sf.items, &init_name, prologue, &mut next);
+    let call = module_init_call_stmt(std::slice::from_ref(&init_name), &mut || {
+        let n = NodeId::from_raw(next);
+        next = next.saturating_add(1);
+        n
+    });
     sf.next_node_id = next;
+    if let Some(entry) = sf.items.iter_mut().find_map(|item| match &mut item.kind {
+        ItemKind::Fn(decl) if decl.name.name == "main" => match decl.body.as_deref_mut() {
+            Some(Expr {
+                kind: ExprKind::Block(block),
+                ..
+            }) => Some(block),
+            _ => None,
+        },
+        _ => None,
+    }) {
+        entry.stmts.insert(0, call);
+    }
+}
+
+pub use gossamer_ast::STATIC_INIT_FN;
+
+/// Appends `pub fn <name>() { <stmts> }` at the unit root.
+fn add_init_fn(
+    items: &mut Vec<Item>,
+    name: &str,
+    stmts: Vec<gossamer_ast::stmt::Stmt>,
+    next: &mut u32,
+) {
+    let mut id = || {
+        let n = NodeId::from_raw(*next);
+        *next = next.saturating_add(1);
+        n
+    };
+    let span = stmts.first().map_or_else(Span::default, |stmt| stmt.span);
+    let body = Expr {
+        id: id(),
+        span,
+        kind: ExprKind::Block(gossamer_ast::expr::Block {
+            stmts,
+            tail: None,
+            synthetic: true,
+            kind: gossamer_ast::BlockKind::Plain,
+        }),
+    };
+    let decl = gossamer_ast::items::FnDecl {
+        attrs: gossamer_ast::Attrs::default(),
+        span,
+        is_unsafe: false,
+        is_comptime: false,
+        visibility: gossamer_ast::Visibility::Public,
+        name: Ident::new(name.to_string()),
+        generics: gossamer_ast::Generics::default(),
+        params: Vec::new(),
+        ret: None,
+        where_clause: gossamer_ast::WhereClause::default(),
+        body: Some(Box::new(body)),
+        extern_abi: None,
+    };
+    items.push(Item {
+        id: id(),
+        span,
+        attrs: gossamer_ast::Attrs::default(),
+        visibility: gossamer_ast::Visibility::Public,
+        kind: ItemKind::Fn(decl),
+    });
 }
 
 /// Collects the module-qualified path and initializer of every `static mut`
@@ -93,6 +148,9 @@ fn collect_heap_mut_statics(
 ) {
     for item in items {
         match &item.kind {
+            // A foreign static is a C global; its placeholder initializer
+            // never runs.
+            ItemKind::Static(_) if item.attrs.has_word(gossamer_ast::FOREIGN_STATIC_ATTR) => {}
             ItemKind::Static(decl)
                 if decl.mutability == gossamer_ast::common::Mutability::Mutable && !scalar_static_ty(&decl.ty) =>
             {

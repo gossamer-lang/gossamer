@@ -88,7 +88,9 @@ pub fn ffi_leave_capture() {
     // First, before anything that could make a system call of its own.
     let errors = native_errors::capture();
     FFI_ERRNO.with(|cell| cell.set(errors));
-    CALL_GUARDS.with(|guards| drop(guards.borrow_mut().pop()));
+    CALL_GUARDS.with(|guards| {
+        guards.borrow_mut().pop();
+    });
 }
 
 /// The calling thread's C `errno` and operating-system error code.
@@ -172,47 +174,66 @@ pub fn in_foreign_call() -> bool {
     CALL_GUARDS.with(|guards| !guards.borrow().is_empty())
 }
 
-/// Ends the program because native code called back on a thread that is not
-/// inside one of the program's foreign calls: a thread the library started,
-/// or a callback kept past the call that registered it on another thread.
-pub fn foreign_thread_callback(callback: &str) -> ! {
-    super::panic::fatal_program_fault(
-        "GX0015",
-        "",
-        &format!(
-            "native code called back into `{callback}` on a thread that is not running one of \
-             the program's foreign calls; a callback runs only on the thread whose foreign \
-             call invokes it"
-        ),
-        false,
-    )
+/// Readies a thread the program did not start to run Gossamer code: the
+/// native fault handler and the recursion guard, once per thread.
+pub fn attach_foreign_thread() {
+    thread_local! {
+        static ATTACHED: Cell<bool> = const { Cell::new(false) };
+    }
+    if ATTACHED.with(|attached| attached.replace(true)) {
+        return;
+    }
+    crate::stack_guard::install_stack_guard();
+    let remaining =
+        crate::stack_guard::remaining_stack_bytes().unwrap_or(gossamer_coro::DEFAULT_STACK_BYTES);
+    gossamer_coro::arm_stack_guard(remaining.saturating_sub(gossamer_coro::STACK_GUARD_MARGIN));
+}
+
+/// Ends the program with the fault a callback raised on a thread outside
+/// the program's foreign calls, where no Gossamer frame can take it: the
+/// report it would have printed, and exit code 101.
+pub fn foreign_thread_fault(code: &str, prefix: &str, text: &str, trace: &str) -> ! {
+    if !trace.is_empty() {
+        eprint!("{trace}");
+    }
+    super::panic::fatal_program_fault(code, prefix, text, false)
 }
 
 /// The C-ABI entry of a compiled callback: runs the adapter `code` over the
 /// argument words at `words` and answers its result word. A fault the
 /// adapter raises is held and raised again when the foreign call that ran
-/// the callback returns; until then the callback answers zero.
+/// the callback returns; until then the callback answers zero. On a thread
+/// outside the program's foreign calls the callback runs on that thread,
+/// and a fault ends the program.
 ///
 /// # Safety
 ///
 /// `code` is a compiled adapter of the shape `fn(i64) -> i64`, `words`
-/// holds the words it reads, and `name` is a NUL-terminated name.
+/// holds the words it reads, and `_name` is the callback's NUL-terminated
+/// name, which the entry carries for diagnostics.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_ffi_callback_run(
     code: *const u8,
     words: *const u64,
-    name: *const u8,
+    _name: *const u8,
 ) -> u64 {
-    if !in_foreign_call() {
-        // HOST-CSTRING: `name` is a NUL-terminated label the backend emits
-        // as constant data beside the callback's entry, not a `String`.
-        // SAFETY: `name` is NUL-terminated (contract).
-        let name = unsafe { std::ffi::CStr::from_ptr(name.cast()) };
-        foreign_thread_callback(&name.to_string_lossy());
-    }
     type Adapter = unsafe extern "C-unwind" fn(i64) -> i64;
     // SAFETY: `code` is an adapter of this shape (contract).
     let adapter: Adapter = unsafe { std::mem::transmute::<*const u8, Adapter>(code) };
+    // A thread the library started (or one running a callback after the
+    // call that registered it returned) runs the callback itself, blocking
+    // as an `Isolation::Thread` child does; a fault there has no foreign call
+    // to resume in, so it ends the program.
+    if !in_foreign_call() {
+        attach_foreign_thread();
+        // SAFETY: the adapter reads only the words the shim stored.
+        return match super::par::run_deferred(|| unsafe { adapter(words as i64) }) {
+            Ok(result) => result as u64,
+            Err(fault) => {
+                foreign_thread_fault(&fault.code, &fault.prefix, &fault.text, &fault.trace)
+            }
+        };
+    }
     // SAFETY: the adapter reads only the words the shim stored.
     match super::par::run_deferred(|| unsafe { adapter(words as i64) }) {
         Ok(result) => result as u64,
@@ -226,6 +247,90 @@ pub unsafe extern "C" fn gos_rt_ffi_callback_run(
             0
         }
     }
+}
+
+/// Readies the runtime inside a library whose host owns `main`, once per
+/// process: the arguments `os::args` answers and the heap statics `init`
+/// builds. A program with its own `main` has done both, so its exported
+/// entries skip this. The host's threads stay outside the program's
+/// deadlock accounting, which only a program with `main` enters.
+fn start_library(init: *const u8) {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    if crate::sched_global::program_entered() {
+        return;
+    }
+    STARTED.call_once(|| {
+        attach_foreign_thread();
+        // The argument strings live for the process, as a C `argv` does.
+        let argv: Vec<*const std::ffi::c_char> = std::env::args_os()
+            .filter_map(|arg| std::ffi::CString::new(arg.as_encoded_bytes()).ok())
+            .map(|arg| arg.into_raw().cast_const())
+            .collect();
+        let argc = std::ffi::c_int::try_from(argv.len()).unwrap_or(std::ffi::c_int::MAX);
+        let argv = Box::leak(argv.into_boxed_slice());
+        // SAFETY: `argv` holds `argc` NUL-terminated strings leaked above.
+        unsafe { super::args::gos_rt_set_args(argc, argv.as_ptr()) };
+        if init.is_null() {
+            return;
+        }
+        type Init = unsafe extern "C-unwind" fn();
+        // SAFETY: a non-null `init` is the program's compiled static-init
+        // function, which takes nothing and answers nothing (contract).
+        let init: Init = unsafe { std::mem::transmute::<*const u8, Init>(init) };
+        // SAFETY: as above.
+        if let Err(fault) = super::par::run_deferred(|| unsafe { init() }) {
+            foreign_thread_fault(&fault.code, &fault.prefix, &fault.text, &fault.trace);
+        }
+    });
+}
+
+/// `<library>_shutdown()`: what a library's host calls before it exits, to
+/// run the hooks `runtime::at_exit` registered and write out what was
+/// printed. A process's own exit cannot run them, since the thread state
+/// Gossamer code needs is gone by then. A hook that panics is reported and
+/// the rest still run.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_library_shutdown() {
+    super::print::gos_rt_flush_stdout();
+    attach_foreign_thread();
+    loop {
+        match super::par::run_deferred(super::exit_hooks::run_exit_hooks) {
+            Ok(()) => break,
+            Err(fault) => {
+                if !fault.trace.is_empty() {
+                    eprint!("{}", fault.trace);
+                }
+                eprintln!("{}{}", fault.prefix, fault.text);
+            }
+        }
+    }
+    super::print::gos_rt_flush_stdout();
+}
+
+/// The C-ABI entry of an `#[export]` function: readies the runtime the
+/// first time a library is entered, runs the adapter `code` over the
+/// argument words at `words` as [`gos_rt_ffi_callback_run`] does, and
+/// flushes what it printed, since the host may exit without the runtime's
+/// shutdown.
+///
+/// # Safety
+///
+/// As for [`gos_rt_ffi_callback_run`]; `init` is null or the program's
+/// compiled static-init function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_ffi_export_run(
+    code: *const u8,
+    words: *const u64,
+    name: *const u8,
+    init: *const u8,
+) -> u64 {
+    start_library(init);
+    // SAFETY: forwarded under the same contract.
+    let result = unsafe { gos_rt_ffi_callback_run(code, words, name) };
+    if !in_foreign_call() {
+        super::print::gos_rt_flush_stdout();
+    }
+    result
 }
 
 /// The word at index `index` of the callback argument words at `base`.
@@ -270,6 +375,307 @@ pub unsafe extern "C" fn gos_rt_ffi_read(dst: *mut u8, src: u64, len: u64) {
     }
     // SAFETY: both ranges are valid for `len` bytes (contract).
     unsafe { std::ptr::copy(src as *const u8, dst, len as usize) };
+}
+
+/// The integer of C class `class` at the foreign address `addr`, sign- or
+/// zero-extended by its class (`B` reads as 0 or 1).
+///
+/// # Safety
+///
+/// `addr` addresses a readable value of the class.
+#[must_use]
+pub unsafe fn load_int(addr: u64, class: i64) -> i64 {
+    let (width, signed, _) = class_shape(class);
+    let mut bytes = [0u8; 8];
+    // SAFETY: `addr` holds `width` readable bytes (contract).
+    unsafe { std::ptr::copy_nonoverlapping(addr as *const u8, bytes.as_mut_ptr(), width) };
+    if signed && bytes[width - 1] & 0x80 != 0 {
+        bytes[width..].fill(0xff);
+    }
+    let value = i64::from_le_bytes(bytes);
+    if u8::try_from(class).ok().map(char::from) == Some('B') {
+        i64::from(value & 0xff != 0)
+    } else {
+        value
+    }
+}
+
+/// The float of C class `class` (`f` or `d`) at `addr`, as a double.
+///
+/// # Safety
+///
+/// `addr` addresses a readable value of the class.
+#[must_use]
+pub unsafe fn load_float(addr: u64, class: i64) -> f64 {
+    let (width, _, _) = class_shape(class);
+    if width == 4 {
+        // SAFETY: four readable bytes (contract).
+        f64::from(unsafe { (addr as *const f32).read_unaligned() })
+    } else {
+        // SAFETY: eight readable bytes (contract).
+        unsafe { (addr as *const f64).read_unaligned() }
+    }
+}
+
+/// Stores `value` at `addr` as a C integer of class `class`.
+///
+/// # Safety
+///
+/// `addr` addresses writable room for a value of the class.
+pub unsafe fn store_int(addr: u64, class: i64, value: i64) {
+    let (width, _, _) = class_shape(class);
+    let bytes = value.to_le_bytes();
+    // SAFETY: `addr` holds `width` writable bytes (contract).
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), addr as *mut u8, width) };
+}
+
+/// Stores `value` at `addr` as a C float of class `class` (`f` or `d`).
+///
+/// # Safety
+///
+/// `addr` addresses writable room for a value of the class.
+pub unsafe fn store_float(addr: u64, class: i64, value: f64) {
+    let (width, _, _) = class_shape(class);
+    if width == 4 {
+        // SAFETY: four writable bytes (contract).
+        unsafe { (addr as *mut f32).write_unaligned(value as f32) };
+    } else {
+        // SAFETY: eight writable bytes (contract).
+        unsafe { (addr as *mut f64).write_unaligned(value) };
+    }
+}
+
+/// [`load_int`] for compiled code: `ffi::read` of an integer and
+/// `ffi::View::get`.
+///
+/// # Safety
+///
+/// As [`load_int`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_ffi_load_int(addr: u64, class: i64) -> i64 {
+    // SAFETY: forwarded contract.
+    unsafe { load_int(addr, class) }
+}
+
+/// [`load_float`] for compiled code.
+///
+/// # Safety
+///
+/// As [`load_float`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_ffi_load_float(addr: u64, class: i64) -> f64 {
+    // SAFETY: forwarded contract.
+    unsafe { load_float(addr, class) }
+}
+
+/// [`store_int`] for compiled code.
+///
+/// # Safety
+///
+/// As [`store_int`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_ffi_store_int(addr: u64, class: i64, value: i64) {
+    // SAFETY: forwarded contract.
+    unsafe { store_int(addr, class, value) }
+}
+
+/// [`store_float`] for compiled code.
+///
+/// # Safety
+///
+/// As [`store_float`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_ffi_store_float(addr: u64, class: i64, value: f64) {
+    // SAFETY: forwarded contract.
+    unsafe { store_float(addr, class, value) }
+}
+
+/// The panic message for element `index` of an `ffi::View` of `len`.
+#[must_use]
+pub fn view_index_message(index: i64, len: i64) -> String {
+    format!("ffi::View index out of bounds: the len is {len} but the index is {index}")
+}
+
+/// Panics unless `0 <= index < len`: an `ffi::View` element access.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn gos_rt_ffi_view_check(index: i64, len: i64) {
+    if index < 0 || index >= len {
+        super::panic::panic_text(&view_index_message(index, len));
+    }
+}
+
+/// The panic message for `lo..hi` outside an `ffi::View` of `len`.
+#[must_use]
+pub fn view_range_message(lo: i64, hi: i64, len: i64) -> String {
+    format!("ffi::View range {lo}..{hi} is out of bounds for a view of {len}")
+}
+
+/// Panics unless `0 <= lo <= hi <= len`: an `ffi::View` sub-view.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn gos_rt_ffi_view_range_check(lo: i64, hi: i64, len: i64) {
+    if lo < 0 || lo > hi || hi > len {
+        super::panic::panic_text(&view_range_message(lo, hi, len));
+    }
+}
+
+/// The panic message for copying `found` values into a view of `len`.
+#[must_use]
+pub fn view_len_message(len: i64, found: i64) -> String {
+    format!("ffi::View::copy_from: the view holds {len} values but the source holds {found}")
+}
+
+/// Panics unless `found == len`: `ffi::View::copy_from`.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn gos_rt_ffi_view_len_check(len: i64, found: i64) {
+    if found != len {
+        super::panic::panic_text(&view_len_message(len, found));
+    }
+}
+
+/// The atomic operation `op` (0 load, 1 store, 2 swap, 3 add, 4 sub, 5 and,
+/// 6 or, 7 xor) on the `width`-byte integer at `addr`, sequentially
+/// consistent, answering the value before it (the value read, for a load).
+/// An address not aligned to `width` is an error message.
+///
+/// # Safety
+///
+/// `addr` addresses a live, writable integer of `width` bytes that every
+/// concurrent access reaches atomically.
+pub unsafe fn atomic_rmw(addr: u64, op: i64, width: i64, value: i64) -> Result<i64, String> {
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::SeqCst};
+    let width = u64::try_from(width).unwrap_or(0);
+    if !matches!(width, 4 | 8) || !addr.is_multiple_of(width) {
+        return Err(format!(
+            "ffi atomic: the address 0x{addr:x} is not aligned to {width} bytes"
+        ));
+    }
+    if width == 4 {
+        // SAFETY: aligned and live (checked above, contract).
+        let cell = unsafe { AtomicU32::from_ptr(addr as *mut u32) };
+        let v = value as u32;
+        let old = match op {
+            0 => cell.load(SeqCst),
+            1 => {
+                cell.store(v, SeqCst);
+                0
+            }
+            2 => cell.swap(v, SeqCst),
+            3 => cell.fetch_add(v, SeqCst),
+            4 => cell.fetch_sub(v, SeqCst),
+            5 => cell.fetch_and(v, SeqCst),
+            6 => cell.fetch_or(v, SeqCst),
+            _ => cell.fetch_xor(v, SeqCst),
+        };
+        Ok(i64::from(old))
+    } else {
+        // SAFETY: aligned and live (checked above, contract).
+        let cell = unsafe { AtomicU64::from_ptr(addr as *mut u64) };
+        let v = value as u64;
+        let old = match op {
+            0 => cell.load(SeqCst),
+            1 => {
+                cell.store(v, SeqCst);
+                0
+            }
+            2 => cell.swap(v, SeqCst),
+            3 => cell.fetch_add(v, SeqCst),
+            4 => cell.fetch_sub(v, SeqCst),
+            5 => cell.fetch_and(v, SeqCst),
+            6 => cell.fetch_or(v, SeqCst),
+            _ => cell.fetch_xor(v, SeqCst),
+        };
+        Ok(old as i64)
+    }
+}
+
+/// Atomically replaces the `width`-byte integer at `addr` with `new` when it
+/// holds `expected`, sequentially consistent, answering the value it held.
+///
+/// # Safety
+///
+/// As [`atomic_rmw`].
+pub unsafe fn atomic_cas(addr: u64, width: i64, expected: i64, new: i64) -> Result<i64, String> {
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::SeqCst};
+    let width = u64::try_from(width).unwrap_or(0);
+    if !matches!(width, 4 | 8) || !addr.is_multiple_of(width) {
+        return Err(format!(
+            "ffi atomic: the address 0x{addr:x} is not aligned to {width} bytes"
+        ));
+    }
+    Ok(if width == 4 {
+        // SAFETY: aligned and live (checked above, contract).
+        let cell = unsafe { AtomicU32::from_ptr(addr as *mut u32) };
+        let old = match cell.compare_exchange(expected as u32, new as u32, SeqCst, SeqCst) {
+            Ok(old) | Err(old) => old,
+        };
+        i64::from(old)
+    } else {
+        // SAFETY: aligned and live (checked above, contract).
+        let cell = unsafe { AtomicU64::from_ptr(addr as *mut u64) };
+        let old = match cell.compare_exchange(expected as u64, new as u64, SeqCst, SeqCst) {
+            Ok(old) | Err(old) => old,
+        };
+        old as i64
+    })
+}
+
+/// [`atomic_rmw`] for compiled code; a misaligned address panics.
+///
+/// # Safety
+///
+/// As [`atomic_rmw`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn gos_rt_ffi_atomic_rmw(
+    addr: u64,
+    op: i64,
+    width: i64,
+    value: i64,
+) -> i64 {
+    // SAFETY: forwarded contract.
+    match unsafe { atomic_rmw(addr, op, width, value) } {
+        Ok(old) => old,
+        Err(message) => {
+            super::panic::panic_text(&message);
+            0
+        }
+    }
+}
+
+/// [`atomic_cas`] for compiled code; a misaligned address panics.
+///
+/// # Safety
+///
+/// As [`atomic_cas`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn gos_rt_ffi_atomic_cas(
+    addr: u64,
+    width: i64,
+    expected: i64,
+    new: i64,
+) -> i64 {
+    // SAFETY: forwarded contract.
+    match unsafe { atomic_cas(addr, width, expected, new) } {
+        Ok(old) => old,
+        Err(message) => {
+            super::panic::panic_text(&message);
+            0
+        }
+    }
+}
+
+/// Copies the leading `len` bytes of the C buffer `src` over those of `dst`:
+/// how a value is reinterpreted as a union member and back.
+///
+/// # Safety
+///
+/// `dst` and `src` each hold at least `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_ffi_copy(dst: *mut u8, src: *const u8, len: u64) {
+    if len == 0 {
+        return;
+    }
+    // SAFETY: both ranges are valid for `len` bytes (contract).
+    unsafe { std::ptr::copy(src, dst, len as usize) };
 }
 
 /// Copies `len` bytes from `src` to the foreign address `dst`.
@@ -788,6 +1194,22 @@ fn library_search_dirs() -> Vec<std::path::PathBuf> {
     LIBRARY_DIRS.read().clone()
 }
 
+/// The shared libraries compiled from the program's `[native]` sources,
+/// which a declaration with no `#[link]` resolves against before the
+/// process's own modules.
+static NATIVE_LIBRARIES: parking_lot::RwLock<Vec<std::path::PathBuf>> =
+    parking_lot::RwLock::new(Vec::new());
+
+/// Sets the `[native]` shared libraries the bytecode tier and the JIT load.
+pub fn set_native_libraries(paths: Vec<std::path::PathBuf>) {
+    *NATIVE_LIBRARIES.write() = paths;
+}
+
+#[cfg(any(unix, windows))]
+fn native_libraries() -> Vec<std::path::PathBuf> {
+    NATIVE_LIBRARIES.read().clone()
+}
+
 /// The address of the native function `name`, looked up the way the
 /// compiled tiers link it: the runtime's own exports first, then the
 /// libraries named in `libraries`, then the process's loaded modules (the
@@ -892,6 +1314,22 @@ mod platform {
                 }
             }
         }
+        for path in super::native_libraries() {
+            let Ok(file) = CString::new(path.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            // SAFETY: `file` is NUL-terminated; a failed open answers null.
+            let handle = unsafe { libc::dlopen(file.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
+            if handle.is_null() {
+                continue;
+            }
+            // SAFETY: `handle` is a live library handle and `symbol` is
+            // NUL-terminated.
+            let addr = unsafe { libc::dlsym(handle, symbol.as_ptr()) };
+            if !addr.is_null() {
+                return Some(addr.cast_const().cast());
+            }
+        }
         // SAFETY: `RTLD_DEFAULT` searches every loaded object; `symbol` is
         // NUL-terminated.
         let addr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, symbol.as_ptr()) };
@@ -927,6 +1365,11 @@ mod platform {
             })
             .collect();
         modules.extend(libraries.iter().map(|l| format!("{l}.dll")));
+        modules.extend(
+            super::native_libraries()
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        );
         modules.extend(
             ["kernel32.dll", "user32.dll", "ucrtbase.dll", "msvcrt.dll"].map(str::to_string),
         );

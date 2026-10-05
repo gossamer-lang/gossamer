@@ -29,12 +29,13 @@ pub use escape::{
     CaptureSummary, EscapeSet, analyse as analyse_escape,
     analyse_with_summary as analyse_escape_with_summary, build_capture_summary,
 };
+pub use gossamer_hir::{FFI_EXPORTS_FN, STATIC_INIT_FN};
 pub use ir::{
     AggregateKind, AssertMessage, BasicBlock, BinOp, BlockId, Body, ConstValue, F64MathIntrinsic,
-    ForeignCall, ForeignCallback, ForeignParam, InlineChain, InlineFrame, IteratorAdapterKind,
-    IteratorOwnership, IteratorSourceKind, Local, LocalDecl, Operand, Place, Projection,
-    RawIntrinsic, RawIntrinsicArity, Rvalue, Statement, StatementKind, StaticRef, Terminator, UnOp,
-    foreign_params, local_is_uint_cast,
+    ForeignCall, ForeignCallback, ForeignParam, ForeignStatic, InlineChain, InlineFrame,
+    IteratorAdapterKind, IteratorOwnership, IteratorSourceKind, Local, LocalDecl, Operand, Place,
+    Projection, RawIntrinsic, RawIntrinsicArity, Rvalue, Statement, StatementKind, StaticRef,
+    Terminator, UnOp, export_symbols, foreign_params, local_is_uint_cast,
 };
 pub use lower::helpers::escape::{ParamShare, collect_region_unsafe_fns, collect_shareable_params};
 pub use lower::{lower_program, mangle_callable_shape};

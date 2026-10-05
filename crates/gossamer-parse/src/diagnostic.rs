@@ -303,13 +303,19 @@ pub enum ParseError {
     #[error("unexpected construct")]
     UnexpectedConstruct,
     /// An `extern` form other than `unsafe extern "C" { fn ...; }`: an
-    /// extern block without `unsafe`, an exported `extern "C" fn` with a
-    /// body, or an ABI other than `"C"` / `"system"`.
+    /// extern block without `unsafe`, or an ABI other than `"C"` /
+    /// `"system"`.
     #[error("foreign functions are declared in an `unsafe extern \"C\" {{ ... }}` block")]
     ExternReserved,
+    /// `extern "C" fn name(..) { .. }`, Rust's spelling of a function C
+    /// calls, which Gossamer writes `#[export] fn`.
+    #[error("a function C calls is written `#[export] fn`")]
+    ExternFnDefinition,
     /// A declaration inside an `unsafe extern "C"` block that is not a
-    /// bodyless, non-generic `fn`.
-    #[error("an `unsafe extern \"C\"` block holds only `fn` signatures without bodies")]
+    /// bodyless, non-generic `fn`, a `type Name`, or a `static NAME: T`.
+    #[error(
+        "an `unsafe extern \"C\"` block holds only `fn` signatures without bodies, `type` names, and `static` declarations"
+    )]
     ExternItemShape,
     /// An expression, type, or pattern nested past the parser's hard
     /// recursion limit. Emitted to keep adversarial inputs from
@@ -540,6 +546,7 @@ impl ParseError {
                 )
             }),
             ParseError::VecMacroRetired => Some(("write `#[...]`".to_string(), "#".to_string())),
+            ParseError::ExternFnDefinition => Some(write("#[export]")),
             ParseError::MacroSigilRetired { .. } => Some(drop("the `!`")),
             ParseError::SharedReferenceArgument | ParseError::SharedReferenceParameter => {
                 Some(drop("the `&`"))
@@ -605,18 +612,30 @@ impl ParseError {
                     .to_string(),
                 Some(
                     "write `unsafe extern \"C\" { fn name(params) -> ret }` at module level \
-                     and call the function inside `unsafe { }`; a Gossamer function cannot be exported to \
-                     C, and only the `\"C\"` and `\"system\"` ABIs are recognised"
+                     and call the function inside `unsafe { }`; a Gossamer function is given to C \
+                     with `#[export]` on a plain `fn`, and only the `\"C\"` and `\"system\"` ABIs \
+                     are recognised"
+                        .to_string(),
+                ),
+            ),
+            Self::ExternFnDefinition => (
+                "GP0016",
+                "a function C calls is written `#[export] fn`".to_string(),
+                Some(
+                    "`#[export]` defines the function under its own name for C, and \
+                     `#[export(\"symbol\")]` under another; `gos check --fix` rewrites it"
                         .to_string(),
                 ),
             ),
             Self::ExternItemShape => (
                 "GP0016",
-                "an `unsafe extern \"C\"` block holds only `fn` signatures without bodies"
+                "an `unsafe extern \"C\"` block holds only `fn` signatures without bodies, \
+                 `type` names, and `static` declarations"
                     .to_string(),
                 Some(
                     "declare each foreign function as `fn name(params) -> ret`, with no body \
-                     and no generic parameters; its body is in the native library"
+                     and no generic parameters; its body is in the native library. A C global \
+                     is `static NAME: T` with no initializer, reached through `ffi::addr_of`"
                         .to_string(),
                 ),
             ),
@@ -698,7 +717,9 @@ impl ParseError {
                 "invalid tuple index".to_string(),
                 Some("tuple indices must be plain decimal integers".to_string()),
             ),
-            ParseError::ExternReserved | ParseError::ExternItemShape => self.foreign_report(),
+            ParseError::ExternReserved
+            | ParseError::ExternFnDefinition
+            | ParseError::ExternItemShape => self.foreign_report(),
             ParseError::RecursionLimit { limit } => (
                 "GP0017",
                 format!("expression nests beyond {limit} levels"),

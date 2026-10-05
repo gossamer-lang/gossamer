@@ -395,8 +395,10 @@ pub const REGISTRY: &[(&str, &str)] = &[
                      `\"system\"`) and called inside `unsafe { }`. Any other\n\
                      `extern` form is rejected: an extern block without `unsafe`,\n\
                      an item in it that is not a bodyless, non-generic `fn`, an\n\
-                     exported `extern \"C\" fn` with a body, or another ABI.\n\
-                     Rust crates are still reached through `[rust-bindings]`.",
+                     `extern \"C\" fn` with a body, or another ABI. A Gossamer\n\
+                     function is given to C by writing `#[export]` (or\n\
+                     `#[export(\"symbol\")]`) on a plain `fn`. Rust crates are\n\
+                     still reached through `[rust-bindings]`.",
     ),
     (
         "GP0017",
@@ -1503,9 +1505,12 @@ pub const REGISTRY: &[(&str, &str)] = &[
         "GT0089",
         "A `Simd` or `Mask` vector named an element type, a lane count, or an\n\
             operation the vector type does not support. `Simd<T, N>` takes\n\
-            `f32`, `f64`, `i32`, `i64`, `u8`, or `u32` lanes and `N` of 2, 4, 8,\n\
-            or 16 (16 for `u8`, `i32`, and `u32`); `Simd::splat` takes its lane\n\
-            count from the annotated type.",
+            `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, or `f64`\n\
+            lanes and `N` of 2, 4, 8, or 16 (16 for lanes of 32 bits or fewer);\n\
+            `Simd::splat`, `Simd::load`, `Simd::load_or`, `Simd::from_bits`, and\n\
+            `Mask::from_bitmask` take their lane count from the annotated type,\n\
+            and a swizzle's indices are a literal list, each below the lanes it\n\
+            picks from.",
     ),
     (
         "GT0090",
@@ -1584,13 +1589,13 @@ pub const REGISTRY: &[(&str, &str)] = &[
             representation. A parameter is a scalar (an integer up to 64 bits,\n\
             `bool`, `f32`, `f64`), an `ffi::Ptr<T>` or `Option<ffi::Ptr<T>>`\n\
             (a `T *` that may be NULL), a C function pointer `Fn(..) -> R`, a\n\
-            slice `[T]` of scalars (a pointer to the first element, read-only),\n\
-            a `#[repr(C)]` plain-data struct (a pointer to a read-only C-layout\n\
-            copy), or `&mut` one of these: `&mut` a scalar or pointer is an\n\
-            out-parameter C writes back, and `&mut [T]` or `&mut` a struct is a\n\
-            pointer whose writes come back. A return type is a scalar, `()`,\n\
-            an `ffi::Ptr<T>`, or an `Option<ffi::Ptr<T>>`; a struct comes back\n\
-            through an out-parameter or C-allocated memory.",
+            `#[repr(C)]` plain-data struct (passed by value, as C passes it), a\n\
+            slice `[T]` of scalars or `#[repr(C)]` structs (a pointer to the\n\
+            first element, read-only), or `&mut` one of these: `&mut` a scalar\n\
+            or pointer is an out-parameter C writes back, and `&mut [T]` or\n\
+            `&mut` a struct is a pointer whose writes come back. A return type\n\
+            is a scalar, `()`, an `ffi::Ptr<T>`, an `Option<ffi::Ptr<T>>`, or a\n\
+            `#[repr(C)]` plain-data struct.",
     ),
     (
         "GT0099",
@@ -1674,6 +1679,53 @@ pub const REGISTRY: &[(&str, &str)] = &[
             a callback with no environment, so it is a top-level `fn` with\n\
             exactly the declared signature, passed by name; state it needs\n\
             travels through its `void *` argument as an `ffi::Handle`.",
+    ),
+    (
+        "GT0109",
+        "`ffi::offset_of::<T>(path)` cannot locate the field. The path is a\n\
+            string literal naming a field of the `#[repr(C)]` plain-data struct\n\
+            `T`, with `.` between the fields of nested structs\n\
+            (`\"header.len\"`); the offset is computed while compiling, so a\n\
+            path built at run time, or a field `T` does not have, is rejected.",
+    ),
+    (
+        "GT0110",
+        "An `ffi::Union<(A, B, ..)>` is a C union of its listed members. Each\n\
+            member is plain data with a C layout (a scalar, an `ffi::Ptr`, a\n\
+            fixed array, a `#[repr(C)]` struct, or another union), listed once,\n\
+            and `Union::new`, `get`, and `set` take one of those member types:\n\
+            the union is chosen by type, so a type it does not list, or one it\n\
+            lists twice, has no meaning.",
+    ),
+    (
+        "GT0111",
+        "A C global declared `static NAME: T` in an `unsafe extern` block is\n\
+            named anywhere but as the argument of `ffi::addr_of`, or\n\
+            `ffi::addr_of` is given something other than a foreign static. The\n\
+            global lives in native memory; reach it through its address,\n\
+            `unsafe { ffi::read(ffi::addr_of(NAME)) }` and\n\
+            `unsafe { ffi::write(ffi::addr_of(NAME), value) }`.",
+    ),
+    (
+        "GT0112",
+        "A foreign function in a project whose `gossamer-version` predates 0.67\n\
+            takes a plain `#[repr(C)]` struct parameter. Before 0.67 such a\n\
+            parameter passed a pointer to a copy of the struct (C `const T *`);\n\
+            from 0.67 it passes the struct by value, as C, Rust, and Go spell it.\n\
+            A C function that takes a pointer is declared with `&mut T` and\n\
+            called with `&mut` the value, which `gos check --fix` writes; one that\n\
+            takes the struct by value keeps the plain spelling once the project's\n\
+            `gossamer-version` names 0.67 or later.",
+    ),
+    (
+        "GT0113",
+        "A function marked `#[export]` or `#[export(\"symbol\")]` cannot be\n\
+            called from C as written. An exported function is a free, non-generic\n\
+            `fn` (not a method), its symbol is a C identifier no other export\n\
+            uses, and its parameters and result are what the C ABI carries:\n\
+            scalars, `ffi::Ptr`, `Option<ffi::Ptr>`, and `#[repr(C)]` plain-data\n\
+            structs. A buffer crosses as an `ffi::Ptr` and a length, which the\n\
+            function reads through `unsafe { ffi::View::new(ptr, len) }`.",
     ),
     (
         "GX0001",
@@ -1777,15 +1829,6 @@ pub const REGISTRY: &[(&str, &str)] = &[
         "An `ffi::Handle` was used after `release` or `take`, or a pointer\n\
             native code handed back is not a live handle. The handle's value\n\
             is gone, so the program stops rather than reading freed memory.",
-    ),
-    (
-        "GX0015",
-        "Native code called back into the program on a thread that is not\n\
-            running one of the program's foreign calls: a thread the library\n\
-            started, or a callback kept and run after the call that registered\n\
-            it on another thread. A callback runs only on the thread whose\n\
-            foreign call invokes it, so the program stops without running\n\
-            it.",
     ),
 ];
 
