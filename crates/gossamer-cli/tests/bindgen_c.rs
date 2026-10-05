@@ -61,15 +61,43 @@ fn an_allow_list_keeps_the_named_declarations_and_what_they_reach() {
 
 #[test]
 fn declarations_that_differ_between_targets_carry_a_cfg() {
-    let text = bindgen(&[
-        "--target",
-        "x86_64-unknown-linux-gnu",
-        "--target",
-        "x86_64-pc-windows-msvc",
-    ]);
-    // `size_t` is `unsigned long` on one and `unsigned long long` on the
-    // other, but both read as `ffi::size_t`; `struct shapes_point` agrees.
-    assert_eq!(text.matches("struct shapes_point {").count(), 1, "{text}");
+    // A header needing no system headers reads for a target whose C library
+    // the host does not have.
+    let out = Command::new(gos())
+        .arg("bindgen")
+        .arg("--c")
+        .arg(fixture("targets.h"))
+        .args([
+            "--target",
+            "x86_64-unknown-linux-gnu",
+            "--target",
+            "x86_64-pc-windows-msvc",
+        ])
+        .output()
+        .expect("run gos bindgen");
+    assert!(
+        out.status.success(),
+        "gos bindgen --c failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+    assert_eq!(text.matches("struct targets_point {").count(), 1, "{text}");
+    assert_eq!(text.matches("fn targets_common(").count(), 1, "{text}");
+    let windows =
+        r#"#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]"#;
+    let linux = r#"#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]"#;
+    let before = |name: &str| {
+        let at = text
+            .find(name)
+            .unwrap_or_else(|| panic!("no {name} in:\n{text}"));
+        text[..at]
+            .lines()
+            .rev()
+            .find(|line| line.contains("#[cfg("))
+            .map(str::trim)
+    };
+    assert_eq!(before("fn targets_windows_only("), Some(windows), "{text}");
+    assert_eq!(before("fn targets_unix_only("), Some(linux), "{text}");
 }
 
 fn run(tier: Tier, dir: &Path) -> String {

@@ -112,7 +112,9 @@ fn a_new_session_leads_its_own_group() {
         r#"use std::process::{Command, Stdio}
 
 fn main() {
-    let child = Command::new("sh").args(#["-c", "ps -o sid= -p $$; echo $$"]).new_session().stdout(Stdio::Piped).spawn().unwrap()
+    // `setsid` makes the child the leader of a new process group too; `pgid`
+    // reads the same on Linux and macOS, where `sid` does not.
+    let child = Command::new("sh").args(#["-c", "ps -o pgid= -p $$; echo $$"]).new_session().stdout(Stdio::Piped).spawn().unwrap()
     let text = child.read_stdout()
     let lines = text.split("\n").map(|line| line.trim()).filter(|line| line.len() > 0)
     println(f"session leader: {lines[0] == lines[1]} {child.wait().unwrap()}")

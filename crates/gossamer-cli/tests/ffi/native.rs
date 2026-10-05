@@ -23,10 +23,11 @@ int shim_digit_sum(int value) {
     return sum;
 }
 
-/* The exit code a `waitpid` status holds, through the `<sys/wait.h>` macros. */
+/* The exit code a `waitpid` status holds, through the `<sys/wait.h>` macros
+   where they exist and the same encoding by hand elsewhere. */
 int shim_exit_code(int status) {
 #ifdef _WIN32
-    return status & 0xff;
+    return (status >> 8) & 0xff;
 #else
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 #endif

@@ -310,7 +310,7 @@ impl Toolchain {
         let mut cmd = self.tool.to_command();
         if self.msvc {
             // A DLL exports only what its module definition lists: every
-            // function the objects define.
+            // function and global variable the objects define.
             let def = dir.join(format!("gosnative_{name}.def"));
             fs::write(&def, module_definition(objects)?)
                 .with_context(|| format!("writing {}", def.display()))?;
@@ -575,7 +575,9 @@ fn record_product(product: &Path, objects: &[PathBuf]) -> Result<()> {
         .with_context(|| format!("writing {}", record.display()))
 }
 
-/// A module definition exporting every function `objects` define.
+/// A module definition exporting every function and global variable
+/// `objects` define; a variable is marked `DATA`, which a C global declared
+/// in an `unsafe extern` block is reached through.
 fn module_definition(objects: &[PathBuf]) -> Result<String> {
     use object::{Object, ObjectSymbol, SymbolKind};
 
@@ -585,10 +587,22 @@ fn module_definition(objects: &[PathBuf]) -> Result<String> {
         let file = object::File::parse(bytes.as_slice())
             .map_err(|err| anyhow!("reading the symbols of {}: {err}", path.display()))?;
         for symbol in file.symbols() {
-            if symbol.is_global() && symbol.is_definition() && symbol.kind() == SymbolKind::Text {
-                if let Ok(name) = symbol.name() {
-                    text.push_str(&format!("    {name}\n"));
-                }
+            if !symbol.is_global() {
+                continue;
+            }
+            let Ok(name) = symbol.name() else {
+                continue;
+            };
+            let data =
+                symbol.is_common() || (symbol.is_definition() && symbol.kind() == SymbolKind::Data);
+            if data {
+                text.push_str("    ");
+                text.push_str(name);
+                text.push_str(" DATA\n");
+            } else if symbol.is_definition() && symbol.kind() == SymbolKind::Text {
+                text.push_str("    ");
+                text.push_str(name);
+                text.push('\n');
             }
         }
     }
