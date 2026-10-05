@@ -13,27 +13,11 @@ use anyhow::{Result, anyhow};
 use crate::loaders::{load_and_check, profile_rss_stage};
 use crate::paths::resolve_entry_arg;
 
-/// Runs a source file through the bytecode VM.
-pub(crate) fn dispatch(path: Option<PathBuf>, main_thread: bool, args: &[String]) -> Result<()> {
+/// Runs a source file through the bytecode VM on the process main thread,
+/// where a native build runs `main` too.
+pub(crate) fn dispatch(path: Option<PathBuf>, args: &[String]) -> Result<()> {
     let resolved = resolve_entry_arg(path)?;
-    run(&resolved, main_thread, args)
-}
-
-fn run(file: &Path, main_thread: bool, forwarded: &[String]) -> Result<()> {
-    let file = file.to_path_buf();
-    let forwarded = forwarded.to_vec();
-    if main_thread {
-        // Execute directly on the process main thread so native
-        // libraries that require it (GLFW / OpenGL / Cocoa / Metal) work
-        // from `[rust-bindings]`. Trades the large spawned-thread stack
-        // for the OS-default main-thread stack (see `cmd::on_main_thread`).
-        crate::cmd::on_main_thread(move || run_on_vm(&file, &forwarded))
-    } else {
-        // Execute on a thread with a large native stack so the host's
-        // default main-thread stack size never bounds recursion depth or
-        // the in-process JIT compile pass (see `cmd::with_vm_stack`).
-        crate::cmd::with_vm_stack(move || run_on_vm(&file, &forwarded))
-    }
+    crate::cmd::on_main_thread(|| run_on_vm(&resolved, args))
 }
 
 fn run_on_vm(file: &Path, forwarded: &[String]) -> Result<()> {
@@ -49,7 +33,7 @@ fn run_on_vm(file: &Path, forwarded: &[String]) -> Result<()> {
 
 /// Executes inline source passed through `gos -e` or `gos --eval`.
 pub(crate) fn command(source: String) -> Result<()> {
-    crate::cmd::with_vm_stack(move || run_source_on_vm(&source, "<command>", &[], None))
+    crate::cmd::on_main_thread(|| run_source_on_vm(&source, "<command>", &[], None))
 }
 
 fn run_source_on_vm(

@@ -65,6 +65,11 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::ffi",
+        name: "last_os_error",
+        signature: "fn last_os_error() -> i64",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
         name: "read",
         signature: "fn read<T>(p: ffi::Ptr<T>) -> T",
     },

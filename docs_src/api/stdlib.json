@@ -4053,7 +4053,26 @@
       "name": "std::ffi::last_errno",
       "kind": "function",
       "signature": "fn last_errno() -> i64",
-      "description": "`last_errno() -> i64`: the `errno` (on Windows, `GetLastError`) the goroutine's most recent foreign call left, captured before anything else could change it.",
+      "description": "`last_errno() -> i64`: the C `errno` the goroutine's most recent foreign call left, cleared just before the call and captured before anything else could change it, so a call that does not set it answers 0.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-last-os-error",
+      "name": "std::ffi::last_os_error",
+      "kind": "function",
+      "signature": "fn last_os_error() -> i64",
+      "description": "`last_os_error() -> i64`: the operating-system error code the goroutine's most recent foreign call left: `GetLastError` on Windows, `errno` elsewhere. Cleared just before the call, so a call that does not set it answers 0.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",

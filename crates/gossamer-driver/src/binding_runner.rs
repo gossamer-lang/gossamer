@@ -32,8 +32,9 @@ use parking_lot::Mutex;
 
 use gossamer_pkg::{GitRef, Manifest, RustBindingSpec};
 use gossamer_runner_template::{
-    BindingEntry, GossamerPatchSource, Profile as TmplProfile, RenderInput, render_cargo_toml,
-    render_main_rs, render_sigs_dump_rs, render_staticlib_cargo_toml, render_staticlib_lib_rs,
+    BUILD_RS, BindingEntry, GossamerPatchSource, Profile as TmplProfile, RenderInput,
+    render_cargo_toml, render_main_rs, render_sigs_dump_rs, render_staticlib_cargo_toml,
+    render_staticlib_lib_rs,
 };
 use thiserror::Error;
 
@@ -246,6 +247,7 @@ impl BindingRunner {
 
         let input = self.render_input(self.profile.template_profile());
         write_if_different(&cargo_toml, &render_cargo_toml(&input))?;
+        write_if_different(&dir.join("build.rs"), BUILD_RS)?;
         write_if_different(&main_rs, &render_main_rs(&input))?;
         write_if_different(&sigs_rs, &render_sigs_dump_rs(&input))?;
         seed_lockfile(&dir, &self.gossamer_root)?;
@@ -295,6 +297,7 @@ impl BindingRunner {
 
         let input = self.render_input(self.profile.template_profile());
         write_if_different(&cargo_toml, &render_cargo_toml(&input))?;
+        write_if_different(&dir.join("build.rs"), BUILD_RS)?;
         write_if_different(&main_rs, &render_main_rs(&input))?;
         write_if_different(&sigs_rs, &render_sigs_dump_rs(&input))?;
         seed_lockfile(&dir, &self.gossamer_root)?;

@@ -12,19 +12,7 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    // Apply the same process-wide allocator knobs to the `gos` VM tier
-    // and the toolchain that compiled programs get from `runtime_init`.
-    gossamer_runtime::init_process_allocator();
-    // Arm the byte-budget recursion guard at the shallowest point of
-    // the main thread, so deeply recursive walker code (closures,
-    // methods, `gos`'s top-level `main`, the REPL) raises a clean
-    // stack-overflow error instead of overflowing the OS stack and
-    // aborting. Spawned goroutines arm their own 1 MiB coroutine
-    // stacks; this covers the main thread, budgeted for the smallest
-    // main stack we target (Windows defaults to ~1 MiB).
-    gossamer_coro::arm_stack_guard(
-        gossamer_coro::DEFAULT_STACK_BYTES - gossamer_coro::STACK_GUARD_MARGIN,
-    );
+    gossamer_cli::prepare_main_thread();
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     match gossamer_cli::dispatch_runner_if_needed(&args) {
         gossamer_cli::DispatchOutcome::InProcess => gossamer_cli::run_main_with_args(&args),

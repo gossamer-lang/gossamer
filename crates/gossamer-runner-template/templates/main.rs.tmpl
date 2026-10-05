@@ -6,6 +6,8 @@ extern crate {{ this.crate_name_ident }};
 {{/each}}
 
 fn main() -> std::process::ExitCode {
+    gossamer_cli::prepare_main_thread();
+
     // Side-effect: every binding's distributed_slice entries are
     // already linked. install_all() walks REGISTRY and registers
     // every item with the interpreter + resolver before we hand

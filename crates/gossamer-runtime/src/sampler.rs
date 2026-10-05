@@ -162,16 +162,23 @@ pub fn drain() -> Vec<RawSample> {
     out
 }
 
+/// `micros` as the platform's `tv_usec` type. Generic so one spelling holds
+/// where that type is `i32` (Darwin) and where it is `i64` (glibc, musl).
+#[cfg(all(unix, not(miri), not(target_arch = "wasm32")))]
+fn widen_micros<T: From<i32>>(micros: i32) -> T {
+    T::from(micros)
+}
+
 #[cfg(all(unix, not(miri), not(target_arch = "wasm32")))]
 fn set_timer(hz: u32) -> std::io::Result<()> {
     // Written without naming `suseconds_t`: it is `i64` on glibc, `i32` on
     // Darwin, and deprecated on musl. An `i32` holds any microsecond count
-    // this produces (at most 1_000_000), and `into()` widens it to
+    // this produces (at most 1_000_000), and `widen_micros` converts it to
     // whichever width the platform's `tv_usec` actually is.
     let micros: i32 = i32::try_from(1_000_000 / hz.max(1)).unwrap_or(10_000);
     let interval = libc::timeval {
         tv_sec: 0,
-        tv_usec: if hz == 0 { 0 } else { micros }.into(),
+        tv_usec: widen_micros(if hz == 0 { 0 } else { micros }),
     };
     let spec = libc::itimerval {
         it_interval: interval,

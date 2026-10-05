@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.66.1 - Foreign-call error codes and main-thread parity
+
+- Every foreign call clears `errno` (and on Windows the thread's last error) just before the native function runs, so `ffi::last_errno()` answers 0 after a call that does not set it; it reported whatever an earlier call, or the runtime itself, had left.
+- `ffi::last_errno()` reads the C `errno` on every platform, which on Windows the C runtime's functions set and was never captured; `ffi::last_os_error()` reads the operating system's code, `GetLastError` on Windows and `errno` elsewhere, and `std::term` errors report it.
+- `gos run` and `gos -e` run a program's `main` on the process main thread, as a native build does, so native libraries that require that thread (GLFW, Cocoa, Metal on macOS) behave the same on every tier; `--main-thread` is accepted and no longer needed. On Windows `gos` reserves the same 16 MiB main-thread stack a compiled program does.
+- `gos explain GT0098` lists every parameter and result a foreign function takes, `ffi::Ptr`, `Option<ffi::Ptr>`, out-parameters, function pointers, and pointer results included.
+
 ## 0.66.0 - Foreign functions and a terminal-ready standard library
 
 - `unsafe extern "C" { fn strlen(text: [u8]) -> usize }` declares C functions a program calls inside `unsafe { }` (GT0097), on the bytecode VM, the JIT, and native builds alike; `#[link(name = "lib")]` adds a library to the native link and to the VM's lookup, `#[link_name = "sym"]` names a different C symbol, and `#[cfg]` selects declarations per platform.

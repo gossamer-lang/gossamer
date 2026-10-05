@@ -83,7 +83,8 @@ const MODULE_CAPABILITIES: &[(&str, Option<Capability>)] = &[
     // Mixed modules: pure by default, members named individually.
     ("fs", None),
     ("os", None),
-    // `ffi::last_errno` reads the goroutine's saved errno; a foreign call is
+    // `ffi::last_errno` and `last_os_error` read the goroutine's saved error
+    // codes; a foreign call is
     // the `__gos_ffi_` leaf's capability.
     ("ffi", None),
     ("env", None),

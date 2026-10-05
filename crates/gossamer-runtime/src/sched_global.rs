@@ -878,7 +878,7 @@ pub fn try_spawn(task: Box<dyn FnOnce() + Send + 'static>) -> Option<Gid> {
         arena: crate::c_abi::rc::ArenaState::empty(),
         isolated_faults: false,
         joinable: false,
-        ffi_errno: 0,
+        ffi_errno: crate::c_abi::ffi::ForeignErrors::default(),
         started: false,
     })
 }
@@ -894,7 +894,7 @@ pub fn try_spawn_service(task: Box<dyn FnOnce() + Send + 'static>) -> Option<Gid
         arena: crate::c_abi::rc::ArenaState::empty(),
         isolated_faults: false,
         joinable: false,
-        ffi_errno: 0,
+        ffi_errno: crate::c_abi::ffi::ForeignErrors::default(),
         started: false,
     })
 }
@@ -915,7 +915,7 @@ pub fn spawn(task: Box<dyn FnOnce() + Send + 'static>) -> Gid {
         arena: crate::c_abi::rc::ArenaState::empty(),
         isolated_faults: false,
         joinable: false,
-        ffi_errno: 0,
+        ffi_errno: crate::c_abi::ffi::ForeignErrors::default(),
         started: false,
     })
 }
@@ -938,8 +938,8 @@ struct GoroutineTask {
     /// parked, since several goroutines take turns on one worker.
     isolated_faults: bool,
     joinable: bool,
-    /// The `errno` this goroutine's last foreign call left.
-    ffi_errno: i64,
+    /// The error codes this goroutine's last foreign call left.
+    ffi_errno: crate::c_abi::ffi::ForeignErrors,
     /// Whether the coroutine has been resumed; until then it may start on
     /// any worker.
     started: bool,

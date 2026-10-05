@@ -105,8 +105,9 @@ enum Command {
         /// Disable the Cranelift JIT and use pure bytecode dispatch.
         #[arg(long)]
         no_jit: bool,
-        /// Run on the process main thread for native libraries that require it.
-        #[arg(long = "main-thread")]
+        /// Accepted for compatibility: `gos run` always runs `main` on the
+        /// process main thread.
+        #[arg(long = "main-thread", hide = true)]
         main_thread: bool,
         /// Require a matching `project.lock`.
         #[arg(long)]
@@ -750,7 +751,7 @@ pub fn try_fast_run(args: &[std::ffi::OsString]) -> Option<ExitCode> {
         if parsed.no_jit {
             gossamer_interp::set_jit_disabled();
         }
-        cmd::run::dispatch(parsed.file, parsed.main_thread, &parsed.forwarded)
+        cmd::run::dispatch(parsed.file, &parsed.forwarded)
     })();
     Some(match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -764,7 +765,6 @@ pub fn try_fast_run(args: &[std::ffi::OsString]) -> Option<ExitCode> {
 struct FastRun {
     file: Option<PathBuf>,
     no_jit: bool,
-    main_thread: bool,
     locked: bool,
     forwarded: Vec<String>,
 }
@@ -776,11 +776,11 @@ fn parse_fast_run(args: &[std::ffi::OsString]) -> Option<FastRun> {
     let mut parsed = FastRun {
         file: None,
         no_jit: false,
-        main_thread: false,
         locked: false,
         forwarded: Vec::new(),
     };
     let mut forwarding = false;
+    let mut main_thread = false;
     for arg in &args[2..] {
         if forwarding || parsed.file.is_some() {
             parsed.forwarded.push(arg.to_str()?.to_owned());
@@ -789,7 +789,7 @@ fn parse_fast_run(args: &[std::ffi::OsString]) -> Option<FastRun> {
         match arg.to_str() {
             Some("--") => forwarding = true,
             Some("--no-jit") if !parsed.no_jit => parsed.no_jit = true,
-            Some("--main-thread") if !parsed.main_thread => parsed.main_thread = true,
+            Some("--main-thread") if !main_thread => main_thread = true,
             Some("--locked") if !parsed.locked => parsed.locked = true,
             Some(text) if text.starts_with('-') => return None,
             _ if parsed.file.is_none() => parsed.file = Some(PathBuf::from(arg)),
@@ -1144,7 +1144,7 @@ fn dispatch(
         Some(Command::Run {
             file,
             no_jit,
-            main_thread,
+            main_thread: _,
             locked,
             args,
         }) => {
@@ -1152,7 +1152,7 @@ fn dispatch(
             if no_jit {
                 gossamer_interp::set_jit_disabled();
             }
-            cmd::run::dispatch(file, main_thread, &args)
+            cmd::run::dispatch(file, &args)
         }
         Some(Command::Watch {
             file,

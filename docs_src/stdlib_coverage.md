@@ -19,7 +19,7 @@ evidence visible.
 | `std::os::exec` | shipped | 12 | module-only | module-only | module-only | Command builder + output / status / spawn / kill / wait. Wired through interp builtins, MIR lower, and C ABI. |
 | `std::os::signal` | experimental | 15 | module-only | module-only | module-only | on(signum) + Notifier::wait/try_wait. Wired through interp builtins, MIR lower, and C ABI. |
 | `std::os::fd` | experimental | 2 | none | none | none | No module-level evidence record. |
-| `std::ffi` | experimental | 33 | none | none | none | No module-level evidence record. |
+| `std::ffi` | experimental | 34 | none | none | none | No module-level evidence record. |
 | `std::term` | experimental | 9 | none | none | none | No module-level evidence record. |
 | `std::env` | shipped | 10 | none | none | none | No module-level evidence record. |
 | `std::process` | shipped | 14 | none | none | none | No module-level evidence record. |
@@ -349,6 +349,7 @@ evidence is linked to that canonical item path yet.
 | `std::ffi::free` | Function | experimental | `feature-testing-examples/ffi_calls.gos`, `feature-testing-examples/ffi_pointers_callbacks.gos` |
 | `std::ffi::from_cstr` | Function | experimental | `feature-testing-examples/ffi_calls.gos`, `feature-testing-examples/ffi_pointers_callbacks.gos` |
 | `std::ffi::last_errno` | Function | experimental | `feature-testing-examples/ffi_calls.gos`, `feature-testing-examples/ffi_pointers_callbacks.gos` |
+| `std::ffi::last_os_error` | Function | experimental | `feature-testing-examples/ffi_calls.gos`, `feature-testing-examples/ffi_pointers_callbacks.gos` |
 | `std::ffi::read` | Function | experimental | `feature-testing-examples/ffi_calls.gos`, `feature-testing-examples/ffi_pointers_callbacks.gos` |
 | `std::ffi::read_at` | Function | experimental | `feature-testing-examples/ffi_calls.gos`, `feature-testing-examples/ffi_pointers_callbacks.gos` |
 | `std::ffi::read_bytes` | Function | experimental | `feature-testing-examples/ffi_calls.gos`, `feature-testing-examples/ffi_pointers_callbacks.gos` |

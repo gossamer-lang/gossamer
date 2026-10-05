@@ -1,6 +1,6 @@
 # `lang::unsafe_extern`
 
-`unsafe extern "C" { fn strlen(text: [u8]) -> usize }` declares C functions, called inside `unsafe { }` (GT0097), and `type Name` declares a C type reached only as `ffi::Ptr<Name>` (GT0104). Parameters are scalars, `ffi::Ptr` and `Option<ffi::Ptr>`, out-parameters (`&mut` a scalar or pointer), C function pointers written `Fn(..) -> R` and filled with a named function, slices of scalars, and `#[repr(C)]` structs; results are scalars and pointers (GT0098). `std::ffi` reads and writes foreign memory by copy inside `unsafe` (GT0103), allocates from the C allocator, and holds callback context in `ffi::Handle`. Every call is foreign and unsafe whatever it does, captures `errno` for `ffi::last_errno()`, and when it blocks lets another worker start the goroutines waiting on its own; `#[link(name, search)]`, `#[link_name]`, and `#[cfg]` choose the library, symbol, and platform. A project refuses native code with `ffi = false` in `project.toml` (the default is `true`), and then a declaration in the project or a dependency is GT0102.
+`unsafe extern "C" { fn strlen(text: [u8]) -> usize }` declares C functions, called inside `unsafe { }` (GT0097), and `type Name` declares a C type reached only as `ffi::Ptr<Name>` (GT0104). Parameters are scalars, `ffi::Ptr` and `Option<ffi::Ptr>`, out-parameters (`&mut` a scalar or pointer), C function pointers written `Fn(..) -> R` and filled with a named function, slices of scalars, and `#[repr(C)]` structs; results are scalars and pointers (GT0098). `std::ffi` reads and writes foreign memory by copy inside `unsafe` (GT0103), allocates from the C allocator, and holds callback context in `ffi::Handle`. Every call is foreign and unsafe whatever it does, clears and captures `errno` for `ffi::last_errno()` and `ffi::last_os_error()`, and when it blocks lets another worker start the goroutines waiting on its own; `#[link(name, search)]`, `#[link_name]`, and `#[cfg]` choose the library, symbol, and platform. A project refuses native code with `ffi = false` in `project.toml` (the default is `true`), and then a declaration in the project or a dependency is GT0102.
 
 <!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
 
@@ -294,8 +294,12 @@ starts, and C++.
 
 ## errno and blocking
 
-Every call captures `errno` (on Windows, `GetLastError`) before anything else
-runs, into the calling goroutine's own slot:
+Every call starts with `errno` cleared (on Windows, the thread's last error
+too) and captures both before anything else runs, into the calling
+goroutine's own slot. `ffi::last_errno()` reads the C `errno`, so a call that
+succeeds without setting it answers 0; `ffi::last_os_error()` reads the
+operating system's code, which is `GetLastError` on Windows and `errno`
+elsewhere:
 
 ```gossamer
 use std::ffi

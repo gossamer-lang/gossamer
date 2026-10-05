@@ -42,6 +42,9 @@ use std::process::Command;
 )]
 mod macos_deployment;
 
+#[path = "src/main_stack.rs"]
+mod main_stack;
+
 #[path = "../gossamer-driver/src/lsda_link_order.rs"]
 #[allow(
     unreachable_pub,
@@ -90,6 +93,22 @@ const KNOWN_UNUSED_RUNTIME_SYMBOLS: &[&str] = &[
     "gos_rt_spawn",
 ];
 
+/// Gives the `gos` binary the main-thread stack a compiled Windows program
+/// reserves, since `gos run` runs a program's `main` on that thread. Linux
+/// and macOS give every process's main thread the same stack already.
+fn reserve_main_thread_stack() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    let reserve = main_stack::WINDOWS_MAIN_STACK_RESERVE;
+    let flag = if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        format!("/STACK:{reserve}")
+    } else {
+        format!("-Wl,--stack,{reserve}")
+    };
+    println!("cargo:rustc-link-arg-bin=gos={flag}");
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../gossamer-driver/src/lsda_link_order.rs");
@@ -107,6 +126,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GOS_RUNTIME_LIB");
     println!("cargo:rerun-if-env-changed=GOSSAMER_SKIP_DISPATCH_PARITY");
     println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+    println!("cargo:rerun-if-changed=src/main_stack.rs");
+    reserve_main_thread_stack();
 
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest

@@ -113,19 +113,28 @@ pub fn clear_jit_breadcrumb() {
     JIT_BODY_PTR.store(std::ptr::null_mut(), Ordering::Release);
 }
 
-/// Total stack size in bytes of the calling thread, or `None` when the
-/// platform cannot report it. The byte-budget recursion guard uses this
-/// to size itself when the VM runs on the process main thread (`gos
-/// --main-thread`), whose stack is the OS default rather than the large
-/// reserve a spawned VM thread receives.
+/// Bytes between the caller's stack pointer and the low end of the calling
+/// thread's stack, or `None` when the platform cannot report the bounds. The
+/// byte-budget recursion guard sizes itself from this when the VM runs on the
+/// process main thread, whose stack is whatever the OS and the `gos` binary
+/// reserve rather than a size the toolchain chose.
 #[must_use]
-pub fn current_thread_stack_size() -> Option<usize> {
+pub fn remaining_stack_bytes() -> Option<usize> {
+    gossamer_coro::current_stack_ptr().checked_sub(stack_low_limit()?)
+}
+
+/// The lowest address the calling thread's stack can grow to.
+fn stack_low_limit() -> Option<usize> {
     #[cfg(unix)]
     {
         let (lo, hi) = unix::thread_stack_bounds();
-        (hi > lo).then(|| hi - lo)
+        (hi > lo).then_some(lo)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows::thread_stack_low_limit()
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         None
     }
@@ -584,7 +593,18 @@ mod windows {
         AddVectoredExceptionHandler, EXCEPTION_CONTINUE_SEARCH, EXCEPTION_POINTERS,
         SetUnhandledExceptionFilter,
     };
-    use windows_sys::Win32::System::Threading::SetThreadStackGuarantee;
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThreadStackLimits, SetThreadStackGuarantee,
+    };
+
+    /// The lowest address the calling thread's stack can grow to.
+    pub(super) fn thread_stack_low_limit() -> Option<usize> {
+        let mut low = 0usize;
+        let mut high = 0usize;
+        // SAFETY: both out-pointers address live locals the call fills.
+        unsafe { GetCurrentThreadStackLimits(&raw mut low, &raw mut high) };
+        (high > low).then_some(low)
+    }
 
     /// 64 KiB reserved tail kept available so the unhandled
     /// exception filter can execute even when the user stack is

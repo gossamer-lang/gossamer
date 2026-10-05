@@ -2,8 +2,10 @@
  * handles, nullable results, out-parameters, caller- and callee-owned
  * buffers, structs with pointer fields, callbacks run during a call and from
  * a later call, a callback from a thread the library starts, and function
- * pointers handed back. The tests build it as a shared library. */
+ * pointers handed back, and error codes set or left alone. The tests build it
+ * as a shared library. */
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -197,3 +199,22 @@ static double halved(double x) { return x / 2.0; }
 EXPORT int (*get_doubler(void))(int) { return doubled; }
 
 EXPORT void *get_halver(void) { return (void *)halved; }
+
+/* Error codes: what a call finds on entry, and calls that set or leave them. */
+EXPORT int errno_on_entry(void) { return errno; }
+
+EXPORT int fail_with_errno(int code) {
+    errno = code;
+    return -1;
+}
+
+EXPORT int succeed_quietly(void) { return 7; }
+
+#ifdef _WIN32
+EXPORT int last_error_on_entry(void) { return (int)GetLastError(); }
+
+EXPORT int fail_with_last_error(int code) {
+    SetLastError((DWORD)code);
+    return -1;
+}
+#endif

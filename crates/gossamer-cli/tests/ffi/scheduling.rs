@@ -110,3 +110,35 @@ fn errno_stays_with_the_goroutine_whose_call_set_it() {
         "EBADF kept: true ENOENT kept: true"
     );
 }
+
+/// Asks the platform whether `main` runs on the process main thread.
+const MAIN_THREAD: &str = r#"#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn gettid() -> i32
+    fn getpid() -> i32
+}
+
+#[cfg(target_os = "linux")]
+fn on_main_thread() -> bool {
+    unsafe { gettid() == getpid() }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn pthread_main_np() -> i32
+}
+
+#[cfg(target_os = "macos")]
+fn on_main_thread() -> bool {
+    unsafe { pthread_main_np() == 1 }
+}
+
+fn main() {
+    println(f"main thread: {on_main_thread()}")
+}
+"#;
+
+#[test]
+fn main_runs_on_the_process_main_thread_on_every_tier() {
+    assert_eq!(on_one_worker(MAIN_THREAD).trim(), "main thread: true");
+}

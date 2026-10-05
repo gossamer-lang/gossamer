@@ -1577,10 +1577,17 @@ mod blocking_file_tests {
     }
 }
 
-/// `std::ffi::last_errno()`: the `errno` (on Windows, `GetLastError`) the
-/// goroutine's most recent foreign call left.
+/// `std::ffi::last_errno()`: the C `errno` the goroutine's most recent
+/// foreign call left.
 fn builtin_ffi_last_errno(_args: &[Value]) -> RuntimeResult<Value> {
-    Ok(Value::Int(gossamer_runtime::c_abi::ffi::ffi_errno()))
+    Ok(Value::Int(gossamer_runtime::c_abi::ffi::ffi_errno().errno))
+}
+
+/// `std::ffi::last_os_error()`: the operating-system error code
+/// (`GetLastError` on Windows, `errno` elsewhere) the goroutine's most recent
+/// foreign call left.
+fn builtin_ffi_last_os_error(_args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Int(gossamer_runtime::c_abi::ffi::ffi_errno().os))
 }
 
 /// `__gos_fd_wait_raw(fd, writable, timeout_ms)`: `Ok(1)` when the

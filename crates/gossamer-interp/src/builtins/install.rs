@@ -647,6 +647,10 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
     globals.push(("__gos_fd_wait_raw", builtin("__gos_fd_wait_raw", builtin_fd_wait_raw)));
     globals.push(("ffi::last_errno", builtin("ffi::last_errno", builtin_ffi_last_errno)));
     globals.push((
+        "ffi::last_os_error",
+        builtin("ffi::last_os_error", builtin_ffi_last_os_error),
+    ));
+    globals.push((
         gossamer_hir::FOREIGN_DISPATCHER,
         native(gossamer_hir::FOREIGN_DISPATCHER, crate::ffi_call::native_ffi_call),
     ));

@@ -1582,11 +1582,15 @@ pub const REGISTRY: &[(&str, &str)] = &[
         "GT0098",
         "A parameter or return type of a foreign function has no C\n\
             representation. A parameter is a scalar (an integer up to 64 bits,\n\
-            `bool`, `f32`, `f64`), a slice `[T]` of scalars (a pointer to the\n\
-            first element, read-only), `&mut [T]` (a pointer whose writes come\n\
-            back), a `#[repr(C)]` plain-data struct (a pointer to a read-only\n\
-            C-layout copy), or `&mut` such a struct (a pointer whose writes come\n\
-            back). A return type is a scalar or `()`.",
+            `bool`, `f32`, `f64`), an `ffi::Ptr<T>` or `Option<ffi::Ptr<T>>`\n\
+            (a `T *` that may be NULL), a C function pointer `Fn(..) -> R`, a\n\
+            slice `[T]` of scalars (a pointer to the first element, read-only),\n\
+            a `#[repr(C)]` plain-data struct (a pointer to a read-only C-layout\n\
+            copy), or `&mut` one of these: `&mut` a scalar or pointer is an\n\
+            out-parameter C writes back, and `&mut [T]` or `&mut` a struct is a\n\
+            pointer whose writes come back. A return type is a scalar, `()`,\n\
+            an `ffi::Ptr<T>`, or an `Option<ffi::Ptr<T>>`; a struct comes back\n\
+            through an out-parameter or C-allocated memory.",
     ),
     (
         "GT0099",

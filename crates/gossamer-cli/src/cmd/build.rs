@@ -39,6 +39,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow};
 
 use crate::loaders::profile_rss_stage;
+use crate::main_stack::WINDOWS_MAIN_STACK_RESERVE;
 use crate::paths::{
     default_unit_name, platform_exe_name, read_entry_unit, resolve_entry_arg, resolve_output_path,
 };
@@ -108,14 +109,6 @@ impl LinkOptions {
 fn macos_link_optimisation_flag(opts: LinkOptions) -> &'static str {
     if opts.release { "-Wl,-O1" } else { "-Wl,-O0" }
 }
-
-/// Main-thread stack a Windows executable reserves. A PE's default reserve is
-/// 1 MiB against the 8 MiB main-thread stack Linux and macOS give a process,
-/// and a Win64 frame is larger than its System V counterpart (32 bytes of
-/// shadow space per call, more callee-saved registers), so the reserve is
-/// doubled again to reach the same recursion depth. The OS commits the pages
-/// only as the stack grows into them.
-const WINDOWS_MAIN_STACK_RESERVE: u64 = 16 * 1024 * 1024;
 
 /// The mingw `cc` spelling of [`WINDOWS_MAIN_STACK_RESERVE`].
 fn mingw_stack_reserve_flag() -> String {

@@ -14,6 +14,8 @@ mod acceptance;
 mod callbacks;
 #[path = "ffi/compile_fail.rs"]
 mod compile_fail;
+#[path = "ffi/errno.rs"]
+mod errno;
 #[path = "ffi/handles.rs"]
 mod handles;
 #[path = "ffi/memory.rs"]

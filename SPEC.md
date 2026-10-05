@@ -2835,7 +2835,7 @@ Escape sequences, key decoding, and drawing belong to libraries.
 
 **`std::ffi`** names the C types per target and converts strings for
 foreign calls (§12): `c_char`, `c_int`, `c_long`, `size_t`, ...,
-`cstring`, `from_cstr`, and `last_errno`.
+`cstring`, `from_cstr`, `last_errno`, and `last_os_error`.
 
 Fallible operations return `Result` (§9), so a discarded call is a
 compile error rather than a silently ignored failure.
@@ -3353,9 +3353,13 @@ Rules:
   native function does. No attribute relaxes that: `#[pure]`,
   `#[readonly]`, `#[effect]`, `#[blocking]`, and `#[nonblocking]` on a
   foreign declaration are `GT0099`.
-- **`errno`.** Each call captures `errno` (on Windows, `GetLastError`)
-  before any other code runs, into the calling goroutine's own slot,
-  which `std::ffi::last_errno()` reads.
+- **`errno`.** Each call clears `errno` (on Windows, the thread's last
+  error too) as the last step before the native function runs, and
+  captures both before any other code runs, into the calling goroutine's
+  own slot. `std::ffi::last_errno()` reads the C `errno`, so a call that
+  succeeds without setting it answers 0; `std::ffi::last_os_error()`
+  reads the operating system's code: `GetLastError` on Windows, `errno`
+  elsewhere.
 - **Blocking.** Each call marks its scheduler worker as inside a system
   call. A call that outlasts a millisecond while goroutines wait starts a
   worker to run every goroutine that has not yet started. A goroutine

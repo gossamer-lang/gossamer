@@ -28,6 +28,9 @@ pub const CARGO_TOML: &str = include_str!("../templates/Cargo.toml.tmpl");
 /// Raw template text for the runner's `main.rs`.
 pub const MAIN_RS: &str = include_str!("../templates/main.rs.tmpl");
 
+/// The runner's `build.rs`, which reserves the runner's main-thread stack.
+pub const BUILD_RS: &str = include_str!("../templates/build.rs.tmpl");
+
 /// Raw template text for the signature-dumping bin's `sigs_dump.rs`.
 pub const SIGS_DUMP_RS: &str = include_str!("../templates/sigs_dump.rs.tmpl");
 

@@ -327,7 +327,12 @@ pub const FFI: StdModule = StdModule {
         StdItem {
             name: "last_errno",
             kind: StdItemKind::Function,
-            doc: "`last_errno() -> i64`: the `errno` (on Windows, `GetLastError`) the goroutine's most recent foreign call left, captured before anything else could change it.",
+            doc: "`last_errno() -> i64`: the C `errno` the goroutine's most recent foreign call left, cleared just before the call and captured before anything else could change it, so a call that does not set it answers 0.",
+        },
+        StdItem {
+            name: "last_os_error",
+            kind: StdItemKind::Function,
+            doc: "`last_os_error() -> i64`: the operating-system error code the goroutine's most recent foreign call left: `GetLastError` on Windows, `errno` elsewhere. Cleared just before the call, so a call that does not set it answers 0.",
         },
         StdItem {
             name: "c_void",

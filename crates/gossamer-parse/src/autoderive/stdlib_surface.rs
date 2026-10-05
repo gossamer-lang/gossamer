@@ -1112,7 +1112,7 @@ pub fn inject_synthetic_uses(sf: &mut SourceFile, file: FileId) {
         }
     }
     // The `__gos_term_*` wrappers restore the terminal through
-    // `runtime::at_exit` and report `ffi::last_errno`.
+    // `runtime::at_exit` and report `ffi::last_os_error`.
     let has_term = sf.items.iter().any(|item| {
         matches!(&item.kind, ItemKind::Fn(decl) if decl.name.name.starts_with("__gos_term_"))
     });

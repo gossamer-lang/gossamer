@@ -2,9 +2,10 @@
 //!
 //! Every tier brackets a foreign call the same way: [`gos_rt_ffi_enter`]
 //! marks the worker as inside a call that may block, so the scheduler's
-//! watchdog runs waiting goroutines on another worker if it does, and
-//! [`gos_rt_ffi_leave`] captures `errno` (or `GetLastError`) before any other
-//! code runs, then gives the worker back. A slice argument crosses as a
+//! watchdog runs waiting goroutines on another worker if it does, and clears
+//! `errno` (and on Windows the thread's last error) as the last step before
+//! the call; [`gos_rt_ffi_leave`] captures both before any other code runs,
+//! then gives the worker back. A slice argument crosses as a
 //! pointer to its C elements from [`gos_rt_ffi_buf_begin`], which
 //! [`gos_rt_ffi_buf_end`] retires after the call; a struct or fixed array is
 //! packed into a [`gos_rt_ffi_struct_alloc`] buffer with the `put` helpers and
@@ -18,11 +19,23 @@ use std::collections::HashMap;
 use super::vec::GosVec;
 use crate::sched_global::{SyscallGuard, syscall_enter};
 
+/// The error codes a foreign call left behind.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ForeignErrors {
+    /// The C library's `errno`.
+    pub errno: i64,
+    /// The operating system's error: `GetLastError` on Windows, `errno`
+    /// elsewhere.
+    pub os: i64,
+}
+
 thread_local! {
-    /// The `errno` the most recent foreign call left, for the goroutine
-    /// running on this worker. The scheduler saves and restores it around
-    /// every goroutine switch, so it follows the goroutine across workers.
-    static FFI_ERRNO: Cell<i64> = const { Cell::new(0) };
+    /// The error codes the most recent foreign call left, for the goroutine
+    /// running on this worker. The scheduler saves and restores them around
+    /// every goroutine switch, so they follow the goroutine across workers.
+    static FFI_ERRNO: Cell<ForeignErrors> = const {
+        Cell::new(ForeignErrors { errno: 0, os: 0 })
+    };
     /// The system-call marks of the foreign calls in progress on this worker,
     /// innermost last: a callback may make a foreign call of its own.
     static CALL_GUARDS: RefCell<Vec<SyscallGuard>> = const { RefCell::new(Vec::new()) };
@@ -37,23 +50,26 @@ thread_local! {
     static STRUCT_BUFFERS: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
 }
 
-/// Swaps the worker's foreign-call `errno` for `value`, answering the old
-/// one. The scheduler calls this around each goroutine step.
-pub fn swap_ffi_errno(value: i64) -> i64 {
+/// Swaps the worker's foreign-call error codes for `value`, answering the
+/// old ones. The scheduler calls this around each goroutine step.
+pub fn swap_ffi_errno(value: ForeignErrors) -> ForeignErrors {
     FFI_ERRNO.with(|cell| cell.replace(value))
 }
 
-/// The `errno` the current goroutine's most recent foreign call left.
+/// The error codes the current goroutine's most recent foreign call left.
 #[must_use]
-pub fn ffi_errno() -> i64 {
+pub fn ffi_errno() -> ForeignErrors {
     FFI_ERRNO.with(Cell::get)
 }
 
-/// Marks the worker as inside a foreign call that may block.
+/// Marks the worker as inside a foreign call that may block, then clears the
+/// thread's error codes, so a call that succeeds without touching them reads
+/// back zero. Every tier calls this immediately before the native function.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_ffi_enter() {
     let guard = syscall_enter();
     CALL_GUARDS.with(|guards| guards.borrow_mut().push(guard));
+    native_errors::clear();
 }
 
 /// Captures the foreign call's `errno` and leaves the call mark, then raises
@@ -70,11 +86,83 @@ pub extern "C-unwind" fn gos_rt_ffi_leave() {
 /// reports a callback's fault through its own error value.
 pub fn ffi_leave_capture() {
     // First, before anything that could make a system call of its own.
-    let errno = std::io::Error::last_os_error()
-        .raw_os_error()
-        .map_or(0, i64::from);
-    FFI_ERRNO.with(|cell| cell.set(errno));
+    let errors = native_errors::capture();
+    FFI_ERRNO.with(|cell| cell.set(errors));
     CALL_GUARDS.with(|guards| drop(guards.borrow_mut().pop()));
+}
+
+/// The calling thread's C `errno` and operating-system error code.
+mod native_errors {
+    use super::ForeignErrors;
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn errno_location() -> *mut libc::c_int {
+        // SAFETY: answers the calling thread's `errno` slot; no preconditions.
+        unsafe { libc::__errno_location() }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+    fn errno_location() -> *mut libc::c_int {
+        // SAFETY: answers the calling thread's `errno` slot; no preconditions.
+        unsafe { libc::__error() }
+    }
+
+    #[cfg(any(target_os = "netbsd", target_os = "openbsd"))]
+    fn errno_location() -> *mut libc::c_int {
+        // SAFETY: answers the calling thread's `errno` slot; no preconditions.
+        unsafe { libc::__errno() }
+    }
+
+    #[cfg(unix)]
+    pub(super) fn clear() {
+        // SAFETY: the slot is the calling thread's own and always writable.
+        unsafe { *errno_location() = 0 }
+    }
+
+    // On Unix the system reports through `errno`, so the two codes agree.
+    #[cfg(unix)]
+    pub(super) fn capture() -> ForeignErrors {
+        // SAFETY: the slot is the calling thread's own and always readable.
+        let errno = i64::from(unsafe { *errno_location() });
+        ForeignErrors { errno, os: errno }
+    }
+
+    // Windows keeps two codes: the C runtime's `errno`, which CRT functions
+    // set, and the thread's last error, which Win32 functions set.
+    #[cfg(windows)]
+    unsafe extern "C" {
+        fn _errno() -> *mut core::ffi::c_int;
+    }
+
+    #[cfg(windows)]
+    pub(super) fn clear() {
+        // SAFETY: `_errno` answers the calling thread's CRT `errno` slot,
+        // always writable; `SetLastError` has no preconditions.
+        unsafe {
+            *_errno() = 0;
+            windows_sys::Win32::Foundation::SetLastError(0);
+        }
+    }
+
+    #[cfg(windows)]
+    pub(super) fn capture() -> ForeignErrors {
+        // The last error first: reaching the CRT's per-thread data may make
+        // Win32 calls of its own.
+        // SAFETY: `GetLastError` has no preconditions.
+        let os = i64::from(unsafe { windows_sys::Win32::Foundation::GetLastError() });
+        // SAFETY: `_errno` answers the calling thread's CRT `errno` slot.
+        let errno = i64::from(unsafe { *_errno() });
+        ForeignErrors { errno, os }
+    }
+
+    // wasm32 has no foreign functions, so there is nothing to clear or read.
+    #[cfg(not(any(unix, windows)))]
+    pub(super) fn clear() {}
+
+    #[cfg(not(any(unix, windows)))]
+    pub(super) fn capture() -> ForeignErrors {
+        ForeignErrors::default()
+    }
 }
 
 /// Whether this thread is inside a foreign call, the only time native code
@@ -402,11 +490,19 @@ pub extern "C-unwind" fn gos_rt_ffi_handle_release(id: u64) {
     handles::release(id);
 }
 
-/// `std::ffi::last_errno()`: the `errno` (on Windows, `GetLastError`) the
-/// current goroutine's most recent foreign call left.
+/// `std::ffi::last_errno()`: the C `errno` the current goroutine's most
+/// recent foreign call left.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_ffi_last_errno() -> i64 {
-    ffi_errno()
+    ffi_errno().errno
+}
+
+/// `std::ffi::last_os_error()`: the operating-system error code
+/// (`GetLastError` on Windows, `errno` elsewhere) the current goroutine's
+/// most recent foreign call left.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_ffi_last_os_error() -> i64 {
+    ffi_errno().os
 }
 
 /// Bytes, signedness, and float-ness of the C element class `class`.

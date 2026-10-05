@@ -858,7 +858,7 @@ static mut __gos_term_LAST_COLS: i64 = -1
 static mut __gos_term_LAST_ROWS: i64 = -1
 
 fn __gos_term_os_error(operation: String) -> errors::Error {
-    errors::new(f"term::{operation}: os error {ffi::last_errno()}")
+    errors::new(f"term::{operation}: os error {ffi::last_os_error()}")
 }
 
 fn __gos_term_read_input(timeout_ms: i64, fd: i64 = 0) -> Result<Vec<u8>, errors::Error> {

@@ -33,6 +33,7 @@ pub mod cmd;
 pub mod comptime_fold;
 pub mod doc;
 pub mod loaders;
+mod main_stack;
 pub mod paths;
 pub mod repl;
 pub mod repl_handles;
@@ -40,6 +41,24 @@ pub mod repl_helper;
 pub mod style;
 
 pub use binding_dispatch::{DispatchOutcome, dispatch_runner_if_needed, needs_runner_dispatch};
+
+/// Process-wide setup a `gos` executable performs first thing on its main
+/// thread: the allocator settings compiled programs get from their runtime,
+/// and the recursion guard armed at the thread's shallowest point.
+pub fn prepare_main_thread() {
+    gossamer_runtime::init_process_allocator();
+    arm_main_thread_guard();
+}
+
+/// Arms the byte-budget recursion guard for the stack left below the caller,
+/// so deep recursion raises a clean error before the OS guard page. A
+/// platform that cannot report its stack bounds gets the smallest stack a
+/// goroutine has.
+pub(crate) fn arm_main_thread_guard() {
+    let remaining = gossamer_runtime::stack_guard::remaining_stack_bytes()
+        .unwrap_or(gossamer_coro::DEFAULT_STACK_BYTES);
+    gossamer_coro::arm_stack_guard(remaining.saturating_sub(gossamer_coro::STACK_GUARD_MARGIN));
+}
 
 /// Library entry point. Equivalent to running `gos` from the
 /// command line, but invokable from a `main()` that wants to do

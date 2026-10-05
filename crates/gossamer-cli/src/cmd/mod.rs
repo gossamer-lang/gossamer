@@ -44,12 +44,10 @@ pub(crate) use test::TestOpts;
 const VM_STACK_BYTES: usize = gossamer_interp::VM_THREAD_STACK_BYTES;
 
 /// Runs `f` on a dedicated thread with the VM native stack reserve
-/// ([`VM_STACK_BYTES`]) and returns its result, so the host's default
-/// main-thread stack never bounds a Gossamer program's recursion
-/// depth. A panic inside `f` is propagated to the caller unchanged.
-/// Used by every VM-execution entry point (`gos` / `test` /
-/// `bench` / the REPL) and by the comptime fold, whose bytecode-VM
-/// evaluation runs on the `build` / `check` main thread.
+/// ([`VM_STACK_BYTES`]) and returns its result. A panic inside `f` is
+/// propagated to the caller unchanged. Used by `gos test`, `gos bench`, the
+/// REPL, and the comptime fold, whose bytecode-VM evaluation would otherwise
+/// run on the `build` / `check` main thread below the compiler's own frames.
 pub(crate) fn with_vm_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new()
         .name("gos-vm".to_string())
@@ -81,17 +79,13 @@ pub(crate) fn with_vm_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 's
 }
 
 /// Runs `f` directly on the calling (process main) thread, installing the
-/// native fault handler and arming the recursion guard for this thread's
-/// actual stack size rather than the large [`VM_STACK_BYTES`] reserve a
-/// spawned thread gets. Used by `gos run --main-thread` so native
-/// libraries that mandate the process main thread (GLFW / Cocoa / Metal
-/// on macOS, called through `[rust-bindings]`) can create windows and
-/// pump their event loop. The trade-off is the OS default main-thread
-/// stack, so deeply recursive programs have less headroom here.
+/// native fault handler and arming the recursion guard for the stack left
+/// below this point. A program's `main` runs here on the bytecode VM as it
+/// does in a native build, so native libraries that mandate the process main
+/// thread (GLFW, Cocoa, Metal on macOS) behave the same on every tier, with
+/// the same main-thread stack a compiled program gets.
 pub(crate) fn on_main_thread<T>(f: impl FnOnce() -> T) -> T {
     gossamer_runtime::stack_guard::install_stack_guard();
-    let stack =
-        gossamer_runtime::stack_guard::current_thread_stack_size().unwrap_or(VM_STACK_BYTES);
-    gossamer_coro::arm_stack_guard(stack.saturating_sub(gossamer_coro::STACK_GUARD_MARGIN));
+    crate::arm_main_thread_guard();
     f()
 }

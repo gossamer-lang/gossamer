@@ -1517,6 +1517,10 @@ impl<'a> Builder<'a> {
                 "gos_rt_ffi_last_errno",
                 self.tcx.int_ty(gossamer_types::IntTy::I64),
             ),
+            "ffi::last_os_error" | "std::ffi::last_os_error" => (
+                "gos_rt_ffi_last_os_error",
+                self.tcx.int_ty(gossamer_types::IntTy::I64),
+            ),
             "time::format_rfc3339" => {
                 let s = self.tcx.string_ty();
                 let substs = gossamer_types::Substs::from_types([s, s]);

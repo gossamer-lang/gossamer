@@ -408,7 +408,8 @@ tests/          # integration tests
   `read_at`, `read_bytes`, `read_cstr`, `alloc` / `free`. Callback context is
   an `ffi::Handle::new(value)` passed as `h.as_ptr()`. `#[link(name = "z",
   search = "dir")]`, `#[link_name = "sym"]`, and `#[cfg]` per platform;
-  `ffi::last_errno()`; `gos check --target TRIPLE` checks another platform's
+  `ffi::last_errno()` (C `errno`) and `ffi::last_os_error()` (`GetLastError`
+  on Windows); `gos check --target TRIPLE` checks another platform's
   declarations. Native code is allowed by default; `ffi = false` under
   `[project]` refuses it, and GT0102 then lists every library and file
   that declares one.
