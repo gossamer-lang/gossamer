@@ -166,10 +166,13 @@ pub(super) fn build_offline_module(
         populate_fn(func_id);
     }
     let mut data_info: HashMap<u32, (bool, bool)> = HashMap::new();
+    // An imported symbol (the preemption flag, a C global) lives in another
+    // image, which may load beyond a 32-bit displacement from this code.
     for &data_id in intrinsics
         .strings
         .values()
         .chain(intrinsics.preempt_requested.iter())
+        .chain(intrinsics.foreign_data.values())
     {
         let decl = decls.get_data_decl(data_id);
         data_info.insert(data_id.as_u32(), (decl.linkage.is_final(), decl.tls));

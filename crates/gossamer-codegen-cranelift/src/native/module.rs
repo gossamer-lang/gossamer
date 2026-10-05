@@ -235,11 +235,13 @@ impl Module for OfflineModule {
     }
     /// Override the default implementation so we never call `declarations()`.
     fn declare_data_in_func(&self, data_id: DataId, func: &mut ir::Function) -> ir::GlobalValue {
+        // A far reference reaches any symbol; a near one only data this
+        // module defines, so a symbol the snapshot does not describe is far.
         let (colocated, tls) = self
             .data_info
             .get(&data_id.as_u32())
             .copied()
-            .unwrap_or((true, false));
+            .unwrap_or((false, false));
         let user_name_ref = func.declare_imported_user_function(UserExternalName {
             namespace: 1,
             index: data_id.as_u32(),

@@ -282,6 +282,9 @@ fn compile_driver(dir: &Path, artifacts: &Artifacts, shared: bool) -> PathBuf {
             if cfg!(target_os = "linux") {
                 cmd.arg("-ldl");
             }
+            if cfg!(target_os = "macos") {
+                cmd.args(["-framework", "CoreFoundation"]);
+            }
         }
     }
     let out = cmd.output().expect("run the C compiler");

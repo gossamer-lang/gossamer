@@ -658,6 +658,7 @@ mod platform {
 pub(crate) mod callbacks {
     use std::cell::RefCell;
 
+    #[cfg(not(target_arch = "wasm32"))]
     use parking_lot::Mutex;
 
     use crate::value::{NativeDispatch, RuntimeError, RuntimeResult, Value};
@@ -677,6 +678,8 @@ pub(crate) mod callbacks {
     /// A registered callback: its key, the adapter, the program's function
     /// name for reports, and how to run it on a thread the program did not
     /// start.
+    // wasm32 has no trampoline to run a registered callback.
+    #[cfg(not(target_arch = "wasm32"))]
     struct Slot {
         key: String,
         adapter: Value,
@@ -685,6 +688,7 @@ pub(crate) mod callbacks {
     }
 
     /// Registered callbacks by slot.
+    #[cfg(not(target_arch = "wasm32"))]
     static SLOTS: Mutex<Vec<Slot>> = Mutex::new(Vec::new());
 
     /// Runs `call` with `dispatch` as the interpreter callbacks on this
@@ -709,6 +713,7 @@ pub(crate) mod callbacks {
 
     /// The slot of the callback that runs `adapter` for the function
     /// `name`, registering it on first use.
+    #[cfg(not(target_arch = "wasm32"))]
     fn slot(
         adapter: &Value,
         key: &str,
@@ -730,6 +735,7 @@ pub(crate) mod callbacks {
 
     /// `__gos_ffi_callback(adapter, signature, name)`: the address of a
     /// C-ABI entry that runs `adapter` on this interpreter.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn native_ffi_callback(
         dispatch: &mut dyn NativeDispatch,
         args: &[Value],
@@ -941,16 +947,16 @@ pub(crate) mod callbacks {
         }
     }
 
-    // wasm32 has no foreign functions, so nothing calls back.
+    /// `__gos_ffi_callback` on wasm32, which has no foreign functions, so
+    /// nothing calls back.
     #[cfg(target_arch = "wasm32")]
-    mod platform {
-        use crate::value::{RuntimeError, RuntimeResult};
-
-        pub(super) fn entry_address(_signature: &str, _slot: u64) -> RuntimeResult<usize> {
-            Err(RuntimeError::Panic(
-                "foreign functions are not available on wasm32".to_string(),
-            ))
-        }
+    pub(crate) fn native_ffi_callback(
+        _dispatch: &mut dyn NativeDispatch,
+        _args: &[Value],
+    ) -> RuntimeResult<Value> {
+        Err(RuntimeError::Panic(
+            "foreign functions are not available on wasm32".to_string(),
+        ))
     }
 }
 

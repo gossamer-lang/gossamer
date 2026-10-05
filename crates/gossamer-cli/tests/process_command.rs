@@ -148,12 +148,13 @@ fn the_piped_child_of_spawn_piped_is_a_command_child() {
 
 fn main() {
     let child = process::spawn_piped("sort", #[]).unwrap()
-    child.write_stdin("b\na\n")
+    // Whole words: Windows `sort` takes a few bytes of text for UTF-16.
+    child.write_stdin("pear\napple\nmango\n")
     child.close_stdin()
-    println(f"{child.read_line()} {child.read_line()} {child.read_line()} {child.id() > 0}")
+    println(f"{child.read_line()} {child.read_line()} {child.read_line()} {child.read_line()} {child.id() > 0}")
     println(f"{child.wait().unwrap()}")
 }
 "#,
-        "Some(\"a\") Some(\"b\") None true\n0\n",
+        "Some(\"apple\") Some(\"mango\") Some(\"pear\") None true\n0\n",
     );
 }

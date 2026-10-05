@@ -303,7 +303,9 @@ fn static_link_libraries(lt: &LinkTarget, libraries: &NativeLinks) -> Vec<String
             "dbghelp.lib",
         ],
         TargetOs::Windows => &["-lws2_32", "-lbcrypt", "-ladvapi32", "-luserenv", "-lntdll"],
-        TargetOs::MacOs | TargetOs::Other => &["-lpthread", "-lm"],
+        // The runtime reads the local time zone through CoreFoundation.
+        TargetOs::MacOs => &["-lpthread", "-lm", "-framework", "CoreFoundation"],
+        TargetOs::Other => &["-lpthread", "-lm"],
     };
     flags.extend(system.iter().map(ToString::to_string));
     flags
@@ -495,6 +497,9 @@ fn shared(parts: &Parts<'_>, name: &str, out: &Path) -> std::result::Result<(), 
         cmd.arg("-ldl");
     }
     cmd.arg("-lm");
+    if parts.lt.os == TargetOs::MacOs {
+        cmd.args(["-framework", "CoreFoundation"]);
+    }
     if parts.lt.os == TargetOs::Windows {
         for lib in ["ws2_32", "bcrypt", "advapi32", "userenv", "ntdll"] {
             cmd.arg(format!("-l{lib}"));
