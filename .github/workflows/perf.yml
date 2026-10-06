@@ -1,15 +1,15 @@
 name: Perf gate
 
 on:
-  pull_request:
-    branches: [main]
   push:
     branches: ['**']
+  # The PR gate calls this for fork pull requests.
+  workflow_call:
   workflow_dispatch:
 
 concurrency:
-  group: perf-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: perf-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   perf:
@@ -71,14 +71,15 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .perf/baseline.txt
-          # Baseline is keyed to the main branch head. PRs restore the
-          # most recent main baseline and compare against it; pushes to
-          # main refresh it after a successful run. A cache can be evicted,
-          # so the comparison step tolerates one baseline-seeding run.
+          # Baseline is keyed to the main branch head. Branch pushes and
+          # fork pull requests never save one, so the prefix restore yields
+          # the most recent main baseline; pushes to main refresh it after
+          # a successful run. A cache can be evicted, so the comparison
+          # step tolerates one baseline-seeding run.
           # Hosted ubuntu-latest spans materially different CPU generations.
           # Comparing their absolute ns/op values produces uniform false
           # regressions, so each CPU model maintains its own accepted baseline.
-          key: perf-baseline-${{ runner.os }}-${{ steps.perf_cpu.outputs.fingerprint }}-${{ github.base_ref == '' && github.sha || 'main' }}
+          key: perf-baseline-${{ runner.os }}-${{ steps.perf_cpu.outputs.fingerprint }}-${{ github.sha }}
           restore-keys: |
             perf-baseline-${{ runner.os }}-${{ steps.perf_cpu.outputs.fingerprint }}-
 
@@ -214,7 +215,7 @@ jobs:
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         shell: bash
         run: |
-          # The cache restore key gives PRs the latest accepted main baseline
+          # The cache restore key gives branches the latest accepted main baseline
           # for this CPU model. Keep it representative of current main, not
           # the fastest run ever seen on a matching hosted runner.
           CURRENT=.perf/current.txt

@@ -1,0 +1,138 @@
+name: PR gate
+
+# Every branch push in this repository runs CI, Fuzz smoke, and Perf gate.
+# A pull request from a branch of this repository reuses those push runs
+# instead of running them again; a pull request from a fork runs them here,
+# since a fork's own push runs are outside this repository. "Required CI"
+# is the one status check branch protection requires.
+#
+# A same-repository pull request is gated on CI of its head commit, not of
+# GitHub's synthetic refs/pull/N/merge commit. "Require branches to be up to
+# date before merging" makes main an ancestor of that head, so the head is
+# the tree that lands.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: pr-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  push-ci:
+    name: Push CI of the head commit
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for the push runs of the head commit
+        uses: actions/github-script@v9
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        with:
+          script: |
+            const sha = process.env.HEAD_SHA;
+            const branch = process.env.HEAD_REF;
+            const workflows = ['ci.yml', 'fuzz.yml', 'perf.yml'];
+            const pollMs = 30_000;
+            // The push event and this pull_request event arrive together,
+            // and GitHub lists a new run moments after its push. A run
+            // still absent after this window was never created (a
+            // [skip ci] push), so the gate fails closed.
+            const appearMs = 10 * 60_000;
+            const started = Date.now();
+
+            // Newest push run of the workflow for this exact commit on the
+            // PR's head branch; a re-run keeps its id and reports its
+            // latest attempt.
+            async function newestRun(workflow_id) {
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id,
+                event: 'push',
+                branch,
+                head_sha: sha,
+                per_page: 100,
+              });
+              return data.workflow_runs
+                .filter((r) => r.event === 'push' && r.head_sha === sha && r.head_branch === branch)
+                .sort((a, b) => b.run_number - a.run_number)[0];
+            }
+
+            const pending = new Set(workflows);
+            while (pending.size > 0) {
+              for (const workflow of [...pending]) {
+                const run = await newestRun(workflow);
+                if (!run) {
+                  if (Date.now() - started > appearMs) {
+                    core.setFailed(`no push run of ${workflow} for ${sha} on ${branch}`);
+                    return;
+                  }
+                  core.info(`${workflow}: no push run for ${sha} yet`);
+                  continue;
+                }
+                if (run.status !== 'completed') {
+                  core.info(`${run.name}: ${run.status} (${run.html_url})`);
+                  continue;
+                }
+                if (run.conclusion !== 'success') {
+                  core.setFailed(`${run.name} concluded ${run.conclusion}: ${run.html_url}`);
+                  return;
+                }
+                core.info(`${run.name} passed: ${run.html_url}`);
+                pending.delete(workflow);
+              }
+              if (pending.size > 0) {
+                await new Promise((resolve) => setTimeout(resolve, pollMs));
+              }
+            }
+
+  # Fork code runs under the pull_request event: a read-only token, no
+  # secrets passed to the called workflows, and the default checkout of the
+  # merge commit.
+  fork-ci:
+    name: Fork CI
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    uses: ./.github/workflows/ci.yml
+
+  fork-fuzz:
+    name: Fork fuzz smoke
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    uses: ./.github/workflows/fuzz.yml
+
+  fork-perf:
+    name: Fork perf gate
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    uses: ./.github/workflows/perf.yml
+
+  required:
+    name: Required CI
+    if: always()
+    needs: [push-ci, fork-ci, fork-fuzz, fork-perf]
+    runs-on: ubuntu-latest
+    steps:
+      # Each path is judged by its own results, so the skipped jobs of the
+      # path that does not apply never count as a pass.
+      - name: Require the applicable path to have passed
+        env:
+          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          PUSH_CI: ${{ needs.push-ci.result }}
+          FORK_CI: ${{ needs.fork-ci.result }}
+          FORK_FUZZ: ${{ needs.fork-fuzz.result }}
+          FORK_PERF: ${{ needs.fork-perf.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$SAME_REPO" == "true" ]]; then
+            echo "push CI of the head commit: $PUSH_CI"
+            [[ "$PUSH_CI" == "success" ]]
+          else
+            echo "fork CI: $FORK_CI, fuzz smoke: $FORK_FUZZ, perf gate: $FORK_PERF"
+            [[ "$FORK_CI" == "success" && "$FORK_FUZZ" == "success" && "$FORK_PERF" == "success" ]]
+          fi
