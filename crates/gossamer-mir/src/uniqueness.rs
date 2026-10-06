@@ -793,6 +793,14 @@ impl Transfer<'_> {
                 if is_share_neutral_intrinsic(name) {
                     return Base::Unique;
                 }
+                // A carrier's payload is the handle the carrier holds, so
+                // taking it out of a carrier nothing reads afterwards moves it.
+                if matches!(*name, "gos_rt_result_payload" | "gos_rt_result_payload_f64")
+                    && let [op @ Operand::Copy(src)] = args.as_slice()
+                    && src.projection.is_empty()
+                {
+                    return self.hand_on(state, op, live_after);
+                }
                 if is_goroutine_publish(name) {
                     for op in args {
                         if let Operand::Copy(p) = op {
@@ -1072,6 +1080,13 @@ fn runtime_answers_fresh(name: &str) -> bool {
             | "gos_rt_queue_clone"
             | "gos_rt_stack_clone"
             | "gos_rt_par_run"
+            // A map's `remove` hands over the value it held, which nothing
+            // else reaches once it leaves the table.
+            | "gos_rt_map_pop_i64"
+            | "gos_rt_map_pop_str"
+            | "gos_rt_map_pop_typed_str"
+            | "gos_rt_map_pop_skey"
+            | "gos_rt_map_pop_ekey"
     ) || answers_fresh_table(name)
         || gossamer_abi::lookup(name).is_some_and(|entry| {
             // A sequence combinator builds the collection it answers, so nothing
@@ -1147,8 +1162,14 @@ fn table_receiver_only(name: &str) -> bool {
 pub(crate) fn runtime_arg_kept_no_handle(name: &str, index: usize) -> bool {
     let receiver_only = matches!(
         name,
+        // An arm query reads a carrier's tag and nothing it holds.
+        "gos_rt_result_disc"
+            | "gos_rt_result_is_ok"
+            | "gos_rt_result_is_err"
+            | "gos_rt_option_is_some"
+            | "gos_rt_option_is_none"
         // Tagging a vector's element kind writes its header and keeps nothing.
-        "gos_rt_vec_mark_rc_elems"
+            | "gos_rt_vec_mark_rc_elems"
             | "gos_rt_vec_mark_str_elems"
             | "gos_rt_vec_mark_vec_elems"
             | "gos_rt_vec_set_elem_meta"

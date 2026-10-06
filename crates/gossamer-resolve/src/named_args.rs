@@ -78,20 +78,24 @@ enum Slot {
     Default(usize),
 }
 
+/// A method call whose name several types declare with different
+/// parameters, left as written until the receiver's type is known.
+#[derive(Debug, Clone)]
+pub struct DeferredMethodCall {
+    /// The call expression's node id.
+    pub call: NodeId,
+    /// The labels the caller wrote.
+    written: Vec<gossamer_ast::NamedArg>,
+}
+
 /// Rewrites every labelled or defaulted call in `sf` into positional
-/// order, returning one diagnostic per call it could not.
+/// order, returning one diagnostic per call it could not and the method
+/// calls whose rewrite waits on their receiver's type.
 pub fn resolve_named_arguments(
     sf: &mut SourceFile,
     resolutions: &Resolutions,
-) -> Vec<ResolveDiagnostic> {
-    let mut signatures = SignatureTable::default();
-    for item in sf
-        .items
-        .iter()
-        .filter(|item| gossamer_ast::cfg::item_is_active(&item.attrs))
-    {
-        signatures.collect_item(item, resolutions);
-    }
+) -> (Vec<ResolveDiagnostic>, Vec<DeferredMethodCall>) {
+    let signatures = SignatureTable::of(sf, resolutions);
     let mut diagnostics = Vec::new();
     for item in sf
         .items
@@ -111,6 +115,43 @@ pub fn resolve_named_arguments(
         labels,
         ids: &mut ids,
         diagnostics,
+        receiver: None,
+        deferred: Vec::new(),
+    };
+    pass.visit_source_file(sf);
+    let diagnostics = std::mem::take(&mut pass.diagnostics);
+    let deferred = std::mem::take(&mut pass.deferred);
+    sf.next_node_id = ids.issued();
+    (diagnostics, deferred)
+}
+
+/// Rewrites each deferred method call against the parameters of the type
+/// its receiver turned out to have. `receiver` answers, for a call, the
+/// name of that type, or of the trait bounding a type-parameter receiver; a
+/// call it has no answer for is reported as ambiguous.
+pub fn resolve_deferred_method_arguments(
+    sf: &mut SourceFile,
+    resolutions: &Resolutions,
+    deferred: Vec<DeferredMethodCall>,
+    receiver: &dyn Fn(NodeId) -> Option<String>,
+) -> Vec<ResolveDiagnostic> {
+    let signatures = SignatureTable::of(sf, resolutions);
+    let labels = deferred
+        .into_iter()
+        .map(|call| (call.call, call.written))
+        .collect();
+    let mut ids = NodeIdGenerator::new();
+    while ids.issued() < sf.next_node_id {
+        let _ = ids.next();
+    }
+    let mut pass = Rewrite {
+        signatures,
+        resolutions,
+        labels,
+        ids: &mut ids,
+        diagnostics: Vec::new(),
+        receiver: Some(receiver),
+        deferred: Vec::new(),
     };
     pass.visit_source_file(sf);
     let diagnostics = std::mem::take(&mut pass.diagnostics);
@@ -136,6 +177,18 @@ struct SignatureTable {
 }
 
 impl SignatureTable {
+    fn of(sf: &SourceFile, resolutions: &Resolutions) -> Self {
+        let mut signatures = Self::default();
+        for item in sf
+            .items
+            .iter()
+            .filter(|item| gossamer_ast::cfg::item_is_active(&item.attrs))
+        {
+            signatures.collect_item(item, resolutions);
+        }
+        signatures
+    }
+
     fn record_associated(&mut self, owner: &str, decl: &FnDecl) {
         let sig = signature_of(decl);
         self.associated
@@ -219,6 +272,10 @@ struct Rewrite<'a> {
     labels: HashMap<NodeId, Vec<gossamer_ast::NamedArg>>,
     ids: &'a mut NodeIdGenerator,
     diagnostics: Vec<ResolveDiagnostic>,
+    /// The receiver's type for each deferred method call, once checked.
+    /// `None` on the first pass, which defers those calls instead.
+    receiver: Option<&'a dyn Fn(NodeId) -> Option<String>>,
+    deferred: Vec<DeferredMethodCall>,
 }
 
 impl VisitorMut for Rewrite<'_> {
@@ -234,6 +291,10 @@ impl VisitorMut for Rewrite<'_> {
         walk_expr_mut(self, expr);
         let id = expr.id;
         let span = expr.span;
+        // The second pass revisits only the calls the first one deferred.
+        if self.receiver.is_some() && !self.labels.contains_key(&id) {
+            return;
+        }
         let written = self.labels.remove(&id).unwrap_or_default();
         let Some(sig) = self.signature_for(expr, &written, span) else {
             return;
@@ -310,6 +371,26 @@ impl Rewrite<'_> {
                         .any(|(_, sig)| args.len() == sig.names.len())
                 {
                     return None;
+                }
+                // Otherwise the receiver's type picks the declaration, so the
+                // call waits for the checker to say what that type is.
+                let Some(receiver) = self.receiver else {
+                    self.deferred.push(DeferredMethodCall {
+                        call: expr.id,
+                        written: written.to_vec(),
+                    });
+                    return None;
+                };
+                if let Some(owner) = receiver(expr.id) {
+                    let mut own = candidates
+                        .iter()
+                        .filter(|(candidate, _)| *candidate == owner)
+                        .map(|(_, sig)| sig);
+                    if let Some(sig) = own.next()
+                        && own.all(|other| other.rewrites_same_as(sig))
+                    {
+                        return Some(sig.clone());
+                    }
                 }
                 self.diagnostics.push(ResolveDiagnostic::new(
                     ResolveError::AmbiguousNamedArgument {

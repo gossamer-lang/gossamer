@@ -35,7 +35,7 @@ pub(crate) const TRAIT_OBJECTS: Declined = (
 );
 pub(crate) const IMPL_TRAIT_TYPES: Declined = (
     "`impl Trait` types",
-    "take a generic parameter `<T: Trait>`, or name the concrete type",
+    "answer `Iterator<T>` for a lazy sequence or `Fn(..) -> R` for a callable, take a generic parameter `<T: Trait>`, or name the concrete type",
 );
 pub(crate) const GENERIC_ASSOCIATED_TYPES: Declined = (
     "generic associated types",

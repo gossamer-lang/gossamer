@@ -101,7 +101,7 @@ unsafe fn serve_ws_conn(mut stream: TcpStream, env_addr: usize, fn_addr: usize) 
     // `websocket::serve(addr, app)` call site; `env_addr` is the `&app`
     // pointer passed alongside. A `fn handle(&self, ws: i64)` Gossamer
     // method lowers to a `void(ptr, i64)` C-ABI function.
-    type WsHandlerFn = unsafe extern "C" fn(env: *mut u8, ws: i64);
+    type WsHandlerFn = unsafe extern "C-unwind" fn(env: *mut u8, ws: i64);
     // SAFETY: this function's contract makes `fn_addr` a compiled
     // `fn(env, ws)` method.
     let handler: WsHandlerFn = unsafe { std::mem::transmute::<usize, WsHandlerFn>(fn_addr) };

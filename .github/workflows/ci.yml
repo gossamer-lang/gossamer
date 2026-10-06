@@ -2,12 +2,13 @@ name: CI
 
 on:
   push:
-    branches: [main]
-  pull_request:
+    branches: ['**']
+  # The PR gate calls this for fork pull requests.
+  workflow_call:
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always

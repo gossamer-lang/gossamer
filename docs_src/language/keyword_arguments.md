@@ -60,14 +60,14 @@ gets that value spliced in at its position.
 fn label(text: String, prefix: String = "item", times: i64 = 1) -> String
 ```
 
-A default must be a constant: an integer, float, string, char, byte, or
+A default must be a literal: an integer, float, string, char, byte, or
 bool literal, optionally negated (`-1`). The default is spliced into
 every call that omits it, so an expression that would have to be resolved
 separately at each of those sites is rejected:
 
 <!-- compile_fail GR0014 -->
 ```gossamer
-fn f(a: i64, b: i64 = a + 1)   // error[GR0014]: a parameter default must be a constant
+fn f(a: i64, b: i64 = a + 1)   // error[GR0014]: a parameter default must be a literal
 ```
 
 Defaults are per call site. Two calls to the same function never share a
@@ -90,28 +90,34 @@ r.scaled()                   // factor defaults to 2
 r.scaled(factor: 10)
 ```
 
-A method call is rewritten before its receiver's type is known, so the
-rewrite has to be the same whichever type the receiver turns out to be.
-When several types declare a method of the same name, that holds as long
-as they agree on their parameter names and defaults - which is the usual
-case. When they disagree, the call is reported rather than guessed:
+A method call binds its names and defaults against the declaration its
+receiver's type reaches, so another type that happens to declare a method
+of the same name, with other parameters, changes nothing:
 
-<!-- fragment -->
 ```gossamer
-impl A { fn scaled(&self, factor: i64 = 2) -> i64 { .. } }
-impl B { fn scaled(&self, factor: i64 = 3) -> i64 { .. } }
+struct Socket { host: String }
+struct Database { url: String }
 
-a.scaled()        // error[GR0013]: declared with different parameters
-a.scaled(2)       // fine - nothing to rewrite
+impl Socket { fn connect(&self, timeout: i64 = 30) -> String { f"{self.host} {timeout}" } }
+impl Database { fn connect(&self, retries: i64 = 3) -> String { f"{self.url} {retries}" } }
+
+fn main() {
+    let s = Socket { host: "a" }
+    println(s.connect())
+    println(s.connect(timeout: 5))
+}
 ```
 
-Passing the argument explicitly always works.
+A receiver whose type is a generic parameter uses the declaration of the
+trait that bounds it. Only a receiver whose type is not settled where the
+call is written, with declarations that disagree, is reported (`GR0013`);
+passing every argument by position always works.
 
 ## Diagnostics
 
 | Code | Meaning |
 |---|---|
-| `GR0013` | A name that matches no parameter, is given twice, follows a positional argument, or is on a method several types declare differently. |
-| `GR0014` | A parameter default that is not a constant. |
+| `GR0013` | A name that matches no parameter, is given twice, follows a positional argument, or is on a method whose receiver's type is not settled where several types declare it differently. |
+| `GR0014` | A parameter default that is not a literal. |
 
 `gos explain GR0013` and `gos explain GR0014` expand both.

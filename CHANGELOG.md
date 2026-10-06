@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.67.1 - Goroutine faults, map entry writes, and name resolution
+
+- A fault the runtime raises inside a spawned goroutine - an index out of bounds, a negative `repeat` or capacity, a panicking callback a library runs, a `Display` that panics while a value is formatted - ends that goroutine and reaches `join()` as an `Err` on every tier; native builds aborted the whole process or let the goroutine continue with a placeholder value, and the JIT ended the program.
+- A fault the runtime raises for itself rather than for the program (memory exhausted, a broken internal invariant) ends the program as a fault on `main` does, instead of continuing with a placeholder value.
+- A JIT-compiled body that panics is no longer run a second time on the bytecode VM, so what it did before the panic happens once.
+- `f(&mut m[k])` and `f(&mut m[k][i].field)` write back to the map entry on every tier; the callee wrote to a copy.
+- Assignments and mutating calls through a map entry - `m[k][i] = v`, `m[a][b] += 1`, `m[k][i].field = v`, `m[k][i].items.push(x)` - land in the map on every tier, where the bytecode VM, and native builds for a struct inside a vector inside a map, wrote to a copy. The right-hand side and the arguments are evaluated before the entry is read.
+- A write through a map entry in a loop, `m[k].push(x)` included, no longer copies the stored value on the bytecode VM.
+- A write inside a closure to a binding it captured by copy - `count += 1`, `s.push_str(t)`, `acc.items.push(x)` - is GT0114; the write changed only the closure's own copy, and native builds and the bytecode VM disagreed when the copy was a struct holding a `Vec`.
+- Two enums may declare variants of the same name in one module (`Conn::Ready` beside `Job::Ready`), and an enum in another module no longer makes a bare variant name ambiguous: a bare name resolves to the current module's enum first.
+- A method call's named and default arguments bind against the declaration its receiver's type reaches, so an unrelated type declaring a method of the same name with other parameters no longer rejects the call with GR0013, a positional call that leaves out a default included.
+- `impl Sub for T`, where `trait Sub: Super`, requires `impl Super for T` (GT0115).
+- A goroutine that finds a `sync::Mutex` held parks and gives its worker back, and a lock nothing left in the program can release, such as one held by a goroutine that panicked, is reported as a deadlock (GX0005) on every tier instead of hanging.
+- A name read inside the initializer of the `let` that declares it is reported as such, with a note that a line starting with `||` continues the expression above it.
+- GR0014 says a parameter default must be a literal, and GP0061 for an `impl Trait` type points at `Iterator<T>` and `Fn(..) -> R` results.
+- The specification matches the compiler on argument labels (`name: value`), statement separators, `unsafe`, foreign pointers (`ffi::Ptr`), associated types, trait objects, and `fn init`, and the closure, enum, keyword-argument, and trait pages describe capture, variant names, receiver-based argument binding, and supertraits.
+
 ## 0.67.0 - Native interop, stdlib process additions, SIMD and other improvements
 
 - `ffi::Union<(A, B, ..)>` is a C union of its listed members, sized and aligned for the largest, usable as a `#[repr(C)]` field, a pointee, and a foreign argument; `Union::new(v)`, `Union::zeroed()`, `u.get::<T>()`, and `u.set(v)` read and write the leading bytes as a member type, on every tier (GT0110 for a type the union does not list, a member without a C layout, or a member listed twice).

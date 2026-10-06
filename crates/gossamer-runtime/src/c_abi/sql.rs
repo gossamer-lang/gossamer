@@ -2021,7 +2021,7 @@ unsafe impl Send for Dispatcher {}
 // are atomic.
 unsafe impl Sync for Dispatcher {}
 
-type DispatchFn = unsafe extern "C" fn(env: *mut u8, op: i64, h: i64) -> i64;
+type DispatchFn = unsafe extern "C-unwind" fn(env: *mut u8, op: i64, h: i64) -> i64;
 
 impl Dispatcher {
     fn call(&self, op: i64, h: i64) -> i64 {

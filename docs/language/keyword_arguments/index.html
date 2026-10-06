@@ -2504,12 +2504,12 @@ order, so every later argument needs a name too.</p>
 gets that value spliced in at its position.</p>
 <div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">fn</span> <span class="nf">label</span><span class="p">(</span><span class="n">text</span>: <span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="n">prefix</span>: <span class="nb">String</span> <span class="o">=</span><span class="w"> </span><span class="s">&quot;item&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">times</span>: <span class="kt">i64</span> <span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nb">String</span>
 </code></pre></div>
-<p>A default must be a constant: an integer, float, string, char, byte, or
+<p>A default must be a literal: an integer, float, string, char, byte, or
 bool literal, optionally negated (<code>-1</code>). The default is spliced into
 every call that omits it, so an expression that would have to be resolved
 separately at each of those sites is rejected:</p>
 <!-- compile_fail GR0014 -->
-<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">fn</span> <span class="nf">f</span><span class="p">(</span><span class="n">a</span>: <span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="n">b</span>: <span class="kt">i64</span> <span class="o">=</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w">   </span><span class="c1">// error[GR0014]: a parameter default must be a constant</span>
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">fn</span> <span class="nf">f</span><span class="p">(</span><span class="n">a</span>: <span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="n">b</span>: <span class="kt">i64</span> <span class="o">=</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w">   </span><span class="c1">// error[GR0014]: a parameter default must be a literal</span>
 </code></pre></div>
 <p>Defaults are per call site. Two calls to the same function never share a
 value, so a default of a String or any other owned type is safe.</p>
@@ -2526,19 +2526,25 @@ value, so a default of a String or any other owned type is safe.</p>
 <a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="n">r</span><span class="p">.</span><span class="n">scaled</span><span class="p">()</span><span class="w">                   </span><span class="c1">// factor defaults to 2</span>
 <a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a><span class="n">r</span><span class="p">.</span><span class="n">scaled</span><span class="p">(</span><span class="n">factor</span>: <span class="mi">10</span><span class="p">)</span>
 </code></pre></div>
-<p>A method call is rewritten before its receiver's type is known, so the
-rewrite has to be the same whichever type the receiver turns out to be.
-When several types declare a method of the same name, that holds as long
-as they agree on their parameter names and defaults - which is the usual
-case. When they disagree, the call is reported rather than guessed:</p>
-<!-- fragment -->
-<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="k">impl</span><span class="w"> </span><span class="n">A</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">fn</span> <span class="nf">scaled</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">factor</span>: <span class="kt">i64</span> <span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i64</span> <span class="p">{</span><span class="w"> </span><span class="o">..</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="k">impl</span><span class="w"> </span><span class="n">B</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">fn</span> <span class="nf">scaled</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">factor</span>: <span class="kt">i64</span> <span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i64</span> <span class="p">{</span><span class="w"> </span><span class="o">..</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+<p>A method call binds its names and defaults against the declaration its
+receiver's type reaches, so another type that happens to declare a method
+of the same name, with other parameters, changes nothing:</p>
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="k">struct</span> <span class="nc">Socket</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">host</span>: <span class="nb">String</span> <span class="p">}</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="k">struct</span> <span class="nc">Database</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">url</span>: <span class="nb">String</span> <span class="p">}</span>
 <a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>
-<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="n">a</span><span class="p">.</span><span class="n">scaled</span><span class="p">()</span><span class="w">        </span><span class="c1">// error[GR0013]: declared with different parameters</span>
-<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="n">a</span><span class="p">.</span><span class="n">scaled</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span><span class="w">       </span><span class="c1">// fine - nothing to rewrite</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="k">impl</span><span class="w"> </span><span class="n">Socket</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">fn</span> <span class="nf">connect</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">timeout</span>: <span class="kt">i64</span> <span class="o">=</span><span class="w"> </span><span class="mi">30</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nb">String</span> <span class="p">{</span><span class="w"> </span><span class="s">f&quot;</span><span class="si">{</span><span class="bp">self</span><span class="p">.</span><span class="n">host</span><span class="si">}</span><span class="s"> </span><span class="si">{</span><span class="n">timeout</span><span class="si">}</span><span class="s">&quot;</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="k">impl</span><span class="w"> </span><span class="n">Database</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">fn</span> <span class="nf">connect</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">retries</span>: <span class="kt">i64</span> <span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nb">String</span> <span class="p">{</span><span class="w"> </span><span class="s">f&quot;</span><span class="si">{</span><span class="bp">self</span><span class="p">.</span><span class="n">url</span><span class="si">}</span><span class="s"> </span><span class="si">{</span><span class="n">retries</span><span class="si">}</span><span class="s">&quot;</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">s</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Socket</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">host</span>: <span class="s">&quot;a&quot;</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="w">    </span><span class="n">println</span><span class="p">(</span><span class="n">s</span><span class="p">.</span><span class="n">connect</span><span class="p">())</span>
+<a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a><span class="w">    </span><span class="n">println</span><span class="p">(</span><span class="n">s</span><span class="p">.</span><span class="n">connect</span><span class="p">(</span><span class="n">timeout</span>: <span class="mi">5</span><span class="p">))</span>
+<a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a><span class="p">}</span>
 </code></pre></div>
-<p>Passing the argument explicitly always works.</p>
+<p>A receiver whose type is a generic parameter uses the declaration of the
+trait that bounds it. Only a receiver whose type is not settled where the
+call is written, with declarations that disagree, is reported (<code>GR0013</code>);
+passing every argument by position always works.</p>
 <h2 id="diagnostics">Diagnostics<a class="headerlink" href="#diagnostics" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -2550,11 +2556,11 @@ case. When they disagree, the call is reported rather than guessed:</p>
 <tbody>
 <tr>
 <td><code>GR0013</code></td>
-<td>A name that matches no parameter, is given twice, follows a positional argument, or is on a method several types declare differently.</td>
+<td>A name that matches no parameter, is given twice, follows a positional argument, or is on a method whose receiver's type is not settled where several types declare it differently.</td>
 </tr>
 <tr>
 <td><code>GR0014</code></td>
-<td>A parameter default that is not a constant.</td>
+<td>A parameter default that is not a literal.</td>
 </tr>
 </tbody>
 </table>

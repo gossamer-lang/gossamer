@@ -291,6 +291,7 @@ fn front_end(
             if matches!(
                 diag.error,
                 ResolveError::UnresolvedName { .. }
+                    | ResolveError::UsedInOwnInitializer { .. }
                     | ResolveError::DuplicateItem { .. }
                     | ResolveError::UnknownModulePath { .. }
             ) {

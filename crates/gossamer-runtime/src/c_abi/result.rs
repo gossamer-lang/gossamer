@@ -149,7 +149,7 @@ pub extern "C" fn gos_rt_result_payload_f64(r: i128) -> f64 {
 ///
 /// The payload of `r` addresses the live two-word copy its construction made.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_result_payload_i128(r: i128) -> i128 {
+pub unsafe extern "C-unwind" fn gos_rt_result_payload_i128(r: i128) -> i128 {
     let addr = result_payload_of(r);
     if addr == 0 {
         return 0;
@@ -167,7 +167,7 @@ pub unsafe extern "C" fn gos_rt_result_payload_i128(r: i128) -> i128 {
 
 /// Signature of a derived `Type::fmt`: it reads the value's flat slot buffer
 /// and returns a freshly allocated runtime String the caller owns.
-type AdtFmt = unsafe extern "C" fn(*const u8) -> *mut std::ffi::c_char;
+type AdtFmt = unsafe extern "C-unwind" fn(*const u8) -> *mut std::ffi::c_char;
 
 /// Renders one aggregate by calling the derived `fmt` at `fmt`, taking
 /// ownership of the String it returns. `value` carries whatever that `fmt`
@@ -413,7 +413,7 @@ pub unsafe extern "C" fn gos_rt_debug_result(
 /// A `Some` payload of `opt` is a live value of the shape `payload_kind` names,
 /// and `fmt` is its formatter when that shape is an aggregate.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_debug_option_fmt(
+pub unsafe extern "C-unwind" fn gos_rt_debug_option_fmt(
     opt: i128,
     payload_kind: i64,
     fmt: *const std::ffi::c_void,
@@ -438,7 +438,7 @@ pub unsafe extern "C" fn gos_rt_debug_option_fmt(
 /// The payload of `res` is a live value of the shape its arm's kind names, and
 /// that arm's formatter is its formatter when the shape is an aggregate.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_debug_result_fmt(
+pub unsafe extern "C-unwind" fn gos_rt_debug_result_fmt(
     res: i128,
     ok_kind: i64,
     err_kind: i64,
@@ -465,8 +465,8 @@ pub unsafe extern "C" fn gos_rt_debug_result_fmt(
 /// `result.unwrap()` / `option.unwrap()`. Returns the payload on the happy
 /// path; panics on Err / None.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_result_unwrap(r: i128) -> i64 {
-    ffi_entry!(-1, {
+pub extern "C-unwind" fn gos_rt_result_unwrap(r: i128) -> i64 {
+    ffi_entry_passthrough!(-1, {
         if result_disc_of(r) != 0 {
             crate::c_abi::panic::panic_text("called `Result::unwrap()` on an `Err` value");
             return 0;
@@ -479,8 +479,8 @@ pub extern "C" fn gos_rt_result_unwrap(r: i128) -> i64 {
 /// [`gos_rt_result_unwrap`] and differs only in the message the empty case
 /// panics with, which names the shape the program actually wrote.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_option_unwrap(r: i128) -> i64 {
-    ffi_entry!(-1, {
+pub extern "C-unwind" fn gos_rt_option_unwrap(r: i128) -> i64 {
+    ffi_entry_passthrough!(-1, {
         if result_disc_of(r) != 0 {
             crate::c_abi::panic::panic_text("called `Option::unwrap()` on a `None` value");
             return 0;
@@ -514,8 +514,8 @@ unsafe fn boxed_carrier_of(r: i128) -> i128 {
 ///
 /// A `Some` payload of `r` addresses a live boxed two-word carrier.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_option_unwrap_carrier(r: i128) -> i128 {
-    ffi_entry!(0, {
+pub unsafe extern "C-unwind" fn gos_rt_option_unwrap_carrier(r: i128) -> i128 {
+    ffi_entry_passthrough!(0, {
         if result_disc_of(r) != 0 {
             crate::c_abi::panic::panic_text("called `Option::unwrap()` on a `None` value");
             return 0;
@@ -532,8 +532,8 @@ pub unsafe extern "C" fn gos_rt_option_unwrap_carrier(r: i128) -> i128 {
 ///
 /// An `Ok` payload of `r` addresses a live boxed two-word carrier.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_result_unwrap_carrier(r: i128) -> i128 {
-    ffi_entry!(0, {
+pub unsafe extern "C-unwind" fn gos_rt_result_unwrap_carrier(r: i128) -> i128 {
+    ffi_entry_passthrough!(0, {
         if result_disc_of(r) != 0 {
             crate::c_abi::panic::panic_text("called `Result::unwrap()` on an `Err` value");
             return 0;

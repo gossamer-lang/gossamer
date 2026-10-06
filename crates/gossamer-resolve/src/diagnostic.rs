@@ -154,6 +154,12 @@ pub enum ResolveError {
         /// Name that could not be resolved.
         name: String,
     },
+    /// A name read inside the initializer of the `let` that declares it.
+    #[error("cannot find `{name}` in this scope")]
+    UsedInOwnInitializer {
+        /// The name the enclosing `let` declares.
+        name: String,
+    },
     /// A resolved name exists, but in the wrong namespace for this usage.
     #[error("expected {expected} but `{name}` is a {found}")]
     WrongNamespace {
@@ -328,8 +334,8 @@ pub enum ResolveError {
         /// Backticked, comma-joined parameters that do have defaults.
         optional: String,
     },
-    /// A parameter default that is not a constant.
-    #[error("a parameter default must be a constant")]
+    /// A parameter default that is not a literal.
+    #[error("a parameter default must be a literal")]
     NonConstantDefault {
         /// Parameter the default was written on.
         name: String,
@@ -388,6 +394,7 @@ impl ResolveError {
         match self {
             Self::UnknownModulePath { .. } => "unknown-module-path",
             Self::UnresolvedName { .. } => "unresolved-name",
+            Self::UsedInOwnInitializer { .. } => "used-in-own-initializer",
             Self::WrongNamespace { .. } => "wrong-namespace",
             Self::DuplicateItem { .. } => "duplicate-item",
             Self::DataLastCallOrder { .. } => "data-last-call-order",
@@ -433,6 +440,7 @@ impl ResolveError {
         }
         let reported = match self {
             Self::UnresolvedName { name }
+            | Self::UsedInOwnInitializer { name }
             | Self::WrongNamespace { name, .. }
             | Self::DuplicateItem { name }
             | Self::AmbiguousVariant { name, .. }
@@ -479,7 +487,7 @@ impl ResolveError {
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
-            Self::UnresolvedName { .. } => "GR0001",
+            Self::UnresolvedName { .. } | Self::UsedInOwnInitializer { .. } => "GR0001",
             Self::WrongNamespace { .. } => "GR0002",
             Self::DuplicateItem { .. } => "GR0003",
             Self::DuplicateImport { .. } => "GR0004",
@@ -616,8 +624,9 @@ impl ResolveDiagnostic {
                 first,
                 second,
             } => out.with_help(format!(
-                "`{first}` and `{second}` both declare `{method}`, with different parameters; \
-                 the receiver's type is not known here, so pass the arguments by position"
+                "`{first}` and `{second}` both declare `{method}`, with different parameters, \
+                 and the receiver's type is not settled where the call is written; give the \
+                 receiver a type annotation, or pass every argument by position"
             )),
             ResolveError::NamedArgumentTarget { .. } => out.with_help(
                 "a name may only be given for a call to a function, method, or associated \
@@ -799,6 +808,11 @@ impl ResolveDiagnostic {
                 enums.first().map_or("Enum", String::as_str)
             )),
             ResolveError::UnresolvedName { .. } => out,
+            ResolveError::UsedInOwnInitializer { name } => out.with_help(format!(
+                "`{name}` is declared by the `let` this expression initialises, and is in scope \
+                 only after it; a line that starts with `||` continues the expression above it, \
+                 so a closure written there is `(|| ..)`"
+            )),
         }
     }
 }

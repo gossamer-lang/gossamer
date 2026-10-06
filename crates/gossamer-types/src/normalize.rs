@@ -20,11 +20,23 @@ pub fn normalize_caller_side_spellings(
     sf: &mut SourceFile,
     resolutions: &Resolutions,
 ) -> Vec<ResolveDiagnostic> {
-    let diagnostics = gossamer_resolve::resolve_named_arguments(sf, resolutions);
+    let (mut diagnostics, deferred) = gossamer_resolve::resolve_named_arguments(sf, resolutions);
     let _ = crate::std_fn_eta::expand_std_fn_values(sf, resolutions);
-    let mut diagnostics = diagnostics;
     diagnostics.extend(crate::data_first::rotate_data_first_calls(sf, resolutions));
     name_display_channel(&mut sf.items);
+    // A method name several types declare with different parameters is
+    // rewritten against the declaration its receiver's type reaches, which
+    // only a check of the otherwise canonical program can say.
+    if !deferred.is_empty() {
+        let receivers =
+            crate::checker::receiver_owners(sf, resolutions, deferred.iter().map(|d| d.call));
+        diagnostics.extend(gossamer_resolve::resolve_deferred_method_arguments(
+            sf,
+            resolutions,
+            deferred,
+            &|call| receivers.get(&call).cloned(),
+        ));
+    }
     diagnostics
 }
 

@@ -32,6 +32,16 @@ Use `quick-check.sh` for quick checks during development.
 
 Before submitting , run `full-check.sh`.
 
+## CI on pull requests
+
+Every push to a branch of this repository runs CI once. A pull request
+from such a branch does not run it again: its "Required CI" check waits
+for the push runs of the PR's head commit and passes only if they did.
+That is CI of the head commit, not of GitHub's merge commit, which is why
+a branch must be up to date with `main` before it merges. A pull request
+from a fork runs the full CI itself, with a read-only token and no
+secrets.
+
 ## Commit messages
 
 One logical change per commit. Imperative subject line under 72

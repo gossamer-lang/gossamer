@@ -18,10 +18,10 @@ use super::{
     gos_rt_vec_push_i64,
 };
 
-type PredFn = unsafe extern "C" fn(env: *const u8, x: i64) -> bool;
-type EnumFn = unsafe extern "C" fn(env: *const u8, x: i64) -> i128;
-type ThunkEnumFn = unsafe extern "C" fn(env: *const u8) -> i128;
-type ThunkValFn = unsafe extern "C" fn(env: *const u8) -> i64;
+type PredFn = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> bool;
+type EnumFn = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> i128;
+type ThunkEnumFn = unsafe extern "C-unwind" fn(env: *const u8) -> i128;
+type ThunkValFn = unsafe extern "C-unwind" fn(env: *const u8) -> i64;
 
 const NONE: i128 = 1;
 
@@ -105,8 +105,8 @@ fn vec_from(xs: &[i64]) -> *mut GosVec {
 /// `result::and_then(f, res)` - `f(ok_payload) -> Result` when Ok,
 /// Err passthrough. Callback returns a packed i128 Result.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_result_and_then(res: i128, env: *const u8) -> i128 {
-    ffi_entry!(0i128, {
+pub unsafe extern "C-unwind" fn gos_rt_result_and_then(res: i128, env: *const u8) -> i128 {
+    ffi_entry_passthrough!(0i128, {
         if gos_rt_result_disc(res) != 0 {
             return res;
         }
@@ -125,8 +125,8 @@ pub unsafe extern "C" fn gos_rt_result_and_then(res: i128, env: *const u8) -> i1
 /// `result::or_else(f, res)` - `f(err_payload) -> Result` when Err,
 /// Ok passthrough.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_result_or_else(res: i128, env: *const u8) -> i128 {
-    ffi_entry!(0i128, {
+pub unsafe extern "C-unwind" fn gos_rt_result_or_else(res: i128, env: *const u8) -> i128 {
+    ffi_entry_passthrough!(0i128, {
         if gos_rt_result_disc(res) == 0 {
             return res;
         }
@@ -168,8 +168,8 @@ pub extern "C" fn gos_rt_result_to_opt_err(res: i128) -> i128 {
 /// `option::and_then(f, opt)` - `f(payload) -> Option` when Some,
 /// None passthrough.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_option_and_then(opt: i128, env: *const u8) -> i128 {
-    ffi_entry!(NONE, {
+pub unsafe extern "C-unwind" fn gos_rt_option_and_then(opt: i128, env: *const u8) -> i128 {
+    ffi_entry_passthrough!(NONE, {
         if gos_rt_result_disc(opt) != 0 {
             return NONE;
         }
@@ -187,8 +187,8 @@ pub unsafe extern "C" fn gos_rt_option_and_then(opt: i128, env: *const u8) -> i1
 
 /// `option::filter(p, opt)` - keeps Some(x) only when `p(x)` holds.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_option_filter(opt: i128, env: *const u8) -> i128 {
-    ffi_entry!(NONE, {
+pub unsafe extern "C-unwind" fn gos_rt_option_filter(opt: i128, env: *const u8) -> i128 {
+    ffi_entry_passthrough!(NONE, {
         if gos_rt_result_disc(opt) != 0 {
             return NONE;
         }
@@ -223,8 +223,8 @@ pub extern "C" fn gos_rt_option_or(alt: i128, opt: i128) -> i128 {
 /// `option::or_else(f, opt)` - returns `opt` when Some, otherwise
 /// `f() -> Option`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_option_or_else(opt: i128, env: *const u8) -> i128 {
-    ffi_entry!(NONE, {
+pub unsafe extern "C-unwind" fn gos_rt_option_or_else(opt: i128, env: *const u8) -> i128 {
+    ffi_entry_passthrough!(NONE, {
         if gos_rt_result_disc(opt) == 0 {
             return opt;
         }
@@ -242,8 +242,8 @@ pub unsafe extern "C" fn gos_rt_option_or_else(opt: i128, env: *const u8) -> i12
 
 /// `option::default_with(f, opt)` - Some payload, or `f()`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_option_default_with(opt: i128, env: *const u8) -> i64 {
-    ffi_entry!(0, {
+pub unsafe extern "C-unwind" fn gos_rt_option_default_with(opt: i128, env: *const u8) -> i64 {
+    ffi_entry_passthrough!(0, {
         if gos_rt_result_disc(opt) == 0 {
             return gos_rt_result_payload(opt);
         }
@@ -262,8 +262,8 @@ pub unsafe extern "C" fn gos_rt_option_default_with(opt: i128, env: *const u8) -
 /// `opt.ok_or_else(f)` - Some payload becomes Ok (same packed repr),
 /// None becomes `Err(f())`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_result_ok_or_else(opt: i128, env: *const u8) -> i128 {
-    ffi_entry!(NONE, {
+pub unsafe extern "C-unwind" fn gos_rt_result_ok_or_else(opt: i128, env: *const u8) -> i128 {
+    ffi_entry_passthrough!(NONE, {
         if gos_rt_result_disc(opt) == 0 {
             return opt;
         }
@@ -355,8 +355,8 @@ pub unsafe extern "C" fn gos_rt_iter_unzip_i64(v: *const GosVec) -> *mut u8 {
 
 /// `result.map_err(closure)`. If Err, calls closure and rebuilds.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_result_map_err(result: i128, closure: *const u8) -> i128 {
-    ffi_entry!(0i128, {
+pub unsafe extern "C-unwind" fn gos_rt_result_map_err(result: i128, closure: *const u8) -> i128 {
+    ffi_entry_passthrough!(0i128, {
         if gos_rt_result_disc(result) != 1 || closure.is_null() {
             return result;
         }
@@ -387,8 +387,8 @@ pub unsafe extern "C" fn gos_rt_result_map_err(result: i128, closure: *const u8)
 /// transform the env pointer instead of the payload (the askq
 /// round-2 corruption pre-fix).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_result_map(result: i128, closure: *const u8) -> i128 {
-    ffi_entry!(0i128, {
+pub unsafe extern "C-unwind" fn gos_rt_result_map(result: i128, closure: *const u8) -> i128 {
+    ffi_entry_passthrough!(0i128, {
         if gos_rt_result_disc(result) != 0 || closure.is_null() {
             return result;
         }
@@ -417,8 +417,11 @@ pub unsafe extern "C" fn gos_rt_result_map(result: i128, closure: *const u8) -> 
 /// a pointer, depending on `T`). Mirrors `gos_rt_result_map`'s closure
 /// invocation convention.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_result_default_with(result: i128, closure: *const u8) -> i64 {
-    ffi_entry!(0, {
+pub unsafe extern "C-unwind" fn gos_rt_result_default_with(
+    result: i128,
+    closure: *const u8,
+) -> i64 {
+    ffi_entry_passthrough!(0, {
         if gos_rt_result_disc(result) == 0 {
             return gos_rt_result_payload(result);
         }
@@ -461,8 +464,8 @@ pub extern "C" fn gos_rt_result_default(fallback: i64, result: i128) -> i64 {
 /// the stored payload word is reinterpreted as its IEEE-754 bit
 /// pattern, and the fallback rides the float register directly.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_result_default_f64(fallback: f64, result: i128) -> f64 {
-    ffi_entry!(0.0, {
+pub extern "C-unwind" fn gos_rt_result_default_f64(fallback: f64, result: i128) -> f64 {
+    ffi_entry_passthrough!(0.0, {
         if gos_rt_result_disc(result) == 0 {
             f64::from_bits(gos_rt_result_payload(result) as u64)
         } else {
@@ -484,8 +487,8 @@ pub extern "C" fn gos_rt_result_default_f64(fallback: f64, result: i128) -> f64 
 /// A non-zero `fn_addr` is the entry address of a compiled `extern "C" fn(i64)
 /// -> i64`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_result_map_bare(result: i128, fn_addr: i64) -> i128 {
-    ffi_entry!(0i128, {
+pub unsafe extern "C-unwind" fn gos_rt_result_map_bare(result: i128, fn_addr: i64) -> i128 {
+    ffi_entry_passthrough!(0i128, {
         if gos_rt_result_disc(result) != 0 || fn_addr == 0 {
             return result;
         }
@@ -504,8 +507,8 @@ pub unsafe extern "C" fn gos_rt_result_map_bare(result: i128, fn_addr: i64) -> i
 /// A non-zero `fn_addr` is the entry address of a compiled `extern "C" fn(i64)
 /// -> i64`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_result_map_err_bare(result: i128, fn_addr: i64) -> i128 {
-    ffi_entry!(0i128, {
+pub unsafe extern "C-unwind" fn gos_rt_result_map_err_bare(result: i128, fn_addr: i64) -> i128 {
+    ffi_entry_passthrough!(0i128, {
         if gos_rt_result_disc(result) == 0 || fn_addr == 0 {
             return result;
         }

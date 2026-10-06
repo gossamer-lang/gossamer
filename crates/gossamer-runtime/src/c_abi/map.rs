@@ -908,12 +908,12 @@ pub extern "C" fn gos_rt_map_new(_key_bytes: u32, _val_bytes: u32) -> *mut GosMa
 /// Pre-sizing avoids the doubling chain on counter-style hot
 /// loops where the caller knows the total entry count.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_map_new_with_capacity(
+pub extern "C-unwind" fn gos_rt_map_new_with_capacity(
     key_bytes: u32,
     val_bytes: u32,
     cap: i64,
 ) -> *mut GosMap {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // An inferred loop bound may ultimately come from untrusted input.
         // Keep preallocation an optimisation rather than an allocation-DoS;
         // subsequent inserts retain ordinary map growth semantics.
@@ -946,12 +946,12 @@ pub extern "C" fn gos_rt_map_new_with_capacity(
 /// width-only constructor cannot distinguish scalar, string, and byte-vector
 /// values. Unknown kinds retain lazy generic storage.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_map_new_with_capacity_typed(
+pub extern "C-unwind" fn gos_rt_map_new_with_capacity_typed(
     key_kind: u32,
     val_kind: u32,
     cap: i64,
 ) -> *mut GosMap {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         const MAX_PREALLOCATED_CAPACITY: usize = 1 << 24;
         if cap < 0 {
             crate::c_abi::panic::panic_text(
@@ -1018,8 +1018,12 @@ pub unsafe extern "C" fn gos_rt_map_insert(m: *mut GosMap, key: *const u8, val: 
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_map_get(m: *const GosMap, key: *const u8, val_out: *mut u8) -> i32 {
-    ffi_entry!(-1, {
+pub unsafe extern "C-unwind" fn gos_rt_map_get(
+    m: *const GosMap,
+    key: *const u8,
+    val_out: *mut u8,
+) -> i32 {
+    ffi_entry_passthrough!(-1, {
         if m.is_null() || key.is_null() || val_out.is_null() {
             return 0;
         }
@@ -2058,14 +2062,14 @@ pub unsafe extern "C" fn gos_rt_map_remove_typed_str(m: *mut GosMap, key: *const
 /// Returns the new value at `seq[start..start+len]` (or `by` if
 /// the entry is fresh).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_map_inc_at_str_i64(
+pub unsafe extern "C-unwind" fn gos_rt_map_inc_at_str_i64(
     m: *mut GosMap,
     seq: *const c_char,
     start: i64,
     len: i64,
     by: i64,
 ) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry_passthrough!(-1, {
         if start < 0 {
             crate::c_abi::panic::panic_text("HashMap::inc_at: start must be non-negative");
         }
@@ -2553,13 +2557,13 @@ unsafe fn render_map_value(out: &mut String, word: i64, val_tag: i64, aux: *cons
 /// # Safety
 /// `m` is a live `GosMap`, and `tags` addresses descriptors at both offsets.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_map_format_desc(
+pub unsafe extern "C-unwind" fn gos_rt_map_format_desc(
     m: *const GosMap,
     tags: *const u8,
     key_desc: i64,
     val_desc: i64,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if m.is_null() || tags.is_null() {
             return alloc_cstring(b"{}");
         }
@@ -2824,14 +2828,14 @@ unsafe fn map_aggregate_entries(m: *const GosMap) -> Vec<DescEntry> {
 /// # Safety
 /// `m` is a live `GosMap` whose value words match `val_tag`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_map_format_tagged(
+pub unsafe extern "C-unwind" fn gos_rt_map_format_tagged(
     m: *const GosMap,
     key_tag: i64,
     val_tag: i64,
     aux: *const u8,
     aux_n: i64,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if m.is_null() {
             return alloc_cstring(b"{}");
         }
@@ -4603,7 +4607,7 @@ unsafe fn append_pair_slots(out: *mut GosVec, pairs: &[[i64; 2]]) {
 /// when it never reads the key: the pair it is handed carries the value beside
 /// a null key word.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_map_select_by_key_into(
+pub unsafe extern "C-unwind" fn gos_rt_map_select_by_key_into(
     m: *const GosMap,
     out: *mut GosVec,
     env: *const u8,
@@ -4611,7 +4615,7 @@ pub unsafe extern "C" fn gos_rt_map_select_by_key_into(
     want_max: i64,
 ) {
     use crate::c_abi::iter_cross::{SortKey, env_fn_addr, key_of_ptr};
-    ffi_entry!((), {
+    ffi_entry_passthrough!((), {
         if m.is_null() || out.is_null() {
             return;
         }

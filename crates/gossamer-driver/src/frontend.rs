@@ -22,7 +22,7 @@ use gossamer_diagnostics::Diagnostic;
 use gossamer_lex::FileId;
 use gossamer_resolve::resolve_source_file;
 use gossamer_types::{
-    ExhaustivenessError, TyCtxt, check_arena_escapes, check_exhaustiveness,
+    ExhaustivenessError, TyCtxt, check_arena_escapes, check_capture_writes, check_exhaustiveness,
     check_parallel_adapters, normalize_caller_side_spellings, typecheck_source_file,
 };
 use std::time::{Duration, Instant};
@@ -184,6 +184,13 @@ pub fn check_frontend(source: &str, file_id: FileId) -> FrontendOutcome {
     let phase_started = Instant::now();
     for diag in check_arena_escapes(&sf, &resolutions, &table, &tcx) {
         if !parse_failed {
+            diagnostics.push(diag.to_diagnostic());
+        }
+    }
+    // A write to a captured copy never reaches the binding, and a spawned
+    // write to a shared container races with the spawning code.
+    if !parse_failed {
+        for diag in check_capture_writes(&sf, &resolutions, &table, &tcx) {
             diagnostics.push(diag.to_diagnostic());
         }
     }

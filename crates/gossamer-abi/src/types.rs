@@ -202,10 +202,11 @@ impl RuntimeEntry {
             };
             format!("declare {} @{}({}) {tail}", ret_ir, self.name, params)
         } else {
-            // Every `gos_rt_*` symbol is an `extern "C"` Rust function, and
-            // unwinding out of an `extern "C"` boundary aborts (Rust never
-            // propagates a panic across it) - so the call cannot unwind. The
-            // `nounwind` attribute makes that explicit to LLVM, which would
+            // A `gos_rt_*` symbol registered without `unwinds` is an
+            // `extern "C"` Rust function, and unwinding out of an `extern "C"`
+            // boundary aborts (Rust never propagates a panic across it) - so
+            // the call cannot unwind. The `nounwind` attribute makes that
+            // explicit to LLVM, which would
             // otherwise treat every runtime call as a potential exception
             // edge: that blocks reordering, hoisting (LICM), and CSE of the
             // surrounding loads/stores in every hot loop that calls a runtime
@@ -220,14 +221,20 @@ impl RuntimeEntry {
             // `visited[nb]` read out of a loop and CSE repeated reads -
             // `nounwind` alone is insufficient because, without a memory-effect
             // bound, LLVM must assume the call clobbers all memory.
-            let attrs = if self.unwinds {
-                ""
-            } else if PURE_ARGMEM_READ.contains(&self.name) {
-                "nounwind memory(argmem: read)"
+            // A getter that raises a goroutine-scoped fault on a bad index
+            // unwinds, which drops `nounwind` but not what it reads: a
+            // read-only function may still unwind.
+            let memory = if PURE_ARGMEM_READ.contains(&self.name) {
+                "memory(argmem: read)"
             } else if PURE_READ.contains(&self.name) {
-                "nounwind memory(read)"
+                "memory(read)"
             } else {
-                "nounwind"
+                ""
+            };
+            let attrs = match (self.unwinds, memory.is_empty()) {
+                (true, _) => memory.to_string(),
+                (false, true) => "nounwind".to_string(),
+                (false, false) => format!("nounwind {memory}"),
             };
             let ret_attr = if NOALIAS_RET.contains(&self.name) {
                 "noalias "

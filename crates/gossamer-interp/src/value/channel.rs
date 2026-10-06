@@ -153,6 +153,24 @@ fn register_live_channel(inner: &Arc<ChannelInner>) {
 /// mid-update and counts as progress: reporting a deadlock over a state
 /// still being written would turn a working program into a failure, while
 /// missing one only means the program waits as it did before.
+/// Whether any live channel holds a waiter that could proceed, for a wait on
+/// something other than a channel.
+pub(crate) fn any_live_channel_can_progress() -> bool {
+    let live = LIVE_CHANNELS.lock();
+    for weak in live.iter() {
+        let Some(inner) = weak.upgrade() else {
+            continue;
+        };
+        let Some(state) = inner.state.try_lock() else {
+            return true;
+        };
+        if state.has_ready_waiter() {
+            return true;
+        }
+    }
+    false
+}
+
 fn any_channel_can_progress(holding: &ChannelInner) -> bool {
     let live = LIVE_CHANNELS.lock();
     for weak in live.iter() {

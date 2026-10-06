@@ -80,8 +80,8 @@ pub unsafe extern "C" fn gos_rt_iter_sum_i64(v: *const GosVec) -> i64 {
 /// where the sum leaves `i64`. The checked build profiles call this one, so
 /// `sum` overflows exactly where `+` would.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_sum_i64_checked(v: *const GosVec) -> i64 {
-    ffi_entry!(-1, {
+pub unsafe extern "C-unwind" fn gos_rt_iter_sum_i64_checked(v: *const GosVec) -> i64 {
+    ffi_entry_passthrough!(-1, {
         if v.is_null() {
             return 0;
         }
@@ -98,8 +98,8 @@ pub unsafe extern "C" fn gos_rt_iter_sum_i64_checked(v: *const GosVec) -> i64 {
 /// Product of all i64 elements of `v`, raising the language's integer overflow
 /// panic where the product leaves `i64`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_product_i64_checked(v: *const GosVec) -> i64 {
-    ffi_entry!(-1, {
+pub unsafe extern "C-unwind" fn gos_rt_iter_product_i64_checked(v: *const GosVec) -> i64 {
+    ffi_entry_passthrough!(-1, {
         if v.is_null() {
             return 1;
         }
@@ -375,8 +375,8 @@ pub unsafe extern "C" fn gos_rt_iter_range_inclusive(start: i64, end: i64) -> *m
 
 /// Build `Vec<i64>` of length `n` filled with `value`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_repeat_i64(value: i64, n: i64) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_iter_repeat_i64(value: i64, n: i64) -> *mut GosVec {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         let out = gos_rt_vec_new(8);
         if n < 0 {
             crate::c_abi::panic::panic_text("iter::repeat: count must be non-negative");
@@ -949,18 +949,18 @@ unsafe fn lazy_callback<F: Copy>(env: *const u8) -> Option<F> {
     Some(unsafe { std::mem::transmute_copy::<*const (), F>(&crate::c_abi::code_address(raw)) })
 }
 
-type CallF64F64 = unsafe extern "C" fn(env: *const u8, x: f64) -> f64;
-type CallF64Word = unsafe extern "C" fn(env: *const u8, x: f64) -> i64;
-type CallWordF64 = unsafe extern "C" fn(env: *const u8, x: i64) -> f64;
-type PredF64 = unsafe extern "C" fn(env: *const u8, x: f64) -> bool;
-type FoldF64F64 = unsafe extern "C" fn(env: *const u8, acc: f64, x: f64) -> f64;
-type FoldF64Word = unsafe extern "C" fn(env: *const u8, acc: f64, x: i64) -> f64;
-type FoldWordF64 = unsafe extern "C" fn(env: *const u8, acc: i64, x: f64) -> i64;
-type FoldWordPtr = unsafe extern "C" fn(env: *const u8, acc: i64, x: *const u8) -> i64;
-type FoldF64Ptr = unsafe extern "C" fn(env: *const u8, acc: f64, x: *const u8) -> f64;
-type CallPtrF64 = unsafe extern "C" fn(env: *const u8, x: *const u8) -> f64;
-type CallPtrWord = unsafe extern "C" fn(env: *const u8, x: *const u8) -> i64;
-type PredPtr = unsafe extern "C" fn(env: *const u8, x: *const u8) -> bool;
+type CallF64F64 = unsafe extern "C-unwind" fn(env: *const u8, x: f64) -> f64;
+type CallF64Word = unsafe extern "C-unwind" fn(env: *const u8, x: f64) -> i64;
+type CallWordF64 = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> f64;
+type PredF64 = unsafe extern "C-unwind" fn(env: *const u8, x: f64) -> bool;
+type FoldF64F64 = unsafe extern "C-unwind" fn(env: *const u8, acc: f64, x: f64) -> f64;
+type FoldF64Word = unsafe extern "C-unwind" fn(env: *const u8, acc: f64, x: i64) -> f64;
+type FoldWordF64 = unsafe extern "C-unwind" fn(env: *const u8, acc: i64, x: f64) -> i64;
+type FoldWordPtr = unsafe extern "C-unwind" fn(env: *const u8, acc: i64, x: *const u8) -> i64;
+type FoldF64Ptr = unsafe extern "C-unwind" fn(env: *const u8, acc: f64, x: *const u8) -> f64;
+type CallPtrF64 = unsafe extern "C-unwind" fn(env: *const u8, x: *const u8) -> f64;
+type CallPtrWord = unsafe extern "C-unwind" fn(env: *const u8, x: *const u8) -> i64;
+type PredPtr = unsafe extern "C-unwind" fn(env: *const u8, x: *const u8) -> bool;
 
 unsafe fn take_lazy_pair_i64(
     iter: *mut GosLazyIterPairI64,
@@ -986,23 +986,23 @@ unsafe fn take_lazy_pair_i64(
 /// Takes a share of a lazy iterator handle for an aggregate copy that holds
 /// it as a field. Null-safe.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_retain_i64(iter: *mut GosLazyIterI64) {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_retain_i64(iter: *mut GosLazyIterI64) {
     // SAFETY: `iter` is this shim's argument, null or a live lazy iterator (C-ABI contract).
-    ffi_entry!((), { unsafe { lazy_iter_retain(iter) } });
+    ffi_entry_passthrough!((), { unsafe { lazy_iter_retain(iter) } });
 }
 
 /// Takes a share of a lazy pair iterator handle for an aggregate copy that
 /// holds it as a field. Null-safe.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_retain_pair_i64(iter: *mut GosLazyIterPairI64) {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_retain_pair_i64(iter: *mut GosLazyIterPairI64) {
     // SAFETY: `iter` is this shim's argument, null or a live pair iterator (C-ABI contract).
-    ffi_entry!((), { unsafe { lazy_iter_pair_retain(iter) } });
+    ffi_entry_passthrough!((), { unsafe { lazy_iter_pair_retain(iter) } });
 }
 
 /// Release an unconsumed lazy i64 iterator and its complete adapter chain.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_drop_i64(iter: *mut GosLazyIterI64) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_drop_i64(iter: *mut GosLazyIterI64) {
+    ffi_entry_passthrough!((), {
         // SAFETY: the caller gives up its share of a live handle; the last
         // share drops the box and with it every upstream adapter.
         if let Some(state) = unsafe { iter.as_ref() }
@@ -1017,8 +1017,8 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_drop_i64(iter: *mut GosLazyIterI64) {
 
 /// Release an unconsumed lazy pair iterator and its complete adapter chain.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_drop_pair_i64(iter: *mut GosLazyIterPairI64) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_drop_pair_i64(iter: *mut GosLazyIterPairI64) {
+    ffi_entry_passthrough!((), {
         // SAFETY: as for `gos_rt_lazy_iter_drop_i64`.
         if let Some(state) = unsafe { iter.as_ref() }
             && release_share(&state.shares)
@@ -1035,8 +1035,8 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_drop_pair_i64(iter: *mut GosLazyIterPa
 /// Returns `Option<i64>` in the runtime's packed i128 carrier: discriminant 0
 /// for `Some(value)`, discriminant 1 for `None`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_next_i64(iter: *mut GosLazyIterI64) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_next_i64(iter: *mut GosLazyIterI64) -> i128 {
+    ffi_entry_passthrough!(gos_rt_result_new(1, 0), {
         if iter.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -1061,8 +1061,10 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_next_i64(iter: *mut GosLazyIterI64) ->
 static PAIR_BLOB_META: [i64; 2] = [gossamer_abi::rc::RC_KIND_STRUCT_GUARDED, 0];
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_next_pair_i64(iter: *mut GosLazyIterPairI64) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_next_pair_i64(
+    iter: *mut GosLazyIterPairI64,
+) -> i128 {
+    ffi_entry_passthrough!(gos_rt_result_new(1, 0), {
         if iter.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -1097,10 +1099,10 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_next_pair_i64(iter: *mut GosLazyIterPa
 /// each pair becomes the counted two-word blob [`gos_rt_lazy_iter_next_pair_i64`]
 /// answers, a share the puller owns and gives back when it discards the pair.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_pair_blobs(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_pair_blobs(
     iter: *mut GosLazyIterPairI64,
 ) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `iter` is this shim's pair iterator argument, whose share this call consumes
         // (C-ABI contract).
         let (pairs, _classes) = unsafe { take_lazy_pair_i64(iter) };
@@ -1137,10 +1139,10 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_pair_blobs(
 /// Reads a stream of `(i64, i64)` element addresses as the pair state, the one
 /// form an `Iterator<(i64, i64)>` value takes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_aggr_pairs(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_aggr_pairs(
     iter: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterPairI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         let (upstream, tag) = unsafe { take_lazy_word(iter) };
@@ -1168,15 +1170,15 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_aggr_pairs(
 
 /// Lazy `[start, end)` i64 range.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_lazy_iter_range_i64(start: i64, end: i64) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), { lazy_i64(start..end) })
+pub extern "C-unwind" fn gos_rt_lazy_iter_range_i64(start: i64, end: i64) -> *mut GosLazyIterI64 {
+    ffi_entry_passthrough!(std::ptr::null_mut(), { lazy_i64(start..end) })
 }
 
 /// Lazy `start..` i64 range for the release profile: it yields `i64::MAX`,
 /// wraps, and continues, as `+` does there.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_lazy_iter_range_from_i64(start: i64) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+pub extern "C-unwind" fn gos_rt_lazy_iter_range_from_i64(start: i64) -> *mut GosLazyIterI64 {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         lazy_i64(GosRangeFromI64 {
             current: start,
             checked: false,
@@ -1187,8 +1189,10 @@ pub extern "C" fn gos_rt_lazy_iter_range_from_i64(start: i64) -> *mut GosLazyIte
 /// Lazy `start..` i64 range for the checked build profiles: stepping past
 /// `i64::MAX` raises the overflow panic `+` raises there.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_lazy_iter_range_from_i64_checked(start: i64) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+pub extern "C-unwind" fn gos_rt_lazy_iter_range_from_i64_checked(
+    start: i64,
+) -> *mut GosLazyIterI64 {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         lazy_i64(GosRangeFromI64 {
             current: start,
             checked: true,
@@ -1198,11 +1202,11 @@ pub extern "C" fn gos_rt_lazy_iter_range_from_i64_checked(start: i64) -> *mut Go
 
 /// Lazy `[start, end]` i64 range.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_lazy_iter_range_inclusive_i64(
+pub extern "C-unwind" fn gos_rt_lazy_iter_range_inclusive_i64(
     start: i64,
     end: i64,
 ) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), { lazy_i64(start..=end) })
+    ffi_entry_passthrough!(std::ptr::null_mut(), { lazy_i64(start..=end) })
 }
 
 /// Borrow `source` as a lazy element stream tagged with `class`.
@@ -1319,10 +1323,10 @@ impl Drop for BorrowedGosVecAggr {
 /// the element stays where it is and its address rides the slot, so an element
 /// of any width reaches a callback without being packed into one.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_from_vec_aggr(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_from_vec_aggr(
     source: *mut GosVec,
 ) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if source.is_null() {
             return lazy_classed(lazy_elem_class::AGGR, std::iter::empty());
         }
@@ -1355,8 +1359,10 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_from_vec_aggr(
 /// element shape, copying each element out whole and minting the container's
 /// share of any pointer-bearing field.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_collect_aggr(iter: *mut GosLazyIterI64) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_collect_aggr(
+    iter: *mut GosLazyIterI64,
+) -> *mut GosVec {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         let (upstream, tag) = unsafe { take_lazy_tagged(iter) };
@@ -1413,8 +1419,8 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_from_vec_f64(source: *mut GosVec) -> *
 
 /// Lazy repeat of an i64 value.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_lazy_iter_repeat_i64(value: i64, n: i64) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+pub extern "C-unwind" fn gos_rt_lazy_iter_repeat_i64(value: i64, n: i64) -> *mut GosLazyIterI64 {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if n < 0 {
             crate::c_abi::panic::panic_text("iter::repeat: count must be non-negative");
         }
@@ -1463,8 +1469,10 @@ impl Iterator for StrBytes {
 /// # Safety
 /// `s` is a live NUL-terminated string pointer or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_str_chars(s: *const c_char) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_str_chars(
+    s: *const c_char,
+) -> *mut GosLazyIterI64 {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let text = unsafe { crate::c_abi::gos_str_arg_string(s) };
         lazy_i64(StrScalars {
@@ -1479,8 +1487,10 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_str_chars(s: *const c_char) -> *mut Go
 /// # Safety
 /// `s` is a live NUL-terminated string pointer or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_str_bytes(s: *const c_char) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_str_bytes(
+    s: *const c_char,
+) -> *mut GosLazyIterI64 {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let text = unsafe { crate::c_abi::gos_str_arg_string(s) };
         lazy_i64(StrBytes { text, index: 0 })
@@ -1489,15 +1499,18 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_str_bytes(s: *const c_char) -> *mut Go
 
 /// Lazy single-item i64 iterator.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_lazy_iter_once_i64(value: i64) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), { lazy_i64(std::iter::once(value)) })
+pub extern "C-unwind" fn gos_rt_lazy_iter_once_i64(value: i64) -> *mut GosLazyIterI64 {
+    ffi_entry_passthrough!(std::ptr::null_mut(), { lazy_i64(std::iter::once(value)) })
 }
 
 /// Lazy repeat of a `String` `n` times. The state takes a share of `value`,
 /// since the caller's binding may end before the stream is drained.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_repeat_str(value: i64, n: i64) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_repeat_str(
+    value: i64,
+    n: i64,
+) -> *mut GosLazyIterI64 {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if n < 0 {
             crate::c_abi::panic::panic_text("iter::repeat: count must be non-negative");
         }
@@ -1510,8 +1523,8 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_repeat_str(value: i64, n: i64) -> *mut
 
 /// Lazy single-item `String` iterator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_once_str(value: i64) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_once_str(value: i64) -> *mut GosLazyIterI64 {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: a non-zero `value` is a live string body (C-ABI contract).
         let value = unsafe { share_pulled(lazy_elem_class::STRING, value) };
         lazy_classed(
@@ -1526,11 +1539,11 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_once_str(value: i64) -> *mut GosLazyIt
 
 /// Lazy `take(n)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_take_i64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_take_i64(
     n: i64,
     iter: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if n < 0 {
             crate::c_abi::panic::panic_text("iter::take: count must be non-negative");
         }
@@ -1544,11 +1557,11 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_take_i64(
 
 /// Lazy `step_by(step)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_step_by_i64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_step_by_i64(
     step: i64,
     iter: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if step <= 0 {
             crate::c_abi::panic::panic_text("iter::step_by: step must be positive");
         }
@@ -1573,11 +1586,11 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_step_by_i64(
 
 /// Lazy `skip(n)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_skip_i64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_skip_i64(
     n: i64,
     iter: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if n < 0 {
             crate::c_abi::panic::panic_text("iter::skip: count must be non-negative");
         }
@@ -1601,11 +1614,11 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_skip_i64(
 
 /// Lazy `chain(other)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_chain_i64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_chain_i64(
     first: *mut GosLazyIterI64,
     second: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `first` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         let (first, first_tag) = unsafe { take_lazy_tagged(first) };
@@ -1632,10 +1645,10 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_chain_i64(
 
 /// Lazy `enumerate`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_enumerate_i64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_enumerate_i64(
     iter: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterPairI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         let (upstream, tag) = unsafe { take_lazy_word(iter) };
@@ -1650,11 +1663,11 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_enumerate_i64(
 
 /// Lazy `zip`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_zip_i64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_zip_i64(
     left: *mut GosLazyIterI64,
     right: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterPairI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `left` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         let (left, left_tag) = unsafe { take_lazy_word(left) };
@@ -1722,7 +1735,7 @@ unsafe fn lazy_map_word(
     iter: *mut GosLazyIterI64,
     out_class: u8,
 ) -> *mut GosLazyIterI64 {
-    type CallFn = unsafe extern "C" fn(env: *const u8, x: i64) -> i64;
+    type CallFn = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> i64;
     // SAFETY: this `unsafe fn`'s caller passes `iter` a lazy iterator whose share it consumes.
     let (upstream, tag) = unsafe { take_lazy_word(iter) };
     // SAFETY: this `unsafe fn`'s caller passes `env` live or null, which `lazy_callback` accepts.
@@ -1746,11 +1759,11 @@ unsafe fn lazy_map_word(
 
 /// Lazy `map(f)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_map_i64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_map_i64(
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `env` and `iter` are this shim's arguments; `iter` carries the share this call
         // consumes (C-ABI contract).
         unsafe { lazy_map_word(env, iter, lazy_elem_class::WORD) }
@@ -1759,11 +1772,11 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_map_i64(
 
 /// Lazy `map(f)` whose callback answers a `String`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_map_str(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_map_str(
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `env` and `iter` are this shim's arguments; `iter` carries the share this call
         // consumes (C-ABI contract).
         unsafe { lazy_map_word(env, iter, lazy_elem_class::STRING) }
@@ -1781,7 +1794,7 @@ unsafe fn lazy_filter_map_word(
     iter: *mut GosLazyIterI64,
     out_class: u8,
 ) -> *mut GosLazyIterI64 {
-    type OptionFn = unsafe extern "C" fn(env: *const u8, x: i64) -> i128;
+    type OptionFn = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> i128;
     // SAFETY: this `unsafe fn`'s caller passes `iter` a lazy iterator whose share it consumes.
     let (upstream, tag) = unsafe { take_lazy_word(iter) };
     // SAFETY: this `unsafe fn`'s caller passes `env` live or null, which `lazy_callback` accepts.
@@ -1807,11 +1820,11 @@ unsafe fn lazy_filter_map_word(
 /// Lazy `filter_map(f)` whose callback answers `Option<i64>`, `Option<bool>`,
 /// or `Option<char>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_filter_map_i64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_filter_map_i64(
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `env` and `iter` are this shim's arguments; `iter` carries the share this call
         // consumes (C-ABI contract).
         unsafe { lazy_filter_map_word(env, iter, lazy_elem_class::WORD) }
@@ -1820,11 +1833,11 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_filter_map_i64(
 
 /// Lazy `filter_map(f)` whose callback answers `Option<String>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_filter_map_str(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_filter_map_str(
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `env` and `iter` are this shim's arguments; `iter` carries the share this call
         // consumes (C-ABI contract).
         unsafe { lazy_filter_map_word(env, iter, lazy_elem_class::STRING) }
@@ -1838,12 +1851,12 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_filter_map_str(
 /// reads the element through it. `out_bytes` is the element's width, which a
 /// terminal that rebuilds storage strides by.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_map_aggr(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_map_aggr(
     env: *const u8,
     iter: *mut GosLazyIterI64,
     out_bytes: i64,
 ) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         let (upstream, in_tag) = unsafe { take_lazy_word(iter) };
@@ -1853,7 +1866,7 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_map_aggr(
             elem_kind: 0,
             source: 0,
         };
-        type CallFn = unsafe extern "C" fn(env: *const u8, x: i64) -> i64;
+        type CallFn = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> i64;
         // SAFETY: `env` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `lazy_callback` accepts.
         let Some(f) = (unsafe { lazy_callback::<CallFn>(env) }) else {
@@ -1882,13 +1895,13 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_map_aggr(
 /// address: the one form a lazy stream carries an element wider than a slot
 /// in. A consumer that stops pulling stops the calls with it.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_map_carrier(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_map_carrier(
     env: *const u8,
     iter: *mut GosLazyIterI64,
     meta: *const i64,
 ) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
-        type CarrierFn = unsafe extern "C" fn(env: *const u8, x: i64) -> i128;
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
+        type CarrierFn = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> i128;
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         let (upstream, in_tag) = unsafe { take_lazy_word(iter) };
@@ -1941,11 +1954,11 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_map_carrier(
 /// one that keeps an element keeps a counted value. Only a mapped stream is
 /// converted: a stream borrowed from a vec already has an owner.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_set_elem_meta(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_set_elem_meta(
     iter: *mut GosLazyIterI64,
     meta: *const i64,
 ) {
-    ffi_entry!((), {
+    ffi_entry_passthrough!((), {
         if iter.is_null() || meta.is_null() {
             return;
         }
@@ -1983,18 +1996,18 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_set_elem_meta(
 
 /// Lazy `filter(p)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_filter_i64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_filter_i64(
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         let (upstream, tag) = unsafe { take_lazy_word(iter) };
         if env.is_null() {
             return lazy_i64(std::iter::empty());
         }
-        type PredFn = unsafe extern "C" fn(env: *const u8, x: i64) -> bool;
+        type PredFn = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> bool;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -2026,8 +2039,10 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_filter_i64(
 
 /// Consume a lazy i64 iterator into a `GosVec`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_collect_i64(iter: *mut GosLazyIterI64) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_collect_i64(
+    iter: *mut GosLazyIterI64,
+) -> *mut GosVec {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         let (upstream, tag) = unsafe { take_lazy_tagged(iter) };
@@ -2048,10 +2063,10 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_collect_i64(iter: *mut GosLazyIterI64)
 
 /// Consume a lazy pair iterator into a `Vec<(i64, i64)>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_collect_pair_i64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_collect_pair_i64(
     iter: *mut GosLazyIterPairI64,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         let out = gos_rt_vec_new(16);
         // SAFETY: `iter` is this shim's pair iterator argument, whose share this call consumes
         // (C-ABI contract).
@@ -2067,8 +2082,8 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_collect_pair_i64(
 
 /// Count a lazy i64 iterator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_count_i64(iter: *mut GosLazyIterI64) -> i64 {
-    ffi_entry!(0, {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_count_i64(iter: *mut GosLazyIterI64) -> i64 {
+    ffi_entry_passthrough!(0, {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         let (upstream, tag) = unsafe { take_lazy_tagged(iter) };
@@ -2088,8 +2103,10 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_count_i64(iter: *mut GosLazyIterI64) -
 
 /// Count a lazy pair iterator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_count_pair_i64(iter: *mut GosLazyIterPairI64) -> i64 {
-    ffi_entry!(0, {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_count_pair_i64(
+    iter: *mut GosLazyIterPairI64,
+) -> i64 {
+    ffi_entry_passthrough!(0, {
         // SAFETY: `iter` is this shim's pair iterator argument, whose share this call consumes
         // (C-ABI contract).
         let (pairs, [first, second]) = unsafe { take_lazy_pair_i64(iter) };
@@ -2109,8 +2126,8 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_count_pair_i64(iter: *mut GosLazyIterP
 
 /// Sum a lazy i64 iterator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_sum_i64(iter: *mut GosLazyIterI64) -> i64 {
-    ffi_entry!(0, {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_sum_i64(iter: *mut GosLazyIterI64) -> i64 {
+    ffi_entry_passthrough!(0, {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         unsafe { take_lazy_i64(iter) }.fold(0i64, i64::wrapping_add)
@@ -2119,8 +2136,8 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_sum_i64(iter: *mut GosLazyIterI64) -> 
 
 /// Product of a lazy i64 iterator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_product_i64(iter: *mut GosLazyIterI64) -> i64 {
-    ffi_entry!(1, {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_product_i64(iter: *mut GosLazyIterI64) -> i64 {
+    ffi_entry_passthrough!(1, {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         unsafe { take_lazy_i64(iter) }.fold(1i64, i64::wrapping_mul)
@@ -2130,19 +2147,21 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_product_i64(iter: *mut GosLazyIterI64)
 /// Sum of a lazy i64 iterator, raising the language's integer overflow panic
 /// where the sum leaves `i64`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_sum_i64_checked(iter: *mut GosLazyIterI64) -> i64 {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_sum_i64_checked(iter: *mut GosLazyIterI64) -> i64 {
     // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes (C-ABI
     // contract).
-    ffi_entry!(0, { checked_sum_i64(unsafe { take_lazy_i64(iter) }) })
+    ffi_entry_passthrough!(0, { checked_sum_i64(unsafe { take_lazy_i64(iter) }) })
 }
 
 /// Product of a lazy i64 iterator, raising the language's integer overflow
 /// panic where the product leaves `i64`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_product_i64_checked(iter: *mut GosLazyIterI64) -> i64 {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_product_i64_checked(
+    iter: *mut GosLazyIterI64,
+) -> i64 {
     // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes (C-ABI
     // contract).
-    ffi_entry!(1, { checked_product_i64(unsafe { take_lazy_i64(iter) }) })
+    ffi_entry_passthrough!(1, { checked_product_i64(unsafe { take_lazy_i64(iter) }) })
 }
 
 /// The least (or, with `greatest`, the greatest) element of a word-register
@@ -2201,8 +2220,8 @@ unsafe fn lazy_word_extreme(iter: *mut GosLazyIterI64, greatest: bool) -> i128 {
 
 /// Minimum of a lazy i64 or `String` iterator as `Option<T>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_min_i64(iter: *mut GosLazyIterI64) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_min_i64(iter: *mut GosLazyIterI64) -> i128 {
+    ffi_entry_passthrough!(gos_rt_result_new(1, 0), {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         unsafe { lazy_word_extreme(iter, false) }
@@ -2211,8 +2230,8 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_min_i64(iter: *mut GosLazyIterI64) -> 
 
 /// Maximum of a lazy i64 or `String` iterator as `Option<T>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_max_i64(iter: *mut GosLazyIterI64) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_max_i64(iter: *mut GosLazyIterI64) -> i128 {
+    ffi_entry_passthrough!(gos_rt_result_new(1, 0), {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         unsafe { lazy_word_extreme(iter, true) }
@@ -2221,16 +2240,16 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_max_i64(iter: *mut GosLazyIterI64) -> 
 
 /// Fold a lazy i64 iterator with an i64 accumulator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_fold_i64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_fold_i64(
     init: i64,
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> i64 {
-    ffi_entry!(init, {
+    ffi_entry_passthrough!(init, {
         if env.is_null() {
             return init;
         }
-        type FoldFn = unsafe extern "C" fn(env: *const u8, acc: i64, x: i64) -> i64;
+        type FoldFn = unsafe extern "C-unwind" fn(env: *const u8, acc: i64, x: i64) -> i64;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -2258,15 +2277,15 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_fold_i64(
 
 /// Short-circuiting `any` over a lazy i64 iterator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_any_i64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_any_i64(
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry_passthrough!(0, {
         if env.is_null() {
             return 0;
         }
-        type PredFn = unsafe extern "C" fn(env: *const u8, x: i64) -> bool;
+        type PredFn = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> bool;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -2296,15 +2315,15 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_any_i64(
 
 /// Short-circuiting `all` over a lazy i64 iterator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_all_i64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_all_i64(
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> i64 {
-    ffi_entry!(1, {
+    ffi_entry_passthrough!(1, {
         if env.is_null() {
             return 1;
         }
-        type PredFn = unsafe extern "C" fn(env: *const u8, x: i64) -> bool;
+        type PredFn = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> bool;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -2336,15 +2355,15 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_all_i64(
 /// using the runtime Result/Option i128 carrier, with disc 0 for Some and
 /// disc 1 for None.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_find_i64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_find_i64(
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+    ffi_entry_passthrough!(gos_rt_result_new(1, 0), {
         if env.is_null() {
             return gos_rt_result_new(1, 0);
         }
-        type PredFn = unsafe extern "C" fn(env: *const u8, x: i64) -> bool;
+        type PredFn = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> bool;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -2373,8 +2392,8 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_find_i64(
 
 /// Lazy repeat of an f64 value.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_lazy_iter_repeat_f64(value: f64, n: i64) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+pub extern "C-unwind" fn gos_rt_lazy_iter_repeat_f64(value: f64, n: i64) -> *mut GosLazyIterI64 {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if n < 0 {
             crate::c_abi::panic::panic_text("iter::repeat: count must be non-negative");
         }
@@ -2385,8 +2404,8 @@ pub extern "C" fn gos_rt_lazy_iter_repeat_f64(value: f64, n: i64) -> *mut GosLaz
 
 /// Lazy single-item f64 iterator.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_lazy_iter_once_f64(value: f64) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), { lazy_f64(std::iter::once(value)) })
+pub extern "C-unwind" fn gos_rt_lazy_iter_once_f64(value: f64) -> *mut GosLazyIterI64 {
+    ffi_entry_passthrough!(std::ptr::null_mut(), { lazy_f64(std::iter::once(value)) })
 }
 
 /// Advance a float-carrying lazy iterator without consuming the handle.
@@ -2394,8 +2413,8 @@ pub extern "C" fn gos_rt_lazy_iter_once_f64(value: f64) -> *mut GosLazyIterI64 {
 /// Returns `Option<f64>` in the packed i128 carrier; the payload word holds the
 /// element's float bits, which is the representation an `Option<f64>` slot uses.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_next_f64(iter: *mut GosLazyIterI64) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_next_f64(iter: *mut GosLazyIterI64) -> i128 {
+    ffi_entry_passthrough!(gos_rt_result_new(1, 0), {
         if iter.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -2416,11 +2435,11 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_next_f64(iter: *mut GosLazyIterI64) ->
 
 /// Lazy `map(f)` for `f64 -> f64`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_map_f64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_map_f64(
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         let upstream = unsafe { take_lazy_f64(iter) };
@@ -2461,11 +2480,11 @@ unsafe fn lazy_map_f64_word(
 
 /// Lazy `map(f)` for `f64 -> i64`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_map_f64_word(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_map_f64_word(
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `env` and `iter` are this shim's arguments; `iter` carries the share this call
         // consumes (C-ABI contract).
         unsafe { lazy_map_f64_word(env, iter, lazy_elem_class::WORD) }
@@ -2474,11 +2493,11 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_map_f64_word(
 
 /// Lazy `map(f)` for `f64 -> String`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_map_f64_str(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_map_f64_str(
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `env` and `iter` are this shim's arguments; `iter` carries the share this call
         // consumes (C-ABI contract).
         unsafe { lazy_map_f64_word(env, iter, lazy_elem_class::STRING) }
@@ -2487,11 +2506,11 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_map_f64_str(
 
 /// Lazy `map(f)` for `i64 -> f64`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_map_word_f64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_map_word_f64(
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // The word reaches the callback in an integer register whether it is
         // an element's value or an aggregate element's address, so both
         // classes are operands here - only a float slot would be read in the
@@ -2519,11 +2538,11 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_map_word_f64(
 
 /// Lazy `filter(p)` over f64 elements.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_filter_f64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_filter_f64(
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         let upstream = unsafe { take_lazy_f64(iter) };
@@ -2542,9 +2561,9 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_filter_f64(
 
 /// Sum a lazy f64 iterator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_sum_f64(iter: *mut GosLazyIterI64) -> f64 {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_sum_f64(iter: *mut GosLazyIterI64) -> f64 {
     // Starts from +0.0 as `gos_rt_iter_sum_f64` does.
-    ffi_entry!(0.0, {
+    ffi_entry_passthrough!(0.0, {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         unsafe { take_lazy_f64(iter) }.fold(0.0, |total, value| total + value)
@@ -2553,17 +2572,17 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_sum_f64(iter: *mut GosLazyIterI64) -> 
 
 /// Product of a lazy f64 iterator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_product_f64(iter: *mut GosLazyIterI64) -> f64 {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_product_f64(iter: *mut GosLazyIterI64) -> f64 {
     // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes (C-ABI
     // contract).
-    ffi_entry!(1.0, { unsafe { take_lazy_f64(iter) }.product() })
+    ffi_entry_passthrough!(1.0, { unsafe { take_lazy_f64(iter) }.product() })
 }
 
 /// Minimum of a lazy f64 iterator as `Option<f64>`, with the payload word
 /// holding the winner's float bits.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_min_f64(iter: *mut GosLazyIterI64) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_min_f64(iter: *mut GosLazyIterI64) -> i128 {
+    ffi_entry_passthrough!(gos_rt_result_new(1, 0), {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         match unsafe { take_lazy_f64(iter) }.reduce(f64::min) {
@@ -2575,8 +2594,8 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_min_f64(iter: *mut GosLazyIterI64) -> 
 
 /// Maximum of a lazy f64 iterator as `Option<f64>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_max_f64(iter: *mut GosLazyIterI64) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_max_f64(iter: *mut GosLazyIterI64) -> i128 {
+    ffi_entry_passthrough!(gos_rt_result_new(1, 0), {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         match unsafe { take_lazy_f64(iter) }.reduce(f64::max) {
@@ -2588,12 +2607,12 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_max_f64(iter: *mut GosLazyIterI64) -> 
 
 /// Fold a lazy f64 iterator with an f64 accumulator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_fold_f64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_fold_f64(
     init: f64,
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> f64 {
-    ffi_entry!(init, {
+    ffi_entry_passthrough!(init, {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         let upstream = unsafe { take_lazy_f64(iter) };
@@ -2614,12 +2633,12 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_fold_f64(
 
 /// Fold a lazy i64 iterator with an f64 accumulator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_fold_f64_word(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_fold_f64_word(
     init: f64,
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> f64 {
-    ffi_entry!(init, {
+    ffi_entry_passthrough!(init, {
         // See `gos_rt_lazy_iter_map_word_f64`: the element reaches the
         // callback as a word either way.
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
@@ -2645,12 +2664,12 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_fold_f64_word(
 
 /// Fold a lazy f64 iterator with an i64 accumulator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_fold_word_f64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_fold_word_f64(
     init: i64,
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> i64 {
-    ffi_entry!(init, {
+    ffi_entry_passthrough!(init, {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         let upstream = unsafe { take_lazy_f64(iter) };
@@ -2671,11 +2690,11 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_fold_word_f64(
 
 /// Short-circuiting `any` over a lazy f64 iterator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_any_f64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_any_f64(
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry_passthrough!(0, {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         let upstream = unsafe { take_lazy_f64(iter) };
@@ -2691,11 +2710,11 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_any_f64(
 
 /// Short-circuiting `all` over a lazy f64 iterator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_all_f64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_all_f64(
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> i64 {
-    ffi_entry!(1, {
+    ffi_entry_passthrough!(1, {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         let upstream = unsafe { take_lazy_f64(iter) };
@@ -2712,11 +2731,11 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_all_f64(
 /// Short-circuiting `find` over a lazy f64 iterator, as `Option<f64>` in the
 /// i128 carrier with the payload word holding the match's float bits.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lazy_iter_find_f64(
+pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_find_f64(
     env: *const u8,
     iter: *mut GosLazyIterI64,
 ) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+    ffi_entry_passthrough!(gos_rt_result_new(1, 0), {
         // SAFETY: `iter` is this shim's lazy iterator argument, whose share this call consumes
         // (C-ABI contract).
         let upstream = unsafe { take_lazy_f64(iter) };
@@ -2738,8 +2757,8 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_find_f64(
 
 /// Build `Vec<i64>` from the first `n` elements of `v`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_take_i64(n: i64, v: *const GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_iter_take_i64(n: i64, v: *const GosVec) -> *mut GosVec {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `vec_like_source` accepts.
         let out = unsafe { vec_like_source(v, 0) };
@@ -2763,8 +2782,8 @@ pub unsafe extern "C" fn gos_rt_iter_take_i64(n: i64, v: *const GosVec) -> *mut 
 
 /// Build `Vec<i64>` dropping the first `n` elements of `v`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_skip_i64(n: i64, v: *const GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_iter_skip_i64(n: i64, v: *const GosVec) -> *mut GosVec {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `vec_like_source` accepts.
         let out = unsafe { vec_like_source(v, 0) };
@@ -2984,8 +3003,8 @@ pub unsafe extern "C" fn gos_rt_iter_zip_i64(a: *const GosVec, b: *const GosVec)
 /// VEC-typed vec of inner `*mut GosVec` pointers
 /// (recursively freed).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_windowed_i64(n: i64, v: *const GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_iter_windowed_i64(n: i64, v: *const GosVec) -> *mut GosVec {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         let out =
             { crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::VEC) };
         if n <= 0 {
@@ -3018,8 +3037,11 @@ pub unsafe extern "C" fn gos_rt_iter_windowed_i64(n: i64, v: *const GosVec) -> *
 /// `iter::chunks(n, xs)` - `Vec<Vec<i64>>` of consecutive
 /// width-`n` chunks; the final chunk may be short.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_chunk_by_size_i64(n: i64, v: *const GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_iter_chunk_by_size_i64(
+    n: i64,
+    v: *const GosVec,
+) -> *mut GosVec {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         let out =
             { crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::VEC) };
         if n <= 0 {
@@ -3058,8 +3080,8 @@ pub unsafe extern "C" fn gos_rt_iter_chunk_by_size_i64(n: i64, v: *const GosVec)
 /// Closure body sig: `(env: *const u8, x: i64) -> i64` (return value
 /// ignored; using i64 keeps the callback ABI uniform with sort_by).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_for_each_i64(env: *const u8, v: *const GosVec) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_iter_for_each_i64(env: *const u8, v: *const GosVec) {
+    ffi_entry_passthrough!((), {
         if env.is_null() || v.is_null() {
             return;
         }
@@ -3068,7 +3090,7 @@ pub unsafe extern "C" fn gos_rt_iter_for_each_i64(env: *const u8, v: *const GosV
         if vec.len <= 0 {
             return;
         }
-        type CallFn = unsafe extern "C" fn(env: *const u8, x: i64) -> i64;
+        type CallFn = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> i64;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -3092,8 +3114,8 @@ pub unsafe extern "C" fn gos_rt_iter_for_each_i64(env: *const u8, v: *const GosV
 /// `iter::for_each(f, xs)` for `Vec<String>` / `Vec<*ptr>` shape.
 /// Closure body sig: `(env: *const u8, x: *const u8) -> i64`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_for_each_ptr(env: *const u8, v: *const GosVec) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_iter_for_each_ptr(env: *const u8, v: *const GosVec) {
+    ffi_entry_passthrough!((), {
         if env.is_null() || v.is_null() {
             return;
         }
@@ -3102,7 +3124,7 @@ pub unsafe extern "C" fn gos_rt_iter_for_each_ptr(env: *const u8, v: *const GosV
         if vec.len <= 0 {
             return;
         }
-        type CallFn = unsafe extern "C" fn(env: *const u8, x: *const u8) -> i64;
+        type CallFn = unsafe extern "C-unwind" fn(env: *const u8, x: *const u8) -> i64;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -3129,20 +3151,20 @@ pub unsafe extern "C" fn gos_rt_iter_for_each_ptr(env: *const u8, v: *const GosV
 /// the mapped element: a map changes the element type, so the output's stride
 /// comes from the call site rather than from the source header.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_map_i64(
+pub unsafe extern "C-unwind" fn gos_rt_iter_map_i64(
     env: *const u8,
     v: *const GosVec,
     out_bytes: i64,
     out_is_block: i64,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         let out = gos_rt_vec_new(mapped_stride(out_bytes));
         if env.is_null() || v.is_null() {
             return out;
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
-        type CallFn = unsafe extern "C" fn(env: *const u8, x: i64) -> i64;
+        type CallFn = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> i64;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -3169,18 +3191,18 @@ pub unsafe extern "C" fn gos_rt_iter_map_i64(
 /// `iter::map(f, xs)` for aggregate elements whose callback receives an
 /// address to the element's complete flat-slot storage.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_map_ptr_i64(
+pub unsafe extern "C-unwind" fn gos_rt_iter_map_ptr_i64(
     env: *const u8,
     v: *const GosVec,
     out_bytes: i64,
     out_is_block: i64,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         let out = gos_rt_vec_new(mapped_stride(out_bytes));
         if env.is_null() || v.is_null() {
             return out;
         }
-        type CallFn = unsafe extern "C" fn(env: *const u8, x: *const u8) -> i64;
+        type CallFn = unsafe extern "C-unwind" fn(env: *const u8, x: *const u8) -> i64;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -3209,8 +3231,11 @@ pub unsafe extern "C" fn gos_rt_iter_map_ptr_i64(
 /// `iter::filter(p, xs)` for `Vec<i64>`. Predicate returns i64
 /// (truthy = nonzero) to keep the callback ABI uniform.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_filter_i64(env: *const u8, v: *const GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_iter_filter_i64(
+    env: *const u8,
+    v: *const GosVec,
+) -> *mut GosVec {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `vec_like_source` accepts.
         let out = unsafe { vec_like_source(v, 0) };
@@ -3219,7 +3244,7 @@ pub unsafe extern "C" fn gos_rt_iter_filter_i64(env: *const u8, v: *const GosVec
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
-        type PredFn = unsafe extern "C" fn(env: *const u8, x: i64) -> bool;
+        type PredFn = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> bool;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -3255,8 +3280,8 @@ pub unsafe extern "C" fn gos_rt_iter_filter_i64(env: *const u8, v: *const GosVec
 /// value in the float ABI (an `f64` param rides an SSE register, not the
 /// integer register `f(env, x: i64)` would fill).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_for_each_f64(env: *const u8, v: *const GosVec) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_iter_for_each_f64(env: *const u8, v: *const GosVec) {
+    ffi_entry_passthrough!((), {
         if env.is_null() || v.is_null() {
             return;
         }
@@ -3265,7 +3290,7 @@ pub unsafe extern "C" fn gos_rt_iter_for_each_f64(env: *const u8, v: *const GosV
         if vec.len <= 0 {
             return;
         }
-        type CallFn = unsafe extern "C" fn(env: *const u8, x: f64) -> i64;
+        type CallFn = unsafe extern "C-unwind" fn(env: *const u8, x: f64) -> i64;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -3293,15 +3318,18 @@ pub unsafe extern "C" fn gos_rt_iter_for_each_f64(env: *const u8, v: *const GosV
 /// pointer an integer one) - a mismatched pairing would read the result
 /// out of the wrong register.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_map_f64(env: *const u8, v: *const GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_iter_map_f64(
+    env: *const u8,
+    v: *const GosVec,
+) -> *mut GosVec {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         let out = gos_rt_vec_new(8);
         if env.is_null() || v.is_null() {
             return out;
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
-        type CallFn = unsafe extern "C" fn(env: *const u8, x: f64) -> f64;
+        type CallFn = unsafe extern "C-unwind" fn(env: *const u8, x: f64) -> f64;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -3329,20 +3357,20 @@ pub unsafe extern "C" fn gos_rt_iter_map_f64(env: *const u8, v: *const GosVec) -
 /// element mapped to an integer-register result (`|x| x as i64`,
 /// `|x| format!("{}", x)`).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_map_f64_word(
+pub unsafe extern "C-unwind" fn gos_rt_iter_map_f64_word(
     env: *const u8,
     v: *const GosVec,
     out_bytes: i64,
     out_is_block: i64,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         let out = gos_rt_vec_new(mapped_stride(out_bytes));
         if env.is_null() || v.is_null() {
             return out;
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
-        type CallFn = unsafe extern "C" fn(env: *const u8, x: f64) -> i64;
+        type CallFn = unsafe extern "C-unwind" fn(env: *const u8, x: f64) -> i64;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -3369,15 +3397,18 @@ pub unsafe extern "C" fn gos_rt_iter_map_f64_word(
 /// `iter::map(f, xs)` for `Vec<i64 / ptr> -> Vec<f64>` - an
 /// integer-register element mapped to an `f64` result (`|i| i as f64`).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_map_word_f64(env: *const u8, v: *const GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_iter_map_word_f64(
+    env: *const u8,
+    v: *const GosVec,
+) -> *mut GosVec {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         let out = gos_rt_vec_new(8);
         if env.is_null() || v.is_null() {
             return out;
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
-        type CallFn = unsafe extern "C" fn(env: *const u8, x: i64) -> f64;
+        type CallFn = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> f64;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -3405,8 +3436,11 @@ pub unsafe extern "C" fn gos_rt_iter_map_word_f64(env: *const u8, v: *const GosV
 /// original bit patterns; only the predicate sees the reinterpreted
 /// `f64` value.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_filter_f64(env: *const u8, v: *const GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_iter_filter_f64(
+    env: *const u8,
+    v: *const GosVec,
+) -> *mut GosVec {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `vec_like_source` accepts.
         let out = unsafe { vec_like_source(v, 0) };
@@ -3415,7 +3449,7 @@ pub unsafe extern "C" fn gos_rt_iter_filter_f64(env: *const u8, v: *const GosVec
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
-        type PredFn = unsafe extern "C" fn(env: *const u8, x: f64) -> bool;
+        type PredFn = unsafe extern "C-unwind" fn(env: *const u8, x: f64) -> bool;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -3443,14 +3477,14 @@ pub unsafe extern "C" fn gos_rt_iter_filter_f64(env: *const u8, v: *const GosVec
 /// `iter::any(p, xs)` over a `Vec<f64>`: the slot bits are reinterpreted as
 /// `f64` so the predicate sees the float value rather than its bit pattern.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_any_f64(env: *const u8, v: *const GosVec) -> i64 {
-    ffi_entry!(-1, {
+pub unsafe extern "C-unwind" fn gos_rt_iter_any_f64(env: *const u8, v: *const GosVec) -> i64 {
+    ffi_entry_passthrough!(-1, {
         if env.is_null() || v.is_null() {
             return 0;
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
-        type PredFn = unsafe extern "C" fn(env: *const u8, x: f64) -> bool;
+        type PredFn = unsafe extern "C-unwind" fn(env: *const u8, x: f64) -> bool;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -3478,8 +3512,11 @@ pub unsafe extern "C" fn gos_rt_iter_any_f64(env: *const u8, v: *const GosVec) -
 /// receives each element's storage address, and a kept element is copied out
 /// whole, so the result keeps the source's element width and ownership shape.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_filter_ptr(env: *const u8, v: *const GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_iter_filter_ptr(
+    env: *const u8,
+    v: *const GosVec,
+) -> *mut GosVec {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if v.is_null() {
             return gos_rt_vec_new(8);
         }
@@ -3518,8 +3555,11 @@ pub unsafe extern "C" fn gos_rt_iter_filter_ptr(env: *const u8, v: *const GosVec
 
 /// `iter::map(f, xs)` for aggregate elements producing `f64`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_map_ptr_f64(env: *const u8, v: *const GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_iter_map_ptr_f64(
+    env: *const u8,
+    v: *const GosVec,
+) -> *mut GosVec {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         let out = gos_rt_vec_new(8);
         if v.is_null() {
             return out;
@@ -3547,8 +3587,8 @@ pub unsafe extern "C" fn gos_rt_iter_map_ptr_f64(env: *const u8, v: *const GosVe
 
 /// `iter::all(p, xs)` for `Vec<f64>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_all_f64(env: *const u8, v: *const GosVec) -> i64 {
-    ffi_entry!(1, {
+pub unsafe extern "C-unwind" fn gos_rt_iter_all_f64(env: *const u8, v: *const GosVec) -> i64 {
+    ffi_entry_passthrough!(1, {
         if v.is_null() {
             return 1;
         }
@@ -3574,8 +3614,12 @@ pub unsafe extern "C" fn gos_rt_iter_all_f64(env: *const u8, v: *const GosVec) -
 
 /// `iter::fold(init, f, xs)` for `Vec<f64>` with an f64 accumulator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_fold_f64(init: f64, env: *const u8, v: *const GosVec) -> f64 {
-    ffi_entry!(init, {
+pub unsafe extern "C-unwind" fn gos_rt_iter_fold_f64(
+    init: f64,
+    env: *const u8,
+    v: *const GosVec,
+) -> f64 {
+    ffi_entry_passthrough!(init, {
         if v.is_null() {
             return init;
         }
@@ -3600,12 +3644,12 @@ pub unsafe extern "C" fn gos_rt_iter_fold_f64(init: f64, env: *const u8, v: *con
 
 /// `iter::fold(init, f, xs)` for `Vec<i64>` with an f64 accumulator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_fold_f64_word(
+pub unsafe extern "C-unwind" fn gos_rt_iter_fold_f64_word(
     init: f64,
     env: *const u8,
     v: *const GosVec,
 ) -> f64 {
-    ffi_entry!(init, {
+    ffi_entry_passthrough!(init, {
         if v.is_null() {
             return init;
         }
@@ -3630,12 +3674,12 @@ pub unsafe extern "C" fn gos_rt_iter_fold_f64_word(
 
 /// `iter::fold(init, f, xs)` for `Vec<f64>` with an i64 accumulator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_fold_word_f64(
+pub unsafe extern "C-unwind" fn gos_rt_iter_fold_word_f64(
     init: i64,
     env: *const u8,
     v: *const GosVec,
 ) -> i64 {
-    ffi_entry!(init, {
+    ffi_entry_passthrough!(init, {
         if v.is_null() {
             return init;
         }
@@ -3661,8 +3705,12 @@ pub unsafe extern "C" fn gos_rt_iter_fold_word_f64(
 /// `iter::fold(init, f, xs)` for aggregate elements with an i64 accumulator;
 /// the callback receives each element's storage address.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_fold_ptr(init: i64, env: *const u8, v: *const GosVec) -> i64 {
-    ffi_entry!(init, {
+pub unsafe extern "C-unwind" fn gos_rt_iter_fold_ptr(
+    init: i64,
+    env: *const u8,
+    v: *const GosVec,
+) -> i64 {
+    ffi_entry_passthrough!(init, {
         if v.is_null() {
             return init;
         }
@@ -3688,12 +3736,12 @@ pub unsafe extern "C" fn gos_rt_iter_fold_ptr(init: i64, env: *const u8, v: *con
 
 /// `iter::fold(init, f, xs)` for aggregate elements with an f64 accumulator.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_fold_f64_ptr(
+pub unsafe extern "C-unwind" fn gos_rt_iter_fold_f64_ptr(
     init: f64,
     env: *const u8,
     v: *const GosVec,
 ) -> f64 {
-    ffi_entry!(init, {
+    ffi_entry_passthrough!(init, {
         if v.is_null() {
             return init;
         }
@@ -3719,8 +3767,8 @@ pub unsafe extern "C" fn gos_rt_iter_fold_f64_ptr(
 
 /// `iter::sum_by(f, xs)` for `Vec<f64>` summing `f64` projections.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_sum_by_f64(env: *const u8, v: *const GosVec) -> f64 {
-    ffi_entry!(0.0, {
+pub unsafe extern "C-unwind" fn gos_rt_iter_sum_by_f64(env: *const u8, v: *const GosVec) -> f64 {
+    ffi_entry_passthrough!(0.0, {
         if v.is_null() {
             return 0.0;
         }
@@ -3745,8 +3793,11 @@ pub unsafe extern "C" fn gos_rt_iter_sum_by_f64(env: *const u8, v: *const GosVec
 
 /// `iter::sum_by(f, xs)` for `Vec<i64>` summing `f64` projections.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_sum_by_word_f64(env: *const u8, v: *const GosVec) -> f64 {
-    ffi_entry!(0.0, {
+pub unsafe extern "C-unwind" fn gos_rt_iter_sum_by_word_f64(
+    env: *const u8,
+    v: *const GosVec,
+) -> f64 {
+    ffi_entry_passthrough!(0.0, {
         if v.is_null() {
             return 0.0;
         }
@@ -3771,8 +3822,11 @@ pub unsafe extern "C" fn gos_rt_iter_sum_by_word_f64(env: *const u8, v: *const G
 
 /// `iter::sum_by(f, xs)` for `Vec<f64>` summing `i64` projections.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_sum_by_f64_word(env: *const u8, v: *const GosVec) -> i64 {
-    ffi_entry!(0, {
+pub unsafe extern "C-unwind" fn gos_rt_iter_sum_by_f64_word(
+    env: *const u8,
+    v: *const GosVec,
+) -> i64 {
+    ffi_entry_passthrough!(0, {
         if v.is_null() {
             return 0;
         }
@@ -3798,8 +3852,8 @@ pub unsafe extern "C" fn gos_rt_iter_sum_by_f64_word(env: *const u8, v: *const G
 /// `iter::sum_by(f, xs)` for aggregate elements summing `i64` projections;
 /// the callback receives each element's storage address.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_sum_by_ptr(env: *const u8, v: *const GosVec) -> i64 {
-    ffi_entry!(0, {
+pub unsafe extern "C-unwind" fn gos_rt_iter_sum_by_ptr(env: *const u8, v: *const GosVec) -> i64 {
+    ffi_entry_passthrough!(0, {
         if v.is_null() {
             return 0;
         }
@@ -3825,8 +3879,11 @@ pub unsafe extern "C" fn gos_rt_iter_sum_by_ptr(env: *const u8, v: *const GosVec
 
 /// `iter::sum_by(f, xs)` for aggregate elements summing `f64` projections.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_sum_by_ptr_f64(env: *const u8, v: *const GosVec) -> f64 {
-    ffi_entry!(0.0, {
+pub unsafe extern "C-unwind" fn gos_rt_iter_sum_by_ptr_f64(
+    env: *const u8,
+    v: *const GosVec,
+) -> f64 {
+    ffi_entry_passthrough!(0.0, {
         if v.is_null() {
             return 0.0;
         }
@@ -3853,14 +3910,18 @@ pub unsafe extern "C" fn gos_rt_iter_sum_by_ptr_f64(env: *const u8, v: *const Go
 /// `iter::fold(init, f, xs)` for `Vec<i64>` with i64 accumulator.
 /// Closure body sig: `(env, acc, x) -> acc`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_fold_i64(init: i64, env: *const u8, v: *const GosVec) -> i64 {
-    ffi_entry!(-1, {
+pub unsafe extern "C-unwind" fn gos_rt_iter_fold_i64(
+    init: i64,
+    env: *const u8,
+    v: *const GosVec,
+) -> i64 {
+    ffi_entry_passthrough!(-1, {
         if env.is_null() || v.is_null() {
             return init;
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
-        type FoldFn = unsafe extern "C" fn(env: *const u8, acc: i64, x: i64) -> i64;
+        type FoldFn = unsafe extern "C-unwind" fn(env: *const u8, acc: i64, x: i64) -> i64;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -3886,14 +3947,14 @@ pub unsafe extern "C" fn gos_rt_iter_fold_i64(init: i64, env: *const u8, v: *con
 /// `iter::sum_by(f, xs)` for `Vec<i64>` -> i64. `f` maps each element
 /// to its contribution.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_sum_by_i64(env: *const u8, v: *const GosVec) -> i64 {
-    ffi_entry!(-1, {
+pub unsafe extern "C-unwind" fn gos_rt_iter_sum_by_i64(env: *const u8, v: *const GosVec) -> i64 {
+    ffi_entry_passthrough!(-1, {
         if env.is_null() || v.is_null() {
             return 0;
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
-        type MapFn = unsafe extern "C" fn(env: *const u8, x: i64) -> i64;
+        type MapFn = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> i64;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -3918,14 +3979,14 @@ pub unsafe extern "C" fn gos_rt_iter_sum_by_i64(env: *const u8, v: *const GosVec
 
 /// `iter::any(p, xs)` for `Vec<i64>` -> bool (returned as i64 0/1).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_any_i64(env: *const u8, v: *const GosVec) -> i64 {
-    ffi_entry!(-1, {
+pub unsafe extern "C-unwind" fn gos_rt_iter_any_i64(env: *const u8, v: *const GosVec) -> i64 {
+    ffi_entry_passthrough!(-1, {
         if env.is_null() || v.is_null() {
             return 0;
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
-        type PredFn = unsafe extern "C" fn(env: *const u8, x: i64) -> bool;
+        type PredFn = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> bool;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -3951,14 +4012,14 @@ pub unsafe extern "C" fn gos_rt_iter_any_i64(env: *const u8, v: *const GosVec) -
 
 /// `iter::all(p, xs)` for `Vec<i64>` -> bool (returned as i64 0/1).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_all_i64(env: *const u8, v: *const GosVec) -> i64 {
-    ffi_entry!(-1, {
+pub unsafe extern "C-unwind" fn gos_rt_iter_all_i64(env: *const u8, v: *const GosVec) -> i64 {
+    ffi_entry_passthrough!(-1, {
         if env.is_null() || v.is_null() {
             return 1;
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
-        type PredFn = unsafe extern "C" fn(env: *const u8, x: i64) -> bool;
+        type PredFn = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> bool;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -3985,14 +4046,14 @@ pub unsafe extern "C" fn gos_rt_iter_all_i64(env: *const u8, v: *const GosVec) -
 /// `iter::all(p, xs)` for vectors whose elements must be passed by slot
 /// address, such as user structs.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_all_ptr(env: *const u8, v: *const GosVec) -> i64 {
-    ffi_entry!(-1, {
+pub unsafe extern "C-unwind" fn gos_rt_iter_all_ptr(env: *const u8, v: *const GosVec) -> i64 {
+    ffi_entry_passthrough!(-1, {
         if env.is_null() || v.is_null() {
             return 1;
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
-        type PredFn = unsafe extern "C" fn(env: *const u8, x: *mut u8) -> bool;
+        type PredFn = unsafe extern "C-unwind" fn(env: *const u8, x: *mut u8) -> bool;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -4019,14 +4080,14 @@ pub unsafe extern "C" fn gos_rt_iter_all_ptr(env: *const u8, v: *const GosVec) -
 /// `iter::any(p, xs)` for vectors whose elements must be passed by slot
 /// address, such as user structs.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_iter_any_ptr(env: *const u8, v: *const GosVec) -> i64 {
-    ffi_entry!(-1, {
+pub unsafe extern "C-unwind" fn gos_rt_iter_any_ptr(env: *const u8, v: *const GosVec) -> i64 {
+    ffi_entry_passthrough!(-1, {
         if env.is_null() || v.is_null() {
             return 0;
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
-        type PredFn = unsafe extern "C" fn(env: *const u8, x: *mut u8) -> bool;
+        type PredFn = unsafe extern "C-unwind" fn(env: *const u8, x: *mut u8) -> bool;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -4099,8 +4160,8 @@ pub extern "C" fn gos_rt_option_default_f64(fallback: f64, opt: i128) -> f64 {
 /// (disc=0 Some, disc=1 None) so the surrounding pattern match
 /// reads the standard discriminant.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_option_map_i64(env: *const u8, opt: i128) -> i128 {
-    ffi_entry!(0i128, {
+pub unsafe extern "C-unwind" fn gos_rt_option_map_i64(env: *const u8, opt: i128) -> i128 {
+    ffi_entry_passthrough!(0i128, {
         // None passes through unchanged.
         if env.is_null() {
             return gos_rt_result_new(1, 0);
@@ -4109,7 +4170,7 @@ pub unsafe extern "C" fn gos_rt_option_map_i64(env: *const u8, opt: i128) -> i12
             return gos_rt_result_new(1, 0);
         }
         let payload = super::result::gos_rt_result_payload(opt);
-        type CallFn = unsafe extern "C" fn(env: *const u8, x: i64) -> i64;
+        type CallFn = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> i64;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -4128,8 +4189,8 @@ pub unsafe extern "C" fn gos_rt_option_map_i64(env: *const u8, opt: i128) -> i12
 /// `result::map(f, res) -> Result<i64, E>`. Mirror of
 /// `gos_rt_option_map_i64`: maps Ok payload, passes Err through.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_result_map_i64(env: *const u8, res: i128) -> i128 {
-    ffi_entry!(0i128, {
+pub unsafe extern "C-unwind" fn gos_rt_result_map_i64(env: *const u8, res: i128) -> i128 {
+    ffi_entry_passthrough!(0i128, {
         if env.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -4139,7 +4200,7 @@ pub unsafe extern "C" fn gos_rt_result_map_i64(env: *const u8, res: i128) -> i12
             // Err - pass through.
             return gos_rt_result_new(disc, payload);
         }
-        type CallFn = unsafe extern "C" fn(env: *const u8, x: i64) -> i64;
+        type CallFn = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> i64;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };

@@ -904,6 +904,13 @@ impl<'tcx> FnBuilder<'tcx> {
                 {
                     return Ok(None);
                 }
+                // A place step is a position; a keyed container is reached by
+                // its key, which the recursive store writes back level by level.
+                HirExprKind::Index { base, .. }
+                    if matches!(self.tcx.kind(base.ty), Some(TyKind::HashMap { .. })) =>
+                {
+                    return Ok(None);
+                }
                 HirExprKind::Index { index, .. } => {
                     let reg = self.compile_expr(index)?;
                     path.push(crate::bytecode::PlaceStep::Index(reg));

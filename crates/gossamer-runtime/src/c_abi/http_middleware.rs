@@ -31,7 +31,8 @@ use super::*;
 /// `fn(env, token) -> bool` - the one-argument value-thunk shape, with
 /// the closure's `String` parameter carried as a gos C-string pointer
 /// (pointer-width, same slot the `i64` combinator thunks use).
-type VerifyFn = unsafe extern "C" fn(env: *const u8, token: *mut std::os::raw::c_char) -> i64;
+type VerifyFn =
+    unsafe extern "C-unwind" fn(env: *const u8, token: *mut std::os::raw::c_char) -> i64;
 
 /// Callable address stored at `env[0]`, or `None` for a null/zero env.
 ///
@@ -74,8 +75,11 @@ fn bearer_token(auth: &str) -> Option<String> {
 /// the request carries a `Bearer` token the `verify` closure accepts.
 /// `false` (without calling `verify`) when no bearer header is present.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_http_bearer_ok(req: *const GosHttpRequest, env: *const u8) -> i64 {
-    ffi_entry!(0, {
+pub unsafe extern "C-unwind" fn gos_rt_http_bearer_ok(
+    req: *const GosHttpRequest,
+    env: *const u8,
+) -> i64 {
+    ffi_entry_passthrough!(0, {
         if req.is_null() {
             return 0;
         }

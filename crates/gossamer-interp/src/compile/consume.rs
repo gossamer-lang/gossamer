@@ -48,6 +48,9 @@ struct Slot {
     bind_depth: usize,
     read_count: u32,
     read: Option<Occ>,
+    /// A write through the binding comes after its read, which would reach
+    /// the slot a consuming read emptied.
+    written_after_read: bool,
 }
 
 #[derive(Default)]
@@ -88,6 +91,7 @@ impl Analyzer {
             bind_depth: depth,
             read_count: 0,
             read: None,
+            written_after_read: false,
         });
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), idx);
@@ -144,6 +148,34 @@ impl Analyzer {
                 HirExprKind::Unary { operand, .. } => cur = operand,
                 _ => return,
             }
+        }
+    }
+
+    /// Records a write through `place` (`v = x`, `v[i] = x`, `v.f = x`, a
+    /// mutating method on `v`). It changes the binding in place rather than
+    /// reading it out, so it does not count against the binding's one read;
+    /// it only has to come before that read. Each index on the way is an
+    /// ordinary read.
+    fn record_place_write(&mut self, place: &HirExpr, depth: usize, in_closure: bool) {
+        match &place.kind {
+            HirExprKind::Path { segments, .. } if !in_closure => {
+                if let [seg] = segments.as_slice()
+                    && let Some(idx) = self.resolve(&seg.name)
+                {
+                    let slot = &mut self.slots[idx];
+                    if slot.read.is_some() {
+                        slot.written_after_read = true;
+                    }
+                }
+            }
+            HirExprKind::Field { receiver, .. } | HirExprKind::TupleIndex { receiver, .. } => {
+                self.record_place_write(receiver, depth, in_closure);
+            }
+            HirExprKind::Index { base, index } => {
+                self.record_place_write(base, depth, in_closure);
+                self.visit_expr(index, depth, in_closure, true);
+            }
+            _ => self.visit_expr(place, depth, in_closure, false),
         }
     }
 
@@ -210,12 +242,20 @@ impl Analyzer {
                 args,
                 ..
             } => {
-                if gossamer_types::is_mutating_method_name(name.name.as_str()) {
+                let mutating = gossamer_types::is_mutating_method_name(name.name.as_str());
+                if mutating {
                     self.record_mutation(receiver);
                 }
-                self.visit_expr(receiver, depth, in_closure, false);
                 for arg in args {
                     self.visit_expr(arg, depth, in_closure, true);
+                }
+                if mutating {
+                    // The receiver is compiled again to store the updated
+                    // value back, so everything it reads is read twice.
+                    self.record_place_write(receiver, depth, in_closure);
+                    self.record_place_write(receiver, depth, in_closure);
+                } else {
+                    self.visit_expr(receiver, depth, in_closure, false);
                 }
             }
             HirExprKind::Field { receiver, .. } | HirExprKind::TupleIndex { receiver, .. } => {
@@ -239,10 +279,8 @@ impl Analyzer {
             }
             HirExprKind::Assign { place, value } => {
                 self.record_mutation(place);
-                // Visiting `place` records the LHS path with `bare =
-                // false`, so an assignment target is never consumable.
-                self.visit_expr(place, depth, in_closure, false);
                 self.visit_expr(value, depth, in_closure, false);
+                self.record_place_write(place, depth, in_closure);
             }
             HirExprKind::If {
                 condition,
@@ -408,6 +446,7 @@ impl Analyzer {
             }
             any_read.insert(slot.name.clone());
             let ok = slot.read_count == 1
+                && !slot.written_after_read
                 && slot
                     .read
                     .is_some_and(|occ| occ.bare && !occ.in_closure && occ.depth == slot.bind_depth);

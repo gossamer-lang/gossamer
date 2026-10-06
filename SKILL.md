@@ -81,8 +81,10 @@ about values.
   write. Passing a value twice needs no clone.
 - **Closure capture is the one asymmetry**: a container (`Vec`, `Map`, `Set`)
   is captured by reference, so `xs.push(v)` inside a closure is visible
-  outside; a scalar, `String`, or struct is captured by value, so
-  `count += 1` inside is not. Accumulate into a container. No `move`.
+  outside; a scalar, `String`, or struct is captured by copy, and a write
+  to one inside a closure (`count += 1`) is rejected (GT0114). Accumulate
+  into a container, or return the value. No `move`. Goroutines that write
+  one captured container serialise the writes with a `sync::Mutex`.
 
 ```gossamer
 fn tally(mut xs: Vec<i64>) -> i64 { xs.push(1); xs.len() }
@@ -135,8 +137,10 @@ extend(&mut items)     // items is now #[1, 2, 1]
 - Named and default arguments: `fn volume(width: i64, height: i64 = 2)`
   then `volume(2)`, `volume(width: 2, height: 3)`, or `volume(2, height: 3)`.
 - Semicolons only separate statements on one line. A line starting with
-  `&`, `*`, `-`, or `|` begins a new statement; to continue an expression,
-  end the previous line with the operator.
+  `&`, `*`, `-`, or a single `|` begins a new statement; to continue an
+  expression, end the previous line with the operator. A line starting with
+  `||` continues the expression above, so a no-argument closure on its own
+  line is `(|| expr)`.
 - Delimited lists use commas on one line and newlines when multiline.
 
 **Strings and formatting**
@@ -185,7 +189,9 @@ extend(&mut items)     // items is now #[1, 2, 1]
 - Structs build by their declared shape: `Unit`, `Pair(a, b)`,
   `Point { x: 1, y: 2 }`. Structs, enums, tuples, and sequences compare and
   order structurally; `impl` of `eq` / `cmp` overrides. Recursive enums work
-  directly: `enum List { Cons(i64, List), Nil }`.
+  directly: `enum List { Cons(i64, List), Nil }`. Two enums may share a
+  variant name (`Conn::Ready`, `Job::Ready`); write `Enum::Variant` where a
+  bare name would be ambiguous (GR0009).
 - `#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord)]`; `Clone`,
   `Hash`, `Copy`, `Display`, and serde are automatic, not derived.
   Conversions and operators are `impl From` / `TryFrom` / `Add` / `Mul` /
@@ -225,7 +231,8 @@ extend(&mut items)     // items is now #[1, 2, 1]
   `to_vec()` copies an array, slice, or set into a `Vec`.
 - A type with `impl Iterator for T { type Item = X; fn next(&mut self) ->
   Option<X> }` works in `for` and gains the same adapters and terminals.
-- Maps: any hashable value is a key; `m[k]` reads and writes;
+- Maps: any hashable value is a key; `m[k]` reads and writes, and so does a
+  place below it (`m[k][i] = v`, `m[k].items.push(x)`, `f(&mut m[k])`);
   `m.inc(k)` counts; `m.or_insert(k, d)` fills; `m.iter()` walks pairs.
   `BTreeMap` / `BTreeSet` keep keys ordered and answer `first_key_value`,
   `pop_first`, and `range(lo..hi)`. A `Set`'s own order is unspecified: sort,

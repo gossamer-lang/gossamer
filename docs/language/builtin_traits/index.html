@@ -4083,7 +4083,7 @@
 </code></pre></div>
 <p>A bound naming <code>Hashable</code> licenses <code>hash</code> on a type parameter.</p>
 <h3 id="copy"><code>Copy</code><a class="headerlink" href="#copy" title="Permanent link">&para;</a></h3>
-<p>Every value is passed, assigned, and captured by value already, and no parameter asks for a <code>&amp;</code> to avoid a copy.</p>
+<p>Every value is passed and assigned by value already, and no parameter asks for a <code>&amp;</code> to avoid a copy. A closure captures a container by reference and every other value by copy (see <code>lang::closure</code>).</p>
 <p>Instead: Remove the block.</p>
 <!-- fragment -->
 <div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-52-1" name="__codelineno-52-1" href="#__codelineno-52-1"></a><span class="kd">let</span><span class="w"> </span><span class="n">b</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">a</span>

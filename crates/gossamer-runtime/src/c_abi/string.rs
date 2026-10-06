@@ -1732,7 +1732,7 @@ pub unsafe extern "C" fn gos_rt_str_clear(s: *const c_char) -> *mut c_char {
 /// unique `push_str` calls reuse the allocation until the reserved space is
 /// exhausted.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_str_with_capacity(capacity: i64) -> *mut c_char {
+pub extern "C-unwind" fn gos_rt_str_with_capacity(capacity: i64) -> *mut c_char {
     if capacity < 0 {
         crate::c_abi::panic::panic_text("String::with_capacity: capacity must be non-negative");
     }
@@ -1748,8 +1748,8 @@ pub extern "C" fn gos_rt_str_with_capacity(capacity: i64) -> *mut c_char {
 /// place, when this reference holds it alone; otherwise a copy of the kept
 /// prefix, and `s` is released.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_str_truncate(s: *const c_char, n: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_str_truncate(s: *const c_char, n: i64) -> *mut c_char {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if n < 0 {
             crate::c_abi::panic::panic_text("truncate: length must be non-negative");
         }
@@ -1991,7 +1991,7 @@ pub unsafe extern "C" fn gos_rt_str_byte_at(s: *const c_char, i: i64) -> i64 {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_str_char_at(s: *const c_char, i: i64) -> i64 {
+pub unsafe extern "C-unwind" fn gos_rt_str_char_at(s: *const c_char, i: i64) -> i64 {
     // `s[i]` is an indexed read, and an index outside `[0, len)` panics, in the
     // wording every sequence access reports so a failure's text does not
     // depend on the tier that ran it.
@@ -3036,8 +3036,8 @@ pub unsafe extern "C" fn gos_rt_str_rstrip_chars(
 /// `s.zfill(width)` - pad with `'0'` on the left until at least
 /// `width` characters wide.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_str_zfill(s: *const c_char, width: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_str_zfill(s: *const c_char, width: i64) -> *mut c_char {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         let s = if s.is_null() {
             ""
         } else {
@@ -3463,8 +3463,8 @@ pub unsafe extern "C" fn gos_rt_str_push_byte(s: *const c_char, b: i32) -> *mut 
 /// semantics: `n=0` returns the empty string, `n=1` returns a
 /// fresh copy.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_str_repeat(s: *const c_char, n: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_str_repeat(s: *const c_char, n: i64) -> *mut c_char {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         let s = if s.is_null() {
             ""
         } else {
@@ -3646,8 +3646,8 @@ pub extern "C" fn gos_rt_f32_debug_to_str(x: f64) -> *mut c_char {
 /// `{:.N}` Display output bit-for-bit. Very large `prec` is clamped
 /// to a sane upper bound to keep the allocation bounded.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_f64_prec_to_str(x: f64, prec: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+pub extern "C-unwind" fn gos_rt_f64_prec_to_str(x: f64, prec: i64) -> *mut c_char {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if prec < 0 {
             crate::c_abi::panic::panic_text("__fmt_prec: precision must be non-negative");
         }
@@ -3660,8 +3660,8 @@ pub extern "C" fn gos_rt_f64_prec_to_str(x: f64, prec: i64) -> *mut c_char {
 /// `{:.N}` spec asks of text: precision bounds how much of a value is
 /// shown, and a string's length is counted in scalars everywhere else.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_str_prec_to_str(s: *const c_char, prec: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_str_prec_to_str(s: *const c_char, prec: i64) -> *mut c_char {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if prec < 0 {
             crate::c_abi::panic::panic_text("__fmt_prec: precision must be non-negative");
         }

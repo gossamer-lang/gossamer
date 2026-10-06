@@ -32,7 +32,9 @@ pub use gossamer_ast::cfg::{
 
 pub use def_id::{CrateId, DefId, DefIdGenerator, DefKind, ModId};
 pub use diagnostic::{ResolveDiagnostic, ResolveError};
-pub use named_args::resolve_named_arguments;
+pub use named_args::{
+    DeferredMethodCall, resolve_deferred_method_arguments, resolve_named_arguments,
+};
 pub use numeric_limits::{LimitConstant, LimitLiteral, limit_constant};
 pub use resolutions::{FloatWidth, IntWidth, PrimitiveTy, Resolution, Resolutions};
 pub use resolver::{project_dep_module_name, resolve_source_file};

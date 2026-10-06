@@ -64,6 +64,10 @@ An impl that omits a required associated item is rejected (`GT0059`), a
 projection of an undeclared item is rejected (`GT0060`), and an ambiguous
 projection is rejected with the constraint to write (`GT0061`).
 
+A supertrait is part of its subtrait: a type that implements
+`trait BufRead: Read` implements `Read` too, and an `impl BufRead for T`
+without an `impl Read for T` is rejected (`GT0115`).
+
 Out of scope: generic associated types (`type Item<T>`), associated types
 on `dyn Trait` (Gossamer has no trait objects), and inferring a
 projection across several candidate impls without a constraint.

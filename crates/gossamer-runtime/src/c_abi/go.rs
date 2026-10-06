@@ -511,8 +511,8 @@ pub extern "C" fn gos_rt_sleep_ns(ns: i64) {
 /// `ctx_handle` is an opaque context handle, or null for an uncancellable
 /// sleep.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sleep_ms_ctx(ctx_handle: *const u8, ms: i64) -> i64 {
-    ffi_entry!(0, {
+pub unsafe extern "C-unwind" fn gos_rt_sleep_ms_ctx(ctx_handle: *const u8, ms: i64) -> i64 {
+    ffi_entry_passthrough!(0, {
         if ms < 0 {
             crate::c_abi::panic::panic_text("time::sleep_ctx: duration_ms must be non-negative");
         }
@@ -570,8 +570,8 @@ pub unsafe extern "C" fn gos_rt_sleep_ns_ctx(ctx_handle: *const u8, ns: i64) -> 
 /// nanoseconds, busy-spinning every poll loop under
 /// `gos build` / `gos build --release` builds.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sleep_ms(ms: i64) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_sleep_ms(ms: i64) {
+    ffi_entry_passthrough!((), {
         if ms < 0 {
             crate::c_abi::panic::panic_text("time::sleep: duration_ms must be non-negative");
         }

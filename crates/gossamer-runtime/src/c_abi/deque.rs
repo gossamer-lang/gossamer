@@ -630,8 +630,8 @@ pub(crate) unsafe fn deque_format_at(
 
 /// Format a `Deque` of one-word integer elements for `{}` / `{:?}`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_deque_format(d: *mut GosDeque) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_deque_format(d: *mut GosDeque) -> *mut c_char {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `d` is this shim's argument, null or live for the call (C-ABI contract), and
         // the null descriptor selects the word rendering.
         unsafe { deque_format_with(d, "Deque", std::ptr::null()) }
@@ -640,8 +640,8 @@ pub unsafe extern "C" fn gos_rt_deque_format(d: *mut GosDeque) -> *mut c_char {
 
 /// Format a `Queue` of one-word integer elements for `{}` / `{:?}`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_queue_format(d: *mut GosDeque) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_queue_format(d: *mut GosDeque) -> *mut c_char {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `d` is this shim's argument, null or live for the call (C-ABI contract), and
         // the null descriptor selects the word rendering.
         unsafe { deque_format_with(d, "Queue", std::ptr::null()) }
@@ -650,8 +650,8 @@ pub unsafe extern "C" fn gos_rt_queue_format(d: *mut GosDeque) -> *mut c_char {
 
 /// Format a `Stack` of one-word integer elements for `{}` / `{:?}`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_stack_format(d: *mut GosDeque) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_stack_format(d: *mut GosDeque) -> *mut c_char {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `d` is this shim's argument, null or live for the call (C-ABI contract), and
         // the null descriptor selects the word rendering.
         unsafe { deque_format_with(d, "Stack", std::ptr::null()) }
@@ -660,11 +660,11 @@ pub unsafe extern "C" fn gos_rt_stack_format(d: *mut GosDeque) -> *mut c_char {
 
 /// Format a `Deque` whose elements are described by `tags`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_deque_format_desc(
+pub unsafe extern "C-unwind" fn gos_rt_deque_format_desc(
     d: *mut GosDeque,
     tags: *const u8,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `d` is this shim's argument, null or live for the call, and `tags` null or its
         // element descriptor (C-ABI contract).
         unsafe { deque_format_with(d, "Deque", tags) }
@@ -673,11 +673,11 @@ pub unsafe extern "C" fn gos_rt_deque_format_desc(
 
 /// Format a `Queue` whose elements are described by `tags`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_queue_format_desc(
+pub unsafe extern "C-unwind" fn gos_rt_queue_format_desc(
     d: *mut GosDeque,
     tags: *const u8,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `d` is this shim's argument, null or live for the call, and `tags` null or its
         // element descriptor (C-ABI contract).
         unsafe { deque_format_with(d, "Queue", tags) }
@@ -686,11 +686,11 @@ pub unsafe extern "C" fn gos_rt_queue_format_desc(
 
 /// Format a `Stack` whose elements are described by `tags`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_stack_format_desc(
+pub unsafe extern "C-unwind" fn gos_rt_stack_format_desc(
     d: *mut GosDeque,
     tags: *const u8,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `d` is this shim's argument, null or live for the call, and `tags` null or its
         // element descriptor (C-ABI contract).
         unsafe { deque_format_with(d, "Stack", tags) }

@@ -31,6 +31,8 @@ concurrency:
 
 jobs:
   build:
+    # Only `main` publishes, including a manual run started elsewhere.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -88,6 +90,7 @@ jobs:
           path: site
 
   deploy:
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     environment:

@@ -147,7 +147,7 @@ unsafe fn call_closure<R>(code: *const (), env: *const u8, args: &[Arg]) -> Opti
     use Arg::{Float as F, Word as W};
     macro_rules! call {
         ($($ty:ty => $value:expr),*) => {{
-            type Code<R> = unsafe extern "C" fn(*const u8 $(, $ty)*) -> R;
+            type Code<R> = unsafe extern "C-unwind" fn(*const u8 $(, $ty)*) -> R;
             // SAFETY: the caller guarantees the code's parameter classes.
             let f: Code<R> = unsafe { std::mem::transmute(code) };
             // SAFETY: `f` is the closure code `code` names, whose parameters take exactly these

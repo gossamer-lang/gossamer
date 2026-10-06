@@ -54,6 +54,21 @@ pub fn typecheck_source_file(
     checker.run(source)
 }
 
+/// The name of the type, or of the trait bounding a type parameter, that
+/// each receiver in `calls` has, for the method calls whose labelled or
+/// defaulted arguments wait on it. Diagnostics are left to the real check.
+#[must_use]
+pub(crate) fn receiver_owners(
+    source: &SourceFile,
+    resolutions: &Resolutions,
+    calls: impl IntoIterator<Item = NodeId>,
+) -> HashMap<NodeId, String> {
+    let mut tcx = TyCtxt::new();
+    let mut checker = TypeChecker::new(&mut tcx, resolutions);
+    checker.receiver_owner_watch = calls.into_iter().collect();
+    checker.collect_receiver_owners(source)
+}
+
 /// Typechecks generated REPL inspection programs.
 ///
 /// Normal user code rejects reads through an owner while a named `&mut`
@@ -74,6 +89,18 @@ pub fn typecheck_source_file_for_repl_inspection(
 }
 
 impl TypeChecker<'_> {
+    fn collect_receiver_owners(mut self, source: &SourceFile) -> HashMap<NodeId, String> {
+        let active = gossamer_resolve::without_inactive_items(source);
+        let source = active.as_ref().unwrap_or(source);
+        self.collect_import_targets(&source.uses);
+        self.assoc = gossamer_ast::AssocIndex::build(source);
+        self.collect_signatures(&source.items);
+        for item in &source.items {
+            self.check_item(item);
+        }
+        self.receiver_owners
+    }
+
     fn run(mut self, source: &SourceFile) -> (TypeTable, Vec<TypeDiagnostic>) {
         // The items the resolver resolved, and no others.
         let active = gossamer_resolve::without_inactive_items(source);
@@ -879,6 +906,10 @@ struct TypeChecker<'a> {
     /// receiver, method). Which `impl` block the call reaches depends on the
     /// width defaulting gives the literal, so the owner is recorded then.
     deferred_method_owners: Vec<(NodeId, Ty, String)>,
+    /// Method calls whose receiver's type the named-argument rewrite waits
+    /// on, and the type (or bounding trait) each receiver turned out to have.
+    receiver_owner_watch: HashSet<NodeId>,
+    receiver_owners: HashMap<NodeId, String>,
     /// Closures handed to a `[rust-bindings]` callback parameter, as (type,
     /// callee, span). A binding's signature does not name the closure's
     /// types, so they are checked once inference has settled them.
@@ -1282,6 +1313,8 @@ impl<'a> TypeChecker<'a> {
             deferred_literal_type_mismatches: Vec::new(),
             deferred_scalar_method_rejections: Vec::new(),
             deferred_method_owners: Vec::new(),
+            receiver_owner_watch: HashSet::new(),
+            receiver_owners: HashMap::new(),
             deferred_binding_callbacks: Vec::new(),
             deferred_wrapping_operands: Vec::new(),
             deferred_conversion_targets: Vec::new(),
@@ -2048,6 +2081,39 @@ impl<'a> TypeChecker<'a> {
             );
         }
         self.claimed_trait_impls.insert(key, span);
+    }
+
+    /// Reports each direct supertrait of the implemented trait that the
+    /// implementing type does not implement too.
+    pub(super) fn check_supertrait_impls(
+        &mut self,
+        decl: &ImplDecl,
+        module_path: &[String],
+        span: Span,
+    ) {
+        let Some(trait_name) = decl.trait_ref.as_ref().and_then(|b| b.trait_name()) else {
+            return;
+        };
+        let Some(supertraits) = self.trait_supertraits.get(trait_name).cloned() else {
+            return;
+        };
+        let own = impl_self_ty_name(decl);
+        let qualified = qualified_type_name(module_path, &own);
+        for supertrait in supertraits {
+            if self.bound_is_satisfied(&supertrait, &own)
+                || self.bound_is_satisfied(&supertrait, &qualified)
+            {
+                continue;
+            }
+            self.emit(
+                TypeError::MissingSupertraitImpl {
+                    trait_name: trait_name.to_string(),
+                    supertrait,
+                    ty: written_type_name(&decl.self_ty),
+                },
+                span,
+            );
+        }
     }
 
     /// Reports every associated type and constant a trait declares without

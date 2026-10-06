@@ -194,8 +194,10 @@ is reserved but has no role - source files do not declare a package;
 see §6. `move` is **not** a keyword: Gossamer has no ownership
 transfer, so the Rust-style `move` closure qualifier would be
 meaningless. Closures capture by managed reference for the
-containers (`Vec`, `Map`, `Set`) and by value for everything else, with
-no opt-in needed.
+containers (`Vec`, `Map`, `Set`, deques, and heaps) and by value for
+everything else, with no opt-in needed. A write to a binding captured by
+value would change only the closure's copy, so it is rejected (`GT0114`,
+§3.5).
 
 ### 2.5 Operators and punctuation
 
@@ -290,10 +292,9 @@ marker.
 ### 2.7 Statement termination
 
 A block is a sequence of statements and an optional trailing expression.
-Statements are either ended by `;` or are self-terminated by their
-trailing `}` (for control-flow constructs). An expression without a
-trailing `;` at the end of a block is the block's value. This mirrors
-Rust 2024 exactly.
+A statement ends at the end of its line; `;` separates two statements
+written on one line and is never written at the end of one. An
+expression in the last position of a block is the block's value.
 
 Example:
 
@@ -303,8 +304,8 @@ fn abs(n: i32) -> i32 {
 }
 ```
 
-Unlike Go, Gossamer neither inserts nor accepts `;`. The lexer emits tokens
-verbatim; the parser uses whitespace, newlines, and delimiters as separators.
+The lexer emits tokens verbatim; the parser uses newlines, `;`, and
+delimiters as separators.
 
 Delimited lists use commas on one line and newlines across multiple lines.
 This applies to every delimited list: function parameters and arguments,
@@ -320,11 +321,13 @@ is the sum, not a one-element tuple. The one-element tuple is still written
 with its comma, `(a,)`.
 
 One narrow newline rule disambiguates the operators that also begin an
-expression (`&`, `*`, `-`, and the `|` that opens a closure): when one of
-them appears as the first non-whitespace token on a new line, it begins a
-new statement rather than continuing the previous expression as a binary
-operator. A function can therefore end in a closure on its own line
-(`let k = 2` then `|x| x * k`). So:
+expression (`&`, `*`, `-`, and the single `|` that opens a closure with
+parameters): when one of them appears as the first non-whitespace token on
+a new line, it begins a new statement rather than continuing the previous
+expression as a binary operator. A function can therefore end in a closure
+on its own line (`let k = 2` then `|x| x * k`). A line that starts with
+`||` continues the expression above it as a logical or, so a closure with
+no parameters on a line of its own is written `(|| expr)`. So:
 
 ```
 let s = read_file(path)?
@@ -664,9 +667,9 @@ pattern does not create another alias to the referent.
 Raw pointers (`*const T`, `*mut T`) are **not** part of the language
 today: the type spellings do not parse (`GP0001`), and there is no safe
 or unsafe way to construct one in Gossamer source. A foreign function
-(§12) takes slices and `#[repr(C)]` structs, which cross as pointers for
-the duration of the call, and an opaque C pointer it answers crosses as a
-`usize` handle.
+(§12) takes slices and `#[repr(C)]` structs, and a C pointer crosses as an
+`ffi::Ptr<T>` (`Option<ffi::Ptr<T>>` where C may answer `NULL`), read and
+written inside `unsafe` through `ffi::read`, `ffi::write`, and `ffi::View`.
 
 `&T` and `&mut T` have implicit lexical lifetimes. A named reference remains
 active from its declaration through the closing brace of that scope. Gossamer
@@ -685,7 +688,13 @@ argument place, and writes from a closure taking the parameter are all
 visible in the caller's binding after the call returns. Calls do not create
 mutable references implicitly. A writable place must appear as `&mut place`
 at the call site; an expression already typed as `&mut T` can be forwarded
-directly. Passing the same root twice as `&mut` in one call
+directly. A place reached through a map entry (`&mut m[k]`,
+`&mut m[k][i].hp`) is written back to the entry when the call returns: the
+value leaves the map for the length of the call, the callee writes it, and
+it is stored back under the same key; a missing key panics as a read of it
+does. Assignments and mutating method calls through a map entry
+(`m[k][i] = v`, `m[a][b] += 1`, `m[k].items.push(x)`) follow the same rule,
+with the right-hand side and the arguments evaluated first. Passing the same root twice as `&mut` in one call
 (`f(&mut v, &mut v)`) is rejected. References cannot cross a goroutine
 boundary, so `spawn(|| f(&mut v))` is rejected.
 
@@ -706,6 +715,15 @@ closure trait and are heap-allocated. Closure capture does not currently
 distinguish shared from exclusive environment access, so `Fn` and `FnMut`
 collapse into essentially the same constraint; the distinction is retained
 for readability and forward compatibility.
+
+A closure captures a `Vec`, `Map`, `Set`, deque, or heap by managed
+reference: a write to one inside the closure is the enclosing binding's
+write. Every other value - a scalar, a `String`, a tuple, a fixed array, a
+struct or enum - is captured by copy, and a write to it (`count += 1`,
+`s.push_str(t)`, `acc.items.push(x)`, `&mut n`) would change only the
+closure's own copy, which starts from the captured value on every call.
+Such a write is rejected with `GT0114`; return the new value, or hold the
+state in a container.
 
 #### 3.5.1 Keyword arguments and parameter defaults
 
@@ -732,9 +750,9 @@ the call omits has its default spliced in. The calling convention is
 unchanged, and the bytecode VM, the JIT, and native builds compile the
 identical positional call.
 
-An argument label binds with `=`, not `:`; `:` is the annotation and
-struct-literal spelling, and `==` is a single token, so an equality test
-in argument position is never read as a label.
+An argument label binds with `:`, as every keyed form does - a struct
+field, a map entry, a `cohort` header setting. `name = value` at a call
+site is `GP0045`, with the `:` rewrite.
 
 A name must name a parameter of the callee and may be given once.
 Positional arguments precede named ones: once a name is used, the
@@ -748,12 +766,13 @@ rejected with `GR0014`. Each call site receives its own copy, so no two
 calls share a default value.
 
 Methods and associated functions accept both forms. A method call is
-rewritten before its receiver's type is known, so the rewrite must be
-independent of which type the receiver has: when several types declare a
-method of that name, the call is rewritten only if they agree on
-parameter names and defaults, and is otherwise reported as `GR0013`
-rather than resolved by guessing. Passing the arguments positionally is
-always accepted.
+rewritten against the declaration its receiver's type reaches, so an
+unrelated type that declares a method of the same name with other
+parameters does not affect it. A receiver whose type is a generic
+parameter uses the declaration of the bounding trait. Only a receiver
+whose type is not settled where the call is written, with declarations
+that disagree, is reported as `GR0013`; passing every argument
+positionally is always accepted.
 
 ### 3.6 Structs
 
@@ -847,15 +866,18 @@ variant a value names, `==`, ordering, matching, `{}` and `{:?}`,
 serialization, use as a `Map` key, and storage in an array or a tuple all
 behave the same at every width.
 
-> **Constraint - variant names share the module namespace.** Unlike
-> Rust, a variant name is not scoped under its enum: every variant in a
-> module occupies the module's top-level name namespace. Two enums in
-> the same module therefore cannot both declare a variant with the same
-> name (`enum Color { …, C }` and `enum Grade { …, C }` collide with
-> `GR0003: the name 'C' is defined multiple times`). Give colliding
-> variants distinct names. This is also why method dispatch is largely
-> name-global. (`Option` / `Result` are special-cased and do not
-> reserve `Some` / `None` / `Ok` / `Err` against your enums.)
+**Variant names.** A variant belongs to its enum, and `Enum::Variant`
+always names it. Two enums may declare variants of the same name, in one
+module or in different ones (`enum Conn { Ready, Error }` beside
+`enum Job { Ready, Pending }`). A variant may also be written bare: a
+bare name resolves to the variant of an enum the current module declares,
+and otherwise to the variant of the one enum in the program that declares
+it. A bare name that two enums in the current module declare, or that no
+enum in the current module declares and two elsewhere do, is ambiguous and
+reported as `GR0009` with the qualified spelling; an enum declared in
+another module never makes a bare name in this module ambiguous. A variant
+never collides with an item of the same name. (`Option` / `Result` do not
+reserve `Some` / `None` / `Ok` / `Err` against your enums.)
 
 ### 3.8 Traits
 
@@ -872,7 +894,9 @@ Traits support:
 - Required and default methods.
 - Associated types and associated constants (see below).
 - Bounds on trait generics.
-- Supertraits (`trait Foo: Bar + Baz`).
+- Supertraits (`trait Foo: Bar + Baz`). A type that implements `Foo`
+  implements `Bar` and `Baz` too; an `impl Foo for T` without them is
+  `GT0115`.
 - Default methods.
 
 **Associated types.** A trait declares `type Item`, optionally with a
@@ -2515,9 +2539,13 @@ carried across goroutine boundaries. Pass the underlying value (managed
 reference, or `Copy`) instead.
 
 Cross-goroutine data races on other explicitly shared mutable state are
-possible. Detect them at runtime with `gos test --race`
-(§7.4) and prevent them by communicating through channels rather than
-sharing state.
+possible. A container a spawned closure captures is such state: the
+goroutine and the code that spawned it reach one container, so writes to
+it from both sides, or from several goroutines, must be serialised with a
+`sync::Mutex` held around each access; unserialised writes are a data race
+whose result is undefined. Detect them at runtime with `gos test --race`
+(§7.4) and prevent them by communicating through channels, answering the
+value from the goroutine, or keeping it in a `sync::Shared`.
 
 The scheduler is an M:N work-stealing scheduler:
 
@@ -2632,8 +2660,12 @@ travel as `Result` (§9).
 What a program can do with a panic is contain it and observe it.
 `spawn(f)` is the containment boundary: a panic ends that goroutine
 alone, and `handle.join() -> Result<T, String>` delivers the message to
-the joiner. `runtime::set_panic_hook` observes
-one before it unwinds.
+the joiner. That holds for every fault the goroutine raises, whether its
+own code raises it or the runtime does on its behalf (an index out of
+bounds, a missing map key, a callback a library runs), on every tier. A
+fault the runtime raises for itself rather than for the program (memory
+exhausted, a broken internal invariant) ends the program as a fault on
+`main` does. `runtime::set_panic_hook` observes one before it unwinds.
 
 ### 8.6 Two concurrency primitives
 
@@ -2676,14 +2708,16 @@ unsafe { ... }
 unsafe fn raw_thing() { ... }
 ```
 
-An `unsafe { ... }` block evaluates like an ordinary block expression. Its
-one power is calling a function declared in an `unsafe extern "C"` block
-(§12): the compiler cannot see what native code does with its arguments,
-so the call site states that its author vouches for the call. A foreign
-call outside an `unsafe` block is `GT0097`.
+An `unsafe { ... }` block evaluates like an ordinary block expression. It
+permits what the compiler cannot check: calling a function declared in an
+`unsafe extern "C"` block (§12), and reading or writing foreign memory
+(`ffi::read`, `ffi::write`, `ffi::View::new`, the `ffi::atomic_*`
+operations). The call site states that its author vouches for it. A
+foreign call outside an `unsafe` block is `GT0097`.
 
-`unsafe fn` declarations parse and run; calling one needs no `unsafe`
-ceremony. `unsafe` never disables automatic memory management or affects
+`unsafe` is only a block. `unsafe fn`, `unsafe impl`, and `unsafe trait`
+withhold nothing and are rejected with `GP0046`, whose rewrite drops the
+word. `unsafe` never disables automatic memory management or affects
 memory reclamation.
 
 The purity analysis classifies an `unsafe` block as foreign: a callback
@@ -2946,9 +2980,8 @@ trait Iterator {
 }
 ```
 
-Associated types (`type Item`) parse but the typechecker
-currently does not project through them; declare the item
-type concretely (`Option<i64>`, `Option<String>`, …) for now.
+The trait may declare `type Item` and answer `Option<Self::Item>`
+(§3.8); a concrete item type works the same way.
 
 Any type providing a `next(&mut self) -> Option<T>` method
 ranges with `for`:
@@ -3065,7 +3098,9 @@ transformation when the chain doesn't return from the enclosing fn.
 ### 10.8 `std::sync`
 
 - `Mutex`: `Mutex::new()`, `lock()`, `unlock()` (no poisoning). It guards
-  the code between the two calls, not a value.
+  the code between the two calls, not a value. A goroutine that finds it
+  held parks until it is released, and a lock nothing left in the program
+  can release is reported as a deadlock (`GX0005`).
 - `RwLock`, guarding an `i64`: `RwLock::new(v)`, `read()`, `write(v)`,
   `with_read(f)`, `with_write(f)`, where `f` is `Fn(i64) -> i64`.
 - `Once`: `Once::new()`, `call(f) -> bool`, true on the call that ran `f`.
@@ -3910,13 +3945,12 @@ The first index response alone must never establish publisher identity.
 - Experimental syntax may change between versions, but it must be reported as
   Experimental by `gos feature-status` before it is accepted.
 
-Edition 2026 keeps the historical eager `std::iter` signatures. In edition
-2027, `iter::range`, `range_inclusive`, `map`, `filter`, `take`, `skip`,
+`iter::range`, `range_inclusive`, `map`, `filter`, `take`, `skip`,
 `enumerate`, `chain`, and `zip` produce linear `Iterator<T>` state. `fold`,
 `any`, `all`, `find`, `count`, `sum`, and `collect` consume that state once.
 Adapters pull only on terminal demand, and `any`, `all`, `find`, `take`, and
 `zip` stop as soon as their result is decided. A program that needs to
-materialize a 2027 iterator uses `iter::collect`; a collection that already
+materialize an iterator uses `iter::collect`; a collection that already
 holds its values traverses through its own methods (`xs.map(f)`, `xs.sum()`).
 
 ### 17.2 Standard library compatibility
@@ -3926,8 +3960,9 @@ holds its values traverses through its own methods (`xs.map(f)`, `xs.sum()`).
   compatible toolchain line.
 - Adding an optional field, method, error variant, or capability to an
   Experimental entry is not a Stable compatibility guarantee.
-- Removing, renaming, or weakening a Stable entry requires a new edition or a
-  documented compatibility shim that remains available for the old edition.
+- Removing, renaming, or weakening a Stable entry requires a new major
+  version or a documented compatibility shim that keeps the old spelling
+  working.
 - A module's status is not inherited by undocumented implementation helpers;
   only manifest-listed paths are public contracts.
 
@@ -4008,7 +4043,7 @@ idiom, a new type-system theory, or machinery the reader cannot see.
 **Metaprogramming**
 
 - **User macros, procedural or declarative.** `comptime` plus `codegen`
-  (§7 of the skill card, `lang::comptime`) is the metaprogramming bet: no
+  (§14, `lang::comptime`) is the metaprogramming bet: no
   hygiene problem, no separate codegen language. The macro set is fixed
   (§14).
 - **Type providers.** Compile-time network dependencies break hermetic
@@ -4035,8 +4070,8 @@ idiom, a new type-system theory, or machinery the reader cannot see.
 2. No implicit zero-value for function types.
 3. No interfaces in Go's sense - traits with explicit `impl`.
 4. No `iota` - use `const` or an enum with explicit discriminants.
-5. No type switch `x.(type)` - use `match` on an enum or `match` on
-   a trait object with `Any::type_id`.
+5. No type switch `x.(type)` - use `match` on an enum whose variants carry
+   the alternatives.
 6. No labeled `goto`.
 7. Semicolons are allowed only as same-line statement separators; trailing
    semicolons are invalid.
@@ -4049,8 +4084,9 @@ idiom, a new type-system theory, or machinery the reader cannot see.
 2. No borrow checker (automatic memory management removes the need).
 3. No `Drop` trait with deterministic destruction - use `defer` for
    cleanup tied to scope; the runtime reclaims memory.
-4. No `Box<T>` / `Rc<T>` / `Arc<T>` - plain references are
-   runtime-managed and safe to share across goroutines.
+4. No `Box<T>` / `Rc<T>` / `Arc<T>` - values are reference counted by the
+   runtime; a `&T` / `&mut T` is a lexical view that cannot cross a
+   goroutine boundary (§3.4).
 5. `&T` is a managed reference, not a borrow, and never a parameter type:
    a parameter is `T` or `&mut T` (§3.4). `&T` and `&mut T` have the same
    runtime; the distinction is a type-check-only aliasing hint.
@@ -4079,8 +4115,8 @@ idiom, a new type-system theory, or machinery the reader cannot see.
 - `panic`/`recover` at function level. A panic is contained by the
   goroutine that raised it, and `spawn(f).join()` reports it as an
   `Err` (§8.5); recoverable failure is `Result` (§9).
-- Init functions with ordering by import - replaced by explicit
-  `fn init()` called in dependency-topological order.
+- Init functions run by import order - a program calls whatever setup it
+  needs from `main`; a `fn init` is an ordinary function.
 - Untyped constants with arbitrary precision - literal constants have
   a default type and are coerced at use sites; infinite-precision
   compile-time arithmetic is not performed beyond what LLVM/Cranelift

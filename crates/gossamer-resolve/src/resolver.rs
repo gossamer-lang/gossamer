@@ -185,10 +185,14 @@ struct Resolver {
     /// never consults it and reaches a module's items through a path or an
     /// import.
     synthesized_scope: std::collections::HashMap<String, Binding>,
-    /// Enum-variant names this unit declares more than once, mapped to
-    /// the enums that declare them. A bare reference to one of these is
-    /// ambiguous and must be written with its enum.
-    ambiguous_variants: std::collections::HashMap<String, Vec<String>>,
+    /// Every enum-variant name this unit declares, mapped to each declaring
+    /// enum and the module path it is declared in. A bare reference is
+    /// ambiguous when more than one enum offers the name to the module the
+    /// reference is written in.
+    ambiguous_variants: std::collections::HashMap<String, Vec<(String, Vec<String>)>>,
+    /// The names each enclosing `let` declares while its initializer
+    /// resolves, innermost last.
+    initializing: Vec<Vec<String>>,
 }
 
 impl Resolver {
@@ -217,6 +221,7 @@ impl Resolver {
             synthesized_depth: 0,
             synthesized_scope: std::collections::HashMap::new(),
             ambiguous_variants: std::collections::HashMap::new(),
+            initializing: Vec::new(),
         }
     }
 
@@ -942,6 +947,19 @@ impl Resolver {
             );
             return;
         }
+        if self
+            .initializing
+            .iter()
+            .any(|names| names.iter().any(|n| n == name))
+        {
+            self.emit(
+                ResolveError::UsedInOwnInitializer {
+                    name: name.to_string(),
+                },
+                span,
+            );
+            return;
+        }
         self.emit(
             ResolveError::UnresolvedName {
                 name: name.to_string(),
@@ -1251,28 +1269,38 @@ impl Resolver {
                     kind: DefKind::Variant,
                 },
             );
-            match self.ambiguous_variants.entry(variant.name.name.clone()) {
-                std::collections::hash_map::Entry::Occupied(mut owners) => {
-                    owners.get_mut().push(decl.name.name.clone());
-                }
-                std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert(vec![decl.name.name.clone()]);
-                }
-            }
+            self.ambiguous_variants
+                .entry(variant.name.name.clone())
+                .or_default()
+                .push((decl.name.name.clone(), module_path.to_vec()));
+            let name = variant.name.name.as_str();
+            // Variants of different enums may share a name: each is reached
+            // through its enum, and a bare reference that more than one of
+            // them answers is reported where it is written. Only a clash
+            // with an item that is not a variant is a redeclaration.
             let own_module_ok = match self.collect_mod_stack.last().copied() {
-                Some(mod_id) => self
-                    .module_scopes
-                    .get_mut(&mod_id)
-                    .is_none_or(|scope| scope.insert_value(&variant.name.name, binding)),
+                Some(mod_id) => self.module_scopes.get_mut(&mod_id).is_none_or(|scope| {
+                    let occupant = scope.lookup_value(name);
+                    scope.insert_value(name, binding) || is_variant_binding(occupant)
+                }),
                 None => true,
             };
-            let root_ok = self
-                .scopes
-                .module_mut()
-                .insert_value(&variant.name.name, binding);
-            // Two enums in one module competing for a bare variant name
-            // leave that name genuinely ambiguous, and every reference
-            // to it would have to guess.
+            let root_occupant = self.scopes.module_mut().lookup_value(name);
+            let root_ok = self.scopes.module_mut().insert_value(name, binding)
+                || is_variant_binding(root_occupant);
+            // The root module's own enum answers a bare name at the root
+            // ahead of a variant a nested module registered there first.
+            if module_path.is_empty()
+                && let Some(Binding {
+                    resolution: Resolution::Def { def: occupant, .. },
+                }) = root_occupant
+                && self
+                    .item_homes
+                    .get(&occupant)
+                    .is_some_and(|home| home.kind == DefKind::Variant && !home.module.is_empty())
+            {
+                self.scopes.module_mut().shadow_value(name, binding);
+            }
             if !own_module_ok || (module_path.is_empty() && !root_ok) {
                 self.emit(
                     ResolveError::DuplicateItem {
@@ -2674,12 +2702,25 @@ impl Resolver {
         let Some(owners) = self.ambiguous_variants.get(name) else {
             return;
         };
-        if owners.len() < 2 {
+        // The enums the current module declares answer its bare names first,
+        // as its own scope does; only a name it does not declare falls back
+        // to every enum in the unit.
+        let local: Vec<String> = owners
+            .iter()
+            .filter(|(_, module)| *module == self.current_module)
+            .map(|(owner, _)| owner.clone())
+            .collect();
+        let candidates = if local.is_empty() {
+            owners.iter().map(|(owner, _)| owner.clone()).collect()
+        } else {
+            local
+        };
+        if candidates.len() < 2 {
             return;
         }
         let error = ResolveError::AmbiguousVariant {
             name: name.to_string(),
-            enums: owners.clone(),
+            enums: candidates,
         };
         self.emit(error, span);
     }
@@ -2856,7 +2897,9 @@ impl Resolver {
                     self.resolve_type(ty);
                 }
                 if let Some(init) = init {
+                    self.initializing.push(pattern_binding_names(pattern));
                     self.resolve_expr(init);
+                    self.initializing.pop();
                 }
                 self.bind_pattern(pattern);
             }
@@ -3328,4 +3371,33 @@ fn target_path_text(target: &UseTarget) -> String {
             None => id.clone(),
         },
     }
+}
+
+/// Whether `binding` names an enum variant.
+fn is_variant_binding(binding: Option<Binding>) -> bool {
+    matches!(
+        binding,
+        Some(Binding {
+            resolution: Resolution::Def {
+                kind: DefKind::Variant,
+                ..
+            },
+        })
+    )
+}
+
+/// The names a `let` pattern binds.
+fn pattern_binding_names(pattern: &Pattern) -> Vec<String> {
+    struct Names(Vec<String>);
+    impl gossamer_ast::visitor::Visitor for Names {
+        fn visit_pattern(&mut self, pattern: &Pattern) {
+            if let gossamer_ast::PatternKind::Ident { name, .. } = &pattern.kind {
+                self.0.push(name.name.clone());
+            }
+            gossamer_ast::visitor::walk_pattern(self, pattern);
+        }
+    }
+    let mut names = Names(Vec::new());
+    gossamer_ast::visitor::Visitor::visit_pattern(&mut names, pattern);
+    names.0
 }

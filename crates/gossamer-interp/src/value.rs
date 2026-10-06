@@ -31,6 +31,7 @@ use gossamer_runtime::{
 };
 
 mod channel;
+pub(crate) use channel::any_live_channel_can_progress;
 mod descriptor;
 mod native;
 mod render;

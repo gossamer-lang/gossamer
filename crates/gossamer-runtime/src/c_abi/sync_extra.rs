@@ -66,8 +66,8 @@ pub extern "C" fn gos_rt_barrier_new(n: i64) -> *mut GosBarrier {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_barrier_wait(b: *mut GosBarrier) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_barrier_wait(b: *mut GosBarrier) {
+    ffi_entry_passthrough!((), {
         if b.is_null() {
             return;
         }
@@ -103,7 +103,7 @@ pub unsafe extern "C" fn gos_rt_barrier_wait(b: *mut GosBarrier) {
 // the same `fn(env) -> i64` value-thunk shape as
 // `option::default_with`'s callback.
 
-type ThunkValFn = unsafe extern "C" fn(env: *const u8) -> i64;
+type ThunkValFn = unsafe extern "C-unwind" fn(env: *const u8) -> i64;
 
 /// Callable address stored at `env[0]`, or `None` for a null/zero env.
 ///
@@ -150,8 +150,8 @@ pub extern "C" fn gos_rt_once_new() -> *mut GosOnce {
 /// handle. Returns `1` on the call that executed the body, `0`
 /// otherwise. Mirrors the interp's `native_once_call`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_once_call(o: *mut GosOnce, env: *const u8) -> i64 {
-    ffi_entry!(0, {
+pub unsafe extern "C-unwind" fn gos_rt_once_call(o: *mut GosOnce, env: *const u8) -> i64 {
+    ffi_entry_passthrough!(0, {
         if o.is_null() {
             return 0;
         }

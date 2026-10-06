@@ -792,6 +792,16 @@ pub enum TypeError {
         /// Variant names the enum declares, sorted for a stable listing.
         declared: Vec<String>,
     },
+    /// `impl Sub for T` where `trait Sub: Super` and no `impl Super for T`.
+    #[error("`{ty}` implements `{trait_name}` but not its supertrait `{supertrait}`")]
+    MissingSupertraitImpl {
+        /// The implemented trait.
+        trait_name: String,
+        /// The supertrait the type does not implement.
+        supertrait: String,
+        /// The implementing type.
+        ty: String,
+    },
     /// A method reached through a generic bound (`fn f<T: Pet>(p: &T)`)
     /// resolves only through a supertrait of the bound (`trait Pet:
     /// Animal`, `name` declared on `Animal`). The compiled tiers cannot
@@ -1169,6 +1179,7 @@ impl TypeError {
             Self::CallArityMismatch { .. } => "call-arity-mismatch",
             Self::UnknownVariant { .. } => "unknown-variant",
             Self::SupertraitMethodThroughBound { .. } => "supertrait-method-through-bound",
+            Self::MissingSupertraitImpl { .. } => "missing-supertrait-impl",
             Self::NotIndexable { .. } => "not-indexable",
             Self::NotCallable { .. } => "not-callable",
             Self::NoTupleField { .. } => "no-tuple-field",
@@ -1216,6 +1227,10 @@ impl TypeError {
 
     /// Stable error code used by the diagnostics framework.
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm per diagnostic: the variant-to-code table reads as one list"
+    )]
     pub const fn code(&self) -> &'static str {
         match self {
             Self::TypeMismatch { .. } => "GT0001",
@@ -1293,6 +1308,7 @@ impl TypeError {
             Self::CallArityMismatch { .. } => "GT0018",
             Self::UnknownVariant { .. } => "GT0019",
             Self::SupertraitMethodThroughBound { .. } => "GT0020",
+            Self::MissingSupertraitImpl { .. } => "GT0115",
             Self::NotIndexable { .. } => "GT0021",
             Self::NotCallable { .. } => "GT0022",
             Self::NoTupleField { .. } => "GT0023",
@@ -2077,6 +2093,11 @@ impl TypeDiagnostic {
                 supertrait,
                 ..
             } => out = supertrait_method_diagnostic(out, method, bound, supertrait),
+            TypeError::MissingSupertraitImpl { supertrait, ty, .. } => {
+                out = out.with_help(format!(
+                    "a trait's supertraits come with it: add `impl {supertrait} for {ty}`"
+                ));
+            }
             TypeError::NotIndexable { .. }
             | TypeError::NotCallable { .. }
             | TypeError::NoTupleField { .. } => out = structural_use_diagnostic(out, &self.error),

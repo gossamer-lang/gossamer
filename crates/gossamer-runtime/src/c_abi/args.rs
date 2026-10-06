@@ -685,8 +685,11 @@ static DIR_ENTRY_META: [i64; 6] = [
 ];
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fs_walk_dir_raw(path: *const c_char, env: *const u8) -> i128 {
-    ffi_entry!(0i128, {
+pub unsafe extern "C-unwind" fn gos_rt_fs_walk_dir_raw(
+    path: *const c_char,
+    env: *const u8,
+) -> i128 {
+    ffi_entry_passthrough!(0i128, {
         let root = if path.is_null() {
             ".".to_string()
         } else {
@@ -696,7 +699,7 @@ pub unsafe extern "C" fn gos_rt_fs_walk_dir_raw(path: *const c_char, env: *const
         if env.is_null() {
             return gos_rt_result_new(0, 0);
         }
-        type VisitFn = unsafe extern "C" fn(env: *const u8, entry: i64) -> i128;
+        type VisitFn = unsafe extern "C-unwind" fn(env: *const u8, entry: i64) -> i128;
         // SAFETY: `env` is non-null (checked above) and a live closure environment, whose first
         // word is the body address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };

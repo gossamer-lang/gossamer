@@ -359,8 +359,8 @@ pub extern "C" fn gos_rt_signal_try_wait(handle: i64) -> i32 {
 /// closure params as plain `i64` rather than `&i64`, so the
 /// closure body reads them as direct register values.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_arr_sort_by_i64(p: *mut i64, len: i64, env: *const u8) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_arr_sort_by_i64(p: *mut i64, len: i64, env: *const u8) {
+    ffi_entry_passthrough!((), {
         if p.is_null() || len <= 0 || env.is_null() {
             return;
         }
@@ -368,7 +368,7 @@ pub unsafe extern "C" fn gos_rt_arr_sort_by_i64(p: *mut i64, len: i64, env: *con
         // SAFETY: `p` is non-null (checked above) and addresses `len` elements (C-ABI contract).
         let buf = unsafe { std::slice::from_raw_parts_mut(p, len_usize) };
         // Closure body sig: (env, i64, i64) -> i64.
-        type CmpFn = unsafe extern "C" fn(env: *const u8, a: i64, b: i64) -> i64;
+        type CmpFn = unsafe extern "C-unwind" fn(env: *const u8, a: i64, b: i64) -> i64;
         // env[0] holds the body address (cranelift / LLVM both use
         // this layout for Fn(...)-shaped values).
         // SAFETY: `env` is non-null (checked above) and a live closure environment, whose first
@@ -467,8 +467,8 @@ pub unsafe extern "C" fn gos_rt_arr_reverse(p: *mut u8, len: i64, elem_bytes: i6
 /// `elem_bytes`, so a byte-strided `bool` or `u8` sequence sorts within its
 /// own storage.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_sort_by_i64(v: *mut GosVec, env: *const u8) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_vec_sort_by_i64(v: *mut GosVec, env: *const u8) {
+    ffi_entry_passthrough!((), {
         // SAFETY: `v`, `env` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `sortable_elems` accepts.
         let Some(mut elems) = (unsafe { sortable_elems(v, env) }) else {
@@ -494,8 +494,8 @@ pub unsafe extern "C" fn gos_rt_vec_sort_by_i64(v: *mut GosVec, env: *const u8) 
 /// Sorts an `f64`-element `Vec` in place. The comparator takes its two
 /// elements in SSE registers, which an integer-shaped signature never fills.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_sort_by_f64(v: *mut GosVec, env: *const u8) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_vec_sort_by_f64(v: *mut GosVec, env: *const u8) {
+    ffi_entry_passthrough!((), {
         // SAFETY: `v`, `env` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `sortable_elems` accepts.
         let Some(mut elems) = (unsafe { sortable_elems(v, env) }) else {
@@ -523,8 +523,8 @@ pub unsafe extern "C" fn gos_rt_vec_sort_by_f64(v: *mut GosVec, env: *const u8) 
 /// Sorts a fixed `f64` array in place, the array counterpart of
 /// [`gos_rt_vec_sort_by_f64`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_arr_sort_by_f64(p: *mut f64, len: i64, env: *const u8) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_arr_sort_by_f64(p: *mut f64, len: i64, env: *const u8) {
+    ffi_entry_passthrough!((), {
         if p.is_null() || len <= 0 {
             return;
         }
@@ -543,8 +543,8 @@ pub unsafe extern "C" fn gos_rt_arr_sort_by_f64(p: *mut f64, len: i64, env: *con
     });
 }
 
-type WordCmpFn = unsafe extern "C" fn(env: *const u8, a: i64, b: i64) -> i64;
-type FloatCmpFn = unsafe extern "C" fn(env: *const u8, a: f64, b: f64) -> i64;
+type WordCmpFn = unsafe extern "C-unwind" fn(env: *const u8, a: i64, b: i64) -> i64;
+type FloatCmpFn = unsafe extern "C-unwind" fn(env: *const u8, a: f64, b: f64) -> i64;
 
 /// The comparator body address stored at `env[0]`, or `None` when there is
 /// no callable to run.
@@ -691,19 +691,19 @@ pub unsafe extern "C" fn gos_rt_vec_reverse(v: *mut GosVec) {
 /// `xs.sort_by(closure)` for fixed-size arrays whose element type
 /// is not single-slot scalar.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_arr_sort_by_aggr(
+pub unsafe extern "C-unwind" fn gos_rt_arr_sort_by_aggr(
     p: *mut u8,
     len: i64,
     elem_bytes: i64,
     env: *const u8,
 ) {
-    ffi_entry!((), {
+    ffi_entry_passthrough!((), {
         if p.is_null() || len <= 0 || elem_bytes <= 0 || env.is_null() {
             return;
         }
         let len_usize = len.max(0) as usize;
         let stride = elem_bytes.max(0) as usize;
-        type CmpFn = unsafe extern "C" fn(env: *const u8, a: *const u8, b: *const u8) -> i64;
+        type CmpFn = unsafe extern "C-unwind" fn(env: *const u8, a: *const u8, b: *const u8) -> i64;
         // SAFETY: `env` is non-null (checked above) and a live closure environment, whose first
         // word is the body address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
@@ -759,8 +759,8 @@ pub unsafe extern "C" fn gos_rt_arr_sort_by_aggr(
 /// elements in place. Stride comes from `vec.elem_bytes`, so the
 /// MIR side doesn't have to thread it through separately.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_sort_by_aggr(v: *mut GosVec, env: *const u8) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_vec_sort_by_aggr(v: *mut GosVec, env: *const u8) {
+    ffi_entry_passthrough!((), {
         if v.is_null() || env.is_null() {
             return;
         }
@@ -1008,8 +1008,8 @@ pub unsafe extern "C" fn gos_rt_arr_iter_free(iter: *mut GosArrIter) {
 /// every execution tier. Use an explicit `get`-style API where a
 /// non-panicking probe is intended.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_get_i64(v: *const GosVec, idx: i64) -> i64 {
-    ffi_entry!(-1, {
+pub unsafe extern "C-unwind" fn gos_rt_vec_get_i64(v: *const GosVec, idx: i64) -> i64 {
+    ffi_entry_passthrough!(-1, {
         if v.is_null() {
             crate::c_abi::panic::panic_oob_text("vec index", idx, 0);
         }
@@ -1062,8 +1062,8 @@ pub unsafe extern "C" fn gos_rt_vec_get_ptr_unchecked(v: *const GosVec, idx: i64
 /// Writes an `i64`-shaped element to a `Vec` at `idx`. Invalid scalar
 /// indexing is a bounds panic; it is never silently ignored.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_set_i64(v: *mut GosVec, idx: i64, value: i64) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_vec_set_i64(v: *mut GosVec, idx: i64, value: i64) {
+    ffi_entry_passthrough!((), {
         if v.is_null() {
             crate::c_abi::panic::panic_oob_text("vec index", idx, 0);
         }
@@ -1137,8 +1137,8 @@ pub unsafe extern "C" fn gos_rt_vec_swap_i64(v: *mut GosVec, i: i64, j: i64) {
 /// Swaps two `Vec` elements. `swap` is an indexed write, so an index
 /// outside `[0, len)` is a bounds panic on every tier, matching `xs[i] = v`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_swap_safe(v: *mut GosVec, i: i64, j: i64) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_vec_swap_safe(v: *mut GosVec, i: i64, j: i64) {
+    ffi_entry_passthrough!((), {
         if v.is_null() {
             crate::c_abi::panic::panic_oob_text("vec swap index", i, 0);
         }
@@ -1334,8 +1334,8 @@ pub unsafe extern "C" fn gos_rt_vec_reversed(v: *const GosVec) -> *mut GosVec {
 /// `xs.step_by(step) -> [T]`: every `step`-th element starting at
 /// index 0, as a fresh Vec.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_step_by(v: *const GosVec, step: i64) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_vec_step_by(v: *const GosVec, step: i64) -> *mut GosVec {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if step <= 0 {
             crate::c_abi::panic::panic_text("Vec::step_by: count must be positive");
         }
@@ -1363,8 +1363,8 @@ pub unsafe extern "C" fn gos_rt_vec_step_by(v: *const GosVec, step: i64) -> *mut
 /// `xs.take(n) -> [T]`: the first `n` elements (clamped to the source
 /// length) as a fresh Vec.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_take(v: *const GosVec, n: i64) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_vec_take(v: *const GosVec, n: i64) -> *mut GosVec {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if n < 0 {
             crate::c_abi::panic::panic_text("Vec::take: count must be non-negative");
         }
@@ -1394,8 +1394,8 @@ pub unsafe extern "C" fn gos_rt_vec_take(v: *const GosVec, n: i64) -> *mut GosVe
 /// `[0, len]`. The copy keeps the source's element width and takes its own
 /// share of every element's heap children, exactly as `take` does.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_skip(v: *const GosVec, n: i64) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+pub unsafe extern "C-unwind" fn gos_rt_vec_skip(v: *const GosVec, n: i64) -> *mut GosVec {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if n < 0 {
             crate::c_abi::panic::panic_text("Vec::skip: count must be non-negative");
         }
@@ -1708,8 +1708,8 @@ pub unsafe extern "C" fn gos_rt_vec_insert_safe(v: *mut GosVec, idx: i64, value:
 /// In-place insert at `idx`, shifting the tail up one slot and panicking on an
 /// invalid index. `value` is the raw 8-byte payload used by the erased Vec ABI.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_insert_at(v: *mut GosVec, idx: i64, value: i64) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_vec_insert_at(v: *mut GosVec, idx: i64, value: i64) {
+    ffi_entry_passthrough!((), {
         // SAFETY: `v` is null or live for the call (C-ABI contract).
         let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
         if v.is_null() || idx < 0 || idx > len {
@@ -1843,8 +1843,8 @@ pub unsafe extern "C" fn gos_rt_vec_remove_safe(v: *mut GosVec, idx: i64) -> i12
 /// `xs.remove(i)` / `Vec::remove(&mut xs, i)` - removes and returns the
 /// element. Invalid indices are invariant violations and panic.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_remove_at(v: *mut GosVec, idx: i64) -> i64 {
-    ffi_entry!(0, {
+pub unsafe extern "C-unwind" fn gos_rt_vec_remove_at(v: *mut GosVec, idx: i64) -> i64 {
+    ffi_entry_passthrough!(0, {
         // SAFETY: `v` is null or live for the call (C-ABI contract).
         let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
         if v.is_null() || idx < 0 || idx >= len {

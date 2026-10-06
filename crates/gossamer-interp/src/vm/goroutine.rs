@@ -173,6 +173,9 @@ impl GoroutinePool {
             let p = Arc::clone(pool);
             let spawned = spawn_goroutine_thread("gossamer-worker", move || {
                 ON_GOROUTINE_WORKER.with(|flag| flag.set(true));
+                // Each task is a goroutine, so a fault native code raises here
+                // ends that goroutine, as the bytecode's own panics do.
+                let _faults = gossamer_runtime::c_abi::panic::IsolatedFaults::enter();
                 loop {
                     let task = {
                         let mut inner = p.inner.lock();
