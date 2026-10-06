@@ -608,42 +608,64 @@ pub(crate) static SET_REGISTRY: GlobalReg<StdHashMap<i64, SetEntries>> =
 /// blocking discipline `Channel::recv` uses) rather than spinning.
 #[derive(Default)]
 pub(crate) struct MutexCell {
-    /// `true` while a goroutine holds the lock.
-    held: parking_lot::Mutex<bool>,
+    state: parking_lot::Mutex<LockState>,
     /// Signalled by `unlock()` so one parked acquirer can proceed.
     available: parking_lot::Condvar,
+}
+
+#[derive(Default)]
+struct LockState {
+    /// `true` while a goroutine holds the lock.
+    held: bool,
+    /// Acquirers waiting for the lock.
+    waiting: usize,
+    /// Released with an acquirer waiting that has not taken it yet. Counted
+    /// among the program's pending handoffs, so the woken acquirer is not
+    /// read as asleep before it runs.
+    ready: bool,
 }
 
 impl MutexCell {
     /// Whether a `lock` entered now would have to park.
     pub(crate) fn would_block(&self) -> bool {
-        *self.held.lock()
+        self.state.lock().held
     }
 
     /// Acquires the lock, parking until it is free. Answers `false`, holding
     /// nothing, when every participant is waiting and nothing is left that
     /// could release it.
     pub(crate) fn lock(&self) -> bool {
-        let mut held = self.held.lock();
-        while *held {
+        let mut state = self.state.lock();
+        while state.held {
+            state.waiting += 1;
             let Some(_waiting) = crate::vm::goroutine::ChannelWait::enter("Mutex::lock", || {
                 crate::value::any_live_channel_can_progress()
                     || crate::stdlib_builtins::context::deadline_pending()
                     || crate::stdlib_builtins::cohort::deadline_pending()
             }) else {
+                state.waiting -= 1;
                 return false;
             };
-            self.available.wait(&mut held);
+            self.available.wait(&mut state);
+            state.waiting -= 1;
         }
-        *held = true;
+        if state.ready {
+            state.ready = false;
+            crate::vm::goroutine::adjust_pending_handoffs(false);
+        }
+        state.held = true;
         true
     }
 
     /// Releases the lock and wakes one parked acquirer.
     pub(crate) fn unlock(&self) {
-        let mut held = self.held.lock();
-        *held = false;
-        drop(held);
+        let mut state = self.state.lock();
+        state.held = false;
+        if state.waiting > 0 && !state.ready {
+            state.ready = true;
+            crate::vm::goroutine::adjust_pending_handoffs(true);
+        }
+        drop(state);
         self.available.notify_one();
     }
 }
