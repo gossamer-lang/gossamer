@@ -2,7 +2,7 @@ name: Fuzz smoke
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
 
 concurrency:

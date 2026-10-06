@@ -11,7 +11,7 @@ name: Sanitizers
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
   schedule:
     - cron: "0 5 * * *"
   workflow_dispatch:
