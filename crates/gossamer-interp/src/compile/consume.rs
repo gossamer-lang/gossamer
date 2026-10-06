@@ -250,6 +250,9 @@ impl Analyzer {
                     self.visit_expr(arg, depth, in_closure, true);
                 }
                 if mutating {
+                    // The receiver is compiled again to store the updated
+                    // value back, so everything it reads is read twice.
+                    self.record_place_write(receiver, depth, in_closure);
                     self.record_place_write(receiver, depth, in_closure);
                 } else {
                     self.visit_expr(receiver, depth, in_closure, false);

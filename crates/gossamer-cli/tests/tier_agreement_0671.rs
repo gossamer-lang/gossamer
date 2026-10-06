@@ -284,3 +284,26 @@ fn a_closure_still_writes_a_container_it_captured() {
         "#[30, 10]\n",
     );
 }
+
+#[test]
+fn an_entry_mutation_keeps_its_key_when_the_key_is_read_once() {
+    everywhere(
+        r#"fn main() {
+    let mut records: Map<String, Vec<i64>> = Map::new()
+    for line in #["a 1", "b 2", "a 3"] {
+        let parts = line.split(" ")
+        let label = parts[0]
+        let ns = parts[1].to_i64().unwrap_or(0)
+        records.or_insert(label, #[]).push(ns)
+    }
+    let mut xs = #[#[0], #[0]]
+    for i in 0..2 {
+        let k = i
+        xs[k].push(k)
+    }
+    println(f"{records} {xs}")
+}
+"#,
+        "{\"a\": #[1, 3], \"b\": #[2]} #[#[0, 0], #[0, 1]]\n",
+    );
+}
