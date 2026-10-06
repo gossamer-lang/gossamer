@@ -12,6 +12,35 @@ because every variant payload is already heap-shared. The `List` /
 same thing, so reach for them only when the type reads clearer with the
 wrapper. Match exhaustively.
 
+## Variant names
+
+A variant belongs to its enum, so two enums may declare variants of the
+same name, in one module or in different ones:
+
+```gossamer
+enum Conn { Ready, Closed }
+enum Job { Ready, Pending }
+
+fn describe(c: Conn) -> String {
+    match c {
+        Conn::Ready => "ready",
+        Conn::Closed => "closed",
+    }
+}
+
+fn main() {
+    println(describe(Conn::Ready))
+    let j = Job::Ready
+    println("{}", j == Job::Ready)
+}
+```
+
+A bare variant name resolves to the enum the current module declares, or
+to the one enum in the program that declares it. A bare name two enums in
+the current module share is ambiguous and reported with the qualified
+spelling (`GR0009`); an enum in another module never makes a bare name in
+this one ambiguous.
+
 ## Compare by value, no derive
 
 Enums are value types, so `==` / `!=` / `<` / `<=` / `>` / `>=` are

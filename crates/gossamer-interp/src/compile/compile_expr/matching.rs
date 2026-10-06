@@ -112,10 +112,16 @@ impl<'tcx> FnBuilder<'tcx> {
         let scrut = self.compile_expr(scrutinee)?;
         let mut end_jumps: Vec<InstrIdx> = Vec::new();
         let scrut_ty = scrutinee.ty;
+        // Drains the payload out of a scrutinee nothing reads afterwards, on
+        // the same terms as `compile_match`.
+        let consume_eligible =
+            self.value_consumable_here(scrutinee) && arms.iter().all(|arm| arm.guard.is_none());
         for arm in arms {
             self.push_scope();
             let mut fails: Vec<InstrIdx> = Vec::new();
-            self.emit_pattern_test(scrut, &arm.pattern, &mut fails)?;
+            let arm_consume =
+                consume_eligible && crate::compile::consume::pattern_consume_safe(&arm.pattern);
+            self.emit_pattern_test_ex(scrut, &arm.pattern, &mut fails, arm_consume)?;
             let mut coll_names: Vec<String> = Vec::new();
             self.collect_collection_binding_names(&arm.pattern, Some(scrut_ty), &mut coll_names);
             for name in coll_names {

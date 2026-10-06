@@ -1222,8 +1222,8 @@ pub unsafe extern "C" fn gos_rt_bheap_min_push_desc(
 
 /// Remove and return the greatest element as `Option<T>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_bheap_max_pop_desc(v: *mut GosVec, tags: *const u8) -> i128 {
-    ffi_entry!(super::result::pack_result(1, 0), {
+pub unsafe extern "C-unwind" fn gos_rt_bheap_max_pop_desc(v: *mut GosVec, tags: *const u8) -> i128 {
+    ffi_entry_passthrough!(super::result::pack_result(1, 0), {
         // SAFETY: `v`, `tags` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `bheap_pop_desc` accepts.
         unsafe { bheap_pop_desc(v, tags, true) }
@@ -1232,8 +1232,8 @@ pub unsafe extern "C" fn gos_rt_bheap_max_pop_desc(v: *mut GosVec, tags: *const 
 
 /// Remove and return the least element as `Option<T>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_bheap_min_pop_desc(v: *mut GosVec, tags: *const u8) -> i128 {
-    ffi_entry!(super::result::pack_result(1, 0), {
+pub unsafe extern "C-unwind" fn gos_rt_bheap_min_pop_desc(v: *mut GosVec, tags: *const u8) -> i128 {
+    ffi_entry_passthrough!(super::result::pack_result(1, 0), {
         // SAFETY: `v`, `tags` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `bheap_pop_desc` accepts.
         unsafe { bheap_pop_desc(v, tags, false) }
@@ -1243,27 +1243,27 @@ pub unsafe extern "C" fn gos_rt_bheap_min_pop_desc(v: *mut GosVec, tags: *const 
 /// Remove the greatest element into caller-owned storage; see
 /// [`bheap_pop_desc_into`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_bheap_max_pop_desc_into(
+pub unsafe extern "C-unwind" fn gos_rt_bheap_max_pop_desc_into(
     v: *mut GosVec,
     tags: *const u8,
     out: *mut u8,
 ) -> i64 {
     // SAFETY: `v`, `tags`, `out` are this shim's arguments, live for the call (C-ABI contract) or
     // null, which `bheap_pop_desc_into` accepts.
-    ffi_entry!(1, { unsafe { bheap_pop_desc_into(v, tags, out, true) } })
+    ffi_entry_passthrough!(1, { unsafe { bheap_pop_desc_into(v, tags, out, true) } })
 }
 
 /// Remove the least element into caller-owned storage; see
 /// [`bheap_pop_desc_into`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_bheap_min_pop_desc_into(
+pub unsafe extern "C-unwind" fn gos_rt_bheap_min_pop_desc_into(
     v: *mut GosVec,
     tags: *const u8,
     out: *mut u8,
 ) -> i64 {
     // SAFETY: `v`, `tags`, `out` are this shim's arguments, live for the call (C-ABI contract) or
     // null, which `bheap_pop_desc_into` accepts.
-    ffi_entry!(1, { unsafe { bheap_pop_desc_into(v, tags, out, false) } })
+    ffi_entry_passthrough!(1, { unsafe { bheap_pop_desc_into(v, tags, out, false) } })
 }
 
 /// The root element as `Option<T>` without removing it. The payload of a
@@ -1287,11 +1287,11 @@ pub unsafe extern "C" fn gos_rt_bheap_peek_elem(v: *const GosVec) -> i128 {
 
 /// Heapify a `Vec` of any orderable element into a max heap.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_bheap_max_from_vec_desc(
+pub unsafe extern "C-unwind" fn gos_rt_bheap_max_from_vec_desc(
     v: *mut GosVec,
     tags: *const u8,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `v`, `tags` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `bheap_from_vec_desc` accepts.
         unsafe { bheap_from_vec_desc(v, tags, true) }
@@ -1300,11 +1300,11 @@ pub unsafe extern "C" fn gos_rt_bheap_max_from_vec_desc(
 
 /// Heapify a `Vec` of any orderable element into a min heap.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_bheap_min_from_vec_desc(
+pub unsafe extern "C-unwind" fn gos_rt_bheap_min_from_vec_desc(
     v: *mut GosVec,
     tags: *const u8,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `v`, `tags` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `bheap_from_vec_desc` accepts.
         unsafe { bheap_from_vec_desc(v, tags, false) }
@@ -1361,11 +1361,11 @@ pub(crate) unsafe fn bheap_format_at(
 
 /// Format a `MaxHeap` whose elements are described by `tags`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_bheap_max_format_desc(
+pub unsafe extern "C-unwind" fn gos_rt_bheap_max_format_desc(
     v: *const GosVec,
     tags: *const u8,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `v` and `tags` are this shim's arguments, each null or live (C-ABI contract).
         unsafe { bheap_format_desc(v, "MaxHeap", tags) }
     })
@@ -1373,11 +1373,11 @@ pub unsafe extern "C" fn gos_rt_bheap_max_format_desc(
 
 /// Format a `MinHeap` whose elements are described by `tags`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_bheap_min_format_desc(
+pub unsafe extern "C-unwind" fn gos_rt_bheap_min_format_desc(
     v: *const GosVec,
     tags: *const u8,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `v` and `tags` are this shim's arguments, each null or live (C-ABI contract).
         unsafe { bheap_format_desc(v, "MinHeap", tags) }
     })

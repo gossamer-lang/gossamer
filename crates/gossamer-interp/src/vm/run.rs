@@ -1196,7 +1196,11 @@ impl Vm {
                         for i in 0..argc_usz {
                             // 0.7.0 flag::Cell auto-deref at the
                             // call boundary - same rule as `Op::Call`.
-                            let raw = registers[args as usize + i].clone();
+                            // The argument window holds this call's operands
+                            // and nothing else, so the call takes them: a
+                            // value the method keeps is then held once.
+                            let raw =
+                                std::mem::replace(&mut registers[args as usize + i], Value::Void);
                             buf[i + 1] = auto_deref_cell(&raw).unwrap_or(raw);
                         }
                         if let Some(call_fn) = cached_builtin {
@@ -1258,7 +1262,11 @@ impl Vm {
                         for i in 0..argc_usz {
                             // 0.7.0 flag::Cell auto-deref at the
                             // call boundary - same rule as `Op::Call`.
-                            let raw = registers[args as usize + i].clone();
+                            // The argument window holds this call's operands
+                            // and nothing else, so the call takes them: a
+                            // value the method keeps is then held once.
+                            let raw =
+                                std::mem::replace(&mut registers[args as usize + i], Value::Void);
                             call_args.push(auto_deref_cell(&raw).unwrap_or(raw));
                         }
                         if let Some(call_fn) = cached_builtin {

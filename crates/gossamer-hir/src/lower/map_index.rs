@@ -11,6 +11,30 @@ use crate::tree::{
 
 use super::Lowerer;
 
+/// A map entry opened for a write: the place inside the entry's value the
+/// write names, and one frame per entry on the path, outermost first.
+pub(super) struct OpenEntry {
+    pub(super) target: HirExpr,
+    frames: Vec<EntryFrame>,
+}
+
+/// One map entry a write passes through.
+struct EntryFrame {
+    /// Binds the key, evaluated once, before the entry is taken.
+    key_stmt: HirStmt,
+    /// The map the entry lives in, as a place.
+    map_place: HirExpr,
+    key_name: String,
+    key_ty: Ty,
+    slot_name: String,
+    value_ty: Ty,
+    /// The new value for a plain store to the entry itself, which reads
+    /// nothing; otherwise the stored value is taken out of the map.
+    initial: Option<HirExpr>,
+    /// Binds each index on the way down from the entry, evaluated once.
+    index_stmts: Vec<HirStmt>,
+}
+
 impl Lowerer<'_> {
     /// `m[k]` read: the stored value, or a panic naming the missing key.
     pub(super) fn map_index_read(
@@ -21,78 +45,21 @@ impl Lowerer<'_> {
         span: Span,
     ) -> HirExpr {
         let key_ty = key.ty;
-        let string_ty = self.tcx.string_ty();
-        let never = self.tcx.never();
-        let option_value = self.tcx.intern(gossamer_types::TyKind::Adt {
-            def: gossamer_resolve::DefId::local(u32::MAX - 1),
-            substs: gossamer_types::Substs::from_types([value_ty]),
-        });
+        let option_value = self.option_of(value_ty);
         let bind_key = self.entry_let_stmt(span, "__gos_map_key", key_ty, false, key);
         let key_arg = self.entry_path(span, "__gos_map_key", key_ty);
         let found = self.method_call(map, "get", vec![key_arg], option_value, span);
-        let value_pat = HirPat {
-            id: self.fresh(),
-            span,
-            ty: option_value,
-            kind: HirPatKind::Variant {
-                name: Ident::new("Some"),
-                fields: vec![HirPat {
-                    id: self.fresh(),
-                    span,
-                    ty: value_ty,
-                    kind: HirPatKind::Binding {
-                        name: Ident::new("__gos_map_value"),
-                        mutable: false,
-                    },
-                }],
-            },
-        };
         let value = self.entry_path(span, "__gos_map_value", value_ty);
-        let missing_pat = HirPat {
-            id: self.fresh(),
+        let missing = self.missing_key_panic("__gos_map_key", key_ty, span);
+        let lookup = self.option_match(
+            found,
+            value_ty,
+            "__gos_map_value",
+            false,
+            value,
+            missing,
             span,
-            ty: option_value,
-            kind: HirPatKind::Variant {
-                name: Ident::new("None"),
-                fields: Vec::new(),
-            },
-        };
-        let key_again = self.entry_path(span, "__gos_map_key", key_ty);
-        let shown = self.builtin_call("__debug", vec![key_again], string_ty, span);
-        let prefix = HirExpr {
-            id: self.fresh(),
-            span,
-            ty: string_ty,
-            kind: HirExprKind::Literal(HirLiteral::String("key ".to_string())),
-        };
-        let suffix = HirExpr {
-            id: self.fresh(),
-            span,
-            ty: string_ty,
-            kind: HirExprKind::Literal(HirLiteral::String(" is not in the map".to_string())),
-        };
-        let message = self.builtin_call("__concat", vec![prefix, shown, suffix], string_ty, span);
-        let missing = self.builtin_call("panic", vec![message], never, span);
-        let lookup = HirExpr {
-            id: self.fresh(),
-            span,
-            ty: value_ty,
-            kind: HirExprKind::Match {
-                scrutinee: Box::new(found),
-                arms: vec![
-                    HirMatchArm {
-                        pattern: value_pat,
-                        guard: None,
-                        body: value,
-                    },
-                    HirMatchArm {
-                        pattern: missing_pat,
-                        guard: None,
-                        body: missing,
-                    },
-                ],
-            },
-        };
+        );
         HirExpr {
             id: self.fresh(),
             span,
@@ -108,9 +75,108 @@ impl Lowerer<'_> {
         }
     }
 
-    /// `m[k] = v`, `m[k] op= v`, and `m[k].field op= v`: the key evaluates
+    /// `Option<value_ty>`.
+    fn option_of(&mut self, value_ty: Ty) -> Ty {
+        self.tcx.intern(gossamer_types::TyKind::Adt {
+            def: gossamer_resolve::DefId::local(u32::MAX - 1),
+            substs: gossamer_types::Substs::from_types([value_ty]),
+        })
+    }
+
+    /// `match scrutinee { Some(binding) => present, None => missing }`,
+    /// typed as `present`.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each argument is one part of the match the caller spells"
+    )]
+    fn option_match(
+        &mut self,
+        scrutinee: HirExpr,
+        value_ty: Ty,
+        binding: &str,
+        mutable: bool,
+        present: HirExpr,
+        missing: HirExpr,
+        span: Span,
+    ) -> HirExpr {
+        let option_value = self.option_of(value_ty);
+        let ty = present.ty;
+        let value_pat = HirPat {
+            id: self.fresh(),
+            span,
+            ty: option_value,
+            kind: HirPatKind::Variant {
+                name: Ident::new("Some"),
+                fields: vec![HirPat {
+                    id: self.fresh(),
+                    span,
+                    ty: value_ty,
+                    kind: HirPatKind::Binding {
+                        name: Ident::new(binding),
+                        mutable,
+                    },
+                }],
+            },
+        };
+        let missing_pat = HirPat {
+            id: self.fresh(),
+            span,
+            ty: option_value,
+            kind: HirPatKind::Variant {
+                name: Ident::new("None"),
+                fields: Vec::new(),
+            },
+        };
+        HirExpr {
+            id: self.fresh(),
+            span,
+            ty,
+            kind: HirExprKind::Match {
+                scrutinee: Box::new(scrutinee),
+                arms: vec![
+                    HirMatchArm {
+                        pattern: value_pat,
+                        guard: None,
+                        body: present,
+                    },
+                    HirMatchArm {
+                        pattern: missing_pat,
+                        guard: None,
+                        body: missing,
+                    },
+                ],
+            },
+        }
+    }
+
+    /// The panic a read of a key the map lacks raises, naming the key bound
+    /// to `key_name`.
+    fn missing_key_panic(&mut self, key_name: &str, key_ty: Ty, span: Span) -> HirExpr {
+        let string_ty = self.tcx.string_ty();
+        let never = self.tcx.never();
+        let key = self.entry_path(span, key_name, key_ty);
+        let shown = self.builtin_call("__debug", vec![key], string_ty, span);
+        let prefix = HirExpr {
+            id: self.fresh(),
+            span,
+            ty: string_ty,
+            kind: HirExprKind::Literal(HirLiteral::String("key ".to_string())),
+        };
+        let suffix = HirExpr {
+            id: self.fresh(),
+            span,
+            ty: string_ty,
+            kind: HirExprKind::Literal(HirLiteral::String(" is not in the map".to_string())),
+        };
+        let message = self.builtin_call("__concat", vec![prefix, shown, suffix], string_ty, span);
+        self.builtin_call("panic", vec![message], never, span)
+    }
+
+    /// `m[k] = v`, `m[k] op= v`, and a write to any place below an entry
+    /// (`m[k].field op= v`, `m[k][i] = v`, `m[a][b] = v`): the key evaluates
     /// once, the stored value is read (a missing key panics, except for a
-    /// plain `=`, which inserts), updated, and stored back.
+    /// plain `=` on the entry itself, which inserts), updated, and stored
+    /// back.
     pub(super) fn lower_map_index_assign(
         &mut self,
         op: AssignOp,
@@ -118,70 +184,256 @@ impl Lowerer<'_> {
         value: &AstExpr,
         span: Span,
     ) -> Option<HirExprKind> {
-        let mut root = place;
-        let mut projections: Vec<&AstExpr> = Vec::new();
-        while let AstExprKind::FieldAccess { receiver, .. } = &root.kind {
-            projections.push(root);
-            root = receiver;
+        let (_, _, _, steps) = self.split_map_place(place)?;
+        let initial = (steps.is_empty() && matches!(op, AssignOp::Assign)).then_some(value);
+        if initial.is_some() {
+            let entry = self.open_entry(place, initial, span)?;
+            return Some(self.close_entry(entry, Vec::new(), None, span).kind);
         }
-        let AstExprKind::Index { base, index } = &root.kind else {
-            return None;
-        };
-        let base_ty = self.ty_of(base.id);
-        if !self.is_map_ty(base_ty) {
-            return None;
-        }
-        let unit = self.unit();
-        let value_ty = self.ty_of(root.id);
-        let key = self.lower_expr(index);
-        let key_ty = key.ty;
-        let bind_key = self.entry_let_stmt(span, "__gos_map_slot_key", key_ty, false, key);
-        let mut stmts = vec![bind_key];
-        let stored = if projections.is_empty() && matches!(op, AssignOp::Assign) {
-            self.lower_expr(value)
-        } else {
-            let map = self.lower_expr(base);
-            let key_arg = self.entry_path(span, "__gos_map_slot_key", key_ty);
-            let current = self.map_index_read(map, key_arg, value_ty, span);
-            stmts.push(self.entry_let_stmt(span, "__gos_map_slot", value_ty, true, current));
-            let slot = self.entry_path(span, "__gos_map_slot", value_ty);
-            let target = self.project_entry_value(slot, &projections, span);
-            let written = self.lower_expr(value);
-            let kind = self.assign_kind(op, target, written, span);
-            stmts.push(HirStmt {
+        // The right-hand side is evaluated before the entry opens, so it reads
+        // the map as it stands.
+        let (bind, written) = self.bind_entry_operand(value, span);
+        let entry = self.open_entry(place, None, span)?;
+        let target = entry.target.clone();
+        let kind = self.assign_kind(op, target, written, span);
+        let write = self.unit_stmt(kind, span);
+        let closed = self.close_entry(entry, vec![write], None, span);
+        Some(self.prefixed(bind, closed, span).kind)
+    }
+
+    /// `{ stmts; expr }`.
+    pub(super) fn prefixed(&mut self, stmts: Vec<HirStmt>, expr: HirExpr, span: Span) -> HirExpr {
+        let ty = expr.ty;
+        HirExpr {
+            id: self.fresh(),
+            span,
+            ty,
+            kind: HirExprKind::Block(HirBlock {
                 id: self.fresh(),
                 span,
-                kind: HirStmtKind::Expr {
-                    expr: HirExpr {
+                stmts,
+                tail: Some(Box::new(expr)),
+                ty,
+                is_comptime: false,
+            }),
+        }
+    }
+
+    /// The map index nearest the written leaf of `place`, as the index
+    /// expression itself, the map, the key, and the projections from that
+    /// entry down to the leaf (outermost first). `None` when no map index is
+    /// on the path.
+    pub(super) fn split_map_place<'p>(
+        &mut self,
+        place: &'p AstExpr,
+    ) -> Option<(&'p AstExpr, &'p AstExpr, &'p AstExpr, Vec<&'p AstExpr>)> {
+        let mut cur = place;
+        let mut steps = Vec::new();
+        loop {
+            match &cur.kind {
+                AstExprKind::FieldAccess { receiver, .. } => {
+                    steps.push(cur);
+                    cur = receiver;
+                }
+                AstExprKind::Index { base, index } => {
+                    if matches!(index.kind, AstExprKind::Range { .. }) {
+                        return None;
+                    }
+                    let base_ty = self.ty_of(base.id);
+                    if self.is_map_ty(base_ty) {
+                        return Some((cur, base, index, steps));
+                    }
+                    steps.push(cur);
+                    cur = base;
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// Opens the map entry a write to `place` goes through, and every entry
+    /// enclosing it: answers the place inside the entry's value the write
+    /// names. [`Self::close_entry`] wraps the write in the code that takes
+    /// each value out of its map and stores it back.
+    pub(super) fn open_entry(
+        &mut self,
+        place: &AstExpr,
+        initial: Option<&AstExpr>,
+        span: Span,
+    ) -> Option<OpenEntry> {
+        let (entry, map, key, steps) = self.split_map_place(place)?;
+        let value_ty = self.ty_of(entry.id);
+        let tag = self.fresh().0;
+        let key_name = format!("__gos_map_slot_key_{tag}");
+        let slot_name = format!("__gos_map_slot_{tag}");
+        let (mut frames, map_place) = match self.open_entry(map, None, span) {
+            Some(outer) => (outer.frames, outer.target),
+            None => (Vec::new(), self.lower_expr(map)),
+        };
+        let key = self.lower_expr(key);
+        let key_ty = key.ty;
+        let key_stmt = self.entry_let_stmt(span, &key_name, key_ty, false, key);
+        let initial = initial.map(|value| self.lower_expr(value));
+        let mut index_stmts = Vec::new();
+        let mut target = self.entry_path(span, &slot_name, value_ty);
+        for step in steps.iter().rev() {
+            let ty = self.ty_of(step.id);
+            target = match &step.kind {
+                AstExprKind::Index { index, .. } => {
+                    let index = self.lower_expr(index);
+                    let index_ty = index.ty;
+                    let index_name = format!("__gos_map_slot_index_{}", self.fresh().0);
+                    index_stmts.push(self.entry_let_stmt(
+                        span,
+                        &index_name,
+                        index_ty,
+                        false,
+                        index,
+                    ));
+                    let index = self.entry_path(span, &index_name, index_ty);
+                    HirExpr {
                         id: self.fresh(),
                         span,
-                        ty: unit,
-                        kind,
-                    },
-                    has_semi: true,
-                },
-            });
-            self.entry_path(span, "__gos_map_slot", value_ty)
-        };
-        let map = self.lower_expr(base);
-        let key_arg = self.entry_path(span, "__gos_map_slot_key", key_ty);
-        let insert = self.method_call(map, "insert", vec![key_arg, stored], unit, span);
-        stmts.push(HirStmt {
+                        ty,
+                        kind: HirExprKind::Index {
+                            base: Box::new(target),
+                            index: Box::new(index),
+                        },
+                    }
+                }
+                _ => self.project_entry_value(target, &[*step], span),
+            };
+        }
+        frames.push(EntryFrame {
+            key_stmt,
+            map_place,
+            key_name,
+            key_ty,
+            slot_name,
+            value_ty,
+            initial,
+            index_stmts,
+        });
+        Some(OpenEntry { target, frames })
+    }
+
+    /// Runs `writes` against an opened entry, then `result`, and answers
+    /// `result`'s value once every entry is back in its map.
+    ///
+    /// Each value leaves its map while the write runs (a missing key
+    /// panics), bound in the arm that takes it, so the write lands in place
+    /// rather than in a copy; the store back puts it where it was, since a
+    /// map iterates in key order.
+    pub(super) fn close_entry(
+        &mut self,
+        entry: OpenEntry,
+        writes: Vec<HirStmt>,
+        result: Option<HirExpr>,
+        span: Span,
+    ) -> HirExpr {
+        let unit = self.unit();
+        let mut stmts = writes;
+        let mut tail = result;
+        for frame in entry.frames.into_iter().rev() {
+            let result_ty = tail.as_ref().map_or(unit, |t| t.ty);
+            let result_name = format!("__gos_map_result_{}", self.fresh().0);
+            let mut body = frame.index_stmts;
+            body.extend(stmts);
+            // A unit answer runs as a statement, so an in-place mutation
+            // (`push`) lowers to its statement form on every tier.
+            if let Some(value) = tail.take() {
+                if result_ty == unit {
+                    body.push(HirStmt {
+                        id: self.fresh(),
+                        span,
+                        kind: HirStmtKind::Expr {
+                            expr: value,
+                            has_semi: true,
+                        },
+                    });
+                } else {
+                    body.push(self.entry_let_stmt(span, &result_name, result_ty, false, value));
+                }
+            }
+            let key = self.entry_path(span, &frame.key_name, frame.key_ty);
+            let slot = self.entry_path(span, &frame.slot_name, frame.value_ty);
+            let insert = self.method_call(
+                frame.map_place.clone(),
+                "insert",
+                vec![key, slot],
+                unit,
+                span,
+            );
+            body.push(self.unit_stmt(insert.kind, span));
+            let answer =
+                (result_ty != unit).then(|| self.entry_path(span, &result_name, result_ty));
+            let arm = HirExpr {
+                id: self.fresh(),
+                span,
+                ty: result_ty,
+                kind: HirExprKind::Block(HirBlock {
+                    id: self.fresh(),
+                    span,
+                    stmts: body,
+                    tail: answer.map(Box::new),
+                    ty: result_ty,
+                    is_comptime: false,
+                }),
+            };
+            let opened = if let Some(value) = frame.initial {
+                let bind = self.entry_let_stmt(span, &frame.slot_name, frame.value_ty, true, value);
+                self.prefixed(vec![bind], arm, span)
+            } else {
+                let option_value = self.option_of(frame.value_ty);
+                let key = self.entry_path(span, &frame.key_name, frame.key_ty);
+                let taken =
+                    self.method_call(frame.map_place, "remove", vec![key], option_value, span);
+                let missing = self.missing_key_panic(&frame.key_name, frame.key_ty, span);
+                self.option_match(
+                    taken,
+                    frame.value_ty,
+                    &frame.slot_name,
+                    true,
+                    arm,
+                    missing,
+                    span,
+                )
+            };
+            stmts = vec![frame.key_stmt];
+            tail = Some(opened);
+        }
+        let ty = tail.as_ref().map_or(unit, |t| t.ty);
+        HirExpr {
+            id: self.fresh(),
+            span,
+            ty,
+            kind: HirExprKind::Block(HirBlock {
+                id: self.fresh(),
+                span,
+                stmts,
+                tail: tail.map(Box::new),
+                ty,
+                is_comptime: false,
+            }),
+        }
+    }
+
+    /// A unit-typed expression statement.
+    fn unit_stmt(&mut self, kind: HirExprKind, span: Span) -> HirStmt {
+        let unit = self.unit();
+        HirStmt {
             id: self.fresh(),
             span,
             kind: HirStmtKind::Expr {
-                expr: insert,
+                expr: HirExpr {
+                    id: self.fresh(),
+                    span,
+                    ty: unit,
+                    kind,
+                },
                 has_semi: true,
             },
-        });
-        Some(HirExprKind::Block(HirBlock {
-            id: self.fresh(),
-            span,
-            stmts,
-            tail: None,
-            ty: unit,
-            is_comptime: false,
-        }))
+        }
     }
 
     fn entry_let_stmt(
@@ -630,10 +882,10 @@ impl Lowerer<'_> {
         })
     }
 
-    /// Desugars the statement `m[k].method(args)`, or the same through a
-    /// field path (`m[k].items.push(x)`), into a read of the stored value
-    /// (a missing key panics), the call on it, and a store back, so the
-    /// mutation lands in the map.
+    /// Desugars `m[k].method(args)`, or the same on any place below an
+    /// entry (`m[k].items.push(x)`, `m[k][i].tags.push(x)`), into a read of
+    /// the stored value (a missing key panics), the call on it, and a store
+    /// back, so the mutation lands in the map.
     pub(super) fn desugar_map_index_mutation(&mut self, expr: &AstExpr) -> Option<HirExpr> {
         let AstExprKind::MethodCall {
             receiver,
@@ -644,61 +896,37 @@ impl Lowerer<'_> {
         else {
             return None;
         };
-        let mut root = &**receiver;
-        let mut projections: Vec<&AstExpr> = Vec::new();
-        while let AstExprKind::FieldAccess { receiver, .. } = &root.kind {
-            projections.push(root);
-            root = receiver;
-        }
-        let AstExprKind::Index { base, index } = &root.kind else {
-            return None;
-        };
-        let base_ty = self.ty_of(base.id);
-        if !self.is_map_ty(base_ty) {
-            return None;
-        }
         let span = expr.span;
-        let unit = self.unit();
-        let value_ty = self.ty_of(root.id);
         let outer_ty = self.ty_of(expr.id);
-        let key = self.lower_expr(index);
-        let key_ty = key.ty;
-        let bind_key = self.entry_let_stmt(span, "__gos_map_slot_key", key_ty, false, key);
-        let map = self.lower_expr(base);
-        let key_arg = self.entry_path(span, "__gos_map_slot_key", key_ty);
-        let current = self.map_index_read(map, key_arg, value_ty, span);
-        let bind_slot = self.entry_let_stmt(span, "__gos_map_slot", value_ty, true, current);
-        let slot = self.entry_path(span, "__gos_map_slot", value_ty);
-        let target = self.project_entry_value(slot, &projections, span);
-        let lowered_args: Vec<HirExpr> = args.iter().map(|a| self.lower_expr(a)).collect();
+        self.split_map_place(receiver)?;
+        // The arguments are evaluated before the entry opens, so they read
+        // the map as it stands.
+        let mut binds = Vec::new();
+        let mut lowered_args = Vec::with_capacity(args.len());
+        for arg in args {
+            let (bind, value) = self.bind_entry_operand(arg, span);
+            binds.extend(bind);
+            lowered_args.push(value);
+        }
+        let entry = self.open_entry(receiver, None, span)?;
+        let target = entry.target.clone();
         let call = self.method_call(target, name.name.as_str(), lowered_args, outer_ty, span);
-        let slot = self.entry_path(span, "__gos_map_slot", value_ty);
-        let map = self.lower_expr(base);
-        let key_arg = self.entry_path(span, "__gos_map_slot_key", key_ty);
-        let insert = self.method_call(map, "insert", vec![key_arg, slot], unit, span);
-        let stmt = |this: &mut Self, expr: HirExpr| HirStmt {
-            id: this.fresh(),
-            span,
-            kind: HirStmtKind::Expr {
-                expr,
-                has_semi: true,
-            },
-        };
-        let call = stmt(self, call);
-        let insert = stmt(self, insert);
-        Some(HirExpr {
-            id: self.fresh(),
-            span,
-            ty: unit,
-            kind: HirExprKind::Block(HirBlock {
-                id: self.fresh(),
-                span,
-                stmts: vec![bind_key, bind_slot, call, insert],
-                tail: None,
-                ty: unit,
-                is_comptime: false,
-            }),
-        })
+        let closed = self.close_entry(entry, Vec::new(), Some(call), span);
+        Some(self.prefixed(binds, closed, span))
+    }
+
+    /// Evaluates `operand` into a local of its own, answering the binding
+    /// and a path naming it.
+    pub(super) fn bind_entry_operand(
+        &mut self,
+        operand: &AstExpr,
+        span: Span,
+    ) -> (Vec<HirStmt>, HirExpr) {
+        let lowered = self.lower_expr(operand);
+        let ty = lowered.ty;
+        let name = format!("__gos_map_operand_{}", self.fresh().0);
+        let bind = self.entry_let_stmt(span, &name, ty, false, lowered);
+        (vec![bind], self.entry_path(span, &name, ty))
     }
 
     /// `value` reached through `projections` (outermost first), the field

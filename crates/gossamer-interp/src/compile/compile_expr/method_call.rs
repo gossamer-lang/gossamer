@@ -616,7 +616,18 @@ impl<'tcx> FnBuilder<'tcx> {
                 .checked_add(u16::try_from(i).expect("argc overflow"))
                 .expect("reg overflow");
             self.ensure_reg_slot(slot);
-            self.emit(Op::Move { dst: slot, src: *r });
+            // Move-on-last-use, as for a free call's argument: a consumable
+            // local read straight from its home register is handed over, so
+            // what the method keeps is not also held by a dead register.
+            let consume = self
+                .consumable_path(&args[i])
+                .and_then(|name| self.lookup_local(name))
+                .is_some_and(|tr| tr.kind == RegKind::Value && tr.reg == *r);
+            if consume {
+                self.emit(Op::MoveConsume { dst: slot, src: *r });
+            } else {
+                self.emit(Op::Move { dst: slot, src: *r });
+            }
         }
         let argc = u16::try_from(args.len()).map_err(|_| RuntimeError::Arity {
             expected: u16::MAX as usize,
@@ -874,6 +885,20 @@ impl<'tcx> FnBuilder<'tcx> {
             }
         }
         self.release_chain_temp(receiver, receiver_reg);
+        // A call's answer used only as this receiver is read by nothing after
+        // the call, so the register lets go of it: what the method answered
+        // out of it (`m.remove(k).unwrap()`) is then held once.
+        if matches!(
+            receiver.kind,
+            HirExprKind::Call { .. } | HirExprKind::MethodCall { .. }
+        ) && receiver_reg != dst
+            && !self.reg_is_bound_local(receiver_reg)
+        {
+            self.emit(Op::ClearRegs {
+                start: receiver_reg,
+                count: 1,
+            });
+        }
         let returns_unit = match self.tcx.kind(resolved_receiver_ty) {
             Some(TyKind::String) => matches!(
                 name.name.as_str(),

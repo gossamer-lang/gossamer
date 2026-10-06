@@ -322,6 +322,9 @@ impl Vm {
                                 }
                                 return Ok(value);
                             }
+                            jit_call::Dispatch::Panic(text) => {
+                                return Err(RuntimeError::Panic(text));
+                            }
                             jit_call::Dispatch::Fallback => {
                                 if jit_call::jit_trace() {
                                     eprintln!(

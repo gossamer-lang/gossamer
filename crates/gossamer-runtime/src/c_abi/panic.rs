@@ -482,7 +482,7 @@ pub extern "C" fn gos_rt_goroutine_panicked() -> i32 {
 /// the failing access. NULL is tolerated and rendered as
 /// `"array index"`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_panic_oob(what: *const c_char, idx: i64, len: i64) -> ! {
+pub unsafe extern "C-unwind" fn gos_rt_panic_oob(what: *const c_char, idx: i64, len: i64) -> ! {
     let label = if what.is_null() {
         "array index".to_string()
     } else {
@@ -499,7 +499,7 @@ pub unsafe extern "C" fn gos_rt_panic_oob(what: *const c_char, idx: i64, len: i6
 /// # Safety
 /// `v` must be null or point to a live `GosVec`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_panic_vec_index(
+pub unsafe extern "C-unwind" fn gos_rt_panic_vec_index(
     v: *const crate::c_abi::vec::GosVec,
     idx: i64,
 ) -> ! {

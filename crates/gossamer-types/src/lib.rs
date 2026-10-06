@@ -16,6 +16,7 @@
 mod admissible;
 mod arena_escape;
 pub mod builtin_traits;
+mod capture_writes;
 mod checker;
 mod context;
 pub mod data_first;
@@ -44,6 +45,7 @@ pub use builtin_traits::{
     BUILTIN_TRAITS, BuiltinTrait, BuiltinTraitKind, ITERATOR_BOUND_METHODS, builtin_trait,
     render_builtin_traits_markdown,
 };
+pub use capture_writes::{CaptureWriteDiagnostic, check_capture_writes};
 pub use checker::{
     STDLIB_TRAIT_NAMES, core_type_accepts_method, core_type_declares_method,
     is_array_sequence_method, is_btree_map_method, is_btree_set_method,

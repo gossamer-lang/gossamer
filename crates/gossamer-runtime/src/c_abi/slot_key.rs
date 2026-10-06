@@ -117,7 +117,7 @@ impl UserCmp {
     /// # Safety
     /// As [`UserCmp::order`], for a key the comparator takes by value.
     pub(crate) unsafe fn order_word(self, a: i64, b: i64) -> Ordering {
-        type ByWord = unsafe extern "C" fn(i64, i64) -> i64;
+        type ByWord = unsafe extern "C-unwind" fn(i64, i64) -> i64;
         // SAFETY: the address is the comparator the program compiled for this
         // key type, which takes a one-word key by value.
         let cmp: ByWord = unsafe { std::mem::transmute(crate::c_abi::code_address(self.address)) };
@@ -131,8 +131,8 @@ impl UserCmp {
     /// # Safety
     /// The slots hold the key type the comparator was compiled for.
     pub(crate) unsafe fn order(self, a: &[u8], b: &[u8]) -> Ordering {
-        type ByAddress = unsafe extern "C" fn(*const u8, *const u8) -> i64;
-        type ByWord = unsafe extern "C" fn(i64, i64) -> i64;
+        type ByAddress = unsafe extern "C-unwind" fn(*const u8, *const u8) -> i64;
+        type ByWord = unsafe extern "C-unwind" fn(i64, i64) -> i64;
         let verdict = if self.by_address {
             // SAFETY: the address is the comparator the program compiled for
             // this key type, which takes its two aggregates by address.

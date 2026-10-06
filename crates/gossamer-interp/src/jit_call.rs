@@ -1844,6 +1844,19 @@ pub(crate) enum Dispatch {
     /// unsupported, or a runtime arg's type didn't match the JIT
     /// signature). The caller falls back to the bytecode chunk.
     Fallback,
+    /// The JIT body raised a Gossamer fault, which ends the goroutine
+    /// running it exactly as the bytecode's own panic would.
+    Panic(String),
+}
+
+/// The dispatch a payload unwound out of a JIT body answers: the fault a
+/// Gossamer panic names, or a fallback for a fault of the host's own.
+fn unwound_dispatch(payload: &(dyn std::any::Any + Send)) -> Dispatch {
+    if let Some(fault) = payload.downcast_ref::<gossamer_coro::GosPanic>() {
+        return Dispatch::Panic(fault.0.clone());
+    }
+    eprintln!("jit: panic inside JIT-compiled body; falling back to bytecode");
+    Dispatch::Fallback
 }
 
 const MAX_ARGS: usize = 12;
@@ -3611,8 +3624,8 @@ pub(crate) fn invoke_prepared(p: &Prepared, args: &[Value], graph_cache: &GraphC
     let n = jit.params.len();
     // SAFETY: `prepare` resolved `stub` for exactly this body's
     // `(arity, shape, ret)` triple, so the reified `extern "C"`
-    // signature matches the cranelift-emitted entry. `catch_unwind`
-    // demotes a panic unwound through the boundary to a `Fallback`.
+    // signature matches the cranelift-emitted entry. `catch_unwind` turns a
+    // panic unwound through the boundary into the dispatch it answers.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
         (p.stub)(jit.ptr, &slots[..n], p.ret_kind)
     }));
@@ -3636,10 +3649,7 @@ pub(crate) fn invoke_prepared(p: &Prepared, args: &[Value], graph_cache: &GraphC
             Dispatch::Ok(value)
         }
         Ok(None) => Dispatch::Fallback,
-        Err(_) => {
-            eprintln!("jit: panic inside JIT-compiled body; falling back to bytecode");
-            Dispatch::Fallback
-        }
+        Err(payload) => unwound_dispatch(payload.as_ref()),
     }
 }
 
@@ -3911,8 +3921,8 @@ fn invoke_prepared_native(p: &Prepared, args: &[Value], graph_cache: &GraphCache
     };
     // SAFETY: `prepare` resolved `stub` for this body's `(arity, shape,
     // ret)` triple; native aggregate slots cross as pointer-sized i64
-    // values matching the flat-ABI signature. `catch_unwind` demotes a
-    // boundary panic to a `Fallback`.
+    // values matching the flat-ABI signature. `catch_unwind` turns a
+    // boundary panic into the dispatch it answers.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
         (p.stub)(jit.ptr, &slots[..n_call], p.ret_kind)
     }));
@@ -3922,10 +3932,9 @@ fn invoke_prepared_native(p: &Prepared, args: &[Value], graph_cache: &GraphCache
             free_in_flight(&natives, &built_enums, &str_cells);
             return Dispatch::Fallback;
         }
-        Err(_) => {
-            eprintln!("jit: panic inside JIT-compiled body; falling back to bytecode");
+        Err(payload) => {
             free_in_flight(&natives, &built_enums, &str_cells);
-            return Dispatch::Fallback;
+            return unwound_dispatch(payload.as_ref());
         }
     };
     // Copy each marshalled `U8Vec`'s (mutated) bytes back to its registry

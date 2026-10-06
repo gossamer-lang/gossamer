@@ -176,13 +176,13 @@ pub unsafe extern "C" fn gos_rt_vec_format_char(v: *const GosVec, bare: i32) -> 
 /// fields from that address (`by_ref`); an inline enum's `fmt` decodes the
 /// element word itself, so that word is loaded and passed instead.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_format_adt(
+pub unsafe extern "C-unwind" fn gos_rt_vec_format_adt(
     v: *const GosVec,
     fmt: *const std::ffi::c_void,
     by_ref: i32,
     bare: i32,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if fmt.is_null() {
             return alloc_cstring(seq_empty(bare).as_bytes());
         }
@@ -209,13 +209,13 @@ pub unsafe extern "C" fn gos_rt_vec_format_adt(
 /// # Safety
 /// `v` is a live `GosVec` and `tags` addresses a descriptor at `desc`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_format_desc(
+pub unsafe extern "C-unwind" fn gos_rt_vec_format_desc(
     v: *const GosVec,
     tags: *const u8,
     desc: i64,
     bare: i32,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if tags.is_null() {
             return alloc_cstring(seq_empty(bare).as_bytes());
         }
@@ -285,13 +285,13 @@ pub unsafe extern "C" fn gos_rt_vec_format_map(v: *const GosVec, bare: i32) -> *
 /// `v` is a live `GosVec` whose elements are tuple slot buffers, and `tags`
 /// addresses at least the tag bytes those `n` elements describe.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_format_tuple(
+pub unsafe extern "C-unwind" fn gos_rt_vec_format_tuple(
     v: *const GosVec,
     n: i64,
     tags: *const u8,
     bare: i32,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if tags.is_null() || n <= 0 {
             return alloc_cstring(seq_empty(bare).as_bytes());
         }
@@ -591,14 +591,14 @@ pub unsafe extern "C" fn gos_rt_arr_format_char(p: *const i64, len: i64) -> *mut
 /// distinguishes a struct's slot address from an enum's element word exactly
 /// as in [`gos_rt_vec_format_adt`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_arr_format_adt(
+pub unsafe extern "C-unwind" fn gos_rt_arr_format_adt(
     p: *const u8,
     len: i64,
     stride: i64,
     fmt: *const std::ffi::c_void,
     by_ref: i32,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if p.is_null() || len <= 0 || stride <= 0 || fmt.is_null() {
             return alloc_cstring(b"[]");
         }

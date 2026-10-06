@@ -1728,6 +1728,21 @@ pub const REGISTRY: &[(&str, &str)] = &[
             function reads through `unsafe { ffi::View::new(ptr, len) }`.",
     ),
     (
+        "GT0114",
+        "A closure writes a value it captured by copy: a scalar, a `String`, a\n\
+            tuple, a fixed array, or a struct or enum. The write changes the\n\
+            closure's own copy, which starts from the captured value on every\n\
+            call, and never the enclosing binding. Return the new value, or hold\n\
+            it in a `Vec` or `Map`, which a closure captures by reference.",
+    ),
+    (
+        "GT0115",
+        "An `impl Sub for T` names a trait declared `trait Sub: Super`, and `T`\n\
+            has no `impl Super for T`. A supertrait is part of the trait: every\n\
+            type that implements the subtrait implements the supertrait too, so a\n\
+            bound on the subtrait can rely on it. Add the supertrait's `impl`.",
+    ),
+    (
         "GX0001",
         "An operation received a value of an incompatible type. The\n\
                      diagnostic names the type that was required and the type\n\

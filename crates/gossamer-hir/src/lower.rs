@@ -55,6 +55,8 @@ pub fn lower_source_file(
         tcx,
         ids: HirIdGenerator::new(),
         recursion_depth: 0,
+        entry_arg_targets: std::collections::HashMap::new(),
+        entry_arg_values: std::collections::HashMap::new(),
         current_fn_ret_ty: None,
         current_generic_names: Vec::new(),
         import_targets: collect_import_targets(&source.uses),
@@ -616,6 +618,12 @@ struct Lowerer<'a> {
     /// `lower_pat`. Reaching the cap returns a placeholder node so
     /// the rest of lowering can continue with a self-consistent tree.
     recursion_depth: u32,
+    /// The place inside an opened map entry each `&mut m[k]..` call
+    /// argument names, keyed by the argument's node, while its call lowers.
+    entry_arg_targets: std::collections::HashMap<NodeId, HirExpr>,
+    /// The binding each other argument of such a call was evaluated into
+    /// before its entries opened, keyed by the argument's node.
+    entry_arg_values: std::collections::HashMap<NodeId, HirExpr>,
     /// Declared return type of the function whose body is currently
     /// being lowered. Read by `lower_try` so the `?` desugar can
     /// detect a mismatch between the inner expression's `Err` type
@@ -1071,6 +1079,68 @@ impl Lowerer<'_> {
     }
 
     fn lower_expr(&mut self, expr: &AstExpr) -> HirExpr {
+        if let Some(value) = self.entry_arg_values.remove(&expr.id) {
+            return value;
+        }
+        if let Some(wrapped) = self.lower_call_with_entry_args(expr) {
+            return wrapped;
+        }
+        self.lower_expr_plain(expr)
+    }
+
+    /// A call passing `&mut` to a place below a map entry (`f(&mut m[k])`,
+    /// `g(&mut m[k][i].hp)`): each such entry is opened before the call,
+    /// the argument names the place inside it, and the entry is stored back
+    /// once the call returns, so the callee's writes land in the map.
+    fn lower_call_with_entry_args(&mut self, expr: &AstExpr) -> Option<HirExpr> {
+        let (AstExprKind::Call { args, .. } | AstExprKind::MethodCall { args, .. }) = &expr.kind
+        else {
+            return None;
+        };
+        let opens_entry = |this: &mut Self, arg: &AstExpr| {
+            matches!(&arg.kind, AstExprKind::Unary { op: UnaryOp::RefMut, operand }
+                if this.split_map_place(operand).is_some())
+        };
+        if !args.iter().any(|arg| opens_entry(self, arg)) {
+            return None;
+        }
+        // The other arguments are evaluated before any entry leaves its map,
+        // so they read the map as it stands.
+        let mut binds = Vec::new();
+        for arg in args {
+            if opens_entry(self, arg) {
+                continue;
+            }
+            let (bind, value) = self.bind_entry_operand(arg, arg.span);
+            binds.extend(bind);
+            self.entry_arg_values.insert(arg.id, value);
+        }
+        let mut entries = Vec::new();
+        for arg in args {
+            let AstExprKind::Unary {
+                op: UnaryOp::RefMut,
+                operand,
+            } = &arg.kind
+            else {
+                continue;
+            };
+            let Some(entry) = self.open_entry(operand, None, arg.span) else {
+                continue;
+            };
+            self.entry_arg_targets.insert(arg.id, entry.target.clone());
+            entries.push(entry);
+        }
+        if entries.is_empty() {
+            return None;
+        }
+        let mut call = self.lower_expr_plain(expr);
+        for entry in entries.into_iter().rev() {
+            call = self.close_entry(entry, Vec::new(), Some(call), expr.span);
+        }
+        Some(self.prefixed(binds, call, expr.span))
+    }
+
+    fn lower_expr_plain(&mut self, expr: &AstExpr) -> HirExpr {
         use gossamer_types::TyKind;
         if self.recursion_depth >= RECURSION_LIMIT {
             let ty = self.error_ty();
@@ -1407,10 +1477,16 @@ impl Lowerer<'_> {
                     None => HirExprKind::Placeholder,
                 }
             }
-            AstExprKind::Unary { op, operand } => HirExprKind::Unary {
-                op: lower_unary_op(*op),
-                operand: Box::new(self.lower_expr(operand)),
-            },
+            AstExprKind::Unary { op, operand } => {
+                let operand = match self.entry_arg_targets.remove(&expr.id) {
+                    Some(target) => target,
+                    None => self.lower_expr(operand),
+                };
+                HirExprKind::Unary {
+                    op: lower_unary_op(*op),
+                    operand: Box::new(operand),
+                }
+            }
             AstExprKind::Binary { op, lhs, rhs } => self.lower_binary(*op, lhs, rhs),
             AstExprKind::Assign { op, place, value } => self.lower_assign(*op, place, value, expr),
             AstExprKind::Cast { value, ty: ast_ty } => HirExprKind::Cast {

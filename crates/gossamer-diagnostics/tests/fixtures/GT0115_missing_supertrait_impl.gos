@@ -1,0 +1,9 @@
+// ERROR: GT0115
+trait Read { fn read(&self) -> String }
+trait BufRead: Read { fn read_line(&self) -> String }
+
+struct F { s: String }
+
+impl BufRead for F { fn read_line(&self) -> String { self.s } }
+
+fn main() { println("{}", F { s: "x" }.read_line()) }

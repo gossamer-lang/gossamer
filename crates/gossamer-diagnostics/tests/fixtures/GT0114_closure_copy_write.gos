@@ -1,0 +1,6 @@
+// ERROR: GT0114
+fn main() {
+    let mut count = 0
+    #[1, 2, 3].for_each(|x| count += x)
+    println("{}", count)
+}

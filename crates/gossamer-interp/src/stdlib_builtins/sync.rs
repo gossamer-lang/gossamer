@@ -489,7 +489,9 @@ pub(crate) fn builtin_mutex_lock(args: &[Value]) -> RuntimeResult<Value> {
         if !gossamer_runtime::platform::CAN_BLOCK && cell.would_block() {
             return Err(crate::value::RuntimeError::WouldNeverWake("Mutex::lock"));
         }
-        cell.lock();
+        if !cell.lock() {
+            return Err(crate::value::deadlock_error("Mutex::lock"));
+        }
     }
     Ok(Value::Unit)
 }

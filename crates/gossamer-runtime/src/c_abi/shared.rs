@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 /// `fn(env, value) -> result` - the one-argument value-thunk shape
 /// shared with the `MapFn` callbacks in `combinator.rs`.
-type GuardFn = unsafe extern "C" fn(env: *const u8, value: i64) -> i64;
+type GuardFn = unsafe extern "C-unwind" fn(env: *const u8, value: i64) -> i64;
 
 /// Callable address stored at `env[0]`, or `None` for a null/zero env.
 ///
@@ -114,8 +114,8 @@ pub unsafe extern "C" fn gos_rt_shared_set(shared: *mut GosShared, value: i64) {
 /// `shared.with(f)` - run `f(value)` under the lock and answer its
 /// result. The guarded value is unchanged.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_shared_with(shared: *mut GosShared, env: *const u8) -> i64 {
-    ffi_entry!(0, {
+pub unsafe extern "C-unwind" fn gos_rt_shared_with(shared: *mut GosShared, env: *const u8) -> i64 {
+    ffi_entry_passthrough!(0, {
         if shared.is_null() {
             return 0;
         }
@@ -145,8 +145,11 @@ pub unsafe extern "C" fn gos_rt_shared_with(shared: *mut GosShared, env: *const 
 /// answers, and return that. The lock spans the read and the write, so
 /// two goroutines updating at once cannot lose one another's work.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_shared_update(shared: *mut GosShared, env: *const u8) -> i64 {
-    ffi_entry!(0, {
+pub unsafe extern "C-unwind" fn gos_rt_shared_update(
+    shared: *mut GosShared,
+    env: *const u8,
+) -> i64 {
+    ffi_entry_passthrough!(0, {
         if shared.is_null() {
             return 0;
         }

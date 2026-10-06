@@ -937,8 +937,12 @@ pub(crate) unsafe fn compare_flat_slots(fields: &[u8], a: *const u8, b: *const u
 /// # Safety
 /// `a` and `b` address values `tags` describes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_desc_cmp(a: *const u8, b: *const u8, tags: *const u8) -> i64 {
-    ffi_entry!(0, {
+pub unsafe extern "C-unwind" fn gos_rt_desc_cmp(
+    a: *const u8,
+    b: *const u8,
+    tags: *const u8,
+) -> i64 {
+    ffi_entry_passthrough!(0, {
         if a.is_null() || b.is_null() || tags.is_null() {
             return 0;
         }
@@ -956,8 +960,8 @@ pub unsafe extern "C" fn gos_rt_desc_cmp(a: *const u8, b: *const u8, tags: *cons
 /// # Safety
 /// `a` and `b` address values `tags` describes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_desc_eq(a: *const u8, b: *const u8, tags: *const u8) -> i64 {
-    ffi_entry!(0, {
+pub unsafe extern "C-unwind" fn gos_rt_desc_eq(a: *const u8, b: *const u8, tags: *const u8) -> i64 {
+    ffi_entry_passthrough!(0, {
         if a.is_null() || b.is_null() || tags.is_null() {
             return i64::from(a == b);
         }
@@ -987,12 +991,12 @@ pub unsafe extern "C" fn gos_rt_desc_eq(a: *const u8, b: *const u8, tags: *const
 /// `a` and `b` are null or `GosVec` handles whose elements `elem_tags`
 /// describes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_desc_cmp(
+pub unsafe extern "C-unwind" fn gos_rt_vec_desc_cmp(
     a: *const GosVec,
     b: *const GosVec,
     elem_tags: *const u8,
 ) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry_passthrough!(0, {
         if elem_tags.is_null() {
             return 0;
         }

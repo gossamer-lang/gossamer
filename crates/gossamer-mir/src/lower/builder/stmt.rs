@@ -230,10 +230,12 @@ impl<'a> Builder<'a> {
     }
 
     /// `true` when `value` is the payload of a carrier one of this frame's own
-    /// calls answered - what `let x = f(..)?` leaves behind. The carrier hands
-    /// its payload over with it, so the value has no source-language identity
-    /// of its own any more than a call result has one: the binding takes the
-    /// handles as they are, and the RC schedule gives the caller's share back.
+    /// calls answered - what `let x = f(..)?` leaves behind - or a map's
+    /// `remove` answered, which hands over the one share the map held. The
+    /// carrier hands its payload over with it, so the value has no
+    /// source-language identity of its own any more than a call result has
+    /// one: the binding takes the handles as they are, and the RC schedule
+    /// gives the caller's share back.
     pub(crate) fn is_owned_carrier_payload(&self, value: Local) -> bool {
         let Some(carrier) = self
             .blocks
@@ -266,15 +268,26 @@ impl<'a> Builder<'a> {
         else {
             return false;
         };
-        self.blocks.iter().any(|block| {
-            matches!(
-                &block.terminator,
-                Terminator::Call {
-                    callee: Operand::FnRef { .. },
-                    destination,
-                    ..
-                } if destination.local == carrier && destination.projection.is_empty()
-            )
+        self.blocks.iter().any(|block| match &block.terminator {
+            Terminator::Call {
+                callee,
+                destination,
+                ..
+            } if destination.local == carrier && destination.projection.is_empty() => {
+                match callee {
+                    Operand::FnRef { .. } => true,
+                    Operand::Const(ConstValue::Str(name)) => matches!(
+                        name.as_str(),
+                        "gos_rt_map_pop_i64"
+                            | "gos_rt_map_pop_str"
+                            | "gos_rt_map_pop_typed_str"
+                            | "gos_rt_map_pop_skey"
+                            | "gos_rt_map_pop_ekey"
+                    ),
+                    _ => false,
+                }
+            }
+            _ => false,
         })
     }
 

@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0115]: An `impl Sub for T` names a trait declared `trait Sub: Super`, and `T` - here
+--- framed ---
+error[GT0115]: An `impl Sub for T` names a trait declared `trait Sub: Super`, and `T`
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

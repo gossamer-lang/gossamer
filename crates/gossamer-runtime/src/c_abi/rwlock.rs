@@ -23,7 +23,7 @@ use parking_lot::RwLock as PRwLock;
 
 /// `fn(env, value) -> result` - the one-argument value-thunk shape
 /// shared with the `MapFn` callbacks in `combinator.rs`.
-type GuardFn = unsafe extern "C" fn(env: *const u8, value: i64) -> i64;
+type GuardFn = unsafe extern "C-unwind" fn(env: *const u8, value: i64) -> i64;
 
 /// Callable address stored at `env[0]`, or `None` for a null/zero env.
 ///
@@ -92,8 +92,11 @@ pub unsafe extern "C" fn gos_rt_rwlock_set(lock: *mut GosRwLock, value: i64) {
 /// `sync::RwLock::with_read(lock, f)` - run `f(value)` under a shared
 /// lock and return its result; the guarded value is unchanged.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_rwlock_with_read(lock: *mut GosRwLock, env: *const u8) -> i64 {
-    ffi_entry!(0, {
+pub unsafe extern "C-unwind" fn gos_rt_rwlock_with_read(
+    lock: *mut GosRwLock,
+    env: *const u8,
+) -> i64 {
+    ffi_entry_passthrough!(0, {
         if lock.is_null() {
             return 0;
         }
@@ -117,8 +120,11 @@ pub unsafe extern "C" fn gos_rt_rwlock_with_read(lock: *mut GosRwLock, env: *con
 /// `sync::RwLock::with_write(lock, f)` - run `f(value)` under an
 /// exclusive lock, store the returned value back, and return it.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_rwlock_with_write(lock: *mut GosRwLock, env: *const u8) -> i64 {
-    ffi_entry!(0, {
+pub unsafe extern "C-unwind" fn gos_rt_rwlock_with_write(
+    lock: *mut GosRwLock,
+    env: *const u8,
+) -> i64 {
+    ffi_entry_passthrough!(0, {
         if lock.is_null() {
             return 0;
         }

@@ -677,12 +677,12 @@ pub unsafe extern "C" fn gos_rt_set_format_tagged(
 /// # Safety
 /// `s` is a live `GosSet` and `tags` addresses a descriptor for its elements.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_set_format_desc(
+pub unsafe extern "C-unwind" fn gos_rt_set_format_desc(
     s: *const GosSet,
     _ordered: i32,
     tags: *const u8,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         let mut out = String::from(set_format_open());
         if !s.is_null() && !tags.is_null() {
             // SAFETY: `tags` is non-null (checked above) and addresses the element descriptor
@@ -1464,12 +1464,12 @@ pub unsafe extern "C" fn gos_rt_set_to_vec_ekey(
 /// # Safety
 /// `s` is a live `GosSet` and `tags` addresses a descriptor for its elements.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_set_format_ekey(
+pub unsafe extern "C-unwind" fn gos_rt_set_format_ekey(
     s: *const GosSet,
     _ordered: i32,
     tags: *const u8,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         let mut out = String::from(set_format_open());
         if !s.is_null() && !tags.is_null() {
             // SAFETY: `tags` is non-null (checked above) and addresses the element descriptor

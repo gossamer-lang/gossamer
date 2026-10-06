@@ -620,13 +620,23 @@ impl MutexCell {
         *self.held.lock()
     }
 
-    /// Acquires the lock, parking until it is free.
-    pub(crate) fn lock(&self) {
+    /// Acquires the lock, parking until it is free. Answers `false`, holding
+    /// nothing, when every participant is waiting and nothing is left that
+    /// could release it.
+    pub(crate) fn lock(&self) -> bool {
         let mut held = self.held.lock();
         while *held {
+            let Some(_waiting) = crate::vm::goroutine::ChannelWait::enter("Mutex::lock", || {
+                crate::value::any_live_channel_can_progress()
+                    || crate::stdlib_builtins::context::deadline_pending()
+                    || crate::stdlib_builtins::cohort::deadline_pending()
+            }) else {
+                return false;
+            };
             self.available.wait(&mut held);
         }
         *held = true;
+        true
     }
 
     /// Releases the lock and wakes one parked acquirer.

@@ -44,9 +44,9 @@ fn main() {
     println("capture: {}", iter::range(1, 40) |> |v| iter::filter(v, |n: i64| n % step == 0) |> iter::sum)
 
     // for_each drives side effects in element order
-    let mut acc = 0
-    iter::range_inclusive(1, 5) |> |v| iter::for_each(v, |n: i64| acc += n)
-    println("for_each: {acc}")
+    let mut acc = #[0]
+    iter::range_inclusive(1, 5) |> |v| iter::for_each(v, |n: i64| acc[0] += n)
+    println("for_each: {}", acc[0])
 }
 
 #[cfg(test)]

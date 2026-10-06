@@ -2416,6 +2416,9 @@ associated items are reachable through the subtrait that inherits them.
 An impl that omits a required associated item is rejected (<code>GT0059</code>), a
 projection of an undeclared item is rejected (<code>GT0060</code>), and an ambiguous
 projection is rejected with the constraint to write (<code>GT0061</code>).</p>
+<p>A supertrait is part of its subtrait: a type that implements
+<code>trait BufRead: Read</code> implements <code>Read</code> too, and an <code>impl BufRead for T</code>
+without an <code>impl Read for T</code> is rejected (<code>GT0115</code>).</p>
 <p>Out of scope: generic associated types (<code>type Item&lt;T&gt;</code>), associated types
 on <code>dyn Trait</code> (Gossamer has no trait objects), and inferring a
 projection across several candidate impls without a constraint.</p>

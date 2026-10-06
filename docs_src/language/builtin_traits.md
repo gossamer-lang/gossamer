@@ -494,7 +494,7 @@ A bound naming `Hashable` licenses `hash` on a type parameter.
 
 ### `Copy`
 
-Every value is passed, assigned, and captured by value already, and no parameter asks for a `&` to avoid a copy.
+Every value is passed and assigned by value already, and no parameter asks for a `&` to avoid a copy. A closure captures a container by reference and every other value by copy (see `lang::closure`).
 
 Instead: Remove the block.
 

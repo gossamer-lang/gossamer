@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0114]: A closure writes a value it captured by copy: a scalar, a `String`, a - here
+--- framed ---
+error[GT0114]: A closure writes a value it captured by copy: a scalar, a `String`, a
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

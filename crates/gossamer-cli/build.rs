@@ -538,12 +538,17 @@ fn read_text(path: PathBuf) -> String {
 
 /// Returns every `gos_rt_*` symbol whose Rust definition appears in
 /// `c_abi.rs`. The author convention is `pub unsafe extern "C" fn
-/// gos_rt_<name>` or `pub extern "C" fn gos_rt_<name>`; both are
-/// matched by anchoring on the `extern "C"` clause.
+/// gos_rt_<name>` or `pub extern "C" fn gos_rt_<name>`, with
+/// `"C-unwind"` for a shim a goroutine-scoped fault unwinds out of; each
+/// is matched by anchoring on the `extern` clause.
 fn extract_runtime_definitions(src: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for line in src.lines() {
-        let Some(rest) = line.split_once("extern \"C\" fn ").map(|(_, r)| r) else {
+        let Some(rest) = line
+            .split_once("extern \"C\" fn ")
+            .or_else(|| line.split_once("extern \"C-unwind\" fn "))
+            .map(|(_, r)| r)
+        else {
             continue;
         };
         let name: String = rest

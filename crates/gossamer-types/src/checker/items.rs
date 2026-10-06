@@ -149,6 +149,7 @@ impl TypeChecker<'_> {
                     self.check_trait_impl_uniqueness(decl, module_path, item.span);
                     self.check_method_uniqueness(decl, module_path);
                     self.check_trait_impl_assoc_items(decl, item.span);
+                    self.check_supertrait_impls(decl, module_path, item.span);
                 }
                 ItemKind::Mod(decl) => {
                     if let gossamer_ast::ModBody::Inline(inner) = &decl.body {

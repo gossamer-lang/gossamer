@@ -33,25 +33,25 @@ pub(crate) enum ElemPass {
     Ptr,
 }
 
-type WordPred = unsafe extern "C" fn(env: *const u8, x: i64) -> bool;
-type FloatPred = unsafe extern "C" fn(env: *const u8, x: f64) -> bool;
-type PtrPred = unsafe extern "C" fn(env: *const u8, x: *mut u8) -> bool;
+type WordPred = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> bool;
+type FloatPred = unsafe extern "C-unwind" fn(env: *const u8, x: f64) -> bool;
+type PtrPred = unsafe extern "C-unwind" fn(env: *const u8, x: *mut u8) -> bool;
 
-type WordToWord = unsafe extern "C" fn(env: *const u8, x: i64) -> i64;
-type FloatToWord = unsafe extern "C" fn(env: *const u8, x: f64) -> i64;
-type PtrToWord = unsafe extern "C" fn(env: *const u8, x: *mut u8) -> i64;
+type WordToWord = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> i64;
+type FloatToWord = unsafe extern "C-unwind" fn(env: *const u8, x: f64) -> i64;
+type PtrToWord = unsafe extern "C-unwind" fn(env: *const u8, x: *mut u8) -> i64;
 
-type WordToEnum = unsafe extern "C" fn(env: *const u8, x: i64) -> i128;
-type FloatToEnum = unsafe extern "C" fn(env: *const u8, x: f64) -> i128;
-type PtrToEnum = unsafe extern "C" fn(env: *const u8, x: *mut u8) -> i128;
+type WordToEnum = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> i128;
+type FloatToEnum = unsafe extern "C-unwind" fn(env: *const u8, x: f64) -> i128;
+type PtrToEnum = unsafe extern "C-unwind" fn(env: *const u8, x: *mut u8) -> i128;
 
-type WordToVec = unsafe extern "C" fn(env: *const u8, x: i64) -> *mut GosVec;
-type FloatToVec = unsafe extern "C" fn(env: *const u8, x: f64) -> *mut GosVec;
-type PtrToVec = unsafe extern "C" fn(env: *const u8, x: *mut u8) -> *mut GosVec;
+type WordToVec = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> *mut GosVec;
+type FloatToVec = unsafe extern "C-unwind" fn(env: *const u8, x: f64) -> *mut GosVec;
+type PtrToVec = unsafe extern "C-unwind" fn(env: *const u8, x: *mut u8) -> *mut GosVec;
 
-type WordCmp = unsafe extern "C" fn(env: *const u8, a: i64, b: i64) -> i64;
-type FloatCmp = unsafe extern "C" fn(env: *const u8, a: f64, b: f64) -> i64;
-type PtrCmp = unsafe extern "C" fn(env: *const u8, a: *mut u8, b: *mut u8) -> i64;
+type WordCmp = unsafe extern "C-unwind" fn(env: *const u8, a: i64, b: i64) -> i64;
+type FloatCmp = unsafe extern "C-unwind" fn(env: *const u8, a: f64, b: f64) -> i64;
+type PtrCmp = unsafe extern "C-unwind" fn(env: *const u8, a: *mut u8, b: *mut u8) -> i64;
 
 /// Callable address stored at `env[0]`, or `None` for a null or zero env.
 ///
@@ -617,12 +617,12 @@ unsafe fn fold_step_typed(
     elem: ElemPass,
     acc_pass: ElemPass,
 ) -> i64 {
-    type WordWord = unsafe extern "C" fn(env: *const u8, acc: i64, x: i64) -> i64;
-    type WordFloat = unsafe extern "C" fn(env: *const u8, acc: i64, x: f64) -> i64;
-    type WordPtr = unsafe extern "C" fn(env: *const u8, acc: i64, x: *mut u8) -> i64;
-    type FloatWord = unsafe extern "C" fn(env: *const u8, acc: f64, x: i64) -> f64;
-    type FloatFloat = unsafe extern "C" fn(env: *const u8, acc: f64, x: f64) -> f64;
-    type FloatPtr = unsafe extern "C" fn(env: *const u8, acc: f64, x: *mut u8) -> f64;
+    type WordWord = unsafe extern "C-unwind" fn(env: *const u8, acc: i64, x: i64) -> i64;
+    type WordFloat = unsafe extern "C-unwind" fn(env: *const u8, acc: i64, x: f64) -> i64;
+    type WordPtr = unsafe extern "C-unwind" fn(env: *const u8, acc: i64, x: *mut u8) -> i64;
+    type FloatWord = unsafe extern "C-unwind" fn(env: *const u8, acc: f64, x: i64) -> f64;
+    type FloatFloat = unsafe extern "C-unwind" fn(env: *const u8, acc: f64, x: f64) -> f64;
+    type FloatPtr = unsafe extern "C-unwind" fn(env: *const u8, acc: f64, x: *mut u8) -> f64;
     // SAFETY: `addr` is the callable the closure lowering stored, compiled
     // against the pair of classes this symbol declares.
     unsafe {
@@ -1124,9 +1124,9 @@ unsafe fn sort_key_at(
     }
 }
 
-type WordToF64 = unsafe extern "C" fn(env: *const u8, x: i64) -> f64;
-type FloatToF64 = unsafe extern "C" fn(env: *const u8, x: f64) -> f64;
-type PtrToF64 = unsafe extern "C" fn(env: *const u8, x: *mut u8) -> f64;
+type WordToF64 = unsafe extern "C-unwind" fn(env: *const u8, x: i64) -> f64;
+type FloatToF64 = unsafe extern "C-unwind" fn(env: *const u8, x: f64) -> f64;
+type PtrToF64 = unsafe extern "C-unwind" fn(env: *const u8, x: *mut u8) -> f64;
 
 /// One key a `*_by_key` combinator orders by. Which shape a call sees is
 /// fixed by the `key_is_f64` flag the lowering passes, so the two never mix

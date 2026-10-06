@@ -600,6 +600,7 @@ impl TypeChecker<'_> {
         let receiver_expected = self.method_receiver_expectation(method, receiver, expected);
         let receiver_ty = self.check_expr_expecting(receiver, receiver_expected);
         let receiver_ty = self.window_receiver_ty(receiver, receiver_ty, method, args);
+        self.note_receiver_owner(call_id, receiver_ty, method);
         if method == "par_chunks_mut" {
             self.check_chunk_receiver(receiver, receiver_ty, args);
         }
@@ -1005,6 +1006,34 @@ impl TypeChecker<'_> {
 
     /// Records the owner of each method call on a numeric literal, once
     /// defaulting has given the literal its type.
+    /// Records, for a call the named-argument rewrite waits on, the type
+    /// `receiver_ty` names, or the bound trait declaring `method` for a
+    /// type-parameter receiver, by its declared name.
+    fn note_receiver_owner(&mut self, call_id: NodeId, receiver_ty: Ty, method: &str) {
+        if !self.receiver_owner_watch.contains(&call_id) {
+            return;
+        }
+        let resolved = self.peel_refs(self.infer.resolve(self.tcx, receiver_ty));
+        let owner = if let Some(TyKind::Param { idx, .. }) = self.tcx.kind(resolved) {
+            let idx = idx.0 as usize;
+            self.current_param_bounds.get(idx).and_then(|bounds| {
+                bounds
+                    .iter()
+                    .find(|bound| {
+                        self.trait_method_ret
+                            .contains_key(&((*bound).clone(), method.to_string()))
+                    })
+                    .cloned()
+            })
+        } else {
+            self.impl_owner_of(resolved)
+        };
+        if let Some(owner) = owner {
+            let head = owner.rsplit("::").next().unwrap_or(&owner).to_string();
+            self.receiver_owners.insert(call_id, head);
+        }
+    }
+
     pub(super) fn record_deferred_method_owners(&mut self) {
         for (call_id, receiver_ty, method) in std::mem::take(&mut self.deferred_method_owners) {
             let resolved = self.deep_resolve(receiver_ty);

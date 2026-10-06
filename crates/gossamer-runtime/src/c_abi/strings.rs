@@ -92,12 +92,12 @@ fn split_whitespace_vec(text: &str) -> *mut GosVec {
 
 /// `strings::splitn(s, n, sep) -> [String]`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_str_splitn(
+pub unsafe extern "C-unwind" fn gos_rt_str_splitn(
     s: *const c_char,
     n: i64,
     sep: *const c_char,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if n < 0 {
             crate::c_abi::panic::panic_text("strings::splitn: count must be non-negative");
         }
@@ -131,13 +131,13 @@ pub unsafe extern "C" fn gos_rt_str_fields(s: *const c_char) -> *mut GosVec {
 
 /// `strings::replacen(s, from, to, n) -> String`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_str_replacen(
+pub unsafe extern "C-unwind" fn gos_rt_str_replacen(
     s: *const c_char,
     from: *const c_char,
     to: *const c_char,
     n: i64,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if n < 0 {
             crate::c_abi::panic::panic_text("strings::replacen: count must be non-negative");
         }
@@ -207,12 +207,12 @@ pub unsafe extern "C" fn gos_rt_str_first_codepoint(s: *const c_char) -> i64 {
 /// `strings::pad_left(s, width, pad_char) -> String`. `pad_char` is
 /// the Unicode scalar value; invalid scalars fall back to a space.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_str_pad_left(
+pub unsafe extern "C-unwind" fn gos_rt_str_pad_left(
     s: *const c_char,
     width: i64,
     pad_char: i64,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
         // `cstr` accepts.
         let text = unsafe { cstr(s) };
@@ -241,12 +241,12 @@ pub unsafe extern "C" fn gos_rt_str_pad_left(
 
 /// `strings::pad_right(s, width, pad_char) -> String`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_str_pad_right(
+pub unsafe extern "C-unwind" fn gos_rt_str_pad_right(
     s: *const c_char,
     width: i64,
     pad_char: i64,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
         // `cstr` accepts.
         let text = unsafe { cstr(s) };
@@ -279,13 +279,13 @@ pub unsafe extern "C" fn gos_rt_str_pad_right(
 /// between the number's sign (and radix prefix) and its digits. Backs the
 /// `{:>N}` / `{:<N}` / `{:^N}` / `{:0N}` format specs.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fmt_pad(
+pub unsafe extern "C-unwind" fn gos_rt_fmt_pad(
     s: *const c_char,
     width: i64,
     fill: i64,
     align: i64,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         let text = if s.is_null() {
             ""
         } else {
@@ -336,13 +336,13 @@ pub unsafe extern "C" fn gos_rt_fmt_pad(
 /// padding stages so `{:08}` produces one runtime string instead of rendering
 /// an intermediate decimal string and copying it into a second allocation.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fmt_pad_i64(
+pub unsafe extern "C-unwind" fn gos_rt_fmt_pad_i64(
     value: i64,
     width: i64,
     fill: i64,
     align: i64,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if width < 0 {
             crate::c_abi::panic::panic_text("__fmt_pad: width must be non-negative");
         }
@@ -415,14 +415,14 @@ pub unsafe extern "C" fn gos_rt_fmt_pad_i64(
 
 /// Concatenate a string prefix and a width-formatted integer in one allocation.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_concat_pad_i64(
+pub unsafe extern "C-unwind" fn gos_rt_concat_pad_i64(
     prefix: *const c_char,
     value: i64,
     width: i64,
     fill: i64,
     align: i64,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if width < 0 {
             crate::c_abi::panic::panic_text("__fmt_pad: width must be non-negative");
         }

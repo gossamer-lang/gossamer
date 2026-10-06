@@ -213,11 +213,11 @@ unsafe fn skip_desc(tags: DescStream, cursor: &mut usize) {
 /// # Safety
 /// `slots` addresses the tuple's slot buffer and `desc` a descriptor global.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_tuple_format_desc(
+pub unsafe extern "C-unwind" fn gos_rt_tuple_format_desc(
     slots: *const i64,
     desc: *const u8,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if slots.is_null() || desc.is_null() {
             return alloc_cstring(b"()");
         }
@@ -746,12 +746,12 @@ pub(crate) unsafe fn render_tuple_elements(
 /// self-describing given `n`; a caller-supplied stream must match the
 /// tuple's shape.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_tuple_format(
+pub unsafe extern "C-unwind" fn gos_rt_tuple_format(
     p: *const i64,
     n: i64,
     tags: *const u8,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if p.is_null() || tags.is_null() || n <= 0 {
             return alloc_cstring(b"()");
         }
@@ -781,13 +781,13 @@ pub unsafe extern "C" fn gos_rt_tuple_format(
 /// Char, `5` Str). The first non-equal element decides; equal prefixes continue.
 /// Routed to by the compiled tiers for tuple `== != < <= > >=`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_tuple_cmp(
+pub unsafe extern "C-unwind" fn gos_rt_tuple_cmp(
     a: *const i64,
     b: *const i64,
     n: i64,
     tags: *const u8,
 ) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry_passthrough!(0, {
         if a.is_null() || b.is_null() || tags.is_null() || n <= 0 {
             return 0;
         }
@@ -813,13 +813,13 @@ pub unsafe extern "C" fn gos_rt_tuple_cmp(
 /// answering `1` or `0`. A float element decides by IEEE `==`, so a NaN
 /// equals nothing, as it does on the interpreter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_tuple_eq(
+pub unsafe extern "C-unwind" fn gos_rt_tuple_eq(
     a: *const i64,
     b: *const i64,
     n: i64,
     tags: *const u8,
 ) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry_passthrough!(0, {
         if a.is_null() || b.is_null() || tags.is_null() || n <= 0 {
             return i64::from(a == b || n <= 0);
         }

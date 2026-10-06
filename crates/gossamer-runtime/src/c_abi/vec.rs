@@ -519,7 +519,7 @@ pub fn window_overlap_message(len: i64, a: (i64, i64, i64), b: (i64, i64, i64)) 
 /// Panics when two mutable windows passed to one call overlap. `len` is the
 /// sequence's length; each window is `lo, hi, inclusive` as written.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_vec_windows_disjoint(
+pub extern "C-unwind" fn gos_rt_vec_windows_disjoint(
     len: i64,
     a_lo: i64,
     a_hi: i64,
@@ -528,7 +528,7 @@ pub extern "C" fn gos_rt_vec_windows_disjoint(
     b_hi: i64,
     b_inclusive: i64,
 ) {
-    ffi_entry!((), {
+    ffi_entry_passthrough!((), {
         if let Some(message) =
             window_overlap_message(len, (a_lo, a_hi, a_inclusive), (b_lo, b_hi, b_inclusive))
         {
@@ -844,12 +844,12 @@ pub(crate) unsafe fn vec_retain_slot_children(v: *const GosVec, slot: *mut u8) {
 /// storage. Fixed arrays store one word per element, so sub-word element
 /// views use an 8-byte stride rather than the packed Vec stride.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_borrow_arr(
+pub unsafe extern "C-unwind" fn gos_rt_vec_borrow_arr(
     elem_bytes: u32,
     data: *const u8,
     len: i64,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if len < 0 {
             crate::c_abi::panic::panic_text("Vec length must be non-negative");
         }
@@ -870,12 +870,12 @@ pub unsafe extern "C" fn gos_rt_vec_borrow_arr(
 /// LLVM counterpart of [`gos_rt_vec_borrow_arr`] for fixed `[u8; N]` arrays,
 /// whose native storage is `[N x i8]` rather than one 8-byte slot per element.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_borrow_packed_arr(
+pub unsafe extern "C-unwind" fn gos_rt_vec_borrow_packed_arr(
     elem_bytes: u32,
     data: *const u8,
     len: i64,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if len < 0 {
             crate::c_abi::panic::panic_text("Vec length must be non-negative");
         }
@@ -930,8 +930,8 @@ pub(crate) unsafe fn vec_release_slot_children(v: *const GosVec, slot: *const u8
 /// Invalid indexing is a bounds panic, exactly as the scalar setter and
 /// an indexed read are; it is never silently ignored.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_set_slots(v: *mut GosVec, idx: i64, slots: *const u8) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_vec_set_slots(v: *mut GosVec, idx: i64, slots: *const u8) {
+    ffi_entry_passthrough!((), {
         if v.is_null() {
             crate::c_abi::panic::panic_oob_text("vec index", idx, 0);
         }
@@ -2136,8 +2136,8 @@ pub(crate) unsafe fn free_vec_buffer(ptr: *mut u8, bytes: usize) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_vec_with_capacity(elem_bytes: u32, cap: i64) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+pub extern "C-unwind" fn gos_rt_vec_with_capacity(elem_bytes: u32, cap: i64) -> *mut GosVec {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         // Header + reserved element buffer in one `Box<InlineVec>` (or a
         // separate buffer for a capacity larger than the inline slot). Only
         // initialized slots below len are readable; spare split capacity is
@@ -2153,12 +2153,12 @@ pub extern "C" fn gos_rt_vec_with_capacity(elem_bytes: u32, cap: i64) -> *mut Go
 /// and capacity are already known, so constructing the initialized buffer in
 /// one runtime call avoids repeated header traffic and branches.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_repeat_primitive(
+pub unsafe extern "C-unwind" fn gos_rt_vec_repeat_primitive(
     elem_bytes: u32,
     count: i64,
     value: i64,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if count < 0 {
             crate::c_abi::panic::panic_text("array repeat count must be non-negative");
         }
@@ -2209,12 +2209,12 @@ pub unsafe extern "C" fn gos_rt_vec_repeat_primitive(
 /// encoding. Out-of-range tags fall back to `PRIMITIVE` with an
 /// `eprintln!` warning.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_vec_with_capacity_typed(
+pub extern "C-unwind" fn gos_rt_vec_with_capacity_typed(
     elem_bytes: u32,
     cap: i64,
     elem_kind: u8,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         let kind = header_elem_kind(elem_kind, "gos_rt_vec_with_capacity_typed");
         alloc_vec_with_capacity(elem_bytes, kind, cap)
     })
@@ -2233,12 +2233,12 @@ pub extern "C" fn gos_rt_vec_with_capacity_typed(
 /// repacks from each slot's low byte; a flat `len * elem_bytes`
 /// memcpy would read the first slots' spare bytes as elements.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_from_arr(
+pub unsafe extern "C-unwind" fn gos_rt_vec_from_arr(
     elem_bytes: u32,
     data: *const u8,
     len: i64,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if len < 0 {
             crate::c_abi::panic::panic_text("Vec length must be non-negative");
         }
@@ -2276,12 +2276,12 @@ pub unsafe extern "C" fn gos_rt_vec_from_arr(
 /// elem_bytes` contiguous bytes instead of applying the legacy word-slot
 /// repack used by [`gos_rt_vec_from_arr`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_from_packed_arr(
+pub unsafe extern "C-unwind" fn gos_rt_vec_from_packed_arr(
     elem_bytes: u32,
     data: *const u8,
     len: i64,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!(std::ptr::null_mut(), {
         if len < 0 {
             crate::c_abi::panic::panic_text("Vec length must be non-negative");
         }
@@ -2417,8 +2417,8 @@ pub unsafe extern "C" fn gos_rt_vec_get_i128(v: *const GosVec, idx: i64) -> i128
 /// keep only the discriminant and drop the payload. Invalid indexing is a
 /// bounds panic, matching [`gos_rt_vec_set_i64`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_set_i128(v: *mut GosVec, idx: i64, value: i128) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_vec_set_i128(v: *mut GosVec, idx: i64, value: i128) {
+    ffi_entry_passthrough!((), {
         if v.is_null() {
             crate::c_abi::panic::panic_oob_text("vec index", idx, 0);
         }
@@ -3025,8 +3025,8 @@ pub unsafe extern "C" fn gos_rt_vec_clear(v: *mut GosVec) {
 
 /// `v.truncate(n)` - drop elements at indices `n..len`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_truncate(v: *mut GosVec, len: i64) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_vec_truncate(v: *mut GosVec, len: i64) {
+    ffi_entry_passthrough!((), {
         if v.is_null() {
             return;
         }
@@ -3262,8 +3262,13 @@ pub unsafe extern "C" fn gos_rt_main_exit_code_err(disc: i64, payload: i64) -> i
 /// move reads the original contents, and every element the destination
 /// range drops is released before the copy lands on it.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_copy_within(v: *mut GosVec, src: i64, dest: i64, len: i64) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_vec_copy_within(
+    v: *mut GosVec,
+    src: i64,
+    dest: i64,
+    len: i64,
+) {
+    ffi_entry_passthrough!((), {
         if v.is_null() {
             crate::c_abi::panic::panic_text("copy_within: null vector");
         }
@@ -3333,8 +3338,8 @@ pub unsafe extern "C" fn gos_rt_vec_copy_within(v: *mut GosVec, src: i64, dest: 
 /// matching element of `src`. Both sequences must have the same length,
 /// exactly as the operation reads.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_copy_from_slice(dst: *mut GosVec, src: *const GosVec) {
-    ffi_entry!((), {
+pub unsafe extern "C-unwind" fn gos_rt_vec_copy_from_slice(dst: *mut GosVec, src: *const GosVec) {
+    ffi_entry_passthrough!((), {
         if dst.is_null() || src.is_null() {
             crate::c_abi::panic::panic_text("copy_from_slice: null vector");
         }

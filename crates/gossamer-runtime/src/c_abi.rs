@@ -94,14 +94,25 @@ pub(crate) fn code_address(addr: usize) -> *const () {
     std::ptr::with_exposed_provenance(addr)
 }
 
-/// Wraps an FFI body in `catch_unwind`, returning `$sentinel` on
-/// panic. Without this, a panic inside the body crosses the
-/// `extern "C"` boundary into compiled Gossamer code, which is UB.
+/// Wraps an FFI body in `catch_unwind`, returning `$sentinel` when the
+/// shim itself faults, since a Rust panic may not cross an `extern "C"`
+/// boundary into compiled Gossamer code.
+///
+/// A Gossamer fault raised inside the body cannot unwind out of a shim that
+/// does not unwind, and its result has no value to answer, so it ends the
+/// program as a fault on `main` does. A shim that raises a fault the program
+/// can contain is `extern "C-unwind"` and uses `ffi_entry_passthrough!`.
 macro_rules! ffi_entry {
     ($sentinel:expr, $body:block) => {{
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $body));
         match result {
             Ok(v) => v,
+            Err(payload) if payload.is::<gossamer_coro::GosPanic>() => {
+                let text = payload
+                    .downcast_ref::<gossamer_coro::GosPanic>()
+                    .map_or_else(String::new, |p| p.0.clone());
+                $crate::c_abi::panic::fatal_program_fault("GX0005", "panic: ", &text, false)
+            }
             Err(payload) => {
                 let msg = if let Some(s) = payload.downcast_ref::<&'static str>() {
                     (*s).to_string()
@@ -127,7 +138,6 @@ macro_rules! ffi_entry {
 /// names the request. Catching the fault here would replace that answer
 /// with a sentinel, so a Gossamer panic is re-raised and only a fault
 /// raised by the shim itself is caught.
-#[cfg(not(target_arch = "wasm32"))]
 macro_rules! ffi_entry_passthrough {
     ($sentinel:expr, $body:block) => {{
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $body));

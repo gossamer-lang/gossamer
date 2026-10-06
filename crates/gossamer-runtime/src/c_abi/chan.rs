@@ -563,8 +563,8 @@ pub unsafe extern "C" fn gos_rt_chan_recv_option(c: *mut GosChan) -> i128 {
 /// Single-argument wrapper for LLVM: like `gos_rt_chan_recv_option`
 /// but non-blocking (returns None immediately when the buffer is empty).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_chan_try_recv_option(c: *mut GosChan) -> i128 {
-    ffi_entry!(0i128, {
+pub unsafe extern "C-unwind" fn gos_rt_chan_try_recv_option(c: *mut GosChan) -> i128 {
+    ffi_entry_passthrough!(0i128, {
         let mut out = 0i64;
         // SAFETY: `c` is this shim's argument, null or live for the call (C-ABI contract), which
         // `gos_rt_chan_try_recv` accepts, and `out` is a local word that holds a one-word
@@ -660,11 +660,11 @@ fn ctx_is_cancelled_hook() -> Option<CtxIsCancelledFn> {
 /// the runtime never derefs it directly. Passing `null` falls
 /// back to the unconditional [`gos_rt_chan_recv_option`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_chan_recv_ctx_option(
+pub unsafe extern "C-unwind" fn gos_rt_chan_recv_ctx_option(
     c: *mut GosChan,
     ctx_handle: *const u8,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry_passthrough!(0i128, {
         // SAFETY: `c` and `ctx_handle` are this shim's arguments, each null or live for the call
         // (C-ABI contract), which `chan_recv_ctx_core` accepts.
         let (disc, payload) = unsafe { chan_recv_ctx_core(c, ctx_handle) };
@@ -683,12 +683,12 @@ pub unsafe extern "C" fn gos_rt_chan_recv_ctx_option(
 /// `out` must be writable for 8 bytes when non-null; `c` and `ctx_handle`
 /// carry the same requirements as [`gos_rt_chan_recv_ctx_option`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_chan_recv_ctx(
+pub unsafe extern "C-unwind" fn gos_rt_chan_recv_ctx(
     c: *mut GosChan,
     ctx_handle: *const u8,
     out: *mut i64,
 ) -> i32 {
-    ffi_entry!(0, {
+    ffi_entry_passthrough!(0, {
         // SAFETY: `c` and `ctx_handle` are this shim's arguments, each null or live for the call
         // (C-ABI contract), which `chan_recv_ctx_core` accepts.
         let (disc, payload) = unsafe { chan_recv_ctx_core(c, ctx_handle) };
@@ -1280,8 +1280,8 @@ fn select_arm_is_ready(kind: u8, chan: &GosChan) -> bool {
 /// builder. The popped value of a chosen recv arm is stored for retrieval via
 /// `gos_rt_select_value`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64 {
-    ffi_entry!(-1, {
+pub unsafe extern "C-unwind" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64 {
+    ffi_entry_passthrough!(-1, {
         if b.is_null() {
             return -1;
         }
