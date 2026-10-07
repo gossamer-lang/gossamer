@@ -57,9 +57,9 @@ fn main() {
 }
 
 #[test]
-fn scalar_capture_is_a_snapshot() {
-    // Mutating the original local after the closure is built does not
-    // change the captured value - the upvalue was snapshotted by value.
+fn scalar_capture_reads_the_binding_when_called() {
+    // A closure names the binding it captures, so a write to the local
+    // after the closure is built is what the closure reads.
     let src = r#"
 fn call(f: Fn() -> i64) -> i64 { f() }
 fn main() {
@@ -69,7 +69,7 @@ fn main() {
     println("{} {}", call(f), x)
 }
 "#;
-    assert_eq!(run_main(src), "5 99\n");
+    assert_eq!(run_main(src), "99 99\n");
 }
 
 #[test]

@@ -1,7 +1,7 @@
-// `defer` runs on the exit edges the compiler can see, and a panic is not
-// one of them. The cohort accounting a panicking child owes is kept by the
-// spawn wrapper's unwind backstop instead, so a nested cohort is still
-// retired and the program still leaves cleanly.
+// `defer` runs on every exit edge of its block, and as a panic unwinds
+// through it. The cohort accounting a panicking child owes is kept by the
+// spawn wrapper's unwind backstop, so a nested cohort is still retired and
+// the program still leaves cleanly.
 fn edges(n: i64) -> i64 {
     defer println("edges leaving {}", n)
     if n == 0 {
@@ -25,7 +25,7 @@ fn fallible(n: i64) -> Option<i64> {
 }
 
 fn panicking() -> i64 {
-    defer println("this defer does not run")
+    defer println("this defer runs as the panic unwinds")
     panic("invariant violated")
 }
 

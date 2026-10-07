@@ -1234,6 +1234,9 @@ const SPECS: &[Spec] = &[
         ..spec("feature-testing-examples/channel_fan_in.gos")
     },
     spec("feature-testing-examples/capture_by_reference.gos"),
+    // A closure reads and writes the bindings it captures, whatever their
+    // types; a spawned closure takes a snapshot of each at the spawn.
+    spec("feature-testing-examples/closure_binding_capture.gos"),
     spec("feature-testing-examples/closure_capture_mutation.gos"),
     spec("feature-testing-examples/closure_lifetime_inference.gos"),
     spec("feature-testing-examples/closure_payload_typing.gos"),
@@ -2034,9 +2037,42 @@ const SPECS: &[Spec] = &[
     // irrefutable array pattern in `let`, negated minimum literals, and an
     // iterator stating `type Item`.
     spec("feature-testing-examples/let_patterns_and_negative_literals.gos"),
-    // Operators opening a line: a statement start outside a grouping paren,
-    // a continuation inside one, a sign inside a list.
+    // Operators opening a line: a closure or a statement start, inside
+    // parentheses too, a sign inside a list, and `|>` continuing a pipeline.
     spec("feature-testing-examples/leading_operator_lines.gos"),
+    // `<<%` / `>>%` mask the amount at the left operand's width.
+    spec("feature-testing-examples/masking_shifts.gos"),
+    // Parameter defaults folded from consts, associated consts, arithmetic,
+    // and `comptime`, resolved where the function is declared.
+    spec("feature-testing-examples/const_parameter_defaults.gos"),
+    // Ranges that tile `u8`, `i8`, and `char` cover the match with no `_`.
+    spec("feature-testing-examples/range_patterns_cover_types.gos"),
+    // Supertrait methods, defaults, and `&mut self` methods through a bound.
+    spec("feature-testing-examples/supertrait_methods_through_bounds.gos"),
+    // A panic runs the pending defers of every frame it leaves: a deferred
+    // unlock, a nested panic noted on the first, `&mut` writes the caller's
+    // defer reads, and `main`'s defers before its report.
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/defer_on_panic.gos")
+    },
+    // The same through compiled frames: a panic in a compiled body runs the
+    // pending defers of the compiled and interpreted frames it leaves.
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/defer_on_panic_compiled.gos")
+    },
+    // A fault in a compiled body entered through its carrier thunk unwinds
+    // to the interpreted caller.
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/compiled_option_fault.gos")
+    },
+    // A shift amount past the type's width panics with one report.
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/shift_amount_out_of_range.gos")
+    },
     // NaN takes one place in float order whatever its sign bit.
     spec("feature-testing-examples/float_nan_ordering.gos"),
     // Standard-stream methods answer their declared types.

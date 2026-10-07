@@ -1,0 +1,110 @@
+// A closure names the bindings it captures: it reads each one's current
+// value, and its writes reach the binding. A spawned closure instead takes a
+// snapshot of each capture at the spawn.
+
+use std::errors
+
+struct Tally { hits: i64, names: Vec<String> }
+
+impl Tally {
+    fn hit(&mut self, name: String) {
+        self.hits += 1
+        self.names.push(name)
+    }
+}
+
+fn make_counter() -> Fn() -> i64 {
+    let mut n = 0
+    || {
+        n += 1
+        n
+    }
+}
+
+fn bump(x: &mut i64) { *x += 10 }
+
+fn sum_with(xs: Vec<i64>) -> i64 {
+    let mut total = 0
+    xs.for_each(|x| total += x)
+    total
+}
+
+fn snapshots() -> Result<(), errors::Error> {
+    let mut k = 1
+    let mut items = #[1, 2]
+    cohort {
+        let h = spawn(|| k * 100 + items.len())
+        k = 2
+        items.push(3)
+        println(f"spawned {h.join()?} {k} {items}")
+    }
+}
+
+fn main() {
+    let mut count = 0
+    #[1, 2, 3].for_each(|x| count += x)
+    println(f"for_each {count}")
+
+    let mut k = 10
+    let peek = || k
+    k = 11
+    println(f"read {peek()} {k}")
+
+    let mut s = "a"
+    let grow = || s.push_str("b")
+    grow()
+    grow()
+    s += "!"
+    println(f"string {s}")
+
+    let mut t = Tally { hits: 0, names: #[] }
+    let record = |name: String| t.hit(name)
+    record("x")
+    record("y")
+    println(f"struct {t.hits} {t.names}")
+
+    let mut items = #[1]
+    let add = || items.push(2)
+    items = #[10, 20]
+    add()
+    println(f"rebound {items}")
+
+    let mut n = 1
+    let lend = || bump(&mut n)
+    lend()
+    println(f"lent {n}")
+
+    let c = make_counter()
+    let d = make_counter()
+    println(f"escaping {c()} {c()} {d()}")
+
+    println(f"in a helper {sum_with(#[4, 5, 6])}")
+
+    let mut fs: Vec<Fn() -> i64> = #[]
+    for i in 0..3 {
+        let mut local = i
+        fs.push(|| {
+            local += 100
+            local
+        })
+    }
+    println(f"per iteration {fs[0]()} {fs[1]()} {fs[2]()} {fs[0]()}")
+
+    let mut shadow = 1
+    let first = || shadow += 1
+    first()
+    let shadow = shadow * 10
+    println(f"shadowed {shadow}")
+
+    match Some(5) {
+        Some(mut v) => {
+            let inc = || v += 1
+            inc()
+            inc()
+            println(f"arm {v}")
+        }
+        None => {}
+    }
+
+    let _ = snapshots()
+}

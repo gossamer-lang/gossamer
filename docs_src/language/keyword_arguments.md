@@ -60,14 +60,31 @@ gets that value spliced in at its position.
 fn label(text: String, prefix: String = "item", times: i64 = 1) -> String
 ```
 
-A default must be a literal: an integer, float, string, char, byte, or
-bool literal, optionally negated (`-1`). The default is spliced into
-every call that omits it, so an expression that would have to be resolved
-separately at each of those sites is rejected:
+A default must be a value known while compiling: an integer, float,
+string, char, byte, or bool literal, optionally negated (`-1`), a `const`
+or an associated const, integer arithmetic over those, or a `comptime`
+expression. It folds to a literal that is spliced into every call that
+omits it. A const is resolved where the function is declared, so every
+call receives the declaration's value:
+
+```gossamer
+const DEFAULT_TIMEOUT: i64 = 30
+
+fn connect(host: String, timeout: i64 = DEFAULT_TIMEOUT * 1000) -> String {
+    f"{host} {timeout}"
+}
+
+fn main() {
+    println(connect("db"))
+}
+```
+
+An expression that would have to be resolved separately at each call site
+is rejected:
 
 <!-- compile_fail GR0014 -->
 ```gossamer
-fn f(a: i64, b: i64 = a + 1)   // error[GR0014]: a parameter default must be a literal
+fn f(a: i64, b: i64 = a + 1)   // error[GR0014]: a parameter default must be a literal or a constant
 ```
 
 Defaults are per call site. Two calls to the same function never share a
@@ -118,6 +135,6 @@ passing every argument by position always works.
 | Code | Meaning |
 |---|---|
 | `GR0013` | A name that matches no parameter, is given twice, follows a positional argument, or is on a method whose receiver's type is not settled where several types declare it differently. |
-| `GR0014` | A parameter default that is not a literal. |
+| `GR0014` | A parameter default that is not a literal or a constant. |
 
 `gos explain GR0013` and `gos explain GR0014` expand both.

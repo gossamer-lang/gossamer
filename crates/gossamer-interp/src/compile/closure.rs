@@ -121,7 +121,11 @@ impl<'tcx> FnBuilder<'tcx> {
         // rest of the arity prefix.
         let capture_regs: Vec<Reg> = capture_names.iter().map(|_| b.alloc_reg()).collect();
         let (captured_locals, mutated_locals) =
-            crate::compile::consume::closure_captured_locals_in_expr(params, body);
+            crate::compile::consume::closure_captured_locals_in_expr(
+                params,
+                body,
+                self.method_muts,
+            );
         b.capture_cell_names =
             crate::compile::capture_cell_names(self.tcx, &captured_locals, &mutated_locals);
         // Declared parameters follow, mirroring `compile_fn`'s param

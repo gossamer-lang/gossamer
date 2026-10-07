@@ -125,6 +125,9 @@ pub(crate) struct VmCallStackFrame {
     /// The inlined call the frame stands in, when its position is inside an
     /// inlined body.
     pub(crate) inline_site: Option<u32>,
+    /// Set while a landing pad runs: the position is where the fault was
+    /// raised and stays so until the frame is gone.
+    pub(crate) frozen: bool,
 }
 
 impl VmCallStackFrame {
@@ -134,6 +137,7 @@ impl VmCallStackFrame {
             location: None,
             inline_sites: &[],
             inline_site: None,
+            frozen: false,
         }
     }
 }
@@ -323,6 +327,9 @@ pub struct Vm {
     /// Names are interned `&'static str`; recursive programs do not
     /// allocate a heap String per frame.
     pub(crate) call_stack: RefCell<Vec<VmCallStackFrame>>,
+    /// The JIT frames the fault being raised was raised in, outermost
+    /// first, until the dispatch that ran them takes the fault.
+    pub(crate) native_fault_frames: RefCell<Vec<VmCallStackFrame>>,
     /// Current Gossamer call depth for this goroutine's VM. Incremented
     /// on every `apply` entry, decremented on return.
     pub(crate) call_depth: Cell<usize>,
@@ -2579,6 +2586,7 @@ mod tests {
             i64_params: Vec::new(),
             closure_protos: Vec::new(),
             select_arms: Vec::new(),
+            unwind_table: Vec::new(),
         }
     }
 

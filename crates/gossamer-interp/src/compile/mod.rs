@@ -432,6 +432,7 @@ pub fn compile_fn(
             i64_params: Vec::new(),
             closure_protos: Vec::new(),
             select_arms: Vec::new(),
+            unwind_table: Vec::new(),
         });
     };
     let mut builder = FnBuilder::new(
@@ -453,9 +454,9 @@ pub fn compile_fn(
         builder.dispatch = Some(table);
         builder.dispatch_key = key;
     }
-    builder.consumable = consume::consumable_locals(decl);
+    builder.consumable = consume::consumable_locals(decl, method_muts);
     let (captured_locals, mutated_locals) =
-        consume::closure_captured_locals(&decl.params, &body.block);
+        consume::closure_captured_locals(&decl.params, &body.block, method_muts);
     builder.capture_cell_names = capture_cell_names(tcx, &captured_locals, &mutated_locals);
     let mut pending_cells: Vec<(String, Reg, gossamer_types::Ty)> = Vec::new();
     for (idx, param) in decl.params.iter().enumerate() {
@@ -756,6 +757,17 @@ pub(crate) struct FnBuilder<'tcx> {
     /// `continue` emit the pending frames at their exit edge before the
     /// jump. The same block-scoped LIFO contract the compiled tiers use.
     pub(crate) defer_stack: Vec<Vec<HirExpr>>,
+    /// Faulting spans of the chunk and the landing pads they continue at.
+    pub(crate) unwind_table: Vec<crate::bytecode::UnwindEntry>,
+    /// First instruction of the span whose pending deferred expressions are
+    /// the current ones.
+    pub(crate) unwind_region_start: InstrIdx,
+    /// `(frame, expression)` positions in `defer_stack` running on the exit
+    /// edge being compiled: they are no longer pending there.
+    pub(crate) running_defers: Vec<(usize, usize)>,
+    /// Nonzero while a landing pad is compiled, whose code has no spans of
+    /// its own beyond the notes the pad records.
+    pub(crate) in_unwind_pad: u32,
     pub(crate) closure_protos: Vec<crate::bytecode::ClosureProto>,
     pub(crate) select_arms: Vec<crate::bytecode::SelectArmMeta>,
     pub(crate) wide_ops: Vec<crate::bytecode::WideOp>,
@@ -900,6 +912,7 @@ mod op_expr;
 mod reg_scope;
 mod stmt;
 mod type_helpers;
+mod unwind;
 
 pub(crate) use inline::detect_inlinable_fn;
 

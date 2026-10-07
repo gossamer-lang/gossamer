@@ -570,6 +570,7 @@ fn build_artifact_key(
         "GOS_LLVM_MCPU",
         "GOS_LLVM_OPT",
         "GOS_LLVM_SPLIT_TOOLS",
+        "GOS_LLVM_UNWIND",
         "GOS_PGO_COLLECT",
         "GOS_PGO_PROFILE",
         "GOS_RUNTIME_LIB",

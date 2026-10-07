@@ -85,6 +85,12 @@ pub enum BinaryOp {
     Shl,
     /// Right shift `>>` (level 7).
     Shr,
+    /// Masking left shift `<<%`, whose amount is taken modulo the left
+    /// operand's width (level 7).
+    WrappingShl,
+    /// Masking right shift `>>%`, whose amount is taken modulo the left
+    /// operand's width (level 7).
+    WrappingShr,
     /// Bitwise AND `&` (level 8).
     BitAnd,
     /// Bitwise XOR `^` (level 9).
@@ -126,6 +132,8 @@ impl BinaryOp {
             Self::WrappingSub => "-%",
             Self::Shl => "<<",
             Self::Shr => ">>",
+            Self::WrappingShl => "<<%",
+            Self::WrappingShr => ">>%",
             Self::BitAnd => "&",
             Self::BitXor => "^",
             Self::BitOr => "|",
@@ -147,7 +155,7 @@ impl BinaryOp {
         match self {
             Self::Mul | Self::Div | Self::Rem | Self::WrappingMul => 5,
             Self::Add | Self::Sub | Self::WrappingAdd | Self::WrappingSub => 6,
-            Self::Shl | Self::Shr => 7,
+            Self::Shl | Self::Shr | Self::WrappingShl | Self::WrappingShr => 7,
             Self::BitAnd => 8,
             Self::BitXor => 9,
             Self::BitOr => 10,
@@ -222,6 +230,10 @@ pub enum AssignOp {
     WrappingSubAssign,
     /// Compound wrapping multiplication `*%=`.
     WrappingMulAssign,
+    /// Compound masking left shift `<<%=`.
+    WrappingShlAssign,
+    /// Compound masking right shift `>>%=`.
+    WrappingShrAssign,
 }
 
 impl AssignOp {
@@ -243,6 +255,8 @@ impl AssignOp {
             Self::WrappingAddAssign => "+%=",
             Self::WrappingSubAssign => "-%=",
             Self::WrappingMulAssign => "*%=",
+            Self::WrappingShlAssign => "<<%=",
+            Self::WrappingShrAssign => ">>%=",
         }
     }
 }

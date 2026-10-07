@@ -26,7 +26,7 @@ fn main() {
     let mut words = #[big, one, mid]
     words.sort()
     println("sort {:?}", words)
-    let mut cast = #[18446744073709551615 as u64, 1 as u64]
+    let mut cast = #[18446744073709551615u64, 1 as u64]
     cast.sort()
     println("cast sort {:?}", cast)
     println("binary_search {:?} {:?}", words.binary_search(big), words.binary_search(5 as u64))

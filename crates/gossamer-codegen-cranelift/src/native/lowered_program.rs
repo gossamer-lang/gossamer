@@ -542,7 +542,7 @@ pub(crate) fn emit_carrier_entry_thunk(
     module: &mut dyn Module,
     body_id: FuncId,
     body_name: &str,
-) -> Result<FuncId> {
+) -> Result<(FuncId, crate::jit_frames::FunctionFrames)> {
     let ptr_ty = module.target_config().pointer_type();
     let body_sig = module
         .declarations()
@@ -632,7 +632,20 @@ pub(crate) fn emit_carrier_entry_thunk(
     module
         .define_function(thunk_id, &mut ctx)
         .map_err(|e| anyhow!("define {static_name}: {e}"))?;
-    Ok(thunk_id)
+    let code = ctx
+        .compiled_code()
+        .ok_or_else(|| anyhow!("define {static_name}: Cranelift returned no compiled code"))?;
+    // A fault the body raises unwinds through the thunk to the trampoline,
+    // so the unwinder has to know its frame; a trace names the body instead.
+    let frames = crate::jit_frames::FunctionFrames {
+        id: thunk_id,
+        name: std::sync::Arc::from(""),
+        code_len: code.code_info().total_size,
+        unwind: code.create_unwind_info(module.isa()).ok().flatten(),
+        positions: Vec::new(),
+        spans: Vec::new(),
+    };
+    Ok((thunk_id, frames))
 }
 
 pub(super) fn emit_c_main_shim(module: &mut dyn Module, gos_main: FuncId) -> Result<()> {

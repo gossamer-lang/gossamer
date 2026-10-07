@@ -178,6 +178,7 @@ pub(super) fn collect_body_str_consts(body: &Body) -> Vec<String> {
             Terminator::Goto { .. }
             | Terminator::Return
             | Terminator::Unreachable
+            | Terminator::Resume
             | Terminator::Panic { .. }
             | Terminator::Drop { .. } => {}
         }
@@ -342,7 +343,7 @@ pub(super) fn lower_body(
     function_ids_by_name: &HashMap<String, FuncId>,
     intrinsics: &mut IntrinsicContext,
     capture_summary: &gossamer_mir::CaptureSummary,
-) -> Result<()> {
+) -> Result<Option<super::UnwindRewrite>> {
     let mut builder = FunctionBuilder::new(func, fb_ctx);
 
     intrinsics.nonescaping_iter_locals.clear();
@@ -607,6 +608,17 @@ pub(super) fn lower_body(
         }
     }
     let entry_block_id = body.blocks.first().map(|b| b.id.as_u32());
+    let mut unwind = super::unwind_calls::UnwindLowering::of(
+        body,
+        tcx,
+        module,
+        &mut builder,
+        &mut locals,
+        &intrinsics.body_cl_types,
+    );
+    if let Some(unwind) = &unwind {
+        unwind.spill_all(&mut builder, &locals);
+    }
     let mut entry_block_filled = false;
     // Each statement and terminator tags its instructions with its position
     // in `source_spans(body)`, so a frame found on the stack names its line.
@@ -617,6 +629,7 @@ pub(super) fn lower_body(
             continue;
         }
         let cl_block = blocks[&block.id.as_u32()];
+        let first_new_block = builder.func.dfg.num_blocks();
         // The entry block is already current from the parameter-
         // binding section above. Cranelift's debug-assert trips if we
         // call `switch_to_block` on an unfilled current block, so skip
@@ -631,6 +644,12 @@ pub(super) fn lower_body(
         // every function entry blocks leaf-function inlining and
         // serialises on a global lock - unacceptable in hot loops.
         entry_block_filled = true;
+
+        if let Some(unwind) = &unwind {
+            builder.set_srcloc(ir::SourceLoc::new(source_index));
+            unwind.open_pad(module, &mut builder, &locals, intrinsics, block.id)?;
+            unwind.spill_on_entry(&mut builder, &locals, block.id);
+        }
 
         if let Some(polls) = &preempt
             && polls.headers.contains(&block.id)
@@ -659,6 +678,9 @@ pub(super) fn lower_body(
                 lane_loop,
                 exit,
             )?;
+            if let Some(unwind) = &mut unwind {
+                unwind.note_lowered(block.id, cl_block, first_new_block, builder.func);
+            }
             continue;
         }
 
@@ -674,6 +696,13 @@ pub(super) fn lower_body(
                 statement,
                 intrinsics,
             )?;
+            if let Some(unwind) = &unwind {
+                unwind.spill(
+                    &mut builder,
+                    &locals,
+                    &gossamer_mir::statement_locals(statement),
+                );
+            }
         }
 
         if !cleanup_plan.is_empty() {
@@ -684,25 +713,33 @@ pub(super) fn lower_body(
 
         builder.set_srcloc(ir::SourceLoc::new(source_index));
         source_index += 1;
-        lower_terminator(
-            module,
-            &mut builder,
-            &mut locals,
-            body,
-            tcx,
-            &mut blocks,
-            &callees_by_def,
-            &callees_by_name,
-            &block.terminator,
-            intrinsics,
-            &cleanup_plan,
-            block.id.as_u32(),
-        )?;
+        if unwind.is_some() && matches!(block.terminator, Terminator::Resume) {
+            super::unwind_calls::UnwindLowering::lower_resume(module, &mut builder, intrinsics)?;
+        } else {
+            lower_terminator(
+                module,
+                &mut builder,
+                &mut locals,
+                body,
+                tcx,
+                &mut blocks,
+                &callees_by_def,
+                &callees_by_name,
+                &block.terminator,
+                intrinsics,
+                &cleanup_plan,
+                block.id.as_u32(),
+            )?;
+        }
+        if let Some(unwind) = &mut unwind {
+            unwind.note_lowered(block.id, cl_block, first_new_block, builder.func);
+        }
     }
 
+    let rewrite = unwind.map(|unwind| unwind.finish(&blocks)).transpose()?;
     builder.seal_all_blocks();
     builder.finalize(module.target_config());
-    Ok(())
+    Ok(rewrite)
 }
 
 /// The source position of every statement and terminator of `body`, in the

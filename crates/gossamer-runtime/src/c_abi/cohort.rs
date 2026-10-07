@@ -197,8 +197,9 @@ fn set_current_cohort(id: i64) {
     }
 }
 
-/// Whether `id` or any enclosing cohort is cancelled. The chain is
-/// walked iteratively so nesting depth costs heap rather than frames.
+/// Whether `id` or an enclosing cohort, up to the nearest shielded one, is
+/// cancelled. The chain is walked iteratively so nesting depth costs heap
+/// rather than frames.
 pub fn chain_is_cancelled(id: i64) -> bool {
     let mut current = id;
     while current != 0 {
@@ -209,6 +210,10 @@ pub fn chain_is_cancelled(id: i64) -> bool {
         };
         if node.cancelled.load(Ordering::Acquire) {
             return true;
+        }
+        // A shielded region is where an enclosing cancellation stops.
+        if node.uncancellable {
+            return false;
         }
         current = node.parent;
     }
@@ -419,14 +424,14 @@ pub fn leave_child(id: i64, index: i64, failure: Option<String>) {
     let Some(node) = cohort_at(id) else {
         return;
     };
-    // Read and released before the state lock is taken. The joiner reaches
-    // `mark_handle_observed` on its own goroutine and holds the state lock
-    // while it consults the same set, so this path holding only one at a
-    // time is what leaves the two no cycle to deadlock on.
-    let observed = observed_ahead(id, index);
     let cancel_now;
     {
         let mut state = node.state.lock();
+        // Read under the state lock, which a joiner holds while it finds no
+        // failure yet and records itself as ahead: either it sees the
+        // failure, or the failure sees its record. Both take the state lock
+        // first, so the two locks never form a cycle.
+        let observed = observed_ahead(id, index);
         state.outstanding -= 1;
         state.live.retain(|live| live.index != index);
         if let Some(message) = failure {

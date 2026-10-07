@@ -66,7 +66,38 @@ projection is rejected with the constraint to write (`GT0061`).
 
 A supertrait is part of its subtrait: a type that implements
 `trait BufRead: Read` implements `Read` too, and an `impl BufRead for T`
-without an `impl Read for T` is rejected (`GT0115`).
+without an `impl Read for T` is rejected (`GT0115`). A bound brings the
+supertrait's methods with it, so a `T: BufRead` parameter answers `read`:
+
+```gossamer
+trait Read {
+    fn read(&self) -> String
+}
+
+trait BufRead: Read {
+    fn line(&self) -> String
+}
+
+struct Stdin {}
+
+impl Read for Stdin {
+    fn read(&self) -> String { "data" }
+}
+
+impl BufRead for Stdin {
+    fn line(&self) -> String { "line" }
+}
+
+fn both<T: BufRead>(input: T) -> String {
+    f"{input.read()} {input.line()}"
+}
+
+fn main() {
+    println(both(Stdin {}))
+}
+```
+
+A method that two of a parameter's traits declare is ambiguous (`GT0117`).
 
 Out of scope: generic associated types (`type Item<T>`), associated types
 on `dyn Trait` (Gossamer has no trait objects), and inferring a

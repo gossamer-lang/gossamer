@@ -172,8 +172,9 @@ pub fn check_frontend(source: &str, file_id: FileId) -> FrontendOutcome {
     let exhaustiveness = phase_started.elapsed();
     if !parse_failed {
         for diag in &exhaustive_diags {
-            if matches!(diag.error, ExhaustivenessError::NonExhaustive { .. }) {
-                diagnostics.push(diag.to_diagnostic());
+            match diag.error {
+                ExhaustivenessError::NonExhaustive { .. } => diagnostics.push(diag.to_diagnostic()),
+                ExhaustivenessError::UnreachableArm => warnings.push(diag.to_diagnostic()),
             }
         }
     }

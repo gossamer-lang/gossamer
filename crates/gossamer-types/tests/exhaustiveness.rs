@@ -446,7 +446,7 @@ fn main() { println("{}", head([1, 2, 3])) }
 }
 
 #[test]
-fn range_patterns_still_require_a_catch_all_arm() {
+fn a_range_that_leaves_values_out_reports_the_uncovered_ranges() {
     let source = r#"
 fn main() {
     let n = 3
@@ -455,12 +455,9 @@ fn main() {
 }
 "#;
     let diagnostics = run(source);
-    assert!(
-        diagnostics.iter().any(|d| matches!(
-            &d.error,
-            ExhaustivenessError::NonExhaustive { missing } if missing.iter().any(|m| m == "_")
-        )),
-        "{diagnostics:?}"
+    assert_eq!(
+        missing(&diagnostics),
+        vec!["i64::MIN..=0".to_string(), "6..=i64::MAX".to_string()]
     );
 }
 
@@ -485,4 +482,82 @@ fn main() {
             .any(|d| matches!(d.error, ExhaustivenessError::NonExhaustive { .. })),
         "{diagnostics:?}"
     );
+}
+
+fn unreachable_count(diagnostics: &[gossamer_types::ExhaustivenessDiagnostic]) -> usize {
+    diagnostics
+        .iter()
+        .filter(|d| matches!(d.error, ExhaustivenessError::UnreachableArm))
+        .count()
+}
+
+fn missing(diagnostics: &[gossamer_types::ExhaustivenessDiagnostic]) -> Vec<String> {
+    diagnostics
+        .iter()
+        .find_map(|d| match &d.error {
+            ExhaustivenessError::NonExhaustive { missing } => Some(missing.clone()),
+            ExhaustivenessError::UnreachableArm => None,
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn ranges_that_tile_an_unsigned_type_are_exhaustive() {
+    let diagnostics = run(
+        "fn f(n: u8) -> i64 { match n { 0..=127 => 1, 128..=255 => 2 } }\n\
+         fn g(n: u8) -> i64 { match n { 0 => 0, 1..=254 => 1, 255 => 2 } }\n\
+         fn h(n: i8) -> i64 { match n { ..=-1 => 0, 0 => 1, 1.. => 2 } }\n",
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn a_gap_between_ranges_is_the_witness() {
+    let diagnostics = run("fn f(n: u8) -> i64 { match n { 0..=99 => 1, 200..=255 => 2 } }\n");
+    assert_eq!(missing(&diagnostics), vec!["100..=199".to_string()]);
+    let diagnostics = run("fn f(n: i64) -> i64 { match n { 0.. => 1 } }\n");
+    assert_eq!(missing(&diagnostics), vec!["i64::MIN..=-1".to_string()]);
+}
+
+#[test]
+fn guarded_ranges_do_not_count_toward_coverage() {
+    let diagnostics =
+        run("fn f(n: u8, b: bool) -> i64 { match n { 0..=127 if b => 1, 128..=255 => 2 } }\n");
+    assert_eq!(missing(&diagnostics), vec!["0..=127".to_string()]);
+}
+
+#[test]
+fn chars_are_covered_by_ranges_around_the_surrogates() {
+    let diagnostics = run(
+        "fn f(c: char) -> i64 { match c { '\\u{0}'..='\\u{d7ff}' => 1, '\\u{e000}'..='\\u{10ffff}' => 2 } }\n",
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let diagnostics = run("fn f(c: char) -> i64 { match c { 'a'..='z' => 1 } }\n");
+    assert!(non_exhaustive(&diagnostics), "{diagnostics:?}");
+}
+
+#[test]
+fn an_arm_inside_earlier_ranges_is_unreachable() {
+    let diagnostics = run(
+        "fn f(n: u8) -> i64 { match n { 0..=127 => 1, 100..=127 => 2, 128..=255 => 3, 200 => 4 } }\n",
+    );
+    assert_eq!(unreachable_count(&diagnostics), 2, "{diagnostics:?}");
+    let diagnostics = run(
+        "fn f(n: u8) -> i64 { match n { 0..=99 => 1, 100..=199 => 2, 50..=150 => 3, _ => 4 } }\n",
+    );
+    assert_eq!(unreachable_count(&diagnostics), 1, "{diagnostics:?}");
+}
+
+#[test]
+fn an_overlapping_range_that_adds_values_is_reachable() {
+    let diagnostics =
+        run("fn f(n: u8) -> i64 { match n { 0..=127 => 1, 100..=200 => 2, _ => 3 } }\n");
+    assert_eq!(unreachable_count(&diagnostics), 0, "{diagnostics:?}");
+}
+
+#[test]
+fn a_catch_all_after_ranges_that_tile_the_type_is_unreachable() {
+    let diagnostics =
+        run("fn f(n: u8) -> i64 { match n { 0..=127 => 1, 128..=255 => 2, _ => 3 } }\n");
+    assert_eq!(unreachable_count(&diagnostics), 1, "{diagnostics:?}");
 }

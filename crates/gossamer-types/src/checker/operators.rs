@@ -5,8 +5,8 @@ use super::{
     HashSet, INT_SUFFIXES, IntTy, Literal, MatchArm, Mutbl, NodeId, Pattern, PatternKind, PlaceMut,
     Resolution, Span, TryFamily, Ty, TyKind, TypeChecker, TypeDiagnostic, TypeError, UnaryOp,
     arith_op_method, assign_op_method, branch_value_span, callee_display_name, cast_allowed,
-    combinator_module_name, is_iterator_method, is_plainly_not_callable, op_trait_name,
-    operand_display, pipe_step_operation_name,
+    combinator_module_name, expr_display, is_iterator_method, is_plainly_not_callable,
+    op_trait_name, operand_display, pipe_step_operation_name,
 };
 
 impl TypeChecker<'_> {
@@ -987,6 +987,99 @@ impl TypeChecker<'_> {
         )
     }
 
+    /// The type of `!operand`, whose type is `operand_ty` (`resolved` once
+    /// resolved).
+    fn check_not(&mut self, operand: &Expr, operand_ty: Ty, resolved: Ty, span: Span) -> Ty {
+        if matches!(self.tcx.kind(resolved), Some(TyKind::Bool)) {
+            self.tcx.bool_ty()
+        } else if self.reject_operator_off_bound(resolved, "!", "not", span) {
+            self.tcx.error_ty()
+        } else if self.adt_name_of(resolved).is_some() {
+            // `!x` on a user struct / enum routes to its `not` impl
+            // (a zero-arg method on the receiver), the same way `-x`
+            // routes to `neg`. The operand node is anchored to its
+            // resolved nominal type so tier lowering dispatches the
+            // call.
+            self.record(operand.id, resolved);
+            if let Some(ret) = self.adt_op_method_ret(resolved, "not", 0) {
+                ret
+            } else {
+                let ty = self.render_public_ty(resolved);
+                self.emit(
+                    TypeError::UnresolvedOpImpl {
+                        op: "!".to_string(),
+                        trait_name: "Not".to_string(),
+                        method: "not".to_string(),
+                        ty,
+                    },
+                    span,
+                );
+                self.tcx.error_ty()
+            }
+        } else if self.is_concrete(resolved) && !self.is_integer(resolved) {
+            let lhs = self.render_public_ty(resolved);
+            self.emit(
+                TypeError::UnresolvedOp {
+                    op: "!".to_string(),
+                    lhs,
+                    rhs: String::new(),
+                },
+                span,
+            );
+            self.tcx.error_ty()
+        } else {
+            operand_ty
+        }
+    }
+
+    /// The type of `-operand`, whose type is `operand_ty` (`resolved` once
+    /// resolved).
+    fn check_neg(&mut self, operand: &Expr, operand_ty: Ty, resolved: Ty, span: Span) -> Ty {
+        // `-x` on a user struct / enum routes to its `neg` impl
+        // (a zero-arg method on the receiver); the result is that
+        // method's return type, and the operand node is anchored
+        // to its resolved nominal type so tier lowering dispatches
+        // the call. An ADT with no `impl Neg` is rejected here
+        // rather than faulting at runtime. Scalars and lane vectors
+        // keep the operand type.
+        if matches!(self.tcx.kind(resolved), Some(TyKind::Simd { .. })) {
+            operand_ty
+        } else if self.reject_operator_off_bound(resolved, "-", "neg", span) {
+            self.tcx.error_ty()
+        } else if self.adt_name_of(resolved).is_some() {
+            self.record(operand.id, resolved);
+            if let Some(ret) = self.adt_op_method_ret(resolved, "neg", 0) {
+                ret
+            } else {
+                let ty = self.render_public_ty(resolved);
+                self.emit(
+                    TypeError::UnresolvedOpImpl {
+                        op: "-".to_string(),
+                        trait_name: "Neg".to_string(),
+                        method: "neg".to_string(),
+                        ty,
+                    },
+                    span,
+                );
+                self.tcx.error_ty()
+            }
+        } else {
+            // A negated literal is one constant, which the literal
+            // range check judges whole.
+            let literal = matches!(operand.kind, ExprKind::Literal(_));
+            if !literal {
+                self.deferred_integer_operands.push((
+                    operand_ty,
+                    "-",
+                    false,
+                    expr_display(operand),
+                    span,
+                ));
+            }
+            operand_ty
+        }
+    }
+
     pub(super) fn check_unary(
         &mut self,
         op: UnaryOp,
@@ -1021,81 +1114,8 @@ impl TypeChecker<'_> {
         self.suppressed.borrow_read_conflict = previous_suppression;
         let resolved = self.infer.resolve(self.tcx, operand_ty);
         match op {
-            UnaryOp::Not => {
-                if matches!(self.tcx.kind(resolved), Some(TyKind::Bool)) {
-                    self.tcx.bool_ty()
-                } else if self.reject_operator_off_bound(resolved, "!", "not", span) {
-                    self.tcx.error_ty()
-                } else if self.adt_name_of(resolved).is_some() {
-                    // `!x` on a user struct / enum routes to its `not` impl
-                    // (a zero-arg method on the receiver), the same way `-x`
-                    // routes to `neg`. The operand node is anchored to its
-                    // resolved nominal type so tier lowering dispatches the
-                    // call.
-                    self.record(operand.id, resolved);
-                    if let Some(ret) = self.adt_op_method_ret(resolved, "not", 0) {
-                        ret
-                    } else {
-                        let ty = self.render_public_ty(resolved);
-                        self.emit(
-                            TypeError::UnresolvedOpImpl {
-                                op: "!".to_string(),
-                                trait_name: "Not".to_string(),
-                                method: "not".to_string(),
-                                ty,
-                            },
-                            span,
-                        );
-                        self.tcx.error_ty()
-                    }
-                } else if self.is_concrete(resolved) && !self.is_integer(resolved) {
-                    let lhs = self.render_public_ty(resolved);
-                    self.emit(
-                        TypeError::UnresolvedOp {
-                            op: "!".to_string(),
-                            lhs,
-                            rhs: String::new(),
-                        },
-                        span,
-                    );
-                    self.tcx.error_ty()
-                } else {
-                    operand_ty
-                }
-            }
-            UnaryOp::Neg => {
-                // `-x` on a user struct / enum routes to its `neg` impl
-                // (a zero-arg method on the receiver); the result is that
-                // method's return type, and the operand node is anchored
-                // to its resolved nominal type so tier lowering dispatches
-                // the call. An ADT with no `impl Neg` is rejected here
-                // rather than faulting at runtime. Scalars and lane vectors
-                // keep the operand type.
-                if matches!(self.tcx.kind(resolved), Some(TyKind::Simd { .. })) {
-                    operand_ty
-                } else if self.reject_operator_off_bound(resolved, "-", "neg", span) {
-                    self.tcx.error_ty()
-                } else if self.adt_name_of(resolved).is_some() {
-                    self.record(operand.id, resolved);
-                    if let Some(ret) = self.adt_op_method_ret(resolved, "neg", 0) {
-                        ret
-                    } else {
-                        let ty = self.render_public_ty(resolved);
-                        self.emit(
-                            TypeError::UnresolvedOpImpl {
-                                op: "-".to_string(),
-                                trait_name: "Neg".to_string(),
-                                method: "neg".to_string(),
-                                ty,
-                            },
-                            span,
-                        );
-                        self.tcx.error_ty()
-                    }
-                } else {
-                    operand_ty
-                }
-            }
+            UnaryOp::Not => self.check_not(operand, operand_ty, resolved, span),
+            UnaryOp::Neg => self.check_neg(operand, operand_ty, resolved, span),
             UnaryOp::RefShared | UnaryOp::RefMut => {
                 self.check_reference_unary(op, operand, operand_ty)
             }
@@ -1238,15 +1258,6 @@ impl TypeChecker<'_> {
         }
     }
 
-    pub(super) fn both_integer_types(&mut self, lhs: Ty, rhs: Ty) -> bool {
-        let lhs = self.infer.resolve(self.tcx, lhs);
-        let rhs = self.infer.resolve(self.tcx, rhs);
-        matches!(
-            (self.tcx.kind(lhs), self.tcx.kind(rhs)),
-            (Some(TyKind::Int(_)), Some(TyKind::Int(_)))
-        )
-    }
-
     /// Records what the right of `|>` is before its stage is checked: a
     /// bare path there is a callee, and a call or method call receives
     /// the piped value as its trailing argument during lowering, so the
@@ -1296,12 +1307,101 @@ impl TypeChecker<'_> {
         // explicit `as i64`: `s[i] == b'>'`. A byte literal is an `Int` value
         // on every tier, so re-typing its node to the integer operand's type
         // lets the comparison flow unchanged.
-        if !self.both_integer_types(lhs_ty, rhs_ty)
-            && !self.coerce_byte_literal_cmp(lhs, lhs_ty, rhs, rhs_ty)
-        {
+        if !self.coerce_byte_literal_cmp(lhs, lhs_ty, rhs, rhs_ty) {
             self.unify_operands(op, lhs, lhs_ty, rhs, rhs_ty, span);
         }
         self.tcx.bool_ty()
+    }
+
+    /// The type of `lhs op rhs` when an operand is a user type, answered by
+    /// its operator impl (`+` -> `add`, `|` -> `bitor`, ...): receiver-first,
+    /// so the left operand is `self`. `None` when neither operand is one.
+    fn check_operator_impl(
+        &mut self,
+        op: BinaryOp,
+        method: &'static str,
+        (lhs, lhs_ty): (&Expr, Ty),
+        (rhs, rhs_ty): (&Expr, Ty),
+        span: Span,
+    ) -> Option<Ty> {
+        if self.reject_operands_off_bound(lhs_ty, rhs_ty, op.as_str(), method, span) {
+            return Some(self.tcx.error_ty());
+        }
+        let lhs_res = self.infer.resolve(self.tcx, lhs_ty);
+        let rhs_res = self.infer.resolve(self.tcx, rhs_ty);
+        let lhs_adt = self.operand_nominal_name_of(lhs_res);
+        let rhs_adt = self.operand_nominal_name_of(rhs_res);
+        if lhs_adt.is_some() || rhs_adt.is_some() {
+            // Anchor ADT operand nodes to their resolved
+            // nominal type: tier lowering dispatches the
+            // impl-method call off the operand node's type,
+            // which otherwise may stay an inference var
+            // (enum locals in particular).
+            if lhs_adt.is_some() {
+                self.record(lhs.id, lhs_res);
+            }
+            if rhs_adt.is_some() {
+                self.record(rhs.id, rhs_res);
+            }
+            if lhs_adt.is_some()
+                && let Some((chosen, ret)) =
+                    self.rhs_typed_operator_method((lhs_res, rhs_res), method, span)
+            {
+                self.table.insert_operator_method(lhs.id, chosen);
+                return Some(ret);
+            }
+            if lhs_adt.is_some()
+                && let Some(ret) = self.adt_op_method_ret(lhs_res, method, 1)
+            {
+                // The right operand is the method's argument.
+                if let Some(param) = self
+                    .user_method_params_for(lhs_res, method)
+                    .and_then(|params| params.first().copied())
+                {
+                    self.unify(param, rhs_ty, rhs.span);
+                }
+                return Some(ret);
+            }
+            let ty = if lhs_adt.is_some() { lhs_res } else { rhs_res };
+            // An impl answers one right-hand type, so a right
+            // operand of another type names the one to write.
+            let trait_name = if lhs_adt.is_some() && lhs_res != rhs_res {
+                let rhs_text = self.render_public_ty(rhs_res);
+                format!("{}<{rhs_text}>", op_trait_name(method))
+            } else {
+                op_trait_name(method).to_string()
+            };
+            let ty = self.render_public_ty(ty);
+            self.emit(
+                TypeError::UnresolvedOpImpl {
+                    op: op.as_str().to_string(),
+                    trait_name,
+                    method: method.to_string(),
+                    ty,
+                },
+                span,
+            );
+            return Some(self.tcx.error_ty());
+        }
+        None
+    }
+
+    /// The type of a shift: the amount is a count of bits, so it may be any
+    /// integer type, and the result is the shifted operand's type.
+    fn check_shift(
+        &mut self,
+        op: BinaryOp,
+        (lhs, lhs_ty): (&Expr, Ty),
+        (rhs, rhs_ty): (&Expr, Ty),
+    ) -> Ty {
+        if let Some(amount) = literal_int_spelling(rhs) {
+            self.deferred_shift_amounts.push((lhs_ty, amount, rhs.span));
+        }
+        for (ty, operand) in [(lhs_ty, lhs), (rhs_ty, rhs)] {
+            self.deferred_integer_operands
+                .push((ty, op.as_str(), false, None, operand.span));
+        }
+        lhs_ty
     }
 
     pub(super) fn check_binary(&mut self, op: BinaryOp, lhs: &Expr, rhs: &Expr, span: Span) -> Ty {
@@ -1331,6 +1431,12 @@ impl TypeChecker<'_> {
             BinaryOp::WrappingAdd | BinaryOp::WrappingSub | BinaryOp::WrappingMul => {
                 self.check_wrapping_operands(op, lhs, lhs_ty, rhs, rhs_ty, span)
             }
+            // A masking shift's amount is a count of any integer type, as a
+            // plain shift's is; the result is the shifted operand's type.
+            BinaryOp::WrappingShl | BinaryOp::WrappingShr => {
+                self.require_wrapping_integer(op.as_str(), rhs_ty, lhs_ty, rhs.span);
+                self.require_wrapping_integer(op.as_str(), lhs_ty, rhs_ty, span)
+            }
             _ => {
                 // String concatenation accepts a borrowed RHS:
                 // `"hello, " + &name` (the documented spelling). Peel
@@ -1354,77 +1460,38 @@ impl TypeChecker<'_> {
                 // operand with no such impl - or an ADT appearing only on
                 // the right of a non-ADT left operand - is rejected here
                 // rather than miscompiling to a runtime fault.
-                if let Some(method) = arith_op_method(op) {
-                    if self.reject_operands_off_bound(lhs_ty, rhs_ty, op.as_str(), method, span) {
-                        return self.tcx.error_ty();
-                    }
-                    let lhs_res = self.infer.resolve(self.tcx, lhs_ty);
-                    let rhs_res = self.infer.resolve(self.tcx, rhs_ty);
-                    let lhs_adt = self.operand_nominal_name_of(lhs_res);
-                    let rhs_adt = self.operand_nominal_name_of(rhs_res);
-                    if lhs_adt.is_some() || rhs_adt.is_some() {
-                        // Anchor ADT operand nodes to their resolved
-                        // nominal type: tier lowering dispatches the
-                        // impl-method call off the operand node's type,
-                        // which otherwise may stay an inference var
-                        // (enum locals in particular).
-                        if lhs_adt.is_some() {
-                            self.record(lhs.id, lhs_res);
-                        }
-                        if rhs_adt.is_some() {
-                            self.record(rhs.id, rhs_res);
-                        }
-                        if lhs_adt.is_some()
-                            && let Some((chosen, ret)) =
-                                self.rhs_typed_operator_method((lhs_res, rhs_res), method, span)
-                        {
-                            self.table.insert_operator_method(lhs.id, chosen);
-                            return ret;
-                        }
-                        if lhs_adt.is_some()
-                            && let Some(ret) = self.adt_op_method_ret(lhs_res, method, 1)
-                        {
-                            // The right operand is the method's argument.
-                            if let Some(param) = self
-                                .user_method_params_for(lhs_res, method)
-                                .and_then(|params| params.first().copied())
-                            {
-                                self.unify(param, rhs_ty, rhs.span);
-                            }
-                            return ret;
-                        }
-                        let ty = if lhs_adt.is_some() { lhs_res } else { rhs_res };
-                        // An impl answers one right-hand type, so a right
-                        // operand of another type names the one to write.
-                        let trait_name = if lhs_adt.is_some() && lhs_res != rhs_res {
-                            let rhs_text = self.render_public_ty(rhs_res);
-                            format!("{}<{rhs_text}>", op_trait_name(method))
-                        } else {
-                            op_trait_name(method).to_string()
-                        };
-                        let ty = self.render_public_ty(ty);
-                        self.emit(
-                            TypeError::UnresolvedOpImpl {
-                                op: op.as_str().to_string(),
-                                trait_name,
-                                method: method.to_string(),
-                                ty,
-                            },
-                            span,
-                        );
-                        return self.tcx.error_ty();
-                    }
+                if let Some(method) = arith_op_method(op)
+                    && let Some(ty) =
+                        self.check_operator_impl(op, method, (lhs, lhs_ty), (rhs, rhs_ty), span)
+                {
+                    return ty;
+                }
+                // A shift amount is a count of bits, so it may be any integer
+                // type; the result is the shifted operand's type.
+                if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
+                    return self.check_shift(op, (lhs, lhs_ty), (rhs, rhs_ty));
                 }
                 // A byte literal joins integer arithmetic without an explicit
                 // `as i64` - `s[i] - b'0'` - through the same node re-typing
                 // the comparison arms apply; the result takes the integer
                 // operand's type.
                 let lhs_is_byte = matches!(&lhs.kind, ExprKind::Literal(Literal::Byte(_)));
-                if self.coerce_byte_literal_cmp(lhs, lhs_ty, rhs, rhs_ty) {
-                    return if lhs_is_byte { rhs_ty } else { lhs_ty };
+                let result = if self.coerce_byte_literal_cmp(lhs, lhs_ty, rhs, rhs_ty) {
+                    if lhs_is_byte { rhs_ty } else { lhs_ty }
+                } else {
+                    self.unify_operands(op, lhs, lhs_ty, rhs, rhs_ty, span);
+                    lhs_ty
+                };
+                if let Some(allows_bool) = bit_operator_allows_bool(op) {
+                    self.deferred_integer_operands.push((
+                        result,
+                        op.as_str(),
+                        allows_bool,
+                        None,
+                        span,
+                    ));
                 }
-                self.unify_operands(op, lhs, lhs_ty, rhs, rhs_ty, span);
-                lhs_ty
+                result
             }
         }
     }
@@ -1504,6 +1571,77 @@ impl TypeChecker<'_> {
         );
     }
 
+    /// Reports each deferred operand whose settled type the operator cannot
+    /// apply to: `-` on an unsigned integer (GT0001), and a bitwise or shift
+    /// operator on anything but an integer or, for `&` `|` `^`, a `bool`
+    /// (GT0003). An operand still unsettled, or already an error, is left
+    /// to the diagnostics that unsettled it; a user type's operator impl was
+    /// chosen before any operand was deferred.
+    pub(super) fn check_deferred_integer_operands(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred_integer_operands);
+        for (ty, op, allows_bool, operand, span) in deferred {
+            let resolved = self.deep_resolve(ty);
+            let resolved = self.peel_refs(resolved);
+            match self.tcx.kind(resolved).cloned() {
+                Some(TyKind::Int(int_ty)) if op == "-" && !int_ty.is_signed() => {
+                    self.emit(
+                        TypeError::UnsignedNegation {
+                            ty: int_ty.as_str().to_string(),
+                            operand,
+                        },
+                        span,
+                    );
+                }
+                Some(
+                    TyKind::Int(_)
+                    | TyKind::Var(_)
+                    | TyKind::Error
+                    | TyKind::Never
+                    | TyKind::Param { .. },
+                )
+                | None => {}
+                Some(TyKind::Bool) if allows_bool => {}
+                Some(_) if op == "-" => {}
+                Some(_) => {
+                    let lhs = self.render_public_ty(resolved);
+                    self.emit(
+                        TypeError::UnresolvedOp {
+                            op: op.to_string(),
+                            lhs: lhs.clone(),
+                            rhs: lhs,
+                        },
+                        span,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Reports GT0116 for each `<<` / `>>` whose literal amount falls outside
+    /// `0..BITS` of the shifted type inference settled on.
+    pub(super) fn check_deferred_shift_amounts(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred_shift_amounts);
+        for (ty, amount, span) in deferred {
+            let resolved = self.deep_resolve(ty);
+            let Some(TyKind::Int(int_ty)) = self.tcx.kind(resolved).cloned() else {
+                continue;
+            };
+            let bits = int_bits(int_ty);
+            let in_range = super::literals::parse_int_magnitude(&amount)
+                .is_some_and(|magnitude| !amount.starts_with('-') && magnitude < u128::from(bits));
+            if !in_range {
+                self.emit(
+                    TypeError::ShiftAmountOutOfRange {
+                        amount,
+                        ty: int_ty.as_str().to_string(),
+                        bits,
+                    },
+                    span,
+                );
+            }
+        }
+    }
+
     /// Unifies two operand types, reporting an integer paired with a float
     /// as the cast the reader has to write instead of a bare mismatch.
     pub(super) fn unify_operands(
@@ -1541,6 +1679,13 @@ impl TypeChecker<'_> {
         let op = op.as_str();
         let (left_text, right_text) = (operand_display(lhs), operand_display(rhs));
         let cast = match (left_kind, right_kind) {
+            (TyKind::Int(left_int), TyKind::Int(right_int)) if left_int != right_int => {
+                return Some(integer_operand_mismatch(
+                    op,
+                    (lhs, left_int),
+                    (rhs, right_int),
+                ));
+            }
             (TyKind::Int(_), TyKind::Float(_)) => {
                 format!("{left_text} as {found} {op} {right_text}")
             }
@@ -2321,6 +2466,54 @@ impl TypeChecker<'_> {
         matches!(self.tcx.kind(vr), Some(TyKind::String))
     }
 
+    /// Checks the compound assignments only an integer place answers: the
+    /// wrapping forms and the shifts. Whether `op` was one of them.
+    fn check_integer_compound_assign(
+        &mut self,
+        op: gossamer_ast::AssignOp,
+        (place, place_ty): (&Expr, Ty),
+        (value, value_ty): (&Expr, Ty),
+    ) -> bool {
+        if matches!(
+            op,
+            gossamer_ast::AssignOp::WrappingAddAssign
+                | gossamer_ast::AssignOp::WrappingSubAssign
+                | gossamer_ast::AssignOp::WrappingMulAssign
+        ) {
+            self.unify(place_ty, value_ty, value.span);
+            self.require_wrapping_integer(op.as_str(), place_ty, value_ty, place.span);
+            return true;
+        }
+        // A shift amount is a count of bits of any integer type, so it is not
+        // unified with the place it shifts.
+        if matches!(
+            op,
+            gossamer_ast::AssignOp::WrappingShlAssign | gossamer_ast::AssignOp::WrappingShrAssign
+        ) {
+            self.require_wrapping_integer(op.as_str(), value_ty, place_ty, value.span);
+            self.require_wrapping_integer(op.as_str(), place_ty, value_ty, place.span);
+            return true;
+        }
+        if matches!(
+            op,
+            gossamer_ast::AssignOp::ShlAssign | gossamer_ast::AssignOp::ShrAssign
+        ) && self
+            .adt_name_of(self.infer.resolve(self.tcx, place_ty))
+            .is_none()
+        {
+            if let Some(amount) = literal_int_spelling(value) {
+                self.deferred_shift_amounts
+                    .push((place_ty, amount, value.span));
+            }
+            for (ty, operand) in [(place_ty, place), (value_ty, value)] {
+                self.deferred_integer_operands
+                    .push((ty, op.as_str(), false, None, operand.span));
+            }
+            return true;
+        }
+        false
+    }
+
     pub(super) fn check_assign(
         &mut self,
         place: &Expr,
@@ -2375,14 +2568,7 @@ impl TypeChecker<'_> {
         {
             return self.tcx.unit();
         }
-        if matches!(
-            op,
-            gossamer_ast::AssignOp::WrappingAddAssign
-                | gossamer_ast::AssignOp::WrappingSubAssign
-                | gossamer_ast::AssignOp::WrappingMulAssign
-        ) {
-            self.unify(place_ty, value_ty, value.span);
-            self.require_wrapping_integer(op.as_str(), place_ty, value_ty, place.span);
+        if self.check_integer_compound_assign(op, (place, place_ty), (value, value_ty)) {
             return self.tcx.unit();
         }
         // Compound assignment on a user struct / enum desugars through the
@@ -2877,6 +3063,186 @@ fn place_key(expr: &Expr) -> Option<String> {
             op: UnaryOp::Deref,
             operand,
         } => Some(format!("*{}", place_key(operand)?)),
+        _ => None,
+    }
+}
+
+/// Bit width of an integer type; `isize` and `usize` are a machine word,
+/// which every Gossamer target holds in 64 bits.
+const fn int_bits(ty: IntTy) -> u32 {
+    match ty {
+        IntTy::I8 | IntTy::U8 => 8,
+        IntTy::I16 | IntTy::U16 => 16,
+        IntTy::I32 | IntTy::U32 => 32,
+        IntTy::I64 | IntTy::U64 | IntTy::Isize | IntTy::Usize => 64,
+        IntTy::I128 | IntTy::U128 => 128,
+    }
+}
+
+/// Whether every value of `from` is a value of `to`.
+const fn int_holds(to: IntTy, from: IntTy) -> bool {
+    match (to.is_signed(), from.is_signed()) {
+        (true, true) | (false, false) => int_bits(to) >= int_bits(from),
+        (true, false) => int_bits(to) > int_bits(from),
+        (false, true) => false,
+    }
+}
+
+/// The narrowest signed type holding every value of both, when one exists.
+fn int_common_type(a: IntTy, b: IntTy) -> Option<IntTy> {
+    [IntTy::I16, IntTy::I32, IntTy::I64]
+        .into_iter()
+        .find(|candidate| int_holds(*candidate, a) && int_holds(*candidate, b))
+}
+
+/// An operand a postfix `as` binds to whole; any other needs parentheses.
+fn is_cast_atom(expr: &Expr) -> bool {
+    matches!(
+        expr.kind,
+        ExprKind::Literal(_)
+            | ExprKind::Path(_)
+            | ExprKind::Call { .. }
+            | ExprKind::MethodCall { .. }
+            | ExprKind::FieldAccess { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Try(_)
+    )
+}
+
+/// The type holding every value of both integer types: one of them when it
+/// already does, else the narrowest signed type wide enough.
+fn int_target(left: IntTy, right: IntTy) -> Option<IntTy> {
+    if int_holds(left, right) {
+        Some(left)
+    } else if int_holds(right, left) {
+        Some(right)
+    } else {
+        int_common_type(left, right)
+    }
+}
+
+/// The text inserted before and after an operand to cast it to `target`.
+fn cast_insertions(operand: &Expr, target: IntTy) -> (String, String) {
+    if is_cast_atom(operand) {
+        (String::new(), format!(" as {}", target.as_str()))
+    } else {
+        ("(".to_string(), format!(") as {}", target.as_str()))
+    }
+}
+
+/// `text` with the insertions around it.
+fn with_insertions(text: &str, (before, after): &(String, String)) -> String {
+    format!("{before}{text}{after}")
+}
+
+/// The GT0001 diagnostic for two integer operands of different types, with
+/// the casts to the type that holds every value of both.
+pub(super) fn integer_operand_mismatch(
+    op: &str,
+    (lhs, left): (&Expr, IntTy),
+    (rhs, right): (&Expr, IntTy),
+) -> TypeError {
+    let target = int_target(left, right);
+    let mut casts = Vec::new();
+    let mut rendered = Vec::new();
+    for (operand, ty) in [(lhs, left), (rhs, right)] {
+        let text = expr_display(operand);
+        match target {
+            Some(target) if target != ty => {
+                let insertions = cast_insertions(operand, target);
+                rendered.push(text.map(|text| with_insertions(&text, &insertions)));
+                casts.push((operand.span, insertions.0, insertions.1));
+            }
+            _ => rendered.push(text),
+        }
+    }
+    let rewritten = match (&rendered[0], &rendered[1]) {
+        (Some(left_text), Some(right_text)) if !casts.is_empty() => {
+            Some(format!("{left_text} {op} {right_text}"))
+        }
+        _ => None,
+    };
+    TypeError::IntegerOperandMismatch {
+        op: op.to_string(),
+        lhs: left.as_str().to_string(),
+        rhs: right.as_str().to_string(),
+        fix: Box::new(crate::error::IntegerCastFix {
+            target: target.map(|target| target.as_str().to_string()),
+            casts,
+            rewritten,
+        }),
+    }
+}
+
+/// The GT0001 diagnostic for an integer method (`a.min(b)`) whose argument
+/// has another integer type than its receiver. A cast receiver is wrapped
+/// whole, so the method still applies to the cast value.
+pub(super) fn integer_method_mismatch(
+    method: &str,
+    (receiver, receiver_ty): (&Expr, IntTy),
+    (args, mismatched, arg_ty): (&[Expr], usize, IntTy),
+) -> TypeError {
+    let target = int_target(receiver_ty, arg_ty);
+    let mut casts = Vec::new();
+    let mut receiver_text = expr_display(receiver);
+    let mut arg_texts: Vec<Option<String>> = args.iter().map(expr_display).collect();
+    if let Some(target) = target {
+        if target != receiver_ty {
+            let insertions = ("(".to_string(), format!(" as {})", target.as_str()));
+            receiver_text = receiver_text.map(|text| with_insertions(&text, &insertions));
+            casts.push((receiver.span, insertions.0, insertions.1));
+        }
+        if target != arg_ty {
+            let arg = &args[mismatched];
+            let insertions = cast_insertions(arg, target);
+            arg_texts[mismatched] = arg_texts[mismatched]
+                .take()
+                .map(|text| with_insertions(&text, &insertions));
+            casts.push((arg.span, insertions.0, insertions.1));
+        }
+    }
+    let arg_texts: Option<Vec<String>> = arg_texts.into_iter().collect();
+    let rewritten = match (receiver_text, arg_texts) {
+        (Some(receiver), Some(args)) if !casts.is_empty() => {
+            Some(format!("{receiver}.{method}({})", args.join(", ")))
+        }
+        _ => None,
+    };
+    TypeError::IntegerOperandMismatch {
+        op: format!(".{method}"),
+        lhs: receiver_ty.as_str().to_string(),
+        rhs: arg_ty.as_str().to_string(),
+        fix: Box::new(crate::error::IntegerCastFix {
+            target: target.map(|target| target.as_str().to_string()),
+            casts,
+            rewritten,
+        }),
+    }
+}
+
+/// For a bitwise operator, whether it also applies to `bool` (it does);
+/// `None` for every other operator.
+fn bit_operator_allows_bool(op: BinaryOp) -> Option<bool> {
+    match op {
+        BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => Some(true),
+        _ => None,
+    }
+}
+
+/// The spelling of an integer literal, negated or not, with no suffix.
+fn literal_int_spelling(expr: &Expr) -> Option<String> {
+    match &expr.kind {
+        ExprKind::Literal(Literal::Int(text))
+            if !INT_SUFFIXES
+                .iter()
+                .any(|(suffix, _)| text.ends_with(suffix)) =>
+        {
+            Some(text.clone())
+        }
+        ExprKind::Unary {
+            op: UnaryOp::Neg,
+            operand,
+        } => literal_int_spelling(operand).map(|text| format!("-{text}")),
         _ => None,
     }
 }

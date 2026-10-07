@@ -147,6 +147,18 @@ impl<'a> Lowerer<'a> {
         index: String,
     ) {
         writeln!(self.out, "{label}:").unwrap();
+        // A body with landing pads raises each failed check where it fails,
+        // so the raise unwinds to the pad its own code reaches.
+        if self.unwind.is_some() {
+            declare_rt(&mut self.runtime_refs, "gos_rt_panic_check");
+            writeln!(
+                self.out,
+                "  call void @gos_rt_panic_check(i64 {kind}, ptr {seq}, i64 {index})"
+            )
+            .unwrap();
+            writeln!(self.out, "  unreachable").unwrap();
+            return;
+        }
         writeln!(self.out, "  br label %{CHECK_FAIL_LABEL}").unwrap();
         self.check_fail_edges.push(CheckFailEdge {
             label,
@@ -228,6 +240,12 @@ impl<'a> Lowerer<'a> {
             gossamer_mir::AssertMessage::BoundsCheck { .. } => "index out of bounds\n",
             gossamer_mir::AssertMessage::Overflow => "arithmetic overflow\n",
             gossamer_mir::AssertMessage::DivideByZero => "divide by zero\n",
+            gossamer_mir::AssertMessage::ShiftOverflow { left: true } => {
+                "attempt to shift left with overflow\n"
+            }
+            gossamer_mir::AssertMessage::ShiftOverflow { left: false } => {
+                "attempt to shift right with overflow\n"
+            }
         };
         declare_rt(&mut self.runtime_refs, "gos_rt_panic");
         // Intern the message through the module-scoped string pool so a

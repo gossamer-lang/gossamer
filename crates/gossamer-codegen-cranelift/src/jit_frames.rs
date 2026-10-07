@@ -79,6 +79,11 @@ pub(crate) fn register(
     );
     let mut registry = REGISTRY.write();
     for (start, frames) in functions {
+        // A catching thunk has no name: the unwinder crosses its frame, and
+        // a trace names the body that made the call instead.
+        if frames.name.is_empty() {
+            continue;
+        }
         registry.push(Registered {
             start,
             end: start + frames.code_len as usize,

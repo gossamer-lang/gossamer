@@ -1,0 +1,26 @@
+// `<<%` and `>>%` take the shift amount modulo the left operand's width, at
+// that type's width; `<<` and `>>` with an amount in range agree with them.
+
+use std::env
+
+fn main() {
+    let base = env::args().len()
+    let x: i64 = 1
+    let y: u8 = 3
+    let s: i8 = -128
+    let w: i16 = -4
+    println("{} {} {}", x <<% (base + 65), y <<% 9, s >>% 9)
+    println("{} {}", x <<% (base - 1), 255 as u8 >>% 12)
+    let mut e: u32 = 1
+    e <<%= 33
+    let mut f = w
+    f >>%= 17
+    println("{} {}", e, f)
+    let n = base + 5
+    println("{} {} {}", x << n, y << 7, w >> 15)
+    let mut acc: u64 = 0
+    for i in 0..70 {
+        acc ^= 1u64 <<% i
+    }
+    println("{}", acc)
+}

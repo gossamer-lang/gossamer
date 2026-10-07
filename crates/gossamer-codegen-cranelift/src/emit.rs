@@ -186,6 +186,9 @@ fn emit_terminator(out: &mut String, terminator: &Terminator) {
         Terminator::Unreachable => {
             out.push_str("    unreachable\n");
         }
+        Terminator::Resume => {
+            out.push_str("    resume\n");
+        }
         Terminator::Panic { message } => {
             let _ = writeln!(out, "    panic {message:?}");
         }

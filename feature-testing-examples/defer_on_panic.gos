@@ -1,0 +1,101 @@
+// A panic runs the deferred expressions pending in every frame it leaves,
+// innermost block first, before the goroutine ends: a lock released in a
+// `defer` is released, and a panic a deferred expression raises while
+// another unwinds becomes a note on the first.
+
+use std::errors
+use std::sync
+
+fn risky(m: sync::Mutex, n: i64) -> i64 {
+    m.lock()
+    defer m.unlock()
+    if n == 2 {
+        panic("worker 2 failed")
+    }
+    n * 10
+}
+
+fn noisy() {
+    defer println("noisy defer ran")
+    defer panic("defer exploded")
+    panic("noisy failed")
+}
+
+fn inner(n: i64) -> i64 {
+    defer println("inner defer")
+    let xs = #[1, 2, 3]
+    xs[n]
+}
+
+fn middle(n: i64) -> i64 {
+    let label = "middle"
+    defer println("{} defer", label)
+    {
+        defer println("block defer")
+        println("before")
+    }
+    defer println("second middle defer")
+    inner(n) + 1
+}
+
+fn record(i: i64, log: &mut Vec<i64>) -> i64 {
+    defer log.push(i)
+    if i == 4 {
+        panic("record {} failed", i)
+    }
+    i
+}
+
+fn checksum(xs: Vec<i64>, limit: i64) -> i64 {
+    defer println("checksum defer ran")
+    let mut total = 0
+    for x in xs {
+        total += x
+        if total > limit {
+            panic("checksum passed {}", limit)
+        }
+    }
+    total
+}
+
+fn guarded(xs: Vec<i64>) -> i64 {
+    defer println("guarded defer ran")
+    defer panic("guarded defer exploded")
+    let mut sum = 0
+    for x in xs {
+        sum += x
+    }
+    checksum(xs, sum - 1)
+}
+
+fn run() -> Result<(), errors::Error> {
+    let m = sync::Mutex::new()
+    cohort(policy: Policy::CollectAll) {
+        let a = spawn(|| risky(m, 1))
+        let b = spawn(|| risky(m, 2))
+        let c = spawn(|| risky(m, 3))
+        println("{} {} {}", a.join(), b.join(), c.join())
+        let d = spawn(|| noisy())
+        println("{}", d.join())
+        let e = spawn(|| middle(10))
+        println("{}", e.join())
+    }
+}
+
+fn main() {
+    println("{}", checksum(#[1, 2, 3], 100))
+    println("{}", run())
+    let m = sync::Mutex::new()
+    let h = spawn(|| risky(m, 2))
+    println("{}", h.join())
+    let g = spawn(|| guarded(#[1, 2, 3]))
+    println("{}", g.join())
+    m.lock()
+    println("main took the lock")
+    m.unlock()
+    let mut log = #[]
+    defer println("main defer saw {:?}", log)
+    for i in 0..10 {
+        record(i, &mut log)
+    }
+}

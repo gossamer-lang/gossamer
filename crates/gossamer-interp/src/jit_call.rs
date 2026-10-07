@@ -46,8 +46,8 @@ use gossamer_codegen_cranelift::{ArrayElem, JitFn, JitKind, TupleElem};
 use gossamer_runtime::c_abi as rt;
 
 use crate::value::{
-    NativeEnumShape, NativeFieldKind, NativeFieldPlacement, NativeStructShape, SmolStr,
-    StructInner, ThreadConfinedCell, Value, VariantInner, native_struct_shape,
+    NativeEnumShape, NativeFieldKind, NativeFieldPlacement, NativeStructShape, RuntimeError,
+    SmolStr, StructInner, ThreadConfinedCell, Value, VariantInner, native_struct_shape,
 };
 
 /// One trampoline-owned native object built for an aggregate parameter,
@@ -1844,19 +1844,34 @@ pub(crate) enum Dispatch {
     /// unsupported, or a runtime arg's type didn't match the JIT
     /// signature). The caller falls back to the bytecode chunk.
     Fallback,
-    /// The JIT body raised a Gossamer fault, which ends the goroutine
-    /// running it exactly as the bytecode's own panic would.
-    Panic(String),
+    /// The JIT body raised a Gossamer fault, which unwinds the bytecode
+    /// frames above it exactly as the bytecode's own fault would.
+    Panic(RuntimeError),
 }
 
 /// The dispatch a payload unwound out of a JIT body answers: the fault a
 /// Gossamer panic names, or a fallback for a fault of the host's own.
 fn unwound_dispatch(payload: &(dyn std::any::Any + Send)) -> Dispatch {
+    if let Some(fault) = gossamer_runtime::c_abi::panic::take_deferred_fault(payload) {
+        return Dispatch::Panic(native_fault_error(fault));
+    }
     if let Some(fault) = payload.downcast_ref::<gossamer_coro::GosPanic>() {
-        return Dispatch::Panic(fault.0.clone());
+        return Dispatch::Panic(RuntimeError::Panic(fault.0.clone()));
     }
     eprintln!("jit: panic inside JIT-compiled body; falling back to bytecode");
     Dispatch::Fallback
+}
+
+/// The bytecode fault a fault a JIT body raised is.
+fn native_fault_error(fault: gossamer_runtime::c_abi::panic::DeferredFault) -> RuntimeError {
+    match fault.code.as_str() {
+        "GX0005" => RuntimeError::Panic(fault.text),
+        "GX0004" => RuntimeError::Arithmetic(fault.text),
+        code => RuntimeError::Foreign {
+            code: crate::value::intern_type_name(code),
+            message: format!("{}{}", fault.prefix, fault.text),
+        },
+    }
 }
 
 const MAX_ARGS: usize = 12;
@@ -3626,9 +3641,13 @@ pub(crate) fn invoke_prepared(p: &Prepared, args: &[Value], graph_cache: &GraphC
     // `(arity, shape, ret)` triple, so the reified `extern "C"`
     // signature matches the cranelift-emitted entry. `catch_unwind` turns a
     // panic unwound through the boundary into the dispatch it answers.
+    // A fault the body raises unwinds to here, so the bytecode frames above
+    // it run their deferred expressions before it is reported.
+    let deferred = gossamer_runtime::c_abi::panic::DeferredFaults::enter();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
         (p.stub)(jit.ptr, &slots[..n], p.ret_kind)
     }));
+    drop(deferred);
     match outcome {
         Ok(Some(value)) => {
             if let Some(shape_idx) = p.enum_return {
@@ -3923,9 +3942,13 @@ fn invoke_prepared_native(p: &Prepared, args: &[Value], graph_cache: &GraphCache
     // ret)` triple; native aggregate slots cross as pointer-sized i64
     // values matching the flat-ABI signature. `catch_unwind` turns a
     // boundary panic into the dispatch it answers.
+    // A fault the body raises unwinds to here, so the bytecode frames above
+    // it run their deferred expressions before it is reported.
+    let deferred = gossamer_runtime::c_abi::panic::DeferredFaults::enter();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
         (p.stub)(jit.ptr, &slots[..n_call], p.ret_kind)
     }));
+    drop(deferred);
     let raw = match outcome {
         Ok(Some(v)) => v,
         Ok(None) => {

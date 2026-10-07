@@ -324,6 +324,10 @@ pub enum Terminator {
         /// Success continuation.
         target: BlockId,
     },
+    /// Ends a landing pad: the fault the frame is unwinding with continues
+    /// to its callers once the pad has run the pending deferred
+    /// expressions.
+    Resume,
     /// Compiler knows this block is never reached at runtime.
     Unreachable,
     /// Unconditional panic: terminates the program with `message`.
@@ -359,6 +363,11 @@ pub enum AssertMessage {
     Overflow,
     /// Integer divide/modulo by zero.
     DivideByZero,
+    /// A shift amount outside `0..BITS` of the shifted type; `left` for `<<`.
+    ShiftOverflow {
+        /// Whether the shift is `<<` rather than `>>`.
+        left: bool,
+    },
 }
 
 impl AssertMessage {
@@ -367,7 +376,7 @@ impl AssertMessage {
     pub fn operands(&self) -> impl Iterator<Item = &Operand> {
         let pair = match self {
             Self::BoundsCheck { index, seq } => Some([index, seq]),
-            Self::Overflow | Self::DivideByZero => None,
+            Self::Overflow | Self::DivideByZero | Self::ShiftOverflow { .. } => None,
         };
         pair.into_iter().flatten()
     }
@@ -376,7 +385,7 @@ impl AssertMessage {
     pub fn operands_mut(&mut self) -> impl Iterator<Item = &mut Operand> {
         let pair = match self {
             Self::BoundsCheck { index, seq } => Some([index, seq]),
-            Self::Overflow | Self::DivideByZero => None,
+            Self::Overflow | Self::DivideByZero | Self::ShiftOverflow { .. } => None,
         };
         pair.into_iter().flatten()
     }
@@ -587,6 +596,9 @@ pub enum RawIntrinsic {
     /// Internal marker used to keep bytecode-only user iterators out of native
     /// promotion.
     JitUnsupportedUserIterator,
+    /// `gos_unwind_probe()`: the value a body's entry switches on to reach
+    /// its landing pads, which is never one of their arms when it runs.
+    UnwindProbe,
     /// A call to a function declared in an `unsafe extern "C"` block; the
     /// name carries the call's [`ForeignCall`] parts.
     Foreign,
@@ -1101,6 +1113,7 @@ impl RawIntrinsic {
             "gos_fn_addr" => Self::FnAddr,
             "gos_rt_weak_opt_payload" => Self::WeakOptPayload,
             "gos_jit_unsupported_user_iterator" => Self::JitUnsupportedUserIterator,
+            "gos_unwind_probe" => Self::UnwindProbe,
             "f64.sqrt" | "sqrt" => Self::F64Math(F64MathIntrinsic::Sqrt),
             "f64.sin" | "sin" => Self::F64Math(F64MathIntrinsic::Sin),
             "f64.cos" | "cos" => Self::F64Math(F64MathIntrinsic::Cos),
@@ -1144,7 +1157,9 @@ impl RawIntrinsic {
             | Self::F64Math(_) => RawIntrinsicArity::Exact(1),
             Self::Alloc => RawIntrinsicArity::Range { min: 0, max: 1 },
             Self::RcAlloc | Self::RcAllocTagged => RawIntrinsicArity::Range { min: 0, max: 2 },
-            Self::JitUnsupportedUserIterator | Self::ForeignStatic => RawIntrinsicArity::Exact(0),
+            Self::JitUnsupportedUserIterator | Self::UnwindProbe | Self::ForeignStatic => {
+                RawIntrinsicArity::Exact(0)
+            }
             Self::Foreign => {
                 RawIntrinsicArity::Exact(ForeignCall::parse(name).map_or(usize::MAX, |call| {
                     call.param_list().len()

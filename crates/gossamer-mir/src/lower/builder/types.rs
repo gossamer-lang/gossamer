@@ -115,6 +115,9 @@ impl<'a> Builder<'a> {
             region_depth: 0,
             deferred_auto_region_collections: Vec::new(),
             defer_stack: Vec::new(),
+            unwind: None,
+            running_defers: Vec::new(),
+            in_unwind_pad: 0,
         }
     }
 

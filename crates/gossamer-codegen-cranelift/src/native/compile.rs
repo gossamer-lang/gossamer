@@ -900,7 +900,7 @@ pub(crate) fn lower_program_full(
                      fb_ctx: &mut FunctionBuilderContext,
                      body: &Body,
                      bct: &Vec<Option<ir::Type>>|
-     -> Result<(FuncId, String, Function)> {
+     -> Result<(FuncId, String, Function, Option<UnwindRewrite>)> {
         let id = function_ids_by_name
             .get(&body.name)
             .copied()
@@ -908,7 +908,7 @@ pub(crate) fn lower_program_full(
         intrinsics.body_cl_types.clone_from(bct);
         let signature = build_signature_from_types(offline, body, tcx, bct);
         let mut func = Function::with_name_signature(UserFuncName::user(0, id.as_u32()), signature);
-        lower_body(
+        let unwind = lower_body(
             offline,
             &mut func,
             fb_ctx,
@@ -920,9 +920,9 @@ pub(crate) fn lower_program_full(
             &capture_summary,
         )
         .map_err(|e| e.context(FailedBody(body.name.clone())))?;
-        Ok((id, body.name.clone(), func))
+        Ok((id, body.name.clone(), func, unwind))
     };
-    let ir_pairs: Vec<(FuncId, String, Function)> = match mode {
+    let ir_pairs: Vec<(FuncId, String, Function, Option<UnwindRewrite>)> = match mode {
         // Each worker needs its own context, so the clone is per body here.
         LoweringMode::Parallel => bodies
             .par_iter()
@@ -975,7 +975,12 @@ pub(crate) fn lower_program_full(
         .map(|body| (body.name.as_str(), body))
         .collect();
     let mut frames = Vec::with_capacity(ir_pairs.len());
-    for (id, name, func) in ir_pairs {
+    let mut catching_thunks = CatchingThunks::default();
+    for (id, name, mut func, unwind) in ir_pairs {
+        if let Some(unwind) = &unwind {
+            rewrite_unwinding_calls(module, &mut func, unwind, &mut catching_thunks)
+                .map_err(|e| e.context(FailedBody(name.clone())))?;
+        }
         if dump_clif {
             eprintln!("=== CLIF {name} ===\n{}", func.display());
         }
@@ -1014,6 +1019,7 @@ pub(crate) fn lower_program_full(
         }
     }
 
+    frames.extend(catching_thunks.take_frames());
     Ok(LoweredProgram {
         function_ids_by_name,
         emitted_code_bytes,

@@ -89,8 +89,8 @@ impl Lowerer<'_> {
             AstBinOp::BitAnd if !float => LaneOp::Arith(HirBinaryOp::BitAnd),
             AstBinOp::BitOr if !float => LaneOp::Arith(HirBinaryOp::BitOr),
             AstBinOp::BitXor if !float => LaneOp::Arith(HirBinaryOp::BitXor),
-            AstBinOp::Shl if !float => LaneOp::Shift(HirBinaryOp::Shl),
-            AstBinOp::Shr if !float => LaneOp::Shift(HirBinaryOp::Shr),
+            AstBinOp::Shl | AstBinOp::WrappingShl if !float => LaneOp::Shift(HirBinaryOp::Shl),
+            AstBinOp::Shr | AstBinOp::WrappingShr if !float => LaneOp::Shift(HirBinaryOp::Shr),
             _ => return None,
         };
         let a = self.lower_expr(lhs);
@@ -120,6 +120,26 @@ impl Lowerer<'_> {
                 }
             }),
         )
+    }
+
+    /// `x <<% n` / `x >>% n` on a scalar integer: the shift by `n` taken
+    /// modulo the width of `x`'s type, `x << (n & (BITS - 1))`.
+    pub(super) fn lower_masked_shift(
+        &mut self,
+        op: HirBinaryOp,
+        value: HirExpr,
+        amount: HirExpr,
+        span: Span,
+    ) -> HirExprKind {
+        let width = self.int_bits(value.ty);
+        let amount_ty = amount.ty;
+        let mask = self.hir_int(i64::from(width) - 1, amount_ty, span);
+        let count = self.hir_binary(HirBinaryOp::BitAnd, amount, mask, amount_ty, span);
+        HirExprKind::Binary {
+            op,
+            lhs: Box::new(value),
+            rhs: Box::new(count),
+        }
     }
 
     /// `-v` over a `Simd` operand: floats negate, integers wrap.

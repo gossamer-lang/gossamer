@@ -1591,6 +1591,7 @@ pub(crate) fn lower_fn(
     // The return value is read into RETURN before the pop, and eligibility
     // admits only a Copy tail, so nothing handed back points into the
     // popped region.
+    builder.begin_unwind(&body.block, span);
     let regioned = matches!(decl.origin, gossamer_hir::FnOrigin::LiftedClosure)
         && builder.begin_closure_body_region(&body.block, span);
     let result_local = builder.lower_block(&body.block);
@@ -1629,6 +1630,7 @@ pub(crate) fn lower_fn(
     }
     builder.end_auto_region(regioned, span);
     builder.terminate(Terminator::Return);
+    builder.finish_unwind();
     let mut body = Body {
         name: decl.name.name.clone(),
         def,

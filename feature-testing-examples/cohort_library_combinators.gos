@@ -28,27 +28,29 @@ fn main() {
 
     // Cancellation does not reach a shielded region, so the work inside
     // one runs to its own end while an unshielded sibling stops early.
-    let mut plain: Vec<i64> = #[]
-    let mut held: Vec<i64> = #[]
+    let mut plain = 0
+    let mut held = 0
     let cancelled = cohort(on_error: OnError::Ignore) {
-        let _a = spawn(|| {
+        let a = spawn(|| {
             let start = time::now_ms()
             time::sleep(400)
-            plain.push(time::now_ms() - start)
-            0
+            time::now_ms() - start
         }, reason: "unshielded")
-        let _b = spawn(|| {
+        let b = spawn(|| {
             let start = time::now_ms()
             let _ = sync::shield(|| time::sleep(400))
-            held.push(time::now_ms() - start)
-            0
+            time::now_ms() - start
         }, reason: "shielded")
         time::sleep(40)
         runtime::cohort_cancel()
+        // A join in the cancelled cohort is cancelled too, so each waits
+        // for its child under a shield.
+        plain = sync::shield(|| a.join()).unwrap_or(0)
+        held = sync::shield(|| b.join()).unwrap_or(0)
     }
     println("cancelled: {:?}", cancelled)
-    println("unshielded ran on: {}", plain.first().unwrap_or(0) >= 380)
-    println("shielded ran on: {}", held.first().unwrap_or(0) >= 380)
+    println("unshielded ran on: {}", plain >= 380)
+    println("shielded ran on: {}", held >= 380)
 
     // A spawn's `reason:` label names the child in the cohort's own
     // enumeration, in place of the bare spawn index.

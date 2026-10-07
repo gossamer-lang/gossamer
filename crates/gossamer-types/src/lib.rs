@@ -55,7 +55,9 @@ pub use checker::{
     typecheck_source_file, typecheck_source_file_for_repl_inspection,
 };
 pub use context::{PackedLayout, PlainLayout, TyCtxt, UNION_TYPE_NAME};
-pub use error::{ForeignError, ForeignLibrary, NotDisplayableClass, TypeDiagnostic, TypeError};
+pub use error::{
+    ForeignError, ForeignLibrary, IntegerCastFix, NotDisplayableClass, TypeDiagnostic, TypeError,
+};
 pub use exhaustiveness::{ExhaustivenessDiagnostic, ExhaustivenessError, check_exhaustiveness};
 pub use foreign_layout::{CLeaf, CStep, c_class_signed, c_class_width};
 pub use foreign_policy::ForeignPolicy;

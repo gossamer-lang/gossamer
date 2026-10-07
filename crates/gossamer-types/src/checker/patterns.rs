@@ -1928,7 +1928,10 @@ impl TypeChecker<'_> {
             );
             return self.tcx.error_ty();
         }
-        self.infer.fresh_int_var(self.tcx)
+        let ty = self.infer.fresh_int_var(self.tcx);
+        self.deferred_literal_ranges
+            .push((ty, text.to_string(), span));
+        ty
     }
 
     pub(super) fn type_of_float_literal(&mut self, text: &str) -> Ty {

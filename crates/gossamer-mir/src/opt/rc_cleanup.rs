@@ -256,7 +256,7 @@ fn successor_indices(t: &Terminator) -> Vec<usize> {
         Terminator::Assert { target, .. } | Terminator::Drop { target, .. } => {
             vec![target.0 as usize]
         }
-        Terminator::Return | Terminator::Unreachable | Terminator::Panic { .. } => Vec::new(),
+        Terminator::Return | Terminator::Unreachable | Terminator::Resume | Terminator::Panic { .. } => Vec::new(),
     }
 }
 
@@ -1315,7 +1315,7 @@ fn term_use_is_borrow(t: &Terminator, holder: Local, _is_member: &[bool]) -> boo
         Terminator::Drop { place, .. } => place.local != holder,
         Terminator::Goto { .. }
         | Terminator::Return
-        | Terminator::Unreachable
+        | Terminator::Unreachable | Terminator::Resume
         | Terminator::Panic { .. } => true,
     }
 }

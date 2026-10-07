@@ -43,6 +43,7 @@ impl Vm {
             globals_generation: Cell::new(1),
             user_comparators: RefCell::new(rustc_hash::FxHashMap::default()),
             call_stack: RefCell::new(Vec::new()),
+            native_fault_frames: RefCell::new(Vec::new()),
             call_depth: Cell::new(0),
             heap_frame_bytes: Cell::new(0),
             source_map: None,
@@ -109,6 +110,7 @@ impl Vm {
             globals_generation: Cell::new(1),
             user_comparators: RefCell::new(rustc_hash::FxHashMap::default()),
             call_stack: RefCell::new(Vec::new()),
+            native_fault_frames: RefCell::new(Vec::new()),
             call_depth: Cell::new(0),
             heap_frame_bytes: Cell::new(0),
             // Worker VMs run already-compiled chunks; the source map is

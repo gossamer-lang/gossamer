@@ -90,6 +90,9 @@ pub fn lower_source_file(
     );
     crate::par::desugar_parallel_adapters(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
     crate::fuse::fuse_iter_pipelines(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
+    // After fusing, so a pipeline spliced into a loop writes its bindings
+    // directly rather than through a cell.
+    crate::capture_cells::insert_capture_cells(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
     // After the desugars above, so the arithmetic they generate rounds too.
     crate::f32_round::round_f32_values(&mut program, lowerer.tcx, &mut lowerer.ids);
     crate::disjoint_windows::guard_disjoint_windows(
@@ -1588,6 +1591,10 @@ impl Lowerer<'_> {
         {
             return kind;
         }
+        if let Some(shift) = masked_shift_op(op) {
+            let (value, amount) = (self.lower_expr(lhs), self.lower_expr(rhs));
+            return self.lower_masked_shift(shift, value, amount, lhs.span);
+        }
         if let Some(method) = wrapping_binary_method(op) {
             return wrapping_call(method, self.lower_expr(lhs), self.lower_expr(rhs));
         }
@@ -1873,13 +1880,17 @@ impl Lowerer<'_> {
                 source
             } else {
                 let chosen = self.table.operator_method(target.id).map(str::to_string);
-                let kind = match chosen.as_deref().or_else(|| wrapping_assign_method(op)) {
-                    Some(method) => wrapping_call(method, lowered_target.clone(), source),
-                    None => HirExprKind::Binary {
-                        op: compound_assign_to_binary(op),
-                        lhs: Box::new(lowered_target.clone()),
-                        rhs: Box::new(source),
-                    },
+                let kind = if let Some(shift) = masked_shift_assign_op(op) {
+                    self.lower_masked_shift(shift, lowered_target.clone(), source, target.span)
+                } else {
+                    match chosen.as_deref().or_else(|| wrapping_assign_method(op)) {
+                        Some(method) => wrapping_call(method, lowered_target.clone(), source),
+                        None => HirExprKind::Binary {
+                            op: compound_assign_to_binary(op),
+                            lhs: Box::new(lowered_target.clone()),
+                            rhs: Box::new(source),
+                        },
+                    }
                 };
                 HirExpr {
                     id: self.fresh(),
@@ -2029,16 +2040,20 @@ impl Lowerer<'_> {
         let bin_op = compound_assign_to_binary(op);
         let place_ty = lowered_place.ty;
         let value_ty = lowered_value.ty;
-        let combined = match wrapping_assign_method(op) {
-            Some(method) => wrapping_call(method, lowered_place.clone(), lowered_value),
-            None => HirExprKind::Binary {
-                op: bin_op,
-                lhs: Box::new(lowered_place.clone()),
-                rhs: Box::new(HirExpr {
-                    ty: value_ty,
-                    ..lowered_value
-                }),
-            },
+        let combined = if let Some(shift) = masked_shift_assign_op(op) {
+            self.lower_masked_shift(shift, lowered_place.clone(), lowered_value, span)
+        } else {
+            match wrapping_assign_method(op) {
+                Some(method) => wrapping_call(method, lowered_place.clone(), lowered_value),
+                None => HirExprKind::Binary {
+                    op: bin_op,
+                    lhs: Box::new(lowered_place.clone()),
+                    rhs: Box::new(HirExpr {
+                        ty: value_ty,
+                        ..lowered_value
+                    }),
+                },
+            }
         };
         let bin_expr = HirExpr {
             id: self.fresh(),
@@ -3014,8 +3029,8 @@ fn lower_binary_op(op: AstBinOp) -> HirBinaryOp {
         AstBinOp::BitAnd => HirBinaryOp::BitAnd,
         AstBinOp::BitOr => HirBinaryOp::BitOr,
         AstBinOp::BitXor => HirBinaryOp::BitXor,
-        AstBinOp::Shl => HirBinaryOp::Shl,
-        AstBinOp::Shr => HirBinaryOp::Shr,
+        AstBinOp::Shl | AstBinOp::WrappingShl => HirBinaryOp::Shl,
+        AstBinOp::Shr | AstBinOp::WrappingShr => HirBinaryOp::Shr,
         AstBinOp::Eq => HirBinaryOp::Eq,
         AstBinOp::Ne => HirBinaryOp::Ne,
         AstBinOp::Lt => HirBinaryOp::Lt,
@@ -3051,6 +3066,25 @@ fn wrapping_assign_method(op: AssignOp) -> Option<&'static str> {
     }
 }
 
+/// The shift a masking shift operator (`<<%`, `>>%`) applies to its masked
+/// amount.
+fn masked_shift_op(op: AstBinOp) -> Option<HirBinaryOp> {
+    match op {
+        AstBinOp::WrappingShl => Some(HirBinaryOp::Shl),
+        AstBinOp::WrappingShr => Some(HirBinaryOp::Shr),
+        _ => None,
+    }
+}
+
+/// [`masked_shift_op`] for the compound forms `<<%=` and `>>%=`.
+fn masked_shift_assign_op(op: AssignOp) -> Option<HirBinaryOp> {
+    match op {
+        AssignOp::WrappingShlAssign => Some(HirBinaryOp::Shl),
+        AssignOp::WrappingShrAssign => Some(HirBinaryOp::Shr),
+        _ => None,
+    }
+}
+
 /// The `receiver.method(arg)` call a wrapping arithmetic operator lowers to.
 fn wrapping_call(method: &str, receiver: HirExpr, arg: HirExpr) -> HirExprKind {
     HirExprKind::MethodCall {
@@ -3073,8 +3107,8 @@ fn compound_assign_to_binary(op: AssignOp) -> HirBinaryOp {
         AssignOp::BitAndAssign => HirBinaryOp::BitAnd,
         AssignOp::BitOrAssign => HirBinaryOp::BitOr,
         AssignOp::BitXorAssign => HirBinaryOp::BitXor,
-        AssignOp::ShlAssign => HirBinaryOp::Shl,
-        AssignOp::ShrAssign => HirBinaryOp::Shr,
+        AssignOp::ShlAssign | AssignOp::WrappingShlAssign => HirBinaryOp::Shl,
+        AssignOp::ShrAssign | AssignOp::WrappingShrAssign => HirBinaryOp::Shr,
     }
 }
 

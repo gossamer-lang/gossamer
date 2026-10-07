@@ -1,0 +1,111 @@
+// A bound brings its supertraits' methods with it, including default
+// methods and `&mut self` methods, statically dispatched on every tier.
+
+trait Named {
+    fn name(&self) -> String
+}
+
+trait Animal: Named {
+    fn legs(&self) -> i64
+}
+
+trait Pet: Animal {
+    fn owner(&self) -> String
+}
+
+struct Dog {
+    owner: String
+}
+
+impl Named for Dog {
+    fn name(&self) -> String {
+        "dog"
+    }
+}
+
+impl Animal for Dog {
+    fn legs(&self) -> i64 {
+        4
+    }
+}
+
+impl Pet for Dog {
+    fn owner(&self) -> String {
+        self.owner
+    }
+}
+
+struct Cat {}
+
+impl Named for Cat {
+    fn name(&self) -> String {
+        "cat"
+    }
+}
+
+impl Animal for Cat {
+    fn legs(&self) -> i64 {
+        4
+    }
+}
+
+impl Pet for Cat {
+    fn owner(&self) -> String {
+        "nobody"
+    }
+}
+
+fn describe<T: Pet>(p: T) -> String {
+    f"{p.name()} with {p.legs()} legs owned by {p.owner()}"
+}
+
+fn count<T: Animal>(xs: Vec<T>) -> i64 {
+    xs.map(|a| a.legs()).sum()
+}
+
+trait Counter {
+    fn bump(&mut self)
+    fn value(&self) -> i64
+    fn twice(&self) -> i64 {
+        self.value() * 2
+    }
+}
+
+trait Labeled: Counter {
+    fn label(&self) -> String
+}
+
+struct Tally {
+    n: i64
+}
+
+impl Counter for Tally {
+    fn bump(&mut self) {
+        self.n += 1
+    }
+
+    fn value(&self) -> i64 {
+        self.n
+    }
+}
+
+impl Labeled for Tally {
+    fn label(&self) -> String {
+        "tally"
+    }
+}
+
+fn run<T: Labeled>(t: &mut T) -> String {
+    t.bump()
+    t.bump()
+    f"{t.label()} {t.value()} {t.twice()}"
+}
+
+fn main() {
+    println(describe(Dog { owner: "ann" }))
+    println(describe(Cat {}))
+    println("{}", count(#[Dog { owner: "a" }, Dog { owner: "b" }]))
+    let mut t = Tally { n: 1 }
+    println(run(&mut t))
+    println("{}", t.n)
+}

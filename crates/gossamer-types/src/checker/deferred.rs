@@ -1,8 +1,8 @@
 //! Checks that wait for the whole program: spawn scopes, deferred reference storage, and expectations.
 
 use super::{
-    CATALOG_TYPE_PARAM_SLOTS, DeferredStructural, DeferredStructuralKind, Expectation, Expr,
-    ExprKind, FnDecl, FnParam, FnSig, HashMap, HashSet, INT_SUFFIXES, IntTy, Literal,
+    BinaryOp, CATALOG_TYPE_PARAM_SLOTS, DeferredStructural, DeferredStructuralKind, Expectation,
+    Expr, ExprKind, FnDecl, FnParam, FnSig, HashMap, HashSet, INT_SUFFIXES, IntTy, Literal,
     LiteralConsts, MethodCallSite, Mutbl, Resolution, Span, SpawnScopeScan, Ty, TyKind,
     TypeChecker, TypeError, UnaryOp, WriteArgPathCollector, body_value_span, builtin_trait_methods,
     combinator_module_name, field_name_span, int_literal_fits, is_compiler_generated,
@@ -202,6 +202,27 @@ impl TypeChecker<'_> {
         };
         let param_name = name.to_string();
         let bounds = self.current_param_bounds.get(idx.0 as usize)?.clone();
+        // A bound brings its supertraits' methods with it.
+        let bounds = self.with_supertraits(bounds);
+        let declaring: Vec<String> = bounds
+            .iter()
+            .filter(|bound| {
+                self.trait_method_ret
+                    .contains_key(&((*bound).clone(), method.to_string()))
+            })
+            .cloned()
+            .collect();
+        if declaring.len() > 1 {
+            self.emit(
+                TypeError::AmbiguousBoundMethod {
+                    param: param_name,
+                    method: method.to_string(),
+                    traits: declaring,
+                },
+                span,
+            );
+            return Some((self.tcx.error_ty(), Vec::new()));
+        }
         for bound in bounds {
             let key = (bound, method.to_string());
             if let Some(ret) = self.trait_method_ret.get(&key).copied() {
@@ -299,64 +320,6 @@ impl TypeChecker<'_> {
             span,
         );
         true
-    }
-
-    /// Rejects a method on a bound type-parameter receiver that resolves
-    /// only through a *supertrait* of one of the parameter's bounds
-    /// (P0-5: `fn describe<T: Pet>(p: &T)` calling `p.name()` where
-    /// `name` is declared on `Animal` and `trait Pet: Animal`). The
-    /// compiled tiers cannot lower supertrait-through-bound dispatch
-    /// (SPEC §3.8); it runs right on the VM but miscompiles native, so it
-    /// is rejected uniformly. Returns `true` when a diagnostic was
-    /// emitted.
-    pub(super) fn reject_supertrait_method_through_bound(
-        &mut self,
-        receiver_ty: Ty,
-        method: &str,
-        span: Span,
-    ) -> bool {
-        let mut t = self.infer.resolve(self.tcx, receiver_ty);
-        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(t) {
-            t = self.infer.resolve(self.tcx, *inner);
-        }
-        let Some(TyKind::Param { idx, .. }) = self.tcx.kind(t) else {
-            return false;
-        };
-        let idx = *idx;
-        let Some(bounds) = self.current_param_bounds.get(idx.0 as usize).cloned() else {
-            return false;
-        };
-        // If the method is declared directly on any bound, it is a normal
-        // generic-bound call (handled elsewhere), not a supertrait leak.
-        for bound in &bounds {
-            if self
-                .trait_own_methods
-                .get(bound)
-                .is_some_and(|m| m.contains(method))
-            {
-                return false;
-            }
-        }
-        for bound in &bounds {
-            if let Some(supertrait) = self.supertrait_owning_method(bound, method) {
-                let param = self
-                    .current_generic_scope
-                    .iter()
-                    .find(|(_, (pidx, _))| *pidx == idx)
-                    .map_or_else(|| "T".to_string(), |(name, _)| name.clone());
-                self.emit(
-                    TypeError::SupertraitMethodThroughBound {
-                        param,
-                        method: method.to_string(),
-                        bound: bound.clone(),
-                        supertrait,
-                    },
-                    span,
-                );
-                return true;
-            }
-        }
-        false
     }
 
     /// Walks the supertrait graph of `trait_name` (transitively) and
@@ -490,10 +453,17 @@ impl TypeChecker<'_> {
         if matches!(self.tcx.kind(actual), Some(TyKind::Error)) || has_suffix {
             return;
         }
-        let Some(expected) = self.expectation_target(expected) else {
-            return;
-        };
-        let Some(TyKind::Int(int_ty)) = self.tcx.kind(expected).cloned() else {
+        let expected_int =
+            self.expectation_target(expected)
+                .and_then(|expected| match self.tcx.kind(expected) {
+                    Some(TyKind::Int(int_ty)) => Some(*int_ty),
+                    _ => None,
+                });
+        if text.starts_with('-') {
+            self.deferred_literal_ranges
+                .push((actual, text.clone(), expr.span));
+        }
+        let Some(int_ty) = expected_int else {
             return;
         };
         if !int_literal_fits(&text, int_ty) {
@@ -504,6 +474,35 @@ impl TypeChecker<'_> {
                 },
                 expr.span,
             );
+        }
+    }
+
+    /// Reports GT0009 for each unsuffixed integer literal whose settled type
+    /// cannot hold it, wherever its type came from: a comparison, an
+    /// arithmetic operand, a pattern, or an argument. A literal inside a
+    /// negated literal is judged as the negation, so `-128` fits `i8`.
+    pub(super) fn check_deferred_literal_ranges(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred_literal_ranges);
+        let negated: Vec<Span> = deferred
+            .iter()
+            .filter(|(_, text, _)| text.starts_with('-'))
+            .map(|(_, _, span)| *span)
+            .collect();
+        for (ty, literal, span) in deferred {
+            let inside_negation = negated
+                .iter()
+                .any(|outer| *outer != span && outer.start <= span.start && span.end <= outer.end);
+            if inside_negation {
+                continue;
+            }
+            let resolved = self.deep_resolve(ty);
+            let Some(TyKind::Int(int_ty)) = self.tcx.kind(resolved).cloned() else {
+                continue;
+            };
+            if !int_literal_fits(&literal, int_ty) {
+                let ty = int_ty.as_str().to_string();
+                self.emit(TypeError::IntLiteralOverflow { literal, ty }, span);
+            }
         }
     }
 
@@ -1300,9 +1299,38 @@ impl TypeChecker<'_> {
         self.record_qualified_method_const_generic_args(callee, &arg_tys);
         self.check_exponent_placeholder(callee, args);
         self.check_callback_arguments(callee, args, &arg_tys);
+        self.check_assert_eq_operands(callee, args, &arg_tys);
         let ret = self.check_call_inner(callee, args, callee_ty, &arg_tys, expected);
         self.check_ffi_operation(callee, args, &arg_tys, ret);
         ret
+    }
+
+    /// `assert_eq(a, b)` compares its operands with `==`, so they share one
+    /// type exactly as the operator's do. A user function of that name is
+    /// typed by its own signature instead.
+    pub(super) fn check_assert_eq_operands(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        arg_tys: &[Ty],
+    ) {
+        let ExprKind::Path(path) = &callee.kind else {
+            return;
+        };
+        if path.segments.len() != 1
+            || path.segments[0].name.name != "assert_eq"
+            || matches!(
+                self.resolutions.get(callee.id),
+                Some(Resolution::Def { .. })
+            )
+        {
+            return;
+        }
+        let ([lhs, rhs, ..], [lhs_ty, rhs_ty, ..]) = (args, arg_tys) else {
+            return;
+        };
+        let span = Span::new(lhs.span.file, lhs.span.start, rhs.span.end);
+        self.unify_operands(BinaryOp::Eq, lhs, *lhs_ty, rhs, *rhs_ty, span);
     }
 
     /// `{:e}` renders a number in scientific notation. The placeholder

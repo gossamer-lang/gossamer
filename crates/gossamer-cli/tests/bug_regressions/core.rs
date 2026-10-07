@@ -420,7 +420,7 @@ fn try_it() {
     args.push("zero")
     args.push("one")
     let mut i: usize = 0
-    while i < args.len() {
+    while i < args.len() as usize {
         println("[{}] = {}", i, args[i].clone())
         i = i + 1
     }
@@ -460,7 +460,7 @@ fn indexing_tuple_slices_with_usize_works() {
 fn first_key(vars: [(String, String)]) -> String {
     if vars.len() == 0 { return "" }
     let mut i: usize = 0
-    while i < vars.len() {
+    while i < vars.len() as usize {
         let _ = vars[i].0.clone()
         i = i + 1
     }

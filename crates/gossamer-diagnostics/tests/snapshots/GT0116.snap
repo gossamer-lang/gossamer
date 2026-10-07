@@ -3,9 +3,9 @@ source: crates/gossamer-diagnostics/tests/snapshots.rs
 expression: rendered
 ---
 --- plain ---
-error[GT0020]: A method reached through a generic bound resolves only through a - here
+error[GT0116]: A shift by a literal amount outside `0..BITS` of the shifted type, such - here
 --- framed ---
-error[GT0020]: A method reached through a generic bound resolves only through a
+error[GT0116]: A shift by a literal amount outside `0..BITS` of the shifted type, such
   --> snap.gos:2:5
      2 |     let x = 1
        |     ^^^^^

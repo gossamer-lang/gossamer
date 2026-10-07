@@ -979,6 +979,7 @@ impl<'a> Lowerer<'a> {
             | RawIntrinsic::MapEnumKey
             | RawIntrinsic::FnAddr
             | RawIntrinsic::WeakOptPayload
+            | RawIntrinsic::UnwindProbe
             | RawIntrinsic::JitUnsupportedUserIterator => {
                 return Err(BuildError::InternalLoweringBug(
                     "raw pointer intrinsic reached rvalue lowering",

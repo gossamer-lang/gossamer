@@ -126,6 +126,9 @@ impl TypeChecker<'_> {
         self.record_deferred_method_owners();
         self.check_deferred_binding_callbacks();
         self.check_deferred_wrapping_operands();
+        self.check_deferred_literal_ranges();
+        self.check_deferred_integer_operands();
+        self.check_deferred_shift_amounts();
         self.check_deferred_mutating_receivers();
         self.check_deferred_private_fields();
         self.check_deferred_field_receivers();
@@ -918,6 +921,18 @@ struct TypeChecker<'a> {
     /// the other operand's type, the operator, and its span. Literal defaulting
     /// settles them, so the integer requirement is checked afterwards.
     deferred_wrapping_operands: Vec<(Ty, Ty, &'static str, Span)>,
+    /// Unsuffixed integer literals, as (type, spelling, span), a negated one
+    /// spelled with its sign. Inference settles the type a literal takes
+    /// from its use, so its range is checked once inference is done.
+    deferred_literal_ranges: Vec<(Ty, String, Span)>,
+    /// Operands whose type must settle on an integer (or, for `&`, `|`, `^`,
+    /// on `bool`) for the operator applied to them, as (type, operator,
+    /// whether `bool` is allowed, operand spelling, span). A literal's type
+    /// is settled only once inference is done.
+    deferred_integer_operands: Vec<(Ty, &'static str, bool, Option<String>, Span)>,
+    /// `<<` / `>>` with a literal amount, as (shifted type, amount, span):
+    /// the amount is judged against the width inference settles on.
+    deferred_shift_amounts: Vec<(Ty, String, Span)>,
     /// `.into()` / `.try_into()` call sites, recorded as (result, method,
     /// span). The target comes from the use site, so whether one was given
     /// at all is only known once unification has run.
@@ -1317,6 +1332,9 @@ impl<'a> TypeChecker<'a> {
             receiver_owners: HashMap::new(),
             deferred_binding_callbacks: Vec::new(),
             deferred_wrapping_operands: Vec::new(),
+            deferred_literal_ranges: Vec::new(),
+            deferred_integer_operands: Vec::new(),
+            deferred_shift_amounts: Vec::new(),
             deferred_conversion_targets: Vec::new(),
             enum_variant_payloads: HashMap::new(),
             variant_ctor_substs: HashMap::new(),
@@ -3592,7 +3610,7 @@ fn strings_fn_param_metadata(name: &str, position: usize, shape: StrArgShape) ->
 /// Source-shaped spelling of an expression, for a diagnostic that shows
 /// the rewrite in the reader's own terms. `None` for a shape with no short
 /// spelling, which leaves the diagnostic on its generic `<expr>` wording.
-fn expr_display(expr: &Expr) -> Option<String> {
+pub(super) fn expr_display(expr: &Expr) -> Option<String> {
     match &expr.kind {
         ExprKind::Literal(_) | ExprKind::Path(_) => match argument_value_display(expr).as_str() {
             "<expression>" => None,
@@ -4113,7 +4131,9 @@ fn assign_op_method(op: gossamer_ast::AssignOp) -> Option<&'static str> {
         AssignOp::Assign
         | AssignOp::WrappingAddAssign
         | AssignOp::WrappingSubAssign
-        | AssignOp::WrappingMulAssign => None,
+        | AssignOp::WrappingMulAssign
+        | AssignOp::WrappingShlAssign
+        | AssignOp::WrappingShrAssign => None,
         AssignOp::AddAssign => Some("add"),
         AssignOp::SubAssign => Some("sub"),
         AssignOp::MulAssign => Some("mul"),

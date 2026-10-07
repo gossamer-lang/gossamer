@@ -319,7 +319,7 @@ fn terminator_successors(term: &Terminator) -> Vec<BlockId> {
             ..
         } => vec![*target],
         Terminator::Return
-        | Terminator::Unreachable
+        | Terminator::Unreachable | Terminator::Resume
         | Terminator::Panic { .. }
         | Terminator::Drop { .. }
         | Terminator::Call { target: None, .. } => Vec::new(),
@@ -538,7 +538,7 @@ fn terminator_mentions_local_forbidden(term: &Terminator, local: Local) -> bool 
         Terminator::Drop { place, .. } => place_mentions_local(place, local),
         Terminator::Goto { .. }
         | Terminator::Return
-        | Terminator::Unreachable
+        | Terminator::Unreachable | Terminator::Resume
         | Terminator::Panic { .. } => false,
     }
 }
@@ -917,7 +917,7 @@ fn terminator_targets(t: &Terminator) -> Vec<crate::ir::BlockId> {
             out
         }
         Terminator::Call { target, .. } => target.iter().copied().collect(),
-        Terminator::Return | Terminator::Unreachable | Terminator::Panic { .. } => Vec::new(),
+        Terminator::Return | Terminator::Unreachable | Terminator::Resume | Terminator::Panic { .. } => Vec::new(),
     }
 }
 

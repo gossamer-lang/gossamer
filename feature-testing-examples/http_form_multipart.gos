@@ -21,17 +21,17 @@ fn byte_sum(data: [u8]) -> i64 {
 
 fn main() {
     let boundary = "GOSBOUNDARY9000"
-    let body = "preamble-ignored\r\n"
-    + "--GOSBOUNDARY9000\r\n"
-    + "Content-Disposition: form-data; name=\"field1\"\r\n"
-    + "\r\n"
-    + "hello-value\r\n"
-    + "--GOSBOUNDARY9000\r\n"
-    + "Content-Disposition: form-data; name=\"upload\"; filename=\"greeting.txt\"\r\n"
-    + "Content-Type: text/plain\r\n"
-    + "\r\n"
-    + "file-body-contents\r\n"
-    + "--GOSBOUNDARY9000--\r\n"
+    let body = "preamble-ignored\r\n" +
+        "--GOSBOUNDARY9000\r\n" +
+        "Content-Disposition: form-data; name=\"field1\"\r\n" +
+        "\r\n" +
+        "hello-value\r\n" +
+        "--GOSBOUNDARY9000\r\n" +
+        "Content-Disposition: form-data; name=\"upload\"; filename=\"greeting.txt\"\r\n" +
+        "Content-Type: text/plain\r\n" +
+        "\r\n" +
+        "file-body-contents\r\n" +
+        "--GOSBOUNDARY9000--\r\n"
     let bytes = body.as_bytes()
     let parts = http::multipart::parse(bytes, boundary)
     println("count={}", parts.len())

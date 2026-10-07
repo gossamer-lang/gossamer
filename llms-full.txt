@@ -85,12 +85,11 @@ about values.
 - **Assignment gives a value of its own**: after `let b = a`, `b.push(3)`
   leaves `a` alone. `clone()` is only for a second value from one you still
   write. Passing a value twice needs no clone.
-- **Closure capture is the one asymmetry**: a container (`Vec`, `Map`, `Set`)
-  is captured by reference, so `xs.push(v)` inside a closure is visible
-  outside; a scalar, `String`, or struct is captured by copy, and a write
-  to one inside a closure (`count += 1`) is rejected (GT0114). Accumulate
-  into a container, or return the value. No `move`. Goroutines that write
-  one captured container serialise the writes with a `sync::Mutex`.
+- **A closure names its captures**: it reads their current values and its
+  writes reach them, whatever the type (`xs.for_each(|x| count += x)`). No
+  `move`. A spawned closure is the exception: it takes a snapshot of each
+  capture at the spawn, and writing one inside it is GT0114 - answer the
+  value through `join()`, a channel, or a `sync::Shared`.
 
 ```gossamer
 fn tally(mut xs: Vec<i64>) -> i64 { xs.push(1); xs.len() }
@@ -139,14 +138,15 @@ extend(&mut items)     // items is now #[1, 2, 1]
 - Exhaustive `match`, no `_ =>` unless every other case means the same.
   Labeled loops: `'outer: for .. { break 'outer }`.
 - `defer expr` runs at every exit of its block (end, `return`, `break`, `?`),
-  last first; not on panic.
+  last first, and when a panic unwinds through it, so a deferred `unlock`
+  or `close` runs in a panicking goroutine too.
 - Named and default arguments: `fn volume(width: i64, height: i64 = 2)`
   then `volume(2)`, `volume(width: 2, height: 3)`, or `volume(2, height: 3)`.
-- Semicolons only separate statements on one line. A line starting with
-  `&`, `*`, `-`, or a single `|` begins a new statement; to continue an
-  expression, end the previous line with the operator. A line starting with
-  `||` continues the expression above, so a no-argument closure on its own
-  line is `(|| expr)`.
+- Semicolons only separate statements on one line. To continue an
+  expression on the next line, end the line with its operator (`a &&` then
+  `b`); `|>` is the one operator that may begin a line. A line starting
+  with `&`, `*`, `-`, `|`, or `||` begins a new statement, so a closure on
+  its own line is a closure; any other operator there is GP0066.
 - Delimited lists use commas on one line and newlines when multiline.
 
 **Strings and formatting**
@@ -183,7 +183,13 @@ extend(&mut items)     // items is now #[1, 2, 1]
   to int; narrowing masks (`300 as u8 == 44`), float to int saturates.
 - `+ - *` panic on overflow on every tier and profile; `+%` `-%` `*%` (and
   `+%=`...) wrap at the declared width, and are the only way to wrap. Divide
-  by zero panics.
+  by zero panics, and so does a shift amount outside `0..BITS`; `<<%` /
+  `>>%` take it modulo the width.
+- Both operands of `+`, `<`, `==`, `&`, `a.min(b)`, `v.contains(x)` share one
+  type: `u32 < i64` is GT0001, fixed with the cast that loses nothing
+  (`a as i64 < b`; `gos check --fix` writes it). A literal must fit its
+  operand's type (`u8 == 300` is GT0009); `-x` on an unsigned type is
+  GT0001.
 - Integers answer `checked_add`, `saturating_sub`, `overflowing_mul`, `pow`,
   `rem_euclid`, `signum`, `abs_diff`, `isqrt`, `count_ones`; a `char`
   answers `is_alphabetic`, `is_ascii_digit`, `to_digit(radix)`,

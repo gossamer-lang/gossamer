@@ -1,0 +1,35 @@
+// Literal and range arms that cover every value of an integer or `char` type
+// make a `match` exhaustive without a `_` arm.
+
+fn bucket(b: u8) -> String {
+    match b {
+        0..=31 => "control"
+        32..=126 => "printable"
+        127 => "delete"
+        128..=255 => "high"
+    }
+}
+
+fn sign(n: i8) -> i64 {
+    match n {
+        ..=-1 => -1
+        0 => 0
+        1.. => 1
+    }
+}
+
+fn kind(c: char) -> String {
+    match c {
+        'a'..='z' => "lower"
+        'A'..='Z' => "upper"
+        '\u{0}'..='@' | '['..='`' | '{'..='\u{d7ff}' | '\u{e000}'..='\u{10ffff}' => "other"
+    }
+}
+
+fn main() {
+    for b in [0u8, 65, 127, 200] {
+        println(bucket(b))
+    }
+    println("{} {} {}", sign(-5), sign(0), sign(9))
+    println("{} {} {}", kind('q'), kind('Q'), kind('!'))
+}

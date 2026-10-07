@@ -1014,6 +1014,7 @@ fn body_has_loop(body: &Body) -> bool {
             }
             Terminator::Return
             | Terminator::Unreachable
+            | Terminator::Resume
             | Terminator::Panic { .. }
             | Terminator::Call { target: None, .. } => {}
         }
@@ -1303,23 +1304,24 @@ fn compile_bodies(
     // `main` produced flaky SIGILLs on bring-up. The lookup map
     // we hand back to the VM keeps the original Gossamer name as
     // the key, so dispatch is unaffected.
-    let lowered = lower_program_serial(&mut module, filtered, tcx, Some("gos_main"))?;
+    let mut lowered = lower_program_serial(&mut module, filtered, tcx, Some("gos_main"))?;
 
     let carrier_thunks = emit_carrier_thunks(
         &mut module,
         filtered,
         &lowered.function_ids_by_name,
         (tcx, enum_shapes, struct_shapes),
+        &mut lowered.frames,
     )?;
 
     module
         .finalize_definitions()
         .map_err(|e| anyhow!("jit finalize: {e}"))?;
-    let placed: Vec<(usize, crate::jit_frames::FunctionFrames)> = lowered
-        .frames
-        .into_iter()
-        .map(|frames| (module.get_finalized_function(frames.id) as usize, frames))
-        .collect();
+    let placed: Vec<(usize, crate::jit_frames::FunctionFrames)> =
+        std::mem::take(&mut lowered.frames)
+            .into_iter()
+            .map(|frames| (module.get_finalized_function(frames.id) as usize, frames))
+            .collect();
     let frames = crate::jit_frames::register(cranelift_module::Module::isa(&module), placed);
 
     let body_name_set: std::collections::HashSet<&str> =
@@ -1431,6 +1433,7 @@ fn emit_carrier_thunks(
     filtered: &[Body],
     function_ids_by_name: &HashMap<String, cranelift_module::FuncId>,
     (tcx, enum_shapes, struct_shapes): (&TyCtxt, &HashMap<u32, u32>, &HashMap<u32, u32>),
+    frames: &mut Vec<crate::jit_frames::FunctionFrames>,
 ) -> Result<HashMap<String, cranelift_module::FuncId>> {
     let mut carrier_thunks = HashMap::new();
     for body in filtered {
@@ -1447,8 +1450,10 @@ fn emit_carrier_thunks(
         let Some(&body_id) = function_ids_by_name.get(&body.name) else {
             continue;
         };
-        let thunk_id = crate::native::emit_carrier_entry_thunk(module, body_id, &body.name)?;
+        let (thunk_id, thunk_frames) =
+            crate::native::emit_carrier_entry_thunk(module, body_id, &body.name)?;
         carrier_thunks.insert(body.name.clone(), thunk_id);
+        frames.push(thunk_frames);
     }
     Ok(carrier_thunks)
 }

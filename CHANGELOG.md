@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.68.0 - Closures, defers, trait bounds, and a stricter type checker
+
+- A closure names the bindings it captures: it reads their current values, and its writes reach them whatever their types, so `xs.for_each(|x| count += x)`, a counter closure over a local, and a closure that reassigns a captured `Vec` work, where a write to a scalar, `String`, or struct capture was GT0114 and a later write outside the closure went unseen. A spawned closure takes a snapshot of each capture at the `spawn`, and a write to one inside it is now GT0114, pointing at `join()`, a channel, or `sync::Shared`; a spawned closure writing a captured container under a `Mutex` was a data race.
+- `sync::with_timeout` answers the work's value through its join handle.
+- `|>` is the one operator that continues an expression from the start of a line. A line starting with `||` begins a closure, as one starting with `|`, `-`, `&`, or `*` begins a new statement, inside parentheses too; a line starting with any other binary operator (`&&`, `+`, `==`, ...) is GP0066, and `gos check --fix` moves the operator to the end of the line above.
+- The two operands of a comparison share one type, as arithmetic operands already did: `a < b` with `a: u32` and `b: i64` is GT0001, where it compared the raw words and answered differently on the bytecode VM and in native builds (`0u32 < -1i64`). The help and `gos check --fix` write the cast that loses no value; for `u64` against `i64` the help says what each direction of cast gives up. `assert_eq` and match guards follow.
+- `a.min(b)`, `a.max(b)`, and `a.clamp(lo, hi)` take the receiver's integer type for their arguments, and `contains`, `index_of`, and `count_of` on a `Vec` or array and `contains`, `insert`, and `remove` on a `Set` take the element type, where an argument of another integer type was accepted (`200u8.min(-1i64)` answered `-1`).
+- An unsuffixed integer literal must fit the type it takes wherever it is used (GT0009): in a comparison (`x == 300` with `x: u8`, `n > -1` with `n: u32`), an arithmetic operand, a `match` arm, or an argument, as it already had to in a `let`. The help for a literal too large for `i64` names its `u64` suffix.
+- Unary `-` on an unsigned integer is GT0001 with the `0 -% x` and `-(x as i64)` spellings, where `-a` wrapped.
+- `&`, `|`, `^`, `<<`, and `>>` on a float, and `<<` and `>>` on a `bool`, are GT0003 at check time; they were accepted and then refused when the program ran.
+- A shift amount outside `0..BITS` of the shifted type panics on every tier (`attempt to shift left with overflow`), as an overflowing `+` does, where it was masked to 6 bits; a literal amount out of range is GT0116. A shift amount may be any integer type, and the result has the shifted operand's type.
+- `<<%` and `>>%`, with `<<%=` and `>>%=`, shift by the amount modulo the left operand's width, on every tier.
+- Literal and range patterns over an integer or `char` count toward `match` exhaustiveness by the values they cover, so `0..=127` and `128..=255` cover a `u8` without a `_` arm, and a missing span is reported as a range (`100..=199`). Guarded arms do not count.
+- An arm whose every value earlier unguarded arms already match is reported as the warning GM0002, ranges that cover it together included, as is a `_` after ranges that cover the whole type; the check ran but its findings were never shown.
+- A panic runs the deferred expressions pending in every frame it leaves, innermost block first, on every tier: a `defer m.unlock()` releases its lock and a deferred `close` runs when a goroutine panics, where they were skipped and a second goroutine waiting on the lock hung. On `main` the defers run before the report, and the panic hook after them.
+- A panic a deferred expression raises while another unwinds no longer stops the remaining defers: the goroutine ends with the first panic, and its report and `join()` message carry the later one as a `note:` line.
+- A panic in a JIT-compiled function answering an `Option` or `Result`, called from interpreted code, no longer aborts `gos run` with `failed to initiate panic`.
+- What a function wrote through a `&mut` parameter before it panicked reaches its caller on the bytecode VM, as it does in native builds; the caller's value was lost.
+- Cancellation no longer reaches into a `sync::shield` region: `runtime::cohort_cancelled()`, a channel receive, and a join inside one answer as if the enclosing cohort were live, where only a `sleep` was shielded.
+- A goroutine failure read through `join()` is no longer reported at exit as one nobody observed when the join and the goroutine's end race.
+- A `&mut self` method called on a captured `Vec`'s element inside a closure keeps its write on the bytecode VM.
+- A generic parameter's bound brings its supertraits' methods: with `trait BufRead: Read`, a `T: BufRead` parameter answers `read` on every tier, where it was GT0056 or GT0020. A method two of the traits declare is GT0117; GT0020 is retired.
+- A parameter default may be a `const`, an associated const, integer arithmetic over those, or a `comptime` expression, resolved where the function is declared and spliced as its value; it had to be a literal (GR0014).
+
 ## 0.67.1 - Goroutine faults, map entry writes, and name resolution
 
 - A fault the runtime raises inside a spawned goroutine - an index out of bounds, a negative `repeat` or capacity, a panicking callback a library runs, a `Display` that panics while a value is formatted - ends that goroutine and reaches `join()` as an `Err` on every tier; native builds aborted the whole process or let the goroutine continue with a placeholder value, and the JIT ended the program.

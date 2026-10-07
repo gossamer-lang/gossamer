@@ -1,0 +1,31 @@
+// A panic raised in compiled code runs the deferred expressions pending in
+// every frame it leaves, compiled and interpreted alike, and a panic a
+// deferred expression raises while it unwinds becomes a note on it.
+
+fn checksum(xs: Vec<i64>, limit: i64) -> i64 {
+    defer println("checksum defer ran")
+    let mut total = 0
+    for x in xs {
+        total += x
+        if total > limit {
+            panic("checksum passed {}", limit)
+        }
+    }
+    total
+}
+
+fn guarded(xs: Vec<i64>, label: String) -> i64 {
+    let mut seen = 0
+    defer println("guarded defer saw {} for {}", seen, label)
+    defer panic("guarded defer exploded")
+    for x in xs {
+        seen += x
+    }
+    checksum(xs, seen - 1)
+}
+
+fn main() {
+    defer println("main defer ran")
+    println("{}", checksum(#[1, 2, 3], 100))
+    println("{}", guarded(#[4, 5], "pair"))
+}

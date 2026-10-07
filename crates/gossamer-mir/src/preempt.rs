@@ -68,7 +68,10 @@ fn successors(terminator: &Terminator) -> Vec<usize> {
             .chain(std::iter::once(default.0 as usize))
             .collect(),
         Terminator::Call { target, .. } => target.iter().map(|b| b.0 as usize).collect(),
-        Terminator::Return | Terminator::Unreachable | Terminator::Panic { .. } => Vec::new(),
+        Terminator::Return
+        | Terminator::Unreachable
+        | Terminator::Resume
+        | Terminator::Panic { .. } => Vec::new(),
     }
 }
 

@@ -105,7 +105,7 @@ fn terminator_locals(term: &Terminator, out: &mut Vec<Local>) {
         Terminator::Drop { place, .. } => place_locals(place, out),
         Terminator::Goto { .. }
         | Terminator::Return
-        | Terminator::Unreachable
+        | Terminator::Unreachable | Terminator::Resume
         | Terminator::Panic { .. } => {}
     }
 }

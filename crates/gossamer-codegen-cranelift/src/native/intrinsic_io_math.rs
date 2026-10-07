@@ -901,6 +901,19 @@ pub(super) fn lower_intrinsic_call_io_math(
             );
             Ok(true)
         }
+        // The landing pads are reached from each catching call, so the
+        // entry probe takes its default arm.
+        "gos_unwind_probe" => {
+            let zero = builder.ins().iconst(types::I64, 0);
+            define_var_to(
+                builder,
+                locals,
+                &intrinsics.body_cl_types,
+                destination.local,
+                zero,
+            );
+            Ok(true)
+        }
         "gos_fn_addr" => {
             // Returns the address of a named function as an i64 so
             // closures and other first-class callable values can

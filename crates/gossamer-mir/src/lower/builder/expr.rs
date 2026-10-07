@@ -1990,6 +1990,31 @@ impl<'a> Builder<'a> {
             );
             return Some(local);
         }
+        // A shift amount outside `0..BITS` of the shifted type panics on
+        // every tier, as an overflowing `+` does. A literal amount in range
+        // needs no guard.
+        if matches!(bin_op, BinOp::Shl | BinOp::Shr)
+            && let gossamer_types::TyKind::Int(int_ty) = self.tcx.kind_of(ty)
+        {
+            let bits = i128::from(narrow_int_width(*int_ty).unwrap_or(64));
+            let in_range = |expr: &HirExpr| match &expr.kind {
+                HirExprKind::Literal(lit @ HirLiteral::Int(_)) => matches!(
+                    literal_to_const(lit),
+                    ConstValue::Int(n) if (0..bits).contains(&n)
+                ),
+                _ => false,
+            };
+            // An amount masked by a literal in range (`n & 63`, what `<<%`
+            // lowers to) is in range whatever `n` holds.
+            let masked = matches!(
+                &rhs.kind,
+                HirExprKind::Binary { op: HirBinaryOp::BitAnd, lhs, rhs }
+                    if in_range(lhs) || in_range(rhs)
+            );
+            if !in_range(rhs) && !masked {
+                self.emit_shift_guard(rhs_local, bits, matches!(bin_op, BinOp::Shl), span);
+            }
+        }
         // A shift moves bits past the operand's own width, and the ones that
         // leave it are gone. The op runs at i64 width, so a narrower type
         // takes its value back from the wide result.
@@ -4663,6 +4688,52 @@ fn arith_overload_method(op: HirBinaryOp) -> Option<&'static str> {
 
 /// Bit width of an integer type narrower than the i64 the arithmetic ops
 /// run at, or `None` for a type that occupies the whole word.
+impl Builder<'_> {
+    /// Asserts `0 <= amount < bits`, the range a shift of a `bits`-wide
+    /// integer accepts, continuing in a fresh block.
+    fn emit_shift_guard(&mut self, amount: Local, bits: i128, left: bool, span: Span) {
+        let bool_ty = self.tcx.bool_ty();
+        let not_negative = self.fresh(bool_ty);
+        self.emit_assign(
+            Place::local(not_negative),
+            Rvalue::BinaryOp {
+                op: BinOp::Ge,
+                lhs: Operand::Copy(Place::local(amount)),
+                rhs: Operand::Const(ConstValue::Int(0)),
+            },
+            span,
+        );
+        let below_width = self.fresh(bool_ty);
+        self.emit_assign(
+            Place::local(below_width),
+            Rvalue::BinaryOp {
+                op: BinOp::Lt,
+                lhs: Operand::Copy(Place::local(amount)),
+                rhs: Operand::Const(ConstValue::Int(bits)),
+            },
+            span,
+        );
+        let in_range = self.fresh(bool_ty);
+        self.emit_assign(
+            Place::local(in_range),
+            Rvalue::BinaryOp {
+                op: BinOp::BitAnd,
+                lhs: Operand::Copy(Place::local(not_negative)),
+                rhs: Operand::Copy(Place::local(below_width)),
+            },
+            span,
+        );
+        let ok = self.new_block(span);
+        self.terminate(Terminator::Assert {
+            cond: Operand::Copy(Place::local(in_range)),
+            expected: true,
+            msg: AssertMessage::ShiftOverflow { left },
+            target: ok,
+        });
+        self.set_current(ok);
+    }
+}
+
 pub(crate) const fn narrow_int_width(ty: gossamer_types::IntTy) -> Option<u32> {
     use gossamer_types::IntTy;
     match ty {

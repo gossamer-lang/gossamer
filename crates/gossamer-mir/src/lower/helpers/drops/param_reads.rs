@@ -247,6 +247,7 @@ pub(super) fn param_fields_only_read(body: &Body, p: Local, rc_fields: &AggField
             | Terminator::SwitchInt { .. }
             | Terminator::Assert { .. }
             | Terminator::Unreachable
+            | Terminator::Resume
             | Terminator::Panic { .. } => {}
         }
     }

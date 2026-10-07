@@ -69,11 +69,6 @@ pub struct Parser<'src> {
     /// newline is not a token, so accepting the same one twice would let a
     /// list loop ask for an element that never arrives.
     pub(crate) newline_separator_at: Option<usize>,
-    /// Whether the expression being parsed sits directly inside a grouping
-    /// `( .. )`, where a line that opens with an operator continues the one
-    /// above instead of starting a statement. Every other delimiter, block
-    /// included, clears it for its contents.
-    pub(crate) in_paren_group: bool,
     /// Trait named by the header of the `impl` block being parsed, when
     /// one is. A method's contract is decided by that header, so the name
     /// has to be in hand while the method itself is read.
@@ -129,7 +124,6 @@ impl<'src> Parser<'src> {
             mod_stack: Vec::new(),
             named_args: std::collections::HashMap::new(),
             newline_separator_at: None,
-            in_paren_group: false,
         }
     }
 
@@ -371,10 +365,8 @@ impl<'src> Parser<'src> {
     /// exists to resolve.
     pub(crate) fn with_struct_literals_allowed<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
         let saved = std::mem::take(&mut self.no_struct_literal_depth);
-        let saved_group = std::mem::take(&mut self.in_paren_group);
         let out = f(self);
         self.no_struct_literal_depth = saved;
-        self.in_paren_group = saved_group;
         out
     }
 

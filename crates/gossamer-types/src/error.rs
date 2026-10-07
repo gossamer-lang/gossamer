@@ -94,6 +94,49 @@ pub enum TypeError {
         /// The whole expression rewritten with the cast in place.
         cast: String,
     },
+    /// A binary operator or an integer method met two integer operands of
+    /// different types. Each tier compares and computes with one integer
+    /// type, so the program names the common type with a cast.
+    #[error("mismatched integer types: `{lhs}` and `{rhs}` meet at `{op}`")]
+    IntegerOperandMismatch {
+        /// The operator or method, as written.
+        op: String,
+        /// Left operand (or receiver) type.
+        lhs: String,
+        /// Right operand (or argument) type.
+        rhs: String,
+        /// The cast that brings the two to one type.
+        fix: Box<IntegerCastFix>,
+    },
+    /// A method call on a type parameter that two traits among its bounds and
+    /// their supertraits both declare.
+    #[error("`{method}` on `{param}` is declared by more than one of its traits: {}", traits.join(", "))]
+    AmbiguousBoundMethod {
+        /// The type parameter.
+        param: String,
+        /// The method name.
+        method: String,
+        /// The traits declaring it.
+        traits: Vec<String>,
+    },
+    /// A shift by a literal amount outside `0..BITS` of the shifted type.
+    #[error("shift amount `{amount}` is outside `0..{bits}` for `{ty}`")]
+    ShiftAmountOutOfRange {
+        /// The literal amount, as written.
+        amount: String,
+        /// The shifted operand's type.
+        ty: String,
+        /// That type's width in bits.
+        bits: u32,
+    },
+    /// `-x` on an unsigned integer, which has no negative values.
+    #[error("cannot negate a value of the unsigned type `{ty}`")]
+    UnsignedNegation {
+        /// The operand's unsigned type.
+        ty: String,
+        /// Source spelling of the operand, when it has a short one.
+        operand: Option<String>,
+    },
     /// An `Option<T>` value was used where the payload `T` is required.
     #[error("type mismatch: expected `{expected}`, found `{found}`")]
     OptionValueMismatch {
@@ -802,25 +845,6 @@ pub enum TypeError {
         /// The implementing type.
         ty: String,
     },
-    /// A method reached through a generic bound (`fn f<T: Pet>(p: &T)`)
-    /// resolves only through a supertrait of the bound (`trait Pet:
-    /// Animal`, `name` declared on `Animal`). The compiled tiers cannot
-    /// lower supertrait-through-bound dispatch (SPEC §3.8), so it is
-    /// rejected uniformly instead of miscompiling on the native tier.
-    #[error(
-        "method `{method}` on `{param}` comes from supertrait `{supertrait}` of bound `{bound}`; \
-         supertrait methods through a generic bound are not supported"
-    )]
-    SupertraitMethodThroughBound {
-        /// Generic parameter the receiver binds to.
-        param: String,
-        /// Method name as called.
-        method: String,
-        /// The directly-named bound trait.
-        bound: String,
-        /// The supertrait that actually declares the method.
-        supertrait: String,
-    },
     /// `value[index]` where `value`'s type cannot be indexed (only
     /// `[T]` / `[T; N]` / `Vec<T>` / `String` are). The VM faults at
     /// runtime (GX0001) and the compiled tier reads through the value
@@ -1093,6 +1117,19 @@ pub enum TypeError {
     },
 }
 
+/// The cast that brings two integer operands to one type, for
+/// [`TypeError::IntegerOperandMismatch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegerCastFix {
+    /// The type that holds every value of both, when one exists.
+    pub target: Option<String>,
+    /// The casts to `target`, as (operand span, text inserted before it,
+    /// text inserted after it).
+    pub casts: Vec<(Span, String, String)>,
+    /// The expression rewritten with those casts, for the help line.
+    pub rewritten: Option<String>,
+}
+
 impl TypeError {
     /// Returns a short stable tag useful for snapshot tests.
     // A stable tag per variant is a data table, not control flow: the lint
@@ -1104,6 +1141,10 @@ impl TypeError {
         match self {
             Self::TypeMismatch { .. } => "type-mismatch",
             Self::NumericOperandMismatch { .. } => "numeric-operand-mismatch",
+            Self::IntegerOperandMismatch { .. } => "integer-operand-mismatch",
+            Self::UnsignedNegation { .. } => "unsigned-negation",
+            Self::ShiftAmountOutOfRange { .. } => "shift-amount-out-of-range",
+            Self::AmbiguousBoundMethod { .. } => "ambiguous-bound-method",
             Self::OptionValueMismatch { .. } => "option-value-mismatch",
             Self::ArgumentTypeMismatch { .. } => "argument-type-mismatch",
             Self::SlotCollectionElement { .. } => "slot-collection-element",
@@ -1178,7 +1219,6 @@ impl TypeError {
             Self::JsonNotSerializable { .. } => "json-not-serializable",
             Self::CallArityMismatch { .. } => "call-arity-mismatch",
             Self::UnknownVariant { .. } => "unknown-variant",
-            Self::SupertraitMethodThroughBound { .. } => "supertrait-method-through-bound",
             Self::MissingSupertraitImpl { .. } => "missing-supertrait-impl",
             Self::NotIndexable { .. } => "not-indexable",
             Self::NotCallable { .. } => "not-callable",
@@ -1235,6 +1275,10 @@ impl TypeError {
         match self {
             Self::TypeMismatch { .. } => "GT0001",
             Self::NumericOperandMismatch { .. } => "GT0001",
+            Self::IntegerOperandMismatch { .. } => "GT0001",
+            Self::UnsignedNegation { .. } => "GT0001",
+            Self::ShiftAmountOutOfRange { .. } => "GT0116",
+            Self::AmbiguousBoundMethod { .. } => "GT0117",
             Self::OptionValueMismatch { .. } => "GT0001",
             Self::ArgumentTypeMismatch { .. } => "GT0001",
             Self::SlotCollectionElement { .. } => "GT0068",
@@ -1307,7 +1351,6 @@ impl TypeError {
             Self::AmbiguousAssocItem { .. } => "GT0061",
             Self::CallArityMismatch { .. } => "GT0018",
             Self::UnknownVariant { .. } => "GT0019",
-            Self::SupertraitMethodThroughBound { .. } => "GT0020",
             Self::MissingSupertraitImpl { .. } => "GT0115",
             Self::NotIndexable { .. } => "GT0021",
             Self::NotCallable { .. } => "GT0022",
@@ -1353,6 +1396,28 @@ fn int128_diagnostic(
         ))
 }
 
+/// Whether every value of the integer type named `from` is a value of the
+/// one named `to`; `isize` and `usize` are 64-bit.
+fn int_name_holds(to: &str, from: &str) -> bool {
+    let shape = |name: &str| -> Option<(bool, u32)> {
+        let signed = name.starts_with('i');
+        let bits = match &name[1..] {
+            "size" => 64,
+            digits => digits.parse().ok()?,
+        };
+        Some((signed, bits))
+    };
+    let (Some((to_signed, to_bits)), Some((from_signed, from_bits))) = (shape(to), shape(from))
+    else {
+        return false;
+    };
+    match (to_signed, from_signed) {
+        (true, true) | (false, false) => to_bits >= from_bits,
+        (true, false) => to_bits > from_bits,
+        (false, true) => false,
+    }
+}
+
 fn mismatch_suggestion(expected: &str, found: &str) -> Option<String> {
     if expected.starts_with("Vec<") && found.starts_with("Iterator<") {
         return Some(
@@ -1372,7 +1437,13 @@ fn mismatch_suggestion(expected: &str, found: &str) -> Option<String> {
     ];
     let float_suffixes = ["f32", "f64"];
     if int_suffixes.contains(&expected) && int_suffixes.contains(&found) {
-        return Some(format!("cast explicitly with `<expr> as {expected}`"));
+        if int_name_holds(expected, found) {
+            return Some(format!("cast explicitly with `<expr> as {expected}`"));
+        }
+        return Some(format!(
+            "`<expr> as {expected}` keeps only the low bits of a `{found}` outside \
+             `{expected}`'s range, so check the value fits before casting"
+        ));
     }
     // Integer and float operands never widen into each other implicitly.
     if (int_suffixes.contains(&expected) && float_suffixes.contains(&found))
@@ -1458,19 +1529,8 @@ impl TypeDiagnostic {
                     out = out.with_help(suggestion);
                 }
             }
-            TypeError::NumericOperandMismatch { cast, .. } => {
-                out = out.with_help(format!("cast explicitly: `{cast}`"));
-            }
-            TypeError::OptionValueMismatch {
-                actual,
-                binding,
-                default,
-                ..
-            } => {
-                out = out.with_help(format!(
-                    "unwrap it with `{actual}.unwrap_or({default})`, or bind with \
-                     `if let Some({binding}) = {actual}`"
-                ));
+            TypeError::IntegerOperandMismatch { lhs, rhs, fix, .. } => {
+                out = integer_cast_help(out, lhs, rhs, fix);
             }
             TypeError::SlotCollectionElement { owner, found } => {
                 out = if matches!(found.as_str(), "u64" | "usize") {
@@ -1973,7 +2033,7 @@ impl TypeDiagnostic {
                 out = out.with_help(hint.clone());
             }
             TypeError::IntLiteralOverflow { literal, ty } => {
-                out = out.with_help(format!("`{literal}` exceeds the range of `{ty}`"));
+                out = out.with_help(literal_overflow_help(literal, ty));
             }
             TypeError::InvalidEscape { escape, reason } => {
                 out = out.with_help(format!("`{escape}` is not a valid escape: {reason}"));
@@ -2041,6 +2101,11 @@ impl TypeDiagnostic {
             // The title names the combinator and spells the annotation to
             // write, so a help line here would only restate it.
             TypeError::ClosureParamUninferred { .. } => {}
+            TypeError::NumericOperandMismatch { .. }
+            | TypeError::OptionValueMismatch { .. }
+            | TypeError::AmbiguousBoundMethod { .. }
+            | TypeError::ShiftAmountOutOfRange { .. }
+            | TypeError::UnsignedNegation { .. } => out = with_plain_help(out, &self.error),
             TypeError::GenericReturnTypeUninferred { callable, param } => {
                 out = out
                     .with_help(format!(
@@ -2087,12 +2152,6 @@ impl TypeDiagnostic {
             } => {
                 out = unknown_variant_diagnostic(out, enum_name, variant, declared);
             }
-            TypeError::SupertraitMethodThroughBound {
-                method,
-                bound,
-                supertrait,
-                ..
-            } => out = supertrait_method_diagnostic(out, method, bound, supertrait),
             TypeError::MissingSupertraitImpl { supertrait, ty, .. } => {
                 out = out.with_help(format!(
                     "a trait's supertraits come with it: add `impl {supertrait} for {ty}`"
@@ -2628,21 +2687,6 @@ fn arity_mismatch_diagnostic(
     ))
 }
 
-/// Attaches the GT0020 help + note. Split out of `to_diagnostic` to keep
-/// that match within the line-count lint budget.
-fn supertrait_method_diagnostic(
-    out: gossamer_diagnostics::Diagnostic,
-    method: &str,
-    bound: &str,
-    supertrait: &str,
-) -> gossamer_diagnostics::Diagnostic {
-    out.with_help(format!(
-        "add `{method}` to bound `{bound}`, or bound the parameter on `{supertrait}` \
-         directly (`<T: {supertrait}>`)"
-    ))
-    .with_note("a generic bound exposes only the named trait's own methods")
-}
-
 /// Attaches the GT0016 note + help. Split out of `to_diagnostic` to keep
 /// that match within the line-count lint budget.
 fn json_not_serializable_diagnostic(
@@ -3070,5 +3114,108 @@ impl ForeignError {
                  `ffi::View::new`",
             ),
         }
+    }
+}
+
+/// The help and the cast suggestions of an integer operand mismatch.
+fn integer_cast_help(
+    out: gossamer_diagnostics::Diagnostic,
+    lhs: &str,
+    rhs: &str,
+    fix: &IntegerCastFix,
+) -> gossamer_diagnostics::Diagnostic {
+    use gossamer_diagnostics::{Location, Suggestion};
+    let mut out = out.with_help(match (&fix.target, &fix.rewritten) {
+        (None, _) => format!(
+            "no integer type holds every value of both `{lhs}` and `{rhs}`, so cast one side \
+             and choose which values to give up: a cast to the signed type turns large \
+             unsigned values negative, and a cast to the unsigned type turns negative values \
+             large"
+        ),
+        (Some(target), Some(rewritten)) => {
+            format!("cast to `{target}`, which holds every value of both: `{rewritten}`")
+        }
+        (Some(target), None) => format!("cast to `{target}`, which holds every value of both"),
+    });
+    let target = fix.target.clone().unwrap_or_default();
+    for (span, before, after) in &fix.casts {
+        for (offset, text) in [(span.start, before), (span.end, after)] {
+            if text.is_empty() {
+                continue;
+            }
+            let at = Location::new(span.file, Span::new(span.file, offset, offset));
+            out = out.with_suggestion(Suggestion::replacement(
+                at,
+                format!("cast to `{target}`"),
+                text.clone(),
+            ));
+        }
+    }
+    out
+}
+
+/// `out` with the help line of a diagnostic whose help is one sentence
+/// about its own fields.
+fn with_plain_help(
+    out: gossamer_diagnostics::Diagnostic,
+    error: &TypeError,
+) -> gossamer_diagnostics::Diagnostic {
+    match plain_help(error) {
+        Some(help) => out.with_help(help),
+        None => out,
+    }
+}
+
+/// The help line of a diagnostic whose help is one sentence about its own
+/// fields.
+fn plain_help(error: &TypeError) -> Option<String> {
+    match error {
+        TypeError::NumericOperandMismatch { cast, .. } => {
+            Some(format!("cast explicitly: `{cast}`"))
+        }
+        TypeError::OptionValueMismatch {
+            actual,
+            binding,
+            default,
+            ..
+        } => Some(format!(
+            "unwrap it with `{actual}.unwrap_or({default})`, or bind with \
+             `if let Some({binding}) = {actual}`"
+        )),
+        TypeError::AmbiguousBoundMethod { method, .. } => Some(format!(
+            "a type has one method per name (GT0096), so no type implements both; rename \
+             `{method}` in one of the traits"
+        )),
+        TypeError::ShiftAmountOutOfRange { .. } => Some(
+            "a shift amount must be below the type's width; `<<%` and `>>%` take the amount \
+             modulo the width"
+                .to_string(),
+        ),
+        TypeError::UnsignedNegation { ty, operand } => {
+            let x = operand.as_deref().unwrap_or("<expr>");
+            Some(format!(
+                "write `0 -% {x}` for the value that wraps at `{ty}`'s width, or `-({x} as i64)` \
+                 to negate in a signed type"
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// The help line of a literal outside its type's range.
+fn literal_overflow_help(literal: &str, ty: &str) -> String {
+    // An unsuffixed literal too large for `i64`, its default, often means a
+    // `u64` value: the suffix gives it that type.
+    let digits = literal.replace('_', "");
+    let fits_u64 = ty == "i64"
+        && !literal.starts_with('-')
+        && digits.chars().all(|c| c.is_ascii_digit())
+        && digits.parse::<u64>().is_ok();
+    if fits_u64 {
+        format!(
+            "`{literal}` exceeds the range of `{ty}`; `{literal}u64` is the same value as a `u64`"
+        )
+    } else {
+        format!("`{literal}` exceeds the range of `{ty}`")
     }
 }

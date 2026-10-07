@@ -101,9 +101,9 @@ fn main() {
             )
         }
 
-        let time_regressed = base_row.ns > 0
-        && row.ns as f64 / base_row.ns as f64 >= limit_ratio
-        && time_delta >= min_delta
+        let time_regressed = base_row.ns > 0 &&
+            row.ns as f64 / base_row.ns as f64 >= limit_ratio &&
+            time_delta >= min_delta
         let rss_regressed = gates_rss && row.rss as f64 / base_row.rss as f64 >= 1.5
         let status = if time_regressed || rss_regressed { "REGRESSION" } else { "OK" }
         let rss_text = if gates_rss {

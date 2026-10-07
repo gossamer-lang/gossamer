@@ -31,8 +31,8 @@ impl http::Handler for App {
         }
         http::Response::text(
             200
-            "form_user=" + user + " form_role=" + role
-            + " missing=[" + missing + "] " + auth
+            "form_user=" + user + " form_role=" + role +
+                " missing=[" + missing + "] " + auth
         )
     }
 }

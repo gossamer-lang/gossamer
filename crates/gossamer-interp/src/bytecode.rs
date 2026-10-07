@@ -1134,6 +1134,12 @@ pub enum Op {
     /// (matches Rust's `u64 >> u64` semantics - zero-filling). Used when
     /// the shifted operand's declared type is unsigned.
     ShrU64 { dst_i: Reg, lhs_i: Reg, rhs_i: Reg },
+    /// Panics unless `0 <= ints[amount_i] < bits`, the amounts a shift of a
+    /// `bits`-wide integer accepts; `left` names `<<` in the report.
+    CheckShiftI64 { amount_i: Reg, bits: u8, left: bool },
+    /// Raises again the fault the frame's landing pad is unwinding with,
+    /// once the pad has run the deferred expressions pending at the fault.
+    ResumeUnwind,
     /// `ints[dst_i] = src_v.as_int()`. `peer_v` is present for a binary
     /// operation so a type mismatch can report both operands.
     UnboxI64 {
@@ -2033,6 +2039,37 @@ pub struct FnChunk {
     /// contiguous `[first .. first + count]` ranges. Empty for chunks
     /// containing no `select`.
     pub select_arms: Vec<SelectArmMeta>,
+    /// Where a fault raised inside a span of instructions continues: the
+    /// landing pad that runs the deferred expressions pending there. Empty
+    /// for chunks with no `defer`.
+    pub unwind_table: Vec<UnwindEntry>,
+}
+
+/// One span of a chunk's instructions whose faults land somewhere other than
+/// the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnwindEntry {
+    /// First instruction of the span.
+    pub start: InstrIdx,
+    /// One past the last instruction of the span.
+    pub end: InstrIdx,
+    /// Where execution continues after the fault.
+    pub landing: InstrIdx,
+    /// What the fault means there.
+    pub kind: UnwindKind,
+}
+
+/// How a fault inside an [`UnwindEntry`] span is handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnwindKind {
+    /// The fault starts unwinding the frame: it is held while the landing
+    /// pad runs the pending deferred expressions, then [`Op::ResumeUnwind`]
+    /// raises it again.
+    Cleanup,
+    /// A deferred expression faulted while the frame unwound: the fault is
+    /// attached to the held one as a note, and the landing pad continues
+    /// with the next deferred expression.
+    Note,
 }
 
 /// One adaptive-arith inline-cache slot. Tier C2 of the interp
@@ -2162,7 +2199,18 @@ impl FnChunk {
     /// `compile_fn` grows the Vec fields incrementally; this trims
     /// each one to its occupied length so the chunk holds no wasted
     /// allocation beyond what the bytecode actually requires.
+    /// The innermost unwind entry whose span holds `instruction`.
+    #[must_use]
+    pub fn unwind_entry(&self, instruction: InstrIdx) -> Option<UnwindEntry> {
+        self.unwind_table
+            .iter()
+            .filter(|entry| entry.start <= instruction && instruction < entry.end)
+            .min_by_key(|entry| entry.end - entry.start)
+            .copied()
+    }
+
     pub fn compact(&mut self) {
+        self.unwind_table.shrink_to_fit();
         self.instrs.shrink_to_fit();
         self.instruction_locations.shrink_to_fit();
         self.wide_ops.shrink_to_fit();

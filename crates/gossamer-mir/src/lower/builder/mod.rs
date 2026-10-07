@@ -184,6 +184,14 @@ pub(crate) struct Builder<'a> {
     /// at every edge that leaves the block - normal fall-through, `return`
     /// (all frames), and `break`/`continue` (frames down to the loop's frame).
     pub(crate) defer_stack: Vec<Vec<gossamer_hir::HirExpr>>,
+    /// The landing pads of a body that registers deferred expressions,
+    /// `None` for every other body.
+    pub(crate) unwind: Option<unwind::UnwindState>,
+    /// `(frame, expression)` positions in `defer_stack` running on the exit
+    /// edge being lowered: they are no longer pending there.
+    pub(crate) running_defers: Vec<(usize, usize)>,
+    /// Nonzero while a landing pad's code is lowered.
+    pub(crate) in_unwind_pad: u32,
 }
 
 /// A live loop context: where to jump on `break` vs. `continue`,
@@ -234,6 +242,7 @@ mod scope;
 mod stdlib;
 mod stmt;
 mod types;
+pub(crate) mod unwind;
 
 mod expr_call;
 
