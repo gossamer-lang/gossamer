@@ -266,9 +266,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 // `return` / `break` / `continue` emit the pending frames
                 // before their jump. A `defer` never diverges the enclosing
                 // statement sequence.
-                if let Some(frame) = self.defer_stack.last_mut() {
-                    frame.push(expr.clone());
-                }
+                self.push_defer(expr.clone())?;
                 Ok(false)
             }
             HirStmtKind::Item(item) => match &item.kind {
@@ -986,9 +984,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 }),
             },
         };
-        if let Some(frame) = self.defer_stack.last_mut() {
-            frame.push(write_back);
-        }
+        self.push_defer(write_back)?;
         Ok(true)
     }
 

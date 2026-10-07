@@ -192,24 +192,25 @@ fn main() {
 #[test]
 fn a_contended_mutex_serialises_its_goroutines() {
     everywhere(
-        r#"use std::sync::Mutex
+        r#"use std::sync
+use std::sync::Mutex
 
 fn main() {
     let m = Mutex::new()
-    let mut total = #[0]
+    let total = sync::Shared::new(0)
     let _ = cohort {
         for _ in 0..4 {
             spawn(|| {
                 for _ in 0..5000 {
                     m.lock()
-                    let v = total[0]
-                    total[0] = v + 1
+                    let v = total.get()
+                    total.set(v + 1)
                     m.unlock()
                 }
             })
         }
     }
-    println(f"{total[0]}")
+    println(f"{total.get()}")
 }
 "#,
         "20000\n",
@@ -252,19 +253,19 @@ fn main() { println(f"{run()}") }
 }
 
 #[test]
-fn a_closure_cannot_write_a_value_it_captured_by_copy() {
+fn a_spawned_closure_cannot_write_a_binding_it_captured() {
     for (src, name) in [
         (
-            "fn main() {\n    let mut count = 0\n    #[1, 2].for_each(|x| count += x)\n    println(f\"{count}\")\n}\n",
+            "fn main() {\n    let mut count = 0\n    let h = spawn(|| count += 1)\n    let _ = h.join()\n}\n",
             "count",
         ),
         (
-            "struct Bag { items: Vec<i64> }\nfn call(f: Fn()) { f() }\nfn main() {\n    let mut b = Bag { items: #[1] }\n    call(|| b.items.push(2))\n    println(f\"{b.items}\")\n}\n",
-            "b",
+            "fn main() {\n    let mut seen = #[]\n    let h = spawn(|| seen.push(1))\n    let _ = h.join()\n}\n",
+            "seen",
         ),
         (
-            "fn main() {\n    let mut s = \"a\"\n    let f = || s.push_str(\"b\")\n    f()\n}\n",
-            "s",
+            "struct Bag { items: Vec<i64> }\nfn main() {\n    let mut b = Bag { items: #[1] }\n    let h = spawn(|| #[1].for_each(|x| b.items.push(x)))\n    let _ = h.join()\n}\n",
+            "b",
         ),
     ] {
         let out = gos_check_str(src);
@@ -275,6 +276,14 @@ fn a_closure_cannot_write_a_value_it_captured_by_copy() {
             "{err}"
         );
     }
+}
+
+#[test]
+fn a_closure_writes_the_bindings_it_captures() {
+    everywhere(
+        "struct Bag { items: Vec<i64> }\nfn call(f: Fn()) { f() }\nfn main() {\n    let mut count = 0\n    #[1, 2].for_each(|x| count += x)\n    let mut b = Bag { items: #[1] }\n    call(|| b.items.push(2))\n    let mut s = \"a\"\n    let f = || s.push_str(\"b\")\n    f()\n    println(f\"{count} {b.items} {s}\")\n}\n",
+        "3 #[1, 2] ab\n",
+    );
 }
 
 #[test]

@@ -201,6 +201,7 @@ impl<'a> Lowerer<'a> {
         block: &gossamer_mir::BasicBlock,
     ) -> Result<(), BuildError> {
         writeln!(self.out, "bb{}:", block.id.as_u32()).unwrap();
+        self.emit_landing_pad(block.id.as_u32());
         if self.preempt_headers.contains(&block.id.as_u32()) {
             self.emit_preempt_poll();
         }
@@ -302,6 +303,15 @@ impl<'a> Lowerer<'a> {
         place: &Place,
         rvalue: &Rvalue,
     ) -> Result<(), BuildError> {
+        // The entry probe's value is read only by the switch the pads hang
+        // off, which lowers to its default.
+        if let Rvalue::CallIntrinsic {
+            name: "gos_unwind_probe",
+            ..
+        } = rvalue
+        {
+            return Ok(());
+        }
         if place.projection.is_empty()
             && let Some(view) = self.payload_views.get(&place.local).cloned()
             && let Rvalue::CallIntrinsic {
@@ -684,6 +694,10 @@ impl<'a> Lowerer<'a> {
                 arms,
                 default,
             } => {
+                if self.is_unwind_probe(discriminant) {
+                    writeln!(self.out, "  br label %bb{}", default.as_u32()).unwrap();
+                    return Ok(());
+                }
                 let v = self.lower_operand(discriminant)?;
                 let mut ty = render_ty(self.tcx, self.operand_ty(discriminant));
                 let mut v = v;
@@ -712,6 +726,10 @@ impl<'a> Lowerer<'a> {
             }
             Terminator::Unreachable => {
                 writeln!(self.out, "  unreachable").unwrap();
+                Ok(())
+            }
+            Terminator::Resume => {
+                self.lower_resume();
                 Ok(())
             }
             Terminator::Panic { message } => {

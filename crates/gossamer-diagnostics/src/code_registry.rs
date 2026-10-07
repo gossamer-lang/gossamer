@@ -716,6 +716,23 @@ pub const REGISTRY: &[(&str, &str)] = &[
             is written twice, `{{` or `}}`.",
     ),
     (
+        "GP0066",
+        "A binary operator other than `|>` began a line. A line break before\n\
+            an operator never continues the expression above it: a line starting\n\
+            with `||`, `|`, `-`, `&`, or `*` begins a new statement, so `|| expr`\n\
+            on its own line is always a closure. To continue an expression, end\n\
+            the previous line with the operator; `gos check --fix` moves it.",
+    ),
+    (
+        "GP0067",
+        "A closure is a statement of its own, so its value is never read. A line\n\
+            starting with `||` or `|` begins a closure rather than continuing the\n\
+            expression above, so `let ok = a` followed by `|| b` on the next line\n\
+            is `let ok = a` and an unused closure. To continue a logical or, end\n\
+            the line above with `||` (`gos check --fix` moves it); to keep the\n\
+            closure, bind it with `let`.",
+    ),
+    (
         "GR0001",
         "A name used in source could not be resolved to a declaration.\n\
                      Check the spelling, whether a `use` brings the name into scope,\n\
@@ -806,9 +823,10 @@ pub const REGISTRY: &[(&str, &str)] = &[
         "GR0014",
         "A parameter default was not a constant. The default is spliced\n\
                      into every call that leaves the parameter out, so it has to be\n\
-                     a literal - `10`, `-1`, `true`, `\"\"` - rather than an\n\
-                     expression that would have to be resolved separately at each\n\
-                     of those call sites.",
+                     a value known while compiling: a literal (`10`, `-1`, `true`,\n\
+                     `\"\"`), a `const` or associated const, integer arithmetic over\n\
+                     those, or a `comptime` expression. A const is resolved where the\n\
+                     function is declared, and its value is what every call receives.",
     ),
     (
         "GR0015",
@@ -1014,15 +1032,6 @@ pub const REGISTRY: &[(&str, &str)] = &[
                      declare. The resolver leaves the path unresolved and the\n\
                      program faults at runtime; check the variant spelling against\n\
                      the enum declaration.",
-    ),
-    (
-        "GT0020",
-        "A method reached through a generic bound resolves only through a\n\
-                     supertrait of that bound (e.g. `fn f<T: Pet>(p: T)` calling a\n\
-                     method declared on `Animal` where `trait Pet: Animal`). The\n\
-                     compiled tiers cannot lower supertrait-through-bound dispatch\n\
-                     (SPEC §3.8); add the method to the named bound, or bound the\n\
-                     parameter on the supertrait directly.",
     ),
     (
         "GT0021",
@@ -1729,11 +1738,11 @@ pub const REGISTRY: &[(&str, &str)] = &[
     ),
     (
         "GT0114",
-        "A closure writes a value it captured by copy: a scalar, a `String`, a\n\
-            tuple, a fixed array, or a struct or enum. The write changes the\n\
-            closure's own copy, which starts from the captured value on every\n\
-            call, and never the enclosing binding. Return the new value, or hold\n\
-            it in a `Vec` or `Map`, which a closure captures by reference.",
+        "A spawned closure writes a binding it captured. A spawned closure\n\
+            runs on another goroutine, so it takes a snapshot of each capture\n\
+            where the `spawn` is written, and the write changes only the\n\
+            goroutine's snapshot. Answer the value through `join()`, send it on a\n\
+            channel, or share it through a `sync::Shared`.",
     ),
     (
         "GT0115",
@@ -1741,6 +1750,20 @@ pub const REGISTRY: &[(&str, &str)] = &[
             has no `impl Super for T`. A supertrait is part of the trait: every\n\
             type that implements the subtrait implements the supertrait too, so a\n\
             bound on the subtrait can rely on it. Add the supertrait's `impl`.",
+    ),
+    (
+        "GT0116",
+        "A shift by a literal amount outside `0..BITS` of the shifted type, such\n\
+            as `x << 64` on an `i64` or `b >> 8` on a `u8`. A shift amount must be\n\
+            below the type's width; at run time an amount out of range panics. To\n\
+            take the amount modulo the width, write `<<%` or `>>%`.",
+    ),
+    (
+        "GT0117",
+        "A method call on a generic parameter names a method two of its traits\n\
+            declare: two bounds, or a bound and one of its supertraits. A type has\n\
+            one method per name (GT0096), so no type can implement both traits;\n\
+            rename the method in one of them.",
     ),
     (
         "GX0001",

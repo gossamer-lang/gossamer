@@ -164,8 +164,10 @@ impl<'tcx> FnBuilder<'tcx> {
     /// `break`, `continue`. Each expression's result register is
     /// discarded: a `defer` body yields no value and never redirects
     /// control flow out of the deferred expression.
-    pub(crate) fn emit_defer_frame(&mut self, frame: &[HirExpr]) -> RuntimeResult<()> {
-        for expr in frame.iter().rev() {
+    pub(crate) fn emit_defer_frame(&mut self, frame_idx: usize) -> RuntimeResult<()> {
+        let frame = self.defer_stack.get(frame_idx).cloned().unwrap_or_default();
+        for (expr_idx, expr) in frame.iter().enumerate().rev() {
+            self.mark_defer_running(frame_idx, expr_idx)?;
             let _ = self.compile_expr(expr)?;
         }
         Ok(())
@@ -179,10 +181,9 @@ impl<'tcx> FnBuilder<'tcx> {
     /// `gossamer-mir`'s `emit_defers_above`.
     pub(crate) fn emit_defers_above(&mut self, from_depth: usize) -> RuntimeResult<()> {
         for i in (from_depth..self.defer_stack.len()).rev() {
-            let frame = self.defer_stack[i].clone();
-            self.emit_defer_frame(&frame)?;
+            self.emit_defer_frame(i)?;
         }
-        Ok(())
+        self.finish_defer_edge()
     }
 
     pub(crate) fn bind_local(&mut self, name: &str, typed: TypedReg) {

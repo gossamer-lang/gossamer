@@ -1,6 +1,7 @@
 // ERROR: GT0114
 fn main() {
     let mut count = 0
-    #[1, 2, 3].for_each(|x| count += x)
+    let h = spawn(|| count += 1)
+    let _ = h.join()
     println("{}", count)
 }

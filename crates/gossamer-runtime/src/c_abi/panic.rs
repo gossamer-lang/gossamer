@@ -21,34 +21,226 @@ use super::*;
 // Panic
 // ---------------------------------------------------------------
 
-thread_local! {
-    /// The message of the most recent goroutine panic on this worker
-    /// thread. Set by `gos_rt_panic` just before it raises the Rust
-    /// panic, so a spawned goroutine's Drop-guard (in `gos_rt_spawn`)
-    /// can read it during unwinding and deliver `Err(message)` to the
-    /// join handle. The runtime catches the panic itself, so the
-    /// payload string is otherwise unreachable from the spawn body.
-    static LAST_GOROUTINE_PANIC: std::cell::RefCell<Option<String>> =
-        const { std::cell::RefCell::new(None) };
+/// The fault state of one goroutine, or of a thread outside any goroutine.
+/// It follows the goroutine across worker threads, since a deferred
+/// expression may block while its frame unwinds.
+#[derive(Default)]
+struct FaultState {
+    /// The message of the goroutine's most recent panic, with the notes its
+    /// landing pads recorded. Set when the panic is raised, so a spawned
+    /// goroutine's Drop-guard (in `gos_rt_spawn`) can deliver
+    /// `Err(message)` to the join handle as the panic unwinds; the runtime
+    /// catches the panic itself, so the payload is otherwise unreachable.
+    last_panic: Option<String>,
+    /// How many landing pads are running their deferred expressions.
+    pads: usize,
+    /// A panic a deferred expression raised inside a landing pad, until the
+    /// pad's note handler records it.
+    nested: Option<String>,
+    /// The panics deferred expressions raised while the current one
+    /// unwound, oldest first.
+    notes: Vec<String>,
+    /// The faults [`gos_rt_unwind_try_call`] caught for the landing pads
+    /// running now, innermost last, each resumed when its pad has run.
+    caught: Vec<Box<dyn std::any::Any + Send>>,
+}
+
+/// Runs `f` on the running goroutine's [`FaultState`], creating it first.
+fn with_fault_state<R>(f: impl FnOnce(&mut FaultState) -> R) -> R {
+    let mut word = gossamer_coro::local_word();
+    if word == 0 {
+        gossamer_coro::set_local_word_drop(drop_fault_state);
+        word = Box::into_raw(Box::new(FaultState::default())) as usize;
+        gossamer_coro::set_local_word(word);
+    }
+    // SAFETY: a nonzero local word is a `Box<FaultState>` this function
+    // allocated for the running goroutine or thread, freed only by
+    // `drop_fault_state` once that goroutine is gone, and no other borrow of
+    // it is live during `f`, which runs no Gossamer code.
+    let state = unsafe { &mut *(word as *mut FaultState) };
+    f(state)
+}
+
+/// Frees a finished goroutine's [`FaultState`].
+fn drop_fault_state(word: usize) {
+    // SAFETY: `word` is the `Box<FaultState>` `with_fault_state` leaked into
+    // the goroutine's local word, and its goroutine is being dropped.
+    drop(unsafe { Box::from_raw(word as *mut FaultState) });
 }
 
 /// Records the current goroutine's panic message for `gos_rt_spawn`'s
 /// join-handle delivery.
 pub(crate) fn set_last_goroutine_panic(msg: &str) {
-    LAST_GOROUTINE_PANIC.with(|c| *c.borrow_mut() = Some(msg.to_string()));
+    with_fault_state(|state| state.last_panic = Some(msg.to_string()));
 }
 
 /// Takes (and clears) the last goroutine panic message recorded on
-/// this thread, if any.
+/// this goroutine, if any.
 pub(crate) fn take_last_goroutine_panic() -> Option<String> {
-    LAST_GOROUTINE_PANIC.with(|c| c.borrow_mut().take())
+    with_fault_state(|state| state.last_panic.take())
 }
 
 /// Reads the last goroutine panic message without clearing it, for a
 /// second observer on the same unwind: a cohort records the child's
 /// failure and the join handle still delivers the message.
 pub(crate) fn peek_last_goroutine_panic() -> Option<String> {
-    LAST_GOROUTINE_PANIC.with(|c| c.borrow().clone())
+    with_fault_state(|state| state.last_panic.clone())
+}
+
+/// The report line a panic a deferred expression raised while another
+/// unwound adds to that panic's report.
+fn unwind_note(nested: &str) -> String {
+    format!("\nnote: a deferred expression panicked while unwinding: {nested}")
+}
+
+/// `text` with the notes this goroutine's landing pads recorded while its
+/// panic unwound.
+fn with_unwind_notes(text: &str) -> String {
+    with_fault_state(|state| {
+        let mut out = text.to_string();
+        for note in &state.notes {
+            out.push_str(&unwind_note(note));
+        }
+        out
+    })
+}
+
+/// Records `text` as raised: the panic a frame starts unwinding with, or,
+/// inside a landing pad, one a deferred expression raised.
+fn record_raise(text: &str) -> bool {
+    with_fault_state(|state| {
+        if state.pads > 0 {
+            state.nested = Some(text.to_string());
+            true
+        } else {
+            state.notes.clear();
+            false
+        }
+    })
+}
+
+/// A landing pad starts running its frame's pending deferred expressions.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_unwind_begin() {
+    with_fault_state(|state| state.pads += 1);
+}
+
+/// A landing pad has run its deferred expressions and resumes unwinding.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_unwind_end() {
+    with_fault_state(|state| state.pads = state.pads.saturating_sub(1));
+}
+
+/// A deferred expression panicked inside a landing pad: the panic is kept
+/// as a note on the one the frame unwinds with, whose report names it.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_unwind_note() {
+    with_fault_state(|state| {
+        if let Some(nested) = state.nested.take() {
+            if let Some(last) = state.last_panic.as_mut() {
+                last.push_str(&unwind_note(&nested));
+            }
+            state.notes.push(nested);
+        }
+    });
+}
+
+/// The body a catching call runs: a compiled thunk that reads its callee
+/// and arguments from `ctx` and writes the callee's results back there.
+type CatchingThunk = extern "C-unwind" fn(*mut u8);
+
+/// Runs `thunk(ctx)`, answering the payload of a fault that unwound out of
+/// it.
+///
+/// # Safety
+///
+/// `thunk` is the address of a compiled function of the [`CatchingThunk`]
+/// shape, and `ctx` the buffer it was compiled to read.
+unsafe fn catching_call(
+    thunk: *const u8,
+    ctx: *mut u8,
+) -> Result<(), Box<dyn std::any::Any + Send>> {
+    // SAFETY: the caller passes a thunk compiled with this signature.
+    let thunk: CatchingThunk = unsafe { std::mem::transmute(thunk) };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| thunk(ctx)))
+}
+
+/// Makes a call from a body with landing pads, catching a fault that
+/// unwinds out of it so the caller branches to its cleanup pad. The fault
+/// is held until the pad's [`gos_rt_unwind_resume`].
+///
+/// # Safety
+///
+/// `thunk` is the address of a compiled catching thunk and `ctx` the
+/// buffer holding the callee and arguments it reads.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_unwind_try_call(thunk: *const u8, ctx: *mut u8) -> i32 {
+    // SAFETY: forwarded from this function's own contract.
+    match unsafe { catching_call(thunk, ctx) } {
+        Ok(()) => 0,
+        Err(payload) => {
+            with_fault_state(|state| state.caught.push(payload));
+            1
+        }
+    }
+}
+
+/// Makes a call from a landing pad's code, catching a panic a deferred
+/// expression raises so the pad notes it on the fault it is running for and
+/// goes on with the next one.
+///
+/// # Safety
+///
+/// As [`gos_rt_unwind_try_call`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_unwind_try_call_in_pad(thunk: *const u8, ctx: *mut u8) -> i32 {
+    // SAFETY: forwarded from this function's own contract.
+    match unsafe { catching_call(thunk, ctx) } {
+        Ok(()) => 0,
+        Err(_nested) => 1,
+    }
+}
+
+/// Continues the fault the innermost running landing pad caught, once its
+/// deferred expressions have run.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn gos_rt_unwind_resume() -> ! {
+    match with_fault_state(|state| state.caught.pop()) {
+        Some(payload) => std::panic::resume_unwind(payload),
+        // A pad is entered only from a catching call that held its fault.
+        None => std::process::abort(),
+    }
+}
+
+thread_local! {
+    /// Whether a fault on `main`'s thread unwinds to `gos_rt_call_main`, so
+    /// the deferred expressions pending in its frames run before the report.
+    static MAIN_UNWINDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs a native program's `main` through `entry`, which writes its result
+/// to `out`. A fault raised on `main`'s thread unwinds to here, running the
+/// deferred expressions pending in every frame it leaves, and is reported
+/// then, as the bytecode VM reports it after its frames unwind.
+///
+/// # Safety
+///
+/// `entry` is the address of the program's main shim, a function taking the
+/// result slot `out`, which it writes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_call_main(entry: *const u8, out: *mut u8) {
+    // SAFETY: the native `main` passes the address of `gos_main_shim`, an
+    // unwinding function that takes the result slot's address.
+    let entry: extern "C-unwind" fn(*mut u8) = unsafe { std::mem::transmute(entry) };
+    let outer = MAIN_UNWINDS.with(|flag| flag.replace(true));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| entry(out)));
+    MAIN_UNWINDS.with(|flag| flag.set(outer));
+    if let Err(payload) = result {
+        if let Some(fault) = take_deferred_fault(&*payload) {
+            reraise_deferred_fault(&fault);
+        }
+        std::panic::resume_unwind(payload);
+    }
 }
 
 // `C-unwind`, not `C`: on the goroutine path this raises a Rust panic
@@ -261,7 +453,7 @@ impl Drop for DeferredFaults {
 /// stack this thread recorded for it.
 #[must_use]
 pub fn take_deferred_fault(payload: &(dyn std::any::Any + Send)) -> Option<DeferredFault> {
-    let text = payload.downcast_ref::<GosPanic>()?.0.clone();
+    let text = with_unwind_notes(&payload.downcast_ref::<GosPanic>()?.0);
     let trace = DEFERRED_TRACE.with(|t| std::mem::take(&mut *t.borrow_mut()));
     let (code, prefix) = DEFERRED_KIND.with(|k| std::mem::take(&mut *k.borrow_mut()));
     let (code, prefix) = if code.is_empty() {
@@ -330,10 +522,23 @@ fn raise_with_trace(code: &str, prefix: &str, text: String, trace: Option<String
     // message and the frames below it.
     let text = text.trim_end_matches('\n').to_string();
     install_silent_gos_hook();
-    if DEFERRED_FAULTS.with(std::cell::Cell::get) {
-        let trace = fault_trace();
-        DEFERRED_TRACE.with(|t| *t.borrow_mut() = trace);
-        DEFERRED_KIND.with(|k| *k.borrow_mut() = (code.to_string(), prefix.to_string()));
+    let nested = record_raise(&text);
+    // A frame's deferred expressions run before its main-thread fault is
+    // reported, so the fault unwinds to `gos_rt_call_main` like a deferred
+    // one; the report, the hook, and the exit happen there.
+    let main_unwinds = MAIN_UNWINDS.with(std::cell::Cell::get) && !faults_are_isolated();
+    if DEFERRED_FAULTS.with(std::cell::Cell::get) || main_unwinds {
+        // A deferred expression's panic inside a landing pad is caught there
+        // and noted; the held fault keeps the frames and kind it was raised
+        // with.
+        if !nested {
+            let trace = trace.unwrap_or_else(fault_trace);
+            DEFERRED_TRACE.with(|t| *t.borrow_mut() = trace);
+            DEFERRED_KIND.with(|k| *k.borrow_mut() = (code.to_string(), prefix.to_string()));
+        }
+        std::panic::panic_any(GosPanic(text));
+    }
+    if nested {
         std::panic::panic_any(GosPanic(text));
     }
     let hooked = call_user_panic_hook(&text);
@@ -344,7 +549,8 @@ fn raise_with_trace(code: &str, prefix: &str, text: String, trace: Option<String
     if faults_are_isolated() {
         // Stash the message so a `spawn`-created join handle can deliver
         // `Err(message)` from its unwinding Drop-guard before the coroutine
-        // wrapper catches and isolates this panic.
+        // wrapper catches and isolates this panic. A deferred expression's
+        // panic inside a landing pad becomes a note on that message instead.
         set_last_goroutine_panic(&text);
         // A panic in a JOINABLE (`spawn`) body is observed through `join()`,
         // which delivers it as `Err`. Suppress the eager report so stderr stays

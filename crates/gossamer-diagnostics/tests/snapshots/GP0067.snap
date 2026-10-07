@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GP0067]: A closure is a statement of its own, so its value is never read. A line - here
+--- framed ---
+error[GP0067]: A closure is a statement of its own, so its value is never read. A line
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

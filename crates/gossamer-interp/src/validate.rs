@@ -516,7 +516,7 @@ pub(crate) fn validate_chunk(chunk: &FnChunk) -> Result<(), ValidationError> {
                 check_cache(op_idx, cache_idx, call_cache_count, CacheKind::Call)?;
             }
             Op::Return { value } => check_v(op_idx, value)?,
-            Op::ReturnUnit => {}
+            Op::ReturnUnit | Op::ResumeUnwind => {}
             Op::Panic { msg } => {
                 check_pool(op_idx, u32::from(msg), consts_len, PoolKind::Consts)?;
             }
@@ -1229,6 +1229,7 @@ pub(crate) fn validate_chunk(chunk: &FnChunk) -> Result<(), ValidationError> {
                 check_i(op_idx, dst_i)?;
                 check_i(op_idx, src_i)?;
             }
+            Op::CheckShiftI64 { amount_i, .. } => check_i(op_idx, amount_i)?,
             Op::ArithImmI64 { dst_i, lhs_i, .. } => {
                 check_i(op_idx, dst_i)?;
                 check_i(op_idx, lhs_i)?;
@@ -1578,6 +1579,16 @@ fn validate_control_flow(chunk: &FnChunk) -> Result<(), ValidationError> {
         });
     }
 
+    let len = chunk.instrs.len() as u32;
+    if let Some(entry) = chunk
+        .unwind_table
+        .iter()
+        .find(|entry| entry.start > entry.end || entry.end > len || entry.landing >= len)
+    {
+        return Err(ValidationError::InvalidChunkShape {
+            reason: format!("unwind entry {entry:?} lies outside the chunk"),
+        });
+    }
     let mut reachable = vec![false; chunk.instrs.len()];
     let mut pending = vec![0usize];
     while let Some(op_idx) = pending.pop() {
@@ -1590,8 +1601,16 @@ fn validate_control_flow(chunk: &FnChunk) -> Result<(), ValidationError> {
                 pending.push(target);
             }
         };
+        // A fault inside an unwind span continues at its landing pad.
+        if let Some(entry) = chunk.unwind_entry(op_idx as u32) {
+            add_successor(entry.landing as usize);
+        }
         match chunk.instrs[op_idx] {
-            Op::Return { .. } | Op::ReturnUnit | Op::Panic { .. } | Op::TypeError { .. } => {}
+            Op::Return { .. }
+            | Op::ReturnUnit
+            | Op::ResumeUnwind
+            | Op::Panic { .. }
+            | Op::TypeError { .. } => {}
             Op::Jump { target } => add_successor(target as usize),
             Op::BranchIf { target, .. }
             | Op::BranchIfNot { target, .. }
@@ -1731,6 +1750,10 @@ fn validate_register_initialization(chunk: &FnChunk) -> Result<(), ValidationErr
     while let Some(op_idx) = pending.pop() {
         let state = incoming[op_idx].as_ref().expect("queued state").clone();
         let effects = op_effects(chunk, op_idx);
+        // A fault leaves the registers as they were before the faulting op.
+        let before_fault = chunk
+            .unwind_entry(op_idx as u32)
+            .map(|entry| (entry, state.clone()));
         let mut out = state;
         out.apply(&effects);
 
@@ -1752,8 +1775,15 @@ fn validate_register_initialization(chunk: &FnChunk) -> Result<(), ValidationErr
             }
         };
 
+        if let Some((entry, before)) = before_fault {
+            propagate(entry.landing as usize, before);
+        }
         match chunk.instrs[op_idx] {
-            Op::Return { .. } | Op::ReturnUnit | Op::Panic { .. } | Op::TypeError { .. } => {}
+            Op::Return { .. }
+            | Op::ReturnUnit
+            | Op::ResumeUnwind
+            | Op::Panic { .. }
+            | Op::TypeError { .. } => {}
             Op::Jump { target } => propagate(target as usize, out),
             Op::BranchIf { target, .. }
             | Op::BranchIfNot { target, .. }
@@ -2288,6 +2318,7 @@ pub(crate) fn register_effects(
         | Op::Jump { .. }
         | Op::Return { .. }
         | Op::ReturnUnit
+        | Op::ResumeUnwind
         | Op::Panic { .. }
         | Op::TypeError { .. }
         | Op::CovHit { .. }
@@ -2351,7 +2382,10 @@ pub(crate) fn register_effects(
         | Op::BranchIfGtI64 { lhs_i, rhs_i, .. } => effect.i_reads.extend([lhs_i, rhs_i]),
         Op::NegI64 { src_i, .. }
         | Op::MoveI64 { src_i, .. }
-        | Op::ArithImmI64 { lhs_i: src_i, .. } => effect.i_reads.push(src_i),
+        | Op::ArithImmI64 { lhs_i: src_i, .. }
+        | Op::CheckShiftI64 {
+            amount_i: src_i, ..
+        } => effect.i_reads.push(src_i),
         Op::IncJumpIfLtI64 {
             counter_i, end_i, ..
         }
@@ -2673,6 +2707,7 @@ mod tests {
             i64_params: Vec::new(),
             closure_protos: Vec::new(),
             select_arms: Vec::new(),
+            unwind_table: Vec::new(),
         }
     }
 

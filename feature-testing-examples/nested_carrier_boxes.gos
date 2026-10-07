@@ -47,8 +47,8 @@ fn unwrap_forms(i: i64) -> String {
     let n = option::unwrap_or_else(wrap(i + 5), || Some("lazy free"))
     let q = result::unwrap_or_else(parse(i + 4), |e| Some(e))
     let _ = churn(i)
-    describe(e) + "," + describe(f) + "," + describe(g) + "," + describe(h) + "," + describe(k) + ","
-    + describe(m) + "," + describe(n) + "," + describe(q)
+    describe(e) + "," + describe(f) + "," + describe(g) + "," + describe(h) + "," + describe(k) + "," +
+        describe(m) + "," + describe(n) + "," + describe(q)
 }
 
 fn read_twice(i: i64) -> String {

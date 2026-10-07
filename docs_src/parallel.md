@@ -76,10 +76,10 @@ because that storage belongs to the call.
 
 Two shapes are refused outright, and the reason for each is worth knowing:
 
-- **A closure that writes something it captured.** A closure captures a `Vec`,
-  `Map`, or `Set` by managed reference, so `xs.par_map(|v| { seen.push(v); v })`
-  would have every worker pushing into one container at once. A captured
-  scalar is refused too: every worker shares one closure environment.
+- **A closure that writes something it captured.** A closure's writes reach
+  the bindings it captures, so `xs.par_map(|v| { seen.push(v); v })` would have
+  every worker pushing into one container at once, and `count += 1` would have
+  every worker writing one integer.
 - **A callable reached through a binding.** `let f = |v| v * 2` then
   `xs.par_map(f)` hides the body at the call site, so its purity cannot be
   decided there. Write the literal at the call, or name a function.

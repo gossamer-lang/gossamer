@@ -71,6 +71,10 @@ impl<'tcx> FnBuilder<'tcx> {
             loop_stack: Vec::new(),
             pending_loop_label: None,
             defer_stack: Vec::new(),
+            unwind_table: Vec::new(),
+            unwind_region_start: 0,
+            running_defers: Vec::new(),
+            in_unwind_pad: 0,
             closure_protos: Vec::new(),
             select_arms: Vec::new(),
             wide_ops: Vec::new(),
@@ -95,8 +99,16 @@ impl<'tcx> FnBuilder<'tcx> {
 
     pub(crate) fn finish(mut self, arity: u16) -> FnChunk {
         debug_assert_eq!(self.instrs.len(), self.instruction_locations.len());
-        optimize_float_accumulator_moves(&mut self.instrs, &mut self.instruction_locations);
-        optimize_i64_to_f64_divs(&mut self.instrs, &mut self.instruction_locations);
+        optimize_float_accumulator_moves(
+            &mut self.instrs,
+            &mut self.instruction_locations,
+            &mut self.unwind_table,
+        );
+        optimize_i64_to_f64_divs(
+            &mut self.instrs,
+            &mut self.instruction_locations,
+            &mut self.unwind_table,
+        );
         if !self.capture_cells_used {
             optimize_tail_call_argument_moves(&mut self.instrs, &self.mut_ref_params);
         }
@@ -127,6 +139,7 @@ impl<'tcx> FnBuilder<'tcx> {
             field_cache_count: self.next_field_cache_idx,
             mut_ref_params: self.mut_ref_params,
             i64_params: self.i64_params,
+            unwind_table: self.unwind_table,
         };
         // Release growth-by-doubling slack on every Vec field
         // unconditionally - any code path that produces a chunk
@@ -203,12 +216,16 @@ fn optimize_tail_call_argument_moves(instrs: &mut [Op], mut_ref_params: &[Reg]) 
     }
 }
 
-fn optimize_i64_to_f64_divs(instrs: &mut Vec<Op>, locations: &mut Vec<super::InstrSource>) {
+fn optimize_i64_to_f64_divs(
+    instrs: &mut Vec<Op>,
+    locations: &mut Vec<super::InstrSource>,
+    unwind: &mut [crate::bytecode::UnwindEntry],
+) {
     if instrs.len() < 2 {
         return;
     }
 
-    let branch_targets = branch_targets(instrs);
+    let branch_targets = branch_targets(instrs, unwind);
     let mut remove = vec![false; instrs.len()];
     let mut idx = 0usize;
     while idx + 1 < instrs.len() {
@@ -246,16 +263,20 @@ fn optimize_i64_to_f64_divs(instrs: &mut Vec<Op>, locations: &mut Vec<super::Ins
     }
 
     if remove.iter().any(|drop| *drop) {
-        compact_instrs(instrs, locations, &remove);
+        compact_instrs(instrs, locations, unwind, &remove);
     }
 }
 
-fn optimize_float_accumulator_moves(instrs: &mut Vec<Op>, locations: &mut Vec<super::InstrSource>) {
+fn optimize_float_accumulator_moves(
+    instrs: &mut Vec<Op>,
+    locations: &mut Vec<super::InstrSource>,
+    unwind: &mut [crate::bytecode::UnwindEntry],
+) {
     if instrs.len() < 2 {
         return;
     }
 
-    let branch_targets = branch_targets(instrs);
+    let branch_targets = branch_targets(instrs, unwind);
     let mut remove = vec![false; instrs.len()];
     let mut idx = 0usize;
     while idx + 1 < instrs.len() {
@@ -295,7 +316,7 @@ fn optimize_float_accumulator_moves(instrs: &mut Vec<Op>, locations: &mut Vec<su
     }
 
     if remove.iter().any(|drop| *drop) {
-        compact_instrs(instrs, locations, &remove);
+        compact_instrs(instrs, locations, unwind, &remove);
     }
 }
 
@@ -425,8 +446,15 @@ fn op_writes_float(op: Op, reg: Reg) -> bool {
     }
 }
 
-fn branch_targets(instrs: &[Op]) -> Vec<bool> {
+/// Which instructions control reaches other than by falling through: jump
+/// targets and the instructions a fault continues at.
+fn branch_targets(instrs: &[Op], unwind: &[crate::bytecode::UnwindEntry]) -> Vec<bool> {
     let mut targets = vec![false; instrs.len()];
+    for entry in unwind {
+        if let Some(slot) = targets.get_mut(entry.landing as usize) {
+            *slot = true;
+        }
+    }
     for op in instrs {
         if let Some(target) = op_target(*op)
             && let Some(slot) = targets.get_mut(target as usize)
@@ -437,7 +465,12 @@ fn branch_targets(instrs: &[Op]) -> Vec<bool> {
     targets
 }
 
-fn compact_instrs(instrs: &mut Vec<Op>, locations: &mut Vec<super::InstrSource>, remove: &[bool]) {
+fn compact_instrs(
+    instrs: &mut Vec<Op>,
+    locations: &mut Vec<super::InstrSource>,
+    unwind: &mut [crate::bytecode::UnwindEntry],
+    remove: &[bool],
+) {
     debug_assert_eq!(instrs.len(), locations.len());
     debug_assert_eq!(instrs.len(), remove.len());
     let mut remap = vec![0u32; instrs.len() + 1];
@@ -460,6 +493,11 @@ fn compact_instrs(instrs: &mut Vec<Op>, locations: &mut Vec<super::InstrSource>,
     }
     *instrs = compacted;
     *locations = compacted_locations;
+    for entry in unwind {
+        entry.start = remap[entry.start as usize];
+        entry.end = remap[entry.end as usize];
+        entry.landing = remap[entry.landing as usize];
+    }
 }
 
 fn encode_instruction_locations(

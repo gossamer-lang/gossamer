@@ -66,7 +66,79 @@ const LLVM_SPECIAL_DECLS: &[&str] = &[
     "declare void @gos_rt_flush_stdout()",
     "declare i32 @gos_rt_main_exit_code(i64)",
     "declare i32 @gos_rt_main_exit_code_err(i64, i64)",
+    "declare void @gos_rt_call_main(ptr, ptr)",
 ];
+
+/// What a program's `gos_main` answers, which the C `main` translates into an
+/// exit code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainReturn {
+    Unit,
+    Word,
+    Result,
+}
+
+/// The C `main` and the shim it runs `gos_main` through. The shim runs under
+/// `gos_rt_call_main`, so a fault on `main`'s thread unwinds through the
+/// program's frames, running their pending deferred expressions, before it
+/// is reported.
+fn render_main_entry(kind: MainReturn) -> String {
+    let mut out = String::new();
+    writeln!(out, "define void @gos_main_shim(ptr %out) #0 {{").unwrap();
+    writeln!(out, "entry:").unwrap();
+    match kind {
+        MainReturn::Unit => writeln!(out, "  call void @\"gos_main\"()").unwrap(),
+        MainReturn::Word => {
+            writeln!(out, "  %r = call i64 @\"gos_main\"()").unwrap();
+            writeln!(out, "  store i64 %r, ptr %out").unwrap();
+        }
+        MainReturn::Result => {
+            writeln!(out, "  %r = call i128 @\"gos_main\"()").unwrap();
+            writeln!(out, "  store i128 %r, ptr %out").unwrap();
+        }
+    }
+    writeln!(out, "  ret void").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out, "define i32 @main(i32 %argc, ptr %argv) {{").unwrap();
+    writeln!(out, "entry:").unwrap();
+    writeln!(out, "  %slot = alloca i128, align 16").unwrap();
+    writeln!(out, "  call void @gos_rt_program_start()").unwrap();
+    writeln!(out, "  call void @gos_rt_set_args(i32 %argc, ptr %argv)").unwrap();
+    writeln!(
+        out,
+        "  call void @gos_rt_call_main(ptr @gos_main_shim, ptr %slot)"
+    )
+    .unwrap();
+    match kind {
+        MainReturn::Unit => {
+            // Routed through the same exit handler as a value-returning main so
+            // goroutines still running when `main` falls off the end are
+            // drained, and their output reaches the user, on every tier.
+            writeln!(out, "  %code = call i32 @gos_rt_main_exit_code(i64 0)").unwrap();
+            writeln!(out, "  ret i32 %code").unwrap();
+        }
+        MainReturn::Word => {
+            writeln!(out, "  %r = load i64, ptr %slot").unwrap();
+            writeln!(out, "  call void @gos_rt_flush_stdout()").unwrap();
+            writeln!(out, "  %code = call i32 @gos_rt_main_exit_code(i64 %r)").unwrap();
+            writeln!(out, "  ret i32 %code").unwrap();
+        }
+        MainReturn::Result => {
+            writeln!(out, "  %r = load i128, ptr %slot").unwrap();
+            writeln!(out, "  %disc = trunc i128 %r to i64").unwrap();
+            writeln!(out, "  %hi = lshr i128 %r, 64").unwrap();
+            writeln!(out, "  %payload = trunc i128 %hi to i64").unwrap();
+            writeln!(
+                out,
+                "  %code = call i32 @gos_rt_main_exit_code_err(i64 %disc, i64 %payload)"
+            )
+            .unwrap();
+            writeln!(out, "  ret i32 %code").unwrap();
+        }
+    }
+    writeln!(out, "}}").unwrap();
+    out
+}
 
 /// Parallel to `gossamer-codegen-cranelift::NativeObject`.
 #[derive(Debug, Clone)]
@@ -1167,35 +1239,14 @@ fn render_chunk_module(
         // disc + payload to the error-aware exit handler so an `Err` entry-point
         // result prints its Display chain to stderr and exits nonzero.
         let ret_is_result = !ret_is_unit && ctx.tcx.slot_bytes(ret_ty) == 16;
-        writeln!(out, "define i32 @main(i32 %argc, ptr %argv) {{").unwrap();
-        writeln!(out, "entry:").unwrap();
-        writeln!(out, "  call void @gos_rt_program_start()").unwrap();
-        writeln!(out, "  call void @gos_rt_set_args(i32 %argc, ptr %argv)").unwrap();
-        if ret_is_unit {
-            writeln!(out, "  call void @\"gos_main\"()").unwrap();
-            // Routed through the same exit handler as a value-returning main so
-            // goroutines still running when `main` falls off the end are
-            // drained, and their output reaches the user, on every tier.
-            writeln!(out, "  %code = call i32 @gos_rt_main_exit_code(i64 0)").unwrap();
-            writeln!(out, "  ret i32 %code").unwrap();
+        let kind = if ret_is_unit {
+            MainReturn::Unit
         } else if ret_is_result {
-            writeln!(out, "  %r = call i128 @\"gos_main\"()").unwrap();
-            writeln!(out, "  %disc = trunc i128 %r to i64").unwrap();
-            writeln!(out, "  %hi = lshr i128 %r, 64").unwrap();
-            writeln!(out, "  %payload = trunc i128 %hi to i64").unwrap();
-            writeln!(
-                out,
-                "  %code = call i32 @gos_rt_main_exit_code_err(i64 %disc, i64 %payload)"
-            )
-            .unwrap();
-            writeln!(out, "  ret i32 %code").unwrap();
+            MainReturn::Result
         } else {
-            writeln!(out, "  %r = call i64 @\"gos_main\"()").unwrap();
-            writeln!(out, "  call void @gos_rt_flush_stdout()").unwrap();
-            writeln!(out, "  %code = call i32 @gos_rt_main_exit_code(i64 %r)").unwrap();
-            writeln!(out, "  ret i32 %code").unwrap();
-        }
-        writeln!(out, "}}").unwrap();
+            MainReturn::Word
+        };
+        out.push_str(&render_main_entry(kind));
     }
 
     writeln!(out).unwrap();
@@ -1638,31 +1689,14 @@ fn render_module_to_path(
         // disc + payload to the error-aware exit handler so an `Err` entry-point
         // result prints its Display chain to stderr and exits nonzero.
         let ret_is_result = !ret_is_unit && tcx.slot_bytes(ret_ty) == 16;
-        writeln!(body_w, "define i32 @main(i32 %argc, ptr %argv) {{")?;
-        writeln!(body_w, "entry:")?;
-        writeln!(body_w, "  call void @gos_rt_program_start()")?;
-        writeln!(body_w, "  call void @gos_rt_set_args(i32 %argc, ptr %argv)")?;
-        if ret_is_unit {
-            writeln!(body_w, "  call void @\"gos_main\"()")?;
-            writeln!(body_w, "  call void @gos_rt_flush_stdout()")?;
-            writeln!(body_w, "  ret i32 0")?;
+        let kind = if ret_is_unit {
+            MainReturn::Unit
         } else if ret_is_result {
-            writeln!(body_w, "  %r = call i128 @\"gos_main\"()")?;
-            writeln!(body_w, "  %disc = trunc i128 %r to i64")?;
-            writeln!(body_w, "  %hi = lshr i128 %r, 64")?;
-            writeln!(body_w, "  %payload = trunc i128 %hi to i64")?;
-            writeln!(
-                body_w,
-                "  %code = call i32 @gos_rt_main_exit_code_err(i64 %disc, i64 %payload)"
-            )?;
-            writeln!(body_w, "  ret i32 %code")?;
+            MainReturn::Result
         } else {
-            writeln!(body_w, "  %r = call i64 @\"gos_main\"()")?;
-            writeln!(body_w, "  call void @gos_rt_flush_stdout()")?;
-            writeln!(body_w, "  %code = call i32 @gos_rt_main_exit_code(i64 %r)")?;
-            writeln!(body_w, "  ret i32 %code")?;
-        }
-        writeln!(body_w, "}}")?;
+            MainReturn::Word
+        };
+        body_w.write_all(render_main_entry(kind).as_bytes())?;
     }
     writeln!(body_w)?;
     writeln!(body_w, "!0 = !{{}}")?;

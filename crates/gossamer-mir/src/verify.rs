@@ -511,7 +511,7 @@ fn check_terminator(
             }
             check_block_id(body, block, *target, n_blocks, errors);
         }
-        Terminator::Unreachable | Terminator::Panic { .. } => {}
+        Terminator::Unreachable | Terminator::Resume | Terminator::Panic { .. } => {}
         Terminator::Drop { place, target } => {
             check_place(body, block, place, n_locals, errors);
             check_block_id(body, block, *target, n_blocks, errors);

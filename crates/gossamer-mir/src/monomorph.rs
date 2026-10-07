@@ -1426,6 +1426,7 @@ fn for_each_operand(body: &Body, f: &mut impl FnMut(&Operand)) {
             Terminator::Goto { .. }
             | Terminator::Return
             | Terminator::Unreachable
+            | Terminator::Resume
             | Terminator::Panic { .. }
             | Terminator::Drop { .. } => {}
         }
@@ -1479,6 +1480,7 @@ fn for_each_operand_mut(body: &mut Body, f: &mut impl FnMut(&mut Operand)) {
             Terminator::Goto { .. }
             | Terminator::Return
             | Terminator::Unreachable
+            | Terminator::Resume
             | Terminator::Panic { .. }
             | Terminator::Drop { .. } => {}
         }

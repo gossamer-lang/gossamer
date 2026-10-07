@@ -66,6 +66,11 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
         "the VM slices a byte array with the range-index operation on `Value::ByteArray`",
     ),
     (
+        "gos_rt_call_main",
+        "the VM runs `main` in its own dispatch loop, which runs each frame's \
+         pending deferred expressions as a fault unwinds it before reporting",
+    ),
+    (
         "gos_rt_callback_*",
         "the VM calls a binding callback by invoking the closure value it holds \
          directly, with no registry handle in between",
@@ -557,6 +562,12 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
         "gos_rt_unix_*",
         "the VM implements `net::UnixListener` / `UnixStream` in \
          `stdlib_builtins/net.rs`",
+    ),
+    (
+        "gos_rt_unwind_*",
+        "the VM keeps an unwind table per chunk, whose cleanup entries run a \
+         frame's pending deferred expressions as a fault unwinds it and whose \
+         note entries record a panic one of them raises (`vm/run.rs`)",
     ),
     (
         "gos_rt_utf8_*",

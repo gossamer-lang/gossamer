@@ -1087,3 +1087,170 @@ fn an_import_after_an_item_reports_where_it_belongs() {
         "the rejected keyword must not be listed as accepted: {rendered:?}"
     );
 }
+
+fn fn_body_tail(source: &str) -> ExprKind {
+    let mut map = SourceMap::new();
+    let file = map.add_file("leading_operator.gos", source.to_string());
+    let (sf, diags) = parse_source_file(source, file);
+    assert!(diags.is_empty(), "`{source}` produced {diags:?}");
+    let ItemKind::Fn(decl) = &sf.items[0].kind else {
+        panic!("expected a function item");
+    };
+    let Some(body) = &decl.body else {
+        panic!("expected a body");
+    };
+    let ExprKind::Block(block) = &body.kind else {
+        panic!("expected a block body");
+    };
+    assert_eq!(
+        block.stmts.len(),
+        1,
+        "`{source}`: the statement before the tail"
+    );
+    block.tail.as_ref().expect("a tail expression").kind.clone()
+}
+
+#[test]
+fn a_line_starting_with_a_closure_after_a_statement_is_the_closure() {
+    for source in [
+        "fn f() -> Fn() -> i64 {\n    let k = 2\n    || k * 3\n}\n",
+        "fn f() -> Fn(i64) -> i64 {\n    let k = 2\n    |x| x * k\n}\n",
+    ] {
+        assert!(
+            matches!(fn_body_tail(source), ExprKind::Closure { .. }),
+            "`{source}` must end in a closure"
+        );
+    }
+}
+
+#[test]
+fn a_line_starting_with_a_pipe_continues_the_expression() {
+    let source = "fn f(k: i64) -> i64 {\n    let n = k\n        |> g\n        |> |v| v + 1\n    n\n}\nfn g(v: i64) -> i64 { v }\n";
+    let mut map = SourceMap::new();
+    let file = map.add_file("leading_pipe.gos", source.to_string());
+    let (_, diags) = parse_source_file(source, file);
+    assert!(diags.is_empty(), "`|>` opening a line continues: {diags:?}");
+}
+
+#[test]
+fn a_line_starting_with_another_binary_operator_is_rejected_with_its_rewrite() {
+    for (source, op, replacement) in [
+        (
+            "fn f(a: bool, b: bool) -> bool {\n    a\n        && b\n}\n",
+            "&&",
+            " &&\n        ",
+        ),
+        (
+            "fn f(a: i64, b: i64) -> i64 {\n    a // sum\n    + b\n}\n",
+            "+",
+            " + // sum\n    ",
+        ),
+        (
+            "fn f(a: i64, b: i64) -> bool {\n    a\n    == b\n}\n",
+            "==",
+            " ==\n    ",
+        ),
+    ] {
+        let mut map = SourceMap::new();
+        let file = map.add_file("leading_operator.gos", source.to_string());
+        let (_, diags) = parse_source_file(source, file);
+        assert_eq!(diags.len(), 1, "`{source}` produced {diags:?}");
+        let ParseError::LeadingBinaryOperator {
+            op: found,
+            replacement: fix,
+            fix_span,
+        } = &diags[0].error
+        else {
+            panic!("`{source}` produced {diags:?}");
+        };
+        assert_eq!(found, op);
+        assert_eq!(fix, replacement);
+        let mut fixed = source.to_string();
+        fixed.replace_range(fix_span.start as usize..fix_span.end as usize, fix);
+        let (_, after) = parse_source_file(&fixed, file);
+        assert!(
+            after.is_empty(),
+            "the rewrite `{fixed}` must parse: {after:?}"
+        );
+    }
+}
+
+#[test]
+fn a_condition_continues_across_lines_only_with_a_trailing_operator() {
+    for source in [
+        "fn f(a: bool, b: bool) {\n    if a\n        && b {\n    }\n}\n",
+        "fn f(a: Option<i64>) {\n    while let Some(x) = a\n        && x > 0 {\n    }\n}\n",
+    ] {
+        let mut map = SourceMap::new();
+        let file = map.add_file("condition.gos", source.to_string());
+        let (_, diags) = parse_source_file(source, file);
+        assert!(
+            matches!(
+                diags.as_slice(),
+                [d] if matches!(&d.error, ParseError::LeadingBinaryOperator { op, .. } if op == "&&")
+            ),
+            "`{source}` produced {diags:?}"
+        );
+    }
+    let source = "fn f(a: bool, b: bool) {\n    if a &&\n        b {\n    }\n}\n";
+    let mut map = SourceMap::new();
+    let file = map.add_file("condition.gos", source.to_string());
+    let (_, diags) = parse_source_file(source, file);
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
+fn a_closure_whose_value_nothing_reads_is_rejected() {
+    let source = "fn f(a: bool, b: bool) -> bool {\n    let x = a\n        || b\n    x\n}\n";
+    let mut map = SourceMap::new();
+    let file = map.add_file("discarded.gos", source.to_string());
+    let (_, diags) = parse_source_file(source, file);
+    let [diag] = diags.as_slice() else {
+        panic!("{diags:?}");
+    };
+    let ParseError::DiscardedClosure {
+        continuation: Some((fix, fix_span)),
+    } = &diag.error
+    else {
+        panic!("{diags:?}");
+    };
+    let mut fixed = source.to_string();
+    fixed.replace_range(fix_span.start as usize..fix_span.end as usize, fix);
+    assert_eq!(
+        fixed,
+        "fn f(a: bool, b: bool) -> bool {\n    let x = a ||\n        b\n    x\n}\n"
+    );
+    let (_, after) = parse_source_file(&fixed, file);
+    assert!(after.is_empty(), "{after:?}");
+
+    let kept = "fn f() -> i64 {\n    let n = 1\n    let g = || n\n    g()\n}\nfn h() -> Fn() -> i64 {\n    || 1\n}\n";
+    let file = map.add_file("kept.gos", kept.to_string());
+    let (_, diags) = parse_source_file(kept, file);
+    assert!(
+        diags.is_empty(),
+        "a bound or answered closure is read: {diags:?}"
+    );
+}
+
+#[test]
+fn a_line_starting_with_a_sign_inside_parentheses_begins_an_element() {
+    let source =
+        "fn f(a: i64) -> (i64, i64) {\n    let t = (\n        a\n        -2\n    )\n    t\n}\n";
+    let mut map = SourceMap::new();
+    let file = map.add_file("paren_sign.gos", source.to_string());
+    let (sf, diags) = parse_source_file(source, file);
+    assert!(diags.is_empty(), "{diags:?}");
+    let ItemKind::Fn(decl) = &sf.items[0].kind else {
+        panic!("expected a function item");
+    };
+    let ExprKind::Block(block) = &decl.body.as_ref().expect("a body").kind else {
+        panic!("expected a block body");
+    };
+    let StmtKind::Let {
+        init: Some(init), ..
+    } = &block.stmts[0].kind
+    else {
+        panic!("expected a let");
+    };
+    assert!(matches!(&init.kind, ExprKind::Tuple(elems) if elems.len() == 2));
+}

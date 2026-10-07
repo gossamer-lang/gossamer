@@ -474,9 +474,10 @@ pub fn render_native_panic_trace() -> String {
         if is_runtime_frame(sym) {
             continue;
         }
-        let entry = sym == "gos_main" || sym == "main";
-        // The program's `main` is emitted as `gos_main`; the report names
-        // the function the source declares.
+        // The program's `main` is emitted as `gos_main`, which an optimised
+        // build may inline into the shim `main` runs it through; the report
+        // names the function the source declares.
+        let entry = sym == "gos_main" || sym == "gos_main_shim" || sym == "main";
         let mut line = format!("    at {}", if entry { "main" } else { sym.as_str() });
         if let Some(location) = location {
             line.push_str(" (");

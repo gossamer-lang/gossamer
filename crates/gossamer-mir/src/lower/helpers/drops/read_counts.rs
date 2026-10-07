@@ -139,6 +139,7 @@ pub(super) fn collect_local_read_counts(body: &Body) -> HashMap<u32, usize> {
             Terminator::Goto { .. }
             | Terminator::Return
             | Terminator::Unreachable
+            | Terminator::Resume
             | Terminator::Panic { .. } => {}
         }
     }
@@ -643,7 +644,10 @@ pub(crate) fn block_successors(t: &Terminator) -> Vec<BlockId> {
         }
         Terminator::Call { target, .. } => target.iter().copied().collect(),
         Terminator::Assert { target, .. } | Terminator::Drop { target, .. } => vec![*target],
-        Terminator::Return | Terminator::Unreachable | Terminator::Panic { .. } => Vec::new(),
+        Terminator::Return
+        | Terminator::Unreachable
+        | Terminator::Resume
+        | Terminator::Panic { .. } => Vec::new(),
     }
 }
 

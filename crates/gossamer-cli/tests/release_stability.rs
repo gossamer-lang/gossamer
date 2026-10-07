@@ -397,12 +397,11 @@ fn main() {
 }
 
 #[test]
-fn release_closure_captures_value_at_definition() {
-    // Defines `bump` *before* mutating `k`, so each call sees `k`
-    // as captured (zero), making `bump(k)` collapse to `k + 1`.
-    // sum_{k=0..99}(k+1) = 5050. Catches closure-capture ABI
-    // regressions where the capture is silently aliased to a
-    // mutable upvar.
+fn release_closure_reads_its_capture_when_called() {
+    // Defines `bump` *before* mutating `k`: a closure names the binding,
+    // so each call reads the current `k` and `bump(k)` is `2k + 1`.
+    // sum_{k=0..99}(2k+1) = 10000. Catches closure-capture ABI
+    // regressions where the capture is silently a stale copy.
     assert_release_stdout_eq(
         "closure_capture",
         r#"
@@ -417,7 +416,7 @@ fn main() {
     println("acc={}", acc)
 }
 "#,
-        "acc=5050\n",
+        "acc=10000\n",
     );
 }
 

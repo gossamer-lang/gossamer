@@ -87,6 +87,7 @@ impl<'a> Lowerer<'a> {
             pending_frame_line: None,
             cold_spans: Vec::new(),
             check_fail_edges: Vec::new(),
+            unwind: None,
             frame_observed: false,
             frame_globals: None,
             fn_name_by_def: std::collections::HashMap::new(),
@@ -149,9 +150,22 @@ impl<'a> Lowerer<'a> {
         // through the same pipeline as user functions and the
         // generated `define`s become visible to the IR-shape
         // gates.
+        self.unwind = super::unwind::UnwindPlan::of(self.body);
         self.emit_prelude();
         // Entry block opens with `alloca`s for every local.
         self.emit_allocas();
+        if self
+            .unwind
+            .as_ref()
+            .is_some_and(|plan| plan.entry == super::unwind::PadEntry::Landing)
+        {
+            writeln!(
+                self.out,
+                "  {} = alloca {{ ptr, i32 }}",
+                super::unwind::EXCEPTION_SLOT
+            )
+            .unwrap();
+        }
         self.emit_debug_variables();
         self.plan_preemption_polls();
         // Copy function parameters into their local slots so
@@ -176,6 +190,9 @@ impl<'a> Lowerer<'a> {
             self.out.insert_str(entry_end, &hoisted);
         }
         self.elide_unobserved_frame();
+        if let Some(plan) = self.unwind.clone() {
+            self.connect_pads(&plan)?;
+        }
         Ok(std::mem::take(&mut self.out))
     }
 
@@ -252,10 +269,21 @@ impl<'a> Lowerer<'a> {
         }
         writeln!(
             self.out,
-            "define {ret_ty} @\"{name}\"({params}) #0 {{",
+            "define {ret_ty} @\"{name}\"({params}) #0{personality} {{",
             name = escape_ident(&mangle_fn_name(&self.body.name)),
             ret_ty = ret_ty,
             params = params,
+            personality = if self
+                .unwind
+                .as_ref()
+                .is_some_and(|plan| plan.entry == super::unwind::PadEntry::Landing)
+            {
+                self.runtime_refs
+                    .insert("declare i32 @rust_eh_personality(...)".to_string());
+                " personality ptr @rust_eh_personality"
+            } else {
+                ""
+            },
         )
         .unwrap();
         writeln!(self.out, "entry:").unwrap();

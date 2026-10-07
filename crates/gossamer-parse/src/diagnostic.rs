@@ -263,6 +263,29 @@ pub enum ParseError {
         /// The same step written as the closure it stands for.
         replacement: Option<String>,
     },
+    /// A binary operator other than `|>` began a line, where it cannot
+    /// continue the expression above.
+    #[error("a line cannot start with `{op}`")]
+    LeadingBinaryOperator {
+        /// The operator as written.
+        op: String,
+        /// The operator moved to the end of the line above, replacing
+        /// `fix_span`.
+        replacement: String,
+        /// From the end of the line above's last token through the operator
+        /// and the space after it.
+        fix_span: Span,
+    },
+    /// A closure is a statement of its own, so nothing reads it: a line
+    /// starting with `||` or `|` begins a closure rather than continuing the
+    /// expression above.
+    #[error("this closure is a statement of its own, so its value is unused")]
+    DiscardedClosure {
+        /// When the closure takes no parameters and follows an expression,
+        /// its `||` moved to the end of the line above, replacing the span:
+        /// the logical or that line most likely meant.
+        continuation: Option<(String, Span)>,
+    },
     /// An assignment appeared in a non-statement expression position.
     #[error("assignment is only valid at statement position")]
     AssignmentNotAllowed,
@@ -510,7 +533,14 @@ impl ParseDiagnostic {
             out = out.with_help(help);
         }
         if let Some((label, replacement)) = self.error.rewrite() {
-            out = out.with_suggestion(Suggestion::replacement(location, label, replacement));
+            let target = match &self.error {
+                ParseError::LeadingBinaryOperator { fix_span, .. }
+                | ParseError::DiscardedClosure {
+                    continuation: Some((_, fix_span)),
+                } => Location::new(fix_span.file, *fix_span),
+                _ => location,
+            };
+            out = out.with_suggestion(Suggestion::replacement(target, label, replacement));
         }
         out
     }
@@ -562,6 +592,18 @@ impl ParseError {
             ParseError::ArgumentLabelSeparator { name } => {
                 Some((format!("write `{name}:`"), ":".to_string()))
             }
+            ParseError::LeadingBinaryOperator {
+                op, replacement, ..
+            } => Some((
+                format!("move `{op}` to the end of the line above"),
+                replacement.clone(),
+            )),
+            ParseError::DiscardedClosure {
+                continuation: Some((replacement, _)),
+            } => Some((
+                "move `||` to the end of the line above".to_string(),
+                replacement.clone(),
+            )),
             // A pipe step's rewrite covers the step alone, so every step of a
             // chain converges in a single `--fix` pass.
             ParseError::CohortIsolationSpelling { replacement }
@@ -1144,6 +1186,25 @@ impl ParseError {
                     "a spec is fill, alignment, sign, zero-pad, width, precision, and radix or \
                      exponent (`:>8`, `:+08.3`, `:#x`, `:.2e`), or `?`; an expression that needs \
                      a `:` of its own is written in parentheses"
+                        .to_string(),
+                ),
+            ),
+            ParseError::LeadingBinaryOperator { op, .. } => (
+                "GP0066",
+                format!("a line cannot start with `{op}`"),
+                Some(format!(
+                    "end the line above with `{op}` to continue the expression across lines; \
+                     `|>` is the one operator that may begin a line, and a line starting \
+                     with `||`, `|`, `-`, `&`, or `*` begins a new statement"
+                )),
+            ),
+            ParseError::DiscardedClosure { .. } => (
+                "GP0067",
+                "this closure is a statement of its own, so its value is unused".to_string(),
+                Some(
+                    "a line starting with `||` or `|` begins a closure; to continue a logical \
+                     or across lines, end the line above with `||`, and to keep the closure, \
+                     bind it with `let`"
                         .to_string(),
                 ),
             ),

@@ -288,6 +288,8 @@ impl TypeChecker<'_> {
             BinaryOp::WrappingAdd
             | BinaryOp::WrappingSub
             | BinaryOp::WrappingMul
+            | BinaryOp::WrappingShl
+            | BinaryOp::WrappingShr
             | BinaryOp::Shl
             | BinaryOp::Shr => int,
             BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => int || mask,

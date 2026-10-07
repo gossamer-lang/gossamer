@@ -22,52 +22,68 @@ fn main() {
 ## What a closure captures
 
 A closure names the bindings around it without any annotation; there is no
-`move`. What it captures depends on the type:
+`move`. It reads each capture's current value when it runs, and a write
+inside it reaches the binding, whatever the binding's type:
 
-- A `Vec`, `Map`, `Set`, deque, or heap is captured by managed reference.
-  A write to it inside the closure is the enclosing binding's write:
+```gossamer
+fn main() {
+    let mut count = 0
+    let mut seen = #[]
+    #[3, 1, 2].for_each(|x| {
+        count += x
+        seen.push(x * 10)
+    })
+    println("{} {}", count, seen)
+}
+```
 
-  ```gossamer
-  fn main() {
-      let mut seen = #[]
-      #[3, 1, 2].for_each(|x| seen.push(x * 10))
-      println("{}", seen)
-  }
-  ```
+A closure that outlives the function that made it keeps its captures alive,
+so a counter is a closure over a local:
 
-- Every other value - a scalar, a `String`, a tuple, a fixed array, a
-  struct or enum - is captured by copy. The closure reads the value the
-  binding held when the closure was made, and a write to it would change
-  only the closure's copy, which starts over on every call. Such a write is
-  rejected with `GT0114`:
+```gossamer
+fn counter() -> Fn() -> i64 {
+    let mut n = 0
+    || {
+        n += 1
+        n
+    }
+}
 
-  <!-- compile_fail GT0114 -->
-  ```gossamer
-  fn main() {
-      let mut count = 0
-      #[1, 2, 3].for_each(|x| count += x)
-  }
-  ```
+fn main() {
+    let next = counter()
+    next()
+    println("{}", next())
+}
+```
 
-  Answer the new value instead (`let count = xs.fold(0, |acc, x| acc + x)`),
-  or keep the state in a container the closure captures by reference.
+A closure given to `spawn` is the exception: it runs on another goroutine,
+so it takes a snapshot of each binding it captures at the spawn. A write to
+one inside it would change only the goroutine's snapshot, so it is rejected
+with `GT0114`:
 
-A closure given to `spawn` captures the same way. A container it shares
-with the code that spawned it is reached from two goroutines, so writes to
-it are serialised with a `sync::Mutex`, or the goroutine answers its result
-through `join()` or a channel.
+<!-- compile_fail GT0114 -->
+```gossamer
+fn main() {
+    let mut total = 0
+    let h = spawn(|| total += 1)
+    h.join()
+}
+```
+
+Answer the value through `join()` instead, send it on a channel, or share it
+through a `sync::Shared`.
 
 ## A closure on its own line
 
-A line that starts with `|` and a parameter list begins a new statement,
-so a function can end with a closure. A line that starts with `||`
-continues the expression above it as a logical or; a no-argument closure on
-a line of its own is written in parentheses:
+A line that starts with `|` or `||` begins a new statement, so a function
+can end with a closure, with parameters or without. A logical or that spans
+lines ends the first line with `||`; a closure that nothing binds, passes, or
+answers is GP0067, which is what a `|| b` line meant to continue `a` becomes.
 
 ```gossamer
 fn counter_from(start: i64) -> Fn() -> i64 {
     let base = start * 10
-    (|| base + 1)
+    || base + 1
 }
 
 fn main() {

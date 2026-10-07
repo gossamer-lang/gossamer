@@ -193,11 +193,9 @@ method, or function may carry any of these names. What claims each one:
 is reserved but has no role - source files do not declare a package;
 see §6. `move` is **not** a keyword: Gossamer has no ownership
 transfer, so the Rust-style `move` closure qualifier would be
-meaningless. Closures capture by managed reference for the
-containers (`Vec`, `Map`, `Set`, deques, and heaps) and by value for
-everything else, with no opt-in needed. A write to a binding captured by
-value would change only the closure's copy, so it is rejected (`GT0114`,
-§3.5).
+meaningless. A closure names the bindings it captures, with no opt-in
+needed: it reads their current values and its writes reach them. A spawned
+closure takes a snapshot of each capture instead (§3.5).
 
 ### 2.5 Operators and punctuation
 
@@ -205,8 +203,9 @@ value would change only the closure's copy, so it is rejected (`GT0114`,
 +  -  *  /  %
 +%  -%  *%                          // wrapping arithmetic
 &  |  ^  <<  >>
+<<%  >>%                            // masking shifts
 += -= *= /= %= &= |= ^= <<= >>=
-+%= -%= *%=
++%= -%= *%= <<%= >>%=
 =  ==  !=  <  <=  >  >=
 !  &&  ||
 |>                                  // pipe (F#-style forward pipe)
@@ -320,46 +319,51 @@ parenthesised expression spanning lines stays that expression: `(\n a + b \n)`
 is the sum, not a one-element tuple. The one-element tuple is still written
 with its comma, `(a,)`.
 
-One narrow newline rule disambiguates the operators that also begin an
-expression (`&`, `*`, `-`, and the single `|` that opens a closure with
-parameters): when one of them appears as the first non-whitespace token on
-a new line, it begins a new statement rather than continuing the previous
-expression as a binary operator. A function can therefore end in a closure
-on its own line (`let k = 2` then `|x| x * k`). A line that starts with
-`||` continues the expression above it as a logical or, so a closure with
-no parameters on a line of its own is written `(|| expr)`. So:
+A line break before a binary operator never continues an expression, with
+one exception: `|>`, which may begin a line to continue a pipeline.
+
+- An operator that also begins an expression (`&`, `*`, `-`, `<`, `^`, a
+  closure's `|`, and `||`) begins a new statement, or a new element of a
+  delimited list, when it is the first token on a line. This holds inside
+  parentheses too. A function can therefore end in a closure on its own
+  line after a statement, with parameters or without (`let k = 2` then
+  `|x| x * k`, or `|| k * 3`).
+- Any other binary operator (`+`, `/`, `%`, `==`, `<=`, `&&`, `<<`, `+%`,
+  ...) as the first token of a line is GP0066, in an `if` or `while`
+  condition and a let-chain too.
+- A closure written as a statement, which nothing binds, passes, or answers,
+  is GP0067: `let ok = a` then `|| b` is that statement, never `a || b`.
+- To continue an expression on the next line, end the line with the
+  operator: `let ok = a &&\n    b`. `gos check --fix` moves a line-leading
+  operator to the end of the line above.
+
+So:
 
 ```
 let s = read_file(path)?
 &s |> strings::lines |> |v| iter::for_each(v, handle)   // two statements
+let n = values
+    |> sum
+    |> |v| v * 2                                           // one pipeline
 ```
 
-parses as a let followed by a pipe-expression statement, not as
-`let s = read_file(path)? & s |> ...`. Multi-line continuation of
-those operators still works when the operator sits at the end
-of the previous line (`let x = a -\n  b`) or inside parentheses.
-The other binary operators (`+`, `&&`, `||`, `|>`, `==`, …) continue across
-newlines unconditionally.
+parses as a let, a pipe-expression statement, and a second let whose
+pipeline spans three lines, not as `let s = read_file(path)? & s |> ...`.
 
-> **Gotcha - leading `&` / `*` / `-` starts a new statement.** A line break
-> before one of these three operators is **not** a continuation. Splitting a binary
-> expression as
+> **Gotcha - a leading `-`, `&`, or `*` starts a new statement.** Splitting
+> a binary expression as
 >
 > ```
 > let total = subtotal
 >     - discount        // parsed as a new statement `-discount`, NOT a subtraction
 > ```
 >
-> silently changes the meaning (here `total` binds to `subtotal` and
-> `-discount` becomes a separate, discarded statement). Keep the
-> operator at the **end** of the previous line, or wrap the expression
-> in parentheses:
+> binds `total` to `subtotal` and makes `-discount` a separate statement.
+> Keep the operator at the **end** of the previous line:
 >
 > ```
 > let total = subtotal -
 >     discount          // continues correctly
-> let total = (subtotal
->     - discount)       // continues correctly
 > ```
 
 An entry file's top-level statements follow the same termination rules.
@@ -400,18 +404,26 @@ Consequences of the model:
   `attempt to add with overflow`. `+%`, `-%`, and `*%` are the wrapping
   spelling, and the only one: no setting makes the plain operators wrap, so
   `a + b` means the same thing in every program and every package.
-- Unary `-`, unary `!` (the bitwise complement on an integer), `<<`,
-  and a signed `MIN / -1` wrap at the declared width in every profile:
-  `-(-128i8) == -128`, `!5u8 == 250`, `200u8 << 2 == 32`,
-  `-128i8 / -1 == -128`, and `i64::MIN / -1 == i64::MIN`.
+- Unary `-` on a signed integer, unary `!` (the bitwise complement on an
+  integer), the bits `<<` moves past the width, and a signed `MIN / -1`
+  wrap at the declared width in every profile: `-(-128i8) == -128`,
+  `!5u8 == 250`, `200u8 << 2 == 32`, `-128i8 / -1 == -128`, and
+  `i64::MIN / -1 == i64::MIN`. Unary `-` on an unsigned integer is GT0001:
+  `0 -% x` is the value that wraps, `-(x as i64)` the signed negation.
 - `u64`/`usize` values use the same 64-bit payload as signed integers,
   but arithmetic, comparison, shifts, division/remainder, and display are
   type-aware on every tier. Casts reinterpret or truncate to the target
   width (`(0 - 1) as u64` prints `18446744073709551615`); an explicit
   cast back to a signed type reinterprets the same bits.
-- `<<` and `>>` mask the shift amount to the low 6 bits
-  (`1 << 70 == 1 << 6`); `>>` is the arithmetic (sign-propagating)
-  shift.
+- A shift amount is a count of any integer type, and the result has the
+  shifted operand's type. An amount outside `0..BITS` of that type panics
+  with `attempt to shift left with overflow` (or `right`), as an
+  overflowing `+` does, on every tier and in every profile; a literal
+  amount outside it is GT0116 at compile time. `<<%` and `>>%` take the
+  amount modulo the width instead (`1 <<% 70 == 1 << 6`, `3u8 <<% 9 == 6`),
+  with `<<%=` and `>>%=` their compound forms. `>>` and `>>%` are the
+  arithmetic (sign-propagating) shift on a signed type and the logical
+  shift on an unsigned one.
 - Float → int casts truncate toward zero and saturate at the target
   type's range (`300.7 as u8 == 255`, `-5.0 as u8 == 0`,
   `1e20 as i64 == i64::MAX`, NaN → 0).
@@ -452,6 +464,22 @@ explicit two's-complement arithmetic at 64-bit width, not
 narrowing - require an explicit `as` cast. `let bigger: i64 = small_i32`
 is a type error; write `let bigger = small_i32 as i64`. This prevents
 silent truncation, silent sign changes, and surprise precision loss.
+
+The two operands of an arithmetic, bitwise, or comparison operator share
+one type, so `a < b` with `a: u32` and `b: i64` is GT0001, whose help and
+`gos check --fix` write the cast that loses no value (`a as i64 < b`).
+When no integer type holds every value of both (`u64` with `i64`), the
+help says which values each direction of cast gives up, and the choice is
+the program's. The same holds for an integer method's second operand
+(`a.min(b)`, `a.max(b)`, `a.clamp(lo, hi)`) and for the value an element
+query asks about (`v.contains(x)`, `v.index_of(x)`, `v.count_of(x)`, a
+`Set`'s `contains`, `insert`, and `remove`): it takes the receiver's
+type. A shift's amount is the exception, since it counts bits.
+
+An unsuffixed literal takes its type from where it is used, and must fit
+that type wherever that is (GT0009): `x == 300` with `x: u8`, `n > -1`
+with `n: u32`, and a `300 =>` arm in a `match` on a `u8` are all
+rejected, as `let x: u8 = 300` is.
 
 **The `as` whitelist.** `as` is whitelist-checked (`GT0005`). The
 permitted shapes are: numeric ↔ numeric (any integer or float type on
@@ -716,14 +744,23 @@ distinguish shared from exclusive environment access, so `Fn` and `FnMut`
 collapse into essentially the same constraint; the distinction is retained
 for readability and forward compatibility.
 
-A closure captures a `Vec`, `Map`, `Set`, deque, or heap by managed
-reference: a write to one inside the closure is the enclosing binding's
-write. Every other value - a scalar, a `String`, a tuple, a fixed array, a
-struct or enum - is captured by copy, and a write to it (`count += 1`,
-`s.push_str(t)`, `acc.items.push(x)`, `&mut n`) would change only the
-closure's own copy, which starts from the captured value on every call.
-Such a write is rejected with `GT0114`; return the new value, or hold the
-state in a container.
+A closure names the bindings it captures, whatever their types. It reads a
+capture's current value when it runs, and a write inside it (`count += 1`,
+`s.push_str(t)`, `acc.items.push(x)`, `items = #[]`, `&mut n`) is a write to
+the enclosing binding, which the code around the closure then reads. A
+closure that outlives the function that made it keeps its captures alive,
+and each evaluation of a closure expression names the bindings live at that
+point, so a closure made in a loop body names that iteration's bindings.
+
+A spawned closure (`spawn(|| ..)`) is the one exception. It runs on another
+goroutine, so it takes a snapshot of each binding it captures where the
+`spawn` is written, and a later write on either side does not reach the
+other. A write inside a spawned closure to a binding it captured would
+change only the goroutine's snapshot, so it is rejected with `GT0114`:
+answer the value through `join()`, send it on a channel, or share it through
+a `sync::Shared`. A synchronisation handle (a `Mutex`, a channel end, a
+`sync::Shared`, an atomic) names the same object in every snapshot, so
+calling one is not a write to the snapshot.
 
 #### 3.5.1 Keyword arguments and parameter defaults
 
@@ -759,11 +796,15 @@ Positional arguments precede named ones: once a name is used, the
 positions after it are no longer in written order, so every later
 argument needs a name too. Violations are `GR0013`.
 
-A default must be a literal - integer, float, string, char, byte, or bool
-- optionally negated. It is spliced into every call that omits the
-parameter, so an expression needing resolution at each of those sites is
-rejected with `GR0014`. Each call site receives its own copy, so no two
-calls share a default value.
+A default must be a value known while compiling: a literal - integer,
+float, string, char, byte, or bool - optionally negated, a path to a
+`const` item or an associated const, integer arithmetic over those, or a
+`comptime` expression. Each folds to a literal before it is spliced into
+the calls that omit the parameter. A const is resolved where the function
+is declared, so a call site with another `DEFAULT_TIMEOUT` in scope still
+receives the declaration's. Anything else, which would need resolving at
+each call site, is rejected with `GR0014`. Each call site receives its
+own copy, so no two calls share a default value.
 
 Methods and associated functions accept both forms. A method call is
 rewritten against the declaration its receiver's type reaches, so an
@@ -973,9 +1014,11 @@ instantiation is monomorphised and the trait-method call is lowered to
 the concrete impl's symbol (`Square::name`), giving static dispatch that
 is bit-identical across the bytecode VM, the Cranelift JIT, and the LLVM
 AOT tiers. A type parameter may carry several bounds (`T: Read + Write`),
-and methods resolve from any of them. The arguments are struct-typed;
-`dyn Trait`, blanket impls, and supertrait method inheritance through a
-bound are not yet part of static dispatch.
+and methods resolve from any of them and from their supertraits: with
+`trait BufRead: Read`, a `T: BufRead` parameter answers `read`. A method
+that two of those traits declare is `GT0117`. The arguments are
+struct-typed; `dyn Trait` and blanket impls are not part of static
+dispatch.
 
 Gossamer does **not** support:
 
@@ -1082,8 +1125,8 @@ specialisation, including across recursive calls. Generic struct types
 (`struct Wrapper<T> { value: T }`) and their `impl<T>` methods
 specialise per instantiation on every tier. Bounds are static dispatch
 and may be written several to a parameter (`T: A + B`), in the parameter
-list or in a `where` clause; there is no `dyn Trait`, no blanket impl,
-and no supertrait method inheritance through the bound.
+list or in a `where` clause, and a bound brings its supertraits' methods
+with it; there is no `dyn Trait` and no blanket impl.
 
 ### 3.10a Lane vectors
 
@@ -1108,9 +1151,10 @@ checked. `Simd::gather(xs, indices)` reads `xs[indices[i]]` into lane `i`,
 each read checked.
 
 `+`, `-`, and `*` apply lane by lane to float and integer lanes, `/` to float
-lanes, `+%`, `-%`, `*%`, `<<`, and `>>` to integer lanes, and `&`, `|`, and `^`
-to integer lanes and masks. Both operands share one vector type, which the
-result has too.
+lanes, `+%`, `-%`, `*%`, `<<`, `>>`, `<<%`, and `>>%` to integer lanes, and
+`&`, `|`, and `^` to integer lanes and masks. A lane shift takes its amount
+modulo the lane width, as `<<%` does. Both operands share one vector type,
+which the result has too.
 
 The methods on a vector:
 
@@ -1434,8 +1478,14 @@ Patterns support literals, wildcards (`_`), ranges, bindings,
 struct/enum destructuring, and or-patterns (`A | B`). Ranges may be
 closed (`1..=10`), exclusive (`1..10`), or open-ended: `..=hi` and
 `..hi` (open start), or `lo..` (open end, covering up to the type maximum
-inclusive). Range patterns are opaque to exhaustiveness analysis, so a `_`
-arm is still required even when the ranges appear to cover the type. An
+inclusive). Literal and range patterns over an integer or `char` count
+toward exhaustiveness by the values they cover, so arms whose ranges tile
+the type need no `_` (`0..=127` and `128..=255` cover a `u8`; the `char`
+ranges skip the surrogate code points no `char` holds). A guarded arm
+does not count, and a missing span is reported as a range
+(`100..=199`). An arm every value of which earlier unguarded arms already
+match, a `_` after ranges that tile the type included, is the warning
+`GM0002`. An
 inclusive marker requires an upper bound, so bare `..=` and `lo..=` are
 parse errors. A bound is a literal or a primitive integer limit
 (`i64::MIN..=-1`, `128..=u8::MAX`), which stands for its literal; any other
@@ -1639,7 +1689,8 @@ while let Some(conn) = listener.accept() {
 Deferred expressions are **evaluated when they run**, not when registered:
 they read the current value of any variable they reference at block exit (the
 same capture rule as Swift/Zig). A deferred expression's own value and any
-control flow inside it are discarded; a panic raised inside one propagates.
+control flow inside it are discarded; a panic raised inside one propagates,
+and the deferred expressions still pending run as it unwinds.
 
 #### `spawn` / `join`
 
@@ -1883,7 +1934,7 @@ From highest to lowest:
 | 4 | `as` cast | left |
 | 5 | `*`, `/`, `%`, `*%` | left |
 | 6 | `+`, `-`, `+%`, `-%` | left |
-| 7 | `<<`, `>>` | left |
+| 7 | `<<`, `>>`, `<<%`, `>>%` | left |
 | 8 | `&` bitand | left |
 | 9 | `^` bitxor | left |
 | 10 | `\|` bitor | left |
@@ -1936,8 +1987,8 @@ Pattern = LiteralPattern
 
 An open-ended range covers up to the type's maximum (inclusive). An
 inclusive marker requires an upper bound, so bare `..=` and `lo..=` are
-parse errors. Range patterns are opaque to the exhaustiveness checker, so a
-match using only ranges still needs a `_` arm.
+parse errors. Range patterns count toward exhaustiveness by the values
+they cover (see `match` in §4.4).
 
 A `let` binding (§4.1) and a `let` clause in an `if` / `while` condition
 (§4.4) require an irrefutable pattern (or an `else` branch that diverges,
@@ -2538,14 +2589,12 @@ A spawned call may not capture or pass a `&T` or `&mut T`. The tracked
 carried across goroutine boundaries. Pass the underlying value (managed
 reference, or `Copy`) instead.
 
-Cross-goroutine data races on other explicitly shared mutable state are
-possible. A container a spawned closure captures is such state: the
-goroutine and the code that spawned it reach one container, so writes to
-it from both sides, or from several goroutines, must be serialised with a
-`sync::Mutex` held around each access; unserialised writes are a data race
-whose result is undefined. Detect them at runtime with `gos test --race`
-(§7.4) and prevent them by communicating through channels, answering the
-value from the goroutine, or keeping it in a `sync::Shared`.
+A spawned closure's captures are snapshots (§3.5), so a container it
+captures is the goroutine's own value and the spawning code's later writes
+do not reach it. Goroutines share mutable state only through a handle the
+program names: a channel, a `sync::Shared`, a `sync::Map`, or an atomic.
+Memory reached through an `ffi::Ptr` can still race; detect such races at
+runtime with `gos test --race` (§7.4).
 
 The scheduler is an M:N work-stealing scheduler:
 
@@ -2642,14 +2691,21 @@ off the end of the block, `return`, `break`, `continue`, and `?` - and each
 runs that block's pending defers in LIFO order. `defer` therefore costs
 nothing a hand-written statement at each of those edges would not.
 
-A **panic is not one of those edges**. It is a violated invariant with no
-`recover` to reach (§8.5), so a panicking goroutine's pending defers do not
-run: on the main goroutine the process crashes, and a spawned goroutine's
-panic ends that goroutine alone. Cohort accounting does not ride on `defer`
-for this reason - the spawn wrapper's unwind backstop retires every cohort
-the goroutine still had open, so a panicking child is still counted, still
-reported, and never leaves its cohort undrained. Anything that must hold
-across a panic belongs on that backstop, not on a `defer`.
+A **panic unwinds through the same defers**. It cannot be caught (§8.5), but
+as it leaves each frame on its way to the goroutine's end, it runs the
+deferred expressions pending there, innermost block first and each block's
+last registered first: the order the normal exits use. A lock released in a
+`defer` is released when its goroutine panics, and a file closed in one is
+closed. A panic raised by a deferred expression while another unwinds does
+not stop the remaining defers; the goroutine ends with the first panic, whose
+report names the later one in a `note:` line, and `join()` delivers that
+text. On the main goroutine the defers run before the report and the exit
+with status 101, and the panic hook (`runtime::set_panic_hook`) runs after
+them. A stack overflow (`GX0008`) and `process::exit` end the program without
+unwinding, so they run no defers. Cohort accounting does not ride on `defer`:
+the spawn wrapper's unwind backstop retires every cohort the goroutine still
+had open, so a panicking child is still counted, still reported, and never
+leaves its cohort undrained.
 
 ### 8.5 Recovering from a panic
 

@@ -1946,6 +1946,66 @@ pub enum RuntimeError {
 }
 
 impl RuntimeError {
+    /// Whether this fault runs the deferred expressions pending in the
+    /// frames it leaves. A stack overflow, an exhausted budget, a refused
+    /// compile-time capability, and a requested exit end the program
+    /// rather than unwind it.
+    #[must_use]
+    pub fn unwinds_defers(&self) -> bool {
+        match self {
+            Self::Type(_)
+            | Self::UnresolvedName(_)
+            | Self::Arity { .. }
+            | Self::Arithmetic(_)
+            | Self::Panic(_)
+            | Self::MatchFailure
+            | Self::Unsupported(_)
+            | Self::Foreign { .. } => true,
+            Self::StackOverflow(_)
+            | Self::ComptimeDenied(_)
+            | Self::WouldNeverWake(_)
+            | Self::Exit(_) => false,
+            #[cfg(feature = "fuel")]
+            Self::FuelExhausted => false,
+        }
+    }
+
+    /// This fault with `later`, raised by a deferred expression while this
+    /// one unwound, attached as a note to its report.
+    #[must_use]
+    pub fn with_unwind_note(self, later: &Self) -> Self {
+        let note = format!(
+            "\nnote: a deferred expression panicked while unwinding: {}",
+            later.report_text()
+        );
+        match self {
+            Self::Type(text) => Self::Type(text + &note),
+            Self::UnresolvedName(text) => Self::UnresolvedName(text + &note),
+            Self::Arithmetic(text) => Self::Arithmetic(text + &note),
+            Self::Panic(text) => Self::Panic(text + &note),
+            Self::Foreign { code, message } => Self::Foreign {
+                code,
+                message: message + &note,
+            },
+            other => other,
+        }
+    }
+
+    /// The text a report shows for this fault after its code and prefix.
+    #[must_use]
+    pub fn report_text(&self) -> String {
+        match self {
+            Self::Panic(text) => text.clone(),
+            other => {
+                let rendered = other.to_string();
+                match rendered.split_once("]: ") {
+                    Some((_, rest)) => rest.to_string(),
+                    None => rendered,
+                }
+            }
+        }
+    }
+
     /// Returns the stable `GXNNNN` diagnostic code for this runtime
     /// error. The code is the same in every execution path and is
     /// rendered by `gos explain` for long-form help.

@@ -30,8 +30,8 @@ impl http::Handler for App {
         let r = r.set_value("user", "bob")
         http::Response::text(
             200
-            "user=" + r.value("user") + " role=" + r.value("role")
-            + " missing=[" + r.value("nope") + "]"
+            "user=" + r.value("user") + " role=" + r.value("role") +
+                " missing=[" + r.value("nope") + "]"
         )
     }
 }

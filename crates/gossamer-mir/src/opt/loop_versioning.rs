@@ -1162,7 +1162,7 @@ fn remap_terminator_blocks(term: &mut Terminator, map: &HashMap<usize, usize>) {
         }
         Terminator::Assert { target, .. } => f(target),
         Terminator::Drop { target, .. } => f(target),
-        Terminator::Return | Terminator::Unreachable | Terminator::Panic { .. } => {}
+        Terminator::Return | Terminator::Unreachable | Terminator::Resume | Terminator::Panic { .. } => {}
     }
 }
 
@@ -1188,7 +1188,7 @@ fn redirect_terminator_target(term: &mut Terminator, from: usize, to: BlockId) {
         }
         Terminator::Assert { target, .. } => f(target),
         Terminator::Drop { target, .. } => f(target),
-        Terminator::Return | Terminator::Unreachable | Terminator::Panic { .. } => {}
+        Terminator::Return | Terminator::Unreachable | Terminator::Resume | Terminator::Panic { .. } => {}
     }
 }
 

@@ -1199,6 +1199,7 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
             }
             Terminator::Goto { .. }
             | Terminator::Return
+            | Terminator::Resume
             | Terminator::Unreachable
             | Terminator::Panic { .. } => {}
         }

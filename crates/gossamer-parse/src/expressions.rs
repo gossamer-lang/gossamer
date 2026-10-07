@@ -125,6 +125,70 @@ impl Parser<'_> {
     /// left-hand side. Used both by the core driver and by condition
     /// parsing, where a `&&`-chain is parsed clause-by-clause and then
     /// rejoined into a normal expression when no `let` clause appears.
+    /// Reports the binary operator at the cursor, which begins a line, with
+    /// the rewrite that moves it to the end of the line above. Parsing then
+    /// continues the expression so later stages see the program as meant.
+    fn report_leading_operator(&mut self, op: BinaryOp) {
+        let file = self.tokens.file();
+        let line_end = self.last_span().end;
+        let op_span = self.peek_span();
+        let gap = self.slice(Span::new(file, line_end, op_span.start));
+        let spaced = self
+            .source
+            .get(op_span.end as usize..)
+            .is_some_and(|rest| rest.starts_with(' '));
+        let fix_end = op_span.end + u32::from(spaced);
+        let replacement = format!(" {}{gap}", op.as_str());
+        self.record(
+            ParseError::LeadingBinaryOperator {
+                op: op.as_str().to_string(),
+                replacement,
+                fix_span: Span::new(file, line_end, fix_end),
+            },
+            op_span,
+        );
+    }
+
+    /// Reports a closure written as a statement, which nothing reads. A
+    /// parameterless one after an expression statement or a `let` most
+    /// likely continued that line's logical or, which the fix restores.
+    fn report_discarded_closure(
+        &mut self,
+        span: Span,
+        parameterless: bool,
+        previous: Option<&Stmt>,
+    ) {
+        let file = self.tokens.file();
+        let continues = previous.is_some_and(|stmt| match &stmt.kind {
+            gossamer_ast::StmtKind::Let { init, .. } => init.is_some(),
+            gossamer_ast::StmtKind::Expr { has_semi, .. } => !has_semi,
+            _ => false,
+        });
+        let continuation = previous
+            .filter(|_| parameterless && continues)
+            .and_then(|stmt| {
+                let line_end = stmt.span.end;
+                let gap = self
+                    .slice(Span::new(file, line_end, span.start))
+                    .to_string();
+                if !gap.contains('\n')
+                    || !self
+                        .slice(Span::new(file, span.start, span.end))
+                        .starts_with("||")
+                {
+                    return None;
+                }
+                let after = span.start + 2;
+                let spaced = self
+                    .source
+                    .get(after as usize..)
+                    .is_some_and(|rest| rest.starts_with(' '));
+                let fix_end = after + u32::from(spaced);
+                Some((format!(" ||{gap}"), Span::new(file, line_end, fix_end)))
+            });
+        self.record(ParseError::DiscardedClosure { continuation }, span);
+    }
+
     fn continue_binary(&mut self, mut lhs: Expr, max_prec: u8, allow_assign: bool) -> Expr {
         loop {
             if allow_assign && self.peek_assign_op().is_some() {
@@ -139,8 +203,11 @@ impl Parser<'_> {
                 if op == BinaryOp::BitOr && self.in_pattern_pipe() {
                     break;
                 }
-                if is_unary_startable(op) && self.newline_before_peek() && !self.in_paren_group {
-                    break;
+                if op != BinaryOp::PipeGt && self.newline_before_peek() {
+                    if begins_expression(op) {
+                        break;
+                    }
+                    self.report_leading_operator(op);
                 }
                 self.bump();
                 if is_non_associative_compare(op)
@@ -225,7 +292,8 @@ impl Parser<'_> {
     fn peek_binary_op(&self) -> Option<BinaryOp> {
         use Punct::{
             Amp, AmpAmp, Caret, EqEq, Gt, GtEq, Lt, LtEq, Minus, MinusPercent, NotEq, Percent,
-            Pipe, PipeGt, PipePipe, Plus, PlusPercent, ShiftL, ShiftR, Slash, Star, StarPercent,
+            Pipe, PipeGt, PipePipe, Plus, PlusPercent, ShiftL, ShiftLPercent, ShiftR,
+            ShiftRPercent, Slash, Star, StarPercent,
         };
         let TokenKind::Punct(punct) = self.peek().kind else {
             return None;
@@ -241,6 +309,8 @@ impl Parser<'_> {
             Minus => BinaryOp::Sub,
             ShiftL => BinaryOp::Shl,
             ShiftR => BinaryOp::Shr,
+            ShiftLPercent => BinaryOp::WrappingShl,
+            ShiftRPercent => BinaryOp::WrappingShr,
             Amp => BinaryOp::BitAnd,
             Caret => BinaryOp::BitXor,
             Pipe => BinaryOp::BitOr,
@@ -362,6 +432,8 @@ impl Parser<'_> {
             Punct::PlusPercentEq => AssignOp::WrappingAddAssign,
             Punct::MinusPercentEq => AssignOp::WrappingSubAssign,
             Punct::StarPercentEq => AssignOp::WrappingMulAssign,
+            Punct::ShiftLPercentEq => AssignOp::WrappingShlAssign,
+            Punct::ShiftRPercentEq => AssignOp::WrappingShrAssign,
             _ => return None,
         })
     }
@@ -1416,7 +1488,6 @@ impl Parser<'_> {
 
     fn parse_paren_or_tuple(&mut self) -> ExprKind {
         self.with_struct_literals_allowed(|p| {
-            p.in_paren_group = true;
             if p.eat_punct(Punct::RParen) {
                 return ExprKind::Literal(Literal::Unit);
             }
@@ -1661,6 +1732,11 @@ impl Parser<'_> {
     fn parse_condition(&mut self) -> Condition {
         let mut clauses = vec![self.parse_cond_clause()];
         while self.at_punct(Punct::AmpAmp) {
+            // A condition continues across lines as any expression does: the
+            // operator ends the line above.
+            if self.newline_before_peek() {
+                self.report_leading_operator(BinaryOp::And);
+            }
             self.bump();
             clauses.push(self.parse_cond_clause());
         }
@@ -2696,7 +2772,6 @@ impl Parser<'_> {
         }
         let saved_tokens = std::mem::replace(&mut self.tokens, stream);
         let saved_separator = self.newline_separator_at.take();
-        let saved_group = std::mem::replace(&mut self.in_paren_group, true);
         let saved_pipe = std::mem::replace(&mut self.parsing_pipe_step, false);
         let expr = self.with_struct_literals_allowed(Self::parse_expr_no_assign);
         if !self.at_eof() {
@@ -2708,7 +2783,6 @@ impl Parser<'_> {
         }
         self.tokens = saved_tokens;
         self.newline_separator_at = saved_separator;
-        self.in_paren_group = saved_group;
         self.parsing_pipe_step = saved_pipe;
         expr
     }
@@ -3298,6 +3372,11 @@ impl Parser<'_> {
                 tail = Some(expr);
                 break;
             }
+            if let gossamer_ast::StmtKind::Expr { expr, .. } = &stmt.kind
+                && let ExprKind::Closure { params, .. } = &expr.kind
+            {
+                self.report_discarded_closure(expr.span, params.is_empty(), stmts.last());
+            }
             stmts.push(stmt);
         }
         self.expect_punct(Punct::RBrace, "to close block");
@@ -3439,19 +3518,20 @@ fn keyword_or_ident_text(text: &str) -> String {
     text.to_string()
 }
 
-/// Whether a binary operator's punctuation also begins an expression in
-/// Gossamer. These are the only ops for which a leading newline must be
-/// treated as a statement boundary, so that `let x = expr\n&y` parses as two
-/// statements (`let x = expr;` followed by `&y`) rather than the binary
-/// `expr & y`, and a closure `|x| x * k` on the line after a statement is a
-/// closure rather than `expr | x | x * k`. The other unary prefix `!` has no
-/// binary form so does not need this guard; `||` stays a continuation, since
-/// a leading `||` continues a condition far more often than it opens a
-/// parameterless closure.
-fn is_unary_startable(op: BinaryOp) -> bool {
+/// Whether a binary operator's punctuation also begins an expression, so a
+/// line starting with it begins a new statement: `let x = expr` then `&y` on
+/// the next line is two statements, and `|x| x * k` or `|| k` on the line
+/// after a statement is a closure.
+fn begins_expression(op: BinaryOp) -> bool {
     matches!(
         op,
-        BinaryOp::Sub | BinaryOp::BitAnd | BinaryOp::Mul | BinaryOp::BitOr
+        BinaryOp::Sub
+            | BinaryOp::BitAnd
+            | BinaryOp::Mul
+            | BinaryOp::BitOr
+            | BinaryOp::Or
+            | BinaryOp::Lt
+            | BinaryOp::BitXor
     )
 }
 

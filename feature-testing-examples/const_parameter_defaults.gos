@@ -1,0 +1,46 @@
+// A parameter default may name a `const`, an associated const, integer
+// arithmetic over those, or a `comptime` expression; each is folded where the
+// function is declared and spliced into every call that omits it.
+
+const DEFAULT_TIMEOUT: i64 = 30
+const SCALE: i64 = 1000
+
+mod net {
+    pub const PORT: i64 = 8080
+
+    pub fn listen(port: i64 = PORT) -> String {
+        f"port {port}"
+    }
+}
+
+struct Conn {}
+
+impl Conn {
+    const RETRIES: i64 = 3
+
+    fn open(host: String, retries: i64 = Conn::RETRIES) -> String {
+        f"{host} x{retries}"
+    }
+}
+
+fn connect(host: String, timeout: i64 = DEFAULT_TIMEOUT * SCALE, label: String = "db") -> String {
+    f"{host} {timeout} {label}"
+}
+
+fn negated(n: i64 = -DEFAULT_TIMEOUT) -> i64 {
+    n
+}
+
+fn computed(n: i64 = comptime { 6 * 7 }) -> i64 {
+    n
+}
+
+fn main() {
+    for host in #["a", "b"] {
+        println(connect(host))
+        println(connect(host, timeout: 5))
+    }
+    println(Conn::open("c"))
+    println(net::listen())
+    println("{} {}", negated(), computed())
+}

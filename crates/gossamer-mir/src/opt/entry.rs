@@ -389,7 +389,7 @@ fn scalar_replacement_operand_mentions_local(operand: &Operand, local: Local) ->
 
 fn terminator_mentions_local(terminator: &Terminator, local: Local) -> bool {
     match terminator {
-        Terminator::Goto { .. } | Terminator::Return | Terminator::Unreachable | Terminator::Panic { .. } => false,
+        Terminator::Goto { .. } | Terminator::Return | Terminator::Unreachable | Terminator::Resume | Terminator::Panic { .. } => false,
         Terminator::SwitchInt { discriminant, .. } => {
             scalar_replacement_operand_mentions_local(discriminant, local)
         }

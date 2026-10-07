@@ -498,7 +498,9 @@ fn try_build_general(body: &Body) -> Option<GeneralCallee> {
     for b in &body.blocks {
         match &b.terminator {
             Terminator::Return => has_return = true,
-            Terminator::Drop { .. } => return None,
+            // A landing pad belongs to the frame that unwinds: the body keeps
+            // its own frame so the pad runs for it.
+            Terminator::Drop { .. } | Terminator::Resume => return None,
             _ => {}
         }
     }
@@ -1225,6 +1227,7 @@ fn remap_terminator_full(
             target: remap_block(*target),
         },
         Terminator::Unreachable => Terminator::Unreachable,
+        Terminator::Resume => Terminator::Resume,
         Terminator::Panic { message } => Terminator::Panic {
             message: message.clone(),
         },

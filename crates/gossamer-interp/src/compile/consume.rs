@@ -28,6 +28,8 @@ use gossamer_hir::{
 };
 use gossamer_types::Ty;
 
+use super::MutSelfMethods;
+
 /// One recorded `Path` read of a local.
 #[derive(Clone, Copy)]
 struct Occ {
@@ -73,9 +75,22 @@ struct Analyzer {
     /// projection, handed out as `&mut`, or the receiver of a method that
     /// mutates it. A binding absent here is only ever read.
     mutated: HashSet<String>,
+    /// Names of the program's `&mut self` methods, whose calls write their
+    /// receiver like a mutating builtin method does.
+    mut_self_methods: HashSet<String>,
 }
 
 impl Analyzer {
+    fn new(method_muts: &MutSelfMethods) -> Self {
+        Self {
+            mut_self_methods: method_muts
+                .iter()
+                .map(|qual| qual.rsplit("::").next().unwrap_or(qual).to_string())
+                .collect(),
+            ..Self::default()
+        }
+    }
+
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
     }
@@ -242,7 +257,8 @@ impl Analyzer {
                 args,
                 ..
             } => {
-                let mutating = gossamer_types::is_mutating_method_name(name.name.as_str());
+                let mutating = gossamer_types::is_mutating_method_name(name.name.as_str())
+                    || self.mut_self_methods.contains(&name.name);
                 if mutating {
                     self.record_mutation(receiver);
                 }
@@ -617,8 +633,9 @@ impl super::FnBuilder<'_> {
 pub(crate) fn closure_captured_locals(
     params: &[HirParam],
     body: &HirBlock,
+    method_muts: &MutSelfMethods,
 ) -> (Vec<(String, Ty)>, HashSet<String>) {
-    let mut a = Analyzer::default();
+    let mut a = Analyzer::new(method_muts);
     a.push_scope();
     for param in params {
         a.record_bindings(&param.pattern, 0);
@@ -632,8 +649,9 @@ pub(crate) fn closure_captured_locals(
 pub(crate) fn closure_captured_locals_in_expr(
     params: &[HirParam],
     body: &HirExpr,
+    method_muts: &MutSelfMethods,
 ) -> (Vec<(String, Ty)>, HashSet<String>) {
-    let mut a = Analyzer::default();
+    let mut a = Analyzer::new(method_muts);
     a.push_scope();
     for param in params {
         a.record_bindings(&param.pattern, 0);
@@ -644,11 +662,11 @@ pub(crate) fn closure_captured_locals_in_expr(
 
 /// Returns the set of local names that are safe to move at their single
 /// use within `decl`'s body. Empty for bodyless declarations.
-pub(crate) fn consumable_locals(decl: &HirFn) -> HashSet<String> {
+pub(crate) fn consumable_locals(decl: &HirFn, method_muts: &MutSelfMethods) -> HashSet<String> {
     let Some(body) = decl.body.as_ref() else {
         return HashSet::new();
     };
-    let mut a = Analyzer::default();
+    let mut a = Analyzer::new(method_muts);
     // Outer scope for the function parameters; `visit_block` pushes its
     // own scope for the body's bindings.
     a.push_scope();

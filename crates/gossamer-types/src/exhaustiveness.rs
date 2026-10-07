@@ -8,13 +8,15 @@
 //!
 //! A column's type decides how far the search goes. Booleans, tuples,
 //! fixed-length arrays, user enums, `Option`, and `Result` enumerate their
-//! constructors and are decomposed recursively. Integers, floats, strings,
-//! and chars have no finite constructor list, so covering them takes a
-//! catch-all arm. Every other type contributes no witness of its own: the
-//! search cannot enumerate it, and reporting a gap it cannot see would be a
-//! guess. Range patterns and slice patterns whose fixed elements sit around
-//! a rest constrain a span of values rather than one constructor, so they
-//! stay opaque to the usefulness lattice.
+//! constructors and are decomposed recursively. An integer or `char` column
+//! is the interval of its type's values, which literal and range patterns
+//! split into segments, so a set of ranges that tiles the type covers it
+//! without a catch-all. Floats and strings have no finite constructor list,
+//! so covering them takes a catch-all arm. Every other type contributes no
+//! witness of its own: the search cannot enumerate it, and reporting a gap
+//! it cannot see would be a guess. Slice patterns whose fixed elements sit
+//! around a rest constrain a span of lengths rather than one constructor,
+//! so they stay opaque to the usefulness lattice.
 
 #![forbid(unsafe_code)]
 
@@ -246,16 +248,26 @@ impl Checker<'_> {
                 span: arm.pattern.span,
             })
             .collect();
-        self.report_redundancy(&rows);
+        self.report_redundancy(scrutinee_ty, &rows);
         self.report_non_exhaustive(scrutinee_ty, &rows, span);
     }
 
-    fn report_redundancy(&mut self, rows: &[Row]) {
+    /// Reports each arm whose every value an earlier unguarded arm already
+    /// matches. Over an integer or `char` scrutinee the earlier arms' ranges
+    /// cover it together, and an arm outside the type's range matches no
+    /// value at all.
+    fn report_redundancy(&mut self, scrutinee_ty: Option<Ty>, rows: &[Row]) {
+        let intervals = match self.domain_of(scrutinee_ty) {
+            Domain::Ints { intervals, .. } => Some(intervals),
+            _ => None,
+        };
         for (i, row) in rows.iter().enumerate() {
-            if rows[..i]
+            let earlier: Vec<&Pat> = rows[..i]
                 .iter()
-                .any(|earlier| !earlier.has_guard && subsumes(&earlier.pat, &row.pat))
-            {
+                .filter(|earlier| !earlier.has_guard)
+                .map(|earlier| &earlier.pat)
+                .collect();
+            if covered(&earlier, &row.pat, intervals.as_deref()) {
                 self.diagnostics.push(ExhaustivenessDiagnostic::new(
                     ExhaustivenessError::UnreachableArm,
                     row.span,
@@ -319,9 +331,12 @@ impl Checker<'_> {
         let rows = expand_or_heads(rows);
         let mut out: Vec<Vec<String>> = Vec::new();
         let domain = self.domain_of(*head_ty);
+        if let Domain::Ints { intervals, kind } = &domain {
+            return self.missing_int_rows(&rows, intervals, *kind, rest_tys, depth);
+        }
         let signature = match &domain {
             Domain::Finite(ctors) => Some(ctors.clone()),
-            Domain::Infinite | Domain::Unknown => None,
+            Domain::Ints { .. } | Domain::Infinite | Domain::Unknown => None,
         };
         // A signature constructor counts as tested once some row head other
         // than a wildcard can match it, whatever shape that head takes: a
@@ -356,7 +371,7 @@ impl Checker<'_> {
         };
         let head_is_open = match domain {
             Domain::Finite(_) => !uncovered.is_empty(),
-            Domain::Infinite => true,
+            Domain::Ints { .. } | Domain::Infinite => true,
             // An unknown head only leaves a gap when no row constrains it.
             Domain::Unknown => used.is_empty(),
         };
@@ -384,6 +399,52 @@ impl Checker<'_> {
         out
     }
 
+    /// [`Self::missing_rows`] over an integer or `char` head column: the
+    /// type's intervals split at every bound the head patterns name, so each
+    /// segment lies wholly inside or wholly outside each pattern, and each
+    /// segment is a constructor. A run of adjacent segments no row covers is
+    /// reported as one range.
+    fn missing_int_rows(
+        &self,
+        rows: &[Vec<Pat>],
+        intervals: &[Interval],
+        kind: IntKind,
+        rest_tys: &[Option<Ty>],
+        depth: usize,
+    ) -> Vec<Vec<String>> {
+        let mut out: Vec<Vec<String>> = Vec::new();
+        let mut gap: Option<Interval> = None;
+        let flush = |gap: &mut Option<Interval>, out: &mut Vec<Vec<String>>| {
+            if let Some((lo, hi)) = gap.take() {
+                let mut witness = vec![render_ctor(&Ctor::IntRange { lo, hi, kind })];
+                witness.extend(rest_tys.iter().map(|_| "_".to_string()));
+                out.push(witness);
+            }
+        };
+        for (lo, hi) in int_segments(rows, intervals) {
+            let ctor = Ctor::IntRange { lo, hi, kind };
+            let specialized = specialize(rows, &ctor);
+            if specialized.is_empty() {
+                gap = match gap {
+                    Some((start, end)) if end.checked_add(1) == Some(lo) => Some((start, hi)),
+                    other => {
+                        let mut pending = other;
+                        flush(&mut pending, &mut out);
+                        Some((lo, hi))
+                    }
+                };
+                continue;
+            }
+            flush(&mut gap, &mut out);
+            for witness in self.missing_rows(specialized, rest_tys, depth + 1) {
+                out.push(apply_ctor(&ctor, witness));
+            }
+        }
+        flush(&mut gap, &mut out);
+        out.truncate(MAX_WITNESSES);
+        out
+    }
+
     /// Value domain of a column's type.
     fn domain_of(&self, ty: Option<Ty>) -> Domain {
         let Some(kind) = ty.and_then(|ty| self.tcx.kind(ty)) else {
@@ -400,7 +461,20 @@ impl Checker<'_> {
             TyKind::Adt { def, .. } => self.adt_domain(*def),
             // A domain no finite list of patterns can exhaust: only a
             // catch-all arm covers it.
-            TyKind::Int(_) | TyKind::Float(_) | TyKind::String | TyKind::Char => Domain::Infinite,
+            TyKind::Int(int_ty) => {
+                let (lo, hi) = int_type_bounds(*int_ty);
+                Domain::Ints {
+                    intervals: vec![(lo, hi)],
+                    kind: IntKind::Int(*int_ty),
+                }
+            }
+            // A `char` is a Unicode scalar value, which excludes the
+            // surrogate code points.
+            TyKind::Char => Domain::Ints {
+                intervals: vec![(0, 0xD7FF), (0xE000, 0x10_FFFF)],
+                kind: IntKind::Char,
+            },
+            TyKind::Float(_) | TyKind::String => Domain::Infinite,
             _ => Domain::Unknown,
         }
     }
@@ -509,10 +583,31 @@ const MAX_WITNESSES: usize = 3;
 /// exponential expansion.
 const MAX_DEPTH: usize = 8;
 
+/// An inclusive interval of an integer or `char` column's values.
+type Interval = (i128, i128);
+
+/// How an integer-valued column's values are spelled in a witness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IntKind {
+    /// An integer of this type.
+    Int(crate::ty::IntTy),
+    /// A `char`, by its scalar value.
+    Char,
+    /// An integer of a type the column does not name.
+    Plain,
+}
+
 /// Value domain of a scrutinee column.
 enum Domain {
     /// Every constructor the type admits.
     Finite(Vec<Ctor>),
+    /// The intervals of an integer or `char` type's values.
+    Ints {
+        /// Disjoint, ascending intervals of the values.
+        intervals: Vec<Interval>,
+        /// How a value is spelled.
+        kind: IntKind,
+    },
     /// A domain no finite pattern list exhausts, such as the integers.
     Infinite,
     /// No usable type information.
@@ -537,12 +632,21 @@ enum Ctor {
     List(usize),
     /// A literal value in an unbounded domain, keyed by its spelling.
     Literal(String),
+    /// A segment of an integer or `char` column's values.
+    IntRange {
+        /// Least value in the segment.
+        lo: i128,
+        /// Greatest value in the segment.
+        hi: i128,
+        /// How the values are spelled.
+        kind: IntKind,
+    },
 }
 
 impl Ctor {
     fn arity(&self) -> usize {
         match self {
-            Self::Bool(_) | Self::Literal(_) => 0,
+            Self::Bool(_) | Self::Literal(_) | Self::IntRange { .. } => 0,
             Self::Variant { arity, .. } => *arity,
             Self::Tuple(n) | Self::List(n) => *n,
         }
@@ -603,6 +707,11 @@ fn pat_ctor(pat: &Pat) -> Option<Ctor> {
         Pat::Tuple(fields) => Some(Ctor::Tuple(fields.len())),
         Pat::List(fields) => Some(Ctor::List(fields.len())),
         Pat::Literal(text) => Some(Ctor::Literal(text.clone())),
+        Pat::Range(lo, hi) => Some(Ctor::IntRange {
+            lo: *lo,
+            hi: *hi,
+            kind: IntKind::Plain,
+        }),
         // A rest-carrying slice spans a range of lengths, so it pins no
         // single constructor of its own.
         Pat::Wild | Pat::Or(_) | Pat::Opaque | Pat::SliceRest { .. } => None,
@@ -633,6 +742,11 @@ fn head_fields(head: &Pat, ctor: &Ctor) -> Option<Vec<Pat>> {
         },
         Pat::Literal(text) => match ctor {
             Ctor::Literal(want) if text == want => Some(Vec::new()),
+            _ => None,
+        },
+        // A segment lies wholly inside or wholly outside each pattern.
+        Pat::Range(plo, phi) => match ctor {
+            Ctor::IntRange { lo, hi, .. } if plo <= lo && hi <= phi => Some(Vec::new()),
             _ => None,
         },
         Pat::Tuple(fields) => match ctor {
@@ -696,6 +810,17 @@ fn render_ctor_with(ctor: &Ctor, fields: &[String]) -> String {
     match ctor {
         Ctor::Bool(value) => value.to_string(),
         Ctor::Literal(text) => text.clone(),
+        Ctor::IntRange { lo, hi, kind } => {
+            if lo == hi {
+                render_int_value(*lo, *kind)
+            } else {
+                format!(
+                    "{}..={}",
+                    render_int_value(*lo, *kind),
+                    render_int_value(*hi, *kind)
+                )
+            }
+        }
         Ctor::Variant { name, arity } => {
             if *arity == 0 {
                 name.clone()
@@ -763,6 +888,11 @@ fn subsumes(earlier: &Pat, later: &Pat) -> bool {
         },
         Pat::Literal(text) => match later {
             Pat::Literal(other) => other == text,
+            Pat::Or(alts) => alts.iter().all(|a| subsumes(earlier, a)),
+            _ => false,
+        },
+        Pat::Range(lo, hi) => match later {
+            Pat::Range(other_lo, other_hi) => lo <= other_lo && other_hi <= hi,
             Pat::Or(alts) => alts.iter().all(|a| subsumes(earlier, a)),
             _ => false,
         },
@@ -872,13 +1002,32 @@ fn lower_pattern(pattern: &Pattern) -> Pat {
             None => Pat::List(prefix.iter().map(lower_pattern).collect()),
         },
         PatternKind::Or(alts) => Pat::Or(alts.iter().map(lower_pattern).collect()),
-        PatternKind::Range { .. } => Pat::Opaque,
+        PatternKind::Range { lo, hi, kind } => {
+            let bound = |lit: &Option<Literal>, open: i128| match lit {
+                None => Some(open),
+                Some(lit) => literal_value(lit),
+            };
+            let open_end = hi.is_none();
+            let (Some(lo), Some(hi)) = (bound(lo, i128::MIN), bound(hi, i128::MAX)) else {
+                return Pat::Opaque;
+            };
+            // `lo..` reaches the type's maximum; `..hi` and `lo..hi` stop
+            // before `hi`.
+            let hi = match kind {
+                gossamer_ast::RangeKind::Exclusive if !open_end => hi - 1,
+                _ => hi,
+            };
+            Pat::Range(lo, hi)
+        }
         PatternKind::Ref { inner, .. } => lower_pattern(inner),
         PatternKind::Error => Pat::Opaque,
     }
 }
 
 fn lower_literal(lit: &Literal) -> Pat {
+    if let Some(value) = literal_value(lit) {
+        return Pat::Range(value, value);
+    }
     match lit {
         Literal::Bool(value) => Pat::Bool(*value),
         Literal::Int(text) | Literal::Float(text) => Pat::Literal(text.clone()),
@@ -930,11 +1079,20 @@ fn collect_enums_in(
 enum Pat {
     Wild,
     Bool(bool),
-    Variant { name: String, fields: Vec<Pat> },
+    Variant {
+        name: String,
+        fields: Vec<Pat>,
+    },
     Tuple(Vec<Pat>),
     List(Vec<Pat>),
-    SliceRest { prefix: Vec<Pat>, suffix: Vec<Pat> },
+    SliceRest {
+        prefix: Vec<Pat>,
+        suffix: Vec<Pat>,
+    },
     Literal(String),
+    /// The inclusive interval of integer or `char` values a literal or range
+    /// pattern matches; an open bound reaches past every type's range.
+    Range(i128, i128),
     Or(Vec<Pat>),
     Opaque,
 }
@@ -969,7 +1127,15 @@ impl ExhaustivenessDiagnostic {
         use gossamer_diagnostics::{Code, Diagnostic, Location};
         let location = Location::new(self.span.file, self.span);
         let title = format!("{}", self.error);
-        Diagnostic::error(Code(self.error.code()), title.clone()).with_primary(location, title)
+        let out = match self.error {
+            ExhaustivenessError::UnreachableArm => {
+                Diagnostic::warning(Code(self.error.code()), title.clone())
+            }
+            ExhaustivenessError::NonExhaustive { .. } => {
+                Diagnostic::error(Code(self.error.code()), title.clone())
+            }
+        };
+        out.with_primary(location, title)
     }
 }
 
@@ -1011,6 +1177,179 @@ impl ExhaustivenessError {
             Self::UnreachableArm => "GM0002",
         }
     }
+}
+
+/// The integer value an integer, `char`, or byte literal names, or `None`
+/// for any other literal.
+fn literal_value(lit: &Literal) -> Option<i128> {
+    match lit {
+        Literal::Int(text) => parse_int_literal(text),
+        Literal::Char(c) => Some(i128::from(u32::from(*c))),
+        Literal::Byte(b) => Some(i128::from(*b)),
+        _ => None,
+    }
+}
+
+/// The value of an integer literal's spelling: sign, radix prefix,
+/// underscores, and type suffix included.
+fn parse_int_literal(text: &str) -> Option<i128> {
+    let (negative, body) = match text.trim().strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.trim()),
+    };
+    let body = [
+        "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize",
+    ]
+    .iter()
+    .find_map(|suffix| body.strip_suffix(suffix))
+    .unwrap_or(body);
+    let digits: String = body.chars().filter(|c| *c != '_').collect();
+    let (radix, digits) = match digits.get(..2) {
+        Some("0x" | "0X") => (16, &digits[2..]),
+        Some("0o" | "0O") => (8, &digits[2..]),
+        Some("0b" | "0B") => (2, &digits[2..]),
+        _ => (10, digits.as_str()),
+    };
+    let magnitude = i128::from_str_radix(digits, radix).ok()?;
+    Some(if negative { -magnitude } else { magnitude })
+}
+
+/// The least and greatest value of an integer type; `isize` and `usize` are
+/// 64-bit.
+fn int_type_bounds(ty: crate::ty::IntTy) -> Interval {
+    use crate::ty::IntTy;
+    let bits: u32 = match ty {
+        IntTy::I8 | IntTy::U8 => 8,
+        IntTy::I16 | IntTy::U16 => 16,
+        IntTy::I32 | IntTy::U32 => 32,
+        IntTy::I64 | IntTy::U64 | IntTy::Isize | IntTy::Usize => 64,
+        IntTy::I128 | IntTy::U128 => 127,
+    };
+    if ty.is_signed() {
+        (-(1_i128 << (bits - 1)), (1_i128 << (bits - 1)) - 1)
+    } else {
+        (0, (1_i128 << bits) - 1)
+    }
+}
+
+/// `value` as a witness spells it: a `char` literal, a type's `MIN` or
+/// `MAX` by name, or the number.
+fn render_int_value(value: i128, kind: IntKind) -> String {
+    match kind {
+        IntKind::Char => match u32::try_from(value).ok().and_then(char::from_u32) {
+            Some(c) if !c.is_control() && !c.is_whitespace() => format!("'{c}'"),
+            _ => format!("'\\u{{{value:x}}}'"),
+        },
+        IntKind::Int(ty) => {
+            let (lo, hi) = int_type_bounds(ty);
+            if value == lo && lo != 0 {
+                format!("{}::MIN", ty.as_str())
+            } else if value == hi {
+                format!("{}::MAX", ty.as_str())
+            } else {
+                value.to_string()
+            }
+        }
+        IntKind::Plain => value.to_string(),
+    }
+}
+
+/// The segments of `intervals` cut at every bound a head range pattern of
+/// `rows` names, so each segment lies wholly inside or wholly outside each
+/// head pattern.
+fn int_segments(rows: &[Vec<Pat>], intervals: &[Interval]) -> Vec<Interval> {
+    let mut cuts: Vec<i128> = Vec::new();
+    for row in rows {
+        if let Some(Pat::Range(lo, hi)) = row.first() {
+            cuts.push(*lo);
+            if let Some(next) = hi.checked_add(1) {
+                cuts.push(next);
+            }
+        }
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut segments = Vec::new();
+    for &(start, end) in intervals {
+        let mut lo = start;
+        for &cut in cuts.iter().filter(|cut| **cut > start && **cut <= end) {
+            segments.push((lo, cut - 1));
+            lo = cut;
+        }
+        segments.push((lo, end));
+    }
+    segments
+}
+
+/// Whether the `earlier` patterns together match every value `later` does.
+/// A range is covered when the earlier ranges and wildcards span it within
+/// `domain`, the scrutinee type's intervals when it has them; a range wholly
+/// outside the type matches nothing and so is covered by anything.
+fn covered(earlier: &[&Pat], later: &Pat, domain: Option<&[Interval]>) -> bool {
+    match later {
+        Pat::Or(alts) => alts.iter().all(|alt| covered(earlier, alt, domain)),
+        // A catch-all after ranges that tile the type matches nothing new.
+        Pat::Wild if domain.is_some() => {
+            covered(earlier, &Pat::Range(i128::MIN, i128::MAX), domain)
+        }
+        Pat::Range(lo, hi) => {
+            let wanted: Vec<Interval> = match domain {
+                Some(domain) => domain
+                    .iter()
+                    .filter_map(|&(start, end)| {
+                        let (lo, hi) = ((*lo).max(start), (*hi).min(end));
+                        (lo <= hi).then_some((lo, hi))
+                    })
+                    .collect(),
+                None => vec![(*lo, *hi)],
+            };
+            let mut spans: Vec<Interval> = Vec::new();
+            for pat in earlier {
+                if !collect_ranges(pat, &mut spans) {
+                    return true;
+                }
+            }
+            wanted
+                .iter()
+                .all(|&(lo, hi)| interval_covered((lo, hi), &mut spans))
+        }
+        _ => earlier.iter().any(|pat| subsumes(pat, later)),
+    }
+}
+
+/// Adds the ranges `pat` matches to `spans`; answers `false` when `pat`
+/// matches every value, which covers any range on its own.
+fn collect_ranges(pat: &Pat, spans: &mut Vec<Interval>) -> bool {
+    match pat {
+        Pat::Wild => false,
+        Pat::Range(lo, hi) => {
+            spans.push((*lo, *hi));
+            true
+        }
+        Pat::Or(alts) => alts.iter().all(|alt| collect_ranges(alt, spans)),
+        _ => true,
+    }
+}
+
+/// Whether the union of `spans` contains every value of `wanted`.
+fn interval_covered(wanted: Interval, spans: &mut [Interval]) -> bool {
+    spans.sort_unstable();
+    let mut next = wanted.0;
+    for &(lo, hi) in spans.iter() {
+        if lo > next {
+            break;
+        }
+        if hi >= next {
+            match hi.checked_add(1) {
+                Some(after) => next = after,
+                None => return true,
+            }
+        }
+        if next > wanted.1 {
+            return true;
+        }
+    }
+    next > wanted.1
 }
 
 fn format_missing(missing: &[String]) -> String {

@@ -142,6 +142,8 @@ pub(crate) struct Lowerer<'a> {
     pub(crate) cold_spans: Vec<(usize, usize)>,
     /// Each failed check that branches to the body's shared report block.
     pub(crate) check_fail_edges: Vec<CheckFailEdge>,
+    /// The body's landing pads, when it registers deferred expressions.
+    pub(crate) unwind: Option<unwind::UnwindPlan>,
     /// Whether any call this body makes can reach a panic report, which is
     /// what a call-stack frame for this body is read by. A body that makes
     /// no such call raises only from its own cold blocks, which name the
@@ -620,6 +622,7 @@ mod operand;
 mod rvalue;
 mod setup;
 mod stmt;
+mod unwind;
 
 fn local_slot(local: Local) -> String {
     format!("%l{}", local.as_u32())

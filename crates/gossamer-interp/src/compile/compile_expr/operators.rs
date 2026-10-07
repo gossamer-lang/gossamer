@@ -8,6 +8,45 @@ impl<'tcx> FnBuilder<'tcx> {
     /// `LoadConstI64`. Declined for a zero `Div`/`Rem` divisor (the
     /// two-op form owns the divide-by-zero panic) and for unsigned
     /// operands (handled by the caller's guard).
+    /// Emits the range check a shift amount takes: `0..BITS` of the shifted
+    /// type, which a literal amount already in range needs no check for.
+    fn emit_shift_check(
+        &mut self,
+        op: HirBinaryOp,
+        amount: &HirExpr,
+        amount_i: Reg,
+        shifted: Option<gossamer_types::IntTy>,
+    ) {
+        use gossamer_types::IntTy;
+        let bits: u8 = match shifted {
+            Some(IntTy::I8 | IntTy::U8) => 8,
+            Some(IntTy::I16 | IntTy::U16) => 16,
+            Some(IntTy::I32 | IntTy::U32) => 32,
+            _ => 64,
+        };
+        let in_range = |expr: &HirExpr| match &expr.kind {
+            HirExprKind::Literal(HirLiteral::Int(text)) => {
+                parse_int(text).is_some_and(|n| (0..i128::from(bits)).contains(&i128::from(n)))
+            }
+            _ => false,
+        };
+        // A literal in range, or an amount masked by one (`n & 63`, what
+        // `<<%` lowers to), is in range whatever its other operand holds.
+        let masked = matches!(
+            &amount.kind,
+            HirExprKind::Binary { op: HirBinaryOp::BitAnd, lhs, rhs }
+                if in_range(lhs) || in_range(rhs)
+        );
+        if in_range(amount) || masked {
+            return;
+        }
+        self.emit(Op::CheckShiftI64 {
+            amount_i,
+            bits,
+            left: op == HirBinaryOp::Shl,
+        });
+    }
+
     fn try_compile_i64_arith_imm(
         &mut self,
         op: HirBinaryOp,
@@ -202,6 +241,9 @@ impl<'tcx> FnBuilder<'tcx> {
                     .into_iter()
                     .find_map(|ty| int_ty_of(self, ty))
             };
+            if matches!(op, HirBinaryOp::Shl | HirBinaryOp::Shr) {
+                self.emit_shift_check(op, rhs, rhs_i, overflow_ty);
+            }
             return self.emit_binary_i64(op, lhs_i, rhs_i, lhs_unsigned, rhs_unsigned, overflow_ty);
         }
         // Struct `==` / `!=` routes to the derived `<Type>::eq` method,

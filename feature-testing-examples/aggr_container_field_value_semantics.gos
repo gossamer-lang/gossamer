@@ -34,13 +34,13 @@ fn fill(mut b: Bag) -> i64 {
     b.heap.push(9)
     b.table.insert(9, 9)
     b.list.push(9)
-    b.set.len() + b.ordered.len() + b.deque.len() + b.queue.len() + b.stack.len() + b.heap.len()
-    + b.table.len() + b.list.len()
+    b.set.len() + b.ordered.len() + b.deque.len() + b.queue.len() + b.stack.len() + b.heap.len() +
+        b.table.len() + b.list.len()
 }
 
 fn measure(b: Bag) -> i64 {
-    b.set.len() + b.ordered.len() + b.deque.len() + b.queue.len() + b.stack.len() + b.heap.len()
-    + b.table.len() + b.list.len()
+    b.set.len() + b.ordered.len() + b.deque.len() + b.queue.len() + b.stack.len() + b.heap.len() +
+        b.table.len() + b.list.len()
 }
 
 fn fill_nested(mut n: Nested) -> i64 {

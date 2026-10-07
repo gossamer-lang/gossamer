@@ -13,8 +13,8 @@ const TALLY: i64 = 500000
 const PRIMES: i64 = 41538
 
 fn rec_record(r: Rec) -> String {
-    "" + "id:int=" + format("{}", r.id) + ";" + "name:str=" + format("{}", r.name) + ";"
-        + "score:real=" + format("{}", r.score) + ";" + "active:bool=" + format("{}", r.active) + ";"
+    "" + "id:int=" + format("{}", r.id) + ";" + "name:str=" + format("{}", r.name) + ";" +
+        "score:real=" + format("{}", r.score) + ";" + "active:bool=" + format("{}", r.active) + ";"
 }
 
 fn main() {

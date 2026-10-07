@@ -1,0 +1,13 @@
+// A shift amount outside `0..BITS` of the shifted type panics, as an
+// overflowing `+` does.
+
+use std::env
+
+fn main() {
+    let amount = env::args().len() + 8
+    let byte: u8 = 1
+    for step in 6..8 {
+        println("{}", byte << step)
+    }
+    println("{}", byte << amount)
+}

@@ -334,8 +334,8 @@ pub enum ResolveError {
         /// Backticked, comma-joined parameters that do have defaults.
         optional: String,
     },
-    /// A parameter default that is not a literal.
-    #[error("a parameter default must be a literal")]
+    /// A parameter default that is not a constant.
+    #[error("a parameter default must be a literal or a constant")]
     NonConstantDefault {
         /// Parameter the default was written on.
         name: String,
@@ -635,7 +635,9 @@ impl ResolveDiagnostic {
             ),
             ResolveError::NonConstantDefault { .. } => out.with_help(
                 "a default is spliced into every call that omits it, so it must be a \
-                 literal - `10`, `-1`, `true`, `\"\"`"
+                 value known while compiling: a literal (`10`, `-1`, `true`, `\"\"`), a \
+                 `const` or associated const, integer arithmetic over those, or a \
+                 `comptime` expression"
                     .to_string(),
             ),
             _ => out,

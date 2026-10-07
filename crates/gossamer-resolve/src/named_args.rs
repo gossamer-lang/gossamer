@@ -95,6 +95,7 @@ pub fn resolve_named_arguments(
     sf: &mut SourceFile,
     resolutions: &Resolutions,
 ) -> (Vec<ResolveDiagnostic>, Vec<DeferredMethodCall>) {
+    fold_const_defaults(sf, resolutions);
     let signatures = SignatureTable::of(sf, resolutions);
     let mut diagnostics = Vec::new();
     for item in sf
@@ -579,12 +580,327 @@ impl VisitorMut for Renumber<'_> {
     }
 }
 
-/// True for the expression forms a parameter default accepts: a literal,
-/// optionally negated. Anything else would need resolving at each call
-/// site it is spliced into, which this pass runs too late to arrange.
+/// The `const` items a parameter default may name: module-level ones by
+/// their definition and by `(module path, name)`, associated ones by
+/// `(owner type, name)`.
+#[derive(Default)]
+struct ConstTable<'a> {
+    items: HashMap<DefId, &'a Expr>,
+    scoped: HashMap<(Vec<String>, String), &'a Expr>,
+    associated: HashMap<(String, String), &'a Expr>,
+}
+
+impl<'a> ConstTable<'a> {
+    fn collect(&mut self, items: &'a [Item], resolutions: &Resolutions, module: &[String]) {
+        for item in items
+            .iter()
+            .filter(|item| gossamer_ast::cfg::item_is_active(&item.attrs))
+        {
+            match &item.kind {
+                ItemKind::Const(decl) => {
+                    if let Some(def) = resolutions.definition_of(item.id) {
+                        self.items.insert(def, &decl.value);
+                    }
+                    self.scoped
+                        .insert((module.to_vec(), decl.name.name.clone()), &decl.value);
+                }
+                ItemKind::Mod(decl) => {
+                    if let ModBody::Inline(inner) = &decl.body {
+                        let mut path = module.to_vec();
+                        path.push(decl.name.name.clone());
+                        self.collect(inner, resolutions, &path);
+                    }
+                }
+                ItemKind::Impl(decl) => {
+                    let owner = type_head_name(&decl.self_ty);
+                    for inner in &decl.items {
+                        if let ImplItem::Const { name, value, .. } = inner {
+                            self.associated
+                                .insert((owner.clone(), name.name.clone()), value);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The const a path names from `module`: by its resolution, else by
+    /// name in `module` or the module path it spells, else as an associated
+    /// const `Type::NAME`.
+    fn lookup(
+        &self,
+        expr: &Expr,
+        path: &PathExpr,
+        resolutions: &Resolutions,
+        module: &[String],
+    ) -> Option<(&'a Expr, Vec<String>)> {
+        if let Some(Resolution::Def { def, .. }) = resolutions.get(expr.id)
+            && let Some(value) = self.items.get(&def)
+        {
+            return Some((value, module.to_vec()));
+        }
+        let names: Vec<String> = path.segments.iter().map(|s| s.name.name.clone()).collect();
+        let (last, prefix) = names.split_last()?;
+        let mut within: Vec<String> = match prefix.first().map(String::as_str) {
+            Some("crate") => prefix[1..].to_vec(),
+            Some("super") => {
+                let mut up = module.to_vec();
+                up.pop();
+                up.extend(prefix[1..].iter().cloned());
+                up
+            }
+            _ => {
+                let mut nested = module.to_vec();
+                nested.extend(prefix.iter().cloned());
+                nested
+            }
+        };
+        if let Some(value) = self.scoped.get(&(within.clone(), last.clone())) {
+            return Some((value, within));
+        }
+        if let [owner] = prefix
+            && let Some(value) = self.associated.get(&(owner.clone(), last.clone()))
+        {
+            return Some((value, module.to_vec()));
+        }
+        // A path written from the package root.
+        within = prefix.to_vec();
+        self.scoped
+            .get(&(within.clone(), last.clone()))
+            .map(|value| (*value, within))
+    }
+
+    /// The constant `expr` evaluates to as a literal expression: a literal,
+    /// a negated number, a `const` path, or integer arithmetic over those,
+    /// with paths resolved from `module`. `depth` bounds a chain of consts
+    /// naming each other.
+    fn fold(
+        &self,
+        expr: &Expr,
+        resolutions: &Resolutions,
+        module: &[String],
+        depth: usize,
+    ) -> Option<Folded> {
+        if depth > 32 {
+            return None;
+        }
+        match &expr.kind {
+            ExprKind::Literal(Literal::Int(text)) => parse_int(text).map(Folded::Int),
+            ExprKind::Literal(lit) => Some(Folded::Other(lit.clone())),
+            ExprKind::Unary {
+                op: gossamer_ast::UnaryOp::Neg,
+                operand,
+            } => match self.fold(operand, resolutions, module, depth + 1)? {
+                Folded::Int(n) => n.checked_neg().map(Folded::Int),
+                Folded::Other(Literal::Float(text)) => Some(Folded::Other(Literal::Float(
+                    text.strip_prefix('-')
+                        .map_or_else(|| format!("-{text}"), str::to_string),
+                ))),
+                Folded::Other(_) => None,
+            },
+            ExprKind::Path(path) => {
+                let (value, declared_in) = self.lookup(expr, path, resolutions, module)?;
+                self.fold(value, resolutions, &declared_in, depth + 1)
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                use gossamer_ast::BinaryOp as B;
+                let (Folded::Int(a), Folded::Int(b)) = (
+                    self.fold(lhs, resolutions, module, depth + 1)?,
+                    self.fold(rhs, resolutions, module, depth + 1)?,
+                ) else {
+                    return None;
+                };
+                let value = match op {
+                    B::Add => a.checked_add(b),
+                    B::Sub => a.checked_sub(b),
+                    B::Mul => a.checked_mul(b),
+                    B::Div => a.checked_div(b),
+                    B::Rem => a.checked_rem(b),
+                    B::BitAnd => Some(a & b),
+                    B::BitOr => Some(a | b),
+                    B::BitXor => Some(a ^ b),
+                    B::Shl => u32::try_from(b).ok().and_then(|b| a.checked_shl(b)),
+                    B::Shr => u32::try_from(b).ok().and_then(|b| a.checked_shr(b)),
+                    _ => None,
+                }?;
+                Some(Folded::Int(value))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// A constant default's folded value.
+enum Folded {
+    /// An integer, in a range every integer type's literal fits.
+    Int(i128),
+    /// Any other literal, as written.
+    Other(Literal),
+}
+
+/// The value of an integer literal's spelling: radix prefix and
+/// underscores included; a typed suffix leaves it unfolded.
+fn parse_int(text: &str) -> Option<i128> {
+    let digits: String = text.chars().filter(|c| *c != '_').collect();
+    let (radix, digits) = match digits.get(..2) {
+        Some("0x" | "0X") => (16, &digits[2..]),
+        Some("0o" | "0O") => (8, &digits[2..]),
+        Some("0b" | "0B") => (2, &digits[2..]),
+        _ => (10, digits.as_str()),
+    };
+    i128::from_str_radix(digits, radix).ok()
+}
+
+/// Rewrites each parameter default that names a `const` - or computes one
+/// from consts and literals - into the literal it evaluates to, resolved
+/// where the function is declared. A call site splices the literal, so a
+/// `DEFAULT_TIMEOUT` in scope there cannot stand in for the declaration's.
+fn fold_const_defaults(sf: &mut SourceFile, resolutions: &Resolutions) {
+    let mut folded: HashMap<NodeId, Expr> = HashMap::new();
+    {
+        let mut table = ConstTable::default();
+        table.collect(&sf.items, resolutions, &[]);
+        let mut visit = |decl: &FnDecl, module: &[String]| {
+            for param in &decl.params {
+                if let FnParam::Typed {
+                    default: Some(default),
+                    ..
+                } = param
+                    && !is_constant_default(default)
+                    && let Some(value) = table.fold(default, resolutions, module, 0)
+                {
+                    folded.insert(default.id, folded_expr(value, default));
+                }
+            }
+        };
+        for_each_fn_decl(&sf.items, &[], &mut visit);
+    }
+    if folded.is_empty() {
+        return;
+    }
+    for_each_fn_decl_mut(&mut sf.items, &mut |decl: &mut FnDecl| {
+        for param in &mut decl.params {
+            if let FnParam::Typed {
+                default: Some(default),
+                ..
+            } = param
+                && let Some(value) = folded.remove(&default.id)
+            {
+                **default = value;
+            }
+        }
+    });
+}
+
+/// The literal expression a folded value is spelled as, in the place of
+/// `original`.
+fn folded_expr(value: Folded, original: &Expr) -> Expr {
+    let literal = |lit: Literal| Expr::new(original.id, original.span, ExprKind::Literal(lit));
+    match value {
+        Folded::Int(n) if n < 0 => Expr::new(
+            original.id,
+            original.span,
+            ExprKind::Unary {
+                op: gossamer_ast::UnaryOp::Neg,
+                operand: Box::new(literal(Literal::Int(n.unsigned_abs().to_string()))),
+            },
+        ),
+        Folded::Int(n) => literal(Literal::Int(n.to_string())),
+        Folded::Other(Literal::Float(text)) if text.starts_with('-') => Expr::new(
+            original.id,
+            original.span,
+            ExprKind::Unary {
+                op: gossamer_ast::UnaryOp::Neg,
+                operand: Box::new(literal(Literal::Float(text[1..].to_string()))),
+            },
+        ),
+        Folded::Other(lit) => literal(lit),
+    }
+}
+
+/// Calls `f` on every function declaration reachable from `items`, with
+/// the inline-module path it is declared in: free functions, functions in
+/// inline modules, and `impl` and `trait` methods.
+fn for_each_fn_decl<'a>(
+    items: &'a [Item],
+    module: &[String],
+    f: &mut impl FnMut(&'a FnDecl, &[String]),
+) {
+    for item in items
+        .iter()
+        .filter(|item| gossamer_ast::cfg::item_is_active(&item.attrs))
+    {
+        match &item.kind {
+            ItemKind::Fn(decl) => f(decl, module),
+            ItemKind::Mod(decl) => {
+                if let ModBody::Inline(inner) = &decl.body {
+                    let mut path = module.to_vec();
+                    path.push(decl.name.name.clone());
+                    for_each_fn_decl(inner, &path, f);
+                }
+            }
+            ItemKind::Impl(decl) => {
+                for inner in &decl.items {
+                    if let ImplItem::Fn(fn_decl) = inner {
+                        f(fn_decl, module);
+                    }
+                }
+            }
+            ItemKind::Trait(decl) => {
+                for inner in &decl.items {
+                    if let TraitItem::Fn(fn_decl) = inner {
+                        f(fn_decl, module);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// [`for_each_fn_decl`], mutably.
+fn for_each_fn_decl_mut(items: &mut [Item], f: &mut impl FnMut(&mut FnDecl)) {
+    for item in items
+        .iter_mut()
+        .filter(|item| gossamer_ast::cfg::item_is_active(&item.attrs))
+    {
+        match &mut item.kind {
+            ItemKind::Fn(decl) => f(decl),
+            ItemKind::Mod(decl) => {
+                if let ModBody::Inline(inner) = &mut decl.body {
+                    for_each_fn_decl_mut(inner, f);
+                }
+            }
+            ItemKind::Impl(decl) => {
+                for inner in &mut decl.items {
+                    if let ImplItem::Fn(fn_decl) = inner {
+                        f(fn_decl);
+                    }
+                }
+            }
+            ItemKind::Trait(decl) => {
+                for inner in &mut decl.items {
+                    if let TraitItem::Fn(fn_decl) = inner {
+                        f(fn_decl);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// True for the expression forms a parameter default accepts once
+/// [`fold_const_defaults`] has run: a literal, optionally negated. Anything
+/// else would need resolving at each call site it is spliced into, which
+/// this pass runs too late to arrange.
 fn is_constant_default(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::Literal(_) => true,
+        // The comptime fold evaluates the block where the default is written
+        // and splices its value there, before any call receives it.
+        ExprKind::Block(block) => block.is_comptime(),
         ExprKind::Unary { op, operand } => {
             matches!(op, gossamer_ast::UnaryOp::Neg)
                 && matches!(

@@ -2,8 +2,8 @@
 // value at or above 2^63 reads as itself rather than as a negative, whether
 // through `to_string`, a format, or a concatenation. Identical on every tier.
 fn joined(a: u8, b: u16, c: u32, d: u64, e: usize) -> String {
-    a.to_string() + " " + b.to_string() + " " + c.to_string() + " " + d.to_string() + " "
-    + e.to_string()
+    a.to_string() + " " + b.to_string() + " " + c.to_string() + " " + d.to_string() + " " +
+        e.to_string()
 }
 
 // A loop gives the JIT a hot body, so the cranelift row renders natively.

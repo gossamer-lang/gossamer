@@ -75,7 +75,7 @@ impl<'a> Builder<'a> {
                 // Diverged mid-block (a `return` / `break` / `continue` inside
                 // a statement). That construct already emitted the defers it
                 // needed; drop this frame without re-emitting.
-                self.defer_stack.pop();
+                self.pop_defer_frame(block.span);
                 self.pop_scope();
                 // Eligibility rejects all early exits, so this is defensive
                 // only; keeping the pop here preserves the region stack if a
@@ -105,7 +105,7 @@ impl<'a> Builder<'a> {
         // block's deferred expressions LIFO after the block's value is
         // computed. A diverging tail (e.g. `return`) leaves `current` None and
         // has already emitted the frames itself.
-        let frame = self.defer_stack.pop().unwrap_or_default();
+        let frame = self.defer_stack.last().cloned().unwrap_or_default();
         // Snapshot the block's value into a fresh local before the deferred
         // expressions run, so a defer that mutates a binding the tail names
         // (`{ defer t += 1; t }`) cannot change the value the block yields -
@@ -124,9 +124,13 @@ impl<'a> Builder<'a> {
         } else {
             result
         };
-        if self.current.is_some() {
-            self.emit_defer_frame(&frame);
+        if self.current.is_some()
+            && let Some(frame_idx) = self.defer_stack.len().checked_sub(1)
+        {
+            self.emit_defer_frame(frame_idx);
+            self.finish_defer_edge();
         }
+        self.pop_defer_frame(block.span);
         self.pop_scope();
         self.end_auto_region(lexical_region, block.span);
         if self.current.is_none() { None } else { result }
@@ -918,9 +922,7 @@ impl<'a> Builder<'a> {
                 // (LIFO) when control leaves the enclosing block, emitted by
                 // `lower_block` (normal exit) or by `return` / `break` /
                 // `continue` (the exit edges).
-                if let Some(frame) = self.defer_stack.last_mut() {
-                    frame.push(expr.clone());
-                }
+                self.push_defer(expr.clone(), stmt.span);
             }
             HirStmtKind::Item(_) => {}
         }
@@ -1062,6 +1064,7 @@ fn rename_local_in_block(block: &mut crate::ir::BasicBlock, from: Local, to: Loc
         Terminator::Goto { .. }
         | Terminator::Return
         | Terminator::Unreachable
+        | Terminator::Resume
         | Terminator::Panic { .. } => {}
     }
 }

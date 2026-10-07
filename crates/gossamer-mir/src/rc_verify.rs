@@ -156,6 +156,7 @@ fn transfer(
         Terminator::Goto { .. }
         | Terminator::Return
         | Terminator::Unreachable
+        | Terminator::Resume
         | Terminator::Panic { .. } => {}
     }
     state
@@ -366,7 +367,10 @@ fn successors(terminator: &Terminator) -> Vec<BlockId> {
             .chain(std::iter::once(*default))
             .collect(),
         Terminator::Call { target, .. } => target.iter().copied().collect(),
-        Terminator::Return | Terminator::Unreachable | Terminator::Panic { .. } => Vec::new(),
+        Terminator::Return
+        | Terminator::Unreachable
+        | Terminator::Resume
+        | Terminator::Panic { .. } => Vec::new(),
     }
 }
 

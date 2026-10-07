@@ -79,6 +79,44 @@ impl Vm {
         }
     }
 
+    /// Keeps the JIT frames a fault is being raised in, outermost first, for
+    /// the report the fault makes once it reaches the bytecode frames.
+    fn note_native_fault_frames(&self, active: &[jit_backend::JitFrame]) {
+        let frames = active
+            .iter()
+            .rev()
+            .map(|frame| {
+                let location = frame.span.and_then(|span| {
+                    self.jit_source_locations
+                        .borrow()
+                        .as_ref()
+                        .and_then(|locations| locations.get(&span).copied())
+                });
+                VmCallStackFrame {
+                    location,
+                    frozen: true,
+                    ..VmCallStackFrame::new(crate::value::intern_type_name(&frame.function))
+                }
+            })
+            .collect();
+        *self.native_fault_frames.borrow_mut() = frames;
+    }
+
+    /// Continues the call stack with the JIT frames the fault being taken
+    /// in was raised in. The dispatching frame, which ran no bytecode, is
+    /// the first of them.
+    fn adopt_native_fault_frames(&self) {
+        let native = std::mem::take(&mut *self.native_fault_frames.borrow_mut());
+        let mut stack = self.call_stack.borrow_mut();
+        if let (Some(top), Some(first)) = (stack.last(), native.first())
+            && top.function == first.function
+            && top.location.is_none()
+        {
+            stack.pop();
+        }
+        stack.extend(native);
+    }
+
     /// Snapshot of the in-flight (or last failing) call stack with source
     /// positions for frames whose bytecode was compiled with a source map.
     #[must_use]
@@ -159,6 +197,9 @@ impl Vm {
                 // is written just before that frame resumes.
                 let mut suspended: Vec<(u16, crate::vm::run::SuspendedFrame, usize)> = Vec::new();
                 let mut resumed: Option<crate::vm::run::SuspendedFrame> = None;
+                // A fault the resumed frame raises at the call it is suspended
+                // at, so its landing pad runs before the fault leaves it.
+                let mut resumed_fault: Option<RuntimeError> = None;
                 // Byte-precise native-stack guard, consulted before the frame
                 // count. A JIT-compiled body recurses on the real OS stack
                 // (not the heap frame pool `MAX_HEAP_FRAME_BYTES` bounds), so a
@@ -279,6 +320,7 @@ impl Vm {
                                 _ => None,
                             }
                         };
+                    let mut native_fault: Option<RuntimeError> = None;
                     if let Some(prepared) = jit_opt {
                         match jit_call::invoke_prepared(&prepared, &args, &self.jit_graph_cache) {
                             jit_call::Dispatch::Ok(value) => {
@@ -322,8 +364,11 @@ impl Vm {
                                 }
                                 return Ok(value);
                             }
-                            jit_call::Dispatch::Panic(text) => {
-                                return Err(RuntimeError::Panic(text));
+                            jit_call::Dispatch::Panic(err) => {
+                                // The native frames the fault left are the
+                                // rest of the chain its report names.
+                                self.adopt_native_fault_frames();
+                                native_fault = Some(err);
                             }
                             jit_call::Dispatch::Fallback => {
                                 if jit_call::jit_trace() {
@@ -350,13 +395,43 @@ impl Vm {
                             }
                         }
                     }
-                    let run_result = match resumed.take() {
-                        Some(frame) => self.resume(frame),
-                        None => self.run(Arc::clone(&chunk), state, args),
+                    let run_result = match native_fault {
+                        Some(err) => Err(err),
+                        None => match (resumed.take(), resumed_fault.take()) {
+                            (Some(frame), Some(fault)) => self.resume_unwinding(frame, fault),
+                            (Some(frame), None) => self.resume(frame),
+                            (None, _) => self.run(Arc::clone(&chunk), state, args),
+                        },
                     };
                     let control = match run_result {
                         Ok(control) => control,
                         Err(err) => {
+                            // A suspended caller with deferred expressions
+                            // pending at its call runs them before the fault
+                            // reaches the callers above it.
+                            if let Some(at) = suspended.iter().rposition(|(_, parent, _)| {
+                                err.unwinds_defers()
+                                    && parent
+                                        .chunk
+                                        .unwind_entry(parent.pc.saturating_sub(1))
+                                        .is_some()
+                            }) {
+                                // The faulting frame and the suspended
+                                // callers between it and `parent` end; the
+                                // parent itself runs on at its own depth.
+                                let left = suspended.len() - at;
+                                self.call_depth
+                                    .set(self.call_depth.get().saturating_sub(left));
+                                let mut leaving = suspended.split_off(at);
+                                self.release_heap_frame(leaving.iter().map(|s| s.2).sum());
+                                let (_, parent, _) = leaving.remove(0);
+                                chunk = Arc::clone(&parent.chunk);
+                                resumed = Some(parent);
+                                resumed_fault = Some(err);
+                                args = Vec::new();
+                                tail_frames = 0;
+                                continue;
+                            }
                             // The explicit parents will not get individual
                             // Rust unwinds. Retire all their logical depth
                             // slots here while intentionally retaining the
@@ -1053,7 +1128,9 @@ extern "C" fn render_active_vm_trace() -> *mut std::ffi::c_char {
     // that dispatched into it, so the frames found there continue the chain;
     // the dispatching frame itself, which never ran bytecode, is the first of
     // them.
-    let mut native: Vec<CallStackFrame> = jit_backend::active_jit_frames()
+    let active = jit_backend::active_jit_frames();
+    vm.note_native_fault_frames(&active);
+    let mut native: Vec<CallStackFrame> = active
         .iter()
         .rev()
         .map(|frame| vm.jit_call_stack_frame(frame))

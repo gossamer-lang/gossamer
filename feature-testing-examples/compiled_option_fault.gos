@@ -1,0 +1,26 @@
+// A fault raised in a compiled body that answers an `Option` reaches the
+// interpreted caller's defers and its report, on the way out through the
+// entry the interpreter calls such a body by.
+
+use std::sync
+
+fn find(xs: Vec<i64>, want: i64) -> Option<i64> {
+    for x in xs {
+        if x == want {
+            return Some(x)
+        }
+        if x < 0 {
+            panic("negative {}", x)
+        }
+    }
+    None
+}
+
+fn main() {
+    let m = sync::Mutex::new()
+    m.lock()
+    m.unlock()
+    defer println("main defer ran")
+    println("{}", find(#[1, 2, 3], 2))
+    println("{}", find(#[1, -2, 3], 3))
+}

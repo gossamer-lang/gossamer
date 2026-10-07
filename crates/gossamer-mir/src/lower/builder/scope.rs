@@ -217,11 +217,13 @@ impl<'a> Builder<'a> {
     /// Lowers the expressions in a defer frame in LIFO (reverse-registration)
     /// order for their side effects. A frame is emitted at every edge that
     /// leaves its block.
-    pub(crate) fn emit_defer_frame(&mut self, frame: &[HirExpr]) {
-        for expr in frame.iter().rev() {
+    pub(crate) fn emit_defer_frame(&mut self, frame_idx: usize) {
+        let frame = self.defer_stack.get(frame_idx).cloned().unwrap_or_default();
+        for (expr_idx, expr) in frame.iter().enumerate().rev() {
             if self.current.is_none() {
                 break;
             }
+            self.mark_defer_running(frame_idx, expr_idx, expr.span);
             let _ = self.lower_expr(expr);
         }
     }
@@ -233,9 +235,9 @@ impl<'a> Builder<'a> {
     pub(crate) fn emit_defers_above(&mut self, from_depth: usize) {
         let depth = self.defer_stack.len();
         for i in (from_depth..depth).rev() {
-            let frame = self.defer_stack[i].clone();
-            self.emit_defer_frame(&frame);
+            self.emit_defer_frame(i);
         }
+        self.finish_defer_edge();
     }
 
     pub(crate) fn new_block(&mut self, span: Span) -> BlockId {

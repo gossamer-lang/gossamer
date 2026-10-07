@@ -256,6 +256,8 @@ pub fn disarm_stack_guard() {
 pub struct Goroutine {
     coro: Coroutine<(), (), (), DefaultStack>,
     yielder_slot: Arc<AtomicPtr<()>>,
+    /// This goroutine's [`local_word`], held here while it is suspended.
+    local: usize,
     /// Stack origin captured at body entry, published so
     /// [`Self::resume`] can re-arm the byte-budget guard when this
     /// goroutine migrates to a different worker thread. `0` until the
@@ -349,6 +351,7 @@ impl Goroutine {
         Ok(Self {
             coro,
             yielder_slot,
+            local: 0,
             stack_origin_slot,
         })
     }
@@ -382,10 +385,12 @@ impl Goroutine {
         let origin = self.stack_origin_slot.load(Ordering::Acquire);
         let restore = (origin != 0)
             .then(|| set_stack_guard(origin, stack_size().saturating_sub(STACK_GUARD_MARGIN)));
+        let outer = LOCAL_WORD.with(|word| word.replace(self.local));
         let done = match self.coro.resume(()) {
             CoroutineResult::Yield(()) => false,
             CoroutineResult::Return(()) => true,
         };
+        self.local = LOCAL_WORD.with(|word| word.replace(outer));
         if let Some((o, b)) = restore {
             let _ = set_stack_guard(o, b);
         }
@@ -436,7 +441,16 @@ impl Goroutine {
     /// goroutine isolation contract.
     pub fn resume(&mut self) -> bool {
         if let Some(body) = self.body.take() {
+            // The body runs to completion here, so its local word lives and
+            // ends within this call.
+            let outer = LOCAL_WORD.with(|word| word.replace(0));
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+            let local = LOCAL_WORD.with(|word| word.replace(outer));
+            if local != 0
+                && let Some(drop_word) = LOCAL_WORD_DROP.get()
+            {
+                drop_word(local);
+            }
             if result.is_err() {
                 GOROUTINE_PANICKED.store(true, Ordering::Release);
             }
@@ -449,6 +463,45 @@ impl Goroutine {
     #[must_use]
     pub fn done(&self) -> bool {
         self.done
+    }
+}
+
+thread_local! {
+    /// The running goroutine's [`local_word`], or the thread's own when no
+    /// goroutine runs on it.
+    static LOCAL_WORD: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Frees a goroutine's nonzero [`local_word`] when the goroutine is dropped.
+static LOCAL_WORD_DROP: std::sync::OnceLock<fn(usize)> = std::sync::OnceLock::new();
+
+/// A word of state that belongs to the running goroutine and follows it
+/// across worker threads, or to the thread when no goroutine runs on it.
+/// `0` until [`set_local_word`] stores one.
+#[must_use]
+pub fn local_word() -> usize {
+    LOCAL_WORD.with(Cell::get)
+}
+
+/// Replaces the running goroutine's (or thread's) [`local_word`].
+pub fn set_local_word(word: usize) {
+    LOCAL_WORD.with(|cell| cell.set(word));
+}
+
+/// Registers how a dropped goroutine's nonzero [`local_word`] is freed. The
+/// first registration wins.
+pub fn set_local_word_drop(drop_word: fn(usize)) {
+    let _ = LOCAL_WORD_DROP.set(drop_word);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for Goroutine {
+    fn drop(&mut self) {
+        if self.local != 0
+            && let Some(drop_word) = LOCAL_WORD_DROP.get()
+        {
+            drop_word(self.local);
+        }
     }
 }
 

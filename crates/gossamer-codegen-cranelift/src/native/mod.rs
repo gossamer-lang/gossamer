@@ -198,4 +198,7 @@ pub use vec_elem_kind::*;
 
 pub(crate) mod foreign;
 
+mod unwind_calls;
+pub(crate) use unwind_calls::{CatchingThunks, UnwindRewrite, rewrite_unwinding_calls};
+
 mod simd_lanes;

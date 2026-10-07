@@ -201,9 +201,6 @@ struct Open {
     kind: BraceKind,
     line_level: usize,
     line_was_cont: bool,
-    /// A `(` that groups an expression rather than opening a call's
-    /// arguments, inside which a leading operator continues the line above.
-    group: bool,
 }
 
 /// Operator role resolved from left context, for tokens whose spacing
@@ -304,7 +301,7 @@ fn render(lines: &[Line<'_>], file: FileId) -> String {
         let starts_in_top_use_list = stack
             .iter()
             .any(|open| open.kind == BraceKind::UseList && open.line_level == 0);
-        let body = render_code_line(
+        let (body, ends_in_binary_pipe) = render_code_line(
             line,
             file,
             line_level,
@@ -312,7 +309,7 @@ fn render(lines: &[Line<'_>], file: FileId) -> String {
             &mut stack,
             &mut prev_sig,
         );
-        cont_after_prev_line = line_has_trailing_continuation(line);
+        cont_after_prev_line = ends_in_binary_pipe || line_has_trailing_continuation(line);
         prev_code_level = line_level;
         prev_code_was_cont = line_was_cont;
         let is_top_use = line_level == 0
@@ -395,7 +392,8 @@ fn push_token_text(body: &mut String, tok: &Tok<'_>, line_level: usize) {
 }
 
 /// Renders one code line, updating the bracket stack and significant
-/// previous-token state as it walks.
+/// previous-token state as it walks. Also answers whether the line ends in
+/// a binary `|`, which the token kind alone cannot tell from a closure's.
 fn render_code_line<'src>(
     line: &Line<'src>,
     file: FileId,
@@ -403,8 +401,9 @@ fn render_code_line<'src>(
     line_was_cont: bool,
     stack: &mut Vec<Open>,
     prev_sig: &mut Option<TokenKind>,
-) -> String {
+) -> (String, bool) {
     let mut body = String::new();
+    let mut ends_in_binary_pipe = false;
     let mut closure_pipe: Option<usize> = None;
     let mut prev: Option<Emitted<'src>> = None;
     let mut prev_was_comment = false;
@@ -439,25 +438,20 @@ fn render_code_line<'src>(
             *prev_sig = Some(tok.kind);
             continue;
         }
-        // A `|` that opens a line opens a closure, as the parser reads it,
-        // except inside a grouping `(`, where it continues the line above.
-        let prev_for_class = if first_code
-            && tok.kind == TokenKind::Punct(Punct::Pipe)
-            && !stack.last().is_some_and(|open| open.group)
-        {
+        // A `|` that opens a line opens a closure, as the parser reads it.
+        let prev_for_class = if first_code && tok.kind == TokenKind::Punct(Punct::Pipe) {
             None
         } else {
             *prev_sig
         };
         let mut class = classify(tok.kind, prev_for_class, &mut closure_pipe, stack.len());
-        // SPEC: a newline followed by a leading `&`, `*`, or `-` starts a
-        // new statement outside a grouping `(`, so those read as unary here.
+        // SPEC: a leading `&`, `*`, or `-` begins a new statement or list
+        // element, so those read as unary here.
         if first_code
             && matches!(
                 tok.kind,
                 TokenKind::Punct(Punct::Minus | Punct::Star | Punct::Amp)
             )
-            && !stack.last().is_some_and(|open| open.group)
         {
             class = Class::Unary;
         }
@@ -491,6 +485,7 @@ fn render_code_line<'src>(
         ) {
             closure_pipe = None;
         }
+        ends_in_binary_pipe = tok.kind == TokenKind::Punct(Punct::Pipe) && class == Class::Binary;
         prev = Some(Emitted {
             kind: tok.kind,
             text: tok.text,
@@ -500,7 +495,7 @@ fn render_code_line<'src>(
         *prev_sig = Some(tok.kind);
         prev_was_comment = false;
     }
-    body
+    (body, ends_in_binary_pipe)
 }
 
 /// Re-renders a multi-line triple-quoted literal with `indent` spaces
@@ -554,14 +549,10 @@ fn update_stack(
         kind,
         line_level,
         line_was_cont,
-        group: false,
     };
     match kind {
         TokenKind::Punct(Punct::LParen) => {
-            stack.push(Open {
-                group: !prev_sig.is_some_and(ends_expr),
-                ..open(BraceKind::Paren)
-            });
+            stack.push(open(BraceKind::Paren));
             Some(BraceKind::Paren)
         }
         TokenKind::Punct(Punct::LBracket) => {
@@ -587,7 +578,6 @@ fn update_stack(
                 kind: brace,
                 line_level: anchor,
                 line_was_cont: line_was_cont && anchor == line_level,
-                group: false,
             });
             Some(brace)
         }
@@ -683,6 +673,8 @@ fn spaced_after(kind: TokenKind) -> bool {
                 | Punct::PlusPercent
                 | Punct::MinusPercent
                 | Punct::StarPercent
+                | Punct::ShiftLPercent
+                | Punct::ShiftRPercent
                 | Punct::Caret
                 | Punct::AmpAmp
                 | Punct::PipePipe
@@ -700,6 +692,8 @@ fn spaced_after(kind: TokenKind) -> bool {
                 | Punct::PlusPercentEq
                 | Punct::MinusPercentEq
                 | Punct::StarPercentEq
+                | Punct::ShiftLPercentEq
+                | Punct::ShiftRPercentEq
                 | Punct::AmpEq
                 | Punct::PipeEq
                 | Punct::CaretEq
@@ -726,6 +720,8 @@ fn spaced_before(kind: TokenKind) -> bool {
                 | Punct::PlusPercent
                 | Punct::MinusPercent
                 | Punct::StarPercent
+                | Punct::ShiftLPercent
+                | Punct::ShiftRPercent
                 | Punct::Caret
                 | Punct::AmpAmp
                 | Punct::PipePipe
@@ -743,6 +739,8 @@ fn spaced_before(kind: TokenKind) -> bool {
                 | Punct::PlusPercentEq
                 | Punct::MinusPercentEq
                 | Punct::StarPercentEq
+                | Punct::ShiftLPercentEq
+                | Punct::ShiftRPercentEq
                 | Punct::AmpEq
                 | Punct::PipeEq
                 | Punct::CaretEq
@@ -993,6 +991,8 @@ fn trailing_continuation(kind: TokenKind) -> bool {
                 | Punct::PlusPercentEq
                 | Punct::MinusPercentEq
                 | Punct::StarPercentEq
+                | Punct::ShiftLPercentEq
+                | Punct::ShiftRPercentEq
                 | Punct::AmpEq
                 | Punct::PipeEq
                 | Punct::CaretEq
@@ -1006,6 +1006,8 @@ fn trailing_continuation(kind: TokenKind) -> bool {
                 | Punct::PlusPercent
                 | Punct::MinusPercent
                 | Punct::StarPercent
+                | Punct::ShiftLPercent
+                | Punct::ShiftRPercent
                 | Punct::Amp
                 | Punct::Caret
                 | Punct::AmpAmp

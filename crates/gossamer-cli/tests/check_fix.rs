@@ -186,3 +186,23 @@ fn a_fix_that_leaves_the_file_clean_succeeds() {
     );
     let _ = std::fs::remove_dir_all(file.parent().unwrap());
 }
+
+#[test]
+fn a_line_leading_operator_moves_to_the_end_of_the_line_above() {
+    let file = case(
+        "leading-operator",
+        "fn main() {\n    let a = 2\n    let ok = a > 1 // first\n        && a < 5\n    let sum = a\n        + 1\n    println(\"{} {}\", ok, sum)\n}\n",
+    );
+    let report = run_fix(&file);
+    assert!(report.contains("fix: 2 edit"), "report was: {report}");
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        after.contains("let ok = a > 1 && // first\n        a < 5\n"),
+        "after: {after}"
+    );
+    assert!(
+        after.contains("let sum = a +\n        1\n"),
+        "after: {after}"
+    );
+    let _ = std::fs::remove_dir_all(file.parent().unwrap());
+}

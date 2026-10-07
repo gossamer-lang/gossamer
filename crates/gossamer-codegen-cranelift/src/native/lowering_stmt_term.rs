@@ -2431,6 +2431,11 @@ pub(super) fn lower_terminator(
             let block = blocks[&target.as_u32()];
             builder.ins().jump(block, &[]);
         }
+        // Only a body with landing pads has a `Resume`, which its unwind
+        // lowering emits.
+        Terminator::Resume => {
+            emit_runtime_panic(module, builder, intrinsics, UNREACHABLE_PANIC_MSG)?;
+        }
         Terminator::Unreachable => {
             // A well-formed program never reaches this terminator. If a
             // miscompiled path does, render a clean diagnostic and exit /
@@ -2453,6 +2458,8 @@ pub(super) fn assert_message_text(msg: &AssertMessage) -> &'static str {
         AssertMessage::BoundsCheck { .. } => "index out of bounds\n",
         AssertMessage::Overflow => "arithmetic overflow\n",
         AssertMessage::DivideByZero => "divide by zero\n",
+        AssertMessage::ShiftOverflow { left: true } => "attempt to shift left with overflow\n",
+        AssertMessage::ShiftOverflow { left: false } => "attempt to shift right with overflow\n",
     }
 }
 
@@ -2467,6 +2474,8 @@ pub(super) const STATIC_PANIC_MESSAGES: &[&str] = &[
     "attempt to subtract with overflow\n",
     "attempt to multiply with overflow\n",
     "divide by zero\n",
+    "attempt to shift left with overflow\n",
+    "attempt to shift right with overflow\n",
     UNREACHABLE_PANIC_MSG,
 ];
 

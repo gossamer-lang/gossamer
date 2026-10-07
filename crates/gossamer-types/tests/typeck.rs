@@ -237,15 +237,22 @@ fn basic_expression_error_cases() -> &'static [BasicErrorCase] {
 }
 
 #[test]
-fn integer_comparisons_accept_different_declared_widths() {
+fn integer_comparisons_require_one_integer_type() {
     let checked = run("fn main() {\n\
          let i: usize = 0usize\n\
          let n: i64 = 1i64\n\
          let _ = i < n\n\
          let _ = n == i\n\
+         let _ = i as i64 < n\n\
          }\n");
 
-    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let mismatches = checked
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| matches!(diagnostic.error, TypeError::IntegerOperandMismatch { .. }))
+        .count();
+    assert_eq!(mismatches, 2, "{:?}", checked.diagnostics);
+    assert_eq!(checked.diagnostics.len(), 2, "{:?}", checked.diagnostics);
 }
 
 /// `fs::File::write` is text-typed, so a byte vector is a type error at

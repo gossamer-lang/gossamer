@@ -1,10 +1,7 @@
-// A closure captures a heap sequence by managed reference and a `Copy`
-// scalar by value (SPEC 4.6). Mutating the captured `Vec` through the
-// closure is observed by the enclosing binding and the other way round,
-// because both name one buffer. Assigning the whole variable replaces
-// the binding's own slot, so a closure built earlier keeps the value it
-// captured. A captured `String` rebinds on `+=`, which is a slot write,
-// not a buffer mutation, so it stays private to the closure.
+// A closure names the bindings it captures (SPEC 3.5). Mutating a captured
+// `Vec` through the closure is observed by the enclosing binding and the
+// other way round, and so is assigning the whole binding, a scalar, or a
+// `String`: the closure reads each capture's current value.
 
 fn make_counter() -> Fn() -> i64 {
     let mut seen: Vec<i64> = #[]
@@ -42,22 +39,21 @@ fn main() {
     log.push(2)
     println("read-only {}", size())
 
-    // Assigning the whole variable installs new storage for the binding
-    // alone; the closure keeps pushing onto what it captured.
+    // Assigning the whole binding is seen by the closure, which pushes onto
+    // the new value.
     let mut items: Vec<i64> = #[1]
     let grow = || { items.push(2) }
     items = #[10, 20, 30]
     grow()
     println("reassigned {}", items.len())
 
-    // A scalar is captured by copy: the closure reads the value the binding
-    // held when the closure was made.
+    // A scalar capture reads the binding's current value.
     let mut k = 10
     let peek = || k
     k = 11
     println("scalar {} {}", peek(), k)
 
-    // So is a `String`.
+    // So does a `String` capture.
     let mut s = "a"
     let shown = || s
     s += "b"

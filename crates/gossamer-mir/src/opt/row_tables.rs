@@ -450,7 +450,7 @@ fn term_reaches_nested(term: &Terminator, root: Local, related: &dyn Fn(&[Projec
         Terminator::Drop { place, .. } => place.local == root,
         Terminator::Goto { .. }
         | Terminator::Return
-        | Terminator::Unreachable
+        | Terminator::Unreachable | Terminator::Resume
         | Terminator::Panic { .. } => false,
     }
 }

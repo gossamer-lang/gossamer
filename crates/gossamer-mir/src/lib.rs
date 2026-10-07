@@ -37,6 +37,10 @@ pub use ir::{
     Projection, RawIntrinsic, RawIntrinsicArity, Rvalue, Statement, StatementKind, StaticRef,
     Terminator, UnOp, export_symbols, foreign_params, local_is_uint_cast,
 };
+pub use lower::builder::unwind::{
+    CLEANUP_PAD_ARM, NOTE_PAD_ARM, UNWIND_PROBE_NAME, UNWIND_REGION_NAME, UnwindPads,
+    statement_locals,
+};
 pub use lower::helpers::escape::{ParamShare, collect_region_unsafe_fns, collect_shareable_params};
 pub use lower::{lower_program, mangle_callable_shape};
 pub use monomorph::{

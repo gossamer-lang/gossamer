@@ -12,7 +12,8 @@ pub(crate) fn lex_punct(cursor: &mut Cursor<'_>) -> Option<Punct> {
     let first = cursor.peek();
     let second = cursor.peek_nth(1);
     let third = cursor.peek_nth(2);
-    let (punct, consumed) = classify(first, second, third)?;
+    let fourth = cursor.peek_nth(3);
+    let (punct, consumed) = classify(first, second, third, fourth)?;
     for _ in 0..consumed {
         cursor.bump();
     }
@@ -20,9 +21,14 @@ pub(crate) fn lex_punct(cursor: &mut Cursor<'_>) -> Option<Punct> {
 }
 
 /// Returns the punctuation token and how many characters it consumes
-/// for a three-character lookahead window, or `None` when no token
+/// for a four-character lookahead window, or `None` when no token
 /// matches.
-fn classify(first: char, second: char, third: char) -> Option<(Punct, usize)> {
+fn classify(first: char, second: char, third: char, fourth: char) -> Option<(Punct, usize)> {
+    match (first, second, third, fourth) {
+        ('<', '<', '%', '=') => return Some((Punct::ShiftLPercentEq, 4)),
+        ('>', '>', '%', '=') => return Some((Punct::ShiftRPercentEq, 4)),
+        _ => {}
+    }
     if let Some(hit) = classify_three(first, second, third) {
         return Some(hit);
     }
@@ -42,6 +48,8 @@ fn classify_three(first: char, second: char, third: char) -> Option<(Punct, usiz
         ('+', '%', '=') => Punct::PlusPercentEq,
         ('-', '%', '=') => Punct::MinusPercentEq,
         ('*', '%', '=') => Punct::StarPercentEq,
+        ('<', '<', '%') => Punct::ShiftLPercent,
+        ('>', '>', '%') => Punct::ShiftRPercent,
         _ => return None,
     };
     Some((hit, 3))

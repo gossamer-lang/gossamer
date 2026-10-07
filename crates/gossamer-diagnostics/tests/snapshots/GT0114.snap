@@ -3,9 +3,9 @@ source: crates/gossamer-diagnostics/tests/snapshots.rs
 expression: rendered
 ---
 --- plain ---
-error[GT0114]: A closure writes a value it captured by copy: a scalar, a `String`, a - here
+error[GT0114]: A spawned closure writes a binding it captured. A spawned closure - here
 --- framed ---
-error[GT0114]: A closure writes a value it captured by copy: a scalar, a `String`, a
+error[GT0114]: A spawned closure writes a binding it captured. A spawned closure
   --> snap.gos:2:5
      2 |     let x = 1
        |     ^^^^^

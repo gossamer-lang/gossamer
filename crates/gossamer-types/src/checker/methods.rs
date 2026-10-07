@@ -808,7 +808,13 @@ impl TypeChecker<'_> {
         ) {
             return ty;
         }
-        self.check_unsurfaced_method(call_id, method, resolved, args, arg_count, name_span)
+        self.check_unsurfaced_method(
+            call_id,
+            method,
+            (receiver, resolved),
+            (args, &all_arg_tys),
+            name_span,
+        )
     }
 
     /// Types a call the surfaced-receiver arms did not claim: the `math`
@@ -819,11 +825,11 @@ impl TypeChecker<'_> {
         &mut self,
         call_id: NodeId,
         method: &str,
-        resolved: Ty,
-        args: &[Expr],
-        arg_count: usize,
+        (receiver, resolved): (&Expr, Ty),
+        (args, arg_tys): (&[Expr], &[Ty]),
         span: Span,
     ) -> Ty {
+        let arg_count = arg_tys.len();
         if let Some(ty) = self.float_mul_add_method_ret(method, resolved, args) {
             return ty;
         }
@@ -831,6 +837,9 @@ impl TypeChecker<'_> {
             return ty;
         }
         if let Some(ty) = self.check_numeric_receiver_method(method, resolved, arg_count) {
+            if matches!(method, "min" | "max" | "clamp") {
+                self.unify_bound_arguments(method, (receiver, resolved), args, arg_tys);
+            }
             return ty;
         }
         if let Some(name) = self.payload_adt_method_owner(resolved)
@@ -1131,6 +1140,35 @@ impl TypeChecker<'_> {
                 Some(self.tcx.int_ty(IntTy::U64))
             }
             _ => None,
+        }
+    }
+
+    /// Gives each argument of `a.min(b)`, `a.max(b)`, or `a.clamp(lo, hi)`
+    /// the receiver's type, which the call answers in; an integer argument
+    /// of another integer type is the GT0001 that names the cast.
+    fn unify_bound_arguments(
+        &mut self,
+        method: &str,
+        (receiver, receiver_ty): (&Expr, Ty),
+        args: &[Expr],
+        arg_tys: &[Ty],
+    ) {
+        for (index, (arg, arg_ty)) in args.iter().zip(arg_tys).enumerate() {
+            let receiver_res = self.infer.resolve(self.tcx, receiver_ty);
+            let arg_res = self.infer.resolve(self.tcx, *arg_ty);
+            if let (Some(TyKind::Int(receiver_int)), Some(TyKind::Int(arg_int))) =
+                (self.tcx.kind(receiver_res), self.tcx.kind(arg_res))
+                && receiver_int != arg_int
+            {
+                let error = super::operators::integer_method_mismatch(
+                    method,
+                    (receiver, *receiver_int),
+                    (args, index, *arg_int),
+                );
+                self.emit(error, arg.span);
+                continue;
+            }
+            self.unify(receiver_ty, *arg_ty, arg.span);
         }
     }
 
@@ -2912,16 +2950,10 @@ impl TypeChecker<'_> {
         let (_owner, elem) = self.set_elem_ty(resolved)?;
         // The value a set is asked about is one of its elements, so a set
         // built empty (`Set::new()`) learns its element type from the first
-        // such call. Left unpinned, the element stays a variable that no later
-        // traversal can dispatch a field read against. Only an unpinned
-        // element is filled in here, and the queried value is read through any
-        // borrow: `s.contains(&k)` asks about `k`.
+        // such call, and a value of another type is a mismatch. The queried
+        // value is read through any borrow: `s.contains(&k)` asks about `k`.
         if matches!(method, "insert" | "remove" | "contains")
             && let [value] = arg_tys
-            && matches!(
-                self.tcx.kind(self.infer.resolve(self.tcx, elem)),
-                Some(TyKind::Var(_))
-            )
         {
             let value = self.peel_refs(*value);
             self.unify(elem, value, span);
@@ -3258,7 +3290,7 @@ impl TypeChecker<'_> {
         let push_arg = match (method, arg_tys.len()) {
             ("push" | "fill", 1) => arg_tys.first().copied(),
             ("insert" | "resize", 2) => arg_tys.get(1).copied(),
-            ("binary_search", 1) => arg_tys.first().copied(),
+            ("binary_search" | "contains" | "index_of" | "count_of", 1) => arg_tys.first().copied(),
             _ => None,
         };
         if let Some(arg_ty) = push_arg {
@@ -3771,12 +3803,6 @@ impl TypeChecker<'_> {
         span: Span,
     ) -> Option<Ty> {
         if self.reject_method_off_bound(receiver_ty, method, args, span) {
-            return Some(self.tcx.error_ty());
-        }
-        if self.reject_supertrait_method_through_bound(receiver_ty, method, span) {
-            for arg in args {
-                self.check_expr(arg);
-            }
             return Some(self.tcx.error_ty());
         }
         // A callable carries no method surface, so a method reached on one is

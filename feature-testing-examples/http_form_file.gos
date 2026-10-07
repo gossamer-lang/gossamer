@@ -62,16 +62,16 @@ fn await_ready(url: String) {
 fn main() {
     spawn(|| serve_app())
     await_ready("http://127.0.0.1:23922/x")
-    let body = "--ZZBOUND\r\n"
-    + "Content-Disposition: form-data; name=\"text\"\r\n"
-    + "\r\n"
-    + "hello\r\n"
-    + "--ZZBOUND\r\n"
-    + "Content-Disposition: form-data; name=\"upload\"; filename=\"x.txt\"\r\n"
-    + "Content-Type: text/plain\r\n"
-    + "\r\n"
-    + "ABCDE\r\n"
-    + "--ZZBOUND--\r\n"
+    let body = "--ZZBOUND\r\n" +
+        "Content-Disposition: form-data; name=\"text\"\r\n" +
+        "\r\n" +
+        "hello\r\n" +
+        "--ZZBOUND\r\n" +
+        "Content-Disposition: form-data; name=\"upload\"; filename=\"x.txt\"\r\n" +
+        "Content-Type: text/plain\r\n" +
+        "\r\n" +
+        "ABCDE\r\n" +
+        "--ZZBOUND--\r\n"
     let hdr: Vec<(String, String)> = Vec::from([("Content-Type", "multipart/form-data; boundary=ZZBOUND")])
     match http::request("POST", "http://127.0.0.1:23922/x", body, hdr) {
         Ok(r) => println("status={} body={}", r.status, r.body)

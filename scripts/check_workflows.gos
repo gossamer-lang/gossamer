@@ -42,8 +42,8 @@ fn yaml_files(directory: String) -> Vec<String> {
         }
         if entry.is_dir {
             for nested in fs::read_dir(entry.path).unwrap_or(#[]) {
-                if nested.is_file
-                && (nested.name.ends_with(".yml") || nested.name.ends_with(".yaml"))
+                if nested.is_file &&
+                    (nested.name.ends_with(".yml") || nested.name.ends_with(".yaml"))
                 {
                     found.push(nested.path)
                 }

@@ -516,7 +516,10 @@ fn successors(t: &Terminator) -> Vec<BlockId> {
         Terminator::Call { target, .. } => target.iter().copied().collect(),
         Terminator::Assert { target, .. } => vec![*target],
         Terminator::Drop { target, .. } => vec![*target],
-        Terminator::Return | Terminator::Unreachable | Terminator::Panic { .. } => Vec::new(),
+        Terminator::Return
+        | Terminator::Unreachable
+        | Terminator::Resume
+        | Terminator::Panic { .. } => Vec::new(),
     }
 }
 

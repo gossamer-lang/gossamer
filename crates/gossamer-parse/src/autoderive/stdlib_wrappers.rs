@@ -324,20 +324,15 @@ fn __gos_sync_shield<T>(f: Fn() -> T) -> T {
 /// `sync::with_timeout(f, ms)` - runs `f` on a child of a cohort bounded by
 /// `ms`. The bound is a runtime value, which a `cohort(timeout: ..)` header
 /// cannot take, so this is written as the desugar the header compiles to.
-/// The child's value comes back through a captured `Vec`, which a closure
-/// reaches by managed reference; an empty one after the join means the
-/// bound elapsed first.
+/// The child's value comes back through its join handle once the cohort has
+/// joined it.
 const SYNC_TIMEOUT_WRAPPERS: &str = r#"
 fn __gos_sync_with_timeout<T>(f: Fn() -> T, ms: i64) -> Result<T, errors::Error> {
-    let mut out: Vec<T> = #[]
     runtime::cohort_push(0, ms, 0, 0, 0, 0)
     defer runtime::cohort_pop()
-    spawn(|| out.push(f()), reason: "sync::with_timeout")
+    let child = spawn(|| f(), reason: "sync::with_timeout")
     runtime::cohort_join().map_err(|e| errors::wrap(e, format("sync::with_timeout: bound of {} ms", ms)))?
-    match out.pop() {
-        Some(value) => Ok(value)
-        None => Err(errors::new("sync::with_timeout: the work did not finish inside its bound"))
-    }
+    child.join().map_err(|e| errors::new(format("sync::with_timeout: {}", e)))
 }
 "#;
 
@@ -2388,8 +2383,8 @@ fn __gos_http_secure_attr(secure: bool) -> String {
 }
 fn __gos_http_csrf_cookie_value(token: String, config: __gos_http_csrf_Config) -> String {
     let bare = http::cookie::serialize(config.cookie_name, token)
-    bare + "; Path=/" + &__gos_http_max_age_attr(config.max_age_secs)
-        + &__gos_http_secure_attr(config.secure) + "; SameSite=" + &config.same_site
+    bare + "; Path=/" + &__gos_http_max_age_attr(config.max_age_secs) +
+        &__gos_http_secure_attr(config.secure) + "; SameSite=" + &config.same_site
 }
 fn __gos_http_csrf_attach_cookie(resp: http::Response, token: String, config: __gos_http_csrf_Config) -> http::Response {
     let sc = __gos_http_csrf_cookie_value(token, config)
@@ -2442,8 +2437,8 @@ fn __gos_http_session_encode(store: __gos_http_session_Store, data: String) -> S
 fn __gos_http_session_cookie_value(store: __gos_http_session_Store, data: String) -> String {
     let cookie_val = __gos_http_session_encode(store, data)
     let bare = http::cookie::serialize(store.cookie_name, cookie_val)
-    bare + "; Path=/; HttpOnly" + &__gos_http_max_age_attr(store.max_age_secs)
-        + &__gos_http_secure_attr(store.secure) + "; SameSite=Lax"
+    bare + "; Path=/; HttpOnly" + &__gos_http_max_age_attr(store.max_age_secs) +
+        &__gos_http_secure_attr(store.secure) + "; SameSite=Lax"
 }
 // load / save are free functions, not methods: a `&self` method that
 // returns the 2-word `Result` while also taking an opaque-handle arg

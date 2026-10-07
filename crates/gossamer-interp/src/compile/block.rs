@@ -68,10 +68,11 @@ impl<'tcx> FnBuilder<'tcx> {
         // `return` / `break` / `continue` edge via `emit_defers_above`, so
         // it must not re-emit here. Deferred expressions allocate fresh
         // registers, so the result register stays intact.
-        let frame = self.defer_stack.pop().unwrap_or_default();
-        if !diverges {
-            self.emit_defer_frame(&frame)?;
+        if !diverges && let Some(frame_idx) = self.defer_stack.len().checked_sub(1) {
+            self.emit_defer_frame(frame_idx)?;
+            self.finish_defer_edge()?;
         }
+        self.pop_defer_frame()?;
         self.pop_scope();
         Ok(result)
     }

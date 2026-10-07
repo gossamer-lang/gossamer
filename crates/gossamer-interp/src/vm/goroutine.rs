@@ -702,7 +702,11 @@ impl JoinWait {
     ///
     /// Returns `None` on `main`'s thread in that state, for the caller to
     /// report with its call stack; a goroutine worker stops the program.
-    pub(crate) fn enter() -> Option<Self> {
+    ///
+    /// `settled` answers whether the join has nothing left to wait for. It
+    /// is read after the counts, so a last child that finished between the
+    /// caller's own check and this one is never read as a deadlock.
+    pub(crate) fn enter(settled: impl FnOnce() -> bool) -> Option<Self> {
         if !gossamer_runtime::platform::CAN_BLOCK {
             return Some(Self);
         }
@@ -716,7 +720,9 @@ impl JoinWait {
         // Past `main`, leftover goroutines are abandoned rather than reported,
         // as a compiled binary leaves them.
         if !main_returned
-            && reads_as_terminal(waiting as u64, participants, epoch, a_waiter_is_cancelled)
+            && reads_as_terminal(waiting as u64, participants, epoch, || {
+                a_waiter_is_cancelled() || settled()
+            })
         {
             note_main_wait(None);
             JOIN_WAITERS.fetch_sub(1, Ordering::AcqRel);
@@ -797,6 +803,14 @@ mod tests {
             quiet_handoffs && PROGRESS_EPOCH.load(Ordering::Acquire) == epoch,
             "a window nothing moved in decides on its counts alone"
         );
+    }
+
+    /// A last child can finish between a join's own check and the counts it
+    /// reads, leaving the joiner as the only participant; the join has then
+    /// nothing to wait for, which is not a deadlock.
+    #[test]
+    fn a_join_whose_children_have_settled_is_not_a_deadlock() {
+        assert!(JoinWait::enter(|| true).is_some());
     }
 
     /// A task that blocks holds its worker, so a pool that could not grow

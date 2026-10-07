@@ -1,24 +1,42 @@
-// A line that opens with `-`, `*`, `&`, or a closure's `|` starts a new
-// statement, except inside a grouping `( .. )`, where it continues the line
-// above. A list keeps a leading `-` as the sign of its next element.
+// A line that opens with `-`, `*`, `&`, `|`, or `||` starts a new statement
+// or list element, inside parentheses too, so a closure opening a line is a
+// closure. `|>` is the one operator that continues the line above; every
+// other operator continues an expression from the end of a line.
 
 fn offset(k: i64) -> Fn(i64) -> i64 {
     let base = k * 2
     |x| x + base
 }
 
+fn scaled(k: i64) -> Fn() -> i64 {
+    let factor = k * 3
+    || factor + 1
+}
+
+fn double(n: i64) -> i64 { n * 2 }
+
 fn main() {
-    let total = (8
-        - 2)
-    let mask = (4
-        | 1)
-    let product = (3
-        * 5)
-    println("{} {} {}", total, mask, product)
+    let total = (8 -
+        2)
+    let mask = 4 |
+        1
+    let both = total > 1 &&
+        mask > 1
+    let either = total > 100 ||
+        mask > 1
+    let piped = total
+        |> double
+        |> |v| v + 1
+    println("{} {} {} {} {}", total, mask, both, either, piped)
+    let pair = (
+        total
+        -2
+    )
+    println("{:?}", pair)
     let signed = #[
         1
         -2
     ]
     println("{:?}", signed)
-    println("{}", offset(5)(1))
+    println("{} {}", offset(5)(1), scaled(2)())
 }

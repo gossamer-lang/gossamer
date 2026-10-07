@@ -39,7 +39,7 @@ fn main() {
     let r = rand::Rng::new(424_242)
     let first = draw(r)
     println("{} {}", first, first > 9_223_372_036_854_775_807)
-    println("{} {}", r.next_u32() < 4_294_967_296, r.range_u64(10, 20) >= 10)
+    println("{} {}", r.next_u32() as i64 < 4_294_967_296, r.range_u64(10, 20) >= 10)
 
     let root = context::Context::background()
     let child = context::Context::with_cancel(root)
