@@ -149,6 +149,46 @@ impl Parser<'_> {
         );
     }
 
+    /// Reports a closure written as a statement, which nothing reads. A
+    /// parameterless one after an expression statement or a `let` most
+    /// likely continued that line's logical or, which the fix restores.
+    fn report_discarded_closure(
+        &mut self,
+        span: Span,
+        parameterless: bool,
+        previous: Option<&Stmt>,
+    ) {
+        let file = self.tokens.file();
+        let continues = previous.is_some_and(|stmt| match &stmt.kind {
+            gossamer_ast::StmtKind::Let { init, .. } => init.is_some(),
+            gossamer_ast::StmtKind::Expr { has_semi, .. } => !has_semi,
+            _ => false,
+        });
+        let continuation = previous
+            .filter(|_| parameterless && continues)
+            .and_then(|stmt| {
+                let line_end = stmt.span.end;
+                let gap = self
+                    .slice(Span::new(file, line_end, span.start))
+                    .to_string();
+                if !gap.contains('\n')
+                    || !self
+                        .slice(Span::new(file, span.start, span.end))
+                        .starts_with("||")
+                {
+                    return None;
+                }
+                let after = span.start + 2;
+                let spaced = self
+                    .source
+                    .get(after as usize..)
+                    .is_some_and(|rest| rest.starts_with(' '));
+                let fix_end = after + u32::from(spaced);
+                Some((format!(" ||{gap}"), Span::new(file, line_end, fix_end)))
+            });
+        self.record(ParseError::DiscardedClosure { continuation }, span);
+    }
+
     fn continue_binary(&mut self, mut lhs: Expr, max_prec: u8, allow_assign: bool) -> Expr {
         loop {
             if allow_assign && self.peek_assign_op().is_some() {
@@ -1692,6 +1732,11 @@ impl Parser<'_> {
     fn parse_condition(&mut self) -> Condition {
         let mut clauses = vec![self.parse_cond_clause()];
         while self.at_punct(Punct::AmpAmp) {
+            // A condition continues across lines as any expression does: the
+            // operator ends the line above.
+            if self.newline_before_peek() {
+                self.report_leading_operator(BinaryOp::And);
+            }
             self.bump();
             clauses.push(self.parse_cond_clause());
         }
@@ -3326,6 +3371,11 @@ impl Parser<'_> {
                 };
                 tail = Some(expr);
                 break;
+            }
+            if let gossamer_ast::StmtKind::Expr { expr, .. } = &stmt.kind
+                && let ExprKind::Closure { params, .. } = &expr.kind
+            {
+                self.report_discarded_closure(expr.span, params.is_empty(), stmts.last());
             }
             stmts.push(stmt);
         }

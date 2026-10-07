@@ -329,7 +329,10 @@ one exception: `|>`, which may begin a line to continue a pipeline.
   line after a statement, with parameters or without (`let k = 2` then
   `|x| x * k`, or `|| k * 3`).
 - Any other binary operator (`+`, `/`, `%`, `==`, `<=`, `&&`, `<<`, `+%`,
-  ...) as the first token of a line is GP0066.
+  ...) as the first token of a line is GP0066, in an `if` or `while`
+  condition and a let-chain too.
+- A closure written as a statement, which nothing binds, passes, or answers,
+  is GP0067: `let ok = a` then `|| b` is that statement, never `a || b`.
 - To continue an expression on the next line, end the line with the
   operator: `let ok = a &&\n    b`. `gos check --fix` moves a line-leading
   operator to the end of the line above.

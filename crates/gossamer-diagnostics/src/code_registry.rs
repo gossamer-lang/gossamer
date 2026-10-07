@@ -724,6 +724,15 @@ pub const REGISTRY: &[(&str, &str)] = &[
             the previous line with the operator; `gos check --fix` moves it.",
     ),
     (
+        "GP0067",
+        "A closure is a statement of its own, so its value is never read. A line\n\
+            starting with `||` or `|` begins a closure rather than continuing the\n\
+            expression above, so `let ok = a` followed by `|| b` on the next line\n\
+            is `let ok = a` and an unused closure. To continue a logical or, end\n\
+            the line above with `||` (`gos check --fix` moves it); to keep the\n\
+            closure, bind it with `let`.",
+    ),
+    (
         "GR0001",
         "A name used in source could not be resolved to a declaration.\n\
                      Check the spelling, whether a `use` brings the name into scope,\n\

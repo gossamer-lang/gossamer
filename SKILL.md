@@ -140,7 +140,8 @@ extend(&mut items)     // items is now #[1, 2, 1]
   expression on the next line, end the line with its operator (`a &&` then
   `b`); `|>` is the one operator that may begin a line. A line starting
   with `&`, `*`, `-`, `|`, or `||` begins a new statement, so a closure on
-  its own line is a closure; any other operator there is GP0066.
+  its own line is a closure (GP0067 when nothing reads it); any other
+  operator there is GP0066, let-chain `&&` included.
 - Delimited lists use commas on one line and newlines when multiline.
 
 **Strings and formatting**

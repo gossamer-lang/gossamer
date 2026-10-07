@@ -77,7 +77,8 @@ through a `sync::Shared`.
 
 A line that starts with `|` or `||` begins a new statement, so a function
 can end with a closure, with parameters or without. A logical or that spans
-lines ends the first line with `||`.
+lines ends the first line with `||`; a closure that nothing binds, passes, or
+answers is GP0067, which is what a `|| b` line meant to continue `a` becomes.
 
 ```gossamer
 fn counter_from(start: i64) -> Fn() -> i64 {

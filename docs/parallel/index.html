@@ -2574,10 +2574,10 @@ calls <code>mid</code>, which calls <code>log</code>, which prints, is refused w
 because that storage belongs to the call.</p>
 <p>Two shapes are refused outright, and the reason for each is worth knowing:</p>
 <ul>
-<li><strong>A closure that writes something it captured.</strong> A closure captures a <code>Vec</code>,
-  <code>Map</code>, or <code>Set</code> by managed reference, so <code>xs.par_map(|v| { seen.push(v); v })</code>
-  would have every worker pushing into one container at once. A captured
-  scalar is refused too: every worker shares one closure environment.</li>
+<li><strong>A closure that writes something it captured.</strong> A closure's writes reach
+  the bindings it captures, so <code>xs.par_map(|v| { seen.push(v); v })</code> would have
+  every worker pushing into one container at once, and <code>count += 1</code> would have
+  every worker writing one integer.</li>
 <li><strong>A callable reached through a binding.</strong> <code>let f = |v| v * 2</code> then
   <code>xs.par_map(f)</code> hides the body at the call site, so its purity cannot be
   decided there. Write the literal at the call, or name a function.</li>

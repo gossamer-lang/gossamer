@@ -530,7 +530,9 @@ fn wait_for_drain(node: &Arc<CohortNode>) -> bool {
     if node.state.lock().outstanding == 0 {
         return true;
     }
-    let Some(_joining) = crate::vm::goroutine::JoinWait::enter() else {
+    let Some(_joining) =
+        crate::vm::goroutine::JoinWait::enter(|| node.state.lock().outstanding == 0)
+    else {
         return false;
     };
     let mut state = node.state.lock();

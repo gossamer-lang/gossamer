@@ -145,7 +145,10 @@ for s in shapes {
     title: "Closures + higher-order fns",
     prose: `
       <p>A closure is <code>|param: T| body</code> and captures its
-      environment automatically - there is no <code>move</code>. Two
+      environment automatically - there is no <code>move</code>. It names
+      the bindings it captures: it reads their current values, and its
+      writes reach them. A closure handed to <code>spawn</code> takes a
+      snapshot of each instead. Two
       callable types name a function value: <code>fn(args) -> ret</code>
       for a bare code pointer, and <code>Fn(args) -> ret</code> - the
       callable trait - which also accepts capturing closures.</p>
@@ -167,6 +170,11 @@ println(f"inc(41)   = {apply(inc, 41)}")   // bare fn coerces
 // Closures power the sequence combinators, one per step.
 let total = (1..=6).filter(|n| n % 2 == 0).map(|n| n * n).sum()
 println(f"sum of squares of evens in 1..=6 = {total}")
+
+// A write inside a closure reaches the binding it names.
+let mut seen = 0
+#[3, 4, 5].for_each(|n| seen += n)
+println(f"seen = {seen}")
 `,
   },
   {
@@ -981,10 +989,10 @@ let lines = ["2026-06-29 ERROR disk full", "2026-06-30 INFO restarted"]
 for line in lines {
     // \`captures\` yields [full, group1, group2, ...]; a let-chain
     // binds all three groups and tests them in one condition.
-    if let Some(c) = regex::captures(re, line)
-        && let Some(date) = c[1]
-        && let Some(level) = c[2]
-        && let Some(msg) = c[3] {
+    if let Some(c) = regex::captures(re, line) &&
+        let Some(date) = c[1] &&
+        let Some(level) = c[2] &&
+        let Some(msg) = c[3] {
         println(f"{date}  [{level}]  {msg}")
     }
 }

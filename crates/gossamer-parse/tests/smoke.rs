@@ -1176,6 +1176,63 @@ fn a_line_starting_with_another_binary_operator_is_rejected_with_its_rewrite() {
 }
 
 #[test]
+fn a_condition_continues_across_lines_only_with_a_trailing_operator() {
+    for source in [
+        "fn f(a: bool, b: bool) {\n    if a\n        && b {\n    }\n}\n",
+        "fn f(a: Option<i64>) {\n    while let Some(x) = a\n        && x > 0 {\n    }\n}\n",
+    ] {
+        let mut map = SourceMap::new();
+        let file = map.add_file("condition.gos", source.to_string());
+        let (_, diags) = parse_source_file(source, file);
+        assert!(
+            matches!(
+                diags.as_slice(),
+                [d] if matches!(&d.error, ParseError::LeadingBinaryOperator { op, .. } if op == "&&")
+            ),
+            "`{source}` produced {diags:?}"
+        );
+    }
+    let source = "fn f(a: bool, b: bool) {\n    if a &&\n        b {\n    }\n}\n";
+    let mut map = SourceMap::new();
+    let file = map.add_file("condition.gos", source.to_string());
+    let (_, diags) = parse_source_file(source, file);
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
+fn a_closure_whose_value_nothing_reads_is_rejected() {
+    let source = "fn f(a: bool, b: bool) -> bool {\n    let x = a\n        || b\n    x\n}\n";
+    let mut map = SourceMap::new();
+    let file = map.add_file("discarded.gos", source.to_string());
+    let (_, diags) = parse_source_file(source, file);
+    let [diag] = diags.as_slice() else {
+        panic!("{diags:?}");
+    };
+    let ParseError::DiscardedClosure {
+        continuation: Some((fix, fix_span)),
+    } = &diag.error
+    else {
+        panic!("{diags:?}");
+    };
+    let mut fixed = source.to_string();
+    fixed.replace_range(fix_span.start as usize..fix_span.end as usize, fix);
+    assert_eq!(
+        fixed,
+        "fn f(a: bool, b: bool) -> bool {\n    let x = a ||\n        b\n    x\n}\n"
+    );
+    let (_, after) = parse_source_file(&fixed, file);
+    assert!(after.is_empty(), "{after:?}");
+
+    let kept = "fn f() -> i64 {\n    let n = 1\n    let g = || n\n    g()\n}\nfn h() -> Fn() -> i64 {\n    || 1\n}\n";
+    let file = map.add_file("kept.gos", kept.to_string());
+    let (_, diags) = parse_source_file(kept, file);
+    assert!(
+        diags.is_empty(),
+        "a bound or answered closure is read: {diags:?}"
+    );
+}
+
+#[test]
 fn a_line_starting_with_a_sign_inside_parentheses_begins_an_element() {
     let source =
         "fn f(a: i64) -> (i64, i64) {\n    let t = (\n        a\n        -2\n    )\n    t\n}\n";
