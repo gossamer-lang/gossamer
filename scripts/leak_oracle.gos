@@ -320,6 +320,49 @@ fn probes() -> Vec<(String, String)> {
             println("{}", acc)
         }
         """)
+        ("rwlock_local", """
+        use std::sync
+        fn main() {
+            let mut acc = 0
+            for i in 0..COUNT { let lock = sync::RwLock::new(i); acc += lock.read() }
+            println("{}", acc)
+        }
+        """)
+        ("rwlock_captured_and_stored", """
+        use std::sync
+        struct Guarded { lock: sync::RwLock, tag: i64 }
+        fn read_twice(lock: sync::RwLock) -> i64 { lock.read() + lock.read() }
+        fn main() {
+            let mut acc = 0
+            for i in 0..COUNT {
+                let lock = sync::RwLock::new(i)
+                let f = || lock.read() * 2
+                let g = Guarded { lock: sync::RwLock::new(i), tag: 1 }
+                let locks = #[sync::RwLock::new(1), sync::RwLock::new(2)]
+                acc += f() + read_twice(lock) + g.lock.read() + g.tag
+                for l in locks { acc += l.read() }
+                acc += sync::RwLock::with_write(g.lock, |v| v + 1)
+            }
+            println("{}", acc)
+        }
+        """)
+        ("rwlock_goroutine", """
+        use std::{errors, sync}
+        fn round(i: i64) -> Result<i64, errors::Error> {
+            let lock = sync::RwLock::new(i)
+            let mut got = 0
+            cohort {
+                let h = spawn(|| { lock.write(lock.read() + 1); lock.read() })
+                got = h.join().unwrap()
+            }?
+            Ok(got + lock.read())
+        }
+        fn main() {
+            let mut acc = 0
+            for i in 0..(COUNT / 10) { acc += round(i).unwrap() }
+            println("{}", acc)
+        }
+        """)
         ("map_of_vecs", """
         fn main() {
             let mut acc = 0

@@ -576,74 +576,31 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_try_recv_option(c: *mut GosChan) -> 
     })
 }
 
-/// Cross-crate hooks installed by `gossamer-std` so the runtime
-/// can observe a `Context` without depending on `gossamer-std`
-/// itself. `ctx_handle` is the opaque pointer the caller passes
-/// to `gos_rt_chan_recv_ctx_option` etc.; the installed callbacks
-/// downcast it on their side. All three hooks must be installed
-/// together via [`install_ctx_hooks`] before any
-/// context-aware runtime entry point is called.
-type CtxRegisterFn = unsafe extern "C" fn(ctx_handle: *const u8, gid: u32);
-type CtxDeregisterFn = unsafe extern "C" fn(ctx_handle: *const u8, gid: u32);
-type CtxIsCancelledFn = unsafe extern "C" fn(ctx_handle: *const u8) -> i32;
-
-static CTX_REGISTER_HOOK: std::sync::atomic::AtomicPtr<()> =
-    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
-static CTX_DEREGISTER_HOOK: std::sync::atomic::AtomicPtr<()> =
-    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
-static CTX_IS_CANCELLED_HOOK: std::sync::atomic::AtomicPtr<()> =
-    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
-
-/// Installs the cross-crate context hooks. Idempotent; calling
-/// twice with the same fn pointers is a no-op. Calling with a
-/// different fn pointer (an actual rebind) is undefined behaviour -
-/// the caller (gossamer-std) installs exactly once at first
-/// use of a context-aware runtime entry.
-pub unsafe fn install_ctx_hooks(
-    register: CtxRegisterFn,
-    deregister: CtxDeregisterFn,
-    is_cancelled: CtxIsCancelledFn,
-) {
-    ffi_entry!((), {
-        use std::sync::atomic::Ordering;
-        CTX_REGISTER_HOOK.store(register as *mut (), Ordering::Release);
-        CTX_DEREGISTER_HOOK.store(deregister as *mut (), Ordering::Release);
-        CTX_IS_CANCELLED_HOOK.store(is_cancelled as *mut (), Ordering::Release);
-    });
+/// A cancellation source a cancellable receive watches: it answers whether
+/// it has fired and wakes the goroutines registered on it when it does.
+pub trait CancelSource {
+    /// Whether the source has fired.
+    fn is_cancelled(&self) -> bool;
+    /// Records `gid` as parked on this source, so firing it unparks `gid`.
+    fn register(&self, gid: crate::sched::Gid);
+    /// Withdraws a registration made by [`CancelSource::register`].
+    fn deregister(&self, gid: crate::sched::Gid);
 }
 
-fn ctx_register_hook() -> Option<CtxRegisterFn> {
-    let p = CTX_REGISTER_HOOK.load(std::sync::atomic::Ordering::Acquire);
-    if p.is_null() {
-        None
-    } else {
-        // SAFETY: `p` was stored via `CtxRegisterFn as *mut ()` in
-        // `install_ctx_hooks` and is read back with the
-        // same function-pointer type. The pointer itself is
-        // immutable for the program's lifetime after install.
-        Some(unsafe { std::mem::transmute::<*mut (), CtxRegisterFn>(p) })
+/// A context a compiled program minted, named by its runtime registry id.
+struct RuntimeContext(super::context::CtxHandle);
+
+impl CancelSource for RuntimeContext {
+    fn is_cancelled(&self) -> bool {
+        super::context::handle_is_cancelled(self.0)
     }
-}
 
-fn ctx_deregister_hook() -> Option<CtxDeregisterFn> {
-    let p = CTX_DEREGISTER_HOOK.load(std::sync::atomic::Ordering::Acquire);
-    if p.is_null() {
-        None
-    } else {
-        // SAFETY: `p` was stored as a `CtxDeregisterFn` by `install_ctx_hooks` and is read back
-        // as the same function-pointer type.
-        Some(unsafe { std::mem::transmute::<*mut (), CtxDeregisterFn>(p) })
+    fn register(&self, gid: crate::sched::Gid) {
+        super::context::register_waiter(self.0, gid);
     }
-}
 
-fn ctx_is_cancelled_hook() -> Option<CtxIsCancelledFn> {
-    let p = CTX_IS_CANCELLED_HOOK.load(std::sync::atomic::Ordering::Acquire);
-    if p.is_null() {
-        None
-    } else {
-        // SAFETY: `p` was stored as a `CtxIsCancelledFn` by `install_ctx_hooks` and is read back
-        // as the same function-pointer type.
-        Some(unsafe { std::mem::transmute::<*mut (), CtxIsCancelledFn>(p) })
+    fn deregister(&self, gid: crate::sched::Gid) {
+        super::context::deregister_waiter(self.0, gid);
     }
 }
 
@@ -651,23 +608,20 @@ fn ctx_is_cancelled_hook() -> Option<CtxIsCancelledFn> {
 ///
 /// Behaves identically to `chan_recv_option` when the context
 /// is uncancelled. If the context fires while the goroutine is
-/// parked on the channel's `parked_recv` queue, the registered
-/// `is_cancelled` hook's cancellation will be observed on the
-/// next unpark cycle and the function returns `None` (disc=1).
+/// parked on the channel's `parked_recv` queue, the cancellation is
+/// observed on the next unpark cycle and the function returns `None`
+/// (disc=1).
 ///
-/// `ctx_handle` is the opaque pointer the caller's
-/// `install_ctx_hooks` callbacks know how to interpret;
-/// the runtime never derefs it directly. Passing `null` falls
-/// back to the unconditional [`gos_rt_chan_recv_option`].
+/// `ctx_handle` is a context handle a compiled program minted, or null
+/// for an unconditional [`gos_rt_chan_recv_option`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_chan_recv_ctx_option(
     c: *mut GosChan,
-    ctx_handle: *const u8,
+    ctx_handle: *const super::context::GosCtx,
 ) -> i128 {
     ffi_entry_passthrough!(0i128, {
-        // SAFETY: `c` and `ctx_handle` are this shim's arguments, each null or live for the call
-        // (C-ABI contract), which `chan_recv_ctx_core` accepts.
-        let (disc, payload) = unsafe { chan_recv_ctx_core(c, ctx_handle) };
+        // SAFETY: `c` is this shim's argument, null or live for the call (C-ABI contract).
+        let (disc, payload) = unsafe { chan_recv_ctx_handle(c, ctx_handle) };
         crate::c_abi::result::pack_result(disc, payload)
     })
 }
@@ -685,13 +639,12 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_recv_ctx_option(
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_chan_recv_ctx(
     c: *mut GosChan,
-    ctx_handle: *const u8,
+    ctx_handle: *const super::context::GosCtx,
     out: *mut i64,
 ) -> i32 {
     ffi_entry_passthrough!(0, {
-        // SAFETY: `c` and `ctx_handle` are this shim's arguments, each null or live for the call
-        // (C-ABI contract), which `chan_recv_ctx_core` accepts.
-        let (disc, payload) = unsafe { chan_recv_ctx_core(c, ctx_handle) };
+        // SAFETY: `c` is this shim's argument, null or live for the call (C-ABI contract).
+        let (disc, payload) = unsafe { chan_recv_ctx_handle(c, ctx_handle) };
         if disc == 0 {
             if !out.is_null() {
                 // SAFETY: `out` is non-null (checked above) and addresses the caller's result
@@ -718,49 +671,39 @@ fn one_word_width(chan: &GosChan) -> usize {
     width
 }
 
-/// Receives with cancellation, answering `(disc, payload)` where `disc` is
-/// `0` for a value and `1` for a closed channel or a cancelled context.
-unsafe fn chan_recv_ctx_core(c: *mut GosChan, ctx_handle: *const u8) -> (i64, i64) {
+/// [`chan_recv_cancellable`] for a compiled program's context handle, where
+/// `0` names no context.
+///
+/// # Safety
+/// `c` is null or a live channel.
+unsafe fn chan_recv_ctx_handle(
+    c: *mut GosChan,
+    ctx_handle: *const super::context::GosCtx,
+) -> (i64, i64) {
+    if ctx_handle.is_null() {
+        // SAFETY: this `unsafe fn`'s caller passes `c` null or live, which
+        // `gos_rt_chan_recv_option` accepts.
+        let packed = unsafe { gos_rt_chan_recv_option(c) };
+        return (
+            (packed & 0xFFFF_FFFF_FFFF_FFFF) as u64 as i64,
+            ((packed >> 64) as u64) as i64,
+        );
+    }
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { chan_recv_cancellable(c, &RuntimeContext(ctx_handle.expose_provenance())) }
+}
+
+/// Receives a one-word value from `c` unless `source` fires first, answering
+/// `(disc, payload)` where `disc` is `0` for a value and `1` for a closed
+/// channel or a fired source.
+///
+/// # Safety
+/// `c` is null or a live channel from `gos_rt_chan_new`.
+pub unsafe fn chan_recv_cancellable(c: *mut GosChan, source: &impl CancelSource) -> (i64, i64) {
     {
-        if ctx_handle.is_null() {
-            // SAFETY: this `unsafe fn`'s caller passes `c` null or live, which
-            // `gos_rt_chan_recv_option` accepts.
-            let packed = unsafe { gos_rt_chan_recv_option(c) };
-            return (
-                (packed & 0xFFFF_FFFF_FFFF_FFFF) as u64 as i64,
-                ((packed >> 64) as u64) as i64,
-            );
-        }
-        // Hooks carry contexts owned by a Rust caller. A handle a compiled
-        // program minted is a node in this runtime's own registry, which the
-        // fallbacks consult directly, so both kinds of context cancel a
-        // receive through the same loop below.
-        let addr = ctx_handle as usize;
-        let register: Box<dyn Fn(*const u8, u32)> = match ctx_register_hook() {
-            // SAFETY: the hook is the installed context runtime's register function, called with
-            // the live context handle and a goroutine id.
-            Some(hook) => Box::new(move |h, g| unsafe { hook(h, g) }),
-            None => Box::new(move |_, g| {
-                super::context::register_waiter(addr, crate::sched::Gid(g));
-            }),
-        };
-        let deregister: Box<dyn Fn(*const u8, u32)> = match ctx_deregister_hook() {
-            // SAFETY: the hook is the installed context runtime's deregister function, called
-            // with the live context handle and a goroutine id.
-            Some(hook) => Box::new(move |h, g| unsafe { hook(h, g) }),
-            None => Box::new(move |_, g| {
-                super::context::deregister_waiter(addr, crate::sched::Gid(g));
-            }),
-        };
-        let is_cancelled: Box<dyn Fn(*const u8) -> i32> = match ctx_is_cancelled_hook() {
-            // SAFETY: the hook is the installed context runtime's cancellation query, called with
-            // the live context handle.
-            Some(hook) => Box::new(move |h| unsafe { hook(h) }),
-            None => Box::new(move |_| i32::from(super::context::addr_is_cancelled(addr))),
-        };
         // Check before parking: an already-cancelled context
         // short-circuits without touching the channel.
-        if is_cancelled(ctx_handle) != 0 {
+        if source.is_cancelled() {
             return (1, 0);
         }
         if c.is_null() {
@@ -772,7 +715,7 @@ unsafe fn chan_recv_ctx_core(c: *mut GosChan, ctx_handle: *const u8) -> (i64, i6
         let bytes_len = one_word_width(chan);
         let gid = crate::sched_global::current_gid();
         if let Some(g) = gid {
-            register(ctx_handle, g.as_u32());
+            source.register(g);
         }
         // Inline the recv loop with cancel polling on both the
         // goroutine park path and the OS-thread condvar path. The
@@ -818,7 +761,7 @@ unsafe fn chan_recv_ctx_core(c: *mut GosChan, ctx_handle: *const u8) -> (i64, i6
                 if let Some(g) = parked_as {
                     chan.parked_recv.lock().retain(|x| *x != g);
                 }
-                if is_cancelled(ctx_handle) != 0 {
+                if source.is_cancelled() {
                     break (1i64, 0i64);
                 }
             } else {
@@ -827,13 +770,13 @@ unsafe fn chan_recv_ctx_core(c: *mut GosChan, ctx_handle: *const u8) -> (i64, i6
                     .wait_for(&mut guard, std::time::Duration::from_millis(50));
                 chan.recv_waiters.fetch_sub(1, Ordering::AcqRel);
                 drop(guard);
-                if is_cancelled(ctx_handle) != 0 {
+                if source.is_cancelled() {
                     break (1i64, 0i64);
                 }
             }
         };
         if let Some(g) = gid {
-            deregister(ctx_handle, g.as_u32());
+            source.deregister(g);
         }
         (result_disc, result_payload)
     }

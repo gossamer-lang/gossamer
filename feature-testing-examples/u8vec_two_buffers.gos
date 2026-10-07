@@ -1,0 +1,18 @@
+// Two byte buffers read back their own bytes, through the VM's fast
+// byte-access path as much as through the generic one.
+
+fn main() {
+    let a = U8Vec::new(4)
+    let b = U8Vec::new(4)
+    for i in 0..4 {
+        a.set_byte(i, 10 + i)
+        b.set_byte(i, 20 + i)
+    }
+    let mut sa = 0
+    let mut sb = 0
+    for i in 0..4 {
+        sa += a.get_byte(i)
+        sb += b.get_byte(i)
+    }
+    println(f"{sa} {sb}")
+}

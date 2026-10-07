@@ -1,23 +1,21 @@
 #![allow(clippy::missing_safety_doc)]
 
 //! Runtime support for `std::sync::RwLock` - a reader-writer lock
-//! guarding a single `i64` value. The handle is an opaque heap
-//! `Box<GosRwLock>`; compiled tiers carry the pointer as an `i64` and
-//! the MIR receiver-kind dispatch tags constructor results
-//! `sync::RwLock` so method calls route to the helpers below. The
-//! handle is never freed (it leaks at process exit), matching the
-//! other long-lived synchronisation handles (`sync::Map`,
-//! `sync::Once`).
+//! guarding a single `i64` value. The handle is the payload of a counted
+//! heap node with no counted children: compiled tiers carry the pointer as
+//! an `i64`, retain it for each holder (a binding, a closure environment, a
+//! field, a goroutine), and release it when the holder ends, so the lock is
+//! freed with its last share. The MIR receiver-kind dispatch tags
+//! constructor results `sync::RwLock` so method calls route to the helpers
+//! below.
 //!
 //! `with_read` / `with_write` cross the C-ABI through the shared
 //! callable convention used by the `iter::*` / `option::*` / `Once`
 //! combinators: `env` is a heap blob whose first word is the callable
-//! address; the body is invoked as `f(env, value)`. `with_read`
-//! passes the guarded value and returns the callback's result without
-//! mutating the lock; `with_write` stores the callback's return value
-//! back into the lock and returns it. The guarded value is an `i64`
-//! for this first cut - a String-guarded variant is a documented
-//! follow-up (it needs a pointer-shaped thunk and a String slot).
+//! address; the body is invoked as `f(env, value)`. `with_read` reads the
+//! guarded value under the shared lock, releases it, and returns the
+//! callback's result for that value; `with_write` runs the callback under
+//! the exclusive lock, stores its return value back, and returns it.
 
 use parking_lot::RwLock as PRwLock;
 
@@ -49,18 +47,21 @@ unsafe fn env_fn_addr(env: *const u8) -> Option<*const ()> {
     }
 }
 
-/// Opaque heap handle wrapping the guarded `i64`.
+/// The guarded `i64`, stored as the payload of a counted node.
 pub struct GosRwLock {
     inner: PRwLock<i64>,
 }
 
-/// Allocate a `sync::RwLock` guarding `value`.
+super::rc::managed_handle!(GosRwLock);
+
+/// Allocate a `sync::RwLock` guarding `value`, as a counted node holding one
+/// share for the caller.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_rwlock_new(value: i64) -> *mut GosRwLock {
     ffi_entry!(std::ptr::null_mut(), {
-        Box::into_raw(Box::new(GosRwLock {
+        super::rc::alloc_managed(GosRwLock {
             inner: PRwLock::new(value),
-        }))
+        })
     })
 }
 
@@ -89,8 +90,8 @@ pub unsafe extern "C" fn gos_rt_rwlock_set(lock: *mut GosRwLock, value: i64) {
     });
 }
 
-/// `sync::RwLock::with_read(lock, f)` - run `f(value)` under a shared
-/// lock and return its result; the guarded value is unchanged.
+/// `sync::RwLock::with_read(lock, f)` - read the value under a shared lock,
+/// then return `f(value)`; the guarded value is unchanged.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_rwlock_with_read(
     lock: *mut GosRwLock,

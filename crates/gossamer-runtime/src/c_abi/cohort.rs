@@ -136,6 +136,8 @@ struct Cohort {
     /// Milliseconds the drain waits, or 0 for "as long as it takes".
     drain_ms: i64,
     cancelled: AtomicBool,
+    /// The deadline's armed timer, disarmed when the cohort retires first.
+    timer: Mutex<Option<crate::sched_global::TimerHandle>>,
     state: Mutex<CohortState>,
     /// Signalled whenever `outstanding` or the failure set changes.
     progress: Condvar,
@@ -351,6 +353,7 @@ fn push(
         uncancellable: uncancellable != 0,
         drain_ms,
         cancelled: AtomicBool::new(false),
+        timer: Mutex::new(None),
         state: Mutex::new(CohortState {
             next_index: 0,
             outstanding: 0,
@@ -365,7 +368,7 @@ fn push(
         waiters: Mutex::new(Vec::new()),
         children: Mutex::new(Vec::new()),
     });
-    COHORTS.lock().insert(id, node);
+    COHORTS.lock().insert(id, Arc::clone(&node));
     if let Some(enclosing) = cohort_at(parent) {
         enclosing.children.lock().push(id);
     }
@@ -381,16 +384,15 @@ fn push(
         // cohort costs an entry there rather than a thread parked on a
         // sleep.
         let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-        let timer_gid = crate::sched_global::add_timer(deadline);
-        crate::sched_global::register_waker(
-            timer_gid,
+        *node.timer.lock() = Some(crate::sched_global::add_timer(
+            deadline,
             Box::new(move || {
                 if let Some(node) = cohort_at(id) {
                     node.state.lock().timed_out = true;
                     cancel(id);
                 }
             }),
-        );
+        ));
     }
     id
 }
@@ -639,6 +641,9 @@ fn pop_current() {
     OBSERVED_AHEAD.lock().retain(|(cohort, _)| *cohort != id);
     if let Some(enclosing) = cohort_at(node.parent) {
         enclosing.children.lock().retain(|child| *child != id);
+    }
+    if let Some(timer) = node.timer.lock().take() {
+        crate::sched_global::cancel_timer(timer);
     }
     COHORTS.lock().remove(&id);
 }

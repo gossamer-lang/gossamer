@@ -241,11 +241,15 @@ const TRACE_ENDED_SPAN_OFFSET: u32 = 60;
 /// Sentinel offset of the `U8Vec` byte buffer, which predates the bands.
 const U8_VEC_OFFSET: u32 = 20;
 
+/// Sentinel offset of `http::FileServer`, a pure handle the full pure band
+/// had no room left for.
+const FILE_SERVER_OFFSET: u32 = 61;
+
 /// Widest sentinel offset any stdlib handle occupies, the handle bands and
 /// the pre-band handles alike. A receiver inside this span whose display name
 /// is module-qualified answers a closed method table, which is what lets an
 /// unknown name on one be named at the call site.
-pub(crate) const HANDLE_SENTINEL_SPAN: u32 = TRACE_ENDED_SPAN_OFFSET;
+pub(crate) const HANDLE_SENTINEL_SPAN: u32 = FILE_SERVER_OFFSET;
 
 /// One constructor of a runtime handle: the module path it is written
 /// under, and the associated function's name.
@@ -296,7 +300,7 @@ const PURE_HANDLES: &[HandleRow] = &[
     (45, "fs::OpenOptions", &[(&["fs", "OpenOptions"], "new")]),
     (46, "sync::Shared", &[(&["sync", "Shared"], "new")]),
     (
-        46,
+        FILE_SERVER_OFFSET,
         "http::FileServer",
         &[
             (&["static_files", "FileServer"], "new"),
@@ -647,6 +651,7 @@ struct DeferredStructural {
 }
 
 struct DeferredMutatingReceiver {
+    receiver: NodeId,
     ty: Ty,
     method: String,
     place: PlaceMut,

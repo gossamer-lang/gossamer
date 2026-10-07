@@ -57,6 +57,8 @@ pub struct GosShared {
     last_release_gid: AtomicI64,
 }
 
+super::rc::managed_handle!(GosShared);
+
 impl GosShared {
     fn record_acquire(&self) {
         let from = self.last_release_gid.load(Ordering::Acquire);
@@ -75,10 +77,10 @@ impl GosShared {
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_shared_new(value: i64) -> *mut GosShared {
     ffi_entry!(std::ptr::null_mut(), {
-        Box::into_raw(Box::new(GosShared {
+        super::rc::alloc_managed(GosShared {
             inner: parking_lot::Mutex::new(value),
             last_release_gid: AtomicI64::new(-1),
-        }))
+        })
     })
 }
 

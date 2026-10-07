@@ -163,7 +163,8 @@ fn next_binary_heap_handle() -> i64 {
 }
 
 fn binary_heap_handle(owner: &'static str, id: i64) -> Value {
-    Value::struct_(owner, vec![("__heap", Value::Int(id))])
+    let key = super::set::registry_key(id, |id| BINARY_HEAP_REGISTRY.retire(id));
+    Value::struct_(owner, vec![("__heap", key)])
 }
 
 fn binary_heap_id_of(value: &Value) -> Option<i64> {
@@ -171,10 +172,8 @@ fn binary_heap_id_of(value: &Value) -> Option<i64> {
         && matches!(inner.name.as_str(), "MaxHeap" | "MinHeap")
     {
         for (name, field) in &inner.fields {
-            if *name == "__heap"
-                && let Value::Int(id) = field
-            {
-                return Some(*id);
+            if *name == "__heap" {
+                return super::set::registry_id(field);
             }
         }
     }
@@ -485,11 +484,14 @@ fn builtin_binary_heap_clear(args: &[Value]) -> RuntimeResult<Value> {
     let Some(id) = args.first().and_then(binary_heap_id_of) else {
         return Ok(Value::Unit);
     };
-    BINARY_HEAP_REGISTRY.with(|r| {
-        if let Some(state) = r.borrow_mut().get_mut(&id) {
-            state.values.clear();
-        }
+    // The elements are dropped after the registry is released: one may hold
+    // the last handle of another heap.
+    let elements = BINARY_HEAP_REGISTRY.with(|r| {
+        r.borrow_mut()
+            .get_mut(&id)
+            .map(|state| std::mem::take(&mut state.values))
     });
+    drop(elements);
     Ok(Value::Unit)
 }
 

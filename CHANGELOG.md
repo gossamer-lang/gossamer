@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.68.1 - Goroutine isolation, handle lifetimes, and one front end for every tool
+
+- A callable that reaches another goroutine any way other than a closure written at the `spawn` - `spawn(f)`, a spawned closure that calls `f`, a callable parameter a function spawns, `sync::with_timeout(f, ms)` - is rejected with the new GT0118 when it captures a binding something writes, or when what it captures is not visible where it crosses (a call's result, a field, a reassigned binding). Such a callable carried the bindings themselves into the goroutine, so its writes reached the spawning code and raced with it, where a closure written at the `spawn` works on snapshots.
+- A spawned closure calling a method declared `&mut self` on a captured value is GT0114 whatever the method is named, including trait methods and calls through nested fields; only the built-in mutator names were recognised, so `c.bump()` changed the goroutine's snapshot unreported. A user method that happens to be named `push` or `insert` but takes `&self` is no longer counted as a write.
+- A cancelled context stays cancelled while anything holds it, and cancelling it never reaches a context made after it; in native builds and JIT-compiled code a handle could come to name a later context, reporting the old one as live and cancelling the new one.
+- A context is freed with the last handle or child context that holds it, on every tier, along with its deadline: contexts that were never cancelled were kept for the life of the process, and a cancelled `with_timeout` context kept its timer until the deadline.
+- A context deadline that is already due when it is armed closes `done_chan()`; the timer could fire before its callback was registered, leaving a receiver on the done channel waiting for good.
+- Creating `with_timeout` contexts on the bytecode VM takes time in proportion to how many are created, where every creation re-sorted every pending deadline.
+- `sync::RwLock`, `sync::Mutex`, `sync::Once`, `sync::WaitGroup`, `sync::Barrier`, `sync::Map`, `sync::Shared`, and the atomics are freed with their last handle on every tier; each one created was kept for the life of the process.
+- On the bytecode VM a `Set`, `BTreeSet`, `Deque`, `Queue`, `Stack`, `MinHeap`, `MaxHeap`, `bytes::Builder`, `bytes::Buffer`, `U8Vec`, `I64Vec`, `rand::Rng`, `regex::Pattern`, `validate::FieldError`, `validate::Errors`, and `fs::OpenOptions` is freed with its last handle; every one created was kept for the life of the process.
+- On the bytecode VM, `get_byte` and `set_byte` on a `U8Vec` reach that buffer; a program holding more than one read and wrote the first `U8Vec` it created.
+- A `cohort` with a timeout releases its timer when it ends. On the bytecode VM a program whose goroutines are all blocked after a timed cohort ended is reported as deadlocked at once, rather than once that cohort's deadline would have passed.
+- `http::FileServer` is no longer accepted where a `sync::Shared` is expected; the two types shared one identity in the checker.
+- An unknown method on a `bytes::Builder`, `bytes::Buffer`, `MinHeap`, or `MaxHeap` is GT0002 at check time; `gos check` accepted it, and the program then failed at run time or at link time with an undefined symbol.
+- A check served from the front-end cache reports the warnings the first check reported; a warm `gos check`, `gos run`, or `gos build` dropped every warning, such as GM0002 for an unreachable `match` arm.
+- `gos check` reports a comptime failure only once the rest of the front end accepts the program, and reports the program's warnings beside it, the order the editor uses.
+- The language server runs the same checks as `gos check`: a write to a spawned closure's snapshot (GT0114), a callable shared with a goroutine (GT0118), a parallel callback whose purity cannot be shown, and the warnings for unreachable `match` arms are reported in the editor, which showed none of them.
+- The language server analyses a package from every buffer the editor has open, so unsaved edits in several files of one package are checked together, and an edit to one file refreshes the diagnostics of the other open files of its package. A burst of edits that arrives together is analysed once.
+- The playground runs the same checks as `gos check`, and a warning no longer stops a program from running there.
+- The README describes `[1, 2, 3]` as a fixed array and `#[1, 2, 3]` as a `Vec`, and documents calling C through `unsafe extern "C"` blocks beside Rust bindings; it had both the other way round.
+
 ## 0.68.0 - Closures, defers, trait bounds, and a stricter type checker
 
 - A closure names the bindings it captures: it reads their current values, and its writes reach them whatever their types, so `xs.for_each(|x| count += x)`, a counter closure over a local, and a closure that reassigns a captured `Vec` work, where a write to a scalar, `String`, or struct capture was GT0114 and a later write outside the closure went unseen. A spawned closure takes a snapshot of each capture at the `spawn`, and a write to one inside it is now GT0114, pointing at `join()`, a channel, or `sync::Shared`; a spawned closure writing a captured container under a `Mutex` was a data race.

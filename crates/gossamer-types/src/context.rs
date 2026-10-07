@@ -1239,6 +1239,9 @@ impl TyCtxt {
         if self.rc_managed_tys.contains(&ty) {
             return true;
         }
+        if self.is_managed_handle(ty) {
+            return true;
+        }
         // Payload-bearing user enums are heap nodes (tagged-pointer
         // or header-disc) on the compiled tiers; recognise every
         // instantiation by def, not by interned handle. Inline
@@ -1256,6 +1259,20 @@ impl TyCtxt {
         // helpers instead of the strong ones - so report it here even
         // though no per-instantiation registration exists.
         self.is_weak_ty(ty)
+    }
+
+    /// Returns true when `ty` is a stdlib handle the runtime allocates as a
+    /// counted node and frees with its last share: `context::Context`
+    /// (sentinel offset 11), `sync::Map` (34), `sync::RwLock` (35),
+    /// `sync::Shared` (46), and the band from `sync::Mutex` (50) through
+    /// `sync::AtomicBool` (57).
+    #[must_use]
+    pub fn is_managed_handle(&self, ty: Ty) -> bool {
+        matches!(
+            self.kind(ty),
+            Some(TyKind::Adt { def, .. })
+                if matches!(u32::MAX - def.local, 11 | 34 | 35 | 46 | 50..=57)
+        )
     }
 
     /// Returns true when `ty` is a `Weak<T>` reference (the sentinel
@@ -1284,12 +1301,14 @@ impl TyCtxt {
 
     /// Whether a value of `ty` is one word pointing at a counted heap node that
     /// `gos_rt_rc_retain` / `gos_rt_rc_release` manage: a payload-bearing enum,
-    /// an `errors::Error` cell, or a callable value's capture environment (null
+    /// a `std::sync` handle, an `errors::Error` cell, or a callable value's capture
+    /// environment (null
     /// for a callable that captures nothing, which both calls treat as a
     /// no-op).
     #[must_use]
     pub fn is_counted_node(&self, ty: Ty) -> bool {
         self.is_payload_enum(ty)
+            || self.is_managed_handle(ty)
             || matches!(
                 self.kind(ty),
                 Some(TyKind::FnTrait(_) | TyKind::Closure { .. } | TyKind::DynError)

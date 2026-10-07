@@ -73,6 +73,46 @@ fn main() {
 Answer the value through `join()` instead, send it on a channel, or share it
 through a `sync::Shared`.
 
+Calling a method declared `&mut self` on a captured value is a write too,
+whatever the method is called.
+
+Only a closure written at the `spawn` takes snapshots. Any other callable
+that reaches a goroutine - a closure bound earlier, a closure the spawned
+one calls, or a callable parameter a function spawns - carries the bindings
+it captured themselves, so it is accepted only when nothing writes them.
+One that would share a written binding with the code around it is rejected
+with `GT0118`, as is one whose captures cannot be seen where it crosses (a
+call's result, a field, a reassigned binding):
+
+<!-- compile_fail GT0118 -->
+```gossamer
+fn main() {
+    let mut n = 0
+    let next = || {
+        n += 1
+        n
+    }
+    let h = spawn(next)
+    println("{:?} {}", h.join(), n)
+}
+```
+
+A callable whose captures nothing writes crosses freely, and a named
+function always does:
+
+```gossamer
+fn work() -> i64 { 41 }
+
+fn main() {
+    let base = 10
+    let f = || base + 1
+    let a = spawn(f)
+    let b = spawn(|| f() * 2)
+    let c = spawn(work)
+    println("{:?} {:?} {:?}", a.join(), b.join(), c.join())
+}
+```
+
 ## A closure on its own line
 
 A line that starts with `|` or `||` begins a new statement, so a function

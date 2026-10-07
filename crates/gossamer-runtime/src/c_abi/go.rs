@@ -507,32 +507,29 @@ pub extern "C" fn gos_rt_sleep_ns(ns: i64) {
 /// when the context cancelled the wait. A cancelled context returns `0`
 /// without sleeping.
 ///
-/// # Safety
-/// `ctx_handle` is an opaque context handle, or null for an uncancellable
-/// sleep.
+/// `ctx_handle` is a context handle, or null for an uncancellable sleep.
 #[unsafe(no_mangle)]
-pub unsafe extern "C-unwind" fn gos_rt_sleep_ms_ctx(ctx_handle: *const u8, ms: i64) -> i64 {
+pub extern "C-unwind" fn gos_rt_sleep_ms_ctx(
+    ctx_handle: *const super::context::GosCtx,
+    ms: i64,
+) -> i64 {
     ffi_entry_passthrough!(0, {
         if ms < 0 {
             crate::c_abi::panic::panic_text("time::sleep_ctx: duration_ms must be non-negative");
         }
-        // SAFETY: `ctx_handle` is this shim's argument, null or an opaque context handle (C-ABI
-        // contract), which `gos_rt_sleep_ns_ctx` accepts.
-        unsafe { gos_rt_sleep_ns_ctx(ctx_handle, ms.saturating_mul(1_000_000)) }
+        gos_rt_sleep_ns_ctx(ctx_handle, ms.saturating_mul(1_000_000))
     })
 }
 
 /// [`gos_rt_sleep_ms_ctx`] for a wait given as a `time::Duration`, a count of
 /// nanoseconds. A negative duration waits not at all.
 ///
-/// # Safety
-/// `ctx_handle` is an opaque context handle, or null for an uncancellable
-/// sleep.
+/// `ctx_handle` is a context handle, or null for an uncancellable sleep.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sleep_ns_ctx(ctx_handle: *const u8, ns: i64) -> i64 {
+pub extern "C" fn gos_rt_sleep_ns_ctx(ctx_handle: *const super::context::GosCtx, ns: i64) -> i64 {
     ffi_entry!(0, {
-        let addr = ctx_handle as usize;
-        let cancelled = || super::context::addr_is_cancelled(addr);
+        let addr = ctx_handle.expose_provenance();
+        let cancelled = || super::context::handle_is_cancelled(addr);
         if cancelled() {
             return 0;
         }

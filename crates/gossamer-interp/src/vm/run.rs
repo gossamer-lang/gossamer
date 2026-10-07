@@ -1500,21 +1500,6 @@ impl Vm {
                                 ) && matches!(idx_val, Value::Int(_))
                                     && matches!(byte_val, Value::Int(_));
                                 if fast {
-                                    let handle = match recv {
-                                        Value::Struct(inner) => {
-                                            let mut h = 0i64;
-                                            for (n, v) in &inner.fields {
-                                                if (*n) == "handle" {
-                                                    if let Value::Int(x) = v {
-                                                        h = *x;
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            h
-                                        }
-                                        _ => unreachable!(),
-                                    };
                                     let idx = match idx_val {
                                         Value::Int(n) => *n,
                                         _ => unreachable!(),
@@ -1523,7 +1508,7 @@ impl Vm {
                                         Value::Int(n) => *n,
                                         _ => unreachable!(),
                                     };
-                                    if crate::builtins::u8vec_set_byte_inline(handle, idx, byte) {
+                                    if crate::builtins::u8vec_set_byte_inline(recv, idx, byte) {
                                         registers[dst as usize] = Value::Unit;
                                         continue;
                                     }
@@ -1564,27 +1549,12 @@ impl Vm {
                                     Value::Struct(inner) if inner.name == "U8Vec"
                                 ) && matches!(idx_val, Value::Int(_));
                                 if fast {
-                                    let handle = match recv {
-                                        Value::Struct(inner) => {
-                                            let mut h = 0i64;
-                                            for (n, v) in &inner.fields {
-                                                if (*n) == "handle" {
-                                                    if let Value::Int(x) = v {
-                                                        h = *x;
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            h
-                                        }
-                                        _ => unreachable!(),
-                                    };
                                     let idx = match idx_val {
                                         Value::Int(n) => *n,
                                         _ => unreachable!(),
                                     };
                                     if let Some(b) =
-                                        crate::builtins::u8vec_get_byte_inline(handle, idx)
+                                        crate::builtins::u8vec_get_byte_inline(recv, idx)
                                     {
                                         // SAFETY: `dst_i` is a compile-allocated
                                         // i64 register slot.

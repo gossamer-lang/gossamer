@@ -316,33 +316,34 @@ struct BundledModule {
     spans: Vec<BundledSpan>,
 }
 
-/// The editor's unsaved text for one file of the unit, substituted for
-/// that file's on-disk contents wherever the bundler would read it.
+/// The editor's unsaved buffers, each substituted for its file's on-disk
+/// contents wherever the bundler would read that file.
 ///
-/// A language server holds the buffer the user is typing into, which the
-/// filesystem has not seen yet; every other file of the unit still reads
+/// A language server holds the text the user is typing into, which the
+/// filesystem has not seen yet; every file without a buffer still reads
 /// from disk.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Overlay<'a> {
-    entry: Option<(&'a Path, &'a str)>,
+    buffers: &'a [(PathBuf, String)],
 }
 
 impl<'a> Overlay<'a> {
-    /// An overlay substituting `text` for the contents of `path`.
+    /// An overlay substituting each `(path, text)` buffer for its file.
     #[must_use]
-    pub fn new(path: &'a Path, text: &'a str) -> Self {
-        Self {
-            entry: Some((path, text)),
-        }
+    pub fn new(buffers: &'a [(PathBuf, String)]) -> Self {
+        Self { buffers }
     }
 
-    /// The contents of `path`: the overlaid text when it names the
-    /// overlaid file, and the file's own bytes otherwise.
+    /// The contents of `path`: its buffer's text when it has one, and the
+    /// file's own bytes otherwise.
     fn read(self, path: &Path) -> Option<String> {
-        match self.entry {
-            Some((overlaid, text)) if same_file(overlaid, path) => Some(text.to_string()),
-            _ => fs::read_to_string(path).ok(),
-        }
+        self.buffers
+            .iter()
+            .find(|(buffered, _)| same_file(buffered, path))
+            .map_or_else(
+                || fs::read_to_string(path).ok(),
+                |(_, text)| Some(text.clone()),
+            )
     }
 }
 
@@ -681,10 +682,24 @@ pub struct DocumentUnit {
 /// its project's layout does not reach are each their own root.
 #[must_use]
 pub fn bundle_document_unit(path: &Path, text: &str) -> DocumentUnit {
-    let overlay = Overlay::new(path, text);
+    let buffers = [(path.to_path_buf(), text.to_string())];
+    bundle_document_unit_with(path, text, &buffers)
+}
+
+/// As [`bundle_document_unit`], reading every file `buffers` holds from its
+/// buffer rather than from disk, so the documents an editor has open with
+/// unsaved edits form one coherent unit. `buffers` should include `path`'s
+/// own `text`.
+#[must_use]
+pub fn bundle_document_unit_with(
+    path: &Path,
+    text: &str,
+    buffers: &[(PathBuf, String)],
+) -> DocumentUnit {
+    let overlay = Overlay::new(buffers);
     if let Some(entry) = crate::entry::enclosing_project_entry(path)
         && !same_file(&entry, path)
-        && let Ok(entry_source) = fs::read_to_string(&entry)
+        && let Some(entry_source) = overlay.read(&entry)
     {
         let (source, mut origins) = bundle_sibling_modules_inner(&entry, entry_source, overlay);
         let (source, dep_origins) =
@@ -703,7 +718,9 @@ pub fn bundle_document_unit(path: &Path, text: &str) -> DocumentUnit {
             };
         }
     }
-    let (source, origins) = bundle_entry_source_traced(path, text.to_string());
+    let (source, mut origins) = bundle_sibling_modules_inner(path, text.to_string(), overlay);
+    let (source, dep_origins) = bundle_path_dependencies_traced(path, source, &mut Vec::new());
+    origins.extend(dep_origins);
     DocumentUnit {
         source,
         entry: path.to_path_buf(),
@@ -718,7 +735,8 @@ pub fn bundle_document_unit(path: &Path, text: &str) -> DocumentUnit {
 /// Module bodies are inlined verbatim, so the region attributed to `path`
 /// is exactly the text that was handed in; a region of a different length
 /// describes a different read and is declined.
-fn document_window(origins: &[BundledSpan], path: &Path, len: usize) -> Option<(u32, u32)> {
+#[must_use]
+pub fn document_window(origins: &[BundledSpan], path: &Path, len: usize) -> Option<(u32, u32)> {
     let len = u32::try_from(len).ok()?;
     origins
         .iter()

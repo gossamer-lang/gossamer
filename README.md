@@ -406,29 +406,62 @@ gos test src/main.gos
 gos
 ```
 
-Sequence types follow Rust's model. `[T; N]` is an owned fixed-size array,
-`[T]` is an unsized slice used behind `&` or `&mut`, and `Vec<T>` is the only
-owned growable sequence. A bracket literal such as `[1, 2, 3]` creates a
-`Vec` by default. Use `#[1, 2, 3]` when a fixed array is required explicitly,
-or let an expected fixed type such as `[i64; 3]` shape a plain bracket literal.
-Map literals use `{key: value}` and construct `Map` values. Set literals
-use `#{value, ...}` and construct `Set` values, or `BTreeSet` values when
-an expected `BTreeSet<T>` type is present.
-References to arrays and Vec values coerce to slice references in the same
-four shared and mutable forms as Rust. Arrays and slices expose the implemented
-slice-method surface, while Vec additionally owns eager collection
-combinators, resizing, and capacity operations. Mutable arrays and slices
-support non-resizing mutation such as `sort`, `reverse`, `swap`, and `fill`.
-`%i` shows these distinct type surfaces and `%e` filters them further by the
-binding's writable capability.
+Sequence types: `[1, 2, 3]` is a fixed array of type `[i64; 3]`, and
+`#[1, 2, 3]` is a `Vec<i64>`, the only sequence that grows or shrinks.
+
+<!-- output: [1, 2, 3] #[1, 2, 3, 4] [1, 9, 3] -->
+```gossamer
+fn fill(xs: &mut [i64]) { xs[0] = 9 }
+
+fn main() {
+    let mut fixed = [1, 2, 3]
+    let mut grows = #[1, 2, 3]
+    grows.push(4)
+    fill(&mut fixed[1..3])
+    println(f"{[1, 2, 3]} {grows} {fixed}")
+}
+```
+
+A parameter typed `[T]` accepts an array, a `Vec`, or a window of either,
+and a `&mut [T]` parameter writes through to the caller's storage:
+`fill(&mut v)` or `fill(&mut b[1..3])`. Parameters are `T` or `&mut T`;
+there is no shared `&` parameter (`GP0054`). Arrays and windows expose the
+non-resizing sequence methods (`sort`, `reverse`, `swap`, `fill`, ...),
+while `push`, `pop`, `insert`, and the other length-changing methods
+require a `Vec` (`GT0050`). Map literals use `{key: value}` and construct
+`Map` values. Set literals use `#{value, ...}` and construct `Set` values,
+or `BTreeSet` values when an expected `BTreeSet<T>` type is present.
+`%i` shows these distinct type surfaces and `%e` filters them further by
+the binding's writable capability.
 
 ## Foreign Function Interface (FFI)
 
-Gossamer can call native (Rust) code through the `[rust-bindings]`
-section of `project.toml`. A Rust crate that depends on
-`gossamer-binding` marks the functions it publishes with
-`#[gos_module]`, and the toolchain compiles and links it into the
-produced binary (or the interpreter) - the bound functions are then
+Gossamer reaches native code two ways: C functions declared directly in
+source, and Rust crates bound through `project.toml`.
+
+**C.** An `unsafe extern "C" { ... }` block declares C functions, called
+inside `unsafe { }`:
+
+```gossamer
+unsafe extern "C" { fn abs(x: i32) -> i32 }
+
+fn main() { println(f"{unsafe { abs(-3) }}") }
+```
+
+Parameters are scalars, pointers (`ffi::Ptr<T>`, `Option<Ptr<T>>` where C
+may answer NULL), out-parameters (`&mut i32`), callbacks filled with a
+named `fn`, `[T]` / `&mut [T]` buffers, and `#[repr(C)]` structs by value.
+`#[link(name = "z")]` links a system library, C sources a package carries
+go under `[native] sources = [..]`, and `gos bindgen --c lib.h` writes the
+declarations for a header. `#[export]` on a free `fn` makes it a C symbol,
+and `[lib] kind = ["staticlib", "cdylib"]` builds a library with its
+header. Native code is allowed by default; `ffi = false` under `[project]`
+refuses it (`GT0102`). See [`SPEC.md`](SPEC.md) for the full surface.
+
+**Rust.** The `[rust-bindings]` section of `project.toml` names crates
+that depend on `gossamer-binding` and mark the functions they publish
+with `#[gos_module]`; the toolchain compiles and links them into the
+produced binary (or the interpreter), and the bound functions are then
 `use`-able from `.gos` source like any other module. `gos new ID
 --template binding` scaffolds the crate:
 
@@ -451,6 +484,7 @@ mod bindings {
 }
 ```
 
+<!-- fragment -->
 ```gossamer
 use echo::shout
 fn main() { println("{}", shout("hello")) }
@@ -459,13 +493,10 @@ fn main() { println("{}", shout("hello")) }
 The boundary uses the typed `gossamer-binding` ABI (integers, floats,
 strings, tuples, vectors, `Option` / `Result`, opaque handles, byte
 buffers, callbacks); a panic inside a binding is caught and surfaced as
-a `Result::Err`. There is no source-level `extern "C"` item form - the
-`extern` keyword is reserved (`GP0016`) and `[rust-bindings]` is the
-single FFI surface. The full instructions - the type vocabulary,
-errors, opaque handles, blocking work, wrapping a crate that knows
-nothing about Gossamer, and the tier rules - are in [Calling
-Rust](https://gossamer-lang.org/docs/rust_bindings/).
-See also [`SPEC.md` section 12](SPEC.md) and
+a `Result::Err`. The full instructions - the type vocabulary, errors,
+opaque handles, blocking work, wrapping a crate that knows nothing
+about Gossamer, and the tier rules - are in [Calling
+Rust](https://gossamer-lang.org/docs/rust_bindings/). See also
 [`example-external-libraries/`](example-external-libraries/) for
 end-to-end examples (a Gossamer-aware crate, and a plain published
 crate wrapped thinly).

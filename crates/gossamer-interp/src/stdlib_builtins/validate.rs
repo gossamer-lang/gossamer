@@ -84,17 +84,19 @@ pub(crate) fn install_validate(globals: &mut Vec<(&'static str, Value)>) {
 }
 
 fn fe_handle(id: i64) -> Value {
-    Value::struct_(
-        "validate::FieldError",
-        Arc::unwrap_or_clone(Arc::new(vec![("__fe", Value::Int(id))])),
-    )
+    let key = super::set::registry_key(id, |id| {
+        let removed = with_fe(|r| r.borrow_mut().remove(&id));
+        drop(removed);
+    });
+    Value::struct_("validate::FieldError", vec![("__fe", key)])
 }
 
 fn errs_handle(id: i64) -> Value {
-    Value::struct_(
-        "validate::Errors",
-        Arc::unwrap_or_clone(Arc::new(vec![("__errs", Value::Int(id))])),
-    )
+    let key = super::set::registry_key(id, |id| {
+        let removed = with_errs(|r| r.borrow_mut().remove(&id));
+        drop(removed);
+    });
+    Value::struct_("validate::Errors", vec![("__errs", key)])
 }
 
 fn id_of(value: &Value, ty: &str, field: &str) -> Option<i64> {
@@ -102,9 +104,7 @@ fn id_of(value: &Value, ty: &str, field: &str) -> Option<i64> {
         if inner.name == ty {
             for (i, v) in &inner.fields {
                 if (*i) == field {
-                    if let Value::Int(n) = v {
-                        return Some(*n);
-                    }
+                    return super::set::registry_id(v);
                 }
             }
         }

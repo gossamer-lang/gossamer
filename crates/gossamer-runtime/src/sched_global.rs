@@ -216,15 +216,38 @@ pub fn forget_waker(gid: Gid) {
     globals().wakers.lock().remove(&gid);
 }
 
-/// Adds a one-shot timer firing at `deadline`. Returns the [`Gid`]
-/// the caller passes to [`register_waker`].
+/// A one-shot timer armed by [`add_timer`], disarmed by [`cancel_timer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimerHandle {
+    gid: Gid,
+    source: crate::sched::PollSource,
+}
+
+/// Arms a one-shot timer that runs `waker` once `deadline` passes.
+///
+/// The waker is registered before the timer reaches the poller, so a deadline
+/// that is already due when the poller sees it still finds its waker.
 #[must_use]
-pub fn add_timer(deadline: Instant) -> Gid {
+pub fn add_timer(deadline: Instant, waker: Box<dyn Fn() + Send + Sync>) -> TimerHandle {
     let gid = alloc_runtime_gid();
-    with_poller(|poller| {
-        poller.add_timer(deadline, gid);
-    });
-    gid
+    register_waker(gid, waker);
+    let source = with_poller(|poller| poller.add_timer(deadline, gid));
+    TimerHandle { gid, source }
+}
+
+/// Whether `timer` still has a waker waiting to run.
+#[cfg(test)]
+pub(crate) fn timer_is_armed(timer: TimerHandle) -> bool {
+    globals().wakers.lock().contains_key(&timer.gid)
+        || globals().poller.lock().has_timer(timer.source)
+}
+
+/// Disarms `timer`: its entry leaves the poller's queue and its waker is
+/// dropped. A timer whose waker already ran is left as it is.
+pub fn cancel_timer(timer: TimerHandle) {
+    let g = globals();
+    g.poller.lock().cancel_timer(timer.source);
+    forget_waker(timer.gid);
 }
 
 /// Borrows the netpoller for a closure. Used by the I/O bridge code
@@ -1013,6 +1036,30 @@ mod tests {
         let start = Instant::now();
         sleep_until(start + Duration::from_millis(20));
         assert!(start.elapsed() >= Duration::from_millis(15));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // drives the netpoller thread; Miri can't
+    fn an_already_due_timer_finds_its_waker() {
+        for _ in 0..200 {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let tx = parking_lot::Mutex::new(tx);
+            let _ = add_timer(
+                Instant::now(),
+                Box::new(move || {
+                    let _ = tx.lock().send(());
+                }),
+            );
+            rx.recv().expect("a due timer runs its waker");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // drives the netpoller thread; Miri can't
+    fn a_cancelled_timer_drops_its_waker_and_queue_entry() {
+        let timer = add_timer(Instant::now() + Duration::from_hours(1), Box::new(|| {}));
+        cancel_timer(timer);
+        assert!(!timer_is_armed(timer));
     }
 
     #[test]

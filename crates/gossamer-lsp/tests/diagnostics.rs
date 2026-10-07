@@ -488,3 +488,93 @@ fn each_file_that_declares_a_foreign_function_shows_gt0102_where_it_is() {
     assert_eq!(in_main.len(), 1, "{in_main:?}");
     assert_eq!(in_main[0].0, "3", "anchored at `fn abs`: {in_main:?}");
 }
+
+/// `(code, severity)` of each diagnostic, sorted, with the LSP's numeric
+/// severity spelled the way the command line renders it.
+fn lsp_findings(diags: &[Value]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = diags
+        .iter()
+        .filter_map(|diag| {
+            let code = diagnostic_code(diag)?;
+            let severity = match field_f64(diag, "severity") {
+                Some(1.0) => "error",
+                Some(2.0) => "warning",
+                _ => "other",
+            };
+            Some((code, severity.to_string()))
+        })
+        .filter(|(code, _)| !code.starts_with("GL"))
+        .collect();
+    out.sort();
+    out
+}
+
+fn cli_findings(source: &str) -> Vec<(String, String)> {
+    let mut map = gossamer_lex::SourceMap::new();
+    let augmented = gossamer_parse::autoderive::augment_source(source);
+    let file = map.add_file("corpus.gos".to_string(), augmented);
+    let outcome = gossamer_driver::check_frontend(map.source(file), file);
+    let mut out: Vec<(String, String)> = outcome
+        .diagnostics
+        .iter()
+        .chain(&outcome.warnings)
+        .map(|diag| {
+            (
+                diag.code.as_str().to_string(),
+                diag.severity.tag().to_string(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn the_editor_reports_what_the_command_line_does() {
+    let corpus = [
+        (
+            "capture",
+            "fn main() {\n    let mut count = 0\n    let h = spawn(|| count += 1)\n    let _ = h.join()\n}\n",
+        ),
+        (
+            "shared_callable",
+            "fn main() {\n    let mut n = 0\n    let f = || { n += 1; n }\n    let h = spawn(f)\n    println(\"{:?} {}\", h.join(), n)\n}\n",
+        ),
+        (
+            "purity",
+            "fn main() {\n    let xs = #[1, 2, 3]\n    let ys = xs.par_map(|x| { println(\"{}\", x); x })\n    println(\"{}\", ys.len())\n}\n",
+        ),
+        (
+            "unreachable",
+            "fn main() {\n    let x: u8 = 5\n    match x { 0..=255 => println(\"all\"), _ => println(\"never\") }\n}\n",
+        ),
+    ];
+    for (name, source) in corpus {
+        let cli = cli_findings(source);
+        assert!(
+            !cli.is_empty(),
+            "{name}: the corpus program must draw a finding"
+        );
+        let uri = format!("file:///{name}.gos");
+        let server = server_with(&uri, source);
+        let lsp = lsp_findings(&diagnostics_from(&server.publish_diagnostics(&uri)));
+        assert_eq!(lsp, cli, "{name}: editor and command line disagree");
+    }
+}
+
+/// A warning and a comptime failure in one program. `gos check` reports
+/// both (pinned in the command line's own tests); the editor must too.
+#[test]
+fn the_editor_reports_a_warning_beside_a_comptime_failure() {
+    let source = "comptime fn boom() -> i64 { panic(\"no\") }\nconst N: i64 = comptime { boom() }\nfn main() {\n    let x: u8 = 5\n    match x { 0..=255 => println(\"{}\", N), _ => println(\"never\") }\n}\n";
+    let uri = "file:///comptime_and_warning.gos";
+    let server = server_with(uri, source);
+    let lsp = lsp_findings(&diagnostics_from(&server.publish_diagnostics(uri)));
+    assert_eq!(
+        lsp,
+        [
+            ("GM0002".to_string(), "warning".to_string()),
+            ("GX0005".to_string(), "error".to_string())
+        ]
+    );
+}

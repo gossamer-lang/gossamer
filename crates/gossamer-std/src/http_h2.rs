@@ -809,7 +809,7 @@ pub enum Error {
 struct Deadline<F> {
     future: Pin<Box<F>>,
     expires_at: Instant,
-    timer_gid: Option<crate::sched_global::Gid>,
+    timer: Option<crate::sched_global::TimerHandle>,
 }
 
 impl<F> Deadline<F> {
@@ -817,13 +817,13 @@ impl<F> Deadline<F> {
         Self {
             future: Box::pin(future),
             expires_at,
-            timer_gid: None,
+            timer: None,
         }
     }
 
     fn clear_timer(&mut self) {
-        if let Some(gid) = self.timer_gid.take() {
-            crate::sched_global::forget_waker(gid);
+        if let Some(timer) = self.timer.take() {
+            crate::sched_global::cancel_timer(timer);
         }
     }
 }
@@ -837,11 +837,12 @@ impl<F: Future> Future for Deadline<F> {
             this.clear_timer();
             return Poll::Ready(Err(Error::Timeout("stream deadline exceeded".into())));
         }
-        if this.timer_gid.is_none() {
-            let timer_gid = crate::sched_global::add_timer(this.expires_at);
+        if this.timer.is_none() {
             let wake = cx.waker().clone();
-            crate::sched_global::register_waker(timer_gid, Box::new(move || wake.wake_by_ref()));
-            this.timer_gid = Some(timer_gid);
+            this.timer = Some(crate::sched_global::add_timer(
+                this.expires_at,
+                Box::new(move || wake.wake_by_ref()),
+            ));
         }
         match this.future.as_mut().poll(cx) {
             Poll::Ready(output) => {

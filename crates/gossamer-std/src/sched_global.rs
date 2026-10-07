@@ -43,11 +43,18 @@ pub fn forget_waker(gid: Gid) {
     gossamer_runtime::sched_global::forget_waker(gid);
 }
 
-/// Adds a one-shot timer firing at `deadline`. Returns the [`Gid`]
-/// the caller passes to [`register_waker`].
+pub use gossamer_runtime::sched_global::TimerHandle;
+
+/// Arms a one-shot timer that runs `waker` once `deadline` passes. The
+/// waker is registered before the timer can fire.
 #[must_use]
-pub fn add_timer(deadline: Instant) -> Gid {
-    gossamer_runtime::sched_global::add_timer(deadline)
+pub fn add_timer(deadline: Instant, waker: Box<dyn Fn() + Send + Sync>) -> TimerHandle {
+    gossamer_runtime::sched_global::add_timer(deadline, waker)
+}
+
+/// Disarms a timer armed by [`add_timer`] and drops its waker.
+pub fn cancel_timer(timer: TimerHandle) {
+    gossamer_runtime::sched_global::cancel_timer(timer);
 }
 
 /// Sleeps the calling OS thread until `deadline` using the netpoller's

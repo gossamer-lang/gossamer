@@ -2380,6 +2380,7 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                                 "gos_rt_option_unwrap" | "gos_rt_result_unwrap"
                             ) && enum_arg_is_borrowed(args)))
                         || mints_owned_error(name)
+                        || mints_owned_node(name)
                 }
                 _ => true,
             };
@@ -4315,6 +4316,26 @@ fn mints_owned_error(name: &str) -> bool {
     matches!(
         name,
         "gos_rt_error_new" | "gos_rt_error_from" | "gos_rt_error_wrap" | "gos_rt_error_with_field"
+    )
+}
+
+/// Whether `name` answers a fresh counted runtime node - a context or a
+/// `std::sync` handle - whose one share the caller holds.
+fn mints_owned_node(name: &str) -> bool {
+    matches!(
+        name,
+        "gos_rt_ctx_background"
+            | "gos_rt_ctx_with_cancel"
+            | "gos_rt_ctx_with_timeout"
+            | "gos_rt_rwlock_new"
+            | "gos_rt_sync_map_new"
+            | "gos_rt_shared_new"
+            | "gos_rt_mutex_new"
+            | "gos_rt_once_new"
+            | "gos_rt_wg_new"
+            | "gos_rt_barrier_new"
+            | "gos_rt_atomic_i64_new"
+            | "gos_rt_atomic_bool_new"
     )
 }
 

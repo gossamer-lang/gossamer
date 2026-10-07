@@ -1,9 +1,8 @@
-//! Cross-crate context-hook bridge tests.
+//! Cancellable channel receive driven by a `gossamer-std` context.
 //!
-//! Exercises the `install_ctx_hooks` /
-//! `gos_rt_chan_recv_ctx_option` ABI surface that lets
-//! `gossamer-runtime` observe a `gossamer-std::context::Context`
-//! without depending on the std crate.
+//! Exercises `chan_recv_ctx_i64`, which hands a
+//! `gossamer-std::context::Context` to the runtime's cancellable
+//! receive as its `CancelSource`.
 //!
 //! The end-to-end "cancel a parked goroutine on a channel"
 //! scenario needs the scheduler to be driving real goroutines
@@ -46,7 +45,9 @@ fn chan_recv_ctx_returns_some_value_when_send_happens_before_cancel() {
         }
     });
 
-    let result = gossamer_std::context::chan_recv_ctx_i64(chan, &ctx);
+    #[allow(unsafe_code, reason = "the test drives the raw channel C-ABI directly")]
+    // SAFETY: `chan` came from `gos_rt_chan_new` and stays live for the test.
+    let result = unsafe { gossamer_std::context::chan_recv_ctx_i64(chan, &ctx) };
     assert_eq!(result, Some(42), "expected Some(42), got {result:?}");
     sender.join().expect("sender thread");
 
@@ -69,7 +70,9 @@ fn chan_recv_ctx_returns_none_when_context_is_already_cancelled_at_entry() {
     // through the `is_cancelled` hook check at the top of
     // `gos_rt_chan_recv_ctx_option`, returning None without
     // ever parking on the channel.
-    let result = gossamer_std::context::chan_recv_ctx_i64(chan, &ctx);
+    #[allow(unsafe_code, reason = "the test drives the raw channel C-ABI directly")]
+    // SAFETY: `chan` came from `gos_rt_chan_new` and stays live for the test.
+    let result = unsafe { gossamer_std::context::chan_recv_ctx_i64(chan, &ctx) };
     assert_eq!(
         result, None,
         "pre-cancelled context must short-circuit to None, got {result:?}",
@@ -104,7 +107,9 @@ fn chan_recv_ctx_returns_none_when_cancel_fires_mid_recv_from_os_thread() {
 
     let handle = std::thread::spawn(move || {
         let chan = chan_addr as *mut u8;
-        let value = gossamer_std::context::chan_recv_ctx_i64(chan, &ctx_clone);
+        #[allow(unsafe_code, reason = "the test drives the raw channel C-ABI directly")]
+        // SAFETY: `chan` came from `gos_rt_chan_new` and stays live for the test.
+        let value = unsafe { gossamer_std::context::chan_recv_ctx_i64(chan, &ctx_clone) };
         observed_w.store(value.unwrap_or(-1), Ordering::Release);
     });
 
@@ -136,7 +141,9 @@ fn chan_recv_ctx_returns_none_when_channel_is_closed_with_no_value() {
     }
 
     let ctx = Context::background();
-    let result = gossamer_std::context::chan_recv_ctx_i64(chan, &ctx);
+    #[allow(unsafe_code, reason = "the test drives the raw channel C-ABI directly")]
+    // SAFETY: `chan` came from `gos_rt_chan_new` and stays live for the test.
+    let result = unsafe { gossamer_std::context::chan_recv_ctx_i64(chan, &ctx) };
     assert_eq!(result, None, "closed channel must yield None");
     // Skip chan_drop here - it closes again and aborts. The
     // channel allocation leaks for the test process lifetime,

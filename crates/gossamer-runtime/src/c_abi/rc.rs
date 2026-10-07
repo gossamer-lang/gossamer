@@ -1261,6 +1261,114 @@ pub(crate) unsafe fn rc_alloc_global(size: u64, meta: *const i64) -> *mut u8 {
     unsafe { base.add(RC_HEADER_SIZE) }
 }
 
+/// A runtime object the runtime allocates as a counted node: compiled code
+/// shares and releases it like any other node, and its last release drops it.
+pub trait ManagedHandle: Sized + Send + Sync + 'static {
+    /// The `RC_KIND_FINALIZED` layout naming this type's finalizer.
+    fn meta() -> *const i64;
+}
+
+/// Implements [`ManagedHandle`] for a runtime handle type.
+macro_rules! managed_handle {
+    ($ty:ty) => {
+        impl $crate::c_abi::rc::ManagedHandle for $ty {
+            fn meta() -> *const i64 {
+                static META: std::sync::OnceLock<[i64; 2]> = std::sync::OnceLock::new();
+                META.get_or_init(|| $crate::c_abi::rc::finalized_meta::<$ty>())
+                    .as_ptr()
+            }
+        }
+    };
+}
+pub(crate) use managed_handle;
+
+/// Drops the `T` a finalized node holds.
+///
+/// # Safety
+///
+/// `payload` is the payload of a dead node [`alloc_managed`] built for `T`.
+unsafe extern "C" fn drop_managed<T>(payload: *mut u8) {
+    // SAFETY: the payload holds the `T` `alloc_managed` wrote, dropped once,
+    // when the node's last share is released.
+    unsafe { std::ptr::drop_in_place(payload.cast::<T>()) };
+}
+
+/// The `RC_KIND_FINALIZED` layout for `T`.
+#[must_use]
+pub fn finalized_meta<T>() -> [i64; 2] {
+    let finalizer: unsafe extern "C" fn(*mut u8) = drop_managed::<T>;
+    [
+        gossamer_abi::rc::RC_KIND_FINALIZED,
+        finalizer as usize as i64,
+    ]
+}
+
+/// Allocates `value` as the payload of a counted node holding one share for
+/// the caller. The node never lives in an arena region: a region frees its
+/// blocks wholesale, which would skip the finalizer.
+pub fn alloc_managed<T: ManagedHandle>(value: T) -> *mut T {
+    const { assert!(std::mem::align_of::<T>() <= RC_ALIGN) };
+    let Some(meta_id) = meta_intern(T::meta()) else {
+        return std::ptr::null_mut();
+    };
+    let payload = rc_alloc_heap(std::mem::size_of::<T>(), meta_id).cast::<T>();
+    if !payload.is_null() {
+        // SAFETY: `payload` is a fresh, suitably aligned block of `size_of::<T>()` bytes.
+        unsafe { payload.write(value) };
+    }
+    payload
+}
+
+/// Runs the finalizer of a dead `RC_KIND_FINALIZED` node; any other node has
+/// none.
+///
+/// # Safety
+///
+/// `payload` is a node whose strong count just reached zero.
+unsafe fn finalize(payload: *mut u8) {
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a node.
+    let meta = unsafe { meta_of(header_ptr(payload)) };
+    // SAFETY: a non-null meta table's first word is its kind.
+    if meta.is_null() || unsafe { *meta } != gossamer_abi::rc::RC_KIND_FINALIZED {
+        return;
+    }
+    // SAFETY: a finalized layout's second word is its finalizer's address.
+    let addr = unsafe { *meta.add(1) } as usize;
+    // SAFETY: `addr` is the `drop_managed::<T>` `finalized_meta` stored for this node's type.
+    let finalizer: unsafe extern "C" fn(*mut u8) =
+        unsafe { std::mem::transmute(std::ptr::with_exposed_provenance::<()>(addr)) };
+    // SAFETY: the node is dead and its payload holds the `T` the finalizer drops.
+    unsafe { finalizer(payload) };
+}
+
+/// A zeroed counted block of `size` payload bytes, outside any region, with
+/// one strong share and the layout `meta_id`.
+fn rc_alloc_heap(size: usize, meta_id: u16) -> *mut u8 {
+    let total = size.saturating_add(RC_HEADER_SIZE);
+    let base = rc_block_alloc_zeroed(total);
+    if base.is_null() {
+        return std::ptr::null_mut();
+    }
+    let h = base as *mut RcHeader;
+    // SAFETY: `base` is non-null (checked above), a fresh block of at least a header's size.
+    unsafe {
+        (*h).strong = 1;
+        (*h).weak = AtomicU8::new(0);
+        (*h).disc = 0;
+        (*h).meta_id = meta_id;
+    }
+    rc_live_inc();
+    let usable = if crate::c_abi::ledger::rc_alloc_stats_enabled() {
+        // SAFETY: `base` is the fresh block from the global allocator.
+        unsafe { rc_block_usable_size(base) }
+    } else {
+        0
+    };
+    crate::c_abi::ledger::rc_alloc(size, usable, false, false);
+    // SAFETY: the block holds the header followed by the payload.
+    unsafe { base.add(RC_HEADER_SIZE) }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_rc_alloc(size: u64, meta: *const i64) -> *mut u8 {
     // Exact-size request: mimalloc's bins serve it without padding and
@@ -1801,6 +1909,8 @@ unsafe fn rc_block_usable_size(base: *mut u8) -> usize {
 /// exactly as a normal release would.
 unsafe fn release_rc_children(payload: *mut u8) {
     use gossamer_abi::rc::{RC_CHILD_MAP, RC_CHILD_RC, RC_CHILD_VEC};
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a node whose count reached zero.
+    unsafe { finalize(payload) };
     // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     let meta = unsafe { meta_of(header_ptr(payload)) };
     if meta.is_null() {
@@ -2134,6 +2244,8 @@ unsafe fn block_base(h: *mut RcHeader) -> *mut u8 {
 )]
 #[inline(always)]
 unsafe fn release_children_into(payload: *mut u8, worklist: &mut Vec<*mut u8>) {
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a node whose count reached zero.
+    unsafe { finalize(payload) };
     // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     let meta = unsafe { meta_of(header_ptr(payload)) };
     if meta.is_null() {
@@ -2727,6 +2839,31 @@ unsafe fn free_block(payload: *mut u8) {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    struct CountsDrops(&'static std::sync::atomic::AtomicUsize);
+
+    impl Drop for CountsDrops {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    managed_handle!(CountsDrops);
+
+    #[test]
+    fn a_managed_node_is_dropped_once_with_its_last_share() {
+        static DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let node = alloc_managed(CountsDrops(&DROPS)).cast::<u8>();
+        // SAFETY: `node` is the live managed node built above; each release gives back one of
+        // the two shares it holds.
+        unsafe {
+            gos_rt_rc_retain(node);
+            gos_rt_rc_release(node);
+            assert_eq!(DROPS.load(Ordering::SeqCst), 0, "a share is still held");
+            gos_rt_rc_release(node);
+        }
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     #[cfg_attr(miri, ignore)] // arena uses mmap with non-RW protections; Miri can't model it

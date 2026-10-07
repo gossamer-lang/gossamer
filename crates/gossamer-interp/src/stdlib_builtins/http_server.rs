@@ -261,10 +261,20 @@ pub(crate) fn native_http_server_serve(
     let result = http_std::server::run_dispatch(listener, &config, |request, sink| {
         let method = request.method.as_str().to_string();
         let path = request.path.clone();
-        let (context, context_id) = crate::stdlib_builtins::context::request_context(
+        let (context, context_id) = match crate::stdlib_builtins::context::timed_request_context(
             request_timeout_ms,
             Some(request.context.clone()),
-        );
+        ) {
+            Ok(opened) => opened,
+            Err(e) => {
+                sink.send(crate::builtins::handler_outcome_to_response(
+                    Err(e),
+                    &method,
+                    &path,
+                ));
+                return;
+            }
+        };
         let mut call_args = leading.clone();
         call_args.push(crate::builtins::request_to_value_with_context(
             &request, context,

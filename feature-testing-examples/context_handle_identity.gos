@@ -1,0 +1,44 @@
+// A cancelled context stays cancelled for as long as any handle to it is
+// held, however many contexts are minted after it, and cancelling it again
+// never reaches a context minted later. A deadline cancelled before it fires
+// leaves nothing behind that could later cancel a newer context.
+
+use std::context
+
+fn main() {
+    let root = context::Context::background()
+    let old = context::Context::with_cancel(root)
+    old.cancel()
+    let mut revived = 0
+    for _ in 0..20000 {
+        let fresh = context::Context::with_cancel(root)
+        if !old.is_cancelled() {
+            revived += 1
+        }
+        old.cancel()
+        if fresh.is_cancelled() {
+            revived += 1
+        }
+        fresh.cancel()
+    }
+    println(f"revived: {revived}")
+
+    let timed = context::Context::with_timeout(root, 1)
+    timed.cancel()
+    let mut later = #[]
+    for _ in 0..1000 {
+        later.push(context::Context::with_cancel(root))
+    }
+    let survivor = context::Context::with_timeout(root, 3600000)
+    survivor.cancel()
+    let watched = context::Context::with_cancel(root)
+    println("timed-done {:?}", timed.done_chan().recv())
+    let cancelled_later = later.filter(|c| c.is_cancelled()).len()
+    println(f"later cancelled: {cancelled_later}")
+    println(f"watched cancelled: {watched.is_cancelled()}")
+    for _ in 0..1000 {
+        let c = context::Context::with_timeout(root, 3600000)
+        c.cancel()
+    }
+    println(f"root cancelled: {root.is_cancelled()}")
+}

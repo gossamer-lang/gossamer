@@ -94,7 +94,11 @@ pub(crate) fn install_bytes_builder(globals: &mut Vec<(&'static str, Value)>) {
 // ---------------------------------------------------------------
 
 fn builder_handle(id: i64) -> Value {
-    Value::struct_("bytes::Builder", vec![("__builder", Value::Int(id))])
+    let key = super::set::registry_key(id, |id| {
+        let removed = with_builders(|r| r.borrow_mut().remove(&id));
+        drop(removed);
+    });
+    Value::struct_("bytes::Builder", vec![("__builder", key)])
 }
 
 fn builder_id_of(value: &Value) -> Option<i64> {
@@ -102,9 +106,7 @@ fn builder_id_of(value: &Value) -> Option<i64> {
         if inner.name == "bytes::Builder" {
             for (i, v) in &inner.fields {
                 if (*i) == "__builder" {
-                    if let Value::Int(n) = v {
-                        return Some(*n);
-                    }
+                    return super::set::registry_id(v);
                 }
             }
         }
@@ -175,7 +177,11 @@ pub(crate) fn builtin_builder_len(args: &[Value]) -> RuntimeResult<Value> {
 // ---------------------------------------------------------------
 
 fn buffer_handle(id: i64) -> Value {
-    Value::struct_("bytes::Buffer", vec![("__buffer", Value::Int(id))])
+    let key = super::set::registry_key(id, |id| {
+        let removed = with_buffers(|r| r.borrow_mut().remove(&id));
+        drop(removed);
+    });
+    Value::struct_("bytes::Buffer", vec![("__buffer", key)])
 }
 
 fn buffer_id_of(value: &Value) -> Option<i64> {
@@ -183,9 +189,7 @@ fn buffer_id_of(value: &Value) -> Option<i64> {
         if inner.name == "bytes::Buffer" {
             for (i, v) in &inner.fields {
                 if (*i) == "__buffer" {
-                    if let Value::Int(n) = v {
-                        return Some(*n);
-                    }
+                    return super::set::registry_id(v);
                 }
             }
         }

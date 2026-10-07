@@ -52,7 +52,13 @@ fn regex_handle(id: u64, source: &str) -> Value {
     Value::struct_(
         "regex::Pattern",
         vec![
-            ("__regex_id", Value::Int(id as i64)),
+            (
+                "__regex_id",
+                crate::stdlib_builtins::set::registry_key(id as i64, |id| {
+                    let removed = REGEX_REGISTRY.with(|r| r.borrow_mut().remove(&(id as u64)));
+                    drop(removed);
+                }),
+            ),
             ("__source", Value::String(SmolStr::from(source.to_string()))),
         ],
     )
@@ -70,10 +76,10 @@ fn regex_id_from(value: &Value) -> RuntimeResult<u64> {
         ));
     }
     for (ident, v) in &inner.fields {
-        if (*ident) == "__regex_id" {
-            if let Value::Int(id) = v {
-                return Ok(*id as u64);
-            }
+        if (*ident) == "__regex_id"
+            && let Some(id) = crate::stdlib_builtins::set::registry_id(v)
+        {
+            return Ok(id as u64);
         }
     }
     Err(RuntimeError::Type(

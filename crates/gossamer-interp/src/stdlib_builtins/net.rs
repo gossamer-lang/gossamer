@@ -234,7 +234,7 @@ pub(crate) fn builtin_tcp_listener_bind(args: &[Value]) -> RuntimeResult<Value> 
                 r.borrow_mut()
                     .insert(id, Arc::new(parking_lot::Mutex::new(listener)));
             });
-            Ok(ok_variant(handle_struct("net::TcpListener", id)))
+            Ok(ok_variant(open_handle_struct("net::TcpListener", id)))
         }
         Err(e) => Ok(err_variant(format!("{e}"))),
     }
@@ -267,7 +267,7 @@ pub(crate) fn builtin_tcp_listener_accept(args: &[Value]) -> RuntimeResult<Value
                     .insert(sid, Arc::new(parking_lot::Mutex::new(Some(stream))));
             });
             let pair = Value::Tuple(Arc::from(vec![
-                handle_struct("net::TcpStream", sid),
+                open_handle_struct("net::TcpStream", sid),
                 Value::String(addr.to_string().into()),
             ]));
             Ok(ok_variant(pair))
@@ -315,7 +315,7 @@ pub(crate) fn builtin_tcp_stream_connect(args: &[Value]) -> RuntimeResult<Value>
                 r.borrow_mut()
                     .insert(id, Arc::new(parking_lot::Mutex::new(Some(stream))));
             });
-            Ok(ok_variant(handle_struct("net::TcpStream", id)))
+            Ok(ok_variant(open_handle_struct("net::TcpStream", id)))
         }
         Ok(Err(e)) => Ok(err_variant(e.to_string())),
         Err(e) => Ok(err_variant(e)),
@@ -744,7 +744,7 @@ pub(crate) fn builtin_unix_listener_bind(args: &[Value]) -> RuntimeResult<Value>
                 r.borrow_mut()
                     .insert(id, Arc::new(parking_lot::Mutex::new(l)));
             });
-            Ok(ok_variant(handle_struct("net::UnixListener", id)))
+            Ok(ok_variant(open_handle_struct("net::UnixListener", id)))
         }
         Err(e) => Ok(err_variant(format!("{e}"))),
     }
@@ -774,7 +774,7 @@ pub(crate) fn builtin_unix_listener_accept(args: &[Value]) -> RuntimeResult<Valu
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let pair = Value::Tuple(Arc::from(vec![
-                handle_struct("net::UnixStream", sid),
+                open_handle_struct("net::UnixStream", sid),
                 Value::String(addr_str.into()),
             ]));
             Ok(ok_variant(pair))
@@ -809,7 +809,7 @@ pub(crate) fn builtin_unix_stream_connect(args: &[Value]) -> RuntimeResult<Value
                 r.borrow_mut()
                     .insert(id, Arc::new(parking_lot::Mutex::new(s)));
             });
-            Ok(ok_variant(handle_struct("net::UnixStream", id)))
+            Ok(ok_variant(open_handle_struct("net::UnixStream", id)))
         }
         Ok(Err(e)) => Ok(err_variant(e.to_string())),
         Err(e) => Ok(err_variant(e)),
@@ -1007,7 +1007,7 @@ pub(crate) fn builtin_tcp_stream_start_tls(args: &[Value]) -> RuntimeResult<Valu
                 r.borrow_mut()
                     .insert(nid, Arc::new(parking_lot::Mutex::new(tls)));
             });
-            Ok(ok_variant(handle_struct("net::TcpStream", nid)))
+            Ok(ok_variant(open_handle_struct("net::TcpStream", nid)))
         }
         Err(e) => Ok(err_variant(format!("{e}"))),
     }
@@ -1039,7 +1039,7 @@ pub(crate) fn builtin_tcp_stream_start_tls_insecure(args: &[Value]) -> RuntimeRe
                 r.borrow_mut()
                     .insert(nid, Arc::new(parking_lot::Mutex::new(tls)));
             });
-            Ok(ok_variant(handle_struct("net::TcpStream", nid)))
+            Ok(ok_variant(open_handle_struct("net::TcpStream", nid)))
         }
         Err(e) => Ok(err_variant(format!("{e}"))),
     }
@@ -1067,7 +1067,7 @@ pub(crate) fn builtin_tcp_stream_start_tls_ca(args: &[Value]) -> RuntimeResult<V
                 r.borrow_mut()
                     .insert(nid, Arc::new(parking_lot::Mutex::new(tls)));
             });
-            Ok(ok_variant(handle_struct("net::TcpStream", nid)))
+            Ok(ok_variant(open_handle_struct("net::TcpStream", nid)))
         }
         Err(e) => Ok(err_variant(format!("{e}"))),
     }
@@ -1097,7 +1097,7 @@ pub(crate) fn builtin_udp_bind(args: &[Value]) -> RuntimeResult<Value> {
                 r.borrow_mut()
                     .insert(id, Arc::new(parking_lot::Mutex::new(sock)));
             });
-            Ok(ok_variant(handle_struct("net::UdpSocket", id)))
+            Ok(ok_variant(open_handle_struct("net::UdpSocket", id)))
         }
         Err(e) => Ok(err_variant(format!("{e}"))),
     }

@@ -171,3 +171,34 @@ fn blob_count(dir: &Path) -> usize {
             .count()
     })
 }
+
+#[test]
+fn a_warm_check_reports_the_warnings_a_cold_one_did() {
+    let project = Project::new("warnings");
+    project.write(
+        "main.gos",
+        "fn main() {\n    let x: u8 = 5\n    match x { 0..=255 => println(\"all\"), _ => println(\"never\") }\n}\n",
+    );
+    let warnings = |out: &Output| -> Vec<String> {
+        String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .filter(|line| line.starts_with("warning["))
+            .map(str::to_string)
+            .collect()
+    };
+    let cold = project.check();
+    assert_ok(&cold, "cold check");
+    assert!(!restored(&cold), "the first check cannot be a cache hit");
+    let warm = project.check();
+    assert_ok(&warm, "warm check");
+    assert!(
+        restored(&warm),
+        "the second check must restore the front end"
+    );
+    assert!(
+        warnings(&cold).iter().any(|line| line.contains("GM0002")),
+        "{}",
+        String::from_utf8_lossy(&cold.stderr)
+    );
+    assert_eq!(warnings(&warm), warnings(&cold));
+}

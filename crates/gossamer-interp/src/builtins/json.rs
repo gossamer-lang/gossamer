@@ -597,6 +597,7 @@ pub(crate) fn gossamer_to_json_value(value: &Value) -> json_std::Value {
         | Value::Builtin(_)
         | Value::Native(_)
         | Value::Channel(_)
+        | Value::Opaque(_)
         | Value::LazyIter(_) => json_std::Value::Null,
         Value::Map(map) => {
             let mut out = std::collections::BTreeMap::new();

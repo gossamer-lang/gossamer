@@ -41,6 +41,8 @@ pub struct GosMutex {
     owner: AtomicI64,
 }
 
+super::rc::managed_handle!(GosMutex);
+
 #[derive(Default)]
 struct MutexState {
     locked: bool,
@@ -51,12 +53,12 @@ struct MutexState {
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_mutex_new() -> *mut GosMutex {
     ffi_entry!(std::ptr::null_mut(), {
-        Box::into_raw(Box::new(GosMutex {
+        super::rc::alloc_managed(GosMutex {
             state: parking_lot::Mutex::new(MutexState::default()),
             released: parking_lot::Condvar::new(),
             last_unlocker: AtomicI64::new(-1),
             owner: AtomicI64::new(-1),
-        }))
+        })
     })
 }
 

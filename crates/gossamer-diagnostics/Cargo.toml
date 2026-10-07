@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 gossamer-lex = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 gossamer-ast = { workspace = true }

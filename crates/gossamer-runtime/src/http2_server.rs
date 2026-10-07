@@ -95,7 +95,7 @@ fn try_begin_stream(in_flight: &AtomicUsize) -> bool {
 struct Deadline<F> {
     future: Pin<Box<F>>,
     expires_at: Instant,
-    timer_gid: Option<Gid>,
+    timer: Option<sched_global::TimerHandle>,
 }
 
 impl<F> Deadline<F> {
@@ -103,13 +103,13 @@ impl<F> Deadline<F> {
         Self {
             future: Box::pin(future),
             expires_at,
-            timer_gid: None,
+            timer: None,
         }
     }
 
     fn clear_timer(&mut self) {
-        if let Some(gid) = self.timer_gid.take() {
-            sched_global::forget_waker(gid);
+        if let Some(timer) = self.timer.take() {
+            sched_global::cancel_timer(timer);
         }
     }
 }
@@ -123,11 +123,12 @@ impl<F: Future> Future for Deadline<F> {
             this.clear_timer();
             return Poll::Ready(Err("HTTP/2 stream deadline exceeded"));
         }
-        if this.timer_gid.is_none() {
-            let timer_gid = sched_global::add_timer(this.expires_at);
+        if this.timer.is_none() {
             let wake = cx.waker().clone();
-            sched_global::register_waker(timer_gid, Box::new(move || wake.wake_by_ref()));
-            this.timer_gid = Some(timer_gid);
+            this.timer = Some(sched_global::add_timer(
+                this.expires_at,
+                Box::new(move || wake.wake_by_ref()),
+            ));
         }
         match this.future.as_mut().poll(cx) {
             Poll::Ready(output) => {

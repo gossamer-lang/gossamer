@@ -71,6 +71,7 @@ fn cached_frontend_round_trips_every_side_table() {
         &checked.resolutions,
         &checked.table,
         &checked.tcx,
+        &[],
     );
 
     let restored: CachedFrontend = load_blob_in(&root, &key).expect("blob was published");
@@ -111,6 +112,7 @@ fn an_edited_source_does_not_hit_the_previous_entry() {
         &checked.resolutions,
         &checked.table,
         &checked.tcx,
+        &[],
     );
 
     let edited = PROGRAM.replace("3.14159", "3.14");
@@ -136,6 +138,7 @@ fn a_truncated_blob_is_a_miss_rather_than_a_panic() {
         &checked.resolutions,
         &checked.table,
         &checked.tcx,
+        &[],
     );
 
     let path = root.join(format!("{}.bin", key.as_hex()));
@@ -157,4 +160,36 @@ fn scratch(name: &str) -> PathBuf {
     ));
     fs::create_dir_all(&path).expect("create scratch dir");
     path
+}
+
+#[test]
+fn a_restored_pass_reports_the_warnings_the_first_pass_did() {
+    const WARNS: &str = "fn main() {\n    let x: u8 = 5\n    match x { 0..=255 => println(\"all\"), _ => println(\"never\") }\n}\n";
+    let root = scratch("warnings");
+    let mut map = SourceMap::new();
+    let file = map.add_file("warnings.gos".to_string(), WARNS.to_string());
+    let outcome = check_frontend(map.source(file), file);
+    assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
+    let codes: Vec<&str> = outcome.warnings.iter().map(|w| w.code.as_str()).collect();
+    assert_eq!(codes, ["GM0002"]);
+
+    let key = FrontendCacheKey::new(WARNS, "warnings");
+    let checked = outcome.checked;
+    store_frontend_in(
+        &root,
+        &key,
+        &checked.sf,
+        &checked.resolutions,
+        &checked.table,
+        &checked.tcx,
+        &outcome.warnings,
+    );
+    let restored: CachedFrontend = load_blob_in(&root, &key).expect("blob was published");
+    assert_eq!(
+        format!("{:?}", restored.warnings),
+        format!("{:?}", outcome.warnings),
+        "restored warnings differ"
+    );
+
+    let _ = fs::remove_dir_all(&root);
 }

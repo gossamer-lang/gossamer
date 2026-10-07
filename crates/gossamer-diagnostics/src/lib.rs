@@ -22,7 +22,7 @@ pub use code_registry::{REGISTRY, codes, explain};
 pub use render::{RenderOptions, render, render_json, render_plain};
 
 /// Severity of a diagnostic. Mirrors the standard four-level scale.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Severity {
     /// Hard error; compilation cannot produce a usable artifact.
     Error,
@@ -74,6 +74,24 @@ impl Code {
     }
 }
 
+impl serde::Serialize for Code {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.0)
+    }
+}
+
+// A code read back resolves to the registry's own spelling, so only a code
+// the registry knows deserializes.
+impl<'de> serde::Deserialize<'de> for Code {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let spelled = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
+        code_registry::codes()
+            .find(|code| *code == spelled)
+            .map(Code)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown diagnostic code `{spelled}`")))
+    }
+}
+
 impl fmt::Display for Code {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         out.write_str(self.0)
@@ -81,7 +99,7 @@ impl fmt::Display for Code {
 }
 
 /// Anchor for a label: a file id plus a byte-range span.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Location {
     /// File the label refers to.
     pub file: FileId,
@@ -98,7 +116,7 @@ impl Location {
 }
 
 /// One label attached to a diagnostic.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Label {
     /// Where the label points.
     pub location: Location,
@@ -131,7 +149,7 @@ impl Label {
 }
 
 /// A structured fix-it the formatter (or `gos lint --fix`) can apply.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Suggestion {
     /// Where the replacement applies.
     pub location: Location,
@@ -158,7 +176,7 @@ impl Suggestion {
 }
 
 /// One diagnostic emitted by the compiler.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Diagnostic {
     /// Severity of the diagnostic.
     pub severity: Severity,

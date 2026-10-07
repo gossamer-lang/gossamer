@@ -31,6 +31,8 @@ pub struct GosAtomicI64 {
     last_release_gid: AtomicI64,
 }
 
+super::rc::managed_handle!(GosAtomicI64);
+
 fn record_atomic_acquire(a: &GosAtomicI64) {
     let from = a.last_release_gid.load(Ordering::Acquire);
     if from >= 0 {
@@ -46,10 +48,10 @@ fn record_atomic_release(a: &GosAtomicI64) {
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_atomic_i64_new(initial: i64) -> *mut GosAtomicI64 {
     ffi_entry!(std::ptr::null_mut(), {
-        Box::into_raw(Box::new(GosAtomicI64 {
+        super::rc::alloc_managed(GosAtomicI64 {
             inner: AtomicI64::new(initial),
             last_release_gid: AtomicI64::new(-1),
-        }))
+        })
     })
 }
 
@@ -109,10 +111,10 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_fetch_add(a: *mut GosAtomicI64, delta
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_atomic_bool_new(initial: bool) -> *mut GosAtomicI64 {
     ffi_entry!(std::ptr::null_mut(), {
-        Box::into_raw(Box::new(GosAtomicI64 {
+        super::rc::alloc_managed(GosAtomicI64 {
             inner: AtomicI64::new(i64::from(initial)),
             last_release_gid: AtomicI64::new(-1),
-        }))
+        })
     })
 }
 
@@ -415,9 +417,9 @@ mod tests {
         // null one is accepted by the callee.
         let published = unsafe { &*atomic }.last_release_gid.load(Ordering::Acquire);
         assert_eq!(published, 701);
-        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
-        // and not used again.
-        unsafe { drop(Box::from_raw(atomic)) };
+        // SAFETY: the pointer is the one share this test's constructor call answered, given back
+        // once here and not used again.
+        unsafe { crate::c_abi::rc::gos_rt_rc_release(atomic.cast()) };
     }
 
     #[test]
@@ -431,8 +433,8 @@ mod tests {
         // null one is accepted by the callee.
         let published = unsafe { &*atomic }.last_release_gid.load(Ordering::Acquire);
         assert_eq!(published, -1);
-        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
-        // and not used again.
-        unsafe { drop(Box::from_raw(atomic)) };
+        // SAFETY: the pointer is the one share this test's constructor call answered, given back
+        // once here and not used again.
+        unsafe { crate::c_abi::rc::gos_rt_rc_release(atomic.cast()) };
     }
 }

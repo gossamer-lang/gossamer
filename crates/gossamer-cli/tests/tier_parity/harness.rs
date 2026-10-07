@@ -453,6 +453,15 @@ const SPECS: &[Spec] = &[
     // cancellation-aware receive answer the same on every tier, whether the
     // context node lives in the interpreter's registry or the runtime's.
     spec("feature-testing-examples/context_lifecycle.gos"),
+    // A context handle names one context for as long as it is held: a
+    // cancelled one never revives and never cancels a context minted after
+    // it, and a deadline cancelled early leaves nothing that fires later.
+    spec("feature-testing-examples/context_handle_identity.gos"),
+    // A lock stays alive for every holder - a closure, a field, a `Vec`, a
+    // goroutine, one that panics - and is freed with the last.
+    spec("feature-testing-examples/sync_rwlock_lifetimes.gos"),
+    // Each byte buffer reads back its own bytes on the VM's fast path.
+    spec("feature-testing-examples/u8vec_two_buffers.gos"),
     // Reflection over a struct, a tuple struct, an enum, and a generic type
     // at two instantiations, all folded during compilation.
     spec("feature-testing-examples/typeinfo_enums_and_generics.gos"),

@@ -1766,6 +1766,17 @@ pub const REGISTRY: &[(&str, &str)] = &[
             rename the method in one of them.",
     ),
     (
+        "GT0118",
+        "A callable runs on another goroutine, but it captures a binding the\n\
+            code around it can still reach: one something writes, or one held by a\n\
+            callable whose captures are not visible where it crosses, such as a\n\
+            call's result, a field, a reassigned binding, or a closure's parameter.\n\
+            A closure written at the `spawn` snapshots what it captures; any other\n\
+            callable carries the bindings themselves. Spawn a named function or a\n\
+            closure written at the `spawn`, and answer values through `join()`, a\n\
+            channel, or a `sync::Shared`.",
+    ),
+    (
         "GX0001",
         "An operation received a value of an incompatible type. The\n\
                      diagnostic names the type that was required and the type\n\

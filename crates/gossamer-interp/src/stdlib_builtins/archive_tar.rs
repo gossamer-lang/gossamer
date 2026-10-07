@@ -207,24 +207,6 @@ pub(crate) fn builtin_archive_tar_write(args: &[Value]) -> RuntimeResult<Value> 
 
 use std::sync::atomic::AtomicU64 as StdAtomicU64;
 
-use super::set::GlobalReg;
-
-// Process-global (not `thread_local!`): goroutines run on an OS
-// worker-thread pool, so a handle minted on one thread must resolve on
-// another. A `thread_local!` registry silently lost every cross-goroutine
-// barrier rendezvous (`Barrier::wait` no-op'd on the worker thread,
-// deadlocking the main goroutine). Mirrors the `sync::*` registries.
-pub(crate) static ATOMIC_U64_REGISTRY: GlobalReg<
-    std::collections::HashMap<i64, Arc<StdAtomicU64>>,
-> = GlobalReg::new(|| {
-    parking_lot::ReentrantMutex::new(std::cell::RefCell::new(std::collections::HashMap::new()))
-});
-pub(crate) static BARRIER_REGISTRY: GlobalReg<
-    std::collections::HashMap<i64, Arc<gossamer_std::sync::Barrier>>,
-> = GlobalReg::new(|| {
-    parking_lot::ReentrantMutex::new(std::cell::RefCell::new(std::collections::HashMap::new()))
-});
-
 pub(crate) fn install_sync_atomic_u64(globals: &mut Vec<(&'static str, Value)>) {
     let entries: &[(&str, BuiltinFnPub)] = &[
         ("AtomicU64::new", builtin_atomic_u64_new),
@@ -241,29 +223,16 @@ pub(crate) fn install_sync_atomic_u64(globals: &mut Vec<(&'static str, Value)>) 
     }
 }
 
-pub(crate) fn atomic_u64_handle(id: i64) -> Value {
-    atomic_handle("sync::AtomicU64", id)
-}
-
-pub(crate) fn atomic_u64_id_of(value: &Value) -> Option<i64> {
-    atomic_id_of(value, "sync::AtomicU64")
-}
-
 pub(crate) fn with_atomic_u64<R>(
     value: &Value,
     f: impl FnOnce(&Arc<StdAtomicU64>) -> R,
 ) -> Option<R> {
-    let id = atomic_u64_id_of(value)?;
-    ATOMIC_U64_REGISTRY.with(|r| r.borrow().get(&id).map(f))
+    atomic_cell(value, "sync::AtomicU64").map(|cell| f(&cell))
 }
 
 pub(crate) fn builtin_atomic_u64_new(args: &[Value]) -> RuntimeResult<Value> {
     let init = args.first().and_then(value_to_int).unwrap_or(0) as u64;
-    let id = next_atomic_id();
-    ATOMIC_U64_REGISTRY.with(|r| {
-        r.borrow_mut().insert(id, Arc::new(StdAtomicU64::new(init)));
-    });
-    Ok(atomic_u64_handle(id))
+    Ok(atomic_handle("sync::AtomicU64", StdAtomicU64::new(init)))
 }
 
 pub(crate) fn builtin_atomic_u64_load(args: &[Value]) -> RuntimeResult<Value> {

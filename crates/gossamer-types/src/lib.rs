@@ -24,6 +24,7 @@ mod error;
 mod exhaustiveness;
 mod foreign_layout;
 mod foreign_policy;
+mod frontend_checks;
 mod infer;
 mod normalize;
 pub mod printer;
@@ -45,7 +46,7 @@ pub use builtin_traits::{
     BUILTIN_TRAITS, BuiltinTrait, BuiltinTraitKind, ITERATOR_BOUND_METHODS, builtin_trait,
     render_builtin_traits_markdown,
 };
-pub use capture_writes::{CaptureWriteDiagnostic, check_capture_writes};
+pub use capture_writes::{CaptureWriteDiagnostic, CaptureWriteKind, check_capture_writes};
 pub use checker::{
     STDLIB_TRAIT_NAMES, core_type_accepts_method, core_type_declares_method,
     is_array_sequence_method, is_btree_map_method, is_btree_set_method,
@@ -61,6 +62,9 @@ pub use error::{
 pub use exhaustiveness::{ExhaustivenessDiagnostic, ExhaustivenessError, check_exhaustiveness};
 pub use foreign_layout::{CLeaf, CStep, c_class_signed, c_class_width};
 pub use foreign_policy::ForeignPolicy;
+pub use frontend_checks::{
+    CheckPhase, PhaseObserver, UnitChecks, check_resolved_unit, top_level_names,
+};
 pub use infer::{InferCtxt, UnifyError};
 pub use normalize::normalize_caller_side_spellings;
 pub use printer::{public_type_name, render_public_ty, render_ty};

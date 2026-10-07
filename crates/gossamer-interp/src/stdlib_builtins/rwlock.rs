@@ -9,35 +9,24 @@
     clippy::needless_pass_by_value
 )]
 //! `std::sync::RwLock` builtins for the bytecode VM - a reader-writer
-//! lock guarding a single `i64`. The handle is a struct carrying an
-//! `id`; the real `parking_lot::RwLock` lives in a process-global
-//! registry keyed by `id` (mirrors `sync::Map` / `sync::Once`), so a
-//! handle minted on one goroutine worker thread resolves on another.
+//! lock guarding a single `i64`. The handle is a struct whose one field
+//! holds the `parking_lot::RwLock` itself, shared by every copy of the
+//! handle and freed with the last one, so a handle minted on one goroutine
+//! worker thread reaches the same lock on another.
 //!
 //! `with_read` / `with_write` are `native` builtins so the closure can
 //! be invoked through the interpreter dispatcher - a plain
 //! `BuiltinFnPub` cannot call the callback. They are registered as
 //! free data-last calls (`sync::RwLock::with_read(lock, f)`), the same
 //! shape as `sync::Once::call`, and are the bit-identical VM mirror of
-//! the compiled `gos_rt_rwlock_with_read` / `_with_write` shims. The
-//! guarded value is an `i64` for this first cut; a String-guarded
-//! variant is a documented follow-up.
+//! the compiled `gos_rt_rwlock_with_read` / `_with_write` shims.
 
-use std::cell::RefCell;
-use std::collections::HashMap as StdHashMap;
 use std::sync::Arc;
-use std::sync::LazyLock;
-use std::sync::atomic::{AtomicI64, Ordering};
-
-use gossamer_ast::Ident;
 
 use crate::builtins::{BuiltinFnPub, value_to_int};
 use crate::value::{NativeDispatch, RuntimeResult, Value};
 
-static RWLOCK_REGISTRY: LazyLock<
-    parking_lot::Mutex<StdHashMap<i64, Arc<parking_lot::RwLock<i64>>>>,
-> = LazyLock::new(|| parking_lot::Mutex::new(StdHashMap::new()));
-static NEXT_ID: AtomicI64 = AtomicI64::new(1);
+type Lock = parking_lot::RwLock<i64>;
 
 pub(crate) fn install_rwlock(globals: &mut Vec<(&'static str, Value)>) {
     let plain: &[(&str, BuiltinFnPub)] = &[
@@ -68,46 +57,23 @@ pub(crate) fn install_rwlock(globals: &mut Vec<(&'static str, Value)>) {
     }
 }
 
-fn lock_handle(id: i64) -> Value {
-    Value::struct_(
-        "sync::RwLock",
-        Arc::unwrap_or_clone(Arc::new(vec![("__rwlock", Value::Int(id))])),
-    )
+fn lock_handle(lock: Lock) -> Value {
+    crate::value::state_handle("sync::RwLock", "__rwlock", Arc::new(lock))
 }
 
-fn lock_id_of(value: &Value) -> Option<i64> {
-    if let Value::Struct(inner) = value {
-        if inner.name == "sync::RwLock" {
-            for (i, v) in &inner.fields {
-                if (*i) == "__rwlock" {
-                    if let Value::Int(n) = v {
-                        return Some(*n);
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-fn arc_of(id: i64) -> Option<Arc<parking_lot::RwLock<i64>>> {
-    RWLOCK_REGISTRY.lock().get(&id).cloned()
+fn lock_of(value: &Value) -> Option<Arc<Lock>> {
+    crate::value::handle_state(value, "sync::RwLock", "__rwlock")
 }
 
 pub(crate) fn builtin_rwlock_new(args: &[Value]) -> RuntimeResult<Value> {
     let init = args.first().and_then(value_to_int).unwrap_or(0);
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    RWLOCK_REGISTRY
-        .lock()
-        .insert(id, Arc::new(parking_lot::RwLock::new(init)));
-    Ok(lock_handle(id))
+    Ok(lock_handle(Lock::new(init)))
 }
 
 pub(crate) fn builtin_rwlock_get(args: &[Value]) -> RuntimeResult<Value> {
     let v = args
         .first()
-        .and_then(lock_id_of)
-        .and_then(arc_of)
+        .and_then(lock_of)
         .map(|a| *a.read())
         .unwrap_or(0);
     Ok(Value::Int(v))
@@ -115,7 +81,7 @@ pub(crate) fn builtin_rwlock_get(args: &[Value]) -> RuntimeResult<Value> {
 
 pub(crate) fn builtin_rwlock_set(args: &[Value]) -> RuntimeResult<Value> {
     let val = args.get(1).and_then(value_to_int).unwrap_or(0);
-    if let Some(arc) = args.first().and_then(lock_id_of).and_then(arc_of) {
+    if let Some(arc) = args.first().and_then(lock_of) {
         *arc.write() = val;
     }
     Ok(Value::Unit)
@@ -125,7 +91,7 @@ pub(crate) fn native_rwlock_with_read(
     dispatch: &mut dyn NativeDispatch,
     args: &[Value],
 ) -> RuntimeResult<Value> {
-    let Some(arc) = args.first().and_then(lock_id_of).and_then(arc_of) else {
+    let Some(arc) = args.first().and_then(lock_of) else {
         return Ok(Value::Int(0));
     };
     let Some(f) = args.get(1).cloned() else {
@@ -139,7 +105,7 @@ pub(crate) fn native_rwlock_with_write(
     dispatch: &mut dyn NativeDispatch,
     args: &[Value],
 ) -> RuntimeResult<Value> {
-    let Some(arc) = args.first().and_then(lock_id_of).and_then(arc_of) else {
+    let Some(arc) = args.first().and_then(lock_of) else {
         return Ok(Value::Int(0));
     };
     let Some(f) = args.get(1).cloned() else {
@@ -151,4 +117,24 @@ pub(crate) fn native_rwlock_with_write(
     let next = value_to_int(&result).unwrap_or(current);
     *guard = next;
     Ok(Value::Int(next))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_lock_is_freed_with_its_last_handle() {
+        let handle = builtin_rwlock_new(&[Value::Int(7)]).expect("RwLock::new");
+        let copy = handle.clone();
+        let lock = lock_of(&handle).expect("a lock handle");
+        assert_eq!(*lock.read(), 7);
+        drop(handle);
+        drop(copy);
+        assert_eq!(
+            Arc::strong_count(&lock),
+            1,
+            "only this test still holds the lock"
+        );
+    }
 }

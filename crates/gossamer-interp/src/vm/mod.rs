@@ -1503,6 +1503,7 @@ impl Vm {
             | Value::Builtin(_)
             | Value::Native(_)
             | Value::NativeEnum(_)
+            | Value::Opaque(_)
             | Value::CaptureCell(_) => None,
         }
     }

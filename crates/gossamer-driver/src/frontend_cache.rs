@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gossamer_ast::SourceFile;
+use gossamer_diagnostics::Diagnostic;
 use gossamer_lex::FileId;
 use gossamer_pkg::sha256;
 use gossamer_resolve::Resolutions;
@@ -41,7 +42,7 @@ use gossamer_types::{TyCtxt, TypeTable};
 
 /// Bumped whenever the payload layout or the key recipe changes, so blobs
 /// written by an older schema are rejected instead of mis-decoded.
-const BLOB_MAGIC: &[u8; 8] = b"GOSFC002";
+const BLOB_MAGIC: &[u8; 8] = b"GOSFC003";
 const MAX_BLOB_BYTES: usize = 64 * 1024 * 1024;
 static CACHE_WRITE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -57,6 +58,9 @@ pub struct CachedFrontend {
     pub table: TypeTable,
     /// Type interner backing every [`gossamer_types::Ty`] in `table`.
     pub tcx: TyCtxt,
+    /// The advisory findings the pass reported, which a restored pass
+    /// reports again.
+    pub warnings: Vec<Diagnostic>,
 }
 
 /// Borrowed mirror of [`CachedFrontend`] used on the write path so
@@ -69,17 +73,20 @@ struct FrontendView<'a> {
     resolutions: &'a Resolutions,
     table: &'a TypeTable,
     tcx: &'a TyCtxt,
+    warnings: &'a [Diagnostic],
 }
 
-/// Publishes one accepted front-end result under `key`.
+/// Publishes one accepted front-end result, with the warnings it reported,
+/// under `key`.
 pub fn store_frontend(
     key: &FrontendCacheKey,
     sf: &SourceFile,
     resolutions: &Resolutions,
     table: &TypeTable,
     tcx: &TyCtxt,
+    warnings: &[Diagnostic],
 ) {
-    store_frontend_in(&cache_dir(), key, sf, resolutions, table, tcx);
+    store_frontend_in(&cache_dir(), key, sf, resolutions, table, tcx, warnings);
 }
 
 /// Variant of [`store_frontend`] that writes into `root`.
@@ -90,6 +97,7 @@ pub fn store_frontend_in(
     resolutions: &Resolutions,
     table: &TypeTable,
     tcx: &TyCtxt,
+    warnings: &[Diagnostic],
 ) {
     store_blob_in(
         root,
@@ -99,6 +107,7 @@ pub fn store_frontend_in(
             resolutions,
             table,
             tcx,
+            warnings,
         },
     );
 }

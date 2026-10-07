@@ -862,7 +862,7 @@ fn native_http_serve(dispatch: &mut dyn NativeDispatch, args: &[Value]) -> Runti
         let method = request.method.as_str().to_string();
         let path = request.path.clone();
         let (context, context_id) =
-            crate::stdlib_builtins::context::request_context(0, Some(request.context.clone()));
+            crate::stdlib_builtins::context::request_context(Some(request.context.clone()));
         let mut args = leading.clone();
         args.push(request_to_value_with_context(&request, context));
         dispatch.spawn_with_outcome(
@@ -922,7 +922,7 @@ fn native_httptest_record(
         trailers: None,
         peer_addr: String::new(),
     };
-    let (context, context_id) = crate::stdlib_builtins::context::request_context(0, None);
+    let (context, context_id) = crate::stdlib_builtins::context::request_context(None);
     let value = request_to_value_with_context(&request, context);
     let outcome = crate::value::dispatch_request(dispatch, &args[0], value);
     crate::stdlib_builtins::context::cancel_request_context(context_id);
@@ -1040,10 +1040,7 @@ fn native_http_serve_tls(
         |request, sink| {
             let method = request.method.as_str().to_string();
             let path = request.path.clone();
-            let (context, context_id) = crate::stdlib_builtins::context::request_context(
-                0,
-                Some(request.context.clone()),
-            );
+            let (context, context_id) = crate::stdlib_builtins::context::request_context(Some(request.context.clone()));
             let mut args = leading.clone();
             args.push(request_to_value_with_context(&request, context));
             dispatch.spawn_with_outcome(
@@ -1167,10 +1164,7 @@ fn native_http2_bind_and_run_h2c(
             Ok((req, resp_tx)) => {
                 let method = req.method.as_str().to_string();
                 let path = req.path.clone();
-                let (context, context_id) = crate::stdlib_builtins::context::request_context(
-                    0,
-                    Some(req.context.clone()),
-                );
+                let (context, context_id) = crate::stdlib_builtins::context::request_context(Some(req.context.clone()));
                 let mut args = leading.clone();
                 args.push(request_to_value_with_context(&req, context));
                 dispatch.spawn_with_outcome(
@@ -1310,10 +1304,7 @@ fn native_http3_serve(dispatch: &mut dyn NativeDispatch, args: &[Value]) -> Runt
             Ok((req, resp_tx)) => {
                 let method = req.method.as_str().to_string();
                 let path = req.path.clone();
-                let (context, context_id) = crate::stdlib_builtins::context::request_context(
-                    0,
-                    Some(req.context.clone()),
-                );
+                let (context, context_id) = crate::stdlib_builtins::context::request_context(Some(req.context.clone()));
                 let mut args = leading.clone();
                 args.push(request_to_value_with_context(&req, context));
                 dispatch.spawn_with_outcome(

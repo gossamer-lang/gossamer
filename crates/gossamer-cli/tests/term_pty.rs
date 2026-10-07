@@ -343,17 +343,22 @@ fn main() {
 "#;
 
 /// The path of the terminal device `fd` refers to.
+///
+/// `ttyname_r` writes into a buffer of the caller's own: the tests run on
+/// parallel threads, and `ttyname` answers one buffer the whole process
+/// shares, so one test could read another's terminal.
 fn tty_path(fd: &OwnedFd) -> String {
-    // SAFETY: `fd` is an open terminal; `ttyname` answers a NUL-terminated
-    // name valid until the next call on this thread.
-    let name = unsafe { libc::ttyname(fd.as_raw_fd()) };
-    assert!(
-        !name.is_null(),
-        "ttyname: {}",
-        std::io::Error::last_os_error()
+    let mut buf = [0 as libc::c_char; 256];
+    // SAFETY: `fd` is an open terminal and `buf` is writable for its length.
+    let rc = unsafe { libc::ttyname_r(fd.as_raw_fd(), buf.as_mut_ptr(), buf.len()) };
+    assert_eq!(
+        rc,
+        0,
+        "ttyname_r: {}",
+        std::io::Error::from_raw_os_error(rc)
     );
-    // SAFETY: as above.
-    unsafe { std::ffi::CStr::from_ptr(name) }
+    // SAFETY: on success `ttyname_r` leaves a NUL-terminated name in `buf`.
+    unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
         .to_string_lossy()
         .into_owned()
 }

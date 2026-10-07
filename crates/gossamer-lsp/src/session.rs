@@ -12,11 +12,9 @@ use std::rc::Rc;
 use gossamer_ast::SourceFile;
 use gossamer_diagnostics::Diagnostic;
 use gossamer_lex::{FileId, SourceMap, Span};
+use gossamer_pkg::bundle::BundledSpan;
 use gossamer_resolve::{Resolutions, resolve_source_file};
-use gossamer_types::{
-    ExhaustivenessError, TyCtxt, TypeTable, check_arena_escapes, check_exhaustiveness,
-    normalize_caller_side_spellings, typecheck_source_file,
-};
+use gossamer_types::{TyCtxt, TypeTable};
 
 use crate::navigation::DefinitionIndex;
 
@@ -61,6 +59,10 @@ impl<'a> CursorContext<'a> {
     reason = "fields are reads from the LSP request handlers populated lazily as capabilities expand"
 )]
 pub(crate) struct UnitAnalysis {
+    /// The unit's identity: its entry file's URI.
+    pub(crate) name: String,
+    /// Which file each region of the unit's source was read from.
+    origins: Vec<BundledSpan>,
     pub(crate) file: FileId,
     pub(crate) map: SourceMap,
     pub(crate) sf: SourceFile,
@@ -74,6 +76,11 @@ pub(crate) struct UnitAnalysis {
     /// Length of the assembled unit; the autoderive tail begins here.
     bundle_len: u32,
 }
+
+/// The text of every document the editor has open, by URI. A package's
+/// unit is assembled from these wherever it names an open file, so unsaved
+/// edits in several files of one package are analysed together.
+pub(crate) type OpenBuffers = std::collections::BTreeMap<String, String>;
 
 /// Analysis result for a single document: its window into the
 /// [`UnitAnalysis`] of the package it belongs to, plus the diagnostics
@@ -123,16 +130,27 @@ pub(crate) struct UnitCache {
 impl UnitCache {
     /// The analysis of `unit_source`, running the pipeline only when the
     /// cached one was built from different text.
-    fn analysed(&mut self, name: &str, unit_source: String) -> Rc<UnitAnalysis> {
+    fn analysed(
+        &mut self,
+        name: &str,
+        unit_source: String,
+        origins: Vec<BundledSpan>,
+    ) -> Rc<UnitAnalysis> {
         if let Some((cached_source, analysis)) = self.entries.get(name)
             && cached_source == &unit_source
         {
             return Rc::clone(analysis);
         }
-        let analysis = Rc::new(analyse_unit(name, &unit_source));
+        let analysis = Rc::new(analyse_unit(name, &unit_source, origins));
         self.entries
             .insert(name.to_string(), (unit_source, Rc::clone(&analysis)));
         analysis
+    }
+
+    /// How many analyses the cache holds.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
     }
 
     /// Drops the analyses no live document refers to.
@@ -153,13 +171,23 @@ impl UnitCache {
 /// unchanged for a document with no filesystem path or one that is not
 /// inside a project.
 #[cfg(not(target_arch = "wasm32"))]
-fn bundle_project_unit(uri: &str, source: &str) -> (String, String, u32) {
+fn bundle_project_unit(
+    uri: &str,
+    source: &str,
+    open: &OpenBuffers,
+) -> (String, String, u32, Vec<BundledSpan>) {
     let Some(path) = uri_to_path(uri) else {
-        return (source.to_string(), uri.to_string(), 0);
+        return (source.to_string(), uri.to_string(), 0, Vec::new());
     };
-    let unit = gossamer_pkg::bundle::bundle_document_unit(&path, source);
+    let mut buffers: Vec<(std::path::PathBuf, String)> = open
+        .iter()
+        .filter(|(open_uri, _)| open_uri.as_str() != uri)
+        .filter_map(|(open_uri, text)| Some((uri_to_path(open_uri)?, text.clone())))
+        .collect();
+    buffers.push((path.clone(), source.to_string()));
+    let unit = gossamer_pkg::bundle::bundle_document_unit_with(&path, source, &buffers);
     let name = format!("file://{}", unit.entry.display());
-    (unit.source, name, unit.window_start)
+    (unit.source, name, unit.window_start, unit.origins)
 }
 
 /// The foreign-function rule of the project the unit named `name` (its
@@ -180,8 +208,12 @@ fn unit_foreign_policy(_name: &str) -> gossamer_types::ForeignPolicy {
 /// The wasm build has no filesystem to read sibling modules from, so a
 /// document is its own compilation unit there.
 #[cfg(target_arch = "wasm32")]
-fn bundle_project_unit(uri: &str, source: &str) -> (String, String, u32) {
-    (source.to_string(), uri.to_string(), 0)
+fn bundle_project_unit(
+    uri: &str,
+    source: &str,
+    _open: &OpenBuffers,
+) -> (String, String, u32, Vec<BundledSpan>) {
+    (source.to_string(), uri.to_string(), 0, Vec::new())
 }
 
 /// Decodes a `file://` URI into a filesystem path, undoing the percent
@@ -215,23 +247,62 @@ fn uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
 /// documents of one package share the analysis of that package.
 #[cfg(test)]
 pub(crate) fn analyse(uri: &str, source: &str) -> DocumentAnalysis {
-    analyse_with(uri, source, &mut UnitCache::default())
+    analyse_with(uri, source, &mut UnitCache::default(), &OpenBuffers::new())
 }
 
 /// Analyses `source` as the document at `uri`: assembles the package it
 /// belongs to, reuses `cache`'s analysis of that package when the
 /// assembled text is unchanged, and narrows the result to the window the
 /// editor's buffer occupies.
-pub(crate) fn analyse_with(uri: &str, source: &str, cache: &mut UnitCache) -> DocumentAnalysis {
+pub(crate) fn analyse_with(
+    uri: &str,
+    source: &str,
+    cache: &mut UnitCache,
+    open: &OpenBuffers,
+) -> DocumentAnalysis {
     // The source map strips a leading byte-order mark so spans and
     // diagnostic columns share one basis with the rest of the toolchain.
     // Measure the editor's text after the same strip, or every length
     // derived here describes three bytes the stored source does not have.
     let source = source.strip_prefix('\u{feff}').unwrap_or(source);
-    let (bundled, unit_name, doc_start) = bundle_project_unit(uri, source);
-    let user_len = u32::try_from(source.len()).unwrap_or(u32::MAX);
-    let unit = cache.analysed(&unit_name, bundled);
+    let (bundled, unit_name, doc_start, origins) = bundle_project_unit(uri, source, open);
+    let unit = cache.analysed(&unit_name, bundled, origins);
+    view_in_unit(uri, source, unit, doc_start)
+}
 
+/// The document at `uri`, holding `source`, as the already-analysed `unit`
+/// sees it, when `unit` still holds that text: the view an edit to another
+/// file of the same package leaves this one with.
+pub(crate) fn sibling_view(
+    uri: &str,
+    source: &str,
+    unit: &Rc<UnitAnalysis>,
+) -> Option<DocumentAnalysis> {
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let doc_start = unit_window(uri, source, unit)?;
+    Some(view_in_unit(uri, source, Rc::clone(unit), doc_start))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn unit_window(uri: &str, source: &str, unit: &UnitAnalysis) -> Option<u32> {
+    let path = uri_to_path(uri)?;
+    gossamer_pkg::bundle::document_window(&unit.origins, &path, source.len()).map(|w| w.0)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn unit_window(_uri: &str, _source: &str, _unit: &UnitAnalysis) -> Option<u32> {
+    None
+}
+
+/// Narrows `unit`'s findings to the window `doc_start ..` that the
+/// document's `source` occupies, and adds the document's own lint findings.
+fn view_in_unit(
+    uri: &str,
+    source: &str,
+    unit: Rc<UnitAnalysis>,
+    doc_start: u32,
+) -> DocumentAnalysis {
+    let user_len = u32::try_from(source.len()).unwrap_or(u32::MAX);
     let mut diagnostics = unit.unit_diagnostics.clone();
     // A diagnostic anchored in the synthesized autoderive tail still
     // describes a defect in the user's own declarations, so it is moved
@@ -276,7 +347,7 @@ pub(crate) fn analyse_with(uri: &str, source: &str, cache: &mut UnitCache) -> Do
 }
 
 /// Runs the full front end over one assembled compilation unit.
-fn analyse_unit(name: &str, bundled: &str) -> UnitAnalysis {
+fn analyse_unit(name: &str, bundled: &str, origins: Vec<BundledSpan>) -> UnitAnalysis {
     // Mirror the driver pipeline: the parse-time autoderive step
     // synthesizes the serde free functions (`from_json::<T>` and
     // friends), `#[derive]` impls, and stdlib struct wrappers. The
@@ -290,21 +361,6 @@ fn analyse_unit(name: &str, bundled: &str) -> UnitAnalysis {
     let file = map.add_file(name.to_string(), augmented.clone());
     let (mut sf, parse_diags) = gossamer_parse::autoderive::parse_with_autoderive(&augmented, file);
     let (resolutions, resolve_diags) = resolve_source_file(&sf);
-    // A named argument, a parameter default, and a std function named in
-    // value position are caller-side spellings the checker never sees.
-    // Every front end runs this rewrite, or a call that omits a defaulted
-    // parameter reaches the checker with fewer arguments than the function
-    // declares and reads as an arity error the command line accepts.
-    let named_arg_diags = normalize_caller_side_spellings(&mut sf, &resolutions);
-    let mut tcx = TyCtxt::new();
-    let (types, type_diags) = typecheck_source_file(&sf, &resolutions, &mut tcx);
-
-    let mut diagnostics: Vec<Diagnostic> = Vec::new();
-    diagnostics.extend(
-        parse_diags
-            .iter()
-            .map(gossamer_parse::ParseDiagnostic::to_diagnostic),
-    );
     // A program that does not parse is not the program the later passes
     // see: `autoderive::augment_source` declines to synthesize from a
     // recovered tree, so the derived `fmt` / `to_string` / serde surface a
@@ -313,38 +369,35 @@ fn analyse_unit(name: &str, bundled: &str) -> UnitAnalysis {
     // diagnostics are the actionable report, exactly as on the command
     // line; the passes still run so navigation keeps a type table.
     let parse_failed = !parse_diags.is_empty();
-    // Seed `did you mean ...?` candidates from the file's
-    // top-level item names so the resolver attaches a Suggestion
-    // that LSP code-actions can surface as a quickfix.
-    let in_scope = collect_top_level_names(&sf);
+    let mut fatal: Vec<Diagnostic> = parse_diags
+        .iter()
+        .map(gossamer_parse::ParseDiagnostic::to_diagnostic)
+        .collect();
     if !parse_failed {
-        diagnostics.extend(named_arg_diags.iter().map(|d| d.to_diagnostic(&in_scope)));
-        diagnostics.extend(resolve_diags.iter().map(|d| d.to_diagnostic(&in_scope)));
-        diagnostics.extend(
-            type_diags
-                .iter()
-                .map(gossamer_types::TypeDiagnostic::to_diagnostic),
-        );
-        diagnostics.extend(unit_foreign_policy(name).diagnostics_per_declaration(
+        fatal.extend(unit_foreign_policy(name).diagnostics_per_declaration(
             &sf,
             gossamer_parse::autoderive::program_source_end(&augmented),
         ));
-        // The editor must run every phase the command-line gate runs, or a
-        // file reads clean here and fails `gos check`. Exhaustiveness
-        // (GM0001) and arena escape (GM0003) are fatal there, so they are
-        // reported here under the same policy.
-        for diag in check_exhaustiveness(&sf, &resolutions, &types, &tcx) {
-            if matches!(diag.error, ExhaustivenessError::NonExhaustive { .. }) {
-                diagnostics.push(diag.to_diagnostic());
-            }
-        }
-        for diag in check_arena_escapes(&sf, &resolutions, &types, &tcx) {
-            diagnostics.push(diag.to_diagnostic());
-        }
     }
+    // The editor runs the command-line gate's own checks, so a file reads
+    // clean here exactly when `gos check` accepts it.
+    let mut tcx = TyCtxt::new();
+    let earlier_fatal = !fatal.is_empty();
+    let checks = gossamer_types::check_resolved_unit(
+        &mut sf,
+        &resolutions,
+        &resolve_diags,
+        parse_failed,
+        earlier_fatal,
+        &mut tcx,
+        &mut (),
+    );
+    fatal.extend(checks.fatal);
+    let types = checks.table;
     // The comptime fold lowers the program, so it runs only once every
     // earlier phase has accepted it - exactly the order `gos check` uses.
-    if diagnostics.is_empty()
+    // Advisory findings do not hold it back.
+    if fatal.is_empty()
         && let Some(diag) = crate::comptime::fold_diagnostic(
             name,
             &augmented,
@@ -355,12 +408,16 @@ fn analyse_unit(name: &str, bundled: &str) -> UnitAnalysis {
             file,
         )
     {
-        diagnostics.push(diag);
+        fatal.push(diag);
     }
+    let mut diagnostics = fatal;
+    diagnostics.extend(checks.advisory);
 
     let index = DefinitionIndex::build(&sf, &augmented, &resolutions);
 
     UnitAnalysis {
+        name: name.to_string(),
+        origins,
         file,
         map,
         sf,
@@ -404,31 +461,6 @@ fn attach_lint_fixes(diagnostics: &mut [Diagnostic], fixes: Vec<gossamer_lint::F
             fix.replacement,
         ));
     }
-}
-
-/// Best-effort enumeration of every top-level item name a source
-/// file declares. Seeds the resolver's `did you mean ...?`
-/// suggestion candidates so `GR0001` diagnostics carry a
-/// machine-applicable replacement that LSP code-actions can
-/// surface as a quickfix. Mirrors the same function in
-/// `gossamer-cli/src/loaders.rs`; duplicated here so the LSP
-/// crate stays decoupled from the CLI crate.
-fn collect_top_level_names(sf: &gossamer_ast::SourceFile) -> Vec<&str> {
-    let mut out = Vec::new();
-    for item in &sf.items {
-        match &item.kind {
-            gossamer_ast::ItemKind::Fn(decl) => out.push(decl.name.name.as_str()),
-            gossamer_ast::ItemKind::Struct(decl) => out.push(decl.name.name.as_str()),
-            gossamer_ast::ItemKind::Enum(decl) => out.push(decl.name.name.as_str()),
-            gossamer_ast::ItemKind::Trait(decl) => out.push(decl.name.name.as_str()),
-            gossamer_ast::ItemKind::TypeAlias(decl) => out.push(decl.name.name.as_str()),
-            gossamer_ast::ItemKind::Const(decl) => out.push(decl.name.name.as_str()),
-            gossamer_ast::ItemKind::Static(decl) => out.push(decl.name.name.as_str()),
-            gossamer_ast::ItemKind::Mod(decl) => out.push(decl.name.name.as_str()),
-            gossamer_ast::ItemKind::Impl(_) | gossamer_ast::ItemKind::AttrItem(_) => {}
-        }
-    }
-    out
 }
 
 impl DocumentAnalysis {

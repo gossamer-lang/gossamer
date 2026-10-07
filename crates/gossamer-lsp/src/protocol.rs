@@ -17,6 +17,14 @@ pub(crate) struct Transport<R: BufRead, W: Write> {
     buffer: Vec<u8>,
 }
 
+impl<R: std::io::Read, W: Write> Transport<std::io::BufReader<R>, W> {
+    /// Whether more input has already arrived, so the next read would not
+    /// wait for the client.
+    pub(crate) fn has_buffered_input(&self) -> bool {
+        !self.reader.buffer().is_empty()
+    }
+}
+
 impl<R: BufRead, W: Write> Transport<R, W> {
     /// Constructs a transport bound to the supplied streams.
     pub(crate) fn new(reader: R, writer: W) -> Self {
