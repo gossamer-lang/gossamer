@@ -81,6 +81,8 @@ pub(super) const OPAQUE_HANDLE_OFFSETS: &[u32] = &[
     26,
     27,
     FILE_SERVER_OFFSET,
+    super::WEBSOCKET_CONN_OFFSET,
+    super::BYTES_BUFFER_OFFSET,
 ];
 
 /// A parameter or return shape in [`HANDLE_METHODS`].

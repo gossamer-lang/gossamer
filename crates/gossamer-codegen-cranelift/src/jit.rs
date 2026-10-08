@@ -448,10 +448,12 @@ fn is_bare_container_handle(def_local: u32) -> bool {
     // `gos_rt_shared_*` call, so a local holding one lowers as that pointer.
     // 26 is `regex::Pattern`, which is the same shape: the body only ever
     // hands it to a `gos_rt_regex_*` call. 17 is `signal::Notifier`, an index
-    // the body hands to the `gos_rt_signal_*` calls.
+    // the body hands to the `gos_rt_signal_*` calls. 27 and 63 are the
+    // `bytes::Builder` and `bytes::Buffer` byte buffers and 42 is `rand::Rng`,
+    // each a counted pointer the body hands to its own runtime calls.
     matches!(
         u32::MAX - def_local,
-        7 | 17 | 18 | 19 | 26 | 28 | 30 | 31 | 32 | 46
+        7 | 17 | 18 | 19 | 26 | 27 | 28 | 30 | 31 | 32 | 42 | 46 | 63
     )
 }
 

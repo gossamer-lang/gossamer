@@ -161,6 +161,14 @@ pub fn program_entered() -> bool {
 /// real limit of this target, so a second report would say less, not more.
 pub fn report_deadlock_if_stuck(_op: &str) {}
 
+/// The browser build has no other actor to wait on; see
+/// [`report_deadlock_if_stuck`].
+pub fn report_cancellable_wait_if_stuck(
+    _op: &str,
+    _still_waiting: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+) {
+}
+
 /// Records `main` waiting on the program. Inert here for the same reason as
 /// [`report_deadlock_if_stuck`].
 pub fn main_waits_on(_op: &str, _still_waiting: std::sync::Arc<dyn Fn() -> bool + Send + Sync>) {}

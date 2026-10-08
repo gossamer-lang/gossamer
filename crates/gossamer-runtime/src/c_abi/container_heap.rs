@@ -1241,7 +1241,7 @@ pub unsafe extern "C-unwind" fn gos_rt_bheap_min_pop_desc(v: *mut GosVec, tags: 
 }
 
 /// Remove the greatest element into caller-owned storage; see
-/// [`bheap_pop_desc_into`].
+/// `bheap_pop_desc_into`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_bheap_max_pop_desc_into(
     v: *mut GosVec,
@@ -1254,7 +1254,7 @@ pub unsafe extern "C-unwind" fn gos_rt_bheap_max_pop_desc_into(
 }
 
 /// Remove the least element into caller-owned storage; see
-/// [`bheap_pop_desc_into`].
+/// `bheap_pop_desc_into`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_bheap_min_pop_desc_into(
     v: *mut GosVec,

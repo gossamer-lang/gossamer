@@ -1163,7 +1163,10 @@ fn builtin_flag_spec_bool(args: &[Value]) -> RuntimeResult<Value> {
 /// returns the `(long_name, cell_value)` pair for the generated
 /// `Flags` struct. Pulled out of `builtin_flag_define` so the
 /// entry-point stays short enough for clippy's body-length lint.
-fn register_flag_spec(set_id: u64, spec: &Value) -> Option<(&'static str, Value)> {
+fn register_flag_spec(
+    set: &crate::builtins::SharedSet,
+    spec: &Value,
+) -> Option<(&'static str, Value)> {
     let Value::Struct(spec_inner) = spec else {
         return None;
     };
@@ -1207,21 +1210,18 @@ fn register_flag_spec(set_id: u64, spec: &Value) -> Option<(&'static str, Value)
         "bool" => FlagKind::Bool,
         _ => return None,
     };
-    SET_REGISTRY.with(|reg| {
-        if let Some(state) = reg.borrow_mut().get_mut(&set_id) {
-            state.flag_order.push(long.clone());
-            state.flags.insert(
-                long.clone(),
-                FlagDef {
-                    short,
-                    kind: flag_kind,
-                    help,
-                    default: default.clone(),
-                },
-            );
-        }
-    });
-    let cell = make_cell(set_id, &long, default);
+    let mut state = set.lock();
+    state.flag_order.push(long.clone());
+    state.flags.insert(
+        long.clone(),
+        FlagDef {
+            short,
+            kind: flag_kind,
+            help,
+            default: default.clone(),
+        },
+    );
+    let cell = make_cell(&mut state, &long, default);
     Some((crate::value::intern_type_name(&long), cell))
 }
 
@@ -1236,27 +1236,14 @@ fn builtin_flag_define(args: &[Value]) -> RuntimeResult<Value> {
         Some(Value::Array(arr)) => arr.as_ref().as_slice(),
         _ => &[],
     };
-    let set_id = NEXT_SET_ID.with(|cell| {
-        let mut v = cell.borrow_mut();
-        let id = *v;
-        *v += 1;
-        id
-    });
-    SET_REGISTRY.with(|reg| {
-        reg.borrow_mut().insert(
-            set_id,
-            SetState {
-                name: set_name,
-                flag_order: Vec::new(),
-                last_flag: None,
-                flags: std::collections::HashMap::new(),
-            },
-        );
-    });
+    let set_value = crate::builtins::new_set(set_name);
+    let Some(set) = crate::builtins::set_of(&set_value) else {
+        return Ok(Value::Unit);
+    };
     let mut fields: Vec<(&'static str, Value)> = Vec::with_capacity(specs.len() + 1);
-    fields.push(("__set_id", Value::Int(i64::try_from(set_id).unwrap_or(0))));
+    fields.push(("__set", set_value.clone()));
     for spec in specs {
-        if let Some(entry) = register_flag_spec(set_id, spec) {
+        if let Some(entry) = register_flag_spec(&set, spec) {
             fields.push(entry);
         }
     }
@@ -1267,10 +1254,6 @@ fn builtin_flag_define(args: &[Value]) -> RuntimeResult<Value> {
             .map(|s| Value::String(s.into()))
             .collect(),
     ));
-    let set_value = Value::struct_(
-        "Set",
-        vec![("__id", Value::Int(i64::try_from(set_id).unwrap_or(0)))],
-    );
     let _ = crate::flag_set_builtins::builtin_flag_set_parse(&[set_value, args_array]);
     Ok(Value::struct_(
         "Flags",

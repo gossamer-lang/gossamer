@@ -10,13 +10,15 @@
 )]
 //! `std::sync::RwLock` builtins for the bytecode VM - a reader-writer
 //! lock guarding a single `i64`. The handle is a struct whose one field
-//! holds the `parking_lot::RwLock` itself, shared by every copy of the
-//! handle and freed with the last one, so a handle minted on one goroutine
-//! worker thread reaches the same lock on another.
+//! holds the lock's state, shared by every copy of the handle and freed
+//! with the last one, so a handle minted on one goroutine worker thread
+//! reaches the same lock on another.
 //!
-//! `with_read` / `with_write` are `native` builtins so the closure can
-//! be invoked through the interpreter dispatcher - a plain
-//! `BuiltinFnPub` cannot call the callback. They are registered as
+//! `with_read` calls back with the value read under the shared lock,
+//! released first; `with_write` calls back holding the exclusive lock and
+//! stores the answer. Both are `native` builtins so the closure can be
+//! invoked through the interpreter dispatcher - a plain `BuiltinFnPub`
+//! cannot call the callback. They are registered as
 //! free data-last calls (`sync::RwLock::with_read(lock, f)`), the same
 //! shape as `sync::Once::call`, and are the bit-identical VM mirror of
 //! the compiled `gos_rt_rwlock_with_read` / `_with_write` shims.
@@ -26,7 +28,111 @@ use std::sync::Arc;
 use crate::builtins::{BuiltinFnPub, value_to_int};
 use crate::value::{NativeDispatch, RuntimeResult, Value};
 
-type Lock = parking_lot::RwLock<i64>;
+/// A reader-writer lock over one `i64`. A waiting goroutine is counted
+/// among the program's waiters, so a lock nothing left can release is
+/// reported as a deadlock, and the lock is held as a flag rather than an
+/// OS guard, so a callback run under it may block or panic.
+#[derive(Default)]
+struct Lock {
+    state: parking_lot::Mutex<RwState>,
+    released: parking_lot::Condvar,
+}
+
+#[derive(Default)]
+struct RwState {
+    value: i64,
+    readers: usize,
+    writer: bool,
+    /// Acquirers waiting for the lock.
+    waiting: usize,
+    /// Released with an acquirer waiting that has not taken it yet. Counted
+    /// among the program's pending handoffs, so the woken acquirer is not
+    /// read as asleep before it runs.
+    ready: bool,
+}
+
+/// The access a holder of the lock has, given back when it is dropped.
+struct Held<'a> {
+    lock: &'a Lock,
+    exclusive: bool,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        let mut state = self.lock.state.lock();
+        if self.exclusive {
+            state.writer = false;
+        } else {
+            state.readers -= 1;
+        }
+        if state.waiting > 0 && !state.ready {
+            state.ready = true;
+            crate::vm::goroutine::adjust_pending_handoffs(true);
+        }
+        drop(state);
+        self.lock.released.notify_all();
+    }
+}
+
+impl Lock {
+    fn new(value: i64) -> Self {
+        Self {
+            state: parking_lot::Mutex::new(RwState {
+                value,
+                ..RwState::default()
+            }),
+            released: parking_lot::Condvar::new(),
+        }
+    }
+
+    /// Takes the lock for shared or exclusive access, waiting until it is
+    /// free. Answers `None`, holding nothing, when every participant is
+    /// waiting and nothing is left that could release it.
+    fn acquire(&self, exclusive: bool) -> Option<Held<'_>> {
+        let busy = |state: &RwState| state.writer || (exclusive && state.readers > 0);
+        let mut state = self.state.lock();
+        while busy(&state) {
+            if !gossamer_runtime::platform::CAN_BLOCK {
+                return None;
+            }
+            state.waiting += 1;
+            let Some(waiting) = crate::vm::goroutine::ChannelWait::enter("RwLock", || {
+                crate::value::any_live_channel_can_progress()
+                    || crate::stdlib_builtins::context::deadline_pending()
+                    || crate::stdlib_builtins::cohort::deadline_pending()
+            }) else {
+                state.waiting -= 1;
+                return None;
+            };
+            self.released.wait(&mut state);
+            // The wait is given up before the readiness that woke it, so no
+            // reading sees this acquirer asleep with nothing left to wake it.
+            drop(waiting);
+            state.waiting -= 1;
+            if state.ready {
+                state.ready = false;
+                crate::vm::goroutine::adjust_pending_handoffs(false);
+            }
+        }
+        if exclusive {
+            state.writer = true;
+        } else {
+            state.readers += 1;
+        }
+        Some(Held {
+            lock: self,
+            exclusive,
+        })
+    }
+}
+
+fn blocked() -> crate::value::RuntimeError {
+    if gossamer_runtime::platform::CAN_BLOCK {
+        crate::value::deadlock_error("RwLock")
+    } else {
+        crate::value::RuntimeError::WouldNeverWake("RwLock")
+    }
+}
 
 pub(crate) fn install_rwlock(globals: &mut Vec<(&'static str, Value)>) {
     let plain: &[(&str, BuiltinFnPub)] = &[
@@ -74,15 +180,22 @@ pub(crate) fn builtin_rwlock_get(args: &[Value]) -> RuntimeResult<Value> {
     let v = args
         .first()
         .and_then(lock_of)
-        .map(|a| *a.read())
+        .map(|lock| {
+            let held = lock.acquire(false).ok_or_else(blocked)?;
+            let value = lock.state.lock().value;
+            drop(held);
+            Ok::<i64, crate::value::RuntimeError>(value)
+        })
+        .transpose()?
         .unwrap_or(0);
     Ok(Value::Int(v))
 }
 
 pub(crate) fn builtin_rwlock_set(args: &[Value]) -> RuntimeResult<Value> {
     let val = args.get(1).and_then(value_to_int).unwrap_or(0);
-    if let Some(arc) = args.first().and_then(lock_of) {
-        *arc.write() = val;
+    if let Some(lock) = args.first().and_then(lock_of) {
+        let _held = lock.acquire(true).ok_or_else(blocked)?;
+        lock.state.lock().value = val;
     }
     Ok(Value::Unit)
 }
@@ -97,7 +210,10 @@ pub(crate) fn native_rwlock_with_read(
     let Some(f) = args.get(1).cloned() else {
         return Ok(Value::Int(0));
     };
-    let value = *arc.read();
+    let value = {
+        let _held = arc.acquire(false).ok_or_else(blocked)?;
+        arc.state.lock().value
+    };
     dispatch.call_value(&f, vec![Value::Int(value)])
 }
 
@@ -111,11 +227,11 @@ pub(crate) fn native_rwlock_with_write(
     let Some(f) = args.get(1).cloned() else {
         return Ok(Value::Int(0));
     };
-    let mut guard = arc.write();
-    let current = *guard;
+    let _held = arc.acquire(true).ok_or_else(blocked)?;
+    let current = arc.state.lock().value;
     let result = dispatch.call_value(&f, vec![Value::Int(current)])?;
     let next = value_to_int(&result).unwrap_or(current);
-    *guard = next;
+    arc.state.lock().value = next;
     Ok(Value::Int(next))
 }
 
@@ -128,7 +244,7 @@ mod tests {
         let handle = builtin_rwlock_new(&[Value::Int(7)]).expect("RwLock::new");
         let copy = handle.clone();
         let lock = lock_of(&handle).expect("a lock handle");
-        assert_eq!(*lock.read(), 7);
+        assert_eq!(lock.state.lock().value, 7);
         drop(handle);
         drop(copy);
         assert_eq!(

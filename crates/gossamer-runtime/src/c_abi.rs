@@ -31,11 +31,11 @@
 //!
 //! A shim converts a handle argument once, at its entry, into a typed
 //! view: `as_ref` for a handle that is a Rust value (a `GosMap`, a
-//! `GosSet`, a `GosJson`), [`vec::VecView::of`] or
-//! [`vec::StrVecView::of`] for a `Vec`, whose elements it then reads
+//! `GosSet`, a `GosJson`), `vec::VecView::of` or
+//! `vec::StrVecView::of` for a `Vec`, whose elements it then reads
 //! through bounds-checked safe code. That conversion is the `unsafe`
 //! step the contract above justifies; a callable word is turned back
-//! into a function pointer through [`code_address`].
+//! into a function pointer through `code_address`.
 
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
@@ -343,6 +343,7 @@ pub mod pprof_rt;
 pub mod print;
 pub mod rc;
 pub mod regex;
+pub mod registry_key;
 pub mod result;
 pub mod rwlock;
 pub mod set;

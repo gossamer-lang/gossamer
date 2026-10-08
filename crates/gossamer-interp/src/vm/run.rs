@@ -668,21 +668,7 @@ impl Vm {
                                 let v = registers[src as usize].clone();
                                 let resolved = if let Value::Struct(inner) = &v {
                                     if inner.name == "__Cell" {
-                                        let mut set_id: u64 = 0;
-                                        let mut flag_name = String::new();
-                                        for (ident, val) in &inner.fields {
-                                            if (*ident) == "__set_id"
-                                                && let Value::Int(n) = val
-                                            {
-                                                set_id = *n as u64;
-                                            }
-                                            if (*ident) == "__flag_name"
-                                                && let Value::String(s) = val
-                                            {
-                                                flag_name = s.as_str().to_string();
-                                            }
-                                        }
-                                        crate::builtins::resolve_cell(set_id, &flag_name)
+                                        crate::builtins::resolve_cell(inner)
                                             .unwrap_or_else(|| v.clone())
                                     } else {
                                         v
@@ -5605,8 +5591,9 @@ fn select_dispatch(
             return Err(RuntimeError::WouldNeverWake("select"));
         }
         if channels.is_empty() {
-            gossamer_runtime::platform::sleep(std::time::Duration::from_millis(1));
-            continue;
+            return Err(RuntimeError::Type(
+                "select: no blocking arm holds a channel".to_string(),
+            ));
         }
         let waiter = crate::value::Channel::select_waiter();
         for ch in &channels {

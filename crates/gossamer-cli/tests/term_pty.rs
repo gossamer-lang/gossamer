@@ -314,9 +314,10 @@ fn cohort_cancellation_ends_terminal_and_signal_waits_as_a_native_binary() {
     }
 }
 
-/// The terminal reached through a descriptor the program opened, with its
-/// standard input redirected away from it: the way a terminal program
-/// started as `producer | program` reads keys from `/dev/tty`.
+/// The terminal reached through a file the program opened, with its standard
+/// input redirected away from it: the way a terminal program started as
+/// `producer | program` reads keys from `/dev/tty`. Each call takes the file
+/// itself, which keeps it open while the call uses it.
 const TTY_PROGRAM: &str = r#"
 use std::env
 use std::fs
@@ -328,14 +329,13 @@ fn main() {
     let opts = opts.read(true)
     let opts = opts.write(true)
     let tty = opts.open(path).unwrap()
-    let fd = tty.fd().unwrap()
     println(f"stdin tty {term::is_terminal(term::STDIN)}")
-    println(f"opened tty {term::is_terminal(fd)}")
-    let cols, rows = term::size(fd).unwrap()
+    println(f"opened tty {term::is_terminal(tty)}")
+    let cols, rows = term::size(tty).unwrap()
     println(f"size {cols}x{rows}")
-    let raw = term::enter_raw(fd).unwrap()
+    let raw = term::enter_raw(tty).unwrap()
     print("ready\r\n")
-    let bytes = term::read_input(-1, fd).unwrap()
+    let bytes = term::read_input(-1, tty).unwrap()
     print(f"got {bytes}\r\n")
     raw.restore()
     println("done")

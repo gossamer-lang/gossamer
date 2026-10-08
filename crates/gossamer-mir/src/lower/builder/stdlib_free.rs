@@ -1767,10 +1767,9 @@ impl<'a> Builder<'a> {
             }
             "sync::Barrier::wait" | "Barrier::wait" => ("gos_rt_barrier_wait", self.tcx.unit()),
             "sync::Once::new" | "Once::new" => ("gos_rt_once_new", self.sync_handle_ty(51)),
-            "rand::Rng::new" | "math::rand::Rng::new" | "Rng::new" => (
-                "gos_rt_math_rng_new",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
+            "rand::Rng::new" | "math::rand::Rng::new" | "Rng::new" => {
+                ("gos_rt_math_rng_new", self.sync_handle_ty(42))
+            }
             "validate::FieldError::new" | "FieldError::new" => (
                 "gos_rt_field_error_new",
                 self.tcx.int_ty(gossamer_types::IntTy::I64),
@@ -1834,22 +1833,19 @@ impl<'a> Builder<'a> {
         _args: &[HirExpr],
     ) -> Option<(&'static str, gossamer_types::Ty)> {
         Some(match joined {
-            "bytes::Builder::new" | "Builder::new" => (
-                "gos_rt_bytes_builder_new",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
+            "bytes::Builder::new" | "Builder::new" => {
+                ("gos_rt_bytes_builder_new", self.sync_handle_ty(27))
+            }
             "bytes::Builder::with_capacity" | "Builder::with_capacity" => (
                 "gos_rt_bytes_builder_with_capacity",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
+                self.sync_handle_ty(27),
             ),
-            "bytes::Buffer::new" | "Buffer::new" => (
-                "gos_rt_bytes_buffer_new",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
-            "bytes::Buffer::with_capacity" | "Buffer::with_capacity" => (
-                "gos_rt_bytes_buffer_with_capacity",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
+            "bytes::Buffer::new" | "Buffer::new" => {
+                ("gos_rt_bytes_buffer_new", self.sync_handle_ty(63))
+            }
+            "bytes::Buffer::with_capacity" | "Buffer::with_capacity" => {
+                ("gos_rt_bytes_buffer_with_capacity", self.sync_handle_ty(63))
+            }
             "bytes::index_of" => ("gos_rt_bytes_index_of", self.option_i64_adt_ty()),
             // These three take and answer byte vectors, not text: a byte a
             // caller stored survives the round trip whether or not it is UTF-8.

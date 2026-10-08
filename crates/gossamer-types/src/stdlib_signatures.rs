@@ -196,37 +196,37 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::os::fd",
         name: "wait_readable",
-        signature: "fn wait_readable(fd: i64, timeout_ms: i64) -> Result<bool, errors::Error>",
+        signature: "fn wait_readable<D: os::fd::Descriptor>(fd: D, timeout_ms: i64) -> Result<bool, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::os::fd",
         name: "wait_writable",
-        signature: "fn wait_writable(fd: i64, timeout_ms: i64) -> Result<bool, errors::Error>",
+        signature: "fn wait_writable<D: os::fd::Descriptor>(fd: D, timeout_ms: i64) -> Result<bool, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::term",
         name: "enter_raw",
-        signature: "fn enter_raw(fd: i64 = term::STDIN) -> Result<term::RawMode, errors::Error>",
+        signature: "fn enter_raw<D: os::fd::Descriptor>(fd: D = term::STDIN) -> Result<term::RawMode, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::term",
         name: "is_terminal",
-        signature: "fn is_terminal(fd: i64) -> bool",
+        signature: "fn is_terminal<D: os::fd::Descriptor>(fd: D) -> bool",
     },
     StdFunctionSignature {
         module_path: "std::term",
         name: "read_input",
-        signature: "fn read_input(timeout_ms: i64, fd: i64 = term::STDIN) -> Result<Vec<u8>, errors::Error>",
+        signature: "fn read_input<D: os::fd::Descriptor>(timeout_ms: i64, fd: D = term::STDIN) -> Result<Vec<u8>, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::term",
         name: "resized",
-        signature: "fn resized(fd: i64 = term::STDOUT) -> bool",
+        signature: "fn resized<D: os::fd::Descriptor>(fd: D = term::STDOUT) -> bool",
     },
     StdFunctionSignature {
         module_path: "std::term",
         name: "size",
-        signature: "fn size(fd: i64 = term::STDOUT) -> Result<(i64, i64), errors::Error>",
+        signature: "fn size<D: os::fd::Descriptor>(fd: D = term::STDOUT) -> Result<(i64, i64), errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::archive::tar",
@@ -1551,7 +1551,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::http::websocket",
         name: "recv",
-        signature: "fn recv(conn: http::websocket::Conn) -> Result<http::websocket::Message, errors::Error>",
+        signature: "fn recv(conn: http::websocket::Conn) -> Result<String, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::http::websocket",
@@ -1566,7 +1566,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::http::websocket",
         name: "serve",
-        signature: "fn serve(addr: String, handler: Fn(http::websocket::Conn) -> ()) -> Result<(), errors::Error>",
+        signature: "fn serve<H>(addr: String, handler: H) -> Result<(), errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::http_h3",

@@ -222,6 +222,13 @@ pub(crate) fn builtin_net_resolve(args: &[Value]) -> RuntimeResult<Value> {
     }
 }
 
+/// Removes the plain or TLS stream registered under `id`; the two share one
+/// id space, so the entry is in at most one of them.
+fn retire_tcp_stream(id: i64) {
+    TCP_STREAM_REGISTRY.retire(id);
+    TLS_STREAM_REGISTRY.retire(id);
+}
+
 pub(crate) fn builtin_tcp_listener_bind(args: &[Value]) -> RuntimeResult<Value> {
     let addr = match arg_str_at(args, 0, "TcpListener::bind", "address") {
         Ok(s) => s,
@@ -234,7 +241,9 @@ pub(crate) fn builtin_tcp_listener_bind(args: &[Value]) -> RuntimeResult<Value> 
                 r.borrow_mut()
                     .insert(id, Arc::new(parking_lot::Mutex::new(listener)));
             });
-            Ok(ok_variant(open_handle_struct("net::TcpListener", id)))
+            Ok(ok_variant(handle_struct("net::TcpListener", id, |id| {
+                TCP_LISTENER_REGISTRY.retire(id)
+            })))
         }
         Err(e) => Ok(err_variant(format!("{e}"))),
     }
@@ -267,7 +276,7 @@ pub(crate) fn builtin_tcp_listener_accept(args: &[Value]) -> RuntimeResult<Value
                     .insert(sid, Arc::new(parking_lot::Mutex::new(Some(stream))));
             });
             let pair = Value::Tuple(Arc::from(vec![
-                open_handle_struct("net::TcpStream", sid),
+                handle_struct("net::TcpStream", sid, retire_tcp_stream),
                 Value::String(addr.to_string().into()),
             ]));
             Ok(ok_variant(pair))
@@ -315,7 +324,11 @@ pub(crate) fn builtin_tcp_stream_connect(args: &[Value]) -> RuntimeResult<Value>
                 r.borrow_mut()
                     .insert(id, Arc::new(parking_lot::Mutex::new(Some(stream))));
             });
-            Ok(ok_variant(open_handle_struct("net::TcpStream", id)))
+            Ok(ok_variant(handle_struct(
+                "net::TcpStream",
+                id,
+                retire_tcp_stream,
+            )))
         }
         Ok(Err(e)) => Ok(err_variant(e.to_string())),
         Err(e) => Ok(err_variant(e)),
@@ -744,7 +757,9 @@ pub(crate) fn builtin_unix_listener_bind(args: &[Value]) -> RuntimeResult<Value>
                 r.borrow_mut()
                     .insert(id, Arc::new(parking_lot::Mutex::new(l)));
             });
-            Ok(ok_variant(open_handle_struct("net::UnixListener", id)))
+            Ok(ok_variant(handle_struct("net::UnixListener", id, |id| {
+                UNIX_LISTENER_REGISTRY.retire(id)
+            })))
         }
         Err(e) => Ok(err_variant(format!("{e}"))),
     }
@@ -774,7 +789,7 @@ pub(crate) fn builtin_unix_listener_accept(args: &[Value]) -> RuntimeResult<Valu
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let pair = Value::Tuple(Arc::from(vec![
-                open_handle_struct("net::UnixStream", sid),
+                handle_struct("net::UnixStream", sid, |id| UNIX_STREAM_REGISTRY.retire(id)),
                 Value::String(addr_str.into()),
             ]));
             Ok(ok_variant(pair))
@@ -809,7 +824,9 @@ pub(crate) fn builtin_unix_stream_connect(args: &[Value]) -> RuntimeResult<Value
                 r.borrow_mut()
                     .insert(id, Arc::new(parking_lot::Mutex::new(s)));
             });
-            Ok(ok_variant(open_handle_struct("net::UnixStream", id)))
+            Ok(ok_variant(handle_struct("net::UnixStream", id, |id| {
+                UNIX_STREAM_REGISTRY.retire(id)
+            })))
         }
         Ok(Err(e)) => Ok(err_variant(e.to_string())),
         Err(e) => Ok(err_variant(e)),
@@ -1007,7 +1024,11 @@ pub(crate) fn builtin_tcp_stream_start_tls(args: &[Value]) -> RuntimeResult<Valu
                 r.borrow_mut()
                     .insert(nid, Arc::new(parking_lot::Mutex::new(tls)));
             });
-            Ok(ok_variant(open_handle_struct("net::TcpStream", nid)))
+            Ok(ok_variant(handle_struct(
+                "net::TcpStream",
+                nid,
+                retire_tcp_stream,
+            )))
         }
         Err(e) => Ok(err_variant(format!("{e}"))),
     }
@@ -1039,7 +1060,11 @@ pub(crate) fn builtin_tcp_stream_start_tls_insecure(args: &[Value]) -> RuntimeRe
                 r.borrow_mut()
                     .insert(nid, Arc::new(parking_lot::Mutex::new(tls)));
             });
-            Ok(ok_variant(open_handle_struct("net::TcpStream", nid)))
+            Ok(ok_variant(handle_struct(
+                "net::TcpStream",
+                nid,
+                retire_tcp_stream,
+            )))
         }
         Err(e) => Ok(err_variant(format!("{e}"))),
     }
@@ -1067,7 +1092,11 @@ pub(crate) fn builtin_tcp_stream_start_tls_ca(args: &[Value]) -> RuntimeResult<V
                 r.borrow_mut()
                     .insert(nid, Arc::new(parking_lot::Mutex::new(tls)));
             });
-            Ok(ok_variant(open_handle_struct("net::TcpStream", nid)))
+            Ok(ok_variant(handle_struct(
+                "net::TcpStream",
+                nid,
+                retire_tcp_stream,
+            )))
         }
         Err(e) => Ok(err_variant(format!("{e}"))),
     }
@@ -1097,7 +1126,9 @@ pub(crate) fn builtin_udp_bind(args: &[Value]) -> RuntimeResult<Value> {
                 r.borrow_mut()
                     .insert(id, Arc::new(parking_lot::Mutex::new(sock)));
             });
-            Ok(ok_variant(open_handle_struct("net::UdpSocket", id)))
+            Ok(ok_variant(handle_struct("net::UdpSocket", id, |id| {
+                UDP_REGISTRY.retire(id)
+            })))
         }
         Err(e) => Ok(err_variant(format!("{e}"))),
     }

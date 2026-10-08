@@ -123,7 +123,7 @@ pub const SYNC: StdModule = StdModule {
         StdItem {
             name: "RwLock",
             kind: StdItemKind::Type,
-            doc: "Reader-writer lock guarding an `i64`: `read`, `write`, `with_read`, `with_write`.",
+            doc: "Reader-writer lock guarding an `i64`: `read`, `write`, `with_read` (calls back with the value read under the shared lock, released first), `with_write` (calls back holding the exclusive lock and stores the answer).",
         },
         StdItem {
             name: "Shared",

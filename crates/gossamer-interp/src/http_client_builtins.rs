@@ -52,28 +52,32 @@ const DEFAULT_MAX_REDIRECTS: i64 = 10;
 /// Default per-request timeout in milliseconds, matching `Client::new()`.
 const DEFAULT_TIMEOUT_MS: i64 = 30_000;
 
-/// Process-wide registry of persistent `gossamer_std::http::Client`
-/// instances built with `.cookie_jar(true)`. The built `Client`
-/// Gossamer struct carries the id in a `__client` field; the request
-/// builtins look the engine up so the cookie jar survives across
-/// requests on the same client (the runtime tiers do this by holding
-/// a persistent `ureq::Agent` on the boxed `GosHttpClient`). The
-/// `gossamer_std::http::Client` is `Send + Sync` (an `Arc` inside).
-static NEXT_CLIENT_ID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
-static CLIENT_REGISTRY: parking_lot::Mutex<Option<rustc_hash::FxHashMap<i64, StdClient>>> =
-    parking_lot::Mutex::new(None);
-
-fn client_registry_register(client: StdClient) -> i64 {
-    let id = NEXT_CLIENT_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let mut guard = CLIENT_REGISTRY.lock();
-    guard
-        .get_or_insert_with(rustc_hash::FxHashMap::default)
-        .insert(id, client);
-    id
+/// A persistent `gossamer_std::http::Client` built with
+/// `.cookie_jar(true)`, as the `__client` field of a `Client` value and of
+/// every request made through it, so the cookie jar survives across
+/// requests and lives as long as any of them (the runtime tiers hold a
+/// persistent `ureq::Agent` on the boxed `GosHttpClient` the same way).
+fn client_field(client: StdClient) -> Value {
+    Value::Opaque(crate::value::OpaqueState::new(Arc::new(client)))
 }
 
-fn client_registry_lookup(id: i64) -> Option<StdClient> {
-    CLIENT_REGISTRY.lock().as_ref()?.get(&id).cloned()
+/// The persistent client a `__client` field holds.
+fn client_of_field(field: &Value) -> Option<StdClient> {
+    match field {
+        Value::Opaque(state) => state
+            .downcast_ref::<Arc<StdClient>>()
+            .map(|client| StdClient::clone(client)),
+        _ => None,
+    }
+}
+
+/// The `__client` field of a struct, if it has one.
+fn client_field_of(inner: &crate::value::StructInner) -> Option<&Value> {
+    inner
+        .fields
+        .iter()
+        .find(|(ident, _)| **ident == "__client")
+        .map(|(_, field)| field)
 }
 
 pub(crate) fn builtin_http_client_new(_args: &[Value]) -> RuntimeResult<Value> {
@@ -256,10 +260,7 @@ pub(crate) fn builtin_http_client_builder_build(args: &[Value]) -> RuntimeResult
             clamp_timeout_ms(timeout_ms) as u64,
             &proxy,
         ) {
-            Ok(client) => {
-                let id = client_registry_register(client);
-                fields.push(("__client", Value::Int(id)));
-            }
+            Ok(client) => fields.push(("__client", client_field(client))),
             Err(e) => return Ok(crate::builtins::err_variant(e)),
         }
     }
@@ -292,8 +293,7 @@ fn client_config(receiver: Option<&Value>) -> (u32, u64) {
 fn client_for_request(receiver: Option<&Value>) -> Result<StdClient, String> {
     if let Some(Value::Struct(inner)) = receiver
         && inner.name == "Client"
-        && let Some(id) = int_field(inner, "__client")
-        && let Some(client) = client_registry_lookup(id)
+        && let Some(client) = client_field_of(inner).and_then(client_of_field)
     {
         return Ok(client);
     }
@@ -323,11 +323,11 @@ fn configured_std_client(
     builder.build().map_err(|e| format!("{e}"))
 }
 
-/// Extracts the persistent-client registry id (`__client`) off a
-/// `Client` receiver, if it was built with the cookie jar enabled.
-fn client_id_of(receiver: Option<&Value>) -> Option<i64> {
+/// The persistent client (`__client`) of a `Client` receiver, if it was
+/// built with the cookie jar enabled.
+fn client_id_of(receiver: Option<&Value>) -> Option<Value> {
     match receiver {
-        Some(Value::Struct(inner)) if inner.name == "Client" => int_field(inner, "__client"),
+        Some(Value::Struct(inner)) if inner.name == "Client" => client_field_of(inner).cloned(),
         _ => None,
     }
 }
@@ -419,10 +419,7 @@ pub(crate) fn builtin_http_request_send(args: &[Value]) -> RuntimeResult<Value> 
     // proxy) when this request came from `client.<verb>(url)`; a
     // standalone request uses a fresh default-policy engine.
     let client = field("__client")
-        .and_then(|v| match v {
-            Value::Int(id) => client_registry_lookup(*id),
-            _ => None,
-        })
+        .and_then(client_of_field)
         .unwrap_or_else(gossamer_std::http::Client::new);
     match client.do_request(parsed, &url, body_opt, &headers) {
         Ok(resp) => Ok(crate::builtins::ok_variant(lift_response(resp))),
@@ -467,74 +464,119 @@ pub(crate) fn builtin_http_response_bytes(args: &[Value]) -> RuntimeResult<Value
 
 use gossamer_std::http::{Client as StdClient, Method, StreamResponse};
 
-/// Process-wide registry of in-flight streaming HTTP responses.
-/// Handles are allocated monotonically and never reused, so a stale
-/// `ResponseStream` value whose stream was already consumed by
-/// `Response::stream(...)` looks up an absent handle (yielding `None`)
-/// rather than colliding with a later stream that recycled its slot.
-/// Mirrors the compiled tier's `NEXT_STREAM_HANDLE` registry so both
-/// tiers behave identically.
-static NEXT_STREAM_HANDLE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
-static STREAM_REGISTRY: parking_lot::Mutex<
-    Option<rustc_hash::FxHashMap<i64, Arc<parking_lot::Mutex<StreamResponse>>>>,
-> = parking_lot::Mutex::new(None);
-
-/// Registers a stream the interpreter itself produced - a response body a
-/// handler writes as it goes - in the same registry a client stream uses,
-/// so one drain serves both.
-pub(crate) fn stream_register_public(stream: StreamResponse) -> i64 {
-    stream_register(stream)
+/// What a `ResponseStream` holds, shared by every copy of the handle and
+/// by a `Response::stream` built over it, and freed with the last one.
+pub(crate) struct StreamSlot {
+    state: parking_lot::Mutex<SlotState>,
+    /// The writing end of a stream a handler fills as it goes; dropping it
+    /// ends the body.
+    writer: parking_lot::Mutex<Option<std::sync::mpsc::Sender<Vec<u8>>>>,
 }
 
-fn stream_register(stream: StreamResponse) -> i64 {
-    let handle = NEXT_STREAM_HANDLE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let arc = Arc::new(parking_lot::Mutex::new(stream));
-    STREAM_REGISTRY
-        .lock()
-        .get_or_insert_with(rustc_hash::FxHashMap::default)
-        .insert(handle, arc);
-    handle
+enum SlotState {
+    /// Readable through the handle.
+    Open(Arc<parking_lot::Mutex<StreamResponse>>),
+    /// Claimed by a `Response::stream`, waiting for a server to drain it.
+    Claimed(Arc<parking_lot::Mutex<StreamResponse>>),
+    /// Drained, or being drained, by a server.
+    Taken,
 }
 
-fn stream_lookup(handle: i64) -> Option<Arc<parking_lot::Mutex<StreamResponse>>> {
-    STREAM_REGISTRY.lock().as_ref()?.get(&handle).cloned()
-}
+impl StreamSlot {
+    /// The stream while it is still readable through its handle.
+    fn readable(&self) -> Option<Arc<parking_lot::Mutex<StreamResponse>>> {
+        match &*self.state.lock() {
+            SlotState::Open(stream) => Some(Arc::clone(stream)),
+            SlotState::Claimed(_) | SlotState::Taken => None,
+        }
+    }
 
-/// Streams already claimed by a `Response::stream(...)` value and
-/// waiting to be drained to a client by the server writer. Keyed by
-/// the original registry handle; `stream_take_for_serve` is one-shot.
-static PENDING_SERVE: parking_lot::Mutex<
-    Option<rustc_hash::FxHashMap<i64, Arc<parking_lot::Mutex<StreamResponse>>>>,
-> = parking_lot::Mutex::new(None);
+    /// Queues `bytes` for the stream's reader, answering how many were
+    /// queued or `-1` when the stream is closed.
+    pub(crate) fn push(&self, bytes: Vec<u8>) -> i64 {
+        let len = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
+        match self.writer.lock().as_ref() {
+            Some(tx) if tx.send(bytes).is_ok() => len,
+            _ => -1,
+        }
+    }
 
-/// Moves `handle` from the client registry into the pending-serve
-/// registry. After this, `next_line` / `next_chunk` on the same
-/// `ResponseStream` yield `None` - the stream now belongs to the
-/// response. No-op when the handle was already consumed.
-pub(crate) fn stream_consume_for_response(handle: i64) {
-    let taken = {
-        let mut reg = STREAM_REGISTRY.lock();
-        reg.as_mut().and_then(|map| map.remove(&handle))
-    };
-    if let Some(arc) = taken {
-        PENDING_SERVE
-            .lock()
-            .get_or_insert_with(rustc_hash::FxHashMap::default)
-            .insert(handle, arc);
+    /// Ends the body a handler writes.
+    pub(crate) fn close(&self) {
+        self.writer.lock().take();
+    }
+
+    /// Whether the handler-written body is still open.
+    pub(crate) fn is_open(&self) -> bool {
+        self.writer.lock().is_some()
     }
 }
 
-/// Takes the pending stream for `handle` - one-shot, so serving the
-/// same streamed response twice drains an empty body the second time.
-pub(crate) fn stream_take_for_serve(
-    handle: i64,
-) -> Option<Arc<parking_lot::Mutex<StreamResponse>>> {
-    PENDING_SERVE.lock().as_mut()?.remove(&handle)
+/// A `ResponseStream`'s handle field over `stream`, with `writer` as its
+/// writing end when a handler fills it.
+pub(crate) fn stream_handle_value(
+    stream: StreamResponse,
+    writer: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+) -> Value {
+    let slot = StreamSlot {
+        state: parking_lot::Mutex::new(SlotState::Open(Arc::new(parking_lot::Mutex::new(stream)))),
+        writer: parking_lot::Mutex::new(writer),
+    };
+    Value::Opaque(crate::value::OpaqueState::new(Arc::new(slot)))
 }
 
-/// Extracts the `__handle` of a `ResponseStream` value.
-pub(crate) fn response_stream_handle(value: &Value) -> Option<i64> {
-    handle_field(value, "ResponseStream")
+/// The slot a stream handle field holds.
+pub(crate) fn slot_of_field(field: &Value) -> Option<Arc<StreamSlot>> {
+    match field {
+        Value::Opaque(state) => state.downcast_ref::<Arc<StreamSlot>>().cloned(),
+        _ => None,
+    }
+}
+
+/// The handle field of a `ResponseStream` value.
+pub(crate) fn response_stream_field(value: &Value) -> Option<Value> {
+    let Value::Struct(inner) = value else {
+        return None;
+    };
+    if inner.name != "ResponseStream" {
+        return None;
+    }
+    inner
+        .fields
+        .iter()
+        .find(|(ident, _)| **ident == "__handle")
+        .map(|(_, field)| field.clone())
+}
+
+/// The slot of a `ResponseStream` value.
+pub(crate) fn response_stream_slot(value: &Value) -> Option<Arc<StreamSlot>> {
+    slot_of_field(&response_stream_field(value)?)
+}
+
+/// Claims the stream for a `Response::stream`: afterwards `next_line` /
+/// `next_chunk` on the same `ResponseStream` answer `None`, because the
+/// stream now belongs to the response. A stream already claimed or taken
+/// stays as it is.
+pub(crate) fn stream_consume_for_response(slot: &StreamSlot) {
+    let mut state = slot.state.lock();
+    if let SlotState::Open(stream) = &*state {
+        *state = SlotState::Claimed(Arc::clone(stream));
+    }
+}
+
+/// Takes the claimed stream for a server to drain - one-shot, so serving
+/// the same streamed response twice drains an empty body the second time.
+pub(crate) fn stream_take_for_serve(
+    slot: &StreamSlot,
+) -> Option<Arc<parking_lot::Mutex<StreamResponse>>> {
+    let mut state = slot.state.lock();
+    match std::mem::replace(&mut *state, SlotState::Taken) {
+        SlotState::Claimed(stream) => Some(stream),
+        other => {
+            *state = other;
+            None
+        }
+    }
 }
 
 /// `Read` adapter over a registry stream so the server writer can
@@ -545,23 +587,6 @@ impl std::io::Read for StreamBody {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.0.lock().read_raw(buf)
     }
-}
-
-fn handle_field(value: &Value, expected_name: &str) -> Option<i64> {
-    let Value::Struct(inner) = value else {
-        return None;
-    };
-    if inner.name != expected_name {
-        return None;
-    }
-    for (ident, val) in &inner.fields {
-        if (*ident) == "__handle" {
-            if let Value::Int(n) = val {
-                return Some(*n);
-            }
-        }
-    }
-    None
 }
 
 /// Lifts a `gossamer_std::http::Response` into the Gossamer
@@ -794,9 +819,8 @@ pub(crate) fn builtin_http_stream(args: &[Value]) -> RuntimeResult<Value> {
                 .get("content-type")
                 .unwrap_or("text/plain")
                 .to_string();
-            let handle = stream_register(stream);
             let fields = vec![
-                ("__handle", Value::Int(handle)),
+                ("__handle", stream_handle_value(stream, None)),
                 ("status", Value::Int(status)),
                 ("content_type", Value::String(SmolStr::from(content_type))),
             ];
@@ -811,12 +835,12 @@ pub(crate) fn builtin_http_stream(args: &[Value]) -> RuntimeResult<Value> {
 
 /// `ResponseStream::next_line() -> Option<String>`.
 pub(crate) fn builtin_response_stream_next_line(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(handle) = args.first().and_then(|v| handle_field(v, "ResponseStream")) else {
+    let Some(slot) = args.first().and_then(response_stream_slot) else {
         return Err(RuntimeError::Type(
             "ResponseStream::next_line: receiver must be ResponseStream".to_string(),
         ));
     };
-    let Some(arc) = stream_lookup(handle) else {
+    let Some(arc) = slot.readable() else {
         return Ok(crate::builtins::none_variant());
     };
     let mut guard = arc.lock();
@@ -830,7 +854,7 @@ pub(crate) fn builtin_response_stream_next_line(args: &[Value]) -> RuntimeResult
 /// lift as an Array of Ints, matching the `resp.raw_bytes`
 /// convention; EOF and I/O failure both surface as `None`.
 pub(crate) fn builtin_response_stream_next_chunk(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(handle) = args.first().and_then(|v| handle_field(v, "ResponseStream")) else {
+    let Some(slot) = args.first().and_then(response_stream_slot) else {
         return Err(RuntimeError::Type(
             "ResponseStream::next_chunk: receiver must be ResponseStream".to_string(),
         ));
@@ -844,7 +868,7 @@ pub(crate) fn builtin_response_stream_next_chunk(args: &[Value]) -> RuntimeResul
         Some(Value::Int(n)) => usize::try_from(*n).unwrap_or(0),
         _ => 0,
     };
-    let Some(arc) = stream_lookup(handle) else {
+    let Some(arc) = slot.readable() else {
         return Ok(crate::builtins::none_variant());
     };
     let mut guard = arc.lock();
@@ -863,13 +887,13 @@ pub(crate) fn builtin_response_stream_next_chunk(args: &[Value]) -> RuntimeResul
 // builder produces a `Request { method, url }` struct; calling
 // `.send()` on it dispatches through `gossamer_std::http::Client`.
 
-fn pending_request_for(method: &str, url: &str, client_id: Option<i64>) -> Value {
+fn pending_request_for(method: &str, url: &str, client: Option<Value>) -> Value {
     let mut fields = vec![
         ("method", Value::String(SmolStr::from(method.to_string()))),
         ("url", Value::String(SmolStr::from(url.to_string()))),
     ];
-    if let Some(id) = client_id {
-        fields.push(("__client", Value::Int(id)));
+    if let Some(client) = client {
+        fields.push(("__client", client));
     }
     Value::struct_("Request", fields)
 }

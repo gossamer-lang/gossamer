@@ -75,12 +75,9 @@ pub struct GosChan {
     /// This is the ownership descriptor a value nobody received is given back
     /// through. Empty until a send records it.
     elem_desc: PlMutex<Vec<u8>>,
-    /// How many parties still reach this channel. A channel a single
-    /// binding owns starts at one and is reclaimed by the drop the
-    /// codegen emits at its last use; a spawn handle is shared with the
-    /// child that delivers the outcome, so it starts at two and the
-    /// party that leaves last reclaims it.
-    refs: AtomicUsize,
+    /// OS threads waiting on this channel among other sources, raised on
+    /// every change a waiter could be waiting for.
+    wakers: crate::wake::WakerSet,
 }
 
 /// A goroutine suspended inside a send, and the value it is waiting to
@@ -151,7 +148,10 @@ pub extern "C" fn gos_rt_chan_new(elem_bytes: u32, cap: i64) -> *mut GosChan {
         } else {
             ChanStorage::Bytes(VecDeque::new())
         };
-        Box::into_raw(Box::new(GosChan {
+        // A counted node: every sender, receiver, and join handle holding the
+        // channel owns a share, and the last share out runs the teardown in
+        // `Drop`.
+        super::rc::alloc_managed(GosChan {
             elem_bytes,
             cap,
             closed: PlMutex::new(false),
@@ -167,8 +167,8 @@ pub extern "C" fn gos_rt_chan_new(elem_bytes: u32, cap: i64) -> *mut GosChan {
             counted_ready: std::sync::atomic::AtomicBool::new(false),
             elem_kind: AtomicI64::new(0),
             elem_desc: PlMutex::new(Vec::new()),
-            refs: AtomicUsize::new(1),
-        }))
+            wakers: crate::wake::WakerSet::new(),
+        })
     })
 }
 
@@ -206,6 +206,11 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_send(c: *mut GosChan, val: *const u8
             // closed check because a close that lands after the handoff says
             // nothing about a send that is already done.
             if queued_unbuffered && !storage_contains_id(&guard, send_id) {
+                // This sender left the waiter count when its wait ended, after
+                // the receiver last synced the channel's readiness, so it is
+                // synced again here or the channel stays counted as holding a
+                // handoff that already happened.
+                chan.sync_ready(storage_len(&guard));
                 return false;
             }
             // A channel closed while this send was parked has no reader
@@ -307,6 +312,7 @@ impl Drop for SendWaiterGuard<'_> {
     fn drop(&mut self) {
         crate::sched_global::adjust_channel_waiters(false);
         self.chan.send_waiters.fetch_sub(1, Ordering::AcqRel);
+        crate::sched_global::end_main_wait();
     }
 }
 
@@ -320,6 +326,7 @@ impl Drop for RecvWaiterGuard<'_> {
     fn drop(&mut self) {
         crate::sched_global::adjust_channel_waiters(false);
         self.chan.recv_waiters.fetch_sub(1, Ordering::AcqRel);
+        crate::sched_global::end_main_wait();
     }
 }
 
@@ -328,6 +335,7 @@ fn wake_one_recv(chan: &GosChan) {
         crate::sched_global::scheduler().unpark(gid);
     }
     chan.not_empty.notify_one();
+    chan.wakers.wake_all();
 }
 
 /// Removes the send waiters released by consuming the value tagged
@@ -373,6 +381,7 @@ fn wake_send_after_consume(chan: &GosChan, consumed_id: u64) {
     } else {
         chan.not_full.notify_one();
     }
+    chan.wakers.wake_all();
 }
 
 fn wake_all(chan: &GosChan) {
@@ -384,6 +393,7 @@ fn wake_all(chan: &GosChan) {
     }
     chan.not_empty.notify_all();
     chan.not_full.notify_all();
+    chan.wakers.wake_all();
 }
 
 /// Sends without blocking, answering `1` when the value was taken and `0`
@@ -585,6 +595,14 @@ pub trait CancelSource {
     fn register(&self, gid: crate::sched::Gid);
     /// Withdraws a registration made by [`CancelSource::register`].
     fn deregister(&self, gid: crate::sched::Gid);
+    /// Runs `waker` when the source fires, for a waiter that is an OS
+    /// thread rather than a goroutine.
+    fn watch(&self, waker: &std::task::Waker);
+    /// Withdraws a registration made by [`CancelSource::watch`].
+    fn unwatch(&self, waker: &std::task::Waker);
+    /// A check that answers whether the source has yet to fire. It holds the
+    /// source itself, so it stays sound when called after the wait ends.
+    fn not_fired(&self) -> std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
 }
 
 /// A context a compiled program minted, named by its runtime registry id.
@@ -601,6 +619,18 @@ impl CancelSource for RuntimeContext {
 
     fn deregister(&self, gid: crate::sched::Gid) {
         super::context::deregister_waiter(self.0, gid);
+    }
+
+    fn watch(&self, waker: &std::task::Waker) {
+        super::context::watch(self.0, waker);
+    }
+
+    fn unwatch(&self, waker: &std::task::Waker) {
+        super::context::unwatch(self.0, waker);
+    }
+
+    fn not_fired(&self) -> std::sync::Arc<dyn Fn() -> bool + Send + Sync> {
+        super::context::not_cancelled(self.0)
     }
 }
 
@@ -717,11 +747,9 @@ pub unsafe fn chan_recv_cancellable(c: *mut GosChan, source: &impl CancelSource)
         if let Some(g) = gid {
             source.register(g);
         }
-        // Inline the recv loop with cancel polling on both the
-        // goroutine park path and the OS-thread condvar path. The
-        // 50 ms condvar timeout is the cancel-observation latency
-        // for non-goroutine callers: short enough to feel responsive,
-        // long enough not to hot-loop while idle.
+        // The recv loop, re-checking the source after every wake: a
+        // goroutine is unparked by a send or by the source firing, and an
+        // OS thread is raised by either.
         let mut out_val = 0i64;
         let out_ptr = std::ptr::addr_of_mut!(out_val).cast::<u8>();
         let (result_disc, result_payload) = loop {
@@ -743,7 +771,7 @@ pub unsafe fn chan_recv_cancellable(c: *mut GosChan, source: &impl CancelSource)
             crate::sched_global::adjust_channel_waiters(true);
             let _receiving = RecvWaiterGuard { chan };
             chan.sync_ready(storage_len(&guard));
-            crate::sched_global::report_deadlock_if_stuck("receive");
+            crate::sched_global::report_cancellable_wait_if_stuck("receive", source.not_fired());
             if gossamer_coro::in_goroutine() {
                 // Keep the empty-buffer check and receiver registration in
                 // one critical section, just like the unconditional recv
@@ -765,11 +793,22 @@ pub unsafe fn chan_recv_cancellable(c: *mut GosChan, source: &impl CancelSource)
                     break (1i64, 0i64);
                 }
             } else {
+                // An OS thread sleeps on one signal that a value arriving,
+                // the channel closing, and the source firing all raise.
+                // Registered while `buf` is held, so a send after the empty
+                // check above finds the waker.
+                let signal = crate::wake::ThreadSignal::new();
+                let waker = signal.waker();
+                chan.wakers.register(&waker);
+                source.watch(&waker);
                 chan.recv_waiters.fetch_add(1, Ordering::AcqRel);
-                chan.not_empty
-                    .wait_for(&mut guard, std::time::Duration::from_millis(50));
-                chan.recv_waiters.fetch_sub(1, Ordering::AcqRel);
                 drop(guard);
+                if !source.is_cancelled() {
+                    signal.wait();
+                }
+                chan.recv_waiters.fetch_sub(1, Ordering::AcqRel);
+                chan.wakers.deregister(&waker);
+                source.unwatch(&waker);
                 if source.is_cancelled() {
                     break (1i64, 0i64);
                 }
@@ -921,12 +960,8 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_close(c: *mut GosChan) -> i32 {
     }
 }
 
-/// Drops this caller's reference to a channel created with
-/// `gos_rt_chan_new`. The last reference closes the channel, so any
-/// thread parked on `not_empty` / `not_full` wakes with
-/// `RecvResult::Closed` / `SendResult::Closed` before the underlying
-/// storage is reclaimed. The codegen emits the call at the channel's
-/// last live use.
+/// Gives back this caller's share of a channel; the last share runs its
+/// teardown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_chan_drop(c: *mut GosChan) {
     ffi_entry!((), {
@@ -1034,71 +1069,61 @@ unsafe fn release_elem(kind: i64, word: i64) {
 
 /// Records one more party reaching `chan`.
 pub(crate) fn chan_retain(chan: &GosChan) {
-    chan.refs.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: `chan` is a live counted node the caller reaches through a share.
+    unsafe { super::rc::gos_rt_rc_retain(std::ptr::from_ref(chan).cast_mut().cast()) };
 }
 
-/// Drops one party's reference to `chan`, reclaiming the storage once
-/// the last one is gone.
+/// Drops one party's share of `chan`; the last one runs its teardown.
 ///
 /// # Safety
-/// `chan` must be a live channel the caller holds a reference to, and
+/// `chan` must be null or a live channel the caller holds a share of, and
 /// the caller must not touch it again.
 pub(crate) unsafe fn chan_release(chan: *mut GosChan) {
-    if chan.is_null() {
-        return;
-    }
-    // SAFETY: the caller's reference keeps the channel alive for this read.
-    let remaining = unsafe { (*chan).refs.fetch_sub(1, Ordering::AcqRel) };
-    if remaining != 1 {
-        return;
-    }
-    // Close + notify before reclamation so parked threads observe the
-    // closed flag rather than racing the Box drop. The Drop impl on
-    // `GosChan` repeats the close+notify, harmlessly, because callers
-    // may also drop a `Box<GosChan>` directly in tests without going
-    // through this entry point.
-    // SAFETY: this party held the last reference, so nothing else reaches the channel, and the
-    // caller's reference kept it live until now.
-    unsafe {
-        // Idempotent close for reclamation - must not panic if the user
-        // already closed this channel explicitly (the user-facing
-        // `gos_rt_chan_close` panics on double-close).
-        chan_close_idempotent(&*chan);
-        // A value nobody received still holds the share its send minted. The
-        // last party out is who gives it back, so an abandoned producer costs
-        // the queue's storage and nothing more.
-        let kind = (*chan).elem_kind.load(Ordering::Relaxed);
-        if kind != 0 {
-            let queued: Vec<i64> = match &*(*chan).buf.lock() {
-                ChanStorage::I64(deque) => deque.iter().map(|(_, word)| *word).collect(),
-                ChanStorage::Bytes(deque) => deque
-                    .iter()
-                    .filter(|(_, bytes)| bytes.len() >= 8)
-                    .map(|(_, bytes)| {
-                        let mut tmp = [0u8; 8];
-                        tmp.copy_from_slice(&bytes[..8]);
-                        i64::from_ne_bytes(tmp)
-                    })
-                    .collect(),
-            };
-            let desc = (*chan).elem_desc.lock().clone();
-            for word in queued {
-                if kind == 3 && !desc.is_empty() {
-                    release_aggregate(word, &desc);
-                } else {
-                    release_elem(kind, word);
-                }
-            }
-        }
-        drop(Box::from_raw(chan));
-    }
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { super::rc::gos_rt_rc_release(chan.cast()) };
 }
 
+super::rc::managed_handle!(GosChan);
+
 impl Drop for GosChan {
+    /// Runs when the last share is given back. Nothing can be waiting on the
+    /// channel then, since a waiter holds a share, so all that is left is
+    /// the share each send minted for a value nobody received.
     fn drop(&mut self) {
-        *self.closed.lock() = true;
-        self.not_empty.notify_all();
-        self.not_full.notify_all();
+        *self.closed.get_mut() = true;
+        // A channel counted as holding a ready handoff gives that count back:
+        // nothing is left to complete it.
+        if *self.counted_ready.get_mut() {
+            crate::sched_global::adjust_pending_handoffs(false);
+        }
+        let kind = *self.elem_kind.get_mut();
+        if kind == 0 {
+            return;
+        }
+        let queued: Vec<i64> = match self.buf.get_mut() {
+            ChanStorage::I64(deque) => deque.iter().map(|(_, word)| *word).collect(),
+            ChanStorage::Bytes(deque) => deque
+                .iter()
+                .filter(|(_, bytes)| bytes.len() >= 8)
+                .map(|(_, bytes)| {
+                    let mut tmp = [0u8; 8];
+                    tmp.copy_from_slice(&bytes[..8]);
+                    i64::from_ne_bytes(tmp)
+                })
+                .collect(),
+        };
+        let desc = std::mem::take(self.elem_desc.get_mut());
+        for word in queued {
+            if kind == 3 && !desc.is_empty() {
+                // SAFETY: the descriptor the send recorded describes the copy
+                // it queued, which holds the shares released here.
+                unsafe { release_aggregate(word, &desc) };
+            } else {
+                // SAFETY: the kind the send recorded names the shape of the
+                // share it queued.
+                unsafe { release_elem(kind, word) };
+            }
+        }
     }
 }
 
@@ -1154,6 +1179,28 @@ pub struct SelectBuilder {
     last_value: i64,
 }
 
+/// A builder holds a share of each arm's channel from the arm's registration
+/// until it is freed, so a channel whose last other holder lets go while the
+/// select waits stays alive for it.
+impl Drop for SelectBuilder {
+    fn drop(&mut self) {
+        for arm in &self.arms {
+            if let SelectArmRt::Recv(c) | SelectArmRt::Send(c, _) = arm {
+                // SAFETY: the arm's registration took this share.
+                unsafe { chan_release(*c) };
+            }
+        }
+    }
+}
+
+/// Takes the builder's share of an arm's channel.
+fn retain_arm(c: *mut GosChan) {
+    if !c.is_null() {
+        // SAFETY: an arm channel is live for its registration (C-ABI contract).
+        chan_retain(unsafe { &*c });
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_select_new(n: i64) -> *mut SelectBuilder {
     ffi_entry!(std::ptr::null_mut(), {
@@ -1171,6 +1218,7 @@ pub unsafe extern "C" fn gos_rt_select_arm_recv(b: *mut SelectBuilder, c: *mut G
         if b.is_null() {
             return;
         }
+        retain_arm(c);
         // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &mut *b }.arms.push(SelectArmRt::Recv(c));
     });
@@ -1182,6 +1230,7 @@ pub unsafe extern "C" fn gos_rt_select_arm_send(b: *mut SelectBuilder, c: *mut G
         if b.is_null() {
             return;
         }
+        retain_arm(c);
         // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &mut *b }.arms.push(SelectArmRt::Send(c, val));
     });
@@ -1305,9 +1354,9 @@ pub unsafe extern "C-unwind" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64
             // Nothing ready, no default: block until a channel changes, then
             // re-poll. Mirrors the single-channel recv/send park discipline,
             // registering on every arm's queue so any sender/receiver wakes us.
-            // No arm can become ready if nothing is left to run.
-            crate::sched_global::report_deadlock_if_stuck("select");
             if gossamer_coro::in_goroutine() {
+                // No arm can become ready if nothing is left to run.
+                crate::sched_global::report_deadlock_if_stuck("select");
                 let mut parked_as = None;
                 let mut cohort_wait = 0i64;
                 crate::sched_global::park(crate::sched::ParkReason::Chan, |parker| {
@@ -1359,25 +1408,51 @@ pub unsafe extern "C-unwind" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64
                     }
                 }
             } else {
-                // OS-thread fallback: a select waits on several channels, but a
-                // single condvar wait tracks only one. Bounded-wait on the first
-                // operable channel and re-poll; the 50 ms bound is the
-                // missed-notify backstop, matching the walker's park cadence.
-                let first = arms
-                    .iter()
-                    .find(|(kind, c, _)| *kind != 2 && !c.is_null())
-                    .map(|(_, c, _)| *c);
-                if let Some(c) = first {
-                    // SAFETY: `c` is a non-null arm channel, live for the select (C-ABI
-                    // contract).
-                    let chan = unsafe { &*c };
-                    let mut guard = chan.buf.lock();
-                    chan.not_empty
-                        .wait_for(&mut guard, std::time::Duration::from_millis(50));
-                    drop(guard);
-                } else {
+                // An OS thread sleeps on one signal every arm's channel raises
+                // when it changes, then re-polls the arms.
+                if arms.iter().all(|(kind, c, _)| *kind == 2 || c.is_null()) {
                     return -1;
                 }
+                let signal = crate::wake::ThreadSignal::new();
+                let waker = signal.waker();
+                // Each receive arm counts this thread among its channel's
+                // receivers, as a parked goroutine's select does, so a sender
+                // arriving on any of them reads as a handoff rather than as a
+                // program with nobody left to take the value.
+                let waits: Vec<(u8, &GosChan)> = arms
+                    .iter()
+                    .filter(|(kind, c, _)| *kind != 2 && !c.is_null())
+                    // SAFETY: a non-null arm channel is live for the select (C-ABI contract).
+                    .map(|(kind, c, _)| (*kind, unsafe { &**c }))
+                    .collect();
+                for (kind, chan) in &waits {
+                    let guard = chan.buf.lock();
+                    if *kind == 0 {
+                        chan.recv_waiters.fetch_add(1, Ordering::AcqRel);
+                    }
+                    chan.wakers.register(&waker);
+                    chan.sync_ready(storage_len(&guard));
+                }
+                crate::sched_global::adjust_channel_waiters(true);
+                crate::sched_global::report_deadlock_if_stuck("select");
+                // An arm that became ready before its waker was registered
+                // raised nothing, so the arms are read again before sleeping.
+                let ready = waits
+                    .iter()
+                    .any(|(kind, chan)| select_arm_is_ready(*kind, chan));
+                if !ready {
+                    signal.wait();
+                }
+                crate::sched_global::adjust_channel_waiters(false);
+                for (kind, chan) in &waits {
+                    let guard = chan.buf.lock();
+                    if *kind == 0 {
+                        chan.recv_waiters.fetch_sub(1, Ordering::AcqRel);
+                    }
+                    chan.wakers.deregister(&waker);
+                    chan.sync_ready(storage_len(&guard));
+                }
+                crate::sched_global::end_main_wait();
             }
         }
     })

@@ -1284,18 +1284,29 @@ pub(crate) use managed_handle;
 
 /// Drops the `T` a finalized node holds.
 ///
+/// The value is moved out of the node, so its block can be reclaimed at once.
+/// A value whose drop gives back shares of other nodes would re-enter the
+/// release walk that is reclaiming this one, so inside a teardown frame the
+/// drop waits for the outermost frame's exit, as an owned container child
+/// does.
+///
 /// # Safety
 ///
 /// `payload` is the payload of a dead node [`alloc_managed`] built for `T`.
-unsafe extern "C" fn drop_managed<T>(payload: *mut u8) {
-    // SAFETY: the payload holds the `T` `alloc_managed` wrote, dropped once,
+unsafe extern "C" fn drop_managed<T: 'static>(payload: *mut u8) {
+    // SAFETY: the payload holds the `T` `alloc_managed` wrote, moved out once,
     // when the node's last share is released.
-    unsafe { std::ptr::drop_in_place(payload.cast::<T>()) };
+    let value = unsafe { payload.cast::<T>().read() };
+    if TEARDOWN_DEPTH.with(std::cell::Cell::get) == 0 {
+        drop(value);
+    } else {
+        PENDING_FINALIZERS.with(|q| q.borrow_mut().push(Box::new(move || drop(value))));
+    }
 }
 
 /// The `RC_KIND_FINALIZED` layout for `T`.
 #[must_use]
-pub fn finalized_meta<T>() -> [i64; 2] {
+pub fn finalized_meta<T: 'static>() -> [i64; 2] {
     let finalizer: unsafe extern "C" fn(*mut u8) = drop_managed::<T>;
     [
         gossamer_abi::rc::RC_KIND_FINALIZED,
@@ -2418,6 +2429,10 @@ thread_local! {
     /// reads, which re-enters the release path.
     static PENDING_ITER_FREES: std::cell::RefCell<Vec<(*mut u8, bool)>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// Values of dead managed nodes whose drop waits for the outermost
+    /// teardown exit, on the same terms as [`PENDING_MAP_FREES`].
+    static PENDING_FINALIZERS: std::cell::RefCell<Vec<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
     /// Nesting depth of teardown frames (release walks / collection
     /// slices) on this thread; pending Vec frees drain when it reaches 0.
     static TEARDOWN_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
@@ -2543,6 +2558,11 @@ unsafe fn teardown_exit() {
         let Some((iter, pair)) = next else { break };
         // SAFETY: each queued iterator carries the share a dead node held.
         unsafe { drop_iter_child(iter, pair) };
+    }
+    loop {
+        let next = PENDING_FINALIZERS.with(|q| q.borrow_mut().pop());
+        let Some(finalize) = next else { break };
+        finalize();
     }
 }
 

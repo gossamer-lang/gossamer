@@ -376,6 +376,10 @@ impl TypeChecker<'_> {
     pub(super) fn bind_fn_param(&mut self, param: &FnParam) {
         match param {
             FnParam::Typed { pattern, ty, .. } => {
+                if let gossamer_ast::PatternKind::Ident { name, .. } = &pattern.kind {
+                    self.param_type_spans
+                        .insert(pattern.id, (name.name.clone(), ty.span));
+                }
                 let param_ty = self.type_from_ast(ty);
                 self.check_param_reference_pattern(pattern, param_ty);
                 self.bind_pattern(pattern, param_ty);

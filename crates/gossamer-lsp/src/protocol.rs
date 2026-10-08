@@ -117,6 +117,22 @@ pub(crate) fn response_ok(id: Value, result: Value) -> Value {
     Value::Object(map)
 }
 
+/// The JSON-RPC error code for a request the client cancelled before it was
+/// answered.
+pub(crate) const REQUEST_CANCELLED: i64 = -32800;
+
+/// Builds a JSON-RPC error response.
+pub(crate) fn response_error(id: Value, code: i64, message: &str) -> Value {
+    let mut error = std::collections::BTreeMap::new();
+    error.insert("code".to_string(), Value::Int(code));
+    error.insert("message".to_string(), Value::String(message.to_string()));
+    let mut map = std::collections::BTreeMap::new();
+    map.insert("jsonrpc".to_string(), Value::String("2.0".to_string()));
+    map.insert("id".to_string(), id);
+    map.insert("error".to_string(), Value::Object(error));
+    Value::Object(map)
+}
+
 /// Builds a JSON-RPC notification (a message without an `id`).
 pub(crate) fn notification(method: &str, params: Value) -> Value {
     let mut map = std::collections::BTreeMap::new();

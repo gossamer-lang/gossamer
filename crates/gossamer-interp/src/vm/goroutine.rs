@@ -215,7 +215,7 @@ impl GoroutinePool {
                             // where a completed task signals between the
                             // check and the Condvar wait, stranding program
                             // shutdown after all user output is printed.
-                            let _inner = p.inner.lock();
+                            let inner = p.inner.lock();
                             let prev = p.outstanding.fetch_sub(1, Ordering::AcqRel);
                             note_progress();
                             if prev == 1 {
@@ -223,6 +223,8 @@ impl GoroutinePool {
                                 // wake any drain() waiter.
                                 p.drain_cv.notify_all();
                             }
+                            drop(inner);
+                            report_if_left_waiting();
                         }
                         None => break,
                     }
@@ -673,6 +675,33 @@ impl ChannelWait {
             stuck: false,
             cohort,
         })
+    }
+}
+
+/// Reports a deadlock when a goroutine that just finished was the last
+/// participant not waiting.
+///
+/// A wait checks for a deadlock as it is entered, so the program is judged
+/// again at every change that could leave it with nothing able to run. A
+/// goroutine that finishes shrinks the participants without entering a wait,
+/// and the ones already waiting would never look again.
+fn report_if_left_waiting() {
+    if !gossamer_runtime::platform::CAN_BLOCK || MAIN_RETURNED.load(Ordering::Acquire) {
+        return;
+    }
+    let epoch = PROGRESS_EPOCH.load(Ordering::Acquire);
+    let waiting = CHANNEL_WAITERS.load(Ordering::Acquire) + JOIN_WAITERS.load(Ordering::Acquire);
+    if waiting == 0 {
+        return;
+    }
+    let participants = outstanding_goroutines() + 1;
+    if reads_as_terminal(waiting as u64, participants, epoch, || {
+        a_waiter_is_cancelled()
+            || crate::value::any_live_channel_can_progress()
+            || crate::stdlib_builtins::context::deadline_pending()
+            || crate::stdlib_builtins::cohort::deadline_pending()
+    }) {
+        report_fatal_deadlock("receive");
     }
 }
 

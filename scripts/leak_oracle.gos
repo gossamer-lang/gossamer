@@ -374,6 +374,55 @@ fn probes() -> Vec<(String, String)> {
             println("{}", acc)
         }
         """)
+        ("channel_local", """
+        use std::sync::channel
+        fn main() {
+            let mut acc = 0
+            for i in 0..COUNT {
+                let tx, rx = channel::<i64>()
+                tx.close()
+                acc += match rx.recv() { Some(v) => v, None => i % 3 }
+            }
+            println("{}", acc)
+        }
+        """)
+        ("channel_goroutine_and_struct", """
+        use std::{errors}
+        use std::sync::channel
+        struct Pipe { tx: Sender<i64>, rx: Receiver<i64> }
+        fn round(i: i64) -> Result<i64, errors::Error> {
+            let tx, rx = channel::<i64>()
+            let p = Pipe { tx: tx, rx: rx }
+            let out = p.tx
+            let mut got = 0
+            cohort {
+                let h = spawn(|| out.send(i))
+                got = p.rx.recv().unwrap()
+                h.join().unwrap()
+            }?
+            Ok(got)
+        }
+        fn main() {
+            let mut acc = 0
+            for i in 0..(COUNT / 10) { acc += round(i).unwrap() }
+            println("{}", acc)
+        }
+        """)
+        ("channel_of_senders", """
+        use std::sync
+        fn main() {
+            let mut acc = 0
+            for i in 0..COUNT {
+                let outer_tx, outer_rx = sync::channel_unbounded::<Sender<i64>>()
+                let tx, rx = sync::channel_unbounded::<i64>()
+                outer_tx.send(tx)
+                let inner = outer_rx.recv().unwrap()
+                inner.send(i)
+                acc += rx.recv().unwrap() % 7
+            }
+            println("{}", acc)
+        }
+        """)
     ]
 }
 

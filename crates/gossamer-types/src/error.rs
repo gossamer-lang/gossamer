@@ -929,6 +929,18 @@ pub enum TypeError {
         /// The argument as written.
         argument: String,
     },
+    /// A parameter declared `i64` holds a websocket connection.
+    #[error("`{param}` holds a websocket connection; declare it `websocket::Conn`")]
+    IntegerWebSocketParam {
+        /// The parameter's name.
+        param: String,
+    },
+    /// A descriptor read off a file was passed where the call takes the file.
+    #[error("`{file}.fd()` passes a bare descriptor; pass `{file}`")]
+    DescriptorReadOffFile {
+        /// The file as written.
+        file: String,
+    },
     /// A wrapping arithmetic operation was written as an integer method.
     /// The operator is the one spelling.
     #[error(
@@ -1226,6 +1238,8 @@ impl TypeError {
             Self::TransparentWrapper { .. } => "transparent-wrapper",
             Self::StringParseRetired { .. } => "string-parse-retired",
             Self::WrappingMethodRetired { .. } => "wrapping-method-retired",
+            Self::DescriptorReadOffFile { .. } => "descriptor-read-off-file",
+            Self::IntegerWebSocketParam { .. } => "integer-websocket-param",
             Self::ConstGenericNotInferred { .. } => "const-generic-not-inferred",
             Self::SimdShape { .. } => "simd-shape",
             Self::OrderedRangeArgument { .. } => "ordered-range-argument",
@@ -1285,6 +1299,8 @@ impl TypeError {
             Self::ContainerIgnoresUserOrder { .. } => "GT0085",
             Self::SpawnOutsideCohort { .. } => "GT0086",
             Self::WrappingMethodRetired { .. } => "GT0087",
+            Self::DescriptorReadOffFile { .. } => "GT0119",
+            Self::IntegerWebSocketParam { .. } => "GT0120",
             Self::ConstGenericNotInferred { .. } => "GT0088",
             Self::SimdShape { .. } => "GT0089",
             Self::OrderedRangeArgument { .. } => "GT0091",
@@ -2232,6 +2248,31 @@ impl TypeDiagnostic {
                         location,
                         format!("write `*{argument}`"),
                         format!("*{argument}"),
+                    ));
+            }
+            TypeError::IntegerWebSocketParam { .. } => {
+                out = out
+                    .with_note(
+                        "a connection is a handle that closes with its last holder, so it \
+                         has its own type",
+                    )
+                    .with_suggestion(gossamer_diagnostics::Suggestion::replacement(
+                        location,
+                        "declare it `websocket::Conn`".to_string(),
+                        "websocket::Conn".to_string(),
+                    ));
+            }
+            TypeError::DescriptorReadOffFile { file } => {
+                out = out
+                    .with_note(
+                        "the call takes the file so it stays open while the call uses it; a \
+                         descriptor alone names whatever the OS reuses it for once the file \
+                         closes",
+                    )
+                    .with_suggestion(gossamer_diagnostics::Suggestion::replacement(
+                        location,
+                        format!("pass `{file}`"),
+                        file.clone(),
                     ));
             }
             TypeError::WrappingMethodRetired {

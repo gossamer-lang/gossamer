@@ -528,11 +528,13 @@ fn builtin_runtime_cycle_collection_supported(_args: &[Value]) -> RuntimeResult<
 /// `steps`, `yields`, `steals`, `parks` and `unparks` name work-stealing
 /// mechanics the pool does not have - it takes each task from one shared
 /// queue and runs it to completion on a worker thread, with no step loop and
-/// no per-worker deques to steal between - so they read as zero.
+/// no per-worker deques to steal between - so they read as zero. A VM
+/// goroutine is an OS thread that runs its blocking operations itself, so
+/// the blocking-pool counters read as zero too.
 fn builtin_runtime_scheduler_stats_json(_args: &[Value]) -> RuntimeResult<Value> {
     let stats = crate::vm::goroutine::pool_stats();
     Ok(Value::String(format!(
-        "{{\"spawned\":{},\"finished\":{},\"steps\":0,\"yields\":0,\"steals\":0,\"injects\":{},\"parks\":0,\"unparks\":0,\"live_goroutines\":{},\"worker_count\":{},\"worker_count_cap\":{}}}",
+        "{{\"spawned\":{},\"finished\":{},\"steps\":0,\"yields\":0,\"steals\":0,\"injects\":{},\"parks\":0,\"unparks\":0,\"live_goroutines\":{},\"worker_count\":{},\"worker_count_cap\":{},\"blocking_threads\":0,\"blocking_queued\":0,\"blocking_admission_waiters\":0,\"blocking_oldest_queued_ms\":0}}",
         stats.spawned, stats.finished, stats.injects, stats.live, stats.worker_count,
         stats.worker_count_cap,
     )

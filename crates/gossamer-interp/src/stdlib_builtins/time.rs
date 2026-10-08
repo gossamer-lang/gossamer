@@ -371,13 +371,6 @@ pub(crate) fn handle_struct(name: &'static str, id: i64, retire: fn(i64)) -> Val
     )
 }
 
-/// A handle named `name` over registry entry `id` that stays registered
-/// until the program closes it. A descriptor the program reads off such a
-/// handle (`fd()`) stays valid for as long as the program does not.
-pub(crate) fn open_handle_struct(name: &'static str, id: i64) -> Value {
-    Value::struct_(name, vec![("__handle", Value::Int(id))])
-}
-
 pub(crate) fn handle_id(value: &Value) -> Option<i64> {
     let Value::Struct(inner) = value else {
         return None;

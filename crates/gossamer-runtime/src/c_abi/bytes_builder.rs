@@ -97,13 +97,15 @@ pub struct GosBytesBuilder {
     inner: String,
 }
 
+super::rc::managed_handle!(GosBytesBuilder);
+
 /// Allocate an empty `bytes::Builder`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_bytes_builder_new() -> *mut GosBytesBuilder {
     ffi_entry!(std::ptr::null_mut(), {
-        Box::into_raw(Box::new(GosBytesBuilder {
+        super::rc::alloc_managed(GosBytesBuilder {
             inner: String::new(),
-        }))
+        })
     })
 }
 
@@ -111,9 +113,9 @@ pub extern "C" fn gos_rt_bytes_builder_new() -> *mut GosBytesBuilder {
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_bytes_builder_with_capacity(n: i64) -> *mut GosBytesBuilder {
     ffi_entry!(std::ptr::null_mut(), {
-        Box::into_raw(Box::new(GosBytesBuilder {
+        super::rc::alloc_managed(GosBytesBuilder {
             inner: String::with_capacity(n.max(0) as usize),
-        }))
+        })
     })
 }
 
@@ -192,11 +194,13 @@ pub struct GosBytesBuffer {
     inner: Vec<u8>,
 }
 
+super::rc::managed_handle!(GosBytesBuffer);
+
 /// Allocate an empty `bytes::Buffer`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_bytes_buffer_new() -> *mut GosBytesBuffer {
     ffi_entry!(std::ptr::null_mut(), {
-        Box::into_raw(Box::new(GosBytesBuffer { inner: Vec::new() }))
+        super::rc::alloc_managed(GosBytesBuffer { inner: Vec::new() })
     })
 }
 
@@ -204,9 +208,9 @@ pub extern "C" fn gos_rt_bytes_buffer_new() -> *mut GosBytesBuffer {
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_bytes_buffer_with_capacity(n: i64) -> *mut GosBytesBuffer {
     ffi_entry!(std::ptr::null_mut(), {
-        Box::into_raw(Box::new(GosBytesBuffer {
+        super::rc::alloc_managed(GosBytesBuffer {
             inner: Vec::with_capacity(n.max(0) as usize),
-        }))
+        })
     })
 }
 

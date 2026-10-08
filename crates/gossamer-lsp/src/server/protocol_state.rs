@@ -15,7 +15,7 @@
 // - formatting: `formatting`
 
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::rc::Rc;
 
@@ -27,7 +27,10 @@ use gossamer_types::{render_public_ty, render_ty};
 
 use crate::inlay::{InlayHint, collect_inlays};
 use crate::navigation::{BindingInfo, DefinitionInfo, Locate, attach_resolution, locate};
-use crate::protocol::{Transport, field, field_str, field_u32, notification, response_ok};
+use crate::protocol::{
+    REQUEST_CANCELLED, Transport, field, field_str, field_u32, notification, response_error,
+    response_ok,
+};
 use crate::semantic_tokens::{TOKEN_MODIFIERS, TOKEN_TYPES, full_tokens};
 use crate::session::{
     CursorContext, DocumentAnalysis, OpenBuffers, UnitCache, analyse_with, sibling_view,
@@ -52,13 +55,29 @@ fn run<R: Read, W: Write>(reader: R, writer: W) -> std::io::Result<()> {
     // anything else is answered, so a burst of keystrokes costs one
     // analysis rather than one per keystroke.
     let mut edited: BTreeMap<String, String> = BTreeMap::new();
+    // Messages already read and not yet handled. Everything that has
+    // arrived is read before the next one is handled, so a cancellation
+    // reaches the request it names while that request is still waiting.
+    let mut queued: VecDeque<Value> = VecDeque::new();
 
     loop {
-        if !edited.is_empty() && !transport.has_buffered_input() {
-            flush_edits(&mut state, &mut edited, &mut transport)?;
+        if queued.is_empty() {
+            if !edited.is_empty() && !transport.has_buffered_input() {
+                flush_edits(&mut state, &mut edited, &mut transport)?;
+            }
+            let Some(message) = transport.read_message()? else {
+                return Ok(());
+            };
+            queue_message(message, &mut queued, &mut transport)?;
         }
-        let Some(message) = transport.read_message()? else {
-            return Ok(());
+        while transport.has_buffered_input() {
+            let Some(message) = transport.read_message()? else {
+                break;
+            };
+            queue_message(message, &mut queued, &mut transport)?;
+        }
+        let Some(message) = queued.pop_front() else {
+            continue;
         };
         let Some(method) = field_str(&message, "method") else {
             continue;
@@ -81,7 +100,7 @@ fn run<R: Read, W: Write>(reader: R, writer: W) -> std::io::Result<()> {
                 state.discover_workspace_roots(&params);
                 transport.write_message(&response_ok(id, initialize_result()))?;
             }
-            "initialized" | "$/cancelRequest" => {}
+            "initialized" => {}
             "textDocument/didOpen" => {
                 if let Some((uri, text)) = extract_did_open(&params) {
                     for affected in state.update(&uri, &text) {
@@ -350,6 +369,46 @@ fn text_position_to_offset(source: &str, line: u32, column: u32) -> Option<usize
         }
     }
     (utf16_column == column).then_some(line_start + line_text.len())
+}
+
+/// Queues `message`, or, for a `$/cancelRequest`, answers the queued request
+/// it names with `RequestCancelled` and drops it, so a request the client no
+/// longer wants costs no analysis. A cancellation for a request already
+/// answered, or never sent, has nothing left to do.
+fn queue_message<R: Read, W: Write>(
+    message: Value,
+    queued: &mut VecDeque<Value>,
+    transport: &mut Transport<BufReader<R>, BufWriter<W>>,
+) -> std::io::Result<()> {
+    if field_str(&message, "method") != Some("$/cancelRequest") {
+        queued.push_back(message);
+        return Ok(());
+    }
+    let target = field(field(&message, "params"), "id");
+    let Some(at) = queued.iter().position(|waiting| {
+        field_str(waiting, "method").is_some() && same_request_id(field(waiting, "id"), target)
+    }) else {
+        return Ok(());
+    };
+    if let Some(cancelled) = queued.remove(at) {
+        let id = field(&cancelled, "id").clone();
+        transport.write_message(&response_error(id, REQUEST_CANCELLED, "request cancelled"))?;
+    }
+    Ok(())
+}
+
+/// Whether two JSON-RPC ids name the same request. An id is an integer or a
+/// string, and a parsed integer may arrive in either of the parser's number
+/// forms.
+fn same_request_id(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Null, _) | (_, Value::Null) => false,
+        (Value::String(x), Value::String(y)) => x == y,
+        _ => match (gossamer_std::json::as_i64(a), gossamer_std::json::as_i64(b)) {
+            (Some(x), Some(y)) => x == y,
+            _ => false,
+        },
+    }
 }
 
 /// Analyses every edited document and publishes the diagnostics of each

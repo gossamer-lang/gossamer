@@ -2,8 +2,8 @@
 // Share transfer and clone moves driven by uniqueness facts.
 // ---------------------------------------------------------------------------
 
-/// How many shares [`transfer_last_use_shares`] moved and clones
-/// [`move_unique_clones`] turned into handoffs, for `--uniqueness-report`.
+/// How many shares `transfer_last_use_shares` moved and clones
+/// `move_unique_clones` turned into handoffs, for `--uniqueness-report`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UniquenessReport {
     /// Retains dropped because the holder they paid for took the last share

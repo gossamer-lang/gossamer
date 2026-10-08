@@ -39,10 +39,10 @@ fn builtin_channel_try_recv(args: &[Value]) -> RuntimeResult<Value> {
     })
 }
 
-/// `rx.recv_ctx(&ctx)` in the interpreter. The VM channel and Context use
-/// separate wait primitives, so the receive performs bounded condvar waits and
-/// checks the Context between them. A context that has already fired answers
-/// `None` without consuming a queued value, as it does in the native runtime.
+/// `rx.recv_ctx(&ctx)` in the interpreter. Cancelling the context wakes the
+/// channel's waiters, so the receive sleeps until a value, a close, or the
+/// cancellation arrives. A context that has already fired answers `None`
+/// without consuming a queued value, as it does in the native runtime.
 fn builtin_channel_recv_ctx(args: &[Value]) -> RuntimeResult<Value> {
     let Some(Value::Channel(channel)) = args.first() else {
         return Err(RuntimeError::Type(
@@ -50,6 +50,7 @@ fn builtin_channel_recv_ctx(args: &[Value]) -> RuntimeResult<Value> {
         ));
     };
     let ctx = args.get(1);
+    let _watch = ctx.and_then(|ctx| crate::stdlib_builtins::context::watch(ctx, channel.waker()));
     Ok(
         match channel.recv_with_cancel(|| {
             ctx.is_some_and(crate::stdlib_builtins::context::value_is_cancelled)
@@ -258,6 +259,22 @@ use std::sync::atomic::AtomicI64;
 struct WaitGroupCell {
     counter: parking_lot::Mutex<i64>,
     cond: parking_lot::Condvar,
+}
+
+/// Wakes a group's waiters so each re-reads the counter and its context.
+/// Takes the counter's lock before notifying, since a waiter reads both
+/// under it.
+struct WaitGroupWake(Arc<WaitGroupCell>);
+
+impl std::task::Wake for WaitGroupWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        drop(self.0.counter.lock());
+        self.0.cond.notify_all();
+    }
 }
 
 
@@ -726,9 +743,8 @@ fn builtin_waitgroup_wait(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 /// `wg.wait_ctx(ctx)` - waits for the counter to reach zero unless the
-/// context fires first, answering which of the two happened. The wait is
-/// split into short steps so a cancellation raised while waiting is
-/// observed promptly.
+/// context fires first, answering which of the two happened. Cancelling the
+/// context wakes the group's waiters, so either event ends the wait.
 fn builtin_waitgroup_wait_ctx(args: &[Value]) -> RuntimeResult<Value> {
     let cell = args.first().and_then(wg_of).ok_or_else(|| {
         RuntimeError::Type("WaitGroup::wait_ctx: receiver must be WaitGroup".to_string())
@@ -736,8 +752,12 @@ fn builtin_waitgroup_wait_ctx(args: &[Value]) -> RuntimeResult<Value> {
     let Some(ctx) = args.get(1) else {
         return Ok(Value::Bool(true));
     };
+    let _watch = crate::stdlib_builtins::context::watch(
+        ctx,
+        std::task::Waker::from(Arc::new(WaitGroupWake(Arc::clone(&cell)))),
+    );
+    let mut count = cell.counter.lock();
     loop {
-        let mut count = cell.counter.lock();
         if *count <= 0 {
             return Ok(Value::Bool(true));
         }
@@ -747,8 +767,7 @@ fn builtin_waitgroup_wait_ctx(args: &[Value]) -> RuntimeResult<Value> {
         if !gossamer_runtime::platform::CAN_BLOCK {
             return Err(RuntimeError::WouldNeverWake("WaitGroup::wait_ctx"));
         }
-        cell.cond
-            .wait_for(&mut count, std::time::Duration::from_millis(5));
+        cell.cond.wait(&mut count);
     }
 }
 

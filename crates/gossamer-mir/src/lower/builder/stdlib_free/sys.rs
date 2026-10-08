@@ -107,7 +107,7 @@ impl<'a> Builder<'a> {
             ),
             "fs::temp_dir" => ("gos_rt_fs_temp_dir", self.result_string_error_adt_ty()),
             "fs::temp_file" => {
-                let file = self.tcx.int_ty(gossamer_types::IntTy::I64);
+                let file = self.sync_handle_ty(44);
                 let path = self.tcx.string_ty();
                 let pair = self
                     .tcx
@@ -327,15 +327,16 @@ impl<'a> Builder<'a> {
             "io::close_writer" => ("gos_rt_io_close_writer", self.tcx.unit()),
             "net::lookup" => ("gos_rt_net_resolve", self.result_vec_string_error_ty()),
             "fs::open" | "fs::File::open" => {
-                ("gos_rt_fs_file_open", self.result_i64_error_adt_ty())
+                let file = self.sync_handle_ty(44);
+                ("gos_rt_fs_file_open", self.result_of(file))
             }
             "fs::create" | "fs::File::create" => {
-                ("gos_rt_fs_file_create", self.result_i64_error_adt_ty())
+                let file = self.sync_handle_ty(44);
+                ("gos_rt_fs_file_create", self.result_of(file))
             }
-            "fs::OpenOptions::new" | "OpenOptions::new" => (
-                "gos_rt_fs_open_options_new",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
+            "fs::OpenOptions::new" | "OpenOptions::new" => {
+                ("gos_rt_fs_open_options_new", self.sync_handle_ty(45))
+            }
             "net::ip::is_valid" => ("gos_rt_netip_is_valid", self.tcx.bool_ty()),
             "net::ip::is_v4" => ("gos_rt_netip_is_v4", self.tcx.bool_ty()),
             "net::ip::is_v6" => ("gos_rt_netip_is_v6", self.tcx.bool_ty()),
@@ -353,18 +354,25 @@ impl<'a> Builder<'a> {
                 )
             }
             "net::TcpListener::bind" => {
-                ("gos_rt_tcp_listener_bind", self.result_i64_error_adt_ty())
+                let listener = self.sync_handle_ty(13);
+                ("gos_rt_tcp_listener_bind", self.result_of(listener))
             }
             "net::TcpStream::connect" => {
-                ("gos_rt_tcp_stream_connect", self.result_i64_error_adt_ty())
+                let stream = self.sync_handle_ty(12);
+                ("gos_rt_tcp_stream_connect", self.result_of(stream))
             }
             "net::UnixListener::bind" => {
-                ("gos_rt_unix_listener_bind", self.result_i64_error_adt_ty())
+                let listener = self.sync_handle_ty(16);
+                ("gos_rt_unix_listener_bind", self.result_of(listener))
             }
             "net::UnixStream::connect" => {
-                ("gos_rt_unix_stream_connect", self.result_i64_error_adt_ty())
+                let stream = self.sync_handle_ty(15);
+                ("gos_rt_unix_stream_connect", self.result_of(stream))
             }
-            "net::UdpSocket::bind" => ("gos_rt_udp_bind", self.result_i64_error_adt_ty()),
+            "net::UdpSocket::bind" => {
+                let socket = self.sync_handle_ty(14);
+                ("gos_rt_udp_bind", self.result_of(socket))
+            }
             "bufio::Scanner::new" | "Scanner::new" => (
                 "gos_rt_bufio_scanner_new",
                 self.tcx.int_ty(gossamer_types::IntTy::I64),

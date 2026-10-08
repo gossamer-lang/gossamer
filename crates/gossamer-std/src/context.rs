@@ -55,6 +55,19 @@ impl gossamer_runtime::c_abi::CancelSource for Context {
     fn deregister(&self, gid: Gid) {
         self.deregister_waiter(gid);
     }
+
+    fn watch(&self, waker: &std::task::Waker) {
+        Context::watch(self, waker);
+    }
+
+    fn unwatch(&self, waker: &std::task::Waker) {
+        Context::unwatch(self, waker);
+    }
+
+    fn not_fired(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        let ctx = self.clone();
+        Arc::new(move || !ctx.is_cancelled())
+    }
 }
 
 /// Cancellation-aware blocking receive on a runtime channel pointer.
@@ -92,6 +105,9 @@ struct Inner {
     /// active goroutine) can be dropped - `cancel_with` skips
     /// upgrade failures rather than treating them as errors.
     children: Mutex<Vec<Weak<Inner>>>,
+    /// Wakers run when this context or an ancestor is cancelled, for
+    /// waiters that are not goroutines.
+    wakers: gossamer_runtime::wake::WakerSet,
 }
 
 /// Shared, reference-counted context handle.
@@ -113,6 +129,7 @@ impl Context {
                 parent: None,
                 waiters: Mutex::new(Vec::new()),
                 children: Mutex::new(Vec::new()),
+                wakers: gossamer_runtime::wake::WakerSet::new(),
             }),
         }
     }
@@ -145,6 +162,22 @@ impl Context {
         if let Some(pos) = waiters.iter().position(|&w| w == gid) {
             waiters.swap_remove(pos);
         }
+    }
+
+    /// Runs `waker` when this context or an ancestor is cancelled. A
+    /// context already cancelled runs it at once, so a caller that
+    /// registers and then sleeps cannot miss a cancellation that came
+    /// first.
+    pub fn watch(&self, waker: &std::task::Waker) {
+        self.inner.wakers.register(waker);
+        if self.is_cancelled() {
+            waker.wake_by_ref();
+        }
+    }
+
+    /// Withdraws a registration made by [`Context::watch`].
+    pub fn unwatch(&self, waker: &std::task::Waker) {
+        self.inner.wakers.deregister(waker);
     }
 
     /// Returns a [`Done`] handle - a receive-only,
@@ -282,6 +315,7 @@ pub fn with_cancel(parent: &Context) -> (Context, Cancel) {
         parent: Some(parent.clone()),
         waiters: Mutex::new(Vec::new()),
         children: Mutex::new(Vec::new()),
+        wakers: gossamer_runtime::wake::WakerSet::new(),
     });
     // Register the child with the parent so an ancestor cancel
     // walks down to the descendants' wait-lists.
@@ -435,6 +469,7 @@ fn propagate_cancel(inner: &Arc<Inner>, reason: String) {
             scheduler.unpark(gid);
         }
     }
+    inner.wakers.wake_all();
     // Walk descendants. Drop dead weak refs as we go.
     let children: Vec<Weak<Inner>> = std::mem::take(&mut *inner.children.lock());
     for weak in children {

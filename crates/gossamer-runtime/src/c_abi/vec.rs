@@ -539,7 +539,7 @@ pub extern "C-unwind" fn gos_rt_vec_windows_disjoint(
 
 /// `&mut v[lo..hi]` - a header aliasing the elements `[lo, hi)` of `v`, for a
 /// `&mut [T]` argument or receiver. Writes through it land in `v`'s buffer.
-/// Bounds clamp as [`gos_rt_vec_slice`](crate::c_abi::gos_rt_vec_slice)
+/// Bounds clamp as [`gos_rt_vec_slice`]
 /// clamps a range read. The checker keeps `v` exclusively borrowed while the
 /// window lives, so `v` is neither resized nor freed under it.
 #[unsafe(no_mangle)]

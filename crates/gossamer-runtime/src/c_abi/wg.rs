@@ -43,6 +43,9 @@ pub struct GosWaitGroup {
     /// drains this list and unparks each one, so a waiter never holds a
     /// scheduler carrier while the fan-out runs.
     parked_waiters: parking_lot::Mutex<Vec<crate::sched::Gid>>,
+    /// OS threads waiting on this group among other sources, raised when
+    /// the counter reaches zero.
+    wakers: crate::wake::WakerSet,
 }
 
 super::rc::managed_handle!(GosWaitGroup);
@@ -56,16 +59,19 @@ pub extern "C" fn gos_rt_wg_new() -> *mut GosWaitGroup {
             error: AtomicI64::new(0),
             last_done: AtomicI64::new(-1),
             parked_waiters: parking_lot::Mutex::new(Vec::new()),
+            wakers: crate::wake::WakerSet::new(),
         })
     })
 }
 
-/// Releases every goroutine parked in `wait`. Called with the counter at zero.
+/// Releases every goroutine parked in `wait` and raises every OS thread
+/// waiting on the group. Called with the counter at zero.
 fn wake_parked_waiters(wg: &GosWaitGroup) {
     let waiters: Vec<crate::sched::Gid> = std::mem::take(&mut *wg.parked_waiters.lock());
     for gid in waiters {
         crate::sched_global::scheduler().unpark(gid);
     }
+    wg.wakers.wake_all();
 }
 
 #[unsafe(no_mangle)]
@@ -196,12 +202,24 @@ pub unsafe extern "C" fn gos_rt_wg_wait_ctx(
                 return 0;
             }
             if !gossamer_coro::in_goroutine() {
-                // An OS thread has no carrier to release, so it re-checks
-                // both conditions on the group's own wakeup cadence.
-                let mut c = wg.counter.lock();
-                if *c > 0 {
-                    wg.cv.wait_for(&mut c, std::time::Duration::from_millis(50));
+                // An OS thread sleeps on one signal that the counter reaching
+                // zero and the context cancelling both raise. Registered while
+                // the counter is held, so a zero-crossing after the check
+                // finds the waker.
+                let c = wg.counter.lock();
+                if *c <= 0 {
+                    return 1;
                 }
+                let signal = crate::wake::ThreadSignal::new();
+                let waker = signal.waker();
+                wg.wakers.register(&waker);
+                super::context::watch(addr, &waker);
+                drop(c);
+                if !cancelled() {
+                    signal.wait();
+                }
+                wg.wakers.deregister(&waker);
+                super::context::unwatch(addr, &waker);
                 continue;
             }
             // The counter reaching zero and the context cancelling both

@@ -52,6 +52,8 @@ mod imp {
 
     use parking_lot::Mutex;
 
+    use super::super::registry_key::{key_handle, key_id};
+
     static UNIX_LISTENERS: Mutex<Option<HashMap<i64, Arc<UnixListener>>>> = Mutex::new(None);
     static UNIX_STREAMS: Mutex<Option<HashMap<i64, Arc<UnixStream>>>> = Mutex::new(None);
     static NEXT_UNIX_HANDLE: AtomicI64 = AtomicI64::new(1);
@@ -75,26 +77,45 @@ mod imp {
     }
 
     fn listener_clone(h: i64) -> Option<Arc<UnixListener>> {
+        let id = key_id(h);
         UNIX_LISTENERS
             .lock()
             .as_ref()
-            .and_then(|m| m.get(&h).cloned())
+            .and_then(|m| m.get(&id).cloned())
     }
 
     fn stream_clone(h: i64) -> Option<Arc<UnixStream>> {
+        let id = key_id(h);
         UNIX_STREAMS
             .lock()
             .as_ref()
-            .and_then(|m| m.get(&h).cloned())
+            .and_then(|m| m.get(&id).cloned())
     }
 
+    /// Removes the listener registered under `id`; it closes once no call is
+    /// still accepting on it.
+    fn retire_listener(id: i64) {
+        if let Some(m) = UNIX_LISTENERS.lock().as_mut() {
+            m.remove(&id);
+        }
+    }
+
+    /// Removes the stream registered under `id`; it closes once no call is
+    /// still working on it.
+    fn retire_stream(id: i64) {
+        if let Some(m) = UNIX_STREAMS.lock().as_mut() {
+            m.remove(&id);
+        }
+    }
+
+    /// Registers `s` and answers a handle owning the entry.
     fn insert_stream(s: UnixStream) -> i64 {
-        let h = next_handle();
+        let id = next_handle();
         UNIX_STREAMS
             .lock()
             .get_or_insert_with(HashMap::new)
-            .insert(h, Arc::new(s));
-        h
+            .insert(id, Arc::new(s));
+        key_handle(id, retire_stream)
     }
 
     pub(super) unsafe fn listener_bind(path: *const c_char) -> i128 {
@@ -102,12 +123,12 @@ mod imp {
         let p = unsafe { cstr_to_str(path) };
         match UnixListener::bind(&p) {
             Ok(l) => {
-                let h = next_handle();
+                let id = next_handle();
                 UNIX_LISTENERS
                     .lock()
                     .get_or_insert_with(HashMap::new)
-                    .insert(h, Arc::new(l));
-                super::super::result::gos_rt_result_new(0, h)
+                    .insert(id, Arc::new(l));
+                super::super::result::gos_rt_result_new(0, key_handle(id, retire_listener))
             }
             Err(e) => super::unix_err(&format!("{e}")),
         }
@@ -125,15 +146,13 @@ mod imp {
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 let addr_cs = super::super::string::alloc_cstring(addr_str.as_bytes());
-                #[repr(C)]
-                struct Pair {
-                    stream: i64,
-                    addr: i64,
+                let pair = super::super::rc::counted_words(
+                    &[sh, addr_cs as i64],
+                    &super::super::net_tcp::ACCEPTED_PAIR_META,
+                );
+                if pair.is_null() {
+                    return super::unix_err("UnixListener::accept: allocation failed");
                 }
-                let pair = Box::into_raw(Box::new(Pair {
-                    stream: sh,
-                    addr: addr_cs as i64,
-                }));
                 super::super::result::gos_rt_result_new(0, pair as i64)
             }
             Err(e) => super::unix_err(&format!("{e}")),
@@ -141,9 +160,7 @@ mod imp {
     }
 
     pub(super) fn listener_close(h: i64) {
-        if let Some(m) = UNIX_LISTENERS.lock().as_mut() {
-            m.remove(&h);
-        }
+        retire_listener(key_id(h));
     }
 
     pub(super) unsafe fn stream_connect(path: *const c_char) -> i128 {
@@ -210,9 +227,7 @@ mod imp {
     }
 
     pub(super) fn stream_close(h: i64) {
-        if let Some(m) = UNIX_STREAMS.lock().as_mut() {
-            m.remove(&h);
-        }
+        retire_stream(key_id(h));
     }
 }
 

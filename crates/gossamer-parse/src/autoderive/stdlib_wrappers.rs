@@ -222,9 +222,16 @@ fn system_wrappers(
     }
     let wants_term =
         (mentions_path(source, "term::") && from_std("term")) || item_imported(TERM_WRAPPERS);
-    if wants_term || (mentions_path(source, "fd::") && from_std("fd")) || item_imported(FD_WRAPPERS)
+    if wants_term
+        || (mentions_path(source, "fd::") && from_std("fd"))
+        || item_imported(FD_WRAPPERS)
+        || item_imported(FD_WAIT_WRAPPERS)
     {
         out.push_str(FD_WRAPPERS);
+        if mentions_path(source, "fs::") && from_std("fs") {
+            out.push_str(FD_FILE_WRAPPERS);
+        }
+        out.push_str(FD_WAIT_WRAPPERS);
     }
     if wants_term {
         out.push_str(TERM_WRAPPERS);
@@ -960,19 +967,72 @@ impl<T> __gos_ffi_Handle<T> {
 }
 "#;
 
-/// `std::os::fd`: waiting for a descriptor to be readable or writable,
-/// over the runtime's `__gos_fd_wait_raw` leaf.
+/// `std::os::fd`: what names a descriptor, and waiting for one to be
+/// readable or writable over the runtime's `__gos_fd_wait_raw` leaf.
+///
+/// A call that needs the OS descriptor takes the handle it belongs to, an
+/// `fs::File`, so the file stays open while the call uses it; a bare integer
+/// names only a standard stream. A descriptor read off a file and passed on
+/// its own would name whatever the OS reused it for once the file closed.
 const FD_WRAPPERS: &str = r"
-fn __gos_fd_wait_readable(fd: i64, timeout_ms: i64) -> Result<bool, errors::Error> {
-    let ready = __gos_fd_wait_raw(fd, 0, timeout_ms)?
+trait __gos_fd_Descriptor {
+    fn raw_descriptor(&self) -> i64
+    fn keep_open(&self) -> Fn() -> ()
+}
+
+impl __gos_fd_Descriptor for i64 {
+    fn raw_descriptor(&self) -> i64 {
+        if *self >= 0 && *self <= 2 { *self } else { -1 }
+    }
+
+    fn keep_open(&self) -> Fn() -> () {
+        || ()
+    }
+}
+";
+
+/// The `os::fd::Descriptor` impl for `fs::File`, injected where the program
+/// reaches `fs`: a program that never does holds no file to pass. The
+/// closure `keep_open` answers captures the file, so whatever holds it keeps
+/// the file open.
+const FD_FILE_WRAPPERS: &str = r"
+impl __gos_fd_Descriptor for fs::File {
+    fn raw_descriptor(&self) -> i64 {
+        self.fd().unwrap_or(-1)
+    }
+
+    fn keep_open(&self) -> Fn() -> () {
+        let file = *self
+        || {
+            let _ = file
+        }
+    }
+}
+";
+
+const FD_WAIT_WRAPPERS: &str = r#"
+fn __gos_fd_not_a_stream(operation: String) -> errors::Error {
+    errors::new(f"{operation}: an integer descriptor names a standard stream (0, 1, or 2); pass an opened file as its fs::File")
+}
+
+fn __gos_fd_wait_readable<D: __gos_fd_Descriptor>(fd: D, timeout_ms: i64) -> Result<bool, errors::Error> {
+    let raw = fd.raw_descriptor()
+    if raw < 0 {
+        return Err(__gos_fd_not_a_stream("fd::wait_readable"))
+    }
+    let ready = __gos_fd_wait_raw(raw, 0, timeout_ms)?
     Ok(ready == 1)
 }
 
-fn __gos_fd_wait_writable(fd: i64, timeout_ms: i64) -> Result<bool, errors::Error> {
-    let ready = __gos_fd_wait_raw(fd, 1, timeout_ms)?
+fn __gos_fd_wait_writable<D: __gos_fd_Descriptor>(fd: D, timeout_ms: i64) -> Result<bool, errors::Error> {
+    let raw = fd.raw_descriptor()
+    if raw < 0 {
+        return Err(__gos_fd_not_a_stream("fd::wait_writable"))
+    }
+    let ready = __gos_fd_wait_raw(raw, 1, timeout_ms)?
     Ok(ready == 1)
 }
-";
+"#;
 
 /// `std::os::signal` signal numbers, per target, for `signal::on`.
 const SIGNAL_WRAPPERS: &str = r#"
@@ -1015,15 +1075,44 @@ fn __gos_term_os_error(operation: String) -> errors::Error {
     errors::new(f"term::{operation}: os error {ffi::last_os_error()}")
 }
 
-fn __gos_term_read_input(timeout_ms: i64, fd: i64 = 0) -> Result<Vec<u8>, errors::Error> {
-    if __gos_fd_wait_raw(__gos_term_handle(fd), 0, timeout_ms)? != 1 {
-        return Ok(#[])
-    }
-    __gos_term_read_ready(fd)
+fn __gos_term_is_terminal<D: __gos_fd_Descriptor>(stream: D) -> bool {
+    let raw = stream.raw_descriptor()
+    raw >= 0 && __gos_term_is_terminal_raw(raw)
 }
 
-fn __gos_term_resized(fd: i64 = 1) -> bool {
-    let Ok(size) = __gos_term_size(fd) else {
+fn __gos_term_size<D: __gos_fd_Descriptor>(fd: D = __gos_term_STDOUT) -> Result<(i64, i64), errors::Error> {
+    let raw = fd.raw_descriptor()
+    if raw < 0 {
+        return Err(__gos_fd_not_a_stream("term::size"))
+    }
+    __gos_term_size_raw(raw)
+}
+
+fn __gos_term_enter_raw<D: __gos_fd_Descriptor>(fd: D = __gos_term_STDIN) -> Result<__gos_term_RawMode, errors::Error> {
+    let raw = fd.raw_descriptor()
+    if raw < 0 {
+        return Err(__gos_fd_not_a_stream("term::enter_raw"))
+    }
+    __gos_term_enter_raw_on(raw, fd.keep_open())
+}
+
+fn __gos_term_read_input<D: __gos_fd_Descriptor>(timeout_ms: i64, fd: D = __gos_term_STDIN) -> Result<Vec<u8>, errors::Error> {
+    let raw = fd.raw_descriptor()
+    if raw < 0 {
+        return Err(__gos_fd_not_a_stream("term::read_input"))
+    }
+    if __gos_fd_wait_raw(__gos_term_handle(raw), 0, timeout_ms)? != 1 {
+        return Ok(#[])
+    }
+    __gos_term_read_ready(raw)
+}
+
+fn __gos_term_resized<D: __gos_fd_Descriptor>(fd: D = __gos_term_STDOUT) -> bool {
+    let raw = fd.raw_descriptor()
+    if raw < 0 {
+        return false
+    }
+    let Ok(size) = __gos_term_size_raw(raw) else {
         return false
     }
     let cols, rows = size
@@ -1135,6 +1224,7 @@ unsafe extern "C" {
 struct __gos_term_RawMode {
     fd: i32
     saved: __gos_term_Termios
+    held: Fn() -> ()
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1151,14 +1241,14 @@ fn __gos_term_handle(fd: i64) -> i64 {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn __gos_term_is_terminal(stream: i64) -> bool {
+fn __gos_term_is_terminal_raw(stream: i64) -> bool {
     unsafe { __gos_term_isatty(stream as i32) } == 1
 }
 
 // A standard stream asked for its size falls back to the other two, so a
 // program whose output is redirected still reads the terminal's size.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn __gos_term_size(fd: i64 = 1) -> Result<(i64, i64), errors::Error> {
+fn __gos_term_size_raw(fd: i64) -> Result<(i64, i64), errors::Error> {
     let candidates = if fd < 3 { #[fd, 1, 0, 2] } else { #[fd] }
     for candidate in candidates {
         let mut size = __gos_term_Winsize { rows: 0, cols: 0, xpixel: 0, ypixel: 0 }
@@ -1170,7 +1260,7 @@ fn __gos_term_size(fd: i64 = 1) -> Result<(i64, i64), errors::Error> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn __gos_term_enter_raw(fd: i64 = 0) -> Result<__gos_term_RawMode, errors::Error> {
+fn __gos_term_enter_raw_on(fd: i64, held: Fn() -> ()) -> Result<__gos_term_RawMode, errors::Error> {
     let fd = fd as i32
     let mut saved = __gos_term_blank_termios()
     if unsafe { __gos_term_tcgetattr(fd, &mut saved) } != 0 {
@@ -1186,7 +1276,7 @@ fn __gos_term_enter_raw(fd: i64 = 0) -> Result<__gos_term_RawMode, errors::Error
     if unsafe { __gos_term_tcsetattr(fd, __gos_term_TCSAFLUSH, &mut attrs) } != 0 {
         return Err(__gos_term_os_error("enter_raw"))
     }
-    let mode = __gos_term_RawMode { fd: fd, saved: saved }
+    let mode = __gos_term_RawMode { fd: fd, saved: saved, held: held }
     runtime::at_exit(|| mode.restore())
     Ok(mode)
 }
@@ -1262,6 +1352,7 @@ struct __gos_term_RawMode {
     input: usize
     input_mode: u32
     output_mode: Option<u32>
+    held: Fn() -> ()
 }
 
 #[cfg(windows)]
@@ -1275,13 +1366,13 @@ impl __gos_term_RawMode {
 }
 
 #[cfg(windows)]
-fn __gos_term_is_terminal(stream: i64) -> bool {
+fn __gos_term_is_terminal_raw(stream: i64) -> bool {
     let mut mode = #[0u32]
     unsafe { __gos_term_GetConsoleMode(__gos_term_handle(stream) as usize, &mut mode) } != 0
 }
 
 #[cfg(windows)]
-fn __gos_term_size(fd: i64 = 1) -> Result<(i64, i64), errors::Error> {
+fn __gos_term_size_raw(fd: i64) -> Result<(i64, i64), errors::Error> {
     let mut info = __gos_term_ConsoleInfo { size_x: 0, size_y: 0, cursor_x: 0, cursor_y: 0, attributes: 0, left: 0, top: 0, right: 0, bottom: 0, max_x: 0, max_y: 0 }
     if unsafe { __gos_term_GetConsoleScreenBufferInfo(__gos_term_handle(fd) as usize, &mut info) } == 0 {
         return Err(__gos_term_os_error("size"))
@@ -1292,7 +1383,7 @@ fn __gos_term_size(fd: i64 = 1) -> Result<(i64, i64), errors::Error> {
 // Standard output gains virtual-terminal processing when it is a console;
 // output redirected elsewhere leaves only the input in raw mode.
 #[cfg(windows)]
-fn __gos_term_enter_raw(fd: i64 = 0) -> Result<__gos_term_RawMode, errors::Error> {
+fn __gos_term_enter_raw_on(fd: i64, held: Fn() -> ()) -> Result<__gos_term_RawMode, errors::Error> {
     let input = __gos_term_handle(fd) as usize
     let output = __gos_term_handle(1) as usize
     let mut input_mode = #[0u32]
@@ -1313,7 +1404,7 @@ fn __gos_term_enter_raw(fd: i64 = 0) -> Result<__gos_term_RawMode, errors::Error
         }
         saved_output = Some(output_mode[0])
     }
-    let mode = __gos_term_RawMode { input: input, input_mode: input_mode[0], output_mode: saved_output }
+    let mode = __gos_term_RawMode { input: input, input_mode: input_mode[0], output_mode: saved_output, held: held }
     runtime::at_exit(|| mode.restore())
     Ok(mode)
 }
@@ -1339,17 +1430,17 @@ impl __gos_term_RawMode {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-fn __gos_term_is_terminal(stream: i64) -> bool {
+fn __gos_term_is_terminal_raw(stream: i64) -> bool {
     false
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-fn __gos_term_size(fd: i64 = 1) -> Result<(i64, i64), errors::Error> {
+fn __gos_term_size_raw(fd: i64) -> Result<(i64, i64), errors::Error> {
     Err(errors::new("term::size: this target has no terminal"))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-fn __gos_term_enter_raw(fd: i64 = 0) -> Result<__gos_term_RawMode, errors::Error> {
+fn __gos_term_enter_raw_on(fd: i64, held: Fn() -> ()) -> Result<__gos_term_RawMode, errors::Error> {
     Err(errors::new("term::enter_raw: this target has no terminal"))
 }
 

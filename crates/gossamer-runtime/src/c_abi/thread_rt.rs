@@ -14,28 +14,40 @@ pub extern "C" fn gos_rt_thread_num_cpus() -> i64 {
     })
 }
 
+/// The scheduler's counters and the blocking pool's load as one compact JSON
+/// object: what `runtime::scheduler_stats_json()` answers on the compiled
+/// tiers and from Rust.
+#[must_use]
+pub fn scheduler_stats_json() -> String {
+    let scheduler = crate::sched_global::scheduler();
+    let stats = scheduler.stats();
+    let blocking = crate::blocking_pool::stats();
+    format!(
+        "{{\"spawned\":{},\"finished\":{},\"steps\":{},\"yields\":{},\"steals\":{},\"injects\":{},\"parks\":{},\"unparks\":{},\"live_goroutines\":{},\"worker_count\":{},\"worker_count_cap\":{},\"blocking_threads\":{},\"blocking_queued\":{},\"blocking_admission_waiters\":{},\"blocking_oldest_queued_ms\":{}}}",
+        stats.spawned,
+        stats.finished,
+        stats.steps,
+        stats.yields,
+        stats.steals,
+        stats.injects,
+        stats.parks,
+        stats.unparks,
+        scheduler.live_goroutines(),
+        scheduler.worker_count(),
+        crate::sched::MultiScheduler::worker_count_cap(),
+        blocking.threads,
+        blocking.queued,
+        blocking.admission_waiters,
+        blocking.oldest_queued_ms,
+    )
+}
+
 /// `runtime::scheduler_stats_json() -> String` - low-overhead snapshot
 /// of the global goroutine scheduler counters.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_runtime_scheduler_stats_json() -> *mut std::os::raw::c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let scheduler = crate::sched_global::scheduler();
-        let stats = scheduler.stats();
-        let text = format!(
-            "{{\"spawned\":{},\"finished\":{},\"steps\":{},\"yields\":{},\"steals\":{},\"injects\":{},\"parks\":{},\"unparks\":{},\"live_goroutines\":{},\"worker_count\":{},\"worker_count_cap\":{}}}",
-            stats.spawned,
-            stats.finished,
-            stats.steps,
-            stats.yields,
-            stats.steals,
-            stats.injects,
-            stats.parks,
-            stats.unparks,
-            scheduler.live_goroutines(),
-            scheduler.worker_count(),
-            crate::sched::MultiScheduler::worker_count_cap(),
-        );
-        crate::c_abi::alloc_cstring(text.as_bytes())
+        crate::c_abi::alloc_cstring(scheduler_stats_json().as_bytes())
     })
 }
 

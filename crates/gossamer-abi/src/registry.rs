@@ -1632,7 +1632,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_rwlock_get", (Ptr) -> I64, Cranelift, "sync::RwLock::read(lock) -> the guarded i64 value."),
     rt!("gos_rt_rwlock_new", (I64) -> Ptr, Cranelift, "sync::RwLock::new(value) -> a reader-writer lock guarding an i64."),
     rt!("gos_rt_rwlock_set", (Ptr, I64) -> Void, Cranelift, "sync::RwLock::write(lock, value): replace the guarded i64 under a write lock."),
-    rt_unwind!("gos_rt_rwlock_with_read", (Ptr, Ptr) -> I64, Cranelift, "sync::RwLock::with_read(lock, f): run f under a read lock with the current value."),
+    rt_unwind!("gos_rt_rwlock_with_read", (Ptr, Ptr) -> I64, Cranelift, "sync::RwLock::with_read(lock, f): run f on the value read under a read lock, released before f runs."),
     rt_unwind!("gos_rt_rwlock_with_write", (Ptr, Ptr) -> I64, Cranelift, "sync::RwLock::with_write(lock, f): run f under a write lock; its result becomes the new value."),
     rt!("gos_rt_select_arm_default", (Ptr) -> Void, Both, "Append a default arm to a select builder (fires when no recv/send arm is ready)."),
     rt!("gos_rt_select_arm_recv", (Ptr, Ptr) -> Void, Both, "Append a recv arm on the given channel to a select builder."),
@@ -2299,6 +2299,9 @@ pub fn answers_counted_payload(name: &str) -> bool {
             | "gos_rt_crypto_ed25519_keypair"
             | "gos_rt_crypto_ecdsa_keypair_pem"
             | "gos_rt_fs_temp_file"
+            | "gos_rt_tcp_listener_accept"
+            | "gos_rt_unix_listener_accept"
+            | "gos_rt_udp_recv_from"
             | "gos_rt_fs_metadata_raw"
             | "gos_rt_exec_run_raw"
             | "gos_rt_exec_run_in_raw"

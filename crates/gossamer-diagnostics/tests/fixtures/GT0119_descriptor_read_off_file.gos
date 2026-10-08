@@ -1,0 +1,12 @@
+// ERROR: GT0119
+use std::{errors, fs, term}
+
+fn width(path: String) -> Result<i64, errors::Error> {
+    let tty = fs::File::open(path)?
+    let cols, _ = term::size(tty.fd()?)?
+    Ok(cols)
+}
+
+fn main() {
+    println("{}", width("/dev/tty").is_ok())
+}

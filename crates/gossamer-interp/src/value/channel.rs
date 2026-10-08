@@ -5,7 +5,6 @@ use super::{RuntimeError, Value};
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
 
 use parking_lot::Mutex;
 
@@ -131,6 +130,20 @@ impl SelectWaiter {
         while !*ready {
             self.cv.wait(&mut ready);
         }
+    }
+}
+
+/// Wakes a channel's waiters; see [`Channel::waker`].
+struct ChannelWake(Arc<ChannelInner>);
+
+impl std::task::Wake for ChannelWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        drop(self.0.state.lock());
+        self.0.cv.notify_all();
     }
 }
 
@@ -499,9 +512,9 @@ impl Channel {
     /// predicate. A context that has already fired short-circuits without
     /// consuming a queued value, matching the native runtime's receive
     /// ordering, so the answer does not depend on whether a sender reached
-    /// the channel first. The bounded wait makes a cancellation raised during
-    /// the wait visible even though a Context does not share this channel's
-    /// condvar.
+    /// the channel first. The caller registers [`Channel::waker`] with the
+    /// cancellation source before calling, so a cancel raised during the
+    /// wait wakes it.
     #[must_use]
     pub fn recv_with_cancel(&self, is_cancelled: impl Fn() -> bool) -> Option<Value> {
         if is_cancelled() {
@@ -524,11 +537,18 @@ impl Channel {
             }
             guard.waiting_receivers += 1;
             self.wake_select_waiters(&guard);
-            self.inner
-                .cv
-                .wait_for(&mut guard, Duration::from_millis(50));
+            self.inner.cv.wait(&mut guard);
             guard.waiting_receivers = guard.waiting_receivers.saturating_sub(1);
         }
+    }
+
+    /// A waker that wakes this channel's waiters, so each re-reads the
+    /// condition it waits on. It takes the channel's lock before notifying:
+    /// a waiter reads its condition under that lock, so the wake cannot land
+    /// between the read and the wait.
+    #[must_use]
+    pub fn waker(&self) -> std::task::Waker {
+        std::task::Waker::from(Arc::new(ChannelWake(Arc::clone(&self.inner))))
     }
 
     /// Returns `true` when the channel currently has at least one

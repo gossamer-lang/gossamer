@@ -106,26 +106,31 @@ use crate::value::{MapKey, NativeCall, NativeDispatch, RuntimeResult, Value};
 /// Entry point invoked from `builtins::install`.
 use super::*;
 
-// Router: free-fn API over a process-global registry. Route
-// registration and pattern lookup are pure computation (no sockets),
-// so this module builds on every target including wasm32; only the
-// serving dispatch (`http::serve`) is socket-bound and stays gated.
+// Router: route registration and pattern lookup are pure computation
+// (no sockets), so this module builds on every target including wasm32;
+// only the serving dispatch (`http::serve`) is socket-bound and stays
+// gated.
 //
-// Process-global (not `thread_local!`): goroutines run on an OS
-// worker-thread pool, so a router handle minted on one thread must
-// resolve on another - `http::serve` dispatches each request's handler
-// on a goroutine that may run on a different worker than the one that
-// built the router. Mirrors the `sync::*` registries. `GlobalReg` is in
-// scope via the `use super::*;` re-export of `set::*`.
-pub(crate) static ROUTER_REGISTRY: GlobalReg<StdHashMap<i64, RefCell<RouterTable>>> =
-    GlobalReg::new(|| parking_lot::ReentrantMutex::new(RefCell::new(StdHashMap::new())));
-pub(crate) static NEXT_ROUTER_ID: GlobalReg<i64> =
-    GlobalReg::new(|| parking_lot::ReentrantMutex::new(RefCell::new(1)));
+// A router handle holds its table, shared by every copy of the handle and
+// by a server serving it, so the routes and their handlers live exactly as
+// long as something can still dispatch to them, on whichever worker thread
+// that happens.
+
+/// One route: the method it answers (empty for any), its pattern, and the
+/// handler it dispatches to (`Unit` for a route `router::add` registered
+/// without one).
+pub(crate) struct Route {
+    method: String,
+    pattern: String,
+    handler: Value,
+}
 
 #[derive(Default)]
 pub(crate) struct RouterTable {
-    pub(crate) routes: Vec<(String, String)>, // (method, pattern)
+    pub(crate) routes: Vec<Route>,
 }
+
+type SharedTable = parking_lot::Mutex<RouterTable>;
 
 // Static router-builtin tables are kept at module scope rather than
 // inside `install_http_router` so clippy's `items-after-statements`
@@ -210,21 +215,13 @@ pub(crate) fn install_http_router(globals: &mut Vec<(&'static str, Value)>) {
 }
 
 pub(crate) fn router_method_add(verb: &'static str, args: &[Value]) -> RuntimeResult<Value> {
-    let Some(id) = args.first().and_then(router_id_of) else {
+    let Some(table) = args.first().and_then(router_of) else {
         return Ok(err_variant("Router method: first arg must be a Router"));
     };
-    let pattern = arg_str(args.get(1));
-    let handler = args.get(2).cloned().unwrap_or(Value::Unit);
-    ROUTER_REGISTRY.with(|r| {
-        if let Some(table) = r.borrow().get(&id) {
-            table
-                .borrow_mut()
-                .routes
-                .push((verb.to_string(), pattern.clone()));
-        }
-    });
-    ROUTER_HANDLERS.with(|h| {
-        h.borrow_mut().entry(id).or_default().push(handler);
+    table.lock().routes.push(Route {
+        method: verb.to_string(),
+        pattern: arg_str(args.get(1)),
+        handler: args.get(2).cloned().unwrap_or(Value::Unit),
     });
     Ok(args.first().cloned().unwrap_or(Value::Unit))
 }
@@ -251,14 +248,6 @@ pub(crate) fn builtin_router_method_options(args: &[Value]) -> RuntimeResult<Val
     router_method_add("OPTIONS", args)
 }
 
-// Process-global (not `thread_local!`): the stored handler closures are
-// keyed by the same router-handle id as `ROUTER_REGISTRY`, so they must
-// resolve on whichever worker thread the goroutine has migrated to.
-// Mirrors the `sync::*` registries. `GlobalReg` is in scope via the
-// `use super::*;` re-export of `set::*`.
-pub(crate) static ROUTER_HANDLERS: GlobalReg<StdHashMap<i64, Vec<Value>>> =
-    GlobalReg::new(|| parking_lot::ReentrantMutex::new(RefCell::new(StdHashMap::new())));
-
 /// `Router::serve(router, request)` - invoked by `http::serve`'s
 /// dispatch loop when the handler is a Router. Walks the route
 /// table, finds the first match for the request's (method, path),
@@ -269,7 +258,7 @@ pub(crate) fn native_router_serve(
     dispatch: &mut dyn crate::value::NativeDispatch,
     args: &[Value],
 ) -> RuntimeResult<Value> {
-    let Some(router_id) = args.first().and_then(router_id_of) else {
+    let Some(table) = args.first().and_then(router_of) else {
         return Ok(ok_variant(http_404_response()));
     };
     let request = args.get(1).cloned().unwrap_or(Value::Unit);
@@ -277,28 +266,18 @@ pub(crate) fn native_router_serve(
     let (method, path) = request_method_and_path(&request);
     // Find a matching route index and its captured path params in one
     // pass, so selection and capture use identical matcher semantics.
-    let matched: Option<(usize, Vec<(String, String)>)> = ROUTER_REGISTRY.with(|r| {
-        r.borrow().get(&router_id).and_then(|table| {
-            let table = table.borrow();
-            for (i, (m, pat)) in table.routes.iter().enumerate() {
-                if m.is_empty() || m.eq_ignore_ascii_case(&method) {
-                    if let Some(caps) = pattern_captures(pat, &path) {
-                        return Some((i, caps));
-                    }
-                }
-            }
+    // The handler is cloned out so the table's lock is not held while the
+    // handler runs, which may itself add routes.
+    let matched = table.lock().routes.iter().find_map(|route| {
+        if route.method.is_empty() || route.method.eq_ignore_ascii_case(&method) {
+            pattern_captures(&route.pattern, &path).map(|caps| (route.handler.clone(), caps))
+        } else {
             None
-        })
+        }
     });
-    let Some((idx, captures)) = matched else {
+    let Some((handler, captures)) = matched else {
         return Ok(ok_variant(http_404_response()));
     };
-    let handler = ROUTER_HANDLERS.with(|h| {
-        h.borrow()
-            .get(&router_id)
-            .and_then(|hs| hs.get(idx).cloned())
-            .unwrap_or(Value::Unit)
-    });
     // Attach captures to the request so the handler can read them via
     // `r.path_value("id")`; mirrors the compiled tier writing
     // `GosHttpRequest.params` in `gos_rt_router_serve`.
@@ -458,71 +437,39 @@ pub(crate) fn builtin_request_path_float(args: &[Value]) -> RuntimeResult<Value>
 }
 
 pub(crate) fn builtin_router_new(_args: &[Value]) -> RuntimeResult<Value> {
-    let id = NEXT_ROUTER_ID.with(|c| {
-        let mut v = c.borrow_mut();
-        let id = *v;
-        *v += 1;
-        id
-    });
-    ROUTER_REGISTRY.with(|r| {
-        r.borrow_mut()
-            .insert(id, RefCell::new(RouterTable::default()));
-    });
-    let fields = vec![("__router", Value::Int(id))];
-    Ok(Value::struct_(
+    Ok(crate::value::state_handle(
         "Router",
-        Arc::unwrap_or_clone(Arc::new(fields)),
+        "__router",
+        Arc::new(SharedTable::default()),
     ))
 }
 
-pub(crate) fn router_id_of(v: &Value) -> Option<i64> {
-    if let Value::Struct(inner) = v {
-        if inner.name == "Router" {
-            for (i, val) in &inner.fields {
-                if (*i) == "__router" {
-                    if let Value::Int(n) = val {
-                        return Some(*n);
-                    }
-                }
-            }
-        }
-    }
-    None
+/// The table a router handle holds.
+pub(crate) fn router_of(v: &Value) -> Option<Arc<SharedTable>> {
+    crate::value::handle_state(v, "Router", "__router")
 }
 
 pub(crate) fn builtin_router_add(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(id) = args.first().and_then(router_id_of) else {
+    let Some(table) = args.first().and_then(router_of) else {
         return Ok(err_variant("router::add: first arg must be a Router"));
     };
-    let method = arg_str(args.get(1));
-    let pattern = arg_str(args.get(2));
-    ROUTER_REGISTRY.with(|r| {
-        if let Some(table) = r.borrow().get(&id) {
-            table
-                .borrow_mut()
-                .routes
-                .push((method.to_ascii_uppercase(), pattern));
-        }
+    table.lock().routes.push(Route {
+        method: arg_str(args.get(1)).to_ascii_uppercase(),
+        pattern: arg_str(args.get(2)),
+        handler: Value::Unit,
     });
     Ok(ok_variant(Value::Unit))
 }
 
 pub(crate) fn builtin_router_lookup(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(id) = args.first().and_then(router_id_of) else {
+    let Some(table) = args.first().and_then(router_of) else {
         return Ok(none_variant());
     };
     let method = arg_str(args.get(1)).to_ascii_uppercase();
     let path = arg_str(args.get(2));
-    let matched: Option<usize> = ROUTER_REGISTRY.with(|r| {
-        r.borrow().get(&id).and_then(|table| {
-            let table = table.borrow();
-            for (i, (m, pat)) in table.routes.iter().enumerate() {
-                if (m.is_empty() || m == &method) && pattern_matches(pat, &path) {
-                    return Some(i);
-                }
-            }
-            None
-        })
+    let matched = table.lock().routes.iter().position(|route| {
+        (route.method.is_empty() || route.method == method)
+            && pattern_matches(&route.pattern, &path)
     });
     match matched {
         Some(idx) => Ok(some_variant(Value::Int(idx as i64))),
@@ -570,4 +517,29 @@ pub(crate) fn pattern_captures(pattern: &str, path: &str) -> Option<Vec<(String,
 
 pub(crate) fn pattern_matches(pattern: &str, path: &str) -> bool {
     pattern_captures(pattern, path).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_router_table_is_freed_with_its_last_handle() {
+        let router = builtin_router_new(&[]).expect("Router::new");
+        let copy = router.clone();
+        let table = router_of(&router).expect("a router handle");
+        builtin_router_add(&[
+            router,
+            Value::String("get".into()),
+            Value::String("/items/{id}".into()),
+        ])
+        .expect("router::add");
+        assert_eq!(table.lock().routes.len(), 1);
+        drop(copy);
+        assert_eq!(
+            Arc::strong_count(&table),
+            1,
+            "only this test still holds the table"
+        );
+    }
 }

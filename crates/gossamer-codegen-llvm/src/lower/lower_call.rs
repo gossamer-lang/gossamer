@@ -950,6 +950,11 @@ impl<'a> Lowerer<'a> {
                 "  {tmp} = call ptr @gos_rt_chan_new(i32 8, i64 {cap})"
             )
             .unwrap();
+            // The channel is a counted node born with one share, and the
+            // pair holds it twice - once as the sender, once as the receiver
+            // - each end released on its own.
+            declare_rt(&mut self.runtime_refs, "gos_rt_rc_retain");
+            writeln!(self.out, "  call void @gos_rt_rc_retain(ptr {tmp})").unwrap();
             // Materialise a fresh 16-byte tuple buffer so the
             // `(Sender, Receiver)` projections both observe the
             // same channel handle. The destination MIR local may

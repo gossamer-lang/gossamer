@@ -31,9 +31,11 @@
 use std::collections::HashMap as StdHashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, LazyLock, Weak};
+use std::task::{Wake, Waker};
 use std::time::Duration;
 
 use gossamer_runtime::platform::Instant;
+use gossamer_runtime::wake::WakerSet;
 
 use super::deadline_queue::DeadlineQueue;
 use crate::builtins::{BuiltinFnPub, value_to_int};
@@ -45,20 +47,41 @@ struct CtxNode {
     deadline: Option<Instant>,
     parent: Option<Arc<CtxNode>>,
     /// A context outside this registry whose cancellation this node
-    /// follows. A request's context takes the server's, so a peer that
-    /// disconnects and a process that begins shutting down each reach the
-    /// handler without a second watcher to keep in step.
-    follows: Option<gossamer_std::context::Context>,
+    /// follows, and the waker that cancels this node when it fires. A
+    /// request's context takes the server's, so a peer that disconnects and
+    /// a process that begins shutting down each reach the handler.
+    follows: Option<(gossamer_std::context::Context, Waker)>,
     /// Live children by id; `cancel` walks these depth-first.
     children: parking_lot::Mutex<StdHashMap<i64, Weak<CtxNode>>>,
     /// The context's "done" channel. `cancel` closes it so a
     /// `select { _ = ctx.done_chan().recv() => ... }` arm becomes ready
     /// via closed-channel select readiness. Closing is idempotent.
     chan: Channel,
+    /// Waits on this context among other sources, raised when it is
+    /// cancelled.
+    wakers: WakerSet,
+}
+
+/// Cancels the node it names when the context it follows fires.
+struct FollowLink(Weak<CtxNode>);
+
+impl Wake for FollowLink {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        if let Some(node) = self.0.upgrade() {
+            cancel_node(&node);
+        }
+    }
 }
 
 impl Drop for CtxNode {
     fn drop(&mut self) {
+        if let Some((ctx, waker)) = &self.follows {
+            ctx.unwatch(waker);
+        }
         if let Some(deadline) = self.deadline {
             DEADLINES.remove(deadline, self.id);
         }
@@ -135,14 +158,15 @@ fn insert_node(
     parent: Option<Arc<CtxNode>>,
     follows: Option<gossamer_std::context::Context>,
 ) -> Arc<CtxNode> {
-    let node = Arc::new(CtxNode {
+    let node = Arc::new_cyclic(|this: &Weak<CtxNode>| CtxNode {
         id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
         cancelled: AtomicBool::new(false),
         deadline,
         parent,
-        follows,
+        follows: follows.map(|ctx| (ctx, Waker::from(Arc::new(FollowLink(this.clone()))))),
         children: parking_lot::Mutex::new(StdHashMap::new()),
         chan: Channel::new(),
+        wakers: WakerSet::new(),
     });
     CTX_REGISTRY.lock().insert(node.id, Arc::downgrade(&node));
     if let Some(parent) = &node.parent {
@@ -156,6 +180,10 @@ fn insert_node(
         if node_is_cancelled(parent) {
             cancel_node(&node);
         }
+    }
+    // A followed context already cancelled runs the waker here.
+    if let Some((ctx, waker)) = &node.follows {
+        ctx.watch(waker);
     }
     node
 }
@@ -273,6 +301,7 @@ fn cancel_node(root: &Arc<CtxNode>) {
         // Closing the done channel makes the node's `select` recv arm
         // ready; idempotent, so a repeated cancel is harmless.
         let _ = node.chan.close();
+        node.wakers.wake_all();
         let kids: Vec<Weak<CtxNode>> = node.children.lock().values().cloned().collect();
         pending.extend(kids.iter().filter_map(Weak::upgrade));
     }
@@ -293,7 +322,11 @@ fn node_is_cancelled(node: &CtxNode) -> bool {
         if node.cancelled.load(Ordering::Acquire) {
             return true;
         }
-        if node.follows.as_ref().is_some_and(|ctx| ctx.is_cancelled()) {
+        if node
+            .follows
+            .as_ref()
+            .is_some_and(|(ctx, _)| ctx.is_cancelled())
+        {
             return true;
         }
         if let Some(deadline) = node.deadline
@@ -304,6 +337,28 @@ fn node_is_cancelled(node: &CtxNode) -> bool {
         current = node.parent.as_deref();
     }
     false
+}
+
+/// A registration made by [`watch`], withdrawn when dropped.
+pub(crate) struct CancelWatch {
+    node: Arc<CtxNode>,
+    waker: Waker,
+}
+
+impl Drop for CancelWatch {
+    fn drop(&mut self) {
+        self.node.wakers.deregister(&self.waker);
+    }
+}
+
+/// Runs `waker` when the context `value` names is cancelled, directly or
+/// through an ancestor, a deadline, or a context it follows. `None` when
+/// `value` is not a context. The caller checks cancellation after this
+/// returns, so a cancel that came first is read rather than waited for.
+pub(crate) fn watch(value: &Value, waker: Waker) -> Option<CancelWatch> {
+    let node = node_of_value(value)?;
+    node.wakers.register(&waker);
+    Some(CancelWatch { node, waker })
 }
 
 /// Returns whether a VM `Context` value has been cancelled or timed out.

@@ -2345,13 +2345,18 @@
 </thead>
 <tbody>
 <tr>
+<td><code>Descriptor</code></td>
+<td><code>trait Descriptor</code></td>
+<td>What a call that needs an OS descriptor takes: an <code>fs::File</code>, which stays open while the call uses it, or <code>term::STDIN</code>, <code>term::STDOUT</code>, or <code>term::STDERR</code> for a standard stream. Any other integer is refused, since a descriptor read off a file names whatever the OS reuses it for once the file closes (GT0119).</td>
+</tr>
+<tr>
 <td><code>wait_readable</code></td>
-<td><code>fn wait_readable(fd: i64, timeout_ms: i64) -&gt; Result&lt;bool, errors::Error&gt;</code></td>
+<td><code>fn wait_readable&lt;D: os::fd::Descriptor&gt;(fd: D, timeout_ms: i64) -&gt; Result&lt;bool, errors::Error&gt;</code></td>
 <td><code>wait_readable(fd, timeout_ms) -&gt; Result&lt;bool, errors::Error&gt;</code>: true when <code>fd</code> has input (or reached end of input) within <code>timeout_ms</code> milliseconds; a negative timeout waits indefinitely. False at the timeout or when the goroutine's cohort is cancelled. The goroutine parks; other goroutines keep running.</td>
 </tr>
 <tr>
 <td><code>wait_writable</code></td>
-<td><code>fn wait_writable(fd: i64, timeout_ms: i64) -&gt; Result&lt;bool, errors::Error&gt;</code></td>
+<td><code>fn wait_writable&lt;D: os::fd::Descriptor&gt;(fd: D, timeout_ms: i64) -&gt; Result&lt;bool, errors::Error&gt;</code></td>
 <td><code>wait_writable(fd, timeout_ms) -&gt; Result&lt;bool, errors::Error&gt;</code>: true when <code>fd</code> accepts a write within the timeout. Windows handles always do.</td>
 </tr>
 </tbody>

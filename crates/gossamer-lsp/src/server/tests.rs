@@ -315,6 +315,41 @@ mod tests {
         assert!(publishes[1].contains("GT0001"), "the burst's last text was analysed: {output}");
     }
 
+    #[test]
+    fn a_request_cancelled_while_queued_is_answered_without_running() {
+        let uri = "file:///cancel.gos";
+        let mut input = frame(&format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"{uri}","languageId":"gossamer","version":1,"text":"fn main() {{ let total = 1 }}\n"}}}}}}"#
+        ));
+        let hover = |id: u32| {
+            frame(&format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"textDocument/hover","params":{{"textDocument":{{"uri":"{uri}"}},"position":{{"line":0,"character":18}}}}}}"#
+            ))
+        };
+        input.push_str(&hover(7));
+        input.push_str(&frame(
+            r#"{"jsonrpc":"2.0","method":"$/cancelRequest","params":{"id":7}}"#,
+        ));
+        input.push_str(&hover(8));
+        let mut output: Vec<u8> = Vec::new();
+        run(input.as_bytes(), &mut output).expect("serve the session");
+        let output = String::from_utf8(output).expect("utf-8 output");
+        let answers: Vec<&str> = output
+            .split("Content-Length:")
+            .filter(|frame| frame.contains("\"id\":"))
+            .collect();
+        let cancelled: Vec<&&str> = answers.iter().filter(|a| a.contains("\"id\":7")).collect();
+        assert_eq!(cancelled.len(), 1, "one answer for the cancelled request: {output}");
+        assert!(
+            cancelled[0].contains("-32800") && !cancelled[0].contains("\"result\""),
+            "the cancelled request is answered with RequestCancelled: {output}"
+        );
+        assert!(
+            answers.iter().any(|a| a.contains("\"id\":8") && a.contains("\"result\"")),
+            "the request after it is still served: {output}"
+        );
+    }
+
     fn codes(state: &ServerState, uri: &str) -> Vec<String> {
         state.documents[uri]
             .diagnostics

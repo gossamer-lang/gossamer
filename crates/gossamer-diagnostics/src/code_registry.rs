@@ -1777,6 +1777,23 @@ pub const REGISTRY: &[(&str, &str)] = &[
             channel, or a `sync::Shared`.",
     ),
     (
+        "GT0119",
+        "A call that needs an OS descriptor, such as `term::size` or\n\
+            `fd::wait_readable`, takes the `fs::File` it belongs to, so the file\n\
+            stays open while the call uses it. A descriptor read off the file with\n\
+            `fd()` names whatever the OS reuses it for once the file closes; pass\n\
+            the file itself. A bare integer names only a standard stream (0, 1,\n\
+            or 2). `gos check --fix` rewrites the argument.",
+    ),
+    (
+        "GT0120",
+        "A websocket connection is a `websocket::Conn`, a handle that closes\n\
+            with its last holder; a parameter declared `i64` was passed where a\n\
+            websocket call takes one. Declare it `websocket::Conn`, as a handler's\n\
+            `fn handle(&self, ws: websocket::Conn)` does. `gos check --fix`\n\
+            rewrites the declaration.",
+    ),
+    (
         "GX0001",
         "An operation received a value of an incompatible type. The\n\
                      diagnostic names the type that was required and the type\n\

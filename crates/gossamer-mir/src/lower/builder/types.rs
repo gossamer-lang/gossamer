@@ -2623,6 +2623,8 @@ fn sentinel_runtime_kind(name: &str) -> Option<&'static str> {
         "metrics::Registry" => "metrics::Registry",
         "rand::Rng" => "math::rand::Rng",
         "bufio::Scanner" => "bufio::Scanner",
+        "bytes::Buffer" => "bytes::Buffer",
+        "bytes::Builder" => "bytes::Builder",
         _ => return None,
     })
 }

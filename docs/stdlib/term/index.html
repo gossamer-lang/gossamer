@@ -2362,31 +2362,31 @@
 <tr>
 <td><code>RawMode</code></td>
 <td><code>type RawMode</code></td>
-<td>Returned by <code>enter_raw</code>; <code>restore()</code> puts the terminal back. Restoration also runs when the program ends, by any path.</td>
+<td>Returned by <code>enter_raw</code>; <code>restore()</code> puts the terminal back. Restoration also runs when the program ends, by any path. A raw mode entered on an <code>fs::File</code> keeps the file open.</td>
 </tr>
 <tr>
 <td><code>is_terminal</code></td>
-<td><code>fn is_terminal(fd: i64) -&gt; bool</code></td>
-<td><code>is_terminal(fd) -&gt; bool</code>: whether the descriptor (a handle on Windows; 0, 1, and 2 name the standard streams) is a terminal.</td>
+<td><code>fn is_terminal&lt;D: os::fd::Descriptor&gt;(fd: D) -&gt; bool</code></td>
+<td><code>is_terminal(fd) -&gt; bool</code>: whether <code>fd</code>, an <code>fs::File</code> or a standard stream, is a terminal.</td>
 </tr>
 <tr>
 <td><code>size</code></td>
-<td><code>fn size(fd: i64 = term::STDOUT) -&gt; Result&lt;(i64, i64), errors::Error&gt;</code></td>
+<td><code>fn size&lt;D: os::fd::Descriptor&gt;(fd: D = term::STDOUT) -&gt; Result&lt;(i64, i64), errors::Error&gt;</code></td>
 <td><code>size(fd = STDOUT) -&gt; Result&lt;(i64, i64), errors::Error&gt;</code>: the terminal's columns and rows. A standard stream that is not a terminal falls back to the other two.</td>
 </tr>
 <tr>
 <td><code>enter_raw</code></td>
-<td><code>fn enter_raw(fd: i64 = term::STDIN) -&gt; Result&lt;term::RawMode, errors::Error&gt;</code></td>
+<td><code>fn enter_raw&lt;D: os::fd::Descriptor&gt;(fd: D = term::STDIN) -&gt; Result&lt;term::RawMode, errors::Error&gt;</code></td>
 <td><code>enter_raw(fd = STDIN) -&gt; Result&lt;RawMode, errors::Error&gt;</code>: input on <code>fd</code> arrives byte by byte without echo or line editing, and output is not translated; the mode is restored when the program ends.</td>
 </tr>
 <tr>
 <td><code>read_input</code></td>
-<td><code>fn read_input(timeout_ms: i64, fd: i64 = term::STDIN) -&gt; Result&lt;Vec&lt;u8&gt;, errors::Error&gt;</code></td>
+<td><code>fn read_input&lt;D: os::fd::Descriptor&gt;(timeout_ms: i64, fd: D = term::STDIN) -&gt; Result&lt;Vec&lt;u8&gt;, errors::Error&gt;</code></td>
 <td><code>read_input(timeout_ms, fd = STDIN) -&gt; Result&lt;Vec&lt;u8&gt;, errors::Error&gt;</code>: the bytes of input available on <code>fd</code> within <code>timeout_ms</code> milliseconds (negative waits indefinitely), empty at the timeout or when the goroutine's cohort is cancelled. The goroutine parks while it waits.</td>
 </tr>
 <tr>
 <td><code>resized</code></td>
-<td><code>fn resized(fd: i64 = term::STDOUT) -&gt; bool</code></td>
+<td><code>fn resized&lt;D: os::fd::Descriptor&gt;(fd: D = term::STDOUT) -&gt; bool</code></td>
 <td><code>resized(fd = STDOUT) -&gt; bool</code>: whether the size changed since the last call; the first call answers false.</td>
 </tr>
 </tbody>

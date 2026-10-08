@@ -241,9 +241,31 @@ pub fn write_terminal(fd: i32, bytes: &[u8]) {
     let _ = crate::sched_global::run_blocking(label, move || write_terminal_direct(fd, &bytes));
 }
 
+/// Whether the last byte the program wrote to stdout left a line open.
+static STDOUT_LINE_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Records `bytes` as the latest output to reach stdout. Every writer that
+/// hands program output to the process's stdout calls this, so
+/// [`stdout_line_open`] reflects the last byte the program printed.
+pub fn note_stdout_written(bytes: &[u8]) {
+    if let Some(&last) = bytes.last() {
+        STDOUT_LINE_OPEN.store(last != b'\n', std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Whether the program's stdout ends partway through a line: its last
+/// output, buffered output included once flushed, did not end in a newline.
+#[must_use]
+pub fn stdout_line_open() -> bool {
+    STDOUT_LINE_OPEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn write_terminal_direct(fd: i32, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
 
+    if fd == 1 {
+        note_stdout_written(bytes);
+    }
     let written = match fd {
         1 => std::io::stdout().lock().write_all(bytes),
         2 => std::io::stderr().lock().write_all(bytes),

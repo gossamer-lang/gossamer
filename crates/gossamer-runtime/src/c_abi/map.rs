@@ -3915,7 +3915,7 @@ unsafe fn map_range(
 }
 
 /// `m.range(lo..hi)` on a `BTreeMap` keyed by words: a new map of the
-/// entries between the bounds `mode` names ([`RANGE_HAS_LO`], ...).
+/// entries between the bounds `mode` names (`RANGE_HAS_LO`, ...).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_range_i64(
     m: *mut GosMap,

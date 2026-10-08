@@ -24,7 +24,7 @@ struct Echo { }
 impl Echo {
     // Blocking recv/send loop on one connection: echo every text
     // message back until the peer closes (recv returns Err).
-    fn handle(&self, ws: i64) {
+    fn handle(&self, ws: websocket::Conn) {
         loop {
             match websocket::recv(ws) {
                 Ok(msg) => {

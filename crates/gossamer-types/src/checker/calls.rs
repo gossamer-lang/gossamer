@@ -898,6 +898,7 @@ impl TypeChecker<'_> {
             }
             if let Some((def, vars, _)) = &inst {
                 self.check_trait_bounds(*def, vars, callee.span);
+                self.check_descriptor_arguments(*def, args);
             }
             return Some(sig.output);
         }

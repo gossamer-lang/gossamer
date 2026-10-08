@@ -155,6 +155,11 @@ struct CohortState {
     live: Vec<LiveChild>,
     joined: bool,
     timed_out: bool,
+    /// A joiner is parked waiting for the children to drain.
+    joining: bool,
+    /// Drained with the joiner not yet woken. Counted among the program's
+    /// pending handoffs, so the joiner is not read as asleep before it runs.
+    drained_ready: bool,
 }
 
 struct CohortNode {
@@ -357,6 +362,8 @@ fn push(
             live: Vec::new(),
             joined: false,
             timed_out: false,
+            joining: false,
+            drained_ready: false,
         }),
         progress: parking_lot::Condvar::new(),
         children: parking_lot::Mutex::new(Vec::new()),
@@ -414,6 +421,10 @@ pub(crate) fn leave_child(id: i64, index: i64, failure: Option<String>) {
         // first, so the two locks never form a cycle.
         let observed = observed_ahead(id, index);
         state.outstanding -= 1;
+        if state.outstanding == 0 && state.joining && !state.drained_ready {
+            state.drained_ready = true;
+            crate::vm::goroutine::adjust_pending_handoffs(true);
+        }
         state.live.retain(|live| live.index != index);
         match failure {
             Some(message) => {
@@ -499,19 +510,27 @@ pub(crate) fn current_isolation() -> i64 {
 /// Waits for `node`'s children. Answers `false` when the wait can never end:
 /// every participant is waiting, the children included.
 fn wait_for_drain(node: &Arc<CohortNode>) -> bool {
-    if node.state.lock().outstanding == 0 {
+    let mut state = node.state.lock();
+    if state.outstanding == 0 {
         return true;
     }
-    let Some(_joining) =
-        crate::vm::goroutine::JoinWait::enter(|| node.state.lock().outstanding == 0)
-    else {
+    state.joining = true;
+    let Some(joining) = crate::vm::goroutine::JoinWait::enter(|| state.outstanding == 0) else {
+        state.joining = false;
         return false;
     };
-    let mut state = node.state.lock();
     // A child settles at its spawn on the browser build, so the count is
     // already final and a wait would be for a goroutine that has finished.
     while gossamer_runtime::platform::CAN_BLOCK && state.outstanding > 0 {
         node.progress.wait(&mut state);
+    }
+    // The wait is given up before the readiness that woke it, so no reading
+    // sees this joiner asleep with nothing left to wake it.
+    drop(joining);
+    state.joining = false;
+    if state.drained_ready {
+        state.drained_ready = false;
+        crate::vm::goroutine::adjust_pending_handoffs(false);
     }
     true
 }

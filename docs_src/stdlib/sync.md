@@ -12,7 +12,7 @@ Synchronisation primitives beyond channels.
 | `Sender` | `type Sender` | The sending end of a channel: `send(v)`, `close()`. |
 | `Receiver` | `type Receiver` | The receiving end of a channel: `recv() -> Option<T>`, `None` once it is closed and drained. |
 | `Mutex` | `type Mutex` | Mutual-exclusion lock: `lock()` / `unlock()` around the code it guards. |
-| `RwLock` | `type RwLock` | Reader-writer lock guarding an `i64`: `read`, `write`, `with_read`, `with_write`. |
+| `RwLock` | `type RwLock` | Reader-writer lock guarding an `i64`: `read`, `write`, `with_read` (calls back with the value read under the shared lock, released first), `with_write` (calls back holding the exclusive lock and stores the answer). |
 | `Shared` | `type Shared` | A value several goroutines reach, every read and write taken under one lock. Build with `Shared::new(value)`; read with `get` or `with`, write with `set`, and read-modify-write with `update`, which holds the lock across the callback. |
 | `Once` | `type Once` | One-shot initialisation latch. |
 | `WaitGroup` | `type WaitGroup` | Counts goroutines and waits for them to finish. |

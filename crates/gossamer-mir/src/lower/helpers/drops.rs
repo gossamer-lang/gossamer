@@ -4319,12 +4319,31 @@ fn mints_owned_error(name: &str) -> bool {
     )
 }
 
-/// Whether `name` answers a fresh counted runtime node - a context or a
-/// `std::sync` handle - whose one share the caller holds.
+/// Whether `name` answers a fresh counted runtime node - a channel, a join
+/// handle, a context or its done channel, a `std::sync` handle, a byte
+/// builder or buffer, a random generator, or file open options - whose one
+/// share the caller holds. An open-options setter answers its receiver with a
+/// share of its own.
 fn mints_owned_node(name: &str) -> bool {
     matches!(
         name,
-        "gos_rt_ctx_background"
+        "gos_rt_chan_new"
+            | "gos_rt_fs_open_options_new"
+            | "gos_rt_fs_open_options_read"
+            | "gos_rt_fs_open_options_write"
+            | "gos_rt_fs_open_options_append"
+            | "gos_rt_fs_open_options_truncate"
+            | "gos_rt_fs_open_options_create"
+            | "gos_rt_fs_open_options_create_new"
+            | "gos_rt_spawn"
+            | "gos_rt_spawn_ex"
+            | "gos_rt_ctx_cancelled"
+            | "gos_rt_ctx_background"
+            | "gos_rt_bytes_builder_new"
+            | "gos_rt_bytes_builder_with_capacity"
+            | "gos_rt_bytes_buffer_new"
+            | "gos_rt_bytes_buffer_with_capacity"
+            | "gos_rt_math_rng_new"
             | "gos_rt_ctx_with_cancel"
             | "gos_rt_ctx_with_timeout"
             | "gos_rt_rwlock_new"

@@ -231,7 +231,7 @@ fn insert_file_handle(file: std::fs::File) -> Value {
         r.borrow_mut()
             .insert(id, Arc::new(parking_lot::Mutex::new(file)));
     });
-    open_handle_struct("fs::File", id)
+    handle_struct("fs::File", id, |id| FS_FILE_REGISTRY.retire(id))
 }
 
 fn insert_open_options_handle(opts: FsOpenOptionsState) -> Value {

@@ -66,6 +66,9 @@ struct CtxNode {
     /// Goroutines parked in a cancellation-aware wait on this context.
     /// Cancelling unparks them so each re-checks its own condition.
     parked_waiters: Mutex<Vec<crate::sched::Gid>>,
+    /// OS threads waiting on this context among other sources. Cancelling
+    /// raises them, as it unparks the goroutines above.
+    wakers: crate::wake::WakerSet,
 }
 
 impl Drop for CtxNode {
@@ -76,6 +79,10 @@ impl Drop for CtxNode {
         if let Some(parent) = &self.parent {
             parent.children.lock().remove(&self.id);
         }
+        let chan = *self.chan.get_mut();
+        // SAFETY: a minted done channel is a counted node this context holds
+        // one share of, given back here.
+        unsafe { super::chan::chan_release(chan as *mut GosChan) };
     }
 }
 
@@ -130,6 +137,30 @@ pub(crate) fn deregister_waiter(handle: CtxHandle, gid: crate::sched::Gid) {
     }
 }
 
+/// Runs `waker` when the context `handle` names is cancelled.
+pub(crate) fn watch(handle: CtxHandle, waker: &std::task::Waker) {
+    // SAFETY: the cancellation-aware waits pass the live handle their caller holds.
+    if let Some(node) = unsafe { node_of(handle) } {
+        node.wakers.register(waker);
+    }
+}
+
+/// A check answering whether the context `handle` names is still live. It
+/// holds the context, so it stays sound after the caller's share is gone.
+pub(crate) fn not_cancelled(handle: CtxHandle) -> Arc<dyn Fn() -> bool + Send + Sync> {
+    // SAFETY: the cancellation-aware waits pass the live handle their caller holds.
+    let node = unsafe { node_of(handle) };
+    Arc::new(move || node.as_ref().is_none_or(|node| !node_is_cancelled(node)))
+}
+
+/// Withdraws a registration made by [`watch`].
+pub(crate) fn unwatch(handle: CtxHandle, waker: &std::task::Waker) {
+    // SAFETY: the cancellation-aware waits pass the live handle their caller holds.
+    if let Some(node) = unsafe { node_of(handle) } {
+        node.wakers.deregister(waker);
+    }
+}
+
 /// Whether the context `handle` names is cancelled or past its deadline.
 /// The cancellation-aware runtime entry points consult this for handles
 /// minted by a compiled program.
@@ -149,6 +180,7 @@ fn alloc_ctx(deadline: Option<Instant>, parent: Option<Arc<CtxNode>>) -> CtxHand
         children: Mutex::new(HashMap::new()),
         chan: Mutex::new(0),
         parked_waiters: Mutex::new(Vec::new()),
+        wakers: crate::wake::WakerSet::new(),
     });
     if let Some(parent) = &node.parent {
         parent
@@ -193,15 +225,15 @@ fn close_done_chan(node: &CtxNode) {
     if chan == 0 {
         return;
     }
-    // SAFETY: the address came from `gos_rt_chan_new`; channels are
-    // never freed, so the pointer is valid for the process lifetime.
+    // SAFETY: the node holds a share of its done channel for as long as it
+    // lives, and the caller reaches the node.
     let chan = unsafe { &*(chan as *const GosChan) };
     super::chan::chan_close_idempotent(chan);
 }
 
-/// The node's done channel, minting one on first use. A channel for a
-/// context already cancelled is born closed, so a `select` recv arm on
-/// it is ready immediately.
+/// The node's done channel, minting one on first use; the node holds one
+/// share of it. A channel for a context already cancelled is born closed,
+/// so a `select` recv arm on it is ready immediately.
 fn done_chan_of(node: &CtxNode) -> *mut GosChan {
     let mut slot = node.chan.lock();
     if *slot == 0 {
@@ -296,6 +328,8 @@ pub fn cancel_live_requests() {
 /// A root context nothing cancels, shared by every request that has no
 /// context of its own. It holds its own share for the life of the process,
 /// so it is handed out without one.
+// Requests are served only where the HTTP modules build, which wasm does not.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn shared_background() -> CtxHandle {
     static BACKGROUND: LazyLock<CtxHandle> = LazyLock::new(|| alloc_ctx(None, None));
     *BACKGROUND
@@ -351,6 +385,7 @@ fn cancel_node(root: &Arc<CtxNode>) {
         for gid in std::mem::take(&mut *node.parked_waiters.lock()) {
             crate::sched_global::scheduler().unpark(gid);
         }
+        node.wakers.wake_all();
         let kids: Vec<Weak<CtxNode>> = node.children.lock().values().cloned().collect();
         pending.extend(kids.iter().filter_map(Weak::upgrade));
     }
@@ -408,10 +443,17 @@ pub unsafe extern "C" fn gos_rt_ctx_done(ctx: *mut GosCtx) -> i64 {
 pub unsafe extern "C" fn gos_rt_ctx_cancelled(ctx: *mut GosCtx) -> *mut GosChan {
     ffi_entry!(std::ptr::null_mut(), {
         // SAFETY: `ctx` is null or a handle the caller holds.
-        match unsafe { node_of(ctx.expose_provenance()) } {
+        let chan = match unsafe { node_of(ctx.expose_provenance()) } {
             Some(node) => done_chan_of(&node),
             None => *NO_CONTEXT_CHAN as *mut GosChan,
+        };
+        // The caller gets a share of its own; the context, or the static for
+        // the absent one, keeps its share.
+        if !chan.is_null() {
+            // SAFETY: `chan` is a live channel the context or the static holds.
+            super::chan::chan_retain(unsafe { &*chan });
         }
+        chan
     })
 }
 

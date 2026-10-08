@@ -15,7 +15,8 @@ use gossamer_std::http as http_std;
 use crate::builtins::{BuiltinFnPub, as_str, err_variant, ok_variant, value_to_int};
 use crate::value::{NativeDispatch, RuntimeError, RuntimeResult, Value};
 
-/// One configured server on the VM tier.
+/// One configured server on the VM tier, held by every copy of its
+/// handle and by its accept loop while it serves.
 struct VmServer {
     config: parking_lot::Mutex<http_std::server::Config>,
     /// How long one request's context lives before it is cancelled.
@@ -23,41 +24,57 @@ struct VmServer {
     listener: parking_lot::Mutex<Option<std::net::TcpListener>>,
     bound_addr: parking_lot::Mutex<String>,
     shutdown: Arc<AtomicBool>,
-    in_flight: Arc<AtomicUsize>,
+    in_flight: Arc<InFlight>,
 }
 
-fn registry() -> &'static parking_lot::Mutex<Vec<Arc<VmServer>>> {
-    static REGISTRY: std::sync::OnceLock<parking_lot::Mutex<Vec<Arc<VmServer>>>> =
-        std::sync::OnceLock::new();
-    REGISTRY.get_or_init(|| parking_lot::Mutex::new(Vec::new()))
+/// Requests being answered, and the signal that the last one finished.
+#[derive(Default)]
+struct InFlight {
+    count: parking_lot::Mutex<usize>,
+    drained: parking_lot::Condvar,
 }
 
-fn server_at(handle: i64) -> Option<Arc<VmServer>> {
-    let index = usize::try_from(handle).ok()?;
-    registry().lock().get(index).map(Arc::clone)
-}
+impl InFlight {
+    fn enter(&self) {
+        *self.count.lock() += 1;
+    }
 
-/// The registry index inside a `Server` value.
-///
-/// The handle is a one-field struct rather than a bare integer so the VM's
-/// method dispatch resolves `s.listen(..)` through the receiver's type
-/// name; an integer receiver would reach `i64::listen` and then a bare
-/// global of that name.
-fn handle_of(args: &[Value]) -> i64 {
-    match args.first() {
-        Some(Value::Struct(inner)) => inner
-            .fields
-            .iter()
-            .find(|(f, _)| (**f) == "__server")
-            .and_then(|(_, v)| value_to_int(v))
-            .unwrap_or(-1),
-        other => other.and_then(value_to_int).unwrap_or(-1),
+    fn leave(&self) {
+        let mut count = self.count.lock();
+        *count -= 1;
+        if *count == 0 {
+            self.drained.notify_all();
+        }
+    }
+
+    /// Waits until no request is in flight or `deadline` passes, answering
+    /// whether the requests drained.
+    fn drain_until(&self, deadline: std::time::Instant) -> bool {
+        let mut count = self.count.lock();
+        while *count > 0 {
+            if self.drained.wait_until(&mut count, deadline).timed_out() {
+                return *count == 0;
+            }
+        }
+        true
     }
 }
 
-/// The `Server` value carrying `handle`.
-fn server_value(handle: i64) -> Value {
-    Value::struct_("Server", vec![("__server", Value::Int(handle))])
+const SERVER_NAME: &str = "Server";
+const SERVER_FIELD: &str = "__server";
+
+/// The server a `Server` value holds.
+///
+/// The handle is a one-field struct rather than a bare value so the VM's
+/// method dispatch resolves `s.listen(..)` through the receiver's type
+/// name.
+fn server_of(args: &[Value]) -> Option<Arc<VmServer>> {
+    crate::value::handle_state(args.first()?, SERVER_NAME, SERVER_FIELD)
+}
+
+/// The receiver itself, which a setter answers so calls chain.
+fn receiver(args: &[Value]) -> Value {
+    args.first().cloned().unwrap_or(Value::Unit)
 }
 
 /// Milliseconds, clamped at zero. A negative budget is not a shorter one.
@@ -108,16 +125,19 @@ pub(crate) fn install_http_server(globals: &mut Vec<(&'static str, Value)>) {
 }
 
 fn builtin_new(_args: &[Value]) -> RuntimeResult<Value> {
-    let mut servers = registry().lock();
-    servers.push(Arc::new(VmServer {
+    let server = VmServer {
         config: parking_lot::Mutex::new(http_std::server::Config::default()),
         request_timeout_ms: std::sync::atomic::AtomicI64::new(0),
         listener: parking_lot::Mutex::new(None),
         bound_addr: parking_lot::Mutex::new(String::new()),
         shutdown: Arc::new(AtomicBool::new(false)),
-        in_flight: Arc::new(AtomicUsize::new(0)),
-    }));
-    Ok(server_value(i64::try_from(servers.len() - 1).unwrap_or(-1)))
+        in_flight: Arc::new(InFlight::default()),
+    };
+    Ok(crate::value::state_handle(
+        SERVER_NAME,
+        SERVER_FIELD,
+        Arc::new(server),
+    ))
 }
 
 /// Applies one limit and answers the server, so the setters chain.
@@ -125,12 +145,11 @@ fn set_limit(
     args: &[Value],
     apply: impl FnOnce(&mut http_std::server::Config, i64),
 ) -> RuntimeResult<Value> {
-    let handle = handle_of(args);
     let value = args.get(1).and_then(value_to_int).unwrap_or(0);
-    if let Some(server) = server_at(handle) {
+    if let Some(server) = server_of(args) {
         apply(&mut server.config.lock(), value);
     }
-    Ok(server_value(handle))
+    Ok(receiver(args))
 }
 
 fn builtin_read_header_timeout_ms(args: &[Value]) -> RuntimeResult<Value> {
@@ -162,31 +181,28 @@ fn builtin_max_connections(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 fn builtin_request_timeout_ms(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = handle_of(args);
     let ms = args.get(1).and_then(value_to_int).unwrap_or(0).max(0);
-    if let Some(server) = server_at(handle) {
+    if let Some(server) = server_of(args) {
         server.request_timeout_ms.store(ms, Ordering::Release);
     }
-    Ok(server_value(handle))
+    Ok(receiver(args))
 }
 
 fn builtin_server_name(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = handle_of(args);
     let name = as_str(args.get(1).unwrap_or(&Value::Unit))
         .unwrap_or("")
         .to_string();
-    if let Some(server) = server_at(handle) {
+    if let Some(server) = server_of(args) {
         server.config.lock().server_name = (!name.is_empty()).then_some(name);
     }
-    Ok(server_value(handle))
+    Ok(receiver(args))
 }
 
 fn builtin_listen(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = handle_of(args);
     let addr = as_str(args.get(1).unwrap_or(&Value::Unit))
         .unwrap_or("0.0.0.0:8080")
         .to_string();
-    let Some(server) = server_at(handle) else {
+    let Some(server) = server_of(args) else {
         return Ok(err_variant("http::Server::listen: stale server handle"));
     };
     match gossamer_runtime::listen::bind_tcp(&addr) {
@@ -203,14 +219,13 @@ fn builtin_listen(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 fn builtin_addr(args: &[Value]) -> RuntimeResult<Value> {
-    let text = server_at(handle_of(args)).map_or_else(String::new, |s| s.bound_addr.lock().clone());
+    let text = server_of(args).map_or_else(String::new, |s| s.bound_addr.lock().clone());
     Ok(Value::String(text.into()))
 }
 
 fn builtin_shutdown(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = handle_of(args);
     let deadline_ms = args.get(1).and_then(value_to_int).unwrap_or(0).max(0);
-    let Some(server) = server_at(handle) else {
+    let Some(server) = server_of(args) else {
         return Ok(Value::Bool(false));
     };
     server.shutdown.store(true, Ordering::Release);
@@ -221,15 +236,8 @@ fn builtin_shutdown(args: &[Value]) -> RuntimeResult<Value> {
     if let Ok(sock) = addr.parse::<std::net::SocketAddr>() {
         let _ = std::net::TcpStream::connect_timeout(&sock, std::time::Duration::from_millis(200));
     }
-    let deadline = gossamer_runtime::platform::Instant::now()
-        + std::time::Duration::from_millis(deadline_ms as u64);
-    while server.in_flight.load(Ordering::Acquire) > 0 {
-        if gossamer_runtime::platform::Instant::now() >= deadline {
-            return Ok(Value::Bool(false));
-        }
-        gossamer_runtime::platform::sleep(std::time::Duration::from_millis(5));
-    }
-    Ok(Value::Bool(true))
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(deadline_ms as u64);
+    Ok(Value::Bool(server.in_flight.drain_until(deadline)))
 }
 
 /// `server.serve(handler) -> Result<(), errors::Error>` - accepts on the
@@ -245,9 +253,8 @@ pub(crate) fn native_http_server_serve(
             found: args.len(),
         });
     }
-    let handle = handle_of(args);
     let handler = args[1].clone();
-    let Some(server) = server_at(handle) else {
+    let Some(server) = server_of(args) else {
         return Ok(err_variant("http::Server::serve: stale server handle"));
     };
     let Some(listener) = server.listener.lock().take() else {
@@ -279,7 +286,7 @@ pub(crate) fn native_http_server_serve(
         call_args.push(crate::builtins::request_to_value_with_context(
             &request, context,
         ));
-        in_flight.fetch_add(1, Ordering::AcqRel);
+        in_flight.enter();
         let done = Arc::clone(&in_flight);
         dispatch.spawn_with_outcome(
             target.clone(),
@@ -289,7 +296,7 @@ pub(crate) fn native_http_server_serve(
                     outcome, &method, &path,
                 ));
                 crate::stdlib_builtins::context::cancel_request_context(context_id);
-                done.fetch_sub(1, Ordering::AcqRel);
+                done.leave();
             }),
         );
     });

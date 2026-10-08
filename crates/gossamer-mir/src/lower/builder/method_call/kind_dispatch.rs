@@ -684,9 +684,6 @@ impl<'a> Builder<'a> {
             | "gos_rt_tcp_stream_set_nodelay"
             | "gos_rt_tcp_stream_clear_read_timeout"
             | "gos_rt_tcp_stream_clear_write_timeout"
-            | "gos_rt_fs_file_create"
-            | "gos_rt_fs_file_open"
-            | "gos_rt_fs_open_options_open"
             | "gos_rt_fs_file_write"
             | "gos_rt_fs_file_write_bytes"
             | "gos_rt_fs_file_write_at"
@@ -695,10 +692,17 @@ impl<'a> Builder<'a> {
             | "gos_rt_fs_file_fd"
             | "gos_rt_fs_file_flush"
             | "gos_rt_unix_stream_write"
-            | "gos_rt_udp_send_to"
-            | "gos_rt_tcp_start_tls"
+            | "gos_rt_udp_send_to" => self.result_i64_error_adt_ty(),
+            "gos_rt_fs_file_create" | "gos_rt_fs_file_open" | "gos_rt_fs_open_options_open" => {
+                let file = self.sync_handle_ty(44);
+                self.result_of(file)
+            }
+            "gos_rt_tcp_start_tls"
             | "gos_rt_tcp_start_tls_insecure"
-            | "gos_rt_tcp_start_tls_ca" => self.result_i64_error_adt_ty(),
+            | "gos_rt_tcp_start_tls_ca" => {
+                let stream = self.sync_handle_ty(12);
+                self.result_of(stream)
+            }
             "gos_rt_tcp_stream_read"
             | "gos_rt_unix_stream_read"
             | "gos_rt_fs_file_read"
@@ -720,9 +724,15 @@ impl<'a> Builder<'a> {
             }
             "gos_rt_fs_file_read_to_string" => self.result_string_error_adt_ty(),
             "gos_rt_tcp_listener_accept" | "gos_rt_unix_listener_accept" => {
-                let i = self.tcx.int_ty(gossamer_types::IntTy::I64);
+                let stream = if rt == "gos_rt_unix_listener_accept" {
+                    self.sync_handle_ty(15)
+                } else {
+                    self.sync_handle_ty(12)
+                };
                 let s = self.tcx.string_ty();
-                let tup = self.tcx.intern(gossamer_types::TyKind::Tuple(vec![i, s]));
+                let tup = self
+                    .tcx
+                    .intern(gossamer_types::TyKind::Tuple(vec![stream, s]));
                 self.result_of(tup)
             }
             "gos_rt_udp_recv_from" => {
