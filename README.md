@@ -35,36 +35,10 @@ PRs, and the LLM policy.
 
 Why build Gossamer? Why use it?
 
-My inspirations tell the story:
+I wanted a language that feels as rock solid and expressive as Rust and F#,
+with a large stdlib, with the option to compile or run via interpreter.
 
-I love the confidence that comes from Rust and F#: the feeling that if it
- compiles, it probably works. Algebraic data types, pattern matching, and 
- explicit error handling feel like a natural way to build correct and 
- maintainable software.
-
-From Python, having a REPL open or being able to iterate quickly on a script 
-without waiting for a compile step.
-
-Go, meanwhile, is an incredible tool for building and shipping software. 
-It feels fast, minimal, and frictionless. The extensive standard library
-let's you be productive quickly.
- 
-Zig's approach to metaprogramming via comptime, C#'s top level statements,
-Java's experimental approach to structured colorless concurrency all appeal.
-
-Swift's approach to garbage collection with ARC strikes a powerful balance.
- 
-### A Single Language?
-
-What if one language could combine all of those ideas?
-
-What if I could iterate quickly in a REPL or script, then compile the exact
- same program into an optimized standalone binary with no code changes?
-
-What if that language could perform Python like while interpreted, 
-but closer to Go when compiled?
-
-I built Gossamer because I wanted that language for myself.
+A language that handles memory management but is resource efficient and blazing fast.
 
 My goal is for Gossamer to replace Go, Python, F#/C#, Kotlin/Java, and 
 (some) Rust for most of my own projects and use cases.
@@ -567,20 +541,18 @@ Support for various editors (VS Code, Neovim, etc) [here](https://github.com/gos
 Examples run through the bytecode VM by default (with optional deferred JIT
 tier-up) and compile in debug or release mode.
 
-There are gaps to fill in the standard library, bugs and optimizations to find via real world usage.
-
-This project is still early but starting to find its sea legs. Right now performance, resource usage, functionality, and productivity
-all feel very promising. But do not trust this yet.
+There are bugs and optimizations to find via real world usage.
 
 My main goals are:
 
 * Making Gossamer reliable enough to run real production code, and trust.
 
-* Optimizing Gossamer toward Go-grade performance and resource usage. Claims
-  are limited to workloads recorded by the checked-in benchmark suite; broad
-  language-level parity is a goal, not a current guarantee.
+* Keeping Gossamer highly optimized and looking for opportunities to push forward
+without impacting reliability. Aiming to roundly beat Go on speed and resource efficiency.
 
-* Building a reliable standard library to reduce the need to reach for third party libraries (using Golang as the gold standard, with small changes that feel right).
+* Rock solid tier parity between interpreted and compiled programs.
+
+* Maintaining a reliable standard library to reduce the need to reach for third party libraries.
 
 * Writing some ecosystem libraries for key functionality (gRPC, Postgres, etc) that shouldn't be in the standard library, but are necessary for real work. (Very early).
 
