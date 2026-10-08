@@ -567,24 +567,29 @@ fn note_progress() {
     PROGRESS_EPOCH.fetch_add(1, Ordering::AcqRel);
 }
 
-/// Whether the sampled counts describe a state nothing left in the program
-/// can move: every participant inside a channel wait, no channel holding a
-/// handoff, and no channel able to complete one.
+/// Whether the program is in a state nothing left in it can move, read as one
+/// consistent snapshot: `counts` answers `(waiting, participants)`.
 ///
-/// `epoch` is the [`PROGRESS_EPOCH`] reading taken before the counts. A
-/// different reading here means a waiter left, a readiness moved, or the
-/// outstanding set changed while the counts were being read, so they describe
-/// separate states and the caller waits rather than reporting.
-fn reads_as_terminal(
-    waiting: u64,
-    participants: u64,
-    epoch: u64,
-    can_progress: impl FnOnce() -> bool,
-) -> bool {
-    waiting >= participants
-        && PENDING_HANDOFFS.load(Ordering::Acquire) == 0
-        && !can_progress()
-        && PROGRESS_EPOCH.load(Ordering::Acquire) == epoch
+/// The counts are read one at a time, so a reading that spans a change of
+/// [`PROGRESS_EPOCH`] mixes two states. A reading that is not terminal needs
+/// no second look, since whoever moves the program next checks again; a
+/// terminal reading that spans a change is read again, because the change
+/// may have been the one that completed it, and the participant that made it
+/// may have checked before this caller was counted.
+fn settles_terminal(counts: impl Fn() -> (u64, u64), can_progress: impl Fn() -> bool) -> bool {
+    loop {
+        let epoch = PROGRESS_EPOCH.load(Ordering::Acquire);
+        let (waiting, participants) = counts();
+        let terminal = waiting >= participants
+            && PENDING_HANDOFFS.load(Ordering::Acquire) == 0
+            && !can_progress();
+        if !terminal {
+            return false;
+        }
+        if PROGRESS_EPOCH.load(Ordering::Acquire) == epoch {
+            return true;
+        }
+    }
 }
 
 /// Marks its thread as suspended in a channel wait for as long as it lives.
@@ -615,7 +620,7 @@ impl ChannelWait {
     /// Call with the channel's own lock held and the caller already counted
     /// among that channel's waiters, so a handoff this caller completes is
     /// visible to the readiness count.
-    pub(crate) fn enter(op: &'static str, can_progress: impl FnOnce() -> bool) -> Option<Self> {
+    pub(crate) fn enter(op: &'static str, can_progress: impl Fn() -> bool) -> Option<Self> {
         // The browser settles every goroutine at its spawn, so by the time a
         // wait is entered there every sender that will ever run has run.
         if !gossamer_runtime::platform::CAN_BLOCK {
@@ -624,26 +629,25 @@ impl ChannelWait {
         // Recorded before this wait is counted, so a participant that sees
         // the count already sees which operation `main` is stopped at.
         note_main_wait(Some(op));
-        // Sampled before the counts: a waiter drops its count one step ahead
-        // of retiring the readiness that woke it, so counts read across such a
-        // step belong to two different states. `reads_as_terminal` compares
-        // this reading again at the end and stands only on a window nothing
-        // moved in.
-        let epoch = PROGRESS_EPOCH.load(Ordering::Acquire);
         let cohort = crate::stdlib_builtins::cohort::current_cohort();
         WAITING_COHORTS.lock().push(cohort);
-        let waiting = CHANNEL_WAITERS.fetch_add(1, Ordering::AcqRel)
-            + 1
-            + JOIN_WAITERS.load(Ordering::Acquire);
+        CHANNEL_WAITERS.fetch_add(1, Ordering::AcqRel);
         // The program's participants are every outstanding goroutine plus
         // `main` while it is still running. All of them waiting on channels
         // that can hand nothing over means nothing is left to deliver a
-        // value, so waiting longer cannot change the answer.
+        // value, so waiting longer cannot change the answer. A waiter drops
+        // its count one step ahead of retiring the readiness that woke it, so
+        // the counts are read as one snapshot.
         let main_returned = MAIN_RETURNED.load(Ordering::Acquire);
-        let participants = outstanding_goroutines() + u64::from(!main_returned);
-        let stuck = reads_as_terminal(waiting as u64, participants, epoch, || {
-            a_waiter_is_cancelled() || can_progress()
-        });
+        let stuck = settles_terminal(
+            || {
+                let waiting =
+                    CHANNEL_WAITERS.load(Ordering::Acquire) + JOIN_WAITERS.load(Ordering::Acquire);
+                let participants = outstanding_goroutines() + u64::from(!main_returned);
+                (waiting as u64, participants)
+            },
+            || a_waiter_is_cancelled() || can_progress(),
+        );
         // Past `main`, the remaining goroutines are abandoned rather than
         // reported: a compiled binary exits the same way, with the same
         // status and the same output.
@@ -689,18 +693,23 @@ fn report_if_left_waiting() {
     if !gossamer_runtime::platform::CAN_BLOCK || MAIN_RETURNED.load(Ordering::Acquire) {
         return;
     }
-    let epoch = PROGRESS_EPOCH.load(Ordering::Acquire);
-    let waiting = CHANNEL_WAITERS.load(Ordering::Acquire) + JOIN_WAITERS.load(Ordering::Acquire);
-    if waiting == 0 {
+    if CHANNEL_WAITERS.load(Ordering::Acquire) + JOIN_WAITERS.load(Ordering::Acquire) == 0 {
         return;
     }
-    let participants = outstanding_goroutines() + 1;
-    if reads_as_terminal(waiting as u64, participants, epoch, || {
-        a_waiter_is_cancelled()
-            || crate::value::any_live_channel_can_progress()
-            || crate::stdlib_builtins::context::deadline_pending()
-            || crate::stdlib_builtins::cohort::deadline_pending()
-    }) {
+    let terminal = settles_terminal(
+        || {
+            let waiting =
+                CHANNEL_WAITERS.load(Ordering::Acquire) + JOIN_WAITERS.load(Ordering::Acquire);
+            (waiting as u64, outstanding_goroutines() + 1)
+        },
+        || {
+            a_waiter_is_cancelled()
+                || crate::value::any_live_channel_can_progress()
+                || crate::stdlib_builtins::context::deadline_pending()
+                || crate::stdlib_builtins::cohort::deadline_pending()
+        },
+    );
+    if terminal {
         report_fatal_deadlock("receive");
     }
 }
@@ -735,23 +744,24 @@ impl JoinWait {
     /// `settled` answers whether the join has nothing left to wait for. It
     /// is read after the counts, so a last child that finished between the
     /// caller's own check and this one is never read as a deadlock.
-    pub(crate) fn enter(settled: impl FnOnce() -> bool) -> Option<Self> {
+    pub(crate) fn enter(settled: impl Fn() -> bool) -> Option<Self> {
         if !gossamer_runtime::platform::CAN_BLOCK {
             return Some(Self);
         }
         note_main_wait(Some("cohort join"));
-        let epoch = PROGRESS_EPOCH.load(Ordering::Acquire);
-        let waiting = JOIN_WAITERS.fetch_add(1, Ordering::AcqRel)
-            + 1
-            + CHANNEL_WAITERS.load(Ordering::Acquire);
+        JOIN_WAITERS.fetch_add(1, Ordering::AcqRel);
         let main_returned = MAIN_RETURNED.load(Ordering::Acquire);
-        let participants = outstanding_goroutines() + u64::from(!main_returned);
         // Past `main`, leftover goroutines are abandoned rather than reported,
         // as a compiled binary leaves them.
         if !main_returned
-            && reads_as_terminal(waiting as u64, participants, epoch, || {
-                a_waiter_is_cancelled() || settled()
-            })
+            && settles_terminal(
+                || {
+                    let waiting = JOIN_WAITERS.load(Ordering::Acquire)
+                        + CHANNEL_WAITERS.load(Ordering::Acquire);
+                    (waiting as u64, outstanding_goroutines() + 1)
+                },
+                || a_waiter_is_cancelled() || settled(),
+            )
         {
             note_main_wait(None);
             JOIN_WAITERS.fetch_sub(1, Ordering::AcqRel);
@@ -807,31 +817,35 @@ mod tests {
         Instant::now() + Duration::from_mins(10)
     }
 
-    /// The counts a report rests on are read one at a time, so a program that
-    /// moved between two of them was never in the state they add up to.
+    /// A terminal reading that spans a change is read again rather than
+    /// given up on: the change may be the one that completed the state, made
+    /// by a participant that checked before this one was counted.
     #[test]
-    fn counts_read_across_a_change_do_not_read_as_terminal() {
-        let stale = PROGRESS_EPOCH.load(Ordering::Acquire);
-        note_progress();
+    fn a_terminal_reading_across_a_change_is_read_again() {
+        let reads = std::cell::Cell::new(0);
+        let quiet_handoffs = PENDING_HANDOFFS.load(Ordering::Acquire) == 0;
+        let terminal = settles_terminal(
+            || {
+                reads.set(reads.get() + 1);
+                if reads.get() == 1 {
+                    note_progress();
+                }
+                (u64::MAX, 0)
+            },
+            || false,
+        );
+        assert_eq!(terminal, quiet_handoffs);
         assert!(
-            !reads_as_terminal(u64::MAX, 0, stale, || false),
-            "a wait whose counts span a change is not a program with nothing left to run"
+            reads.get() >= 2,
+            "the reading that spanned a change was read again"
         );
     }
 
-    /// The reading is what makes a quiet window quiet: with it unchanged, the
-    /// counts are one state and a program with every participant parked and
-    /// nothing to hand over is reported.
+    /// A reading that is not terminal is final: whoever moves the program
+    /// next checks it again.
     #[test]
-    fn quiet_counts_read_as_terminal() {
-        let epoch = PROGRESS_EPOCH.load(Ordering::Acquire);
-        let quiet_handoffs = PENDING_HANDOFFS.load(Ordering::Acquire) == 0;
-        let terminal = reads_as_terminal(u64::MAX, 0, epoch, || false);
-        assert_eq!(
-            terminal,
-            quiet_handoffs && PROGRESS_EPOCH.load(Ordering::Acquire) == epoch,
-            "a window nothing moved in decides on its counts alone"
-        );
+    fn a_reading_with_a_participant_running_is_not_terminal() {
+        assert!(!settles_terminal(|| (0, 1), || false));
     }
 
     /// A last child can finish between a join's own check and the counts it
