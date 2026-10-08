@@ -2367,7 +2367,7 @@
 <tr>
 <td><code>RwLock</code></td>
 <td><code>type RwLock</code></td>
-<td>Reader-writer lock guarding an <code>i64</code>: <code>read</code>, <code>write</code>, <code>with_read</code>, <code>with_write</code>.</td>
+<td>Reader-writer lock guarding an <code>i64</code>: <code>read</code>, <code>write</code>, <code>with_read</code> (calls back with the value read under the shared lock, released first), <code>with_write</code> (calls back holding the exclusive lock and stores the answer).</td>
 </tr>
 <tr>
 <td><code>Shared</code></td>

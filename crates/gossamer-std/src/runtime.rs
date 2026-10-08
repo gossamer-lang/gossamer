@@ -94,6 +94,8 @@ pub struct SchedulerStats {
     pub worker_count: usize,
     /// Hard worker-count cap.
     pub worker_count_cap: usize,
+    /// The blocking pool's load.
+    pub blocking: gossamer_runtime::blocking_pool::BlockingStats,
 }
 
 /// Returns a low-overhead snapshot of the global scheduler counters.
@@ -113,27 +115,14 @@ pub fn scheduler_stats() -> SchedulerStats {
         live_goroutines: scheduler.live_goroutines(),
         worker_count: scheduler.worker_count(),
         worker_count_cap: gossamer_runtime::sched::MultiScheduler::worker_count_cap(),
+        blocking: gossamer_runtime::blocking_pool::stats(),
     }
 }
 
 /// Returns [`scheduler_stats`] rendered as a compact JSON object.
 #[must_use]
 pub fn scheduler_stats_json() -> String {
-    let stats = scheduler_stats();
-    format!(
-        "{{\"spawned\":{},\"finished\":{},\"steps\":{},\"yields\":{},\"steals\":{},\"injects\":{},\"parks\":{},\"unparks\":{},\"live_goroutines\":{},\"worker_count\":{},\"worker_count_cap\":{}}}",
-        stats.spawned,
-        stats.finished,
-        stats.steps,
-        stats.yields,
-        stats.steals,
-        stats.injects,
-        stats.parks,
-        stats.unparks,
-        stats.live_goroutines,
-        stats.worker_count,
-        stats.worker_count_cap,
-    )
+    gossamer_runtime::c_abi::scheduler_stats_json()
 }
 
 /// Returns whether this Rust-hosted runtime has a cycle collector.

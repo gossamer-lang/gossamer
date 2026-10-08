@@ -10,41 +10,20 @@
     clippy::needless_pass_by_value
 )]
 //! `std::metrics` builtins for the bytecode VM - Prometheus-compatible
-//! Counter / Gauge / Histogram and a rendering Registry. Metric and
-//! registry state live in process-global registries keyed by `id`, so
-//! `&self` mutating methods reach through the registry instead of the
-//! VM's receiver write-back (mirrors `math::rand::Rng`). The metric
+//! Counter / Gauge / Histogram and a rendering Registry. Each handle holds
+//! its metric or registry, shared by every copy of the handle, and a
+//! registry holds a share of every metric registered with it, so a metric
+//! lives as long as a handle or a registry reaches it. The metric
 //! primitives and the text-exposition rendering are
-//! `gossamer_std::metrics`, so the Prometheus text matches the
-//! compiled tiers byte-for-byte.
+//! `gossamer_std::metrics`, so the Prometheus text matches the compiled
+//! tiers byte-for-byte.
 
-use std::cell::RefCell;
-use std::collections::HashMap as StdHashMap;
 use std::sync::Arc;
-use std::sync::LazyLock;
-use std::sync::atomic::{AtomicI64, Ordering};
 
-use gossamer_ast::Ident;
 use gossamer_std::metrics::{Counter, Gauge, Histogram, Metric, Registry};
 
-use crate::builtins::{BuiltinFnPub, value_to_int};
+use crate::builtins::BuiltinFnPub;
 use crate::value::{RuntimeResult, Value};
-
-static METRICS: LazyLock<parking_lot::ReentrantMutex<RefCell<StdHashMap<i64, Metric>>>> =
-    LazyLock::new(|| parking_lot::ReentrantMutex::new(RefCell::new(StdHashMap::new())));
-static REGISTRIES: LazyLock<parking_lot::ReentrantMutex<RefCell<StdHashMap<i64, Registry>>>> =
-    LazyLock::new(|| parking_lot::ReentrantMutex::new(RefCell::new(StdHashMap::new())));
-static NEXT_ID: AtomicI64 = AtomicI64::new(1);
-
-fn with_metrics<R>(f: impl FnOnce(&RefCell<StdHashMap<i64, Metric>>) -> R) -> R {
-    let guard = METRICS.lock();
-    f(&guard)
-}
-
-fn with_registries<R>(f: impl FnOnce(&RefCell<StdHashMap<i64, Registry>>) -> R) -> R {
-    let guard = REGISTRIES.lock();
-    f(&guard)
-}
 
 pub(crate) fn install_metrics(globals: &mut Vec<(&'static str, Value)>) {
     let entries: &[(&str, BuiltinFnPub)] = &[
@@ -78,31 +57,23 @@ pub(crate) fn install_metrics(globals: &mut Vec<(&'static str, Value)>) {
     }
 }
 
-fn metric_handle(kind: &'static str, id: i64) -> Value {
-    Value::struct_(
-        kind,
-        Arc::unwrap_or_clone(Arc::new(vec![("__metric", Value::Int(id))])),
-    )
+const METRIC_FIELD: &str = "__metric";
+const REGISTRY_NAME: &str = "metrics::Registry";
+const REGISTRY_FIELD: &str = "__registry";
+
+fn metric_handle(kind: &'static str, metric: Metric) -> Value {
+    crate::value::state_handle(kind, METRIC_FIELD, Arc::new(metric))
 }
 
-fn registry_handle(id: i64) -> Value {
-    Value::struct_(
-        "metrics::Registry",
-        Arc::unwrap_or_clone(Arc::new(vec![("__registry", Value::Int(id))])),
-    )
+/// The metric a Counter, Gauge, or Histogram handle holds.
+fn metric_of(value: &Value) -> Option<Arc<Metric>> {
+    ["metrics::Counter", "metrics::Gauge", "metrics::Histogram"]
+        .into_iter()
+        .find_map(|kind| crate::value::handle_state(value, kind, METRIC_FIELD))
 }
 
-fn handle_id(value: &Value, field: &str) -> Option<i64> {
-    if let Value::Struct(inner) = value {
-        for (i, v) in &inner.fields {
-            if (*i) == field {
-                if let Value::Int(n) = v {
-                    return Some(*n);
-                }
-            }
-        }
-    }
-    None
+fn registry_of(value: &Value) -> Option<Arc<Registry>> {
+    crate::value::handle_state(value, REGISTRY_NAME, REGISTRY_FIELD)
 }
 
 fn str_arg(args: &[Value], idx: usize) -> String {
@@ -145,19 +116,15 @@ fn elem_f64(v: &Value) -> Option<f64> {
 }
 
 pub(crate) fn builtin_counter_new(args: &[Value]) -> RuntimeResult<Value> {
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let metric = Metric::Counter(Counter::new(&str_arg(args, 0), &str_arg(args, 1)));
-    with_metrics(|m| m.borrow_mut().insert(id, metric));
-    Ok(metric_handle("metrics::Counter", id))
+    Ok(metric_handle("metrics::Counter", metric))
 }
 
 pub(crate) fn builtin_counter_inc(args: &[Value]) -> RuntimeResult<Value> {
-    if let Some(id) = args.first().and_then(|v| handle_id(v, "__metric")) {
-        with_metrics(|m| {
-            if let Some(Metric::Counter(c)) = m.borrow().get(&id) {
-                c.inc();
-            }
-        });
+    if let Some(metric) = args.first().and_then(metric_of)
+        && let Metric::Counter(c) = &*metric
+    {
+        c.inc();
     }
     Ok(Value::Unit)
 }
@@ -165,142 +132,102 @@ pub(crate) fn builtin_counter_inc(args: &[Value]) -> RuntimeResult<Value> {
 pub(crate) fn builtin_counter_value(args: &[Value]) -> RuntimeResult<Value> {
     let v = args
         .first()
-        .and_then(|v| handle_id(v, "__metric"))
-        .and_then(|id| {
-            with_metrics(|m| match m.borrow().get(&id) {
-                Some(Metric::Counter(c)) => Some(c.value()),
-                _ => None,
-            })
+        .and_then(metric_of)
+        .and_then(|metric| match &*metric {
+            Metric::Counter(c) => Some(c.value()),
+            _ => None,
         })
         .unwrap_or(0);
     Ok(Value::Int(v as i64))
 }
 
 pub(crate) fn builtin_gauge_new(args: &[Value]) -> RuntimeResult<Value> {
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let metric = Metric::Gauge(Gauge::new(&str_arg(args, 0), &str_arg(args, 1)));
-    with_metrics(|m| m.borrow_mut().insert(id, metric));
-    Ok(metric_handle("metrics::Gauge", id))
+    Ok(metric_handle("metrics::Gauge", metric))
+}
+
+/// Runs `f` on the gauge `value` holds, if it holds one.
+fn with_gauge(value: Option<&Value>, f: impl FnOnce(&Gauge)) {
+    if let Some(metric) = value.and_then(metric_of)
+        && let Metric::Gauge(g) = &*metric
+    {
+        f(g);
+    }
 }
 
 pub(crate) fn builtin_gauge_set(args: &[Value]) -> RuntimeResult<Value> {
-    if let Some(id) = args.first().and_then(|v| handle_id(v, "__metric")) {
-        let v = f64_arg(args, 1);
-        with_metrics(|m| {
-            if let Some(Metric::Gauge(g)) = m.borrow().get(&id) {
-                g.set(v);
-            }
-        });
-    }
+    let v = f64_arg(args, 1);
+    with_gauge(args.first(), |g| g.set(v));
     Ok(Value::Unit)
 }
 
 pub(crate) fn builtin_gauge_inc(args: &[Value]) -> RuntimeResult<Value> {
-    if let Some(id) = args.first().and_then(|v| handle_id(v, "__metric")) {
-        with_metrics(|m| {
-            if let Some(Metric::Gauge(g)) = m.borrow().get(&id) {
-                g.add(1.0);
-            }
-        });
-    }
+    with_gauge(args.first(), |g| g.add(1.0));
     Ok(Value::Unit)
 }
 
 pub(crate) fn builtin_gauge_dec(args: &[Value]) -> RuntimeResult<Value> {
-    if let Some(id) = args.first().and_then(|v| handle_id(v, "__metric")) {
-        with_metrics(|m| {
-            if let Some(Metric::Gauge(g)) = m.borrow().get(&id) {
-                g.sub(1.0);
-            }
-        });
-    }
+    with_gauge(args.first(), |g| g.sub(1.0));
     Ok(Value::Unit)
 }
 
 pub(crate) fn builtin_gauge_value(args: &[Value]) -> RuntimeResult<Value> {
-    let v = args
-        .first()
-        .and_then(|v| handle_id(v, "__metric"))
-        .and_then(|id| {
-            with_metrics(|m| match m.borrow().get(&id) {
-                Some(Metric::Gauge(g)) => Some(g.value()),
-                _ => None,
-            })
-        })
-        .unwrap_or(0.0);
+    let mut v = 0.0;
+    with_gauge(args.first(), |g| v = g.value());
     Ok(Value::Float(v))
 }
 
 pub(crate) fn builtin_histogram_new(args: &[Value]) -> RuntimeResult<Value> {
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let buckets = buckets_arg(args.get(2));
     let metric = Metric::Histogram(Histogram::new(
         &str_arg(args, 0),
         &str_arg(args, 1),
         &buckets,
     ));
-    with_metrics(|m| m.borrow_mut().insert(id, metric));
-    Ok(metric_handle("metrics::Histogram", id))
+    Ok(metric_handle("metrics::Histogram", metric))
+}
+
+/// Runs `f` on the histogram `value` holds, if it holds one.
+fn with_histogram(value: Option<&Value>, f: impl FnOnce(&Histogram)) {
+    if let Some(metric) = value.and_then(metric_of)
+        && let Metric::Histogram(h) = &*metric
+    {
+        f(h);
+    }
 }
 
 pub(crate) fn builtin_histogram_observe(args: &[Value]) -> RuntimeResult<Value> {
-    if let Some(id) = args.first().and_then(|v| handle_id(v, "__metric")) {
-        let v = f64_arg(args, 1);
-        with_metrics(|m| {
-            if let Some(Metric::Histogram(h)) = m.borrow().get(&id) {
-                h.observe(v);
-            }
-        });
-    }
+    let v = f64_arg(args, 1);
+    with_histogram(args.first(), |h| h.observe(v));
     Ok(Value::Unit)
 }
 
 pub(crate) fn builtin_histogram_sum(args: &[Value]) -> RuntimeResult<Value> {
-    let v = args
-        .first()
-        .and_then(|v| handle_id(v, "__metric"))
-        .and_then(|id| {
-            with_metrics(|m| match m.borrow().get(&id) {
-                Some(Metric::Histogram(h)) => Some(h.sum()),
-                _ => None,
-            })
-        })
-        .unwrap_or(0.0);
+    let mut v = 0.0;
+    with_histogram(args.first(), |h| v = h.sum());
     Ok(Value::Float(v))
 }
 
 pub(crate) fn builtin_histogram_count(args: &[Value]) -> RuntimeResult<Value> {
-    let v = args
-        .first()
-        .and_then(|v| handle_id(v, "__metric"))
-        .and_then(|id| {
-            with_metrics(|m| match m.borrow().get(&id) {
-                Some(Metric::Histogram(h)) => Some(h.count()),
-                _ => None,
-            })
-        })
-        .unwrap_or(0);
+    let mut v = 0;
+    with_histogram(args.first(), |h| v = h.count());
     Ok(Value::Int(v as i64))
 }
 
 pub(crate) fn builtin_registry_new(_args: &[Value]) -> RuntimeResult<Value> {
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    with_registries(|r| r.borrow_mut().insert(id, Registry::new()));
-    Ok(registry_handle(id))
+    Ok(crate::value::state_handle(
+        REGISTRY_NAME,
+        REGISTRY_FIELD,
+        Arc::new(Registry::new()),
+    ))
 }
 
 pub(crate) fn builtin_registry_register(args: &[Value]) -> RuntimeResult<Value> {
-    let reg_id = args.first().and_then(|v| handle_id(v, "__registry"));
-    let metric_id = args.get(1).and_then(|v| handle_id(v, "__metric"));
-    if let (Some(rid), Some(mid)) = (reg_id, metric_id) {
-        let metric = with_metrics(|m| m.borrow().get(&mid).cloned());
-        if let Some(metric) = metric {
-            with_registries(|r| {
-                if let Some(reg) = r.borrow().get(&rid) {
-                    reg.register(metric);
-                }
-            });
-        }
+    if let (Some(registry), Some(metric)) = (
+        args.first().and_then(registry_of),
+        args.get(1).and_then(metric_of),
+    ) {
+        registry.register(Metric::clone(&metric));
     }
     Ok(Value::Unit)
 }
@@ -308,8 +235,8 @@ pub(crate) fn builtin_registry_register(args: &[Value]) -> RuntimeResult<Value> 
 pub(crate) fn builtin_registry_render(args: &[Value]) -> RuntimeResult<Value> {
     let text = args
         .first()
-        .and_then(|v| handle_id(v, "__registry"))
-        .and_then(|id| with_registries(|r| r.borrow().get(&id).map(Registry::expose)))
+        .and_then(registry_of)
+        .map(|registry| registry.expose())
         .unwrap_or_default();
     Ok(Value::String(text.into()))
 }
@@ -322,8 +249,8 @@ pub(crate) fn builtin_serve_metrics(args: &[Value]) -> RuntimeResult<Value> {
     let addr = str_arg(args, 0);
     let registry = args
         .get(1)
-        .and_then(|v| handle_id(v, "__registry"))
-        .and_then(|id| with_registries(|r| r.borrow().get(&id).cloned()));
+        .and_then(registry_of)
+        .map(|registry| Registry::clone(&registry));
     let Some(registry) = registry else {
         return Ok(crate::builtins::err_variant(
             "serve_metrics: unknown registry handle",
@@ -332,5 +259,33 @@ pub(crate) fn builtin_serve_metrics(args: &[Value]) -> RuntimeResult<Value> {
     match gossamer_std::metrics::serve_metrics(&addr, registry) {
         Ok(()) => Ok(Value::variant("Ok", vec![Value::Unit])),
         Err(e) => Ok(crate::builtins::err_variant(format!("{e}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_registry_keeps_a_metric_whose_handles_are_gone() {
+        let registry = builtin_registry_new(&[]).expect("Registry::new");
+        let counter = builtin_counter_new(&[
+            Value::String("requests_total".into()),
+            Value::String("Requests served.".into()),
+        ])
+        .expect("Counter::new");
+        builtin_counter_inc(std::slice::from_ref(&counter)).expect("Counter::inc");
+        builtin_registry_register(&[registry.clone(), counter.clone()]).expect("register");
+        let metric = metric_of(&counter).expect("a metric handle");
+        drop(counter);
+        assert_eq!(
+            Arc::strong_count(&metric),
+            1,
+            "only this test holds the handle's metric"
+        );
+        let Value::String(text) = builtin_registry_render(&[registry]).expect("render") else {
+            panic!("render answers a string");
+        };
+        assert!(text.contains("requests_total 1"), "{text}");
     }
 }

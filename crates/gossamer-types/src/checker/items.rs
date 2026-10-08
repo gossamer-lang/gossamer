@@ -966,6 +966,21 @@ impl TypeChecker<'_> {
         let self_scope = self.enter_generic_scope(&decl.generics);
         let impl_self_ty = self.type_from_ast(&decl.self_ty);
         self.leave_generic_scope(self_scope);
+        // A bound is checked against the name of the argument's resolved
+        // type, which for a standard library type is its canonical name
+        // rather than the path the impl spelled, so the impl is recorded
+        // under that name as well.
+        if let Some(trait_ref) = &decl.trait_ref
+            && let Some(trait_seg) = trait_ref.path.segments.last()
+            && let Some(TyKind::Adt { def, .. }) = self.tcx.kind(impl_self_ty)
+            && let Some(name) = self.tcx.def_name(*def)
+        {
+            let name = name.to_string();
+            self.trait_impl_types
+                .entry(trait_seg.name.name.clone())
+                .or_default()
+                .insert(name);
+        }
         let prev_self_ty = self.current_self_ty.replace(impl_self_ty);
         let prev_self_name = std::mem::replace(
             &mut self.current_self_ty_name,

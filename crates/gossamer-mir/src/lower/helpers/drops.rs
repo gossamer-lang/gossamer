@@ -2380,6 +2380,7 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                                 "gos_rt_option_unwrap" | "gos_rt_result_unwrap"
                             ) && enum_arg_is_borrowed(args)))
                         || mints_owned_error(name)
+                        || mints_owned_node(name)
                 }
                 _ => true,
             };
@@ -4315,6 +4316,45 @@ fn mints_owned_error(name: &str) -> bool {
     matches!(
         name,
         "gos_rt_error_new" | "gos_rt_error_from" | "gos_rt_error_wrap" | "gos_rt_error_with_field"
+    )
+}
+
+/// Whether `name` answers a fresh counted runtime node - a channel, a join
+/// handle, a context or its done channel, a `std::sync` handle, a byte
+/// builder or buffer, a random generator, or file open options - whose one
+/// share the caller holds. An open-options setter answers its receiver with a
+/// share of its own.
+fn mints_owned_node(name: &str) -> bool {
+    matches!(
+        name,
+        "gos_rt_chan_new"
+            | "gos_rt_fs_open_options_new"
+            | "gos_rt_fs_open_options_read"
+            | "gos_rt_fs_open_options_write"
+            | "gos_rt_fs_open_options_append"
+            | "gos_rt_fs_open_options_truncate"
+            | "gos_rt_fs_open_options_create"
+            | "gos_rt_fs_open_options_create_new"
+            | "gos_rt_spawn"
+            | "gos_rt_spawn_ex"
+            | "gos_rt_ctx_cancelled"
+            | "gos_rt_ctx_background"
+            | "gos_rt_bytes_builder_new"
+            | "gos_rt_bytes_builder_with_capacity"
+            | "gos_rt_bytes_buffer_new"
+            | "gos_rt_bytes_buffer_with_capacity"
+            | "gos_rt_math_rng_new"
+            | "gos_rt_ctx_with_cancel"
+            | "gos_rt_ctx_with_timeout"
+            | "gos_rt_rwlock_new"
+            | "gos_rt_sync_map_new"
+            | "gos_rt_shared_new"
+            | "gos_rt_mutex_new"
+            | "gos_rt_once_new"
+            | "gos_rt_wg_new"
+            | "gos_rt_barrier_new"
+            | "gos_rt_atomic_i64_new"
+            | "gos_rt_atomic_bool_new"
     )
 }
 

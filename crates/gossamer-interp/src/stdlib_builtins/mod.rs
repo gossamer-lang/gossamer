@@ -259,6 +259,7 @@ pub mod crypto_insecure;
 pub mod database_sql;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod database_sql_native;
+pub(crate) mod deadline_queue;
 pub mod deque;
 pub mod dyn_value;
 pub mod encoding_binary;

@@ -58,6 +58,13 @@ pub const RC_KIND_STRUCT_GUARDED: i64 = 6;
 /// kind: a string, vec, map, set, or reference-counted node.
 pub const RC_KIND_SLOT_CHILDREN: i64 = 7;
 
+/// Layout of a runtime object the runtime itself allocated, such as a lock:
+/// `[kind, finalizer]`, where `finalizer` is the address of an
+/// `unsafe extern "C" fn(*mut u8)` that drops the payload in place. The node
+/// has no counted children; its last release runs the finalizer before the
+/// block is freed.
+pub const RC_KIND_FINALIZED: i64 = 8;
+
 /// Slot-child gate naming a child that is the whole element: a `Set` or deque
 /// stored in a container occupies its one slot as the table handle itself.
 /// Like any negative gate it is unconditional; it also tells an element read

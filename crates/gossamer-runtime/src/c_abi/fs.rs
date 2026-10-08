@@ -64,42 +64,61 @@ fn next_fs_handle() -> i64 {
     NEXT_FS_HANDLE.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Registers `file` and answers a handle owning the entry: the file closes
+/// with the handle's last share, or at an explicit `close`.
 fn insert_file(file: std::fs::File) -> i64 {
-    let h = next_fs_handle();
+    let id = next_fs_handle();
     FILE_HANDLES
         .write()
         .get_or_insert_with(HashMap::new)
         .insert(
-            h,
+            id,
             Arc::new(FileEntry {
                 file,
                 cursor: Mutex::new(()),
             }),
         );
-    h
+    super::registry_key::key_handle(id, retire_file)
+}
+
+/// Removes the file registered under `id` and the locks it holds. A call
+/// still working on the file keeps it open until that call returns.
+fn retire_file(id: i64) {
+    if let Some(files) = FILE_HANDLES.write().as_mut() {
+        files.remove(&id);
+    }
+    if let Some(locks) = HELD_LOCKS.lock().as_mut() {
+        locks.remove(&id);
+    }
 }
 
 fn file_clone(h: i64) -> Option<Arc<FileEntry>> {
+    let id = super::registry_key::key_id(h);
     FILE_HANDLES
         .read()
         .as_ref()
-        .and_then(|m| m.get(&h).cloned())
+        .and_then(|m| m.get(&id).cloned())
 }
 
 fn insert_open_options(opts: GosOpenOptions) -> i64 {
-    let h = next_fs_handle();
+    let id = next_fs_handle();
     OPEN_OPTIONS_HANDLES
         .lock()
         .get_or_insert_with(HashMap::new)
-        .insert(h, Arc::new(Mutex::new(opts)));
-    h
+        .insert(id, Arc::new(Mutex::new(opts)));
+    super::registry_key::key_handle(id, |id| {
+        if let Some(options) = OPEN_OPTIONS_HANDLES.lock().as_mut() {
+            options.remove(&id);
+        }
+    })
 }
 
 fn open_options_clone(h: i64) -> Option<Arc<Mutex<GosOpenOptions>>> {
+    let id = super::registry_key::key_id(h);
     OPEN_OPTIONS_HANDLES
         .lock()
         .as_ref()
-        .and_then(|m| m.get(&h).cloned())
+        .and_then(|m| m.get(&id).cloned())
 }
 
 fn apply_open_options(opts: &GosOpenOptions) -> std::fs::OpenOptions {
@@ -339,13 +358,14 @@ pub unsafe extern "C" fn gos_rt_fs_temp_dir(prefix: *const c_char) -> i128 {
     })
 }
 
-/// Layout of the `fs::temp_file` `(File, String)` pair: the path string is
-/// owned by the blob; the file handle is a registry id.
-static TEMP_FILE_PAIR_META: [i64; 5] = [
+/// Layout of the `fs::temp_file` `(File, String)` pair: the blob owns a
+/// share of the file handle and the path string.
+static TEMP_FILE_PAIR_META: [i64; 6] = [
     gossamer_abi::rc::RC_KIND_STRUCT,
     1,
     0,
-    1,
+    2,
+    gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT,
     (gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 1,
 ];
 
@@ -394,6 +414,16 @@ macro_rules! open_option_setter {
             ffi_entry!(h, {
                 if let Some(opts) = open_options_clone(h) {
                     opts.lock().$field = enabled != 0;
+                }
+                // The answer is the receiver, handed back as a share of its
+                // own so the next call in a chain holds the builder.
+                if h != 0 {
+                    // SAFETY: `h` is the live builder handle the caller holds.
+                    unsafe {
+                        super::rc::gos_rt_rc_retain(std::ptr::with_exposed_provenance_mut(
+                            h as usize,
+                        ))
+                    };
                 }
                 h
             })
@@ -499,12 +529,7 @@ pub extern "C" fn gos_rt_fs_file_flush(h: i64) -> i128 {
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_fs_file_close(h: i64) {
     ffi_entry!((), {
-        if let Some(files) = FILE_HANDLES.write().as_mut() {
-            files.remove(&h);
-        }
-        if let Some(locks) = HELD_LOCKS.lock().as_mut() {
-            locks.remove(&h);
-        }
+        retire_file(super::registry_key::key_id(h));
     });
 }
 
@@ -2139,7 +2164,7 @@ pub extern "C" fn gos_rt_fs_file_unlock(h: i64) -> i128 {
         let held = HELD_LOCKS
             .lock()
             .as_mut()
-            .and_then(|locks| locks.remove(&h))
+            .and_then(|locks| locks.remove(&super::registry_key::key_id(h)))
             .unwrap_or_default();
         if held.is_empty() {
             return gos_rt_result_new(0, 0);
@@ -2158,7 +2183,10 @@ pub extern "C" fn gos_rt_fs_file_unlock(h: i64) -> i128 {
 /// Note a range this handle now holds, so `File::unlock` can name it.
 fn record_held_range(h: i64, start: u64, len: u64) {
     let mut guard = HELD_LOCKS.lock();
-    let held = guard.get_or_insert_with(HashMap::new).entry(h).or_default();
+    let held = guard
+        .get_or_insert_with(HashMap::new)
+        .entry(super::registry_key::key_id(h))
+        .or_default();
     if !held.contains(&(start, len)) {
         held.push((start, len));
     }
@@ -2169,7 +2197,7 @@ fn forget_held_range(h: i64, start: u64, len: u64) {
     if let Some(held) = HELD_LOCKS
         .lock()
         .as_mut()
-        .and_then(|locks| locks.get_mut(&h))
+        .and_then(|locks| locks.get_mut(&super::registry_key::key_id(h)))
         && let Some(at) = held.iter().position(|range| *range == (start, len))
     {
         held.swap_remove(at);

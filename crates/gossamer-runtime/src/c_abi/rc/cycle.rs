@@ -139,6 +139,8 @@ unsafe fn collect_white(root: *mut u8, freed: &mut Vec<*mut u8>) {
         }
         // SAFETY: `h` is the header of the live, thread-local node `s`.
         unsafe { set_color(h, COLOR_BLACK) };
+        // SAFETY: `s` is a garbage cycle member, dead from here on.
+        unsafe { finalize(s) };
         // Use visit_children_raw so string children are freed via their own
         // destructor rather than silently skipped, mirroring rc_release_impl.
         // SAFETY: `s` is a garbage cycle member, whose children this walk gives back.

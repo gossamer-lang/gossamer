@@ -39,10 +39,10 @@ fn builtin_channel_try_recv(args: &[Value]) -> RuntimeResult<Value> {
     })
 }
 
-/// `rx.recv_ctx(&ctx)` in the interpreter. The VM channel and Context use
-/// separate wait primitives, so the receive performs bounded condvar waits and
-/// checks the Context between them. A context that has already fired answers
-/// `None` without consuming a queued value, as it does in the native runtime.
+/// `rx.recv_ctx(&ctx)` in the interpreter. Cancelling the context wakes the
+/// channel's waiters, so the receive sleeps until a value, a close, or the
+/// cancellation arrives. A context that has already fired answers `None`
+/// without consuming a queued value, as it does in the native runtime.
 fn builtin_channel_recv_ctx(args: &[Value]) -> RuntimeResult<Value> {
     let Some(Value::Channel(channel)) = args.first() else {
         return Err(RuntimeError::Type(
@@ -50,6 +50,7 @@ fn builtin_channel_recv_ctx(args: &[Value]) -> RuntimeResult<Value> {
         ));
     };
     let ctx = args.get(1);
+    let _watch = ctx.and_then(|ctx| crate::stdlib_builtins::context::watch(ctx, channel.waker()));
     Ok(
         match channel.recv_with_cancel(|| {
             ctx.is_some_and(crate::stdlib_builtins::context::value_is_cancelled)
@@ -260,78 +261,45 @@ struct WaitGroupCell {
     cond: parking_lot::Condvar,
 }
 
-static I64VEC_REGISTRY: parking_lot::Mutex<Vec<Option<Arc<Vec<AtomicI64>>>>> =
-    parking_lot::Mutex::new(Vec::new());
-static WG_REGISTRY: parking_lot::Mutex<Vec<Option<Arc<WaitGroupCell>>>> =
-    parking_lot::Mutex::new(Vec::new());
+/// Wakes a group's waiters so each re-reads the counter and its context.
+/// Takes the counter's lock before notifying, since a waiter reads both
+/// under it.
+struct WaitGroupWake(Arc<WaitGroupCell>);
 
-fn i64vec_register(arc: Arc<Vec<AtomicI64>>) -> i64 {
-    let mut reg = I64VEC_REGISTRY.lock();
-    for (i, slot) in reg.iter_mut().enumerate() {
-        if slot.is_none() {
-            *slot = Some(arc);
-            return i as i64;
-        }
+impl std::task::Wake for WaitGroupWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
     }
-    let id = reg.len() as i64;
-    reg.push(Some(arc));
-    id
-}
 
-fn i64vec_lookup(handle: i64) -> Option<Arc<Vec<AtomicI64>>> {
-    let reg = I64VEC_REGISTRY.lock();
-    if handle < 0 {
-        return None;
-    }
-    reg.get(handle as usize).and_then(std::clone::Clone::clone)
-}
-
-fn wg_register(arc: Arc<WaitGroupCell>) -> i64 {
-    let mut reg = WG_REGISTRY.lock();
-    for (i, slot) in reg.iter_mut().enumerate() {
-        if slot.is_none() {
-            *slot = Some(arc);
-            return i as i64;
-        }
-    }
-    let id = reg.len() as i64;
-    reg.push(Some(arc));
-    id
-}
-
-fn wg_lookup(handle: i64) -> Option<Arc<WaitGroupCell>> {
-    let reg = WG_REGISTRY.lock();
-    if handle < 0 {
-        return None;
-    }
-    reg.get(handle as usize).and_then(std::clone::Clone::clone)
-}
-
-fn struct_handle(v: &Value, expected: &str) -> Option<i64> {
-    match v {
-        Value::Struct(inner) if inner.name == expected => {
-            for (ident, val) in &inner.fields {
-                if (*ident) == "__handle" {
-                    if let Value::Int(n) = val {
-                        return Some(*n);
-                    }
-                }
-            }
-            None
-        }
-        _ => None,
+    fn wake_by_ref(self: &Arc<Self>) {
+        drop(self.0.counter.lock());
+        self.0.cond.notify_all();
     }
 }
 
-fn make_handle_struct(name: &str, handle: i64) -> Value {
-    Value::struct_(name, vec![("__handle", Value::Int(handle))])
+
+
+type I64Buf = Vec<AtomicI64>;
+type U8Buf = Vec<std::sync::atomic::AtomicU8>;
+
+fn i64vec_of(value: &Value) -> Option<Arc<I64Buf>> {
+    crate::value::handle_state(value, "I64Vec", "__handle")
 }
+
+fn u8vec_of(value: &Value) -> Option<Arc<U8Buf>> {
+    crate::value::handle_state(value, "U8Vec", "__handle")
+}
+
+fn wg_of(value: &Value) -> Option<Arc<WaitGroupCell>> {
+    crate::value::handle_state(value, "WaitGroup", "__handle")
+}
+
+
 
 /// Snapshots a `U8Vec`'s registry-backed bytes for the JIT trampoline to
 /// marshal into a fresh native buffer. `None` if `v` is not a live `U8Vec`.
 pub(crate) fn u8vec_snapshot_bytes(v: &Value) -> Option<Vec<u8>> {
-    let handle = struct_handle(v, "U8Vec")?;
-    let arc = u8vec_lookup(handle)?;
+    let arc = u8vec_of(v)?;
     Some(
         arc.iter()
             .map(|b| b.load(std::sync::atomic::Ordering::Relaxed))
@@ -342,10 +310,7 @@ pub(crate) fn u8vec_snapshot_bytes(v: &Value) -> Option<Vec<u8>> {
 /// Writes `bytes` back into a `U8Vec`'s registry buffer after a JIT body
 /// mutated the marshalled copy, so the caller observes in-place mutations.
 pub(crate) fn u8vec_write_back(v: &Value, bytes: &[u8]) {
-    let Some(handle) = struct_handle(v, "U8Vec") else {
-        return;
-    };
-    let Some(arc) = u8vec_lookup(handle) else {
+    let Some(arc) = u8vec_of(v) else {
         return;
     };
     for (slot, &b) in arc.iter().zip(bytes.iter()) {
@@ -379,17 +344,11 @@ fn builtin_i64vec_new(args: &[Value]) -> RuntimeResult<Value> {
     for _ in 0..len {
         data.push(AtomicI64::new(0));
     }
-    let handle = i64vec_register(Arc::new(data));
-    Ok(make_handle_struct("I64Vec", handle))
+    Ok(crate::value::state_handle("I64Vec", "__handle", Arc::new(data)))
 }
 
 fn builtin_i64vec_set_at(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = args
-        .first()
-        .and_then(|v| struct_handle(v, "I64Vec"))
-        .ok_or_else(|| RuntimeError::Type("set_at: receiver must be I64Vec".to_string()))?;
-    let vec_arc = i64vec_lookup(handle)
-        .ok_or_else(|| RuntimeError::Type("set_at: stale I64Vec handle".to_string()))?;
+    let vec_arc = args.first().and_then(i64vec_of).ok_or_else(|| RuntimeError::Type("set_at: receiver must be I64Vec".to_string()))?;
     let idx = arg_int(args, 1)
         .ok_or_else(|| RuntimeError::Type("set_at: idx must be i64".to_string()))?;
     let val = arg_int(args, 2)
@@ -403,12 +362,7 @@ fn builtin_i64vec_set_at(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 fn builtin_i64vec_get_at(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = args
-        .first()
-        .and_then(|v| struct_handle(v, "I64Vec"))
-        .ok_or_else(|| RuntimeError::Type("get_at: receiver must be I64Vec".to_string()))?;
-    let vec_arc = i64vec_lookup(handle)
-        .ok_or_else(|| RuntimeError::Type("get_at: stale I64Vec handle".to_string()))?;
+    let vec_arc = args.first().and_then(i64vec_of).ok_or_else(|| RuntimeError::Type("get_at: receiver must be I64Vec".to_string()))?;
     let idx = arg_int(args, 1)
         .ok_or_else(|| RuntimeError::Type("get_at: idx must be i64".to_string()))?;
     let v = if idx >= 0 {
@@ -422,25 +376,14 @@ fn builtin_i64vec_get_at(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 fn builtin_i64vec_vec_len(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = args
-        .first()
-        .and_then(|v| struct_handle(v, "I64Vec"))
-        .ok_or_else(|| RuntimeError::Type("vec_len: receiver must be I64Vec".to_string()))?;
-    let vec_arc = i64vec_lookup(handle)
-        .ok_or_else(|| RuntimeError::Type("vec_len: stale I64Vec handle".to_string()))?;
+    let vec_arc = args.first().and_then(i64vec_of).ok_or_else(|| RuntimeError::Type("vec_len: receiver must be I64Vec".to_string()))?;
     Ok(Value::Int(vec_arc.len() as i64))
 }
 
 fn builtin_i64vec_write_range_to_stdout(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = args
-        .first()
-        .and_then(|v| struct_handle(v, "I64Vec"))
-        .ok_or_else(|| {
+    let vec_arc = args.first().and_then(i64vec_of).ok_or_else(|| {
             RuntimeError::Type("write_range_to_stdout: receiver must be I64Vec".to_string())
         })?;
-    let vec_arc = i64vec_lookup(handle).ok_or_else(|| {
-        RuntimeError::Type("write_range_to_stdout: stale I64Vec handle".to_string())
-    })?;
     let off = non_negative_arg(args, 1, 0, "write_range_to_stdout: offset")?;
     let count = non_negative_arg(args, 2, 0, "write_range_to_stdout: count")?;
     let end = off.saturating_add(count).min(vec_arc.len());
@@ -453,15 +396,9 @@ fn builtin_i64vec_write_range_to_stdout(args: &[Value]) -> RuntimeResult<Value> 
 }
 
 fn builtin_i64vec_write_lines_to_stdout(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = args
-        .first()
-        .and_then(|v| struct_handle(v, "I64Vec"))
-        .ok_or_else(|| {
+    let vec_arc = args.first().and_then(i64vec_of).ok_or_else(|| {
             RuntimeError::Type("write_lines_to_stdout: receiver must be I64Vec".to_string())
         })?;
-    let vec_arc = i64vec_lookup(handle).ok_or_else(|| {
-        RuntimeError::Type("write_lines_to_stdout: stale I64Vec handle".to_string())
-    })?;
     let off = non_negative_arg(args, 1, 0, "write_lines_to_stdout: offset")?;
     let count = non_negative_arg(args, 2, 0, "write_lines_to_stdout: count")?;
     let line_len = positive_arg(args, 3, 60, "write_lines_to_stdout: line length")?;
@@ -486,53 +423,8 @@ fn builtin_i64vec_write_lines_to_stdout(args: &[Value]) -> RuntimeResult<Value> 
 // Same handle-table shape as I64Vec; storage uses `AtomicU8` so
 // goroutine workers can write disjoint slices without locks.
 
-static U8VEC_REGISTRY: parking_lot::Mutex<Vec<Option<Arc<Vec<std::sync::atomic::AtomicU8>>>>> =
-    parking_lot::Mutex::new(Vec::new());
 
-fn u8vec_register(arc: Arc<Vec<std::sync::atomic::AtomicU8>>) -> i64 {
-    let mut reg = U8VEC_REGISTRY.lock();
-    for (i, slot) in reg.iter_mut().enumerate() {
-        if slot.is_none() {
-            *slot = Some(arc);
-            return i as i64;
-        }
-    }
-    let id = reg.len() as i64;
-    reg.push(Some(arc));
-    id
-}
 
-thread_local! {
-    /// Single-slot per-thread cache for the most recent U8Vec
-    /// resolution. Hot byte-scan loops issue millions of
-    /// `buf.get_byte(_)` calls against one buffer; a trivial
-    /// cache on `(handle, Arc)` skips the global registry
-    /// mutex entirely after the first lookup.
-    static U8VEC_LAST: std::cell::RefCell<Option<(i64, Arc<Vec<std::sync::atomic::AtomicU8>>)>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-fn u8vec_lookup(handle: i64) -> Option<Arc<Vec<std::sync::atomic::AtomicU8>>> {
-    if handle < 0 {
-        return None;
-    }
-    let cached = U8VEC_LAST.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .filter(|(h, _)| *h == handle)
-            .map(|(_, arc)| Arc::clone(arc))
-    });
-    if cached.is_some() {
-        return cached;
-    }
-    let reg = U8VEC_REGISTRY.lock();
-    let arc = reg.get(handle as usize).and_then(std::clone::Clone::clone);
-    if let Some(ref a) = arc {
-        let cached = Arc::clone(a);
-        U8VEC_LAST.with(|cell| *cell.borrow_mut() = Some((handle, cached)));
-    }
-    arc
-}
 
 /// Inline `set_byte` for the VM's `Op::U8VecSetByte` super-instruction.
 /// Skips the `args: &[Value]` round-trip and the per-arg
@@ -541,8 +433,8 @@ fn u8vec_lookup(handle: i64) -> Option<Arc<Vec<std::sync::atomic::AtomicU8>>> {
 /// `false` lets the caller fall back to the generic method
 /// dispatch path when the receiver shape doesn't match.
 #[inline]
-pub(crate) fn u8vec_set_byte_inline(handle: i64, idx: i64, byte: i64) -> bool {
-    let Some(arc) = u8vec_lookup(handle) else {
+pub(crate) fn u8vec_set_byte_inline(recv: &Value, idx: i64, byte: i64) -> bool {
+    let Some(arc) = u8vec_of(recv) else {
         return false;
     };
     if idx < 0 {
@@ -561,8 +453,8 @@ pub(crate) fn u8vec_set_byte_inline(handle: i64, idx: i64, byte: i64) -> bool {
 /// generic dispatch path); returns `Some(0)` for out-of-range
 /// reads, matching [`builtin_u8vec_get_byte`].
 #[inline]
-pub(crate) fn u8vec_get_byte_inline(handle: i64, idx: i64) -> Option<i64> {
-    let arc = u8vec_lookup(handle)?;
+pub(crate) fn u8vec_get_byte_inline(recv: &Value, idx: i64) -> Option<i64> {
+    let arc = u8vec_of(recv)?;
     if idx < 0 {
         return Some(0);
     }
@@ -577,17 +469,11 @@ fn builtin_u8vec_new(args: &[Value]) -> RuntimeResult<Value> {
     for _ in 0..len {
         data.push(std::sync::atomic::AtomicU8::new(0));
     }
-    let handle = u8vec_register(Arc::new(data));
-    Ok(make_handle_struct("U8Vec", handle))
+    Ok(crate::value::state_handle("U8Vec", "__handle", Arc::new(data)))
 }
 
 fn builtin_u8vec_set_byte(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = args
-        .first()
-        .and_then(|v| struct_handle(v, "U8Vec"))
-        .ok_or_else(|| RuntimeError::Type("set_byte: receiver must be U8Vec".to_string()))?;
-    let vec_arc = u8vec_lookup(handle)
-        .ok_or_else(|| RuntimeError::Type("set_byte: stale U8Vec handle".to_string()))?;
+    let vec_arc = args.first().and_then(u8vec_of).ok_or_else(|| RuntimeError::Type("set_byte: receiver must be U8Vec".to_string()))?;
     let idx = arg_int(args, 1)
         .ok_or_else(|| RuntimeError::Type("set_byte: idx must be i64".to_string()))?;
     let val = arg_int(args, 2)
@@ -601,12 +487,7 @@ fn builtin_u8vec_set_byte(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 fn builtin_u8vec_get_byte(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = args
-        .first()
-        .and_then(|v| struct_handle(v, "U8Vec"))
-        .ok_or_else(|| RuntimeError::Type("get_byte: receiver must be U8Vec".to_string()))?;
-    let vec_arc = u8vec_lookup(handle)
-        .ok_or_else(|| RuntimeError::Type("get_byte: stale U8Vec handle".to_string()))?;
+    let vec_arc = args.first().and_then(u8vec_of).ok_or_else(|| RuntimeError::Type("get_byte: receiver must be U8Vec".to_string()))?;
     let idx = arg_int(args, 1)
         .ok_or_else(|| RuntimeError::Type("get_byte: idx must be i64".to_string()))?;
     let v = if idx >= 0 {
@@ -620,12 +501,7 @@ fn builtin_u8vec_get_byte(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 fn builtin_u8vec_count_singles(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = args
-        .first()
-        .and_then(|v| struct_handle(v, "U8Vec"))
-        .ok_or_else(|| RuntimeError::Type("count_singles: receiver must be U8Vec".to_string()))?;
-    let vec_arc = u8vec_lookup(handle)
-        .ok_or_else(|| RuntimeError::Type("count_singles: stale U8Vec handle".to_string()))?;
+    let vec_arc = args.first().and_then(u8vec_of).ok_or_else(|| RuntimeError::Type("count_singles: receiver must be U8Vec".to_string()))?;
     let buf_len = non_negative_arg(args, 1, 0, "to_string_left: length")?;
     let len = vec_arc.len().min(buf_len);
     let mut counts = [0i64; 4];
@@ -639,12 +515,7 @@ fn builtin_u8vec_count_singles(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 fn builtin_u8vec_count_pairs(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = args
-        .first()
-        .and_then(|v| struct_handle(v, "U8Vec"))
-        .ok_or_else(|| RuntimeError::Type("count_pairs: receiver must be U8Vec".to_string()))?;
-    let vec_arc = u8vec_lookup(handle)
-        .ok_or_else(|| RuntimeError::Type("count_pairs: stale U8Vec handle".to_string()))?;
+    let vec_arc = args.first().and_then(u8vec_of).ok_or_else(|| RuntimeError::Type("count_pairs: receiver must be U8Vec".to_string()))?;
     let buf_len = non_negative_arg(args, 1, 0, "to_string_center: length")?;
     let len = vec_arc.len().min(buf_len);
     let mut counts = [0i64; 16];
@@ -664,12 +535,7 @@ fn builtin_u8vec_count_pairs(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 fn builtin_u8vec_count_kmers(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = args
-        .first()
-        .and_then(|v| struct_handle(v, "U8Vec"))
-        .ok_or_else(|| RuntimeError::Type("count_kmers: receiver must be U8Vec".to_string()))?;
-    let vec_arc = u8vec_lookup(handle)
-        .ok_or_else(|| RuntimeError::Type("count_kmers: stale U8Vec handle".to_string()))?;
+    let vec_arc = args.first().and_then(u8vec_of).ok_or_else(|| RuntimeError::Type("count_kmers: receiver must be U8Vec".to_string()))?;
     let buf_len = non_negative_arg(args, 1, 0, "to_string_right: length")?;
     let k = non_negative_arg(args, 2, 0, "to_string_right: count")?;
     let len = vec_arc.len().min(buf_len);
@@ -723,12 +589,7 @@ fn kmer_count(buf: &[std::sync::atomic::AtomicU8], k: usize) -> DenseMap<i64, i6
 }
 
 fn builtin_u8vec_window_key(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = args
-        .first()
-        .and_then(|v| struct_handle(v, "U8Vec"))
-        .ok_or_else(|| RuntimeError::Type("window_key: receiver must be U8Vec".to_string()))?;
-    let vec_arc = u8vec_lookup(handle)
-        .ok_or_else(|| RuntimeError::Type("window_key: stale U8Vec handle".to_string()))?;
+    let vec_arc = args.first().and_then(u8vec_of).ok_or_else(|| RuntimeError::Type("window_key: receiver must be U8Vec".to_string()))?;
     let i = non_negative_arg(args, 1, 0, "window_key: index")?;
     let k = non_negative_arg(args, 2, 0, "window_key: count")?;
     let len = vec_arc.len();
@@ -748,12 +609,7 @@ fn builtin_u8vec_window_key(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 fn builtin_u8vec_byte_len(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = args
-        .first()
-        .and_then(|v| struct_handle(v, "U8Vec"))
-        .ok_or_else(|| RuntimeError::Type("byte_len: receiver must be U8Vec".to_string()))?;
-    let vec_arc = u8vec_lookup(handle)
-        .ok_or_else(|| RuntimeError::Type("byte_len: stale U8Vec handle".to_string()))?;
+    let vec_arc = args.first().and_then(u8vec_of).ok_or_else(|| RuntimeError::Type("byte_len: receiver must be U8Vec".to_string()))?;
     Ok(Value::Int(vec_arc.len() as i64))
 }
 
@@ -785,12 +641,7 @@ fn builtin_vec_with_capacity(args: &[Value]) -> RuntimeResult<Value> {
 /// for incremental construction, an explicit one-shot conversion
 /// at the end.
 fn builtin_u8vec_to_string(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = args
-        .first()
-        .and_then(|v| struct_handle(v, "U8Vec"))
-        .ok_or_else(|| RuntimeError::Type("to_string: receiver must be U8Vec".to_string()))?;
-    let vec_arc = u8vec_lookup(handle)
-        .ok_or_else(|| RuntimeError::Type("to_string: stale U8Vec handle".to_string()))?;
+    let vec_arc = args.first().and_then(u8vec_of).ok_or_else(|| RuntimeError::Type("to_string: receiver must be U8Vec".to_string()))?;
     let len = match arg_int(args, 1) {
         Some(n) if n < 0 => {
             return Err(RuntimeError::Type(
@@ -812,15 +663,9 @@ fn builtin_u8vec_to_string(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 fn builtin_u8vec_write_byte_range_to_stdout(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = args
-        .first()
-        .and_then(|v| struct_handle(v, "U8Vec"))
-        .ok_or_else(|| {
+    let vec_arc = args.first().and_then(u8vec_of).ok_or_else(|| {
             RuntimeError::Type("write_byte_range_to_stdout: receiver must be U8Vec".to_string())
         })?;
-    let vec_arc = u8vec_lookup(handle).ok_or_else(|| {
-        RuntimeError::Type("write_byte_range_to_stdout: stale U8Vec handle".to_string())
-    })?;
     let off = non_negative_arg(args, 1, 0, "write_byte_range_to_stdout: offset")?;
     let count = non_negative_arg(args, 2, 0, "write_byte_range_to_stdout: count")?;
     let end = off.saturating_add(count).min(vec_arc.len());
@@ -833,15 +678,9 @@ fn builtin_u8vec_write_byte_range_to_stdout(args: &[Value]) -> RuntimeResult<Val
 }
 
 fn builtin_u8vec_write_byte_lines_to_stdout(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = args
-        .first()
-        .and_then(|v| struct_handle(v, "U8Vec"))
-        .ok_or_else(|| {
+    let vec_arc = args.first().and_then(u8vec_of).ok_or_else(|| {
             RuntimeError::Type("write_byte_lines_to_stdout: receiver must be U8Vec".to_string())
         })?;
-    let vec_arc = u8vec_lookup(handle).ok_or_else(|| {
-        RuntimeError::Type("write_byte_lines_to_stdout: stale U8Vec handle".to_string())
-    })?;
     let off = non_negative_arg(args, 1, 0, "write_byte_lines_to_stdout: offset")?;
     let count = non_negative_arg(args, 2, 0, "write_byte_lines_to_stdout: count")?;
     let line_len = positive_arg(args, 3, 60, "write_byte_lines_to_stdout: line length")?;
@@ -865,33 +704,22 @@ fn builtin_waitgroup_new(_args: &[Value]) -> RuntimeResult<Value> {
         counter: parking_lot::Mutex::new(0),
         cond: parking_lot::Condvar::new(),
     });
-    let handle = wg_register(cell);
-    Ok(make_handle_struct("WaitGroup", handle))
+    Ok(crate::value::state_handle("WaitGroup", "__handle", cell))
 }
 
 fn builtin_waitgroup_add(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = args
-        .first()
-        .and_then(|v| struct_handle(v, "WaitGroup"))
-        .ok_or_else(|| {
-            RuntimeError::Type("WaitGroup::add: receiver must be WaitGroup".to_string())
-        })?;
-    let cell = wg_lookup(handle)
-        .ok_or_else(|| RuntimeError::Type("WaitGroup::add: stale WaitGroup handle".to_string()))?;
+    let cell = args.first().and_then(wg_of).ok_or_else(|| {
+        RuntimeError::Type("WaitGroup::add: receiver must be WaitGroup".to_string())
+    })?;
     let n = arg_int(args, 1).unwrap_or(1);
     *cell.counter.lock() += n;
     Ok(Value::Unit)
 }
 
 fn builtin_waitgroup_done(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = args
-        .first()
-        .and_then(|v| struct_handle(v, "WaitGroup"))
-        .ok_or_else(|| {
-            RuntimeError::Type("WaitGroup::done: receiver must be WaitGroup".to_string())
-        })?;
-    let cell = wg_lookup(handle)
-        .ok_or_else(|| RuntimeError::Type("WaitGroup::done: stale WaitGroup handle".to_string()))?;
+    let cell = args.first().and_then(wg_of).ok_or_else(|| {
+        RuntimeError::Type("WaitGroup::done: receiver must be WaitGroup".to_string())
+    })?;
     let mut count = cell.counter.lock();
     *count -= 1;
     if *count <= 0 {
@@ -901,14 +729,9 @@ fn builtin_waitgroup_done(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 fn builtin_waitgroup_wait(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = args
-        .first()
-        .and_then(|v| struct_handle(v, "WaitGroup"))
-        .ok_or_else(|| {
-            RuntimeError::Type("WaitGroup::wait: receiver must be WaitGroup".to_string())
-        })?;
-    let cell = wg_lookup(handle)
-        .ok_or_else(|| RuntimeError::Type("WaitGroup::wait: stale WaitGroup handle".to_string()))?;
+    let cell = args.first().and_then(wg_of).ok_or_else(|| {
+        RuntimeError::Type("WaitGroup::wait: receiver must be WaitGroup".to_string())
+    })?;
     let mut count = cell.counter.lock();
     if *count > 0 && !gossamer_runtime::platform::CAN_BLOCK {
         return Err(RuntimeError::WouldNeverWake("WaitGroup::wait"));
@@ -920,24 +743,21 @@ fn builtin_waitgroup_wait(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 /// `wg.wait_ctx(ctx)` - waits for the counter to reach zero unless the
-/// context fires first, answering which of the two happened. The wait is
-/// split into short steps so a cancellation raised while waiting is
-/// observed promptly.
+/// context fires first, answering which of the two happened. Cancelling the
+/// context wakes the group's waiters, so either event ends the wait.
 fn builtin_waitgroup_wait_ctx(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = args
-        .first()
-        .and_then(|v| struct_handle(v, "WaitGroup"))
-        .ok_or_else(|| {
-            RuntimeError::Type("WaitGroup::wait_ctx: receiver must be WaitGroup".to_string())
-        })?;
-    let cell = wg_lookup(handle).ok_or_else(|| {
-        RuntimeError::Type("WaitGroup::wait_ctx: stale WaitGroup handle".to_string())
+    let cell = args.first().and_then(wg_of).ok_or_else(|| {
+        RuntimeError::Type("WaitGroup::wait_ctx: receiver must be WaitGroup".to_string())
     })?;
     let Some(ctx) = args.get(1) else {
         return Ok(Value::Bool(true));
     };
+    let _watch = crate::stdlib_builtins::context::watch(
+        ctx,
+        std::task::Waker::from(Arc::new(WaitGroupWake(Arc::clone(&cell)))),
+    );
+    let mut count = cell.counter.lock();
     loop {
-        let mut count = cell.counter.lock();
         if *count <= 0 {
             return Ok(Value::Bool(true));
         }
@@ -947,8 +767,7 @@ fn builtin_waitgroup_wait_ctx(args: &[Value]) -> RuntimeResult<Value> {
         if !gossamer_runtime::platform::CAN_BLOCK {
             return Err(RuntimeError::WouldNeverWake("WaitGroup::wait_ctx"));
         }
-        cell.cond
-            .wait_for(&mut count, std::time::Duration::from_millis(5));
+        cell.cond.wait(&mut count);
     }
 }
 

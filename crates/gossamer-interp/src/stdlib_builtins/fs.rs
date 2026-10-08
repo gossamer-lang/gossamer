@@ -231,7 +231,7 @@ fn insert_file_handle(file: std::fs::File) -> Value {
         r.borrow_mut()
             .insert(id, Arc::new(parking_lot::Mutex::new(file)));
     });
-    handle_struct("fs::File", id)
+    handle_struct("fs::File", id, |id| FS_FILE_REGISTRY.retire(id))
 }
 
 fn insert_open_options_handle(opts: FsOpenOptionsState) -> Value {
@@ -240,7 +240,9 @@ fn insert_open_options_handle(opts: FsOpenOptionsState) -> Value {
         r.borrow_mut()
             .insert(id, Arc::new(parking_lot::Mutex::new(opts)));
     });
-    handle_struct("fs::OpenOptions", id)
+    handle_struct("fs::OpenOptions", id, |id| {
+        FS_OPEN_OPTIONS_REGISTRY.retire(id)
+    })
 }
 
 fn fetch_file_handle(id: i64) -> Option<Arc<parking_lot::Mutex<std::fs::File>>> {
@@ -383,7 +385,8 @@ fn fs_open_options_set(args: &[Value], field: fn(&mut FsOpenOptionsState) -> &mu
         return err_variant("OpenOptions: stale handle");
     };
     *field(&mut opts.lock()) = enabled;
-    handle_struct("fs::OpenOptions", id)
+    // The builder answers the same handle, sharing its claim on the entry.
+    args[0].clone()
 }
 
 pub(crate) fn builtin_fs_open_options_read(args: &[Value]) -> RuntimeResult<Value> {

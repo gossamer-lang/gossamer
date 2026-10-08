@@ -13,13 +13,10 @@
 //! the compiled-tier `gos_rt_ws_*` shims, so the wire behaviour is
 //! identical across the bytecode VM, Cranelift JIT, and LLVM AOT tiers.
 //!
-//! Handle model - a process-global registry keyed by an `i64` handle.
-//! The VM runs goroutines on an OS-thread pool, so the registry is a
-//! `Mutex` (not thread-local): a handle created by the server goroutine's
-//! handler and a handle created by the client goroutine both resolve from
-//! any worker thread. Each connection is held behind `Arc<Mutex<_>>` so a
-//! blocking `recv` releases the registry lock before parking on the
-//! socket.
+//! Handle model - a `websocket::Conn` value holds its connection, shared
+//! by every copy of the handle, so a connection created on one goroutine
+//! worker is reached from any other, and the socket closes with the last
+//! copy or at `close`. A blocking `recv` locks only its own connection.
 
 use std::collections::HashMap;
 use std::net::{TcpListener, TcpStream};
@@ -33,35 +30,18 @@ use gossamer_ws::{Message, WebSocket};
 use crate::builtins::{BuiltinFnPub, as_str, err_variant, ok_variant, value_to_int};
 use crate::value::{NativeDispatch, RuntimeResult, Value};
 
-/// One registered connection. `Arc<Mutex<_>>` so a blocking `recv`
-/// releases the registry lock before parking on the socket.
-type WsConn = Arc<Mutex<WebSocket<TcpStream>>>;
+/// An open connection, until `close` takes it.
+type WsConn = Arc<Mutex<Option<WebSocket<TcpStream>>>>;
 
-/// Process-global WebSocket handle registry. Shared across the VM's
-/// goroutine worker threads, so a handle crosses goroutine boundaries.
-fn ws_registry() -> &'static Mutex<HashMap<i64, WsConn>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<i64, WsConn>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+const CONN_NAME: &str = "http::websocket::Conn";
+const CONN_FIELD: &str = "__conn";
+
+fn conn_value(ws: WebSocket<TcpStream>) -> Value {
+    crate::value::state_handle(CONN_NAME, CONN_FIELD, Arc::new(Mutex::new(Some(ws))))
 }
 
-static NEXT_WS_HANDLE: AtomicI64 = AtomicI64::new(1);
-
-fn next_handle() -> i64 {
-    NEXT_WS_HANDLE.fetch_add(1, Ordering::Relaxed)
-}
-
-fn conn_clone(h: i64) -> Option<WsConn> {
-    ws_registry().lock().get(&h).cloned()
-}
-
-fn register_conn(ws: WebSocket<TcpStream>) -> i64 {
-    let h = next_handle();
-    ws_registry().lock().insert(h, Arc::new(Mutex::new(ws)));
-    h
-}
-
-fn unregister_conn(h: i64) {
-    ws_registry().lock().remove(&h);
+fn conn_of(value: Option<&Value>) -> Option<WsConn> {
+    crate::value::handle_state(value?, CONN_NAME, CONN_FIELD)
 }
 
 pub(crate) fn install_http_ws(globals: &mut Vec<(&'static str, Value)>) {
@@ -119,18 +99,17 @@ pub(crate) fn native_websocket_serve(
         if gossamer_ws::server_accept(&mut stream).is_err() {
             continue;
         }
-        let handle = register_conn(WebSocket::server(stream));
+        let conn = conn_value(WebSocket::server(stream));
         let mut guard = dispatch_cell.borrow_mut();
-        let _ = guard.call_fn(&handle_method, vec![handler.clone(), Value::Int(handle)]);
+        let _ = guard.call_fn(&handle_method, vec![handler.clone(), conn]);
         drop(guard);
-        unregister_conn(handle);
     }
     Ok(ok_variant(Value::Unit))
 }
 
-/// `websocket::connect(url) -> Result<i64, Error>`. Client TCP connect +
-/// RFC 6455 upgrade against a `ws://host:port/path` URL; returns the
-/// connected handle.
+/// `websocket::connect(url) -> Result<websocket::Conn, Error>`. Client TCP
+/// connect + RFC 6455 upgrade against a `ws://host:port/path` URL; returns
+/// the connection.
 pub(crate) fn builtin_ws_connect(args: &[Value]) -> RuntimeResult<Value> {
     let url = args.first().and_then(as_str).unwrap_or("").to_string();
     let (authority, path) = match gossamer_ws::parse_ws_url(&url) {
@@ -142,21 +121,22 @@ pub(crate) fn builtin_ws_connect(args: &[Value]) -> RuntimeResult<Value> {
         gossamer_ws::client_handshake(&mut stream, &authority, &path).map_err(|e| e.to_string())?;
         Ok::<_, String>(WebSocket::client(stream))
     }) {
-        Ok(Ok(ws)) => Ok(ok_variant(Value::Int(register_conn(ws)))),
+        Ok(Ok(ws)) => Ok(ok_variant(conn_value(ws))),
         Ok(Err(e)) | Err(e) => Ok(err_variant(format!("websocket::connect: {e}"))),
     }
 }
 
 /// `websocket::send_text(ws, s) -> Result<(), Error>`.
 pub(crate) fn builtin_ws_send_text(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(h) = args.first().and_then(value_to_int) else {
-        return Ok(err_variant("websocket::send_text: missing handle"));
-    };
-    let Some(conn) = conn_clone(h) else {
-        return Ok(err_variant("websocket::send_text: stale handle"));
+    let Some(conn) = conn_of(args.first()) else {
+        return Ok(err_variant("websocket::send_text: missing connection"));
     };
     let text = args.get(1).and_then(as_str).unwrap_or("").to_string();
-    match conn.lock().send_text(&text) {
+    let mut guard = conn.lock();
+    let Some(ws) = guard.as_mut() else {
+        return Ok(err_variant("websocket::send_text: connection closed"));
+    };
+    match ws.send_text(&text) {
         Ok(()) => Ok(ok_variant(Value::Unit)),
         Err(e) => Ok(err_variant(format!("{e}"))),
     }
@@ -164,11 +144,8 @@ pub(crate) fn builtin_ws_send_text(args: &[Value]) -> RuntimeResult<Value> {
 
 /// `websocket::send_binary(ws, data: [u8]) -> Result<(), Error>`.
 pub(crate) fn builtin_ws_send_binary(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(h) = args.first().and_then(value_to_int) else {
-        return Ok(err_variant("websocket::send_binary: missing handle"));
-    };
-    let Some(conn) = conn_clone(h) else {
-        return Ok(err_variant("websocket::send_binary: stale handle"));
+    let Some(conn) = conn_of(args.first()) else {
+        return Ok(err_variant("websocket::send_binary: missing connection"));
     };
     let bytes: Vec<u8> = match args.get(1).and_then(Value::byte_slice) {
         Some(bytes) => bytes.into_owned(),
@@ -178,7 +155,11 @@ pub(crate) fn builtin_ws_send_binary(args: &[Value]) -> RuntimeResult<Value> {
             ));
         }
     };
-    match conn.lock().send_binary(&bytes) {
+    let mut guard = conn.lock();
+    let Some(ws) = guard.as_mut() else {
+        return Ok(err_variant("websocket::send_binary: connection closed"));
+    };
+    match ws.send_binary(&bytes) {
         Ok(()) => Ok(ok_variant(Value::Unit)),
         Err(e) => Ok(err_variant(format!("{e}"))),
     }
@@ -189,13 +170,13 @@ pub(crate) fn builtin_ws_send_binary(args: &[Value]) -> RuntimeResult<Value> {
 /// control frames transparently. A peer close or I/O error is an `Err` -
 /// the loop's exit signal.
 pub(crate) fn builtin_ws_recv(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(h) = args.first().and_then(value_to_int) else {
-        return Ok(err_variant("websocket::recv: missing handle"));
+    let Some(conn) = conn_of(args.first()) else {
+        return Ok(err_variant("websocket::recv: missing connection"));
     };
-    let Some(conn) = conn_clone(h) else {
-        return Ok(err_variant("websocket::recv: stale handle"));
+    let mut guard = conn.lock();
+    let Some(ws) = guard.as_mut() else {
+        return Ok(err_variant("websocket::recv: connection closed"));
     };
-    let mut ws = conn.lock();
     loop {
         match ws.receive() {
             Ok(Message::Text(s)) => return Ok(ok_variant(Value::String(s.into()))),
@@ -213,13 +194,12 @@ pub(crate) fn builtin_ws_recv(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 /// `websocket::close(ws) -> Result<(), Error>`. Sends a normal close
-/// frame (best effort) and unregisters the handle.
+/// frame (best effort) and closes the socket.
 pub(crate) fn builtin_ws_close(args: &[Value]) -> RuntimeResult<Value> {
-    if let Some(h) = args.first().and_then(value_to_int) {
-        if let Some(conn) = conn_clone(h) {
-            let _ = conn.lock().send_close(1000, "");
-        }
-        unregister_conn(h);
+    if let Some(conn) = conn_of(args.first())
+        && let Some(mut ws) = conn.lock().take()
+    {
+        let _ = ws.send_close(1000, "");
     }
     Ok(ok_variant(Value::Unit))
 }

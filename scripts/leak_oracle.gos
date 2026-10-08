@@ -320,6 +320,49 @@ fn probes() -> Vec<(String, String)> {
             println("{}", acc)
         }
         """)
+        ("rwlock_local", """
+        use std::sync
+        fn main() {
+            let mut acc = 0
+            for i in 0..COUNT { let lock = sync::RwLock::new(i); acc += lock.read() }
+            println("{}", acc)
+        }
+        """)
+        ("rwlock_captured_and_stored", """
+        use std::sync
+        struct Guarded { lock: sync::RwLock, tag: i64 }
+        fn read_twice(lock: sync::RwLock) -> i64 { lock.read() + lock.read() }
+        fn main() {
+            let mut acc = 0
+            for i in 0..COUNT {
+                let lock = sync::RwLock::new(i)
+                let f = || lock.read() * 2
+                let g = Guarded { lock: sync::RwLock::new(i), tag: 1 }
+                let locks = #[sync::RwLock::new(1), sync::RwLock::new(2)]
+                acc += f() + read_twice(lock) + g.lock.read() + g.tag
+                for l in locks { acc += l.read() }
+                acc += sync::RwLock::with_write(g.lock, |v| v + 1)
+            }
+            println("{}", acc)
+        }
+        """)
+        ("rwlock_goroutine", """
+        use std::{errors, sync}
+        fn round(i: i64) -> Result<i64, errors::Error> {
+            let lock = sync::RwLock::new(i)
+            let mut got = 0
+            cohort {
+                let h = spawn(|| { lock.write(lock.read() + 1); lock.read() })
+                got = h.join().unwrap()
+            }?
+            Ok(got + lock.read())
+        }
+        fn main() {
+            let mut acc = 0
+            for i in 0..(COUNT / 10) { acc += round(i).unwrap() }
+            println("{}", acc)
+        }
+        """)
         ("map_of_vecs", """
         fn main() {
             let mut acc = 0
@@ -327,6 +370,55 @@ fn probes() -> Vec<(String, String)> {
                 let mut m = Map::new()
                 for i in 0..500 { m.insert(format("k{}", i), #[i, round]) }
                 for (k, v) in m { acc += v[0] + k.len() }
+            }
+            println("{}", acc)
+        }
+        """)
+        ("channel_local", """
+        use std::sync::channel
+        fn main() {
+            let mut acc = 0
+            for i in 0..COUNT {
+                let tx, rx = channel::<i64>()
+                tx.close()
+                acc += match rx.recv() { Some(v) => v, None => i % 3 }
+            }
+            println("{}", acc)
+        }
+        """)
+        ("channel_goroutine_and_struct", """
+        use std::{errors}
+        use std::sync::channel
+        struct Pipe { tx: Sender<i64>, rx: Receiver<i64> }
+        fn round(i: i64) -> Result<i64, errors::Error> {
+            let tx, rx = channel::<i64>()
+            let p = Pipe { tx: tx, rx: rx }
+            let out = p.tx
+            let mut got = 0
+            cohort {
+                let h = spawn(|| out.send(i))
+                got = p.rx.recv().unwrap()
+                h.join().unwrap()
+            }?
+            Ok(got)
+        }
+        fn main() {
+            let mut acc = 0
+            for i in 0..(COUNT / 10) { acc += round(i).unwrap() }
+            println("{}", acc)
+        }
+        """)
+        ("channel_of_senders", """
+        use std::sync
+        fn main() {
+            let mut acc = 0
+            for i in 0..COUNT {
+                let outer_tx, outer_rx = sync::channel_unbounded::<Sender<i64>>()
+                let tx, rx = sync::channel_unbounded::<i64>()
+                outer_tx.send(tx)
+                let inner = outer_rx.recv().unwrap()
+                inner.send(i)
+                acc += rx.recv().unwrap() % 7
             }
             println("{}", acc)
         }

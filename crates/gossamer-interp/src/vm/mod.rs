@@ -1503,6 +1503,7 @@ impl Vm {
             | Value::Builtin(_)
             | Value::Native(_)
             | Value::NativeEnum(_)
+            | Value::Opaque(_)
             | Value::CaptureCell(_) => None,
         }
     }
@@ -2480,21 +2481,7 @@ pub(crate) fn auto_deref_cell(v: &Value) -> Option<Value> {
     if inner.name != "__Cell" {
         return None;
     }
-    let mut set_id: u64 = 0;
-    let mut flag_name = String::new();
-    for (ident, val) in &inner.fields {
-        if (*ident) == "__set_id"
-            && let Value::Int(n) = val
-        {
-            set_id = *n as u64;
-        }
-        if (*ident) == "__flag_name"
-            && let Value::String(s) = val
-        {
-            flag_name = s.as_str().to_string();
-        }
-    }
-    crate::builtins::resolve_cell(set_id, &flag_name)
+    crate::builtins::resolve_cell(inner)
 }
 
 /// Native struct-field read.

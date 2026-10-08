@@ -1,8 +1,9 @@
 //! Opaque stdlib handles: which constructors produce one, and which methods each answers.
 
 use super::{
-    LEGACY_HANDLE_CTORS, PURE_HANDLE_HI_OFFSET, PURE_HANDLE_LO_OFFSET, PURE_HANDLES,
-    SYNC_HANDLE_LO_OFFSET, TRACE_ENDED_SPAN_OFFSET, TRACE_SPAN_OFFSET, Ty, U8_VEC_OFFSET,
+    FILE_SERVER_OFFSET, LEGACY_HANDLE_CTORS, PURE_HANDLE_HI_OFFSET, PURE_HANDLE_LO_OFFSET,
+    PURE_HANDLES, SYNC_HANDLE_LO_OFFSET, TRACE_ENDED_SPAN_OFFSET, TRACE_SPAN_OFFSET, Ty,
+    U8_VEC_OFFSET,
 };
 
 /// `(sentinel offset, name)` of the runtime handle the stdlib constructor
@@ -79,6 +80,9 @@ pub(super) const OPAQUE_HANDLE_OFFSETS: &[u32] = &[
     25,
     26,
     27,
+    FILE_SERVER_OFFSET,
+    super::WEBSOCKET_CONN_OFFSET,
+    super::BYTES_BUFFER_OFFSET,
 ];
 
 /// A parameter or return shape in [`HANDLE_METHODS`].

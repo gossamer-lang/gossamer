@@ -6,7 +6,7 @@ Filesystem reading, writing, and traversal (Rust std::fs shape).
 
 | Item | Signature | Description |
 |---|---|---|
-| `File` | `type File` | Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family. `fd()` answers the OS descriptor (a handle on Windows) for the calls that take one, such as `std::term` on an opened `/dev/tty` or `CONIN$`. |
+| `File` | `type File` | Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family. The file closes at `close()` or with its last handle. `std::term` and `os::fd` calls take the file itself, which keeps it open while they use it; `fd()` answers the OS descriptor (a handle on Windows) for a foreign call. |
 | `DirInfo` | `type DirInfo` | Directory entry yielded by read_dir and walk_dir; carries path, name, is_file, is_dir, is_symlink, and size. |
 | `OpenOptions` | `type OpenOptions` | Builder for opening files with read/write/append/create/truncate flags. |
 | `open` | `fn open(path: String) -> Result<fs::File, io::Error>` | Opens a file for streaming reads. |

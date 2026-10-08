@@ -128,6 +128,7 @@ feature-testing-examples/container_impl_and_literals.gos	admission gate
 feature-testing-examples/container_in_aggregate_rendering.gos	no hot body
 feature-testing-examples/context_aware_waits.gos	cross-goroutine
 feature-testing-examples/context_cancel.gos	no hot body
+feature-testing-examples/context_handle_identity.gos	bytecode-only local
 feature-testing-examples/context_lifecycle.gos	cross-goroutine
 feature-testing-examples/contextual_keywords.gos	cross-goroutine
 feature-testing-examples/crate_import_module_paths/src/main.gos	no hot body
@@ -411,6 +412,7 @@ feature-testing-examples/sync_extra.gos	callable local
 feature-testing-examples/sync_handles_typed.gos	cross-goroutine
 feature-testing-examples/sync_map_demo.gos	no hot body
 feature-testing-examples/sync_rwlock.gos	no hot body
+feature-testing-examples/sync_rwlock_lifetimes.gos	bytecode-only local
 feature-testing-examples/table_carrier_ownership.gos	entry shape
 feature-testing-examples/tail_call_shared_arguments.gos	no hot body
 feature-testing-examples/time_civil.gos	no hot body

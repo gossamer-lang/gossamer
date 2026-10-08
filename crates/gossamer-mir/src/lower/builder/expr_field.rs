@@ -416,10 +416,9 @@ impl<'a> Builder<'a> {
                     ("http::Request", "peer_addr") => {
                         Some(("gos_rt_http_request_peer_addr", self.tcx.string_ty()))
                     }
-                    ("http::Request", "context") => Some((
-                        "gos_rt_http_request_context",
-                        self.tcx.int_ty(gossamer_types::IntTy::I64),
-                    )),
+                    ("http::Request", "context") => {
+                        Some(("gos_rt_http_request_context", self.sync_handle_ty(11)))
+                    }
                     ("http::Request", "body") => {
                         Some(("gos_rt_http_request_body_str", self.tcx.string_ty()))
                     }
@@ -457,9 +456,8 @@ impl<'a> Builder<'a> {
                 };
                 if let Some((rt_name, ret_ty)) = helper {
                     let dest = self.fresh(ret_ty);
-                    // See the sibling table: the request's context is an
-                    // opaque handle in an i64 slot, tagged rather than
-                    // typed so the RC passes leave it alone.
+                    // See the sibling table: the request lends its context,
+                    // and the tag names the receiver its methods dispatch on.
                     if rt_name == "gos_rt_http_request_context" {
                         self.local_runtime_kind.insert(dest, "context::Context");
                     }
@@ -712,10 +710,9 @@ impl<'a> Builder<'a> {
                 ("http::Request", "peer_addr") => {
                     Some(("gos_rt_http_request_peer_addr", self.tcx.string_ty()))
                 }
-                ("http::Request", "context") => Some((
-                    "gos_rt_http_request_context",
-                    self.tcx.int_ty(gossamer_types::IntTy::I64),
-                )),
+                ("http::Request", "context") => {
+                    Some(("gos_rt_http_request_context", self.sync_handle_ty(11)))
+                }
                 ("http::Request", "body") => {
                     Some(("gos_rt_http_request_body_str", self.tcx.string_ty()))
                 }
@@ -745,10 +742,9 @@ impl<'a> Builder<'a> {
             };
             if let Some((rt_name, ret_ty)) = helper {
                 let dest = self.fresh(ret_ty);
-                // The request's context is an opaque handle in an i64
-                // slot, so it is tagged rather than typed: the RC passes
-                // must not treat it as an owned aggregate, and its
-                // methods still need an identity to dispatch on.
+                // The request lends its context: a binding that keeps it
+                // takes a share of its own, as the handle type says, and
+                // the tag names the receiver its methods dispatch on.
                 if rt_name == "gos_rt_http_request_context" {
                     self.local_runtime_kind.insert(dest, "context::Context");
                 }

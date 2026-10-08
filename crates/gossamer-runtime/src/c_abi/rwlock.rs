@@ -1,25 +1,21 @@
 #![allow(clippy::missing_safety_doc)]
 
 //! Runtime support for `std::sync::RwLock` - a reader-writer lock
-//! guarding a single `i64` value. The handle is an opaque heap
-//! `Box<GosRwLock>`; compiled tiers carry the pointer as an `i64` and
-//! the MIR receiver-kind dispatch tags constructor results
-//! `sync::RwLock` so method calls route to the helpers below. The
-//! handle is never freed (it leaks at process exit), matching the
-//! other long-lived synchronisation handles (`sync::Map`,
-//! `sync::Once`).
+//! guarding a single `i64` value. The handle is the payload of a counted
+//! heap node with no counted children: compiled tiers carry the pointer as
+//! an `i64`, retain it for each holder (a binding, a closure environment, a
+//! field, a goroutine), and release it when the holder ends, so the lock is
+//! freed with its last share. The MIR receiver-kind dispatch tags
+//! constructor results `sync::RwLock` so method calls route to the helpers
+//! below.
 //!
 //! `with_read` / `with_write` cross the C-ABI through the shared
 //! callable convention used by the `iter::*` / `option::*` / `Once`
 //! combinators: `env` is a heap blob whose first word is the callable
-//! address; the body is invoked as `f(env, value)`. `with_read`
-//! passes the guarded value and returns the callback's result without
-//! mutating the lock; `with_write` stores the callback's return value
-//! back into the lock and returns it. The guarded value is an `i64`
-//! for this first cut - a String-guarded variant is a documented
-//! follow-up (it needs a pointer-shaped thunk and a String slot).
-
-use parking_lot::RwLock as PRwLock;
+//! address; the body is invoked as `f(env, value)`. `with_read` reads the
+//! guarded value under the shared lock, releases it, and returns the
+//! callback's result for that value; `with_write` runs the callback under
+//! the exclusive lock, stores its return value back, and returns it.
 
 /// `fn(env, value) -> result` - the one-argument value-thunk shape
 /// shared with the `MapFn` callbacks in `combinator.rs`.
@@ -49,18 +45,164 @@ unsafe fn env_fn_addr(env: *const u8) -> Option<*const ()> {
     }
 }
 
-/// Opaque heap handle wrapping the guarded `i64`.
+/// The guarded `i64`, stored as the payload of a counted node.
+///
+/// The lock is a goroutine-level reader-writer lock: a goroutine that has to
+/// wait parks, giving its worker back to the scheduler, so a callback that
+/// blocks while holding the lock never stalls the goroutines that would let
+/// it finish. A thread that is not a goroutine waits on a condvar.
 pub struct GosRwLock {
-    inner: PRwLock<i64>,
+    state: parking_lot::Mutex<RwState>,
+    /// Signalled on release for a waiting thread that is not a goroutine.
+    released: parking_lot::Condvar,
 }
 
-/// Allocate a `sync::RwLock` guarding `value`.
+struct RwState {
+    value: i64,
+    readers: usize,
+    writer: bool,
+    /// Goroutines parked waiting for the lock, in arrival order.
+    parked: std::collections::VecDeque<crate::sched::Gid>,
+}
+
+impl RwState {
+    fn can_read(&self) -> bool {
+        !self.writer
+    }
+
+    fn can_write(&self) -> bool {
+        !self.writer && self.readers == 0
+    }
+}
+
+super::rc::managed_handle!(GosRwLock);
+
+/// The access a holder of the lock has, given back when it is dropped -
+/// including when a callback run under the lock panics.
+struct Held<'a> {
+    lock: &'a GosRwLock,
+    exclusive: bool,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        let mut state = self.lock.state.lock();
+        if self.exclusive {
+            state.writer = false;
+        } else {
+            state.readers -= 1;
+        }
+        // Every parked goroutine re-checks the lock, so a writer that cannot
+        // proceed yet parks again rather than being skipped for good.
+        let waiters: Vec<crate::sched::Gid> = state.parked.drain(..).collect();
+        drop(state);
+        for gid in waiters {
+            crate::sched_global::scheduler().unpark(gid);
+        }
+        self.lock.released.notify_all();
+    }
+}
+
+/// Takes `lock` for shared or exclusive access, waiting until it is free.
+fn acquire(lock: &GosRwLock, exclusive: bool) -> Held<'_> {
+    let free = |state: &RwState| {
+        if exclusive {
+            state.can_write()
+        } else {
+            state.can_read()
+        }
+    };
+    let take = |state: &mut RwState| {
+        if exclusive {
+            state.writer = true;
+        } else {
+            state.readers += 1;
+        }
+    };
+    if gossamer_coro::in_goroutine() {
+        loop {
+            let mut state = lock.state.lock();
+            if free(&state) {
+                take(&mut state);
+                return Held { lock, exclusive };
+            }
+            let mut guard = Some(state);
+            crate::sched_global::park(crate::sched::ParkReason::Sync, |parker| {
+                if let Some(state) = guard.as_mut() {
+                    state.parked.push_back(parker.gid);
+                }
+                drop(guard.take());
+            });
+        }
+    }
+    let mut state = lock.state.lock();
+    if free(&state) {
+        take(&mut state);
+        return Held { lock, exclusive };
+    }
+    drop(state);
+    // `main` waiting on a lock is waiting on the program's goroutines, so a
+    // lock no goroutine left can release is a deadlock rather than a hang.
+    let addr = std::ptr::from_ref(lock) as usize;
+    crate::sched_global::main_waits_on(
+        "RwLock",
+        std::sync::Arc::new(move || {
+            // SAFETY: the lock outlives this wait, which `main` ends with
+            // `end_main_wait` before `acquire` returns.
+            let lock = unsafe { &*(addr as *const GosRwLock) };
+            let state = lock.state.lock();
+            if exclusive {
+                !state.can_write()
+            } else {
+                !state.can_read()
+            }
+        }),
+    );
+    let mut state = lock.state.lock();
+    while !free(&state) {
+        lock.released.wait(&mut state);
+    }
+    take(&mut state);
+    drop(state);
+    crate::sched_global::end_main_wait();
+    Held { lock, exclusive }
+}
+
+/// Runs the callable `env` names on `value`, or answers `value` when there
+/// is none.
+///
+/// # Safety
+///
+/// `env` is null or a live closure environment of the one-argument
+/// value-thunk shape.
+unsafe fn call_guard(env: *const u8, value: i64) -> i64 {
+    // SAFETY: `env` is this function's argument, as `env_fn_addr` requires.
+    match unsafe { env_fn_addr(env) } {
+        Some(addr) => {
+            // SAFETY: `addr` is the callable the closure lowering stored, and a one-argument
+            // closure lowers to the `fn(env, i64) -> i64` value-thunk shape.
+            let f: GuardFn = unsafe { std::mem::transmute(addr) };
+            // SAFETY: `f` is that callable, whose environment `env` is live for the call.
+            unsafe { f(env, value) }
+        }
+        None => value,
+    }
+}
+
+/// Allocate a `sync::RwLock` guarding `value`, as a counted node holding one
+/// share for the caller.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_rwlock_new(value: i64) -> *mut GosRwLock {
     ffi_entry!(std::ptr::null_mut(), {
-        Box::into_raw(Box::new(GosRwLock {
-            inner: PRwLock::new(value),
-        }))
+        super::rc::alloc_managed(GosRwLock {
+            state: parking_lot::Mutex::new(RwState {
+                value,
+                readers: 0,
+                writer: false,
+                parked: std::collections::VecDeque::new(),
+            }),
+            released: parking_lot::Condvar::new(),
+        })
     })
 }
 
@@ -72,7 +214,9 @@ pub unsafe extern "C" fn gos_rt_rwlock_get(lock: *mut GosRwLock) -> i64 {
             return 0;
         }
         // SAFETY: `lock` is a handle from compiled code, checked non-null above and live for the whole call.
-        *unsafe { &*lock }.inner.read()
+        let lock = unsafe { &*lock };
+        let _held = acquire(lock, false);
+        lock.state.lock().value
     })
 }
 
@@ -85,12 +229,15 @@ pub unsafe extern "C" fn gos_rt_rwlock_set(lock: *mut GosRwLock, value: i64) {
             return;
         }
         // SAFETY: `lock` is a handle from compiled code, checked non-null above and live for the whole call.
-        *unsafe { &*lock }.inner.write() = value;
+        let lock = unsafe { &*lock };
+        let _held = acquire(lock, true);
+        lock.state.lock().value = value;
     });
 }
 
-/// `sync::RwLock::with_read(lock, f)` - run `f(value)` under a shared
-/// lock and return its result; the guarded value is unchanged.
+/// `sync::RwLock::with_read(lock, f)` - read the value under the shared lock,
+/// then return `f(value)` with the lock released; the guarded value is
+/// unchanged.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_rwlock_with_read(
     lock: *mut GosRwLock,
@@ -101,19 +248,14 @@ pub unsafe extern "C-unwind" fn gos_rt_rwlock_with_read(
             return 0;
         }
         // SAFETY: `lock` is a handle from compiled code, checked non-null above and live for the whole call.
-        let value = *unsafe { &*lock }.inner.read();
-        // SAFETY: `env` is this shim's argument, as `env_fn_addr` requires (C-ABI contract).
-        match unsafe { env_fn_addr(env) } {
-            Some(addr) => {
-                // SAFETY: `addr` is the callable the closure lowering stored, and a one-argument
-                // closure lowers to the `fn(env, i64) -> i64` value-thunk shape.
-                let f: GuardFn = unsafe { std::mem::transmute(addr) };
-                // SAFETY: `f` is that callable, whose environment `env` is live for the call (C-ABI
-                // contract).
-                unsafe { f(env, value) }
-            }
-            None => value,
-        }
+        let lock = unsafe { &*lock };
+        let value = {
+            let _held = acquire(lock, false);
+            lock.state.lock().value
+        };
+        // SAFETY: `env` is this shim's argument, a live closure environment or null (C-ABI
+        // contract).
+        unsafe { call_guard(env, value) }
     })
 }
 
@@ -129,21 +271,13 @@ pub unsafe extern "C-unwind" fn gos_rt_rwlock_with_write(
             return 0;
         }
         // SAFETY: `lock` is a handle from compiled code, checked non-null above and live for the whole call.
-        let mut guard = unsafe { &*lock }.inner.write();
-        let current = *guard;
-        // SAFETY: `env` is this shim's argument, as `env_fn_addr` requires (C-ABI contract).
-        let next = match unsafe { env_fn_addr(env) } {
-            Some(addr) => {
-                // SAFETY: `addr` is the callable the closure lowering stored, and a one-argument
-                // closure lowers to the `fn(env, i64) -> i64` value-thunk shape.
-                let f: GuardFn = unsafe { std::mem::transmute(addr) };
-                // SAFETY: `f` is that callable, whose environment `env` is live for the call (C-ABI
-                // contract).
-                unsafe { f(env, current) }
-            }
-            None => current,
-        };
-        *guard = next;
+        let lock = unsafe { &*lock };
+        let _held = acquire(lock, true);
+        let current = lock.state.lock().value;
+        // SAFETY: `env` is this shim's argument, a live closure environment or null (C-ABI
+        // contract).
+        let next = unsafe { call_guard(env, current) };
+        lock.state.lock().value = next;
         next
     })
 }

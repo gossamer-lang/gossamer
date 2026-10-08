@@ -1178,15 +1178,11 @@ impl TyCtxt {
         ) {
             return false;
         }
-        // `net::TcpStream` / `TcpListener` / `UdpSocket` / `UnixStream` /
-        // `UnixListener` (sentinels `u32::MAX - 16 ..= - 12`) and
-        // `signal::Notifier` (`u32::MAX - 17`) are bare i64 handles with
-        // no RC header - never reference-counted, freed by runtime
-        // ownership / process teardown like the other opaque handles above.
+        // `signal::Notifier` (`u32::MAX - 17`) is a bare i64 handle with no
+        // RC header, never reference-counted, like the opaque handles above.
         if matches!(
             self.kind(ty),
-            Some(TyKind::Adt { def, .. })
-                if (u32::MAX - 17..=u32::MAX - 12).contains(&def.local)
+            Some(TyKind::Adt { def, .. }) if def.local == u32::MAX - 17
         ) {
             return false;
         }
@@ -1239,6 +1235,9 @@ impl TyCtxt {
         if self.rc_managed_tys.contains(&ty) {
             return true;
         }
+        if self.is_managed_handle(ty) {
+            return true;
+        }
         // Payload-bearing user enums are heap nodes (tagged-pointer
         // or header-disc) on the compiled tiers; recognise every
         // instantiation by def, not by interned handle. Inline
@@ -1256,6 +1255,29 @@ impl TyCtxt {
         // helpers instead of the strong ones - so report it here even
         // though no per-instantiation registration exists.
         self.is_weak_ty(ty)
+    }
+
+    /// Returns true when `ty` is a stdlib handle the runtime allocates as a
+    /// counted node and frees with its last share: a channel's `Sender` and
+    /// `Receiver`, a `JoinHandle`, `context::Context` (sentinel offset 11),
+    /// the sockets `net::TcpStream` through `net::UnixListener` (12 to 16),
+    /// `bytes::Builder` (27), `sync::Map` (34),
+    /// `sync::RwLock` (35), `rand::Rng` (42), `fs::File` (44),
+    /// `fs::OpenOptions` (45), `sync::Shared` (46), the band from
+    /// `sync::Mutex` (50) through `sync::AtomicBool` (57), and
+    /// `http::websocket::Conn` (62), and `bytes::Buffer` (63).
+    #[must_use]
+    pub fn is_managed_handle(&self, ty: Ty) -> bool {
+        match self.kind(ty) {
+            Some(TyKind::Sender(_) | TyKind::Receiver(_) | TyKind::JoinHandle(_)) => true,
+            Some(TyKind::Adt { def, .. }) => {
+                matches!(
+                    u32::MAX - def.local,
+                    11..=16 | 27 | 34 | 35 | 42 | 44..=46 | 50..=57 | 62 | 63
+                )
+            }
+            _ => false,
+        }
     }
 
     /// Returns true when `ty` is a `Weak<T>` reference (the sentinel
@@ -1284,12 +1306,14 @@ impl TyCtxt {
 
     /// Whether a value of `ty` is one word pointing at a counted heap node that
     /// `gos_rt_rc_retain` / `gos_rt_rc_release` manage: a payload-bearing enum,
-    /// an `errors::Error` cell, or a callable value's capture environment (null
+    /// a `std::sync` handle, an `errors::Error` cell, or a callable value's capture
+    /// environment (null
     /// for a callable that captures nothing, which both calls treat as a
     /// no-op).
     #[must_use]
     pub fn is_counted_node(&self, ty: Ty) -> bool {
         self.is_payload_enum(ty)
+            || self.is_managed_handle(ty)
             || matches!(
                 self.kind(ty),
                 Some(TyKind::FnTrait(_) | TyKind::Closure { .. } | TyKind::DynError)

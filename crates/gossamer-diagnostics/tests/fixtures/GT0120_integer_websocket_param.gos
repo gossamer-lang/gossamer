@@ -1,0 +1,14 @@
+// ERROR: GT0120
+use std::http::websocket
+
+struct Echo { }
+
+impl Echo {
+    fn handle(&self, ws: i64) {
+        let _ = websocket::send_text(ws, "hi")
+    }
+}
+
+fn main() {
+    let _ = websocket::serve("127.0.0.1:0", Echo { })
+}

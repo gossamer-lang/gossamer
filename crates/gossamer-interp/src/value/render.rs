@@ -116,6 +116,7 @@ impl fmt::Display for Value {
             Self::Builtin(inner) => write!(out, "<builtin {}>", inner.name),
             Self::Native(inner) => write!(out, "<native {}>", inner.name),
             Self::Channel(ch) => write!(out, "{ch:?}"),
+            Self::Opaque(_) => out.write_str("<opaque>"),
             Self::Map(map) => write_map(out, &map.lock()),
             Self::IntMap(map) => write_int_map(out, &map.lock()),
             Self::StrIntMap(map) => write_str_int_map(out, &map.lock()),

@@ -25,3 +25,6 @@ gossamer-runtime = { workspace = true }
 gossamer-std = { workspace = true }
 gossamer-types = { workspace = true }
 unicode-ident = { workspace = true }
+
+[dev-dependencies]
+gossamer-driver = { workspace = true }

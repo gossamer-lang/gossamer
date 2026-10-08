@@ -223,6 +223,11 @@ pub const OS_FD: StdModule = StdModule {
     summary: "Waiting for a file descriptor (a handle on Windows) to be readable or writable without holding a scheduler worker.",
     items: &[
         StdItem {
+            name: "Descriptor",
+            kind: StdItemKind::Trait,
+            doc: "What a call that needs an OS descriptor takes: an `fs::File`, which stays open while the call uses it, or `term::STDIN`, `term::STDOUT`, or `term::STDERR` for a standard stream. Any other integer is refused, since a descriptor read off a file names whatever the OS reuses it for once the file closes (GT0119).",
+        },
+        StdItem {
             name: "wait_readable",
             kind: StdItemKind::Function,
             doc: "`wait_readable(fd, timeout_ms) -> Result<bool, errors::Error>`: true when `fd` has input (or reached end of input) within `timeout_ms` milliseconds; a negative timeout waits indefinitely. False at the timeout or when the goroutine's cohort is cancelled. The goroutine parks; other goroutines keep running.",
@@ -509,12 +514,12 @@ pub const TERM: StdModule = StdModule {
         StdItem {
             name: "RawMode",
             kind: StdItemKind::Type,
-            doc: "Returned by `enter_raw`; `restore()` puts the terminal back. Restoration also runs when the program ends, by any path.",
+            doc: "Returned by `enter_raw`; `restore()` puts the terminal back. Restoration also runs when the program ends, by any path. A raw mode entered on an `fs::File` keeps the file open.",
         },
         StdItem {
             name: "is_terminal",
             kind: StdItemKind::Function,
-            doc: "`is_terminal(fd) -> bool`: whether the descriptor (a handle on Windows; 0, 1, and 2 name the standard streams) is a terminal.",
+            doc: "`is_terminal(fd) -> bool`: whether `fd`, an `fs::File` or a standard stream, is a terminal.",
         },
         StdItem {
             name: "size",
@@ -628,7 +633,7 @@ pub const FS: StdModule = StdModule {
         StdItem {
             name: "File",
             kind: StdItemKind::Type,
-            doc: "Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family. `fd()` answers the OS descriptor (a handle on Windows) for the calls that take one, such as `std::term` on an opened `/dev/tty` or `CONIN$`.",
+            doc: "Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family. The file closes at `close()` or with its last handle. `std::term` and `os::fd` calls take the file itself, which keeps it open while they use it; `fd()` answers the OS descriptor (a handle on Windows) for a foreign call.",
         },
         StdItem {
             name: "DirInfo",

@@ -466,6 +466,11 @@ pub const HTTP_WEBSOCKET: StdModule = StdModule {
     summary: "RFC 6455 WebSocket support. Server-side accept + send_text / send_binary / ping / pong / close.",
     items: &[
         StdItem {
+            name: "Conn",
+            kind: StdItemKind::Type,
+            doc: "An open connection, from `connect` or handed to a `serve` handler's `fn handle(&self, ws: Conn)`. Every copy shares the one connection, which closes at `close` or with the last copy.",
+        },
+        StdItem {
             name: "WebSocket",
             kind: StdItemKind::Type,
             doc: "Accepted WebSocket connection (Rust-side framing).",
@@ -503,7 +508,7 @@ pub const HTTP_WEBSOCKET: StdModule = StdModule {
         StdItem {
             name: "connect",
             kind: StdItemKind::Function,
-            doc: "connect(url) -> Result<i64, Error>: client TCP connect + RFC 6455 upgrade; returns a WebSocket handle.",
+            doc: "connect(url) -> Result<Conn, Error>: client TCP connect + RFC 6455 upgrade; returns the connection.",
         },
         StdItem {
             name: "send_text",

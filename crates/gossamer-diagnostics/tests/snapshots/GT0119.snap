@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0119]: A call that needs an OS descriptor, such as `term::size` or - here
+--- framed ---
+error[GT0119]: A call that needs an OS descriptor, such as `term::size` or
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

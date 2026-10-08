@@ -1766,6 +1766,34 @@ pub const REGISTRY: &[(&str, &str)] = &[
             rename the method in one of them.",
     ),
     (
+        "GT0118",
+        "A callable runs on another goroutine, but it captures a binding the\n\
+            code around it can still reach: one something writes, or one held by a\n\
+            callable whose captures are not visible where it crosses, such as a\n\
+            call's result, a field, a reassigned binding, or a closure's parameter.\n\
+            A closure written at the `spawn` snapshots what it captures; any other\n\
+            callable carries the bindings themselves. Spawn a named function or a\n\
+            closure written at the `spawn`, and answer values through `join()`, a\n\
+            channel, or a `sync::Shared`.",
+    ),
+    (
+        "GT0119",
+        "A call that needs an OS descriptor, such as `term::size` or\n\
+            `fd::wait_readable`, takes the `fs::File` it belongs to, so the file\n\
+            stays open while the call uses it. A descriptor read off the file with\n\
+            `fd()` names whatever the OS reuses it for once the file closes; pass\n\
+            the file itself. A bare integer names only a standard stream (0, 1,\n\
+            or 2). `gos check --fix` rewrites the argument.",
+    ),
+    (
+        "GT0120",
+        "A websocket connection is a `websocket::Conn`, a handle that closes\n\
+            with its last holder; a parameter declared `i64` was passed where a\n\
+            websocket call takes one. Declare it `websocket::Conn`, as a handler's\n\
+            `fn handle(&self, ws: websocket::Conn)` does. `gos check --fix`\n\
+            rewrites the declaration.",
+    ),
+    (
         "GX0001",
         "An operation received a value of an incompatible type. The\n\
                      diagnostic names the type that was required and the type\n\

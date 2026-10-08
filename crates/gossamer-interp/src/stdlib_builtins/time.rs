@@ -362,22 +362,25 @@ pub(crate) fn fetch_socket<T: 'static>(
     reg.with(|r| r.borrow().get(&id).cloned())
 }
 
-pub(crate) fn handle_struct(name: &'static str, id: i64) -> Value {
+/// A handle named `name` over registry entry `id`, which `retire` removes
+/// when the last copy of the handle is gone.
+pub(crate) fn handle_struct(name: &'static str, id: i64, retire: fn(i64)) -> Value {
     Value::struct_(
         name,
-        Arc::unwrap_or_clone(Arc::new(vec![("__handle", Value::Int(id))])),
+        vec![("__handle", super::set::registry_key(id, retire))],
     )
 }
 
 pub(crate) fn handle_id(value: &Value) -> Option<i64> {
-    if let Value::Struct(inner) = value {
-        for (ident, v) in &inner.fields {
-            if (*ident) == "__handle" {
-                if let Value::Int(n) = v {
-                    return Some(*n);
-                }
-            }
-        }
-    }
-    None
+    let Value::Struct(inner) = value else {
+        return None;
+    };
+    inner
+        .fields
+        .iter()
+        .find(|(ident, _)| **ident == "__handle")
+        .and_then(|(_, v)| match v {
+            Value::Int(id) => Some(*id),
+            other => super::set::registry_id(other),
+        })
 }

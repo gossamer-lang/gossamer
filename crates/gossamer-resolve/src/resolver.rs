@@ -1586,6 +1586,13 @@ impl Resolver {
                 ItemKind::Fn(decl) => is_compiler_generated(&decl.name.name),
                 ItemKind::Struct(decl) => is_compiler_generated(&decl.name.name),
                 ItemKind::Enum(decl) => is_compiler_generated(&decl.name.name),
+                ItemKind::Trait(decl) => is_compiler_generated(&decl.name.name),
+                // An impl of a generated trait is generated with it.
+                ItemKind::Impl(decl) => decl
+                    .trait_ref
+                    .as_ref()
+                    .and_then(|trait_ref| trait_ref.path.segments.last())
+                    .is_some_and(|seg| is_compiler_generated(&seg.name.name)),
                 _ => false,
             };
         if synthesized {

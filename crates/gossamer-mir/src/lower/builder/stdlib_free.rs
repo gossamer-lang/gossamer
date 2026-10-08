@@ -1695,16 +1695,23 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// The stdlib handle type at sentinel offset `offset`. A handle is a
+    /// counted node, typed as itself so the drop passes give each holder a
+    /// share and free it with the last.
+    pub(crate) fn sync_handle_ty(&mut self, offset: u32) -> gossamer_types::Ty {
+        self.tcx.intern(gossamer_types::TyKind::Adt {
+            def: gossamer_resolve::DefId::local(u32::MAX - offset),
+            substs: gossamer_types::Substs::new(),
+        })
+    }
+
     fn lower_concurrency_free(
         &mut self,
         joined: &str,
         _args: &[HirExpr],
     ) -> Option<(&'static str, gossamer_types::Ty)> {
         Some(match joined {
-            "sync::Map::new" => (
-                "gos_rt_sync_map_new",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
+            "sync::Map::new" => ("gos_rt_sync_map_new", self.sync_handle_ty(34)),
             "sync::Map::insert" => ("gos_rt_sync_map_set", self.tcx.unit()),
             "sync::Map::remove" => ("gos_rt_sync_map_delete", self.tcx.unit()),
             "sync::Map::get" => ("gos_rt_sync_map_get", self.option_string_adt_ty()),
@@ -1722,22 +1729,21 @@ impl<'a> Builder<'a> {
             }
             // Qualified-atomic free-call spellings route to the existing
             // AtomicI64 shims (the method form already lowered).
-            "sync::AtomicI64::new"
-            | "AtomicI64::new"
-            | "sync::AtomicU64::new"
-            | "AtomicU64::new"
-            | "sync::AtomicI32::new"
-            | "AtomicI32::new" => (
-                "gos_rt_atomic_i64_new",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
+            "sync::AtomicI64::new" | "AtomicI64::new" => {
+                ("gos_rt_atomic_i64_new", self.sync_handle_ty(54))
+            }
+            "sync::AtomicI32::new" | "AtomicI32::new" => {
+                ("gos_rt_atomic_i64_new", self.sync_handle_ty(55))
+            }
+            "sync::AtomicU64::new" | "AtomicU64::new" => {
+                ("gos_rt_atomic_i64_new", self.sync_handle_ty(56))
+            }
             // AtomicBool shares the i64 handle storage but mints a
             // distinct symbol so the receiver tags as `sync::AtomicBool`
             // and `load` pins to `bool` (renders `true` / `false`).
-            "sync::AtomicBool::new" | "AtomicBool::new" => (
-                "gos_rt_atomic_bool_new",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
+            "sync::AtomicBool::new" | "AtomicBool::new" => {
+                ("gos_rt_atomic_bool_new", self.sync_handle_ty(57))
+            }
             "sync::AtomicI64::load"
             | "AtomicI64::load"
             | "sync::AtomicU64::load"
@@ -1756,19 +1762,14 @@ impl<'a> Builder<'a> {
                 "gos_rt_atomic_i64_fetch_add",
                 self.tcx.int_ty(gossamer_types::IntTy::I64),
             ),
-            "sync::Barrier::new" | "Barrier::new" => (
-                "gos_rt_barrier_new",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
+            "sync::Barrier::new" | "Barrier::new" => {
+                ("gos_rt_barrier_new", self.sync_handle_ty(53))
+            }
             "sync::Barrier::wait" | "Barrier::wait" => ("gos_rt_barrier_wait", self.tcx.unit()),
-            "sync::Once::new" | "Once::new" => (
-                "gos_rt_once_new",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
-            "rand::Rng::new" | "math::rand::Rng::new" | "Rng::new" => (
-                "gos_rt_math_rng_new",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
+            "sync::Once::new" | "Once::new" => ("gos_rt_once_new", self.sync_handle_ty(51)),
+            "rand::Rng::new" | "math::rand::Rng::new" | "Rng::new" => {
+                ("gos_rt_math_rng_new", self.sync_handle_ty(42))
+            }
             "validate::FieldError::new" | "FieldError::new" => (
                 "gos_rt_field_error_new",
                 self.tcx.int_ty(gossamer_types::IntTy::I64),
@@ -1777,26 +1778,17 @@ impl<'a> Builder<'a> {
                 "gos_rt_validate_errors_new",
                 self.tcx.int_ty(gossamer_types::IntTy::I64),
             ),
-            "sync::RwLock::new" | "RwLock::new" => (
-                "gos_rt_rwlock_new",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
-            "sync::Shared::new" | "Shared::new" => (
-                "gos_rt_shared_new",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
-            "context::Context::background" | "Context::background" => (
-                "gos_rt_ctx_background",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
-            "context::Context::with_cancel" | "Context::with_cancel" => (
-                "gos_rt_ctx_with_cancel",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
-            "context::Context::with_timeout" | "Context::with_timeout" => (
-                "gos_rt_ctx_with_timeout",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
+            "sync::RwLock::new" | "RwLock::new" => ("gos_rt_rwlock_new", self.sync_handle_ty(35)),
+            "sync::Shared::new" | "Shared::new" => ("gos_rt_shared_new", self.sync_handle_ty(46)),
+            "context::Context::background" | "Context::background" => {
+                ("gos_rt_ctx_background", self.sync_handle_ty(11))
+            }
+            "context::Context::with_cancel" | "Context::with_cancel" => {
+                ("gos_rt_ctx_with_cancel", self.sync_handle_ty(11))
+            }
+            "context::Context::with_timeout" | "Context::with_timeout" => {
+                ("gos_rt_ctx_with_timeout", self.sync_handle_ty(11))
+            }
             "metrics::Counter::new" | "Counter::new" => (
                 "gos_rt_metrics_counter_new",
                 self.tcx.int_ty(gossamer_types::IntTy::I64),
@@ -1841,22 +1833,19 @@ impl<'a> Builder<'a> {
         _args: &[HirExpr],
     ) -> Option<(&'static str, gossamer_types::Ty)> {
         Some(match joined {
-            "bytes::Builder::new" | "Builder::new" => (
-                "gos_rt_bytes_builder_new",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
+            "bytes::Builder::new" | "Builder::new" => {
+                ("gos_rt_bytes_builder_new", self.sync_handle_ty(27))
+            }
             "bytes::Builder::with_capacity" | "Builder::with_capacity" => (
                 "gos_rt_bytes_builder_with_capacity",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
+                self.sync_handle_ty(27),
             ),
-            "bytes::Buffer::new" | "Buffer::new" => (
-                "gos_rt_bytes_buffer_new",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
-            "bytes::Buffer::with_capacity" | "Buffer::with_capacity" => (
-                "gos_rt_bytes_buffer_with_capacity",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
+            "bytes::Buffer::new" | "Buffer::new" => {
+                ("gos_rt_bytes_buffer_new", self.sync_handle_ty(63))
+            }
+            "bytes::Buffer::with_capacity" | "Buffer::with_capacity" => {
+                ("gos_rt_bytes_buffer_with_capacity", self.sync_handle_ty(63))
+            }
             "bytes::index_of" => ("gos_rt_bytes_index_of", self.option_i64_adt_ty()),
             // These three take and answer byte vectors, not text: a byte a
             // caller stored survives the round trip whether or not it is UTF-8.

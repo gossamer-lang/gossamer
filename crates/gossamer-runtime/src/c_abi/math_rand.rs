@@ -20,6 +20,8 @@ pub struct GosRng {
     state: u64,
 }
 
+super::rc::managed_handle!(GosRng);
+
 impl GosRng {
     fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -34,7 +36,7 @@ impl GosRng {
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_rng_new(seed: i64) -> *mut GosRng {
     ffi_entry!(std::ptr::null_mut(), {
-        Box::into_raw(Box::new(GosRng { state: seed as u64 }))
+        super::rc::alloc_managed(GosRng { state: seed as u64 })
     })
 }
 

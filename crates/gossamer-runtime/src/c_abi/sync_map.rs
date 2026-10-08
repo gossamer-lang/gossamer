@@ -25,12 +25,14 @@ pub struct GosSyncMap {
     inner: parking_lot::RwLock<HashMap<String, String>>,
 }
 
+super::rc::managed_handle!(GosSyncMap);
+
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_sync_map_new() -> *mut GosSyncMap {
     ffi_entry!(std::ptr::null_mut(), {
-        Box::into_raw(Box::new(GosSyncMap {
+        super::rc::alloc_managed(GosSyncMap {
             inner: parking_lot::RwLock::new(HashMap::new()),
-        }))
+        })
     })
 }
 

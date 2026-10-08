@@ -1,10 +1,9 @@
 //! `http::ResponseStream::new()` builtins - a response body a handler
 //! writes as it goes.
 //!
-//! The queue itself is `gossamer_runtime::c_abi::http_stream_writer`'s, so
-//! the framing a client sees is the same one the compiled tiers produce.
-//! Only the registry differs: the VM drains through its own
-//! `StreamResponse` registry, so the reading end is registered there.
+//! The framing a client sees is the same one the compiled tiers produce.
+//! The handle holds the stream's slot, which keeps the writing end, so the
+//! body ends at `close` or when the last copy of the handle is gone.
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
@@ -43,26 +42,16 @@ impl std::io::Read for QueueReader {
     }
 }
 
-/// Writers by stream handle. An entry is removed by `close`, which is
-/// what ends the body.
-static WRITERS: Mutex<Option<std::collections::HashMap<i64, Sender<Vec<u8>>>>> = Mutex::new(None);
-
-fn handle_of(args: &[Value]) -> i64 {
+fn slot_of(args: &[Value]) -> Option<Arc<crate::http_client_builtins::StreamSlot>> {
     args.first()
-        .and_then(crate::http_client_builtins::response_stream_handle)
-        .unwrap_or(-1)
+        .and_then(crate::http_client_builtins::response_stream_slot)
 }
 
 /// Hands `bytes` to the stream's reader. Answers how many bytes were
 /// queued, or `-1` when the stream is closed - which is also what a
 /// client that hung up looks like, so a producer can stop.
-fn push(handle: i64, bytes: Vec<u8>) -> i64 {
-    let len = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
-    let guard = WRITERS.lock();
-    match guard.as_ref().and_then(|map| map.get(&handle)) {
-        Some(tx) if tx.send(bytes).is_ok() => len,
-        _ => -1,
-    }
+fn push(args: &[Value], bytes: Vec<u8>) -> i64 {
+    slot_of(args).map_or(-1, |slot| slot.push(bytes))
 }
 
 /// Registers the `http::ResponseStream` builtins.
@@ -92,18 +81,14 @@ fn builtin_new(_args: &[Value]) -> RuntimeResult<Value> {
         consumed: 0,
     };
     let boxed: Box<dyn std::io::Read + Send + Sync + 'static> = Box::new(reader);
-    let handle = crate::http_client_builtins::stream_register_public(StreamResponse::from_reader(
-        StatusCode::OK,
-        boxed,
-    ));
-    WRITERS
-        .lock()
-        .get_or_insert_with(std::collections::HashMap::new)
-        .insert(handle, tx);
+    let handle = crate::http_client_builtins::stream_handle_value(
+        StreamResponse::from_reader(StatusCode::OK, boxed),
+        Some(tx),
+    );
     Ok(Value::struct_(
         "ResponseStream",
         Arc::unwrap_or_clone(Arc::new(vec![
-            ("__handle", Value::Int(handle)),
+            ("__handle", handle),
             ("status", Value::Int(200)),
             ("content_type", Value::String("".into())),
         ])),
@@ -111,16 +96,14 @@ fn builtin_new(_args: &[Value]) -> RuntimeResult<Value> {
 }
 
 fn builtin_write(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = handle_of(args);
     let text = as_str(args.get(1).unwrap_or(&Value::Unit))
         .unwrap_or("")
         .as_bytes()
         .to_vec();
-    Ok(Value::Int(push(handle, text)))
+    Ok(Value::Int(push(args, text)))
 }
 
 fn builtin_write_bytes(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = handle_of(args);
     let bytes = match args.get(1) {
         Some(Value::ByteVec(b)) => b.as_ref().clone(),
         Some(Value::ByteArray(b)) => b.to_vec(),
@@ -131,21 +114,18 @@ fn builtin_write_bytes(args: &[Value]) -> RuntimeResult<Value> {
             .collect(),
         _ => Vec::new(),
     };
-    Ok(Value::Int(push(handle, bytes)))
+    Ok(Value::Int(push(args, bytes)))
 }
 
 fn builtin_close(args: &[Value]) -> RuntimeResult<Value> {
-    if let Some(map) = WRITERS.lock().as_mut() {
-        map.remove(&handle_of(args));
+    if let Some(slot) = slot_of(args) {
+        slot.close();
     }
     Ok(Value::Unit)
 }
 
 fn builtin_is_open(args: &[Value]) -> RuntimeResult<Value> {
-    let handle = handle_of(args);
-    let open = WRITERS
-        .lock()
-        .as_ref()
-        .is_some_and(|map| map.contains_key(&handle));
-    Ok(Value::Bool(open))
+    Ok(Value::Bool(
+        slot_of(args).is_some_and(|slot| slot.is_open()),
+    ))
 }

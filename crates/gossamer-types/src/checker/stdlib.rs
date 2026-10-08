@@ -993,7 +993,11 @@ impl TypeChecker<'_> {
     }
 
     pub(super) fn bytes_handle_ty(&mut self, name: &str) -> Ty {
-        let offset = if name == "bytes::Buffer" { 26 } else { 27 };
+        let offset = if name == "bytes::Buffer" {
+            super::BYTES_BUFFER_OFFSET
+        } else {
+            27
+        };
         self.stdlib_handle_ty(offset, name)
     }
 
@@ -2805,9 +2809,34 @@ impl TypeChecker<'_> {
                 continue;
             }
             if let Some(param_ty) = self.stdlib_signature_arg_ty(param.ty) {
+                if param.ty == "http::websocket::Conn" && self.integer_param_for_conn(arg, arg_ty) {
+                    continue;
+                }
                 self.check_sig_param_arg(param_ty, arg_ty, arg);
             }
         }
+    }
+
+    /// Reports a parameter declared `i64` passed where a websocket call takes
+    /// its connection, the shape a handler had while connections were bare
+    /// integers, and answers whether it did. The fix retypes the parameter.
+    fn integer_param_for_conn(&mut self, arg: &Expr, arg_ty: Ty) -> bool {
+        let ExprKind::Path(_) = &arg.kind else {
+            return false;
+        };
+        let Some(gossamer_resolve::Resolution::Local(binding)) = self.resolutions.get(arg.id)
+        else {
+            return false;
+        };
+        let Some((name, span)) = self.param_type_spans.get(&binding).cloned() else {
+            return false;
+        };
+        let resolved = self.infer.resolve(self.tcx, arg_ty);
+        if !matches!(self.tcx.kind(resolved), Some(TyKind::Int(IntTy::I64))) {
+            return false;
+        }
+        self.emit(TypeError::IntegerWebSocketParam { param: name }, span);
+        true
     }
 
     /// Return type for a stdlib free function from the checker-owned signature
@@ -2978,9 +3007,16 @@ impl TypeChecker<'_> {
                 .collect::<Option<Vec<_>>>()?;
             return Some(self.tcx.intern(TyKind::Tuple(elems)));
         }
-        // A nominal stdlib handle resolves to the same sentinel Adt a written
-        // annotation gets, so a signature slot naming one carries its fields
-        // rather than an inference variable.
+        self.nominal_handle_ty(src)
+    }
+
+    /// The sentinel Adt a signature slot naming a stdlib handle resolves to:
+    /// the same one a written annotation gets, so the slot carries the
+    /// handle's fields rather than an inference variable.
+    fn nominal_handle_ty(&mut self, src: &str) -> Option<Ty> {
+        if src == "http::websocket::Conn" {
+            return Some(self.stdlib_handle_ty(super::WEBSOCKET_CONN_OFFSET, src));
+        }
         let tail = src.rsplit("::").next().unwrap_or(src);
         if let Some(offset) = stdlib_handle_def_offset(tail) {
             let def = gossamer_resolve::DefId::local(u32::MAX - offset);

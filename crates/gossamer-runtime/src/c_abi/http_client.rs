@@ -119,8 +119,8 @@ pub struct GosHttpRequest {
     /// apply. `None` for server-side requests and standalone pending
     /// requests, which fall back to the default-policy agent.
     pub agent: Option<ureq::Agent>,
-    /// Request-scoped `context::Context`, as its pointer address, or 0
-    /// when the request has none.
+    /// Request-scoped `context::Context` handle, holding the request's
+    /// share, or 0 when the request has none.
     ///
     /// The server creates one per request and cancels it when the request
     /// ends - whether the handler returned, the deadline elapsed, the peer
@@ -614,12 +614,14 @@ pub unsafe extern "C" fn gos_rt_http_request_context(
 ) -> *mut crate::c_abi::context::GosCtx {
     ffi_entry!(std::ptr::null_mut(), {
         if req.is_null() {
-            return crate::c_abi::context::gos_rt_ctx_background();
+            return std::ptr::with_exposed_provenance_mut(
+                crate::c_abi::context::shared_background(),
+            );
         }
         // SAFETY: `req` is a handle from compiled code, checked non-null above and live for the whole call.
         let request = unsafe { &mut *req };
         if request.context != 0 {
-            return request.context as *mut crate::c_abi::context::GosCtx;
+            return std::ptr::with_exposed_provenance_mut(request.context);
         }
         // A served request opens its context here, the first time its handler
         // asks for one: a handler that never does costs neither the allocation
@@ -627,9 +629,11 @@ pub unsafe extern "C" fn gos_rt_http_request_context(
         match crate::c_abi::http_server::open_served_request_context(request) {
             Some(ctx) => {
                 request.context = ctx;
-                ctx as *mut crate::c_abi::context::GosCtx
+                std::ptr::with_exposed_provenance_mut(ctx)
             }
-            None => crate::c_abi::context::gos_rt_ctx_background(),
+            None => {
+                std::ptr::with_exposed_provenance_mut(crate::c_abi::context::shared_background())
+            }
         }
     })
 }

@@ -17,14 +17,10 @@
 
 #![forbid(unsafe_code)]
 
-use gossamer_ast::{ItemKind, SourceFile};
 use gossamer_diagnostics::Diagnostic;
 use gossamer_lex::FileId;
 use gossamer_resolve::resolve_source_file;
-use gossamer_types::{
-    ExhaustivenessError, TyCtxt, check_arena_escapes, check_capture_writes, check_exhaustiveness,
-    check_parallel_adapters, normalize_caller_side_spellings, typecheck_source_file,
-};
+use gossamer_types::{CheckPhase, PhaseObserver, TyCtxt, check_resolved_unit};
 use std::time::{Duration, Instant};
 
 use crate::frontend_cache::{
@@ -130,79 +126,22 @@ pub fn check_frontend(source: &str, file_id: FileId) -> FrontendOutcome {
     let phase_started = Instant::now();
     let (resolutions, resolve_diags) = resolve_source_file(&sf);
     let resolve = phase_started.elapsed();
-    // Every resolve diagnostic the resolver chose to emit is fatal. The
-    // resolver already suppresses the one class that is not actionable
-    // (names the parser fabricated during recovery), so admitting the rest
-    // keeps `gos check` a superset of what the LSP and the REPL report.
-    // Labelled and defaulted arguments are a caller-side spelling. Rewriting
-    // them into declared order here means the checker, HIR, and every tier's
-    // codegen only ever see a positional call.
-    let named_arg_diags = normalize_caller_side_spellings(&mut sf, &resolutions);
-    let in_scope = collect_top_level_names(&sf);
-    if !parse_failed {
-        diagnostics.extend(
-            named_arg_diags
-                .iter()
-                .map(|diag| diag.to_diagnostic(&in_scope)),
-        );
-        diagnostics.extend(
-            resolve_diags
-                .iter()
-                .map(|diag| diag.to_diagnostic(&in_scope)),
-        );
-    }
 
-    let phase_started = Instant::now();
     let mut tcx = TyCtxt::new();
-    let (table, type_diags) = typecheck_source_file(&sf, &resolutions, &mut tcx);
-    let typecheck = phase_started.elapsed();
-    let mut warnings: Vec<Diagnostic> = Vec::new();
-    if !parse_failed {
-        for diag in &type_diags {
-            if diag.is_advisory() {
-                warnings.push(diag.to_diagnostic());
-            } else {
-                diagnostics.push(diag.to_diagnostic());
-            }
-        }
-    }
-
-    let phase_started = Instant::now();
-    let exhaustive_diags = check_exhaustiveness(&sf, &resolutions, &table, &tcx);
-    let exhaustiveness = phase_started.elapsed();
-    if !parse_failed {
-        for diag in &exhaustive_diags {
-            match diag.error {
-                ExhaustivenessError::NonExhaustive { .. } => diagnostics.push(diag.to_diagnostic()),
-                ExhaustivenessError::UnreachableArm => warnings.push(diag.to_diagnostic()),
-            }
-        }
-    }
-
-    // Every arena-escape diagnostic is fatal: a value allocated in an
-    // `arena { }` block that outlives it is a use-after-free, so it must
-    // be rejected on every tier, exactly like a type error.
-    let phase_started = Instant::now();
-    for diag in check_arena_escapes(&sf, &resolutions, &table, &tcx) {
-        if !parse_failed {
-            diagnostics.push(diag.to_diagnostic());
-        }
-    }
-    // A write to a captured copy never reaches the binding, and a spawned
-    // write to a shared container races with the spawning code.
-    if !parse_failed {
-        for diag in check_capture_writes(&sf, &resolutions, &table, &tcx) {
-            diagnostics.push(diag.to_diagnostic());
-        }
-    }
-    // A parallel adapter's callback runs on many workers at once, so one
-    // whose purity cannot be shown is refused on every tier.
-    if !parse_failed && diagnostics.is_empty() {
-        for diag in check_parallel_adapters(&sf, &resolutions, &table, &tcx) {
-            diagnostics.push(diag.to_diagnostic());
-        }
-    }
-    let arena_escape = phase_started.elapsed();
+    let mut clock = PhaseClock::new();
+    let earlier_fatal = !diagnostics.is_empty();
+    let checks = check_resolved_unit(
+        &mut sf,
+        &resolutions,
+        &resolve_diags,
+        parse_failed,
+        earlier_fatal,
+        &mut tcx,
+        &mut clock,
+    );
+    diagnostics.extend(checks.fatal);
+    let warnings = checks.advisory;
+    let table = checks.table;
 
     // The blob is the sole cache-validity marker, and publishing it is what
     // makes a later invocation's hit proof of acceptance. A rejected program
@@ -222,6 +161,7 @@ pub fn check_frontend(source: &str, file_id: FileId) -> FrontendOutcome {
             &checked.resolutions,
             &checked.table,
             &checked.tcx,
+            &warnings,
         );
     }
 
@@ -232,9 +172,9 @@ pub fn check_frontend(source: &str, file_id: FileId) -> FrontendOutcome {
         timings: FrontendTimings {
             parse,
             resolve,
-            typecheck,
-            exhaustiveness,
-            arena_escape,
+            typecheck: clock.typecheck,
+            exhaustiveness: clock.exhaustiveness,
+            arena_escape: clock.analysis,
             parse_cache_hit: false,
         },
     }
@@ -258,7 +198,7 @@ fn restore_frontend(key: &crate::FrontendCacheKey) -> Option<FrontendOutcome> {
             tcx: cached.tcx,
         },
         diagnostics: Vec::new(),
-        warnings: Vec::new(),
+        warnings: cached.warnings,
         timings: FrontendTimings {
             parse: restore_started.elapsed(),
             parse_cache_hit: true,
@@ -267,22 +207,35 @@ fn restore_frontend(key: &crate::FrontendCacheKey) -> Option<FrontendOutcome> {
     })
 }
 
-/// Every top-level item name declared in `sf`, used to seed the
-/// resolver's "did you mean ...?" suggestions when rendering an
-/// unresolved-name diagnostic.
-fn collect_top_level_names(sf: &SourceFile) -> Vec<&str> {
-    sf.items
-        .iter()
-        .filter_map(|item| match &item.kind {
-            ItemKind::Fn(decl) => Some(decl.name.name.as_str()),
-            ItemKind::Struct(decl) => Some(decl.name.name.as_str()),
-            ItemKind::Enum(decl) => Some(decl.name.name.as_str()),
-            ItemKind::Trait(decl) => Some(decl.name.name.as_str()),
-            ItemKind::TypeAlias(decl) => Some(decl.name.name.as_str()),
-            ItemKind::Const(decl) => Some(decl.name.name.as_str()),
-            ItemKind::Static(decl) => Some(decl.name.name.as_str()),
-            ItemKind::Mod(decl) => Some(decl.name.name.as_str()),
-            ItemKind::Impl(_) | ItemKind::AttrItem(_) => None,
-        })
-        .collect()
+/// Times each phase of [`check_resolved_unit`] from the end of the one
+/// before it.
+struct PhaseClock {
+    last: Instant,
+    typecheck: Duration,
+    exhaustiveness: Duration,
+    analysis: Duration,
+}
+
+impl PhaseClock {
+    fn new() -> Self {
+        Self {
+            last: Instant::now(),
+            typecheck: Duration::ZERO,
+            exhaustiveness: Duration::ZERO,
+            analysis: Duration::ZERO,
+        }
+    }
+}
+
+impl PhaseObserver for PhaseClock {
+    fn phase_done(&mut self, phase: CheckPhase) {
+        let now = Instant::now();
+        let spent = now - self.last;
+        self.last = now;
+        match phase {
+            CheckPhase::Typecheck => self.typecheck = spent,
+            CheckPhase::Exhaustiveness => self.exhaustiveness = spent,
+            CheckPhase::Analysis => self.analysis = spent,
+        }
+    }
 }

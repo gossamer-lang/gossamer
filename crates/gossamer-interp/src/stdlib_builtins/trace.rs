@@ -9,8 +9,8 @@
 )]
 //! `std::trace` builtins for the bytecode VM - the explicit
 //! Tracer / Span / EndedSpan handle surface and OTLP JSON export.
-//! Span and ended-span state live in process-global registries keyed
-//! by `id`, mirroring `math::rand::Rng`. Identifiers are minted from
+//! Each Span and EndedSpan handle holds its span, shared by every copy of
+//! the handle and freed with the last one. Identifiers are minted from
 //! `gossamer_std::trace` and span timestamps are zeroed, so the
 //! serialized OTLP JSON differs from the compiled tiers only in the
 //! unguessable id fields - the asserted substrings (span name,
@@ -22,13 +22,9 @@
 //! propagate across a `go` boundary. Only the explicit handle surface
 //! is wired.
 
-use std::cell::RefCell;
-use std::collections::HashMap as StdHashMap;
 use std::sync::Arc;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use gossamer_ast::Ident;
 use gossamer_std::trace::{EndedSpan, SpanContext, SpanId, TraceId};
 
 use crate::builtins::BuiltinFnPub;
@@ -43,21 +39,10 @@ struct SpanData {
     status_message: String,
 }
 
-static SPANS: LazyLock<parking_lot::ReentrantMutex<RefCell<StdHashMap<i64, SpanData>>>> =
-    LazyLock::new(|| parking_lot::ReentrantMutex::new(RefCell::new(StdHashMap::new())));
-static ENDED: LazyLock<parking_lot::ReentrantMutex<RefCell<StdHashMap<i64, EndedSpan>>>> =
-    LazyLock::new(|| parking_lot::ReentrantMutex::new(RefCell::new(StdHashMap::new())));
-static NEXT_ID: AtomicI64 = AtomicI64::new(1);
+/// A span until it ends; `end` takes the data, so a span ends once.
+type OpenSpan = parking_lot::Mutex<Option<SpanData>>;
 
-fn with_spans<R>(f: impl FnOnce(&RefCell<StdHashMap<i64, SpanData>>) -> R) -> R {
-    let guard = SPANS.lock();
-    f(&guard)
-}
-
-fn with_ended<R>(f: impl FnOnce(&RefCell<StdHashMap<i64, EndedSpan>>) -> R) -> R {
-    let guard = ENDED.lock();
-    f(&guard)
-}
+static NEXT_TRACER_ID: AtomicI64 = AtomicI64::new(1);
 
 pub(crate) fn install_trace(globals: &mut Vec<(&'static str, Value)>) {
     let entries: &[(&str, BuiltinFnPub)] = &[
@@ -80,24 +65,12 @@ pub(crate) fn install_trace(globals: &mut Vec<(&'static str, Value)>) {
     }
 }
 
-fn handle(kind: &'static str, field: &'static str, id: i64) -> Value {
-    Value::struct_(
-        kind,
-        Arc::unwrap_or_clone(Arc::new(vec![(field, Value::Int(id))])),
-    )
+fn span_of(value: &Value) -> Option<Arc<OpenSpan>> {
+    crate::value::handle_state(value, "trace::Span", "__span")
 }
 
-fn handle_id(value: &Value, field: &str) -> Option<i64> {
-    if let Value::Struct(inner) = value {
-        for (i, v) in &inner.fields {
-            if (*i) == field {
-                if let Value::Int(n) = v {
-                    return Some(*n);
-                }
-            }
-        }
-    }
-    None
+fn ended_of(value: &Value) -> Option<Arc<EndedSpan>> {
+    crate::value::handle_state(value, "trace::EndedSpan", "__ended")
 }
 
 fn str_arg(args: &[Value], idx: usize) -> String {
@@ -112,12 +85,15 @@ fn bool_arg(args: &[Value], idx: usize) -> bool {
 }
 
 pub(crate) fn builtin_tracer_new(_args: &[Value]) -> RuntimeResult<Value> {
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    Ok(handle("trace::Tracer", "__tracer", id))
+    // A tracer carries no state of its own; the id only tells two apart.
+    let id = NEXT_TRACER_ID.fetch_add(1, Ordering::Relaxed);
+    Ok(Value::struct_(
+        "trace::Tracer",
+        vec![("__tracer", Value::Int(id))],
+    ))
 }
 
 pub(crate) fn builtin_tracer_start_span(args: &[Value]) -> RuntimeResult<Value> {
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let span = SpanData {
         name: str_arg(args, 1),
         trace_id: TraceId::new_random(),
@@ -126,46 +102,43 @@ pub(crate) fn builtin_tracer_start_span(args: &[Value]) -> RuntimeResult<Value> 
         status_ok: true,
         status_message: String::new(),
     };
-    with_spans(|s| s.borrow_mut().insert(id, span));
-    Ok(handle("trace::Span", "__span", id))
+    Ok(crate::value::state_handle(
+        "trace::Span",
+        "__span",
+        Arc::new(OpenSpan::new(Some(span))),
+    ))
 }
 
 pub(crate) fn builtin_span_set_attribute(args: &[Value]) -> RuntimeResult<Value> {
-    if let Some(id) = args.first().and_then(|v| handle_id(v, "__span")) {
+    if let Some(open) = args.first().and_then(span_of)
+        && let Some(span) = open.lock().as_mut()
+    {
         let key = str_arg(args, 1);
         let value = str_arg(args, 2);
-        with_spans(|s| {
-            if let Some(span) = s.borrow_mut().get_mut(&id) {
-                if let Some(slot) = span.attributes.iter_mut().find(|(k, _)| *k == key) {
-                    slot.1 = value;
-                } else {
-                    span.attributes.push((key, value));
-                }
-            }
-        });
+        if let Some(slot) = span.attributes.iter_mut().find(|(k, _)| *k == key) {
+            slot.1 = value;
+        } else {
+            span.attributes.push((key, value));
+        }
     }
     Ok(Value::Unit)
 }
 
 pub(crate) fn builtin_span_set_status(args: &[Value]) -> RuntimeResult<Value> {
-    if let Some(id) = args.first().and_then(|v| handle_id(v, "__span")) {
-        let ok = bool_arg(args, 1);
-        let message = str_arg(args, 2);
-        with_spans(|s| {
-            if let Some(span) = s.borrow_mut().get_mut(&id) {
-                span.status_ok = ok;
-                span.status_message = message;
-            }
-        });
+    if let Some(open) = args.first().and_then(span_of)
+        && let Some(span) = open.lock().as_mut()
+    {
+        span.status_ok = bool_arg(args, 1);
+        span.status_message = str_arg(args, 2);
     }
     Ok(Value::Unit)
 }
 
 pub(crate) fn builtin_span_end(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(id) = args.first().and_then(|v| handle_id(v, "__span")) else {
+    let Some(open) = args.first().and_then(span_of) else {
         return Ok(Value::Unit);
     };
-    let Some(span) = with_spans(|s| s.borrow_mut().remove(&id)) else {
+    let Some(span) = open.lock().take() else {
         return Ok(Value::Unit);
     };
     let ended = EndedSpan {
@@ -182,16 +155,18 @@ pub(crate) fn builtin_span_end(args: &[Value]) -> RuntimeResult<Value> {
         start_unix_nanos: 0,
         end_unix_nanos: 0,
     };
-    let ended_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    with_ended(|e| e.borrow_mut().insert(ended_id, ended));
-    Ok(handle("trace::EndedSpan", "__ended", ended_id))
+    Ok(crate::value::state_handle(
+        "trace::EndedSpan",
+        "__ended",
+        Arc::new(ended),
+    ))
 }
 
 pub(crate) fn builtin_ended_to_otlp_json(args: &[Value]) -> RuntimeResult<Value> {
     let json = args
         .first()
-        .and_then(|v| handle_id(v, "__ended"))
-        .and_then(|id| with_ended(|e| e.borrow().get(&id).map(EndedSpan::to_otlp_json)))
+        .and_then(ended_of)
+        .map(|ended| ended.to_otlp_json())
         .unwrap_or_default();
     Ok(Value::String(json.into()))
 }

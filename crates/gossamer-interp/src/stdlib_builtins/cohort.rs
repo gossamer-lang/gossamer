@@ -18,8 +18,9 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use super::deadline_queue::DeadlineQueue;
 use crate::builtins::{BuiltinFnPub, value_to_int};
-use crate::value::{RuntimeResult, Value};
+use crate::value::{RuntimeError, RuntimeResult, Value};
 
 use gossamer_runtime::platform::Instant;
 
@@ -154,6 +155,11 @@ struct CohortState {
     live: Vec<LiveChild>,
     joined: bool,
     timed_out: bool,
+    /// A joiner is parked waiting for the children to drain.
+    joining: bool,
+    /// Drained with the joiner not yet woken. Counted among the program's
+    /// pending handoffs, so the joiner is not read as asleep before it runs.
+    drained_ready: bool,
 }
 
 struct CohortNode {
@@ -168,6 +174,8 @@ struct CohortNode {
     /// Milliseconds the drain waits, or 0 for "as long as it takes".
     drain_ms: i64,
     cancelled: AtomicBool,
+    /// When the cohort times out, if it was opened with a timeout.
+    deadline: Option<Instant>,
     state: parking_lot::Mutex<CohortState>,
     progress: parking_lot::Condvar,
     /// Cohorts opened under this one, still live. A child sleeping
@@ -213,7 +221,7 @@ pub(crate) fn cohort_for_test(cancelled: bool) -> i64 {
     let parent = current_cohort();
     let id = push(
         POLICY_COLLECT_ALL,
-        0,
+        None,
         ISOLATION_SHARED,
         ON_ERROR_PROPAGATE,
         0,
@@ -306,45 +314,14 @@ fn cancel(id: i64) {
     }
 }
 
-/// Deadlines waiting to fire, earliest last so the timer thread pops the
-/// back. One thread serves every cohort.
-static DEADLINES: LazyLock<parking_lot::Mutex<Vec<(Instant, i64)>>> =
-    LazyLock::new(|| parking_lot::Mutex::new(Vec::new()));
-static DEADLINE_WAKE: LazyLock<parking_lot::Condvar> = LazyLock::new(parking_lot::Condvar::new);
-static TIMER_THREAD: std::sync::Once = std::sync::Once::new();
+/// Cohort deadlines, served by one thread. A cohort that retires first takes
+/// its entry with it.
+static DEADLINES: DeadlineQueue = DeadlineQueue::new("gossamer-cohort-timer", time_out);
 
-fn schedule_deadline(deadline: Instant, id: i64) {
-    {
-        let mut queue = DEADLINES.lock();
-        queue.push((deadline, id));
-        queue.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.0));
-    }
-    TIMER_THREAD.call_once(|| {
-        let _ = std::thread::Builder::new()
-            .name("gossamer-cohort-timer".to_string())
-            .spawn(run_deadline_timer);
-    });
-    DEADLINE_WAKE.notify_all();
-}
-
-fn run_deadline_timer() {
-    loop {
-        let mut queue = DEADLINES.lock();
-        let Some(&(earliest, id)) = queue.last() else {
-            DEADLINE_WAKE.wait(&mut queue);
-            continue;
-        };
-        let now = Instant::now();
-        if earliest > now {
-            DEADLINE_WAKE.wait_for(&mut queue, earliest - now);
-            continue;
-        }
-        queue.pop();
-        drop(queue);
-        if let Some(node) = node_of(id) {
-            node.state.lock().timed_out = true;
-            cancel(id);
-        }
+fn time_out(id: i64) {
+    if let Some(node) = node_of(id) {
+        node.state.lock().timed_out = true;
+        cancel(id);
     }
 }
 
@@ -352,12 +329,14 @@ fn run_deadline_timer() {
 /// an actor outside the goroutine set that will cancel a cohort, so a
 /// program waiting on one is waiting rather than deadlocked.
 pub(crate) fn deadline_pending() -> bool {
-    !DEADLINES.lock().is_empty()
+    DEADLINES.pending()
 }
 
+/// Opens a cohort as the running goroutine's current one. A `deadline`
+/// requires the deadline thread to have been started.
 fn push(
     policy: i64,
-    timeout_ms: i64,
+    deadline: Option<Instant>,
     isolation: i64,
     on_error: i64,
     uncancellable: i64,
@@ -374,6 +353,7 @@ fn push(
         uncancellable: uncancellable != 0,
         drain_ms,
         cancelled: AtomicBool::new(false),
+        deadline,
         state: parking_lot::Mutex::new(CohortState {
             next_index: 0,
             outstanding: 0,
@@ -382,11 +362,13 @@ fn push(
             live: Vec::new(),
             joined: false,
             timed_out: false,
+            joining: false,
+            drained_ready: false,
         }),
         progress: parking_lot::Condvar::new(),
         children: parking_lot::Mutex::new(Vec::new()),
     });
-    COHORTS.lock().insert(id, node);
+    COHORTS.lock().insert(id, Arc::clone(&node));
     if let Some(enclosing) = node_of(parent) {
         enclosing.children.lock().push(id);
     }
@@ -397,11 +379,8 @@ fn push(
     if parent != 0 && chain_is_cancelled(parent) {
         cancel(id);
     }
-    if timeout_ms > 0 {
-        schedule_deadline(
-            Instant::now() + Duration::from_millis(timeout_ms as u64),
-            id,
-        );
+    if let Some(deadline) = deadline {
+        DEADLINES.insert(deadline, id, &node.cancelled);
     }
     id
 }
@@ -442,6 +421,10 @@ pub(crate) fn leave_child(id: i64, index: i64, failure: Option<String>) {
         // first, so the two locks never form a cycle.
         let observed = observed_ahead(id, index);
         state.outstanding -= 1;
+        if state.outstanding == 0 && state.joining && !state.drained_ready {
+            state.drained_ready = true;
+            crate::vm::goroutine::adjust_pending_handoffs(true);
+        }
         state.live.retain(|live| live.index != index);
         match failure {
             Some(message) => {
@@ -527,19 +510,27 @@ pub(crate) fn current_isolation() -> i64 {
 /// Waits for `node`'s children. Answers `false` when the wait can never end:
 /// every participant is waiting, the children included.
 fn wait_for_drain(node: &Arc<CohortNode>) -> bool {
-    if node.state.lock().outstanding == 0 {
+    let mut state = node.state.lock();
+    if state.outstanding == 0 {
         return true;
     }
-    let Some(_joining) =
-        crate::vm::goroutine::JoinWait::enter(|| node.state.lock().outstanding == 0)
-    else {
+    state.joining = true;
+    let Some(joining) = crate::vm::goroutine::JoinWait::enter(|| state.outstanding == 0) else {
+        state.joining = false;
         return false;
     };
-    let mut state = node.state.lock();
     // A child settles at its spawn on the browser build, so the count is
     // already final and a wait would be for a goroutine that has finished.
     while gossamer_runtime::platform::CAN_BLOCK && state.outstanding > 0 {
         node.progress.wait(&mut state);
+    }
+    // The wait is given up before the readiness that woke it, so no reading
+    // sees this joiner asleep with nothing left to wake it.
+    drop(joining);
+    state.joining = false;
+    if state.drained_ready {
+        state.drained_ready = false;
+        crate::vm::goroutine::adjust_pending_handoffs(false);
     }
     true
 }
@@ -673,6 +664,9 @@ fn pop_current() {
     if let Some(enclosing) = node_of(node.parent) {
         enclosing.children.lock().retain(|child| *child != id);
     }
+    if let Some(deadline) = node.deadline {
+        DEADLINES.remove(deadline, id);
+    }
     COHORTS.lock().remove(&id);
 }
 
@@ -694,7 +688,7 @@ pub fn open_root() {
     // for. Its drain bound is `ROOT_DRAIN_DEADLINE`, applied at close.
     push(
         POLICY_COLLECT_ALL,
-        0,
+        None,
         ISOLATION_SHARED,
         ON_ERROR_PROPAGATE,
         0,
@@ -785,9 +779,19 @@ fn builtin_cohort_push(args: &[Value]) -> RuntimeResult<Value> {
         .unwrap_or(ON_ERROR_PROPAGATE);
     let uncancellable = args.get(4).and_then(value_to_int).unwrap_or(0);
     let drain_ms = args.get(5).and_then(value_to_int).unwrap_or(0);
+    let deadline = if timeout_ms > 0 {
+        DEADLINES.start().map_err(|e| {
+            RuntimeError::Panic(format!(
+                "cohort timeout: cannot start the timer thread: {e}"
+            ))
+        })?;
+        Some(Instant::now() + Duration::from_millis(timeout_ms as u64))
+    } else {
+        None
+    };
     push(
         policy,
-        timeout_ms,
+        deadline,
         isolation,
         on_error,
         uncancellable,

@@ -69,6 +69,19 @@ use super::vec::GosVec;
 
 // Process-global handle registries shared with every linked copy of the
 // runtime. `Option` so the `Mutex::new(None)` initialiser is const.
+use super::registry_key::{key_handle, key_id};
+
+/// Layout of an accepted `(TcpStream, String)` pair: the blob owns a share
+/// of the stream handle and the peer address.
+pub(crate) static ACCEPTED_PAIR_META: [i64; 6] = [
+    gossamer_abi::rc::RC_KIND_STRUCT,
+    1,
+    0,
+    2,
+    gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT,
+    (gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 1,
+];
+
 static TCP_LISTENERS: Mutex<Option<HashMap<i64, Arc<TcpListener>>>> = Mutex::new(None);
 static TCP_STREAMS: Mutex<Option<HashMap<i64, Arc<TcpStream>>>> = Mutex::new(None);
 static NEXT_TCP_HANDLE: AtomicI64 = AtomicI64::new(1);
@@ -223,23 +236,48 @@ fn write_stream(stream: Arc<TcpStream>, bytes: Vec<u8>) -> std::io::Result<()> {
 }
 
 fn listener_clone(h: i64) -> Option<Arc<TcpListener>> {
+    let id = key_id(h);
     TCP_LISTENERS
         .lock()
         .as_ref()
-        .and_then(|m| m.get(&h).cloned())
+        .and_then(|m| m.get(&id).cloned())
 }
 
 fn stream_clone(h: i64) -> Option<Arc<TcpStream>> {
-    TCP_STREAMS.lock().as_ref().and_then(|m| m.get(&h).cloned())
+    let id = key_id(h);
+    TCP_STREAMS
+        .lock()
+        .as_ref()
+        .and_then(|m| m.get(&id).cloned())
 }
 
+/// Removes the listener registered under `id`; the socket closes once no
+/// call is still accepting on it.
+fn retire_listener(id: i64) {
+    if let Some(m) = TCP_LISTENERS.lock().as_mut() {
+        m.remove(&id);
+    }
+}
+
+/// Removes the plain or TLS stream registered under `id`; the socket closes
+/// once no call is still working on it.
+fn retire_stream(id: i64) {
+    if let Some(m) = TCP_STREAMS.lock().as_mut() {
+        m.remove(&id);
+    }
+    if let Some(m) = TLS_STREAMS.lock().as_mut() {
+        m.remove(&id);
+    }
+}
+
+/// Registers `s` and answers a handle owning the entry.
 fn insert_stream(s: TcpStream) -> i64 {
-    let h = next_handle();
+    let id = next_handle();
     TCP_STREAMS
         .lock()
         .get_or_insert_with(HashMap::new)
-        .insert(h, Arc::new(s));
-    h
+        .insert(id, Arc::new(s));
+    key_handle(id, retire_stream)
 }
 
 // --- TLS upgrade --------------------------------------------------
@@ -261,7 +299,11 @@ type TlsStream = StreamOwned<ClientConnection, TcpStream>;
 static TLS_STREAMS: Mutex<Option<HashMap<i64, Arc<Mutex<TlsStream>>>>> = Mutex::new(None);
 
 fn tls_clone(h: i64) -> Option<Arc<Mutex<TlsStream>>> {
-    TLS_STREAMS.lock().as_ref().and_then(|m| m.get(&h).cloned())
+    let id = key_id(h);
+    TLS_STREAMS
+        .lock()
+        .as_ref()
+        .and_then(|m| m.get(&id).cloned())
 }
 
 /// Shared TLS client config: ring provider, webpki roots, verification
@@ -379,7 +421,7 @@ unsafe fn start_tls_with(h: i64, host: *const c_char, config: Arc<rustls::Client
         Err(e) => return tcp_err(&socket_error(&e, "start_tls")),
     };
     if let Some(m) = TCP_STREAMS.lock().as_mut() {
-        m.remove(&h);
+        m.remove(&key_id(h));
     }
     let Ok(name) = ServerName::try_from(host.clone()) else {
         return tcp_err(&format!("io: start_tls: invalid server name `{host}`"));
@@ -393,7 +435,7 @@ unsafe fn start_tls_with(h: i64, host: *const c_char, config: Arc<rustls::Client
         .lock()
         .get_or_insert_with(HashMap::new)
         .insert(nh, Arc::new(Mutex::new(StreamOwned::new(conn, sock))));
-    super::result::gos_rt_result_new(0, nh)
+    super::result::gos_rt_result_new(0, key_handle(nh, retire_stream))
 }
 
 /// Client config that accepts any server certificate (PostgreSQL
@@ -491,12 +533,12 @@ pub unsafe extern "C" fn gos_rt_tcp_listener_bind(addr: *const c_char) -> i128 {
         let a = unsafe { cstr_to_str(addr) };
         match crate::listen::bind_tcp(&a) {
             Ok(l) => {
-                let h = next_handle();
+                let id = next_handle();
                 TCP_LISTENERS
                     .lock()
                     .get_or_insert_with(HashMap::new)
-                    .insert(h, Arc::new(l));
-                super::result::gos_rt_result_new(0, h)
+                    .insert(id, Arc::new(l));
+                super::result::gos_rt_result_new(0, key_handle(id, retire_listener))
             }
             Err(e) => tcp_err(&socket_error(&e, &a)),
         }
@@ -523,15 +565,10 @@ pub extern "C" fn gos_rt_tcp_listener_accept(h: i64) -> i128 {
                 let _ = stream.set_nodelay(true);
                 let sh = insert_stream(stream);
                 let addr_cs = super::string::alloc_cstring(peer.to_string().as_bytes());
-                #[repr(C)]
-                struct Pair {
-                    stream: i64,
-                    addr: i64,
+                let pair = super::rc::counted_words(&[sh, addr_cs as i64], &ACCEPTED_PAIR_META);
+                if pair.is_null() {
+                    return tcp_err("TcpListener::accept: allocation failed");
                 }
-                let pair = Box::into_raw(Box::new(Pair {
-                    stream: sh,
-                    addr: addr_cs as i64,
-                }));
                 super::result::gos_rt_result_new(0, pair as i64)
             }
             Err(e) => tcp_err(&socket_error(&e, "accept")),
@@ -560,9 +597,7 @@ pub extern "C" fn gos_rt_tcp_listener_local_addr(h: i64) -> i128 {
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_tcp_listener_close(h: i64) {
     ffi_entry!((), {
-        if let Some(m) = TCP_LISTENERS.lock().as_mut() {
-            m.remove(&h);
-        }
+        retire_listener(key_id(h));
     });
 }
 
@@ -872,12 +907,7 @@ pub unsafe extern "C" fn gos_rt_tcp_stream_clear_write_timeout(h: i64) -> i128 {
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_tcp_stream_close(h: i64) {
     ffi_entry!((), {
-        if let Some(m) = TCP_STREAMS.lock().as_mut() {
-            m.remove(&h);
-        }
-        if let Some(m) = TLS_STREAMS.lock().as_mut() {
-            m.remove(&h);
-        }
+        retire_stream(key_id(h));
     });
 }
 

@@ -69,24 +69,35 @@ fn ws_err(msg: &str) -> i128 {
 }
 
 fn conn_clone(h: i64) -> Option<WsConn> {
-    WS_CONNS.lock().as_ref().and_then(|m| m.get(&h).cloned())
+    let id = super::registry_key::key_id(h);
+    WS_CONNS.lock().as_ref().and_then(|m| m.get(&id).cloned())
 }
 
+/// Removes the connection registered under `id`; its socket closes once no
+/// call is still working on it.
+fn retire_conn(id: i64) {
+    if let Some(m) = WS_CONNS.lock().as_mut() {
+        m.remove(&id);
+    }
+}
+
+/// Registers `ws` and answers a handle owning the entry.
 fn register_conn(ws: WebSocket<WsStream>) -> i64 {
-    let h = next_handle();
+    let id = next_handle();
     WS_CONNS
         .lock()
         .get_or_insert_with(HashMap::new)
-        .insert(h, Arc::new(Mutex::new(ws)));
-    h
+        .insert(id, Arc::new(Mutex::new(ws)));
+    super::registry_key::key_handle(id, retire_conn)
 }
 
 /// Wraps an accepted socket: completes the server handshake, registers
 /// the connection, and dispatches the user handler `handler(env, handle)`
-/// (a `fn handle(&self, ws: i64)` Gossamer method). The handler drives the
-/// blocking recv/send loop and returns to close; the handle is then
-/// unregistered. A handshake failure drops the socket without invoking
-/// the handler.
+/// (a `fn handle(&self, ws: websocket::Conn)` Gossamer method), which
+/// borrows the handle. The handler drives the blocking recv/send loop and
+/// returns; the serve loop then gives back its share, closing the connection
+/// unless the handler kept the handle. A handshake failure drops the socket
+/// without invoking the handler.
 ///
 /// # Safety
 ///
@@ -99,16 +110,19 @@ unsafe fn serve_ws_conn(mut stream: TcpStream, env_addr: usize, fn_addr: usize) 
     let handle = register_conn(WebSocket::server(stream));
     // `fn_addr` came from `gos_fn_addr("T::handle")` at the user's
     // `websocket::serve(addr, app)` call site; `env_addr` is the `&app`
-    // pointer passed alongside. A `fn handle(&self, ws: i64)` Gossamer
-    // method lowers to a `void(ptr, i64)` C-ABI function.
+    // pointer passed alongside. A `fn handle(&self, ws: websocket::Conn)`
+    // Gossamer method lowers to a `void(ptr, i64)` C-ABI function.
     type WsHandlerFn = unsafe extern "C-unwind" fn(env: *mut u8, ws: i64);
     // SAFETY: this function's contract makes `fn_addr` a compiled
     // `fn(env, ws)` method.
     let handler: WsHandlerFn = unsafe { std::mem::transmute::<usize, WsHandlerFn>(fn_addr) };
     // SAFETY: this function's contract keeps `env_addr` live for the call.
     unsafe { handler(env_addr as *mut u8, handle) };
-    if let Some(m) = WS_CONNS.lock().as_mut() {
-        m.remove(&handle);
+    if handle != 0 {
+        // SAFETY: `register_conn` gave this loop the handle's one share.
+        unsafe {
+            super::rc::gos_rt_rc_release(std::ptr::with_exposed_provenance_mut(handle as usize));
+        }
     }
 }
 
@@ -253,9 +267,7 @@ pub extern "C" fn gos_rt_ws_close(h: i64) -> i128 {
         if let Some(conn) = conn_clone(h) {
             let _ = conn.lock().send_close(1000, "");
         }
-        if let Some(m) = WS_CONNS.lock().as_mut() {
-            m.remove(&h);
-        }
+        retire_conn(super::registry_key::key_id(h));
         super::result::gos_rt_result_new(0, 0)
     })
 }

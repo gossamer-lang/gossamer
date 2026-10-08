@@ -408,7 +408,7 @@ struct Part(usize);
 /// # Safety
 ///
 /// `env` must be a live closure environment whose first word is a leaf body
-/// of the [`LeafFn`] shape, and every leaf must answer an owned `Vec` of one
+/// of the `LeafFn` shape, and every leaf must answer an owned `Vec` of one
 /// element layout.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_par_run(env: *const u8, len: i64, mode: i64) -> *mut GosVec {
@@ -508,7 +508,7 @@ impl Drop for ChunkWindow {
 /// # Safety
 ///
 /// `env` must be a live closure environment whose first word is a callback of
-/// the [`ChunkFn`] shape, and `seq` a live `Vec` nothing else reaches while
+/// the `ChunkFn` shape, and `seq` a live `Vec` nothing else reaches while
 /// the call runs.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_par_chunks(env: *const u8, seq: *mut GosVec, size: i64) {

@@ -1,7 +1,9 @@
 //! VM hooks for the legacy builder-style `flag::Set` API
 //! exercised by `examples/cli_args.gos` and `examples/grep.gos`.
-//! Backed by a thread-local cell registry so `Set::parse` can
-//! mutate values that are later read via `*cell` (deref).
+//! A `Set` handle holds its flags, and each flag's cell is shared by the
+//! set and the `__Cell` value its registration answers, so `Set::parse`
+//! writes values that are later read via `*cell` (deref), on whichever
+//! thread either runs.
 //!
 //! Kept as its own module so `builtins.rs` stays under the
 //! 2000-line hard limit defined in `GUIDELINES.md`.
@@ -12,60 +14,30 @@
 use std::sync::Arc;
 
 use crate::builtins::{
-    CELL_REGISTRY, FlagDef, FlagKind, NEXT_SET_ID, SET_REGISTRY, SetState, as_str, make_cell,
-    ok_variant, program_args, value_to_int,
+    FlagDef, FlagKind, SetState, as_str, make_cell, new_set, ok_variant, program_args, set_of,
+    value_to_int,
 };
 use crate::value::{RuntimeError, RuntimeResult, SmolStr, Value};
 
 pub(crate) fn builtin_flag_set_new(args: &[Value]) -> RuntimeResult<Value> {
-    let _name = args.first().and_then(as_str).unwrap_or("");
-    let id = NEXT_SET_ID.with(|cell| {
-        let mut v = cell.borrow_mut();
-        let id = *v;
-        *v += 1;
-        id
-    });
     let set_name = args.first().and_then(as_str).unwrap_or("").to_string();
-    SET_REGISTRY.with(|reg| {
-        reg.borrow_mut().insert(
-            id,
-            SetState {
-                name: set_name,
-                flag_order: Vec::new(),
-                last_flag: None,
-                flags: std::collections::HashMap::new(),
-            },
-        );
-    });
-    Ok(Value::struct_("Set", vec![("__id", Value::Int(id as i64))]))
-}
-
-fn set_id_from_value(value: &Value) -> Option<u64> {
-    match value {
-        Value::Struct(inner) if inner.name == "Set" => inner
-            .fields
-            .iter()
-            .find(|(ident, _)| (**ident) == "__id")
-            .and_then(|(_, v)| match v {
-                Value::Int(n) => Some(*n as u64),
-                _ => None,
-            }),
-        _ => None,
-    }
+    Ok(new_set(set_name))
 }
 
 pub(crate) fn builtin_flag_set_string(args: &[Value]) -> RuntimeResult<Value> {
     let Some(set) = args.first() else {
         return Ok(Value::Unit);
     };
-    let Some(id) = set_id_from_value(set) else {
+    let Some(shared) = set_of(set) else {
         return Ok(Value::Unit);
     };
     let flag_name = args.get(1).and_then(as_str).unwrap_or("");
     let default = args.get(2).and_then(as_str).unwrap_or("").to_string();
     let help_text = args.get(3).and_then(as_str).unwrap_or("");
-    SET_REGISTRY.with(|reg| {
-        if let Some(state) = reg.borrow_mut().get_mut(&id) {
+    let mut guard = shared.lock();
+    let state = &mut *guard;
+    {
+        {
             state.last_flag = Some(flag_name.to_string());
             state.flag_order.retain(|n| n != flag_name);
             state.flag_order.push(flag_name.to_string());
@@ -79,22 +51,24 @@ pub(crate) fn builtin_flag_set_string(args: &[Value]) -> RuntimeResult<Value> {
                 },
             );
         }
-    });
-    Ok(make_cell(id, flag_name, Value::String(default.into())))
+    }
+    Ok(make_cell(state, flag_name, Value::String(default.into())))
 }
 
 pub(crate) fn builtin_flag_set_int(args: &[Value]) -> RuntimeResult<Value> {
     let Some(set) = args.first() else {
         return Ok(Value::Unit);
     };
-    let Some(id) = set_id_from_value(set) else {
+    let Some(shared) = set_of(set) else {
         return Ok(Value::Unit);
     };
     let flag_name = args.get(1).and_then(as_str).unwrap_or("");
     let default = args.get(2).and_then(value_to_int).unwrap_or(0);
     let help_text = args.get(3).and_then(as_str).unwrap_or("");
-    SET_REGISTRY.with(|reg| {
-        if let Some(state) = reg.borrow_mut().get_mut(&id) {
+    let mut guard = shared.lock();
+    let state = &mut *guard;
+    {
+        {
             state.last_flag = Some(flag_name.to_string());
             state.flag_order.retain(|n| n != flag_name);
             state.flag_order.push(flag_name.to_string());
@@ -108,15 +82,15 @@ pub(crate) fn builtin_flag_set_int(args: &[Value]) -> RuntimeResult<Value> {
                 },
             );
         }
-    });
-    Ok(make_cell(id, flag_name, Value::Int(default)))
+    }
+    Ok(make_cell(state, flag_name, Value::Int(default)))
 }
 
 pub(crate) fn builtin_flag_set_uint(args: &[Value]) -> RuntimeResult<Value> {
     let Some(set) = args.first() else {
         return Ok(Value::Unit);
     };
-    let Some(id) = set_id_from_value(set) else {
+    let Some(shared) = set_of(set) else {
         return Ok(Value::Unit);
     };
     let flag_name = args.get(1).and_then(as_str).unwrap_or("");
@@ -126,8 +100,10 @@ pub(crate) fn builtin_flag_set_uint(args: &[Value]) -> RuntimeResult<Value> {
         .and_then(|n| if n >= 0 { Some(n as u64) } else { None })
         .unwrap_or(0);
     let help_text = args.get(3).and_then(as_str).unwrap_or("");
-    SET_REGISTRY.with(|reg| {
-        if let Some(state) = reg.borrow_mut().get_mut(&id) {
+    let mut guard = shared.lock();
+    let state = &mut *guard;
+    {
+        {
             state.last_flag = Some(flag_name.to_string());
             state.flag_order.retain(|n| n != flag_name);
             state.flag_order.push(flag_name.to_string());
@@ -141,15 +117,15 @@ pub(crate) fn builtin_flag_set_uint(args: &[Value]) -> RuntimeResult<Value> {
                 },
             );
         }
-    });
-    Ok(make_cell(id, flag_name, Value::Int(default as i64)))
+    }
+    Ok(make_cell(state, flag_name, Value::Int(default as i64)))
 }
 
 pub(crate) fn builtin_flag_set_float(args: &[Value]) -> RuntimeResult<Value> {
     let Some(set) = args.first() else {
         return Ok(Value::Unit);
     };
-    let Some(id) = set_id_from_value(set) else {
+    let Some(shared) = set_of(set) else {
         return Ok(Value::Unit);
     };
     let flag_name = args.get(1).and_then(as_str).unwrap_or("");
@@ -159,8 +135,10 @@ pub(crate) fn builtin_flag_set_float(args: &[Value]) -> RuntimeResult<Value> {
         _ => 0.0,
     };
     let help_text = args.get(3).and_then(as_str).unwrap_or("");
-    SET_REGISTRY.with(|reg| {
-        if let Some(state) = reg.borrow_mut().get_mut(&id) {
+    let mut guard = shared.lock();
+    let state = &mut *guard;
+    {
+        {
             state.last_flag = Some(flag_name.to_string());
             state.flag_order.retain(|n| n != flag_name);
             state.flag_order.push(flag_name.to_string());
@@ -174,8 +152,8 @@ pub(crate) fn builtin_flag_set_float(args: &[Value]) -> RuntimeResult<Value> {
                 },
             );
         }
-    });
-    Ok(make_cell(id, flag_name, Value::Float(default)))
+    }
+    Ok(make_cell(state, flag_name, Value::Float(default)))
 }
 
 /// Duration cell - a `time::Duration` is a count of nanoseconds, so
@@ -185,14 +163,16 @@ pub(crate) fn builtin_flag_set_duration(args: &[Value]) -> RuntimeResult<Value> 
     let Some(set) = args.first() else {
         return Ok(Value::Unit);
     };
-    let Some(id) = set_id_from_value(set) else {
+    let Some(shared) = set_of(set) else {
         return Ok(Value::Unit);
     };
     let flag_name = args.get(1).and_then(as_str).unwrap_or("");
     let default = args.get(2).and_then(value_to_int).unwrap_or(0);
     let help_text = args.get(3).and_then(as_str).unwrap_or("");
-    SET_REGISTRY.with(|reg| {
-        if let Some(state) = reg.borrow_mut().get_mut(&id) {
+    let mut guard = shared.lock();
+    let state = &mut *guard;
+    {
+        {
             state.last_flag = Some(flag_name.to_string());
             state.flag_order.retain(|n| n != flag_name);
             state.flag_order.push(flag_name.to_string());
@@ -206,21 +186,23 @@ pub(crate) fn builtin_flag_set_duration(args: &[Value]) -> RuntimeResult<Value> 
                 },
             );
         }
-    });
-    Ok(make_cell(id, flag_name, Value::Int(default)))
+    }
+    Ok(make_cell(state, flag_name, Value::Int(default)))
 }
 
 pub(crate) fn builtin_flag_set_string_list(args: &[Value]) -> RuntimeResult<Value> {
     let Some(set) = args.first() else {
         return Ok(Value::Unit);
     };
-    let Some(id) = set_id_from_value(set) else {
+    let Some(shared) = set_of(set) else {
         return Ok(Value::Unit);
     };
     let flag_name = args.get(1).and_then(as_str).unwrap_or("");
     let help_text = args.get(2).and_then(as_str).unwrap_or("");
-    SET_REGISTRY.with(|reg| {
-        if let Some(state) = reg.borrow_mut().get_mut(&id) {
+    let mut guard = shared.lock();
+    let state = &mut *guard;
+    {
+        {
             state.last_flag = Some(flag_name.to_string());
             state.flag_order.retain(|n| n != flag_name);
             state.flag_order.push(flag_name.to_string());
@@ -234,8 +216,12 @@ pub(crate) fn builtin_flag_set_string_list(args: &[Value]) -> RuntimeResult<Valu
                 },
             );
         }
-    });
-    Ok(make_cell(id, flag_name, Value::Array(Arc::new(Vec::new()))))
+    }
+    Ok(make_cell(
+        state,
+        flag_name,
+        Value::Array(Arc::new(Vec::new())),
+    ))
 }
 
 pub(crate) fn builtin_flag_set_usage(args: &[Value]) -> RuntimeResult<Value> {
@@ -243,13 +229,10 @@ pub(crate) fn builtin_flag_set_usage(args: &[Value]) -> RuntimeResult<Value> {
     let Some(set) = args.first() else {
         return Ok(Value::String(SmolStr::from(String::new())));
     };
-    let Some(id) = set_id_from_value(set) else {
+    let Some(shared) = set_of(set) else {
         return Ok(Value::String(SmolStr::from(String::new())));
     };
-    let state = SET_REGISTRY.with(|reg| reg.borrow().get(&id).cloned());
-    let Some(state) = state else {
-        return Ok(Value::String(SmolStr::from(String::new())));
-    };
+    let state = shared.lock().clone();
     let mut out = format!(
         "usage: {} [FLAGS] [POSITIONAL]\n\nflags:\n",
         if state.name.is_empty() {
@@ -275,7 +258,7 @@ pub(crate) fn builtin_flag_set_bool(args: &[Value]) -> RuntimeResult<Value> {
     let Some(set) = args.first() else {
         return Ok(Value::Unit);
     };
-    let Some(id) = set_id_from_value(set) else {
+    let Some(shared) = set_of(set) else {
         return Ok(Value::Unit);
     };
     let flag_name = args.get(1).and_then(as_str).unwrap_or("");
@@ -284,8 +267,10 @@ pub(crate) fn builtin_flag_set_bool(args: &[Value]) -> RuntimeResult<Value> {
         _ => false,
     };
     let help_text = args.get(3).and_then(as_str).unwrap_or("");
-    SET_REGISTRY.with(|reg| {
-        if let Some(state) = reg.borrow_mut().get_mut(&id) {
+    let mut guard = shared.lock();
+    let state = &mut *guard;
+    {
+        {
             state.last_flag = Some(flag_name.to_string());
             state.flag_order.retain(|n| n != flag_name);
             state.flag_order.push(flag_name.to_string());
@@ -299,33 +284,27 @@ pub(crate) fn builtin_flag_set_bool(args: &[Value]) -> RuntimeResult<Value> {
                 },
             );
         }
-    });
-    Ok(make_cell(id, flag_name, Value::Bool(default)))
+    }
+    Ok(make_cell(state, flag_name, Value::Bool(default)))
 }
 
 pub(crate) fn builtin_flag_set_short(args: &[Value]) -> RuntimeResult<Value> {
     let Some(set) = args.first() else {
         return Ok(Value::Unit);
     };
-    let Some(id) = set_id_from_value(set) else {
+    let Some(shared) = set_of(set) else {
         return Ok(Value::Unit);
     };
     let letter = match args.get(1) {
         Some(Value::Char(c)) => *c,
         _ => return Ok(Value::Unit),
     };
-    SET_REGISTRY.with(|reg| {
-        let mut reg = reg.borrow_mut();
-        let Some(state) = reg.get_mut(&id) else {
-            return;
-        };
-        let Some(last) = state.last_flag.clone() else {
-            return;
-        };
-        if let Some(def) = state.flags.get_mut(&last) {
-            def.short = Some(letter);
-        }
-    });
+    let mut state = shared.lock();
+    if let Some(last) = state.last_flag.clone()
+        && let Some(def) = state.flags.get_mut(&last)
+    {
+        def.short = Some(letter);
+    }
     Ok(Value::Unit)
 }
 
@@ -333,7 +312,7 @@ pub(crate) fn builtin_flag_set_parse(args: &[Value]) -> RuntimeResult<Value> {
     let Some(set) = args.first() else {
         return Ok(ok_variant(Value::empty_array()));
     };
-    let Some(id) = set_id_from_value(set) else {
+    let Some(shared) = set_of(set) else {
         return Ok(ok_variant(Value::empty_array()));
     };
     let program_args: Vec<String> = match args.get(1) {
@@ -346,10 +325,7 @@ pub(crate) fn builtin_flag_set_parse(args: &[Value]) -> RuntimeResult<Value> {
             .collect(),
         _ => program_args(),
     };
-    let state = SET_REGISTRY.with(|reg| reg.borrow().get(&id).cloned());
-    let Some(state) = state else {
-        return Ok(ok_variant(Value::empty_array()));
-    };
+    let state = shared.lock().clone();
 
     // Auto-generated `--help` / `-h`. Prints a usage line, the
     // registered flag table, and exits the process with status 0 so
@@ -373,7 +349,7 @@ pub(crate) fn builtin_flag_set_parse(args: &[Value]) -> RuntimeResult<Value> {
             break;
         }
         if let Some(rest) = arg.strip_prefix("--") {
-            idx += parse_long_flag(id, rest, &program_args, idx, &state);
+            idx += parse_long_flag(rest, &program_args, idx, &state);
             continue;
         }
         if let Some(rest) = arg.strip_prefix('-') {
@@ -382,7 +358,7 @@ pub(crate) fn builtin_flag_set_parse(args: &[Value]) -> RuntimeResult<Value> {
                 idx += 1;
                 continue;
             }
-            idx += parse_short_flag(id, rest, &program_args, idx, &state);
+            idx += parse_short_flag(rest, &program_args, idx, &state);
             continue;
         }
         positional.push(Value::String(SmolStr::from(arg.clone())));
@@ -446,13 +422,7 @@ fn print_flag_help(state: &SetState) {
     );
 }
 
-fn parse_long_flag(
-    set_id: u64,
-    rest: &str,
-    program_args: &[String],
-    idx: usize,
-    state: &SetState,
-) -> usize {
+fn parse_long_flag(rest: &str, program_args: &[String], idx: usize, state: &SetState) -> usize {
     let (name, explicit) = match rest.split_once('=') {
         Some((n, v)) => (n.to_string(), Some(v.to_string())),
         None => (rest.to_string(), None),
@@ -470,21 +440,13 @@ fn parse_long_flag(
         };
         (set_parse_value(def, next), 1)
     };
-    CELL_REGISTRY.with(|reg| {
-        if let Some(cell) = reg.borrow().get(&(set_id, name.clone())) {
-            store_or_append_cell(cell, &def.kind, parsed);
-        }
-    });
+    if let Some(cell) = state.cells.get(&name) {
+        store_or_append_cell(cell, &def.kind, parsed);
+    }
     1 + consumed
 }
 
-fn parse_short_flag(
-    set_id: u64,
-    rest: &str,
-    program_args: &[String],
-    idx: usize,
-    state: &SetState,
-) -> usize {
+fn parse_short_flag(rest: &str, program_args: &[String], idx: usize, state: &SetState) -> usize {
     let mut chars = rest.chars();
     let first = chars.next().unwrap();
     let remainder = chars.as_str();
@@ -507,11 +469,9 @@ fn parse_short_flag(
         };
         (set_parse_value(def, next), 1)
     };
-    CELL_REGISTRY.with(|reg| {
-        if let Some(cell) = reg.borrow().get(&(set_id, flag_name.clone())) {
-            store_or_append_cell(cell, &def.kind, parsed);
-        }
-    });
+    if let Some(cell) = state.cells.get(&flag_name) {
+        store_or_append_cell(cell, &def.kind, parsed);
+    }
     1 + consumed
 }
 

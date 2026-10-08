@@ -241,11 +241,21 @@ const TRACE_ENDED_SPAN_OFFSET: u32 = 60;
 /// Sentinel offset of the `U8Vec` byte buffer, which predates the bands.
 const U8_VEC_OFFSET: u32 = 20;
 
+/// Sentinel offset of `http::FileServer`, a pure handle the full pure band
+/// had no room left for.
+const FILE_SERVER_OFFSET: u32 = 61;
+
+/// Sentinel offset of `http::websocket::Conn`, an open WebSocket connection.
+pub(crate) const WEBSOCKET_CONN_OFFSET: u32 = 62;
+
+/// Sentinel offset of `bytes::Buffer`, apart from `regex::Pattern`'s 26.
+pub(crate) const BYTES_BUFFER_OFFSET: u32 = 63;
+
 /// Widest sentinel offset any stdlib handle occupies, the handle bands and
 /// the pre-band handles alike. A receiver inside this span whose display name
 /// is module-qualified answers a closed method table, which is what lets an
 /// unknown name on one be named at the call site.
-pub(crate) const HANDLE_SENTINEL_SPAN: u32 = TRACE_ENDED_SPAN_OFFSET;
+pub(crate) const HANDLE_SENTINEL_SPAN: u32 = BYTES_BUFFER_OFFSET;
 
 /// One constructor of a runtime handle: the module path it is written
 /// under, and the associated function's name.
@@ -295,8 +305,15 @@ const PURE_HANDLES: &[HandleRow] = &[
     (44, "fs::File", &[]),
     (45, "fs::OpenOptions", &[(&["fs", "OpenOptions"], "new")]),
     (46, "sync::Shared", &[(&["sync", "Shared"], "new")]),
+    // The byte buffers are typed at their constructors by `bytes_handle_ty`;
+    // the rows give a written `bytes::Buffer` parameter the same type.
+    (BYTES_BUFFER_OFFSET, "bytes::Buffer", &[]),
+    (27, "bytes::Builder", &[]),
+    // `websocket::connect` answers its connection through a `Result`, and
+    // `serve` hands one to the handler, so neither is a bare constructor.
+    (WEBSOCKET_CONN_OFFSET, "http::websocket::Conn", &[]),
     (
-        46,
+        FILE_SERVER_OFFSET,
         "http::FileServer",
         &[
             (&["static_files", "FileServer"], "new"),
@@ -647,6 +664,7 @@ struct DeferredStructural {
 }
 
 struct DeferredMutatingReceiver {
+    receiver: NodeId,
     ty: Ty,
     method: String,
     place: PlaceMut,
@@ -1087,6 +1105,10 @@ struct TypeChecker<'a> {
     /// the compiled tier needs so the nested byte arrays become heap
     /// Vecs instead of fixed inline arrays.
     write_arg_bindings: HashMap<NodeId, Ty>,
+    /// Each named parameter's binding, with its name and the span of the
+    /// type it was declared with, so a diagnostic about the parameter can
+    /// rewrite its declaration.
+    param_type_spans: HashMap<NodeId, (String, Span)>,
     /// Path-expression nodes sitting in a callee position (a call's
     /// callee, or the rhs of `|>`). A bare std-module path there is a
     /// normal stdlib call shape; everywhere else it is a std fn used
@@ -1365,6 +1387,7 @@ impl<'a> TypeChecker<'a> {
             current_const_generic_scope: HashMap::new(),
             declared_trait_names: std::collections::HashSet::new(),
             write_arg_bindings: HashMap::new(),
+            param_type_spans: HashMap::new(),
             callee_path_nodes: std::collections::HashSet::new(),
             import_targets: HashMap::new(),
             user_type_decls: std::collections::HashSet::new(),
@@ -1738,6 +1761,64 @@ impl<'a> TypeChecker<'a> {
     /// trait). A still-unresolved parameter or a non-named type is left
     /// for argument unification to report; only a concrete type with a
     /// definitely-missing impl is flagged.
+    /// Reports a descriptor read off a file, `f.fd()` (or `f.fd()?`,
+    /// `f.fd().unwrap()`), passed to a call bounded by `os::fd::Descriptor`,
+    /// which takes the file itself so it stays open while the call uses it.
+    fn check_descriptor_arguments(&mut self, def: gossamer_resolve::DefId, args: &[Expr]) {
+        let takes_descriptor = self.fn_param_bounds.get(&def).is_some_and(|bounds| {
+            bounds
+                .iter()
+                .flatten()
+                .any(|bound| bound == "__gos_fd_Descriptor")
+        });
+        if !takes_descriptor {
+            return;
+        }
+        for arg in args {
+            let mut inner = arg;
+            loop {
+                match &inner.kind {
+                    ExprKind::Try(operand) => inner = operand,
+                    ExprKind::MethodCall {
+                        receiver,
+                        name,
+                        args,
+                        ..
+                    } if args.is_empty() && matches!(name.name.as_str(), "unwrap") => {
+                        inner = receiver;
+                    }
+                    _ => break,
+                }
+            }
+            let ExprKind::MethodCall {
+                receiver,
+                name,
+                args: fd_args,
+                ..
+            } = &inner.kind
+            else {
+                continue;
+            };
+            if name.name != "fd" || !fd_args.is_empty() {
+                continue;
+            }
+            let is_file = self
+                .table
+                .get(receiver.id)
+                .map(|ty| self.infer.resolve(self.tcx, ty))
+                .and_then(|ty| self.concrete_type_name(ty))
+                .is_some_and(|name| name == "fs::File");
+            if is_file {
+                self.emit(
+                    TypeError::DescriptorReadOffFile {
+                        file: Self::place_display(receiver),
+                    },
+                    arg.span,
+                );
+            }
+        }
+    }
+
     fn check_trait_bounds(&mut self, def: gossamer_resolve::DefId, vars: &[Ty], span: Span) {
         // `S: Source<Out = T>` decides `T` from the argument `S` names: the
         // concrete type's impl says what its `Out` is.
@@ -4872,6 +4953,7 @@ fn known_builtin_trait(name: &str) -> bool {
 /// `stdlib_export_drift`.
 pub const STDLIB_TRAIT_NAMES: &[&str] = &[
     "Debug",
+    "Descriptor",
     "Deserialize",
     "Display",
     "Driver",

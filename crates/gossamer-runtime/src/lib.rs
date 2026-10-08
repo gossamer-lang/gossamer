@@ -190,7 +190,7 @@ fn configured_purge_delay() -> std::os::raw::c_long {
 /// Configures the process allocator for a predictable memory footprint.
 ///
 /// Keeps mimalloc's own purge delay, for the reason
-/// [`configured_purge_delay`] gives. Set `GOS_ALLOC_PURGE_DELAY=0` to opt
+/// `configured_purge_delay` gives. Set `GOS_ALLOC_PURGE_DELAY=0` to opt
 /// into immediate return-to-OS behavior, or another millisecond value to
 /// tune batching.
 ///
@@ -347,6 +347,9 @@ pub mod smtp;
 // A wasm build has no threads to run blocking operations on.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod blocking_pool;
+#[cfg(target_arch = "wasm32")]
+#[path = "blocking_pool_wasm.rs"]
+pub mod blocking_pool;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod sched_global;
 #[cfg(target_arch = "wasm32")]
@@ -359,6 +362,7 @@ pub mod sql_pool;
 pub mod stack_guard;
 pub mod symbols;
 pub mod value;
+pub mod wake;
 pub mod yaml_node;
 
 // `http2_server` pulls h2 / tokio, which have no wasm32 build; the wasm VM

@@ -15,8 +15,9 @@
 // - formatting: `formatting`
 
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufReader, BufWriter, Read, Write};
+use std::rc::Rc;
 
 use gossamer_diagnostics::{Diagnostic as GossamerDiagnostic, Severity};
 use gossamer_lex::Span;
@@ -26,9 +27,14 @@ use gossamer_types::{render_public_ty, render_ty};
 
 use crate::inlay::{InlayHint, collect_inlays};
 use crate::navigation::{BindingInfo, DefinitionInfo, Locate, attach_resolution, locate};
-use crate::protocol::{Transport, field, field_str, field_u32, notification, response_ok};
+use crate::protocol::{
+    REQUEST_CANCELLED, Transport, field, field_str, field_u32, notification, response_error,
+    response_ok,
+};
 use crate::semantic_tokens::{TOKEN_MODIFIERS, TOKEN_TYPES, full_tokens};
-use crate::session::{CursorContext, DocumentAnalysis, UnitCache, analyse_with};
+use crate::session::{
+    CursorContext, DocumentAnalysis, OpenBuffers, UnitCache, analyse_with, sibling_view,
+};
 use crate::stdlib_index::{MemberSpec, StdlibIndex};
 use crate::symbols::{document_symbols, folding_ranges, workspace_symbols};
 use crate::workspace_index::{
@@ -44,36 +50,63 @@ use crate::workspace_index::{
 fn run<R: Read, W: Write>(reader: R, writer: W) -> std::io::Result<()> {
     let mut transport = Transport::new(BufReader::new(reader), BufWriter::new(writer));
     let mut state = ServerState::new();
+    // Edited text not yet analysed. Edits that arrive together are applied
+    // as text and analysed once, when no more input is waiting or before
+    // anything else is answered, so a burst of keystrokes costs one
+    // analysis rather than one per keystroke.
+    let mut edited: BTreeMap<String, String> = BTreeMap::new();
+    // Messages already read and not yet handled. Everything that has
+    // arrived is read before the next one is handled, so a cancellation
+    // reaches the request it names while that request is still waiting.
+    let mut queued: VecDeque<Value> = VecDeque::new();
 
     loop {
-        let Some(message) = transport.read_message()? else {
-            return Ok(());
+        if queued.is_empty() {
+            if !edited.is_empty() && !transport.has_buffered_input() {
+                flush_edits(&mut state, &mut edited, &mut transport)?;
+            }
+            let Some(message) = transport.read_message()? else {
+                return Ok(());
+            };
+            queue_message(message, &mut queued, &mut transport)?;
+        }
+        while transport.has_buffered_input() {
+            let Some(message) = transport.read_message()? else {
+                break;
+            };
+            queue_message(message, &mut queued, &mut transport)?;
+        }
+        let Some(message) = queued.pop_front() else {
+            continue;
         };
         let Some(method) = field_str(&message, "method") else {
             continue;
         };
         let id = field(&message, "id").clone();
         let params = field(&message, "params").clone();
+        if method == "textDocument/didChange" {
+            if let Some(uri) = field_str(field(&params, "textDocument"), "uri")
+                && let Some(text) =
+                    state.edited_text(uri, field(&params, "contentChanges"), &edited)
+            {
+                edited.insert(uri.to_string(), text);
+            }
+            continue;
+        }
+        flush_edits(&mut state, &mut edited, &mut transport)?;
 
         match method {
             "initialize" => {
                 state.discover_workspace_roots(&params);
                 transport.write_message(&response_ok(id, initialize_result()))?;
             }
-            "initialized" | "$/cancelRequest" => {}
+            "initialized" => {}
             "textDocument/didOpen" => {
                 if let Some((uri, text)) = extract_did_open(&params) {
-                    state.update(&uri, &text);
-                    for notif in state.publish_diagnostics(&uri) {
-                        transport.write_message(&notif)?;
-                    }
-                }
-            }
-            "textDocument/didChange" => {
-                if let Some(uri) = field_str(field(&params, "textDocument"), "uri") {
-                    state.apply_did_change(uri, field(&params, "contentChanges"));
-                    for notif in state.publish_diagnostics(uri) {
-                        transport.write_message(&notif)?;
+                    for affected in state.update(&uri, &text) {
+                        for notif in state.publish_diagnostics(&affected) {
+                            transport.write_message(&notif)?;
+                        }
                     }
                 }
             }
@@ -338,6 +371,69 @@ fn text_position_to_offset(source: &str, line: u32, column: u32) -> Option<usize
     (utf16_column == column).then_some(line_start + line_text.len())
 }
 
+/// Queues `message`, or, for a `$/cancelRequest`, answers the queued request
+/// it names with `RequestCancelled` and drops it, so a request the client no
+/// longer wants costs no analysis. A cancellation for a request already
+/// answered, or never sent, has nothing left to do.
+fn queue_message<R: Read, W: Write>(
+    message: Value,
+    queued: &mut VecDeque<Value>,
+    transport: &mut Transport<BufReader<R>, BufWriter<W>>,
+) -> std::io::Result<()> {
+    if field_str(&message, "method") != Some("$/cancelRequest") {
+        queued.push_back(message);
+        return Ok(());
+    }
+    let target = field(field(&message, "params"), "id");
+    let Some(at) = queued.iter().position(|waiting| {
+        field_str(waiting, "method").is_some() && same_request_id(field(waiting, "id"), target)
+    }) else {
+        return Ok(());
+    };
+    if let Some(cancelled) = queued.remove(at) {
+        let id = field(&cancelled, "id").clone();
+        transport.write_message(&response_error(id, REQUEST_CANCELLED, "request cancelled"))?;
+    }
+    Ok(())
+}
+
+/// Whether two JSON-RPC ids name the same request. An id is an integer or a
+/// string, and a parsed integer may arrive in either of the parser's number
+/// forms.
+fn same_request_id(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Null, _) | (_, Value::Null) => false,
+        (Value::String(x), Value::String(y)) => x == y,
+        _ => match (gossamer_std::json::as_i64(a), gossamer_std::json::as_i64(b)) {
+            (Some(x), Some(y)) => x == y,
+            _ => false,
+        },
+    }
+}
+
+/// Analyses every edited document and publishes the diagnostics of each
+/// document the analyses changed.
+fn flush_edits<R: Read, W: Write>(
+    state: &mut ServerState,
+    edited: &mut BTreeMap<String, String>,
+    transport: &mut Transport<BufReader<R>, BufWriter<W>>,
+) -> std::io::Result<()> {
+    let mut affected: Vec<String> = Vec::new();
+    for (uri, text) in std::mem::take(edited) {
+        for doc in state.update(&uri, &text) {
+            if !affected.contains(&doc) {
+                affected.push(doc);
+            }
+        }
+    }
+    for uri in affected {
+        for notif in state.publish_diagnostics(&uri) {
+            transport.write_message(&notif)?;
+        }
+    }
+    Ok(())
+}
+
 struct ServerState {
     documents: HashMap<String, DocumentAnalysis>,
     /// Analysed compilation units, shared by every open document of the
@@ -357,25 +453,61 @@ impl ServerState {
         }
     }
 
-    fn update(&mut self, uri: &str, text: &str) {
-        let analysis = analyse_with(uri, text, &mut self.units);
+    /// Re-analyses `uri` with `text`, then every other document of the
+    /// package it belongs to, so each one sees the package as the editor
+    /// now holds it. Answers the documents whose analysis changed.
+    fn update(&mut self, uri: &str, text: &str) -> Vec<String> {
+        let mut open: OpenBuffers = self
+            .documents
+            .iter()
+            .map(|(doc_uri, doc)| (doc_uri.clone(), doc.user_source().to_string()))
+            .collect();
+        open.insert(uri.to_string(), text.to_string());
+        let analysis = analyse_with(uri, text, &mut self.units, &open);
+        let unit_name = analysis.unit.name.clone();
         self.workspace.update(uri, &analysis);
         self.documents.insert(uri.to_string(), analysis);
+        let mut affected = vec![uri.to_string()];
+        let siblings: Vec<String> = self
+            .documents
+            .iter()
+            .filter(|(doc_uri, doc)| doc_uri.as_str() != uri && doc.unit.name == unit_name)
+            .map(|(doc_uri, _)| doc_uri.clone())
+            .collect();
+        let unit = Rc::clone(&self.documents[uri].unit);
+        for sibling in siblings {
+            let Some(sibling_text) = open.get(&sibling) else {
+                continue;
+            };
+            let analysis = sibling_view(&sibling, sibling_text, &unit)
+                .unwrap_or_else(|| analyse_with(&sibling, sibling_text, &mut self.units, &open));
+            self.workspace.update(&sibling, &analysis);
+            self.documents.insert(sibling.clone(), analysis);
+            affected.push(sibling);
+        }
         self.units.retain_live();
+        affected
     }
 
-    fn apply_did_change(&mut self, uri: &str, changes: &Value) {
+    /// `uri`'s text with `changes` applied, starting from the edited text
+    /// still awaiting analysis when there is some.
+    fn edited_text(
+        &self,
+        uri: &str,
+        changes: &Value,
+        edited: &BTreeMap<String, String>,
+    ) -> Option<String> {
         let Value::Array(items) = changes else {
-            return;
+            return None;
         };
         if items.is_empty() {
-            return;
+            return None;
         }
-
-        let mut text = self
-            .documents
-            .get(uri)
-            .map_or_else(String::new, |doc| doc.user_source().to_string());
+        let mut text = edited.get(uri).cloned().unwrap_or_else(|| {
+            self.documents
+                .get(uri)
+                .map_or_else(String::new, |doc| doc.user_source().to_string())
+        });
         for change in items {
             let Some(change_text) = field_str(change, "text") else {
                 continue;
@@ -391,7 +523,16 @@ impl ServerState {
                 text.push_str(change_text);
             }
         }
-        self.update(uri, &text);
+        Some(text)
+    }
+
+    /// Applies one `didChange` and analyses the result at once.
+    #[cfg(test)]
+    fn apply_did_change(&mut self, uri: &str, changes: &Value) -> Vec<String> {
+        let Some(text) = self.edited_text(uri, changes, &BTreeMap::new()) else {
+            return Vec::new();
+        };
+        self.update(uri, &text)
     }
 
     fn close(&mut self, uri: &str) {
@@ -474,7 +615,7 @@ impl ServerState {
             if self.documents.contains_key(&uri) {
                 continue;
             }
-            self.update(&uri, &text);
+            let _ = self.update(&uri, &text);
             *budget -= 1;
         }
     }

@@ -31,13 +31,10 @@
 use std::cell::RefCell;
 use std::sync::Once;
 
-use gossamer_ast::{ItemKind, SourceFile};
 use gossamer_diagnostics::{Diagnostic, RenderOptions};
 use gossamer_lex::{FileId, SourceMap};
-use gossamer_resolve::{ResolveError, resolve_source_file};
-use gossamer_types::{
-    ExhaustivenessError, TyCtxt, check_arena_escapes, check_exhaustiveness, typecheck_source_file,
-};
+use gossamer_resolve::resolve_source_file;
+use gossamer_types::TyCtxt;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -248,12 +245,11 @@ fn run_pipeline(user_source: &str) -> Result<(), String> {
     }
 }
 
-/// Parse + resolve + typecheck + exhaustiveness under the same fatal
-/// policy as `gossamer_driver::check_frontend`, minus the on-disk
-/// frontend cache (irrelevant to a one-shot wasm run). On a clean gate
-/// the program is lowered to HIR and returned alongside its type
-/// context; otherwise the fatal diagnostics are returned and nothing is
-/// lowered.
+/// Parse + resolve + the shared front-end checks under the same policy as
+/// `gossamer_driver::check_frontend`, minus the on-disk frontend cache
+/// (irrelevant to a one-shot wasm run). On a clean gate the program is
+/// lowered to HIR and returned alongside its type context with any
+/// warnings; otherwise every diagnostic is returned and nothing is lowered.
 fn front_end(
     source: &str,
     file_id: FileId,
@@ -273,57 +269,23 @@ fn front_end(
     let parse_failed = !parse_diags.is_empty();
 
     let (resolutions, resolve_diags) = resolve_source_file(&sf);
-    // A named argument, a parameter default, and a std function named in
-    // value position are caller-side spellings, rewritten into the one
-    // shape the checker sees. Every front end has to run this: without
-    // it a call that omits a defaulted parameter reaches the checker
-    // with fewer arguments than the function declares, and is reported
-    // as an arity error.
-    let named_arg_diags = gossamer_types::normalize_caller_side_spellings(&mut sf, &resolutions);
-    let in_scope = top_level_names(&sf);
-    if !parse_failed {
-        diagnostics.extend(
-            named_arg_diags
-                .iter()
-                .map(|diag| diag.to_diagnostic(&in_scope)),
-        );
-        for diag in &resolve_diags {
-            if matches!(
-                diag.error,
-                ResolveError::UnresolvedName { .. }
-                    | ResolveError::UsedInOwnInitializer { .. }
-                    | ResolveError::DuplicateItem { .. }
-                    | ResolveError::UnknownModulePath { .. }
-            ) {
-                diagnostics.push(diag.to_diagnostic(&in_scope));
-            }
-        }
-    }
-
     let mut tcx = TyCtxt::new();
-    let (table, type_diags) = typecheck_source_file(&sf, &resolutions, &mut tcx);
-    if !parse_failed {
-        diagnostics.extend(
-            type_diags
-                .iter()
-                .map(gossamer_types::TypeDiagnostic::to_diagnostic),
-        );
+    let earlier_fatal = !diagnostics.is_empty();
+    let checks = gossamer_types::check_resolved_unit(
+        &mut sf,
+        &resolutions,
+        &resolve_diags,
+        parse_failed,
+        earlier_fatal,
+        &mut tcx,
+        &mut (),
+    );
+    diagnostics.extend(checks.fatal);
+    let accepted = diagnostics.is_empty();
+    diagnostics.extend(checks.advisory);
 
-        for diag in check_exhaustiveness(&sf, &resolutions, &table, &tcx) {
-            if matches!(diag.error, ExhaustivenessError::NonExhaustive { .. }) {
-                diagnostics.push(diag.to_diagnostic());
-            }
-        }
-        // A value allocated in an `arena { }` block that outlives it is a
-        // use-after-free, so the escape check is fatal here for the same
-        // reason it is fatal on the command line.
-        for diag in check_arena_escapes(&sf, &resolutions, &table, &tcx) {
-            diagnostics.push(diag.to_diagnostic());
-        }
-    }
-
-    if diagnostics.is_empty() {
-        let program = gossamer_hir::lower_source_file(&sf, &resolutions, &table, &mut tcx);
+    if accepted {
+        let program = gossamer_hir::lower_source_file(&sf, &resolutions, &checks.table, &mut tcx);
         (diagnostics, Some((program, tcx)))
     } else {
         (diagnostics, None)
@@ -350,25 +312,6 @@ fn diagnostic_info(diag: &Diagnostic, map: &SourceMap) -> DiagnosticInfo {
         col,
         code: diag.code.as_str().to_string(),
     }
-}
-
-/// Top-level item names, seeding the resolver's "did you mean ...?"
-/// suggestions when rendering an unresolved-name diagnostic.
-fn top_level_names(sf: &SourceFile) -> Vec<&str> {
-    sf.items
-        .iter()
-        .filter_map(|item| match &item.kind {
-            ItemKind::Fn(decl) => Some(decl.name.name.as_str()),
-            ItemKind::Struct(decl) => Some(decl.name.name.as_str()),
-            ItemKind::Enum(decl) => Some(decl.name.name.as_str()),
-            ItemKind::Trait(decl) => Some(decl.name.name.as_str()),
-            ItemKind::TypeAlias(decl) => Some(decl.name.name.as_str()),
-            ItemKind::Const(decl) => Some(decl.name.name.as_str()),
-            ItemKind::Static(decl) => Some(decl.name.name.as_str()),
-            ItemKind::Mod(decl) => Some(decl.name.name.as_str()),
-            ItemKind::Impl(_) | ItemKind::AttrItem(_) => None,
-        })
-        .collect()
 }
 
 /// Best-effort extraction of a `catch_unwind` payload's message.

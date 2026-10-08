@@ -58,8 +58,31 @@ fn socket_error(err: &std::io::Error, context: &str) -> String {
     crate::c_abi::fs::classify_io_error(err, context)
 }
 
+/// Layout of a received `(Vec<u8>, String)` pair: the blob owns the bytes
+/// and the sender's address.
+static RECEIVED_PAIR_META: [i64; 6] = [
+    gossamer_abi::rc::RC_KIND_STRUCT,
+    1,
+    0,
+    2,
+    gossamer_abi::rc::RC_CHILD_VEC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT,
+    (gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 1,
+];
+
 fn socket_clone(h: i64) -> Option<Arc<UdpSocket>> {
-    UDP_SOCKETS.lock().as_ref().and_then(|m| m.get(&h).cloned())
+    let id = super::registry_key::key_id(h);
+    UDP_SOCKETS
+        .lock()
+        .as_ref()
+        .and_then(|m| m.get(&id).cloned())
+}
+
+/// Removes the socket registered under `id`; it closes once no call is still
+/// working on it.
+fn retire_socket(id: i64) {
+    if let Some(m) = UDP_SOCKETS.lock().as_mut() {
+        m.remove(&id);
+    }
 }
 
 /// `net::UdpSocket::bind(addr) -> Result<UdpSocket, Error>`.
@@ -70,12 +93,15 @@ pub unsafe extern "C" fn gos_rt_udp_bind(addr: *const c_char) -> i128 {
         let a = unsafe { cstr_to_str(addr) };
         match UdpSocket::bind(&a) {
             Ok(s) => {
-                let h = next_handle();
+                let id = next_handle();
                 UDP_SOCKETS
                     .lock()
                     .get_or_insert_with(HashMap::new)
-                    .insert(h, Arc::new(s));
-                super::result::gos_rt_result_new(0, h)
+                    .insert(id, Arc::new(s));
+                super::result::gos_rt_result_new(
+                    0,
+                    super::registry_key::key_handle(id, retire_socket),
+                )
             }
             Err(e) => udp_err(&socket_error(&e, &a)),
         }
@@ -127,15 +153,13 @@ pub extern "C" fn gos_rt_udp_recv_from(h: i64, max: i64) -> i128 {
             Ok(Ok((buf, from))) => {
                 let bytes_vec = super::encoding::bytes_to_gosvec(&buf);
                 let addr_cs = super::string::alloc_cstring(from.to_string().as_bytes());
-                #[repr(C)]
-                struct Pair {
-                    bytes: i64,
-                    addr: i64,
+                let pair = super::rc::counted_words(
+                    &[bytes_vec as i64, addr_cs as i64],
+                    &RECEIVED_PAIR_META,
+                );
+                if pair.is_null() {
+                    return udp_err("UdpSocket::recv_from: allocation failed");
                 }
-                let pair = Box::into_raw(Box::new(Pair {
-                    bytes: bytes_vec as i64,
-                    addr: addr_cs as i64,
-                }));
                 super::result::gos_rt_result_new(0, pair as i64)
             }
             Ok(Err(e)) => udp_err(&socket_error(&e, "UdpSocket::recv_from")),
@@ -165,9 +189,7 @@ pub extern "C" fn gos_rt_udp_local_addr(h: i64) -> i128 {
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_udp_close(h: i64) {
     ffi_entry!((), {
-        if let Some(m) = UDP_SOCKETS.lock().as_mut() {
-            m.remove(&h);
-        }
+        retire_socket(super::registry_key::key_id(h));
     });
 }
 
@@ -195,11 +217,12 @@ mod tests {
     fn receive_in_a_goroutine_resumes_after_a_datagram_arrives() {
         let socket = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
         let addr = socket.local_addr().expect("receiver address");
-        let handle = next_handle();
+        let id = next_handle();
         UDP_SOCKETS
             .lock()
             .get_or_insert_with(HashMap::new)
-            .insert(handle, Arc::new(socket));
+            .insert(id, Arc::new(socket));
+        let handle = crate::c_abi::registry_key::key_handle(id, retire_socket);
 
         let (tx, rx) = mpsc::sync_channel(1);
         crate::sched_global::spawn(Box::new(move || {

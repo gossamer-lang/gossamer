@@ -288,6 +288,110 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    fn frame(body: &str) -> String {
+        format!("Content-Length: {}\r\n\r\n{body}", body.len())
+    }
+
+    #[test]
+    fn a_burst_of_edits_is_analysed_once() {
+        let uri = "file:///burst.gos";
+        let mut input = frame(&format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"{uri}","languageId":"gossamer","version":1,"text":"fn main() {{ }}\n"}}}}}}"#
+        ));
+        for (version, body) in ["fn main() { let a = 1 }", "fn main() { let ab = 1 }", "fn main() { let x: i64 = \\\"s\\\" }"].iter().enumerate() {
+            input.push_str(&frame(&format!(
+                r#"{{"jsonrpc":"2.0","method":"textDocument/didChange","params":{{"textDocument":{{"uri":"{uri}","version":{}}},"contentChanges":[{{"text":"{body}\n"}}]}}}}"#,
+                version + 2
+            )));
+        }
+        let mut output: Vec<u8> = Vec::new();
+        run(input.as_bytes(), &mut output).expect("serve the burst");
+        let output = String::from_utf8(output).expect("utf-8 output");
+        let publishes: Vec<&str> = output
+            .split("Content-Length:")
+            .filter(|frame| frame.contains("publishDiagnostics"))
+            .collect();
+        assert_eq!(publishes.len(), 2, "one for the open, one for the burst: {output}");
+        assert!(publishes[1].contains("GT0001"), "the burst's last text was analysed: {output}");
+    }
+
+    #[test]
+    fn a_request_cancelled_while_queued_is_answered_without_running() {
+        let uri = "file:///cancel.gos";
+        let mut input = frame(&format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"{uri}","languageId":"gossamer","version":1,"text":"fn main() {{ let total = 1 }}\n"}}}}}}"#
+        ));
+        let hover = |id: u32| {
+            frame(&format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"textDocument/hover","params":{{"textDocument":{{"uri":"{uri}"}},"position":{{"line":0,"character":18}}}}}}"#
+            ))
+        };
+        input.push_str(&hover(7));
+        input.push_str(&frame(
+            r#"{"jsonrpc":"2.0","method":"$/cancelRequest","params":{"id":7}}"#,
+        ));
+        input.push_str(&hover(8));
+        let mut output: Vec<u8> = Vec::new();
+        run(input.as_bytes(), &mut output).expect("serve the session");
+        let output = String::from_utf8(output).expect("utf-8 output");
+        let answers: Vec<&str> = output
+            .split("Content-Length:")
+            .filter(|frame| frame.contains("\"id\":"))
+            .collect();
+        let cancelled: Vec<&&str> = answers.iter().filter(|a| a.contains("\"id\":7")).collect();
+        assert_eq!(cancelled.len(), 1, "one answer for the cancelled request: {output}");
+        assert!(
+            cancelled[0].contains("-32800") && !cancelled[0].contains("\"result\""),
+            "the cancelled request is answered with RequestCancelled: {output}"
+        );
+        assert!(
+            answers.iter().any(|a| a.contains("\"id\":8") && a.contains("\"result\"")),
+            "the request after it is still served: {output}"
+        );
+    }
+
+    fn codes(state: &ServerState, uri: &str) -> Vec<String> {
+        state.documents[uri]
+            .diagnostics
+            .iter()
+            .map(|diag| diag.code.as_str().to_string())
+            .filter(|code| !code.starts_with("GL"))
+            .collect()
+    }
+
+    #[test]
+    fn unsaved_buffers_of_one_package_are_analysed_together() {
+        let root = nested_module_project("unsaved");
+        let helper = root.join("src").join("helper.gos");
+        let main = root.join("src").join("main.gos");
+        std::fs::write(&helper, "pub fn one() -> i64 { 1 }\n").unwrap();
+        std::fs::write(&main, "fn main() { println(\"{}\", helper::one()) }\n").unwrap();
+        let (helper_uri, main_uri) = (file_uri(&helper), file_uri(&main));
+        let mut state = ServerState::new();
+        state.update(&helper_uri, "pub fn two() -> i64 { 2 }\n");
+        let affected = state.update(&main_uri, "fn main() { println(\"{}\", helper::two()) }\n");
+        assert!(codes(&state, &main_uri).is_empty(), "{:?}", codes(&state, &main_uri));
+        assert!(affected.contains(&helper_uri), "the helper's view must be refreshed too");
+
+        // Editing only the helper back refreshes the dependent document,
+        // which now names a function the package no longer has.
+        let affected = state.update(&helper_uri, "pub fn one() -> i64 { 1 }\n");
+        assert!(affected.contains(&main_uri));
+        assert_eq!(codes(&state, &main_uri), ["GR0001"]);
+
+        // Alternating edits leave every document on one analysis of the
+        // package, not one snapshot per document.
+        state.update(&main_uri, "fn main() { println(\"{}\", helper::one()) }\n");
+        assert!(codes(&state, &main_uri).is_empty());
+        assert!(std::rc::Rc::ptr_eq(
+            &state.documents[&main_uri].unit,
+            &state.documents[&helper_uri].unit
+        ));
+        state.units.retain_live();
+        assert_eq!(state.units.len(), 1, "a stale snapshot of the package survived");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn every_document_of_one_package_shares_its_analysis() {
         let root = nested_module_project("shared");

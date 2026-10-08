@@ -604,7 +604,6 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         release_mapped_payloads(body, tcx);
         own_carrier_payloads(body, tcx);
         record_channel_elem_kind(body, tcx);
-        drop_confined_channels(body);
         clear_region_on_call_results(body);
         free_overwritten_ctor_values(body, tcx, &container_ctor_free);
         own_returned_map_payloads(body, tcx);

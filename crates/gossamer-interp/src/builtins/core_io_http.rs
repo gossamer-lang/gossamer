@@ -643,18 +643,20 @@ fn builtin_http_response_stream(args: &[Value]) -> RuntimeResult<Value> {
     let content_type = args.get(1).map(render_one).unwrap_or_default();
     let Some(handle) = args
         .get(2)
-        .and_then(crate::http_client_builtins::response_stream_handle)
+        .and_then(crate::http_client_builtins::response_stream_field)
     else {
         return Err(RuntimeError::Type(
             "Response::stream expects a ResponseStream as its third argument".to_string(),
         ));
     };
-    crate::http_client_builtins::stream_consume_for_response(handle);
+    if let Some(slot) = crate::http_client_builtins::slot_of_field(&handle) {
+        crate::http_client_builtins::stream_consume_for_response(&slot);
+    }
     let fields = vec![
         ("status", Value::Int(status)),
         ("body", Value::String(SmolStr::default())),
         ("content_type", Value::String(SmolStr::from(content_type))),
-        ("__stream_handle", Value::Int(handle)),
+        ("__stream_handle", handle),
     ];
     Ok(Value::struct_("Response", fields))
 }
@@ -862,7 +864,7 @@ fn native_http_serve(dispatch: &mut dyn NativeDispatch, args: &[Value]) -> Runti
         let method = request.method.as_str().to_string();
         let path = request.path.clone();
         let (context, context_id) =
-            crate::stdlib_builtins::context::request_context(0, Some(request.context.clone()));
+            crate::stdlib_builtins::context::request_context(Some(request.context.clone()));
         let mut args = leading.clone();
         args.push(request_to_value_with_context(&request, context));
         dispatch.spawn_with_outcome(
@@ -922,7 +924,7 @@ fn native_httptest_record(
         trailers: None,
         peer_addr: String::new(),
     };
-    let (context, context_id) = crate::stdlib_builtins::context::request_context(0, None);
+    let (context, context_id) = crate::stdlib_builtins::context::request_context(None);
     let value = request_to_value_with_context(&request, context);
     let outcome = crate::value::dispatch_request(dispatch, &args[0], value);
     crate::stdlib_builtins::context::cancel_request_context(context_id);
@@ -1040,10 +1042,7 @@ fn native_http_serve_tls(
         |request, sink| {
             let method = request.method.as_str().to_string();
             let path = request.path.clone();
-            let (context, context_id) = crate::stdlib_builtins::context::request_context(
-                0,
-                Some(request.context.clone()),
-            );
+            let (context, context_id) = crate::stdlib_builtins::context::request_context(Some(request.context.clone()));
             let mut args = leading.clone();
             args.push(request_to_value_with_context(&request, context));
             dispatch.spawn_with_outcome(
@@ -1167,10 +1166,7 @@ fn native_http2_bind_and_run_h2c(
             Ok((req, resp_tx)) => {
                 let method = req.method.as_str().to_string();
                 let path = req.path.clone();
-                let (context, context_id) = crate::stdlib_builtins::context::request_context(
-                    0,
-                    Some(req.context.clone()),
-                );
+                let (context, context_id) = crate::stdlib_builtins::context::request_context(Some(req.context.clone()));
                 let mut args = leading.clone();
                 args.push(request_to_value_with_context(&req, context));
                 dispatch.spawn_with_outcome(
@@ -1310,10 +1306,7 @@ fn native_http3_serve(dispatch: &mut dyn NativeDispatch, args: &[Value]) -> Runt
             Ok((req, resp_tx)) => {
                 let method = req.method.as_str().to_string();
                 let path = req.path.clone();
-                let (context, context_id) = crate::stdlib_builtins::context::request_context(
-                    0,
-                    Some(req.context.clone()),
-                );
+                let (context, context_id) = crate::stdlib_builtins::context::request_context(Some(req.context.clone()));
                 let mut args = leading.clone();
                 args.push(request_to_value_with_context(&req, context));
                 dispatch.spawn_with_outcome(
@@ -1434,13 +1427,11 @@ fn value_to_response(value: &Value) -> Option<http_std::Response> {
     let mut body: Vec<u8> = Vec::new();
     let mut content_type = String::new();
     let mut header_pairs: Vec<(String, String)> = Vec::new();
-    let mut stream_handle: Option<i64> = None;
+    let mut stream_slot = None;
     for (ident, v) in fields {
         match *ident {
             "__stream_handle" => {
-                if let Value::Int(h) = v {
-                    stream_handle = Some(*h);
-                }
+                stream_slot = crate::http_client_builtins::slot_of_field(v);
             }
             "status" => {
                 status = match v {
@@ -1476,12 +1467,12 @@ fn value_to_response(value: &Value) -> Option<http_std::Response> {
             _ => {}
         }
     }
-    // A `__stream_handle` field marks a `Response::stream` value:
-    // take the live stream out of the pending registry (one-shot -
-    // a second serve of the same handle drains nothing and answers
-    // an empty chunked body, matching the compiled tier).
-    let body_stream = stream_handle.map(|h| {
-        crate::http_client_builtins::stream_take_for_serve(h).map_or_else(
+    // A `__stream_handle` field marks a `Response::stream` value: take
+    // the live stream it claimed (one-shot - a second serve of the same
+    // handle drains nothing and answers an empty chunked body, matching
+    // the compiled tier).
+    let body_stream = stream_slot.map(|slot| {
+        crate::http_client_builtins::stream_take_for_serve(&slot).map_or_else(
             || http_std::BodyStream(Box::new(std::io::empty())),
             |arc| http_std::BodyStream(Box::new(crate::http_client_builtins::StreamBody(arc))),
         )

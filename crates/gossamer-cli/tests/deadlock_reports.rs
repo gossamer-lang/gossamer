@@ -94,3 +94,60 @@ fn a_cohort_whose_child_cannot_send_reports_the_join() {
         "error[GX0005]: panic: all goroutines are asleep - deadlock! (cohort join can never complete)\n",
     );
 }
+
+/// The reader finishes on its own while the writer and `main` wait on each
+/// other. Whichever of those happens last, the program is left with nothing
+/// able to run, so the order the goroutines settle in is varied by running
+/// the program several times.
+#[test]
+fn a_goroutine_finishing_after_the_others_wait_leaves_a_report() {
+    let source = r#"use std::{errors, sync}
+use std::sync::channel
+
+fn run() -> Result<(), errors::Error> {
+    let lock = sync::RwLock::new(1)
+    let tx, rx = channel()
+    cohort {
+        let writer = spawn(|| sync::RwLock::with_write(lock, |v| v + rx.recv().unwrap()))
+        let reader = spawn(|| lock.read())
+        println(f"{writer.join().unwrap() + reader.join().unwrap()}")
+        tx.send(1)
+    }?
+    Ok(())
+}
+
+fn main() {
+    run().unwrap()
+}
+"#;
+    let expected = "error[GX0005]: panic: all goroutines are asleep - deadlock! (receive can never complete)\n";
+    assert_reports("finished_last", source, expected);
+    let dir = std::env::temp_dir().join(format!("gos-deadlock-orders-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    std::fs::write(dir.join("orders.gos"), source).expect("write program");
+    for _ in 0..20 {
+        let output = Command::new(gos_bin())
+            .current_dir(&dir)
+            .env("GOSSAMER_CACHE_DIR", dir.join("cache"))
+            .env("GOS_JIT", "0")
+            .args(["run", "orders.gos"])
+            .output()
+            .expect("spawn gos run");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(101), "stderr:\n{stderr}");
+        assert!(stderr.starts_with(expected), "report differs:\n{stderr}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A goroutine whose unbuffered send was taken leaves its channel with no
+/// handoff pending, so a later wait nothing can satisfy is still reported.
+#[test]
+fn a_completed_unbuffered_send_leaves_no_pending_handoff() {
+    assert_reports(
+        "completed_send",
+        "use std::sync::channel\n\nfn main() {\n    let first_tx, first_rx = channel::<i64>()\n    spawn(|| first_tx.send(1))\n    let _ = first_rx.recv()\n    let tx, rx = channel::<i64>()\n    tx.send(3)\n    println(\"{}\", rx.recv().unwrap())\n}\n",
+        "error[GX0005]: panic: all goroutines are asleep - deadlock! (send can never complete)\n",
+    );
+}

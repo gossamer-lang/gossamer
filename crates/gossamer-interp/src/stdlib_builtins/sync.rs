@@ -156,126 +156,87 @@ pub(crate) fn install_sync_extras(globals: &mut Vec<(&'static str, Value)>) {
     }
 }
 
-fn sync_map_id_of(value: &Value) -> Option<i64> {
-    if let Value::Struct(inner) = value {
-        if inner.name == "sync::Map" {
-            for (i, v) in &inner.fields {
-                if (*i) == "__map" {
-                    if let Value::Int(n) = v {
-                        return Some(*n);
-                    }
-                }
-            }
-        }
-    }
-    None
+type SyncMapState = parking_lot::RwLock<StdHashMap<String, String>>;
+
+fn sync_map_of(value: &Value) -> Option<Arc<SyncMapState>> {
+    crate::value::handle_state(value, "sync::Map", "__map")
 }
 
 pub(crate) fn builtin_sync_map_new(_args: &[Value]) -> RuntimeResult<Value> {
-    let id = next_atomic_id();
-    SYNC_MAP_REGISTRY.with(|r| {
-        r.borrow_mut()
-            .insert(id, Arc::new(parking_lot::RwLock::new(StdHashMap::new())));
-    });
-    Ok(Value::struct_(
+    Ok(crate::value::state_handle(
         "sync::Map",
-        Arc::unwrap_or_clone(Arc::new(vec![("__map", Value::Int(id))])),
+        "__map",
+        Arc::new(SyncMapState::new(StdHashMap::new())),
     ))
 }
 
 pub(crate) fn builtin_sync_map_set(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(id) = args.first().and_then(sync_map_id_of) else {
+    let Some(m) = args.first().and_then(sync_map_of) else {
         return Ok(Value::Unit);
     };
     let key = args.get(1).and_then(as_str).unwrap_or("").to_string();
     let val = args.get(2).and_then(as_str).unwrap_or("").to_string();
-    let arc = SYNC_MAP_REGISTRY.with(|r| r.borrow().get(&id).cloned());
-    if let Some(m) = arc {
-        m.write().insert(key, val);
-    }
+    m.write().insert(key, val);
     Ok(Value::Unit)
 }
 
 pub(crate) fn builtin_sync_map_get(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(id) = args.first().and_then(sync_map_id_of) else {
+    let Some(m) = args.first().and_then(sync_map_of) else {
         return Ok(none_variant());
     };
     let key = args.get(1).and_then(as_str).unwrap_or("");
-    let arc = SYNC_MAP_REGISTRY.with(|r| r.borrow().get(&id).cloned());
-    Ok(match arc {
-        Some(m) => match m.read().get(key) {
-            Some(v) => some_variant(Value::String(v.clone().into())),
-            None => none_variant(),
-        },
+    Ok(match m.read().get(key) {
+        Some(v) => some_variant(Value::String(v.clone().into())),
         None => none_variant(),
     })
 }
 
 pub(crate) fn builtin_sync_map_delete(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(id) = args.first().and_then(sync_map_id_of) else {
+    let Some(m) = args.first().and_then(sync_map_of) else {
         return Ok(Value::Unit);
     };
     let key = args.get(1).and_then(as_str).unwrap_or("");
-    let arc = SYNC_MAP_REGISTRY.with(|r| r.borrow().get(&id).cloned());
-    if let Some(m) = arc {
-        m.write().remove(key);
-    }
+    m.write().remove(key);
     Ok(Value::Unit)
 }
 
 pub(crate) fn builtin_sync_map_len(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(id) = args.first().and_then(sync_map_id_of) else {
+    let Some(m) = args.first().and_then(sync_map_of) else {
         return Ok(Value::Int(0));
     };
-    let arc = SYNC_MAP_REGISTRY.with(|r| r.borrow().get(&id).cloned());
-    Ok(Value::Int(match arc {
-        Some(m) => m.read().len() as i64,
-        None => 0,
-    }))
+    Ok(Value::Int(m.read().len() as i64))
 }
 
 pub(crate) fn builtin_sync_map_contains(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(id) = args.first().and_then(sync_map_id_of) else {
+    let Some(m) = args.first().and_then(sync_map_of) else {
         return Ok(Value::Bool(false));
     };
     let key = args.get(1).and_then(as_str).unwrap_or("");
-    let arc = SYNC_MAP_REGISTRY.with(|r| r.borrow().get(&id).cloned());
-    Ok(Value::Bool(match arc {
-        Some(m) => m.read().contains_key(key),
-        None => false,
-    }))
+    Ok(Value::Bool(m.read().contains_key(key)))
 }
 
 pub(crate) fn builtin_sync_map_keys(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(id) = args.first().and_then(sync_map_id_of) else {
+    let Some(m) = args.first().and_then(sync_map_of) else {
         return Ok(Value::Array(Arc::new(Vec::new())));
     };
-    let arc = SYNC_MAP_REGISTRY.with(|r| r.borrow().get(&id).cloned());
-    Ok(Value::Array(Arc::new(match arc {
-        Some(m) => m
-            .read()
+    Ok(Value::Array(Arc::new(
+        m.read()
             .keys()
             .map(|k| Value::String(k.clone().into()))
             .collect(),
-        None => Vec::new(),
-    })))
+    )))
 }
 
 pub(crate) fn builtin_atomic_i64_new(args: &[Value]) -> RuntimeResult<Value> {
     let init = args.first().and_then(value_to_int).unwrap_or(0);
-    let id = next_atomic_id();
-    ATOMIC_I64_REGISTRY.with(|r| {
-        r.borrow_mut().insert(id, Arc::new(StdAtomicI64::new(init)));
-    });
-    Ok(atomic_handle("sync::AtomicI64", id))
+    Ok(atomic_handle("sync::AtomicI64", StdAtomicI64::new(init)))
 }
 
 pub(crate) fn with_atomic_i64<R>(
     value: &Value,
     f: impl FnOnce(&Arc<StdAtomicI64>) -> R,
 ) -> Option<R> {
-    let id = atomic_id_of(value, "sync::AtomicI64")?;
-    ATOMIC_I64_REGISTRY.with(|r| r.borrow().get(&id).map(f))
+    atomic_cell(value, "sync::AtomicI64").map(|cell| f(&cell))
 }
 
 pub(crate) fn builtin_atomic_i64_load(args: &[Value]) -> RuntimeResult<Value> {
@@ -331,16 +292,11 @@ pub(crate) fn builtin_atomic_i64_cas(args: &[Value]) -> RuntimeResult<Value> {
 /// its own so its arithmetic wraps at 32 bits.
 pub(crate) fn builtin_atomic_i32_new(args: &[Value]) -> RuntimeResult<Value> {
     let init = args.first().and_then(value_to_int).unwrap_or(0);
-    let id = next_atomic_id();
-    ATOMIC_I64_REGISTRY.with(|r| {
-        r.borrow_mut().insert(id, Arc::new(StdAtomicI64::new(init)));
-    });
-    Ok(atomic_handle("sync::AtomicI32", id))
+    Ok(atomic_handle("sync::AtomicI32", StdAtomicI64::new(init)))
 }
 
 fn with_atomic_i32<R>(value: &Value, f: impl FnOnce(&Arc<StdAtomicI64>) -> R) -> Option<R> {
-    let id = atomic_id_of(value, "sync::AtomicI32")?;
-    ATOMIC_I64_REGISTRY.with(|r| r.borrow().get(&id).map(f))
+    atomic_cell(value, "sync::AtomicI32").map(|cell| f(&cell))
 }
 
 pub(crate) fn builtin_atomic_i32_load(args: &[Value]) -> RuntimeResult<Value> {
@@ -402,20 +358,14 @@ pub(crate) fn builtin_atomic_i32_cas(args: &[Value]) -> RuntimeResult<Value> {
 
 pub(crate) fn builtin_atomic_bool_new(args: &[Value]) -> RuntimeResult<Value> {
     let init = matches!(args.first(), Some(Value::Bool(true)));
-    let id = next_atomic_id();
-    ATOMIC_BOOL_REGISTRY.with(|r| {
-        r.borrow_mut()
-            .insert(id, Arc::new(StdAtomicBool::new(init)));
-    });
-    Ok(atomic_handle("sync::AtomicBool", id))
+    Ok(atomic_handle("sync::AtomicBool", StdAtomicBool::new(init)))
 }
 
 pub(crate) fn with_atomic_bool<R>(
     value: &Value,
     f: impl FnOnce(&Arc<StdAtomicBool>) -> R,
 ) -> Option<R> {
-    let id = atomic_id_of(value, "sync::AtomicBool")?;
-    ATOMIC_BOOL_REGISTRY.with(|r| r.borrow().get(&id).map(f))
+    atomic_cell(value, "sync::AtomicBool").map(|cell| f(&cell))
 }
 
 pub(crate) fn builtin_atomic_bool_load(args: &[Value]) -> RuntimeResult<Value> {
@@ -450,40 +400,19 @@ pub(crate) fn builtin_atomic_bool_cas(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 pub(crate) fn builtin_mutex_new(_args: &[Value]) -> RuntimeResult<Value> {
-    let id = next_atomic_id();
-    MUTEX_REGISTRY.with(|r| {
-        r.borrow_mut().insert(id, Arc::new(MutexCell::default()));
-    });
-    Ok(Value::struct_(
+    Ok(crate::value::state_handle(
         "sync::Mutex",
-        Arc::unwrap_or_clone(Arc::new(vec![("__mutex", Value::Int(id))])),
+        "__mutex",
+        Arc::new(MutexCell::default()),
     ))
 }
 
-pub(crate) fn mutex_id_of(value: &Value) -> Option<i64> {
-    if let Value::Struct(inner) = value {
-        if inner.name == "sync::Mutex" {
-            for (i, v) in &inner.fields {
-                if (*i) == "__mutex" {
-                    if let Value::Int(n) = v {
-                        return Some(*n);
-                    }
-                }
-            }
-        }
-    }
-    None
+pub(crate) fn mutex_of(value: &Value) -> Option<Arc<MutexCell>> {
+    crate::value::handle_state(value, "sync::Mutex", "__mutex")
 }
 
 pub(crate) fn builtin_mutex_lock(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(id) = args.first().and_then(mutex_id_of) else {
-        return Ok(Value::Unit);
-    };
-    // Clone the handle out of the registry before acquiring, so the
-    // registry lock is not held while this goroutine parks on the
-    // mutex's condvar.
-    let arc = MUTEX_REGISTRY.with(|r| r.borrow().get(&id).cloned());
-    if let Some(cell) = arc {
+    if let Some(cell) = args.first().and_then(mutex_of) {
         // A held mutex stays held on the browser build: the goroutine that
         // would unlock it has already run to completion.
         if !gossamer_runtime::platform::CAN_BLOCK && cell.would_block() {
@@ -497,25 +426,17 @@ pub(crate) fn builtin_mutex_lock(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 pub(crate) fn builtin_mutex_unlock(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(id) = args.first().and_then(mutex_id_of) else {
-        return Ok(Value::Unit);
-    };
-    let arc = MUTEX_REGISTRY.with(|r| r.borrow().get(&id).cloned());
-    if let Some(cell) = arc {
+    if let Some(cell) = args.first().and_then(mutex_of) {
         cell.unlock();
     }
     Ok(Value::Unit)
 }
 
 pub(crate) fn builtin_once_new(_args: &[Value]) -> RuntimeResult<Value> {
-    let id = next_atomic_id();
-    ONCE_REGISTRY.with(|r| {
-        r.borrow_mut()
-            .insert(id, Arc::new(parking_lot::Once::new()));
-    });
-    Ok(Value::struct_(
+    Ok(crate::value::state_handle(
         "sync::Once",
-        Arc::unwrap_or_clone(Arc::new(vec![("__once", Value::Int(id))])),
+        "__once",
+        Arc::new(parking_lot::Once::new()),
     ))
 }
 
@@ -527,36 +448,21 @@ pub(crate) fn native_once_call(
     dispatch: &mut dyn NativeDispatch,
     args: &[Value],
 ) -> RuntimeResult<Value> {
-    let id = match args.first() {
-        Some(Value::Struct(inner)) if inner.name == "sync::Once" => inner
-            .fields
-            .iter()
-            .find_map(|(i, v)| {
-                if (*i) == "__once" {
-                    if let Value::Int(n) = v {
-                        Some(*n)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0),
-        _ => return Ok(Value::Bool(false)),
+    let Some(once) = args
+        .first()
+        .and_then(|v| crate::value::handle_state::<parking_lot::Once>(v, "sync::Once", "__once"))
+    else {
+        return Ok(Value::Bool(false));
     };
     let Some(f) = args.get(1).cloned() else {
         return Ok(Value::Bool(false));
     };
-    let arc = ONCE_REGISTRY.with(|r| r.borrow().get(&id).cloned());
     let mut ran = false;
     let mut call_result: RuntimeResult<Value> = Ok(Value::Unit);
-    if let Some(once) = arc {
-        once.call_once(|| {
-            ran = true;
-            call_result = dispatch.call_value(&f, Vec::new());
-        });
-    }
+    once.call_once(|| {
+        ran = true;
+        call_result = dispatch.call_value(&f, Vec::new());
+    });
     call_result?;
     Ok(Value::Bool(ran))
 }

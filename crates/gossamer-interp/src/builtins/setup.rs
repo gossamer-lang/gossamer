@@ -83,10 +83,14 @@ pub fn set_program_name(name: &str) {
 // Mutable cell backing for `flag::Set` API.
 //
 // `Set::string` / `int` / `uint` / `bool` return a `__Cell` struct
-// that `*` dereferences in `interp.rs` via [`resolve_cell`].
+// that `*` dereferences through [`resolve_cell`].
 
-pub(crate) type CellMap =
-    std::collections::HashMap<(u64, String), std::sync::Arc<parking_lot::Mutex<Value>>>;
+/// One flag's value, shared by its set, which `parse` writes through, and
+/// the `__Cell` value the program reads it from.
+pub(crate) type FlagCell = std::sync::Arc<parking_lot::Mutex<Value>>;
+
+/// A flag set, shared by every copy of its handle.
+pub(crate) type SharedSet = parking_lot::Mutex<SetState>;
 
 // HashMap::new is not const-callable on our MSRV; these
 // thread-locals construct on first access and stay registry-style
@@ -96,13 +100,9 @@ pub(crate) type CellMap =
     reason = "HashMap::new with default RandomState is not const on MSRV"
 )]
 mod thread_local_registries {
-    use super::{CellMap, RefCell, SetState};
+    use super::RefCell;
 
     thread_local! {
-        pub(crate) static NEXT_SET_ID: RefCell<u64> = const { RefCell::new(1) };
-        pub(crate) static SET_REGISTRY: RefCell<std::collections::HashMap<u64, SetState>> =
-            RefCell::new(std::collections::HashMap::new());
-        pub(crate) static CELL_REGISTRY: RefCell<CellMap> = RefCell::new(std::collections::HashMap::new());
         pub(crate) static STRUCT_UINT_FIELDS: RefCell<std::collections::HashMap<String, Vec<&'static str>>> =
             RefCell::new(std::collections::HashMap::new());
         pub(crate) static STRUCT_LAYOUTS: RefCell<std::collections::HashMap<String, Vec<&'static str>>> =
@@ -115,8 +115,7 @@ mod thread_local_registries {
 }
 
 pub(crate) use thread_local_registries::{
-    CELL_REGISTRY, NEXT_SET_ID, SET_REGISTRY, STRUCT_LAYOUTS, STRUCT_UINT_FIELDS, VARIANT_OWNERS,
-    VARIANT_RANKS,
+    STRUCT_LAYOUTS, STRUCT_UINT_FIELDS, VARIANT_OWNERS, VARIANT_RANKS,
 };
 
 /// Installs the variant-to-enum table that method dispatch consults to
@@ -257,6 +256,8 @@ pub(crate) struct SetState {
     pub(crate) flag_order: Vec<String>,
     pub(crate) last_flag: Option<String>,
     pub(crate) flags: std::collections::HashMap<String, FlagDef>,
+    /// Each flag's cell, by long name.
+    pub(crate) cells: std::collections::HashMap<String, FlagCell>,
 }
 
 #[derive(Debug, Clone)]
@@ -278,16 +279,34 @@ pub(crate) enum FlagKind {
     StringList,
 }
 
-pub(crate) fn make_cell(set_id: u64, flag_name: &str, default: Value) -> Value {
-    let key = (set_id, flag_name.to_string());
-    let cell = std::sync::Arc::new(parking_lot::Mutex::new(default));
-    CELL_REGISTRY.with(|reg| {
-        reg.borrow_mut().insert(key, cell);
-    });
+/// A new, empty flag set named `name`, as a `Set` handle.
+pub(crate) fn new_set(name: String) -> Value {
+    let state = SetState {
+        name,
+        flag_order: Vec::new(),
+        last_flag: None,
+        flags: std::collections::HashMap::new(),
+        cells: std::collections::HashMap::new(),
+    };
+    crate::value::state_handle("Set", "__id", std::sync::Arc::new(SharedSet::new(state)))
+}
+
+/// The set a `Set` handle holds.
+pub(crate) fn set_of(value: &Value) -> Option<std::sync::Arc<SharedSet>> {
+    crate::value::handle_state(value, "Set", "__id")
+}
+
+/// Gives `state` a cell for `flag_name` holding `default`, and answers the
+/// `__Cell` value that reads it.
+pub(crate) fn make_cell(state: &mut SetState, flag_name: &str, default: Value) -> Value {
+    let cell: FlagCell = std::sync::Arc::new(parking_lot::Mutex::new(default));
+    state
+        .cells
+        .insert(flag_name.to_string(), std::sync::Arc::clone(&cell));
     Value::struct_(
         "__Cell",
         vec![
-            ("__set_id", Value::Int(set_id as i64)),
+            ("__cell", Value::Opaque(crate::value::OpaqueState::new(cell))),
             (
                 "__flag_name",
                 Value::String(SmolStr::from(flag_name.to_string())),
@@ -296,12 +315,13 @@ pub(crate) fn make_cell(set_id: u64, flag_name: &str, default: Value) -> Value {
     )
 }
 
-/// Resolves a `__Cell` handle to its current value.
-pub(crate) fn resolve_cell(set_id: u64, flag_name: &str) -> Option<Value> {
-    CELL_REGISTRY.with(|reg| {
-        reg.borrow()
-            .get(&(set_id, flag_name.to_string()))
-            .map(|arc| arc.lock().clone())
+/// The current value of the flag a `__Cell` reads.
+pub(crate) fn resolve_cell(cell: &crate::value::StructInner) -> Option<Value> {
+    cell.fields.iter().find_map(|(ident, value)| match value {
+        Value::Opaque(state) if *ident == "__cell" => state
+            .downcast_ref::<FlagCell>()
+            .map(|cell| cell.lock().clone()),
+        _ => None,
     })
 }
 

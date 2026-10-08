@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gossamer_ast::NodeId;
 
@@ -15,6 +15,7 @@ pub struct TypeTable {
     method_owners: HashMap<NodeId, String>,
     operator_methods: HashMap<NodeId, String>,
     const_generic_args: HashMap<NodeId, Vec<ConstGenericArg>>,
+    receiver_writes: HashSet<NodeId>,
 }
 
 /// The value a call hands one const generic parameter of its callee.
@@ -64,6 +65,19 @@ impl TypeTable {
     /// trait and each call reach its own body.
     pub fn insert_method_owner(&mut self, node: NodeId, owner: String) {
         self.method_owners.insert(node, owner);
+    }
+
+    /// Records that the method call whose receiver is `receiver` writes it:
+    /// the method it resolves to takes `&mut self`, or is a built-in method
+    /// that writes its receiver.
+    pub fn insert_receiver_write(&mut self, receiver: NodeId) {
+        self.receiver_writes.insert(receiver);
+    }
+
+    /// Whether the method call whose receiver is `receiver` writes it.
+    #[must_use]
+    pub fn writes_receiver(&self, receiver: NodeId) -> bool {
+        self.receiver_writes.contains(&receiver)
     }
 
     /// Records the method an operator reaches when its type implements the

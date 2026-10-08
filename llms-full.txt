@@ -358,8 +358,10 @@ Discover signatures with `hover` / `gos doc std::<module>`. Areas:
 - Web: `net`, `http` (client `http::get`, server `http::serve(addr,
   handler)`, `http::router`), `http::websocket`, `html`, `mime`.
 - Terminal: `term` (`is_terminal`, `size`, `enter_raw`, `read_input`,
-  `resized`; each takes an optional descriptor, e.g. `fs::File::fd()` of
-  `/dev/tty` when stdin is piped), `os::fd` (`wait_readable`), `os::signal`
+  `resized`; each takes an optional `os::fd::Descriptor`: the `fs::File` of
+  an opened `/dev/tty` when stdin is piped, kept open while the call uses
+  it, or `term::STDIN` / `STDOUT` / `STDERR`), `os::fd` (`wait_readable`,
+  same argument), `os::signal`
   (`on(signal::SIGWINCH)`; `n.wait()` answers false once its cohort is
   cancelled or `n.stop()` runs), `process::run_inherit` (hand the terminal
   to a child), `unicode::char_width` / `str_width`. Restore state with

@@ -672,6 +672,7 @@ const MANGLED_STDLIB_NAMES: &[(&str, &str, &str)] = &[
     ("ffi", "fn_from_ptr", "__gos_ffi_fn_from_ptr"),
     ("ffi", "fn_addr", "__gos_ffi_fn_addr"),
     // std::os::fd readiness waits.
+    ("fd", "Descriptor", "__gos_fd_Descriptor"),
     ("fd", "wait_readable", "__gos_fd_wait_readable"),
     ("fd", "wait_writable", "__gos_fd_wait_writable"),
     // std::os::signal numbers, per target.

@@ -212,9 +212,10 @@ impl<'a> Builder<'a> {
             "http::websocket::accept" | "websocket::accept" => {
                 ("gos_rt_ws_accept", self.result_response_error_adt_ty())
             }
-            "http::websocket::connect" | "websocket::connect" => {
-                ("gos_rt_ws_serve_connect", self.result_i64_error_adt_ty())
-            }
+            "http::websocket::connect" | "websocket::connect" => ("gos_rt_ws_serve_connect", {
+                let conn = self.sync_handle_ty(62);
+                self.result_of(conn)
+            }),
             "http::websocket::send_text" | "websocket::send_text" => {
                 ("gos_rt_ws_send_text", self.result_unit_error_adt_ty())
             }

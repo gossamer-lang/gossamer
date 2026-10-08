@@ -28,7 +28,7 @@ use super::*;
 
 /// The payload of a reference-counted error cell. The cell owns its message,
 /// a share of its cause, and its boxed fields, and the release of its last
-/// share frees all three through [`ERROR_META`].
+/// share frees all three through `ERROR_META`.
 #[repr(C)]
 pub struct GosError {
     /// Runtime string holding the UTF-8 message.

@@ -87,10 +87,8 @@ fn deque_handle_named(id: i64, name: &'static str) -> Value {
         "Stack" => "__stack",
         _ => "__deque",
     };
-    Value::struct_(
-        name,
-        Arc::unwrap_or_clone(Arc::new(vec![(field, Value::Int(id))])),
-    )
+    let key = super::set::registry_key(id, |id| DEQUE_REGISTRY.retire(id));
+    Value::struct_(name, vec![(field, key)])
 }
 
 /// A deque, queue, or stack with its own registry entry, so a binding taken
@@ -150,9 +148,7 @@ fn deque_id_of(value: &Value) -> Option<i64> {
         if matches!(inner.name.as_str(), "Deque" | "Queue" | "Stack") {
             for (i, v) in &inner.fields {
                 if matches!(*i, "__deque" | "__queue" | "__stack") {
-                    if let Value::Int(n) = v {
-                        return Some(*n);
-                    }
+                    return super::set::registry_id(v);
                 }
             }
         }
@@ -295,11 +291,10 @@ fn builtin_deque_clear(args: &[Value]) -> RuntimeResult<Value> {
     let Some(id) = args.first().and_then(deque_id_of) else {
         return Ok(Value::Unit);
     };
-    DEQUE_REGISTRY.with(|r| {
-        if let Some(d) = r.borrow_mut().get_mut(&id) {
-            d.clear();
-        }
-    });
+    // The elements are dropped after the registry is released: one may be a
+    // deque whose last handle retires its own entry.
+    let elements = DEQUE_REGISTRY.with(|r| r.borrow_mut().get_mut(&id).map(std::mem::take));
+    drop(elements);
     Ok(Value::Unit)
 }
 
@@ -339,5 +334,31 @@ mod deque_registry_tests {
             }
             other => panic!("expected Some, got {other:?}"),
         }
+    }
+
+    fn live(id: i64) -> bool {
+        DEQUE_REGISTRY.with(|r| r.borrow().contains_key(&id))
+    }
+
+    #[test]
+    fn a_deque_entry_retires_with_its_last_handle_nested_ones_too() {
+        let outer = builtin_deque_new(&[]).unwrap();
+        let inner = builtin_deque_new(&[]).unwrap();
+        let (outer_id, inner_id) = (deque_id_of(&outer).unwrap(), deque_id_of(&inner).unwrap());
+        builtin_deque_push_back(&[outer.clone(), inner]).unwrap();
+        let copy = outer.clone();
+        drop(outer);
+        assert!(
+            live(outer_id) && live(inner_id),
+            "a copy still holds the outer deque"
+        );
+        builtin_deque_clear(std::slice::from_ref(&copy)).unwrap();
+        assert!(
+            !live(inner_id),
+            "clearing dropped the inner deque's last handle"
+        );
+        builtin_deque_push_back(&[copy.clone(), builtin_deque_new(&[]).unwrap()]).unwrap();
+        drop(copy);
+        assert!(!live(outer_id));
     }
 }

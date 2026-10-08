@@ -2204,6 +2204,13 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
         crate::style::force_enable();
     }
     loop {
+        // The line editor draws its prompt from the start of the line and
+        // erases what is there, so output a `print` left unterminated is
+        // ended first rather than drawn over.
+        if tty && gossamer_runtime::c_abi::print::stdout_line_open() {
+            gossamer_runtime::c_abi::print::write_stdout(b"\n");
+            gossamer_runtime::c_abi::flush_stdout_buffer();
+        }
         let prompt = if tty {
             "\x1b[32m>>>\x1b[0m ".to_string()
         } else {

@@ -30,7 +30,7 @@ static GLOBAL_PHASE: AtomicU64 = AtomicU64::new(0);
 /// Nonzero while a yield request has not yet reached a compiled loop's poll.
 /// A compiled loop tests this byte on every pass, and only a set byte sends
 /// it to [`gos_rt_preempt_check_and_yield`], which clears it and decides from
-/// [`GLOBAL_PHASE`] whether this worker yields. A worker that misses a
+/// `GLOBAL_PHASE` whether this worker yields. A worker that misses a
 /// request because another cleared the byte first sees the next one: the
 /// watchdog keeps asking while a worker overruns its slice.
 #[unsafe(export_name = "gos_rt_preempt_requested")]

@@ -699,7 +699,7 @@ impl TypeChecker<'_> {
         if self.reject_collection_method_arity(resolved, method, arg_count, name_span) {
             return self.tcx.error_ty();
         }
-        if self.reject_unknown_deque_method(resolved, method, arg_count, name_span) {
+        if self.reject_unknown_slot_collection_method(resolved, method, arg_count, name_span) {
             return self.tcx.error_ty();
         }
         if let Some(ty) =
@@ -865,7 +865,8 @@ impl TypeChecker<'_> {
     /// Rejects `req.nowhere()` on a handle whose method surface the checker
     /// owns in full. Most runtime handles resolve their methods in the tier
     /// lowerings, so an unknown name on one has to stay open; the handles
-    /// listed here answer a closed table in [`Self::http_client_method_ret`],
+    /// listed here answer a closed table in [`Self::http_client_method_ret`]
+    /// or [`Self::bytes_handle_method_ret`],
     /// and a name that table does not claim has no binding on any tier. The
     /// VM refuses such a call and the native build ends with an undefined
     /// `@name` symbol once the whole program has compiled, so naming it at
@@ -877,6 +878,8 @@ impl TypeChecker<'_> {
         span: Span,
     ) -> bool {
         const CLOSED_HANDLE_SURFACES: &[&str] = &[
+            "bytes::Buffer",
+            "bytes::Builder",
             "http::Client",
             "http::ClientBuilder",
             "http::Request",
@@ -1718,7 +1721,7 @@ impl TypeChecker<'_> {
         true
     }
 
-    pub(super) fn reject_unknown_deque_method(
+    pub(super) fn reject_unknown_slot_collection_method(
         &mut self,
         resolved: Ty,
         method: &str,
@@ -1730,7 +1733,11 @@ impl TypeChecker<'_> {
             Some(TyKind::Adt { def, .. })
                 if matches!(
                     def.local,
-                    VEC_DEQUE_DEF_LOCAL | VEC_QUEUE_DEF_LOCAL | VEC_STACK_DEF_LOCAL
+                    VEC_DEQUE_DEF_LOCAL
+                        | VEC_QUEUE_DEF_LOCAL
+                        | VEC_STACK_DEF_LOCAL
+                        | BINARY_HEAP_DEF_LOCAL
+                        | MIN_HEAP_DEF_LOCAL
                 )
         );
         if !is_vec_deque || method == "clone" {
@@ -2165,6 +2172,7 @@ impl TypeChecker<'_> {
         if matches!(self.tcx.kind(resolved), Some(TyKind::Var(_))) {
             self.deferred_mutating_receivers
                 .push(DeferredMutatingReceiver {
+                    receiver: receiver.id,
                     ty: receiver_ty,
                     method: method.to_string(),
                     place: self.auto_deref_place_mutability(receiver),
@@ -2176,6 +2184,7 @@ impl TypeChecker<'_> {
         if !self.method_requires_mut_receiver(receiver_ty, method) {
             return;
         }
+        self.table.insert_receiver_write(receiver.id);
         self.check_mutating_receiver_place(receiver);
     }
 
@@ -2459,6 +2468,7 @@ impl TypeChecker<'_> {
             matches!(owner, "Map" | "Set" | "BTreeSet") && crate::is_mutating_method_name(method)
         });
         if requires_mut && let Some(receiver) = args.first() {
+            self.table.insert_receiver_write(receiver.id);
             if user_requirement == Some(true) {
                 match self.expr_ref_mutbl(receiver) {
                     Some(Mutbl::Mut) => {}
@@ -3768,6 +3778,7 @@ impl TypeChecker<'_> {
             if !self.method_requires_mut_receiver(receiver.ty, &receiver.method) {
                 continue;
             }
+            self.table.insert_receiver_write(receiver.receiver);
             // The place verdict was taken while the receiver's type was still
             // an inference variable, so a `&mut` binding read as an
             // undeclared-`mut` local. Now that the type is known, a receiver

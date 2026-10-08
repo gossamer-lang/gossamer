@@ -412,6 +412,9 @@ pub enum Value {
     Native(Arc<NativeInner>),
     /// Concurrent channel endpoint.
     Channel(Channel),
+    /// A runtime object the program reaches only through builtins, such as
+    /// a lock. It lives while any value holds it.
+    Opaque(Arc<OpaqueState>),
     /// Hash-map aggregate. `IndexMap` keeps entries dense while retaining
     /// O(1) lookup through the Fx hasher; this avoids hashbrown's full
     /// `(K, V)` power-of-two bucket slack on map-heavy workloads. The mutex keeps
@@ -596,6 +599,7 @@ impl Value {
             Self::Closure(_) => "closure".to_string(),
             Self::Builtin(_) | Self::Native(_) => "function".to_string(),
             Self::Channel(_) => "Channel".to_string(),
+            Self::Opaque(_) => "opaque".to_string(),
             Self::Map(_) | Self::IntMap(_) | Self::StrIntMap(_) => "Map".to_string(),
             Self::Uint(_) => "u64".to_string(),
             Self::Weak(_) => "Weak".to_string(),
@@ -1316,6 +1320,56 @@ pub struct NativeInner {
     pub call: NativeCall,
 }
 
+/// The runtime object a [`Value::Opaque`] holds. Boxed behind a thin `Arc` so
+/// the variant stays one word.
+pub struct OpaqueState(Box<dyn std::any::Any + Send + Sync>);
+
+impl OpaqueState {
+    /// Wraps `state`.
+    pub(crate) fn new(state: impl std::any::Any + Send + Sync) -> Arc<Self> {
+        Arc::new(Self(Box::new(state)))
+    }
+
+    /// The state as a `T`, when it is one.
+    pub(crate) fn downcast_ref<T: std::any::Any>(&self) -> Option<&T> {
+        self.0.downcast_ref()
+    }
+}
+
+impl std::fmt::Debug for OpaqueState {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str("OpaqueState")
+    }
+}
+
+/// A handle value: a struct named `name` whose field `field` holds a runtime
+/// object every copy of the handle shares, dropped with the last copy.
+pub(crate) fn state_handle<T: std::any::Any + Send + Sync>(
+    name: &str,
+    field: &'static str,
+    state: Arc<T>,
+) -> Value {
+    Value::struct_(name, vec![(field, Value::Opaque(OpaqueState::new(state)))])
+}
+
+/// The runtime object a [`state_handle`] named `name` holds in `field`.
+pub(crate) fn handle_state<T: std::any::Any + Send + Sync>(
+    value: &Value,
+    name: &str,
+    field: &str,
+) -> Option<Arc<T>> {
+    let Value::Struct(inner) = value else {
+        return None;
+    };
+    if inner.name != name {
+        return None;
+    }
+    inner.fields.iter().find_map(|(f, v)| match v {
+        Value::Opaque(state) if *f == field => state.downcast_ref::<Arc<T>>().cloned(),
+        _ => None,
+    })
+}
+
 impl Value {
     /// Empty `Value::Array(Arc::new(Vec::new()))` shared across
     /// callers. Avoids the per-call 32 B allocation for empty
@@ -1745,6 +1799,7 @@ impl Value {
             | Self::LazyIter(_)
             | Self::Builtin(_)
             | Self::Native(_)
+            | Self::Opaque(_)
             | Self::Weak(_)
             | Self::Void => {
                 // Unencodable in the raw layout - return a sentinel

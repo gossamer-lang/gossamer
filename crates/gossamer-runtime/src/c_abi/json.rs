@@ -374,7 +374,7 @@ pub unsafe extern "C" fn gos_rt_json_value_object_owned(vec: *mut GosVec) -> *mu
 }
 
 /// [`gos_rt_json_value_object_owned`] over pairs whose key words are of the
-/// kind [`object_member_name`] names.
+/// kind `object_member_name` names.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_value_object_owned_keyed(
     vec: *mut GosVec,
@@ -1657,7 +1657,7 @@ unsafe fn object_member_name(word: i64, key_kind: i64) -> String {
 }
 
 /// [`gos_rt_json_value_object`] over pairs whose key words are of the kind
-/// [`object_member_name`] names.
+/// `object_member_name` names.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_value_object_keyed(
     vec: *const GosVec,

@@ -1409,7 +1409,10 @@ fn builtin_channel_join(args: &[Value]) -> RuntimeResult<Value> {
             "Err",
             vec![Value::String("join: handle channel closed".into())],
         )),
-        crate::value::RecvOutcome::Deadlocked => Err(crate::value::deadlock_error("join")),
+        // A join is a receive on the handle's channel, and the report names
+        // the wait that receive recorded, whichever participant notices the
+        // deadlock first; the compiled tiers name it the same way.
+        crate::value::RecvOutcome::Deadlocked => Err(crate::value::deadlock_error("receive")),
     }
 }
 

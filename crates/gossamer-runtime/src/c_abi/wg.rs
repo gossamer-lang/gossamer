@@ -43,27 +43,35 @@ pub struct GosWaitGroup {
     /// drains this list and unparks each one, so a waiter never holds a
     /// scheduler carrier while the fan-out runs.
     parked_waiters: parking_lot::Mutex<Vec<crate::sched::Gid>>,
+    /// OS threads waiting on this group among other sources, raised when
+    /// the counter reaches zero.
+    wakers: crate::wake::WakerSet,
 }
+
+super::rc::managed_handle!(GosWaitGroup);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_wg_new() -> *mut GosWaitGroup {
     ffi_entry!(std::ptr::null_mut(), {
-        Box::into_raw(Box::new(GosWaitGroup {
+        super::rc::alloc_managed(GosWaitGroup {
             counter: parking_lot::Mutex::new(0),
             cv: parking_lot::Condvar::new(),
             error: AtomicI64::new(0),
             last_done: AtomicI64::new(-1),
             parked_waiters: parking_lot::Mutex::new(Vec::new()),
-        }))
+            wakers: crate::wake::WakerSet::new(),
+        })
     })
 }
 
-/// Releases every goroutine parked in `wait`. Called with the counter at zero.
+/// Releases every goroutine parked in `wait` and raises every OS thread
+/// waiting on the group. Called with the counter at zero.
 fn wake_parked_waiters(wg: &GosWaitGroup) {
     let waiters: Vec<crate::sched::Gid> = std::mem::take(&mut *wg.parked_waiters.lock());
     for gid in waiters {
         crate::sched_global::scheduler().unpark(gid);
     }
+    wg.wakers.wake_all();
 }
 
 #[unsafe(no_mangle)]
@@ -165,15 +173,18 @@ pub unsafe extern "C" fn gos_rt_wg_wait(wg: *mut GosWaitGroup) {
 /// the context cancelled the wait.
 ///
 /// # Safety
-/// `ctx_handle` is an opaque context handle, or null for an uncancellable
-/// wait.
+/// `wg` is null or a live wait group; `ctx_handle` is a context handle, or
+/// null for an uncancellable wait.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_wg_wait_ctx(wg: *mut GosWaitGroup, ctx_handle: *const u8) -> i64 {
+pub unsafe extern "C" fn gos_rt_wg_wait_ctx(
+    wg: *mut GosWaitGroup,
+    ctx_handle: *const super::context::GosCtx,
+) -> i64 {
     ffi_entry!(0, {
         if wg.is_null() {
             return 1;
         }
-        let addr = ctx_handle as usize;
+        let addr = ctx_handle.expose_provenance();
         if addr == 0 {
             // SAFETY: `wg` is this shim's argument, live for the call (C-ABI contract); non-null,
             // checked above.
@@ -182,7 +193,7 @@ pub unsafe extern "C" fn gos_rt_wg_wait_ctx(wg: *mut GosWaitGroup, ctx_handle: *
         }
         // SAFETY: `wg` is a handle from compiled code, checked non-null above and live for the whole call.
         let wg = unsafe { &*wg };
-        let cancelled = || super::context::addr_is_cancelled(addr);
+        let cancelled = || super::context::handle_is_cancelled(addr);
         loop {
             if *wg.counter.lock() <= 0 {
                 return 1;
@@ -191,12 +202,24 @@ pub unsafe extern "C" fn gos_rt_wg_wait_ctx(wg: *mut GosWaitGroup, ctx_handle: *
                 return 0;
             }
             if !gossamer_coro::in_goroutine() {
-                // An OS thread has no carrier to release, so it re-checks
-                // both conditions on the group's own wakeup cadence.
-                let mut c = wg.counter.lock();
-                if *c > 0 {
-                    wg.cv.wait_for(&mut c, std::time::Duration::from_millis(50));
+                // An OS thread sleeps on one signal that the counter reaching
+                // zero and the context cancelling both raise. Registered while
+                // the counter is held, so a zero-crossing after the check
+                // finds the waker.
+                let c = wg.counter.lock();
+                if *c <= 0 {
+                    return 1;
                 }
+                let signal = crate::wake::ThreadSignal::new();
+                let waker = signal.waker();
+                wg.wakers.register(&waker);
+                super::context::watch(addr, &waker);
+                drop(c);
+                if !cancelled() {
+                    signal.wait();
+                }
+                wg.wakers.deregister(&waker);
+                super::context::unwatch(addr, &waker);
                 continue;
             }
             // The counter reaching zero and the context cancelling both

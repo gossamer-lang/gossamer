@@ -216,15 +216,38 @@ pub fn forget_waker(gid: Gid) {
     globals().wakers.lock().remove(&gid);
 }
 
-/// Adds a one-shot timer firing at `deadline`. Returns the [`Gid`]
-/// the caller passes to [`register_waker`].
+/// A one-shot timer armed by [`add_timer`], disarmed by [`cancel_timer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimerHandle {
+    gid: Gid,
+    source: crate::sched::PollSource,
+}
+
+/// Arms a one-shot timer that runs `waker` once `deadline` passes.
+///
+/// The waker is registered before the timer reaches the poller, so a deadline
+/// that is already due when the poller sees it still finds its waker.
 #[must_use]
-pub fn add_timer(deadline: Instant) -> Gid {
+pub fn add_timer(deadline: Instant, waker: Box<dyn Fn() + Send + Sync>) -> TimerHandle {
     let gid = alloc_runtime_gid();
-    with_poller(|poller| {
-        poller.add_timer(deadline, gid);
-    });
-    gid
+    register_waker(gid, waker);
+    let source = with_poller(|poller| poller.add_timer(deadline, gid));
+    TimerHandle { gid, source }
+}
+
+/// Whether `timer` still has a waker waiting to run.
+#[cfg(test)]
+pub(crate) fn timer_is_armed(timer: TimerHandle) -> bool {
+    globals().wakers.lock().contains_key(&timer.gid)
+        || globals().poller.lock().has_timer(timer.source)
+}
+
+/// Disarms `timer`: its entry leaves the poller's queue and its waker is
+/// dropped. A timer whose waker already ran is left as it is.
+pub fn cancel_timer(timer: TimerHandle) {
+    let g = globals();
+    g.poller.lock().cancel_timer(timer.source);
+    forget_waker(timer.gid);
 }
 
 /// Borrows the netpoller for a closure. Used by the I/O bridge code
@@ -572,8 +595,34 @@ pub fn adjust_pending_handoffs(ready: bool) {
 /// goroutine that notices it, so the report ends the program. `op` names the
 /// operation that could not complete.
 pub fn report_deadlock_if_stuck(op: &str) {
+    report_channel_wait_if_stuck(op, None);
+}
+
+/// [`report_deadlock_if_stuck`] for a channel wait that a second source can
+/// also end, such as a receive that a context's cancellation releases.
+/// `still_waiting` answers `false` once that source has fired, and a wait it
+/// has released is never reported, whatever the channels say.
+pub fn report_cancellable_wait_if_stuck(
+    op: &str,
+    still_waiting: Arc<dyn Fn() -> bool + Send + Sync>,
+) {
+    report_channel_wait_if_stuck(op, Some(still_waiting));
+}
+
+fn report_channel_wait_if_stuck(
+    op: &str,
+    still_waiting: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+) {
     if !PROGRAM_ENTERED.load(Ordering::Acquire) {
         return;
+    }
+    // `main`'s wait is recorded before anything here decides not to report:
+    // a handoff still pending now may be retired by a goroutine that then
+    // finishes, and the check that goroutine runs as it leaves reports the
+    // wait only if it is on record.
+    let on_main = is_main_thread();
+    if on_main {
+        begin_main_wait(op, true, still_waiting.clone());
     }
     if PENDING_HANDOFFS.load(Ordering::Acquire) > 0 {
         return;
@@ -610,14 +659,14 @@ pub fn report_deadlock_if_stuck(op: &str) {
     if globals.scheduler.live_goroutines() == 0
         && CHANNEL_WAITERS.load(Ordering::Acquire) == 1
         && globals.wakers.lock().is_empty()
+        && still_waiting.as_ref().is_none_or(|still| still())
     {
         report_fatal_deadlock(op);
     }
-    // `main` about to wait on a channel while goroutines live: record the
-    // wait, so the goroutine whose park leaves nothing runnable reports it,
-    // and check now in case every goroutine already waits.
-    if is_main_thread() {
-        begin_main_wait(op, None);
+    // `main` about to wait on a channel while goroutines live: its wait is on
+    // record, so the goroutine whose park leaves nothing runnable reports it;
+    // check now in case every goroutine already waits.
+    if on_main {
         check_program_blocked();
     }
 }
@@ -646,16 +695,24 @@ fn is_main_thread() -> bool {
 struct MainWait {
     /// The operation named in a deadlock report.
     op: String,
-    /// Whether the wait still has something left to wait for. A channel wait
-    /// has none of its own: the channel counts say whether it can complete.
+    /// Whether `main` is counted among the channel waiters for this wait.
+    on_channel: bool,
+    /// Whether the wait still has something left to wait for. A plain
+    /// channel wait has none of its own: the channel counts say whether it
+    /// can complete.
     still_waiting: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 static MAIN_WAIT: Mutex<Option<MainWait>> = Mutex::new(None);
 
-fn begin_main_wait(op: &str, still_waiting: Option<Arc<dyn Fn() -> bool + Send + Sync>>) {
+fn begin_main_wait(
+    op: &str,
+    on_channel: bool,
+    still_waiting: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+) {
     *MAIN_WAIT.lock() = Some(MainWait {
         op: op.to_string(),
+        on_channel,
         still_waiting,
     });
     note_scheduler_progress();
@@ -670,7 +727,7 @@ pub fn main_waits_on(op: &str, still_waiting: Arc<dyn Fn() -> bool + Send + Sync
     if !is_main_thread() {
         return;
     }
-    begin_main_wait(op, Some(still_waiting));
+    begin_main_wait(op, false, Some(still_waiting));
     check_program_blocked();
 }
 
@@ -696,12 +753,12 @@ pub fn check_program_blocked() {
         return;
     }
     let epoch = SCHEDULER_EPOCH.load(Ordering::Acquire);
-    let (op, still_waiting) = {
+    let (op, on_channel, still_waiting) = {
         let wait = MAIN_WAIT.lock();
         let Some(wait) = wait.as_ref() else {
             return;
         };
-        (wait.op.clone(), wait.still_waiting.clone())
+        (wait.op.clone(), wait.on_channel, wait.still_waiting.clone())
     };
     if PENDING_HANDOFFS.load(Ordering::Acquire) > 0 || EXTERNAL_ACTORS.load(Ordering::Acquire) > 0 {
         return;
@@ -718,7 +775,7 @@ pub fn check_program_blocked() {
     // Every other channel waiter has to be one of the parked goroutines: a
     // thread outside the goroutine set inside a channel wait is an actor
     // this count cannot see.
-    let main_on_channel = usize::from(still_waiting.is_none());
+    let main_on_channel = usize::from(on_channel);
     if CHANNEL_WAITERS.load(Ordering::Acquire) != on_channels + main_on_channel {
         return;
     }
@@ -1013,6 +1070,30 @@ mod tests {
         let start = Instant::now();
         sleep_until(start + Duration::from_millis(20));
         assert!(start.elapsed() >= Duration::from_millis(15));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // drives the netpoller thread; Miri can't
+    fn an_already_due_timer_finds_its_waker() {
+        for _ in 0..200 {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let tx = parking_lot::Mutex::new(tx);
+            let _ = add_timer(
+                Instant::now(),
+                Box::new(move || {
+                    let _ = tx.lock().send(());
+                }),
+            );
+            rx.recv().expect("a due timer runs its waker");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // drives the netpoller thread; Miri can't
+    fn a_cancelled_timer_drops_its_waker_and_queue_entry() {
+        let timer = add_timer(Instant::now() + Duration::from_hours(1), Box::new(|| {}));
+        cancel_timer(timer);
+        assert!(!timer_is_armed(timer));
     }
 
     #[test]

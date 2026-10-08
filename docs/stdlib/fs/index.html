@@ -2346,7 +2346,7 @@
 <tr>
 <td><code>File</code></td>
 <td><code>type File</code></td>
-<td>Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family. <code>fd()</code> answers the OS descriptor (a handle on Windows) for the calls that take one, such as <code>std::term</code> on an opened <code>/dev/tty</code> or <code>CONIN$</code>.</td>
+<td>Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family. The file closes at <code>close()</code> or with its last handle. <code>std::term</code> and <code>os::fd</code> calls take the file itself, which keeps it open while they use it; <code>fd()</code> answers the OS descriptor (a handle on Windows) for a foreign call.</td>
 </tr>
 <tr>
 <td><code>DirInfo</code></td>

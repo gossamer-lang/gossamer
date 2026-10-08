@@ -4889,7 +4889,7 @@
       "name": "std::fs::File",
       "kind": "type",
       "signature": null,
-      "description": "Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family. `fd()` answers the OS descriptor (a handle on Windows) for the calls that take one, such as `std::term` on an opened `/dev/tty` or `CONIN$`.",
+      "description": "Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family. The file closes at `close()` or with its last handle. `std::term` and `os::fd` calls take the file itself, which keeps it open while they use it; `fd()` answers the OS descriptor (a handle on Windows) for a foreign call.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -7868,6 +7868,25 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-http-websocket-Conn",
+      "name": "std::http::websocket::Conn",
+      "kind": "type",
+      "signature": null,
+      "description": "An open connection, from `connect` or handed to a `serve` handler's `fn handle(&self, ws: Conn)`. Every copy shares the one connection, which closes at `close` or with the last copy.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdhttpwebsocket",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-http-websocket-Error",
       "name": "std::http::websocket::Error",
       "kind": "type",
@@ -7986,7 +8005,7 @@
       "name": "std::http::websocket::connect",
       "kind": "function",
       "signature": "fn connect(url: String) -> Result<http::websocket::Conn, errors::Error>",
-      "description": "connect(url) -> Result<i64, Error>: client TCP connect + RFC 6455 upgrade; returns a WebSocket handle.",
+      "description": "connect(url) -> Result<Conn, Error>: client TCP connect + RFC 6455 upgrade; returns the connection.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -8023,7 +8042,7 @@
       "id": "std-http-websocket-recv",
       "name": "std::http::websocket::recv",
       "kind": "function",
-      "signature": "fn recv(conn: http::websocket::Conn) -> Result<http::websocket::Message, errors::Error>",
+      "signature": "fn recv(conn: http::websocket::Conn) -> Result<String, errors::Error>",
       "description": "recv(ws) -> Result<String, Error>: next text message; Err on close/error.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -8080,7 +8099,7 @@
       "id": "std-http-websocket-serve",
       "name": "std::http::websocket::serve",
       "kind": "function",
-      "signature": "fn serve(addr: String, handler: Fn(http::websocket::Conn) -> ()) -> Result<(), errors::Error>",
+      "signature": "fn serve<H>(addr: String, handler: H) -> Result<(), errors::Error>",
       "description": "serve(addr, handler) -> Result<(), Error>: bind, upgrade each connection, dispatch the handler's handle(self, ws) per connection.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -13321,10 +13340,29 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-os-fd-Descriptor",
+      "name": "std::os::fd::Descriptor",
+      "kind": "trait",
+      "signature": null,
+      "description": "What a call that needs an OS descriptor takes: an `fs::File`, which stays open while the call uses it, or `term::STDIN`, `term::STDOUT`, or `term::STDERR` for a standard stream. Any other integer is refused, since a descriptor read off a file names whatever the OS reuses it for once the file closes (GT0119).",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdosfd",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-os-fd-wait-readable",
       "name": "std::os::fd::wait_readable",
       "kind": "function",
-      "signature": "fn wait_readable(fd: i64, timeout_ms: i64) -> Result<bool, errors::Error>",
+      "signature": "fn wait_readable<D: os::fd::Descriptor>(fd: D, timeout_ms: i64) -> Result<bool, errors::Error>",
       "description": "`wait_readable(fd, timeout_ms) -> Result<bool, errors::Error>`: true when `fd` has input (or reached end of input) within `timeout_ms` milliseconds; a negative timeout waits indefinitely. False at the timeout or when the goroutine's cohort is cancelled. The goroutine parks; other goroutines keep running.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -13343,7 +13381,7 @@
       "id": "std-os-fd-wait-writable",
       "name": "std::os::fd::wait_writable",
       "kind": "function",
-      "signature": "fn wait_writable(fd: i64, timeout_ms: i64) -> Result<bool, errors::Error>",
+      "signature": "fn wait_writable<D: os::fd::Descriptor>(fd: D, timeout_ms: i64) -> Result<bool, errors::Error>",
       "description": "`wait_writable(fd, timeout_ms) -> Result<bool, errors::Error>`: true when `fd` accepts a write within the timeout. Windows handles always do.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -16593,7 +16631,7 @@
       "name": "std::sync::RwLock",
       "kind": "type",
       "signature": null,
-      "description": "Reader-writer lock guarding an `i64`: `read`, `write`, `with_read`, `with_write`.",
+      "description": "Reader-writer lock guarding an `i64`: `read`, `write`, `with_read` (calls back with the value read under the shared lock, released first), `with_write` (calls back holding the exclusive lock and stores the answer).",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -16745,7 +16783,7 @@
       "name": "std::term::RawMode",
       "kind": "type",
       "signature": null,
-      "description": "Returned by `enter_raw`; `restore()` puts the terminal back. Restoration also runs when the program ends, by any path.",
+      "description": "Returned by `enter_raw`; `restore()` puts the terminal back. Restoration also runs when the program ends, by any path. A raw mode entered on an `fs::File` keeps the file open.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -16820,7 +16858,7 @@
       "id": "std-term-enter-raw",
       "name": "std::term::enter_raw",
       "kind": "function",
-      "signature": "fn enter_raw(fd: i64 = term::STDIN) -> Result<term::RawMode, errors::Error>",
+      "signature": "fn enter_raw<D: os::fd::Descriptor>(fd: D = term::STDIN) -> Result<term::RawMode, errors::Error>",
       "description": "`enter_raw(fd = STDIN) -> Result<RawMode, errors::Error>`: input on `fd` arrives byte by byte without echo or line editing, and output is not translated; the mode is restored when the program ends.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -16839,8 +16877,8 @@
       "id": "std-term-is-terminal",
       "name": "std::term::is_terminal",
       "kind": "function",
-      "signature": "fn is_terminal(fd: i64) -> bool",
-      "description": "`is_terminal(fd) -> bool`: whether the descriptor (a handle on Windows; 0, 1, and 2 name the standard streams) is a terminal.",
+      "signature": "fn is_terminal<D: os::fd::Descriptor>(fd: D) -> bool",
+      "description": "`is_terminal(fd) -> bool`: whether `fd`, an `fs::File` or a standard stream, is a terminal.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -16858,7 +16896,7 @@
       "id": "std-term-read-input",
       "name": "std::term::read_input",
       "kind": "function",
-      "signature": "fn read_input(timeout_ms: i64, fd: i64 = term::STDIN) -> Result<Vec<u8>, errors::Error>",
+      "signature": "fn read_input<D: os::fd::Descriptor>(timeout_ms: i64, fd: D = term::STDIN) -> Result<Vec<u8>, errors::Error>",
       "description": "`read_input(timeout_ms, fd = STDIN) -> Result<Vec<u8>, errors::Error>`: the bytes of input available on `fd` within `timeout_ms` milliseconds (negative waits indefinitely), empty at the timeout or when the goroutine's cohort is cancelled. The goroutine parks while it waits.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -16877,7 +16915,7 @@
       "id": "std-term-resized",
       "name": "std::term::resized",
       "kind": "function",
-      "signature": "fn resized(fd: i64 = term::STDOUT) -> bool",
+      "signature": "fn resized<D: os::fd::Descriptor>(fd: D = term::STDOUT) -> bool",
       "description": "`resized(fd = STDOUT) -> bool`: whether the size changed since the last call; the first call answers false.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -16896,7 +16934,7 @@
       "id": "std-term-size",
       "name": "std::term::size",
       "kind": "function",
-      "signature": "fn size(fd: i64 = term::STDOUT) -> Result<(i64, i64), errors::Error>",
+      "signature": "fn size<D: os::fd::Descriptor>(fd: D = term::STDOUT) -> Result<(i64, i64), errors::Error>",
       "description": "`size(fd = STDOUT) -> Result<(i64, i64), errors::Error>`: the terminal's columns and rows. A standard stream that is not a terminal falls back to the other two.",
       "lifecycle": "experimental",
       "tier_support": [

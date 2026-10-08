@@ -2345,6 +2345,11 @@
 </thead>
 <tbody>
 <tr>
+<td><code>Conn</code></td>
+<td><code>type Conn</code></td>
+<td>An open connection, from <code>connect</code> or handed to a <code>serve</code> handler's <code>fn handle(&amp;self, ws: Conn)</code>. Every copy shares the one connection, which closes at <code>close</code> or with the last copy.</td>
+</tr>
+<tr>
 <td><code>WebSocket</code></td>
 <td><code>type WebSocket</code></td>
 <td>Accepted WebSocket connection (Rust-side framing).</td>
@@ -2376,13 +2381,13 @@
 </tr>
 <tr>
 <td><code>serve</code></td>
-<td><code>fn serve(addr: String, handler: Fn(http::websocket::Conn) -&gt; ()) -&gt; Result&lt;(), errors::Error&gt;</code></td>
+<td><code>fn serve&lt;H&gt;(addr: String, handler: H) -&gt; Result&lt;(), errors::Error&gt;</code></td>
 <td>serve(addr, handler) -&gt; Result&lt;(), Error&gt;: bind, upgrade each connection, dispatch the handler's handle(self, ws) per connection.</td>
 </tr>
 <tr>
 <td><code>connect</code></td>
 <td><code>fn connect(url: String) -&gt; Result&lt;http::websocket::Conn, errors::Error&gt;</code></td>
-<td>connect(url) -&gt; Result<i64, Error>: client TCP connect + RFC 6455 upgrade; returns a WebSocket handle.</td>
+<td>connect(url) -&gt; Result<Conn, Error>: client TCP connect + RFC 6455 upgrade; returns the connection.</td>
 </tr>
 <tr>
 <td><code>send_text</code></td>
@@ -2396,7 +2401,7 @@
 </tr>
 <tr>
 <td><code>recv</code></td>
-<td><code>fn recv(conn: http::websocket::Conn) -&gt; Result&lt;http::websocket::Message, errors::Error&gt;</code></td>
+<td><code>fn recv(conn: http::websocket::Conn) -&gt; Result&lt;String, errors::Error&gt;</code></td>
 <td>recv(ws) -&gt; Result<String, Error>: next text message; Err on close/error.</td>
 </tr>
 <tr>

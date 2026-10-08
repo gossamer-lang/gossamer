@@ -47,6 +47,8 @@ pub struct GosBarrier {
     cv: Condvar,
 }
 
+super::rc::managed_handle!(GosBarrier);
+
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_barrier_new(n: i64) -> *mut GosBarrier {
     ffi_entry!(std::ptr::null_mut(), {
@@ -54,14 +56,14 @@ pub extern "C" fn gos_rt_barrier_new(n: i64) -> *mut GosBarrier {
         // single participant so `wait()` returns immediately rather
         // than deadlocking, matching `Barrier::new(1)`.
         let expected = if n < 1 { 1 } else { n as usize };
-        Box::into_raw(Box::new(GosBarrier {
+        super::rc::alloc_managed(GosBarrier {
             state: Mutex::new(BarrierState {
                 expected,
                 arrived: 0,
                 generation: 0,
             }),
             cv: Condvar::new(),
-        }))
+        })
     })
 }
 
@@ -136,13 +138,15 @@ pub struct GosOnce {
     completed_by: AtomicI64,
 }
 
+super::rc::managed_handle!(GosOnce);
+
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_once_new() -> *mut GosOnce {
     ffi_entry!(std::ptr::null_mut(), {
-        Box::into_raw(Box::new(GosOnce {
+        super::rc::alloc_managed(GosOnce {
             inner: Once::new(),
             completed_by: AtomicI64::new(-1),
-        }))
+        })
     })
 }
 
@@ -201,8 +205,8 @@ mod tests {
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         assert_eq!(unsafe { gos_rt_once_call(once, std::ptr::null()) }, 0);
-        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
-        // and not used again.
-        unsafe { drop(Box::from_raw(once)) };
+        // SAFETY: the pointer is the one share this test's constructor call answered, given back
+        // once here and not used again.
+        unsafe { crate::c_abi::rc::gos_rt_rc_release(once.cast()) };
     }
 }

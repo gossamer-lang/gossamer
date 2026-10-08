@@ -1644,12 +1644,15 @@ fn peer_watch_loop() {
                 if ctx != 0 && peer_is_gone(entry.socket) {
                     // The connection clears its own slot when the request
                     // ends, so a context is cancelled at most once here.
+                    // The slot holds a share of its own, which taking it hands
+                    // to this cancel; the request keeps its share until it ends.
                     if entry
                         .ctx
                         .compare_exchange(ctx, 0, Ordering::AcqRel, Ordering::Relaxed)
                         .is_ok()
                     {
-                        crate::c_abi::context::close_request_context(ctx);
+                        crate::c_abi::context::cancel_handle(ctx);
+                        crate::c_abi::context::release_handle(ctx);
                     }
                 }
             }
@@ -1685,6 +1688,9 @@ impl Drop for DisconnectWatch {
 pub(crate) fn open_served_request_context(request: &GosHttpRequest) -> Option<usize> {
     let site = request.context_site.as_ref()?;
     let ctx = crate::c_abi::context::open_request_context_at(site.deadline);
+    // The watch holds a share of its own, so whichever of the watcher and
+    // the request's end takes the slot gives that share back.
+    crate::c_abi::context::retain_handle(ctx);
     site.watch.store(ctx, std::sync::atomic::Ordering::Release);
     Some(ctx)
 }
@@ -1703,10 +1709,12 @@ fn cancel_request_context(request: &mut GosHttpRequest) {
 
 /// Ends the request's context and stops the peer watch from naming it.
 ///
-/// The slot is cleared first, so the watcher cannot pick up a context this
-/// call is about to close.
+/// The slot is taken first, so the watcher cannot pick up a context this
+/// call is about to close, and the share the slot held is given back here
+/// when the watcher did not take it.
 fn end_request_context(request: &mut GosHttpRequest, watch_ctx: &std::sync::atomic::AtomicUsize) {
-    watch_ctx.store(0, std::sync::atomic::Ordering::Release);
+    let watched = watch_ctx.swap(0, std::sync::atomic::Ordering::AcqRel);
+    crate::c_abi::context::release_handle(watched);
     request.context_site = None;
     cancel_request_context(request);
 }

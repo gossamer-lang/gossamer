@@ -20,9 +20,9 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::io;
 use std::time::Duration;
 
@@ -32,7 +32,7 @@ use crate::platform::Instant;
 use super::task::Gid;
 
 /// Opaque identifier for a registered I/O source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PollSource(pub u32);
 
 /// Direction (or kind) a goroutine is waiting on.
@@ -127,45 +127,6 @@ impl Poller for MockPoller {
     }
 }
 
-/// Min-heap entry for the timer wheel. Sorted by expiry; the entry
-/// with the soonest deadline pops first.
-#[derive(Debug, Clone, Copy)]
-#[cfg(not(target_arch = "wasm32"))]
-struct TimerEntry {
-    deadline: Instant,
-    source: PollSource,
-    gid: Gid,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl PartialEq for TimerEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.deadline == other.deadline && self.source == other.source
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Eq for TimerEntry {}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl PartialOrd for TimerEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Ord for TimerEntry {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Reverse: BinaryHeap is max-heap by default and we want the
-        // *earliest* deadline at the top.
-        other
-            .deadline
-            .cmp(&self.deadline)
-            .then_with(|| other.source.0.cmp(&self.source.0))
-    }
-}
-
 /// Production poller backed by `mio` (epoll / kqueue / IOCP).
 ///
 /// The poller owns a `mio::Poll` plus a `mio::Registry`, and tracks
@@ -206,14 +167,12 @@ pub struct OsPoller {
     /// Pending readiness events accumulated between `poll` and
     /// `drain` calls.
     pending: Vec<Readiness>,
-    /// Outstanding timer wheel.
-    timers: BinaryHeap<TimerEntry>,
-    /// Timers cannot be removed cheaply from `BinaryHeap`.  Remember
-    /// cancelled sources and discard them when they reach the heap top.
-    /// This is essential for I/O deadlines: a readiness wake must not leave
-    /// a timer behind that can later unpark the goroutine during an unrelated
-    /// wait.
-    cancelled_timers: HashSet<PollSource>,
+    /// Outstanding timers ordered by deadline, ties broken by source.
+    timers: BTreeMap<(Instant, PollSource), Gid>,
+    /// Each outstanding timer's deadline, so a cancel finds its entry in
+    /// [`Self::timers`] directly and removes it at once rather than leaving
+    /// it to occupy the queue until its deadline.
+    timer_deadlines: HashMap<PollSource, Instant>,
     /// Next free token id used when registering with mio.
     next_token: usize,
     /// Map from mio Token to `(PollSource, Gid, Interest)`.
@@ -249,8 +208,8 @@ impl OsPoller {
             interrupt,
             by_source: HashMap::new(),
             pending: Vec::new(),
-            timers: BinaryHeap::new(),
-            cancelled_timers: HashSet::new(),
+            timers: BTreeMap::new(),
+            timer_deadlines: HashMap::new(),
             next_token: 1,
             by_token: HashMap::new(),
         })
@@ -334,36 +293,38 @@ impl OsPoller {
         let token = mio::Token(self.next_token);
         self.next_token = self.next_token.wrapping_add(1).max(1);
         let source = PollSource(u32::try_from(token.0 & 0xFFFF_FFFF).unwrap_or(0));
-        self.timers.push(TimerEntry {
-            deadline,
-            source,
-            gid,
-        });
+        self.timers.insert((deadline, source), gid);
+        self.timer_deadlines.insert(source, deadline);
         source
     }
 
     /// Cancels a timer previously returned by [`Self::add_timer`].
     ///
-    /// Removal is lazy because `BinaryHeap` has no indexed removal.  The
-    /// source is discarded from the heap and pending queue before it can be
-    /// delivered, so cancellation cannot produce a stale scheduler wake.
+    /// The timer leaves the queue and any undrained firing leaves the pending
+    /// buffer, so cancellation cannot produce a stale scheduler wake. A timer
+    /// that already fired or was already cancelled is left as it is.
     pub fn cancel_timer(&mut self, source: PollSource) {
-        self.cancelled_timers.insert(source);
+        if let Some(deadline) = self.timer_deadlines.remove(&source) {
+            self.timers.remove(&(deadline, source));
+        }
         self.pending
             .retain(|event| !(event.source == source && event.interest == Interest::Timer));
+    }
+
+    /// Whether `source` is still waiting to fire.
+    #[cfg(test)]
+    pub(crate) fn has_timer(&self, source: PollSource) -> bool {
+        self.timer_deadlines.contains_key(&source)
     }
 
     /// Returns the duration until the next timer fires, or `None` if
     /// no timer is pending.
     fn next_timeout(&self, base: Option<Duration>) -> Option<Duration> {
         let now = Instant::now();
-        let timer_dur = self.timers.peek().map(|entry| {
-            if entry.deadline <= now {
-                Duration::ZERO
-            } else {
-                entry.deadline - now
-            }
-        });
+        let timer_dur = self
+            .timers
+            .first_key_value()
+            .map(|(&(deadline, _), _)| deadline.saturating_duration_since(now));
         match (base, timer_dur) {
             (None, t) => t,
             (Some(b), None) => Some(b),
@@ -373,18 +334,16 @@ impl OsPoller {
 
     fn drain_expired_timers(&mut self) {
         let now = Instant::now();
-        while let Some(top) = self.timers.peek() {
-            if top.deadline > now {
+        while let Some(entry) = self.timers.first_entry() {
+            if entry.key().0 > now {
                 break;
             }
-            let entry = self.timers.pop().expect("peeked timer disappeared");
-            if self.cancelled_timers.remove(&entry.source) {
-                continue;
-            }
+            let ((_, source), gid) = entry.remove_entry();
+            self.timer_deadlines.remove(&source);
             self.pending.push(Readiness {
-                source: entry.source,
+                source,
                 interest: Interest::Timer,
-                gid: entry.gid,
+                gid,
             });
         }
     }
@@ -422,7 +381,7 @@ impl Poller for OsPoller {
                 return Ok(self.drain());
             }
             let user_remaining = user_deadline.map(|d| d.saturating_duration_since(Instant::now()));
-            if matches!(user_remaining, Some(d) if d.is_zero()) && self.timers.peek().is_none() {
+            if matches!(user_remaining, Some(d) if d.is_zero()) && self.timers.is_empty() {
                 return Ok(self.drain());
             }
             let combined = self.next_timeout(user_remaining);
@@ -441,7 +400,7 @@ impl Poller for OsPoller {
                 if Instant::now() >= d {
                     return Ok(self.drain());
                 }
-            } else if self.timers.peek().is_none() {
+            } else if self.timers.is_empty() {
                 // No deadline and no timer pending - re-polling
                 // would block forever. Return empty.
                 return Ok(self.drain());
@@ -563,6 +522,29 @@ mod tests {
             events.is_empty(),
             "cancelled deadline must not wake later work"
         );
+    }
+
+    #[test]
+    fn cancelled_timers_leave_the_queue_at_once() {
+        let mut poller = OsPoller::new().expect("OsPoller::new");
+        let far = Instant::now() + Duration::from_hours(1);
+        for gid in 0..10_000 {
+            let source = poller.add_timer(far, Gid(gid));
+            poller.cancel_timer(source);
+        }
+        assert!(poller.timers.is_empty());
+        assert!(poller.timer_deadlines.is_empty());
+    }
+
+    #[test]
+    fn cancelling_a_fired_timer_leaves_no_residue() {
+        let mut poller = OsPoller::new().expect("OsPoller::new");
+        let source = poller.add_timer(Instant::now(), Gid(3));
+        let events = poller.poll(Some(Duration::ZERO)).expect("OsPoller::poll");
+        assert_eq!(events.len(), 1);
+        poller.cancel_timer(source);
+        assert!(poller.timers.is_empty());
+        assert!(poller.timer_deadlines.is_empty());
     }
 
     #[test]

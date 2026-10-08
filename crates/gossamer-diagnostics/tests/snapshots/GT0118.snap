@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0118]: A callable runs on another goroutine, but it captures a binding the - here
+--- framed ---
+error[GT0118]: A callable runs on another goroutine, but it captures a binding the
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

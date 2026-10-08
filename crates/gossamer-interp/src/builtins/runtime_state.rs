@@ -95,6 +95,7 @@ fn default_stdout(text: &str) {
     // JIT-native) output in program order. No-op when nothing was
     // buffered, so pure-bytecode programs pay only an uncontended lock.
     gossamer_runtime::c_abi::flush_stdout_buffer();
+    gossamer_runtime::c_abi::print::note_stdout_written(text.as_bytes());
     write_stdio(&mut std::io::stdout().lock(), text);
 }
 

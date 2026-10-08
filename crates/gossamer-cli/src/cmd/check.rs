@@ -109,8 +109,15 @@ pub(crate) fn run(
     let generated_len = source.len().saturating_sub(user_source.len());
     // Comptime fold makes `gos check` authoritative for comptime: a
     // region that is not compile-time-known is reported here, not
-    // deferred to `run` / `build`.
-    let source = crate::comptime_fold::fold_comptime(source, &file.to_string_lossy())?;
+    // deferred to `run` / `build`. The fold runs the program, so a failure
+    // is reported only once the front end has accepted the unfolded unit -
+    // the order the editor uses - and the front end's warnings are reported
+    // alongside it.
+    let (source, fold_error) =
+        match crate::comptime_fold::fold_comptime(source.clone(), &file.to_string_lossy()) {
+            Ok(folded) => (folded, None),
+            Err(err) => (source, Some(err)),
+        };
     let mut map = gossamer_lex::SourceMap::new();
     let file_id = map.add_file(file.to_string_lossy().into_owned(), source.clone());
     crate::paths::register_unit_origins(&mut map, file_id, &unit.entry, &unit.origins);
@@ -156,6 +163,11 @@ pub(crate) fn run(
     }
     for diag in outcome.diagnostics.iter().chain(&outcome.warnings) {
         emit_diag(diag, &map, render_opts, message_format);
+    }
+    if let Some(err) = fold_error
+        && outcome.diagnostics.is_empty()
+    {
+        return Err(err);
     }
     // The editor and `gos lint` both run the default lint registry, so
     // `check` runs it too and stays the superset gate. Lints are advisory

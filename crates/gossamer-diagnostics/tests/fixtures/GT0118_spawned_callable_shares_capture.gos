@@ -1,0 +1,7 @@
+// ERROR: GT0118
+fn main() {
+    let mut n = 0
+    let f = || { n += 1; n }
+    let h = spawn(f)
+    println("{:?} {}", h.join(), n)
+}

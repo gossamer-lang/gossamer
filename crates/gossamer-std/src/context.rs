@@ -34,7 +34,7 @@
 //! from deadline expiry.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Once, Weak};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use gossamer_runtime::platform::Instant;
@@ -43,125 +43,49 @@ use parking_lot::Mutex;
 use crate::errors::Error;
 use crate::sched_global::Gid;
 
-/// Installs the cross-crate context hooks in `gossamer-runtime`
-/// the first time any `Context` is constructed. Idempotent.
-/// The runtime's context-aware blocking primitives
-/// (`gos_rt_chan_recv_ctx_option`) consult these to wake parked
-/// goroutines on cancel without `gossamer-runtime` needing to
-/// link against this crate.
-#[allow(unsafe_code)]
-fn ensure_hooks_installed() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: hook fn pointers have C-ABI signatures matching
-        // the runtime's declared `CtxRegisterFn` /
-        // `CtxDeregisterFn` / `CtxIsCancelledFn`. The runtime
-        // never dereferences `ctx_handle` directly - only these
-        // hooks do, and they downcast back to `&Inner` knowing
-        // the handle came from a live `Arc<Inner>`.
-        unsafe {
-            gossamer_runtime::c_abi::install_ctx_hooks(
-                ctx_register_hook,
-                ctx_deregister_hook,
-                ctx_is_cancelled_hook,
-            );
-        }
-    });
-}
+impl gossamer_runtime::c_abi::CancelSource for Context {
+    fn is_cancelled(&self) -> bool {
+        Context::is_cancelled(self)
+    }
 
-/// Hook called by the runtime to register `gid` on the context
-/// pointed to by `ctx_handle`. `ctx_handle` is the raw pointer
-/// from `Arc::as_ptr(&ctx.inner)`; the caller must hold the
-/// `Arc` alive across the runtime call so the pointer stays
-/// valid.
-#[allow(unsafe_code)]
-unsafe extern "C" fn ctx_register_hook(ctx_handle: *const u8, gid: u32) {
-    if ctx_handle.is_null() {
-        return;
+    fn register(&self, gid: Gid) {
+        self.register_waiter(gid);
     }
-    // SAFETY: the caller (`Channel::recv_ctx` etc.) holds an
-    // Arc clone of the context inner for the duration of the
-    // runtime call, so the pointer is live.
-    // The handle was produced by `Arc::as_ptr(&ctx.inner)` so
-    // the alignment is correct for `Inner`. Cast through the
-    // pointee's exposed-but-correctly-aligned form.
-    #[allow(clippy::cast_ptr_alignment)]
-    let inner = unsafe { &*ctx_handle.cast::<Inner>() };
-    if inner.cancelled.load(Ordering::Acquire) {
-        return;
+
+    fn deregister(&self, gid: Gid) {
+        self.deregister_waiter(gid);
     }
-    let mut waiters = inner.waiters.lock();
-    let g = Gid(gid);
-    if !waiters.contains(&g) {
-        waiters.push(g);
+
+    fn watch(&self, waker: &std::task::Waker) {
+        Context::watch(self, waker);
+    }
+
+    fn unwatch(&self, waker: &std::task::Waker) {
+        Context::unwatch(self, waker);
+    }
+
+    fn not_fired(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        let ctx = self.clone();
+        Arc::new(move || !ctx.is_cancelled())
     }
 }
 
-#[allow(
-    unsafe_code,
-    reason = "a C-ABI hook the runtime calls through a function pointer"
-)]
-unsafe extern "C" fn ctx_deregister_hook(ctx_handle: *const u8, gid: u32) {
-    if ctx_handle.is_null() {
-        return;
-    }
-    // The handle was produced by `Arc::as_ptr(&ctx.inner)` so
-    // the alignment is correct for `Inner`. Cast through the
-    // pointee's exposed-but-correctly-aligned form.
-    #[allow(clippy::cast_ptr_alignment)]
-    let inner = unsafe { &*ctx_handle.cast::<Inner>() };
-    let mut waiters = inner.waiters.lock();
-    let g = Gid(gid);
-    if let Some(pos) = waiters.iter().position(|&w| w == g) {
-        waiters.swap_remove(pos);
-    }
-}
-
-#[allow(
-    unsafe_code,
-    reason = "a C-ABI hook the runtime calls through a function pointer"
-)]
-unsafe extern "C" fn ctx_is_cancelled_hook(ctx_handle: *const u8) -> i32 {
-    if ctx_handle.is_null() {
-        return 0;
-    }
-    // The handle was produced by `Arc::as_ptr(&ctx.inner)` so
-    // the alignment is correct for `Inner`. Cast through the
-    // pointee's exposed-but-correctly-aligned form.
-    #[allow(clippy::cast_ptr_alignment)]
-    let inner = unsafe { &*ctx_handle.cast::<Inner>() };
-    i32::from(inner.cancelled.load(Ordering::Acquire))
-}
-
-/// Cancellation-aware blocking receive on a runtime channel
-/// pointer. Wraps `gos_rt_chan_recv_ctx_option` with hook
-/// installation + Arc lifetime management. Returns `Some(value)`
-/// on a successful recv, `None` on close or context cancel.
+/// Cancellation-aware blocking receive on a runtime channel pointer.
+/// Returns `Some(value)` on a successful recv, `None` on close or
+/// context cancel.
+///
+/// # Safety
 ///
 /// `chan` must be a live `*mut GosChan` returned from
 /// `gos_rt_chan_new`; the caller owns its lifetime (typically
 /// matched by a `gos_rt_chan_close` or `gos_rt_chan_drop`).
 #[allow(unsafe_code)]
 #[must_use]
-pub fn chan_recv_ctx_i64(chan: *mut u8, ctx: &Context) -> Option<i64> {
-    ensure_hooks_installed();
-    // Hold an Arc clone for the duration of the call so the
-    // inner pointer we pass remains valid.
-    let inner_arc = Arc::clone(&ctx.inner);
-    let handle = Arc::as_ptr(&inner_arc).cast::<u8>();
-    // SAFETY: `chan` and `handle` are passed through the C-ABI
-    // surface; runtime owns the channel state, we hold the Arc
-    // here so `handle` is live throughout. Result pointer is a
-    // heap `GosResult` we free below.
-    let raw = unsafe { gossamer_runtime::c_abi::gos_rt_chan_recv_ctx_option(chan.cast(), handle) };
-    // Keep `inner_arc` alive past the call to be sure.
-    drop(inner_arc);
-    // `raw` is the 2-word by-value `Option`/`Result` (disc + payload); no box.
-    if gossamer_runtime::c_abi::gos_rt_result_disc(raw) == 0 {
-        Some(gossamer_runtime::c_abi::gos_rt_result_payload(raw))
-    } else {
-        None
-    }
+pub unsafe fn chan_recv_ctx_i64(chan: *mut u8, ctx: &Context) -> Option<i64> {
+    // SAFETY: forwarded from this function's own contract.
+    let (disc, payload) =
+        unsafe { gossamer_runtime::c_abi::chan_recv_cancellable(chan.cast(), ctx) };
+    (disc == 0).then_some(payload)
 }
 
 #[derive(Debug)]
@@ -181,6 +105,9 @@ struct Inner {
     /// active goroutine) can be dropped - `cancel_with` skips
     /// upgrade failures rather than treating them as errors.
     children: Mutex<Vec<Weak<Inner>>>,
+    /// Wakers run when this context or an ancestor is cancelled, for
+    /// waiters that are not goroutines.
+    wakers: gossamer_runtime::wake::WakerSet,
 }
 
 /// Shared, reference-counted context handle.
@@ -202,6 +129,7 @@ impl Context {
                 parent: None,
                 waiters: Mutex::new(Vec::new()),
                 children: Mutex::new(Vec::new()),
+                wakers: gossamer_runtime::wake::WakerSet::new(),
             }),
         }
     }
@@ -234,6 +162,22 @@ impl Context {
         if let Some(pos) = waiters.iter().position(|&w| w == gid) {
             waiters.swap_remove(pos);
         }
+    }
+
+    /// Runs `waker` when this context or an ancestor is cancelled. A
+    /// context already cancelled runs it at once, so a caller that
+    /// registers and then sleeps cannot miss a cancellation that came
+    /// first.
+    pub fn watch(&self, waker: &std::task::Waker) {
+        self.inner.wakers.register(waker);
+        if self.is_cancelled() {
+            waker.wake_by_ref();
+        }
+    }
+
+    /// Withdraws a registration made by [`Context::watch`].
+    pub fn unwatch(&self, waker: &std::task::Waker) {
+        self.inner.wakers.deregister(waker);
     }
 
     /// Returns a [`Done`] handle - a receive-only,
@@ -371,6 +315,7 @@ pub fn with_cancel(parent: &Context) -> (Context, Cancel) {
         parent: Some(parent.clone()),
         waiters: Mutex::new(Vec::new()),
         children: Mutex::new(Vec::new()),
+        wakers: gossamer_runtime::wake::WakerSet::new(),
     });
     // Register the child with the parent so an ancestor cancel
     // walks down to the descendants' wait-lists.
@@ -524,6 +469,7 @@ fn propagate_cancel(inner: &Arc<Inner>, reason: String) {
             scheduler.unpark(gid);
         }
     }
+    inner.wakers.wake_all();
     // Walk descendants. Drop dead weak refs as we go.
     let children: Vec<Weak<Inner>> = std::mem::take(&mut *inner.children.lock());
     for weak in children {

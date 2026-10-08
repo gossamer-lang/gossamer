@@ -1,8 +1,10 @@
-//! Every Gossamer code fence in `docs_src` is a program `gos check` accepts,
-//! unless the line before it says otherwise: `<!-- fragment -->` marks a
-//! piece of a larger program the prose describes, and
-//! `<!-- compile_fail CODE -->` marks an example that must be rejected with
-//! that diagnostic.
+//! Every Gossamer code fence in `docs_src` and the README is a program
+//! `gos check` accepts, unless the line before it says otherwise:
+//! `<!-- fragment -->` marks a piece of a larger program the prose
+//! describes, `<!-- compile_fail CODE -->` marks an example that must be
+//! rejected with that diagnostic, and `<!-- output: TEXT -->` marks one
+//! `gos run` must print `TEXT` from (`\n` separates lines), which pins what
+//! the prose says about the values it builds.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,6 +22,7 @@ enum Expect {
     Checks,
     Fragment,
     Rejected(String),
+    Prints(String),
 }
 
 struct Fence {
@@ -66,6 +69,11 @@ fn fences_in(file: &Path) -> Vec<Fence> {
             .and_then(|rest| rest.strip_suffix(" -->"))
         {
             Expect::Rejected(code.trim().to_string())
+        } else if let Some(text) = marker
+            .strip_prefix("<!-- output: ")
+            .and_then(|rest| rest.strip_suffix(" -->"))
+        {
+            Expect::Prints(text.replace("\\n", "\n") + "\n")
         } else {
             Expect::Checks
         };
@@ -90,6 +98,7 @@ fn every_docs_fence_checks_or_says_why_not() {
     let root = workspace_root();
     let mut files = Vec::new();
     markdown_files(&root.join("docs_src"), &mut files);
+    files.push(root.join("README.md"));
     files.sort();
     let scratch = std::env::temp_dir().join(format!("gos-doc-fences-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).expect("scratch dir");
@@ -102,11 +111,16 @@ fn every_docs_fence_checks_or_says_why_not() {
         checked += 1;
         let program = scratch.join(format!("fence_{checked}.gos"));
         std::fs::write(&program, &fence.code).expect("write fence");
+        let verb = if matches!(fence.expect, Expect::Prints(_)) {
+            "run"
+        } else {
+            "check"
+        };
         let output = Command::new(env!("CARGO_BIN_EXE_gos"))
-            .arg("check")
+            .arg(verb)
             .arg(&program)
             .output()
-            .expect("run gos check");
+            .expect("run gos");
         let report = format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
@@ -131,6 +145,12 @@ fn every_docs_fence_checks_or_says_why_not() {
             }
             Expect::Rejected(code) if !report.contains(&format!("error[{code}]")) => {
                 failures.push(format!("{place}: expected {code}, got: {}", report.trim()));
+            }
+            Expect::Prints(text) if String::from_utf8_lossy(&output.stdout) != *text => {
+                failures.push(format!(
+                    "{place}: expected output {text:?}, got: {}",
+                    report.trim()
+                ));
             }
             _ => {}
         }

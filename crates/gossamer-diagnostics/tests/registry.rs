@@ -32,7 +32,7 @@ const EMITTED_CODES: &[&str] = &[
     "GT0083", "GT0084", "GT0085", "GT0086", "GT0087", "GT0088", "GT0089", "GT0090", "GT0091",
     "GT0092", "GT0097", "GT0098", "GT0099", "GT0100", "GT0101", "GT0102", "GT0103", "GT0104",
     "GT0105", "GT0106", "GT0107", "GT0108", "GT0109", "GT0110", "GT0111", "GT0112", "GT0113",
-    "GT0116", "GT0117",
+    "GT0116", "GT0117", "GT0118", "GT0119", "GT0120",
     "GT0055", // Match exhaustiveness (gossamer-types/src/exhaustiveness.rs).
     "GM0001", "GM0002", // Arena-escape safety (gossamer-types/src/arena_escape.rs).
     "GM0003", // Runtime (gossamer-interp/src/value.rs).

@@ -200,10 +200,8 @@ pub(crate) fn set_handle(id: i64) -> Value {
 }
 
 pub(crate) fn set_handle_named(name: &'static str, id: i64) -> Value {
-    Value::struct_(
-        name,
-        Arc::unwrap_or_clone(Arc::new(vec![("__set", Value::Int(id))])),
-    )
+    let key = registry_key(id, |id| SET_REGISTRY.retire(id));
+    Value::struct_(name, vec![("__set", key)])
 }
 
 /// Deep-clones a `Set` / `BTreeSet` handle: mints a fresh registry id,
@@ -264,9 +262,7 @@ pub(crate) fn set_id_of(value: &Value) -> Option<i64> {
         if matches!(inner.name.as_str(), "Set" | "BTreeSet") {
             for (i, v) in &inner.fields {
                 if (*i) == "__set" {
-                    if let Value::Int(n) = v {
-                        return Some(*n);
-                    }
+                    return registry_id(v);
                 }
             }
         }
@@ -322,14 +318,14 @@ pub(crate) fn builtin_set_insert(args: &[Value]) -> RuntimeResult<Value> {
         return Ok(Value::Bool(false));
     };
     let key = MapKey::from_value(value);
-    let inserted = SET_REGISTRY.with(|r| {
-        if let Some(s) = r.borrow_mut().get_mut(&id) {
-            s.insert(key, value.clone()).is_none()
-        } else {
-            false
-        }
+    // A displaced element is dropped after the registry is released: it may
+    // hold the last handle of another set.
+    let displaced = SET_REGISTRY.with(|r| {
+        r.borrow_mut()
+            .get_mut(&id)
+            .map(|s| s.insert(key, value.clone()))
     });
-    Ok(Value::Bool(inserted))
+    Ok(Value::Bool(matches!(displaced, Some(None))))
 }
 
 pub(crate) fn builtin_set_remove(args: &[Value]) -> RuntimeResult<Value> {
@@ -341,13 +337,11 @@ pub(crate) fn builtin_set_remove(args: &[Value]) -> RuntimeResult<Value> {
     };
     let key = MapKey::from_value(value);
     let removed = SET_REGISTRY.with(|r| {
-        if let Some(s) = r.borrow_mut().get_mut(&id) {
-            s.shift_remove(&key).is_some()
-        } else {
-            false
-        }
+        r.borrow_mut()
+            .get_mut(&id)
+            .and_then(|s| s.shift_remove(&key))
     });
-    Ok(Value::Bool(removed))
+    Ok(Value::Bool(removed.is_some()))
 }
 
 pub(crate) fn builtin_set_contains(args: &[Value]) -> RuntimeResult<Value> {
@@ -380,11 +374,13 @@ pub(crate) fn builtin_set_is_empty(args: &[Value]) -> RuntimeResult<Value> {
 
 pub(crate) fn builtin_set_clear(args: &[Value]) -> RuntimeResult<Value> {
     if let Some(id) = args.first().and_then(set_id_of) {
-        SET_REGISTRY.with(|r| {
-            if let Some(set) = r.borrow_mut().get_mut(&id) {
-                set.clear();
-            }
+        let cleared = SET_REGISTRY.with(|r| {
+            r.borrow_mut().get_mut(&id).map(|set| {
+                let empty = set.empty_like();
+                std::mem::replace(set, empty)
+            })
         });
+        drop(cleared);
     }
     Ok(Value::Unit)
 }
@@ -581,14 +577,42 @@ impl<T: 'static> GlobalReg<T> {
     }
 }
 
-pub(crate) static NEXT_ATOMIC_ID: GlobalReg<i64> =
-    GlobalReg::new(|| parking_lot::ReentrantMutex::new(RefCell::new(1)));
-pub(crate) static ATOMIC_I64_REGISTRY: GlobalReg<StdHashMap<i64, Arc<StdAtomicI64>>> =
-    GlobalReg::new(|| parking_lot::ReentrantMutex::new(RefCell::new(StdHashMap::new())));
-pub(crate) static ATOMIC_BOOL_REGISTRY: GlobalReg<StdHashMap<i64, Arc<StdAtomicBool>>> =
-    GlobalReg::new(|| parking_lot::ReentrantMutex::new(RefCell::new(StdHashMap::new())));
-pub(crate) static MUTEX_REGISTRY: GlobalReg<StdHashMap<i64, Arc<MutexCell>>> =
-    GlobalReg::new(|| parking_lot::ReentrantMutex::new(RefCell::new(StdHashMap::new())));
+impl<V: 'static> GlobalReg<StdHashMap<i64, V>> {
+    /// Removes entry `id`. The entry is dropped after the registry is
+    /// released, so one that holds handles of this same registry retires
+    /// them in turn.
+    pub(crate) fn retire(&self, id: i64) {
+        let removed = self.with(|r| r.borrow_mut().remove(&id));
+        drop(removed);
+    }
+}
+
+/// A handle's claim on its registry entry, shared by every copy of the
+/// handle: the last copy to go retires the entry.
+pub(crate) struct RegistryKey {
+    id: i64,
+    retire: fn(i64),
+}
+
+impl Drop for RegistryKey {
+    fn drop(&mut self) {
+        (self.retire)(self.id);
+    }
+}
+
+/// The field value naming registry entry `id`, which `retire` removes when
+/// the last copy of the handle holding it is gone.
+pub(crate) fn registry_key(id: i64, retire: fn(i64)) -> Value {
+    Value::Opaque(crate::value::OpaqueState::new(RegistryKey { id, retire }))
+}
+
+/// The registry id a handle's field names.
+pub(crate) fn registry_id(field: &Value) -> Option<i64> {
+    match field {
+        Value::Opaque(key) => key.downcast_ref::<RegistryKey>().map(|key| key.id),
+        _ => None,
+    }
+}
 
 // Process-global (not `thread_local!`): goroutines run on an OS
 // worker-thread pool, so a set handle minted on one thread must
@@ -669,45 +693,18 @@ impl MutexCell {
         self.available.notify_one();
     }
 }
-pub(crate) static ONCE_REGISTRY: GlobalReg<StdHashMap<i64, Arc<parking_lot::Once>>> =
-    GlobalReg::new(|| parking_lot::ReentrantMutex::new(RefCell::new(StdHashMap::new())));
-#[allow(
-    clippy::type_complexity,
-    reason = "the registry's type is the shared map it holds, and naming it would hide that"
-)]
-pub(crate) static SYNC_MAP_REGISTRY: GlobalReg<
-    StdHashMap<i64, Arc<parking_lot::RwLock<StdHashMap<String, String>>>>,
-> = GlobalReg::new(|| parking_lot::ReentrantMutex::new(RefCell::new(StdHashMap::new())));
 
-pub(crate) fn next_atomic_id() -> i64 {
-    NEXT_ATOMIC_ID.with(|c| {
-        let mut v = c.borrow_mut();
-        let id = *v;
-        *v += 1;
-        id
-    })
+/// An atomic handle named `name` over `cell`.
+pub(crate) fn atomic_handle<T: std::any::Any + Send + Sync>(name: &'static str, cell: T) -> Value {
+    crate::value::state_handle(name, "__atomic", Arc::new(cell))
 }
 
-pub(crate) fn atomic_handle(name: &'static str, id: i64) -> Value {
-    Value::struct_(
-        name,
-        Arc::unwrap_or_clone(Arc::new(vec![("__atomic", Value::Int(id))])),
-    )
-}
-
-pub(crate) fn atomic_id_of(value: &Value, expected: &str) -> Option<i64> {
-    if let Value::Struct(inner) = value {
-        if inner.name == expected {
-            for (i, v) in &inner.fields {
-                if (*i) == "__atomic" {
-                    if let Value::Int(n) = v {
-                        return Some(*n);
-                    }
-                }
-            }
-        }
-    }
-    None
+/// The cell of an atomic handle named `expected`.
+pub(crate) fn atomic_cell<T: std::any::Any + Send + Sync>(
+    value: &Value,
+    expected: &str,
+) -> Option<Arc<T>> {
+    crate::value::handle_state(value, expected, "__atomic")
 }
 
 /// `s.__window(lo, hi, take)` on a `BTreeSet`: a set of its elements ranked

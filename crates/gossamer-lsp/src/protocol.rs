@@ -17,6 +17,14 @@ pub(crate) struct Transport<R: BufRead, W: Write> {
     buffer: Vec<u8>,
 }
 
+impl<R: std::io::Read, W: Write> Transport<std::io::BufReader<R>, W> {
+    /// Whether more input has already arrived, so the next read would not
+    /// wait for the client.
+    pub(crate) fn has_buffered_input(&self) -> bool {
+        !self.reader.buffer().is_empty()
+    }
+}
+
 impl<R: BufRead, W: Write> Transport<R, W> {
     /// Constructs a transport bound to the supplied streams.
     pub(crate) fn new(reader: R, writer: W) -> Self {
@@ -106,6 +114,22 @@ pub(crate) fn response_ok(id: Value, result: Value) -> Value {
     map.insert("jsonrpc".to_string(), Value::String("2.0".to_string()));
     map.insert("id".to_string(), id);
     map.insert("result".to_string(), result);
+    Value::Object(map)
+}
+
+/// The JSON-RPC error code for a request the client cancelled before it was
+/// answered.
+pub(crate) const REQUEST_CANCELLED: i64 = -32800;
+
+/// Builds a JSON-RPC error response.
+pub(crate) fn response_error(id: Value, code: i64, message: &str) -> Value {
+    let mut error = std::collections::BTreeMap::new();
+    error.insert("code".to_string(), Value::Int(code));
+    error.insert("message".to_string(), Value::String(message.to_string()));
+    let mut map = std::collections::BTreeMap::new();
+    map.insert("jsonrpc".to_string(), Value::String("2.0".to_string()));
+    map.insert("id".to_string(), id);
+    map.insert("error".to_string(), Value::Object(error));
     Value::Object(map)
 }
 

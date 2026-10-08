@@ -668,21 +668,7 @@ impl Vm {
                                 let v = registers[src as usize].clone();
                                 let resolved = if let Value::Struct(inner) = &v {
                                     if inner.name == "__Cell" {
-                                        let mut set_id: u64 = 0;
-                                        let mut flag_name = String::new();
-                                        for (ident, val) in &inner.fields {
-                                            if (*ident) == "__set_id"
-                                                && let Value::Int(n) = val
-                                            {
-                                                set_id = *n as u64;
-                                            }
-                                            if (*ident) == "__flag_name"
-                                                && let Value::String(s) = val
-                                            {
-                                                flag_name = s.as_str().to_string();
-                                            }
-                                        }
-                                        crate::builtins::resolve_cell(set_id, &flag_name)
+                                        crate::builtins::resolve_cell(inner)
                                             .unwrap_or_else(|| v.clone())
                                     } else {
                                         v
@@ -1500,21 +1486,6 @@ impl Vm {
                                 ) && matches!(idx_val, Value::Int(_))
                                     && matches!(byte_val, Value::Int(_));
                                 if fast {
-                                    let handle = match recv {
-                                        Value::Struct(inner) => {
-                                            let mut h = 0i64;
-                                            for (n, v) in &inner.fields {
-                                                if (*n) == "handle" {
-                                                    if let Value::Int(x) = v {
-                                                        h = *x;
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            h
-                                        }
-                                        _ => unreachable!(),
-                                    };
                                     let idx = match idx_val {
                                         Value::Int(n) => *n,
                                         _ => unreachable!(),
@@ -1523,7 +1494,7 @@ impl Vm {
                                         Value::Int(n) => *n,
                                         _ => unreachable!(),
                                     };
-                                    if crate::builtins::u8vec_set_byte_inline(handle, idx, byte) {
+                                    if crate::builtins::u8vec_set_byte_inline(recv, idx, byte) {
                                         registers[dst as usize] = Value::Unit;
                                         continue;
                                     }
@@ -1564,27 +1535,12 @@ impl Vm {
                                     Value::Struct(inner) if inner.name == "U8Vec"
                                 ) && matches!(idx_val, Value::Int(_));
                                 if fast {
-                                    let handle = match recv {
-                                        Value::Struct(inner) => {
-                                            let mut h = 0i64;
-                                            for (n, v) in &inner.fields {
-                                                if (*n) == "handle" {
-                                                    if let Value::Int(x) = v {
-                                                        h = *x;
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            h
-                                        }
-                                        _ => unreachable!(),
-                                    };
                                     let idx = match idx_val {
                                         Value::Int(n) => *n,
                                         _ => unreachable!(),
                                     };
                                     if let Some(b) =
-                                        crate::builtins::u8vec_get_byte_inline(handle, idx)
+                                        crate::builtins::u8vec_get_byte_inline(recv, idx)
                                     {
                                         // SAFETY: `dst_i` is a compile-allocated
                                         // i64 register slot.
@@ -5635,8 +5591,9 @@ fn select_dispatch(
             return Err(RuntimeError::WouldNeverWake("select"));
         }
         if channels.is_empty() {
-            gossamer_runtime::platform::sleep(std::time::Duration::from_millis(1));
-            continue;
+            return Err(RuntimeError::Type(
+                "select: no blocking arm holds a channel".to_string(),
+            ));
         }
         let waiter = crate::value::Channel::select_waiter();
         for ch in &channels {

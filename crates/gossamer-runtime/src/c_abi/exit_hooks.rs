@@ -26,7 +26,7 @@ pub type HostRunner = fn(u64);
 
 static HOST_RUNNER: Mutex<Option<HostRunner>> = Mutex::new(None);
 
-/// Installs the runner for [`Hook::Host`] entries. The last call wins.
+/// Installs the runner for `Hook::Host` entries. The last call wins.
 pub fn install_host_runner(runner: HostRunner) {
     *HOST_RUNNER.lock() = Some(runner);
 }

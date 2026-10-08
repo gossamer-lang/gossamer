@@ -2,7 +2,7 @@
 //! thread that runs the goroutine waiting for them.
 //!
 //! A goroutine stays on the worker it first ran on, so each worker index owns
-//! a [`Poller`]: the sockets its goroutines registered, and the timers they
+//! a `Poller`: the sockets its goroutines registered, and the timers they
 //! sleep on. A worker with nothing to run blocks in its own poller instead of
 //! on a condition variable, and readiness it reads there makes its own
 //! goroutines runnable with no other thread involved. A busy worker takes a

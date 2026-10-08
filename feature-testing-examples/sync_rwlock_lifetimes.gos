@@ -1,0 +1,54 @@
+// A `sync::RwLock` lives as long as anything holds it - a binding, a
+// closure, a struct field, a `Vec`, a goroutine, a panicking goroutine -
+// and every holder reaches the same lock.
+
+use std::{errors, sync}
+
+struct Guarded { lock: sync::RwLock, tag: i64 }
+
+fn make(i: i64) -> sync::RwLock { sync::RwLock::new(i) }
+
+fn read_twice(lock: sync::RwLock) -> i64 { lock.read() + lock.read() }
+
+fn boom(lock: sync::RwLock) -> i64 {
+    if lock.read() >= 0 { panic("boom") }
+    0
+}
+
+fn spawned(i: i64) -> Result<i64, errors::Error> {
+    let lock = sync::RwLock::new(i)
+    let mut got = 0
+    cohort {
+        let h = spawn(|| { lock.write(lock.read() + 1); lock.read() })
+        got = h.join().unwrap()
+    }?
+    Ok(got + lock.read())
+}
+
+fn panicked(i: i64) -> i64 {
+    let lock = sync::RwLock::new(i)
+    let mut failed = 0
+    let _ = cohort {
+        let h = spawn(|| boom(lock))
+        if h.join().is_err() { failed = 1 }
+    }
+    failed + lock.read()
+}
+
+fn main() {
+    let mut acc = 0
+    for i in 0..300 {
+        let lock = make(i)
+        let f = || lock.read() * 2
+        let g = Guarded { lock: sync::RwLock::new(i), tag: 1 }
+        let locks = #[sync::RwLock::new(1), sync::RwLock::new(2)]
+        acc += f() + read_twice(lock) + g.lock.read() + g.tag
+        for l in locks { acc += l.read() }
+        acc += sync::RwLock::with_write(g.lock, |v| v + 1)
+        acc += sync::RwLock::with_read(lock, |v| v)
+        if i % 100 == 0 {
+            acc += spawned(i).unwrap() + panicked(i)
+        }
+    }
+    println(f"{acc}")
+}

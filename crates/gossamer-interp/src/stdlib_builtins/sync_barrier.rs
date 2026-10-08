@@ -118,32 +118,14 @@ pub(crate) fn install_sync_barrier(globals: &mut Vec<(&'static str, Value)>) {
     }
 }
 
-pub(crate) fn barrier_handle(id: i64) -> Value {
-    Value::struct_(
-        "sync::Barrier",
-        Arc::unwrap_or_clone(Arc::new(vec![("__barrier", Value::Int(id))])),
-    )
+type BarrierState = gossamer_std::sync::Barrier;
+
+fn barrier_of(value: &Value) -> Option<Arc<BarrierState>> {
+    crate::value::handle_state(value, "sync::Barrier", "__barrier")
 }
 
-pub(crate) fn barrier_id_of(value: &Value) -> Option<i64> {
-    if let Value::Struct(inner) = value {
-        for (ident, v) in &inner.fields {
-            if (*ident) == "__barrier" {
-                if let Value::Int(n) = v {
-                    return Some(*n);
-                }
-            }
-        }
-    }
-    None
-}
-
-pub(crate) fn with_barrier<R>(
-    value: &Value,
-    f: impl FnOnce(&Arc<gossamer_std::sync::Barrier>) -> R,
-) -> Option<R> {
-    let id = barrier_id_of(value)?;
-    BARRIER_REGISTRY.with(|r| r.borrow().get(&id).map(f))
+pub(crate) fn with_barrier<R>(value: &Value, f: impl FnOnce(&Arc<BarrierState>) -> R) -> Option<R> {
+    barrier_of(value).map(|b| f(&b))
 }
 
 pub(crate) fn builtin_barrier_new(args: &[Value]) -> RuntimeResult<Value> {
@@ -155,30 +137,19 @@ pub(crate) fn builtin_barrier_new(args: &[Value]) -> RuntimeResult<Value> {
     }
     let n = usize::try_from(n)
         .map_err(|_| RuntimeError::Type("Barrier::new: count is too large".to_string()))?;
-    let id = next_atomic_id();
-    BARRIER_REGISTRY.with(|r| {
-        r.borrow_mut()
-            .insert(id, Arc::new(gossamer_std::sync::Barrier::new(n)));
-    });
-    Ok(barrier_handle(id))
+    Ok(crate::value::state_handle(
+        "sync::Barrier",
+        "__barrier",
+        Arc::new(BarrierState::new(n)),
+    ))
 }
 
 pub(crate) fn builtin_barrier_wait(args: &[Value]) -> RuntimeResult<Value> {
-    // Clone the `Arc<Barrier>` out and drop the registry lock BEFORE
-    // blocking on the rendezvous. Calling `wait()` inside the registry
-    // `with` closure would hold the global lock across the block, so the
-    // first participant to arrive would never release it and every other
-    // participant would deadlock trying to look up the same barrier.
-    if let Some(handle) = args.first() {
-        if let Some(id) = barrier_id_of(handle) {
-            let arc = BARRIER_REGISTRY.with(|r| r.borrow().get(&id).cloned());
-            if let Some(b) = arc {
-                if !gossamer_runtime::platform::CAN_BLOCK && b.would_block() {
-                    return Err(RuntimeError::WouldNeverWake("Barrier::wait"));
-                }
-                b.wait();
-            }
+    if let Some(b) = args.first().and_then(barrier_of) {
+        if !gossamer_runtime::platform::CAN_BLOCK && b.would_block() {
+            return Err(RuntimeError::WouldNeverWake("Barrier::wait"));
         }
+        b.wait();
     }
     Ok(Value::Unit)
 }

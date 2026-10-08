@@ -433,9 +433,10 @@ impl<'a> Builder<'a> {
     ///
     /// A runtime handle is one word, so the structural path would hand
     /// that word to the string formatter and render whatever bytes it
-    /// points at. `errors::Error` is the case that matters: `{}` already
-    /// routes to `gos_rt_error_display` for the colon-joined chain, and
-    /// `to_string` has to answer the same text.
+    /// points at. `errors::Error` renders its colon-joined chain through
+    /// `gos_rt_error_display`, which `{}` already reaches, and a
+    /// `bytes::Buffer` renders its bytes as text through its own
+    /// `to_string`.
     pub(super) fn renders_through_own_shim(
         &self,
         receiver: &HirExpr,
@@ -449,7 +450,7 @@ impl<'a> Builder<'a> {
             .or_else(|| Self::stdlib_runtime_kind_from_kind(receiver_kind_flat))
             .or_else(|| self.runtime_kind_from_ty(receiver_ty))
             .or_else(|| self.runtime_kind_from_ty(receiver.ty));
-        kind == Some("errors::Error")
+        matches!(kind, Some("errors::Error" | "bytes::Buffer"))
     }
 
     /// Whether the receiver is a set, whose local carries the bare handle

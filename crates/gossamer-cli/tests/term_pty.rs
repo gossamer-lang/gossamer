@@ -314,9 +314,10 @@ fn cohort_cancellation_ends_terminal_and_signal_waits_as_a_native_binary() {
     }
 }
 
-/// The terminal reached through a descriptor the program opened, with its
-/// standard input redirected away from it: the way a terminal program
-/// started as `producer | program` reads keys from `/dev/tty`.
+/// The terminal reached through a file the program opened, with its standard
+/// input redirected away from it: the way a terminal program started as
+/// `producer | program` reads keys from `/dev/tty`. Each call takes the file
+/// itself, which keeps it open while the call uses it.
 const TTY_PROGRAM: &str = r#"
 use std::env
 use std::fs
@@ -328,14 +329,13 @@ fn main() {
     let opts = opts.read(true)
     let opts = opts.write(true)
     let tty = opts.open(path).unwrap()
-    let fd = tty.fd().unwrap()
     println(f"stdin tty {term::is_terminal(term::STDIN)}")
-    println(f"opened tty {term::is_terminal(fd)}")
-    let cols, rows = term::size(fd).unwrap()
+    println(f"opened tty {term::is_terminal(tty)}")
+    let cols, rows = term::size(tty).unwrap()
     println(f"size {cols}x{rows}")
-    let raw = term::enter_raw(fd).unwrap()
+    let raw = term::enter_raw(tty).unwrap()
     print("ready\r\n")
-    let bytes = term::read_input(-1, fd).unwrap()
+    let bytes = term::read_input(-1, tty).unwrap()
     print(f"got {bytes}\r\n")
     raw.restore()
     println("done")
@@ -343,17 +343,22 @@ fn main() {
 "#;
 
 /// The path of the terminal device `fd` refers to.
+///
+/// `ttyname_r` writes into a buffer of the caller's own: the tests run on
+/// parallel threads, and `ttyname` answers one buffer the whole process
+/// shares, so one test could read another's terminal.
 fn tty_path(fd: &OwnedFd) -> String {
-    // SAFETY: `fd` is an open terminal; `ttyname` answers a NUL-terminated
-    // name valid until the next call on this thread.
-    let name = unsafe { libc::ttyname(fd.as_raw_fd()) };
-    assert!(
-        !name.is_null(),
-        "ttyname: {}",
-        std::io::Error::last_os_error()
+    let mut buf = [0 as libc::c_char; 256];
+    // SAFETY: `fd` is an open terminal and `buf` is writable for its length.
+    let rc = unsafe { libc::ttyname_r(fd.as_raw_fd(), buf.as_mut_ptr(), buf.len()) };
+    assert_eq!(
+        rc,
+        0,
+        "ttyname_r: {}",
+        std::io::Error::from_raw_os_error(rc)
     );
-    // SAFETY: as above.
-    unsafe { std::ffi::CStr::from_ptr(name) }
+    // SAFETY: on success `ttyname_r` leaves a NUL-terminated name in `buf`.
+    unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
         .to_string_lossy()
         .into_owned()
 }

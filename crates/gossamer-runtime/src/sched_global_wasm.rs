@@ -67,12 +67,23 @@ pub fn register_waker(_gid: Gid, _waker: Box<dyn Fn() + Send + Sync>) {}
 /// No-op counterpart to [`register_waker`].
 pub fn forget_waker(_gid: Gid) {}
 
-/// Returns a fresh timer gid. The timer never fires (no poller), which
-/// is consistent with [`sleep_until`] returning immediately.
-#[must_use]
-pub fn add_timer(_deadline: Instant) -> Gid {
-    alloc_runtime_gid()
+/// A one-shot timer handle; on the single-threaded runtime it never fires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimerHandle {
+    gid: Gid,
 }
+
+/// Returns a handle for a timer that never fires (no poller), which is
+/// consistent with [`sleep_until`] returning immediately.
+#[must_use]
+pub fn add_timer(_deadline: Instant, _waker: Box<dyn Fn() + Send + Sync>) -> TimerHandle {
+    TimerHandle {
+        gid: alloc_runtime_gid(),
+    }
+}
+
+/// No-op counterpart to [`add_timer`].
+pub fn cancel_timer(_timer: TimerHandle) {}
 
 /// Runs `f` against a stub poller. Reachable only from network std
 /// modules, which are gated out of the wasm build; present so the
@@ -149,6 +160,14 @@ pub fn program_entered() -> bool {
 /// the documented "blocking not supported" message. That message names the
 /// real limit of this target, so a second report would say less, not more.
 pub fn report_deadlock_if_stuck(_op: &str) {}
+
+/// The browser build has no other actor to wait on; see
+/// [`report_deadlock_if_stuck`].
+pub fn report_cancellable_wait_if_stuck(
+    _op: &str,
+    _still_waiting: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+) {
+}
 
 /// Records `main` waiting on the program. Inert here for the same reason as
 /// [`report_deadlock_if_stuck`].
