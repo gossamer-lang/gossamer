@@ -69,7 +69,7 @@ pub struct GosEndedSpan {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_trace_tracer_new() -> *mut GosTracer {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         Box::into_raw(Box::new(GosTracer {
             _seq: AtomicU64::new(0),
         }))
@@ -81,7 +81,7 @@ pub unsafe extern "C" fn gos_rt_trace_tracer_start_span(
     _t: *mut GosTracer,
     name: *const c_char,
 ) -> *mut GosSpan {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let seq = SPAN_SEQ.fetch_add(1, Ordering::Relaxed);
         Box::into_raw(Box::new(GosSpan {
             // SAFETY: `name` is this shim's argument, null or a live string body for the call
@@ -101,7 +101,7 @@ pub unsafe extern "C" fn gos_rt_trace_span_set_attribute(
     key: *const c_char,
     value: *const c_char,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live span (C-ABI contract), which
         // `as_ref` accepts.
         if let Some(span) = unsafe { s.as_ref() } {
@@ -124,7 +124,7 @@ pub unsafe extern "C" fn gos_rt_trace_span_set_status(
     ok: i64,
     message: *const c_char,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live span (C-ABI contract), which
         // `as_ref` accepts.
         if let Some(span) = unsafe { s.as_ref() } {
@@ -137,7 +137,7 @@ pub unsafe extern "C" fn gos_rt_trace_span_set_status(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_trace_span_end(s: *mut GosSpan) -> *mut GosEndedSpan {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live span (C-ABI contract), which
         // `as_ref` accepts.
         let Some(span) = (unsafe { s.as_ref() }) else {
@@ -157,7 +157,7 @@ pub unsafe extern "C" fn gos_rt_trace_span_end(s: *mut GosSpan) -> *mut GosEnded
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_trace_ended_to_otlp_json(e: *mut GosEndedSpan) -> *mut c_char {
-    ffi_entry!(alloc_cstring(b""), {
+    ffi_entry!({
         // SAFETY: `e` is this shim's argument, null or a live ended span (C-ABI contract), which
         // `as_ref` accepts.
         let Some(span) = (unsafe { e.as_ref() }) else {

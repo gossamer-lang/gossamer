@@ -74,7 +74,7 @@ fn alloc_string_vec(strings: Vec<String>) -> *mut GosVec {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_is_letter(c: u32) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         i64::from(matches!(
             char_from(c).general_category_group(),
             GeneralCategoryGroup::Letter
@@ -84,7 +84,7 @@ pub extern "C" fn gos_rt_unicode_is_letter(c: u32) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_is_digit(c: u32) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         i64::from(matches!(
             char_from(c).general_category(),
             GeneralCategory::DecimalNumber
@@ -94,7 +94,7 @@ pub extern "C" fn gos_rt_unicode_is_digit(c: u32) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_is_number(c: u32) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         i64::from(matches!(
             char_from(c).general_category_group(),
             GeneralCategoryGroup::Number
@@ -104,7 +104,7 @@ pub extern "C" fn gos_rt_unicode_is_number(c: u32) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_is_space(c: u32) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         let ch = char_from(c);
         if matches!(ch.general_category_group(), GeneralCategoryGroup::Separator) {
             return 1;
@@ -118,7 +118,7 @@ pub extern "C" fn gos_rt_unicode_is_space(c: u32) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_is_upper(c: u32) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         i64::from(matches!(
             char_from(c).general_category(),
             GeneralCategory::UppercaseLetter
@@ -128,7 +128,7 @@ pub extern "C" fn gos_rt_unicode_is_upper(c: u32) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_is_lower(c: u32) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         i64::from(matches!(
             char_from(c).general_category(),
             GeneralCategory::LowercaseLetter
@@ -138,7 +138,7 @@ pub extern "C" fn gos_rt_unicode_is_lower(c: u32) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_is_title(c: u32) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         i64::from(matches!(
             char_from(c).general_category(),
             GeneralCategory::TitlecaseLetter
@@ -148,7 +148,7 @@ pub extern "C" fn gos_rt_unicode_is_title(c: u32) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_is_punct(c: u32) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         i64::from(matches!(
             char_from(c).general_category_group(),
             GeneralCategoryGroup::Punctuation
@@ -158,7 +158,7 @@ pub extern "C" fn gos_rt_unicode_is_punct(c: u32) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_is_symbol(c: u32) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         i64::from(matches!(
             char_from(c).general_category_group(),
             GeneralCategoryGroup::Symbol
@@ -168,7 +168,7 @@ pub extern "C" fn gos_rt_unicode_is_symbol(c: u32) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_is_mark(c: u32) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         i64::from(matches!(
             char_from(c).general_category_group(),
             GeneralCategoryGroup::Mark
@@ -178,7 +178,7 @@ pub extern "C" fn gos_rt_unicode_is_mark(c: u32) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_is_print(c: u32) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         i64::from(!matches!(
             char_from(c).general_category_group(),
             GeneralCategoryGroup::Other
@@ -188,7 +188,7 @@ pub extern "C" fn gos_rt_unicode_is_print(c: u32) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_is_graphic(c: u32) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         let ch = char_from(c);
         let printable = !matches!(ch.general_category_group(), GeneralCategoryGroup::Other);
         let space = matches!(ch.general_category_group(), GeneralCategoryGroup::Separator)
@@ -202,7 +202,7 @@ pub extern "C" fn gos_rt_unicode_is_graphic(c: u32) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_is_control(c: u32) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         i64::from(matches!(
             char_from(c).general_category(),
             GeneralCategory::Control
@@ -212,7 +212,7 @@ pub extern "C" fn gos_rt_unicode_is_control(c: u32) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_is_assigned(c: u32) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         i64::from(!matches!(
             char_from(c).general_category(),
             GeneralCategory::Unassigned
@@ -222,7 +222,7 @@ pub extern "C" fn gos_rt_unicode_is_assigned(c: u32) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_combining_class(c: u32) -> i64 {
-    ffi_entry!(0, { i64::from(canonical_combining_class(char_from(c))) })
+    ffi_entry!({ i64::from(canonical_combining_class(char_from(c))) })
 }
 
 // ---------------------------------------------------------------
@@ -231,7 +231,7 @@ pub extern "C" fn gos_rt_unicode_combining_class(c: u32) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_to_upper(c: u32) -> u32 {
-    ffi_entry!(c, {
+    ffi_entry!({
         let ch = char_from(c);
         let up = ch.to_uppercase().next().unwrap_or(ch);
         up as u32
@@ -240,7 +240,7 @@ pub extern "C" fn gos_rt_unicode_to_upper(c: u32) -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_to_lower(c: u32) -> u32 {
-    ffi_entry!(c, {
+    ffi_entry!({
         let ch = char_from(c);
         let lo = ch.to_lowercase().next().unwrap_or(ch);
         lo as u32
@@ -249,7 +249,7 @@ pub extern "C" fn gos_rt_unicode_to_lower(c: u32) -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_to_title(c: u32) -> u32 {
-    ffi_entry!(c, {
+    ffi_entry!({
         let ch = char_from(c);
         ch.to_uppercase().next().unwrap_or(ch) as u32
     })
@@ -257,7 +257,7 @@ pub extern "C" fn gos_rt_unicode_to_title(c: u32) -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_simple_fold(c: u32) -> u32 {
-    ffi_entry!(c, {
+    ffi_entry!({
         let ch = char_from(c);
         if ch.is_lowercase() {
             let up = ch.to_uppercase().next().unwrap_or(ch);
@@ -280,7 +280,7 @@ pub extern "C" fn gos_rt_unicode_simple_fold(c: u32) -> u32 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_to_upper_str(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
@@ -291,7 +291,7 @@ pub unsafe extern "C" fn gos_rt_unicode_to_upper_str(s: *const c_char) -> *mut c
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_to_lower_str(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
@@ -302,7 +302,7 @@ pub unsafe extern "C" fn gos_rt_unicode_to_lower_str(s: *const c_char) -> *mut c
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_fold_case(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
@@ -317,7 +317,7 @@ pub unsafe extern "C" fn gos_rt_unicode_fold_case(s: *const c_char) -> *mut c_ch
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_nfc(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
@@ -328,7 +328,7 @@ pub unsafe extern "C" fn gos_rt_unicode_nfc(s: *const c_char) -> *mut c_char {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_nfd(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
@@ -339,7 +339,7 @@ pub unsafe extern "C" fn gos_rt_unicode_nfd(s: *const c_char) -> *mut c_char {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_nfkc(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
@@ -350,7 +350,7 @@ pub unsafe extern "C" fn gos_rt_unicode_nfkc(s: *const c_char) -> *mut c_char {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_nfkd(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
@@ -361,7 +361,7 @@ pub unsafe extern "C" fn gos_rt_unicode_nfkd(s: *const c_char) -> *mut c_char {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_is_nfc(s: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
@@ -371,7 +371,7 @@ pub unsafe extern "C" fn gos_rt_unicode_is_nfc(s: *const c_char) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_is_nfd(s: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
@@ -381,7 +381,7 @@ pub unsafe extern "C" fn gos_rt_unicode_is_nfd(s: *const c_char) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_is_nfkc(s: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
@@ -391,7 +391,7 @@ pub unsafe extern "C" fn gos_rt_unicode_is_nfkc(s: *const c_char) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_is_nfkd(s: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
@@ -405,7 +405,7 @@ pub unsafe extern "C" fn gos_rt_unicode_is_nfkd(s: *const c_char) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_graphemes(s: *const c_char) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
@@ -419,15 +419,13 @@ pub unsafe extern "C" fn gos_rt_unicode_graphemes(s: *const c_char) -> *mut GosV
 /// `unicode::char_width(c)`: terminal columns the scalar occupies.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_char_width(c: u32) -> i64 {
-    ffi_entry!(0, {
-        unicode_width::UnicodeWidthChar::width(char_from(c)).map_or(0, |w| w as i64)
-    })
+    ffi_entry!({ unicode_width::UnicodeWidthChar::width(char_from(c)).map_or(0, |w| w as i64) })
 }
 
 /// `unicode::str_width(s)`: terminal columns the string occupies.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_str_width(s: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
@@ -437,7 +435,7 @@ pub unsafe extern "C" fn gos_rt_unicode_str_width(s: *const c_char) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_grapheme_count(s: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
@@ -447,7 +445,7 @@ pub unsafe extern "C" fn gos_rt_unicode_grapheme_count(s: *const c_char) -> i64 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_words(s: *const c_char) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
@@ -458,7 +456,7 @@ pub unsafe extern "C" fn gos_rt_unicode_words(s: *const c_char) -> *mut GosVec {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_word_bounds(s: *const c_char) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
@@ -469,7 +467,7 @@ pub unsafe extern "C" fn gos_rt_unicode_word_bounds(s: *const c_char) -> *mut Go
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_word_count(s: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
@@ -479,7 +477,7 @@ pub unsafe extern "C" fn gos_rt_unicode_word_count(s: *const c_char) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_sentences(s: *const c_char) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
@@ -490,7 +488,7 @@ pub unsafe extern "C" fn gos_rt_unicode_sentences(s: *const c_char) -> *mut GosV
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_sentence_count(s: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };

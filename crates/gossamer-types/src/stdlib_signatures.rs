@@ -229,14 +229,29 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         signature: "fn size<D: os::fd::Descriptor>(fd: D = term::STDOUT) -> Result<(i64, i64), errors::Error>",
     },
     StdFunctionSignature {
+        module_path: "std::archive",
+        name: "enclosed_path",
+        signature: "fn enclosed_path(name: String) -> Option<String>",
+    },
+    StdFunctionSignature {
         module_path: "std::archive::tar",
         name: "read",
         signature: "fn read(data: Vec<u8>) -> Result<Vec<tar::TarEntry>, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::archive::tar",
+        name: "read_limited",
+        signature: "fn read_limited(data: Vec<u8>, max_entries: i64, max_entry_bytes: i64, max_total_bytes: i64) -> Result<Vec<tar::TarEntry>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::archive::tar",
         name: "write",
         signature: "fn write(entries: Vec<(String, Vec<u8>)>) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::archive::tar",
+        name: "extract",
+        signature: "fn extract(data: Vec<u8>, dir: String) -> Result<i64, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::archive::zip",
@@ -245,8 +260,18 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::archive::zip",
+        name: "read_limited",
+        signature: "fn read_limited(data: Vec<u8>, max_entries: i64, max_entry_bytes: i64, max_total_bytes: i64) -> Result<Vec<zip::ZipEntry>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::archive::zip",
         name: "write",
         signature: "fn write(entries: Vec<(String, Vec<u8>)>) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::archive::zip",
+        name: "extract",
+        signature: "fn extract(data: Vec<u8>, dir: String) -> Result<i64, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::bufio",
@@ -294,6 +319,11 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         signature: "fn decompress(data: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
     },
     StdFunctionSignature {
+        module_path: "std::compress::bzip2",
+        name: "decompress_limited",
+        signature: "fn decompress_limited(data: Vec<u8>, max_bytes: i64) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
         module_path: "std::compress::flate",
         name: "compress",
         signature: "fn compress(data: Vec<u8>, level: i64) -> Result<Vec<u8>, errors::Error>",
@@ -304,9 +334,19 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         signature: "fn decompress(data: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
     },
     StdFunctionSignature {
+        module_path: "std::compress::flate",
+        name: "decompress_limited",
+        signature: "fn decompress_limited(data: Vec<u8>, max_bytes: i64) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
         module_path: "std::compress::gzip",
         name: "decode",
         signature: "fn decode(data: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::compress::gzip",
+        name: "decode_limited",
+        signature: "fn decode_limited(data: Vec<u8>, max_bytes: i64) -> Result<Vec<u8>, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::compress::gzip",
@@ -324,9 +364,19 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         signature: "fn decompress(data: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
     },
     StdFunctionSignature {
+        module_path: "std::compress::zlib",
+        name: "decompress_limited",
+        signature: "fn decompress_limited(data: Vec<u8>, max_bytes: i64) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
         module_path: "std::compress::zstd",
         name: "decode",
         signature: "fn decode(data: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::compress::zstd",
+        name: "decode_limited",
+        signature: "fn decode_limited(data: Vec<u8>, max_bytes: i64) -> Result<Vec<u8>, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::compress::zstd",
@@ -3355,6 +3405,26 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::strings",
+        name: "byte_find",
+        signature: "fn byte_find(text: String, needle: String | char) -> Option<i64>",
+    },
+    StdFunctionSignature {
+        module_path: "std::strings",
+        name: "byte_offset",
+        signature: "fn byte_offset(text: String, char_index: i64) -> Option<i64>",
+    },
+    StdFunctionSignature {
+        module_path: "std::strings",
+        name: "byte_rfind",
+        signature: "fn byte_rfind(text: String, needle: String | char) -> Option<i64>",
+    },
+    StdFunctionSignature {
+        module_path: "std::strings",
+        name: "char_index",
+        signature: "fn char_index(text: String, byte_offset: i64) -> Option<i64>",
+    },
+    StdFunctionSignature {
+        module_path: "std::strings",
         name: "slice",
         signature: "fn slice(text: String, start: i64, end: i64) -> Result<String, errors::Error>",
     },
@@ -3924,9 +3994,23 @@ pub fn function_signature(module_path: &str, name: &str) -> Option<&'static str>
 /// Looks up a stdlib function row by canonical module path and name.
 #[must_use]
 pub fn function(module_path: &str, name: &str) -> Option<&'static StdFunctionSignature> {
-    STD_FUNCTION_SIGNATURES
+    rows_named(name)
         .iter()
-        .find(|sig| sig.module_path == module_path && sig.name == name)
+        .copied()
+        .find(|sig| sig.module_path == module_path)
+}
+
+/// Every signature row for a function called `name`, in table order.
+fn rows_named(name: &str) -> &'static [&'static StdFunctionSignature] {
+    type Index = std::collections::HashMap<&'static str, Vec<&'static StdFunctionSignature>>;
+    static BY_NAME: std::sync::LazyLock<Index> = std::sync::LazyLock::new(|| {
+        let mut index = Index::new();
+        for sig in STD_FUNCTION_SIGNATURES {
+            index.entry(sig.name).or_default().push(sig);
+        }
+        index
+    });
+    BY_NAME.get(name).map_or(&[], Vec::as_slice)
 }
 
 /// Looks up a stdlib function row from source path segments.
@@ -3954,12 +4038,13 @@ pub fn function_for_path(
     if module_segments.first().copied() == Some("std") {
         return None;
     }
-    let mut matches = STD_FUNCTION_SIGNATURES.iter().filter(|sig| {
-        sig.name == name
-            && sig
-                .module_path
-                .strip_prefix("std::")
-                .is_some_and(|tail| tail == module || tail.ends_with(&format!("::{module}")))
+    let mut matches = rows_named(name).iter().copied().filter(|sig| {
+        sig.module_path.strip_prefix("std::").is_some_and(|tail| {
+            tail == module
+                || tail
+                    .strip_suffix(module.as_str())
+                    .is_some_and(|head| head.ends_with("::"))
+        })
     });
     let first = matches.next()?;
     if matches.next().is_some() {

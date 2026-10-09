@@ -221,15 +221,13 @@ unsafe fn input<'a>(value: *const c_char) -> Option<&'a str> {
 /// `image::new(width, height) -> i64`.
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn gos_rt_image_new(width: i64, height: i64) -> i64 {
-    ffi_entry_passthrough!(0, {
-        Image::new(dimension(width), dimension(height)).map_or(0, insert)
-    })
+    ffi_entry_passthrough!({ Image::new(dimension(width), dimension(height)).map_or(0, insert) })
 }
 
 /// `image::filled(width, height, rgba) -> i64`.
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn gos_rt_image_filled(width: i64, height: i64, color: i64) -> i64 {
-    ffi_entry_passthrough!(0, {
+    ffi_entry_passthrough!({
         Image::filled(dimension(width), dimension(height), rgba(color)).map_or(0, insert)
     })
 }
@@ -237,11 +235,11 @@ pub extern "C-unwind" fn gos_rt_image_filled(width: i64, height: i64, color: i64
 /// Decodes a base64 PNG or JPEG, returning zero for malformed data.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_image_decode_base64(text: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `text` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `input` accepts.
         unsafe { input(text) }
-            .and_then(|text| super::encoding::base64_decode(text).ok())
+            .and_then(|text| crate::codec::base64::decode(text).ok())
             .and_then(|bytes| decode(&bytes))
             .map_or(0, insert)
     })
@@ -250,7 +248,7 @@ pub unsafe extern "C" fn gos_rt_image_decode_base64(text: *const c_char) -> i64 
 /// `image::width(handle) -> i64`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_image_width(handle: i64) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         lock_images()
             .get(&handle)
             .map_or(0, |image| i64::from(image.width))
@@ -260,7 +258,7 @@ pub extern "C" fn gos_rt_image_width(handle: i64) -> i64 {
 /// `image::height(handle) -> i64`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_image_height(handle: i64) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         lock_images()
             .get(&handle)
             .map_or(0, |image| i64::from(image.height))
@@ -270,7 +268,7 @@ pub extern "C" fn gos_rt_image_height(handle: i64) -> i64 {
 /// `image::pixel(handle, x, y) -> i64`, returning -1 outside the image.
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn gos_rt_image_pixel(handle: i64, x: i64, y: i64) -> i64 {
-    ffi_entry_passthrough!(-1, {
+    ffi_entry_passthrough!({
         lock_images()
             .get(&handle)
             .and_then(|image| image.pixel(dimension(x), dimension(y)))
@@ -290,7 +288,7 @@ pub unsafe extern "C-unwind" fn gos_rt_image_from_rgba_bytes(
     height: i64,
     bytes: *const super::vec::GosVec,
 ) -> i64 {
-    ffi_entry_passthrough!(0, {
+    ffi_entry_passthrough!({
         // SAFETY: `bytes` is this shim's argument, null or a live `Vec` (contract).
         let bytes = unsafe { super::vec::vec_bytes(bytes) };
         Image::from_rgba(dimension(width), dimension(height), bytes).map_or(0, insert)
@@ -301,7 +299,7 @@ pub unsafe extern "C-unwind" fn gos_rt_image_from_rgba_bytes(
 /// by row, empty for an invalid handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_image_to_rgba_bytes(handle: i64) -> *mut super::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let bytes = lock_images()
             .get(&handle)
             .map(Image::rgba)
@@ -313,7 +311,7 @@ pub extern "C" fn gos_rt_image_to_rgba_bytes(handle: i64) -> *mut super::vec::Go
 /// `image::set_pixel(handle, x, y, rgba) -> bool`.
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn gos_rt_image_set_pixel(handle: i64, x: i64, y: i64, color: i64) -> i64 {
-    ffi_entry_passthrough!(0, {
+    ffi_entry_passthrough!({
         i64::from(
             lock_images()
                 .get_mut(&handle)
@@ -325,11 +323,11 @@ pub extern "C-unwind" fn gos_rt_image_set_pixel(handle: i64, x: i64, y: i64, col
 /// Encodes a handle as base64 PNG, returning an empty string for an invalid handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_image_encode_png_base64(handle: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let text = lock_images()
             .get(&handle)
             .and_then(encode_png)
-            .map_or_else(String::new, |bytes| super::encoding::base64_encode(&bytes));
+            .map_or_else(String::new, |bytes| crate::codec::base64::encode(&bytes));
         alloc_cstring(text.as_bytes())
     })
 }
@@ -337,7 +335,7 @@ pub extern "C" fn gos_rt_image_encode_png_base64(handle: i64) -> *mut c_char {
 /// Encodes a handle as base64 JPEG, returning an empty string for an invalid handle.
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn gos_rt_image_encode_jpeg_base64(handle: i64, quality: i64) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if !(1..=100).contains(&quality) {
             crate::c_abi::panic::panic_text(
                 "image::encode_jpeg: quality must be between 1 and 100",
@@ -346,7 +344,7 @@ pub extern "C-unwind" fn gos_rt_image_encode_jpeg_base64(handle: i64, quality: i
         let text = lock_images()
             .get(&handle)
             .and_then(|image| encode_jpeg(image, quality as u8))
-            .map_or_else(String::new, |bytes| super::encoding::base64_encode(&bytes));
+            .map_or_else(String::new, |bytes| crate::codec::base64::encode(&bytes));
         alloc_cstring(text.as_bytes())
     })
 }

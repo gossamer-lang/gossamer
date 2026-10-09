@@ -440,33 +440,7 @@ fn same_host(origin: &str, host: &str) -> bool {
 }
 
 fn url_decode_form_value(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() => {
-                let hi = (bytes[i + 1] as char).to_digit(16);
-                let lo = (bytes[i + 2] as char).to_digit(16);
-                if let (Some(h), Some(l)) = (hi, lo) {
-                    out.push(((h * 16 + l) as u8) as char);
-                    i += 3;
-                } else {
-                    out.push('%');
-                    i += 1;
-                }
-            }
-            b => {
-                out.push(b as char);
-                i += 1;
-            }
-        }
-    }
-    out
+    gossamer_runtime::codec::percent::decode(s, gossamer_runtime::codec::percent::Component::Query)
 }
 
 // -- base64url (RFC 4648 §5, no padding) ---------------------------------

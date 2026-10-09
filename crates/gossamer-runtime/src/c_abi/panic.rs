@@ -773,7 +773,7 @@ pub extern "C" fn gos_rt_exit(code: i32) -> ! {
 /// Gossamer source.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_process_id() -> u32 {
-    ffi_entry!(0, { crate::platform::process_id() })
+    ffi_entry!({ crate::platform::process_id() })
 }
 
 /// Aborts the current process without unwinding. Wraps

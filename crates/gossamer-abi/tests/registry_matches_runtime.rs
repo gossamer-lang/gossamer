@@ -366,20 +366,20 @@ fn every_string_return_declares_its_ownership() {
         let unowned = UNOWNED_STRING_RETURNS
             .iter()
             .any(|(name, _)| *name == entry.name);
-        if answers_string && !unowned && !entry.mints_string {
+        if answers_string && !unowned && !entry.mints_string() {
             problems.push(format!(
                 "{}: answers `{ret}` but is declared with `rt!`; declare it `rt_str!` if the \
                  caller owns the String, or list it in UNOWNED_STRING_RETURNS with the reason",
                 entry.name,
             ));
         }
-        if unowned && entry.mints_string {
+        if unowned && entry.mints_string() {
             problems.push(format!(
                 "{}: listed in UNOWNED_STRING_RETURNS but declared `rt_str!`",
                 entry.name,
             ));
         }
-        if entry.mints_string && !answers_string {
+        if entry.mints_string() && !answers_string {
             problems.push(format!(
                 "{}: declared `rt_str!` but answers `{ret}`, not a String",
                 entry.name,

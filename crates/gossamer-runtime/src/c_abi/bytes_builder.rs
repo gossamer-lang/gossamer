@@ -102,7 +102,7 @@ super::rc::managed_handle!(GosBytesBuilder);
 /// Allocate an empty `bytes::Builder`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_bytes_builder_new() -> *mut GosBytesBuilder {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         super::rc::alloc_managed(GosBytesBuilder {
             inner: String::new(),
         })
@@ -112,7 +112,7 @@ pub extern "C" fn gos_rt_bytes_builder_new() -> *mut GosBytesBuilder {
 /// Allocate a `bytes::Builder` with `n` bytes of reserved capacity.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_bytes_builder_with_capacity(n: i64) -> *mut GosBytesBuilder {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         super::rc::alloc_managed(GosBytesBuilder {
             inner: String::with_capacity(n.max(0) as usize),
         })
@@ -122,7 +122,7 @@ pub extern "C" fn gos_rt_bytes_builder_with_capacity(n: i64) -> *mut GosBytesBui
 /// Append `text` to the builder.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bytes_builder_write(b: *mut GosBytesBuilder, text: *const c_char) {
-    ffi_entry!((), {
+    ffi_entry!({
         if b.is_null() {
             return;
         }
@@ -137,7 +137,7 @@ pub unsafe extern "C" fn gos_rt_bytes_builder_write(b: *mut GosBytesBuilder, tex
 /// scalar value is substituted with U+FFFD rather than unwinding.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bytes_builder_write_char(b: *mut GosBytesBuilder, ch: i32) {
-    ffi_entry!((), {
+    ffi_entry!({
         if b.is_null() {
             return;
         }
@@ -151,7 +151,7 @@ pub unsafe extern "C" fn gos_rt_bytes_builder_write_char(b: *mut GosBytesBuilder
 /// not consume the handle (see module note).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bytes_builder_build(b: *mut GosBytesBuilder) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if b.is_null() {
             return alloc_cstring(b"");
         }
@@ -164,7 +164,7 @@ pub unsafe extern "C" fn gos_rt_bytes_builder_build(b: *mut GosBytesBuilder) -> 
 /// c-string (identical contents to `build`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bytes_builder_as_str(b: *mut GosBytesBuilder) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if b.is_null() {
             return alloc_cstring(b"");
         }
@@ -176,7 +176,7 @@ pub unsafe extern "C" fn gos_rt_bytes_builder_as_str(b: *mut GosBytesBuilder) ->
 /// Byte length of the accumulated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bytes_builder_len(b: *mut GosBytesBuilder) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if b.is_null() {
             return 0;
         }
@@ -199,15 +199,13 @@ super::rc::managed_handle!(GosBytesBuffer);
 /// Allocate an empty `bytes::Buffer`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_bytes_buffer_new() -> *mut GosBytesBuffer {
-    ffi_entry!(std::ptr::null_mut(), {
-        super::rc::alloc_managed(GosBytesBuffer { inner: Vec::new() })
-    })
+    ffi_entry!({ super::rc::alloc_managed(GosBytesBuffer { inner: Vec::new() }) })
 }
 
 /// Allocate a `bytes::Buffer` with `n` bytes of reserved capacity.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_bytes_buffer_with_capacity(n: i64) -> *mut GosBytesBuffer {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         super::rc::alloc_managed(GosBytesBuffer {
             inner: Vec::with_capacity(n.max(0) as usize),
         })
@@ -220,7 +218,7 @@ pub unsafe extern "C" fn gos_rt_bytes_buffer_write_str(
     buf: *mut GosBytesBuffer,
     text: *const c_char,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         if buf.is_null() {
             return;
         }
@@ -234,7 +232,7 @@ pub unsafe extern "C" fn gos_rt_bytes_buffer_write_str(
 /// Append one byte (low 8 bits of `byte`) to the buffer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bytes_buffer_push(buf: *mut GosBytesBuffer, byte: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if buf.is_null() {
             return;
         }
@@ -246,7 +244,7 @@ pub unsafe extern "C" fn gos_rt_bytes_buffer_push(buf: *mut GosBytesBuffer, byte
 /// Current byte length of the buffer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bytes_buffer_len(buf: *mut GosBytesBuffer) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if buf.is_null() {
             return 0;
         }
@@ -258,7 +256,7 @@ pub unsafe extern "C" fn gos_rt_bytes_buffer_len(buf: *mut GosBytesBuffer) -> i6
 /// `1` when the buffer is empty, else `0`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bytes_buffer_is_empty(buf: *mut GosBytesBuffer) -> i64 {
-    ffi_entry!(1, {
+    ffi_entry!({
         if buf.is_null() {
             return 1;
         }
@@ -270,7 +268,7 @@ pub unsafe extern "C" fn gos_rt_bytes_buffer_is_empty(buf: *mut GosBytesBuffer) 
 /// Reset the buffer to empty without releasing capacity.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bytes_buffer_clear(buf: *mut GosBytesBuffer) {
-    ffi_entry!((), {
+    ffi_entry!({
         if buf.is_null() {
             return;
         }
@@ -283,7 +281,7 @@ pub unsafe extern "C" fn gos_rt_bytes_buffer_clear(buf: *mut GosBytesBuffer) {
 /// c-string. Invalid sequences become U+FFFD.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bytes_buffer_to_string(buf: *mut GosBytesBuffer) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if buf.is_null() {
             return alloc_cstring(b"");
         }
@@ -304,7 +302,7 @@ pub unsafe extern "C" fn gos_rt_bytes_index_of(
     haystack: *const crate::c_abi::vec::GosVec,
     needle: *const crate::c_abi::vec::GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `haystack` is this shim's argument, null or a live `Vec` for the call (C-ABI
         // contract), which `vec_bytes` accepts.
         let h = unsafe { crate::c_abi::vec::vec_bytes(haystack) };
@@ -324,7 +322,7 @@ pub unsafe extern "C" fn gos_rt_bytes_split(
     haystack: *const crate::c_abi::vec::GosVec,
     sep: *const crate::c_abi::vec::GosVec,
 ) -> *mut crate::c_abi::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let v =
             { crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::VEC) };
         // SAFETY: `haystack` is this shim's argument, null or a live `Vec` for the call (C-ABI
@@ -353,7 +351,7 @@ pub unsafe extern "C" fn gos_rt_bytes_replace(
     from: *const crate::c_abi::vec::GosVec,
     to: *const crate::c_abi::vec::GosVec,
 ) -> *mut crate::c_abi::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `haystack` is this shim's argument, null or a live `Vec` for the call (C-ABI
         // contract), which `vec_bytes` accepts.
         let h = unsafe { crate::c_abi::vec::vec_bytes(haystack) };

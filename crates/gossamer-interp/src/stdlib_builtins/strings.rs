@@ -159,6 +159,16 @@ pub(crate) fn install_strings(globals: &mut Vec<(&'static str, Value)>) {
     ];
     install_module_pub("strings", STRING_METHODS, globals);
     install_module_pub("strings", &[("join", builtin_strings_join)], globals);
+    install_module_pub(
+        "strings",
+        &[
+            ("byte_find", builtin_strings_byte_find as BuiltinFnPub),
+            ("byte_rfind", builtin_strings_byte_rfind),
+            ("byte_offset", builtin_strings_byte_offset),
+            ("char_index", builtin_strings_char_index),
+        ],
+        globals,
+    );
     install_module_pub("String", STRING_METHODS, globals);
     // `parts.join(sep)` as a method on a `Vec<String>` receiver. Registered
     // under the `Vec::` key so receiver-typed dispatch resolves it ahead of
@@ -282,6 +292,50 @@ pub(crate) fn builtin_strings_find(args: &[Value]) -> RuntimeResult<Value> {
         Some(idx) => Ok(some_variant(Value::Int(idx as i64))),
         None => Ok(none_variant()),
     }
+}
+
+fn index_option(index: Option<usize>) -> Value {
+    match index {
+        Some(i) => some_variant(Value::Int(i64::try_from(i).unwrap_or(i64::MAX))),
+        None => none_variant(),
+    }
+}
+
+pub(crate) fn builtin_strings_byte_find(args: &[Value]) -> RuntimeResult<Value> {
+    let text = args.first().and_then(as_str).unwrap_or("");
+    Ok(index_option(strings_std::byte_find(
+        text,
+        &pattern_arg(args.get(1)),
+    )))
+}
+
+pub(crate) fn builtin_strings_byte_rfind(args: &[Value]) -> RuntimeResult<Value> {
+    let text = args.first().and_then(as_str).unwrap_or("");
+    Ok(index_option(strings_std::byte_rfind(
+        text,
+        &pattern_arg(args.get(1)),
+    )))
+}
+
+/// A position argument; a negative one names no position.
+fn position_arg(args: &[Value]) -> Option<usize> {
+    args.get(1)
+        .and_then(value_to_int)
+        .and_then(|n| usize::try_from(n).ok())
+}
+
+pub(crate) fn builtin_strings_byte_offset(args: &[Value]) -> RuntimeResult<Value> {
+    let text = args.first().and_then(as_str).unwrap_or("");
+    Ok(index_option(
+        position_arg(args).and_then(|i| strings_std::byte_offset(text, i)),
+    ))
+}
+
+pub(crate) fn builtin_strings_char_index(args: &[Value]) -> RuntimeResult<Value> {
+    let text = args.first().and_then(as_str).unwrap_or("");
+    Ok(index_option(
+        position_arg(args).and_then(|i| strings_std::char_index(text, i)),
+    ))
 }
 
 /// `s.to_i64() -> Option<i64>`: strict full-string parse, no trimming.

@@ -210,7 +210,7 @@ pub struct GosHttpResponse {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_http_client_new() -> *mut GosHttpClient {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let config = ClientConfig::DEFAULT;
         let agent = build_agent(&config);
         Box::into_raw(Box::new(GosHttpClient { config, agent }))
@@ -221,7 +221,7 @@ pub extern "C" fn gos_rt_http_client_new() -> *mut GosHttpClient {
 /// configuration chain with `Client::new()`'s defaults.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_http_client_builder_new() -> *mut GosClientBuilder {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         Box::into_raw(Box::new(GosClientBuilder {
             config: ClientConfig::DEFAULT,
         }))
@@ -236,7 +236,7 @@ pub unsafe extern "C" fn gos_rt_http_client_builder_max_redirects(
     builder: *mut GosClientBuilder,
     n: i64,
 ) -> *mut GosClientBuilder {
-    ffi_entry!(builder, {
+    ffi_entry!({
         if !builder.is_null() {
             // SAFETY: `builder` is non-null (checked above), a live builder
             // `gos_rt_http_client_builder_new` boxed, nothing else accesses during the call
@@ -255,7 +255,7 @@ pub unsafe extern "C" fn gos_rt_http_client_builder_timeout_ms(
     builder: *mut GosClientBuilder,
     t: i64,
 ) -> *mut GosClientBuilder {
-    ffi_entry!(builder, {
+    ffi_entry!({
         if !builder.is_null() {
             // SAFETY: `builder` is non-null (checked above), a live builder
             // `gos_rt_http_client_builder_new` boxed, nothing else accesses during the call
@@ -275,7 +275,7 @@ pub unsafe extern "C" fn gos_rt_http_client_builder_cookie_jar(
     builder: *mut GosClientBuilder,
     enabled: i32,
 ) -> *mut GosClientBuilder {
-    ffi_entry!(builder, {
+    ffi_entry!({
         if !builder.is_null() {
             // SAFETY: `builder` is non-null (checked above), a live builder
             // `gos_rt_http_client_builder_new` boxed, nothing else accesses during the call
@@ -293,7 +293,7 @@ pub unsafe extern "C" fn gos_rt_http_client_builder_proxy(
     builder: *mut GosClientBuilder,
     url: *const c_char,
 ) -> *mut GosClientBuilder {
-    ffi_entry!(builder, {
+    ffi_entry!({
         if !builder.is_null() {
             let proxy = if url.is_null() {
                 None
@@ -322,7 +322,7 @@ pub unsafe extern "C" fn gos_rt_http_client_builder_proxy(
 pub unsafe extern "C" fn gos_rt_http_client_builder_build(
     builder: *mut GosClientBuilder,
 ) -> *mut GosHttpClient {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let config = if builder.is_null() {
             ClientConfig::DEFAULT
         } else {
@@ -377,7 +377,7 @@ pub unsafe extern "C" fn gos_rt_http_client_get(
     client: *mut GosHttpClient,
     url: *const c_char,
 ) -> *mut GosHttpRequest {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `url` and `client` are this shim's arguments, each null or live for the call
         // (C-ABI contract), which `client_pending_request` accepts.
         unsafe { client_pending_request("GET", url, client) }
@@ -389,7 +389,7 @@ pub unsafe extern "C" fn gos_rt_http_client_post(
     client: *mut GosHttpClient,
     url: *const c_char,
 ) -> *mut GosHttpRequest {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `url` and `client` are this shim's arguments, each null or live for the call
         // (C-ABI contract), which `client_pending_request` accepts.
         unsafe { client_pending_request("POST", url, client) }
@@ -401,7 +401,7 @@ pub unsafe extern "C" fn gos_rt_http_client_put(
     client: *mut GosHttpClient,
     url: *const c_char,
 ) -> *mut GosHttpRequest {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `url` and `client` are this shim's arguments, each null or live for the call
         // (C-ABI contract), which `client_pending_request` accepts.
         unsafe { client_pending_request("PUT", url, client) }
@@ -413,7 +413,7 @@ pub unsafe extern "C" fn gos_rt_http_client_options(
     client: *mut GosHttpClient,
     url: *const c_char,
 ) -> *mut GosHttpRequest {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `url` and `client` are this shim's arguments, each null or live for the call
         // (C-ABI contract), which `client_pending_request` accepts.
         unsafe { client_pending_request("OPTIONS", url, client) }
@@ -425,7 +425,7 @@ pub unsafe extern "C" fn gos_rt_http_client_delete(
     client: *mut GosHttpClient,
     url: *const c_char,
 ) -> *mut GosHttpRequest {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `url` and `client` are this shim's arguments, each null or live for the call
         // (C-ABI contract), which `client_pending_request` accepts.
         unsafe { client_pending_request("DELETE", url, client) }
@@ -437,7 +437,7 @@ pub unsafe extern "C" fn gos_rt_http_client_head(
     client: *mut GosHttpClient,
     url: *const c_char,
 ) -> *mut GosHttpRequest {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `url` and `client` are this shim's arguments, each null or live for the call
         // (C-ABI contract), which `client_pending_request` accepts.
         unsafe { client_pending_request("HEAD", url, client) }
@@ -450,7 +450,7 @@ pub unsafe extern "C" fn gos_rt_http_request_header(
     name: *const c_char,
     value: *const c_char,
 ) -> *mut GosHttpRequest {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if req.is_null() {
             return req;
         }
@@ -480,7 +480,7 @@ pub unsafe extern "C" fn gos_rt_http_request_set_header(
     name: *const c_char,
     value: *const c_char,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         if req.is_null() {
             return;
         }
@@ -508,7 +508,7 @@ pub unsafe extern "C" fn gos_rt_http_request_get_header(
     req: *const GosHttpRequest,
     name: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if req.is_null() || name.is_null() {
             return alloc_cstring(b"");
         }
@@ -530,7 +530,7 @@ pub unsafe extern "C" fn gos_rt_http_request_body(
     req: *mut GosHttpRequest,
     body: *const c_char,
 ) -> *mut GosHttpRequest {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if req.is_null() {
             return req;
         }
@@ -556,7 +556,7 @@ pub unsafe extern "C" fn gos_rt_http_request_body(
 /// `.map_err(..)` / `?` surface behaves identically on every tier.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_request_send(req: *mut GosHttpRequest) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if req.is_null() {
             return err_result_with_msg("Request::send: request is null");
         }
@@ -585,7 +585,7 @@ pub unsafe extern "C" fn gos_rt_http_request_send(req: *mut GosHttpRequest) -> i
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_request_query(req: *const GosHttpRequest) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if req.is_null() {
             return alloc_cstring(b"");
         }
@@ -612,7 +612,7 @@ pub unsafe extern "C" fn gos_rt_http_request_query(req: *const GosHttpRequest) -
 pub unsafe extern "C" fn gos_rt_http_request_context(
     req: *mut GosHttpRequest,
 ) -> *mut crate::c_abi::context::GosCtx {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if req.is_null() {
             return std::ptr::with_exposed_provenance_mut(
                 crate::c_abi::context::shared_background(),
@@ -642,7 +642,7 @@ pub unsafe extern "C" fn gos_rt_http_request_context(
 /// request, or `""` when there is no socket behind it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_request_peer_addr(req: *const GosHttpRequest) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if req.is_null() {
             return alloc_cstring(b"");
         }
@@ -653,7 +653,7 @@ pub unsafe extern "C" fn gos_rt_http_request_peer_addr(req: *const GosHttpReques
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_request_body_str(req: *const GosHttpRequest) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if req.is_null() {
             return alloc_cstring(b"");
         }
@@ -672,7 +672,7 @@ pub unsafe extern "C" fn gos_rt_http_request_body_str(req: *const GosHttpRequest
 pub unsafe extern "C" fn gos_rt_http_request_raw_body(
     req: *const GosHttpRequest,
 ) -> *mut crate::c_abi::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let bytes: &[u8] = if req.is_null() {
             &[]
         } else {
@@ -686,7 +686,7 @@ pub unsafe extern "C" fn gos_rt_http_request_raw_body(
 /// Returns the request's URL path (the part after the host).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_request_path(req: *const GosHttpRequest) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if req.is_null() {
             return alloc_cstring(b"");
         }
@@ -741,7 +741,7 @@ pub unsafe extern "C" fn gos_rt_http_request_path_value(
     req: *const GosHttpRequest,
     name: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `req`, `name` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `path_param_lookup` accepts.
         match unsafe { path_param_lookup(req, name) } {
@@ -760,7 +760,7 @@ pub unsafe extern "C" fn gos_rt_http_request_path_int(
     req: *const GosHttpRequest,
     name: *const c_char,
 ) -> i128 {
-    ffi_entry!(crate::c_abi::result::gos_rt_result_new(1, 0), {
+    ffi_entry!({
         // SAFETY: `req`, `name` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `path_param_lookup` accepts.
         match unsafe { path_param_lookup(req, name) }.and_then(|s| s.trim().parse::<i64>().ok()) {
@@ -777,7 +777,7 @@ pub unsafe extern "C" fn gos_rt_http_request_path_float(
     req: *const GosHttpRequest,
     name: *const c_char,
 ) -> i128 {
-    ffi_entry!(crate::c_abi::result::gos_rt_result_new_f64(1, 0.0), {
+    ffi_entry!({
         // SAFETY: `req`, `name` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `path_param_lookup` accepts.
         match unsafe { path_param_lookup(req, name) }.and_then(|s| s.trim().parse::<f64>().ok()) {
@@ -789,7 +789,7 @@ pub unsafe extern "C" fn gos_rt_http_request_path_float(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_request_method(req: *const GosHttpRequest) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if req.is_null() {
             return alloc_cstring(b"");
         }
@@ -823,7 +823,7 @@ unsafe fn gos_response_own_body(body: *const c_char) -> *mut c_char {
 /// by whoever ends up holding it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_response_free(response: *mut GosHttpResponse) {
-    ffi_entry!((), {
+    ffi_entry!({
         if response.is_null() {
             return;
         }
@@ -843,7 +843,7 @@ pub unsafe extern "C" fn gos_rt_http_response_text_new(
     status: i64,
     body: *const c_char,
 ) -> *mut GosHttpResponse {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // Box-allocate per request rather than reusing a per-thread
         // buffer. The thread-local optimization saved a malloc/free
         // pair, but exposed a subtle aliasing hazard under concurrent
@@ -873,7 +873,7 @@ pub unsafe extern "C" fn gos_rt_http_response_json_new(
     status: i64,
     body: *const c_char,
 ) -> *mut GosHttpResponse {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         Box::into_raw(Box::new(GosHttpResponse {
             status,
             // SAFETY: `body` is this shim's argument, as `gos_response_own_body` requires (C-ABI
@@ -902,7 +902,7 @@ pub unsafe extern "C" fn gos_rt_http_response_stream_new(
     content_type: *const c_char,
     rs: *const i64,
 ) -> *mut GosHttpResponse {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `rs` is null or addresses the stream's handle word (C-ABI contract).
         let handle = unsafe { rs.as_ref() }.copied().unwrap_or(-1);
         stream_consume_for_response(handle);
@@ -925,7 +925,7 @@ pub unsafe extern "C" fn gos_rt_http_response_stream_new(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_response_status(resp: *const GosHttpResponse) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if resp.is_null() {
             return 0;
         }
@@ -936,7 +936,7 @@ pub unsafe extern "C" fn gos_rt_http_response_status(resp: *const GosHttpRespons
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_response_body(resp: *const GosHttpResponse) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if resp.is_null() {
             return alloc_cstring(b"");
         }
@@ -963,7 +963,7 @@ pub unsafe extern "C" fn gos_rt_http_response_body(resp: *const GosHttpResponse)
 pub unsafe extern "C" fn gos_rt_http_response_raw_bytes(
     resp: *const GosHttpResponse,
 ) -> *mut crate::c_abi::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let bytes: &[u8] = if resp.is_null() {
             &[]
         // SAFETY: `resp` is non-null (checked above) and live for the call (C-ABI contract).
@@ -1005,7 +1005,7 @@ pub unsafe extern "C" fn gos_rt_http_response_raw_bytes(
 pub unsafe extern "C" fn gos_rt_http_response_content_type(
     resp: *const GosHttpResponse,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if resp.is_null() {
             return alloc_cstring(b"");
         }
@@ -1021,7 +1021,7 @@ pub unsafe extern "C" fn gos_rt_http_response_content_type(
 pub unsafe extern "C" fn gos_rt_http_response_location(
     resp: *const GosHttpResponse,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if resp.is_null() {
             return alloc_cstring(b"");
         }
@@ -1086,7 +1086,7 @@ fn header_pairs_to_gosvec(pairs: &[(String, String)]) -> *mut crate::c_abi::vec:
 pub unsafe extern "C" fn gos_rt_http_response_headers(
     resp: *const GosHttpResponse,
 ) -> *mut crate::c_abi::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let pairs: &[(String, String)] = if resp.is_null() {
             &[]
         } else {
@@ -1104,7 +1104,7 @@ pub unsafe extern "C" fn gos_rt_http_response_headers(
 pub unsafe extern "C" fn gos_rt_http_request_headers(
     req: *const GosHttpRequest,
 ) -> *mut crate::c_abi::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let pairs: &[(String, String)] = if req.is_null() {
             &[]
         } else {
@@ -1127,7 +1127,7 @@ pub unsafe extern "C" fn gos_rt_http_request_headers(
 pub unsafe extern "C" fn gos_rt_http_request_query_pairs(
     req: *const GosHttpRequest,
 ) -> *mut crate::c_abi::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if req.is_null() {
             return header_pairs_to_gosvec(&[]);
         }
@@ -1153,7 +1153,7 @@ pub unsafe extern "C" fn gos_rt_http_response_set_header(
     name: *const c_char,
     value: *const c_char,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         if resp.is_null() {
             return;
         }
@@ -1188,7 +1188,7 @@ pub unsafe extern "C" fn gos_rt_http_response_with_header(
     name: *const c_char,
     value: *const c_char,
 ) -> *mut GosHttpResponse {
-    ffi_entry!(resp, {
+    ffi_entry!({
         // SAFETY: `resp`, `name`, `value` are this shim's arguments, live for the call (C-ABI
         // contract) or null, which `gos_rt_http_response_set_header` accepts.
         unsafe { gos_rt_http_response_set_header(resp, name, value) };
@@ -1206,7 +1206,7 @@ pub unsafe extern "C" fn gos_rt_http_response_set_content_type(
     resp: *mut GosHttpResponse,
     content_type: *const c_char,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         if resp.is_null() || content_type.is_null() {
             return;
         }
@@ -1230,7 +1230,7 @@ pub unsafe extern "C" fn gos_rt_http_response_set_body_bytes(
     resp: *mut GosHttpResponse,
     bytes: *const crate::c_abi::vec::GosVec,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         if resp.is_null() {
             return;
         }
@@ -1255,7 +1255,7 @@ pub unsafe extern "C" fn gos_rt_http_response_get_header(
     resp: *const GosHttpResponse,
     name: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if resp.is_null() || name.is_null() {
             return alloc_cstring(b"");
         }
@@ -1640,7 +1640,7 @@ pub unsafe extern "C" fn gos_rt_http_request(
     body: *const c_char,
     headers: *mut GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let method_str = if method.is_null() {
             String::new()
         } else {
@@ -1684,7 +1684,7 @@ pub unsafe extern "C" fn gos_rt_http_request_bytes(
     body: *const crate::c_abi::vec::GosVec,
     headers: *mut GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let method_str = if method.is_null() {
             String::new()
         } else {
@@ -1727,7 +1727,7 @@ pub unsafe extern "C" fn gos_rt_http_client_request(
     body: *const c_char,
     headers: *mut GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let method_str = if method.is_null() {
             String::new()
         } else {
@@ -1772,7 +1772,7 @@ pub unsafe extern "C" fn gos_rt_http_client_request_bytes(
     body: *const crate::c_abi::vec::GosVec,
     headers: *mut GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let method_str = if method.is_null() {
             String::new()
         } else {
@@ -1814,7 +1814,7 @@ pub unsafe extern "C" fn gos_rt_http_client_request_bytes(
 /// `url` is null or a live string body.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_get(url: *const c_char, headers: *mut GosVec) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let url_str = if url.is_null() {
             return err_result_with_msg("http::get: url is null");
         } else {
@@ -1917,7 +1917,7 @@ unsafe fn http_verb_body(
 /// of header pairs.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_head(url: *const c_char, headers: *mut GosVec) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `url` and `headers` are this shim's arguments, each null or live (C-ABI
         // contract).
         unsafe { http_verb_no_body("HEAD", "http::head", url, headers) }
@@ -1932,7 +1932,7 @@ pub unsafe extern "C" fn gos_rt_http_head(url: *const c_char, headers: *mut GosV
 /// of header pairs.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_options(url: *const c_char, headers: *mut GosVec) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `url` and `headers` are this shim's arguments, each null or live (C-ABI
         // contract).
         unsafe { http_verb_no_body("OPTIONS", "http::options", url, headers) }
@@ -1950,7 +1950,7 @@ pub unsafe extern "C" fn gos_rt_http_post(
     body: *const c_char,
     content_type: *const c_char,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `url`, `body`, and `content_type` are this shim's arguments, each null or live
         // (C-ABI contract).
         unsafe { http_verb_body("POST", "http::post", url, body, content_type) }
@@ -1968,7 +1968,7 @@ pub unsafe extern "C" fn gos_rt_http_put(
     body: *const c_char,
     content_type: *const c_char,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `url`, `body`, and `content_type` are this shim's arguments, each null or live
         // (C-ABI contract).
         unsafe { http_verb_body("PUT", "http::put", url, body, content_type) }
@@ -1984,7 +1984,7 @@ pub unsafe extern "C" fn gos_rt_http_delete(
     body: *const c_char,
     headers: *mut GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let url_str = if url.is_null() {
             return err_result_with_msg("http::delete: url is null");
         } else {
@@ -2019,7 +2019,7 @@ pub unsafe extern "C" fn gos_rt_http_delete(
 /// `url` is null or a live string body.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_nc_get(url: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `url` is this shim's argument, null or a live string body (C-ABI contract).
         unsafe { http_verb_no_body("GET", "native_client::get", url, std::ptr::null_mut()) }
     })
@@ -2033,7 +2033,7 @@ pub unsafe extern "C" fn gos_rt_nc_get(url: *const c_char) -> i128 {
 /// `url` is null or a live string body.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_nc_delete(url: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `url` is this shim's argument, null or a live string body (C-ABI contract).
         unsafe { http_verb_no_body("DELETE", "native_client::delete", url, std::ptr::null_mut()) }
     })
@@ -2071,7 +2071,7 @@ pub unsafe extern "C" fn gos_rt_nc_post(
     body: *const c_char,
     content_type: *const c_char,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let url_str = if url.is_null() {
             return err_result_with_msg("native_client::post: url is null");
         } else {
@@ -2111,7 +2111,7 @@ pub unsafe extern "C" fn gos_rt_nc_put(
     body: *const c_char,
     content_type: *const c_char,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let url_str = if url.is_null() {
             return err_result_with_msg("native_client::put: url is null");
         } else {
@@ -2154,7 +2154,7 @@ pub unsafe extern "C" fn gos_rt_proxy_forward_url(
     method: *const c_char,
     body: *const c_char,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let url_str = if upstream_url.is_null() {
             return err_result_with_msg("proxy::forward: url is null");
         } else {
@@ -2221,7 +2221,7 @@ pub unsafe extern "C" fn gos_rt_http_stream(
     body: *const c_char,
     headers: *mut GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let method_str = if method.is_null() {
             "GET".to_string()
         } else {
@@ -2307,7 +2307,7 @@ pub unsafe extern "C" fn gos_rt_http_stream(
 /// None.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_stream_next_line(rs: *const i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if rs.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -2360,7 +2360,7 @@ pub unsafe extern "C" fn gos_rt_http_stream_next_line(rs: *const i64) -> i128 {
 /// chunk reads on one stream stays coherent.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_stream_next_chunk(rs: *const i64, max_bytes: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if rs.is_null() {
             return gos_rt_result_new(1, 0);
         }

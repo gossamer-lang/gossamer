@@ -33,7 +33,7 @@ pub extern "C" fn gos_rt_utf16_rune_len(r: i32) -> i64 {
 /// `encoding::utf16::decode_surrogate_pair(high, low) -> Option<char>`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_utf16_decode_surrogate_pair(high: i64, low: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let high = high as u16;
         let low = low as u16;
         let pair_ok = (HIGH_MIN..=HIGH_MAX).contains(&high) && (LOW_MIN..=LOW_MAX).contains(&low);
@@ -53,7 +53,7 @@ pub extern "C" fn gos_rt_utf16_decode_surrogate_pair(high: i64, low: i64) -> i12
 /// `encoding::utf16::encode_string(s) -> [u16]` (i64-per-element).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_utf16_encode_string(s: *const c_char) -> *mut super::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let text = if s.is_null() {
             ""
         } else {
@@ -82,7 +82,7 @@ pub unsafe extern "C" fn gos_rt_utf16_encode_string(s: *const c_char) -> *mut su
 pub unsafe extern "C" fn gos_rt_utf16_decode_to_string(
     v: *const super::vec::GosVec,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract). Each unit
         // reads at the width its header declares.
         let units: Vec<u16> = unsafe { super::vec::VecView::of(v) }

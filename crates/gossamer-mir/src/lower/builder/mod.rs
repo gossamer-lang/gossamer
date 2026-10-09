@@ -137,9 +137,10 @@ pub(crate) struct Builder<'a> {
     /// an element wider than one slot can be either this or the dedicated pair
     /// state, so which one a local holds is recorded where it is built.
     pub(crate) local_aggr_iter: std::collections::HashSet<Local>,
-    /// Locals that hold a value a loop in this body built and nothing else
-    /// names, so a binding initialised from one takes the value as it is.
-    pub(crate) fresh_loop_results: std::collections::HashSet<Local>,
+    /// Locals that hold a value this body just built and nothing else names -
+    /// a fold's accumulator, a collection a constructor filled - so a binding
+    /// initialised from one takes the value as it is.
+    pub(crate) fresh_results: std::collections::HashSet<Local>,
     /// Per-local field layout for synthesised aggregates produced by
     /// the declarative `flag::define(...)` lowering. Maps the result
     /// local to a `Vec<(long_name, cell_kind)>` indexed by field

@@ -72,6 +72,34 @@ pub fn find(text: &str, needle: &str) -> Option<usize> {
         .map(|byte_index| text[..byte_index].chars().count())
 }
 
+/// Byte offset of the first occurrence of `needle` in `text`, in the unit
+/// `substring`, `slice`, and `byte_at` take.
+#[must_use]
+pub fn byte_find(text: &str, needle: &str) -> Option<usize> {
+    gossamer_runtime::codec::text::byte_find(text, needle)
+}
+
+/// Byte offset of the last occurrence of `needle` in `text`.
+#[must_use]
+pub fn byte_rfind(text: &str, needle: &str) -> Option<usize> {
+    gossamer_runtime::codec::text::byte_rfind(text, needle)
+}
+
+/// Byte offset where the scalar at `char_index` starts, converting a `find`
+/// answer for `substring`; the index one past the last scalar answers the byte
+/// length.
+#[must_use]
+pub fn byte_offset(text: &str, char_index: usize) -> Option<usize> {
+    gossamer_runtime::codec::text::byte_offset(text, char_index)
+}
+
+/// Scalar index of the scalar starting at byte `offset`, or `None` inside a
+/// scalar or past the end.
+#[must_use]
+pub fn char_index(text: &str, offset: usize) -> Option<usize> {
+    gossamer_runtime::codec::text::char_index(text, offset)
+}
+
 /// Replaces every occurrence of `from` with `to`.
 #[must_use]
 pub fn replace(text: &str, from: &str, to: &str) -> String {

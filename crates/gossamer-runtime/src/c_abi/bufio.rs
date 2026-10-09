@@ -33,7 +33,7 @@ pub struct GosScanner {
 pub unsafe extern "C" fn gos_rt_bufio_scanner_new(
     stream: *mut std::ffi::c_void,
 ) -> *mut GosScanner {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // Read the entire stream up front: cheap for the typical
         // CLI/file usage and avoids weaving a real Read trait
         // through the runtime.
@@ -65,7 +65,7 @@ pub unsafe extern "C" fn gos_rt_bufio_scanner_new(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bufio_scanner_scan(s: *mut GosScanner) -> bool {
-    ffi_entry!(false, {
+    ffi_entry!({
         if s.is_null() {
             return false;
         }
@@ -86,7 +86,7 @@ pub unsafe extern "C" fn gos_rt_bufio_scanner_scan(s: *mut GosScanner) -> bool {
 /// text, as a `scan` would leave it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bufio_scanner_next(s: *mut GosScanner) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if s.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -105,7 +105,7 @@ pub unsafe extern "C" fn gos_rt_bufio_scanner_next(s: *mut GosScanner) -> i128 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bufio_scanner_text(s: *const GosScanner) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if s.is_null() {
             return alloc_cstring(b"");
         }

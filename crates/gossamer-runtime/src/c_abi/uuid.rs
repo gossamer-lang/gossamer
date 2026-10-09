@@ -29,7 +29,7 @@ use super::*;
 /// hyphenated form as a heap-owned c-string.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_uuid_v4() -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let s = ::uuid::Uuid::new_v4().hyphenated().to_string();
         alloc_cstring(s.as_bytes())
     })
@@ -38,7 +38,7 @@ pub extern "C" fn gos_rt_uuid_v4() -> *mut c_char {
 /// Generates a fresh v7 (timestamp-ordered) UUID.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_uuid_v7() -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let s = ::uuid::Uuid::now_v7().hyphenated().to_string();
         alloc_cstring(s.as_bytes())
     })
@@ -47,7 +47,7 @@ pub extern "C" fn gos_rt_uuid_v7() -> *mut c_char {
 /// Returns 1 iff `s` parses as a canonical UUID.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_uuid_is_valid(s: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if s.is_null() {
             return 0;
         }
@@ -60,7 +60,7 @@ pub unsafe extern "C" fn gos_rt_uuid_is_valid(s: *const c_char) -> i64 {
 /// Returns the lowercase canonical form of `s` if it parses, else the empty string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_uuid_normalize(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if s.is_null() {
             return alloc_cstring(b"");
         }
@@ -77,7 +77,7 @@ pub unsafe extern "C" fn gos_rt_uuid_normalize(s: *const c_char) -> *mut c_char 
 /// Returns the 32-char unhyphenated form of `s`, else the empty string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_uuid_simple(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if s.is_null() {
             return alloc_cstring(b"");
         }

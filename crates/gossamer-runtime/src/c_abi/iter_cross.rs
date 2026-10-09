@@ -242,7 +242,7 @@ macro_rules! cross_shims {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $word($($arg: $aty),*) -> $ret {
             // SAFETY: the shim's arguments meet the helper contract under the C-ABI contract.
-            ffi_entry!($fallback, { unsafe { $body($($arg),*, ElemPass::Word) } })
+            ffi_entry!({ unsafe { $body($($arg),*, ElemPass::Word) } })
         }
         #[doc = $doc]
         #[doc = ""]
@@ -250,7 +250,7 @@ macro_rules! cross_shims {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $float($($arg: $aty),*) -> $ret {
             // SAFETY: the shim's arguments meet the helper contract under the C-ABI contract.
-            ffi_entry!($fallback, { unsafe { $body($($arg),*, ElemPass::Float) } })
+            ffi_entry!({ unsafe { $body($($arg),*, ElemPass::Float) } })
         }
         #[doc = $doc]
         #[doc = ""]
@@ -258,7 +258,7 @@ macro_rules! cross_shims {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $ptr($($arg: $aty),*) -> $ret {
             // SAFETY: the shim's arguments meet the helper contract under the C-ABI contract.
-            ffi_entry!($fallback, { unsafe { $body($($arg),*, ElemPass::Ptr) } })
+            ffi_entry!({ unsafe { $body($($arg),*, ElemPass::Ptr) } })
         }
     };
 }
@@ -792,7 +792,7 @@ macro_rules! scan_shims {
                 env: *const u8,
                 v: *const GosVec,
             ) -> *mut GosVec {
-                ffi_entry!(std::ptr::null_mut(), {
+                ffi_entry!({
                     // SAFETY: the shim's arguments meet the helper contract under the C-ABI
                     // contract.
                     unsafe { scan_impl(init, env, v, $elem, $acc) }

@@ -130,6 +130,10 @@ unsafe fn scan_black(root: *mut u8) {
 unsafe fn collect_white(root: *mut u8, freed: &mut Vec<*mut u8>) {
     let mut stack = vec![root];
     let mut to_free: Vec<*mut u8> = Vec::new();
+    // Weak shares the garbage holds, given back once the members free below
+    // are gone: a member another member observes weakly lingers for that
+    // share, and freeing it on the share's release is the last step.
+    let mut weak_children: Vec<*mut u8> = Vec::new();
     while let Some(s) = stack.pop() {
         // SAFETY: `s` is a live, thread-local node the collector reaches.
         let h = unsafe { header_ptr(s) };
@@ -167,9 +171,15 @@ unsafe fn collect_white(root: *mut u8, freed: &mut Vec<*mut u8>) {
             // the outermost teardown exit - a Vec free can cascade into
             // RC releases, which must not run mid-collection.
             visit_vec_children(s, queue_vec_child);
+            weak_children_of(s, &mut weak_children);
         }
         to_free.push(s);
     }
+    let members: std::collections::HashSet<*mut u8> = if weak_children.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        to_free.iter().copied().collect()
+    };
     for s in to_free {
         // SAFETY: `s` is a cycle member the walk above collected.
         let h = unsafe { header_ptr(s) };
@@ -179,6 +189,31 @@ unsafe fn collect_white(root: *mut u8, freed: &mut Vec<*mut u8>) {
             freed.push(s);
             // SAFETY: `s` has no strong or weak reference left (checked above).
             unsafe { free_block(s) };
+        }
+    }
+    for child in weak_children {
+        let target = untag_rc(child);
+        if target.is_null() || in_region_arena(target) {
+            continue;
+        }
+        // SAFETY: `target` is a block the dead member's weak share kept allocated.
+        let h = unsafe { header_ptr(target) };
+        // SAFETY: `h` is that block's header.
+        if unsafe { dec_weak(h) } != 1 {
+            continue;
+        }
+        if members.contains(&target) {
+            // SAFETY: `h` is the header of a garbage member this collection left for its
+            // last weak share, which just went.
+            if unsafe { strong_count(h) } == 0 {
+                CYCLES_FREED.fetch_add(1, Ordering::Relaxed);
+                freed.push(target);
+                // SAFETY: the member has no strong or weak reference left.
+                unsafe { free_block(target) };
+            }
+        } else {
+            // SAFETY: `target`'s last weak share just went.
+            unsafe { try_reclaim(target) };
         }
     }
 }

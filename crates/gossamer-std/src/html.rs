@@ -10,104 +10,21 @@ pub use gossamer_template::html as template;
 
 /// Escapes `s` for safe insertion into HTML text or attribute values.
 ///
-/// HTML-escapes `s` to the OWASP "CSP-grade" defensive set: `&`, `<`,
-/// `>`, `"`, `'`, `/`, and backtick. Escaping `/` (`&#x2F;`) closes the
-/// closing-tag / attribute-context parser edge cases, and backtick
-/// (`&#x60;`) defuses IE's attribute delimiter - so the result is safe
-/// in HTML element content AND quoted/unquoted attribute values without
-/// the caller needing to know the context. (Context-specific escaping
-/// for URL / JS / CSS sinks still requires the `html::template`
-/// engine - a single escaper cannot be context-aware.)
+/// Escapes the OWASP "CSP-grade" defensive set: `&`, `<`, `>`, `"`, `'`,
+/// `/`, and backtick, so the result is safe in element content and in
+/// quoted or unquoted attribute values. Context-specific escaping for URL /
+/// JS / CSS sinks still requires the `html::template` engine.
 #[must_use]
 pub fn escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            '/' => out.push_str("&#x2F;"),
-            '`' => out.push_str("&#x60;"),
-            c => out.push(c),
-        }
-    }
-    out
+    gossamer_runtime::codec::html::escape(s)
 }
 
-/// Unescapes named and numeric HTML entities back to their character equivalents.
-///
-/// Handles the five standard named entities (`&amp;`, `&lt;`, `&gt;`,
-/// `&quot;`, `&apos;`) plus decimal (`&#NNN;`) and hex (`&#xHHH;`) references.
+/// Unescapes `&amp; &lt; &gt; &quot; &apos; &nbsp;` and decimal (`&#NNN;`)
+/// or hex (`&#xHHH;`) references; an `&` that starts no known entity is
+/// kept as written.
 #[must_use]
 pub fn unescape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch != '&' {
-            out.push(ch);
-            continue;
-        }
-        // Collect the entity up to ';'.
-        let mut entity = String::new();
-        let mut closed = false;
-        for _ in 0..16 {
-            match chars.next() {
-                Some(';') => {
-                    closed = true;
-                    break;
-                }
-                Some(c) => entity.push(c),
-                None => break,
-            }
-        }
-        if !closed {
-            out.push('&');
-            out.push_str(&entity);
-            continue;
-        }
-        let decoded = match entity.as_str() {
-            "amp" => "&",
-            "lt" => "<",
-            "gt" => ">",
-            "quot" => "\"",
-            "apos" | "#39" => "'",
-            "nbsp" => "\u{00A0}",
-            s if s.starts_with("#x") || s.starts_with("#X") => {
-                let n = u32::from_str_radix(&s[2..], 16)
-                    .ok()
-                    .and_then(char::from_u32);
-                if let Some(c) = n {
-                    out.push(c);
-                } else {
-                    out.push('&');
-                    out.push_str(&entity);
-                    out.push(';');
-                }
-                continue;
-            }
-            s if s.starts_with('#') => {
-                let n = s[1..].parse::<u32>().ok().and_then(char::from_u32);
-                if let Some(c) = n {
-                    out.push(c);
-                } else {
-                    out.push('&');
-                    out.push_str(&entity);
-                    out.push(';');
-                }
-                continue;
-            }
-            _ => {
-                out.push('&');
-                out.push_str(&entity);
-                out.push(';');
-                continue;
-            }
-        };
-        out.push_str(decoded);
-    }
-    out
+    gossamer_runtime::codec::html::unescape(s)
 }
 
 #[cfg(test)]

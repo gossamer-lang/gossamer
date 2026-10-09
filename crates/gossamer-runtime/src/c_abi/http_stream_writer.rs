@@ -108,7 +108,7 @@ unsafe fn push(rs: *const i64, bytes: Vec<u8>) -> i64 {
 /// writes as it goes.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_http_response_stream_open() -> *mut i64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
         let reader = QueueReader {
             rx: Mutex::new(rx),
@@ -129,7 +129,7 @@ pub unsafe extern "C" fn gos_rt_http_response_stream_write(
     rs: *const i64,
     text: *const c_char,
 ) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if text.is_null() {
             return 0;
         }
@@ -148,7 +148,7 @@ pub unsafe extern "C" fn gos_rt_http_response_stream_write_bytes(
     rs: *const i64,
     bytes: *const GosVec,
 ) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if bytes.is_null() {
             return 0;
         }
@@ -176,7 +176,7 @@ pub unsafe extern "C" fn gos_rt_http_response_stream_write_bytes(
 /// `stream.close()` - ends the body. Idempotent.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_response_stream_close(rs: *const i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `rs` is this shim's argument, as `handle_of` requires (C-ABI contract).
         writers().lock().remove(&unsafe { handle_of(rs) });
     });
@@ -186,7 +186,7 @@ pub unsafe extern "C" fn gos_rt_http_response_stream_close(rs: *const i64) {
 /// client has gone.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_response_stream_is_open(rs: *const i64) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `rs` is this shim's argument, as `handle_of` requires (C-ABI contract).
         i64::from(writers().lock().contains_key(&unsafe { handle_of(rs) }))
     })

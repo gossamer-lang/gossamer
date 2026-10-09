@@ -106,7 +106,7 @@ fn vec_from(xs: &[i64]) -> *mut GosVec {
 /// Err passthrough. Callback returns a packed i128 Result.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_result_and_then(res: i128, env: *const u8) -> i128 {
-    ffi_entry_passthrough!(0i128, {
+    ffi_entry_passthrough!({
         if gos_rt_result_disc(res) != 0 {
             return res;
         }
@@ -126,7 +126,7 @@ pub unsafe extern "C-unwind" fn gos_rt_result_and_then(res: i128, env: *const u8
 /// Ok passthrough.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_result_or_else(res: i128, env: *const u8) -> i128 {
-    ffi_entry_passthrough!(0i128, {
+    ffi_entry_passthrough!({
         if gos_rt_result_disc(res) == 0 {
             return res;
         }
@@ -169,7 +169,7 @@ pub extern "C" fn gos_rt_result_to_opt_err(res: i128) -> i128 {
 /// None passthrough.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_option_and_then(opt: i128, env: *const u8) -> i128 {
-    ffi_entry_passthrough!(NONE, {
+    ffi_entry_passthrough!({
         if gos_rt_result_disc(opt) != 0 {
             return NONE;
         }
@@ -188,7 +188,7 @@ pub unsafe extern "C-unwind" fn gos_rt_option_and_then(opt: i128, env: *const u8
 /// `option::filter(p, opt)` - keeps Some(x) only when `p(x)` holds.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_option_filter(opt: i128, env: *const u8) -> i128 {
-    ffi_entry_passthrough!(NONE, {
+    ffi_entry_passthrough!({
         if gos_rt_result_disc(opt) != 0 {
             return NONE;
         }
@@ -224,7 +224,7 @@ pub extern "C" fn gos_rt_option_or(alt: i128, opt: i128) -> i128 {
 /// `f() -> Option`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_option_or_else(opt: i128, env: *const u8) -> i128 {
-    ffi_entry_passthrough!(NONE, {
+    ffi_entry_passthrough!({
         if gos_rt_result_disc(opt) == 0 {
             return opt;
         }
@@ -243,7 +243,7 @@ pub unsafe extern "C-unwind" fn gos_rt_option_or_else(opt: i128, env: *const u8)
 /// `option::default_with(f, opt)` - Some payload, or `f()`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_option_default_with(opt: i128, env: *const u8) -> i64 {
-    ffi_entry_passthrough!(0, {
+    ffi_entry_passthrough!({
         if gos_rt_result_disc(opt) == 0 {
             return gos_rt_result_payload(opt);
         }
@@ -263,7 +263,7 @@ pub unsafe extern "C-unwind" fn gos_rt_option_default_with(opt: i128, env: *cons
 /// None becomes `Err(f())`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_result_ok_or_else(opt: i128, env: *const u8) -> i128 {
-    ffi_entry_passthrough!(NONE, {
+    ffi_entry_passthrough!({
         if gos_rt_result_disc(opt) == 0 {
             return opt;
         }
@@ -284,7 +284,7 @@ pub unsafe extern "C-unwind" fn gos_rt_result_ok_or_else(opt: i128, env: *const 
 /// piped option as `second`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_option_zip(first: i128, second: i128) -> i128 {
-    ffi_entry!(NONE, {
+    ffi_entry!({
         if gos_rt_result_disc(first) != 0 || gos_rt_result_disc(second) != 0 {
             return NONE;
         }
@@ -314,7 +314,7 @@ pub unsafe extern "C" fn gos_rt_option_flatten(opt: i128) -> i128 {
 /// `option::iter(opt) -> [T]` - zero- or one-element Vec.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_option_iter(opt: i128) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if gos_rt_result_disc(opt) == 0 {
             vec_from(&[gos_rt_result_payload(opt)])
         } else {
@@ -332,7 +332,7 @@ pub extern "C" fn gos_rt_option_iter(opt: i128) -> *mut GosVec {
 /// by-value `(Vec, Vec)` pair returned as a 16-byte heap blob.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_iter_unzip_i64(v: *const GosVec) -> *mut u8 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut a = Vec::new();
         let mut b = Vec::new();
         // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
@@ -356,7 +356,7 @@ pub unsafe extern "C" fn gos_rt_iter_unzip_i64(v: *const GosVec) -> *mut u8 {
 /// `result.map_err(closure)`. If Err, calls closure and rebuilds.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_result_map_err(result: i128, closure: *const u8) -> i128 {
-    ffi_entry_passthrough!(0i128, {
+    ffi_entry_passthrough!({
         if gos_rt_result_disc(result) != 1 || closure.is_null() {
             return result;
         }
@@ -388,7 +388,7 @@ pub unsafe extern "C-unwind" fn gos_rt_result_map_err(result: i128, closure: *co
 /// round-2 corruption pre-fix).
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_result_map(result: i128, closure: *const u8) -> i128 {
-    ffi_entry_passthrough!(0i128, {
+    ffi_entry_passthrough!({
         if gos_rt_result_disc(result) != 0 || closure.is_null() {
             return result;
         }
@@ -421,7 +421,7 @@ pub unsafe extern "C-unwind" fn gos_rt_result_default_with(
     result: i128,
     closure: *const u8,
 ) -> i64 {
-    ffi_entry_passthrough!(0, {
+    ffi_entry_passthrough!({
         if gos_rt_result_disc(result) == 0 {
             return gos_rt_result_payload(result);
         }
@@ -451,7 +451,7 @@ pub unsafe extern "C-unwind" fn gos_rt_result_default_with(
 /// unwrapped `T` (a scalar value or a pointer, depending on `T`).
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_result_default(fallback: i64, result: i128) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if gos_rt_result_disc(result) == 0 {
             gos_rt_result_payload(result)
         } else {
@@ -465,7 +465,7 @@ pub extern "C" fn gos_rt_result_default(fallback: i64, result: i128) -> i64 {
 /// pattern, and the fallback rides the float register directly.
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn gos_rt_result_default_f64(fallback: f64, result: i128) -> f64 {
-    ffi_entry_passthrough!(0.0, {
+    ffi_entry_passthrough!({
         if gos_rt_result_disc(result) == 0 {
             f64::from_bits(gos_rt_result_payload(result) as u64)
         } else {
@@ -488,7 +488,7 @@ pub extern "C-unwind" fn gos_rt_result_default_f64(fallback: f64, result: i128) 
 /// -> i64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_result_map_bare(result: i128, fn_addr: i64) -> i128 {
-    ffi_entry_passthrough!(0i128, {
+    ffi_entry_passthrough!({
         if gos_rt_result_disc(result) != 0 || fn_addr == 0 {
             return result;
         }
@@ -508,7 +508,7 @@ pub unsafe extern "C-unwind" fn gos_rt_result_map_bare(result: i128, fn_addr: i6
 /// -> i64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_result_map_err_bare(result: i128, fn_addr: i64) -> i128 {
-    ffi_entry_passthrough!(0i128, {
+    ffi_entry_passthrough!({
         if gos_rt_result_disc(result) == 0 || fn_addr == 0 {
             return result;
         }

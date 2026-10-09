@@ -29,7 +29,7 @@
 /// applications. `n` is clamped to non-negative.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_lcg_jump(state: i64, ia: i64, ic: i64, im: i64, n: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if n <= 0 || im <= 0 {
             return state;
         }

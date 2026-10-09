@@ -145,40 +145,4 @@ pub(crate) fn builtin_insecure_sha1_hex(args: &[Value]) -> RuntimeResult<Value> 
 }
 
 // ----------------------------------------------------------------------
-// compress::bzip2
-
-pub(crate) fn install_compress_bzip2(globals: &mut Vec<(&'static str, Value)>) {
-    for (short, call) in [
-        ("compress", builtin_bzip2_compress as BuiltinFnPub),
-        ("decompress", builtin_bzip2_decompress),
-    ] {
-        let q: &'static str = Box::leak(format!("compress::bzip2::{short}").into_boxed_str());
-        globals.push((q, crate::builtins::builtin_pub(q, call)));
-    }
-}
-
-pub(crate) fn builtin_bzip2_compress(args: &[Value]) -> RuntimeResult<Value> {
-    let data = bytes_from_value(args.first().unwrap_or(&Value::Unit));
-    let level = args.get(1).and_then(value_to_int).unwrap_or(6);
-    if !(1..=9).contains(&level) {
-        return Ok(err_variant(
-            "compress::bzip2::compress: level must be between 1 and 9",
-        ));
-    }
-    let level = u32::try_from(level).unwrap_or(6);
-    match gossamer_std::compress::bzip2::compress(&data, level) {
-        Ok(out) => Ok(ok_variant(bytes_to_array(out))),
-        Err(e) => Ok(err_variant(format!("{e}"))),
-    }
-}
-
-pub(crate) fn builtin_bzip2_decompress(args: &[Value]) -> RuntimeResult<Value> {
-    let data = bytes_from_value(args.first().unwrap_or(&Value::Unit));
-    match gossamer_std::compress::bzip2::decompress(&data) {
-        Ok(out) => Ok(ok_variant(bytes_to_array(out))),
-        Err(e) => Ok(err_variant(format!("{e}"))),
-    }
-}
-
-// ----------------------------------------------------------------------
 // math::big - arbitrary-precision integers (string representation in VM)

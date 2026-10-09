@@ -424,7 +424,7 @@ pub unsafe extern "C-unwind" fn gos_rt_par_run(env: *const u8, len: i64, mode: i
     {
         // SAFETY: `env` is this shim's closure environment, null or live for the call with a leaf
         // body of the `LeafFn` shape (C-ABI contract), which `par_run` accepts.
-        ffi_entry_passthrough!(std::ptr::null_mut(), { unsafe { par_run(env, len, mode) } })
+        ffi_entry_passthrough!({ unsafe { par_run(env, len, mode) } })
     }
 }
 
@@ -520,7 +520,7 @@ pub unsafe extern "C-unwind" fn gos_rt_par_chunks(env: *const u8, seq: *mut GosV
     #[cfg(not(target_arch = "wasm32"))]
     {
         // SAFETY: as this shim's contract states.
-        ffi_entry_passthrough!((), { unsafe { par_chunks(env, seq, size) } });
+        ffi_entry_passthrough!({ unsafe { par_chunks(env, seq, size) } });
     }
 }
 

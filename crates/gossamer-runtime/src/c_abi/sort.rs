@@ -104,7 +104,7 @@ unsafe fn clone_vec(src: *const GosVec, order: &[usize]) -> *mut GosVec {
 /// keep their input order.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sort_stable_i64(v: *const GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if v.is_null() {
             return gos_rt_vec_new(8);
         }
@@ -122,7 +122,7 @@ pub unsafe extern "C" fn gos_rt_sort_stable_i64(v: *const GosVec) -> *mut GosVec
 /// equal elements keep their input order.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sort_stable_str(v: *const GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if v.is_null() {
             return gos_rt_vec_new(8);
         }
@@ -141,7 +141,7 @@ pub unsafe extern "C" fn gos_rt_sort_stable_str(v: *const GosVec) -> *mut GosVec
 /// `Vec<i64>`; `Some(index)` of a matching element, else `None`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sort_binary_search_i64(v: *const GosVec, target: i64) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
         // which `i64_slots` accepts.
         let slots = unsafe { i64_slots(v) };
@@ -161,7 +161,7 @@ pub unsafe extern "C" fn gos_rt_sort_binary_search_str(
     v: *const GosVec,
     target: *const c_char,
 ) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
         // which `i64_slots` accepts.
         let slots = unsafe { i64_slots(v) };
@@ -187,7 +187,7 @@ pub unsafe extern "C" fn gos_rt_sort_binary_search_str(
 /// is also the insertion index that keeps `xs` sorted.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sort_partition_point_i64(v: *const GosVec, pivot: i64) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
         // which `i64_slots` accepts.
         let slots = unsafe { i64_slots(v) };
@@ -202,7 +202,7 @@ pub unsafe extern "C" fn gos_rt_sort_partition_point_str(
     v: *const GosVec,
     pivot: *const c_char,
 ) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
         // which `i64_slots` accepts.
         let slots = unsafe { i64_slots(v) };
@@ -236,7 +236,7 @@ unsafe fn f64_slots<'a>(v: *const GosVec) -> &'a [f64] {
 /// elements keep their input order.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sort_stable_f64(v: *const GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if v.is_null() {
             return gos_rt_vec_new(8);
         }
@@ -254,7 +254,7 @@ pub unsafe extern "C" fn gos_rt_sort_stable_f64(v: *const GosVec) -> *mut GosVec
 /// `Vec<f64>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sort_binary_search_f64(v: *const GosVec, target: f64) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
         // which `f64_slots` accepts.
         let slots = unsafe { f64_slots(v) };
@@ -270,7 +270,7 @@ pub unsafe extern "C" fn gos_rt_sort_binary_search_f64(v: *const GosVec, target:
 /// `sort::partition_point(xs, pivot) -> i64` over a sorted `Vec<f64>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sort_partition_point_f64(v: *const GosVec, pivot: f64) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
         // which `f64_slots` accepts.
         let slots = unsafe { f64_slots(v) };
@@ -283,7 +283,7 @@ pub unsafe extern "C" fn gos_rt_sort_partition_point_f64(v: *const GosVec, pivot
 /// position an insert would keep sorted.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_binary_search_i64(v: *const GosVec, target: i64) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
         // which `i64_slots` accepts.
         let slots = unsafe { i64_slots(v) };
@@ -297,7 +297,7 @@ pub unsafe extern "C" fn gos_rt_vec_binary_search_i64(v: *const GosVec, target: 
 /// `Vec<f64>`, ordered by [`float_order`] like every other float sort.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_binary_search_f64(v: *const GosVec, target: f64) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
         // which `f64_slots` accepts.
         let slots = unsafe { f64_slots(v) };
@@ -314,7 +314,7 @@ pub unsafe extern "C" fn gos_rt_vec_binary_search_str(
     v: *const GosVec,
     target: *const c_char,
 ) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
         // which `i64_slots` accepts.
         let slots = unsafe { i64_slots(v) };
@@ -375,7 +375,7 @@ pub unsafe extern "C" fn gos_rt_sort_stable_aggr(
     n: i64,
     tags: *const u8,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
         // which `aggregate_elems` accepts.
         let Some((base, len, stride)) = (unsafe { aggregate_elems(v) }) else {
@@ -409,7 +409,7 @@ pub unsafe extern "C" fn gos_rt_sort_binary_search_aggr(
     n: i64,
     tags: *const u8,
 ) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
         // which `aggregate_elems` accepts.
         let Some((base, len, stride)) = (unsafe { aggregate_elems(v) }) else {
@@ -447,7 +447,7 @@ pub unsafe extern "C" fn gos_rt_vec_binary_search_aggr(
     n: i64,
     tags: *const u8,
 ) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
         // which `aggregate_elems` accepts.
         let Some((base, len, stride)) = (unsafe { aggregate_elems(v) }) else {
@@ -478,7 +478,7 @@ pub unsafe extern "C" fn gos_rt_sort_partition_point_aggr(
     n: i64,
     tags: *const u8,
 ) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
         // which `aggregate_elems` accepts.
         let Some((base, len, stride)) = (unsafe { aggregate_elems(v) }) else {

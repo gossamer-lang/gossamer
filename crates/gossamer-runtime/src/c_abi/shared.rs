@@ -76,7 +76,7 @@ impl GosShared {
 /// Allocate a `sync::Shared` holding `value`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_shared_new(value: i64) -> *mut GosShared {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         super::rc::alloc_managed(GosShared {
             inner: parking_lot::Mutex::new(value),
             last_release_gid: AtomicI64::new(-1),
@@ -87,7 +87,7 @@ pub extern "C" fn gos_rt_shared_new(value: i64) -> *mut GosShared {
 /// `shared.get()` - the guarded value, read under the lock.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_shared_get(shared: *mut GosShared) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if shared.is_null() {
             return 0;
         }
@@ -102,7 +102,7 @@ pub unsafe extern "C" fn gos_rt_shared_get(shared: *mut GosShared) -> i64 {
 /// `shared.set(value)` - replace the guarded value under the lock.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_shared_set(shared: *mut GosShared, value: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if shared.is_null() {
             return;
         }
@@ -117,7 +117,7 @@ pub unsafe extern "C" fn gos_rt_shared_set(shared: *mut GosShared, value: i64) {
 /// result. The guarded value is unchanged.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_shared_with(shared: *mut GosShared, env: *const u8) -> i64 {
-    ffi_entry_passthrough!(0, {
+    ffi_entry_passthrough!({
         if shared.is_null() {
             return 0;
         }
@@ -151,7 +151,7 @@ pub unsafe extern "C-unwind" fn gos_rt_shared_update(
     shared: *mut GosShared,
     env: *const u8,
 ) -> i64 {
-    ffi_entry_passthrough!(0, {
+    ffi_entry_passthrough!({
         if shared.is_null() {
             return 0;
         }

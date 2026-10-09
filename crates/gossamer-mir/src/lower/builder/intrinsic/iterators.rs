@@ -1348,7 +1348,11 @@ impl<'a> Builder<'a> {
                     self.emit_assign(
                         Place::local(share),
                         Rvalue::CallIntrinsic {
-                            name: "gos_rt_rc_retain",
+                            name: if self.tcx.is_weak_ty(elem_ty) {
+                                "gos_rt_rc_weak_retain"
+                            } else {
+                                "gos_rt_rc_retain"
+                            },
                             args: vec![Operand::Copy(Place::local(value))],
                         },
                         span,

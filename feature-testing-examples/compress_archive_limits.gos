@@ -1,0 +1,110 @@
+// Decompression and archive reads can be bounded, the bounds count the bytes
+// actually produced, levels outside a codec's range are refused, gzip reads
+// every concatenated member, and extraction never writes outside its
+// directory - with the same answers and error text on every tier.
+
+use std::archive
+use std::archive::tar
+use std::archive::zip
+use std::compress
+use std::env
+use std::errors
+use std::fs
+use std::process
+
+fn show(label: String, r: Result<Vec<u8>, errors::Error>) {
+    match r {
+        Ok(bytes) => println(f"{label}: ok {bytes.len()} bytes")
+        Err(e) => println(f"{label}: err {e}")
+    }
+}
+
+fn main() {
+    let data = "abcdefghij".repeat(1000).as_bytes()
+
+    let gz = compress::gzip::encode(data, 6).unwrap()
+    show("gzip decode", compress::gzip::decode(gz))
+    show("gzip limit exact", compress::gzip::decode_limited(gz, 10000))
+    show("gzip limit one over", compress::gzip::decode_limited(gz, 9999))
+    show("gzip limit negative", compress::gzip::decode_limited(gz, -1))
+    let mut both = compress::gzip::encode("first ".as_bytes(), 6).unwrap()
+    for b in compress::gzip::encode("second".as_bytes(), 6).unwrap() {
+        both.push(b)
+    }
+    match compress::gzip::decode(both) {
+        Ok(bytes) => println(f"gzip members: {String::from_utf8(bytes).unwrap()}")
+        Err(e) => println(f"gzip members: err {e}")
+    }
+    show("gzip garbage", compress::gzip::decode(#[1u8, 2u8, 3u8]))
+    show("gzip level 10", compress::gzip::encode(data, 10))
+
+    let fl = compress::flate::compress(data, 9).unwrap()
+    show("flate limit exact", compress::flate::decompress_limited(fl, 10000))
+    show("flate limit one over", compress::flate::decompress_limited(fl, 9999))
+    show("flate level -1", compress::flate::compress(data, -1))
+
+    let zl = compress::zlib::compress(data, 0).unwrap()
+    show("zlib limit exact", compress::zlib::decompress_limited(zl, 10000))
+    show("zlib limit one over", compress::zlib::decompress_limited(zl, 9999))
+    show("zlib garbage", compress::zlib::decompress(#[1u8, 2u8, 3u8]))
+
+    let bz = compress::bzip2::compress(data, 9).unwrap()
+    show("bzip2 limit exact", compress::bzip2::decompress_limited(bz, 10000))
+    show("bzip2 limit one over", compress::bzip2::decompress_limited(bz, 9999))
+    show("bzip2 level 0", compress::bzip2::compress(data, 0))
+
+    let zs = compress::zstd::encode(data).unwrap()
+    show("zstd limit exact", compress::zstd::decode_limited(zs, 10000))
+    show("zstd limit one over", compress::zstd::decode_limited(zs, 9999))
+    show("zstd level 23", compress::zstd::encode_level(data, 23))
+
+    let files = #[("a.txt", "alpha".as_bytes()), ("dir/b.bin", "bbbbbbbbbb".as_bytes())]
+    let z = zip::write(files).unwrap()
+    let t = tar::write(files).unwrap()
+    match zip::read_limited(z, 2, 10, 15) {
+        Ok(entries) => println(f"zip limited: {entries.len()} entries")
+        Err(e) => println(f"zip limited: err {e}")
+    }
+    match zip::read_limited(z, 1, 10, 15) {
+        Ok(entries) => println(f"zip too many: {entries.len()} entries")
+        Err(e) => println(f"zip too many: err {e}")
+    }
+    match tar::read_limited(t, 2, 9, 100) {
+        Ok(entries) => println(f"tar entry over: {entries.len()} entries")
+        Err(e) => println(f"tar entry over: err {e}")
+    }
+    match tar::read_limited(t, 2, 10, 14) {
+        Ok(entries) => println(f"tar total over: {entries.len()} entries")
+        Err(e) => println(f"tar total over: err {e}")
+    }
+    match zip::read_limited(z, -1, 10, 15) {
+        Ok(entries) => println(f"zip negative: {entries.len()} entries")
+        Err(e) => println(f"zip negative: err {e}")
+    }
+
+    for name in #["a/b.txt", "./a//b/../c", "../x", "/etc/passwd", "C:\\x", "a/../../x", ""] {
+        println(f"enclosed {name:?}: {archive::enclosed_path(name):?}")
+    }
+
+    let dir = env::temp_dir() + f"/gos-archive-extract-{process::id()}"
+    let _ = fs::remove_dir_all(dir)
+    match zip::extract(z, dir) {
+        Ok(n) => println(f"zip extract: {n} entries")
+        Err(e) => println(f"zip extract: err {e}")
+    }
+    match fs::read_to_string(dir + "/dir/b.bin") {
+        Ok(text) => println(f"extracted: {text}")
+        Err(e) => println(f"extracted: err {e}")
+    }
+    let evil = zip::write(#[("ok.txt", "ok".as_bytes()), ("../escape.txt", "x".as_bytes())]).unwrap()
+    match zip::extract(evil, dir + "/evil") {
+        Ok(n) => println(f"zip escape: {n} entries")
+        Err(_) => println("zip escape: refused")
+    }
+    match tar::extract(t, dir + "/tar") {
+        Ok(n) => println(f"tar extract: {n} entries")
+        Err(e) => println(f"tar extract: err {e}")
+    }
+    println(f"nothing written: {!fs::exists(dir + "/evil/ok.txt")}")
+    let _ = fs::remove_dir_all(dir)
+}

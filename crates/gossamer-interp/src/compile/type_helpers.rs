@@ -124,26 +124,37 @@ impl<'tcx> FnBuilder<'tcx> {
         dst
     }
 
-    /// The register a function answers with, cloned when the answer is a map
-    /// read straight out of an aggregate's field.
+    /// The register a function answers with, cloned when the answer is a
+    /// table, or a value holding one, read straight out of an aggregate's
+    /// field.
     ///
     /// The caller keeps the struct the field belongs to, so the value handed
     /// back has to be one of its own - exactly what a `let` binding of the
     /// same field takes. A bare local or parameter is not one: its own copy
-    /// discipline already ran where it was bound.
+    /// discipline already ran where it was bound. A closure's capture is the
+    /// exception, since it names the enclosing binding itself.
     pub(crate) fn cloned_returned_field_container(
         &mut self,
         expr: &gossamer_hir::HirExpr,
         reg: Reg,
     ) -> Reg {
         use gossamer_hir::HirExprKind;
-        if !matches!(
-            expr.kind,
-            HirExprKind::Field { .. } | HirExprKind::TupleIndex { .. }
-        ) {
+        let place = match &expr.kind {
+            HirExprKind::Field { .. } | HirExprKind::TupleIndex { .. } => true,
+            HirExprKind::Path { segments, .. } => matches!(
+                segments.as_slice(),
+                [only] if self.closure_capture_names.contains(only.name.as_str())
+            ),
+            _ => false,
+        };
+        if !place {
             return reg;
         }
-        if !self.expr_is_map(expr) {
+        if !(self.expr_is_map(expr)
+            || self.expr_is_hashset(expr)
+            || self.expr_is_slot_container(expr)
+            || self.expr_is_aggregate_with_container(expr))
+        {
             return reg;
         }
         let dst = self.alloc_reg();
@@ -178,13 +189,20 @@ impl<'tcx> FnBuilder<'tcx> {
             {
                 true
             }
-            Some(TyKind::Adt { def, .. }) => {
-                self.tcx.struct_field_tys(*def).is_some_and(|fields| {
-                    fields
-                        .to_vec()
-                        .iter()
+            // A struct reaches its fields, an enum its variants' payloads, and
+            // a generic type (`Option<Set<_>>`, `Result<Map<..>, E>`) the
+            // values its type arguments name.
+            Some(TyKind::Adt { def, substs }) => {
+                let holds = |tys: &[gossamer_types::Ty]| {
+                    tys.iter()
                         .any(|f| self.ty_holds_shared_container(*f, depth + 1))
-                })
+                };
+                self.tcx.struct_field_tys(*def).is_some_and(holds)
+                    || self
+                        .tcx
+                        .enum_variant_tys(*def)
+                        .is_some_and(|variants| variants.iter().any(|payload| holds(payload)))
+                    || holds(&substs.types())
             }
             Some(TyKind::Tuple(elems)) => elems
                 .clone()

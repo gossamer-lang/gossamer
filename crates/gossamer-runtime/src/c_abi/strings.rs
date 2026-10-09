@@ -97,7 +97,7 @@ pub unsafe extern "C-unwind" fn gos_rt_str_splitn(
     n: i64,
     sep: *const c_char,
 ) -> *mut GosVec {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if n < 0 {
             crate::c_abi::panic::panic_text("strings::splitn: count must be non-negative");
         }
@@ -111,7 +111,7 @@ pub unsafe extern "C-unwind" fn gos_rt_str_splitn(
 /// `strings::split_whitespace(s) -> [String]`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_split_whitespace(s: *const c_char) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
         // `cstr` accepts.
         split_whitespace_vec(unsafe { cstr(s) })
@@ -122,7 +122,7 @@ pub unsafe extern "C" fn gos_rt_str_split_whitespace(s: *const c_char) -> *mut G
 /// `split_whitespace` (Go's `strings.Fields`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_fields(s: *const c_char) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
         // `cstr` accepts.
         split_whitespace_vec(unsafe { cstr(s) })
@@ -137,7 +137,7 @@ pub unsafe extern "C-unwind" fn gos_rt_str_replacen(
     to: *const c_char,
     n: i64,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if n < 0 {
             crate::c_abi::panic::panic_text("strings::replacen: count must be non-negative");
         }
@@ -153,7 +153,7 @@ pub unsafe extern "C-unwind" fn gos_rt_str_replacen(
 /// character of each whitespace-separated word.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_to_title(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
         // `cstr` accepts.
         let text = unsafe { cstr(s) };
@@ -180,7 +180,7 @@ pub unsafe extern "C" fn gos_rt_str_trim_matches(
     s: *const c_char,
     cutset: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `cutset` is this shim's `String` argument, null or live (C-ABI contract), which
         // `cstr` accepts.
         let cutset = unsafe { cstr(cutset) };
@@ -197,7 +197,7 @@ pub unsafe extern "C" fn gos_rt_str_trim_matches(
 /// argument is a String pad glyph.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_first_codepoint(s: *const c_char) -> i64 {
-    ffi_entry!(32, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
         // `cstr` accepts.
         unsafe { cstr(s) }.chars().next().map_or(32, |c| c as i64)
@@ -212,7 +212,7 @@ pub unsafe extern "C-unwind" fn gos_rt_str_pad_left(
     width: i64,
     pad_char: i64,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
         // `cstr` accepts.
         let text = unsafe { cstr(s) };
@@ -246,7 +246,7 @@ pub unsafe extern "C-unwind" fn gos_rt_str_pad_right(
     width: i64,
     pad_char: i64,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
         // `cstr` accepts.
         let text = unsafe { cstr(s) };
@@ -285,7 +285,7 @@ pub unsafe extern "C-unwind" fn gos_rt_fmt_pad(
     fill: i64,
     align: i64,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         let text = if s.is_null() {
             ""
         } else {
@@ -342,7 +342,7 @@ pub unsafe extern "C-unwind" fn gos_rt_fmt_pad_i64(
     fill: i64,
     align: i64,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if width < 0 {
             crate::c_abi::panic::panic_text("__fmt_pad: width must be non-negative");
         }
@@ -422,7 +422,7 @@ pub unsafe extern "C-unwind" fn gos_rt_concat_pad_i64(
     fill: i64,
     align: i64,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if width < 0 {
             crate::c_abi::panic::panic_text("__fmt_pad: width must be non-negative");
         }
@@ -507,7 +507,7 @@ pub unsafe extern "C-unwind" fn gos_rt_concat_pad_i64(
 /// `strings::contains_rune(s, r) -> bool`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_contains_rune(s: *const c_char, r: i64) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         let Some(rc) = u32::try_from(r).ok().and_then(char::from_u32) else {
             return 0;
         };
@@ -520,7 +520,7 @@ pub unsafe extern "C" fn gos_rt_str_contains_rune(s: *const c_char, r: i64) -> i
 /// `strings::contains_any(s, chars) -> bool`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_contains_any(s: *const c_char, chars: *const c_char) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         // SAFETY: `chars` is this shim's `String` argument, null or live (C-ABI contract), which
         // `cstr` accepts.
         let chars = unsafe { cstr(chars) };
@@ -537,7 +537,7 @@ pub unsafe extern "C" fn gos_rt_str_contains_any(s: *const c_char, chars: *const
 /// lengths coincide (e.g. KELVIN SIGN U+212A vs "kab").
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_equal_fold(a: *const c_char, b: *const c_char) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         // SAFETY: `a` is this shim's `String` argument, null or live (C-ABI contract), which
         // `cstr` accepts.
         let mut ac = unsafe { cstr(a) }.chars();
@@ -558,7 +558,7 @@ pub unsafe extern "C" fn gos_rt_str_equal_fold(a: *const c_char, b: *const c_cha
 /// a `*mut GosResult` (`disc 0 = Some(idx)`, `disc 1 = None`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_index_rune(s: *const c_char, r: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let rc = u32::try_from(r).ok().and_then(char::from_u32);
         // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
         // `cstr` accepts.
@@ -573,7 +573,7 @@ pub unsafe extern "C" fn gos_rt_str_index_rune(s: *const c_char, r: i64) -> i128
 /// first character that appears in `chars`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_index_any(s: *const c_char, chars: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `chars` is this shim's `String` argument, null or live (C-ABI contract), which
         // `cstr` accepts.
         let chars = unsafe { cstr(chars) };
@@ -594,7 +594,7 @@ pub unsafe extern "C" fn gos_rt_str_index_any(s: *const c_char, chars: *const c_
 /// the last character that appears in `chars`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_last_index_any(s: *const c_char, chars: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `chars` is this shim's `String` argument, null or live (C-ABI contract), which
         // `cstr` accepts.
         let chars = unsafe { cstr(chars) };
@@ -616,7 +616,7 @@ pub unsafe extern "C" fn gos_rt_str_last_index_any(s: *const c_char, chars: *con
 /// `*mut GosResult` (`disc 0 = Some(string-ptr)`, `disc 1 = None`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_strip_prefix(s: *const c_char, prefix: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `s` and `prefix` are this shim's string arguments, each null or live (C-ABI
         // contract), which `cstr` accepts.
         match unsafe { cstr(s) }.strip_prefix(unsafe { cstr(prefix) }) {
@@ -632,7 +632,7 @@ pub unsafe extern "C" fn gos_rt_str_strip_prefix(s: *const c_char, prefix: *cons
 /// `strings::strip_suffix(s, suffix) -> Option<String>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_strip_suffix(s: *const c_char, suffix: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `s` and `suffix` are this shim's string arguments, each null or live (C-ABI
         // contract), which `cstr` accepts.
         match unsafe { cstr(s) }.strip_suffix(unsafe { cstr(suffix) }) {

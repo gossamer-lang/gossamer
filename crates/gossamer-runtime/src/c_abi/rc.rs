@@ -512,42 +512,90 @@ unsafe fn dec_strong(h: *mut RcHeader) -> DecOutcome {
     }
 }
 
-/// Saturating weak increment. Mirrors the strong path's `STRONG_IMMORTAL`
-/// pin: once the 8-bit weak count reaches `u8::MAX` it is never bumped
-/// again, so it can never wrap to a small value and let `try_reclaim`
-/// free a block that outstanding `Weak`s still observe. A pinned block
-/// leaks rather than risk a use-after-free, the same conservative choice
-/// the strong count makes at saturation.
+/// The header byte value meaning a block's weak count lives in
+/// [`WEAK_OVERFLOW_COUNTS`] rather than in the byte.
+const WEAK_OVERFLOW: u8 = u8::MAX;
+
+/// Exact weak counts of the blocks observed by more weak references than the
+/// header byte holds, keyed by header address. A block has an entry exactly
+/// while its byte reads [`WEAK_OVERFLOW`]; both change together under this
+/// lock, so the common case never touches it.
+static WEAK_OVERFLOW_COUNTS: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<usize, u32>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+/// Adds one weak reference to the block whose header is `h`.
 #[inline]
 unsafe fn inc_weak(h: *const RcHeader) {
-    // SAFETY: `h` is the header of a live node (this `unsafe fn`'s caller).
-    let _ = unsafe {
-        (*h).weak
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |w| {
-                if w == u8::MAX { None } else { Some(w + 1) }
-            })
-    };
+    // SAFETY: `h` is the header of a live block (this `unsafe fn`'s caller).
+    let weak = unsafe { &(*h).weak };
+    loop {
+        let w = weak.load(Ordering::Relaxed);
+        if w < WEAK_OVERFLOW - 1 {
+            if weak
+                .compare_exchange_weak(w, w + 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return;
+            }
+            continue;
+        }
+        let mut counts = WEAK_OVERFLOW_COUNTS.lock();
+        match weak.load(Ordering::Relaxed) {
+            WEAK_OVERFLOW => {
+                if let Some(count) = counts.get_mut(&(h as usize)) {
+                    *count += 1;
+                    return;
+                }
+            }
+            w if w == WEAK_OVERFLOW - 1
+                && weak
+                    .compare_exchange(w, WEAK_OVERFLOW, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok() =>
+            {
+                counts.insert(h as usize, u32::from(WEAK_OVERFLOW));
+                return;
+            }
+            _ => {}
+        }
+    }
 }
 
-/// Saturating weak decrement. Returns the previous count when the count
-/// was actually decremented (so the caller can reclaim at the 1 -> 0
-/// edge), or `None` when the count is pinned at `u8::MAX`. A pinned count
-/// is never decremented: lowering it could later reach 0 while weaks that
-/// were dropped from the saturated total still observe the block, so the
-/// block stays pinned (leaked) for good.
+/// Removes one weak reference from the block whose header is `h`, answering
+/// the count before the removal, so the caller reclaims the block at the
+/// 1 -> 0 edge.
 #[inline]
-unsafe fn dec_weak(h: *const RcHeader) -> Option<u8> {
-    // SAFETY: `h` is the header of a live node (this `unsafe fn`'s caller).
-    unsafe {
-        (*h).weak
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |w| {
-                if w == u8::MAX {
-                    None
-                } else {
-                    Some(w.saturating_sub(1))
-                }
-            })
-            .ok()
+unsafe fn dec_weak(h: *const RcHeader) -> u32 {
+    // SAFETY: `h` is the header of a live block (this `unsafe fn`'s caller).
+    let weak = unsafe { &(*h).weak };
+    loop {
+        let w = weak.load(Ordering::Relaxed);
+        if w == 0 {
+            return 0;
+        }
+        if w < WEAK_OVERFLOW {
+            if weak
+                .compare_exchange_weak(w, w - 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return u32::from(w);
+            }
+            continue;
+        }
+        let mut counts = WEAK_OVERFLOW_COUNTS.lock();
+        if weak.load(Ordering::Relaxed) != WEAK_OVERFLOW {
+            continue;
+        }
+        let Some(count) = counts.get_mut(&(h as usize)) else {
+            continue;
+        };
+        let before = *count;
+        *count -= 1;
+        if *count == u32::from(WEAK_OVERFLOW - 1) {
+            counts.remove(&(h as usize));
+            weak.store(WEAK_OVERFLOW - 1, Ordering::Relaxed);
+        }
+        return before;
     }
 }
 
@@ -589,7 +637,13 @@ unsafe fn mark_shared(payload: *mut u8) {
         let h = unsafe { header_ptr(p) };
         // SAFETY: `h` is the header of the live node `p`.
         let s = unsafe { load_strong(h) };
-        if s & SHARED_BIT != 0 || s & REGION_BIT != 0 || s & STRONG_COUNT_MASK == STRONG_IMMORTAL {
+        // A node no strong reference holds - one a `Weak` keeps allocated -
+        // has already given its children back, so there is nothing to share.
+        if s & SHARED_BIT != 0
+            || s & REGION_BIT != 0
+            || s & STRONG_COUNT_MASK == STRONG_IMMORTAL
+            || s & STRONG_COUNT_MASK == 0
+        {
             continue;
         }
         // SAFETY: `h` is the header of the live node `p`, whose count is accessed atomically from
@@ -650,7 +704,36 @@ unsafe fn mark_shared_child(kind: i64, child: *mut u8) {
         gossamer_abi::rc::RC_CHILD_HEAP => unsafe {
             crate::c_abi::vec::gos_rt_vec_mark_shared(child.cast());
         },
+        // A dead target is skipped by the walk, so only a live one turns atomic.
+        // SAFETY: a child of kind `RC_CHILD_WEAK` is a block its weak share keeps allocated.
+        gossamer_abi::rc::RC_CHILD_WEAK => unsafe { mark_shared(child) },
         _ => {}
+    }
+}
+
+/// Takes a weak share of every `Weak` child `payload`'s meta names, for a
+/// copy whose words were taken from storage keeping its own.
+pub(crate) unsafe fn retain_weak_children(payload: *mut u8) {
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
+    unsafe {
+        visit_entries(payload, |kind, child| {
+            if kind == gossamer_abi::rc::RC_CHILD_WEAK {
+                gos_rt_rc_weak_retain(child);
+            }
+        });
+    }
+}
+
+/// The weak children `payload`'s meta names, for a walk that gives them back
+/// after the blocks it frees are gone.
+pub(crate) unsafe fn weak_children_of(payload: *mut u8, out: &mut Vec<*mut u8>) {
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
+    unsafe {
+        visit_entries(payload, |kind, child| {
+            if kind == gossamer_abi::rc::RC_CHILD_WEAK {
+                out.push(child);
+            }
+        });
     }
 }
 
@@ -1732,10 +1815,9 @@ pub unsafe extern "C" fn gos_rt_rc_weak_release(payload: *mut u8) {
     let h = unsafe { header_ptr(payload) };
     // `dec_weak` returns the old weak count; the new value is prev - 1. When
     // prev == 1 the count just reached 0, so the allocation can be reclaimed
-    // if nothing else pins it. A count pinned at `u8::MAX` yields `None` and
-    // is never decremented, so a saturated block is never reclaimed.
+    // if nothing else pins it.
     // SAFETY: `h` is the header of this shim's live weak referent (C-ABI contract).
-    if unsafe { dec_weak(h) } == Some(1) {
+    if unsafe { dec_weak(h) } == 1 {
         // SAFETY: `payload` is the weak referent, whose last weak share just went.
         unsafe { try_reclaim(payload) };
     }
@@ -1950,6 +2032,7 @@ unsafe fn release_rc_children(payload: *mut u8) {
             gossamer_abi::rc::RC_CHILD_HEAP => crate::c_abi::map::gos_rt_vec_free(child.cast()),
             gossamer_abi::rc::RC_CHILD_ITER => drop_iter_child(child, false),
             gossamer_abi::rc::RC_CHILD_ITER_PAIR => drop_iter_child(child, true),
+            gossamer_abi::rc::RC_CHILD_WEAK => gos_rt_rc_weak_release(child),
             gossamer_abi::rc::RC_CHILD_ERROR_FIELDS => drop(Box::from_raw(
                 child.cast::<crate::c_abi::errors::ErrorFields>(),
             )),
@@ -2390,6 +2473,11 @@ unsafe fn release_child_of_kind(kind: i64, child: *mut u8, worklist: &mut Vec<*m
         gossamer_abi::rc::RC_CHILD_HEAP => queue_vec_child(child),
         gossamer_abi::rc::RC_CHILD_ITER => queue_iter_child(child, false),
         gossamer_abi::rc::RC_CHILD_ITER_PAIR => queue_iter_child(child, true),
+        // A weak share frees nothing but the target's block, once its strong
+        // count is gone too, so it is given back on the spot.
+        // SAFETY: an `RC_CHILD_WEAK` child is a block the dead parent's weak share kept
+        // allocated.
+        gossamer_abi::rc::RC_CHILD_WEAK => unsafe { gos_rt_rc_weak_release(child) },
         gossamer_abi::rc::RC_CHILD_ERROR_FIELDS => {
             // SAFETY: an `RC_CHILD_ERROR_FIELDS` child is the boxed field list its error owns
             // alone.
@@ -2689,6 +2777,7 @@ unsafe fn visit_slot_children_meta(
             Ok(vec_elem_kind::HEAP) => gossamer_abi::rc::RC_CHILD_HEAP,
             Ok(vec_elem_kind::ITER) => gossamer_abi::rc::RC_CHILD_ITER,
             Ok(vec_elem_kind::ITER_PAIR) => gossamer_abi::rc::RC_CHILD_ITER_PAIR,
+            Ok(vec_elem_kind::WEAK) => gossamer_abi::rc::RC_CHILD_WEAK,
             _ => continue,
         };
         // SAFETY: each entry names a word inside the payload.
@@ -3754,54 +3843,89 @@ mod tests {
         assert_eq!(rc_live_count(), base);
     }
 
+    /// The exact weak count of `payload`, wherever it lives.
+    unsafe fn weak_count(payload: *mut u8) -> usize {
+        // SAFETY: the caller passes a block its weak or strong share keeps allocated.
+        let h = unsafe { header_ptr(payload) };
+        // SAFETY: as above.
+        let byte = unsafe { weak_of(payload) };
+        if byte == usize::from(WEAK_OVERFLOW) {
+            WEAK_OVERFLOW_COUNTS
+                .lock()
+                .get(&(h as usize))
+                .map_or(byte, |c| *c as usize)
+        } else {
+            byte
+        }
+    }
+
     #[test]
-    fn weak_count_saturates_instead_of_wrapping() {
-        // The weak count is an 8-bit field. More than 255 live `Weak`s drive
-        // it past `u8::MAX`; a bare wrapping `fetch_add` would roll the count
-        // back to a small value (300 increments -> 44, or exactly 256 -> 0),
-        // and a wrap to 0 would let `try_reclaim` free a block that 256
-        // outstanding weaks still observe (use-after-free). Saturating the
-        // count pins it at `u8::MAX` and leaks the block instead.
+    fn weak_counts_past_the_header_byte_stay_exact_and_reclaim() {
         let _g = count_guard();
         let base = rc_live_count();
-        const WEAKS: usize = 300;
-        // SAFETY: every pointer argument is a value this test built above and still holds live; a
-        // null one is accepted by the callee.
+        for weaks in [253usize, 254, 255, 256, 300, 10_000] {
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
+            unsafe {
+                let p = gos_rt_rc_alloc(8, std::ptr::null());
+                for _ in 0..weaks {
+                    gos_rt_rc_weak_retain(p);
+                }
+                assert_eq!(weak_count(p), weaks, "{weaks} weaks counted exactly");
+                gos_rt_rc_release(p);
+                assert_eq!(rc_live_count(), base + 1, "weaks keep the dead block");
+                for left in (1..weaks).rev() {
+                    gos_rt_rc_weak_release(p);
+                    if left == 300 || left == 255 || left == 254 || left == 1 {
+                        assert_eq!(weak_count(p), left, "{weaks} weaks, {left} left");
+                    }
+                }
+                gos_rt_rc_weak_release(p);
+                assert_eq!(
+                    rc_live_count(),
+                    base,
+                    "{weaks} weaks: last release reclaims"
+                );
+            }
+        }
+        assert!(
+            WEAK_OVERFLOW_COUNTS.lock().is_empty(),
+            "no overflow entry outlives its block"
+        );
+    }
+
+    #[test]
+    fn weak_overflow_survives_concurrent_retains_and_releases() {
+        let _g = count_guard();
+        let base = rc_live_count();
+        // SAFETY: the block is marked shared before other threads touch it, and every thread
+        // gives back exactly the weak shares it took.
         unsafe {
             let p = gos_rt_rc_alloc(8, std::ptr::null());
-            for _ in 0..WEAKS {
+            gos_rt_rc_mark_shared(p);
+            for _ in 0..250 {
                 gos_rt_rc_weak_retain(p);
             }
-            // Pinned at the maximum, not wrapped to `WEAKS % 256` (= 44).
-            assert_eq!(weak_of(p), u8::MAX as usize, "weak count pins at u8::MAX");
-
-            // The referent dies, but the block must survive: every one of the
-            // 300 weaks still observes it.
+            let addr = p as usize;
+            std::thread::scope(|scope| {
+                for _ in 0..4 {
+                    scope.spawn(move || {
+                        let p = addr as *mut u8;
+                        for _ in 0..2_000 {
+                            gos_rt_rc_weak_retain(p);
+                            gos_rt_rc_weak_retain(p);
+                            gos_rt_rc_weak_release(p);
+                            gos_rt_rc_weak_release(p);
+                        }
+                    });
+                }
+            });
+            assert_eq!(weak_count(p), 250);
             gos_rt_rc_release(p);
-            assert_eq!(strong_of(p), 0, "strong release destroyed the payload");
-            assert_eq!(
-                rc_live_count(),
-                base + 1,
-                "saturated weak count pins the block; it is never reclaimed \
-                 while weaks may still observe it"
-            );
-
-            // A pinned count is immortal: releasing weaks never decrements it,
-            // so `try_reclaim` can never be re-enabled and free the block out
-            // from under the remaining (uncounted) weaks.
-            for _ in 0..WEAKS {
+            for _ in 0..250 {
                 gos_rt_rc_weak_release(p);
             }
-            assert_eq!(
-                weak_of(p),
-                u8::MAX as usize,
-                "pinned weak count is never decremented"
-            );
-            assert_eq!(
-                rc_live_count(),
-                base + 1,
-                "the block stays pinned (leaked) rather than risk a use-after-free"
-            );
+            assert_eq!(rc_live_count(), base);
         }
     }
 

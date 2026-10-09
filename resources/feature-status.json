@@ -43,6 +43,7 @@
   {"name":"lang::weak_references","tiers":{"vm":"pass","cranelift":"pass","llvm":"pass"}},
   {"name":"lang::while_let","tiers":{"vm":"pass","cranelift":"pass","llvm":"pass"}},
   {"name":"lang::wrapping_arithmetic","tiers":{"vm":"pass","cranelift":"pass","llvm":"pass"}},
+  {"name":"std::archive","tiers":{"vm":"pass","cranelift":"pass","llvm":"pass"}},
   {"name":"std::archive::tar","tiers":{"vm":"pass","cranelift":"pass","llvm":"pass"}},
   {"name":"std::archive::zip","tiers":{"vm":"pass","cranelift":"pass","llvm":"pass"}},
   {"name":"std::bufio","tiers":{"vm":"pass","cranelift":"pass","llvm":"pass"}},

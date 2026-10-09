@@ -459,6 +459,10 @@ impl<'a> Builder<'a> {
                 // reaches those fields through it.
                 value_local = self.box_aggregate_payload(value_local, value_ty, span);
                 child_entries.push(word);
+            } else if self.tcx.is_weak_ty(value_ty) {
+                // The store takes a weak share, which the environment gives
+                // back at its death; it never owns the target.
+                child_entries.push(word | (gossamer_abi::rc::RC_CHILD_WEAK << RC_CHILD_KIND_SHIFT));
             } else if self.tcx.is_rc_managed(value_ty) {
                 child_entries.push(word);
             } else if matches!(

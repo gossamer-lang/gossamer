@@ -198,7 +198,7 @@ unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
 /// given raw signal number and returns an opaque handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_signal_on(sig_raw: i32) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let waiter = std::sync::Arc::new(SignalWaiter::default());
         #[cfg(unix)]
@@ -297,7 +297,7 @@ fn park_until_signal(handle: i64) -> bool {
 /// (`true`) or the caller's cohort is cancelled (`false`).
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_signal_wait(handle: i64) -> i32 {
-    ffi_entry!(0, {
+    ffi_entry!({
         let fired = if gossamer_coro::in_goroutine() {
             park_until_signal(handle)
         } else {
@@ -312,7 +312,7 @@ pub extern "C" fn gos_rt_signal_wait(handle: i64) -> i32 {
 /// its default disposition again.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_signal_stop(handle: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         let Some(notifier) = usize::try_from(handle)
             .ok()
             .and_then(|index| signal_registry().notifiers.lock().get_mut(index)?.take())
@@ -335,7 +335,7 @@ pub extern "C" fn gos_rt_signal_stop(handle: i64) {
 /// fired since the last check, 0 otherwise. Non-blocking.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_signal_try_wait(handle: i64) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         let notifiers = signal_registry().notifiers.lock();
         let Some(Some(n)) = notifiers.get(handle as usize) else {
             return 0;
@@ -360,7 +360,7 @@ pub extern "C" fn gos_rt_signal_try_wait(handle: i64) -> i32 {
 /// closure body reads them as direct register values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_arr_sort_by_i64(p: *mut i64, len: i64, env: *const u8) {
-    ffi_entry_passthrough!((), {
+    ffi_entry_passthrough!({
         if p.is_null() || len <= 0 || env.is_null() {
             return;
         }
@@ -392,7 +392,7 @@ pub unsafe extern "C-unwind" fn gos_rt_arr_sort_by_i64(p: *mut i64, len: i64, en
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_arr_sort_i64(p: *mut i64, len: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if p.is_null() || len <= 1 {
             return;
         }
@@ -405,7 +405,7 @@ pub unsafe extern "C" fn gos_rt_arr_sort_i64(p: *mut i64, len: i64) {
 /// `f64::total_cmp` defines, which is how every tier orders floats.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_arr_sort_f64(p: *mut i64, len: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if p.is_null() || len <= 1 {
             return;
         }
@@ -424,7 +424,7 @@ fn sort_float_words(words: &mut [i64]) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_arr_sort_str(p: *mut usize, len: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if p.is_null() || len <= 1 {
             return;
         }
@@ -442,7 +442,7 @@ pub unsafe extern "C" fn gos_rt_arr_sort_str(p: *mut usize, len: i64) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_arr_reverse(p: *mut u8, len: i64, elem_bytes: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if p.is_null() || len <= 1 || elem_bytes <= 0 {
             return;
         }
@@ -468,7 +468,7 @@ pub unsafe extern "C" fn gos_rt_arr_reverse(p: *mut u8, len: i64, elem_bytes: i6
 /// own storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_sort_by_i64(v: *mut GosVec, env: *const u8) {
-    ffi_entry_passthrough!((), {
+    ffi_entry_passthrough!({
         // SAFETY: `v`, `env` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `sortable_elems` accepts.
         let Some(mut elems) = (unsafe { sortable_elems(v, env) }) else {
@@ -495,7 +495,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_sort_by_i64(v: *mut GosVec, env: *con
 /// elements in SSE registers, which an integer-shaped signature never fills.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_sort_by_f64(v: *mut GosVec, env: *const u8) {
-    ffi_entry_passthrough!((), {
+    ffi_entry_passthrough!({
         // SAFETY: `v`, `env` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `sortable_elems` accepts.
         let Some(mut elems) = (unsafe { sortable_elems(v, env) }) else {
@@ -524,7 +524,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_sort_by_f64(v: *mut GosVec, env: *con
 /// [`gos_rt_vec_sort_by_f64`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_arr_sort_by_f64(p: *mut f64, len: i64, env: *const u8) {
-    ffi_entry_passthrough!((), {
+    ffi_entry_passthrough!({
         if p.is_null() || len <= 0 {
             return;
         }
@@ -587,7 +587,7 @@ unsafe fn store_elems(v: *mut GosVec, elems: &[i64]) {
 /// `f64::total_cmp` defines.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_sort_f64(v: *mut GosVec) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -607,7 +607,7 @@ pub unsafe extern "C" fn gos_rt_vec_sort_f64(v: *mut GosVec) {
 /// Used by `xs.sort()` on integer vecs.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_sort_i64(v: *mut GosVec) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -641,7 +641,7 @@ pub unsafe extern "C" fn gos_rt_vec_sort_i64(v: *mut GosVec) {
 /// the elements by pointer address rather than by value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_sort_str(v: *mut GosVec) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -666,7 +666,7 @@ pub unsafe extern "C" fn gos_rt_vec_sort_str(v: *mut GosVec) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_reverse(v: *mut GosVec) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -697,7 +697,7 @@ pub unsafe extern "C-unwind" fn gos_rt_arr_sort_by_aggr(
     elem_bytes: i64,
     env: *const u8,
 ) {
-    ffi_entry_passthrough!((), {
+    ffi_entry_passthrough!({
         if p.is_null() || len <= 0 || elem_bytes <= 0 || env.is_null() {
             return;
         }
@@ -760,7 +760,7 @@ pub unsafe extern "C-unwind" fn gos_rt_arr_sort_by_aggr(
 /// MIR side doesn't have to thread it through separately.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_sort_by_aggr(v: *mut GosVec, env: *const u8) {
-    ffi_entry_passthrough!((), {
+    ffi_entry_passthrough!({
         if v.is_null() || env.is_null() {
             return;
         }
@@ -834,7 +834,7 @@ pub extern "C" fn gos_rt_callback_register(
     ctx: *const u8,
     invoke: unsafe extern "C" fn(*const u8, *const u8, u32, *mut u8) -> i32,
 ) -> u64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         let handle = NEXT_CALLBACK_HANDLE.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         callback_table().lock().insert(
             handle,
@@ -856,7 +856,7 @@ pub extern "C" fn gos_rt_callback_register(
 /// freeing its own context until the invocation returns.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_callback_unregister(handle: u64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if handle == 0 {
             return;
         }
@@ -892,7 +892,7 @@ pub unsafe extern "C" fn gos_rt_callback_invoke(
     args_len: u32,
     result_out: *mut u8,
 ) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if handle == 0 {
             return -1;
         }
@@ -952,7 +952,7 @@ pub struct GosArrIter {
 /// Creates an iterator over `vec`, starting at index 0.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_arr_iter(vec: *mut GosVec) -> *mut GosArrIter {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         Box::into_raw(Box::new(GosArrIter {
             vec: SyncRawPtr::new(vec),
             idx: 0,
@@ -966,7 +966,7 @@ pub unsafe extern "C" fn gos_rt_arr_iter(vec: *mut GosVec) -> *mut GosArrIter {
 /// callers with other element widths must use a lower-level helper.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_arr_iter_next(iter: *mut GosArrIter) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if iter.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -992,7 +992,7 @@ pub unsafe extern "C" fn gos_rt_arr_iter_next(iter: *mut GosArrIter) -> i128 {
 /// free the underlying vec - the vec is owned by the original local.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_arr_iter_free(iter: *mut GosArrIter) {
-    ffi_entry!((), {
+    ffi_entry!({
         if iter.is_null() {
             return;
         }
@@ -1009,7 +1009,7 @@ pub unsafe extern "C" fn gos_rt_arr_iter_free(iter: *mut GosArrIter) {
 /// non-panicking probe is intended.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_get_i64(v: *const GosVec, idx: i64) -> i64 {
-    ffi_entry_passthrough!(-1, {
+    ffi_entry_passthrough!({
         if v.is_null() {
             crate::c_abi::panic::panic_oob_text("vec index", idx, 0);
         }
@@ -1034,7 +1034,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_get_i64(v: *const GosVec, idx: i64) -
 /// `v` must be a non-null `GosVec` and `idx` in `[0, v.len)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_get_i64_unchecked(v: *const GosVec, idx: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         // SAFETY: this `unsafe fn`'s contract makes `v` a non-null `GosVec`.
         let vec = unsafe { &*v };
         // SAFETY: this `unsafe fn`'s contract puts `idx` in `[0, v.len)`.
@@ -1050,7 +1050,7 @@ pub unsafe extern "C" fn gos_rt_vec_get_i64_unchecked(v: *const GosVec, idx: i64
 /// `v` must be a non-null `GosVec` and `idx` in `[0, v.len)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_get_ptr_unchecked(v: *const GosVec, idx: i64) -> *mut u8 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: this `unsafe fn`'s contract makes `v` a non-null `GosVec`.
         let vec = unsafe { &*v };
         // SAFETY: this `unsafe fn`'s contract puts `idx` in `[0, v.len)`, so the offset stays
@@ -1063,7 +1063,7 @@ pub unsafe extern "C" fn gos_rt_vec_get_ptr_unchecked(v: *const GosVec, idx: i64
 /// indexing is a bounds panic; it is never silently ignored.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_set_i64(v: *mut GosVec, idx: i64, value: i64) {
-    ffi_entry_passthrough!((), {
+    ffi_entry_passthrough!({
         if v.is_null() {
             crate::c_abi::panic::panic_oob_text("vec index", idx, 0);
         }
@@ -1091,7 +1091,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_set_i64(v: *mut GosVec, idx: i64, val
 /// `v` must be a non-null `GosVec` and `idx` in `[0, v.len)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_set_i64_unchecked(v: *mut GosVec, idx: i64, value: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: this `unsafe fn`'s contract makes `v` a non-null `GosVec`.
         let vec = unsafe { &mut *v };
         // SAFETY: this `unsafe fn`'s contract puts `idx` in `[0, v.len)`.
@@ -1105,7 +1105,7 @@ pub unsafe extern "C" fn gos_rt_vec_set_i64_unchecked(v: *mut GosVec, idx: i64, 
 /// indices, matching the old MIR expansion through get plus set calls.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_swap_i64(v: *mut GosVec, i: i64, j: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -1138,7 +1138,7 @@ pub unsafe extern "C" fn gos_rt_vec_swap_i64(v: *mut GosVec, i: i64, j: i64) {
 /// outside `[0, len)` is a bounds panic on every tier, matching `xs[i] = v`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_swap_safe(v: *mut GosVec, i: i64, j: i64) {
-    ffi_entry_passthrough!((), {
+    ffi_entry_passthrough!({
         if v.is_null() {
             crate::c_abi::panic::panic_oob_text("vec swap index", i, 0);
         }
@@ -1165,7 +1165,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_swap_safe(v: *mut GosVec, i: i64, j: 
 /// `v` is a non-null `GosVec` and `i`, `j` lie in `[0, v.len)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_swap_unchecked(v: *mut GosVec, i: i64, j: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: this `unsafe fn`'s contract makes `v` a non-null `GosVec` with `i` and `j` in
         // bounds.
         unsafe { gos_rt_vec_swap_i64(v, i, j) };
@@ -1174,7 +1174,7 @@ pub unsafe extern "C" fn gos_rt_vec_swap_unchecked(v: *mut GosVec, i: i64, j: i6
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_get_ptr(v: *const GosVec, idx: i64) -> *mut u8 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if v.is_null() {
             return std::ptr::null_mut();
         }
@@ -1199,7 +1199,7 @@ pub unsafe extern "C" fn gos_rt_vec_get_ptr(v: *const GosVec, idx: i64) -> *mut 
 /// surface).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_slice(v: *const GosVec, lo: i64, hi: i64) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if v.is_null() {
             return gos_rt_vec_new(8);
         }
@@ -1249,7 +1249,7 @@ pub unsafe extern "C" fn gos_rt_vec_slice(v: *const GosVec, lo: i64, hi: i64) ->
 /// the payload is the raw 8 bytes of element 0 cast to i64.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_first(v: *const GosVec) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if v.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -1268,7 +1268,7 @@ pub unsafe extern "C" fn gos_rt_vec_first(v: *const GosVec) -> i128 {
 /// an empty Vec returns None.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_last(v: *const GosVec) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if v.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -1286,7 +1286,7 @@ pub unsafe extern "C" fn gos_rt_vec_last(v: *const GosVec) -> i128 {
 /// `xs.get(i) -> Option<T>`. Out-of-range and negative indices return None.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_get_opt(v: *const GosVec, idx: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if v.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -1306,7 +1306,7 @@ pub unsafe extern "C" fn gos_rt_vec_get_opt(v: *const GosVec, idx: i64) -> i128 
 /// ABI matching the rest of the Vec surface.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_reversed(v: *const GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if v.is_null() {
             return gos_rt_vec_new(8);
         }
@@ -1335,7 +1335,7 @@ pub unsafe extern "C" fn gos_rt_vec_reversed(v: *const GosVec) -> *mut GosVec {
 /// index 0, as a fresh Vec.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_step_by(v: *const GosVec, step: i64) -> *mut GosVec {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if step <= 0 {
             crate::c_abi::panic::panic_text("Vec::step_by: count must be positive");
         }
@@ -1364,7 +1364,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_step_by(v: *const GosVec, step: i64) 
 /// length) as a fresh Vec.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_take(v: *const GosVec, n: i64) -> *mut GosVec {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if n < 0 {
             crate::c_abi::panic::panic_text("Vec::take: count must be non-negative");
         }
@@ -1395,7 +1395,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_take(v: *const GosVec, n: i64) -> *mu
 /// share of every element's heap children, exactly as `take` does.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_skip(v: *const GosVec, n: i64) -> *mut GosVec {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if n < 0 {
             crate::c_abi::panic::panic_text("Vec::skip: count must be non-negative");
         }
@@ -1423,7 +1423,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_skip(v: *const GosVec, n: i64) -> *mu
 /// `xs.index_of(&needle) -> Option<i64>` for an i64-shaped Vec.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_index_of_i64(v: *const GosVec, needle: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `v` is this shim's argument, null or a live `Vec` for the call (C-ABI contract).
         let Some(vec) = (unsafe { crate::c_abi::vec::VecView::of(v) }) else {
             return gos_rt_result_new(1, 0);
@@ -1438,7 +1438,7 @@ pub unsafe extern "C" fn gos_rt_vec_index_of_i64(v: *const GosVec, needle: i64) 
 /// `xs.index_of(&needle) -> Option<i64>` for a Vec of c-string pointers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_index_of_str(v: *const GosVec, needle: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if needle.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -1461,7 +1461,7 @@ pub unsafe extern "C" fn gos_rt_vec_index_of_str(v: *const GosVec, needle: *cons
 /// `xs.count_of(&needle) -> i64` for an i64-shaped Vec.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_count_of_i64(v: *const GosVec, needle: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         // SAFETY: `v` is this shim's argument, null or a live `Vec` for the call (C-ABI contract).
         let Some(vec) = (unsafe { crate::c_abi::vec::VecView::of(v) }) else {
             return 0;
@@ -1472,7 +1472,7 @@ pub unsafe extern "C" fn gos_rt_vec_count_of_i64(v: *const GosVec, needle: i64) 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_count_of_str(v: *const GosVec, needle: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if needle.is_null() {
             return 0;
         }
@@ -1493,7 +1493,7 @@ pub unsafe extern "C" fn gos_rt_vec_count_of_str(v: *const GosVec, needle: *cons
 /// `xs.contains(&needle) -> bool` for an i64-shaped Vec.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_contains_i64(v: *const GosVec, needle: i64) -> i8 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `v` is this shim's argument, null or a live `Vec` for the call (C-ABI contract).
         let Some(vec) = (unsafe { crate::c_abi::vec::VecView::of(v) }) else {
             return 0;
@@ -1504,7 +1504,7 @@ pub unsafe extern "C" fn gos_rt_vec_contains_i64(v: *const GosVec, needle: i64) 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_contains_str(v: *const GosVec, needle: *const c_char) -> i8 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if needle.is_null() {
             return 0;
         }
@@ -1526,7 +1526,7 @@ pub unsafe extern "C" fn gos_rt_vec_contains_str(v: *const GosVec, needle: *cons
 /// elements byte-copied into a fresh Vec.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_slice_result(v: *const GosVec, start: i64, end: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `v` is null or live for the call (C-ABI contract).
         let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
         if start < 0 || end < 0 || start > end || end > len {
@@ -1557,7 +1557,7 @@ pub unsafe extern "C" fn gos_rt_intarr_slice_result(
     start: i64,
     end: i64,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if p.is_null() || start < 0 || end < 0 || start > end || end > len {
             let msg = format!("slice: range [{start}, {end}) out of bounds for length {len}");
             let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
@@ -1596,7 +1596,7 @@ pub unsafe extern "C" fn gos_rt_bytearr_slice_result(
     start: i64,
     end: i64,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if p.is_null() || start < 0 || end < 0 || start > end || end > len {
             let msg = format!("slice: range [{start}, {end}) out of bounds for length {len}");
             let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
@@ -1630,7 +1630,7 @@ pub unsafe extern "C" fn gos_rt_packed_bytearr_slice_result(
     start: i64,
     end: i64,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if p.is_null() || start < 0 || end < 0 || start > end || end > len {
             let msg = format!("slice: range [{start}, {end}) out of bounds for length {len}");
             let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
@@ -1664,7 +1664,7 @@ pub unsafe extern "C" fn gos_rt_floatarr_slice_result(
     start: i64,
     end: i64,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if p.is_null() || start < 0 || end < 0 || start > end || end > len {
             let msg = format!("slice: range [{start}, {end}) out of bounds for length {len}");
             let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
@@ -1690,7 +1690,7 @@ pub unsafe extern "C" fn gos_rt_floatarr_slice_result(
 /// Bounds-checked in-place insert returning `Result<(), errors::Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_insert_safe(v: *mut GosVec, idx: i64, value: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `v` is null or live for the call (C-ABI contract).
         let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
         if idx < 0 || idx > len {
@@ -1709,7 +1709,7 @@ pub unsafe extern "C" fn gos_rt_vec_insert_safe(v: *mut GosVec, idx: i64, value:
 /// invalid index. `value` is the raw 8-byte payload used by the erased Vec ABI.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_insert_at(v: *mut GosVec, idx: i64, value: i64) {
-    ffi_entry_passthrough!((), {
+    ffi_entry_passthrough!({
         // SAFETY: `v` is null or live for the call (C-ABI contract).
         let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
         if v.is_null() || idx < 0 || idx > len {
@@ -1753,7 +1753,7 @@ pub unsafe extern "C" fn gos_rt_vec_insert_slots_safe(
     idx: i64,
     slots: *const u8,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `v` is null or live for the call (C-ABI contract).
         let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
         if idx < 0 || idx > len {
@@ -1806,7 +1806,7 @@ unsafe fn removed_elem_payload(vec: &GosVec, idx: i64) -> i64 {
 /// Bounds-checked in-place removal returning `Result<T, errors::Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_remove_safe(v: *mut GosVec, idx: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `v` is null or live for the call (C-ABI contract).
         let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
         if v.is_null() || idx < 0 || idx >= len {
@@ -1844,7 +1844,7 @@ pub unsafe extern "C" fn gos_rt_vec_remove_safe(v: *mut GosVec, idx: i64) -> i12
 /// element. Invalid indices are invariant violations and panic.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_remove_at(v: *mut GosVec, idx: i64) -> i64 {
-    ffi_entry_passthrough!(0, {
+    ffi_entry_passthrough!({
         // SAFETY: `v` is null or live for the call (C-ABI contract).
         let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
         if v.is_null() || idx < 0 || idx >= len {
@@ -1881,7 +1881,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_remove_at(v: *mut GosVec, idx: i64) -
 /// the header's `elem_bytes` for the payload read.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_pop_opt(v: *mut GosVec) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if v.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -1905,7 +1905,7 @@ pub unsafe extern "C" fn gos_rt_vec_pop_opt(v: *mut GosVec) -> i128 {
 /// bytes, so no share is taken and nothing is left behind to release.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_pop_into(v: *mut GosVec, out: *mut u8) -> i64 {
-    ffi_entry!(1, {
+    ffi_entry!({
         if v.is_null() || out.is_null() {
             return 1;
         }
@@ -1928,7 +1928,7 @@ pub unsafe extern "C" fn gos_rt_vec_pop_into(v: *mut GosVec, out: *mut u8) -> i6
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_pop(v: *mut GosVec, out: *mut u8) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if v.is_null() || out.is_null() {
             return 0;
         }

@@ -19,143 +19,143 @@
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_sqrt(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.sqrt() })
+    ffi_entry!({ x.sqrt() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_pow(x: f64, y: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.powf(y) })
+    ffi_entry!({ x.powf(y) })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_sin(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.sin() })
+    ffi_entry!({ x.sin() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_cos(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.cos() })
+    ffi_entry!({ x.cos() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_log(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.ln() })
+    ffi_entry!({ x.ln() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_exp(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.exp() })
+    ffi_entry!({ x.exp() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_abs(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.abs() })
+    ffi_entry!({ x.abs() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_floor(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.floor() })
+    ffi_entry!({ x.floor() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_ceil(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.ceil() })
+    ffi_entry!({ x.ceil() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_tan(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.tan() })
+    ffi_entry!({ x.tan() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_asin(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.asin() })
+    ffi_entry!({ x.asin() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_acos(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.acos() })
+    ffi_entry!({ x.acos() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_atan(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.atan() })
+    ffi_entry!({ x.atan() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_atan2(y: f64, x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { y.atan2(x) })
+    ffi_entry!({ y.atan2(x) })
 }
 
 /// `math::log(x, base)`: the logarithm of `x` in `base`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_log_base(x: f64, base: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.ln() / base.ln() })
+    ffi_entry!({ x.ln() / base.ln() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_sinh(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.sinh() })
+    ffi_entry!({ x.sinh() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_cosh(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.cosh() })
+    ffi_entry!({ x.cosh() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_tanh(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.tanh() })
+    ffi_entry!({ x.tanh() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_log2(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.log2() })
+    ffi_entry!({ x.log2() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_log10(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.log10() })
+    ffi_entry!({ x.log10() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_cbrt(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.cbrt() })
+    ffi_entry!({ x.cbrt() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_round(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.round() })
+    ffi_entry!({ x.round() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_exp2(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.exp2() })
+    ffi_entry!({ x.exp2() })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_fmod(x: f64, y: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x % y })
+    ffi_entry!({ x % y })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_hypot(x: f64, y: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.hypot(y) })
+    ffi_entry!({ x.hypot(y) })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_copysign(x: f64, y: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.copysign(y) })
+    ffi_entry!({ x.copysign(y) })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_dim(x: f64, y: f64) -> f64 {
-    ffi_entry!(f64::NAN, { (x - y).max(0.0) })
+    ffi_entry!({ (x - y).max(0.0) })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_trunc(x: f64) -> f64 {
-    ffi_entry!(f64::NAN, { x.trunc() })
+    ffi_entry!({ x.trunc() })
 }
 
 /// Integer path for `math::abs(x)`, saturating at `i64::MAX`
@@ -228,7 +228,7 @@ pub extern "C" fn gos_rt_math_inf(sign: i64) -> f64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_time_now_ms() -> i64 {
-    ffi_entry!(-1, { crate::clock::wall_ms() })
+    ffi_entry!({ crate::clock::wall_ms() })
 }
 
 /// `time::freeze(ms)` - pin the wall clock at `ms` since the epoch.
@@ -240,7 +240,7 @@ pub extern "C" fn gos_rt_time_now_ms() -> i64 {
 /// takes.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_time_freeze(ms: i64) {
-    ffi_entry!((), { crate::clock::freeze(ms) });
+    ffi_entry!({ crate::clock::freeze(ms) });
 }
 
 /// `time::advance(ms)` - move a frozen clock forward. Freezes it at the
@@ -248,19 +248,19 @@ pub extern "C" fn gos_rt_time_freeze(ms: i64) {
 /// name a starting instant it does not care about.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_time_advance(ms: i64) -> i64 {
-    ffi_entry!(-1, { crate::clock::advance(ms) })
+    ffi_entry!({ crate::clock::advance(ms) })
 }
 
 /// `time::unfreeze()` - return to the real wall clock.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_time_unfreeze() {
-    ffi_entry!((), { crate::clock::unfreeze() });
+    ffi_entry!({ crate::clock::unfreeze() });
 }
 
 /// `time::is_frozen() -> bool`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_time_is_frozen() -> i64 {
-    ffi_entry!(0, { i64::from(crate::clock::is_frozen()) })
+    ffi_entry!({ i64::from(crate::clock::is_frozen()) })
 }
 
 // ---------------------------------------------------------------

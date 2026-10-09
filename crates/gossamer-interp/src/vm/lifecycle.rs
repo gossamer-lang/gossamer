@@ -2969,6 +2969,7 @@ fn build_native_enum_shapes(
                     index: idx_of[&c.def_local],
                     tagged,
                     variants,
+                    rc_meta: std::sync::OnceLock::new(),
                 })
             })
             .collect();

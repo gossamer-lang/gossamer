@@ -41,7 +41,7 @@ pub use lift::{
     LIFTED_CLOSURE_PREFIX, collect_free_vars, collect_pattern_names, is_capture_env_load,
     lift_closures, shadowed_global_names,
 };
-pub use lower::lower_source_file;
+pub use lower::{is_map_literal_block, lower_source_file};
 pub use par::PAR_RUN;
 pub use tree::FnOrigin;
 pub use tree::{

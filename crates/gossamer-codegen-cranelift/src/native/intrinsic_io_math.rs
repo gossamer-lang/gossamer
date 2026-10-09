@@ -1236,6 +1236,7 @@ pub(super) fn lower_intrinsic_call_io_math(
         | "gos_rt_map_set_set_values"
         | "gos_rt_map_set_deque_values"
         | "gos_rt_map_set_heap_values"
+        | "gos_rt_map_set_weak_values"
         | "gos_rt_map_set_float_keys" => {
             let m = match args.first() {
                 Some(a) => lower_operand(
@@ -1257,6 +1258,7 @@ pub(super) fn lower_intrinsic_call_io_math(
                 "gos_rt_map_set_set_values" => "gos_rt_map_set_set_values",
                 "gos_rt_map_set_deque_values" => "gos_rt_map_set_deque_values",
                 "gos_rt_map_set_heap_values" => "gos_rt_map_set_heap_values",
+                "gos_rt_map_set_weak_values" => "gos_rt_map_set_weak_values",
                 _ => "gos_rt_map_set_vec_values",
             };
             let f = intrinsics.extern_fn(module, sym, &[ptr_ty], &[])?;

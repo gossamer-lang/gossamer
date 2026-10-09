@@ -81,7 +81,12 @@ pub const COMPRESS_GZIP: StdModule = StdModule {
         StdItem {
             name: "decode",
             kind: StdItemKind::Function,
-            doc: "Decompresses a gzip-formatted payload.",
+            doc: "Decompresses a gzip payload; concatenated members decode as one stream. Output is unbounded - use `decode_limited` for untrusted input.",
+        },
+        StdItem {
+            name: "decode_limited",
+            kind: StdItemKind::Function,
+            doc: "`decode(data)`, refusing output past `max_bytes`: an archive bomb answers `Err` instead of exhausting memory.",
         },
     ],
 };
@@ -93,12 +98,17 @@ pub const COMPRESS_FLATE: StdModule = StdModule {
         StdItem {
             name: "compress",
             kind: StdItemKind::Function,
-            doc: "One-shot DEFLATE compress.",
+            doc: "One-shot DEFLATE compress at `level`, `0` (store only) to `9` (best).",
         },
         StdItem {
             name: "decompress",
             kind: StdItemKind::Function,
             doc: "One-shot DEFLATE decompress.",
+        },
+        StdItem {
+            name: "decompress_limited",
+            kind: StdItemKind::Function,
+            doc: "`decompress(data)`, refusing output past `max_bytes`.",
         },
     ],
 };
@@ -110,12 +120,17 @@ pub const COMPRESS_ZLIB: StdModule = StdModule {
         StdItem {
             name: "compress",
             kind: StdItemKind::Function,
-            doc: "One-shot zlib compress.",
+            doc: "One-shot zlib compress at `level`, `0` (store only) to `9` (best).",
         },
         StdItem {
             name: "decompress",
             kind: StdItemKind::Function,
             doc: "One-shot zlib decompress.",
+        },
+        StdItem {
+            name: "decompress_limited",
+            kind: StdItemKind::Function,
+            doc: "`decompress(data)`, refusing output past `max_bytes`.",
         },
     ],
 };
@@ -127,12 +142,17 @@ pub const COMPRESS_BZIP2: StdModule = StdModule {
         StdItem {
             name: "compress",
             kind: StdItemKind::Function,
-            doc: "One-shot bzip2 compress.",
+            doc: "One-shot bzip2 compress at `level`, `1` (fastest) to `9` (best).",
         },
         StdItem {
             name: "decompress",
             kind: StdItemKind::Function,
             doc: "One-shot bzip2 decompress.",
+        },
+        StdItem {
+            name: "decompress_limited",
+            kind: StdItemKind::Function,
+            doc: "`decompress(data)`, refusing output past `max_bytes`.",
         },
     ],
 };
@@ -155,6 +175,11 @@ pub const COMPRESS_ZSTD: StdModule = StdModule {
             name: "decode",
             kind: StdItemKind::Function,
             doc: "One-shot Zstandard decompress.",
+        },
+        StdItem {
+            name: "decode_limited",
+            kind: StdItemKind::Function,
+            doc: "`decode(data)`, refusing output past `max_bytes`.",
         },
     ],
 };

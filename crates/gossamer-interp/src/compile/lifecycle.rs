@@ -41,6 +41,7 @@ impl<'tcx> FnBuilder<'tcx> {
             uint_display_locals: std::collections::HashSet::new(),
             reference_alias_regs: std::collections::HashSet::new(),
             capture_cell_names: std::collections::HashSet::new(),
+            closure_capture_names: std::collections::HashSet::new(),
             capture_cells: Vec::new(),
             capture_cells_used: false,
             escaped_reference_reg_floor: 0,

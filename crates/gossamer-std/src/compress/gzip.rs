@@ -10,11 +10,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::io::{Read, Write};
-
-use flate2::Compression;
-use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
+use gossamer_runtime::codec::compress::{self, Format};
 
 use crate::io::IoError;
 
@@ -56,21 +52,18 @@ impl Default for Level {
 
 /// Encodes `input` into a gzip-formatted byte vector.
 pub fn encode(input: &[u8], level: Level) -> Result<Vec<u8>, IoError> {
-    let mut enc = GzEncoder::new(Vec::with_capacity(input.len()), Compression::new(level.0));
-    enc.write_all(input)
-        .map_err(|e| IoError::Other(format!("gzip encode write: {e}")))?;
-    enc.finish()
-        .map_err(|e| IoError::Other(format!("gzip encode finish: {e}")))
+    compress::compress(Format::Gzip, input, i64::from(level.0)).map_err(IoError::Other)
 }
 
-/// Decodes `input` (a complete gzip-formatted payload) into the
-/// original bytes.
+/// Decodes `input`, a complete gzip payload whose concatenated members
+/// decode as one stream, into the original bytes.
 pub fn decode(input: &[u8]) -> Result<Vec<u8>, IoError> {
-    let mut dec = GzDecoder::new(input);
-    let mut out = Vec::with_capacity(input.len() * 3);
-    dec.read_to_end(&mut out)
-        .map_err(|e| IoError::Other(format!("gzip decode: {e}")))?;
-    Ok(out)
+    compress::decompress(Format::Gzip, input, None).map_err(IoError::Other)
+}
+
+/// [`decode`], refusing output past `max_bytes`.
+pub fn decode_limited(input: &[u8], max_bytes: u64) -> Result<Vec<u8>, IoError> {
+    compress::decompress(Format::Gzip, input, Some(max_bytes)).map_err(IoError::Other)
 }
 
 #[cfg(test)]

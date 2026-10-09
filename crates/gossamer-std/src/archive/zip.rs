@@ -6,9 +6,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::io::{Cursor, Write};
-
-use zip::write::SimpleFileOptions;
+use gossamer_runtime::codec::archive::{self, Limits};
 
 use crate::io::IoError;
 
@@ -27,30 +25,22 @@ pub struct ZipEntry {
 ///
 /// Directory entries are included with an empty `data` field and
 /// `is_dir = true`. Returns an error if the bytes are not a valid ZIP
-/// archive.
+/// archive or an entry does not hold the size its header states.
 pub fn read(data: &[u8]) -> Result<Vec<ZipEntry>, IoError> {
-    let cursor = Cursor::new(data);
-    let mut archive =
-        zip::ZipArchive::new(cursor).map_err(|e| IoError::Other(format!("zip read: {e}")))?;
-    let mut entries = Vec::with_capacity(archive.len());
-    for i in 0..archive.len() {
-        let mut file = archive
-            .by_index(i)
-            .map_err(|e| IoError::Other(format!("zip entry {i}: {e}")))?;
-        let name = file.name().to_owned();
-        let is_dir = file.is_dir();
-        let mut buf = Vec::new();
-        if !is_dir {
-            std::io::Read::read_to_end(&mut file, &mut buf)
-                .map_err(|e| IoError::Other(format!("zip read entry {name}: {e}")))?;
-        }
-        entries.push(ZipEntry {
-            name,
-            data: buf,
-            is_dir,
-        });
-    }
-    Ok(entries)
+    read_limited(data, Limits::default())
+}
+
+/// [`read`], refusing an archive that holds more than `limits` allows.
+pub fn read_limited(data: &[u8], limits: Limits) -> Result<Vec<ZipEntry>, IoError> {
+    let entries = archive::zip_read(data, limits).map_err(IoError::Other)?;
+    Ok(entries
+        .into_iter()
+        .map(|e| ZipEntry {
+            is_dir: e.kind == archive::EntryKind::Dir,
+            name: e.name,
+            data: e.data,
+        })
+        .collect())
 }
 
 /// Builds an in-memory ZIP archive from `files` - a list of `(name, data)` pairs.
@@ -58,19 +48,15 @@ pub fn read(data: &[u8]) -> Result<Vec<ZipEntry>, IoError> {
 /// Files are stored with deflate compression at the default level. Returns the
 /// raw ZIP bytes on success.
 pub fn write(files: &[(&str, &[u8])]) -> Result<Vec<u8>, IoError> {
-    let buf = Cursor::new(Vec::new());
-    let mut zip = zip::ZipWriter::new(buf);
-    let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    for &(name, data) in files {
-        zip.start_file(name, opts)
-            .map_err(|e| IoError::Other(format!("zip start_file {name}: {e}")))?;
-        zip.write_all(data)
-            .map_err(|e| IoError::Other(format!("zip write {name}: {e}")))?;
-    }
-    let finished = zip
-        .finish()
-        .map_err(|e| IoError::Other(format!("zip finish: {e}")))?;
-    Ok(finished.into_inner())
+    archive::zip_write(files).map_err(IoError::Other)
+}
+
+/// Writes every file and directory of the ZIP archive in `data` under `dir`,
+/// refusing the archive before writing anything when an entry's name would
+/// land outside `dir`. Answers how many entries it wrote.
+pub fn extract(data: &[u8], dir: &std::path::Path) -> Result<u64, IoError> {
+    let entries = archive::zip_read(data, Limits::default()).map_err(IoError::Other)?;
+    archive::extract(&entries, dir).map_err(IoError::Other)
 }
 
 #[cfg(test)]

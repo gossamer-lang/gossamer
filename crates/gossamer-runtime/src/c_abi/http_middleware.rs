@@ -79,7 +79,7 @@ pub unsafe extern "C-unwind" fn gos_rt_http_bearer_ok(
     req: *const GosHttpRequest,
     env: *const u8,
 ) -> i64 {
-    ffi_entry_passthrough!(0, {
+    ffi_entry_passthrough!({
         if req.is_null() {
             return 0;
         }
@@ -641,7 +641,7 @@ pub extern "C" fn gos_rt_middleware_new(
     inner_env: i64,
     inner_serve_addr: i64,
 ) -> *mut GosMiddleware {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         Box::into_raw(Box::new(GosMiddleware {
             inner_env,
             inner_serve_addr,
@@ -661,7 +661,7 @@ pub unsafe extern "C" fn gos_rt_middleware_new_kind(
     kind: i64,
     config: *const std::os::raw::c_char,
 ) -> *mut GosMiddleware {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let config = if config.is_null() {
             String::new()
         } else {
@@ -719,7 +719,7 @@ pub unsafe extern "C-unwind" fn gos_rt_middleware_serve(
     mw: *mut u8,
     req: *mut GosHttpRequest,
 ) -> i128 {
-    ffi_entry_passthrough!(0i128, {
+    ffi_entry_passthrough!({
         if mw.is_null() {
             let err = crate::c_abi::errors::error_new_from_bytes(b"middleware: null handle");
             return crate::c_abi::result::pack_result(1, err as i64);
@@ -816,14 +816,14 @@ pub unsafe extern "C-unwind" fn gos_rt_middleware_serve(
 /// `builtin_mw_decode_basic_auth`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_mw_decode_basic_auth(header: *const std::os::raw::c_char) -> i128 {
-    ffi_entry!(crate::c_abi::result::gos_rt_result_new(1, 0), {
+    ffi_entry!({
         if header.is_null() {
             return crate::c_abi::result::gos_rt_result_new(1, 0);
         }
         // SAFETY: `header` is a String argument from compiled code, null or a live string body for the whole call.
         let header_str = unsafe { crate::c_abi::gos_str_arg_string(header) };
         let token = header_str.strip_prefix("Basic ").unwrap_or(&header_str);
-        let Ok(decoded) = crate::c_abi::encoding::base64_decode(token.trim()) else {
+        let Ok(decoded) = crate::codec::base64::decode(token.trim()) else {
             return crate::c_abi::result::gos_rt_result_new(1, 0);
         };
         let Ok(decoded) = String::from_utf8(decoded) else {
@@ -850,9 +850,7 @@ pub unsafe extern "C" fn gos_rt_mw_decode_basic_auth(header: *const std::os::raw
 /// `middleware::CorsConfig::permissive() -> String`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_mw_cors_permissive() -> *mut std::os::raw::c_char {
-    ffi_entry!(std::ptr::null_mut(), {
-        alloc_cstring(cors_permissive().as_bytes())
-    })
+    ffi_entry!({ alloc_cstring(cors_permissive().as_bytes()) })
 }
 
 /// `middleware::CorsConfig::new(origin, methods, headers, max_age) -> String`.
@@ -863,7 +861,7 @@ pub unsafe extern "C" fn gos_rt_mw_cors_new(
     headers: *const std::os::raw::c_char,
     max_age: i64,
 ) -> *mut std::os::raw::c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let text = cors_config(
             // SAFETY: `origin` is this shim's argument, null or a live string body for the call
             // (C-ABI contract), which `mw_cstr` accepts.
@@ -883,49 +881,37 @@ pub unsafe extern "C" fn gos_rt_mw_cors_new(
 /// `middleware::HstsConfig::safe_default() -> String`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_mw_hsts_safe_default() -> *mut std::os::raw::c_char {
-    ffi_entry!(std::ptr::null_mut(), {
-        alloc_cstring(hsts_safe_default().as_bytes())
-    })
+    ffi_entry!({ alloc_cstring(hsts_safe_default().as_bytes()) })
 }
 
 /// `middleware::HstsConfig::strict() -> String`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_mw_hsts_strict() -> *mut std::os::raw::c_char {
-    ffi_entry!(std::ptr::null_mut(), {
-        alloc_cstring(hsts_strict().as_bytes())
-    })
+    ffi_entry!({ alloc_cstring(hsts_strict().as_bytes()) })
 }
 
 /// `middleware::SecurityHeaders::strict() -> String`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_mw_security_strict() -> *mut std::os::raw::c_char {
-    ffi_entry!(std::ptr::null_mut(), {
-        alloc_cstring(security_headers_strict().as_bytes())
-    })
+    ffi_entry!({ alloc_cstring(security_headers_strict().as_bytes()) })
 }
 
 /// `middleware::SecurityHeaders::off() -> String`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_mw_security_off() -> *mut std::os::raw::c_char {
-    ffi_entry!(std::ptr::null_mut(), {
-        alloc_cstring(security_headers_off().as_bytes())
-    })
+    ffi_entry!({ alloc_cstring(security_headers_off().as_bytes()) })
 }
 
 /// `middleware::CacheControl::no_store() -> String`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_mw_cache_no_store() -> *mut std::os::raw::c_char {
-    ffi_entry!(std::ptr::null_mut(), {
-        alloc_cstring(cache_control_no_store().as_bytes())
-    })
+    ffi_entry!({ alloc_cstring(cache_control_no_store().as_bytes()) })
 }
 
 /// `middleware::CacheControl::immutable_for(seconds) -> String`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_mw_cache_immutable_for(seconds: i64) -> *mut std::os::raw::c_char {
-    ffi_entry!(std::ptr::null_mut(), {
-        alloc_cstring(cache_control_immutable_for(seconds).as_bytes())
-    })
+    ffi_entry!({ alloc_cstring(cache_control_immutable_for(seconds).as_bytes()) })
 }
 
 /// `middleware::RateLimit::per_ip(capacity, refill_per_sec) -> String`.
@@ -934,9 +920,7 @@ pub extern "C" fn gos_rt_mw_rate_limit_per_ip(
     capacity: i64,
     refill_per_sec: i64,
 ) -> *mut std::os::raw::c_char {
-    ffi_entry!(std::ptr::null_mut(), {
-        alloc_cstring(rate_limit_config(capacity, refill_per_sec).as_bytes())
-    })
+    ffi_entry!({ alloc_cstring(rate_limit_config(capacity, refill_per_sec).as_bytes()) })
 }
 
 /// Owned copy of a nul-terminated C string; the empty string for null.

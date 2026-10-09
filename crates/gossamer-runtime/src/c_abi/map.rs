@@ -204,6 +204,7 @@ const MAP_VALUE_MAP: u8 = 3;
 const MAP_VALUE_SET: u8 = 4;
 const MAP_VALUE_DEQUE: u8 = 5;
 const MAP_VALUE_HEAP: u8 = 6;
+const MAP_VALUE_WEAK: u8 = 7;
 
 /// Whether a value stored under `owner` is a store with no reference count
 /// (a `Map`, a `Set`, or a deque), so each holder of it needs a copy of its
@@ -845,7 +846,7 @@ pub unsafe extern "C" fn gos_rt_map_eq(
     value_kind: i64,
     value_desc: *const c_char,
 ) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if std::ptr::eq(a, b) {
             return 1;
         }
@@ -887,7 +888,7 @@ pub unsafe extern "C" fn gos_rt_map_eq(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_map_new(_key_bytes: u32, _val_bytes: u32) -> *mut GosMap {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         crate::c_abi::ledger::map_inc();
         Box::into_raw(Box::new(GosMap {
             len_cache: 0,
@@ -913,7 +914,7 @@ pub extern "C-unwind" fn gos_rt_map_new_with_capacity(
     val_bytes: u32,
     cap: i64,
 ) -> *mut GosMap {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         // An inferred loop bound may ultimately come from untrusted input.
         // Keep preallocation an optimisation rather than an allocation-DoS;
         // subsequent inserts retain ordinary map growth semantics.
@@ -951,7 +952,7 @@ pub extern "C-unwind" fn gos_rt_map_new_with_capacity_typed(
     val_kind: u32,
     cap: i64,
 ) -> *mut GosMap {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         const MAX_PREALLOCATED_CAPACITY: usize = 1 << 24;
         if cap < 0 {
             crate::c_abi::panic::panic_text(
@@ -983,7 +984,7 @@ pub extern "C-unwind" fn gos_rt_map_new_with_capacity_typed(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_len(m: *const GosMap) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if m.is_null() {
             return 0;
         }
@@ -994,7 +995,7 @@ pub unsafe extern "C" fn gos_rt_map_len(m: *const GosMap) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_insert(m: *mut GosMap, key: *const u8, val: *const u8) {
-    ffi_entry!((), {
+    ffi_entry!({
         if m.is_null() || key.is_null() || val.is_null() {
             return;
         }
@@ -1023,7 +1024,7 @@ pub unsafe extern "C-unwind" fn gos_rt_map_get(
     key: *const u8,
     val_out: *mut u8,
 ) -> i32 {
-    ffi_entry_passthrough!(-1, {
+    ffi_entry_passthrough!({
         if m.is_null() || key.is_null() || val_out.is_null() {
             return 0;
         }
@@ -1058,7 +1059,7 @@ pub unsafe extern "C-unwind" fn gos_rt_map_get(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_get_or_i64(m: *const GosMap, key: i64, default: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if m.is_null() {
             return default;
         }
@@ -1077,7 +1078,7 @@ pub unsafe extern "C" fn gos_rt_map_get_or_i64(m: *const GosMap, key: i64, defau
 /// byte slice the `_str_i64` insert path uses, so an `insert(k, v)`
 /// followed by `get_or(k, d)` round-trips.
 unsafe fn map_get_or_str_i64_impl(m: *const GosMap, key: *const c_char, default: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if m.is_null() || key.is_null() {
             return default;
         }
@@ -1130,7 +1131,7 @@ pub unsafe extern "C" fn gos_rt_map_get_or_str_str(
     key: *const c_char,
     default: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let default_bytes: &[u8] = if default.is_null() {
             b""
         } else {
@@ -1162,7 +1163,7 @@ pub unsafe extern "C" fn gos_rt_map_get_or_i64_str(
     key: i64,
     default: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let default_bytes: &[u8] = if default.is_null() {
             b""
         } else {
@@ -1187,7 +1188,7 @@ pub unsafe extern "C" fn gos_rt_map_get_or_i64_str(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_insert_i64_i64(m: *mut GosMap, key: i64, val: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if m.is_null() {
             return;
         }
@@ -1364,7 +1365,7 @@ pub unsafe extern "C" fn gos_rt_map_insert_skey(
     desc: *const c_char,
     val: i64,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
         // contract).
         unsafe { insert_skey_entry(m, key, desc, val, true) };
@@ -1487,7 +1488,7 @@ pub unsafe extern "C" fn gos_rt_map_get_skey_opt(
     key: *const u8,
     desc: *const c_char,
 ) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+    ffi_entry!({
         let none = gos_rt_result_new(1, 0);
         // SAFETY: `m`, `key`, `desc` are this shim's arguments, live for the call (C-ABI
         // contract) or null, which `skey_bytes` accepts.
@@ -1523,7 +1524,7 @@ pub unsafe extern "C" fn gos_rt_map_contains_skey(
     key: *const u8,
     desc: *const c_char,
 ) -> bool {
-    ffi_entry!(false, {
+    ffi_entry!({
         // SAFETY: `m`, `key`, `desc` are this shim's arguments, live for the call (C-ABI
         // contract) or null, which `skey_bytes` accepts.
         let Some(k) = (unsafe { skey_bytes(m, key, desc) }) else {
@@ -1550,7 +1551,7 @@ pub unsafe extern "C" fn gos_rt_map_contains_skey(
 /// hash work on hot counter loops.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_inc_i64(m: *mut GosMap, key: i64, by: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if m.is_null() {
             return 0;
         }
@@ -1574,7 +1575,7 @@ pub unsafe extern "C" fn gos_rt_map_inc_i64(m: *mut GosMap, key: i64, by: i64) -
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_get_i64(m: *const GosMap, key: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if m.is_null() {
             return 0;
         }
@@ -1595,7 +1596,7 @@ pub unsafe extern "C" fn gos_rt_map_get_i64(m: *const GosMap, key: i64) -> i64 {
 /// from the call expression's `Option<V>` Adt substs.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_get_i64_opt(m: *const GosMap, key: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if m.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -1628,7 +1629,7 @@ pub unsafe extern "C" fn gos_rt_map_get_i64_opt(m: *const GosMap, key: i64) -> i
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_contains_key_i64(m: *const GosMap, key: i64) -> bool {
-    ffi_entry!(false, {
+    ffi_entry!({
         if m.is_null() {
             return false;
         }
@@ -1646,7 +1647,7 @@ pub unsafe extern "C" fn gos_rt_map_contains_key_i64(m: *const GosMap, key: i64)
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_remove_i64(m: *mut GosMap, key: i64) -> bool {
-    ffi_entry!(false, {
+    ffi_entry!({
         if m.is_null() {
             return false;
         }
@@ -1678,7 +1679,7 @@ pub unsafe extern "C" fn gos_rt_map_remove_i64(m: *mut GosMap, key: i64) -> bool
 }
 
 unsafe fn map_insert_str_i64_impl(m: *mut GosMap, key: *const c_char, val: i64, typed_key: bool) {
-    ffi_entry!((), {
+    ffi_entry!({
         if m.is_null() || key.is_null() {
             return;
         }
@@ -1795,7 +1796,7 @@ pub unsafe extern "C" fn gos_rt_map_insert_typed_str_i64(
 }
 
 unsafe fn map_get_str_i64_impl(m: *const GosMap, key: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if m.is_null() || key.is_null() {
             return 0;
         }
@@ -1833,7 +1834,7 @@ pub unsafe extern "C" fn gos_rt_map_get_typed_str_i64(m: *const GosMap, key: *co
 /// layout as [`gos_rt_map_get_i64_opt`]: 8-byte payload, MIR pin
 /// recovers V from the call's `Option<V>` substs.
 unsafe fn map_get_str_opt_impl(m: *const GosMap, key: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if m.is_null() || key.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -1894,7 +1895,7 @@ pub unsafe extern "C" fn gos_rt_map_insert_str_str(
     key: *const c_char,
     val: *const c_char,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         if m.is_null() || key.is_null() || val.is_null() {
             return;
         }
@@ -1942,7 +1943,7 @@ pub unsafe extern "C" fn gos_rt_map_get_str_str(
     m: *const GosMap,
     key: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if m.is_null() || key.is_null() {
             return empty_cstring();
         }
@@ -1962,7 +1963,7 @@ pub unsafe extern "C" fn gos_rt_map_get_str_str(
 }
 
 unsafe fn map_contains_key_str_impl(m: *const GosMap, key: *const c_char) -> bool {
-    ffi_entry!(false, {
+    ffi_entry!({
         if m.is_null() || key.is_null() {
             return false;
         }
@@ -2000,7 +2001,7 @@ pub unsafe extern "C" fn gos_rt_map_contains_key_typed_str(
 }
 
 unsafe fn map_remove_str_impl(m: *mut GosMap, key: *const c_char) -> bool {
-    ffi_entry!(false, {
+    ffi_entry!({
         if m.is_null() || key.is_null() {
             return false;
         }
@@ -2069,7 +2070,7 @@ pub unsafe extern "C-unwind" fn gos_rt_map_inc_at_str_i64(
     len: i64,
     by: i64,
 ) -> i64 {
-    ffi_entry_passthrough!(-1, {
+    ffi_entry_passthrough!({
         if start < 0 {
             crate::c_abi::panic::panic_text("HashMap::inc_at: start must be non-negative");
         }
@@ -2125,7 +2126,7 @@ pub unsafe extern "C-unwind" fn gos_rt_map_inc_at_str_i64(
 /// `m.insert(k, m.get_or(k, 0) + by)` and avoids the
 /// double-borrow that pattern triggers in compiled mode.
 unsafe fn map_inc_str_i64_impl(m: *mut GosMap, key: *const c_char, by: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if m.is_null() || key.is_null() {
             return 0;
         }
@@ -2184,7 +2185,7 @@ unsafe fn map_or_insert_str_i64_impl(
     default: i64,
     typed_key: bool,
 ) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if m.is_null() || key.is_null() {
             return default;
         }
@@ -2324,7 +2325,7 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_i64_i64(
     key: i64,
     default: i64,
 ) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if m.is_null() {
             return default;
         }
@@ -2393,7 +2394,7 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_i64_i64(
 /// `m.insert(k: i64, v: String)` - `HashMap<i64, String>` insert.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_insert_i64_str(m: *mut GosMap, key: i64, val: *const c_char) {
-    ffi_entry!((), {
+    ffi_entry!({
         if m.is_null() || val.is_null() {
             return;
         }
@@ -2425,7 +2426,7 @@ pub unsafe extern "C" fn gos_rt_map_insert_i64_str(m: *mut GosMap, key: i64, val
 /// `m.get(k: i64) -> String` - returns an empty string when absent.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_get_i64_str(m: *const GosMap, key: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if m.is_null() {
             return empty_cstring();
         }
@@ -2444,7 +2445,7 @@ pub unsafe extern "C" fn gos_rt_map_get_i64_str(m: *const GosMap, key: i64) -> *
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_clear(m: *mut GosMap) {
-    ffi_entry!((), {
+    ffi_entry!({
         if m.is_null() {
             return;
         }
@@ -2563,7 +2564,7 @@ pub unsafe extern "C-unwind" fn gos_rt_map_format_desc(
     key_desc: i64,
     val_desc: i64,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if m.is_null() || tags.is_null() {
             return alloc_cstring(b"{}");
         }
@@ -2835,7 +2836,7 @@ pub unsafe extern "C-unwind" fn gos_rt_map_format_tagged(
     aux: *const u8,
     aux_n: i64,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if m.is_null() {
             return alloc_cstring(b"{}");
         }
@@ -3064,6 +3065,20 @@ pub unsafe extern "C" fn gos_rt_map_set_deque_values(m: *mut GosMap) {
         .store(MAP_VALUE_DEQUE, Ordering::Release);
 }
 
+/// Marks `m` as holding `Weak` values: an entry keeps one weak share of its
+/// value, a read hands out a weak share of its own, and overwrite, removal,
+/// and free give the entry's share back.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_set_weak_values(m: *mut GosMap) {
+    if m.is_null() {
+        return;
+    }
+    // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
+    unsafe { &*m }
+        .value_owner
+        .store(MAP_VALUE_WEAK, Ordering::Release);
+}
+
 /// Marks `m` as holding `Set` values, owned entry by entry as
 /// [`gos_rt_map_set_map_values`] owns `Map` values.
 #[unsafe(no_mangle)]
@@ -3116,6 +3131,10 @@ unsafe fn release_owned_value_tag(owner: u8, word: i64) {
     match owner {
         // SAFETY: a map of counted-node values holds a share of each value word.
         MAP_VALUE_RC => unsafe { release_blob_value(word) },
+        // SAFETY: a map of `Weak` values holds a weak share of each value word.
+        MAP_VALUE_WEAK => unsafe {
+            crate::c_abi::rc::gos_rt_rc_weak_release(word as usize as *mut u8);
+        },
         // SAFETY: a map of `Vec` values holds a share of each value word.
         MAP_VALUE_VEC | MAP_VALUE_HEAP => unsafe { gos_rt_vec_free(word as usize as *mut GosVec) },
         // SAFETY: a map of `Map` values owns each value word.
@@ -3197,6 +3216,11 @@ unsafe fn share_owned_value_tag(owner: u8, word: i64) -> i64 {
     match owner {
         // SAFETY: a non-zero value word of a counted-node map is a live node.
         MAP_VALUE_RC => unsafe { retain_blob_value(word) },
+        // SAFETY: a non-zero value word of a `Weak` map is a block its weak share keeps
+        // allocated.
+        MAP_VALUE_WEAK => unsafe {
+            crate::c_abi::rc::gos_rt_rc_weak_retain(word as usize as *mut u8);
+        },
         // SAFETY: a non-zero value word of a `Vec` map is a live `Vec`.
         MAP_VALUE_VEC | MAP_VALUE_HEAP => unsafe {
             crate::c_abi::gos_rt_vec_retain(word as usize as *mut GosVec);
@@ -3329,7 +3353,7 @@ fn clone_map_storage(storage: &MapStorage, value_owner: u8) -> MapStorage {
 /// both bindings mutating the same live table.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_clone(src: *const GosMap) -> *mut GosMap {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if src.is_null() {
             return gos_rt_map_new(8, 8);
         }
@@ -3361,7 +3385,7 @@ pub unsafe extern "C" fn gos_rt_map_clone(src: *const GosMap) -> *mut GosMap {
 /// releasing the ones it held.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_assign(dst: *mut GosMap, src: *const GosMap) {
-    ffi_entry!((), {
+    ffi_entry!({
         if dst.is_null() || src.is_null() || std::ptr::addr_eq(dst.cast_const(), src) {
             return;
         }
@@ -3397,6 +3421,11 @@ unsafe fn mark_owned_value_shared(owner: u8, word: i64) {
         MAP_VALUE_RC => unsafe {
             crate::c_abi::rc::gos_rt_rc_mark_shared(word as usize as *mut u8);
         },
+        // SAFETY: a non-zero value word of a `Weak` map is a block its weak share keeps
+        // allocated.
+        MAP_VALUE_WEAK => unsafe {
+            crate::c_abi::rc::gos_rt_rc_mark_shared(word as usize as *mut u8);
+        },
         // SAFETY: a non-zero value word of a `Vec` map is a live `Vec`.
         MAP_VALUE_VEC | MAP_VALUE_HEAP => unsafe {
             crate::c_abi::vec::gos_rt_vec_mark_shared(word as usize as *mut GosVec);
@@ -3427,7 +3456,7 @@ unsafe fn mark_owned_value_shared(owner: u8, word: i64) {
 /// other goroutine through the now-shared map. Idempotent; null-safe.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_mark_shared(m: *mut GosMap) {
-    ffi_entry!((), {
+    ffi_entry!({
         if m.is_null() {
             return;
         }
@@ -3452,7 +3481,7 @@ pub unsafe extern "C" fn gos_rt_map_mark_shared(m: *mut GosMap) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_free(m: *mut GosMap) {
-    ffi_entry!((), {
+    ffi_entry!({
         if m.is_null() {
             return;
         }
@@ -3476,7 +3505,7 @@ pub unsafe extern "C" fn gos_rt_map_free(m: *mut GosMap) {
 /// same field without the second booking touching a freed map. Null-safe.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_field_release(slot: *mut *mut GosMap) {
-    ffi_entry!((), {
+    ffi_entry!({
         if slot.is_null() {
             return;
         }
@@ -3502,7 +3531,7 @@ pub unsafe extern "C" fn gos_rt_map_field_release(slot: *mut *mut GosMap) {
 /// does. Null-safe.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_field_clone(slot: *mut *mut GosMap) {
-    ffi_entry!((), {
+    ffi_entry!({
         if slot.is_null() {
             return;
         }
@@ -3545,7 +3574,7 @@ struct BindingGosMapLayout {
 /// bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_binding_map_free(m: *mut u8) {
-    ffi_entry!((), {
+    ffi_entry!({
         if m.is_null() {
             return;
         }
@@ -3583,7 +3612,7 @@ pub unsafe extern "C" fn gos_rt_binding_map_free(m: *mut u8) {
 /// via `gos_rt_vec_new_typed` opt in to deep free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -3719,6 +3748,11 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
                             // element.
                             unsafe { crate::c_abi::rc::gos_rt_rc_release(slot) };
                         }
+                        vec_elem_kind::WEAK => {
+                            // SAFETY: a `WEAK`-kind vec holds a weak share of each non-null
+                            // element.
+                            unsafe { crate::c_abi::rc::gos_rt_rc_weak_release(slot) };
+                        }
                         vec_elem_kind::JSON => {
                             // Each element is a handle holding a share of the
                             // document's tree; the tree dies with its last one.
@@ -3762,7 +3796,7 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
 /// Drops a `HashSet` allocated by [`gos_rt_set_new`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_free(s: *mut GosSet) {
-    ffi_entry!((), {
+    ffi_entry!({
         if s.is_null() {
             return;
         }
@@ -3780,7 +3814,7 @@ pub unsafe extern "C" fn gos_rt_set_free(s: *mut GosSet) {
 /// process. Returns an empty vec for any other storage shape.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_keys_i64(m: *const GosMap) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
         // snapshot accepts.
         unsafe { map_keys_ordered(m, KeyOrder::Signed) }
@@ -3791,7 +3825,7 @@ pub unsafe extern "C" fn gos_rt_map_keys_i64(m: *const GosMap) -> *mut GosVec {
 /// `usize`, which order unsigned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_keys_u64(m: *const GosMap) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
         // snapshot accepts.
         unsafe { map_keys_ordered(m, KeyOrder::Unsigned) }
@@ -3923,7 +3957,7 @@ pub unsafe extern "C" fn gos_rt_map_range_i64(
     hi: i64,
     mode: i64,
 ) -> *mut GosMap {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract).
         unsafe {
             map_range(m, mode, |s, low, incl| {
@@ -3941,7 +3975,7 @@ pub unsafe extern "C" fn gos_rt_map_range_typed_str(
     hi: *const c_char,
     mode: i64,
 ) -> *mut GosMap {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let bytes = |p: *const c_char| -> &[u8] {
             if p.is_null() {
                 &[]
@@ -3970,7 +4004,7 @@ pub unsafe extern "C" fn gos_rt_map_range_skey(
     hi: *const u8,
     mode: i64,
 ) -> *mut GosMap {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `m`, `lo`, `desc` are this shim's arguments, live for the call (C-ABI contract)
         // or null, which `skey_bytes` accepts.
         let lo = unsafe { skey_bytes(m, lo, desc) }.unwrap_or_default();
@@ -3995,7 +4029,7 @@ pub unsafe extern "C" fn gos_rt_map_range_ekey(
     hi: *mut u8,
     mode: i64,
 ) -> *mut GosMap {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `m`, `lo`, and `desc` are this shim's arguments, each null or live (C-ABI
         // contract), which `ekey_bytes` accepts.
         let lo = unsafe { ekey_bytes(m, lo, desc) }.unwrap_or_default();
@@ -4021,7 +4055,7 @@ pub unsafe extern "C" fn gos_rt_map_window(
     hi: i64,
     take: i64,
 ) -> *mut GosMap {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if m.is_null() {
             return gos_rt_map_new(8, 8);
         }
@@ -4119,7 +4153,7 @@ unsafe fn map_keys_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
 /// storage shapes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_values_i64(m: *const GosMap) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
         // snapshot accepts.
         unsafe { map_values_ordered(m, KeyOrder::Signed) }
@@ -4130,7 +4164,7 @@ pub unsafe extern "C" fn gos_rt_map_values_i64(m: *const GosMap) -> *mut GosVec 
 /// `usize`: the values in unsigned key order.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_values_u64(m: *const GosMap) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
         // snapshot accepts.
         unsafe { map_values_ordered(m, KeyOrder::Unsigned) }
@@ -4146,7 +4180,7 @@ pub unsafe extern "C" fn gos_rt_map_values_u64(m: *const GosMap) -> *mut GosVec 
 /// and its free gives it back.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_values_carrier(m: *const GosMap) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
         // snapshot accepts.
         unsafe { map_values_carrier_ordered(m, KeyOrder::Signed) }
@@ -4157,7 +4191,7 @@ pub unsafe extern "C" fn gos_rt_map_values_carrier(m: *const GosMap) -> *mut Gos
 /// `usize`: the values in unsigned key order.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_values_carrier_u64(m: *const GosMap) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
         // snapshot accepts.
         unsafe { map_values_carrier_ordered(m, KeyOrder::Unsigned) }
@@ -4292,7 +4326,7 @@ unsafe fn map_values_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
 /// representation Gossamer's `String` type uses elsewhere.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_keys_str(m: *const GosMap) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // STRING-typed: the snapshot owns its key strings, so
         // `gos_rt_vec_free` reclaims them even on early `break`.
         let out = crate::c_abi::vec::gos_rt_vec_new_typed(8, vec_elem_kind::STRING);
@@ -4332,7 +4366,7 @@ pub unsafe extern "C" fn gos_rt_map_keys_str(m: *const GosMap) -> *mut GosVec {
 /// a fresh `GosVec<*mut c_char>`. Mirrors `gos_rt_map_keys_str`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_values_str(m: *const GosMap) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
         // snapshot accepts.
         unsafe { map_values_str_ordered(m, KeyOrder::Signed) }
@@ -4489,7 +4523,7 @@ impl<T> RadixRow for (u64, &[u8], T) {
 /// outright, so nothing is retained on its way into the slot.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_entries_into(m: *const GosMap, out: *mut GosVec) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `m` and `out` are this shim's arguments, each null or live (C-ABI contract),
         // which the snapshot accepts.
         unsafe { map_entries_ordered(m, out, KeyOrder::Signed) }
@@ -4503,7 +4537,7 @@ pub unsafe extern "C" fn gos_rt_map_entries_into(m: *const GosMap, out: *mut Gos
 /// As [`gos_rt_map_entries_into`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_entries_into_u64(m: *const GosMap, out: *mut GosVec) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `m` and `out` are this shim's arguments, each null or live (C-ABI contract),
         // which the snapshot accepts.
         unsafe { map_entries_ordered(m, out, KeyOrder::Unsigned) }
@@ -4615,7 +4649,7 @@ pub unsafe extern "C-unwind" fn gos_rt_map_select_by_key_into(
     want_max: i64,
 ) {
     use crate::c_abi::iter_cross::{SortKey, env_fn_addr, key_of_ptr};
-    ffi_entry_passthrough!((), {
+    ffi_entry_passthrough!({
         if m.is_null() || out.is_null() {
             return;
         }
@@ -4695,7 +4729,7 @@ fn empty_cstring() -> *mut c_char {
 /// string slot is reallocated as a c-string the snapshot owns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_keys_skey(m: *const GosMap) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if m.is_null() {
             return gos_rt_vec_new(8);
         }
@@ -4951,7 +4985,7 @@ fn decode_skey_into(key: &[u8], desc: &[u8], slots: &mut [i64]) -> bool {
 /// `Vec<*mut c_char>`. Empty Vec for empty / unknown storage shapes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_keys_vec(m: *const GosMap) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
         // snapshot accepts.
         unsafe { map_keys_vec_ordered(m, KeyOrder::Signed) }
@@ -4962,7 +4996,7 @@ pub unsafe extern "C" fn gos_rt_map_keys_vec(m: *const GosMap) -> *mut GosVec {
 /// `usize`, which walk in unsigned order.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_keys_vec_u64(m: *const GosMap) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
         // snapshot accepts.
         unsafe { map_keys_vec_ordered(m, KeyOrder::Unsigned) }
@@ -5011,7 +5045,7 @@ unsafe fn map_keys_vec_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec
 /// storage. Mirrors [`gos_rt_map_keys_vec`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_values_vec(m: *const GosMap) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
         // snapshot accepts.
         unsafe { map_values_vec_ordered(m, KeyOrder::Signed) }
@@ -5022,7 +5056,7 @@ pub unsafe extern "C" fn gos_rt_map_values_vec(m: *const GosMap) -> *mut GosVec 
 /// `usize`: the values in unsigned key order.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_values_vec_u64(m: *const GosMap) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
         // snapshot accepts.
         unsafe { map_values_vec_ordered(m, KeyOrder::Unsigned) }
@@ -5148,7 +5182,7 @@ unsafe fn map_values_vec_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosV
 /// returns None otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_pop_i64(m: *mut GosMap, key: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if m.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -5182,7 +5216,7 @@ pub unsafe extern "C" fn gos_rt_map_pop_i64(m: *mut GosMap, key: i64) -> i128 {
 /// raw 8-byte previous value (i64 directly for `StrI64`,
 /// `*mut c_char` cast to i64 for `StrStr`).
 unsafe fn map_pop_str_impl(m: *mut GosMap, key: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if m.is_null() || key.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -5241,7 +5275,7 @@ pub unsafe extern "C" fn gos_rt_map_pop_skey(
     key: *const u8,
     desc: *const c_char,
 ) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+    ffi_entry!({
         let none = gos_rt_result_new(1, 0);
         // SAFETY: `m`, `key`, `desc` are this shim's arguments, live for the call (C-ABI
         // contract) or null, which `skey_bytes` accepts.
@@ -5283,7 +5317,7 @@ pub unsafe extern "C" fn gos_rt_map_pop_skey(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_remove(m: *mut GosMap, key: *const u8) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if m.is_null() || key.is_null() {
             return 0;
         }
@@ -5403,7 +5437,7 @@ pub unsafe extern "C" fn gos_rt_map_get_or_skey(
     desc: *const c_char,
     default: i64,
 ) -> i64 {
-    ffi_entry!(default, {
+    ffi_entry!({
         // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
         // contract).
         unsafe { skey_lookup(m, key, desc) }.unwrap_or(default)
@@ -5419,7 +5453,7 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_skey(
     desc: *const c_char,
     default: i64,
 ) -> i64 {
-    ffi_entry!(default, {
+    ffi_entry!({
         // The key and the value arrive as moved shares: the key is folded into
         // the entry's own bytes either way, and the value share becomes the
         // entry's when the key is absent.
@@ -5471,7 +5505,7 @@ pub unsafe extern "C" fn gos_rt_map_inc_skey(
     desc: *const c_char,
     by: i64,
 ) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
         // contract).
         let next = unsafe { skey_lookup(m, key, desc) }
@@ -5675,7 +5709,7 @@ pub unsafe extern "C" fn gos_rt_map_insert_ekey_opt(
     desc: *const i64,
     val: i64,
 ) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+    ffi_entry!({
         // An owning map keeps a share of the stored value, and a replaced value
         // leaves with the share the entry held, so the caller owns what comes
         // back - including the stored value itself when it is inserted again.
@@ -5707,7 +5741,7 @@ pub unsafe extern "C" fn gos_rt_map_get_ekey_opt(
     key: *mut u8,
     desc: *const i64,
 ) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+    ffi_entry!({
         // The caller's option holder receives a share of its own, as every
         // other key shape's `get` gives it.
         // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
@@ -5729,7 +5763,7 @@ pub unsafe extern "C" fn gos_rt_map_contains_ekey(
 ) -> bool {
     // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
     // contract).
-    ffi_entry!(false, { unsafe { ekey_lookup(m, key, desc) }.is_some() })
+    ffi_entry!({ unsafe { ekey_lookup(m, key, desc) }.is_some() })
 }
 
 /// `m.pop(k)` / `m.remove(k)` for an enum-keyed map, returning `Option<V>`.
@@ -5739,7 +5773,7 @@ pub unsafe extern "C" fn gos_rt_map_pop_ekey(
     key: *mut u8,
     desc: *const i64,
 ) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+    ffi_entry!({
         let none = gos_rt_result_new(1, 0);
         // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
         // contract).
@@ -5773,7 +5807,7 @@ pub unsafe extern "C" fn gos_rt_map_get_or_ekey(
     desc: *const i64,
     default: i64,
 ) -> i64 {
-    ffi_entry!(default, {
+    ffi_entry!({
         // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
         // contract).
         unsafe { ekey_lookup(m, key, desc) }.unwrap_or(default)
@@ -5788,7 +5822,7 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_ekey(
     desc: *const i64,
     default: i64,
 ) -> i64 {
-    ffi_entry!(default, {
+    ffi_entry!({
         // The key node and the value arrive as moved shares. The entry takes a
         // key share of its own, and keeps the value share only when the key is
         // absent.
@@ -5837,7 +5871,7 @@ pub unsafe extern "C" fn gos_rt_map_inc_ekey(
     desc: *const i64,
     by: i64,
 ) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
         // contract).
         let next = unsafe { ekey_lookup(m, key, desc) }
@@ -5854,7 +5888,7 @@ pub unsafe extern "C" fn gos_rt_map_inc_ekey(
 /// canonical-key order so `keys()`, `values()`, and `iter()` agree.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_keys_ekey(m: *const GosMap) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if m.is_null() {
             return gos_rt_vec_new(8);
         }

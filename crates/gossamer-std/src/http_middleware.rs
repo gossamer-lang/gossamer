@@ -306,41 +306,10 @@ where
 }
 
 fn decode_basic(b64: &str) -> Option<(String, String)> {
-    let decoded = base64_decode(b64.trim()).ok()?;
+    let decoded = gossamer_runtime::codec::base64::decode(b64.trim()).ok()?;
     let text = String::from_utf8(decoded).ok()?;
     let (user, pass) = text.split_once(':')?;
     Some((user.to_string(), pass.to_string()))
-}
-
-fn base64_decode(input: &str) -> Result<Vec<u8>, ()> {
-    // Standard RFC 4648 base64 (no URL-safe variant). Built
-    // inline to avoid a dependency on the std::encoding feature
-    // which is gated.
-    let mut out = Vec::with_capacity(input.len() * 3 / 4);
-    let mut buf = 0u32;
-    let mut bits = 0u32;
-    for ch in input.chars() {
-        if ch == '=' {
-            break;
-        }
-        let v: u32 = match ch {
-            'A'..='Z' => u32::from(ch as u8 - b'A'),
-            'a'..='z' => u32::from(ch as u8 - b'a') + 26,
-            '0'..='9' => u32::from(ch as u8 - b'0') + 52,
-            '+' => 62,
-            '/' => 63,
-            ' ' | '\r' | '\n' | '\t' => continue,
-            _ => return Err(()),
-        };
-        buf = (buf << 6) | v;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buf >> bits) as u8);
-            buf &= (1 << bits) - 1;
-        }
-    }
-    Ok(out)
 }
 
 // --- Compress (gzip) -------------------------------------------------
@@ -1102,15 +1071,6 @@ mod tests {
         r.headers.insert("authorization", "Basic YWxpY2U6d3Jvbmc=");
         let resp = wrapped.serve(&r, &Params::default());
         assert_eq!(resp.status, StatusCode(401));
-    }
-
-    #[test]
-    fn base64_round_trip_minimal_vectors() {
-        // Sanity-check the inline base64 decoder.
-        assert_eq!(base64_decode("YWJj").unwrap(), b"abc");
-        assert_eq!(base64_decode("YWI=").unwrap(), b"ab");
-        assert_eq!(base64_decode("YQ==").unwrap(), b"a");
-        assert_eq!(base64_decode("").unwrap(), b"");
     }
 
     #[test]

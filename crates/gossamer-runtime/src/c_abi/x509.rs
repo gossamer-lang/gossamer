@@ -76,7 +76,7 @@ static CERT_INFO_META: [i64; 9] = [
 /// serial, not_before_unix, not_after_unix, san_dns, sha256), Error>.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_x509_parse_pem_raw(s: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or a live string body for the call (C-ABI
         // contract), which `cstr` accepts.
         let pem = unsafe { cstr(s) }.as_bytes();
@@ -133,7 +133,7 @@ pub unsafe extern "C" fn gos_rt_x509_verify_server_certificate_with_crls(
     hostname: *const c_char,
     crl_pem: *const c_char,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `chain_pem` is this shim's argument, null or a live string body for the call
         // (C-ABI contract), which `cstr` accepts.
         let chain = match CertificateDer::pem_slice_iter(unsafe { cstr(chain_pem) }.as_bytes())

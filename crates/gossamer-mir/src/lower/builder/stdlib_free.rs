@@ -891,9 +891,11 @@ impl<'a> Builder<'a> {
         {
             let ordered = joined.as_str().ends_with("BTreeMap::from");
             if let Some(map) = self.lower_map_from_aggregate_key_literal(arg, span, ordered) {
+                self.fresh_results.insert(map);
                 return Some(map);
             }
             if let Some(map) = self.lower_map_from_sequence(arg, span, ordered) {
+                self.fresh_results.insert(map);
                 return Some(map);
             }
         }
@@ -903,9 +905,11 @@ impl<'a> Builder<'a> {
         ) && let [arg] = args
         {
             if let Some(set) = self.lower_set_from_array(arg, span, "collections::HashSet") {
+                self.fresh_results.insert(set);
                 return Some(set);
             }
             if let Some(set) = self.lower_set_from_sequence(arg, span, "collections::HashSet") {
+                self.fresh_results.insert(set);
                 return Some(set);
             }
         }
@@ -915,9 +919,11 @@ impl<'a> Builder<'a> {
         ) && let [arg] = args
         {
             if let Some(set) = self.lower_set_from_array(arg, span, "collections::BTreeSet") {
+                self.fresh_results.insert(set);
                 return Some(set);
             }
             if let Some(set) = self.lower_set_from_sequence(arg, span, "collections::BTreeSet") {
+                self.fresh_results.insert(set);
                 return Some(set);
             }
         }
@@ -2326,6 +2332,8 @@ impl<'a> Builder<'a> {
                 | "gos_rt_str_ends_with"
                 | "gos_rt_str_find_opt"
                 | "gos_rt_str_rfind_opt"
+                | "gos_rt_str_byte_find"
+                | "gos_rt_str_byte_rfind"
                 | "gos_rt_str_split"
                 | "gos_rt_str_splitn"
                 | "gos_rt_str_split_once"

@@ -109,7 +109,7 @@ fn write_strings(vec: Option<crate::c_abi::vec::StrVecView<'_>>, bare: i32, out:
 /// the header declares. Returns a fresh String pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_i64(v: *const GosVec, bare: i32) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
         unsafe { format_elems(v, bare, int_elem) }
     })
@@ -121,7 +121,7 @@ pub unsafe extern "C" fn gos_rt_vec_format_i64(v: *const GosVec, bare: i32) -> *
 /// pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_u64(v: *const GosVec, bare: i32) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
         unsafe {
             format_elems(v, bare, |vec, i, out| {
@@ -135,7 +135,7 @@ pub unsafe extern "C" fn gos_rt_vec_format_u64(v: *const GosVec, bare: i32) -> *
 /// String pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_f64(v: *const GosVec, bare: i32) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
         unsafe { format_elems(v, bare, float_elem) }
     })
@@ -145,7 +145,7 @@ pub unsafe extern "C" fn gos_rt_vec_format_f64(v: *const GosVec, bare: i32) -> *
 /// fresh String pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_bool(v: *const GosVec, bare: i32) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
         unsafe {
             format_elems(v, bare, |vec, i, out| {
@@ -160,7 +160,7 @@ pub unsafe extern "C" fn gos_rt_vec_format_bool(v: *const GosVec, bare: i32) -> 
 /// fresh String pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_char(v: *const GosVec, bare: i32) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
         unsafe {
             format_elems(v, bare, |vec, i, out| {
@@ -182,7 +182,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_format_adt(
     by_ref: i32,
     bare: i32,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if fmt.is_null() {
             return alloc_cstring(seq_empty(bare).as_bytes());
         }
@@ -215,7 +215,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_format_desc(
     desc: i64,
     bare: i32,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if tags.is_null() {
             return alloc_cstring(seq_empty(bare).as_bytes());
         }
@@ -257,7 +257,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_format_desc(
 /// `v` is a live `GosVec` whose elements are `GosMap` handles.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_map(v: *const GosVec, bare: i32) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's argument, null or a live `Vec<Map>` (C-ABI contract).
         let elems = unsafe { crate::c_abi::vec::VecView::of(v) };
         let mut out = String::new();
@@ -291,7 +291,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_format_tuple(
     tags: *const u8,
     bare: i32,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if tags.is_null() || n <= 0 {
             return alloc_cstring(seq_empty(bare).as_bytes());
         }
@@ -324,7 +324,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_format_tuple(
 /// pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_string(v: *const GosVec, bare: i32) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut out = String::new();
         // SAFETY: `v` is this shim's argument, null or a live `Vec<String>` (C-ABI contract).
         write_strings(
@@ -342,7 +342,7 @@ pub unsafe extern "C" fn gos_rt_vec_format_string(v: *const GosVec, bare: i32) -
 /// pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_vec_i64(v: *const GosVec, bare: i32) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut out = String::new();
         // SAFETY: `v` is this shim's argument, null or a live `Vec` whose elements are `Vec`s
         // (C-ABI contract).
@@ -366,7 +366,7 @@ pub unsafe extern "C" fn gos_rt_vec_format_vec_i64(v: *const GosVec, bare: i32) 
 /// formatter. Returns a fresh String pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_vec_f64(v: *const GosVec, bare: i32) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut out = String::new();
         // SAFETY: `v` is this shim's argument, null or a live `Vec` whose elements are `Vec`s
         // (C-ABI contract).
@@ -391,7 +391,7 @@ pub unsafe extern "C" fn gos_rt_vec_format_vec_f64(v: *const GosVec, bare: i32) 
 /// pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_vec_string(v: *const GosVec, bare: i32) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut out = String::new();
         // SAFETY: `v` is this shim's argument, null or a live `Vec` whose elements are `Vec`s
         // (C-ABI contract).
@@ -411,7 +411,7 @@ pub unsafe extern "C" fn gos_rt_vec_format_vec_string(v: *const GosVec, bare: i3
 /// stride of one and cannot share [`gos_rt_arr_format_i64`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_arr_format_u8(p: *const u8, len: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if p.is_null() || len <= 0 {
             return alloc_cstring(b"[]");
         }
@@ -440,7 +440,7 @@ pub unsafe extern "C" fn gos_rt_arr_format_u8(p: *const u8, len: i64) -> *mut c_
 /// instead and goes through [`gos_rt_arr_format_u8`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_arr_format_i64(p: *const i64, len: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if p.is_null() || len <= 0 {
             return alloc_cstring(b"[]");
         }
@@ -465,7 +465,7 @@ pub unsafe extern "C" fn gos_rt_arr_format_i64(p: *const i64, len: i64) -> *mut 
 /// as unsigned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_arr_format_u64(p: *const u64, len: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if p.is_null() || len <= 0 {
             return alloc_cstring(b"[]");
         }
@@ -490,7 +490,7 @@ pub unsafe extern "C" fn gos_rt_arr_format_u64(p: *const u64, len: i64) -> *mut 
 /// stored at an 8-byte stride; we read the raw word as f64.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_arr_format_f64(p: *const f64, len: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if p.is_null() || len <= 0 {
             return alloc_cstring(b"[]");
         }
@@ -515,7 +515,7 @@ pub unsafe extern "C" fn gos_rt_arr_format_f64(p: *const f64, len: i64) -> *mut 
 /// holding the value as an `f64`, spelled with single-precision digits.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_arr_format_f32(p: *const f64, len: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if p.is_null() || len <= 0 {
             return alloc_cstring(b"[]");
         }
@@ -540,7 +540,7 @@ pub unsafe extern "C" fn gos_rt_arr_format_f32(p: *const f64, len: i64) -> *mut 
 /// 8-byte slot; the low byte is the bool.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_arr_format_bool(p: *const i64, len: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if p.is_null() || len <= 0 {
             return alloc_cstring(b"[]");
         }
@@ -565,7 +565,7 @@ pub unsafe extern "C" fn gos_rt_arr_format_bool(p: *const i64, len: i64) -> *mut
 /// holding the scalar value's code point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_arr_format_char(p: *const i64, len: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if p.is_null() || len <= 0 {
             return alloc_cstring(b"[]");
         }
@@ -598,7 +598,7 @@ pub unsafe extern "C-unwind" fn gos_rt_arr_format_adt(
     fmt: *const std::ffi::c_void,
     by_ref: i32,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if p.is_null() || len <= 0 || stride <= 0 || fmt.is_null() {
             return alloc_cstring(b"[]");
         }
@@ -634,7 +634,7 @@ pub unsafe extern "C" fn gos_rt_arr_format_string(
     p: *const *const c_char,
     len: i64,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if p.is_null() || len <= 0 {
             return alloc_cstring(b"[]");
         }
@@ -671,7 +671,7 @@ pub unsafe extern "C" fn gos_rt_arr_format_arr_i64(
     outer: i64,
     inner: i64,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if p.is_null() || outer <= 0 || inner <= 0 {
             return alloc_cstring(b"[]");
         }
@@ -707,7 +707,7 @@ pub unsafe extern "C" fn gos_rt_arr_format_arr_f64(
     outer: i64,
     inner: i64,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if p.is_null() || outer <= 0 || inner <= 0 {
             return alloc_cstring(b"[]");
         }
@@ -743,7 +743,7 @@ pub unsafe extern "C" fn gos_rt_arr_format_arr_bool(
     outer: i64,
     inner: i64,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if p.is_null() || outer <= 0 || inner <= 0 {
             return alloc_cstring(b"[]");
         }
@@ -786,7 +786,7 @@ pub unsafe extern "C" fn gos_rt_arr_format_arr_bool(
 /// `os::env(name)` returned the old value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_os_set_env(name: *const c_char, value: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if name.is_null() {
             let err = crate::c_abi::errors::error_new_from_bytes(b"os::set_env: name is null");
             return gos_rt_result_new(1, err as i64);
@@ -809,7 +809,7 @@ pub unsafe extern "C" fn gos_rt_os_set_env(name: *const c_char, value: *const c_
 /// dropped to match the VM's lenient behaviour.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_os_unset_env(name: *const c_char) {
-    ffi_entry!((), {
+    ffi_entry!({
         if name.is_null() {
             return;
         }
@@ -835,7 +835,7 @@ pub unsafe extern "C" fn gos_rt_os_unset_env(name: *const c_char) {
 #[unsafe(no_mangle)]
 #[cfg_attr(target_arch = "wasm32", allow(clippy::forget_non_drop))]
 pub unsafe extern "C" fn gos_rt_exec_spawn(prog: *const c_char, args: *mut GosVec) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let prog_str = if prog.is_null() {
             let err = crate::c_abi::errors::error_new_from_bytes(b"exec::spawn: program is null");
             return gos_rt_result_new(1, err as i64);
@@ -877,7 +877,7 @@ pub unsafe extern "C" fn gos_rt_exec_spawn(prog: *const c_char, args: *mut GosVe
 /// (e.g. the process already exited, EPERM).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_exec_kill(pid: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if pid <= 0 {
             return 0;
         }

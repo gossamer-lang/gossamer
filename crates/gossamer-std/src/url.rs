@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+use gossamer_runtime::codec::percent;
+
 use crate::errors::Error;
 
 /// Parsed URL.
@@ -103,49 +105,12 @@ fn split_host_port(authority: &str) -> Result<(String, Option<u16>), Error> {
 /// Escapes `text` for use in a URL query parameter.
 #[must_use]
 pub fn query_escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for byte in text.as_bytes() {
-        let b = *byte;
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-            out.push(b as char);
-        } else if b == b' ' {
-            out.push('+');
-        } else {
-            out.push('%');
-            out.push(upper_hex(b >> 4));
-            out.push(upper_hex(b & 0xf));
-        }
-    }
-    out
+    percent::encode(text, percent::Component::Query)
 }
 
 /// Inverts [`query_escape`].
 pub fn query_unescape(text: &str) -> Result<String, Error> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' => {
-                if i + 2 >= bytes.len() {
-                    return Err(Error::new("truncated percent-escape"));
-                }
-                let hi = hex_value(bytes[i + 1]).ok_or_else(|| Error::new("bad hex"))?;
-                let lo = hex_value(bytes[i + 2]).ok_or_else(|| Error::new("bad hex"))?;
-                out.push((hi << 4) | lo);
-                i += 3;
-            }
-            other => {
-                out.push(other);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8(out).map_err(|_| Error::new("non-UTF-8 percent-escape"))
+    percent::decode_strict(text, true).map_err(Error::new)
 }
 
 /// Encodes `pairs` as `key=value&key=value` query string.
@@ -185,65 +150,35 @@ pub fn decode_query(raw: &str) -> Result<Vec<(String, String)>, Error> {
 /// is preserved per RFC 3986 §3.3.
 #[must_use]
 pub fn path_escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for byte in text.as_bytes() {
-        let b = *byte;
-        if b.is_ascii_alphanumeric()
-            || matches!(
-                b,
-                b'-' | b'_'
-                    | b'.'
-                    | b'~'
-                    | b'/'
-                    | b':'
-                    | b'@'
-                    | b'!'
-                    | b'$'
-                    | b'&'
-                    | b'\''
-                    | b'('
-                    | b')'
-                    | b'*'
-                    | b'+'
-                    | b','
-                    | b';'
-                    | b'='
-            )
-        {
-            out.push(b as char);
-        } else {
-            out.push('%');
-            out.push(upper_hex(b >> 4));
-            out.push(upper_hex(b & 0xf));
-        }
-    }
-    out
+    percent::encode_keeping(
+        text,
+        |b| {
+            percent::is_unreserved(b)
+                || matches!(
+                    b,
+                    b'/' | b':'
+                        | b'@'
+                        | b'!'
+                        | b'$'
+                        | b'&'
+                        | b'\''
+                        | b'('
+                        | b')'
+                        | b'*'
+                        | b'+'
+                        | b','
+                        | b';'
+                        | b'='
+                )
+        },
+        false,
+    )
 }
 
 /// Inverts [`path_escape`]. Percent-encoded escapes are decoded;
 /// `+` is NOT translated to space (that's a query convention).
 pub fn path_unescape(text: &str) -> Result<String, Error> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' => {
-                if i + 2 >= bytes.len() {
-                    return Err(Error::new("truncated percent-escape"));
-                }
-                let hi = hex_value(bytes[i + 1]).ok_or_else(|| Error::new("bad hex"))?;
-                let lo = hex_value(bytes[i + 2]).ok_or_else(|| Error::new("bad hex"))?;
-                out.push((hi << 4) | lo);
-                i += 3;
-            }
-            other => {
-                out.push(other);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8(out).map_err(|_| Error::new("non-UTF-8 percent-escape"))
+    percent::decode_strict(text, false).map_err(Error::new)
 }
 
 /// Userinfo pair (`user[:password]`) extracted from a URL.
@@ -387,23 +322,6 @@ impl Values {
     pub fn parse(raw: &str) -> Result<Self, Error> {
         let pairs = decode_query(raw)?;
         Ok(Self { pairs })
-    }
-}
-
-const fn upper_hex(n: u8) -> char {
-    match n {
-        0..=9 => (b'0' + n) as char,
-        10..=15 => (b'A' + n - 10) as char,
-        _ => '?',
-    }
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
     }
 }
 

@@ -60,7 +60,7 @@ pub enum FlagKind {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_flag_set_new(name: *const c_char) -> *mut GosFlagSet {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let n = if name.is_null() {
             String::new()
         } else {
@@ -90,7 +90,7 @@ pub unsafe extern "C" fn gos_rt_flag_set_string(
     default_v: *const c_char,
     help: *const c_char,
 ) -> *mut *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if set.is_null() {
             return std::ptr::null_mut();
         }
@@ -126,7 +126,7 @@ pub unsafe extern "C" fn gos_rt_flag_set_int(
     default_v: i64,
     help: *const c_char,
 ) -> *mut i64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if set.is_null() {
             return std::ptr::null_mut();
         }
@@ -155,7 +155,7 @@ pub unsafe extern "C" fn gos_rt_flag_set_uint(
     default_v: u64,
     help: *const c_char,
 ) -> *mut u64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if set.is_null() {
             return std::ptr::null_mut();
         }
@@ -184,7 +184,7 @@ pub unsafe extern "C" fn gos_rt_flag_set_float(
     default_v: f64,
     help: *const c_char,
 ) -> *mut f64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if set.is_null() {
             return std::ptr::null_mut();
         }
@@ -213,7 +213,7 @@ pub unsafe extern "C" fn gos_rt_flag_set_bool(
     default_v: bool,
     help: *const c_char,
 ) -> *mut bool {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if set.is_null() {
             return std::ptr::null_mut();
         }
@@ -244,7 +244,7 @@ pub unsafe extern "C" fn gos_rt_flag_set_duration(
     default_ms: i64,
     help: *const c_char,
 ) -> *mut i64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if set.is_null() {
             return std::ptr::null_mut();
         }
@@ -272,7 +272,7 @@ pub unsafe extern "C" fn gos_rt_flag_set_string_list(
     name: *const c_char,
     help: *const c_char,
 ) -> *mut *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if set.is_null() {
             return std::ptr::null_mut();
         }
@@ -301,7 +301,7 @@ pub unsafe extern "C" fn gos_rt_flag_set_string_list(
 /// flow through the compiled-tier C ABI.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_flag_set_short(set: *mut GosFlagSet, letter: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if set.is_null() {
             return;
         }
@@ -320,7 +320,7 @@ pub unsafe extern "C" fn gos_rt_flag_set_short(set: *mut GosFlagSet, letter: i64
 /// c-string. Matches `gossamer-std::flag::Set::usage`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_flag_set_usage(set: *const GosFlagSet) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if set.is_null() {
             return alloc_cstring(b"");
         }
@@ -488,7 +488,7 @@ fn apply_flag_value(
 /// `Result<Vec<String>, Error>` containing the leftover positional arguments.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_flag_set_parse(set: *mut GosFlagSet, args: *const GosVec) -> i128 {
-    ffi_entry!(crate::c_abi::result::gos_rt_result_new(1, 0), {
+    ffi_entry!({
         if set.is_null() {
             let out = gos_rt_vec_new(8);
             return crate::c_abi::result::gos_rt_result_new(0, out as i64);
@@ -562,7 +562,7 @@ pub unsafe extern "C" fn gos_rt_flag_set_parse(set: *mut GosFlagSet, args: *cons
                 break;
             }
             if arg == "--help" || arg == "-h" {
-                print!("{}", render_flag_usage(set));
+                crate::c_abi::print::write_stdout(render_flag_usage(set).as_bytes());
                 // Route through `gos_rt_exit` so the stdout cache is
                 // flushed and the audited-exit list (Fix C3) stays
                 // empty outside the two legitimate paths.
@@ -583,11 +583,9 @@ pub unsafe extern "C" fn gos_rt_flag_set_parse(set: *mut GosFlagSet, args: *cons
                 continue;
             }
             if let Some(rest) = arg.strip_prefix('-')
-                && !rest.is_empty()
+                && let Some(first) = rest.chars().next()
             {
-                let mut chars = rest.chars();
-                let first = chars.next().unwrap();
-                let remainder: String = chars.collect();
+                let remainder: String = rest[first.len_utf8()..].to_string();
                 if let Some(spec) = set.specs.iter_mut().find(|s| s.short == Some(first)) {
                     let explicit = if remainder.is_empty() {
                         None
@@ -629,7 +627,7 @@ pub unsafe extern "C" fn gos_rt_flag_set_parse(set: *mut GosFlagSet, args: *cons
 /// `*cell` for `flag::Set::string` cells.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_flag_cell_load_str(cell: *const *const c_char) -> *const c_char {
-    ffi_entry!(std::ptr::null(), {
+    ffi_entry!({
         if cell.is_null() {
             return std::ptr::null();
         }
@@ -642,7 +640,7 @@ pub unsafe extern "C" fn gos_rt_flag_cell_load_str(cell: *const *const c_char) -
 /// `*cell` for `flag::Set::uint` cells.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_flag_cell_load_i64(cell: *const i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if cell.is_null() {
             return 0;
         }
@@ -655,7 +653,7 @@ pub unsafe extern "C" fn gos_rt_flag_cell_load_i64(cell: *const i64) -> i64 {
 /// `*cell` for `flag::Set::bool` cells, widened to i64.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_flag_cell_load_bool(cell: *const bool) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if cell.is_null() {
             return 0;
         }
@@ -687,7 +685,7 @@ pub struct GosFlagMap {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_flag_parse(decls: *mut GosVec) -> *mut GosFlagMap {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut entries: Vec<GosFlagMapEntry> = Vec::new();
         if !decls.is_null() {
             // SAFETY: `decls` is this shim's argument, live for the call (C-ABI contract) or
@@ -831,11 +829,9 @@ unsafe fn parse_argv_flag_values(
             continue;
         }
         if let Some(rest) = arg.strip_prefix('-')
-            && !rest.is_empty()
+            && let Some(first) = rest.chars().next()
         {
-            let mut chars = rest.chars();
-            let first = chars.next().unwrap();
-            let remainder: String = chars.collect();
+            let remainder: String = rest[first.len_utf8()..].to_string();
             if let Some(entry) = entries.iter_mut().find(|e| e.short == Some(first)) {
                 let value = if !remainder.is_empty() {
                     remainder
@@ -890,7 +886,7 @@ fn apply_decl_value(entry: &mut GosFlagMapEntry, raw: &str) {
 /// bool flags or the c-string pointer for string flags.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_flag_map_get(map: *const GosFlagMap, key: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if map.is_null() || key.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -918,7 +914,7 @@ pub unsafe extern "C" fn gos_rt_flag_map_get(map: *const GosFlagMap, key: *const
 /// `*cell` for `flag::Set::float` cells.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_flag_cell_load_f64(cell: *const f64) -> f64 {
-    ffi_entry!(f64::NAN, {
+    ffi_entry!({
         if cell.is_null() {
             return 0.0;
         }
@@ -932,7 +928,7 @@ pub unsafe extern "C" fn gos_rt_flag_cell_load_f64(cell: *const f64) -> f64 {
 /// `*mut GosVec` that the runtime owns; reads return a borrow.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_flag_cell_load_vec(cell: *const *mut GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if cell.is_null() {
             return std::ptr::null_mut();
         }

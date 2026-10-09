@@ -4,8 +4,8 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
 
-//! `std::encoding::csv` C-ABI shims. Mirrors
-//! `gossamer_std::encoding::csv` exactly. CSV records cross the ABI
+//! `std::encoding::csv` C-ABI shims over `crate::codec::csv`, the
+//! implementation every tier shares. CSV records cross the ABI
 //! as `Vec<Vec<String>>` - an outer `GosVec` of inner `GosVec`
 //! pointers, each inner holding c-string pointers.
 
@@ -14,6 +14,7 @@ use std::os::raw::c_char;
 use super::result::gos_rt_result_new;
 use super::string::alloc_cstring;
 use super::vec::{GosVec, gos_rt_vec_push};
+use crate::codec::csv;
 
 /// Reads a `GosVec<String>` (elements are c-string pointers) into
 /// owned strings.
@@ -45,91 +46,6 @@ fn build_str_vec(parts: &[String]) -> *mut GosVec {
     vec
 }
 
-/// Hands each of `line`'s fields to `emit` as the bytes it holds.
-///
-/// A field carrying no quote is a run of the line itself and reaches `emit`
-/// as that run, so the common record costs no copy at all. Only a quoted
-/// field is assembled, into `scratch`, which the caller reuses across the
-/// whole document.
-///
-/// The separator and the quote are ASCII, so a byte can only be one of them
-/// where a character is, and the run between two of them is a whole number
-/// of characters.
-fn for_each_field(line: &str, scratch: &mut String, mut emit: impl FnMut(&[u8])) {
-    let bytes = line.as_bytes();
-    let mut assembling = false;
-    let mut in_quotes = false;
-    let mut run_start = 0usize;
-    let mut i = 0usize;
-    scratch.clear();
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' if in_quotes => {
-                scratch.push_str(&line[run_start..i]);
-                assembling = true;
-                if bytes.get(i + 1) == Some(&b'"') {
-                    scratch.push('"');
-                    i += 2;
-                } else {
-                    in_quotes = false;
-                    i += 1;
-                }
-                run_start = i;
-            }
-            b'"' => {
-                scratch.push_str(&line[run_start..i]);
-                assembling = true;
-                in_quotes = true;
-                i += 1;
-                run_start = i;
-            }
-            b',' if !in_quotes => {
-                if assembling {
-                    scratch.push_str(&line[run_start..i]);
-                    emit(scratch.as_bytes());
-                    scratch.clear();
-                    assembling = false;
-                } else {
-                    emit(&bytes[run_start..i]);
-                }
-                i += 1;
-                run_start = i;
-            }
-            _ => i += 1,
-        }
-    }
-    if assembling {
-        scratch.push_str(&line[run_start..]);
-        emit(scratch.as_bytes());
-    } else {
-        emit(&bytes[run_start..]);
-    }
-}
-
-fn parse_line(line: &str) -> Vec<String> {
-    let mut fields = Vec::new();
-    let mut scratch = String::new();
-    for_each_field(line, &mut scratch, |f| {
-        fields.push(String::from_utf8_lossy(f).into_owned());
-    });
-    fields
-}
-
-/// Builds the `GosVec<String>` one record's fields fill, each string
-/// allocated once at its final length. STRING-typed: the vec owns each
-/// element, so `gos_rt_vec_free` deep-frees them.
-fn build_record(line: &str, scratch: &mut String) -> *mut GosVec {
-    let vec =
-        { crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::STRING) };
-    for_each_field(line, scratch, |field| {
-        let pv = alloc_cstring(field) as i64;
-        // SAFETY: `vec` is the fresh vec made above, or null, which `gos_rt_vec_push` accepts,
-        // and `pv` is one 8-byte element.
-        unsafe { gos_rt_vec_push(vec, std::ptr::addr_of!(pv).cast::<u8>()) };
-    });
-    vec
-}
-
 unsafe fn cstr<'a>(p: *const c_char) -> &'a str {
     // SAFETY: this `unsafe fn`'s caller passes `p` live or null, which `gos_str_arg_text`
     // accepts.
@@ -139,17 +55,17 @@ unsafe fn cstr<'a>(p: *const c_char) -> &'a str {
 /// `encoding::csv::parse_line(line) -> [String]`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_csv_parse_line(line: *const c_char) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `line` is this shim's argument, null or a live string body for the call (C-ABI
         // contract), which `cstr` accepts.
-        build_str_vec(&parse_line(unsafe { cstr(line) }))
+        build_str_vec(&csv::parse_line(unsafe { cstr(line) }))
     })
 }
 
 /// `encoding::csv::read(input) -> Result<[[String]], Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_csv_read(input: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `input` is this shim's argument, null or a live string body for the call (C-ABI
         // contract), which `cstr` accepts.
         let input = unsafe { cstr(input) };
@@ -160,26 +76,33 @@ pub unsafe extern "C" fn gos_rt_csv_read(input: *const c_char) -> i128 {
         let outer =
             { crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::VEC) };
         let mut scratch = String::new();
-        for line in input.lines() {
-            if line.trim().is_empty() {
-                continue;
+        let mut row =
+            crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::STRING);
+        let walked = csv::for_each_record(input, &mut scratch, |event| match event {
+            csv::Event::Field(field) => {
+                let pv = alloc_cstring(field) as i64;
+                // SAFETY: `row` is a fresh vec owned here, or null, which `gos_rt_vec_push`
+                // accepts, and `pv` is one 8-byte element.
+                unsafe { gos_rt_vec_push(row, std::ptr::addr_of!(pv).cast::<u8>()) };
             }
-            // A quote is ASCII and cannot occur inside a multi-byte
-            // character, so the bytes answer the same count without decoding
-            // the line.
-            let quote_count = line.bytes().filter(|&b| b == b'"').count();
-            if quote_count % 2 != 0 {
-                let msg = format!("csv: unterminated quoted field in: {line}");
-                let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                // SAFETY: `outer` is the fresh vec made above, owned here alone and not read
-                // again.
-                unsafe { crate::c_abi::map::gos_rt_vec_free(outer) };
-                return gos_rt_result_new(1, err as i64);
+            csv::Event::EndRecord => {
+                let inner = row as i64;
+                // SAFETY: `outer` is the fresh vec made above, or null, which `gos_rt_vec_push`
+                // accepts, and `inner` is one 8-byte element whose share moves into it.
+                unsafe { gos_rt_vec_push(outer, std::ptr::addr_of!(inner).cast::<u8>()) };
+                row = crate::c_abi::vec::gos_rt_vec_new_typed(
+                    8,
+                    crate::c_abi::vec::vec_elem_kind::STRING,
+                );
             }
-            let inner = build_record(line, &mut scratch) as i64;
-            // SAFETY: `outer` is the fresh vec made above, or null, which `gos_rt_vec_push`
-            // accepts, and `inner` is one 8-byte element.
-            unsafe { gos_rt_vec_push(outer, std::ptr::addr_of!(inner).cast::<u8>()) };
+        });
+        // SAFETY: `row` is the fresh, unpushed vec the walk left, owned here alone.
+        unsafe { crate::c_abi::map::gos_rt_vec_free(row) };
+        if let Err(msg) = walked {
+            let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
+            // SAFETY: `outer` is the fresh vec made above, owned here alone and not read again.
+            unsafe { crate::c_abi::map::gos_rt_vec_free(outer) };
+            return gos_rt_result_new(1, err as i64);
         }
         gos_rt_result_new(0, outer as i64)
     })
@@ -188,7 +111,7 @@ pub unsafe extern "C" fn gos_rt_csv_read(input: *const c_char) -> i128 {
 /// `encoding::csv::write(records) -> String`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_csv_write(records: *const GosVec) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let rows: Vec<Vec<String>> = if records.is_null() {
             Vec::new()
         } else {
@@ -211,24 +134,7 @@ pub unsafe extern "C" fn gos_rt_csv_write(records: *const GosVec) -> *mut c_char
                     .collect()
             }
         };
-        let mut out = String::new();
-        for (i, record) in rows.iter().enumerate() {
-            for (j, field) in record.iter().enumerate() {
-                if j > 0 {
-                    out.push(',');
-                }
-                if field.contains(',') || field.contains('"') || field.contains('\n') {
-                    out.push('"');
-                    out.push_str(&field.replace('"', "\"\""));
-                    out.push('"');
-                } else {
-                    out.push_str(field);
-                }
-            }
-            if i + 1 < rows.len() {
-                out.push('\n');
-            }
-        }
+        let out = csv::write(&rows);
         alloc_cstring(out.as_bytes())
     })
 }
@@ -351,7 +257,7 @@ mod tests {
 
 #[cfg(test)]
 mod parse_line_tests {
-    use super::parse_line;
+    use crate::codec::csv::parse_line;
 
     /// A field is the text between separators, whatever it holds.
     #[test]

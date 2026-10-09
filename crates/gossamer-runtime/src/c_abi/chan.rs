@@ -142,7 +142,7 @@ impl GosChan {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_chan_new(elem_bytes: u32, cap: i64) -> *mut GosChan {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let buf = if elem_bytes == 8 {
             ChanStorage::I64(VecDeque::new())
         } else {
@@ -182,7 +182,7 @@ pub extern "C" fn gos_rt_chan_new(elem_bytes: u32, cap: i64) -> *mut GosChan {
 /// reaches the coroutine boundary rather than being converted to a sentinel.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_chan_send(c: *mut GosChan, val: *const u8) {
-    let sent_on_closed = ffi_entry!(false, {
+    let sent_on_closed = ffi_entry!({
         if c.is_null() || val.is_null() {
             return false;
         }
@@ -401,7 +401,7 @@ fn wake_all(chan: &GosChan) {
 /// blocking [`gos_rt_chan_send`] does.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_chan_try_send(c: *mut GosChan, val: *const u8) -> i32 {
-    let outcome = ffi_entry!(-1, {
+    let outcome = ffi_entry!({
         if c.is_null() || val.is_null() {
             return 0;
         }
@@ -450,7 +450,7 @@ const CLOSED_SEND: i32 = -2;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_chan_recv(c: *mut GosChan, out: *mut u8) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if c.is_null() || out.is_null() {
             return 0;
         }
@@ -534,7 +534,7 @@ pub unsafe extern "C" fn gos_rt_chan_recv(c: *mut GosChan, out: *mut u8) -> i32 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_chan_try_recv(c: *mut GosChan, out: *mut u8) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if c.is_null() || out.is_null() {
             return 0;
         }
@@ -559,7 +559,7 @@ pub unsafe extern "C" fn gos_rt_chan_try_recv(c: *mut GosChan, out: *mut u8) -> 
 /// disc=1 → None) so callers don't need to manage an out-pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_chan_recv_option(c: *mut GosChan) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let mut out = 0i64;
         // SAFETY: `c` is this shim's argument, null or live for the call (C-ABI contract), which
         // `gos_rt_chan_recv` accepts, and `out` is a local word that holds a one-word element.
@@ -574,7 +574,7 @@ pub unsafe extern "C" fn gos_rt_chan_recv_option(c: *mut GosChan) -> i128 {
 /// but non-blocking (returns None immediately when the buffer is empty).
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_chan_try_recv_option(c: *mut GosChan) -> i128 {
-    ffi_entry_passthrough!(0i128, {
+    ffi_entry_passthrough!({
         let mut out = 0i64;
         // SAFETY: `c` is this shim's argument, null or live for the call (C-ABI contract), which
         // `gos_rt_chan_try_recv` accepts, and `out` is a local word that holds a one-word
@@ -649,7 +649,7 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_recv_ctx_option(
     c: *mut GosChan,
     ctx_handle: *const super::context::GosCtx,
 ) -> i128 {
-    ffi_entry_passthrough!(0i128, {
+    ffi_entry_passthrough!({
         // SAFETY: `c` is this shim's argument, null or live for the call (C-ABI contract).
         let (disc, payload) = unsafe { chan_recv_ctx_handle(c, ctx_handle) };
         crate::c_abi::result::pack_result(disc, payload)
@@ -672,7 +672,7 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_recv_ctx(
     ctx_handle: *const super::context::GosCtx,
     out: *mut i64,
 ) -> i32 {
-    ffi_entry_passthrough!(0, {
+    ffi_entry_passthrough!({
         // SAFETY: `c` is this shim's argument, null or live for the call (C-ABI contract).
         let (disc, payload) = unsafe { chan_recv_ctx_handle(c, ctx_handle) };
         if disc == 0 {
@@ -942,7 +942,7 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_close(c: *mut GosChan) -> i32 {
     // raised below, *outside* the guard, so a goroutine-scoped unwind
     // reaches the coroutine boundary instead of being swallowed and
     // converted to an FFI-entry sentinel.
-    let outcome = ffi_entry!(None, {
+    let outcome = ffi_entry!({
         if c.is_null() {
             None
         } else {
@@ -964,7 +964,7 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_close(c: *mut GosChan) -> i32 {
 /// teardown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_chan_drop(c: *mut GosChan) {
-    ffi_entry!((), {
+    ffi_entry!({
         if c.is_null() {
             return;
         }
@@ -978,7 +978,7 @@ pub unsafe extern "C" fn gos_rt_chan_drop(c: *mut GosChan) {
 /// type is known; writing the same kind again is the common case.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_chan_set_elem_kind(c: *mut GosChan, kind: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if c.is_null() {
             return;
         }
@@ -994,7 +994,7 @@ pub unsafe extern "C" fn gos_rt_chan_set_elem_kind(c: *mut GosChan, kind: i64) {
 /// the teardown walks to give those back.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_chan_set_elem_desc(c: *mut GosChan, desc: *const std::ffi::c_char) {
-    ffi_entry!((), {
+    ffi_entry!({
         if c.is_null() || desc.is_null() {
             return;
         }
@@ -1203,7 +1203,7 @@ fn retain_arm(c: *mut GosChan) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_select_new(n: i64) -> *mut SelectBuilder {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let cap = usize::try_from(n).unwrap_or(0);
         Box::into_raw(Box::new(SelectBuilder {
             arms: Vec::with_capacity(cap),
@@ -1214,7 +1214,7 @@ pub extern "C" fn gos_rt_select_new(n: i64) -> *mut SelectBuilder {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_select_arm_recv(b: *mut SelectBuilder, c: *mut GosChan) {
-    ffi_entry!((), {
+    ffi_entry!({
         if b.is_null() {
             return;
         }
@@ -1226,7 +1226,7 @@ pub unsafe extern "C" fn gos_rt_select_arm_recv(b: *mut SelectBuilder, c: *mut G
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_select_arm_send(b: *mut SelectBuilder, c: *mut GosChan, val: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if b.is_null() {
             return;
         }
@@ -1238,7 +1238,7 @@ pub unsafe extern "C" fn gos_rt_select_arm_send(b: *mut SelectBuilder, c: *mut G
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_select_arm_default(b: *mut SelectBuilder) {
-    ffi_entry!((), {
+    ffi_entry!({
         if b.is_null() {
             return;
         }
@@ -1273,7 +1273,7 @@ fn select_arm_is_ready(kind: u8, chan: &GosChan) -> bool {
 /// `gos_rt_select_value`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64 {
-    ffi_entry_passthrough!(-1, {
+    ffi_entry_passthrough!({
         if b.is_null() {
             return -1;
         }
@@ -1462,7 +1462,7 @@ pub unsafe extern "C-unwind" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64
 /// outcome on this builder (0 for a send/default outcome or a null builder).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_select_value(b: *mut SelectBuilder) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if b.is_null() {
             return 0;
         }
@@ -1473,7 +1473,7 @@ pub unsafe extern "C" fn gos_rt_select_value(b: *mut SelectBuilder) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_select_free(b: *mut SelectBuilder) {
-    ffi_entry!((), {
+    ffi_entry!({
         if b.is_null() {
             return;
         }

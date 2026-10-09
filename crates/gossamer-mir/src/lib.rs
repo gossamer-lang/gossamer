@@ -42,6 +42,7 @@ pub use lower::builder::unwind::{
     statement_locals,
 };
 pub use lower::helpers::escape::{ParamShare, collect_region_unsafe_fns, collect_shareable_params};
+pub use lower::map_value_owner_marker;
 pub use lower::{lower_program, mangle_callable_shape};
 pub use monomorph::{
     Template, bind_template_params, check_generic_layouts, mangled_name, method_mangled_name,

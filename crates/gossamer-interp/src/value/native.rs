@@ -194,6 +194,9 @@ pub struct NativeEnumShape {
     pub tagged: bool,
     /// Variants in declaration order.
     pub variants: Vec<NativeVariantShape>,
+    /// The runtime child-layout descriptor nodes of this shape are built
+    /// under, interned by content on first use.
+    pub rc_meta: std::sync::OnceLock<&'static [i64]>,
 }
 
 /// Owning handle for a native (compiled-representation) enum value
@@ -931,6 +934,7 @@ mod native_consume_tests {
                 index: base,
                 tagged: true,
                 variants: Vec::new(),
+                rc_meta: std::sync::OnceLock::new(),
             });
             let weak = Arc::downgrade(&shape);
             (vec![shape], (base, weak))
@@ -965,6 +969,7 @@ mod native_consume_tests {
                     name: intern_type_name(VARIANT),
                     fields: Vec::new(),
                 }],
+                rc_meta: std::sync::OnceLock::new(),
             });
             (vec![Arc::clone(&shape)], shape)
         });
@@ -983,6 +988,7 @@ mod native_consume_tests {
                     name: intern_type_name(VARIANT),
                     fields: Vec::new(),
                 }],
+                rc_meta: std::sync::OnceLock::new(),
             });
             (vec![shape], ())
         });
@@ -1003,6 +1009,7 @@ mod native_consume_tests {
                     name: intern_type_name("ConsumeLeaf"),
                     fields: vec![NativeFieldKind::I64],
                 }],
+                rc_meta: std::sync::OnceLock::new(),
             });
             let parent = Arc::new(NativeEnumShape {
                 enum_name: intern_type_name("ConsumeParent"),
@@ -1012,6 +1019,7 @@ mod native_consume_tests {
                     name: intern_type_name("ConsumeNode"),
                     fields: vec![NativeFieldKind::Enum(base)],
                 }],
+                rc_meta: std::sync::OnceLock::new(),
             });
             (
                 vec![Arc::clone(&child), Arc::clone(&parent)],

@@ -285,7 +285,7 @@ pub const STRINGS: StdModule = StdModule {
         StdItem {
             name: "find",
             kind: StdItemKind::Function,
-            doc: "Returns the character index of the first match, or None.",
+            doc: "Returns the Unicode scalar index of the first match, or None; `byte_find` answers the byte offset `substring` and `slice` take.",
         },
         StdItem {
             name: "replace",
@@ -336,6 +336,26 @@ pub const STRINGS: StdModule = StdModule {
             name: "byte_at",
             kind: StdItemKind::Function,
             doc: "Returns the UTF-8 byte at an index.",
+        },
+        StdItem {
+            name: "byte_find",
+            kind: StdItemKind::Function,
+            doc: "Byte offset of the first match, in the unit `substring`, `slice`, and `byte_at` take; `find` answers a scalar index instead.",
+        },
+        StdItem {
+            name: "byte_rfind",
+            kind: StdItemKind::Function,
+            doc: "Byte offset of the last match.",
+        },
+        StdItem {
+            name: "byte_offset",
+            kind: StdItemKind::Function,
+            doc: "`byte_offset(text, char_index) -> Option<i64>`: where a scalar index (a `find` answer) starts in bytes; one past the last scalar answers the byte length.",
+        },
+        StdItem {
+            name: "char_index",
+            kind: StdItemKind::Function,
+            doc: "`char_index(text, byte_offset) -> Option<i64>`: the scalar index starting at a byte offset, or `None` inside a scalar or past the end.",
         },
         StdItem {
             name: "bytes",

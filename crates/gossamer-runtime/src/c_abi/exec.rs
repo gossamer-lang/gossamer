@@ -39,7 +39,7 @@ use super::vec::GosVec;
 /// both strings. Err payload is `*mut GosError`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_exec_pipeline_run_raw(commands: *mut GosVec) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `commands` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `gather_command_lines` accepts.
         let stages = match unsafe { gather_command_lines(commands) } {
@@ -165,7 +165,7 @@ fn run_pipeline(stages: Vec<Vec<String>>) -> Result<(String, String, i64), Strin
 /// (KILL / TERM / INT) and routes them through `TerminateProcess`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_exec_signal(pid: i64, signum: i64) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if pid <= 0 {
             return 0;
         }
@@ -194,7 +194,7 @@ pub unsafe extern "C" fn gos_rt_exec_signal(pid: i64, signum: i64) -> i64 {
 /// Windows: best-effort `TerminateProcess` on the pid itself.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_exec_kill_group(pid: i64) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if pid <= 0 {
             return 0;
         }
@@ -222,7 +222,7 @@ pub unsafe extern "C" fn gos_rt_exec_kill_group(pid: i64) -> i64 {
 /// the timeout, `-2` on any other error (unknown pid, permission denied).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_exec_wait_timeout(pid: i64, ms: i64) -> i64 {
-    ffi_entry!(-2, { wait_timeout(pid, ms) })
+    ffi_entry!({ wait_timeout(pid, ms) })
 }
 
 /// [`gos_rt_exec_wait_timeout`] for the bytecode tier and the standard
@@ -308,7 +308,7 @@ pub(crate) fn status_code(status: std::process::ExitStatus) -> i64 {
 /// `process::run_inherit(program, args) -> Result<i64, errors::Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_exec_run_inherit(prog: *const c_char, args: *mut GosVec) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if prog.is_null() {
             let err = crate::c_abi::errors::error_new_from_bytes(
                 b"process::run_inherit: program is null",

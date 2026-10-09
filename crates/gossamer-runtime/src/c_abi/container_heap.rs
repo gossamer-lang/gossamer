@@ -127,7 +127,7 @@ unsafe fn max_heap_sift_down_i64(buf: *mut i64, len: usize, start_i: usize) {
 /// `slot` addresses a `*mut GosVec` field, or is null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_field_clone(slot: *mut *mut GosVec) {
-    ffi_entry!((), {
+    ffi_entry!({
         if slot.is_null() {
             return;
         }
@@ -154,7 +154,7 @@ pub unsafe extern "C" fn gos_rt_bheap_field_clone(slot: *mut *mut GosVec) {
 /// `slot` addresses a `*mut GosVec` field, or is null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_field_release(slot: *mut *mut GosVec) {
-    ffi_entry!((), {
+    ffi_entry!({
         if slot.is_null() {
             return;
         }
@@ -196,12 +196,12 @@ unsafe fn heap_words_from(v: *mut GosVec) -> *mut GosVec {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_max_new_i64() -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), { gos_rt_vec_new(8) })
+    ffi_entry!({ gos_rt_vec_new(8) })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_max_from_vec_i64(v: *mut GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's argument, null or live for the call (C-ABI contract).
         let heap = unsafe { heap_words_from(v) };
         // SAFETY: `heap` is the fresh word vec `heap_words_from` made.
@@ -220,7 +220,7 @@ pub unsafe extern "C" fn gos_rt_bheap_max_from_vec_i64(v: *mut GosVec) -> *mut G
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_max_push_i64(v: *mut GosVec, value: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -238,7 +238,7 @@ pub unsafe extern "C" fn gos_rt_bheap_max_push_i64(v: *mut GosVec, value: i64) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_max_pop_i64(v: *mut GosVec) -> i128 {
-    ffi_entry!(super::result::pack_result(1, 0), {
+    ffi_entry!({
         if v.is_null() {
             return super::result::pack_result(1, 0);
         }
@@ -268,7 +268,7 @@ pub unsafe extern "C" fn gos_rt_bheap_max_pop_i64(v: *mut GosVec) -> i128 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_max_peek_i64(v: *const GosVec) -> i128 {
-    ffi_entry!(super::result::pack_result(1, 0), {
+    ffi_entry!({
         if v.is_null() {
             return super::result::pack_result(1, 0);
         }
@@ -285,12 +285,12 @@ pub unsafe extern "C" fn gos_rt_bheap_max_peek_i64(v: *const GosVec) -> i128 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_min_new_i64() -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), { gos_rt_vec_new(8) })
+    ffi_entry!({ gos_rt_vec_new(8) })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_min_from_vec_i64(v: *mut GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's argument, null or live for the call (C-ABI contract).
         let heap = unsafe { heap_words_from(v) };
         // SAFETY: `heap` is the fresh word vec `heap_words_from` made.
@@ -309,7 +309,7 @@ pub unsafe extern "C" fn gos_rt_bheap_min_from_vec_i64(v: *mut GosVec) -> *mut G
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_min_push_i64(v: *mut GosVec, value: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -328,7 +328,7 @@ pub unsafe extern "C" fn gos_rt_bheap_min_push_i64(v: *mut GosVec, value: i64) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_min_pop_i64(v: *mut GosVec) -> i128 {
-    ffi_entry!(super::result::pack_result(1, 0), {
+    ffi_entry!({
         if v.is_null() {
             return super::result::pack_result(1, 0);
         }
@@ -358,7 +358,7 @@ pub unsafe extern "C" fn gos_rt_bheap_min_pop_i64(v: *mut GosVec) -> i128 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_min_peek_i64(v: *const GosVec) -> i128 {
-    ffi_entry!(super::result::pack_result(1, 0), {
+    ffi_entry!({
         if v.is_null() {
             return super::result::pack_result(1, 0);
         }
@@ -375,7 +375,7 @@ pub unsafe extern "C" fn gos_rt_bheap_min_peek_i64(v: *const GosVec) -> i128 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_is_empty(v: *const GosVec) -> i32 {
-    ffi_entry!(1, {
+    ffi_entry!({
         if v.is_null() {
             return 1;
         }
@@ -386,7 +386,7 @@ pub unsafe extern "C" fn gos_rt_bheap_is_empty(v: *const GosVec) -> i32 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_clear(v: *mut GosVec) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -421,7 +421,7 @@ unsafe fn bheap_format(v: *const GosVec, owner: &str) -> *mut c_char {
 /// Format a `MaxHeap` for `{}` / `{:?}`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_max_format(v: *const GosVec) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's heap argument, null or live (C-ABI contract).
         unsafe { bheap_format(v, "MaxHeap") }
     })
@@ -430,7 +430,7 @@ pub unsafe extern "C" fn gos_rt_bheap_max_format(v: *const GosVec) -> *mut c_cha
 /// Format a `MinHeap` for `{}` / `{:?}`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_min_format(v: *const GosVec) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's heap argument, null or live (C-ABI contract).
         unsafe { bheap_format(v, "MinHeap") }
     })
@@ -438,7 +438,7 @@ pub unsafe extern "C" fn gos_rt_bheap_min_format(v: *const GosVec) -> *mut c_cha
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_len(v: *const GosVec) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if v.is_null() {
             return 0;
         }
@@ -561,7 +561,7 @@ unsafe fn max_heap_sift_down_f64(buf: *mut i64, len: usize, start_i: usize) {
 /// Heapifies a `Vec<f64>` snapshot into a max-heap over the float values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_max_from_vec_f64(v: *mut GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let heap = if v.is_null() {
             gos_rt_vec_new(8)
         } else {
@@ -586,7 +586,7 @@ pub unsafe extern "C" fn gos_rt_bheap_max_from_vec_f64(v: *mut GosVec) -> *mut G
 /// Pushes a float onto a max-heap, keeping the greatest value at the root.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_max_push_f64(v: *mut GosVec, value: f64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -607,7 +607,7 @@ pub unsafe extern "C" fn gos_rt_bheap_max_push_f64(v: *mut GosVec, value: f64) {
 /// an i128 (disc=0 `Some`, disc=1 `None`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_max_pop_f64(v: *mut GosVec) -> i128 {
-    ffi_entry!(super::result::pack_result(1, 0), {
+    ffi_entry!({
         if v.is_null() {
             return super::result::pack_result(1, 0);
         }
@@ -638,7 +638,7 @@ pub unsafe extern "C" fn gos_rt_bheap_max_pop_f64(v: *mut GosVec) -> i128 {
 /// Heapifies a `Vec<f64>` snapshot into a min-heap over the float values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_min_from_vec_f64(v: *mut GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let heap = if v.is_null() {
             gos_rt_vec_new(8)
         } else {
@@ -663,7 +663,7 @@ pub unsafe extern "C" fn gos_rt_bheap_min_from_vec_f64(v: *mut GosVec) -> *mut G
 /// Pushes a float onto a min-heap, keeping the least value at the root.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_min_push_f64(v: *mut GosVec, value: f64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -684,7 +684,7 @@ pub unsafe extern "C" fn gos_rt_bheap_min_push_f64(v: *mut GosVec, value: f64) {
 /// i128 (disc=0 `Some`, disc=1 `None`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_min_pop_f64(v: *mut GosVec) -> i128 {
-    ffi_entry!(super::result::pack_result(1, 0), {
+    ffi_entry!({
         if v.is_null() {
             return super::result::pack_result(1, 0);
         }
@@ -724,7 +724,7 @@ pub unsafe extern "C" fn gos_rt_bheap_min_pop_f64(v: *mut GosVec) -> i128 {
 /// the `Vec` element-kind tag.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_new_typed(elem_bytes: i32, elem_kind: u8) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let bytes = if elem_bytes > 0 { elem_bytes } else { 8 };
         crate::c_abi::vec::gos_rt_vec_new_typed(bytes as u32, elem_kind)
     })
@@ -1205,7 +1205,7 @@ pub unsafe extern "C" fn gos_rt_bheap_max_push_desc(
 ) {
     // SAFETY: `v`, `elem`, `tags` are this shim's arguments, live for the call (C-ABI contract)
     // or null, which `bheap_push_desc` accepts.
-    ffi_entry!((), { unsafe { bheap_push_desc(v, elem, tags, true) } });
+    ffi_entry!({ unsafe { bheap_push_desc(v, elem, tags, true) } });
 }
 
 /// Push an element of any orderable type onto a min heap.
@@ -1217,13 +1217,13 @@ pub unsafe extern "C" fn gos_rt_bheap_min_push_desc(
 ) {
     // SAFETY: `v`, `elem`, `tags` are this shim's arguments, live for the call (C-ABI contract)
     // or null, which `bheap_push_desc` accepts.
-    ffi_entry!((), { unsafe { bheap_push_desc(v, elem, tags, false) } });
+    ffi_entry!({ unsafe { bheap_push_desc(v, elem, tags, false) } });
 }
 
 /// Remove and return the greatest element as `Option<T>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_bheap_max_pop_desc(v: *mut GosVec, tags: *const u8) -> i128 {
-    ffi_entry_passthrough!(super::result::pack_result(1, 0), {
+    ffi_entry_passthrough!({
         // SAFETY: `v`, `tags` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `bheap_pop_desc` accepts.
         unsafe { bheap_pop_desc(v, tags, true) }
@@ -1233,7 +1233,7 @@ pub unsafe extern "C-unwind" fn gos_rt_bheap_max_pop_desc(v: *mut GosVec, tags: 
 /// Remove and return the least element as `Option<T>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_bheap_min_pop_desc(v: *mut GosVec, tags: *const u8) -> i128 {
-    ffi_entry_passthrough!(super::result::pack_result(1, 0), {
+    ffi_entry_passthrough!({
         // SAFETY: `v`, `tags` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `bheap_pop_desc` accepts.
         unsafe { bheap_pop_desc(v, tags, false) }
@@ -1250,7 +1250,7 @@ pub unsafe extern "C-unwind" fn gos_rt_bheap_max_pop_desc_into(
 ) -> i64 {
     // SAFETY: `v`, `tags`, `out` are this shim's arguments, live for the call (C-ABI contract) or
     // null, which `bheap_pop_desc_into` accepts.
-    ffi_entry_passthrough!(1, { unsafe { bheap_pop_desc_into(v, tags, out, true) } })
+    ffi_entry_passthrough!({ unsafe { bheap_pop_desc_into(v, tags, out, true) } })
 }
 
 /// Remove the least element into caller-owned storage; see
@@ -1263,14 +1263,14 @@ pub unsafe extern "C-unwind" fn gos_rt_bheap_min_pop_desc_into(
 ) -> i64 {
     // SAFETY: `v`, `tags`, `out` are this shim's arguments, live for the call (C-ABI contract) or
     // null, which `bheap_pop_desc_into` accepts.
-    ffi_entry_passthrough!(1, { unsafe { bheap_pop_desc_into(v, tags, out, false) } })
+    ffi_entry_passthrough!({ unsafe { bheap_pop_desc_into(v, tags, out, false) } })
 }
 
 /// The root element as `Option<T>` without removing it. The payload of a
 /// multi-slot element is the address of its slots.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_peek_elem(v: *const GosVec) -> i128 {
-    ffi_entry!(super::result::pack_result(1, 0), {
+    ffi_entry!({
         if v.is_null() {
             return super::result::pack_result(1, 0);
         }
@@ -1291,7 +1291,7 @@ pub unsafe extern "C-unwind" fn gos_rt_bheap_max_from_vec_desc(
     v: *mut GosVec,
     tags: *const u8,
 ) -> *mut GosVec {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         // SAFETY: `v`, `tags` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `bheap_from_vec_desc` accepts.
         unsafe { bheap_from_vec_desc(v, tags, true) }
@@ -1304,7 +1304,7 @@ pub unsafe extern "C-unwind" fn gos_rt_bheap_min_from_vec_desc(
     v: *mut GosVec,
     tags: *const u8,
 ) -> *mut GosVec {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         // SAFETY: `v`, `tags` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `bheap_from_vec_desc` accepts.
         unsafe { bheap_from_vec_desc(v, tags, false) }
@@ -1365,7 +1365,7 @@ pub unsafe extern "C-unwind" fn gos_rt_bheap_max_format_desc(
     v: *const GosVec,
     tags: *const u8,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         // SAFETY: `v` and `tags` are this shim's arguments, each null or live (C-ABI contract).
         unsafe { bheap_format_desc(v, "MaxHeap", tags) }
     })
@@ -1377,7 +1377,7 @@ pub unsafe extern "C-unwind" fn gos_rt_bheap_min_format_desc(
     v: *const GosVec,
     tags: *const u8,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         // SAFETY: `v` and `tags` are this shim's arguments, each null or live (C-ABI contract).
         unsafe { bheap_format_desc(v, "MinHeap", tags) }
     })

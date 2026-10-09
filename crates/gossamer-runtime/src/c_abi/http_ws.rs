@@ -169,7 +169,7 @@ pub unsafe extern "C-unwind" fn gos_rt_ws_serve(
 /// the plaintext registry does not yet carry a TLS transport.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_ws_serve_connect(url: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `url` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
         let url = unsafe { cstr_to_str(url) };
         match ws_client_connect(&url) {
@@ -191,7 +191,7 @@ fn ws_client_connect(url: &str) -> Result<i64, String> {
 /// `websocket::send_text(ws, s) -> Result<(), Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_ws_send_text(h: i64, s: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let Some(conn) = conn_clone(h) else {
             return ws_err("send_text: stale handle");
         };
@@ -208,7 +208,7 @@ pub unsafe extern "C" fn gos_rt_ws_send_text(h: i64, s: *const c_char) -> i128 {
 /// `websocket::send_binary(ws, data: [u8]) -> Result<(), Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_ws_send_binary(h: i64, data: *const super::vec::GosVec) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let Some(conn) = conn_clone(h) else {
             return ws_err("send_binary: stale handle");
         };
@@ -229,7 +229,7 @@ pub unsafe extern "C" fn gos_rt_ws_send_binary(h: i64, data: *const super::vec::
 /// `Err` - the loop's exit signal.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_ws_recv(h: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let Some(conn) = conn_clone(h) else {
             return ws_err("recv: stale handle");
         };
@@ -263,7 +263,7 @@ pub extern "C" fn gos_rt_ws_recv(h: i64) -> i128 {
 /// frame (best effort) and unregisters the handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_ws_close(h: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if let Some(conn) = conn_clone(h) {
             let _ = conn.lock().send_close(1000, "");
         }

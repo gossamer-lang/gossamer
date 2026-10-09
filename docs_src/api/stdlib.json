@@ -2,6 +2,25 @@
   "schema_version": 1,
   "entries": [
     {
+      "id": "std-archive-enclosed-path",
+      "name": "std::archive::enclosed_path",
+      "kind": "function",
+      "signature": "fn enclosed_path(name: String) -> Option<String>",
+      "description": "`enclosed_path(name) -> Option<String>`: an entry name as a relative path that stays inside the directory it is extracted to, `.` and inner `..` steps resolved, or `None` for an absolute path, a drive prefix, or a path that leaves the directory. Check every name before writing an entry by it.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdarchive",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-archive-tar-TarEntry",
       "name": "std::archive::tar::TarEntry",
       "kind": "type",
@@ -21,11 +40,49 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-archive-tar-extract",
+      "name": "std::archive::tar::extract",
+      "kind": "function",
+      "signature": "fn extract(data: Vec<u8>, dir: String) -> Result<i64, errors::Error>",
+      "description": "`extract(data, dir) -> Result<i64, Error>`: writes every file and directory under `dir`, refusing the archive before writing anything when a name would land outside it (`archive::enclosed_path`); answers how many entries it wrote.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdarchivetar",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-archive-tar-read",
       "name": "std::archive::tar::read",
       "kind": "function",
       "signature": "fn read(data: Vec<u8>) -> Result<Vec<tar::TarEntry>, errors::Error>",
       "description": "Reads all entries from a tar archive.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdarchivetar",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-archive-tar-read-limited",
+      "name": "std::archive::tar::read_limited",
+      "kind": "function",
+      "signature": "fn read_limited(data: Vec<u8>, max_entries: i64, max_entry_bytes: i64, max_total_bytes: i64) -> Result<Vec<tar::TarEntry>, errors::Error>",
+      "description": "`read(data)` refusing an archive with more than `max_entries` entries, an entry over `max_entry_bytes`, or more than `max_total_bytes` in all, counted as the bytes are read.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -78,11 +135,49 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-archive-zip-extract",
+      "name": "std::archive::zip::extract",
+      "kind": "function",
+      "signature": "fn extract(data: Vec<u8>, dir: String) -> Result<i64, errors::Error>",
+      "description": "`extract(data, dir) -> Result<i64, Error>`: writes every file and directory under `dir`, refusing the archive before writing anything when a name would land outside it (`archive::enclosed_path`); answers how many entries it wrote.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdarchivezip",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-archive-zip-read",
       "name": "std::archive::zip::read",
       "kind": "function",
       "signature": "fn read(data: Vec<u8>) -> Result<Vec<zip::ZipEntry>, errors::Error>",
       "description": "Reads all file entries from a zip stored in `data`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdarchivezip",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-archive-zip-read-limited",
+      "name": "std::archive::zip::read_limited",
+      "kind": "function",
+      "signature": "fn read_limited(data: Vec<u8>, max_entries: i64, max_entry_bytes: i64, max_total_bytes: i64) -> Result<Vec<zip::ZipEntry>, errors::Error>",
+      "description": "`read(data)` refusing an archive with more than `max_entries` entries, an entry over `max_entry_bytes`, or more than `max_total_bytes` in all, counted as the bytes are read.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -538,7 +633,7 @@
       "name": "std::compress::bzip2::compress",
       "kind": "function",
       "signature": "fn compress(data: Vec<u8>, level: i64) -> Result<Vec<u8>, errors::Error>",
-      "description": "One-shot bzip2 compress.",
+      "description": "One-shot bzip2 compress at `level`, `1` (fastest) to `9` (best).",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -572,11 +667,30 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-compress-bzip2-decompress-limited",
+      "name": "std::compress::bzip2::decompress_limited",
+      "kind": "function",
+      "signature": "fn decompress_limited(data: Vec<u8>, max_bytes: i64) -> Result<Vec<u8>, errors::Error>",
+      "description": "`decompress(data)`, refusing output past `max_bytes`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdcompressbzip2",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-compress-flate-compress",
       "name": "std::compress::flate::compress",
       "kind": "function",
       "signature": "fn compress(data: Vec<u8>, level: i64) -> Result<Vec<u8>, errors::Error>",
-      "description": "One-shot DEFLATE compress.",
+      "description": "One-shot DEFLATE compress at `level`, `0` (store only) to `9` (best).",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -610,11 +724,49 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-compress-flate-decompress-limited",
+      "name": "std::compress::flate::decompress_limited",
+      "kind": "function",
+      "signature": "fn decompress_limited(data: Vec<u8>, max_bytes: i64) -> Result<Vec<u8>, errors::Error>",
+      "description": "`decompress(data)`, refusing output past `max_bytes`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdcompressflate",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-compress-gzip-decode",
       "name": "std::compress::gzip::decode",
       "kind": "function",
       "signature": "fn decode(data: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
-      "description": "Decompresses a gzip-formatted payload.",
+      "description": "Decompresses a gzip payload; concatenated members decode as one stream. Output is unbounded - use `decode_limited` for untrusted input.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdcompressgzip",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-compress-gzip-decode-limited",
+      "name": "std::compress::gzip::decode_limited",
+      "kind": "function",
+      "signature": "fn decode_limited(data: Vec<u8>, max_bytes: i64) -> Result<Vec<u8>, errors::Error>",
+      "description": "`decode(data)`, refusing output past `max_bytes`: an archive bomb answers `Err` instead of exhausting memory.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -652,7 +804,7 @@
       "name": "std::compress::zlib::compress",
       "kind": "function",
       "signature": "fn compress(data: Vec<u8>, level: i64) -> Result<Vec<u8>, errors::Error>",
-      "description": "One-shot zlib compress.",
+      "description": "One-shot zlib compress at `level`, `0` (store only) to `9` (best).",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -686,11 +838,49 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-compress-zlib-decompress-limited",
+      "name": "std::compress::zlib::decompress_limited",
+      "kind": "function",
+      "signature": "fn decompress_limited(data: Vec<u8>, max_bytes: i64) -> Result<Vec<u8>, errors::Error>",
+      "description": "`decompress(data)`, refusing output past `max_bytes`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdcompresszlib",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-compress-zstd-decode",
       "name": "std::compress::zstd::decode",
       "kind": "function",
       "signature": "fn decode(data: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
       "description": "One-shot Zstandard decompress.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdcompresszstd",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-compress-zstd-decode-limited",
+      "name": "std::compress::zstd::decode_limited",
+      "kind": "function",
+      "signature": "fn decode_limited(data: Vec<u8>, max_bytes: i64) -> Result<Vec<u8>, errors::Error>",
+      "description": "`decode(data)`, refusing output past `max_bytes`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15639,11 +15829,68 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-strings-byte-find",
+      "name": "std::strings::byte_find",
+      "kind": "function",
+      "signature": "fn byte_find(text: String, needle: String | char) -> Option<i64>",
+      "description": "Byte offset of the first match, in the unit `substring`, `slice`, and `byte_at` take; `find` answers a scalar index instead.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdstrings",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-strings-byte-len",
       "name": "std::strings::byte_len",
       "kind": "function",
       "signature": "fn byte_len(text: String) -> i64",
       "description": "Returns the UTF-8 byte length.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdstrings",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-strings-byte-offset",
+      "name": "std::strings::byte_offset",
+      "kind": "function",
+      "signature": "fn byte_offset(text: String, char_index: i64) -> Option<i64>",
+      "description": "`byte_offset(text, char_index) -> Option<i64>`: where a scalar index (a `find` answer) starts in bytes; one past the last scalar answers the byte length.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdstrings",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-strings-byte-rfind",
+      "name": "std::strings::byte_rfind",
+      "kind": "function",
+      "signature": "fn byte_rfind(text: String, needle: String | char) -> Option<i64>",
+      "description": "Byte offset of the last match.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15682,6 +15929,25 @@
       "kind": "function",
       "signature": "fn center(text: String, width: i64, fill: char) -> String",
       "description": "Symmetric pad to `width` using the given pad character.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdstrings",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-strings-char-index",
+      "name": "std::strings::char_index",
+      "kind": "function",
+      "signature": "fn char_index(text: String, byte_offset: i64) -> Option<i64>",
+      "description": "`char_index(text, byte_offset) -> Option<i64>`: the scalar index starting at a byte offset, or `None` inside a scalar or past the end.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15814,7 +16080,7 @@
       "name": "std::strings::find",
       "kind": "function",
       "signature": "fn find(text: String, needle: String | char) -> Option<i64>",
-      "description": "Returns the character index of the first match, or None.",
+      "description": "Returns the Unicode scalar index of the first match, or None; `byte_find` answers the byte offset `substring` and `slice` take.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",

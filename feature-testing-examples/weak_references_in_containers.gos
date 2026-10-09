@@ -1,0 +1,140 @@
+// A `Weak` observes its target without keeping it alive wherever it is
+// stored - a local, a struct field, a struct inside a `Vec`, a `Vec`, a
+// `Map` value, a struct `Map` value, an `Option`, an enum payload, a closure
+// capture - and every weak share is given back when its holder dies, even
+// past the 255 references the header counts in place.
+
+enum Node { Leaf(i64), Pair(Node, Node) }
+enum Back { Link(i64, Weak<Node>), Empty }
+struct Holder { w: Weak<Node>, tag: i64 }
+
+fn alive(w: Weak<Node>) -> String {
+    match w.upgrade() {
+        Some(_) => "alive"
+        None => "dead"
+    }
+}
+
+fn weak_vec(k: i64) -> Vec<Weak<Node>> {
+    let n = Node::Leaf(k)
+    let mut ws = #[]
+    ws.push(n.downgrade())
+    ws.push(n.downgrade())
+    ws
+}
+
+fn holder_vec(k: i64) -> Vec<Holder> {
+    let n = Node::Leaf(k)
+    let mut hs = #[]
+    hs.push(Holder { w: n.downgrade(), tag: k })
+    hs
+}
+
+fn weak_map(k: i64) -> Map<i64, Weak<Node>> {
+    let n = Node::Leaf(k)
+    let mut m = Map::new()
+    m[k] = n.downgrade()
+    m
+}
+
+fn holder_map(k: i64) -> Map<i64, Holder> {
+    let n = Node::Leaf(k)
+    let mut m = Map::new()
+    m[k] = Holder { w: n.downgrade(), tag: k }
+    m
+}
+
+fn weak_option(k: i64) -> Option<Weak<Node>> {
+    let n = Node::Leaf(k)
+    Some(n.downgrade())
+}
+
+fn link(k: i64) -> Back {
+    let n = Node::Leaf(k)
+    Back::Link(k, n.downgrade())
+}
+
+fn checker(k: i64) -> Fn() -> String {
+    let n = Node::Leaf(k)
+    let w = n.downgrade()
+    || alive(w)
+}
+
+fn churn(k: i64) -> i64 {
+    let n = Node::Leaf(k)
+    let mut ws = #[]
+    for _ in 0..3 {
+        ws.push(n.downgrade())
+    }
+    let copy = ws.clone()
+    let mut m = Map::new()
+    m[k] = n.downgrade()
+    let held = m[k]
+    let o = Some(n.downgrade())
+    let h = Holder { w: n.downgrade(), tag: k }
+    let mut hs = #[h]
+    hs.push(Holder { w: held, tag: k + 1 })
+    let mut live = 0
+    for w in copy {
+        if w.upgrade().is_some() { live += 1 }
+    }
+    if o.is_some() { live += 1 }
+    match ws.pop() {
+        Some(w) => if w.upgrade().is_some() { live += 1 }
+        None => {}
+    }
+    live + hs.len() + m.len()
+}
+
+fn fan_out(k: i64, count: i64) -> i64 {
+    let n = Node::Leaf(k)
+    let mut ws = #[]
+    for _ in 0..count {
+        ws.push(n.downgrade())
+    }
+    let mut live = 0
+    for w in ws {
+        if w.upgrade().is_some() { live += 1 }
+    }
+    live
+}
+
+fn report() {
+    let n = Node::Leaf(0)
+    let w = n.downgrade()
+    println(f"local while held: {alive(w)}")
+
+    let ws = weak_vec(1)
+    println(f"vec: {alive(ws[0])} {alive(ws[1])}")
+    let hs = holder_vec(2)
+    println(f"struct in vec: {alive(hs[0].w)} tag {hs[0].tag}")
+    let m = weak_map(3)
+    println(f"map value: {alive(m[3])}")
+    let hm = holder_map(4)
+    println(f"struct map value: {alive(hm[4].w)}")
+    match weak_option(5) {
+        Some(w) => println(f"option: {alive(w)}")
+        None => println("option: none")
+    }
+    match link(6) {
+        Back::Link(_, w) => println(f"enum payload: {alive(w)}")
+        Back::Empty => println("enum payload: empty")
+    }
+    let check = checker(7)
+    println(f"closure capture: {check()}")
+}
+
+fn main() {
+    report()
+    let mut total = 0
+    for i in 0..40 {
+        total += churn(i)
+        total += weak_vec(i).len() + holder_vec(i).len() + weak_map(i).len()
+        total += holder_map(i).len()
+        if weak_option(i).is_some() { total += 1 }
+    }
+    println(f"churn total: {total}")
+    for count in #[254, 255, 256, 300, 1000] {
+        println(f"{count} weaks live while held: {fan_out(count, count)}")
+    }
+}

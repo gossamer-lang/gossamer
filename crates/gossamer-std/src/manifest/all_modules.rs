@@ -151,6 +151,7 @@ pub const ALL_MODULES: &[StdModule] = &[
     HTTP_SSE,
     HTTP_CHUNKED,
     HTTP_NATIVE_CLIENT,
+    ARCHIVE,
     ARCHIVE_ZIP,
     ARCHIVE_TAR,
     COMPRESS_FLATE,

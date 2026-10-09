@@ -230,7 +230,7 @@ unsafe fn json_handle<'a>(p: *const GosJson) -> Option<&'a GosJson> {
 /// well-formed JSON. Mirrors the interp `json::valid` builtin.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_valid(text: *const c_char) -> i8 {
-    ffi_entry!(0, {
+    ffi_entry!({
         let bytes: &[u8] = if text.is_null() {
             b""
         } else {
@@ -245,7 +245,7 @@ pub unsafe extern "C" fn gos_rt_json_valid(text: *const c_char) -> i8 {
 /// work across function boundaries in compiled code.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_parse(text: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let bytes: &[u8] = if text.is_null() {
             b""
         } else {
@@ -321,7 +321,7 @@ unsafe fn take_json_value(p: *mut GosJson) -> serde_json::Value {
 /// an array of objects costs the objects and nothing more.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_value_array_owned(vec: *mut GosVec) -> *mut GosJson {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut out: Vec<serde_json::Value> = Vec::new();
         if !vec.is_null() {
             // SAFETY: `vec` is non-null (checked above) and live for the call (C-ABI contract).
@@ -380,7 +380,7 @@ pub unsafe extern "C" fn gos_rt_json_value_object_owned_keyed(
     vec: *mut GosVec,
     key_kind: i64,
 ) -> *mut GosJson {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut out = serde_json::Map::new();
         if !vec.is_null() {
             // SAFETY: `vec` is non-null (checked above) and live for the call (C-ABI contract).
@@ -992,7 +992,7 @@ impl<'de, F: serde_json::ser::Formatter> serde::de::Visitor<'de> for Transcode<'
 /// C-string (empty on null input) into the GC arena.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_render(j: *const GosJson) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_handle` accepts.
         let Some(json) = (unsafe { json_handle(j) }) else {
@@ -1007,7 +1007,7 @@ pub unsafe extern "C" fn gos_rt_json_render(j: *const GosJson) -> *mut c_char {
 /// returns a non-null C-string (empty on null input) into the GC arena.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_render_pretty(j: *const GosJson) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_handle` accepts.
         let Some(json) = (unsafe { json_handle(j) }) else {
@@ -1022,7 +1022,7 @@ pub unsafe extern "C" fn gos_rt_json_render_pretty(j: *const GosJson) -> *mut c_
 /// their JSON representation so they stay machine-readable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_display(j: *const GosJson) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
         let Some(v) = (unsafe { json_borrow(j) }) else {
@@ -1040,7 +1040,7 @@ pub unsafe extern "C" fn gos_rt_json_display(j: *const GosJson) -> *mut c_char {
 /// rendering, where Display strips them from a top-level string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_debug(j: *const GosJson) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
         let Some(v) = (unsafe { json_borrow(j) }) else {
@@ -1058,7 +1058,7 @@ pub unsafe extern "C" fn gos_rt_json_debug(j: *const GosJson) -> *mut c_char {
 /// shares the parent's `Arc<Value>` tree (no deep clone).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_get(j: *const GosJson, key: *const c_char) -> *mut GosJson {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_handle` accepts.
         let Some(parent) = (unsafe { json_handle(j) }) else {
@@ -1089,7 +1089,7 @@ pub unsafe extern "C" fn gos_rt_json_get(j: *const GosJson, key: *const c_char) 
 /// shares the parent's tree.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_at(j: *const GosJson, idx: i64) -> *mut GosJson {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_handle` accepts.
         let Some(parent) = (unsafe { json_handle(j) }) else {
@@ -1109,7 +1109,7 @@ pub unsafe extern "C" fn gos_rt_json_at(j: *const GosJson, idx: i64) -> *mut Gos
 /// `value.len() -> i64` for arrays and objects; 0 elsewhere.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_len(j: *const GosJson) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
         let Some(v) = (unsafe { json_borrow(j) }) else {
@@ -1127,7 +1127,7 @@ pub unsafe extern "C" fn gos_rt_json_len(j: *const GosJson) -> i64 {
 /// `value.is_null() -> bool` (returns 1/0 i32, the codegen ABI).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_is_null(j: *const GosJson) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
         match unsafe { json_borrow(j) } {
@@ -1141,7 +1141,7 @@ pub unsafe extern "C" fn gos_rt_json_is_null(j: *const GosJson) -> i32 {
 /// returns 0 (matches the interpreter's `unwrap_or(0)` shape).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_i64(j: *const GosJson) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
         let Some(v) = (unsafe { json_borrow(j) }) else {
@@ -1161,7 +1161,7 @@ pub unsafe extern "C" fn gos_rt_json_as_i64(j: *const GosJson) -> i64 {
 /// `value.as_f64() -> f64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_f64(j: *const GosJson) -> f64 {
-    ffi_entry!(f64::NAN, {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
         let Some(v) = (unsafe { json_borrow(j) }) else {
@@ -1182,7 +1182,7 @@ pub unsafe extern "C" fn gos_rt_json_as_f64(j: *const GosJson) -> f64 {
 /// log them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_str(j: *const GosJson) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
         let Some(v) = (unsafe { json_borrow(j) }) else {
@@ -1205,7 +1205,7 @@ pub unsafe extern "C" fn gos_rt_json_as_str(j: *const GosJson) -> *mut c_char {
 /// non-integer field silently parse, so type validation never failed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_i64_opt(j: *const GosJson) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
         match unsafe { json_borrow(j) } {
@@ -1231,7 +1231,7 @@ pub unsafe extern "C" fn gos_rt_json_as_i64_opt(j: *const GosJson) -> i128 {
 /// and fits a `u64`, the payload word holding its bits.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_u64_opt(j: *const GosJson) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
         let n = match unsafe { json_borrow(j) } {
@@ -1253,7 +1253,7 @@ pub unsafe extern "C" fn gos_rt_json_as_u64_opt(j: *const GosJson) -> i128 {
 /// `None` otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_f64_opt(j: *const GosJson) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
         match unsafe { json_borrow(j) } {
@@ -1269,7 +1269,7 @@ pub unsafe extern "C" fn gos_rt_json_as_f64_opt(j: *const GosJson) -> i128 {
 /// string, `None` otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_str_opt(j: *const GosJson) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
         match unsafe { json_borrow(j) } {
@@ -1285,7 +1285,7 @@ pub unsafe extern "C" fn gos_rt_json_as_str_opt(j: *const GosJson) -> i128 {
 /// `value.as_bool() -> bool`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_bool(j: *const GosJson) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
         match unsafe { json_borrow(j) } {
@@ -1302,7 +1302,7 @@ pub unsafe extern "C" fn gos_rt_json_as_bool(j: *const GosJson) -> i32 {
 /// Some, disc 1 = None) to match the bytecode VM's `Option<bool>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_bool_opt(j: *const GosJson) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
         match unsafe { json_borrow(j) } {
@@ -1319,7 +1319,7 @@ pub unsafe extern "C" fn gos_rt_json_as_bool_opt(j: *const GosJson) -> i128 {
 /// names without special-casing them at the call site.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_identity(j: *mut GosJson) -> *mut GosJson {
-    ffi_entry!(std::ptr::null_mut(), { j })
+    ffi_entry!({ j })
 }
 
 /// `json::get(value, key) -> Option<json::Value>`. Wraps
@@ -1331,7 +1331,7 @@ pub unsafe extern "C" fn gos_rt_json_identity(j: *mut GosJson) -> *mut GosJson {
 /// `*mut GosJson` pointers through chained calls.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_get_opt(j: *const GosJson, key: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_handle` accepts.
         let Some(parent) = (unsafe { json_handle(j) }) else {
@@ -1359,7 +1359,7 @@ pub unsafe extern "C" fn gos_rt_json_get_opt(j: *const GosJson, key: *const c_ch
 /// shape - pinned by `malformed_json_returns_none_not_segfault`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_keys_opt(j: *const GosJson) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
         let Some(v) = (unsafe { json_borrow(j) }) else {
@@ -1402,7 +1402,7 @@ pub unsafe extern "C" fn gos_rt_json_keys_opt(j: *const GosJson) -> i128 {
 /// so the receiver can be dropped independently.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_array_opt(j: *const GosJson) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_handle` accepts.
         let Some(parent) = (unsafe { json_handle(j) }) else {
@@ -1442,7 +1442,7 @@ pub unsafe extern "C" fn gos_rt_json_as_array_opt(j: *const GosJson) -> i128 {
 /// `json::Value::String(s)` constructor.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_value_string(s: *const c_char) -> *mut GosJson {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let text = if s.is_null() {
             String::new()
         } else {
@@ -1456,33 +1456,27 @@ pub unsafe extern "C" fn gos_rt_json_value_string(s: *const c_char) -> *mut GosJ
 /// `json::Value::Int(n)` constructor.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_json_value_int(n: i64) -> *mut GosJson {
-    ffi_entry!(std::ptr::null_mut(), {
-        GosJson::into_raw(serde_json::Value::Number(n.into()))
-    })
+    ffi_entry!({ GosJson::into_raw(serde_json::Value::Number(n.into())) })
 }
 
 /// `json::Value` integer constructor for a word declared `u64` / `usize`,
 /// which reads as unsigned.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_json_value_uint(n: i64) -> *mut GosJson {
-    ffi_entry!(std::ptr::null_mut(), {
-        GosJson::into_raw(serde_json::Value::Number((n as u64).into()))
-    })
+    ffi_entry!({ GosJson::into_raw(serde_json::Value::Number((n as u64).into())) })
 }
 
 /// `json::Value::Bool(b)` constructor.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_json_value_bool(b: i32) -> *mut GosJson {
-    ffi_entry!(std::ptr::null_mut(), {
-        GosJson::into_raw(serde_json::Value::Bool(b != 0))
-    })
+    ffi_entry!({ GosJson::into_raw(serde_json::Value::Bool(b != 0)) })
 }
 
 /// `json::Value::Float(x)` constructor used by `json::render` on
 /// struct fields of type `f64`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_json_value_float(x: f64) -> *mut GosJson {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // JSON has no NaN or infinity, so such a float is `null`.
         let value = serde_json::Number::from_f64(x)
             .map_or(serde_json::Value::Null, serde_json::Value::Number);
@@ -1500,7 +1494,7 @@ pub unsafe extern "C" fn gos_rt_json_value_float32(x: f64) -> *mut GosJson {
 /// `json::Value::Null` constructor.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_json_value_null() -> *mut GosJson {
-    ffi_entry!(std::ptr::null_mut(), { GosJson::null_ptr() })
+    ffi_entry!({ GosJson::null_ptr() })
 }
 
 /// `json::Value::Array(vec)` constructor. Takes a `*mut GosVec` of
@@ -1508,7 +1502,7 @@ pub extern "C" fn gos_rt_json_value_null() -> *mut GosJson {
 /// `serde_json::Value::Array`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_value_array(vec: *const GosVec) -> *mut GosJson {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `vec` is this shim's argument, null or a live `Vec<json::Value>` (C-ABI
         // contract).
         let items = unsafe { crate::c_abi::vec::VecView::of(vec) };
@@ -1539,7 +1533,7 @@ pub unsafe extern "C" fn gos_rt_json_array_from_scalar_vec(
     vec: *const GosVec,
     kind: i64,
 ) -> *mut GosJson {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let out: Vec<serde_json::Value> = if kind == 2 {
             // SAFETY: a kind-2 `vec` is this shim's argument, null or a live `Vec<String>` (C-ABI
             // contract).
@@ -1585,7 +1579,7 @@ fn scalar_json(kind: i64, word: i64) -> serde_json::Value {
 /// builds that still pass a real `GosVec`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_value_object_n(n: i64, pairs: *const i64) -> *mut GosJson {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut out = serde_json::Map::new();
         let n = usize::try_from(n.max(0)).unwrap_or(0);
         if !pairs.is_null() && n > 0 {
@@ -1663,7 +1657,7 @@ pub unsafe extern "C" fn gos_rt_json_value_object_keyed(
     vec: *const GosVec,
     key_kind: i64,
 ) -> *mut GosJson {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut out = serde_json::Map::new();
         if !vec.is_null() {
             // SAFETY: `vec` is non-null (checked above) and live for the call (C-ABI contract).
@@ -1704,7 +1698,7 @@ pub unsafe extern "C" fn gos_rt_json_set(
     key: *const c_char,
     val: *const GosJson,
 ) -> *mut GosJson {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `obj` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `json_handle` accepts.
         let Some(parent) = (unsafe { json_handle(obj) }) else {
@@ -1814,7 +1808,7 @@ unsafe fn token_writer<'a>(w: *mut JsonTokenWriter) -> Option<&'a mut JsonTokenW
 /// `gos_rt_json_writer_finish`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_json_writer_new() -> *mut JsonTokenWriter {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         Box::into_raw(Box::new(JsonTokenWriter {
             sink: RuntimeJsonWriter::new(64 * 1024),
             open: Vec::new(),
@@ -1827,7 +1821,7 @@ pub extern "C" fn gos_rt_json_writer_new() -> *mut JsonTokenWriter {
 /// `gos_rt_json_render_pretty` answers.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_json_writer_new_pretty() -> *mut JsonTokenWriter {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         Box::into_raw(Box::new(JsonTokenWriter {
             sink: RuntimeJsonWriter::new(64 * 1024),
             open: Vec::new(),
@@ -1839,7 +1833,7 @@ pub extern "C" fn gos_rt_json_writer_new_pretty() -> *mut JsonTokenWriter {
 /// Writes `{` as the next value and opens the object.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_begin_object(w: *mut JsonTokenWriter) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
@@ -1853,7 +1847,7 @@ pub unsafe extern "C" fn gos_rt_json_writer_begin_object(w: *mut JsonTokenWriter
 /// Closes the innermost object with `}`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_end_object(w: *mut JsonTokenWriter) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
@@ -1865,7 +1859,7 @@ pub unsafe extern "C" fn gos_rt_json_writer_end_object(w: *mut JsonTokenWriter) 
 /// Writes `[` as the next value and opens the array.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_begin_array(w: *mut JsonTokenWriter) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
@@ -1879,7 +1873,7 @@ pub unsafe extern "C" fn gos_rt_json_writer_begin_array(w: *mut JsonTokenWriter)
 /// Closes the innermost array with `]`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_end_array(w: *mut JsonTokenWriter) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
@@ -1892,7 +1886,7 @@ pub unsafe extern "C" fn gos_rt_json_writer_end_array(w: *mut JsonTokenWriter) {
 /// comma that separates it from the member before.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_key(w: *mut JsonTokenWriter, key: *const c_char) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `token_writer` accepts.
         let Some(writer) = (unsafe { token_writer(w) }) else {
@@ -1916,7 +1910,7 @@ pub unsafe extern "C" fn gos_rt_json_writer_key(w: *mut JsonTokenWriter, key: *c
 /// Writes a string value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_str(w: *mut JsonTokenWriter, s: *const c_char) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
@@ -1931,7 +1925,7 @@ pub unsafe extern "C" fn gos_rt_json_writer_str(w: *mut JsonTokenWriter, s: *con
 /// Writes an integer value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_i64(w: *mut JsonTokenWriter, n: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
@@ -1944,7 +1938,7 @@ pub unsafe extern "C" fn gos_rt_json_writer_i64(w: *mut JsonTokenWriter, n: i64)
 /// Writes an integer declared `u64` / `usize`, whose word reads as unsigned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_u64(w: *mut JsonTokenWriter, n: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
@@ -1958,7 +1952,7 @@ pub unsafe extern "C" fn gos_rt_json_writer_u64(w: *mut JsonTokenWriter, n: i64)
 /// constructor stores it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_f64(w: *mut JsonTokenWriter, x: f64) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
@@ -1979,7 +1973,7 @@ pub unsafe extern "C" fn gos_rt_json_writer_f32(w: *mut JsonTokenWriter, x: f64)
 /// Writes a boolean value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_bool(w: *mut JsonTokenWriter, b: i32) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
@@ -1992,7 +1986,7 @@ pub unsafe extern "C" fn gos_rt_json_writer_bool(w: *mut JsonTokenWriter, b: i32
 /// Writes `null`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_null(w: *mut JsonTokenWriter) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
@@ -2006,7 +2000,7 @@ pub unsafe extern "C" fn gos_rt_json_writer_null(w: *mut JsonTokenWriter) {
 /// render it in place.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_value(w: *mut JsonTokenWriter, j: *const GosJson) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
@@ -2046,7 +2040,7 @@ pub unsafe extern "C" fn gos_rt_json_writer_value(w: *mut JsonTokenWriter, j: *c
 /// released.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_finish(w: *mut JsonTokenWriter) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if w.is_null() {
             return alloc_cstring(b"");
         }

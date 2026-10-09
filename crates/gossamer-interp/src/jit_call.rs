@@ -366,45 +366,50 @@ fn build_native_str(value: &Value) -> Option<i64> {
 /// RC child-layout kind for an enum node (mirrors `gossamer_abi::rc::RC_KIND_ENUM`).
 const RC_KIND_ENUM: i64 = 0;
 
-thread_local! {
-    /// Per-shape RC child-layout descriptor, built once and leaked so the
-    /// pointer stays stable across calls (`gos_rt_rc_alloc_tagged` interns
-    /// the meta by pointer).
-    static ENUM_META_CACHE: std::cell::RefCell<rustc_hash::FxHashMap<u32, &'static [i64]>> =
-        std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+/// The RC child-layout descriptor each distinct layout content maps to. A
+/// descriptor's address is what the runtime interns, and nodes built under it
+/// read it for as long as they live, so each distinct layout is kept for the
+/// process. Keying by content rather than by a program's shape index means a
+/// later program whose shape takes the same index never reuses another
+/// program's layout.
+static ENUM_META_CACHE: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashSet<&'static [i64]>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+
+/// The child-layout descriptor a native enum node of `shape` needs -
+/// `[RC_KIND_ENUM, n_variants, (disc, n_children, child_slot...)...]` - so the
+/// runtime retains / releases the `Str` and `Enum` children of each variant.
+fn enum_shape_meta(shape: &crate::value::NativeEnumShape) -> &'static [i64] {
+    shape.rc_meta.get_or_init(|| intern_enum_meta(shape))
 }
 
-/// Builds (and caches) the child-layout descriptor a native enum node of
-/// `shape` needs - `[RC_KIND_ENUM, n_variants, (disc, n_children,
-/// child_slot...)...]` - so the runtime retains / releases the `Str` and
-/// `Enum` children of each variant.
-fn enum_shape_meta(shape: &crate::value::NativeEnumShape) -> &'static [i64] {
-    ENUM_META_CACHE.with(|cache| {
-        if let Some(m) = cache.borrow().get(&shape.index) {
-            return *m;
-        }
-        let mut meta: Vec<i64> = vec![RC_KIND_ENUM, shape.variants.len() as i64];
-        for (disc, v) in shape.variants.iter().enumerate() {
-            let children: Vec<i64> = v
-                .fields
-                .iter()
-                .enumerate()
-                .filter(|(_, k)| {
-                    matches!(
-                        k,
-                        crate::value::NativeFieldKind::Str | crate::value::NativeFieldKind::Enum(_)
-                    )
-                })
-                .map(|(i, _)| i as i64)
-                .collect();
-            meta.push(disc as i64);
-            meta.push(children.len() as i64);
-            meta.extend(children);
-        }
-        let leaked: &'static [i64] = Box::leak(meta.into_boxed_slice());
-        cache.borrow_mut().insert(shape.index, leaked);
-        leaked
-    })
+/// Builds `shape`'s descriptor and answers the interned copy of its content.
+fn intern_enum_meta(shape: &crate::value::NativeEnumShape) -> &'static [i64] {
+    let mut meta: Vec<i64> = vec![RC_KIND_ENUM, shape.variants.len() as i64];
+    for (disc, v) in shape.variants.iter().enumerate() {
+        let children: Vec<i64> = v
+            .fields
+            .iter()
+            .enumerate()
+            .filter(|(_, k)| {
+                matches!(
+                    k,
+                    crate::value::NativeFieldKind::Str | crate::value::NativeFieldKind::Enum(_)
+                )
+            })
+            .map(|(i, _)| i as i64)
+            .collect();
+        meta.push(disc as i64);
+        meta.push(children.len() as i64);
+        meta.extend(children);
+    }
+    let mut cache = ENUM_META_CACHE.lock();
+    if let Some(existing) = cache.get(meta.as_slice()) {
+        return existing;
+    }
+    let leaked: &'static [i64] = Box::leak(meta.into_boxed_slice());
+    cache.insert(leaked);
+    leaked
 }
 
 /// Marshals a bytecode `Value::Variant` into a freshly allocated native

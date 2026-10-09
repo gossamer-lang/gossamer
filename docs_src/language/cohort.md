@@ -149,6 +149,14 @@ fn worker(rx: Receiver<Job>) -> Result<(), errors::Error> {
 }
 ```
 
+A child that panics also runs its `defer` frames on the way out, on every
+tier. The bytecode VM reclaims the values its frames held as well; compiled
+code does not reclaim the heap values held by the frames a panic unwinds,
+because releasing them would cost every call that does not panic. A panic
+marks a broken invariant, so a long-running program reports recoverable
+failures as `Err` and gives back any resource it must release on a
+panicking path in a `defer`.
+
 Pure computation is not a cancellation point. A CPU-bound child decides
 where it is willing to stop:
 

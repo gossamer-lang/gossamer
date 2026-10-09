@@ -287,7 +287,7 @@ fn json_to_node(value: &serde_json::Value) -> Option<Node> {
 /// disc 1 = Err with an error handle).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_xml_parse(s: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
         match parse(unsafe { cstr_to_str(s) }) {
             Ok(node) => {
@@ -304,7 +304,7 @@ pub unsafe extern "C" fn gos_rt_xml_parse(s: *const c_char) -> i128 {
 /// as on the VM.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_xml_encode(node: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `node` is a `json::Value` handle (or null), which is what
         // the checker admits for `encode`'s parameter.
         let value = unsafe { super::json::json_borrow(node as *const super::json::GosJson) };

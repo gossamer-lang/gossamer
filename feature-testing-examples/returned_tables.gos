@@ -1,0 +1,87 @@
+// A function that answers a table it was handed - a `Map`, `Set`, deque, or
+// heap, whole or as a field, on any return path - gives the caller a value of
+// its own: writes to the answer never reach the argument, and both are freed
+// exactly once on every tier.
+
+struct Index { m: Map<i64, i64>, s: Set<i64> }
+
+fn build(n: i64) -> Map<i64, i64> {
+    let mut m = Map::new()
+    for i in 0..n { m[i] = i }
+    m
+}
+
+fn pass_map(m: Map<i64, i64>) -> Map<i64, i64> { m }
+fn pass_set(s: Set<i64>) -> Set<i64> { return s }
+fn pass_deque(d: Deque<i64>) -> Deque<i64> { d }
+fn pass_heap(h: MinHeap<i64>) -> MinHeap<i64> { h }
+fn field_map(ix: Index) -> Map<i64, i64> { ix.m }
+fn via_binding(m: Map<i64, i64>) -> Map<i64, i64> {
+    let alias = m
+    alias
+}
+fn pick(m: Map<i64, i64>, fresh: bool) -> Map<i64, i64> {
+    if fresh { build(3) } else { m }
+}
+fn match_deque(d: Deque<i64>, n: i64) -> Deque<i64> {
+    match n {
+        0 => Deque::new()
+        _ => d
+    }
+}
+fn loop_heap(h: MinHeap<i64>) -> MinHeap<i64> {
+    let mut i = 0
+    loop {
+        i += 1
+        if i > 2 { break h }
+    }
+}
+fn early(m: Map<i64, i64>, k: i64) -> Map<i64, i64> {
+    if k > 0 { return m }
+    let mut fresh = Map::new()
+    fresh[k] = k
+    fresh
+}
+
+fn main() {
+    let m = build(100)
+    let s = #{ 1, 2, 3 }
+    let mut d = Deque::new()
+    d.push_back(1)
+    d.push_back(2)
+    let h = MinHeap::from([5, 3, 9])
+    let ix = Index { m: build(10), s: #{ 7 } }
+    let mut total = 0
+    for i in 0..200 {
+        let mut a = pass_map(m)
+        a[0] = -1
+        let mut b = pass_set(s)
+        b.insert(100 + i)
+        let mut c = pass_deque(d)
+        c.push_back(i)
+        let mut e = pass_heap(h)
+        e.push(-i)
+        let mut f = field_map(ix)
+        f[99] = i
+        let g = via_binding(m)
+        let mut p = pick(m, i % 2 == 0)
+        p[1000] = 1
+        let mut q = match_deque(d, i % 3)
+        q.push_front(0)
+        let mut r = loop_heap(h)
+        r.push(0)
+        let mut t = early(m, i % 2)
+        t[5000] = 5
+        total += a.len() + b.len() + c.len() + e.len() + f.len() + g.len()
+        total += p.len() + q.len() + r.len() + t.len()
+    }
+    println(f"total: {total}")
+    println(f"originals: {m.len()} {m[0]} {s} {d} {h.len()} {ix.m.len()} {ix.s}")
+    let mut changed = pass_map(m)
+    changed[0] = -5
+    println(f"after write: {m[0]} {changed[0]}")
+    let mut literal = { 1: (2, "x"), 2: (3, "y") }
+    let kept = literal
+    literal[3] = (4, "z")
+    println(f"literal: {literal.len()} {kept.len()} {kept[1]}")
+}

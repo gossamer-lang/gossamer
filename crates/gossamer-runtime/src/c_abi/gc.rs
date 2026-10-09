@@ -114,7 +114,7 @@ unsafe fn aggregate_free(ptr: *mut u8, layout: Layout) {
 /// (panicking across the FFI boundary into compiled code is UB).
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_gc_alloc(size: u64) -> *mut u8 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if size == 0 {
             return std::ptr::null_mut();
         }
@@ -187,7 +187,7 @@ pub extern "C" fn gos_rt_aggr_alloc_leak(size: u64) -> *mut u8 {
     static ANCHOR: AtomicUsize = AtomicUsize::new(0);
     ANCHOR.fetch_add(1, Ordering::SeqCst);
     std::sync::atomic::compiler_fence(Ordering::SeqCst);
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if size == 0 {
             return std::ptr::null_mut();
         }
@@ -222,7 +222,7 @@ static GOS_RT_AGGR_ALLOC_LEAK_KEEP: extern "C" fn(u64) -> *mut u8 = gos_rt_aggr_
 /// or `gos_rt_aggr_alloc` made, freed nowhere else.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_aggr_free(ptr: *mut u8, size: u64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if ptr.is_null() || size == 0 {
             return;
         }
@@ -246,7 +246,7 @@ pub unsafe extern "C" fn gos_rt_aggr_free(ptr: *mut u8, size: u64) {
 /// aggregates deterministically; escaped ones leak until exit).
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_gc_reset() {
-    ffi_entry!((), {});
+    ffi_entry!({});
 }
 
 /// Retained for ABI compatibility (called after `Vec::from_raw_parts`
@@ -254,7 +254,7 @@ pub extern "C" fn gos_rt_gc_reset() {
 /// registry removed there is nothing to deregister - no-op.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_gc_deregister(_ptr: *mut u8) {
-    ffi_entry!((), {});
+    ffi_entry!({});
 }
 
 /// `std::runtime::gc_collect()` - retained as a no-op (returns 0
@@ -264,27 +264,27 @@ pub extern "C" fn gos_rt_gc_deregister(_ptr: *mut u8) {
 /// well-defined no-op rather than a removed API.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_gc_collect() -> u64 {
-    ffi_entry!(0, { 0 })
+    ffi_entry!({ 0 })
 }
 
 /// `std::runtime` allocation-count hook - returns 0 now that the
 /// tracking registry is gone. Diagnostic only.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_gc_alloc_count() -> u64 {
-    ffi_entry!(0, { 0 })
+    ffi_entry!({ 0 })
 }
 
 /// Legacy arena watermark - no-op (returns the "no checkpoint"
 /// value). Existing compiled artefacts may still reference it.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_arena_save() -> u64 {
-    ffi_entry!(0, { 0 })
+    ffi_entry!({ 0 })
 }
 
 /// Legacy arena rewind - no-op. See `gos_rt_arena_save`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_arena_restore(_saved: u64) {
-    ffi_entry!((), {});
+    ffi_entry!({});
 }
 
 #[cfg(test)]

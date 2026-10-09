@@ -55,7 +55,7 @@ pub unsafe extern "C" fn gos_rt_field_error_new(
     message: *const c_char,
     code: *const c_char,
 ) -> *mut GosFieldError {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         Box::into_raw(Box::new(GosFieldError {
             // SAFETY: `path` is this shim's argument, as `cstr_to_string` requires (C-ABI
             // contract).
@@ -73,7 +73,7 @@ pub unsafe extern "C" fn gos_rt_field_error_new(
 /// `fe.path()` - the field path, as a fresh runtime c-string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_field_error_path(fe: *mut GosFieldError) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if fe.is_null() {
             return alloc_cstring(b"");
         }
@@ -85,7 +85,7 @@ pub unsafe extern "C" fn gos_rt_field_error_path(fe: *mut GosFieldError) -> *mut
 /// `fe.message()` - the failure message, as a fresh runtime c-string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_field_error_message(fe: *mut GosFieldError) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if fe.is_null() {
             return alloc_cstring(b"");
         }
@@ -98,7 +98,7 @@ pub unsafe extern "C" fn gos_rt_field_error_message(fe: *mut GosFieldError) -> *
 /// runtime c-string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_field_error_code(fe: *mut GosFieldError) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if fe.is_null() {
             return alloc_cstring(b"");
         }
@@ -121,7 +121,7 @@ pub struct GosErrors {
 /// Allocate an empty `Errors`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_validate_errors_new() -> *mut GosErrors {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         Box::into_raw(Box::new(GosErrors {
             fields: BTreeMap::new(),
         }))
@@ -135,7 +135,7 @@ pub unsafe extern "C" fn gos_rt_validate_errors_add(
     field: *const c_char,
     fe: *mut GosFieldError,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         if errs.is_null() || fe.is_null() {
             return;
         }
@@ -155,7 +155,7 @@ pub unsafe extern "C" fn gos_rt_validate_errors_add(
 /// `errs.is_empty()` - `1` when no failures recorded, else `0`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_validate_errors_is_empty(errs: *mut GosErrors) -> i64 {
-    ffi_entry!(1, {
+    ffi_entry!({
         if errs.is_null() {
             return 1;
         }
@@ -167,7 +167,7 @@ pub unsafe extern "C" fn gos_rt_validate_errors_is_empty(errs: *mut GosErrors) -
 /// `errs.len()` - total `FieldError` count across every field.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_validate_errors_len(errs: *mut GosErrors) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if errs.is_null() {
             return 0;
         }
@@ -186,7 +186,7 @@ pub unsafe extern "C" fn gos_rt_validate_errors_count(
     errs: *mut GosErrors,
     field: *const c_char,
 ) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if errs.is_null() {
             return 0;
         }
@@ -207,7 +207,7 @@ pub unsafe extern "C" fn gos_rt_validate_errors_get(
     errs: *mut GosErrors,
     field: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if errs.is_null() {
             return alloc_cstring(b"");
         }
@@ -233,7 +233,7 @@ pub unsafe extern "C" fn gos_rt_validate_errors_get(
 /// `gossamer_std::validate::Errors` `Display` impl.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_validate_errors_collect(errs: *mut GosErrors) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if errs.is_null() {
             return alloc_cstring(b"");
         }

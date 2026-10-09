@@ -1,45 +1,26 @@
 //! Release discipline for reference-counted handles in MIR.
 //!
-//! A release call hands back the share one local holds. From that point
-//! until something is assigned to the local again, reading it reaches memory
-//! this body no longer owns, and releasing it again gives up a share it does
-//! not have. Both are checked here on every path: a local counts as released
-//! at a program point when every path reaching the point released it, so a
-//! report names a fault the body commits whichever way it runs.
+//! A release call hands back the share one place holds - a whole local or a
+//! field path inside one. From that point until something is assigned to the
+//! place again, reading it reaches memory this body no longer owns, and
+//! releasing it again gives up a share it does not have.
+//!
+//! Each program point carries two facts per place: released on every path
+//! reaching it (a fault whichever way the body runs), and released on some
+//! path (a fault on the paths that released it). A retain gives a place a
+//! share beyond its own, which the next release of that place gives back
+//! first. Which entry points release and retain is the ABI registry's
+//! `Ownership`, not a list kept here.
 //!
 //! A leak - a share never released on some path - is the remaining failure;
-//! the leak ledger measures that one at run time.
+//! the leak ledger and the runtime's reference trace measure that one.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{
     BlockId, Body, ConstValue, Local, Operand, Place, Projection, Rvalue, Statement, StatementKind,
     Terminator,
 };
-
-/// Runtime entry points that give up the share their first argument holds.
-const RELEASES: &[&str] = &[
-    "gos_rt_aggr_free",
-    "gos_rt_arr_iter_free",
-    "gos_rt_binding_callback_release",
-    "gos_rt_binding_map_free",
-    "gos_rt_deque_free",
-    "gos_rt_dyn_free",
-    "gos_rt_heap_i64_free",
-    "gos_rt_heap_u8_free",
-    "gos_rt_http_response_free",
-    "gos_rt_json_free",
-    "gos_rt_lazy_iter_drop_i64",
-    "gos_rt_lazy_iter_drop_pair_i64",
-    "gos_rt_map_free",
-    "gos_rt_rc_release",
-    "gos_rt_rc_weak_release",
-    "gos_rt_select_free",
-    "gos_rt_set_free",
-    "gos_rt_str_free",
-    "gos_rt_str_free_typed",
-    "gos_rt_vec_free",
-];
 
 /// One fault the verifier found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,19 +45,108 @@ pub enum RcViolation {
         /// The runtime entry point of the second release.
         release: String,
     },
+    /// `local` is read after some path here released it.
+    ConditionalUseAfterRelease {
+        /// Function the fault is in.
+        body: String,
+        /// Block holding the read.
+        block: BlockId,
+        /// The local released on some path.
+        local: Local,
+    },
+    /// `local` is released again after some path here released it.
+    ConditionalDoubleRelease {
+        /// Function the fault is in.
+        body: String,
+        /// Block holding the second release.
+        block: BlockId,
+        /// The local released on some path.
+        local: Local,
+        /// The runtime entry point of the second release.
+        release: String,
+    },
+}
+
+/// A released place: a local and the field path inside it (empty for the
+/// whole local).
+type Key = (Local, Vec<u32>);
+
+/// The most shares beyond its own the walk records for one place. Fewer
+/// recorded shares only make a later release look like the place's own, so the
+/// bound can report a fault the body does not have but never hides one, and it
+/// keeps the walk finite around a loop that retains on every turn.
+const MAX_EXTRA_SHARES: u32 = 4;
+
+/// The released places at one program point.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct State {
+    /// Released on every path reaching the point.
+    must: BTreeSet<Key>,
+    /// Released on some path reaching the point.
+    may: BTreeSet<Key>,
+    /// Shares a place holds beyond its own on every path reaching the point,
+    /// taken by a retain and given back by the next release.
+    extra: BTreeMap<Key, u32>,
+}
+
+impl State {
+    fn join(&mut self, other: &Self) {
+        self.must = self.must.intersection(&other.must).cloned().collect();
+        self.may.extend(other.may.iter().cloned());
+        self.extra = self
+            .extra
+            .iter()
+            .filter_map(|(key, count)| {
+                let theirs = other.extra.get(key).copied().unwrap_or(0);
+                let both = (*count).min(theirs);
+                (both > 0).then(|| (key.clone(), both))
+            })
+            .collect();
+    }
+
+    /// Forgets every released place `key` contains, and every share beyond
+    /// its own: a write renews it.
+    fn renew(&mut self, key: &Key) {
+        let covered = |k: &Key| k.0 == key.0 && k.1.starts_with(&key.1);
+        self.must.retain(|k| !covered(k));
+        self.may.retain(|k| !covered(k));
+        self.extra.retain(|k, _| !covered(k));
+    }
+
+    fn retain(&mut self, key: Key) {
+        let count = self.extra.entry(key).or_insert(0);
+        *count = (*count + 1).min(MAX_EXTRA_SHARES);
+    }
+
+    /// Gives back a share `key` holds beyond its own, answering whether it
+    /// had one.
+    fn give_back_extra(&mut self, key: &Key) -> bool {
+        let Some(count) = self.extra.get_mut(key) else {
+            return false;
+        };
+        *count -= 1;
+        if *count == 0 {
+            self.extra.remove(key);
+        }
+        true
+    }
+
+    fn forget_local(&mut self, local: Local) {
+        self.renew(&(local, Vec::new()));
+    }
 }
 
 /// Checks `body`'s release discipline, answering every fault it finds.
 pub fn verify_rc(body: &Body) -> Result<(), Vec<RcViolation>> {
     let n = body.blocks.len();
-    let mut entry_state: Vec<Option<BTreeSet<Local>>> = vec![None; n];
     if n == 0 {
         return Ok(());
     }
-    entry_state[0] = Some(BTreeSet::new());
+    let mut entry_state: Vec<Option<State>> = vec![None; n];
+    entry_state[0] = Some(State::default());
     let predecessors = predecessors(body);
     let mut worklist: Vec<usize> = vec![0];
-    let mut exit_state: Vec<Option<BTreeSet<Local>>> = vec![None; n];
+    let mut exit_state: Vec<Option<State>> = vec![None; n];
     while let Some(index) = worklist.pop() {
         let Some(state) = entry_state[index].clone() else {
             continue;
@@ -94,9 +164,12 @@ pub fn verify_rc(body: &Body) -> Result<(), Vec<RcViolation>> {
             let joined = predecessors[s]
                 .iter()
                 .filter_map(|p| exit_state[*p].as_ref())
-                .fold(None::<BTreeSet<Local>>, |acc, set| match acc {
-                    None => Some(set.clone()),
-                    Some(acc) => Some(acc.intersection(set).copied().collect()),
+                .fold(None::<State>, |acc, state| match acc {
+                    None => Some(state.clone()),
+                    Some(mut acc) => {
+                        acc.join(state);
+                        Some(acc)
+                    }
                 });
             if joined.is_some() && entry_state[s] != joined {
                 entry_state[s] = joined;
@@ -118,13 +191,13 @@ pub fn verify_rc(body: &Body) -> Result<(), Vec<RcViolation>> {
 }
 
 /// Runs block `index` from `state`, recording each fault in `violations`,
-/// and answers the released set at the block's end.
+/// and answers the released places at the block's end.
 fn transfer(
     body: &Body,
     index: usize,
-    mut state: BTreeSet<Local>,
+    mut state: State,
     violations: &mut Vec<RcViolation>,
-) -> BTreeSet<Local> {
+) -> State {
     let block = &body.blocks[index];
     for stmt in &block.stmts {
         step_statement(body, block.id, stmt, &mut state, violations);
@@ -136,10 +209,13 @@ fn transfer(
             destination,
             ..
         } => {
-            let released = released_local(callee_name(callee), args);
-            check_args(body, block.id, args, released, &state, violations);
-            if let Some((local, name)) = released {
-                release(body, block.id, local, name, &mut state, violations);
+            let released = released_place(callee_name(callee), args);
+            check_args(body, block.id, args, released.is_some(), &state, violations);
+            if let Some((key, name)) = released {
+                release(body, block.id, key, name, &mut state, violations);
+            }
+            if let Some(key) = retained_place(callee_name(callee), args) {
+                state.retain(key);
             }
             define(destination, body, block.id, &mut state, violations);
         }
@@ -166,25 +242,26 @@ fn step_statement(
     body: &Body,
     block: BlockId,
     stmt: &Statement,
-    state: &mut BTreeSet<Local>,
+    state: &mut State,
     violations: &mut Vec<RcViolation>,
 ) {
     match &stmt.kind {
         StatementKind::Assign { place, rvalue } => {
             if let Rvalue::CallIntrinsic { name, args } = rvalue {
-                let released = released_local(Some(name), args);
-                check_args(body, block, args, released, state, violations);
-                if let Some((local, name)) = released {
-                    release(body, block, local, name, state, violations);
+                let released = released_place(Some(name), args);
+                check_args(body, block, args, released.is_some(), state, violations);
+                if let Some((key, name)) = released {
+                    release(body, block, key, name, state, violations);
+                }
+                if let Some(key) = retained_place(Some(name), args) {
+                    state.retain(key);
                 }
             } else {
                 check_rvalue(body, block, rvalue, state, violations);
             }
             define(place, body, block, state, violations);
         }
-        StatementKind::StorageDead(local) => {
-            state.remove(local);
-        }
+        StatementKind::StorageDead(local) => state.forget_local(*local),
         StatementKind::SetDiscriminant { place, .. } => {
             check_place(body, block, place, state, violations);
         }
@@ -226,50 +303,123 @@ fn callee_name(callee: &Operand) -> Option<&str> {
     }
 }
 
-/// The local a call to `name` releases, when it is a release of a whole
-/// local.
-fn released_local<'a>(name: Option<&'a str>, args: &[Operand]) -> Option<(Local, &'a str)> {
+/// Whether the runtime entry point `name` gives up its first argument's share.
+fn releases(name: &str) -> bool {
+    gossamer_abi::registry::lookup(name).is_some_and(gossamer_abi::RuntimeEntry::releases_first_arg)
+}
+
+/// The leading field path of `place`, up to its first projection that is not
+/// a field.
+fn field_prefix(place: &Place) -> Vec<u32> {
+    place
+        .projection
+        .iter()
+        .map_while(|p| match p {
+            Projection::Field(index) => Some(*index),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The place a call to `name` releases, when it is a release of a whole local
+/// or of a field path inside one.
+fn released_place<'a>(name: Option<&'a str>, args: &[Operand]) -> Option<(Key, &'a str)> {
     let name = name?;
-    if !RELEASES.contains(&name) {
+    if !releases(name) {
         return None;
     }
     match args.first() {
-        Some(Operand::Copy(Place { local, projection })) if projection.is_empty() => {
-            Some((*local, name))
+        Some(Operand::Copy(place))
+            if place
+                .projection
+                .iter()
+                .all(|p| matches!(p, Projection::Field(_))) =>
+        {
+            Some(((place.local, field_prefix(place)), name))
         }
         _ => None,
     }
 }
 
-fn release(
-    body: &Body,
-    block: BlockId,
-    local: Local,
-    name: &str,
-    state: &mut BTreeSet<Local>,
-    violations: &mut Vec<RcViolation>,
-) {
-    if !state.insert(local) {
-        violations.push(RcViolation::DoubleRelease {
-            body: body.name.clone(),
-            block,
-            local,
-            release: name.to_string(),
-        });
+/// The place a call to `name` gives a share beyond its own, when it is a
+/// retain of a whole local or of a field path inside one.
+fn retained_place(name: Option<&str>, args: &[Operand]) -> Option<Key> {
+    let name = name?;
+    if !gossamer_abi::registry::lookup(name)
+        .is_some_and(gossamer_abi::RuntimeEntry::retains_first_arg)
+    {
+        return None;
+    }
+    match args.first() {
+        Some(Operand::Copy(place))
+            if place
+                .projection
+                .iter()
+                .all(|p| matches!(p, Projection::Field(_))) =>
+        {
+            Some((place.local, field_prefix(place)))
+        }
+        _ => None,
     }
 }
 
-/// A write to `place`: a whole-local write gives the local a new value, and
-/// a write into part of one reads the local it projects from.
+/// Whether `released` covers the place `key` reaches: the released place is
+/// the key's place or one containing it.
+fn covers(released: &Key, key: &Key) -> bool {
+    released.0 == key.0 && key.1.starts_with(&released.1)
+}
+
+fn release(
+    body: &Body,
+    block: BlockId,
+    key: Key,
+    name: &str,
+    state: &mut State,
+    violations: &mut Vec<RcViolation>,
+) {
+    if state.give_back_extra(&key) {
+        return;
+    }
+    if state.must.iter().any(|r| covers(r, &key)) {
+        violations.push(RcViolation::DoubleRelease {
+            body: body.name.clone(),
+            block,
+            local: key.0,
+            release: name.to_string(),
+        });
+    } else if state.may.iter().any(|r| covers(r, &key)) {
+        violations.push(RcViolation::ConditionalDoubleRelease {
+            body: body.name.clone(),
+            block,
+            local: key.0,
+            release: name.to_string(),
+        });
+    }
+    state.must.insert(key.clone());
+    state.may.insert(key);
+}
+
+/// A write to `place`: it renews the place it names, and a write into part of
+/// a local reads the parts of the local around it.
 fn define(
     place: &Place,
     body: &Body,
     block: BlockId,
-    state: &mut BTreeSet<Local>,
+    state: &mut State,
     violations: &mut Vec<RcViolation>,
 ) {
-    if place.projection.is_empty() {
-        state.remove(&place.local);
+    let fields = field_prefix(place);
+    if fields.len() == place.projection.len() {
+        for depth in 0..fields.len() {
+            check_key(
+                body,
+                block,
+                &(place.local, fields[..depth].to_vec()),
+                state,
+                violations,
+            );
+        }
+        state.renew(&(place.local, fields));
     } else {
         check_place(body, block, place, state, violations);
     }
@@ -279,13 +429,13 @@ fn check_args(
     body: &Body,
     block: BlockId,
     args: &[Operand],
-    released: Option<(Local, &str)>,
-    state: &BTreeSet<Local>,
+    first_is_released: bool,
+    state: &State,
     violations: &mut Vec<RcViolation>,
 ) {
     for (position, operand) in args.iter().enumerate() {
         // The released handle itself is judged by `release`.
-        if position == 0 && released.is_some() {
+        if position == 0 && first_is_released {
             continue;
         }
         check_operand(body, block, operand, state, violations);
@@ -296,7 +446,7 @@ fn check_rvalue(
     body: &Body,
     block: BlockId,
     rvalue: &Rvalue,
-    state: &BTreeSet<Local>,
+    state: &State,
     violations: &mut Vec<RcViolation>,
 ) {
     match rvalue {
@@ -326,7 +476,7 @@ fn check_operand(
     body: &Body,
     block: BlockId,
     operand: &Operand,
-    state: &BTreeSet<Local>,
+    state: &State,
     violations: &mut Vec<RcViolation>,
 ) {
     if let Operand::Copy(place) = operand {
@@ -338,21 +488,43 @@ fn check_place(
     body: &Body,
     block: BlockId,
     place: &Place,
-    state: &BTreeSet<Local>,
+    state: &State,
     violations: &mut Vec<RcViolation>,
 ) {
-    let indices = place.projection.iter().filter_map(|p| match p {
-        Projection::Index(local) => Some(*local),
-        _ => None,
-    });
-    for local in std::iter::once(place.local).chain(indices) {
-        if state.contains(&local) {
-            violations.push(RcViolation::UseAfterRelease {
-                body: body.name.clone(),
-                block,
-                local,
-            });
+    check_key(
+        body,
+        block,
+        &(place.local, field_prefix(place)),
+        state,
+        violations,
+    );
+    for projection in &place.projection {
+        if let Projection::Index(local) = projection {
+            check_key(body, block, &(*local, Vec::new()), state, violations);
         }
+    }
+}
+
+/// Reports a read of `key` that a released place covers.
+fn check_key(
+    body: &Body,
+    block: BlockId,
+    key: &Key,
+    state: &State,
+    violations: &mut Vec<RcViolation>,
+) {
+    if state.must.iter().any(|r| covers(r, key)) {
+        violations.push(RcViolation::UseAfterRelease {
+            body: body.name.clone(),
+            block,
+            local: key.0,
+        });
+    } else if state.may.iter().any(|r| covers(r, key)) {
+        violations.push(RcViolation::ConditionalUseAfterRelease {
+            body: body.name.clone(),
+            block,
+            local: key.0,
+        });
     }
 }
 
@@ -414,6 +586,12 @@ fn reject_faults(bodies: &[Body]) {
         .filter_map(|body| verify_rc(body).err())
         .flatten()
         .collect();
+    if std::env::var_os("GOS_VERIFY_RC_REPORT").is_some() {
+        for fault in &faults {
+            eprintln!("rc-verify: {fault:?}");
+        }
+        return;
+    }
     assert!(
         faults.is_empty(),
         "reference-count verifier rejected the program:\n{}",
@@ -541,8 +719,140 @@ mod tests {
         )])]);
     }
 
+    fn retain(local: u32, into: u32) -> Statement {
+        Statement {
+            kind: StatementKind::Assign {
+                place: Place::local(Local(into)),
+                rvalue: Rvalue::CallIntrinsic {
+                    name: "gos_rt_vec_retain",
+                    args: vec![Operand::Copy(Place::local(Local(local)))],
+                },
+            },
+            span: gossamer_lex::Span::default(),
+            inlined: None,
+        }
+    }
+
     #[test]
-    fn a_release_on_one_branch_only_is_not_a_fault_at_the_join() {
+    fn a_release_after_a_retain_gives_back_the_retained_share() {
+        let b = body(vec![(
+            vec![retain(1, 2), free(1, 3), read(1, 4), free(1, 6)],
+            Terminator::Return,
+        )]);
+        assert!(verify_rc(&b).is_ok());
+    }
+
+    #[test]
+    fn a_retain_covers_one_release_only() {
+        let b = body(vec![(
+            vec![retain(1, 2), free(1, 3), free(1, 4), free(1, 6)],
+            Terminator::Return,
+        )]);
+        let faults = verify_rc(&b).unwrap_err();
+        assert!(matches!(
+            faults[0],
+            RcViolation::DoubleRelease {
+                local: Local(1),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_retain_on_some_paths_covers_no_release_after_them() {
+        let faults =
+            verify_rc(&branchy(vec![retain(1, 2)], vec![free(1, 3), free(1, 4)])).unwrap_err();
+        assert!(matches!(
+            faults[0],
+            RcViolation::DoubleRelease {
+                local: Local(1),
+                ..
+            }
+        ));
+    }
+
+    fn branchy(then_block: Vec<Statement>, join: Vec<Statement>) -> Body {
+        body(vec![
+            (
+                Vec::new(),
+                Terminator::SwitchInt {
+                    discriminant: Operand::Copy(Place::local(Local(5))),
+                    arms: vec![(0, BlockId(1))],
+                    default: BlockId(2),
+                },
+            ),
+            (then_block, Terminator::Goto { target: BlockId(3) }),
+            (Vec::new(), Terminator::Goto { target: BlockId(3) }),
+            (join, Terminator::Return),
+        ])
+    }
+
+    fn field(local: u32, index: u32) -> Place {
+        Place {
+            local: Local(local),
+            projection: vec![crate::ir::Projection::Field(index)],
+        }
+    }
+
+    fn free_place(place: Place, into: u32) -> Statement {
+        Statement {
+            kind: StatementKind::Assign {
+                place: Place::local(Local(into)),
+                rvalue: Rvalue::CallIntrinsic {
+                    name: "gos_rt_vec_free",
+                    args: vec![Operand::Copy(place)],
+                },
+            },
+            span: gossamer_lex::Span::default(),
+            inlined: None,
+        }
+    }
+
+    fn read_place(place: Place, into: u32) -> Statement {
+        Statement {
+            kind: StatementKind::Assign {
+                place: Place::local(Local(into)),
+                rvalue: Rvalue::Use(Operand::Copy(place)),
+            },
+            span: gossamer_lex::Span::default(),
+            inlined: None,
+        }
+    }
+
+    #[test]
+    fn a_read_after_a_release_on_one_branch_is_reported() {
+        let faults = verify_rc(&branchy(vec![free(1, 2)], vec![read(1, 3)])).unwrap_err();
+        assert!(matches!(
+            faults[0],
+            RcViolation::ConditionalUseAfterRelease {
+                local: Local(1),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_release_after_a_release_on_one_branch_is_reported() {
+        let faults = verify_rc(&branchy(vec![free(1, 2)], vec![free(1, 3)])).unwrap_err();
+        assert!(matches!(
+            faults[0],
+            RcViolation::ConditionalDoubleRelease {
+                local: Local(1),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn releases_on_both_branches_balance_a_later_reassignment() {
+        let reassign = Statement {
+            kind: StatementKind::Assign {
+                place: Place::local(Local(1)),
+                rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+            },
+            span: gossamer_lex::Span::default(),
+            inlined: None,
+        };
         let b = body(vec![
             (
                 Vec::new(),
@@ -553,9 +863,110 @@ mod tests {
                 },
             ),
             (vec![free(1, 2)], Terminator::Goto { target: BlockId(3) }),
-            (Vec::new(), Terminator::Goto { target: BlockId(3) }),
-            (vec![read(1, 3)], Terminator::Return),
+            (vec![free(1, 4)], Terminator::Goto { target: BlockId(3) }),
+            (vec![reassign, read(1, 3)], Terminator::Return),
         ]);
         assert!(verify_rc(&b).is_ok());
+    }
+
+    #[test]
+    fn a_read_of_a_released_field_is_reported_and_its_sibling_is_not() {
+        let b = body(vec![(
+            vec![
+                free_place(field(1, 1), 2),
+                read_place(field(1, 0), 3),
+                read_place(field(1, 1), 4),
+            ],
+            Terminator::Return,
+        )]);
+        let faults = verify_rc(&b).unwrap_err();
+        assert_eq!(faults.len(), 1, "{faults:?}");
+        assert!(matches!(
+            faults[0],
+            RcViolation::UseAfterRelease {
+                local: Local(1),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_field_write_renews_the_released_field() {
+        let refill = Statement {
+            kind: StatementKind::Assign {
+                place: field(1, 1),
+                rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+            },
+            span: gossamer_lex::Span::default(),
+            inlined: None,
+        };
+        let b = body(vec![(
+            vec![
+                free_place(field(1, 1), 2),
+                refill,
+                free_place(field(1, 1), 3),
+            ],
+            Terminator::Return,
+        )]);
+        assert!(verify_rc(&b).is_ok());
+    }
+
+    #[test]
+    fn a_whole_release_covers_every_field() {
+        let b = body(vec![(
+            vec![free(1, 2), read_place(field(1, 0), 3)],
+            Terminator::Return,
+        )]);
+        assert!(matches!(
+            verify_rc(&b).unwrap_err()[0],
+            RcViolation::UseAfterRelease {
+                local: Local(1),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_release_carried_around_a_loop_is_reported() {
+        let b = body(vec![
+            (Vec::new(), Terminator::Goto { target: BlockId(1) }),
+            (
+                vec![free(1, 2)],
+                Terminator::SwitchInt {
+                    discriminant: Operand::Copy(Place::local(Local(5))),
+                    arms: vec![(0, BlockId(2))],
+                    default: BlockId(1),
+                },
+            ),
+            (Vec::new(), Terminator::Return),
+        ]);
+        assert!(matches!(
+            verify_rc(&b).unwrap_err()[0],
+            RcViolation::ConditionalDoubleRelease {
+                local: Local(1),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn every_release_helper_the_drop_pass_emits_is_a_registry_release() {
+        for name in [
+            "gos_rt_rc_release",
+            "gos_rt_rc_weak_release",
+            "gos_rt_vec_free",
+            "gos_rt_str_free_typed",
+            "gos_rt_map_free",
+            "gos_rt_set_free",
+            "gos_rt_deque_free",
+            "gos_rt_lazy_iter_drop_i64",
+            "gos_rt_lazy_iter_drop_pair_i64",
+        ] {
+            assert!(
+                super::releases(name),
+                "{name} is not marked Ownership::ReleasesFirstArg"
+            );
+        }
+        assert!(!super::releases("gos_rt_vec_retain"));
     }
 }

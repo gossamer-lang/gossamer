@@ -29,7 +29,7 @@ super::rc::managed_handle!(GosSyncMap);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_sync_map_new() -> *mut GosSyncMap {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         super::rc::alloc_managed(GosSyncMap {
             inner: parking_lot::RwLock::new(HashMap::new()),
         })
@@ -50,7 +50,7 @@ pub unsafe extern "C" fn gos_rt_sync_map_set(
     key: *const c_char,
     value: *const c_char,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         if m.is_null() {
             return;
         }
@@ -71,7 +71,7 @@ pub unsafe extern "C" fn gos_rt_sync_map_set(
 /// fresh result-discriminant convention.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sync_map_get(m: *mut GosSyncMap, key: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if m.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -91,7 +91,7 @@ pub unsafe extern "C" fn gos_rt_sync_map_get(m: *mut GosSyncMap, key: *const c_c
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sync_map_delete(m: *mut GosSyncMap, key: *const c_char) {
-    ffi_entry!((), {
+    ffi_entry!({
         if m.is_null() {
             return;
         }
@@ -104,7 +104,7 @@ pub unsafe extern "C" fn gos_rt_sync_map_delete(m: *mut GosSyncMap, key: *const 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sync_map_len(m: *mut GosSyncMap) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if m.is_null() {
             return 0;
         }
@@ -115,7 +115,7 @@ pub unsafe extern "C" fn gos_rt_sync_map_len(m: *mut GosSyncMap) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sync_map_contains(m: *mut GosSyncMap, key: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if m.is_null() {
             return 0;
         }
@@ -132,7 +132,7 @@ pub unsafe extern "C" fn gos_rt_sync_map_contains(m: *mut GosSyncMap, key: *cons
 pub unsafe extern "C" fn gos_rt_sync_map_keys(
     m: *mut GosSyncMap,
 ) -> *mut crate::c_abi::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let v = {
             crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::STRING)
         };

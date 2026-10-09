@@ -66,7 +66,7 @@ fn json_to_serde_norway(v: &serde_json::Value) -> serde_norway::Value {
 /// payload is a c-string, matching `gos_rt_json_parse`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_yaml_parse(s: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let text = if s.is_null() {
             ""
         } else {
@@ -92,7 +92,7 @@ pub unsafe extern "C" fn gos_rt_yaml_parse(s: *const c_char) -> i128 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_yaml_to_json(s: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let text = if s.is_null() {
             ""
         } else {
@@ -116,7 +116,7 @@ pub unsafe extern "C" fn gos_rt_yaml_to_json(s: *const c_char) -> i128 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_yaml_from_json(s: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let text = if s.is_null() {
             ""
         } else {
@@ -141,7 +141,7 @@ pub unsafe extern "C" fn gos_rt_yaml_from_json(s: *const c_char) -> i128 {
 /// emits via `serde_norway`. Err payload is an `errors::Error`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_yaml_encode(j: *const crate::c_abi::json::GosJson) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_value_ref` accepts.
         let yaml_val = match unsafe { crate::c_abi::json::json_value_ref(j) } {
@@ -161,7 +161,7 @@ pub unsafe extern "C" fn gos_rt_yaml_encode(j: *const crate::c_abi::json::GosJso
 /// `*mut GosVec` of `*mut GosJson` handles (8-byte slots).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_yaml_parse_all(s: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let text = if s.is_null() {
             ""
         } else {
@@ -188,7 +188,7 @@ pub unsafe extern "C" fn gos_rt_yaml_parse_all(s: *const c_char) -> i128 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_yaml_is_valid(s: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         let text = if s.is_null() {
             ""
         } else {

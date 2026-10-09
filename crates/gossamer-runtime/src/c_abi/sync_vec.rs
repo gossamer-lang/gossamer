@@ -29,7 +29,7 @@ pub struct GosSyncI64Vec {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_sync_i64_new(len: i64) -> *mut GosSyncI64Vec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let n = if len < 0 { 0 } else { len as usize };
         Box::into_raw(Box::new(GosSyncI64Vec {
             inner: parking_lot::Mutex::new(vec![0i64; n]),
@@ -39,7 +39,7 @@ pub extern "C" fn gos_rt_sync_i64_new(len: i64) -> *mut GosSyncI64Vec {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sync_i64_drop(v: *mut GosSyncI64Vec) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -51,7 +51,7 @@ pub unsafe extern "C" fn gos_rt_sync_i64_drop(v: *mut GosSyncI64Vec) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sync_i64_len(v: *const GosSyncI64Vec) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if v.is_null() {
             return 0;
         }
@@ -63,7 +63,7 @@ pub unsafe extern "C" fn gos_rt_sync_i64_len(v: *const GosSyncI64Vec) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sync_i64_get(v: *const GosSyncI64Vec, idx: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if v.is_null() || idx < 0 {
             return 0;
         }
@@ -76,7 +76,7 @@ pub unsafe extern "C" fn gos_rt_sync_i64_get(v: *const GosSyncI64Vec, idx: i64) 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sync_i64_set(v: *mut GosSyncI64Vec, idx: i64, val: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() || idx < 0 {
             return;
         }
@@ -91,7 +91,7 @@ pub unsafe extern "C" fn gos_rt_sync_i64_set(v: *mut GosSyncI64Vec, idx: i64, va
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sync_i64_push(v: *mut GosSyncI64Vec, val: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -106,7 +106,7 @@ pub unsafe extern "C" fn gos_rt_sync_i64_push(v: *mut GosSyncI64Vec, val: i64) {
 /// needing a separate AtomicI64 per slot.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sync_i64_add(v: *mut GosSyncI64Vec, idx: i64, delta: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if v.is_null() || idx < 0 {
             return 0;
         }
@@ -128,7 +128,7 @@ pub struct GosSyncU8Vec {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_sync_u8_new(len: i64) -> *mut GosSyncU8Vec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let n = if len < 0 { 0 } else { len as usize };
         Box::into_raw(Box::new(GosSyncU8Vec {
             inner: parking_lot::Mutex::new(vec![0u8; n]),
@@ -138,7 +138,7 @@ pub extern "C" fn gos_rt_sync_u8_new(len: i64) -> *mut GosSyncU8Vec {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sync_u8_drop(v: *mut GosSyncU8Vec) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -150,7 +150,7 @@ pub unsafe extern "C" fn gos_rt_sync_u8_drop(v: *mut GosSyncU8Vec) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sync_u8_len(v: *const GosSyncU8Vec) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if v.is_null() {
             return 0;
         }
@@ -162,7 +162,7 @@ pub unsafe extern "C" fn gos_rt_sync_u8_len(v: *const GosSyncU8Vec) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sync_u8_get(v: *const GosSyncU8Vec, idx: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if v.is_null() || idx < 0 {
             return 0;
         }
@@ -175,7 +175,7 @@ pub unsafe extern "C" fn gos_rt_sync_u8_get(v: *const GosSyncU8Vec, idx: i64) ->
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sync_u8_set(v: *mut GosSyncU8Vec, idx: i64, val: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() || idx < 0 {
             return;
         }
@@ -190,7 +190,7 @@ pub unsafe extern "C" fn gos_rt_sync_u8_set(v: *mut GosSyncU8Vec, idx: i64, val:
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sync_u8_push(v: *mut GosSyncU8Vec, val: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }

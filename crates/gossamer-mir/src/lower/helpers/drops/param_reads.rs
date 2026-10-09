@@ -300,7 +300,8 @@ pub(super) fn stores_aggregate_by_pointer(name: &str) -> bool {
 /// the receiving container stores a copy of, so the frame keeps its own: a
 /// `Map`, `Set`, or deque value of a map that owns such values entry by entry
 /// (`gos_rt_map_set_map_values` and kin), or a `Set`, deque, or heap element
-/// of a vector or deque, whose store copies each one into its slot.
+/// of a vector or deque - bare or as the arm of an `Option` / `Result` - whose
+/// store copies each one into its slot.
 pub(super) fn stores_table_value_copy(
     tcx: &gossamer_types::TyCtxt,
     body: &Body,
@@ -332,7 +333,16 @@ pub(super) fn stores_table_value_copy(
             }
             _ => None,
         };
-        return is_value && elem.is_some_and(|elem| handle_container(tcx, elem).is_some());
+        let copied_table = |t: gossamer_types::Ty| {
+            matches!(tcx.kind_of(t), TyKind::HashMap { .. }) || handle_container(tcx, t).is_some()
+        };
+        return is_value
+            && elem.is_some_and(|elem| {
+                handle_container(tcx, elem).is_some()
+                    || matches!(tcx.kind_of(elem), TyKind::Adt { def, substs }
+                        if (def.local == u32::MAX || def.local == u32::MAX - 1)
+                            && substs.types().into_iter().take(2).any(copied_table))
+            });
     }
     if !(name.starts_with("gos_rt_map_insert") || name.starts_with("gos_rt_map_or_insert")) {
         return false;
@@ -469,6 +479,247 @@ pub(crate) fn copy_stored_containers(body: &mut Body, tcx: &gossamer_types::TyCt
             id: store_id,
             stmts: Vec::new(),
             terminator: store,
+            span,
+            terminator_span,
+            terminator_inlined,
+        });
+    }
+}
+
+/// One definition of a local, as `copy_returned_lent_tables` reads it.
+#[derive(Clone)]
+enum LentDef {
+    /// A bare copy of another place.
+    Copy(Place),
+    /// A table another holder keeps: the payload of a carrier the frame does
+    /// not own.
+    Lent,
+    /// Anything else, which gives the local a value of its own.
+    Owned,
+}
+
+/// Gives the caller a table of its own when a function returns one it was
+/// lent.
+///
+/// A `Map`, `Set`, deque, or heap reaches a callee as the caller's handle and
+/// carries no count of its holders, so handing that handle back through the
+/// return slot would leave the caller freeing its own table when the answer
+/// dies. The return copies it instead, whether the table is a parameter, a
+/// field of one, or a binding copied from either.
+pub(crate) fn copy_returned_lent_tables(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+    use gossamer_types::TyKind;
+    let n_locals = body.locals.len();
+    let arity = body.arity as usize;
+    let clone_symbol = |ty: gossamer_types::Ty| match tcx.kind_of(ty) {
+        TyKind::HashMap { .. } => Some("gos_rt_map_clone"),
+        _ => match handle_container(tcx, ty) {
+            Some(HandleContainer::Set) => Some("gos_rt_set_clone"),
+            Some(HandleContainer::Deque) => Some("gos_rt_deque_clone"),
+            Some(HandleContainer::Heap) => Some("gos_rt_vec_clone"),
+            None => None,
+        },
+    };
+    if n_locals == 0 || clone_symbol(body.locals[0].ty).is_none() {
+        return;
+    }
+    // A local whose every definition holds a lent table: a parameter, a field
+    // or element of any aggregate (which keeps and releases its own), an
+    // element a container still owns, the payload of a carrier the frame does
+    // not own (a `get` on a container, a carrier parameter), or another such
+    // local.
+    let owned_carrier = frame_owned_carriers(body);
+    let lends_payload = |carrier: Option<&Operand>| {
+        matches!(carrier, Some(Operand::Copy(c))
+            if !(c.projection.is_empty()
+                && (c.local.0 as usize) < n_locals
+                && owned_carrier[c.local.0 as usize]))
+    };
+    // The payload operand of a carrier this body builds in its one
+    // definition: its payload is that local's table, lent exactly when the
+    // local is.
+    let built_from: Vec<Option<Place>> = {
+        let mut built: Vec<Vec<Option<Place>>> = vec![Vec::new(); n_locals];
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                if let StatementKind::Assign { place, rvalue } = &stmt.kind
+                    && place.projection.is_empty()
+                    && (place.local.0 as usize) < n_locals
+                {
+                    built[place.local.0 as usize].push(match rvalue {
+                        Rvalue::CallIntrinsic {
+                            name: "gos_rt_result_new",
+                            args,
+                        } => match args.get(1) {
+                            Some(Operand::Copy(p)) if p.projection.is_empty() => Some(p.clone()),
+                            _ => None,
+                        },
+                        _ => None,
+                    });
+                }
+            }
+            if let Terminator::Call { destination, .. } = &block.terminator
+                && (destination.local.0 as usize) < n_locals
+            {
+                built[destination.local.0 as usize].push(None);
+            }
+        }
+        built
+            .into_iter()
+            .map(|defs| match defs.as_slice() {
+                [Some(p)] => Some(p.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let built_payload = |carrier: Option<&Operand>| match carrier {
+        Some(Operand::Copy(c)) if c.projection.is_empty() && (c.local.0 as usize) < n_locals => {
+            built_from[c.local.0 as usize].clone()
+        }
+        _ => None,
+    };
+    let mut defs: Vec<Vec<LentDef>> = vec![Vec::new(); n_locals];
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if let StatementKind::Assign { place, rvalue } = &stmt.kind
+                && (place.local.0 as usize) < n_locals
+            {
+                let def = match rvalue {
+                    Rvalue::Use(Operand::Copy(src))
+                        if place.projection.is_empty() && !src.projection.is_empty() =>
+                    {
+                        LentDef::Lent
+                    }
+                    Rvalue::Use(Operand::Copy(src)) if place.projection.is_empty() => {
+                        LentDef::Copy(src.clone())
+                    }
+                    Rvalue::CallIntrinsic {
+                        name: "gos_rt_result_payload",
+                        args,
+                    } if place.projection.is_empty() => match built_payload(args.first()) {
+                        Some(src) => LentDef::Copy(src),
+                        None if lends_payload(args.first()) => LentDef::Lent,
+                        None => LentDef::Owned,
+                    },
+                    _ => LentDef::Owned,
+                };
+                defs[place.local.0 as usize].push(def);
+            }
+        }
+        if let Terminator::Call {
+            callee,
+            args,
+            destination,
+            ..
+        } = &block.terminator
+            && (destination.local.0 as usize) < n_locals
+        {
+            let lent = destination.projection.is_empty()
+                && matches!(callee, Operand::Const(ConstValue::Str(name))
+                    if returns_borrowed_pointer(name)
+                        || (moves_table_carrier(name) && lends_payload(args.first())));
+            defs[destination.local.0 as usize].push(if lent {
+                LentDef::Lent
+            } else {
+                LentDef::Owned
+            });
+        }
+    }
+    let mut lent: Vec<bool> = (0..n_locals).map(|i| (1..=arity).contains(&i)).collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for i in arity + 1..n_locals {
+            if lent[i] || defs[i].is_empty() {
+                continue;
+            }
+            let all_lent = defs[i].iter().all(|d| match d {
+                LentDef::Lent => true,
+                LentDef::Copy(src) => {
+                    (src.local.0 as usize) < n_locals && lent[src.local.0 as usize]
+                }
+                LentDef::Owned => false,
+            });
+            if all_lent {
+                lent[i] = true;
+                changed = true;
+            }
+        }
+    }
+    // Locals whose value reaches the return slot through bare copies.
+    let mut flows = vec![false; n_locals];
+    flows[Local::RETURN.0 as usize] = true;
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (dest, sources) in defs.iter().enumerate() {
+            if !flows[dest] {
+                continue;
+            }
+            for src in sources.iter().filter_map(|d| match d {
+                LentDef::Copy(src) => Some(src),
+                LentDef::Lent | LentDef::Owned => None,
+            }) {
+                let i = src.local.0 as usize;
+                if src.projection.is_empty() && i < n_locals && !flows[i] {
+                    flows[i] = true;
+                    changed = true;
+                }
+            }
+        }
+    }
+    // The copy that carries a lent table out of the lent locals toward the
+    // return takes the table of its own; every copy after it moves that one.
+    let mut sites: Vec<(usize, usize)> = Vec::new();
+    for (bi, block) in body.blocks.iter().enumerate() {
+        for (si, stmt) in block.stmts.iter().enumerate() {
+            if let StatementKind::Assign {
+                place,
+                rvalue: Rvalue::Use(Operand::Copy(src)),
+            } = &stmt.kind
+                && place.projection.is_empty()
+                && (place.local.0 as usize) < n_locals
+                && flows[place.local.0 as usize]
+                && !lent[place.local.0 as usize]
+                && clone_symbol(body.locals[place.local.0 as usize].ty).is_some()
+                && (src.local.0 as usize) < n_locals
+                && (lent[src.local.0 as usize] || !src.projection.is_empty())
+            {
+                sites.push((bi, si));
+            }
+        }
+    }
+    // Later sites first, so the split blocks keep earlier indices valid.
+    for (bi, si) in sites.into_iter().rev() {
+        let rest_id = BlockId(u32::try_from(body.blocks.len()).expect("block overflow"));
+        let block = &mut body.blocks[bi];
+        let span = block.span;
+        let StatementKind::Assign {
+            place: dest,
+            rvalue: Rvalue::Use(Operand::Copy(src)),
+        } = block.stmts[si].kind.clone()
+        else {
+            continue;
+        };
+        let Some(symbol) = clone_symbol(body.locals[dest.local.0 as usize].ty) else {
+            continue;
+        };
+        let rest_stmts = block.stmts.split_off(si + 1);
+        block.stmts.pop();
+        let terminator = std::mem::replace(
+            &mut block.terminator,
+            Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(symbol.to_string())),
+                args: vec![Operand::Copy(src)],
+                destination: dest,
+                target: Some(rest_id),
+            },
+        );
+        let terminator_span = block.terminator_span;
+        let terminator_inlined = block.terminator_inlined.clone();
+        body.blocks.push(crate::ir::BasicBlock {
+            id: rest_id,
+            stmts: rest_stmts,
+            terminator,
             span,
             terminator_span,
             terminator_inlined,

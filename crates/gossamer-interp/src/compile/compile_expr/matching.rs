@@ -28,7 +28,7 @@ impl<'tcx> FnBuilder<'tcx> {
         // Guards are excluded because a failed guard would fall through
         // and re-extract the drained scrutinee.
         let consume_eligible =
-            self.value_consumable_here(scrutinee) && arms.iter().all(|arm| arm.guard.is_none());
+            self.drains_scrutinee(scrutinee) && arms.iter().all(|arm| arm.guard.is_none());
         for arm in arms {
             self.push_scope();
             let mut fails: Vec<InstrIdx> = Vec::new();
@@ -115,7 +115,7 @@ impl<'tcx> FnBuilder<'tcx> {
         // Drains the payload out of a scrutinee nothing reads afterwards, on
         // the same terms as `compile_match`.
         let consume_eligible =
-            self.value_consumable_here(scrutinee) && arms.iter().all(|arm| arm.guard.is_none());
+            self.drains_scrutinee(scrutinee) && arms.iter().all(|arm| arm.guard.is_none());
         for arm in arms {
             self.push_scope();
             let mut fails: Vec<InstrIdx> = Vec::new();
@@ -260,6 +260,21 @@ impl<'tcx> FnBuilder<'tcx> {
         fails: &mut Vec<InstrIdx>,
     ) -> RuntimeResult<()> {
         self.emit_pattern_test_ex(scrut, pat, fails, false)
+    }
+
+    /// Whether a match may drain `scrutinee`'s payload rather than copy it.
+    ///
+    /// A field, element, or tuple read leaves its storage reachable from the
+    /// place it came from. A vector there is copied on its next write, but a
+    /// table sits behind a shared handle, so a `mut` binding taken from such
+    /// a read copies it as it does everywhere else.
+    fn drains_scrutinee(&self, scrutinee: &HirExpr) -> bool {
+        let place_read = matches!(
+            scrutinee.kind,
+            HirExprKind::Field { .. } | HirExprKind::TupleIndex { .. } | HirExprKind::Index { .. }
+        );
+        self.value_consumable_here(scrutinee)
+            && !(place_read && self.expr_is_aggregate_with_container(scrutinee))
     }
 
     /// Like [`Self::emit_pattern_test`] but with a `consume` flag: when

@@ -47,7 +47,7 @@ pub struct GosI64Vec {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_heap_i64_new(len: i64) -> *mut GosI64Vec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if len < 0 {
             return std::ptr::null_mut();
         }
@@ -61,7 +61,7 @@ pub extern "C" fn gos_rt_heap_i64_new(len: i64) -> *mut GosI64Vec {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_heap_i64_free(v: *mut GosI64Vec) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -81,7 +81,7 @@ pub unsafe extern "C" fn gos_rt_heap_i64_free(v: *mut GosI64Vec) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_heap_i64_get(v: *const GosI64Vec, idx: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if v.is_null() || idx < 0 {
             return 0;
         }
@@ -98,7 +98,7 @@ pub unsafe extern "C" fn gos_rt_heap_i64_get(v: *const GosI64Vec, idx: i64) -> i
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_heap_i64_set(v: *mut GosI64Vec, idx: i64, val: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() || idx < 0 {
             return;
         }
@@ -116,7 +116,7 @@ pub unsafe extern "C" fn gos_rt_heap_i64_set(v: *mut GosI64Vec, idx: i64, val: i
 /// `gos_rt_arr_len` so the codegen can route by symbol.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_heap_i64_len(v: *const GosI64Vec) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if v.is_null() {
             return 0;
         }
@@ -137,7 +137,7 @@ pub unsafe extern "C" fn gos_rt_heap_i64_write_lines_to_stdout(
     count: i64,
     line_width: i64,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() || start < 0 || count <= 0 || line_width <= 0 {
             return;
         }
@@ -241,7 +241,7 @@ pub unsafe extern "C" fn gos_rt_heap_i64_write_bytes_to_stdout(
     start: i64,
     count: i64,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() || start < 0 || count <= 0 {
             return;
         }

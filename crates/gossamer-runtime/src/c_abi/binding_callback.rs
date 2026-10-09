@@ -97,7 +97,7 @@ pub unsafe extern "C" fn gos_rt_binding_callback_register(
     env: *const u8,
     signature: *const c_char,
 ) -> u64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if env.is_null() || signature.is_null() {
             return 0;
         }
@@ -118,7 +118,7 @@ pub unsafe extern "C" fn gos_rt_binding_callback_register(
 /// this returns the handle calls nothing, and no call through it is running.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_binding_callback_release(handle: u64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if handle == 0 {
             return;
         }

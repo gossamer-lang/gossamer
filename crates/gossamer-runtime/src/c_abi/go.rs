@@ -283,7 +283,7 @@ pub unsafe extern "C" fn gos_rt_spawn_ex(
     err_kind: i64,
     reason: *const std::os::raw::c_char,
 ) -> *mut super::chan::GosChan {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if code == 0 {
             return std::ptr::null_mut();
         }
@@ -422,7 +422,7 @@ pub unsafe extern "C" fn gos_rt_spawn_ex(
 /// into the 2-word Result aggregate.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_join(ch: *mut super::chan::GosChan) -> i128 {
-    ffi_entry!(super::result::pack_result(1, 0), {
+    ffi_entry!({
         if ch.is_null() {
             return super::result::pack_result(1, 0);
         }
@@ -450,7 +450,7 @@ pub unsafe extern "C" fn gos_rt_join(ch: *mut super::chan::GosChan) -> i128 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_go_yield() {
-    ffi_entry!((), {
+    ffi_entry!({
         // Real coroutine yield - suspend this goroutine and let the
         // worker M run another. The scheduler immediately re-enqueues
         // the suspended goroutine because we don't set the
@@ -467,7 +467,7 @@ pub extern "C" fn gos_rt_go_yield() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_sleep_ns(ns: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if ns <= 0 {
             return;
         }
@@ -513,7 +513,7 @@ pub extern "C-unwind" fn gos_rt_sleep_ms_ctx(
     ctx_handle: *const super::context::GosCtx,
     ms: i64,
 ) -> i64 {
-    ffi_entry_passthrough!(0, {
+    ffi_entry_passthrough!({
         if ms < 0 {
             crate::c_abi::panic::panic_text("time::sleep_ctx: duration_ms must be non-negative");
         }
@@ -527,7 +527,7 @@ pub extern "C-unwind" fn gos_rt_sleep_ms_ctx(
 /// `ctx_handle` is a context handle, or null for an uncancellable sleep.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_sleep_ns_ctx(ctx_handle: *const super::context::GosCtx, ns: i64) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         let addr = ctx_handle.expose_provenance();
         let cancelled = || super::context::handle_is_cancelled(addr);
         if cancelled() {
@@ -568,7 +568,7 @@ pub extern "C" fn gos_rt_sleep_ns_ctx(ctx_handle: *const super::context::GosCtx,
 /// `gos build` / `gos build --release` builds.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_sleep_ms(ms: i64) {
-    ffi_entry_passthrough!((), {
+    ffi_entry_passthrough!({
         if ms < 0 {
             crate::c_abi::panic::panic_text("time::sleep: duration_ms must be non-negative");
         }
@@ -579,7 +579,7 @@ pub unsafe extern "C-unwind" fn gos_rt_sleep_ms(ms: i64) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_now_ns() -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         use std::time::UNIX_EPOCH;
         crate::platform::system_time_now()
             .duration_since(UNIX_EPOCH)

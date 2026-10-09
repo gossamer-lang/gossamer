@@ -50,17 +50,17 @@ static STREAM_STDERR: GosStream = GosStream { fd: 2 };
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_io_stdin() -> *const GosStream {
-    ffi_entry!(std::ptr::null(), { std::ptr::addr_of!(STREAM_STDIN) })
+    ffi_entry!({ std::ptr::addr_of!(STREAM_STDIN) })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_io_stdout() -> *const GosStream {
-    ffi_entry!(std::ptr::null(), { std::ptr::addr_of!(STREAM_STDOUT) })
+    ffi_entry!({ std::ptr::addr_of!(STREAM_STDOUT) })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_io_stderr() -> *const GosStream {
-    ffi_entry!(std::ptr::null(), { std::ptr::addr_of!(STREAM_STDERR) })
+    ffi_entry!({ std::ptr::addr_of!(STREAM_STDERR) })
 }
 
 /// `io::Copy(dst, src)` - drains `src` (the stdin stream) to EOF,
@@ -70,7 +70,7 @@ pub extern "C" fn gos_rt_io_stderr() -> *const GosStream {
 /// builtin.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_io_copy(dst: *const GosStream, src: *const GosStream) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `dst` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `stream_fd` accepts.
         let dst_fd = unsafe { stream_fd(dst) };
@@ -99,7 +99,7 @@ pub unsafe extern "C" fn gos_rt_io_copy(dst: *const GosStream, src: *const GosSt
 /// Non-stdin readers return an empty string, matching the interpreter builtin.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_io_read_all(reader: *const GosStream) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+    ffi_entry!({
         // SAFETY: `reader` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `stream_fd` accepts.
         let fd = unsafe { stream_fd(reader) };
@@ -172,7 +172,7 @@ fn raw_write_fd(fd: i32, bytes: &[u8]) {
 /// `write(2)` since they're rare.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_stream_write_byte(stream: *const GosStream, b: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `stream` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `stream_fd` accepts.
         let fd = unsafe { stream_fd(stream) };
@@ -212,7 +212,7 @@ pub unsafe extern "C" fn gos_rt_stream_write_byte(stream: *const GosStream, b: i
 /// `stream.write(s)` and `stream.write_str(s)` both land here.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_stream_write_str(stream: *const GosStream, s: *const c_char) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `stream` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `stream_fd` accepts.
         let fd = unsafe { stream_fd(stream) };
@@ -241,7 +241,7 @@ pub unsafe extern "C" fn gos_rt_stream_write_byte_array(
     arr: *const i64,
     len: i64,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         if arr.is_null() || len <= 0 {
             return;
         }
@@ -325,7 +325,7 @@ pub unsafe extern "C" fn gos_rt_stream_write_byte_array(
 /// stream today).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_stream_flush(stream: *const GosStream) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `stream` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `stream_fd` accepts.
         let fd = unsafe { stream_fd(stream) };
@@ -345,7 +345,7 @@ fn stream_read_line_err(message: &str) -> i128 {
 /// non-stdin streams.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_stream_next_line(stream: *const GosStream) -> i128 {
-    ffi_entry!(1i128, {
+    ffi_entry!({
         // SAFETY: `stream` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `stream_fd` accepts.
         let fd = unsafe { stream_fd(stream) };
@@ -379,7 +379,7 @@ pub unsafe extern "C" fn gos_rt_stream_read_line(
     stream: *const GosStream,
     buf_slot: *mut *mut c_char,
 ) -> i128 {
-    ffi_entry!(stream_read_line_err("read_line: runtime panic"), {
+    ffi_entry!({
         if buf_slot.is_null() {
             return stream_read_line_err("read_line: expected &mut String buffer");
         }
@@ -425,7 +425,7 @@ pub unsafe extern "C" fn gos_rt_stream_read_line(
 /// stdin) into a freshly-allocated GC-arena string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_stream_read_to_string(stream: *const GosStream) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `stream` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `stream_fd` accepts.
         let fd = unsafe { stream_fd(stream) };
@@ -447,7 +447,7 @@ pub unsafe extern "C" fn gos_rt_stream_read_to_string(stream: *const GosStream) 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_println() {
-    ffi_entry!((), {
+    ffi_entry!({
         write_stdout(b"\n");
     });
 }

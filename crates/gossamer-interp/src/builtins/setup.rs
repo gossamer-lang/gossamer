@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use gossamer_ast::Ident;
 
-use gossamer_std::compress::gzip as gzip_std;
 use gossamer_std::env as env_std;
 use gossamer_std::exec as exec_std;
 use gossamer_std::fs as fs_std;

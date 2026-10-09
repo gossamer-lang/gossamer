@@ -1306,7 +1306,7 @@ pub(crate) unsafe fn free_promoted_string(body: *mut c_char) {
 /// every raw-pointer ABI, a stale pointer whose address has been reused cannot
 /// be distinguished without a generation-bearing carrier type.
 unsafe fn str_free_impl(s: *mut c_char, typed: bool) {
-    ffi_entry!((), {
+    ffi_entry!({
         if s.is_null() {
             return;
         }
@@ -1468,7 +1468,7 @@ pub unsafe extern "C" fn gos_rt_str_retain_typed(s: *const c_char) {
 /// the caller's binding is freed while it is still holding it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_clone(s: *const c_char) -> *const c_char {
-    ffi_entry!(std::ptr::null(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's string argument, null or live (C-ABI contract).
         unsafe { str_retain_impl(s, true) };
         s
@@ -1564,19 +1564,19 @@ fn alloc_ascii_upper_cstring(src: &[u8]) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_len(s: *const c_char) -> i64 {
     // SAFETY: `s` is this shim's string argument, null or live (C-ABI contract).
-    ffi_entry!(-1, { unsafe { typed_str_char_len(s) as i64 } })
+    ffi_entry!({ unsafe { typed_str_char_len(s) as i64 } })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_byte_len(s: *const c_char) -> i64 {
     // SAFETY: `s` is this shim's string argument, null or live (C-ABI contract).
-    ffi_entry!(-1, { unsafe { typed_str_len(s) as i64 } })
+    ffi_entry!({ unsafe { typed_str_len(s) as i64 } })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_is_empty(s: *const c_char) -> bool {
     // SAFETY: `s` is this shim's string argument, null or live (C-ABI contract).
-    ffi_entry!(false, { unsafe { gos_rt_str_len(s) == 0 } })
+    ffi_entry!({ unsafe { gos_rt_str_len(s) == 0 } })
 }
 
 /// The capacity and length of `s` when it is a heap builder this reference
@@ -1749,7 +1749,7 @@ pub extern "C-unwind" fn gos_rt_str_with_capacity(capacity: i64) -> *mut c_char 
 /// prefix, and `s` is released.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_str_truncate(s: *const c_char, n: i64) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if n < 0 {
             crate::c_abi::panic::panic_text("truncate: length must be non-negative");
         }
@@ -1803,7 +1803,7 @@ fn utf8_boundary_at_or_before(bytes: &[u8], limit: usize) -> usize {
 /// `String::from_utf8(bytes) -> Result<String, errors::Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_string_from_utf8(bytes: *const GosVec) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if bytes.is_null() {
             return gos_rt_result_new(0, alloc_cstring(b"") as i64);
         }
@@ -1832,7 +1832,7 @@ pub unsafe extern "C" fn gos_rt_string_from_utf8(bytes: *const GosVec) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_len_is_zero(p: *const i64) -> bool {
     // SAFETY: `p` is this shim's argument, null or a live sized value (C-ABI contract).
-    ffi_entry!(false, { unsafe { gos_rt_len(p) == 0 } })
+    ffi_entry!({ unsafe { gos_rt_len(p) == 0 } })
 }
 
 /// Clones a `*mut GosVec` element-by-element. Used by
@@ -1853,7 +1853,7 @@ pub unsafe extern "C" fn gos_rt_len_is_zero(p: *const i64) -> bool {
 /// `~/dev/contexts/lang/fix_architecture_ownership.md` §3.1.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_clone(src: *const GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if src.is_null() {
             return gos_rt_vec_new(8);
         }
@@ -1888,7 +1888,7 @@ pub unsafe extern "C" fn gos_rt_vec_clone(src: *const GosVec) -> *mut GosVec {
 /// reclaims them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_as_bytes(s: *const c_char) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let len = if s.is_null() {
             0
         } else {
@@ -1915,7 +1915,7 @@ pub unsafe extern "C" fn gos_rt_str_as_bytes(s: *const c_char) -> *mut GosVec {
 /// auto-emitted `gos_rt_vec_free` at scope-end reclaims them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_chars(s: *const c_char) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let st = if s.is_null() {
             ""
         } else {
@@ -1949,7 +1949,7 @@ pub unsafe extern "C" fn gos_rt_str_chars(s: *const c_char) -> *mut GosVec {
 /// This is the allocation-fused implementation of `n.to_string().chars()`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_i64_chars(n: i64) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut buffer = itoa::Buffer::new();
         let bytes = buffer.format(n).as_bytes();
         let v = gos_rt_vec_with_capacity(8, bytes.len() as i64);
@@ -2022,7 +2022,7 @@ pub unsafe extern "C-unwind" fn gos_rt_str_char_at(s: *const c_char, i: i64) -> 
 /// empty vec rather than a Result-shaped Adt.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_os_read_dir(path: *const c_char) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let p = if path.is_null() {
             std::path::PathBuf::from(".")
         } else {
@@ -2073,7 +2073,7 @@ pub unsafe extern "C" fn gos_rt_str_substring(
     start: i64,
     end: i64,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if s.is_null() {
             return alloc_cstring(b"");
         }
@@ -2131,7 +2131,7 @@ pub unsafe extern "C" fn gos_rt_str_push_substring(
     start: i64,
     end: i64,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let bytes: &[u8] = if src.is_null() {
             &[]
         } else {
@@ -2151,7 +2151,7 @@ pub unsafe extern "C" fn gos_rt_str_push_substring(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_concat(a: *const c_char, b: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // Both operands are language `String` values, so their length comes
         // from the header rather than a NUL scan: a string may contain
         // interior NULs, and one that starts with a NUL is not empty.
@@ -2495,7 +2495,7 @@ pub unsafe extern "C" fn gos_rt_str_append_f64(acc: *const c_char, x: f64) -> *m
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_trim(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let st = if s.is_null() {
             ""
         } else {
@@ -2512,7 +2512,7 @@ pub unsafe extern "C" fn gos_rt_str_trim(s: *const c_char) -> *mut c_char {
 /// Unicode whitespace, mirroring Rust's `str::trim_start`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_trim_start(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let st = if s.is_null() {
             ""
         } else {
@@ -2529,7 +2529,7 @@ pub unsafe extern "C" fn gos_rt_str_trim_start(s: *const c_char) -> *mut c_char 
 /// Unicode whitespace, mirroring Rust's `str::trim_end`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_trim_end(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let st = if s.is_null() {
             ""
         } else {
@@ -2544,7 +2544,7 @@ pub unsafe extern "C" fn gos_rt_str_trim_end(s: *const c_char) -> *mut c_char {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_to_upper(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let bytes = if s.is_null() {
             b"" as &[u8]
         } else {
@@ -2566,7 +2566,7 @@ pub unsafe extern "C" fn gos_rt_str_to_upper(s: *const c_char) -> *mut c_char {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_to_lower(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let st = if s.is_null() {
             ""
         } else {
@@ -2579,7 +2579,7 @@ pub unsafe extern "C" fn gos_rt_str_to_lower(s: *const c_char) -> *mut c_char {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_contains(s: *const c_char, needle: *const c_char) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if s.is_null() || needle.is_null() {
             return 0;
         }
@@ -2604,7 +2604,7 @@ pub unsafe extern "C" fn gos_rt_str_contains(s: *const c_char, needle: *const c_
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_starts_with(s: *const c_char, prefix: *const c_char) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if s.is_null() || prefix.is_null() {
             return 0;
         }
@@ -2618,7 +2618,7 @@ pub unsafe extern "C" fn gos_rt_str_starts_with(s: *const c_char, prefix: *const
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_ends_with(s: *const c_char, suffix: *const c_char) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if s.is_null() || suffix.is_null() {
             return 0;
         }
@@ -2632,7 +2632,7 @@ pub unsafe extern "C" fn gos_rt_str_ends_with(s: *const c_char, suffix: *const c
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_find(s: *const c_char, needle: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if s.is_null() || needle.is_null() {
             return -1;
         }
@@ -2667,7 +2667,7 @@ pub unsafe extern "C" fn gos_rt_str_find(s: *const c_char, needle: *const c_char
 /// None-disc (1).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_find_opt(s: *const c_char, needle: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `s`, `needle` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `gos_rt_str_find` accepts.
         let idx = unsafe { gos_rt_str_find(s, needle) };
@@ -2679,11 +2679,81 @@ pub unsafe extern "C" fn gos_rt_str_find_opt(s: *const c_char, needle: *const c_
     })
 }
 
+/// An `Option<i64>` carrier for a text position.
+fn position_option(index: Option<usize>) -> i128 {
+    match index.and_then(|i| i64::try_from(i).ok()) {
+        Some(i) => gos_rt_result_new(0, i),
+        None => gos_rt_result_new(1, 0),
+    }
+}
+
+/// `strings::byte_find(text, needle) -> Option<i64>`: the byte offset of the
+/// first match.
+///
+/// # Safety
+/// `s` and `needle` are null or live string bodies for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_str_byte_find(s: *const c_char, needle: *const c_char) -> i128 {
+    ffi_entry!({
+        // SAFETY: both are this shim's string arguments, null or live (C-ABI contract).
+        let (text, needle) = unsafe { (gos_str_arg_text(s), gos_str_arg_text(needle)) };
+        position_option(crate::codec::text::byte_find(text, needle))
+    })
+}
+
+/// `strings::byte_rfind(text, needle) -> Option<i64>`: the byte offset of the
+/// last match.
+///
+/// # Safety
+/// `s` and `needle` are null or live string bodies for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_str_byte_rfind(s: *const c_char, needle: *const c_char) -> i128 {
+    ffi_entry!({
+        // SAFETY: both are this shim's string arguments, null or live (C-ABI contract).
+        let (text, needle) = unsafe { (gos_str_arg_text(s), gos_str_arg_text(needle)) };
+        position_option(crate::codec::text::byte_rfind(text, needle))
+    })
+}
+
+/// `strings::byte_offset(text, char_index) -> Option<i64>`.
+///
+/// # Safety
+/// `s` is null or a live string body for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_str_byte_offset(s: *const c_char, char_index: i64) -> i128 {
+    ffi_entry!({
+        // SAFETY: `s` is this shim's string argument, null or live (C-ABI contract).
+        let text = unsafe { gos_str_arg_text(s) };
+        position_option(
+            usize::try_from(char_index)
+                .ok()
+                .and_then(|i| crate::codec::text::byte_offset(text, i)),
+        )
+    })
+}
+
+/// `strings::char_index(text, byte_offset) -> Option<i64>`.
+///
+/// # Safety
+/// `s` is null or a live string body for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_str_char_index(s: *const c_char, byte_offset: i64) -> i128 {
+    ffi_entry!({
+        // SAFETY: `s` is this shim's string argument, null or live (C-ABI contract).
+        let text = unsafe { gos_str_arg_text(s) };
+        position_option(
+            usize::try_from(byte_offset)
+                .ok()
+                .and_then(|i| crate::codec::text::char_index(text, i)),
+        )
+    })
+}
+
 /// `s.to_i64() -> Option<i64>` packed as `{disc, payload}` (`disc 0 =
 /// Some`, `disc 1 = None`). Strict full-string parse, no trimming.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_to_i64_opt(s: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if s.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -2730,7 +2800,7 @@ fn parse_i64_bytes(bytes: &[u8]) -> Option<i64> {
 /// bits (`gos_rt_result_new_f64`), read back by the f64 payload path.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_to_f64_opt(s: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if s.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -2746,7 +2816,7 @@ pub unsafe extern "C" fn gos_rt_str_to_f64_opt(s: *const c_char) -> i128 {
 /// `s.to_bool() -> Option<bool>`: accepts exactly `true` / `false`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_to_bool_opt(s: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if s.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -2766,7 +2836,7 @@ pub unsafe extern "C" fn gos_rt_str_to_bool_opt(s: *const c_char) -> i128 {
 /// `str::rfind` semantics.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_rfind_opt(s: *const c_char, needle: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if s.is_null() || needle.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -2798,7 +2868,7 @@ pub unsafe extern "C" fn gos_rt_str_rfind_opt(s: *const c_char, needle: *const c
 /// pointers compare equal to empty strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_eq(a: *const c_char, b: *const c_char) -> bool {
-    ffi_entry!(false, {
+    ffi_entry!({
         // SAFETY: `a` is a String argument from compiled code, null or a live string body for the whole call.
         unsafe { gos_str_arg_bytes(a) == gos_str_arg_bytes(b) }
     })
@@ -2810,7 +2880,7 @@ pub unsafe extern "C" fn gos_rt_str_eq(a: *const c_char, b: *const c_char) -> bo
 /// etc. when both operands are `String` or `&String`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_compare(a: *const c_char, b: *const c_char) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         let a = if a.is_null() {
             b""
         } else {
@@ -2837,7 +2907,7 @@ pub unsafe extern "C" fn gos_rt_str_replace(
     from: *const c_char,
     to: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let s = if s.is_null() {
             ""
         } else {
@@ -2867,7 +2937,7 @@ pub unsafe extern "C" fn gos_rt_str_replace(
 /// `find_opt` packing convention.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_split_once(s: *const c_char, sep: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if s.is_null() || sep.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -2902,7 +2972,7 @@ pub unsafe extern "C" fn gos_rt_str_split_once(s: *const c_char, sep: *const c_c
 /// `split_once` but anchored at the last occurrence of `sep`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_rsplit_once(s: *const c_char, sep: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if s.is_null() || sep.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -2938,7 +3008,7 @@ pub unsafe extern "C" fn gos_rt_str_rsplit_once(s: *const c_char, sep: *const c_
 /// byte" that Rust's `matches("")` produces).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_count(s: *const c_char, needle: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if s.is_null() || needle.is_null() {
             return 0;
         }
@@ -2960,7 +3030,7 @@ pub unsafe extern "C" fn gos_rt_str_strip_chars(
     s: *const c_char,
     cutset: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let s = if s.is_null() {
             ""
         } else {
@@ -2986,7 +3056,7 @@ pub unsafe extern "C" fn gos_rt_str_lstrip_chars(
     s: *const c_char,
     cutset: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let s = if s.is_null() {
             ""
         } else {
@@ -3012,7 +3082,7 @@ pub unsafe extern "C" fn gos_rt_str_rstrip_chars(
     s: *const c_char,
     cutset: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let s = if s.is_null() {
             ""
         } else {
@@ -3037,7 +3107,7 @@ pub unsafe extern "C" fn gos_rt_str_rstrip_chars(
 /// `width` characters wide.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_str_zfill(s: *const c_char, width: i64) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         let s = if s.is_null() {
             ""
         } else {
@@ -3072,7 +3142,7 @@ pub unsafe extern "C" fn gos_rt_str_center(
     width: i64,
     pad_char: i64,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let s = if s.is_null() {
             ""
         } else {
@@ -3111,7 +3181,7 @@ pub unsafe extern "C" fn gos_rt_str_center(
 /// `*mut GosError`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_slice(s: *const c_char, start: i64, end: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let byte_len = if s.is_null() {
             0usize
         } else {
@@ -3151,7 +3221,7 @@ pub unsafe extern "C" fn gos_rt_str_slice(s: *const c_char, start: i64, end: i64
 /// underlying string's lifetime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_split(s: *const c_char, sep: *const c_char) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let source = s;
         let s = if s.is_null() {
             ""
@@ -3200,7 +3270,7 @@ pub unsafe extern "C" fn gos_rt_strings_join(
     parts: *const GosVec,
     sep: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if parts.is_null() {
             return alloc_cstring(b"");
         }
@@ -3253,7 +3323,7 @@ unsafe fn vec_scalar_word(vec: &GosVec, i: usize) -> i64 {
 /// element, joined by `sep`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_join_i64(v: *const GosVec, sep: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if v.is_null() {
             return alloc_cstring(b"");
         }
@@ -3282,7 +3352,7 @@ pub unsafe extern "C" fn gos_rt_vec_join_i64(v: *const GosVec, sep: *const c_cha
 /// `xs.join(sep)` for an f64-element Vec.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_join_f64(v: *const GosVec, sep: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `v` and `sep` are this shim's arguments, each null or live (C-ABI contract).
         unsafe { join_float_elements(v, sep, |f, out| out.push_str(&format!("{f}"))) }
     })
@@ -3292,7 +3362,7 @@ pub unsafe extern "C" fn gos_rt_vec_join_f64(v: *const GosVec, sep: *const c_cha
 /// single-precision value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_join_f32(v: *const GosVec, sep: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `v` and `sep` are this shim's arguments, each null or live (C-ABI contract).
         unsafe {
             join_float_elements(v, sep, |f, out| {
@@ -3336,7 +3406,7 @@ unsafe fn join_float_elements(
 /// `xs.join(sep)` for a bool-element Vec.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_join_bool(v: *const GosVec, sep: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if v.is_null() {
             return alloc_cstring(b"");
         }
@@ -3365,7 +3435,7 @@ pub unsafe extern "C" fn gos_rt_vec_join_bool(v: *const GosVec, sep: *const c_ch
 /// `xs.join(sep)` for a char-element Vec.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_join_char(v: *const GosVec, sep: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if v.is_null() {
             return alloc_cstring(b"");
         }
@@ -3397,7 +3467,7 @@ pub unsafe extern "C" fn gos_rt_vec_join_char(v: *const GosVec, sep: *const c_ch
 /// (from `"a\nb\n"`) are dropped to mirror Rust's `lines()`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_lines(s: *const c_char) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let source = s;
         let s = if s.is_null() {
             ""
@@ -3435,7 +3505,7 @@ pub unsafe extern "C" fn gos_rt_str_lines(s: *const c_char) -> *mut GosVec {
 /// replaced through the same copy-on-write growth path as `push_str`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_push_char(s: *const c_char, c: i32) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let ch = char::from_u32(c as u32).unwrap_or('\u{FFFD}');
         let mut encoded = [0u8; 4];
         let bytes = ch.encode_utf8(&mut encoded).as_bytes();
@@ -3449,7 +3519,7 @@ pub unsafe extern "C" fn gos_rt_str_push_char(s: *const c_char, c: i32) -> *mut 
 /// with the same in-place/copy-on-write contract as [`gos_rt_str_push_char`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_push_byte(s: *const c_char, b: i32) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let ch = char::from(b as u8);
         let mut encoded = [0u8; 2];
         let bytes = ch.encode_utf8(&mut encoded).as_bytes();
@@ -3464,7 +3534,7 @@ pub unsafe extern "C" fn gos_rt_str_push_byte(s: *const c_char, b: i32) -> *mut 
 /// fresh copy.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_str_repeat(s: *const c_char, n: i64) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         let s = if s.is_null() {
             ""
         } else {
@@ -3484,7 +3554,7 @@ pub unsafe extern "C-unwind" fn gos_rt_str_repeat(s: *const c_char, n: i64) -> *
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_parse_i64(s: *const c_char, ok_out: *mut i32) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if s.is_null() {
             if !ok_out.is_null() {
                 // SAFETY: `ok_out` is non-null (checked above) and this shim's out-slot (C-ABI
@@ -3518,7 +3588,7 @@ pub unsafe extern "C" fn gos_rt_parse_i64(s: *const c_char, ok_out: *mut i32) ->
 /// `e.message()` directly without `map_err`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_parse_i64_result(s: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if s.is_null() {
             let err = crate::c_abi::errors::error_new_from_bytes(b"parse: null input");
             return gos_rt_result_new(1, err as i64);
@@ -3540,7 +3610,7 @@ pub unsafe extern "C" fn gos_rt_parse_i64_result(s: *const c_char) -> i128 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_parse_f64(s: *const c_char, ok_out: *mut i32) -> f64 {
-    ffi_entry!(f64::NAN, {
+    ffi_entry!({
         if s.is_null() {
             if !ok_out.is_null() {
                 // SAFETY: `ok_out` is non-null (checked above) and this shim's out-slot (C-ABI
@@ -3571,7 +3641,7 @@ pub unsafe extern "C" fn gos_rt_parse_f64(s: *const c_char, ok_out: *mut i32) ->
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_i64_to_str(n: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut digits = [0u8; 20];
         alloc_cstring(i64_digits(n, &mut digits))
     })
@@ -3609,9 +3679,7 @@ fn i64_digits(n: i64, out: &mut [u8; 20]) -> &[u8] {
 /// resolves to `u8/u16/u32/u64/u128/usize`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_u64_to_str(n: u64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
-        alloc_cstring(n.to_string().as_bytes())
-    })
+    ffi_entry!({ alloc_cstring(n.to_string().as_bytes()) })
 }
 
 /// `x.to_string()` for an `f64`: [`crate::builtins::f64_display`]'s text in
@@ -3626,18 +3694,14 @@ pub extern "C" fn gos_rt_f64_to_str(x: f64) -> *mut c_char {
 /// single-precision value its double-width slot holds.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_f32_to_str(x: f64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
-        alloc_cstring(crate::builtins::format_f32(x).as_bytes())
-    })
+    ffi_entry!({ alloc_cstring(crate::builtins::format_f32(x).as_bytes()) })
 }
 
 /// `{:?}` of an `f32`: [`gos_rt_f32_to_str`]'s digits, keeping a fractional
 /// part or an exponent so the text reads back as a float.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_f32_debug_to_str(x: f64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
-        alloc_cstring(crate::builtins::format_f32_debug(x).as_bytes())
-    })
+    ffi_entry!({ alloc_cstring(crate::builtins::format_f32_debug(x).as_bytes()) })
 }
 
 /// Stringifies an `f64` with `prec` fractional digits - the runtime
@@ -3647,7 +3711,7 @@ pub extern "C" fn gos_rt_f32_debug_to_str(x: f64) -> *mut c_char {
 /// to a sane upper bound to keep the allocation bounded.
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn gos_rt_f64_prec_to_str(x: f64, prec: i64) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if prec < 0 {
             crate::c_abi::panic::panic_text("__fmt_prec: precision must be non-negative");
         }
@@ -3661,7 +3725,7 @@ pub extern "C-unwind" fn gos_rt_f64_prec_to_str(x: f64, prec: i64) -> *mut c_cha
 /// shown, and a string's length is counted in scalars everywhere else.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_str_prec_to_str(s: *const c_char, prec: i64) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if prec < 0 {
             crate::c_abi::panic::panic_text("__fmt_prec: precision must be non-negative");
         }
@@ -3702,7 +3766,7 @@ pub unsafe extern "C" fn gos_rt_str_push_utf8(
     {
         return crate::c_abi::result::gos_rt_result_new(0, s as i64);
     }
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let unchanged =
             |ok: bool| crate::c_abi::result::gos_rt_result_new(i64::from(!ok), s as i64);
         if buf.is_null() || start < 0 || end < start {
@@ -3820,9 +3884,7 @@ pub(crate) unsafe fn str_append_parts(
 /// codegen to assemble multi-arg panic / format-style messages.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_bool_to_str(b: i32) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
-        alloc_cstring(if b == 0 { b"false" } else { b"true" })
-    })
+    ffi_entry!({ alloc_cstring(if b == 0 { b"false" } else { b"true" }) })
 }
 
 /// Stringifies a char (passed as i32 Unicode scalar) into a freshly
@@ -3830,7 +3892,7 @@ pub extern "C" fn gos_rt_bool_to_str(b: i32) -> *mut c_char {
 /// > U+10FFFF) render as `\u{FFFD}` (REPLACEMENT CHARACTER).
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_char_to_str(c: i32) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let scalar = u32::try_from(c)
             .ok()
             .and_then(char::from_u32)

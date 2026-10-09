@@ -108,6 +108,7 @@ pub(super) fn send_layout_entries(
             // skips, and a scalar payload is never a counted kind.
             TyKind::Adt { def, substs } if def.local == u32::MAX || def.local == u32::MAX - 1 => {
                 let payload_kind = substs.types().iter().find_map(|t| match tcx.kind_of(*t) {
+                    _ if tcx.is_weak_ty(*t) => Some(gossamer_abi::rc::RC_CHILD_WEAK),
                     _ if tcx.is_counted_node(*t) => Some(RC_CHILD_RC),
                     TyKind::String => Some(RC_CHILD_RC),
                     TyKind::Vec(_) | TyKind::Slice(_) => Some(RC_CHILD_VEC),
@@ -115,6 +116,7 @@ pub(super) fn send_layout_entries(
                 });
                 let uniform = substs.types().iter().all(|t| {
                     tcx.is_counted_node(*t)
+                        || tcx.is_weak_ty(*t)
                         || matches!(
                             tcx.kind_of(*t),
                             TyKind::String | TyKind::Vec(_) | TyKind::Slice(_) | TyKind::Unit
@@ -128,6 +130,7 @@ pub(super) fn send_layout_entries(
                         .filter(|t| !matches!(tcx.kind_of(**t), TyKind::Unit))
                         .all(|t| {
                             let same = match tcx.kind_of(*t) {
+                                _ if tcx.is_weak_ty(*t) => gossamer_abi::rc::RC_CHILD_WEAK,
                                 _ if tcx.is_counted_node(*t) => RC_CHILD_RC,
                                 TyKind::String => RC_CHILD_RC,
                                 _ => RC_CHILD_VEC,
@@ -138,6 +141,7 @@ pub(super) fn send_layout_entries(
                     out.push(entry(kind, word + 1));
                 }
             }
+            _ if tcx.is_weak_ty(fty) => out.push(entry(gossamer_abi::rc::RC_CHILD_WEAK, word)),
             _ if tcx.is_rc_managed(fty) => out.push(entry(RC_CHILD_RC, word)),
             TyKind::Tuple(_) | TyKind::Array { .. } | TyKind::Adt { .. } => {
                 send_layout_entries(tcx, fty, word, depth + 1, out);
@@ -378,21 +382,17 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
     }
 
     // The `gos_rt_result_payload_release` kinds of a carrier's two arms,
-    // `(ok, err)`: `1` for a `String`, `2` for a `Vec` / slice, `4` for a
-    // counted node (an `errors::Error` cell, a payload-enum node, or a
-    // callable's environment), `5` / `6` / `7` for a `Map` / `Set` / deque
-    // (see [`table_payload_kind`]), `0` for an arm whose payload the helper
-    // does not own. `None` when neither arm is one.
+    // `(ok, err)`: the [`counted_payload_kind`] of each, or `5` / `6` / `7`
+    // for a `Map` / `Set` / deque (see [`table_payload_kind`]), `0` for an arm
+    // whose payload the helper does not own. `None` when neither arm is one.
     let payload_kind = |ty: gossamer_types::Ty| -> Option<(i64, i64)> {
-        let arm = |payload: Option<&gossamer_types::Ty>| match payload {
-            Some(t) if tcx.is_counted_node(*t) => 4,
-            Some(t) => match tcx.kind_of(*t) {
-                TyKind::String => 1,
-                TyKind::Vec(_) | TyKind::Slice(_) => 2,
-                TyKind::DynError => 4,
-                _ => table_payload_kind(tcx, *t).unwrap_or(0),
-            },
-            None => 0,
+        let arm = |payload: Option<&gossamer_types::Ty>| {
+            payload.map_or(0, |t| {
+                counted_payload_kind(tcx, *t)
+                    .map(i64::from)
+                    .or_else(|| table_payload_kind(tcx, *t))
+                    .unwrap_or(0)
+            })
         };
         match tcx.kind_of(ty) {
             TyKind::Adt { def, substs } if def.local == u32::MAX || def.local == u32::MAX - 1 => {

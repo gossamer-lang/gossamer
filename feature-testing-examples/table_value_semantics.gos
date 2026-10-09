@@ -1,0 +1,129 @@
+// A table - a `Map`, `Set`, deque, or heap - read out of somewhere is a value
+// of its own wherever it lands: answered from a field through `&self` or
+// `&mut`, from a closure's capture, from an `Option` payload or a map value,
+// through a generic function, copied inside an `Option` or an enum, or bound
+// `mut` from a vector element. Writes to the copy never reach the original,
+// and every tier frees each table exactly once.
+
+enum Shape { Holds(Set<i64>), Empty }
+
+struct State { s: Set<i64>, d: Deque<i64>, h: MinHeap<i64>, m: Map<i64, i64> }
+
+impl State {
+    fn set(&self) -> Set<i64> { self.s }
+    fn deque(&self) -> Deque<i64> { self.d }
+    fn heap(&self) -> MinHeap<i64> { self.h }
+    fn map(&self) -> Map<i64, i64> { self.m }
+}
+
+fn field_set(st: &mut State) -> Set<i64> { st.s }
+fn field_deque(st: &mut State) -> Deque<i64> { st.d }
+fn ident<T>(x: T) -> T { x }
+fn first(v: Vec<Set<i64>>) -> Set<i64> { v[0] }
+fn value_of(m: Map<i64, Set<i64>>) -> Set<i64> { m[1] }
+fn unwrap_deque(o: Option<Deque<i64>>) -> Deque<i64> {
+    match o {
+        Some(d) => d
+        None => Deque::new()
+    }
+}
+fn unwrap_map(o: Option<Map<i64, i64>>) -> Map<i64, i64> {
+    match o {
+        Some(m) => m
+        None => Map::new()
+    }
+}
+fn grow_payload(o: Option<Deque<i64>>) -> i64 {
+    if let Some(mut d) = o {
+        d.push_back(1)
+        d.len()
+    } else {
+        0
+    }
+}
+fn grow_variant(e: Shape) -> i64 {
+    match e {
+        Shape::Holds(mut s) => {
+            s.insert(77)
+            s.len()
+        }
+        Shape::Empty => 0
+    }
+}
+
+fn main() {
+    let mut st = State { s: #{ 1, 2 }, d: Deque::new(), h: MinHeap::from([4, 2]), m: { 1: 1 } }
+    st.d.push_back(9)
+    let seed = #{ 5 }
+    let vs = #[#{ 7, 8 }]
+    let ms = { 1: #{ 3 } }
+    let od = Some(st.d)
+    let om = Some(st.m)
+    let mut total = 0
+    for i in 0..100 {
+        let mut a = st.set()
+        a.insert(100 + i)
+        let mut b = st.deque()
+        b.push_back(i)
+        let mut c = st.heap()
+        c.push(i)
+        let mut e = st.map()
+        e[100 + i] = i
+        let mut f = field_set(&mut st)
+        f.insert(-i)
+        let mut g = field_deque(&mut st)
+        g.push_front(i)
+        let mut h = ident(seed)
+        h.insert(i)
+        let mut k = first(vs)
+        k.insert(i)
+        let mut q = value_of(ms)
+        q.insert(i)
+        let mut r = unwrap_deque(od)
+        r.push_back(i)
+        let mut u = unwrap_map(om)
+        u[100 + i] = i
+        let read_s = || st.s
+        let mut w = read_s()
+        w.insert(i)
+        let read_m = || st.m
+        let mut x = read_m()
+        x[100 + i] = i
+        total += a.len() + b.len() + c.len() + e.len() + f.len() + g.len() + h.len()
+        total += k.len() + q.len() + r.len() + u.len() + w.len() + x.len()
+    }
+    println(f"total: {total}")
+    println(f"state: {st.s} {st.d} {st.h.len()} {st.m}")
+    println(f"held: {seed} {vs} {ms} {od} {om}")
+
+    let copy = od
+    if let Some(mut d) = copy {
+        d.push_back(5)
+    }
+    let grown = grow_payload(od)
+    let shape = Shape::Holds(#{ 1 })
+    let shape_copy = shape
+    match shape_copy {
+        Shape::Holds(mut s) => {
+            let _ = s.insert(5)
+        }
+        Shape::Empty => println("empty")
+    }
+    let grown_variant = grow_variant(shape)
+    let after = match shape {
+        Shape::Holds(s) => s.len()
+        Shape::Empty => 0
+    }
+    println(f"carriers: {od} {grown} {grown_variant} {after}")
+
+    let opts = #[Some(#{ 1 }), None]
+    if let Some(mut z) = opts[0] {
+        let _ = z.insert(8)
+    }
+    let mut stored = Vec::new()
+    for i in 0..50 {
+        stored.push(Some(#{ i }))
+    }
+    let results = #[Ok({ 1: 1 }), Err("x")]
+    println(f"elements: {opts} {stored.len()} {results}")
+}

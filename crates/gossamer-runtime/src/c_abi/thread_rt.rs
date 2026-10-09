@@ -9,9 +9,7 @@
 /// agree bit-for-bit with the interpreter.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_thread_num_cpus() -> i64 {
-    ffi_entry!(1, {
-        std::thread::available_parallelism().map_or(1, |n| n.get() as i64)
-    })
+    ffi_entry!({ std::thread::available_parallelism().map_or(1, |n| n.get() as i64) })
 }
 
 /// The scheduler's counters and the blocking pool's load as one compact JSON
@@ -46,9 +44,7 @@ pub fn scheduler_stats_json() -> String {
 /// of the global goroutine scheduler counters.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_runtime_scheduler_stats_json() -> *mut std::os::raw::c_char {
-    ffi_entry!(std::ptr::null_mut(), {
-        crate::c_abi::alloc_cstring(scheduler_stats_json().as_bytes())
-    })
+    ffi_entry!({ crate::c_abi::alloc_cstring(scheduler_stats_json().as_bytes()) })
 }
 
 /// `runtime::cycle_collection_supported() -> bool` - compiled tiers run the

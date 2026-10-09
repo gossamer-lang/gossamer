@@ -761,32 +761,19 @@ pub(crate) fn holder_err_kind(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::
         return None;
     }
     let err = *types.get(1)?;
-    if tcx.is_counted_node(err) {
-        return Some(4);
-    }
-    match tcx.kind_of(err) {
-        TyKind::String => Some(1),
-        TyKind::DynError => Some(4),
-        _ => None,
-    }
+    // A `Vec` error payload is owned by the binding that extracts it.
+    counted_payload_kind(tcx, err)
+        .filter(|kind| *kind != 2)
+        .map(i64::from)
 }
 
 /// The storage kind of an `ok_or` replacement error, in the kinds
-/// `gos_rt_result_ok_payload_release` takes: `1` a `String`, `2` a `Vec`, `4`
-/// an `errors::Error` cell, `0` a value the carrier does not own. The call
+/// `gos_rt_result_ok_payload_release` takes (see [`counted_payload_kind`]),
+/// `0` a value the carrier does not own. The call
 /// consumes the replacement on either arm, so the kind is what lets the arm
 /// that discards it give it back.
 pub(crate) fn ok_or_err_kind(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -> i64 {
-    use gossamer_types::TyKind;
-    if tcx.is_counted_node(ty) {
-        return 4;
-    }
-    match tcx.kind_of(ty) {
-        TyKind::String => 1,
-        TyKind::Vec(_) | TyKind::Slice(_) => 2,
-        TyKind::DynError => 4,
-        _ => 0,
-    }
+    counted_payload_kind(tcx, ty).map_or(0, i64::from)
 }
 
 /// Gives every `gos_rt_result_ok_or` call the kind its replacement error is

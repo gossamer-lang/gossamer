@@ -1896,6 +1896,13 @@ pub const REGISTRY: &[(&str, &str)] = &[
             native code handed back is not a live handle. The handle's value\n\
             is gone, so the program stops rather than reading freed memory.",
     ),
+    (
+        "GX0015",
+        "A standard-library function failed an internal check of its own\n\
+            while running, so it has no value to answer and the program\n\
+            stops. This is a defect in Gossamer, not in the program: report\n\
+            it with the input that reached it.",
+    ),
 ];
 
 /// Returns the explanation text for `code`, or `None` when the code

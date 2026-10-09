@@ -134,7 +134,11 @@ const COMPILED_VIA_SPECIAL_MECHANISM: &[&str] = &[
     // Autoderive-injected real Gossamer wrappers (compile to defined
     // functions; they fold the `__gos_*_raw` leaf intrinsics into structs).
     "archive::tar::read",
+    "archive::tar::read_limited",
     "archive::zip::read",
+    "archive::zip::read_limited",
+    "tar::read_limited",
+    "zip::read_limited",
     "crypto::x509::parse_pem",
     "crypto::x509::verify_server_certificate_with_crls",
     "encoding::pem::decode",

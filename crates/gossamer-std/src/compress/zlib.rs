@@ -5,31 +5,24 @@
 
 #![forbid(unsafe_code)]
 
-use std::io::{Read, Write};
-
-use flate2::Compression;
-use flate2::read::ZlibDecoder;
-use flate2::write::ZlibEncoder;
+use gossamer_runtime::codec::compress::{self, Format};
 
 use crate::io::IoError;
 
-/// Compresses `input` using zlib at the given `level` (0-9).
-/// `level = 0` is store-only; `level = 9` is maximum.
+/// Compresses `input` as zlib at `level`, which must lie in 0..=9 (`0` is
+/// store-only, `9` maximum).
 pub fn compress(input: &[u8], level: u32) -> Result<Vec<u8>, IoError> {
-    let level = level.clamp(0, 9);
-    let mut enc = ZlibEncoder::new(Vec::with_capacity(input.len()), Compression::new(level));
-    enc.write_all(input)
-        .map_err(|e| IoError::Other(e.to_string()))?;
-    enc.finish().map_err(|e| IoError::Other(e.to_string()))
+    compress::compress(Format::Zlib, input, i64::from(level)).map_err(IoError::Other)
 }
 
-/// Decompresses zlib-encoded `input`.
+/// Decompresses zlib `input`.
 pub fn decompress(input: &[u8]) -> Result<Vec<u8>, IoError> {
-    let mut dec = ZlibDecoder::new(input);
-    let mut out = Vec::new();
-    dec.read_to_end(&mut out)
-        .map_err(|e| IoError::Other(e.to_string()))?;
-    Ok(out)
+    compress::decompress(Format::Zlib, input, None).map_err(IoError::Other)
+}
+
+/// [`decompress`], refusing output past `max_bytes`.
+pub fn decompress_limited(input: &[u8], max_bytes: u64) -> Result<Vec<u8>, IoError> {
+    compress::decompress(Format::Zlib, input, Some(max_bytes)).map_err(IoError::Other)
 }
 
 #[cfg(test)]

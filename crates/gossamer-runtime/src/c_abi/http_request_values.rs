@@ -53,7 +53,7 @@ pub unsafe extern "C" fn gos_rt_http_request_set_value(
     key: *const c_char,
     value: *const c_char,
 ) -> *mut GosHttpRequest {
-    ffi_entry!(req, {
+    ffi_entry!({
         if req.is_null() {
             return req;
         }
@@ -78,7 +78,7 @@ pub unsafe extern "C" fn gos_rt_http_request_value(
     req: *const GosHttpRequest,
     key: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if req.is_null() || key.is_null() {
             return alloc_cstring(b"");
         }
@@ -101,8 +101,8 @@ pub unsafe extern "C" fn gos_rt_http_request_value(
 fn form_lookup(body: &str, key: &str) -> String {
     for pair in body.split('&') {
         let (raw_key, raw_val) = pair.split_once('=').unwrap_or((pair, ""));
-        if crate::c_abi::url::percent_decode(raw_key, true) == key {
-            return crate::c_abi::url::percent_decode(raw_val, true);
+        if crate::codec::percent::decode(raw_key, crate::codec::percent::Component::Query) == key {
+            return crate::codec::percent::decode(raw_val, crate::codec::percent::Component::Query);
         }
     }
     String::new()
@@ -116,7 +116,7 @@ pub unsafe extern "C" fn gos_rt_http_request_form_value(
     req: *const GosHttpRequest,
     key: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if req.is_null() || key.is_null() {
             return alloc_cstring(b"");
         }
@@ -136,7 +136,7 @@ pub unsafe extern "C" fn gos_rt_http_request_form_value(
 /// `(String, String)` pair pointer), mirroring `gos_rt_str_split_once`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_request_basic_auth(req: *const GosHttpRequest) -> i128 {
-    ffi_entry!(crate::c_abi::result::gos_rt_result_new(1, 0), {
+    ffi_entry!({
         if req.is_null() {
             return crate::c_abi::result::gos_rt_result_new(1, 0);
         }
@@ -170,7 +170,7 @@ fn decode_basic_credentials(header: &str) -> Option<(String, String)> {
     let token = header
         .strip_prefix("Basic ")
         .or_else(|| header.strip_prefix("basic "))?;
-    let decoded = crate::c_abi::encoding::base64_decode(token.trim()).ok()?;
+    let decoded = crate::codec::base64::decode(token.trim()).ok()?;
     let decoded = String::from_utf8(decoded).ok()?;
     let (user, pass) = decoded.split_once(':')?;
     Some((user.to_string(), pass.to_string()))

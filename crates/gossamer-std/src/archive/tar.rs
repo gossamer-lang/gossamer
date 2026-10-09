@@ -5,7 +5,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::io::Cursor;
+use gossamer_runtime::codec::archive::{self, Limits};
 
 use crate::io::IoError;
 
@@ -20,53 +20,37 @@ pub struct TarEntry {
     pub is_dir: bool,
 }
 
-/// Reads all regular-file and directory entries from a tar archive in `data`.
+/// Reads every entry of the tar archive in `data`. A link or special entry
+/// appears with no data and `is_dir = false`.
 pub fn read(data: &[u8]) -> Result<Vec<TarEntry>, IoError> {
-    let cursor = Cursor::new(data);
-    let mut archive = tar::Archive::new(cursor);
-    let mut entries = Vec::new();
-    for entry in archive
-        .entries()
-        .map_err(|e| IoError::Other(format!("tar entries: {e}")))?
-    {
-        let mut entry = entry.map_err(|e| IoError::Other(format!("tar entry: {e}")))?;
-        let path = entry
-            .path()
-            .map_err(|e| IoError::Other(format!("tar entry path: {e}")))?;
-        let name = path.to_string_lossy().into_owned();
-        let kind = entry.header().entry_type();
-        let is_dir = kind.is_dir();
-        let mut buf = Vec::new();
-        if kind.is_file() {
-            std::io::Read::read_to_end(&mut entry, &mut buf)
-                .map_err(|e| IoError::Other(format!("tar read {name}: {e}")))?;
-        }
-        entries.push(TarEntry {
-            name,
-            data: buf,
-            is_dir,
-        });
-    }
-    Ok(entries)
+    read_limited(data, Limits::default())
+}
+
+/// [`read`], refusing an archive that holds more than `limits` allows.
+pub fn read_limited(data: &[u8], limits: Limits) -> Result<Vec<TarEntry>, IoError> {
+    let entries = archive::tar_read(data, limits).map_err(IoError::Other)?;
+    Ok(entries
+        .into_iter()
+        .map(|e| TarEntry {
+            is_dir: e.kind == archive::EntryKind::Dir,
+            name: e.name,
+            data: e.data,
+        })
+        .collect())
 }
 
 /// Builds an in-memory (ustar) tar archive from `files` - `(name, data)` pairs.
 pub fn write(files: &[(&str, &[u8])]) -> Result<Vec<u8>, IoError> {
-    let buf = Vec::new();
-    let mut builder = tar::Builder::new(buf);
-    for &(name, data) in files {
-        let mut header = tar::Header::new_gnu();
-        header.set_size(data.len() as u64);
-        header.set_mode(0o644);
-        header.set_cksum();
-        builder
-            .append_data(&mut header, name, data)
-            .map_err(|e| IoError::Other(format!("tar append {name}: {e}")))?;
-    }
-    let out = builder
-        .into_inner()
-        .map_err(|e| IoError::Other(format!("tar finish: {e}")))?;
-    Ok(out)
+    archive::tar_write(files).map_err(IoError::Other)
+}
+
+/// Writes every file and directory of the tar archive in `data` under `dir`,
+/// refusing the archive before writing anything when an entry's name would
+/// land outside `dir`; link and special entries are skipped. Answers how many
+/// entries it wrote.
+pub fn extract(data: &[u8], dir: &std::path::Path) -> Result<u64, IoError> {
+    let entries = archive::tar_read(data, Limits::default()).map_err(IoError::Other)?;
+    archive::extract(&entries, dir).map_err(IoError::Other)
 }
 
 #[cfg(test)]

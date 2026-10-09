@@ -476,6 +476,10 @@ impl<'a> Builder<'a> {
             "strings::to_i64" => ("gos_rt_str_to_i64_opt", self.option_i64_adt_ty()),
             "strings::to_f64" => ("gos_rt_str_to_f64_opt", self.option_f64_adt_ty()),
             "strings::to_bool" => ("gos_rt_str_to_bool_opt", self.option_bool_adt_ty()),
+            "strings::byte_find" => ("gos_rt_str_byte_find", self.option_i64_adt_ty()),
+            "strings::byte_rfind" => ("gos_rt_str_byte_rfind", self.option_i64_adt_ty()),
+            "strings::byte_offset" => ("gos_rt_str_byte_offset", self.option_i64_adt_ty()),
+            "strings::char_index" => ("gos_rt_str_char_index", self.option_i64_adt_ty()),
             // String-as-receiver `rfind` returns Option<i64>; same
             // discriminant-packed shape as `find_opt`.
             "strings::rfind" => {
@@ -573,6 +577,26 @@ impl<'a> Builder<'a> {
                 "gos_rt_compress_zlib_decompress",
                 self.result_vec_u8_error_ty(),
             ),
+            "compress::gzip::decode_limited" | "gzip::decode_limited" => (
+                "gos_rt_compress_gzip_decode_limited",
+                self.result_vec_u8_error_ty(),
+            ),
+            "compress::flate::decompress_limited" | "flate::decompress_limited" => (
+                "gos_rt_compress_flate_decompress_limited",
+                self.result_vec_u8_error_ty(),
+            ),
+            "compress::zlib::decompress_limited" | "zlib::decompress_limited" => (
+                "gos_rt_compress_zlib_decompress_limited",
+                self.result_vec_u8_error_ty(),
+            ),
+            "compress::bzip2::decompress_limited" | "bzip2::decompress_limited" => (
+                "gos_rt_compress_bzip2_decompress_limited",
+                self.result_vec_u8_error_ty(),
+            ),
+            "compress::zstd::decode_limited" | "zstd::decode_limited" => (
+                "gos_rt_compress_zstd_decode_limited",
+                self.result_vec_u8_error_ty(),
+            ),
             _ => return None,
         })
     }
@@ -638,6 +662,17 @@ impl<'a> Builder<'a> {
             }
             "archive::zip::write" | "zip::write" => {
                 ("gos_rt_zip_write", self.result_vec_u8_error_ty())
+            }
+            "archive::tar::extract" | "tar::extract" => {
+                let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+                ("gos_rt_tar_extract", self.result_of(i64_ty))
+            }
+            "archive::zip::extract" | "zip::extract" => {
+                let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+                ("gos_rt_zip_extract", self.result_of(i64_ty))
+            }
+            "archive::enclosed_path" => {
+                ("gos_rt_archive_enclosed_path", self.option_string_adt_ty())
             }
             "html::escape" => ("gos_rt_html_escape", self.tcx.string_ty()),
             "html::unescape" => ("gos_rt_html_unescape", self.tcx.string_ty()),

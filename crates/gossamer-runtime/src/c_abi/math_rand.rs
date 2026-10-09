@@ -35,15 +35,13 @@ impl GosRng {
 /// Allocate a new RNG seeded with `seed` (reinterpreted as `u64`).
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_math_rng_new(seed: i64) -> *mut GosRng {
-    ffi_entry!(std::ptr::null_mut(), {
-        super::rc::alloc_managed(GosRng { state: seed as u64 })
-    })
+    ffi_entry!({ super::rc::alloc_managed(GosRng { state: seed as u64 }) })
 }
 
 /// Next 64-bit output; the `u64` bit pattern is returned as `i64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_rng_next_u64(r: *mut GosRng) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if r.is_null() {
             return 0;
         }
@@ -55,7 +53,7 @@ pub unsafe extern "C" fn gos_rt_math_rng_next_u64(r: *mut GosRng) -> i64 {
 /// Next 32-bit output, zero-extended into `i64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_rng_next_u32(r: *mut GosRng) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if r.is_null() {
             return 0;
         }
@@ -69,7 +67,7 @@ pub unsafe extern "C" fn gos_rt_math_rng_next_u32(r: *mut GosRng) -> i64 {
 /// (the Rust `Rng::range_u64` asserts; the shim guards instead).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_rng_range_u64(r: *mut GosRng, low: i64, high: i64) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if r.is_null() {
             return low;
         }
@@ -86,7 +84,7 @@ pub unsafe extern "C" fn gos_rt_math_rng_range_u64(r: *mut GosRng, low: i64, hig
 /// Uniform `f64` in `[0.0, 1.0)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_rng_next_f64(r: *mut GosRng) -> f64 {
-    ffi_entry!(0.0, {
+    ffi_entry!({
         if r.is_null() {
             return 0.0;
         }

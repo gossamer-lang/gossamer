@@ -7,45 +7,28 @@
 
 #![forbid(unsafe_code)]
 
-use std::io::{Read, Write};
+use gossamer_runtime::codec::compress::{self, Format, ZSTD_DEFAULT_LEVEL};
 
 use crate::io::IoError;
 
-/// Default compression level (matches the `zstd` CLI default).
-const DEFAULT_LEVEL: i32 = 3;
-/// Minimum supported compression level.
-const MIN_LEVEL: i32 = 1;
-/// Maximum supported compression level.
-const MAX_LEVEL: i32 = 22;
-
-/// Compresses `input` with Zstandard at the default level (3).
+/// Encodes `input` as Zstandard at the default level.
 pub fn encode(input: &[u8]) -> Result<Vec<u8>, IoError> {
-    encode_level(input, DEFAULT_LEVEL)
+    compress::compress(Format::Zstd, input, ZSTD_DEFAULT_LEVEL).map_err(IoError::Other)
 }
 
-/// Compresses `input` with Zstandard at the given `level` (1..=22).
+/// Encodes `input` as Zstandard at `level`, which must lie in 1..=22.
 pub fn encode_level(input: &[u8], level: i32) -> Result<Vec<u8>, IoError> {
-    if !(MIN_LEVEL..=MAX_LEVEL).contains(&level) {
-        return Err(IoError::Other(format!(
-            "zstd level out of range (expected {MIN_LEVEL}..={MAX_LEVEL}): {level}"
-        )));
-    }
-    let mut enc = zstd::stream::Encoder::new(Vec::with_capacity(input.len()), level)
-        .map_err(|e| IoError::Other(format!("zstd encoder init: {e}")))?;
-    enc.write_all(input)
-        .map_err(|e| IoError::Other(format!("zstd encode write: {e}")))?;
-    enc.finish()
-        .map_err(|e| IoError::Other(format!("zstd encode finish: {e}")))
+    compress::compress(Format::Zstd, input, i64::from(level)).map_err(IoError::Other)
 }
 
-/// Decompresses a Zstandard-encoded payload.
+/// Decodes Zstandard `input`.
 pub fn decode(input: &[u8]) -> Result<Vec<u8>, IoError> {
-    let mut dec = zstd::stream::Decoder::new(input)
-        .map_err(|e| IoError::Other(format!("zstd decoder init: {e}")))?;
-    let mut out = Vec::with_capacity(input.len() * 3);
-    dec.read_to_end(&mut out)
-        .map_err(|e| IoError::Other(format!("zstd decode: {e}")))?;
-    Ok(out)
+    compress::decompress(Format::Zstd, input, None).map_err(IoError::Other)
+}
+
+/// [`decode`], refusing output past `max_bytes`.
+pub fn decode_limited(input: &[u8], max_bytes: u64) -> Result<Vec<u8>, IoError> {
+    compress::decompress(Format::Zstd, input, Some(max_bytes)).map_err(IoError::Other)
 }
 
 #[cfg(test)]
@@ -87,9 +70,11 @@ mod tests {
     #[test]
     fn encode_level_respects_bounds() {
         let plain = b"hello, zstd";
-        assert!(encode_level(plain, 0).is_err());
-        assert!(encode_level(plain, 23).is_err());
-        let cipher = encode_level(plain, MAX_LEVEL).unwrap();
+        let (min, max) = compress::level_range(Format::Zstd);
+        let (min, max) = (i32::try_from(min).unwrap(), i32::try_from(max).unwrap());
+        assert!(encode_level(plain, min - 1).is_err());
+        assert!(encode_level(plain, max + 1).is_err());
+        let cipher = encode_level(plain, max).unwrap();
         assert_eq!(decode(&cipher).unwrap(), plain);
     }
 

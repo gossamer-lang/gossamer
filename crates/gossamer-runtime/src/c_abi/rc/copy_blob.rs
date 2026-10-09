@@ -584,12 +584,11 @@ unsafe fn retain_blob_children(payload: *mut u8, meta: *const i64) {
             // their direct String / RC and Vec fields are retained along with
             // the copied words. `visit_entries` reads this blob from the
             // freshly initialised header and dispatches each child kind.
-            visit_entries(payload, |kind, child| {
-                if kind == gossamer_abi::rc::RC_CHILD_VEC {
-                    crate::c_abi::gos_rt_vec_retain(child.cast());
-                } else if kind == gossamer_abi::rc::RC_CHILD_RC {
-                    gos_rt_rc_retain(child);
-                }
+            visit_entries(payload, |kind, child| match kind {
+                gossamer_abi::rc::RC_CHILD_VEC => crate::c_abi::gos_rt_vec_retain(child.cast()),
+                gossamer_abi::rc::RC_CHILD_RC => gos_rt_rc_retain(child),
+                gossamer_abi::rc::RC_CHILD_WEAK => gos_rt_rc_weak_retain(child),
+                _ => {}
             });
             clone_map_children(payload);
         }
@@ -719,6 +718,7 @@ pub unsafe extern "C" fn gos_rt_enum_box_aggr(
         visit_vec_children(payload, |v| {
             crate::c_abi::vec::vec_retain_header(v.cast());
         });
+        retain_weak_children(payload);
         clone_map_children(payload);
     }
     payload
@@ -774,6 +774,7 @@ pub unsafe extern "C" fn gos_rt_rc_weak_cell(
         visit_vec_children(payload, |v| {
             crate::c_abi::vec::vec_retain_header(v.cast());
         });
+        retain_weak_children(payload);
         clone_map_children(payload);
     }
     payload
@@ -802,6 +803,7 @@ pub unsafe extern "C" fn gos_rt_rc_retain_children(payload: *mut u8) {
         visit_vec_children(base, |v| {
             crate::c_abi::vec::vec_retain_header(v.cast());
         });
+        retain_weak_children(base);
     }
 }
 

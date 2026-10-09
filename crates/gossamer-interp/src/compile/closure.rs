@@ -191,11 +191,16 @@ impl<'tcx> FnBuilder<'tcx> {
                 b.capture_cells_used = true;
             }
         }
+        b.closure_capture_names = capture_names.iter().cloned().collect();
         // A `Block` body mirrors `compile_fn`'s tail handling; a bare
         // expression compiles to a single Value reg returned directly.
         match &body.kind {
             HirExprKind::Block(block) => {
                 if let BlockResult::ValueIn(reg) = b.compile_block(block)? {
+                    let reg = match block.tail.as_deref() {
+                        Some(tail) => b.cloned_returned_field_container(tail, reg),
+                        None => reg,
+                    };
                     b.emit(Op::Return { value: reg });
                 } else {
                     b.emit(Op::ReturnUnit);
@@ -203,6 +208,7 @@ impl<'tcx> FnBuilder<'tcx> {
             }
             _ => {
                 let reg = b.compile_expr(body)?;
+                let reg = b.cloned_returned_field_container(body, reg);
                 b.emit(Op::Return { value: reg });
             }
         }

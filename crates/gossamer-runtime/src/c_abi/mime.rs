@@ -48,7 +48,7 @@ fn mime_parse(s: &str) -> Option<::mime::Mime> {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_mime_parse(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, as `mime_str` requires (C-ABI contract).
         let out = match mime_parse(&unsafe { mime_str(s) }) {
             Some(m) => format!("{}/{}", m.type_(), m.subtype()),
@@ -60,7 +60,7 @@ pub unsafe extern "C" fn gos_rt_mime_parse(s: *const c_char) -> *mut c_char {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_mime_top(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, as `mime_str` requires (C-ABI contract).
         let out = mime_parse(&unsafe { mime_str(s) })
             .map(|m| m.type_().to_string())
@@ -71,7 +71,7 @@ pub unsafe extern "C" fn gos_rt_mime_top(s: *const c_char) -> *mut c_char {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_mime_sub(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, as `mime_str` requires (C-ABI contract).
         let out = mime_parse(&unsafe { mime_str(s) })
             .map(|m| m.subtype().to_string())
@@ -82,7 +82,7 @@ pub unsafe extern "C" fn gos_rt_mime_sub(s: *const c_char) -> *mut c_char {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_mime_charset(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, as `mime_str` requires (C-ABI contract).
         let out = mime_parse(&unsafe { mime_str(s) })
             .and_then(|m| m.get_param("charset").map(|v| v.to_string()))
@@ -93,7 +93,7 @@ pub unsafe extern "C" fn gos_rt_mime_charset(s: *const c_char) -> *mut c_char {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_mime_boundary(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, as `mime_str` requires (C-ABI contract).
         let out = mime_parse(&unsafe { mime_str(s) })
             .and_then(|m| m.get_param("boundary").map(|v| v.to_string()))
@@ -104,7 +104,7 @@ pub unsafe extern "C" fn gos_rt_mime_boundary(s: *const c_char) -> *mut c_char {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_mime_param(s: *const c_char, key: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `key` is this shim's argument, as `mime_str` requires (C-ABI contract).
         let k = unsafe { mime_str(key) };
         let k = k.as_str();
@@ -118,7 +118,7 @@ pub unsafe extern "C" fn gos_rt_mime_param(s: *const c_char, key: *const c_char)
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_mime_type_by_extension(ext: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `ext` is this shim's argument, as `mime_str` requires (C-ABI contract).
         let raw = unsafe { mime_str(ext) };
         let trimmed = raw.strip_prefix('.').unwrap_or(&raw);
@@ -136,7 +136,7 @@ pub unsafe extern "C" fn gos_rt_mime_type_by_extension(ext: *const c_char) -> *m
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_mime_extension_by_type(t: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `t` is this shim's argument, as `mime_str` requires (C-ABI contract).
         let s = unsafe { mime_str(t) };
         let out = match mime_parse(&s) {
@@ -156,7 +156,7 @@ pub unsafe extern "C" fn gos_rt_mime_extension_by_type(t: *const c_char) -> *mut
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_mime_is_valid(s: *const c_char) -> i64 {
     // SAFETY: `s` is this shim's argument, as `mime_str` requires (C-ABI contract).
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `mime_str` accepts.
         i64::from(mime_parse(&unsafe { mime_str(s) }).is_some())
