@@ -107,9 +107,7 @@ fn route_segments_match(segments: &[RouteSegment], path: &str) -> Option<Vec<(St
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_router_new() -> *mut GosRouter {
-    ffi_entry!(std::ptr::null_mut(), {
-        Box::into_raw(Box::new(GosRouter { routes: Vec::new() }))
-    })
+    ffi_entry!({ Box::into_raw(Box::new(GosRouter { routes: Vec::new() })) })
 }
 
 /// Registers `pattern` under an already-decoded verb.
@@ -178,7 +176,7 @@ pub unsafe extern "C" fn gos_rt_router_add(
     env: *mut u8,
     fn_addr: i64,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         let m = if method.is_null() {
             String::new()
         } else {
@@ -202,7 +200,7 @@ pub unsafe extern "C" fn gos_rt_router_add_pattern(
     method: *const c_char,
     pattern: *const c_char,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         if router.is_null() {
             return;
         }
@@ -241,7 +239,7 @@ pub unsafe extern "C" fn gos_rt_router_lookup(
     method: *const c_char,
     path: *const c_char,
 ) -> i128 {
-    ffi_entry!(crate::c_abi::result::gos_rt_result_new(1, 0), {
+    ffi_entry!({
         if router.is_null() {
             return crate::c_abi::result::gos_rt_result_new(1, 0);
         }
@@ -323,7 +321,7 @@ pub unsafe extern "C" fn gos_rt_router_get(
     env: *mut u8,
     fn_addr: i64,
 ) -> *mut GosRouter {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `router`, `pattern`, and `env` are this shim's arguments, each null or live for
         // the call (C-ABI contract), and `fn_addr` a handler of the environment-taking shape,
         // which `router_add_verb` accepts.
@@ -339,7 +337,7 @@ pub unsafe extern "C" fn gos_rt_router_post(
     env: *mut u8,
     fn_addr: i64,
 ) -> *mut GosRouter {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `router`, `pattern`, and `env` are this shim's arguments, each null or live for
         // the call (C-ABI contract), and `fn_addr` a handler of the environment-taking shape,
         // which `router_add_verb` accepts.
@@ -355,7 +353,7 @@ pub unsafe extern "C" fn gos_rt_router_put(
     env: *mut u8,
     fn_addr: i64,
 ) -> *mut GosRouter {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `router`, `pattern`, and `env` are this shim's arguments, each null or live for
         // the call (C-ABI contract), and `fn_addr` a handler of the environment-taking shape,
         // which `router_add_verb` accepts.
@@ -371,7 +369,7 @@ pub unsafe extern "C" fn gos_rt_router_delete(
     env: *mut u8,
     fn_addr: i64,
 ) -> *mut GosRouter {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `router`, `pattern`, and `env` are this shim's arguments, each null or live for
         // the call (C-ABI contract), and `fn_addr` a handler of the environment-taking shape,
         // which `router_add_verb` accepts.
@@ -387,7 +385,7 @@ pub unsafe extern "C" fn gos_rt_router_patch(
     env: *mut u8,
     fn_addr: i64,
 ) -> *mut GosRouter {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `router`, `pattern`, and `env` are this shim's arguments, each null or live for
         // the call (C-ABI contract), and `fn_addr` a handler of the environment-taking shape,
         // which `router_add_verb` accepts.
@@ -403,7 +401,7 @@ pub unsafe extern "C" fn gos_rt_router_head(
     env: *mut u8,
     fn_addr: i64,
 ) -> *mut GosRouter {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `router`, `pattern`, and `env` are this shim's arguments, each null or live for
         // the call (C-ABI contract), and `fn_addr` a handler of the environment-taking shape,
         // which `router_add_verb` accepts.
@@ -419,7 +417,7 @@ pub unsafe extern "C" fn gos_rt_router_options(
     env: *mut u8,
     fn_addr: i64,
 ) -> *mut GosRouter {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `router`, `pattern`, and `env` are this shim's arguments, each null or live for
         // the call (C-ABI contract), and `fn_addr` a handler of the environment-taking shape,
         // which `router_add_verb` accepts.
@@ -438,7 +436,7 @@ pub unsafe extern "C" fn gos_rt_router_get_fn(
     pattern: *const c_char,
     fn_addr: i64,
 ) -> *mut GosRouter {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `router` and `pattern` are this shim's arguments, each null or live for the
         // call (C-ABI contract), and `fn_addr` a bare handler, which `router_add_bare` accepts.
         unsafe { router_add_bare(router, "GET", pattern, fn_addr) };
@@ -452,7 +450,7 @@ pub unsafe extern "C" fn gos_rt_router_post_fn(
     pattern: *const c_char,
     fn_addr: i64,
 ) -> *mut GosRouter {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `router` and `pattern` are this shim's arguments, each null or live for the
         // call (C-ABI contract), and `fn_addr` a bare handler, which `router_add_bare` accepts.
         unsafe { router_add_bare(router, "POST", pattern, fn_addr) };
@@ -466,7 +464,7 @@ pub unsafe extern "C" fn gos_rt_router_put_fn(
     pattern: *const c_char,
     fn_addr: i64,
 ) -> *mut GosRouter {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `router` and `pattern` are this shim's arguments, each null or live for the
         // call (C-ABI contract), and `fn_addr` a bare handler, which `router_add_bare` accepts.
         unsafe { router_add_bare(router, "PUT", pattern, fn_addr) };
@@ -480,7 +478,7 @@ pub unsafe extern "C" fn gos_rt_router_delete_fn(
     pattern: *const c_char,
     fn_addr: i64,
 ) -> *mut GosRouter {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `router` and `pattern` are this shim's arguments, each null or live for the
         // call (C-ABI contract), and `fn_addr` a bare handler, which `router_add_bare` accepts.
         unsafe { router_add_bare(router, "DELETE", pattern, fn_addr) };
@@ -494,7 +492,7 @@ pub unsafe extern "C" fn gos_rt_router_patch_fn(
     pattern: *const c_char,
     fn_addr: i64,
 ) -> *mut GosRouter {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `router` and `pattern` are this shim's arguments, each null or live for the
         // call (C-ABI contract), and `fn_addr` a bare handler, which `router_add_bare` accepts.
         unsafe { router_add_bare(router, "PATCH", pattern, fn_addr) };
@@ -508,7 +506,7 @@ pub unsafe extern "C" fn gos_rt_router_head_fn(
     pattern: *const c_char,
     fn_addr: i64,
 ) -> *mut GosRouter {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `router` and `pattern` are this shim's arguments, each null or live for the
         // call (C-ABI contract), and `fn_addr` a bare handler, which `router_add_bare` accepts.
         unsafe { router_add_bare(router, "HEAD", pattern, fn_addr) };
@@ -522,7 +520,7 @@ pub unsafe extern "C" fn gos_rt_router_options_fn(
     pattern: *const c_char,
     fn_addr: i64,
 ) -> *mut GosRouter {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `router` and `pattern` are this shim's arguments, each null or live for the
         // call (C-ABI contract), and `fn_addr` a bare handler, which `router_add_bare` accepts.
         unsafe { router_add_bare(router, "OPTIONS", pattern, fn_addr) };
@@ -537,7 +535,7 @@ pub unsafe extern "C" fn gos_rt_router_add_fn(
     pattern: *const c_char,
     fn_addr: i64,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         let m = if method.is_null() {
             String::new()
         } else {
@@ -559,7 +557,7 @@ pub unsafe extern "C-unwind" fn gos_rt_router_serve(
     router: *const GosRouter,
     req: *mut GosHttpRequest,
 ) -> i128 {
-    ffi_entry_passthrough!(0i128, {
+    ffi_entry_passthrough!({
         if router.is_null() || req.is_null() {
             return router_404_result();
         }
@@ -861,7 +859,7 @@ pub unsafe extern "C" fn gos_rt_file_server_new(
     root: *const c_char,
     prefix: *const c_char,
 ) -> *mut GosFileServer {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let root_s = if root.is_null() {
             String::new()
         } else {
@@ -889,7 +887,7 @@ pub unsafe extern "C" fn gos_rt_file_server_serve(
     fs: *const GosFileServer,
     req: *const GosHttpRequest,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if fs.is_null() || req.is_null() {
             return router_404_result();
         }
@@ -1008,7 +1006,7 @@ pub unsafe extern "C" fn gos_rt_file_server_serve(
 /// `static_files::serve_file`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_static_serve_file(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let path_s = if path.is_null() {
             String::new()
         } else {
@@ -1073,9 +1071,7 @@ pub struct GosNativeClient;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_native_client_new() -> *mut GosNativeClient {
-    ffi_entry!(std::ptr::null_mut(), {
-        Box::into_raw(Box::new(GosNativeClient))
-    })
+    ffi_entry!({ Box::into_raw(Box::new(GosNativeClient)) })
 }
 
 /// `NativeClient.get(url) -> Result<Response, Error>`. Delegates
@@ -1086,7 +1082,7 @@ pub unsafe extern "C" fn gos_rt_native_client_get(
     url: *const c_char,
 ) -> i128 {
     // SAFETY: `url` is this shim's argument, null or a live string body (C-ABI contract).
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `url` is this shim's argument, null or a live string body (C-ABI contract),
         // which `gos_rt_http_get` accepts with no options.
         unsafe { gos_rt_http_get(url, std::ptr::null_mut()) }
@@ -1102,7 +1098,7 @@ pub struct GosProxy {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_proxy_new(upstream: *const c_char) -> *mut GosProxy {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let u = if upstream.is_null() {
             String::new()
         } else {
@@ -1118,7 +1114,7 @@ pub unsafe extern "C" fn gos_rt_proxy_forward(
     proxy: *const GosProxy,
     req: *const GosHttpRequest,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if proxy.is_null() {
             return router_404_result();
         }
@@ -1151,7 +1147,7 @@ pub unsafe extern "C" fn gos_rt_proxy_forward(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_ws_frame_text(payload: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if payload.is_null() {
             return alloc_cstring(b"");
         }
@@ -1187,7 +1183,7 @@ impl GosHttpRequest {
 /// transfer-encoding with a single data chunk + terminator.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_chunked_encode(data: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if data.is_null() {
             return alloc_cstring(b"");
         }
@@ -1206,7 +1202,7 @@ pub unsafe extern "C" fn gos_rt_chunked_encode(data: *const c_char) -> *mut c_ch
 /// chunked body (trailers discarded).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_chunked_decode(data: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if data.is_null() {
             return alloc_cstring(b"");
         }
@@ -1260,7 +1256,7 @@ pub unsafe extern "C" fn gos_rt_sse_encode_event(
     data: *const c_char,
     id: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let n = if name.is_null() {
             String::new()
         } else {
@@ -1303,7 +1299,7 @@ pub unsafe extern "C" fn gos_rt_sse_encode_event(
 /// sse::encode_comment - render a `:`-prefixed keepalive line.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sse_encode_comment(text: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let t = if text.is_null() {
             String::new()
         } else {
@@ -1317,16 +1313,14 @@ pub unsafe extern "C" fn gos_rt_sse_encode_comment(text: *const c_char) -> *mut 
 /// sse::encode_retry - render a `retry:` directive.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_sse_encode_retry(ms: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
-        alloc_cstring(format!("retry: {ms}\n\n").as_bytes())
-    })
+    ffi_entry!({ alloc_cstring(format!("retry: {ms}\n\n").as_bytes()) })
 }
 
 /// middleware::new_request_id - process-monotonic id with nanos
 /// prefix.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_mw_new_request_id() -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1341,7 +1335,7 @@ pub extern "C" fn gos_rt_mw_new_request_id() -> *mut c_char {
 /// gzip token.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_mw_accepts_gzip(header: *const c_char) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if header.is_null() {
             return 0;
         }
@@ -1358,7 +1352,7 @@ pub unsafe extern "C" fn gos_rt_mw_accepts_gzip(header: *const c_char) -> i32 {
 /// derivation: base64(sha1(client_key + GUID)).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_ws_accept_key(client_key: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         const WS_GUID: &[u8] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
         if client_key.is_null() {
             return alloc_cstring(b"");
@@ -1377,7 +1371,7 @@ pub unsafe extern "C" fn gos_rt_ws_accept_key(client_key: *const c_char) -> *mut
 /// static_files::mime_for_path - extension-driven MIME lookup.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_static_mime_for_path(path: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if path.is_null() {
             return alloc_cstring(b"application/octet-stream");
         }

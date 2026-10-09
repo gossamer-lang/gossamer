@@ -14,6 +14,24 @@ use crate::tree::{
 
 use super::{BTREE_SET_DEF_LOCAL, HASH_SET_DEF_LOCAL, Lowerer, struct_literal_positional_index};
 
+/// The binding a map literal with aggregate values is built in.
+const MAP_LITERAL_BINDING: &str = "__gos_map_literal";
+
+/// Whether `e` is the block a map literal with aggregate values lowers to,
+/// whose answer is the map it just built and which no other name holds.
+#[must_use]
+pub fn is_map_literal_block(e: &HirExpr) -> bool {
+    matches!(
+        &e.kind,
+        HirExprKind::Block(HirBlock { tail: Some(tail), .. })
+            if matches!(
+                &tail.kind,
+                HirExprKind::Path { segments, .. }
+                    if matches!(segments.as_slice(), [only] if only.name == MAP_LITERAL_BINDING)
+            )
+    )
+}
+
 impl Lowerer<'_> {
     /// Lowers `Path { field: value, … }` into a call to the synthetic
     /// `__struct` builtin. The resulting argument list interleaves
@@ -257,7 +275,7 @@ impl Lowerer<'_> {
         span: Span,
         map_ty: Ty,
     ) -> HirExprKind {
-        let name = Ident::new("__gos_map_literal");
+        let name = Ident::new(MAP_LITERAL_BINDING);
         let ctor = HirExpr {
             id: self.fresh(),
             span,

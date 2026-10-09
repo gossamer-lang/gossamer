@@ -33,7 +33,7 @@ static HTTP_TEST_SERVERS: OnceLock<Mutex<HashMap<(u16, String), String>>> = Once
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_testing_check(cond: bool, msg: *const c_char) -> bool {
-    ffi_entry!(false, {
+    ffi_entry!({
         if !cond {
             let m = if msg.is_null() {
                 "check failed".to_string()
@@ -49,7 +49,7 @@ pub unsafe extern "C" fn gos_rt_testing_check(cond: bool, msg: *const c_char) ->
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_testing_check_eq_i64(a: i64, b: i64, msg: *const c_char) -> bool {
-    ffi_entry!(false, {
+    ffi_entry!({
         let ok = a == b;
         if !ok {
             let m = if msg.is_null() {
@@ -66,7 +66,7 @@ pub unsafe extern "C" fn gos_rt_testing_check_eq_i64(a: i64, b: i64, msg: *const
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_testing_wait_for_scheduler_idle(timeout_ms: i64) -> bool {
-    ffi_entry!(false, {
+    ffi_entry!({
         let deadline = crate::platform::Instant::now()
             + std::time::Duration::from_millis(timeout_ms.max(0) as u64);
         let scheduler = crate::sched_global::scheduler();
@@ -136,7 +136,7 @@ pub fn httptest_server(status: i64, body: &str) -> Result<String, std::io::Error
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_httptest_server(status: i64, body: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let body = if body.is_null() {
             String::new()
         } else {
@@ -166,7 +166,7 @@ pub unsafe extern "C" fn gos_rt_httptest_record(
     handler_env: *mut u8,
     handler_fn: i64,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if handler_fn == 0 {
             let err =
                 crate::c_abi::errors::error_new_from_bytes(b"httptest::record: handler is null");

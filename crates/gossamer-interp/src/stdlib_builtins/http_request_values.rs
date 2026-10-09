@@ -110,45 +110,19 @@ fn request_header_value(req: &Value, name: &str) -> Option<String> {
     None
 }
 
-/// Percent-decodes `input`, treating `+` as space (the
-/// x-www-form-urlencoded convention). Mirrors the runtime
-/// `percent_decode(_, query_mode = true)` so both tiers agree.
-fn percent_decode_form(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() => {
-                let hi = (bytes[i + 1] as char).to_digit(16);
-                let lo = (bytes[i + 2] as char).to_digit(16);
-                if let (Some(h), Some(l)) = (hi, lo) {
-                    out.push((h * 16 + l) as u8);
-                    i += 3;
-                } else {
-                    out.push(bytes[i]);
-                    i += 1;
-                }
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 /// First value for `key` in an x-www-form-urlencoded body, or `""`.
 fn form_lookup(body: &str, key: &str) -> String {
     for pair in body.split('&') {
         let (raw_key, raw_val) = pair.split_once('=').unwrap_or((pair, ""));
-        if percent_decode_form(raw_key) == key {
-            return percent_decode_form(raw_val);
+        if gossamer_runtime::codec::percent::decode(
+            raw_key,
+            gossamer_runtime::codec::percent::Component::Query,
+        ) == key
+        {
+            return gossamer_runtime::codec::percent::decode(
+                raw_val,
+                gossamer_runtime::codec::percent::Component::Query,
+            );
         }
     }
     String::new()

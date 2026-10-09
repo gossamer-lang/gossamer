@@ -3,15 +3,16 @@
 //! a pass through the MIR optimiser.
 //!
 //! Catches the class of bug where an optimisation pass corrupts
-//! the body in a way the structural verifier would reject. We
-//! run `verify_body` after `optimise` so a regression that lets
-//! a CFG drift past the verifier surfaces as a fuzz failure.
+//! the body in a way the structural verifier would reject, or leaves it
+//! releasing a handle twice or reading one after its release on some path.
+//! We run `verify_body` and the reference-count verifier after `optimise`
+//! so a regression in either surfaces as a fuzz failure.
 
 use libfuzzer_sys::fuzz_target;
 
 use gossamer_hir::lower_source_file;
 use gossamer_lex::SourceMap;
-use gossamer_mir::{lower_program, optimise, verify::verify_body};
+use gossamer_mir::{lower_program, optimise, rc_verify::verify_rc, verify::verify_body};
 use gossamer_parse::parse_source_file;
 use gossamer_resolve::resolve_source_file;
 use gossamer_types::{TyCtxt, typecheck_source_file};
@@ -58,6 +59,9 @@ fuzz_target!(|data: &[u8]| {
             // optimiser should preserve structural invariants.
             // Panic so libFuzzer reports the input as a crash.
             panic!("MIR verifier rejected body `{}` after optimise()", body.name);
+        }
+        if let Err(faults) = verify_rc(body) {
+            panic!("reference-count verifier rejected body `{}`: {faults:?}", body.name);
         }
     }
 });

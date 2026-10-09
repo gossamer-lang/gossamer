@@ -275,19 +275,19 @@ mod imp {
 pub unsafe extern "C" fn gos_rt_unix_listener_bind(path: *const c_char) -> i128 {
     // SAFETY: `path` is this shim's argument, null or a live string body (C-ABI contract), which
     // `listener_bind` accepts.
-    ffi_entry!(0i128, { unsafe { imp::listener_bind(path) } })
+    ffi_entry!({ unsafe { imp::listener_bind(path) } })
 }
 
 /// `net::UnixListener::accept(handle) -> Result<(UnixStream, String), Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unix_listener_accept(h: i64) -> i128 {
-    ffi_entry!(0i128, { imp::listener_accept(h) })
+    ffi_entry!({ imp::listener_accept(h) })
 }
 
 /// `net::UnixListener::close(handle)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unix_listener_close(h: i64) {
-    ffi_entry!((), { imp::listener_close(h) });
+    ffi_entry!({ imp::listener_close(h) });
 }
 
 /// `net::UnixStream::connect(path) -> Result<UnixStream, Error>`.
@@ -295,19 +295,19 @@ pub unsafe extern "C" fn gos_rt_unix_listener_close(h: i64) {
 pub unsafe extern "C" fn gos_rt_unix_stream_connect(path: *const c_char) -> i128 {
     // SAFETY: `path` is this shim's argument, null or a live string body (C-ABI contract), which
     // `stream_connect` accepts.
-    ffi_entry!(0i128, { unsafe { imp::stream_connect(path) } })
+    ffi_entry!({ unsafe { imp::stream_connect(path) } })
 }
 
 /// `net::UnixStream::read(handle, max) -> Result<[u8], Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unix_stream_read(h: i64, max: i64) -> i128 {
-    ffi_entry!(0i128, { imp::stream_read(h, max) })
+    ffi_entry!({ imp::stream_read(h, max) })
 }
 
 /// `net::UnixStream::read_to_string(handle) -> Result<String, Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unix_stream_read_to_string(h: i64) -> i128 {
-    ffi_entry!(0i128, { imp::stream_read_to_string(h) })
+    ffi_entry!({ imp::stream_read_to_string(h) })
 }
 
 /// `net::UnixStream::write(handle, data: [u8]) -> Result<i64, Error>`.
@@ -315,11 +315,11 @@ pub unsafe extern "C" fn gos_rt_unix_stream_read_to_string(h: i64) -> i128 {
 pub unsafe extern "C" fn gos_rt_unix_stream_write(h: i64, data: *const super::vec::GosVec) -> i128 {
     // SAFETY: `data` is this shim's argument, null or a live `Vec` (C-ABI contract), which
     // `stream_write` accepts.
-    ffi_entry!(0i128, { unsafe { imp::stream_write(h, data) } })
+    ffi_entry!({ unsafe { imp::stream_write(h, data) } })
 }
 
 /// `net::UnixStream::close(handle)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unix_stream_close(h: i64) {
-    ffi_entry!((), { imp::stream_close(h) });
+    ffi_entry!({ imp::stream_close(h) });
 }

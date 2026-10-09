@@ -69,6 +69,16 @@ use crate::registry::{StdItem, StdItemKind, StdModule};
 
 use super::*;
 
+pub const ARCHIVE: StdModule = StdModule {
+    path: "std::archive",
+    summary: "Helpers shared by the archive formats.",
+    items: &[StdItem {
+        name: "enclosed_path",
+        kind: StdItemKind::Function,
+        doc: "`enclosed_path(name) -> Option<String>`: an entry name as a relative path that stays inside the directory it is extracted to, `.` and inner `..` steps resolved, or `None` for an absolute path, a drive prefix, or a path that leaves the directory. Check every name before writing an entry by it.",
+    }],
+};
+
 pub const ARCHIVE_ZIP: StdModule = StdModule {
     path: "std::archive::zip",
     summary: "ZIP archive reader and writer.",
@@ -87,6 +97,16 @@ pub const ARCHIVE_ZIP: StdModule = StdModule {
             name: "write",
             kind: StdItemKind::Function,
             doc: "Builds an in-memory zip from (name, data) pairs.",
+        },
+        StdItem {
+            name: "read_limited",
+            kind: StdItemKind::Function,
+            doc: "`read(data)` refusing an archive with more than `max_entries` entries, an entry over `max_entry_bytes`, or more than `max_total_bytes` in all, counted as the bytes are read.",
+        },
+        StdItem {
+            name: "extract",
+            kind: StdItemKind::Function,
+            doc: "`extract(data, dir) -> Result<i64, Error>`: writes every file and directory under `dir`, refusing the archive before writing anything when a name would land outside it (`archive::enclosed_path`); answers how many entries it wrote.",
         },
     ],
 };
@@ -109,6 +129,16 @@ pub const ARCHIVE_TAR: StdModule = StdModule {
             name: "write",
             kind: StdItemKind::Function,
             doc: "Builds a tar archive from (name, data) pairs.",
+        },
+        StdItem {
+            name: "read_limited",
+            kind: StdItemKind::Function,
+            doc: "`read(data)` refusing an archive with more than `max_entries` entries, an entry over `max_entry_bytes`, or more than `max_total_bytes` in all, counted as the bytes are read.",
+        },
+        StdItem {
+            name: "extract",
+            kind: StdItemKind::Function,
+            doc: "`extract(data, dir) -> Result<i64, Error>`: writes every file and directory under `dir`, refusing the archive before writing anything when a name would land outside it (`archive::enclosed_path`); answers how many entries it wrote.",
         },
     ],
 };

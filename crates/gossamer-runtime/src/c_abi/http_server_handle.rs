@@ -72,7 +72,7 @@ fn err_result(message: &str) -> i128 {
 /// `http::Server::new() -> Server` - a server carrying every default.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_http_server_new() -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         let mut servers = registry().lock();
         servers.push(Arc::new(GosHttpServer::new()));
         i64::try_from(servers.len() - 1).unwrap_or(-1)
@@ -103,9 +103,7 @@ fn budget(value: i64) -> usize {
 /// header every 25 seconds.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_http_server_read_header_timeout_ms(handle: i64, ms: i64) -> i64 {
-    ffi_entry!(handle, {
-        set_limit(handle, |l| l.read_header_timeout_ms = millis(ms))
-    })
+    ffi_entry!({ set_limit(handle, |l| l.read_header_timeout_ms = millis(ms)) })
 }
 
 /// `server.read_body_timeout_ms(ms)` - how long the body has to arrive
@@ -113,36 +111,28 @@ pub extern "C" fn gos_rt_http_server_read_header_timeout_ms(handle: i64, ms: i64
 /// a long header window.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_http_server_read_body_timeout_ms(handle: i64, ms: i64) -> i64 {
-    ffi_entry!(handle, {
-        set_limit(handle, |l| l.read_body_timeout_ms = millis(ms))
-    })
+    ffi_entry!({ set_limit(handle, |l| l.read_body_timeout_ms = millis(ms)) })
 }
 
 /// `server.write_timeout_ms(ms)` - how long a response has to reach a peer
 /// that stopped reading.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_http_server_write_timeout_ms(handle: i64, ms: i64) -> i64 {
-    ffi_entry!(handle, {
-        set_limit(handle, |l| l.write_timeout_ms = millis(ms))
-    })
+    ffi_entry!({ set_limit(handle, |l| l.write_timeout_ms = millis(ms)) })
 }
 
 /// `server.idle_timeout_ms(ms)` - how long a keep-alive connection may sit
 /// between requests.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_http_server_idle_timeout_ms(handle: i64, ms: i64) -> i64 {
-    ffi_entry!(handle, {
-        set_limit(handle, |l| l.idle_timeout_ms = millis(ms))
-    })
+    ffi_entry!({ set_limit(handle, |l| l.idle_timeout_ms = millis(ms)) })
 }
 
 /// `server.max_header_bytes(n)` - largest accepted header block; past it
 /// the answer is 431.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_http_server_max_header_bytes(handle: i64, n: i64) -> i64 {
-    ffi_entry!(handle, {
-        set_limit(handle, |l| l.max_header_bytes = budget(n))
-    })
+    ffi_entry!({ set_limit(handle, |l| l.max_header_bytes = budget(n)) })
 }
 
 /// `server.max_body_bytes(n)` - largest accepted body; past it the answer
@@ -150,18 +140,14 @@ pub extern "C" fn gos_rt_http_server_max_header_bytes(handle: i64, n: i64) -> i6
 /// PDF, or a CSV import raises here.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_http_server_max_body_bytes(handle: i64, n: i64) -> i64 {
-    ffi_entry!(handle, {
-        set_limit(handle, |l| l.max_body_bytes = budget(n))
-    })
+    ffi_entry!({ set_limit(handle, |l| l.max_body_bytes = budget(n)) })
 }
 
 /// `server.max_connections(n)` - largest number of live connections; past
 /// it the answer is 503.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_http_server_max_connections(handle: i64, n: i64) -> i64 {
-    ffi_entry!(handle, {
-        set_limit(handle, |l| l.max_connections = budget(n).max(1))
-    })
+    ffi_entry!({ set_limit(handle, |l| l.max_connections = budget(n).max(1)) })
 }
 
 /// `server.request_timeout_ms(ms)` - how long a request's context lives
@@ -175,16 +161,14 @@ pub extern "C" fn gos_rt_http_server_max_connections(handle: i64, n: i64) -> i64
 /// worker - and those stop on time.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_http_server_request_timeout_ms(handle: i64, ms: i64) -> i64 {
-    ffi_entry!(handle, {
-        set_limit(handle, |l| l.request_timeout_ms = millis(ms))
-    })
+    ffi_entry!({ set_limit(handle, |l| l.request_timeout_ms = millis(ms)) })
 }
 
 /// `server.server_name(name)` - the `Server` response header, or none when
 /// empty.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_server_server_name(handle: i64, name: *const c_char) -> i64 {
-    ffi_entry!(handle, {
+    ffi_entry!({
         let text = if name.is_null() {
             String::new()
         } else {
@@ -199,7 +183,7 @@ pub unsafe extern "C" fn gos_rt_http_server_server_name(handle: i64, name: *cons
 /// bound address is readable before `serve` blocks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_server_listen(handle: i64, addr: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let Some(server) = server_at(handle) else {
             return err_result("http::Server::listen: stale server handle");
         };
@@ -227,7 +211,7 @@ pub unsafe extern "C" fn gos_rt_http_server_listen(handle: i64, addr: *const c_c
 /// finds a free port without racing another test for one.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_http_server_addr(handle: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let text = server_at(handle).map_or_else(String::new, |s| s.bound_addr.lock().clone());
         crate::c_abi::string::alloc_cstring(text.as_bytes())
     })
@@ -241,7 +225,7 @@ pub unsafe extern "C" fn gos_rt_http_server_serve(
     handler_env: *mut u8,
     handler_fn: i64,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let Some(server) = server_at(handle) else {
             return err_result("http::Server::serve: stale server handle");
         };
@@ -285,7 +269,7 @@ pub unsafe extern "C" fn gos_rt_http_server_serve(
 /// report it rather than exit believing the drain was clean.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_http_server_shutdown(handle: i64, deadline_ms: i64) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         let Some(server) = server_at(handle) else {
             return 0;
         };

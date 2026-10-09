@@ -98,7 +98,7 @@ static KEYPAIR_STRINGS_META: [i64; 6] = [
 /// `(secret_pkcs8_pem, public_spki_pem)`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_crypto_ecdsa_keypair_pem() -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use p256::ecdsa::SigningKey;
         use p256::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 
@@ -132,7 +132,7 @@ pub unsafe extern "C" fn gos_rt_crypto_ecdsa_sign_pem(
     secret_pem: *const c_char,
     message: *const GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use p256::ecdsa::{Signature, SigningKey, signature::Signer};
         use p256::pkcs8::DecodePrivateKey;
 
@@ -159,7 +159,7 @@ pub unsafe extern "C" fn gos_rt_crypto_ecdsa_verify_pem(
     message: *const GosVec,
     signature: *const GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
         use p256::pkcs8::DecodePublicKey;
 

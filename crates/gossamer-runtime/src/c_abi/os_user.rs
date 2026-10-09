@@ -27,7 +27,7 @@ use super::*;
 /// Login name of the current process user, or empty string.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_os_user_current_name() -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         #[cfg(unix)]
         let name = {
             use nix::unistd::{Uid, User};
@@ -45,7 +45,7 @@ pub extern "C" fn gos_rt_os_user_current_name() -> *mut c_char {
 /// uid of the current process user, or -1 on non-unix.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_os_user_current_uid() -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         #[cfg(unix)]
         {
             use nix::unistd::Uid;
@@ -61,7 +61,7 @@ pub extern "C" fn gos_rt_os_user_current_uid() -> i64 {
 /// gid of the current process user, or -1 on non-unix.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_os_user_current_gid() -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         #[cfg(unix)]
         {
             use nix::unistd::Gid;
@@ -77,7 +77,7 @@ pub extern "C" fn gos_rt_os_user_current_gid() -> i64 {
 /// Home directory of the current process user.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_os_user_current_home() -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         #[cfg(unix)]
         let home = {
             use nix::unistd::{Uid, User};
@@ -95,7 +95,7 @@ pub extern "C" fn gos_rt_os_user_current_home() -> *mut c_char {
 /// Login name for `uid`, or empty string. Unix-only.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_os_user_lookup_uid(uid: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         #[cfg(unix)]
         let name = {
             use nix::unistd::{Uid, User};
@@ -119,7 +119,7 @@ pub unsafe extern "C" fn gos_rt_os_user_lookup_uid(uid: i64) -> *mut c_char {
 /// uid for user `name`, or -1 if not found.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_os_user_lookup_name(name: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if name.is_null() {
             return -1;
         }

@@ -1,0 +1,58 @@
+// A Result or Option passed to a function is lent: the callee may read its
+// payload, bind it with `?` or a match, and return it, and the caller still
+// gives the payload back exactly once.
+
+use std::compress
+use std::errors
+
+fn mk(n: i64) -> Vec<u8> {
+    let mut v: Vec<u8> = Vec::from([])
+    for i in 0..n { v.push(i as u8) }
+    v
+}
+
+fn opt_len(o: Option<Vec<u8>>) -> i64 {
+    if let Some(v) = o { v.len() } else { 0 }
+}
+
+fn q(r: Result<Vec<u8>, errors::Error>) -> Result<i64, errors::Error> {
+    let v = r?
+    Ok(v.len())
+}
+
+fn keep(r: Result<Vec<u8>, errors::Error>) -> Vec<u8> {
+    match r {
+        Ok(v) => v
+        Err(_) => Vec::from([])
+    }
+}
+
+fn show(label: String, r: Result<Vec<u8>, errors::Error>) {
+    match r {
+        Ok(bytes) => println(f"{label}: ok {bytes.len()} bytes")
+        Err(e) => println(f"{label}: err {e}")
+    }
+}
+
+fn qs(r: Result<String, errors::Error>) -> Result<i64, errors::Error> {
+    let s = r?
+    Ok(s.len())
+}
+
+fn main() {
+    let gz = compress::gzip::encode("hello hello".as_bytes(), 6).unwrap()
+    let mut t = 0
+    for i in 0..200 {
+        t += opt_len(Some(mk(i % 5)))
+        match q(Ok(mk(3))) { Ok(n) => t += n, Err(_) => {} }
+        t += keep(Ok(mk(2))).len()
+        let r: Result<Vec<u8>, errors::Error> = Ok(mk(4))
+        t += keep(r).len()
+        match qs(Ok(f"abc{i}")) { Ok(n) => t += n, Err(_) => {} }
+        if i % 50 == 0 {
+            show("decoded", compress::gzip::decode(gz))
+            show("made", Ok(mk(i % 7)))
+        }
+    }
+    println(t)
+}

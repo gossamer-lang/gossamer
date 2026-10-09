@@ -2,30 +2,23 @@
 
 #![forbid(unsafe_code)]
 
-use bzip2::Compression;
-use bzip2::read::{BzDecoder, BzEncoder};
+use gossamer_runtime::codec::compress::{self, Format};
 
 use crate::io::IoError;
 
-/// Compresses `data` with bzip2 at the given level (0-9; 0 = fastest, 9 = best).
+/// Compresses `data` as bzip2 at `level`, which must lie in 1..=9.
 pub fn compress(data: &[u8], level: u32) -> Result<Vec<u8>, IoError> {
-    use std::io::Read as _;
-    let level = Compression::new(level.clamp(0, 9));
-    let mut enc = BzEncoder::new(data, level);
-    let mut out = Vec::new();
-    enc.read_to_end(&mut out)
-        .map_err(|e| IoError::from_std(e, "bzip2::compress"))?;
-    Ok(out)
+    compress::compress(Format::Bzip2, data, i64::from(level)).map_err(IoError::Other)
 }
 
-/// Decompresses bzip2 `data`.
+/// Decompresses bzip2 `data`; concatenated streams decode as one.
 pub fn decompress(data: &[u8]) -> Result<Vec<u8>, IoError> {
-    use std::io::Read as _;
-    let mut dec = BzDecoder::new(data);
-    let mut out = Vec::new();
-    dec.read_to_end(&mut out)
-        .map_err(|e| IoError::from_std(e, "bzip2::decompress"))?;
-    Ok(out)
+    compress::decompress(Format::Bzip2, data, None).map_err(IoError::Other)
+}
+
+/// [`decompress`], refusing output past `max_bytes`.
+pub fn decompress_limited(data: &[u8], max_bytes: u64) -> Result<Vec<u8>, IoError> {
+    compress::decompress(Format::Bzip2, data, Some(max_bytes)).map_err(IoError::Other)
 }
 
 #[cfg(test)]

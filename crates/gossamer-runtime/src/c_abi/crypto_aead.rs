@@ -71,7 +71,7 @@ pub unsafe extern "C" fn gos_rt_crypto_aes256gcm_seal(
     plaintext: *const GosVec,
     aad: *const GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use aes_gcm::aead::{Aead, KeyInit, Payload};
         use aes_gcm::{Aes256Gcm, Nonce as AesNonce};
         // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
@@ -119,7 +119,7 @@ pub unsafe extern "C" fn gos_rt_crypto_aes256gcm_open(
     ciphertext: *const GosVec,
     aad: *const GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use aes_gcm::aead::{Aead, KeyInit, Payload};
         use aes_gcm::{Aes256Gcm, Nonce as AesNonce};
         // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
@@ -166,7 +166,7 @@ pub unsafe extern "C" fn gos_rt_crypto_chacha20poly1305_seal(
     plaintext: *const GosVec,
     aad: *const GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use aes_gcm::aead::{Aead, KeyInit, Payload};
         use chacha20poly1305::{ChaCha20Poly1305, Nonce as ChaNonce};
         // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
@@ -215,7 +215,7 @@ pub unsafe extern "C" fn gos_rt_crypto_chacha20poly1305_open(
     ciphertext: *const GosVec,
     aad: *const GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use aes_gcm::aead::{Aead, KeyInit, Payload};
         use chacha20poly1305::{ChaCha20Poly1305, Nonce as ChaNonce};
         // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
@@ -259,7 +259,7 @@ pub unsafe extern "C" fn gos_rt_crypto_chacha20poly1305_open(
 /// - fresh Ed25519 keypair `(secret, public)` from the OS CSPRNG.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_crypto_ed25519_keypair() -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use ed25519_dalek::SigningKey;
         let mut seed = [0u8; 32];
         if getrandom::fill(&mut seed).is_err() {
@@ -281,7 +281,7 @@ pub unsafe extern "C" fn gos_rt_crypto_ed25519_sign(
     secret: *const GosVec,
     message: *const GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use ed25519_dalek::{Signer, SigningKey};
         // SAFETY: `secret` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `vec_bytes` accepts.
@@ -308,7 +308,7 @@ pub unsafe extern "C" fn gos_rt_crypto_ed25519_verify(
     message: *const GosVec,
     signature: *const GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
         // SAFETY: `public` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `vec_bytes` accepts.

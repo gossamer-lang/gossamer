@@ -88,7 +88,7 @@ fn retire_socket(id: i64) {
 /// `net::UdpSocket::bind(addr) -> Result<UdpSocket, Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_udp_bind(addr: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `addr` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
         let a = unsafe { cstr_to_str(addr) };
         match UdpSocket::bind(&a) {
@@ -117,7 +117,7 @@ pub unsafe extern "C" fn gos_rt_udp_send_to(
     data: *const super::vec::GosVec,
     addr: *const c_char,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let Some(sock) = socket_clone(h) else {
             return udp_err("UdpSocket::send_to: stale handle");
         };
@@ -138,7 +138,7 @@ pub unsafe extern "C" fn gos_rt_udp_send_to(
 /// the 2-slot tuple `([u8]-vec, sender-address-string)`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_udp_recv_from(h: i64, max: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let Some(sock) = socket_clone(h) else {
             return udp_err("UdpSocket::recv_from: stale handle");
         };
@@ -171,7 +171,7 @@ pub extern "C" fn gos_rt_udp_recv_from(h: i64, max: i64) -> i128 {
 /// `net::UdpSocket::local_addr(handle) -> Result<String, Error>`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_udp_local_addr(h: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let Some(sock) = socket_clone(h) else {
             return udp_err("UdpSocket::local_addr: stale handle");
         };
@@ -188,7 +188,7 @@ pub extern "C" fn gos_rt_udp_local_addr(h: i64) -> i128 {
 /// `net::UdpSocket::close(handle)`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_udp_close(h: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         retire_socket(super::registry_key::key_id(h));
     });
 }

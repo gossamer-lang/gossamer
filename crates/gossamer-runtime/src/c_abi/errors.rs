@@ -125,7 +125,7 @@ pub(crate) fn error_new_from_bytes(text: &[u8]) -> *mut GosError {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_error_new(msg: *const c_char) -> *mut GosError {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let text = if msg.is_null() {
             Vec::new()
         } else {
@@ -146,7 +146,7 @@ pub unsafe extern "C" fn gos_rt_error_new(msg: *const c_char) -> *mut GosError {
 /// is the c-string content. Returns a fresh boxed `GosError`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_error_from(value: *const c_char) -> *mut GosError {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let text = if value.is_null() {
             Vec::new()
         } else {
@@ -163,7 +163,7 @@ pub unsafe extern "C" fn gos_rt_error_wrap(
     cause: *mut GosError,
     msg: *const c_char,
 ) -> *mut GosError {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let text = if msg.is_null() {
             Vec::new()
         } else {
@@ -180,7 +180,7 @@ pub unsafe extern "C" fn gos_rt_error_wrap(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_error_message(err: *const GosError) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if err.is_null() {
             return alloc_cstring(b"");
         }
@@ -231,7 +231,7 @@ pub(crate) unsafe fn error_chain_text(err: *const GosError) -> String {
 /// is for the format-macro lowering of `{}` on an error value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_error_display(err: *const GosError) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut text: Vec<u8> = Vec::new();
         let mut cur = err;
         let mut first = true;
@@ -282,7 +282,7 @@ pub unsafe extern "C" fn gos_rt_error_with_field(
     key: *const c_char,
     value: *const c_char,
 ) -> *mut GosError {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `cstr_owned` accepts.
         let key = unsafe { cstr_owned(key) };
@@ -319,7 +319,7 @@ pub unsafe extern "C" fn gos_rt_error_with_field(
 /// under `key` on this error, ignoring the cause chain.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_error_field(err: *const GosError, key: *const c_char) -> i128 {
-    ffi_entry!(crate::c_abi::result::gos_rt_result_new(1, 0), {
+    ffi_entry!({
         if err.is_null() {
             return crate::c_abi::result::gos_rt_result_new(1, 0);
         }
@@ -343,7 +343,7 @@ pub unsafe extern "C" fn gos_rt_error_field(err: *const GosError, key: *const c_
 /// diagnostic fields of this error in insertion order.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_error_fields(err: *const GosError) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let out = crate::c_abi::vec::gos_rt_vec_with_capacity(16, 0);
         if !err.is_null() {
             // SAFETY: `err` is non-null (checked above) and live for the call (C-ABI contract).
@@ -367,7 +367,7 @@ pub unsafe extern "C" fn gos_rt_error_fields(err: *const GosError) -> *mut GosVe
 /// by every ancestor cause, outermost first.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_error_chain(err: *const GosError) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // Each element is a share of its own, so the vector's teardown gives
         // every link back.
         let out =
@@ -399,7 +399,7 @@ pub unsafe extern "C" fn gos_rt_error_is_sentinel(
     err: *const GosError,
     sentinel: *const GosError,
 ) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if err.is_null() || sentinel.is_null() {
             return 0;
         }

@@ -1862,30 +1862,46 @@ impl __gos_path_Path {
 
 /// Real-struct + wrapper source for `std::archive::tar` (read).
 /// `write` lowers directly (no struct).
-const TAR_WRAPPERS: &str = r"
+const TAR_WRAPPERS: &str = r#"
 struct __gos_tar_TarEntry { name: String, data: Vec<u8>, is_dir: bool }
-fn __gos_tar_read(data: Vec<u8>) -> Result<Vec<__gos_tar_TarEntry>, errors::Error> {
-    let raws = __gos_tar_read_raw(data)?
+fn __gos_tar_entries(raws: Vec<(String, Vec<u8>, bool)>) -> Vec<__gos_tar_TarEntry> {
     let mut out: Vec<__gos_tar_TarEntry> = Vec::from([])
     for r in raws {
         out.push(__gos_tar_TarEntry { name: r.0, data: r.1, is_dir: r.2 })
     }
-    Ok(out)
+    out
 }
-";
+fn __gos_tar_read(data: Vec<u8>) -> Result<Vec<__gos_tar_TarEntry>, errors::Error> {
+    Ok(__gos_tar_entries(__gos_tar_read_raw(data, -1, -1, -1)?))
+}
+fn __gos_tar_read_limited(data: Vec<u8>, max_entries: i64, max_entry_bytes: i64, max_total_bytes: i64) -> Result<Vec<__gos_tar_TarEntry>, errors::Error> {
+    if max_entries < 0 || max_entry_bytes < 0 || max_total_bytes < 0 {
+        return Err(errors::new("tar::read_limited: limits must not be negative"))
+    }
+    Ok(__gos_tar_entries(__gos_tar_read_raw(data, max_entries, max_entry_bytes, max_total_bytes)?))
+}
+"#;
 
 /// Real-struct + wrapper source for `std::archive::zip` (read).
-const ZIP_WRAPPERS: &str = r"
+const ZIP_WRAPPERS: &str = r#"
 struct __gos_zip_ZipEntry { name: String, data: Vec<u8>, is_dir: bool }
-fn __gos_zip_read(data: Vec<u8>) -> Result<Vec<__gos_zip_ZipEntry>, errors::Error> {
-    let raws = __gos_zip_read_raw(data)?
+fn __gos_zip_entries(raws: Vec<(String, Vec<u8>, bool)>) -> Vec<__gos_zip_ZipEntry> {
     let mut out: Vec<__gos_zip_ZipEntry> = Vec::from([])
     for r in raws {
         out.push(__gos_zip_ZipEntry { name: r.0, data: r.1, is_dir: r.2 })
     }
-    Ok(out)
+    out
 }
-";
+fn __gos_zip_read(data: Vec<u8>) -> Result<Vec<__gos_zip_ZipEntry>, errors::Error> {
+    Ok(__gos_zip_entries(__gos_zip_read_raw(data, -1, -1, -1)?))
+}
+fn __gos_zip_read_limited(data: Vec<u8>, max_entries: i64, max_entry_bytes: i64, max_total_bytes: i64) -> Result<Vec<__gos_zip_ZipEntry>, errors::Error> {
+    if max_entries < 0 || max_entry_bytes < 0 || max_total_bytes < 0 {
+        return Err(errors::new("zip::read_limited: limits must not be negative"))
+    }
+    Ok(__gos_zip_entries(__gos_zip_read_raw(data, max_entries, max_entry_bytes, max_total_bytes)?))
+}
+"#;
 
 /// Real-struct + wrapper source for `std::database::sql`. `Conn` /
 /// `Rows` / `Row` / `Tx` are real Gossamer structs holding an opaque

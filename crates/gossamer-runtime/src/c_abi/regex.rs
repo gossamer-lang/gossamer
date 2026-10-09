@@ -54,7 +54,7 @@ static CAPTURE_SLOT_CHILDREN: [crate::c_abi::vec::VecSlotChild; 1] =
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_regex_compile(pat: *const c_char) -> *mut GosRegex {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if pat.is_null() {
             return std::ptr::null_mut();
         }
@@ -74,7 +74,7 @@ pub unsafe extern "C" fn gos_rt_regex_compile(pat: *const c_char) -> *mut GosReg
 /// same message.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_regex_compile_result(pat: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if pat.is_null() {
             let msg = alloc_cstring(b"regex: invalid pattern ``: null pattern");
             return gos_rt_result_new(1, msg as i64);
@@ -96,7 +96,7 @@ pub unsafe extern "C" fn gos_rt_regex_compile_result(pat: *const c_char) -> i128
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_regex_is_match(re: *const GosRegex, text: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if re.is_null() || text.is_null() {
             return 0;
         }
@@ -110,7 +110,7 @@ pub unsafe extern "C" fn gos_rt_regex_is_match(re: *const GosRegex, text: *const
 /// Counts the non-overlapping matches without building them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_regex_count(re: *const GosRegex, text: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if re.is_null() || text.is_null() {
             return 0;
         }
@@ -126,7 +126,7 @@ pub unsafe extern "C" fn gos_rt_regex_find(
     re: *const GosRegex,
     text: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if re.is_null() || text.is_null() {
             return alloc_cstring(b"");
         }
@@ -149,7 +149,7 @@ pub unsafe extern "C" fn gos_rt_regex_find(
 /// `{start: i64, end: i64, text: *mut c_char}` triple.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_regex_find_opt(re: *const GosRegex, text: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if re.is_null() || text.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -185,7 +185,7 @@ pub unsafe extern "C" fn gos_rt_regex_find_opt(re: *const GosRegex, text: *const
 /// disc=0 → Some(captures), disc=1 → None. Group 0 = full match.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_regex_captures(re: *const GosRegex, text: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if re.is_null() || text.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -229,7 +229,7 @@ pub unsafe extern "C" fn gos_rt_regex_find_all(
     re: *const GosRegex,
     text: *const c_char,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // Each element is a 24-byte `(i64 start, i64 end, *c_char text)`
         // tuple. The previous 8-byte-per-element shape only stored the
         // matched text, leaving `hit.0` / `hit.1` reading garbage and
@@ -279,7 +279,7 @@ pub unsafe extern "C" fn gos_rt_regex_replace_all(
     text: *const c_char,
     repl: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if re.is_null() || text.is_null() {
             return alloc_cstring(b"");
         }
@@ -305,7 +305,7 @@ pub unsafe extern "C" fn gos_rt_regex_replace(
     text: *const c_char,
     repl: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if re.is_null() || text.is_null() {
             return alloc_cstring(b"");
         }
@@ -327,7 +327,7 @@ pub unsafe extern "C" fn gos_rt_regex_split(
     re: *const GosRegex,
     text: *const c_char,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // STRING-typed so `gos_rt_vec_free` deep-frees each owned piece
         // (consumer loops borrow the slot strings; see the unicode
         // `alloc_string_vec` template).
@@ -365,7 +365,7 @@ pub unsafe extern "C" fn gos_rt_regex_captures_all(
     re: *const GosRegex,
     text: *const c_char,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // VEC-typed outer: freeing it recursively frees each inner row,
         // whose own slot meta then reclaims the Some-group strings.
         let outer =

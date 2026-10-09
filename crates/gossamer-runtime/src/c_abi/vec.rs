@@ -118,6 +118,11 @@ pub mod vec_elem_kind {
     /// Slot-child kind: as [`ITER`], for the two-word pair state `zip` and
     /// `enumerate` build.
     pub const ITER_PAIR: u8 = 16;
+    /// Element is a `Weak` reference holding one weak share of its target:
+    /// a push moves the frame's weak share in, a copy of the storage takes
+    /// one per element, and `gos_rt_vec_free` gives each back. Also a
+    /// slot-child kind, for a `Weak` field of an `AGGR_OWNED` element.
+    pub const WEAK: u8 = 17;
 }
 
 #[repr(C)]
@@ -528,7 +533,7 @@ pub extern "C-unwind" fn gos_rt_vec_windows_disjoint(
     b_hi: i64,
     b_inclusive: i64,
 ) {
-    ffi_entry_passthrough!((), {
+    ffi_entry_passthrough!({
         if let Some(message) =
             window_overlap_message(len, (a_lo, a_hi, a_inclusive), (b_lo, b_hi, b_inclusive))
         {
@@ -544,7 +549,7 @@ pub extern "C-unwind" fn gos_rt_vec_windows_disjoint(
 /// window lives, so `v` is neither resized nor freed under it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_window(v: *mut GosVec, lo: i64, hi: i64) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if v.is_null() {
             return crate::c_abi::gos_rt_vec_new(8);
         }
@@ -815,6 +820,7 @@ pub(crate) unsafe fn vec_retain_slot_children(v: *const GosVec, slot: *mut u8) {
             vec_elem_kind::STRING => crate::c_abi::string::gos_rt_str_retain(child.cast()),
             vec_elem_kind::VEC => vec_retain_header(child.cast()),
             vec_elem_kind::RC_NODE => crate::c_abi::rc::gos_rt_rc_retain(child),
+            vec_elem_kind::WEAK => crate::c_abi::rc::gos_rt_rc_weak_retain(child),
             vec_elem_kind::MAP => {
                 let cloned = crate::c_abi::gos_rt_map_clone(child.cast());
                 slot_write_word(word, cloned as *mut u8);
@@ -849,7 +855,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_borrow_arr(
     data: *const u8,
     len: i64,
 ) -> *mut GosVec {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if len < 0 {
             crate::c_abi::panic::panic_text("Vec length must be non-negative");
         }
@@ -875,7 +881,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_borrow_packed_arr(
     data: *const u8,
     len: i64,
 ) -> *mut GosVec {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if len < 0 {
             crate::c_abi::panic::panic_text("Vec length must be non-negative");
         }
@@ -912,6 +918,7 @@ pub(crate) unsafe fn vec_release_slot_children(v: *const GosVec, slot: *const u8
                 crate::c_abi::rc::lazy_children::drop_share(child.cast(), true);
             }
             vec_elem_kind::RC_NODE => crate::c_abi::rc::gos_rt_rc_release(child),
+            vec_elem_kind::WEAK => crate::c_abi::rc::gos_rt_rc_weak_release(child),
             _ => {}
         });
     }
@@ -931,7 +938,7 @@ pub(crate) unsafe fn vec_release_slot_children(v: *const GosVec, slot: *const u8
 /// an indexed read are; it is never silently ignored.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_set_slots(v: *mut GosVec, idx: i64, slots: *const u8) {
-    ffi_entry_passthrough!((), {
+    ffi_entry_passthrough!({
         if v.is_null() {
             crate::c_abi::panic::panic_oob_text("vec index", idx, 0);
         }
@@ -1013,6 +1020,7 @@ pub(crate) unsafe fn vec_release_owned_children(v: &GosVec) {
                     crate::c_abi::rc::lazy_children::drop_share(child.cast(), true);
                 }
                 vec_elem_kind::RC_NODE => crate::c_abi::rc::gos_rt_rc_release(child),
+                vec_elem_kind::WEAK => crate::c_abi::rc::gos_rt_rc_weak_release(child),
                 _ => {}
             });
         }
@@ -1027,7 +1035,7 @@ pub(crate) unsafe fn vec_release_owned_children(v: &GosVec) {
 /// `vec_retain_header`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_retain(v: *mut GosVec) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `vec_retain_header` accepts.
         unsafe { vec_retain_header(v) };
@@ -1041,7 +1049,7 @@ pub unsafe extern "C" fn gos_rt_vec_retain(v: *mut GosVec) {
 /// walked recursively.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_mark_shared(v: *mut GosVec) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -1053,6 +1061,15 @@ pub unsafe extern "C" fn gos_rt_vec_mark_shared(v: *mut GosVec) {
         let len = vec.len as usize;
         let stride = vec.elem_bytes as usize;
         match vec.elem_kind {
+            vec_elem_kind::WEAK if stride == 8 => {
+                for index in 0..len {
+                    // SAFETY: `index` is below the vec's length.
+                    let child = unsafe { slot_read_word(vec.ptr.add(index * stride)) };
+                    // SAFETY: a non-null element of a `WEAK` vec is a block its weak share keeps
+                    // allocated.
+                    unsafe { crate::c_abi::rc::gos_rt_rc_mark_shared(child) };
+                }
+            }
             vec_elem_kind::STRING | vec_elem_kind::RC_ENUM | vec_elem_kind::VEC if stride == 8 => {
                 for index in 0..len {
                     // SAFETY: `index` is below the vec's length.
@@ -1084,6 +1101,9 @@ pub unsafe extern "C" fn gos_rt_vec_mark_shared(v: *mut GosVec) {
                                     crate::c_abi::map::gos_rt_map_mark_shared(child.cast());
                                 }
                                 vec_elem_kind::STRING | vec_elem_kind::RC_NODE => {
+                                    crate::c_abi::rc::gos_rt_rc_mark_shared(child);
+                                }
+                                vec_elem_kind::WEAK => {
                                     crate::c_abi::rc::gos_rt_rc_mark_shared(child);
                                 }
                                 _ => {}
@@ -1194,6 +1214,7 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
         vec_elem_kind::STRING
         | vec_elem_kind::VEC
         | vec_elem_kind::RC_ENUM
+        | vec_elem_kind::WEAK
         | vec_elem_kind::MAP
         | vec_elem_kind::JSON
             if s.elem_bytes == 8 =>
@@ -1222,6 +1243,11 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
                     // SAFETY: a non-null element of an `RC_ENUM` vec is a live node.
                     vec_elem_kind::RC_ENUM => unsafe {
                         crate::c_abi::rc::gos_rt_rc_retain(child);
+                    },
+                    // SAFETY: a non-null element of a `WEAK` vec is a block its weak share keeps
+                    // allocated.
+                    vec_elem_kind::WEAK => unsafe {
+                        crate::c_abi::rc::gos_rt_rc_weak_retain(child);
                     },
                     // A JSON handle carries no count, so the copy takes a box
                     // of its own onto the same document.
@@ -1314,6 +1340,7 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
                                 crate::c_abi::rc::lazy_children::retain(child.cast(), true);
                             }
                             vec_elem_kind::RC_NODE => crate::c_abi::rc::gos_rt_rc_retain(child),
+                            vec_elem_kind::WEAK => crate::c_abi::rc::gos_rt_rc_weak_retain(child),
                             _ => {}
                         });
                     }
@@ -1349,6 +1376,24 @@ pub unsafe extern "C" fn gos_rt_vec_mark_rc_elems(v: *mut GosVec) {
         return;
     }
     vec.elem_kind = vec_elem_kind::RC_ENUM;
+}
+
+/// Tags `v` as holding `Weak` elements ([`vec_elem_kind::WEAK`]): a push
+/// moves the frame's weak share in, `gos_rt_vec_free` gives each back, and
+/// storage duplication (clone / slice) takes one per copy. Emitted by the MIR
+/// lowering right after constructing a vec of `Weak` elements. Only a
+/// `PRIMITIVE` vec is re-tagged; no-op for null / region vecs.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_mark_weak_elems(v: *mut GosVec) {
+    if v.is_null() {
+        return;
+    }
+    // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
+    let vec = unsafe { &mut *v };
+    if vec_is_region(vec) || vec.elem_kind != vec_elem_kind::PRIMITIVE || vec.elem_bytes != 8 {
+        return;
+    }
+    vec.elem_kind = vec_elem_kind::WEAK;
 }
 
 /// Tags `v` as owning nested-vec elements ([`vec_elem_kind::VEC`]):
@@ -1404,7 +1449,7 @@ pub const VEC_HEADER_PREFIX_BYTES: usize = 32;
 /// the row's own header.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_header_table(v: *const GosVec) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let len = if v.is_null() {
             0
         } else {
@@ -1935,6 +1980,8 @@ pub(crate) unsafe fn vec_release_owned_elem(v: &GosVec, idx: i64, incoming: i64)
         vec_elem_kind::SET => unsafe { crate::c_abi::map::gos_rt_set_free(old.cast()) },
         // SAFETY: a non-null element of an `RC_ENUM` vec is a node share the vec holds.
         vec_elem_kind::RC_ENUM => unsafe { crate::c_abi::rc::gos_rt_rc_release(old) },
+        // SAFETY: a non-null element of a `WEAK` vec is a weak share the vec holds.
+        vec_elem_kind::WEAK => unsafe { crate::c_abi::rc::gos_rt_rc_weak_release(old) },
         // SAFETY: a non-null element of a `JSON` vec is a handle the vec owns.
         vec_elem_kind::JSON => unsafe { crate::c_abi::json::gos_rt_json_free(old.cast()) },
         _ => {}
@@ -2013,7 +2060,7 @@ pub fn vec_set_rc(v: &GosVec, rc: u16) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_vec_new(elem_bytes: u32) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: the header's pointer fields are null, so nothing it names needs to be live.
         unsafe {
             alloc_vec_header(GosVec {
@@ -2050,6 +2097,7 @@ fn header_elem_kind(requested: u8, site: &str) -> u8 {
         vec_elem_kind::AGGR_GUARDED | vec_elem_kind::AGGR_OWNED => vec_elem_kind::PRIMITIVE,
         kind if kind <= vec_elem_kind::ERROR
             || kind == vec_elem_kind::RC_ENUM
+            || kind == vec_elem_kind::WEAK
             || kind == vec_elem_kind::AGGR_FLAT
             || kind == vec_elem_kind::JSON =>
         {
@@ -2069,7 +2117,7 @@ fn header_elem_kind(requested: u8, site: &str) -> u8 {
 /// warning.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_vec_new_typed(elem_bytes: u32, elem_kind: u8) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let kind = header_elem_kind(elem_kind, "gos_rt_vec_new_typed");
         // SAFETY: the header's pointer fields are null, so nothing it names needs to be live.
         unsafe {
@@ -2137,7 +2185,7 @@ pub(crate) unsafe fn free_vec_buffer(ptr: *mut u8, bytes: usize) {
 
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn gos_rt_vec_with_capacity(elem_bytes: u32, cap: i64) -> *mut GosVec {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         // Header + reserved element buffer in one `Box<InlineVec>` (or a
         // separate buffer for a capacity larger than the inline slot). Only
         // initialized slots below len are readable; spare split capacity is
@@ -2158,7 +2206,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_repeat_primitive(
     count: i64,
     value: i64,
 ) -> *mut GosVec {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if count < 0 {
             crate::c_abi::panic::panic_text("array repeat count must be non-negative");
         }
@@ -2214,7 +2262,7 @@ pub extern "C-unwind" fn gos_rt_vec_with_capacity_typed(
     cap: i64,
     elem_kind: u8,
 ) -> *mut GosVec {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         let kind = header_elem_kind(elem_kind, "gos_rt_vec_with_capacity_typed");
         alloc_vec_with_capacity(elem_bytes, kind, cap)
     })
@@ -2238,7 +2286,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_from_arr(
     data: *const u8,
     len: i64,
 ) -> *mut GosVec {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if len < 0 {
             crate::c_abi::panic::panic_text("Vec length must be non-negative");
         }
@@ -2281,7 +2329,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_from_packed_arr(
     data: *const u8,
     len: i64,
 ) -> *mut GosVec {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if len < 0 {
             crate::c_abi::panic::panic_text("Vec length must be non-negative");
         }
@@ -2307,7 +2355,7 @@ pub unsafe extern "C" fn gos_rt_nested_arr_to_vec(
     raw: *const u8,
     outer_len: i64,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // Outer Vec holds pointer-sized elements (*mut GosVec).
         let outer = gos_rt_vec_new(8);
         if raw.is_null() || outer_len <= 0 || inner_len <= 0 || inner_elem_bytes <= 0 {
@@ -2335,7 +2383,7 @@ pub unsafe extern "C" fn gos_rt_nested_arr_to_vec(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_len(v: *const GosVec) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if v.is_null() {
             return 0;
         }
@@ -2353,7 +2401,7 @@ pub unsafe extern "C" fn gos_rt_vec_len(v: *const GosVec) -> i64 {
 /// explicitly.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_capacity(v: *const GosVec) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if v.is_null() {
             return 0;
         }
@@ -2370,7 +2418,7 @@ pub unsafe extern "C" fn gos_rt_vec_capacity(v: *const GosVec) -> i64 {
 /// stack slot in cranelift.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_push_i64(v: *mut GosVec, value: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         let bytes = value.to_ne_bytes();
         // SAFETY: `v` is this shim's `Vec` argument, null or live (C-ABI contract), and `bytes`
         // one 8-byte element.
@@ -2383,7 +2431,7 @@ pub unsafe extern "C" fn gos_rt_vec_push_i64(v: *mut GosVec, value: i64) {
 /// vec's `elem_bytes` must be 16.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_push_i128(v: *mut GosVec, value: i128) {
-    ffi_entry!((), {
+    ffi_entry!({
         let bytes = value.to_ne_bytes();
         // SAFETY: `v` is this shim's `Vec` argument, null or live (C-ABI contract), and `bytes`
         // one 16-byte element.
@@ -2395,7 +2443,7 @@ pub unsafe extern "C" fn gos_rt_vec_push_i128(v: *mut GosVec, value: i128) {
 /// Null vec / out-of-range → 0 (matching `gos_rt_vec_get_i64`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_get_i128(v: *const GosVec, idx: i64) -> i128 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if v.is_null() {
             return 0;
         }
@@ -2418,7 +2466,7 @@ pub unsafe extern "C" fn gos_rt_vec_get_i128(v: *const GosVec, idx: i64) -> i128
 /// bounds panic, matching [`gos_rt_vec_set_i64`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_set_i128(v: *mut GosVec, idx: i64, value: i128) {
-    ffi_entry_passthrough!((), {
+    ffi_entry_passthrough!({
         if v.is_null() {
             crate::c_abi::panic::panic_oob_text("vec index", idx, 0);
         }
@@ -2640,7 +2688,7 @@ pub unsafe fn vec_bytes(v: *const GosVec) -> Vec<u8> {
 /// The value is a total capacity, not an additional element count.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_reserve_at_least(v: *mut GosVec, min_cap: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -2656,7 +2704,7 @@ pub unsafe extern "C" fn gos_rt_vec_reserve_at_least(v: *mut GosVec, min_cap: i6
 /// Existing larger capacity is preserved; this function never shrinks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_reserve_exact(v: *mut GosVec, cap: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -2696,7 +2744,7 @@ pub unsafe extern "C" fn gos_rt_vec_extend_str_bytes(
     v: *mut GosVec,
     s: *const std::os::raw::c_char,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() || s.is_null() {
             return;
         }
@@ -2737,7 +2785,7 @@ pub unsafe extern "C" fn gos_rt_vec_extend_str_bytes(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_push(v: *mut GosVec, elem: *const u8) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() || elem.is_null() {
             return;
         }
@@ -2769,6 +2817,7 @@ pub unsafe extern "C" fn gos_rt_vec_push(v: *mut GosVec, elem: *const u8) {
                     | vec_elem_kind::MAP
                     | vec_elem_kind::ERROR
                     | vec_elem_kind::RC_ENUM
+                    | vec_elem_kind::WEAK
             )
         {
             // SAFETY: `elem` is this shim's element argument of the vec's width (C-ABI contract).
@@ -2814,6 +2863,7 @@ fn vec_elems_release_nothing(vec: &GosVec) -> bool {
         | vec_elem_kind::VEC
         | vec_elem_kind::MAP
         | vec_elem_kind::RC_ENUM
+        | vec_elem_kind::WEAK
         | vec_elem_kind::JSON => vec.elem_bytes as usize != 8,
         _ => true,
     }
@@ -2877,6 +2927,7 @@ unsafe fn vec_release_elem_at(v: *mut GosVec, idx: i64) {
             vec_elem_kind::VEC => crate::c_abi::map::gos_rt_vec_free(ptr.cast()),
             vec_elem_kind::MAP => crate::c_abi::map::gos_rt_map_free(ptr.cast()),
             vec_elem_kind::RC_ENUM => crate::c_abi::rc::gos_rt_rc_release(ptr),
+            vec_elem_kind::WEAK => crate::c_abi::rc::gos_rt_rc_weak_release(ptr),
             vec_elem_kind::JSON => crate::c_abi::json::gos_rt_json_free(ptr.cast()),
             _ => {}
         }
@@ -2982,6 +3033,7 @@ unsafe fn vec_retain_elem_at_for_copy(v: *const GosVec, idx: i64) -> bool {
             vec_elem_kind::RC_ENUM | vec_elem_kind::ERROR => {
                 crate::c_abi::rc::gos_rt_rc_retain(ptr);
             }
+            vec_elem_kind::WEAK => crate::c_abi::rc::gos_rt_rc_weak_retain(ptr),
             // A JSON handle carries no count, so the copy takes a box of its
             // own onto the same document and the slot names that one.
             vec_elem_kind::JSON => {
@@ -2999,7 +3051,7 @@ unsafe fn vec_retain_elem_at_for_copy(v: *const GosVec, idx: i64) -> bool {
 /// `v.clear()` - drop all live elements and keep capacity.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_clear(v: *mut GosVec) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -3026,7 +3078,7 @@ pub unsafe extern "C" fn gos_rt_vec_clear(v: *mut GosVec) {
 /// `v.truncate(n)` - drop elements at indices `n..len`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_truncate(v: *mut GosVec, len: i64) {
-    ffi_entry_passthrough!((), {
+    ffi_entry_passthrough!({
         if v.is_null() {
             return;
         }
@@ -3063,7 +3115,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_truncate(v: *mut GosVec, len: i64) {
 /// elements it held.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_assign(dst: *mut GosVec, src: *const GosVec) {
-    ffi_entry!((), {
+    ffi_entry!({
         if dst.is_null() || src.is_null() || std::ptr::addr_eq(dst.cast_const(), src) {
             return;
         }
@@ -3114,7 +3166,7 @@ pub unsafe extern "C" fn gos_rt_vec_assign(dst: *mut GosVec, src: *const GosVec)
 /// unchanged rather than shallow-copied unsafely.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_extend(dst: *mut GosVec, src: *const GosVec) {
-    ffi_entry!((), {
+    ffi_entry!({
         if dst.is_null() || src.is_null() {
             return;
         }
@@ -3196,7 +3248,7 @@ pub unsafe extern "C" fn gos_rt_vec_extend(dst: *mut GosVec, src: *const GosVec)
 /// before the process exits.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_main_exit_code(raw: i64) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         // Drain goroutines spawned via `go expr` before exiting:
         // `live_goroutines` is incremented at spawn admission, so a
         // fast `go expr; return` main observes its goroutine here, and
@@ -3228,7 +3280,7 @@ pub unsafe extern "C" fn gos_rt_main_exit_code(raw: i64) -> i32 {
 /// matching the VM tier.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_main_exit_code_err(disc: i64, payload: i64) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         gos_rt_flush_stdout();
         crate::c_abi::cohort::close_root();
         crate::sched_global::drain_goroutines_for_exit();
@@ -3268,7 +3320,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_copy_within(
     dest: i64,
     len: i64,
 ) {
-    ffi_entry_passthrough!((), {
+    ffi_entry_passthrough!({
         if v.is_null() {
             crate::c_abi::panic::panic_text("copy_within: null vector");
         }
@@ -3339,7 +3391,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_copy_within(
 /// exactly as the operation reads.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_copy_from_slice(dst: *mut GosVec, src: *const GosVec) {
-    ffi_entry_passthrough!((), {
+    ffi_entry_passthrough!({
         if dst.is_null() || src.is_null() {
             crate::c_abi::panic::panic_text("copy_from_slice: null vector");
         }

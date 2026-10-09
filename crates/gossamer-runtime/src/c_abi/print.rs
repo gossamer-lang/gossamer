@@ -183,7 +183,7 @@ pub static GOS_RT_STDOUT_LEN: GosRtStdoutLen = GosRtStdoutLen(core::cell::Unsafe
 /// outer acquire.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_stdout_acquire() {
-    ffi_entry!((), {
+    ffi_entry!({
         stdout_lock_acquire();
     });
 }
@@ -194,7 +194,7 @@ pub extern "C" fn gos_rt_stdout_acquire() {
 /// emits matched pairs.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_stdout_release() {
-    ffi_entry!((), {
+    ffi_entry!({
         stdout_lock_release();
     });
 }
@@ -443,7 +443,7 @@ pub fn flush_stdout_buffer() {
 /// stderr writers that must preserve output order, and process exit.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_flush_stdout() {
-    ffi_entry!((), {
+    ffi_entry!({
         if std::env::var_os("GOS_RC_DEBUG").is_some() {
             let live = crate::c_abi::rc::rc_live_count();
             let shared = crate::c_abi::rc::rc_shared_live_count();
@@ -467,7 +467,7 @@ pub extern "C" fn gos_rt_flush_stdout() {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_print_str(s: *const c_char) {
-    ffi_entry!((), {
+    ffi_entry!({
         let bytes = if s.is_null() {
             b"" as &[u8]
         } else {
@@ -480,7 +480,7 @@ pub unsafe extern "C" fn gos_rt_print_str(s: *const c_char) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_print_i64(n: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         // Format on the stack - avoid the per-call heap allocation
         // that `n.to_string()` would incur.
         let mut buf = itoa::Buffer::new();
@@ -491,7 +491,7 @@ pub extern "C" fn gos_rt_print_i64(n: i64) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_println_fn_i64(n: i64) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         gos_rt_print_i64(n);
         write_stdout(b"\n");
         0
@@ -500,7 +500,7 @@ pub unsafe extern "C" fn gos_rt_println_fn_i64(n: i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_println_fn_f64(x: f64) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         gos_rt_print_f64(x);
         write_stdout(b"\n");
         0
@@ -509,7 +509,7 @@ pub unsafe extern "C" fn gos_rt_println_fn_f64(x: f64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_println_fn_str_word(s: i64) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's string word, null or a live string body (C-ABI contract),
         // which `gos_rt_print_str` accepts.
         unsafe { gos_rt_print_str(s as usize as *const c_char) };
@@ -524,7 +524,7 @@ pub unsafe extern "C" fn gos_rt_println_fn_str_word(s: i64) -> i64 {
 /// bug a single shared printer would have).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_print_u64(n: u64) {
-    ffi_entry!((), {
+    ffi_entry!({
         let mut buf = itoa::Buffer::new();
         let text = buf.format(n);
         write_stdout(text.as_bytes());
@@ -533,7 +533,7 @@ pub unsafe extern "C" fn gos_rt_print_u64(n: u64) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_print_f64(x: f64) {
-    ffi_entry!((), {
+    ffi_entry!({
         // Match the interpreter's `{}` Display output.
         let text = format!("{x}");
         write_stdout(text.as_bytes());
@@ -542,14 +542,14 @@ pub extern "C" fn gos_rt_print_f64(x: f64) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_print_bool(b: i32) {
-    ffi_entry!((), {
+    ffi_entry!({
         write_stdout(if b != 0 { b"true" } else { b"false" });
     });
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_print_char(c: i32) {
-    ffi_entry!((), {
+    ffi_entry!({
         if let Some(ch) = char::from_u32(c as u32) {
             let mut buf = [0u8; 4];
             let s = ch.encode_utf8(&mut buf);
@@ -565,7 +565,7 @@ pub unsafe extern "C" fn gos_rt_print_char(c: i32) {
 /// expected place relative to stdout.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_eprint_str(s: *const c_char) {
-    ffi_entry!((), {
+    ffi_entry!({
         let bytes = if s.is_null() {
             b"" as &[u8]
         } else {
@@ -581,7 +581,7 @@ pub unsafe extern "C" fn gos_rt_eprint_str(s: *const c_char) {
 /// for the stderr path.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_eprintln() {
-    ffi_entry!((), {
+    ffi_entry!({
         write_terminal(2, b"\n");
     });
 }

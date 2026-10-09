@@ -51,7 +51,7 @@ super::rc::managed_handle!(GosBarrier);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_barrier_new(n: i64) -> *mut GosBarrier {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // A zero or negative count would never release; clamp to a
         // single participant so `wait()` returns immediately rather
         // than deadlocking, matching `Barrier::new(1)`.
@@ -69,7 +69,7 @@ pub extern "C" fn gos_rt_barrier_new(n: i64) -> *mut GosBarrier {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_barrier_wait(b: *mut GosBarrier) {
-    ffi_entry_passthrough!((), {
+    ffi_entry_passthrough!({
         if b.is_null() {
             return;
         }
@@ -142,7 +142,7 @@ super::rc::managed_handle!(GosOnce);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_once_new() -> *mut GosOnce {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         super::rc::alloc_managed(GosOnce {
             inner: Once::new(),
             completed_by: AtomicI64::new(-1),
@@ -155,7 +155,7 @@ pub extern "C" fn gos_rt_once_new() -> *mut GosOnce {
 /// otherwise. Mirrors the interp's `native_once_call`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_once_call(o: *mut GosOnce, env: *const u8) -> i64 {
-    ffi_entry_passthrough!(0, {
+    ffi_entry_passthrough!({
         if o.is_null() {
             return 0;
         }

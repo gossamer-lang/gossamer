@@ -330,7 +330,7 @@ static TLS_CLIENT_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(||
 /// stream; the plaintext handle `h` is consumed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_tcp_start_tls(h: i64, host: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `host` is this shim's argument, null or a live string body (C-ABI contract).
         unsafe { start_tls_with(h, host, Arc::clone(&TLS_CLIENT_CONFIG)) }
     })
@@ -341,7 +341,7 @@ pub unsafe extern "C" fn gos_rt_tcp_start_tls(h: i64, host: *const c_char) -> i1
 /// (PostgreSQL `sslmode=require`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_tcp_start_tls_insecure(h: i64, host: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `host` is this shim's argument, null or a live string body (C-ABI contract).
         unsafe { start_tls_with(h, host, Arc::clone(&TLS_CLIENT_CONFIG_INSECURE)) }
     })
@@ -357,7 +357,7 @@ pub unsafe extern "C" fn gos_rt_tcp_start_tls_ca(
     host: *const c_char,
     ca_pem: *const c_char,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `ca_pem` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
         let ca = unsafe { cstr_to_str(ca_pem) };
         let config = match tls_config_ca(ca.as_bytes()) {
@@ -379,7 +379,7 @@ pub unsafe extern "C" fn gos_rt_tcp_start_tls_ca(
 /// binding calls for is the caller's rule, not the socket's.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_tcp_tls_peer_cert(h: i64) -> *mut super::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let Some(stream) = tls_clone(h) else {
             return crate::c_abi::encoding::bytes_to_gosvec(&[]);
         };
@@ -528,7 +528,7 @@ impl ServerCertVerifier for NoCertVerify {
 /// `net::TcpListener::bind(addr) -> Result<TcpListener, Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_tcp_listener_bind(addr: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `addr` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
         let a = unsafe { cstr_to_str(addr) };
         match crate::listen::bind_tcp(&a) {
@@ -551,7 +551,7 @@ pub unsafe extern "C" fn gos_rt_tcp_listener_bind(addr: *const c_char) -> i128 {
 /// as `gos_rt_regex_find_opt` packs its triple.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_tcp_listener_accept(h: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let Some(listener) = listener_clone(h) else {
             return tcp_err("TcpListener::accept: stale handle");
         };
@@ -579,7 +579,7 @@ pub extern "C" fn gos_rt_tcp_listener_accept(h: i64) -> i128 {
 /// `net::TcpListener::local_addr(handle) -> Result<String, Error>`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_tcp_listener_local_addr(h: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let Some(listener) = listener_clone(h) else {
             return tcp_err("TcpListener::local_addr: stale handle");
         };
@@ -596,7 +596,7 @@ pub extern "C" fn gos_rt_tcp_listener_local_addr(h: i64) -> i128 {
 /// `net::TcpListener::close(handle)`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_tcp_listener_close(h: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         retire_listener(key_id(h));
     });
 }
@@ -604,7 +604,7 @@ pub extern "C" fn gos_rt_tcp_listener_close(h: i64) {
 /// `net::TcpStream::connect(addr) -> Result<TcpStream, Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_tcp_stream_connect(addr: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `addr` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
         let a = unsafe { cstr_to_str(addr) };
         let dialed = a.clone();
@@ -625,7 +625,7 @@ pub unsafe extern "C" fn gos_rt_tcp_stream_connect(addr: *const c_char) -> i128 
 /// up to `max` bytes (clamped to a 16 MiB ceiling, matching the VM).
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_tcp_stream_read(h: i64, max: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let cap = max.clamp(1, 1 << 24) as usize;
         let buf = if let Some(tls) = tls_clone(h) {
             match crate::sched_global::run_blocking("tls-stream-read", move || {
@@ -664,7 +664,7 @@ pub extern "C" fn gos_rt_tcp_stream_read(h: i64, max: i64) -> i128 {
 /// close. The buffer grows only when it cannot already hold `max`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_tcp_stream_read_into(h: i64, buf: *mut GosVec, max: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if buf.is_null() {
             return tcp_err("TcpStream::read_into: null buffer");
         }
@@ -734,7 +734,7 @@ pub unsafe extern "C" fn gos_rt_tcp_stream_read_into(h: i64, buf: *mut GosVec, m
 /// Reads until the peer closes (EOF); UTF-8-lossy, matching the VM.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_tcp_stream_read_to_string(h: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let mut out = Vec::new();
         let mut chunk = [0u8; 4096];
         if let Some(tls) = tls_clone(h) {
@@ -778,7 +778,7 @@ pub extern "C" fn gos_rt_tcp_stream_read_to_string(h: i64) -> i128 {
 /// `Vec<u8>` ABI before the call (see the delta report).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_tcp_stream_write(h: i64, data: *const super::vec::GosVec) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `data` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `vec_bytes` accepts.
         let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
@@ -827,7 +827,7 @@ fn timeout_duration(ms: i64) -> Option<Duration> {
 /// `net::TcpStream::set_read_timeout_ms(handle, ms) -> Result<(), Error>`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_tcp_stream_set_read_timeout_ms(h: i64, ms: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let timeout = timeout_duration(ms);
         if let Some(tls) = tls_clone(h) {
             match tls.lock().sock.set_read_timeout(timeout) {
@@ -848,7 +848,7 @@ pub extern "C" fn gos_rt_tcp_stream_set_read_timeout_ms(h: i64, ms: i64) -> i128
 /// `net::TcpStream::set_write_timeout_ms(handle, ms) -> Result<(), Error>`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_tcp_stream_set_write_timeout_ms(h: i64, ms: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let timeout = timeout_duration(ms);
         if let Some(tls) = tls_clone(h) {
             match tls.lock().sock.set_write_timeout(timeout) {
@@ -873,7 +873,7 @@ pub extern "C" fn gos_rt_tcp_stream_set_write_timeout_ms(h: i64, ms: i64) -> i12
 /// where coalescing them costs nothing and saves packets.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_tcp_stream_set_nodelay(h: i64, on: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let on = on != 0;
         if let Some(tls) = tls_clone(h) {
             match tls.lock().sock.set_nodelay(on) {
@@ -906,7 +906,7 @@ pub unsafe extern "C" fn gos_rt_tcp_stream_clear_write_timeout(h: i64) -> i128 {
 /// `net::TcpStream::close(handle)`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_tcp_stream_close(h: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         retire_stream(key_id(h));
     });
 }
@@ -922,7 +922,7 @@ pub unsafe extern "C" fn gos_rt_smtp_send(
     subject: *const c_char,
     body: *const c_char,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: the five strings are this shim's arguments, each null or a live string body
         // (C-ABI contract), which `smtp_send` accepts.
         unsafe { smtp_send(addr, from, to, subject, body, None) }
@@ -943,7 +943,7 @@ pub unsafe extern "C" fn gos_rt_smtp_send_auth(
     username: *const c_char,
     password: *const c_char,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `username` and `password` are this shim's arguments, each null or a live string
         // body (C-ABI contract), which `cstr_or_empty` accepts.
         let credentials = unsafe { (cstr_or_empty(username), cstr_or_empty(password)) };

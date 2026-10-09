@@ -2721,7 +2721,17 @@ own code raises it or the runtime does on its behalf (an index out of
 bounds, a missing map key, a callback a library runs), on every tier. A
 fault the runtime raises for itself rather than for the program (memory
 exhausted, a broken internal invariant) ends the program as a fault on
-`main` does. `runtime::set_panic_hook` observes one before it unwinds.
+`main` does; a standard-library function that fails an internal check of
+its own reports `GX0015` and never answers a value. `runtime::set_panic_hook`
+observes one before it unwinds.
+
+A contained panic runs every `defer` of the frames it leaves, on every
+tier. The bytecode VM also reclaims the values those frames held; compiled
+code does not reclaim heap values held by the frames a contained panic
+unwinds (their `String`s, `Vec`s, and other counted values stay allocated),
+because releasing them would cost every call that does not panic. A
+program that must give back a resource on a panicking path does so in a
+`defer`.
 
 ### 8.6 Two concurrency primitives
 

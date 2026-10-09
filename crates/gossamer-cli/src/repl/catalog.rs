@@ -330,11 +330,17 @@ pub(super) fn render_catalog_query_matches(query: &str, details: bool) -> String
         push_module_match(&mut entry, &module, details);
         entries.push(entry);
         // A matching module name is a namespace query, so include its public
-        // contents. A qualified item query does not enter this branch and
-        // remains focused on the requested symbol.
+        // contents and the modules nested under it. A qualified item query
+        // does not enter this branch and remains focused on the requested
+        // symbol.
         for item in module.items {
             let mut entry = String::new();
             push_item_match(&mut entry, &module, item, details);
+            entries.push(entry);
+        }
+        for child in stdlib_namespace_children(module.path) {
+            let mut entry = String::new();
+            push_module_match(&mut entry, &child, details);
             entries.push(entry);
         }
     }

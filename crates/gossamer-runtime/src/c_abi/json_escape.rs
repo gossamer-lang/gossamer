@@ -259,7 +259,7 @@ unsafe fn push_json_quoted_general(
     start: i64,
     end: i64,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let unchanged =
             |ok: bool| crate::c_abi::result::gos_rt_result_new(i64::from(!ok), s as i64);
         if buf.is_null() || start < 0 || end < start {

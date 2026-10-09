@@ -66,7 +66,7 @@ jobs:
         # on musl, but cargo-fuzz does not set that flag).
         run: |
           set -euo pipefail
-          for target in lex parse manifest http_request typecheck mir_lower vm_compile resolve hir_lower vm_run; do
+          for target in lex parse manifest http_request typecheck mir_lower vm_compile resolve hir_lower vm_run codec; do
             cargo +nightly-2026-04-14 fuzz run --target x86_64-unknown-linux-gnu \
               "$target" \
               -- -max_total_time=30 -max_len=65536 \

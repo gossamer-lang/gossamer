@@ -76,7 +76,7 @@ pub extern "C" fn gos_rt_result_new_f64(disc: i64, payload: f64) -> i128 {
 /// pointers).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_binding_variant_to_result(p: *const u8) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if p.is_null() {
             return pack_result(1, 0);
         }
@@ -466,7 +466,7 @@ pub unsafe extern "C-unwind" fn gos_rt_debug_result_fmt(
 /// path; panics on Err / None.
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn gos_rt_result_unwrap(r: i128) -> i64 {
-    ffi_entry_passthrough!(-1, {
+    ffi_entry_passthrough!({
         if result_disc_of(r) != 0 {
             crate::c_abi::panic::panic_text("called `Result::unwrap()` on an `Err` value");
             return 0;
@@ -480,7 +480,7 @@ pub extern "C-unwind" fn gos_rt_result_unwrap(r: i128) -> i64 {
 /// panics with, which names the shape the program actually wrote.
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn gos_rt_option_unwrap(r: i128) -> i64 {
-    ffi_entry_passthrough!(-1, {
+    ffi_entry_passthrough!({
         if result_disc_of(r) != 0 {
             crate::c_abi::panic::panic_text("called `Option::unwrap()` on a `None` value");
             return 0;
@@ -515,7 +515,7 @@ unsafe fn boxed_carrier_of(r: i128) -> i128 {
 /// A `Some` payload of `r` addresses a live boxed two-word carrier.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_option_unwrap_carrier(r: i128) -> i128 {
-    ffi_entry_passthrough!(0, {
+    ffi_entry_passthrough!({
         if result_disc_of(r) != 0 {
             crate::c_abi::panic::panic_text("called `Option::unwrap()` on a `None` value");
             return 0;
@@ -533,7 +533,7 @@ pub unsafe extern "C-unwind" fn gos_rt_option_unwrap_carrier(r: i128) -> i128 {
 /// An `Ok` payload of `r` addresses a live boxed two-word carrier.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_result_unwrap_carrier(r: i128) -> i128 {
-    ffi_entry_passthrough!(0, {
+    ffi_entry_passthrough!({
         if result_disc_of(r) != 0 {
             crate::c_abi::panic::panic_text("called `Result::unwrap()` on an `Err` value");
             return 0;
@@ -816,6 +816,8 @@ pub unsafe extern "C" fn gos_rt_result_ok_payload_release(r: i128, kind: i64) {
                 payload as usize as *mut crate::c_abi::deque::GosDeque,
             );
         },
+        // SAFETY: a payload of kind 8 is a `Weak` the carrier holds a weak share of.
+        8 => unsafe { crate::c_abi::rc::gos_rt_rc_weak_release(payload as usize as *mut u8) },
         _ => {}
     }
 }
@@ -844,7 +846,8 @@ pub unsafe extern "C" fn gos_rt_result_payload_release(r: i128, ok_kind: i64, er
 
 /// Takes a share of the heap payload of whichever arm a carrier holds, by the
 /// kinds [`gos_rt_result_payload_release`] takes: 1 a `String`, 2 a `Vec`, 4 an
-/// `errors::Error` cell, 0 an arm with nothing to share.
+/// `errors::Error` cell or other counted node, 8 a `Weak`, 0 an arm with
+/// nothing to share.
 ///
 /// # Safety
 ///
@@ -872,6 +875,8 @@ pub unsafe extern "C" fn gos_rt_result_payload_retain(r: i128, ok_kind: i64, err
         2 => unsafe { crate::c_abi::gos_rt_vec_retain(payload as usize as *mut GosVec) },
         // SAFETY: as above, for a live error cell.
         4 => unsafe { crate::c_abi::rc::gos_rt_rc_retain(payload as usize as *mut u8) },
+        // SAFETY: as above, for a block a `Weak` payload keeps allocated.
+        8 => unsafe { crate::c_abi::rc::gos_rt_rc_weak_retain(payload as usize as *mut u8) },
         _ => {}
     }
 }

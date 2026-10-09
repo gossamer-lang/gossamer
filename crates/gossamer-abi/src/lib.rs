@@ -293,7 +293,7 @@ pub use registry::{
     combinator_abi_of, combinator_crossings, combinator_symbol, lookup, mints_owned_string,
     returns_fresh_aggregate,
 };
-pub use types::{AbiSig, AbiType, CombinatorAbi, ElemClass, RuntimeEntry, Tier};
+pub use types::{AbiSig, AbiType, CombinatorAbi, ElemClass, Ownership, RuntimeEntry, Tier};
 
 /// The overflow-checked runtime entry for an integer shim, for the build
 /// profiles in which `+` and `*` panic on overflow. `sum` and `product` over

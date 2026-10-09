@@ -56,7 +56,7 @@ static PROGRAM_NAME_PTR: AtomicUsize = AtomicUsize::new(0);
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_args(argc: c_int, argv: *const *const c_char) {
-    ffi_entry!((), {
+    ffi_entry!({
         #[cfg(not(target_arch = "wasm32"))]
         let startup_started = crate::platform::Instant::now();
         // Configure the allocator before copying argv into Gossamer-owned
@@ -301,9 +301,7 @@ fn runtime_init() {
 /// pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_os_args() -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
-        ARGS_VEC.load(Ordering::SeqCst) as *mut GosVec
-    })
+    ffi_entry!({ ARGS_VEC.load(Ordering::SeqCst) as *mut GosVec })
 }
 
 /// Overrides the program name returned by `os::program_name()`.
@@ -315,7 +313,7 @@ pub unsafe extern "C" fn gos_rt_os_args() -> *mut GosVec {
 /// # Safety
 /// `name` is null or a NUL-terminated string live for the call.
 pub unsafe fn set_program_name(name: *const c_char) {
-    ffi_entry!((), {
+    ffi_entry!({
         if name.is_null() {
             return;
         }
@@ -333,9 +331,7 @@ pub unsafe fn set_program_name(name: *const c_char) {
 /// binaries; the script path for `gos`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_os_program_name() -> *const c_char {
-    ffi_entry!(std::ptr::null(), {
-        PROGRAM_NAME_PTR.load(Ordering::SeqCst) as *const c_char
-    })
+    ffi_entry!({ PROGRAM_NAME_PTR.load(Ordering::SeqCst) as *const c_char })
 }
 
 /// `env::temp_dir() -> String`. Returns the platform temp directory:
@@ -344,7 +340,7 @@ pub unsafe extern "C" fn gos_rt_os_program_name() -> *const c_char {
 /// the returned String.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_env_temp_dir() -> *const c_char {
-    ffi_entry!(std::ptr::null(), {
+    ffi_entry!({
         let path = crate::platform::temp_dir();
         let bytes = path.to_string_lossy();
         alloc_cstring(bytes.as_bytes()).cast_const()
@@ -356,7 +352,7 @@ pub extern "C" fn gos_rt_env_temp_dir() -> *const c_char {
 /// already handed out.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_env_vars() -> *mut GosMap {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let out = crate::c_abi::map::gos_rt_map_new(8, 8);
         for (name, value) in std::env::vars() {
             let key = alloc_cstring(name.as_bytes());
@@ -375,7 +371,7 @@ pub unsafe extern "C" fn gos_rt_env_vars() -> *mut GosMap {
 /// `if let Some(h) = env::home_dir()` works the same way.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_env_home_dir() -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         #[allow(
             deprecated,
             reason = "std::env::home_dir is the only std path to the home directory and its Windows behaviour is what this wants"
@@ -395,7 +391,7 @@ pub extern "C" fn gos_rt_env_home_dir() -> i128 {
 /// `*mut GosResult` shaped as Option (disc 0 = Some, 1 = None).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_os_env(name: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if name.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -415,7 +411,7 @@ pub unsafe extern "C" fn gos_rt_os_env(name: *const c_char) -> i128 {
 /// returns a `*mut GosResult` (disc 0 = Ok, 1 = Err).
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_os_cwd() -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         match std::env::current_dir() {
             Ok(path) => {
                 let cs = alloc_cstring(path.to_string_lossy().as_bytes());
@@ -608,7 +604,7 @@ fn dir_entry_words(entry: &DirInfoData) -> [i64; 7] {
 /// each tuple into a `DirInfo` struct.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_read_dir_raw(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let p = if path.is_null() {
             ".".to_string()
         } else {
@@ -689,7 +685,7 @@ pub unsafe extern "C-unwind" fn gos_rt_fs_walk_dir_raw(
     path: *const c_char,
     env: *const u8,
 ) -> i128 {
-    ffi_entry_passthrough!(0i128, {
+    ffi_entry_passthrough!({
         let root = if path.is_null() {
             ".".to_string()
         } else {
@@ -745,7 +741,7 @@ pub unsafe extern "C-unwind" fn gos_rt_fs_walk_dir_raw(
 /// than an i8 that gets garbage in the upper bits.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_os_exists(path: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if path.is_null() {
             return 0;
         }
@@ -758,7 +754,7 @@ pub unsafe extern "C" fn gos_rt_os_exists(path: *const c_char) -> i64 {
 /// `os::is_file(path) -> bool` / `fs::is_file(path) -> bool`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_os_is_file(path: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if path.is_null() {
             return 0;
         }
@@ -771,7 +767,7 @@ pub unsafe extern "C" fn gos_rt_os_is_file(path: *const c_char) -> i64 {
 /// `os::is_dir(path) -> bool` / `fs::is_dir(path) -> bool`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_os_is_dir(path: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if path.is_null() {
             return 0;
         }
@@ -784,7 +780,7 @@ pub unsafe extern "C" fn gos_rt_os_is_dir(path: *const c_char) -> i64 {
 /// `fs::is_symlink(path) -> bool`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_os_is_symlink(path: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if path.is_null() {
             return 0;
         }
@@ -798,7 +794,7 @@ pub unsafe extern "C" fn gos_rt_os_is_symlink(path: *const c_char) -> i64 {
 /// stat'd; the interp's matching helper has the same shape.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_os_file_size(path: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if path.is_null() {
             return 0;
         }
@@ -820,7 +816,7 @@ pub unsafe extern "C" fn gos_rt_os_file_size(path: *const c_char) -> i64 {
 /// also need.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_metadata(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() {
             let err =
                 crate::c_abi::errors::error_new_from_bytes("fs::metadata: null path".as_bytes());
@@ -850,7 +846,7 @@ pub unsafe extern "C" fn gos_rt_fs_metadata(path: *const c_char) -> i128 {
 /// (millis since the Unix epoch) match the VM's `fs::Metadata`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_metadata_raw(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() {
             let err =
                 crate::c_abi::errors::error_new_from_bytes("fs::metadata: null path".as_bytes());
@@ -925,7 +921,7 @@ pub(crate) static OUTPUT_META: [i64; 6] = [
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_exec_run_raw(prog: *const c_char, args: *mut GosVec) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `prog` and `args` are this shim's arguments, each null or live for the call
         // (C-ABI contract), which `exec_run_with` accepts with no directory or environment.
         unsafe {
@@ -954,7 +950,7 @@ pub unsafe extern "C" fn gos_rt_exec_run_in_raw(
     dir: *const c_char,
     env: *mut GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `prog`, `args`, `dir`, and `env` are this shim's arguments, each null or live
         // for the call (C-ABI contract), which `exec_run_with` accepts.
         unsafe { exec_run_with("process::run_in", prog, args, dir, env) }

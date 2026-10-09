@@ -106,7 +106,7 @@ impl<'a> Builder<'a> {
             local_runtime_kind: HashMap::new(),
             local_binary_heap_min_i64: std::collections::HashSet::new(),
             local_aggr_iter: std::collections::HashSet::new(),
-            fresh_loop_results: std::collections::HashSet::new(),
+            fresh_results: std::collections::HashSet::new(),
             local_define_layout: HashMap::new(),
             param_locals: std::collections::HashSet::new(),
             loop_stack: Vec::new(),
@@ -2073,6 +2073,11 @@ impl<'a> Builder<'a> {
                 // An iterator field holds a share of the handle, which the
                 // aggregate gives back at its death.
                 out.push((kind << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | word);
+            } else if self.tcx.is_weak_ty(fty) {
+                out.push(
+                    (gossamer_abi::rc::RC_CHILD_WEAK << gossamer_abi::rc::RC_CHILD_KIND_SHIFT)
+                        | word,
+                );
             } else if self.tcx.is_rc_managed(fty) {
                 out.push(
                     (gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | word,
@@ -2107,6 +2112,7 @@ impl<'a> Builder<'a> {
             return None;
         };
         let child_kind = |t: Ty| match self.tcx.kind_of(t) {
+            _ if self.tcx.is_weak_ty(t) => Some(gossamer_abi::rc::RC_CHILD_WEAK),
             _ if self.tcx.is_counted_node(t) => Some(gossamer_abi::rc::RC_CHILD_RC),
             TyKind::String => Some(gossamer_abi::rc::RC_CHILD_RC),
             TyKind::Vec(_) | TyKind::Slice(_) => Some(gossamer_abi::rc::RC_CHILD_VEC),

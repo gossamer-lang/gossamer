@@ -293,31 +293,31 @@ unsafe fn borrowed(p: *const c_char) -> String {
 pub unsafe extern "C" fn gos_rt_io_string_reader(text: *const c_char) -> i64 {
     // SAFETY: `text` is this shim's argument, live for the call (C-ABI contract) or null, which
     // `borrowed` accepts.
-    ffi_entry!(0, { string_reader(&unsafe { borrowed(text) }) })
+    ffi_entry!({ string_reader(&unsafe { borrowed(text) }) })
 }
 
 /// `io::buffer_writer() -> Writer` handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_io_buffer_writer() -> i64 {
-    ffi_entry!(0, { buffer_writer() })
+    ffi_entry!({ buffer_writer() })
 }
 
 /// `io::limit_reader(src, limit) -> Reader` handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_io_limit_reader(src: i64, limit: i64) -> i64 {
-    ffi_entry!(0, { limit_reader(src, limit) })
+    ffi_entry!({ limit_reader(src, limit) })
 }
 
 /// `io::tee_reader(src, sink) -> Reader` handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_io_tee_reader(src: i64, sink: i64) -> i64 {
-    ffi_entry!(0, { tee_reader(src, sink) })
+    ffi_entry!({ tee_reader(src, sink) })
 }
 
 /// `io::multi_reader(sources) -> Reader` handle over a `Vec<i64>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_io_multi_reader(sources: *const GosVec) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `sources` is this shim's argument, null or a live `Vec` for the call (C-ABI
         // contract).
         let ids: Vec<i64> = unsafe { sources.as_ref() }.map_or_else(Vec::new, |header| {
@@ -333,7 +333,7 @@ pub unsafe extern "C" fn gos_rt_io_multi_reader(sources: *const GosVec) -> i64 {
 /// `io::pipe() -> (Reader, Writer)` - the pair packed as a 2-slot tuple.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_io_pipe() -> *mut i64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let (reader, writer) = pipe();
         #[repr(C)]
         struct Pair {
@@ -351,7 +351,7 @@ pub extern "C" fn gos_rt_io_pipe() -> *mut i64 {
 /// `io::copy_n(dst, src, n) -> Result<i64, errors::Error>`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_io_copy_n(dst: i64, src: i64, n: i64) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+    ffi_entry!({
         if n < 0 {
             let err =
                 crate::c_abi::errors::error_new_from_bytes(b"io::copy_n: negative byte count");
@@ -364,23 +364,19 @@ pub extern "C" fn gos_rt_io_copy_n(dst: i64, src: i64, n: i64) -> i128 {
 /// `io::drain(src) -> String` - reads the handle to end of stream.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_io_drain(src: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
-        alloc_cstring(drain(src).as_bytes())
-    })
+    ffi_entry!({ alloc_cstring(drain(src).as_bytes()) })
 }
 
 /// `io::contents(writer) -> String` - everything written so far.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_io_contents(writer: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
-        alloc_cstring(contents(writer).as_bytes())
-    })
+    ffi_entry!({ alloc_cstring(contents(writer).as_bytes()) })
 }
 
 /// `io::write(writer, text) -> i64` - bytes accepted by the writer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_io_write_str(writer: i64, text: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `text` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `borrowed` accepts.
         write(writer, unsafe { borrowed(text) }.as_bytes()) as i64
@@ -390,5 +386,5 @@ pub unsafe extern "C" fn gos_rt_io_write_str(writer: i64, text: *const c_char) -
 /// `io::close_writer(writer)` - signals end of stream on a pipe.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_io_close_writer(writer: i64) {
-    ffi_entry!((), { close_writer(writer) });
+    ffi_entry!({ close_writer(writer) });
 }

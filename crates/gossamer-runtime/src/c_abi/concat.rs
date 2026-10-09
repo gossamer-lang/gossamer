@@ -29,7 +29,7 @@ thread_local! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_concat_init() {
-    ffi_entry!((), {
+    ffi_entry!({
         CONCAT_BUF.with(|b| {
             let mut buf = b.borrow_mut();
             buf.clear();
@@ -47,7 +47,7 @@ pub extern "C" fn gos_rt_concat_init() {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_concat_str(s: *const c_char) {
-    ffi_entry!((), {
+    ffi_entry!({
         if s.is_null() {
             return;
         }
@@ -59,7 +59,7 @@ pub unsafe extern "C" fn gos_rt_concat_str(s: *const c_char) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_concat_i64(n: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         use std::io::Write;
         // `Vec<u8>` is an `io::Write` sink, so the digits format straight
         // into the buffer with no intermediate `String` allocation.
@@ -76,7 +76,7 @@ pub extern "C" fn gos_rt_concat_i64(n: i64) {
 /// produce.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_concat_u64(n: u64) {
-    ffi_entry!((), {
+    ffi_entry!({
         use std::io::Write;
         CONCAT_BUF.with(|b| {
             let _ = write!(&mut *b.borrow_mut(), "{n}");
@@ -86,7 +86,7 @@ pub extern "C" fn gos_rt_concat_u64(n: u64) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_concat_f64(x: f64) {
-    ffi_entry!((), {
+    ffi_entry!({
         let mut text = crate::builtins::FloatText::new();
         let digits = crate::builtins::f64_display(x, &mut text);
         CONCAT_BUF.with(|b| b.borrow_mut().extend_from_slice(digits));
@@ -98,7 +98,7 @@ pub extern "C" fn gos_rt_concat_f64(x: f64) {
 /// form, so the text always reads back as a float.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_concat_f64_debug(x: f64) {
-    ffi_entry!((), {
+    ffi_entry!({
         let s = crate::builtins::format_float_debug(x);
         CONCAT_BUF.with(|b| b.borrow_mut().extend_from_slice(s.as_bytes()));
     });
@@ -110,7 +110,7 @@ pub extern "C" fn gos_rt_concat_f64_debug(x: f64) {
 /// allocation.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_concat_f64_prec(x: f64, prec: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         let prec = prec.clamp(0, 64) as usize;
         let s = format!("{x:.prec$}");
         CONCAT_BUF.with(|b| b.borrow_mut().extend_from_slice(s.as_bytes()));
@@ -119,7 +119,7 @@ pub extern "C" fn gos_rt_concat_f64_prec(x: f64, prec: i64) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_concat_bool(b: i32) {
-    ffi_entry!((), {
+    ffi_entry!({
         let s = if b != 0 { "true" } else { "false" };
         CONCAT_BUF.with(|buf| buf.borrow_mut().extend_from_slice(s.as_bytes()));
     });
@@ -127,7 +127,7 @@ pub extern "C" fn gos_rt_concat_bool(b: i32) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_concat_char(c: i32) {
-    ffi_entry!((), {
+    ffi_entry!({
         let ch = char::from_u32(c as u32).unwrap_or('\u{FFFD}');
         let s = ch.to_string();
         CONCAT_BUF.with(|b| b.borrow_mut().extend_from_slice(s.as_bytes()));
@@ -136,7 +136,7 @@ pub extern "C" fn gos_rt_concat_char(c: i32) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_concat_finish() -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         CONCAT_BUF.with(|b| {
             let buf = b.borrow();
             alloc_cstring(&buf)
@@ -150,7 +150,7 @@ pub extern "C" fn gos_rt_concat_finish() -> *mut c_char {
 /// discriminant and terminate the cause-chain walk.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_error_cause(err: *const GosError) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let cause = if err.is_null() {
             std::ptr::null_mut::<GosError>()
         } else {
@@ -178,7 +178,7 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
 /// Walks the cause chain looking for a substring match.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_error_is(err: *const GosError, needle: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if err.is_null() || needle.is_null() {
             return 0;
         }
@@ -243,7 +243,7 @@ fn joined_error(parts: &[String]) -> i128 {
 /// of `GosError*` elements and `len` its compile-time count.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_errors_join(ptr: *const *mut GosError, len: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let count = usize::try_from(len).unwrap_or(0);
         if ptr.is_null() || count == 0 {
             return joined_error(&[]);
@@ -266,7 +266,7 @@ pub unsafe extern "C" fn gos_rt_errors_join(ptr: *const *mut GosError, len: i64)
 /// holds no message.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_errors_join_vec(vec: *mut GosVec) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `vec` is this shim's argument, null or a live `Vec<errors::Error>` (C-ABI
         // contract).
         let Some(errors) = (unsafe { crate::c_abi::vec::VecView::of(vec) }) else {

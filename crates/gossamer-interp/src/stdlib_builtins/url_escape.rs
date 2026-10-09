@@ -102,6 +102,7 @@ use crate::builtins::{
     value_to_int,
 };
 use crate::value::{MapKey, NativeCall, NativeDispatch, RuntimeResult, Value};
+use gossamer_runtime::codec::percent::{self, Component};
 
 /// Entry point invoked from `builtins::install`.
 use super::*;
@@ -118,64 +119,21 @@ pub(crate) fn install_url_escape(globals: &mut Vec<(&'static str, Value)>) {
     }
 }
 
-pub(crate) fn url_percent_encode(input: &str, query_mode: bool) -> String {
-    let mut out = String::with_capacity(input.len());
-    for &b in input.as_bytes() {
-        let unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~');
-        if unreserved {
-            out.push(b as char);
-        } else if query_mode && b == b' ' {
-            out.push('+');
-        } else if !query_mode && matches!(b, b'/' | b':' | b'@') {
-            out.push(b as char);
-        } else {
-            out.push('%');
-            out.push_str(&format!("{b:02X}"));
-        }
-    }
-    out
-}
-
-pub(crate) fn url_percent_decode(input: &str, query_mode: bool) -> String {
-    let bytes = input.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'%' && i + 2 < bytes.len() {
-            let h1 = (bytes[i + 1] as char).to_digit(16);
-            let h2 = (bytes[i + 2] as char).to_digit(16);
-            if let (Some(h1), Some(h2)) = (h1, h2) {
-                out.push((h1 * 16 + h2) as u8);
-                i += 3;
-                continue;
-            }
-        }
-        if query_mode && b == b'+' {
-            out.push(b' ');
-        } else {
-            out.push(b);
-        }
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 pub(crate) fn builtin_url_query_escape(args: &[Value]) -> RuntimeResult<Value> {
     let s = args.first().and_then(as_str).unwrap_or("");
-    Ok(Value::String(url_percent_encode(s, true).into()))
+    Ok(Value::String(percent::encode(s, Component::Query).into()))
 }
 pub(crate) fn builtin_url_path_escape(args: &[Value]) -> RuntimeResult<Value> {
     let s = args.first().and_then(as_str).unwrap_or("");
-    Ok(Value::String(url_percent_encode(s, false).into()))
+    Ok(Value::String(percent::encode(s, Component::Path).into()))
 }
 pub(crate) fn builtin_url_query_unescape(args: &[Value]) -> RuntimeResult<Value> {
     let s = args.first().and_then(as_str).unwrap_or("");
-    Ok(Value::String(url_percent_decode(s, true).into()))
+    Ok(Value::String(percent::decode(s, Component::Query).into()))
 }
 pub(crate) fn builtin_url_path_unescape(args: &[Value]) -> RuntimeResult<Value> {
     let s = args.first().and_then(as_str).unwrap_or("");
-    Ok(Value::String(url_percent_decode(s, false).into()))
+    Ok(Value::String(percent::decode(s, Component::Path).into()))
 }
 
 #[cfg(test)]

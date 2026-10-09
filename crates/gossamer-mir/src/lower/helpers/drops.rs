@@ -577,6 +577,34 @@ fn aggregate_slot_takes_own_container(
         .any(|(fp, kind)| fp.as_slice() == path && kind.is_value_container())
 }
 
+/// Whether `ty` is a table: a `Map`, `Set`, deque, or heap, each reached
+/// through a handle that carries no count of its holders.
+pub(crate) fn is_table_ty(tcx: &TyCtxt, ty: Ty) -> bool {
+    matches!(tcx.kind_of(ty), gossamer_types::TyKind::HashMap { .. })
+        || slots::handle_container(tcx, ty).is_some()
+}
+
+/// The `gos_rt_result_payload_release` kind of a carrier arm holding `t`: `1`
+/// a `String`, `2` a `Vec` / slice, `4` a counted node (an `errors::Error`
+/// cell, a payload-enum node, or a callable's environment), `8` a `Weak`, or
+/// `None` for a payload that is not counted heap storage. The one answer every
+/// carrier ownership table starts from.
+pub(crate) fn counted_payload_kind(tcx: &TyCtxt, t: Ty) -> Option<u8> {
+    use gossamer_types::TyKind;
+    if tcx.is_weak_ty(t) {
+        return Some(8);
+    }
+    if tcx.is_counted_node(t) {
+        return Some(4);
+    }
+    match tcx.kind_of(t) {
+        TyKind::String => Some(1),
+        TyKind::Vec(_) | TyKind::Slice(_) => Some(2),
+        TyKind::DynError => Some(4),
+        _ => None,
+    }
+}
+
 /// The field kind of an `Option` / `Result` whose `Some` / `Ok` payload is a
 /// heap value the carrier owns, or `None` for any other type.
 pub(crate) fn carrier_field_kind(tcx: &TyCtxt, ty: Ty) -> Option<FieldRcKind> {
@@ -587,15 +615,10 @@ pub(crate) fn carrier_field_kind(tcx: &TyCtxt, ty: Ty) -> Option<FieldRcKind> {
     if def.local != u32::MAX && def.local != u32::MAX - 1 {
         return None;
     }
-    let arm = |payload: Option<&Ty>| match payload {
-        Some(t) if tcx.is_counted_node(*t) => 4,
-        Some(t) => match tcx.kind_of(*t) {
-            TyKind::String => 1,
-            TyKind::Vec(_) | TyKind::Slice(_) => 2,
-            TyKind::DynError => 4,
-            _ => 0,
-        },
-        None => 0,
+    let arm = |payload: Option<&Ty>| {
+        payload
+            .and_then(|t| counted_payload_kind(tcx, *t))
+            .unwrap_or(0)
     };
     let types = substs.types();
     let (ok, err) = (arm(types.first()), arm(types.get(1)));
@@ -1948,13 +1971,14 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                 {
                     continue;
                 }
-                // A map of payload-enum or callable values owns its values the
-                // same way, so the insert mints the entry's share of the node.
+                // A map of payload-enum, callable, or `Weak` values owns its
+                // values the same way, so the insert mints the entry's share.
                 if (name.starts_with("gos_rt_map_insert")
                     || name.starts_with("gos_rt_map_or_insert"))
                     && arg_idx >= 2
                     && let Some(l) = rc_operand(arg)
-                    && tcx.is_counted_node(body.locals[l.0 as usize].ty)
+                    && (tcx.is_counted_node(body.locals[l.0 as usize].ty)
+                        || tcx.is_weak_ty(body.locals[l.0 as usize].ty))
                 {
                     continue;
                 }
@@ -2042,7 +2066,8 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                 } if *name == "gos_rt_result_payload"
                     && place.projection.is_empty()
                     && (place.local.0 as usize) < n_locals
-                    && !enum_arg_is_borrowed(args) =>
+                    && !enum_arg_is_borrowed(args)
+                    && carrier_is_frame_owned(args) =>
                 {
                     payload_src[place.local.0 as usize] = true;
                 }
@@ -2219,9 +2244,11 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                     // `if let`, `?`). The carrier frees nothing, and a GosVec
                     // carries no RC header, so this local is the only owner and
                     // is released through the same `gos_rt_vec_free` path an
-                    // aggregate-field extract uses.
+                    // aggregate-field extract uses. A parameter's carrier is
+                    // lent by the caller, which keeps the payload's share.
                     Rvalue::CallIntrinsic { name, args }
                         if *name == "gos_rt_result_payload"
+                            && carrier_is_frame_owned(args)
                             && !copy_sourced[i]
                             && matches!(
                                 tcx.kind_of(body.locals[i].ty),
@@ -2934,6 +2961,106 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                         }
                     }
                     _ => {}
+                }
+            }
+        }
+    }
+    // A `Vec` the caller lent - a `Vec` parameter, or the payload of a
+    // parameter carrier, directly or through copies - that flows into the
+    // return slot leaves holding a share the caller will give back, so the
+    // copy that carries it out of the lent locals mints one. A local is lent
+    // when every definition it has is lent; a `return v` of a bare `Vec`
+    // parameter keeps the rule above that already mints its share.
+    {
+        let is_vec = |i: usize| {
+            matches!(
+                tcx.kind_of(body.locals[i].ty),
+                gossamer_types::TyKind::Vec(_) | gossamer_types::TyKind::Slice(_)
+            )
+        };
+        let is_param = |i: usize| (1..=arity).contains(&i);
+        let mut lent: Vec<bool> = (0..n_locals).map(|i| is_vec(i) && i != 0).collect();
+        let mut has_def = vec![false; n_locals];
+        for block in &body.blocks {
+            if let Terminator::Call { destination, .. } = &block.terminator
+                && (destination.local.0 as usize) < n_locals
+            {
+                has_def[destination.local.0 as usize] = true;
+                lent[destination.local.0 as usize] = false;
+            }
+            for stmt in &block.stmts {
+                if let StatementKind::Assign { place, .. }
+                | StatementKind::SetDiscriminant { place, .. } = &stmt.kind
+                    && (place.local.0 as usize) < n_locals
+                {
+                    has_def[place.local.0 as usize] = true;
+                }
+            }
+        }
+        for (i, slot) in lent.iter_mut().enumerate() {
+            if !is_param(i) && !has_def[i] {
+                *slot = false;
+            }
+        }
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for block in &body.blocks {
+                for stmt in &block.stmts {
+                    let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                        continue;
+                    };
+                    let d = place.local.0 as usize;
+                    if d >= n_locals || !lent[d] || is_param(d) {
+                        continue;
+                    }
+                    let keeps_lent = place.projection.is_empty()
+                        && match rvalue {
+                            Rvalue::Use(Operand::Copy(src)) => {
+                                src.projection.is_empty()
+                                    && (src.local.0 as usize) < n_locals
+                                    && lent[src.local.0 as usize]
+                            }
+                            Rvalue::CallIntrinsic { name, args } => {
+                                *name == "gos_rt_result_payload"
+                                    && matches!(
+                                        args.first(),
+                                        Some(Operand::Copy(c))
+                                            if c.projection.is_empty()
+                                                && is_param(c.local.0 as usize)
+                                    )
+                            }
+                            _ => false,
+                        };
+                    if !keeps_lent {
+                        lent[d] = false;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        for (block_idx, block) in body.blocks.iter().enumerate() {
+            for (stmt_idx, stmt) in block.stmts.iter().enumerate() {
+                let StatementKind::Assign {
+                    place,
+                    rvalue: Rvalue::Use(Operand::Copy(src)),
+                } = &stmt.kind
+                else {
+                    continue;
+                };
+                let (d, s) = (place.local.0 as usize, src.local.0 as usize);
+                if place.projection.is_empty()
+                    && src.projection.is_empty()
+                    && d < n_locals
+                    && s < n_locals
+                    && flows_to_return[d]
+                    && is_vec(s)
+                    && lent[s]
+                    && !lent[d]
+                    && !(d == Local::RETURN.0 as usize && is_param(s))
+                    && !copyback_sites.contains(&(block_idx, stmt_idx))
+                {
+                    retain_sites.push((block_idx, stmt_idx, src.local, 1));
                 }
             }
         }
@@ -4286,7 +4413,7 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
 /// extra one only leaks. Keep this list complete for RC-managed payloads.
 /// Runtime calls that hand back an owned `String` the frame must release.
 ///
-/// Two families answer one: a shim the ABI registry declares `mints_string`
+/// Two families answer one: a shim the ABI registry declares `Ownership::MintsString`
 /// (its Rust signature is `-> *mut c_char`, a fresh allocation), and the
 /// carrier accessors below, whose `String` answer is the payload's single
 /// reference handed over rather than a new allocation - the carrier never
@@ -4365,7 +4492,7 @@ mod field_releases;
 mod json;
 mod param_reads;
 mod read_counts;
-mod slots;
+pub(super) mod slots;
 mod tables;
 
 pub(crate) use answers::*;

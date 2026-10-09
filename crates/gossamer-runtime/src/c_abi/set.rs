@@ -236,7 +236,7 @@ impl GosSet {
 /// holding the same members compare equal, as they do in Rust.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_eq(a: *const GosSet, b: *const GosSet) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if std::ptr::eq(a, b) {
             return 1;
         }
@@ -261,7 +261,7 @@ pub unsafe extern "C" fn gos_rt_set_eq(a: *const GosSet, b: *const GosSet) -> i6
 /// copies with no count of their own.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_mark_shared(set: *mut GosSet) {
-    ffi_entry!((), {
+    ffi_entry!({
         if set.is_null() {
             return;
         }
@@ -293,12 +293,12 @@ fn set_handle(set: GosSet) -> *mut GosSet {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_set_new() -> *mut GosSet {
-    ffi_entry!(std::ptr::null_mut(), { set_handle(GosSet::default()) })
+    ffi_entry!({ set_handle(GosSet::default()) })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_btree_set_new() -> *mut GosSet {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut set = GosSet::default();
         set.make_ordered();
         set_handle(set)
@@ -310,7 +310,7 @@ pub extern "C" fn gos_rt_btree_set_new() -> *mut GosSet {
 /// non-zero. Emitted by the MIR lowering right after construction. Null-safe.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_ordered_by(s: *mut GosSet, cmp_addr: i64, by_address: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if s.is_null() {
             return;
         }
@@ -348,7 +348,7 @@ unsafe fn mark_ordered(set: *mut GosSet) -> *mut GosSet {
 /// same live table.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_clone(src: *const GosSet) -> *mut GosSet {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if src.is_null() {
             return gos_rt_set_new();
         }
@@ -368,7 +368,7 @@ pub unsafe extern "C" fn gos_rt_set_clone(src: *const GosSet) -> *mut GosSet {
 /// `slot` addresses a `*mut GosSet` field, or is null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_field_clone(slot: *mut *mut GosSet) {
-    ffi_entry!((), {
+    ffi_entry!({
         if slot.is_null() {
             return;
         }
@@ -396,7 +396,7 @@ pub unsafe extern "C" fn gos_rt_set_field_clone(slot: *mut *mut GosSet) {
 /// `slot` addresses a `*mut GosSet` field, or is null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_field_release(slot: *mut *mut GosSet) {
-    ffi_entry!((), {
+    ffi_entry!({
         if slot.is_null() {
             return;
         }
@@ -421,7 +421,7 @@ pub unsafe extern "C" fn gos_rt_set_field_release(slot: *mut *mut GosSet) {
 /// `dst` and `src` are live `GosSet`s or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_assign(dst: *mut GosSet, src: *const GosSet) {
-    ffi_entry!((), {
+    ffi_entry!({
         if dst.is_null() || src.is_null() || std::ptr::addr_eq(dst.cast_const(), src) {
             return;
         }
@@ -439,7 +439,7 @@ pub unsafe extern "C" fn gos_rt_set_assign(dst: *mut GosSet, src: *const GosSet)
 /// `v` must be null or a live `GosVec` whose slots hold `i64` elements.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_from_vec_i64(v: *const GosVec) -> *mut GosSet {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut set = GosSet::default();
         // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
         if let Some(vec) = unsafe { crate::c_abi::vec::VecView::of(v) } {
@@ -459,7 +459,7 @@ pub unsafe extern "C" fn gos_rt_set_from_vec_i64(v: *const GosVec) -> *mut GosSe
 /// `v` must be null or a live `GosVec` whose slots hold `*const c_char`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_from_vec_str(v: *const GosVec) -> *mut GosSet {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut set = GosSet::default();
         // SAFETY: `v` is this shim's argument, null or a live `Vec<String>` (C-ABI contract).
         if let Some(vec) = unsafe { crate::c_abi::vec::StrVecView::of(v) } {
@@ -494,7 +494,7 @@ pub unsafe extern "C" fn gos_rt_btree_set_from_vec_str(v: *const GosVec) -> *mut
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_insert(s: *mut GosSet, key: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if s.is_null() || key.is_null() {
             return 0;
         }
@@ -514,7 +514,7 @@ pub unsafe extern "C" fn gos_rt_set_insert(s: *mut GosSet, key: *const c_char) -
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_contains(s: *const GosSet, key: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if s.is_null() || key.is_null() {
             return 0;
         }
@@ -531,7 +531,7 @@ pub unsafe extern "C" fn gos_rt_set_contains(s: *const GosSet, key: *const c_cha
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_remove(s: *mut GosSet, key: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if s.is_null() || key.is_null() {
             return 0;
         }
@@ -551,7 +551,7 @@ pub unsafe extern "C" fn gos_rt_set_remove(s: *mut GosSet, key: *const c_char) -
 // reader, which sorts numerically to match the VM's `MapKey::Int` ordering.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_insert_i64(s: *mut GosSet, key: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if s.is_null() {
             return 0;
         }
@@ -563,7 +563,7 @@ pub unsafe extern "C" fn gos_rt_set_insert_i64(s: *mut GosSet, key: i64) -> i64 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_contains_i64(s: *const GosSet, key: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if s.is_null() {
             return 0;
         }
@@ -575,7 +575,7 @@ pub unsafe extern "C" fn gos_rt_set_contains_i64(s: *const GosSet, key: i64) -> 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_remove_i64(s: *mut GosSet, key: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if s.is_null() {
             return 0;
         }
@@ -587,7 +587,7 @@ pub unsafe extern "C" fn gos_rt_set_remove_i64(s: *mut GosSet, key: i64) -> i64 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_len(s: *const GosSet) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if s.is_null() {
             return 0;
         }
@@ -605,7 +605,7 @@ pub unsafe extern "C" fn gos_rt_set_len(s: *const GosSet) -> i64 {
 pub unsafe extern "C" fn gos_rt_set_is_empty(s: *const GosSet) -> i32 {
     // SAFETY: `s` is this shim's argument, live for the call (C-ABI contract) or null, which
     // `gos_rt_set_len` accepts.
-    ffi_entry!(1, { i32::from(unsafe { gos_rt_set_len(s) } <= 0) })
+    ffi_entry!({ i32::from(unsafe { gos_rt_set_len(s) } <= 0) })
 }
 
 /// How a set opens when it is rendered: its own literal spelling, the
@@ -617,7 +617,7 @@ fn set_format_open() -> &'static str {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_format_i64(s: *const GosSet, _ordered: i32) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut out = String::from(set_format_open());
         if !s.is_null() {
             // SAFETY: `s` is non-null (checked above) and live for the call (C-ABI contract).
@@ -648,7 +648,7 @@ pub unsafe extern "C" fn gos_rt_set_format_tagged(
     _ordered: i32,
     tag: i32,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut out = String::from(set_format_open());
         if !s.is_null() {
             // SAFETY: `s` is non-null (checked above) and live for the call (C-ABI contract).
@@ -682,7 +682,7 @@ pub unsafe extern "C-unwind" fn gos_rt_set_format_desc(
     _ordered: i32,
     tags: *const u8,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         let mut out = String::from(set_format_open());
         if !s.is_null() && !tags.is_null() {
             // SAFETY: `tags` is non-null (checked above) and addresses the element descriptor
@@ -722,7 +722,7 @@ pub unsafe extern "C-unwind" fn gos_rt_set_format_desc(
 /// or above `i64::MAX` shows its own decimal.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_format_u64(s: *const GosSet, _ordered: i32) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut out = String::from(set_format_open());
         if !s.is_null() {
             // SAFETY: `s` is non-null (checked above) and live for the call (C-ABI contract).
@@ -743,7 +743,7 @@ pub unsafe extern "C" fn gos_rt_set_format_u64(s: *const GosSet, _ordered: i32) 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_format_string(s: *const GosSet, _ordered: i32) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let mut out = String::from(set_format_open());
         if !s.is_null() {
             // SAFETY: `s` is non-null (checked above) and live for the call (C-ABI contract).
@@ -767,7 +767,7 @@ pub unsafe extern "C" fn gos_rt_set_format_string(s: *const GosSet, _ordered: i3
 /// meaning to beyond being the same on every tier.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_to_vec(s: *const GosSet) -> *mut crate::c_abi::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let out = {
             crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::STRING)
         };
@@ -795,7 +795,7 @@ pub unsafe extern "C" fn gos_rt_set_to_vec(s: *const GosSet) -> *mut crate::c_ab
 /// a `BTreeSet`, and otherwise in the table's own order.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_to_vec_i64(s: *const GosSet) -> *mut crate::c_abi::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or live for the call (C-ABI contract), which
         // `set_to_vec_ordered` accepts.
         unsafe { set_to_vec_ordered(s, crate::c_abi::map::KeyOrder::Signed) }
@@ -806,7 +806,7 @@ pub unsafe extern "C" fn gos_rt_set_to_vec_i64(s: *const GosSet) -> *mut crate::
 /// `usize`: a `BTreeSet` of them reads in unsigned order.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_to_vec_u64(s: *const GosSet) -> *mut crate::c_abi::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or live for the call (C-ABI contract), which
         // `set_to_vec_ordered` accepts.
         unsafe { set_to_vec_ordered(s, crate::c_abi::map::KeyOrder::Unsigned) }
@@ -852,7 +852,7 @@ pub unsafe extern "C" fn gos_rt_set_intersection_to_vec(
     a: *const GosSet,
     b: *const GosSet,
 ) -> *mut crate::c_abi::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let out = {
             crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::STRING)
         };
@@ -880,7 +880,7 @@ pub unsafe extern "C" fn gos_rt_set_intersection_to_vec_i64(
     a: *const GosSet,
     b: *const GosSet,
 ) -> *mut crate::c_abi::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let out = {
             crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::PRIMITIVE)
         };
@@ -902,7 +902,7 @@ pub unsafe extern "C" fn gos_rt_set_intersection_to_vec_i64(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_clear(s: *mut GosSet) -> *mut GosSet {
-    ffi_entry!(s, {
+    ffi_entry!({
         if !s.is_null() {
             // SAFETY: `s` is non-null (checked above) and live for the call (C-ABI contract).
             let s = unsafe { &mut *s };
@@ -996,7 +996,7 @@ pub unsafe extern "C" fn gos_rt_set_insert_skey(
     key: *const u8,
     desc: *const c_char,
 ) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         // SAFETY: `key`, `desc` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `build_skey_for_set` accepts.
         let Some(canonical) = (unsafe { crate::c_abi::map::build_skey_for_set(key, desc) }) else {
@@ -1039,7 +1039,7 @@ pub unsafe extern "C" fn gos_rt_set_contains_skey(
     key: *const u8,
     desc: *const c_char,
 ) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         // SAFETY: `key`, `desc` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `build_skey_for_set` accepts.
         let Some(canonical) = (unsafe { crate::c_abi::map::build_skey_for_set(key, desc) }) else {
@@ -1060,7 +1060,7 @@ pub unsafe extern "C" fn gos_rt_set_remove_skey(
     key: *const u8,
     desc: *const c_char,
 ) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         // SAFETY: `key`, `desc` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `build_skey_for_set` accepts.
         let Some(canonical) = (unsafe { crate::c_abi::map::build_skey_for_set(key, desc) }) else {
@@ -1087,7 +1087,7 @@ pub unsafe extern "C" fn gos_rt_set_to_vec_skey(
     s: *const GosSet,
     desc: *const c_char,
 ) -> *mut crate::c_abi::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if desc.is_null() {
             return std::ptr::null_mut();
         }
@@ -1134,7 +1134,7 @@ pub unsafe extern "C" fn gos_rt_set_intersection_to_vec_skey(
     b: *const GosSet,
     desc: *const c_char,
 ) -> *mut crate::c_abi::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if desc.is_null() {
             return std::ptr::null_mut();
         }
@@ -1175,7 +1175,7 @@ pub unsafe extern "C" fn gos_rt_set_intersection_to_vec_skey(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_union(a: *const GosSet, b: *const GosSet) -> *mut GosSet {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `a` and `b` are this shim's arguments, each null or live for the call (C-ABI
         // contract), which `set_combine` accepts.
         unsafe {
@@ -1195,7 +1195,7 @@ pub unsafe extern "C" fn gos_rt_set_intersection(
     a: *const GosSet,
     b: *const GosSet,
 ) -> *mut GosSet {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `a` and `b` are this shim's arguments, each null or live for the call (C-ABI
         // contract), which `set_combine` accepts.
         unsafe {
@@ -1215,7 +1215,7 @@ pub unsafe extern "C" fn gos_rt_set_intersection_skey(
     a: *const GosSet,
     b: *const GosSet,
 ) -> *mut GosSet {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `a` and `b` are this shim's arguments, each null or live for the call (C-ABI
         // contract), which `set_combine` accepts.
         unsafe {
@@ -1232,7 +1232,7 @@ pub unsafe extern "C" fn gos_rt_set_intersection_skey(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_difference(a: *const GosSet, b: *const GosSet) -> *mut GosSet {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `a` and `b` are this shim's arguments, each null or live for the call (C-ABI
         // contract), which `set_combine` accepts.
         unsafe {
@@ -1252,7 +1252,7 @@ pub unsafe extern "C" fn gos_rt_set_symmetric_difference(
     a: *const GosSet,
     b: *const GosSet,
 ) -> *mut GosSet {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `a` and `b` are this shim's arguments, each null or live for the call (C-ABI
         // contract), which `set_combine` accepts.
         unsafe {
@@ -1269,7 +1269,7 @@ pub unsafe extern "C" fn gos_rt_set_symmetric_difference(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_is_subset(a: *const GosSet, b: *const GosSet) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         // SAFETY: `a` and `b` are this shim's arguments, each null or live for the call (C-ABI
         // contract), which `set_relation` accepts.
         unsafe {
@@ -1282,7 +1282,7 @@ pub unsafe extern "C" fn gos_rt_set_is_subset(a: *const GosSet, b: *const GosSet
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_is_superset(a: *const GosSet, b: *const GosSet) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         // SAFETY: `a` and `b` are this shim's arguments, each null or live for the call (C-ABI
         // contract), which `set_relation` accepts.
         unsafe {
@@ -1299,7 +1299,7 @@ pub unsafe extern "C" fn gos_rt_set_is_superset(a: *const GosSet, b: *const GosS
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_is_disjoint(a: *const GosSet, b: *const GosSet) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         // SAFETY: `a` and `b` are this shim's arguments, each null or live for the call (C-ABI
         // contract), which `set_relation` accepts.
         unsafe {
@@ -1343,7 +1343,7 @@ pub unsafe extern "C" fn gos_rt_set_insert_ekey(
     node: *mut u8,
     desc: *const i64,
 ) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         // SAFETY: `node` is an enum node word and `desc` its descriptor (this shim's contract).
         let Some(key) = (unsafe { enum_element_key(node, desc) }) else {
             return 0;
@@ -1381,7 +1381,7 @@ pub unsafe extern "C" fn gos_rt_set_contains_ekey(
     node: *mut u8,
     desc: *const i64,
 ) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         // SAFETY: `node` is an enum node word and `desc` its descriptor (this shim's contract).
         let Some(key) = (unsafe { enum_element_key(node, desc) }) else {
             return 0;
@@ -1404,7 +1404,7 @@ pub unsafe extern "C" fn gos_rt_set_remove_ekey(
     node: *mut u8,
     desc: *const i64,
 ) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         // SAFETY: `node` is an enum node word and `desc` its descriptor (this shim's contract).
         let Some(key) = (unsafe { enum_element_key(node, desc) }) else {
             return 0;
@@ -1433,7 +1433,7 @@ pub unsafe extern "C" fn gos_rt_set_remove_ekey(
 pub unsafe extern "C" fn gos_rt_set_to_vec_ekey(
     s: *const GosSet,
 ) -> *mut crate::c_abi::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let out = {
             crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::RC_ENUM)
         };
@@ -1469,7 +1469,7 @@ pub unsafe extern "C-unwind" fn gos_rt_set_format_ekey(
     _ordered: i32,
     tags: *const u8,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         let mut out = String::from(set_format_open());
         if !s.is_null() && !tags.is_null() {
             // SAFETY: `tags` is non-null (checked above) and addresses the element descriptor
@@ -1513,7 +1513,7 @@ pub unsafe extern "C" fn gos_rt_set_window(
     hi: i64,
     take: i64,
 ) -> *mut GosSet {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if s.is_null() {
             return gos_rt_btree_set_new();
         }
@@ -1590,7 +1590,7 @@ pub unsafe extern "C" fn gos_rt_set_range_i64(
     hi: i64,
     mode: i64,
 ) -> *mut GosSet {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, null or live for the call and written by nothing
         // else (C-ABI contract), which `set_range` accepts.
         unsafe {
@@ -1609,7 +1609,7 @@ pub unsafe extern "C" fn gos_rt_set_range_str(
     hi: *const c_char,
     mode: i64,
 ) -> *mut GosSet {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let text = |p: *const c_char| -> &str {
             if p.is_null() {
                 return "";
@@ -1639,7 +1639,7 @@ pub unsafe extern "C" fn gos_rt_set_range_skey(
     hi: *const u8,
     mode: i64,
 ) -> *mut GosSet {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `lo`, `desc` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `build_skey_for_set` accepts.
         let lo = unsafe { crate::c_abi::map::build_skey_for_set(lo, desc) }.unwrap_or_default();
@@ -1666,7 +1666,7 @@ pub unsafe extern "C" fn gos_rt_set_range_ekey(
     hi: *mut u8,
     mode: i64,
 ) -> *mut GosSet {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `lo` is an enum node word and `desc` its descriptor (this shim's contract).
         let lo = unsafe { enum_element_key(lo, desc) }.unwrap_or_default();
         // SAFETY: `hi` is an enum node word and `desc` its descriptor (this shim's contract).

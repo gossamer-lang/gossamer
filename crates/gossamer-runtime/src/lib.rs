@@ -314,6 +314,7 @@ pub mod accept;
 pub mod builtins;
 pub mod c_abi;
 pub mod clock;
+pub mod codec;
 pub mod comptime_inputs;
 pub mod comptime_paths;
 pub mod comptime_policy;

@@ -1343,7 +1343,12 @@ impl<'a> Builder<'a> {
                 child_offsets.push(child_word);
                 payload_locals.push(boxed);
             } else {
-                if payload_ty == ty || self.tcx.is_rc_managed(payload_ty) {
+                if self.tcx.is_weak_ty(payload_ty) {
+                    // The node holds the payload's weak share, which its death
+                    // gives back without touching the target's strong count.
+                    use gossamer_abi::rc::{RC_CHILD_KIND_SHIFT, RC_CHILD_WEAK};
+                    child_offsets.push(child_word | (RC_CHILD_WEAK << RC_CHILD_KIND_SHIFT));
+                } else if payload_ty == ty || self.tcx.is_rc_managed(payload_ty) {
                     child_offsets.push(child_word);
                 } else if matches!(
                     self.tcx.kind_of(payload_ty),

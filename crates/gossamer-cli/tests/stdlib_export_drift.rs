@@ -8,6 +8,10 @@
 /// Public members implemented by parse-time injected Gossamer wrappers rather
 /// than direct interpreter registrations.
 const SOURCE_VISIBLE_VIA_REWRITE: &[&str] = &[
+    // `TAR_WRAPPERS` / `ZIP_WRAPPERS`: the bounded reads fold the
+    // `__gos_*_read_raw` leaf, which takes the three limits, into entries.
+    "archive::tar::read_limited",
+    "archive::zip::read_limited",
     "exec::spawn_piped",
     "os::exec::spawn_piped",
     "path::Path",
@@ -22,6 +26,7 @@ const SOURCE_VISIBLE_VIA_REWRITE: &[&str] = &[
     "path::Path::starts_with",
     "path::Path::stem",
     "process::spawn_piped",
+    "tar::read_limited",
     "time::CivilResolution::Fold",
     "time::CivilResolution::Gap",
     "time::CivilResolution::Unique",
@@ -49,6 +54,7 @@ const SOURCE_VISIBLE_VIA_REWRITE: &[&str] = &[
     "time::Time::utc",
     "time::add_date",
     "time::format_in",
+    "zip::read_limited",
 ];
 
 #[test]
@@ -199,6 +205,10 @@ fn registry_members_match_manifest() {
 /// run). The resolver never sees these names - the rewrite fires before
 /// resolution - so the three-segment phantom gate cannot reject them.
 const MANIFEST_IMPL_VIA_REWRITE: &[&str] = &[
+    // `TAR_WRAPPERS` / `ZIP_WRAPPERS`: injected Gossamer wrappers over the
+    // `__gos_*_read_raw` leaf each tier implements.
+    "archive::tar::read_limited",
+    "archive::zip::read_limited",
     // `Parser::rewrite_errors_newf` desugars to `errors::new(format!(..))`.
     "errors::newf",
     // `rewrite_stdlib_struct_surface` maps these to injected

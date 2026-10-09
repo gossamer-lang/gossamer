@@ -117,14 +117,51 @@ pub struct RuntimeEntry {
     /// other symbol. This is the half of a combinator's contract its C-ABI
     /// signature cannot express, and the compiler derives the symbol from it.
     pub combinator: Option<CombinatorAbi>,
-    /// When true the `Ptr` this symbol answers is a freshly allocated
-    /// `String` the caller owns and must release; when false the pointer
-    /// aliases storage the runtime or an argument still owns.
+    /// What the call does with the ownership of the values crossing it.
+    pub ownership: Ownership,
+}
+
+/// What a runtime call does with the ownership of the values crossing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Ownership {
+    /// It takes no share of its arguments, and a `Ptr` it answers aliases
+    /// storage the runtime or an argument still owns.
+    #[default]
+    Lends,
+    /// The `Ptr` it answers is a freshly allocated `String` the caller owns
+    /// and must release.
     ///
     /// A `Ptr` return says nothing about ownership on its own, so the drop
     /// pass reads this instead of inferring one. The runtime spells the same
     /// fact as `-> *mut c_char`, and a drift test holds the two together.
-    pub mints_string: bool,
+    MintsString,
+    /// It gives up the share its first argument holds: a release, free, or
+    /// drop. The ownership checks read this rather than a list of their own,
+    /// so a new release entry is seen everywhere at once.
+    ReleasesFirstArg,
+    /// It adds a share to the handle its first argument names, which a later
+    /// release of the same place gives back.
+    RetainsFirstArg,
+}
+
+impl RuntimeEntry {
+    /// Whether the `Ptr` this symbol answers is a `String` the caller owns.
+    #[must_use]
+    pub const fn mints_string(&self) -> bool {
+        matches!(self.ownership, Ownership::MintsString)
+    }
+
+    /// Whether the call gives up the share its first argument holds.
+    #[must_use]
+    pub const fn releases_first_arg(&self) -> bool {
+        matches!(self.ownership, Ownership::ReleasesFirstArg)
+    }
+
+    /// Whether the call adds a share to the handle its first argument names.
+    #[must_use]
+    pub const fn retains_first_arg(&self) -> bool {
+        matches!(self.ownership, Ownership::RetainsFirstArg)
+    }
 }
 
 impl AbiType {

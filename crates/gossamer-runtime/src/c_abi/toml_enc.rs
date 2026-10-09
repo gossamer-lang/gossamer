@@ -84,7 +84,7 @@ fn toml_result_err(msg: &str) -> i128 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_toml_to_json(s: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let text = if s.is_null() {
             ""
         } else {
@@ -105,7 +105,7 @@ pub unsafe extern "C" fn gos_rt_toml_to_json(s: *const c_char) -> i128 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_toml_from_json(s: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let text = if s.is_null() {
             ""
         } else {
@@ -129,7 +129,7 @@ pub unsafe extern "C" fn gos_rt_toml_from_json(s: *const c_char) -> i128 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_toml_is_valid(s: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         let text = if s.is_null() {
             ""
         } else {
@@ -142,7 +142,7 @@ pub unsafe extern "C" fn gos_rt_toml_is_valid(s: *const c_char) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_toml_pretty(s: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let text = if s.is_null() {
             ""
         } else {

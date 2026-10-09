@@ -238,17 +238,11 @@ pub(crate) fn release_mapped_payloads(body: &mut Body, tcx: &gossamer_types::TyC
                 TyKind::Adt { def, substs }
                     if def.local == u32::MAX || def.local == u32::MAX - 1 =>
                 {
-                    return substs.types().get(arm).and_then(|payload| {
-                        if tcx.is_counted_node(*payload) {
-                            return Some(4);
-                        }
-                        match tcx.kind_of(*payload) {
-                            TyKind::String => Some(1),
-                            TyKind::Vec(_) | TyKind::Slice(_) => Some(2),
-                            TyKind::DynError => Some(4),
-                            _ => None,
-                        }
-                    });
+                    return substs
+                        .types()
+                        .get(arm)
+                        .and_then(|payload| counted_payload_kind(tcx, *payload))
+                        .map(i64::from);
                 }
                 _ => return None,
             }
@@ -821,6 +815,8 @@ pub(super) fn transferable_by_move(free: &str) -> bool {
         free,
         "gos_rt_vec_free"
             | "gos_rt_map_free"
+            | "gos_rt_set_free"
+            | "gos_rt_deque_free"
             | "gos_rt_lazy_iter_drop_i64"
             | "gos_rt_lazy_iter_drop_pair_i64"
             | "gos_rt_http_response_free"

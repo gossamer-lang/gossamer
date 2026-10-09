@@ -30,7 +30,7 @@ use super::*;
 ///   first argv entry happens to look like when dereferenced.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_arr_len(p: *const i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if p.is_null() {
             return 0;
         }
@@ -47,5 +47,5 @@ pub unsafe extern "C" fn gos_rt_arr_len(p: *const i64) -> i64 {
 pub unsafe extern "C" fn gos_rt_len(p: *const i64) -> i64 {
     // SAFETY: `p` is this shim's argument, live for the call (C-ABI contract) or null, which
     // `gos_rt_arr_len` accepts.
-    ffi_entry!(-1, { unsafe { gos_rt_arr_len(p) } })
+    ffi_entry!({ unsafe { gos_rt_arr_len(p) } })
 }

@@ -248,9 +248,11 @@ fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<Vec<usize>> {
 
 /// The summary of `body` given the summaries of what it calls.
 fn summarize(body: &Body, tcx: &TyCtxt, summaries: &CallSummaries) -> CallSummary {
-    let facts = analyze(body, tcx, summaries);
-    let returns_unique = body.locals.first().is_none_or(|decl| !tracks(tcx, decl.ty))
-        || body.blocks.iter().all(|block| {
+    // Only a tracked return value needs the dataflow; every other body
+    // answers a value with no handle to share.
+    let returns_unique = body.locals.first().is_none_or(|decl| !tracks(tcx, decl.ty)) || {
+        let facts = analyze(body, tcx, summaries);
+        body.blocks.iter().all(|block| {
             !matches!(block.terminator, Terminator::Return)
                 || facts.at(
                     Point {
@@ -259,7 +261,8 @@ fn summarize(body: &Body, tcx: &TyCtxt, summaries: &CallSummaries) -> CallSummar
                     },
                     Local::RETURN,
                 ) == Uniqueness::Unique
-        });
+        })
+    };
     let retains = (1..=body.arity)
         .map(|param| param_escapes(body, tcx, summaries, Local(param)))
         .collect();
@@ -1091,7 +1094,7 @@ fn runtime_answers_fresh(name: &str) -> bool {
         || gossamer_abi::lookup(name).is_some_and(|entry| {
             // A sequence combinator builds the collection it answers, so nothing
             // else holds it.
-            entry.mints_string
+            entry.mints_string()
                 || (entry.combinator.is_some() && entry.sig.ret == gossamer_abi::AbiType::Ptr)
         })
 }
@@ -1172,6 +1175,7 @@ pub(crate) fn runtime_arg_kept_no_handle(name: &str, index: usize) -> bool {
             | "gos_rt_vec_mark_rc_elems"
             | "gos_rt_vec_mark_str_elems"
             | "gos_rt_vec_mark_vec_elems"
+            | "gos_rt_vec_mark_weak_elems"
             | "gos_rt_vec_set_elem_meta"
             | "gos_rt_vec_set_slot_children"
             | "gos_rt_vec_len"

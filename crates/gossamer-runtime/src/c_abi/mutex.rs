@@ -52,7 +52,7 @@ struct MutexState {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_mutex_new() -> *mut GosMutex {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         super::rc::alloc_managed(GosMutex {
             state: parking_lot::Mutex::new(MutexState::default()),
             released: parking_lot::Condvar::new(),
@@ -110,7 +110,7 @@ fn acquire(m: &GosMutex) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_mutex_lock(m: *mut GosMutex) {
-    ffi_entry!((), {
+    ffi_entry!({
         if m.is_null() {
             return;
         }
@@ -128,7 +128,7 @@ pub unsafe extern "C" fn gos_rt_mutex_lock(m: *mut GosMutex) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_mutex_unlock(m: *mut GosMutex) {
-    ffi_entry!((), {
+    ffi_entry!({
         if m.is_null() {
             return;
         }

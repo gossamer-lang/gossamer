@@ -16,152 +16,45 @@ pub mod xml;
 pub mod yaml;
 
 pub mod base64 {
-    //! RFC 4648 base64 with the standard alphabet.
+    //! RFC 4648 base64 with the standard alphabet; the codec is
+    //! `gossamer_runtime::codec::base64`, shared with the compiled tiers.
+
+    use gossamer_runtime::codec::base64;
 
     use crate::errors::Error;
-
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     /// Encodes `input` to a base64 string (with `=` padding).
     #[must_use]
     pub fn encode(input: &[u8]) -> String {
-        let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-        let mut chunks = input.chunks_exact(3);
-        for chunk in chunks.by_ref() {
-            let n = (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]);
-            out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
-            out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
-            out.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);
-            out.push(ALPHABET[(n & 0x3f) as usize] as char);
-        }
-        let rem = chunks.remainder();
-        match rem.len() {
-            1 => {
-                let n = u32::from(rem[0]) << 16;
-                out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
-                out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
-                out.push('=');
-                out.push('=');
-            }
-            2 => {
-                let n = (u32::from(rem[0]) << 16) | (u32::from(rem[1]) << 8);
-                out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
-                out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
-                out.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);
-                out.push('=');
-            }
-            _ => {}
-        }
-        out
+        base64::encode(input)
     }
 
     /// Decodes a base64 string, tolerating whitespace between characters.
     /// The input is whole groups of four; `=` pads only the last group,
-    /// as `xx==` or `xxx=`.
+    /// as `xx==` or `xxx=`, and the bits it leaves over are zero.
     pub fn decode(input: &str) -> Result<Vec<u8>, Error> {
-        let filtered: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-        if !filtered.len().is_multiple_of(4) {
-            return Err(Error::new("base64: input length must be a multiple of 4"));
-        }
-        let pad = filtered.iter().rev().take_while(|b| **b == b'=').count();
-        let data = filtered.len() - pad;
-        if filtered[..data].contains(&b'=') {
-            return Err(Error::new("base64: data after padding"));
-        }
-        let valid_padding = match pad {
-            0 => true,
-            1 => data % 4 == 3,
-            2 => data % 4 == 2,
-            _ => false,
-        };
-        if !valid_padding {
-            return Err(Error::new("base64: padding does not end a group"));
-        }
-        let mut out = Vec::with_capacity(filtered.len() / 4 * 3);
-        for chunk in filtered.chunks(4) {
-            let mut values = [0u32; 4];
-            let mut chunk_pad = 0;
-            for (i, byte) in chunk.iter().enumerate() {
-                if *byte == b'=' {
-                    chunk_pad += 1;
-                } else {
-                    values[i] = index(*byte)
-                        .ok_or_else(|| {
-                            Error::new(format!("base64: invalid character '{}'", *byte as char))
-                        })?
-                        .into();
-                }
-            }
-            let n = (values[0] << 18) | (values[1] << 12) | (values[2] << 6) | values[3];
-            out.push((n >> 16) as u8);
-            if chunk_pad < 2 {
-                out.push((n >> 8) as u8);
-            }
-            if chunk_pad < 1 {
-                out.push(n as u8);
-            }
-        }
-        Ok(out)
-    }
-
-    fn index(byte: u8) -> Option<u8> {
-        match byte {
-            b'A'..=b'Z' => Some(byte - b'A'),
-            b'a'..=b'z' => Some(byte - b'a' + 26),
-            b'0'..=b'9' => Some(byte - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
+        base64::decode(input).map_err(Error::new)
     }
 }
 
 pub mod hex {
-    //! Lowercase hex encoding.
+    //! Lowercase hex encoding; the codec is `gossamer_runtime::codec::hex`,
+    //! shared with the compiled tiers.
+
+    use gossamer_runtime::codec::hex;
 
     use crate::errors::Error;
 
     /// Encodes `input` as lowercase hex.
     #[must_use]
     pub fn encode(input: &[u8]) -> String {
-        let mut out = String::with_capacity(input.len() * 2);
-        for byte in input {
-            out.push(nibble(*byte >> 4));
-            out.push(nibble(*byte & 0xf));
-        }
-        out
+        hex::encode(input)
     }
 
-    /// Decodes a hex string, rejecting non-hex bytes and odd length.
+    /// Decodes hex of either case, skipping whitespace between digits and
+    /// rejecting non-hex characters and an odd digit count.
     pub fn decode(input: &str) -> Result<Vec<u8>, Error> {
-        if !input.len().is_multiple_of(2) {
-            return Err(Error::new("hex input must have even length"));
-        }
-        let bytes = input.as_bytes();
-        let mut out = Vec::with_capacity(bytes.len() / 2);
-        for pair in bytes.chunks(2) {
-            let hi = value(pair[0]).ok_or_else(|| Error::new("bad hex digit"))?;
-            let lo = value(pair[1]).ok_or_else(|| Error::new("bad hex digit"))?;
-            out.push((hi << 4) | lo);
-        }
-        Ok(out)
-    }
-
-    const fn nibble(n: u8) -> char {
-        match n {
-            0..=9 => (b'0' + n) as char,
-            10..=15 => (b'a' + n - 10) as char,
-            _ => '?',
-        }
-    }
-
-    fn value(byte: u8) -> Option<u8> {
-        match byte {
-            b'0'..=b'9' => Some(byte - b'0'),
-            b'a'..=b'f' => Some(byte - b'a' + 10),
-            b'A'..=b'F' => Some(byte - b'A' + 10),
-            _ => None,
-        }
+        hex::decode(input).map_err(Error::new)
     }
 }
 
@@ -265,149 +158,66 @@ pub mod binary {
     /// Encodes `x` as an unsigned varint into `buf`.
     /// Returns the number of bytes written.
     pub fn put_uvarint(buf: &mut [u8], x: u64) -> usize {
-        let mut n = 0;
-        let mut v = x;
-        while v >= 0x80 {
-            buf[n] = (v as u8) | 0x80;
-            v >>= 7;
-            n += 1;
-        }
-        buf[n] = v as u8;
-        n + 1
+        let bytes = gossamer_runtime::codec::varint::encode_unsigned(x);
+        buf[..bytes.len()].copy_from_slice(&bytes);
+        bytes.len()
     }
 
     /// Encodes `x` as a signed varint using zigzag encoding.
     /// Returns the number of bytes written.
     pub fn put_varint(buf: &mut [u8], x: i64) -> usize {
-        let ux = if x >= 0 {
-            (x as u64) << 1
-        } else {
-            (!(x as u64) << 1) | 1
-        };
-        put_uvarint(buf, ux)
+        let bytes = gossamer_runtime::codec::varint::encode_signed(x);
+        buf[..bytes.len()].copy_from_slice(&bytes);
+        bytes.len()
     }
 
     /// Decodes an unsigned varint from `buf`.
     /// Returns `(value, bytes_consumed)` or an error.
     pub fn uvarint(buf: &[u8]) -> Result<(u64, usize), Error> {
-        let mut x = 0u64;
-        let mut s = 0u32;
-        for (i, &b) in buf.iter().enumerate() {
-            if i == 10 {
-                return Err(Error::new("varint overflows u64"));
-            }
-            if b < 0x80 {
-                if i == 9 && b > 1 {
-                    return Err(Error::new("varint overflows u64"));
-                }
-                return Ok((x | (u64::from(b) << s), i + 1));
-            }
-            x |= u64::from(b & 0x7f) << s;
-            s += 7;
-        }
-        Err(Error::new("varint: buffer too small"))
+        gossamer_runtime::codec::varint::decode_unsigned(buf).map_err(Error::new)
     }
 
     /// Decodes a signed varint (zigzag) from `buf`.
     /// Returns `(value, bytes_consumed)` or an error.
     pub fn varint(buf: &[u8]) -> Result<(i64, usize), Error> {
-        let (ux, n) = uvarint(buf)?;
-        let x = if ux & 1 == 0 {
-            (ux >> 1) as i64
-        } else {
-            !((ux >> 1) as i64)
-        };
-        Ok((x, n))
+        gossamer_runtime::codec::varint::decode_signed(buf).map_err(Error::new)
     }
 }
 
-/// CSV reading and writing.
+/// CSV reading and writing, over the `gossamer_runtime::codec::csv` codec
+/// the compiled tiers share.
 pub mod csv {
+    use gossamer_runtime::codec::csv;
+
     use crate::errors::Error;
 
     /// Parses a single CSV-formatted line, respecting double-quoted fields
     /// and escaped quotes (`""`).
     #[must_use]
     pub fn parse_line(line: &str) -> Vec<String> {
-        let mut fields = Vec::new();
-        let mut field = String::new();
-        let mut in_quotes = false;
-        let mut chars = line.chars().peekable();
-
-        while let Some(c) = chars.next() {
-            match c {
-                '"' if in_quotes => {
-                    if chars.peek() == Some(&'"') {
-                        field.push('"');
-                        chars.next();
-                    } else {
-                        in_quotes = false;
-                    }
-                }
-                '"' => {
-                    in_quotes = true;
-                }
-                ',' if !in_quotes => {
-                    fields.push(field.clone());
-                    field.clear();
-                }
-                _ => field.push(c),
-            }
-        }
-        fields.push(field);
-        fields
+        csv::parse_line(line)
     }
 
-    /// Parses all records from a CSV string.  Each record is a `Vec<String>`.
-    /// Empty lines are skipped.  Returns an error if a quoted field is
-    /// never closed.
+    /// Parses all records from a CSV string. Each record is a `Vec<String>`;
+    /// a quoted field may span lines, and blank lines are skipped. Returns
+    /// an error if a quoted field is never closed.
     pub fn read(input: &str) -> Result<Vec<Vec<String>>, Error> {
-        let mut records = Vec::new();
-        for line in input.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            // Basic open-quote check.
-            let quote_count = line.chars().filter(|&c| c == '"').count();
-            if quote_count % 2 != 0 {
-                return Err(Error::new(format!(
-                    "csv: unterminated quoted field in: {line}"
-                )));
-            }
-            records.push(parse_line(line));
-        }
-        Ok(records)
+        csv::read(input).map_err(Error::new)
     }
 
-    /// Serialises `records` into a CSV string.  Fields containing a comma,
-    /// double-quote, or newline are quoted; internal double-quotes are
+    /// Serialises `records` into a CSV string. Fields containing a comma,
+    /// double-quote, or line break are quoted; internal double-quotes are
     /// escaped as `""`.
     #[must_use]
     pub fn write(records: &[Vec<String>]) -> String {
-        let mut out = String::new();
-        for (i, record) in records.iter().enumerate() {
-            for (j, field) in record.iter().enumerate() {
-                if j > 0 {
-                    out.push(',');
-                }
-                if field.contains(',') || field.contains('"') || field.contains('\n') {
-                    out.push('"');
-                    out.push_str(&field.replace('"', "\"\""));
-                    out.push('"');
-                } else {
-                    out.push_str(field);
-                }
-            }
-            if i + 1 < records.len() {
-                out.push('\n');
-            }
-        }
-        out
+        csv::write(records)
     }
 }
 
 /// PEM block encoding and decoding.
 pub mod pem {
+    use gossamer_runtime::codec::pem;
+
     use crate::errors::Error;
 
     /// A PEM-encoded block with a type label and decoded bytes.
@@ -422,99 +232,30 @@ pub mod pem {
     /// Encodes `block` as a PEM string.
     #[must_use]
     pub fn encode(block: &Block) -> String {
-        let b64 = crate::encoding::base64::encode(&block.bytes);
-        let mut out = format!("-----BEGIN {}-----\n", block.block_type);
-        for chunk in b64.as_bytes().chunks(64) {
-            out.push_str(std::str::from_utf8(chunk).unwrap_or(""));
-            out.push('\n');
-        }
-        out.push_str(&format!("-----END {}-----\n", block.block_type));
-        out
+        pem::encode(&block.block_type, &block.bytes)
     }
 
     /// Decodes all PEM blocks from `input`. Returns an error if any
     /// BEGIN/END pair is mismatched or a base64 payload is invalid.
     pub fn decode_all(input: &str) -> Result<Vec<Block>, Error> {
-        let mut blocks = Vec::new();
-        let mut remaining = input;
-
-        while let Some(begin_pos) = remaining.find("-----BEGIN ") {
-            let rest = &remaining[begin_pos + 11..];
-            let Some(end_label) = rest.find("-----") else {
-                return Err(Error::new("pem: malformed BEGIN line"));
-            };
-            let label = rest[..end_label].to_string();
-            let after_begin = &rest[end_label + 5..];
-
-            let end_marker = format!("-----END {label}-----");
-            let Some(end_pos) = after_begin.find(end_marker.as_str()) else {
-                return Err(Error::new(format!("pem: missing END {label}")));
-            };
-            let b64_text: String = after_begin[..end_pos]
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty() && !l.starts_with("-----"))
-                .collect::<Vec<_>>()
-                .join("");
-
-            let bytes = crate::encoding::base64::decode(&b64_text)
-                .map_err(|e| Error::new(format!("pem: base64 decode: {e}")))?;
-
-            blocks.push(Block {
-                block_type: label,
-                bytes,
-            });
-
-            let consumed = begin_pos + 11 + end_label + 5 + end_pos + end_marker.len();
-            if consumed >= remaining.len() {
-                break;
-            }
-            remaining = &remaining[consumed..];
-        }
-
-        Ok(blocks)
+        let blocks = pem::decode_all(input).map_err(Error::new)?;
+        Ok(blocks.into_iter().map(Block::from).collect())
     }
 
     /// Decodes the first PEM block from `input`, returning it and any
     /// unparsed remainder.
     pub fn decode(input: &str) -> Result<(Block, &str), Error> {
-        let Some(begin_pos) = input.find("-----BEGIN ") else {
-            return Err(Error::new("pem: no PEM data found"));
-        };
-        let rest = &input[begin_pos + 11..];
-        let Some(end_label) = rest.find("-----") else {
-            return Err(Error::new("pem: malformed BEGIN line"));
-        };
-        let label = rest[..end_label].to_string();
-        let after_begin = &rest[end_label + 5..];
-        let end_marker = format!("-----END {label}-----");
-        let Some(end_pos) = after_begin.find(end_marker.as_str()) else {
-            return Err(Error::new(format!("pem: missing END {label}")));
-        };
-        let b64_text: String = after_begin[..end_pos]
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .collect::<Vec<_>>()
-            .join("");
+        let (block, rest) = pem::decode(input).map_err(Error::new)?;
+        Ok((Block::from(block), rest))
+    }
 
-        let bytes = crate::encoding::base64::decode(&b64_text)
-            .map_err(|e| Error::new(format!("pem: base64 decode: {e}")))?;
-
-        let consumed = begin_pos + 11 + end_label + 5 + end_pos + end_marker.len();
-        let rest_input = if consumed < input.len() {
-            &input[consumed..]
-        } else {
-            ""
-        };
-
-        Ok((
-            Block {
-                block_type: label,
-                bytes,
-            },
-            rest_input,
-        ))
+    impl From<pem::Block> for Block {
+        fn from(block: pem::Block) -> Self {
+            Self {
+                block_type: block.label,
+                bytes: block.bytes,
+            }
+        }
     }
 }
 

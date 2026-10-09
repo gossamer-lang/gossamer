@@ -103,7 +103,7 @@ mod map_kind {
 /// binding owns the returned header and buffer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_binding_bytes_from_vec(v: *mut GosVec) -> *mut GosBytes {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's argument, null or live for the call (C-ABI contract), which
         // `vec_bytes` accepts.
         let bytes = unsafe { crate::c_abi::vec::vec_bytes(v) };
@@ -120,7 +120,7 @@ pub unsafe extern "C" fn gos_rt_binding_bytes_from_vec(v: *mut GosVec) -> *mut G
 /// and reclaims the wire header and its buffer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_binding_bytes_to_vec(b: *mut GosBytes) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let out = super::vec::gos_rt_vec_new(8);
         if b.is_null() {
             return out;
@@ -154,7 +154,7 @@ pub unsafe extern "C" fn gos_rt_binding_map_from_map(
     key_kind: i64,
     value_kind: i64,
 ) -> *mut BindingGosMap {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let keys = if key_kind == map_kind::STRING {
             // SAFETY: `m` is this shim's argument, live for the call (C-ABI contract) or null,
             // which `gos_rt_map_keys_str` accepts.
@@ -185,7 +185,7 @@ pub unsafe extern "C" fn gos_rt_binding_map_to_map(
     key_kind: i64,
     value_kind: i64,
 ) -> *mut GosMap {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let key_bytes = 8;
         let out = super::map::gos_rt_map_new(key_bytes, 8);
         if bm.is_null() {
@@ -251,7 +251,7 @@ pub unsafe extern "C" fn gos_rt_binding_tuple_from_slots(
     n: i64,
     tags: i64,
 ) -> *mut GosTuple {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let count = usize::try_from(n.max(0)).unwrap_or(0);
         if slots.is_null() || count == 0 {
             return Box::into_raw(Box::new(GosTuple {
@@ -294,7 +294,7 @@ pub unsafe extern "C" fn gos_rt_binding_tuple_to_slots(
     n: i64,
     tags: i64,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         let count = usize::try_from(n.max(0)).unwrap_or(0);
         if out.is_null() || count == 0 {
             return;
@@ -393,7 +393,7 @@ pub unsafe extern "C" fn gos_rt_binding_struct_from_slots(
     n: i64,
     tags: i64,
 ) -> *mut GosDynVariant {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let count = usize::try_from(n.max(0)).unwrap_or(0);
         // SAFETY: this shim's arguments, under the C-ABI contract, give `slots` null or
         // addressing `count` words.
@@ -416,7 +416,7 @@ pub unsafe extern "C" fn gos_rt_binding_struct_to_slots(
     n: i64,
     tags: i64,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         let count = usize::try_from(n.max(0)).unwrap_or(0);
         if out.is_null() || count == 0 {
             return;
@@ -582,7 +582,7 @@ fn unbare_wire_arm(name: &str, mut payload: Vec<Arc<DynNode>>) -> DynNode {
 /// pointer that reaches it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_from_binding_variant(v: *const GosDynVariant) -> *mut GosDyn {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `dyn_from_wire_variant` accepts.
         GosDyn::into_raw(unsafe { dyn_from_wire_variant(v) })

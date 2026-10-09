@@ -68,7 +68,7 @@ fn kdf_err(msg: &str) -> i128 {
 /// broken; provided for legacy interop only.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_crypto_md5_hex(input: *const GosVec) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `input` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `vec_bytes` accepts.
         let bytes = unsafe { crate::c_abi::vec::vec_bytes(input) };
@@ -83,7 +83,7 @@ pub unsafe extern "C" fn gos_rt_crypto_md5_hex(input: *const GosVec) -> *mut c_c
 /// broken for collision resistance; provided for legacy interop only.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_crypto_sha1_hex(input: *const GosVec) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `input` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `vec_bytes` accepts.
         let bytes = unsafe { crate::c_abi::vec::vec_bytes(input) };
@@ -126,7 +126,7 @@ pub unsafe extern "C" fn gos_rt_crypto_pbkdf2_sha256(
     iters: i64,
     dklen: i64,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         use pbkdf2::pbkdf2_hmac;
         use sha2::Sha256;
         // SAFETY: `password` is this shim's argument, live for the call (C-ABI contract) or null,
@@ -150,7 +150,7 @@ pub unsafe extern "C" fn gos_rt_crypto_scrypt_interactive(
     password: *const GosVec,
     salt: *const GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use scrypt::{Params as ScryptParams, scrypt};
         // SAFETY: `password` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `vec_bytes` accepts.
@@ -174,7 +174,7 @@ pub unsafe extern "C" fn gos_rt_crypto_scrypt_interactive(
 /// Argon2id PHC hash with default interactive parameters.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_crypto_argon2id_hash(password: *const GosVec) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use argon2::password_hash::{PasswordHasher, SaltString};
         use argon2::{Algorithm, Argon2, Params, Version};
         // SAFETY: `password` is this shim's argument, live for the call (C-ABI contract) or null,
@@ -207,7 +207,7 @@ pub unsafe extern "C" fn gos_rt_crypto_argon2id_verify(
     password: *const GosVec,
     phc: *const c_char,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use argon2::Argon2;
         use argon2::password_hash::{PasswordHash, PasswordVerifier};
         // SAFETY: `password` is this shim's argument, live for the call (C-ABI contract) or null,

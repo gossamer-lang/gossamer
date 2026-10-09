@@ -52,7 +52,7 @@ super::rc::managed_handle!(GosWaitGroup);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_wg_new() -> *mut GosWaitGroup {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         super::rc::alloc_managed(GosWaitGroup {
             counter: parking_lot::Mutex::new(0),
             cv: parking_lot::Condvar::new(),
@@ -76,7 +76,7 @@ fn wake_parked_waiters(wg: &GosWaitGroup) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_wg_add(wg: *mut GosWaitGroup, n: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if wg.is_null() {
             return -1;
         }
@@ -102,7 +102,7 @@ pub unsafe extern "C" fn gos_rt_wg_add(wg: *mut GosWaitGroup, n: i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_wg_done(wg: *mut GosWaitGroup) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if wg.is_null() {
             return -1;
         }
@@ -127,7 +127,7 @@ pub unsafe extern "C" fn gos_rt_wg_done(wg: *mut GosWaitGroup) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_wg_wait(wg: *mut GosWaitGroup) {
-    ffi_entry!((), {
+    ffi_entry!({
         if wg.is_null() {
             return;
         }
@@ -180,7 +180,7 @@ pub unsafe extern "C" fn gos_rt_wg_wait_ctx(
     wg: *mut GosWaitGroup,
     ctx_handle: *const super::context::GosCtx,
 ) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if wg.is_null() {
             return 1;
         }
@@ -250,7 +250,7 @@ pub unsafe extern "C" fn gos_rt_wg_wait_ctx(
 /// `gos_rt_wg_error_clear` resets it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_wg_error(wg: *const GosWaitGroup) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if wg.is_null() {
             return 0;
         }
@@ -264,7 +264,7 @@ pub unsafe extern "C" fn gos_rt_wg_error(wg: *const GosWaitGroup) -> i64 {
 /// before the clear so callers can act on whatever was queued.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_wg_error_clear(wg: *mut GosWaitGroup) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if wg.is_null() {
             return 0;
         }

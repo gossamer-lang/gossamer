@@ -1225,7 +1225,7 @@ impl<'a> Builder<'a> {
 
         self.set_current(exit);
         let Some(result) = result else {
-            self.fresh_loop_results.insert(acc);
+            self.fresh_results.insert(acc);
             return Some(acc);
         };
         // Both arms build the carrier straight into the result, so the

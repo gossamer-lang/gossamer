@@ -239,7 +239,7 @@ fn sanitize_cookie_name(name: &str) -> String {
 /// `gossamer_std::http_cookie::parse_cookie_header`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_cookie_parse_header(header: *const c_char) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `header` is this shim's argument, null or a live string body for the call
         // (C-ABI contract), which `cstr_str` accepts.
         let header = unsafe { cstr_str(header) };
@@ -288,7 +288,7 @@ pub unsafe extern "C" fn gos_rt_http_cookie_serialize(
     name: *const c_char,
     value: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `name` is this shim's argument, null or a live string body for the call (C-ABI
         // contract), which `cstr_str` accepts.
         let name = unsafe { cstr_str(name) };
@@ -324,7 +324,7 @@ fn split_token(token: &str) -> Option<(&str, &str)> {
 /// Mirrors `gossamer_std::http_csrf::issue_token`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_csrf_issue_token(key: *const GosVec) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `vec_bytes` accepts.
         let key = unsafe { crate::c_abi::vec::vec_bytes(key) };
@@ -351,7 +351,7 @@ pub unsafe extern "C" fn gos_rt_http_csrf_verify_token(
     supplied_token: *const c_char,
     key: *const GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `cookie_token` is this shim's argument, null or a live string body for the call
         // (C-ABI contract), which `cstr_str` accepts.
         let cookie_token = unsafe { cstr_str(cookie_token) };
@@ -400,7 +400,7 @@ pub unsafe extern "C" fn gos_rt_http_session_sign(
     payload: *const c_char,
     key: *const GosVec,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `payload` is this shim's argument, null or a live string body for the call
         // (C-ABI contract), which `cstr_bytes` accepts.
         let payload = unsafe { cstr_bytes(payload) };
@@ -422,7 +422,7 @@ pub unsafe extern "C" fn gos_rt_http_session_verify(
     cookie: *const c_char,
     key: *const GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `cookie` is this shim's argument, null or a live string body for the call
         // (C-ABI contract), which `cstr_str` accepts.
         let cookie = unsafe { cstr_str(cookie) };

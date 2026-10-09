@@ -94,16 +94,19 @@ pub(crate) fn code_address(addr: usize) -> *const () {
     std::ptr::with_exposed_provenance(addr)
 }
 
-/// Wraps an FFI body in `catch_unwind`, returning `$sentinel` when the
-/// shim itself faults, since a Rust panic may not cross an `extern "C"`
-/// boundary into compiled Gossamer code.
+/// Wraps an FFI body in `catch_unwind`, since a Rust panic may not cross an
+/// `extern "C"` boundary into compiled Gossamer code.
 ///
 /// A Gossamer fault raised inside the body cannot unwind out of a shim that
 /// does not unwind, and its result has no value to answer, so it ends the
-/// program as a fault on `main` does. A shim that raises a fault the program
-/// can contain is `extern "C-unwind"` and uses `ffi_entry_passthrough!`.
+/// program as a fault on `main` does. A Rust panic is the shim failing an
+/// internal check of its own: it has no value to answer either, and one
+/// made up would read as a success or an ordinary error, so it ends the
+/// program as `GX0015`. Invalid input is the shim's to answer as an `Err`,
+/// never through a panic. A shim that raises a fault the program can contain
+/// is `extern "C-unwind"` and uses `ffi_entry_passthrough!`.
 macro_rules! ffi_entry {
-    ($sentinel:expr, $body:block) => {{
+    ($body:block) => {{
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $body));
         match result {
             Ok(v) => v,
@@ -113,20 +116,7 @@ macro_rules! ffi_entry {
                     .map_or_else(String::new, |p| p.0.clone());
                 $crate::c_abi::panic::fatal_program_fault("GX0005", "panic: ", &text, false)
             }
-            Err(payload) => {
-                let msg = if let Some(s) = payload.downcast_ref::<&'static str>() {
-                    (*s).to_string()
-                } else if let Some(s) = payload.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "(non-string panic payload)".to_string()
-                };
-                eprintln!(
-                    "gossamer runtime: panic at FFI entry caught - {msg}; \
-                     returning sentinel"
-                );
-                $sentinel
-            }
+            Err(payload) => $crate::c_abi::runtime_fault(&*payload),
         }
     }};
 }
@@ -135,33 +125,34 @@ macro_rules! ffi_entry {
 ///
 /// A handler-dispatch shim sits between the server loop and Gossamer code,
 /// and a panicking handler is the server's to report - it answers 500 and
-/// names the request. Catching the fault here would replace that answer
-/// with a sentinel, so a Gossamer panic is re-raised and only a fault
-/// raised by the shim itself is caught.
+/// names the request. Catching the fault here would replace that answer, so
+/// a Gossamer panic is re-raised and only a fault raised by the shim itself
+/// ends the program.
 macro_rules! ffi_entry_passthrough {
-    ($sentinel:expr, $body:block) => {{
+    ($body:block) => {{
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $body));
         match result {
             Ok(v) => v,
             Err(payload) if payload.is::<gossamer_coro::GosPanic>() => {
                 std::panic::resume_unwind(payload)
             }
-            Err(payload) => {
-                let msg = if let Some(s) = payload.downcast_ref::<&'static str>() {
-                    (*s).to_string()
-                } else if let Some(s) = payload.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "(non-string panic payload)".to_string()
-                };
-                eprintln!(
-                    "gossamer runtime: panic at FFI entry caught - {msg}; \
-                     returning sentinel"
-                );
-                $sentinel
-            }
+            Err(payload) => $crate::c_abi::runtime_fault(&*payload),
         }
     }};
+}
+
+/// Ends the program for a Rust panic a runtime shim raised: the shim failed an
+/// internal check and has no value to answer.
+#[cold]
+pub(crate) fn runtime_fault(payload: &(dyn std::any::Any + Send)) -> ! {
+    let msg = if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "(non-string panic payload)".to_string()
+    };
+    crate::c_abi::panic::fatal_program_fault("GX0015", "runtime fault: ", &msg, false)
 }
 
 // ---------------------------------------------------------------
@@ -512,4 +503,92 @@ pub use yaml_enc::*;
 pub fn wake_cancellable_waits() {
     signal::wake_waiters();
     fd::wake_waits();
+}
+
+#[cfg(test)]
+mod ffi_entry_fault_tests {
+    use std::process::Command;
+
+    const CHILD_ENV: &str = "GOSSAMER_FFI_ENTRY_FAULT_CHILD";
+
+    fn failing_result() -> i128 {
+        ffi_entry!({ std::hint::black_box(None::<i128>).expect("internal check failed") })
+    }
+
+    fn failing_pointer() -> *mut u8 {
+        ffi_entry!({
+            let slots: [*mut u8; 0] = [];
+            let index = slots.len();
+            slots[index]
+        })
+    }
+
+    fn failing_scalar() -> i64 {
+        ffi_entry!({
+            let digits = "not a number";
+            digits.parse::<i64>().expect("digits parse")
+        })
+    }
+
+    fn failing_unit() {
+        ffi_entry!({
+            panic!("unit shim failed");
+        });
+    }
+
+    fn failing_passthrough() -> bool {
+        ffi_entry_passthrough!({
+            std::hint::black_box(Err::<bool, &str>("broken")).expect("passthrough state")
+        })
+    }
+
+    /// Runs the shim named in the child environment, which must not return.
+    #[test]
+    fn child_entry() {
+        let Ok(which) = std::env::var(CHILD_ENV) else {
+            return;
+        };
+        match which.as_str() {
+            "result" => println!("answered {}", failing_result()),
+            "pointer" => println!("answered {:?}", failing_pointer()),
+            "scalar" => println!("answered {}", failing_scalar()),
+            "unit" => {
+                failing_unit();
+                println!("answered unit");
+            }
+            "passthrough" => println!("answered {}", failing_passthrough()),
+            _ => {}
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // spawns this test binary as a child; Miri cannot run a process
+    fn a_shim_that_panics_ends_the_program_whatever_it_returns() {
+        if std::env::var(CHILD_ENV).is_ok() {
+            return;
+        }
+        let exe = std::env::current_exe().expect("test binary path");
+        for which in ["result", "pointer", "scalar", "unit", "passthrough"] {
+            let out = Command::new(&exe)
+                .args([
+                    "--exact",
+                    "c_abi::ffi_entry_fault_tests::child_entry",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, which)
+                .output()
+                .expect("spawn test child");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(101), "{which}: {stdout} {stderr}");
+            assert!(
+                stderr.contains("error[GX0015]: runtime fault: "),
+                "{which}: {stderr}"
+            );
+            assert!(
+                !stdout.contains("answered"),
+                "{which} answered a value: {stdout}"
+            );
+        }
+    }
 }

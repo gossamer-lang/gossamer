@@ -124,6 +124,10 @@ pub const RC_CHILD_ITER: i64 = 10;
 /// Child entry naming a lazy pair iterator handle (the state `zip` and
 /// `enumerate` build), held on the same terms as [`RC_CHILD_ITER`].
 pub const RC_CHILD_ITER_PAIR: i64 = 11;
+/// Child entry naming a `Weak` reference the blob holds one weak share of. A
+/// copy takes a weak share, the blob's death gives it back, and no walk that
+/// follows strong edges - the cycle collector's included - crosses it.
+pub const RC_CHILD_WEAK: i64 = 12;
 
 /// The copy-blob child kind for a carrier field whose payload is a blob under
 /// discriminant `gate` (0, 1, or negative for both arms).

@@ -2413,18 +2413,21 @@ pub(crate) fn elide_settled_guarded_walks(body: &mut Body) {
         ZeroedWords::Counted,
         ZeroedWords::EmptyCarrier,
     ] {
-        let entry_state = zeroed_entry_states(body, &succs, kind);
+        let Some(zeroed) = ZeroedLocals::of(body, kind) else {
+            continue;
+        };
+        let entry_state = zeroed_entry_states(body, &succs, kind, &zeroed);
         let mut dead: Vec<(usize, usize)> = Vec::new();
         for (b, block) in body.blocks.iter().enumerate() {
             let mut state = entry_state[b].clone();
             for (si, stmt) in block.stmts.iter().enumerate() {
                 if let Some((name, local)) = kind.accounting_of(stmt)
                     && kind.is_inert_on_zero(name)
-                    && state[local.0 as usize]
+                    && zeroed.slot(local).is_some_and(|slot| state[slot])
                 {
                     dead.push((b, si));
                 }
-                zeroed_state_after(stmt, &mut state, kind);
+                zeroed_state_after(stmt, &mut state, kind, &zeroed);
             }
         }
         for &(b, si) in &dead {
@@ -2451,33 +2454,73 @@ pub(crate) fn elide_settled_guarded_walks(body: &mut Body) {
     }
 }
 
+/// The locals some statement of a body zeroes for one [`ZeroedWords`] kind,
+/// each with its slot in the analysis state. Every other local is never known
+/// to be zero on a path from the entry, so the state tracks only these.
+struct ZeroedLocals {
+    slots: Vec<Option<usize>>,
+    len: usize,
+}
+
+impl ZeroedLocals {
+    /// The zeroed locals of `body` for `kind`, or `None` when it zeroes none.
+    fn of(body: &Body, kind: ZeroedWords) -> Option<Self> {
+        let mut slots = vec![None; body.locals.len()];
+        let mut len = 0;
+        for stmt in body.blocks.iter().flat_map(|b| &b.stmts) {
+            if let Some(local) = kind.zero_of(stmt)
+                && let Some(slot) = slots.get_mut(local.0 as usize)
+                && slot.is_none()
+            {
+                *slot = Some(len);
+                len += 1;
+            }
+        }
+        (len > 0).then_some(Self { slots, len })
+    }
+
+    /// The state slot of `local`, when some statement zeroes it.
+    fn slot(&self, local: Local) -> Option<usize> {
+        self.slots.get(local.0 as usize).copied().flatten()
+    }
+}
+
 /// Must-analysis: a local is zeroed at a block's entry when every path there
 /// ends in a zero with nothing writing the local since. Every block but the
 /// entry starts optimistic and loses bits until the fixpoint; the entry starts
 /// from stack words, which are not zero.
-fn zeroed_entry_states(body: &Body, succs: &[Vec<usize>], kind: ZeroedWords) -> Vec<Vec<bool>> {
+fn zeroed_entry_states(
+    body: &Body,
+    succs: &[Vec<usize>],
+    kind: ZeroedWords,
+    zeroed: &ZeroedLocals,
+) -> Vec<Vec<bool>> {
     let n_blocks = body.blocks.len();
-    let n_locals = body.locals.len();
-    let mut entry_state: Vec<Vec<bool>> = vec![vec![true; n_locals]; n_blocks];
-    entry_state[0] = vec![false; n_locals];
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for b in 0..n_blocks {
-            let mut out = entry_state[b].clone();
-            zeroed_state_through(&body.blocks[b], &mut out, kind);
-            for &s in &succs[b] {
-                if s == 0 {
-                    continue;
+    let mut entry_state: Vec<Vec<bool>> = vec![vec![true; zeroed.len]; n_blocks];
+    entry_state[0] = vec![false; zeroed.len];
+    // Bits only ever clear, so a block needs another visit only when its entry
+    // state just lost one.
+    let mut pending: Vec<usize> = (0..n_blocks).rev().collect();
+    let mut queued = vec![true; n_blocks];
+    let mut out = vec![false; zeroed.len];
+    while let Some(b) = pending.pop() {
+        queued[b] = false;
+        out.clone_from(&entry_state[b]);
+        zeroed_state_through(&body.blocks[b], &mut out, kind, zeroed);
+        for &s in &succs[b] {
+            if s == 0 {
+                continue;
+            }
+            let mut lost = false;
+            for (slot, held) in entry_state[s].iter_mut().zip(out.iter()) {
+                if *slot && !*held {
+                    *slot = false;
+                    lost = true;
                 }
-                let mut lost = false;
-                for (slot, held) in entry_state[s].iter_mut().zip(out.iter()) {
-                    if *slot && !*held {
-                        *slot = false;
-                        lost = true;
-                    }
-                }
-                changed |= lost;
+            }
+            if lost && !queued[s] {
+                queued[s] = true;
+                pending.push(s);
             }
         }
     }
@@ -2485,9 +2528,11 @@ fn zeroed_entry_states(body: &Body, succs: &[Vec<usize>], kind: ZeroedWords) -> 
 }
 
 /// Advances the zeroed-word state across one statement.
-fn zeroed_state_after(stmt: &Statement, state: &mut [bool], kind: ZeroedWords) {
+fn zeroed_state_after(stmt: &Statement, state: &mut [bool], kind: ZeroedWords, zeroed: &ZeroedLocals) {
     if let Some(local) = kind.zero_of(stmt) {
-        state[local.0 as usize] = true;
+        if let Some(slot) = zeroed.slot(local) {
+            state[slot] = true;
+        }
         return;
     }
     // An accounting call reads the words and leaves them as it found them.
@@ -2495,7 +2540,9 @@ fn zeroed_state_after(stmt: &Statement, state: &mut [bool], kind: ZeroedWords) {
         return;
     }
     for local in refilled_locals(stmt) {
-        state[local.0 as usize] = false;
+        if let Some(slot) = zeroed.slot(local) {
+            state[slot] = false;
+        }
     }
 }
 
@@ -2521,12 +2568,19 @@ fn refilled_locals(stmt: &Statement) -> impl Iterator<Item = Local> {
 }
 
 /// Advances the zeroed-word state across a whole block.
-fn zeroed_state_through(block: &BasicBlock, state: &mut [bool], kind: ZeroedWords) {
+fn zeroed_state_through(
+    block: &BasicBlock,
+    state: &mut [bool],
+    kind: ZeroedWords,
+    zeroed: &ZeroedLocals,
+) {
     for stmt in &block.stmts {
-        zeroed_state_after(stmt, state, kind);
+        zeroed_state_after(stmt, state, kind, zeroed);
     }
-    if let Terminator::Call { destination, .. } = &block.terminator {
-        state[destination.local.0 as usize] = false;
+    if let Terminator::Call { destination, .. } = &block.terminator
+        && let Some(slot) = zeroed.slot(destination.local)
+    {
+        state[slot] = false;
     }
 }
 

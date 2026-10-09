@@ -21,6 +21,7 @@ gossamer-mir = { path = "../crates/gossamer-mir" }
 gossamer-parse = { path = "../crates/gossamer-parse" }
 gossamer-pkg = { path = "../crates/gossamer-pkg" }
 gossamer-resolve = { path = "../crates/gossamer-resolve" }
+gossamer-runtime = { path = "../crates/gossamer-runtime" }
 gossamer-std = { path = "../crates/gossamer-std" }
 gossamer-types = { path = "../crates/gossamer-types" }
 
@@ -86,5 +87,11 @@ doc = false
 [[bin]]
 name = "vm_run"
 path = "fuzz_targets/vm_run.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "codec"
+path = "fuzz_targets/codec.rs"
 test = false
 doc = false

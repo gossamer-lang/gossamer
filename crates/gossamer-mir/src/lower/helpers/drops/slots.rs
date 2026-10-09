@@ -14,6 +14,7 @@ pub(super) const SLOT_KIND_DEQUE: i64 = 13;
 pub(super) const SLOT_KIND_HEAP: i64 = 14;
 pub(super) const SLOT_KIND_ITER: i64 = 15;
 pub(super) const SLOT_KIND_ITER_PAIR: i64 = 16;
+pub(super) const SLOT_KIND_WEAK: i64 = 17;
 pub(super) const SLOT_HASH_SET_DEF_LOCAL: u32 = u32::MAX - 7;
 pub(super) const SLOT_BTREE_SET_DEF_LOCAL: u32 = u32::MAX - 18;
 pub(super) const SLOT_VEC_DEQUE_DEF_LOCAL: u32 = u32::MAX - 19;
@@ -147,6 +148,13 @@ pub(super) fn collect_field_rc(
 ) {
     use gossamer_types::TyKind;
     match tcx.kind_of(fty) {
+        // A `Weak` field holds a weak share of its target, which a copy of
+        // the element takes and the element's death gives back; it is never
+        // a strong owner.
+        _ if tcx.is_weak_ty(fty) => {
+            out.push((-1, 0, word, SLOT_KIND_WEAK));
+            *has_direct = true;
+        }
         TyKind::String => {
             out.push((-1, 0, word, SLOT_KIND_STRING));
             *has_direct = true;
@@ -181,6 +189,7 @@ pub(super) fn collect_field_rc(
         TyKind::Adt { def, substs } if def.local == u32::MAX || def.local == u32::MAX - 1 => {
             let payload_kind = |t: gossamer_types::Ty| -> Option<i64> {
                 match tcx.kind_of(t) {
+                    _ if tcx.is_weak_ty(t) => Some(SLOT_KIND_WEAK),
                     TyKind::String => Some(SLOT_KIND_STRING),
                     TyKind::Vec(_) | TyKind::Slice(_) => Some(SLOT_KIND_VEC),
                     TyKind::HashMap { .. } => Some(SLOT_KIND_MAP),
@@ -252,6 +261,8 @@ pub(crate) enum ElemOwnership {
     RcElems,
     /// The element is itself one counted container handle.
     VecElems,
+    /// The element is itself one `Weak` reference.
+    WeakElems,
 }
 
 impl ElemOwnership {
@@ -262,6 +273,7 @@ impl ElemOwnership {
             Self::Owned(_) => "gos_rt_vec_set_slot_children",
             Self::RcElems => "gos_rt_vec_mark_rc_elems",
             Self::VecElems => "gos_rt_vec_mark_vec_elems",
+            Self::WeakElems => "gos_rt_vec_mark_weak_elems",
         }
     }
 
@@ -295,6 +307,9 @@ pub(crate) fn elem_ownership(
     }
     if tcx.is_counted_node(elem) {
         return Some(ElemOwnership::RcElems);
+    }
+    if tcx.is_weak_ty(elem) {
+        return Some(ElemOwnership::WeakElems);
     }
     if matches!(tcx.kind_of(elem), TyKind::Vec(_) | TyKind::Slice(_)) {
         return Some(ElemOwnership::VecElems);
@@ -349,6 +364,52 @@ pub(super) fn ensure_slot_children_meta(
     }
     tcx.register_rc_meta(symbol.clone(), blob);
     Some(symbol)
+}
+
+/// The runtime marker naming how a map holding `value` values owns them, or
+/// `None` for values it stores as plain words or bytes. The one answer the
+/// construction pass and every backend's map literal read.
+#[must_use]
+pub fn map_value_owner_marker(
+    tcx: &gossamer_types::TyCtxt,
+    value: gossamer_types::Ty,
+) -> Option<&'static str> {
+    use gossamer_types::TyKind;
+    let mut value = value;
+    while let TyKind::Ref { inner, .. } = tcx.kind_of(value) {
+        value = *inner;
+    }
+    if tcx.is_weak_ty(value) {
+        return Some("gos_rt_map_set_weak_values");
+    }
+    // The backend copies an aggregate value into a blob whenever EITHER meta
+    // is registered - it reads the structural one first and falls back to the
+    // guarded copy meta - so the map has to be tagged as holding blob values
+    // under exactly the same condition. Tagging is what makes the entry take
+    // its own share and give it back at the entry's death.
+    let structural = format!("gos_rc_meta_boxaggr_{}", value.as_u32());
+    if tcx.aggr_copy_meta(value).is_some()
+        || tcx.rc_meta(&structural).is_some()
+        || tcx.is_counted_node(value)
+    {
+        return Some("gos_rt_map_set_blob_values");
+    }
+    match tcx.kind_of(value) {
+        // A byte sequence is stored as the bytes themselves - the insert copies
+        // them out and the entry owns no handle - so tagging the map as holding
+        // vec shares would release something no entry holds.
+        TyKind::Vec(elem) | TyKind::Slice(elem) => {
+            let bytes = matches!(tcx.kind_of(*elem), TyKind::Int(gossamer_types::IntTy::U8));
+            (!bytes).then_some("gos_rt_map_set_vec_values")
+        }
+        // A table carries no reference count, so each entry owns a copy.
+        TyKind::HashMap { .. } => Some("gos_rt_map_set_map_values"),
+        _ => handle_container(tcx, value).map(|container| match container {
+            HandleContainer::Set => "gos_rt_map_set_set_values",
+            HandleContainer::Deque => "gos_rt_map_set_deque_values",
+            HandleContainer::Heap => "gos_rt_map_set_heap_values",
+        }),
+    }
 }
 
 /// Tags vecs whose element type carries a guarded copy-blob meta, right
@@ -448,12 +509,9 @@ pub(crate) fn insert_vec_elem_metas(
         Owned(String),
         RcElems,
         VecElems,
-        MapBlob,
-        MapVec,
-        MapMapValues,
-        MapSetValues,
-        MapDequeValues,
-        MapHeapValues,
+        WeakElems,
+        /// The marker naming how the map owns its values.
+        MapValues(&'static str),
         MapFloatKeys,
         MapOrdered {
             unsigned: bool,
@@ -491,37 +549,7 @@ pub(crate) fn insert_vec_elem_metas(
         let TyKind::HashMap { value, .. } = tcx.kind_of(body.locals[i].ty) else {
             return None;
         };
-        // The backend copies an aggregate value into a blob whenever EITHER
-        // meta is registered - it reads the structural one first and falls
-        // back to the guarded copy meta - so the map has to be tagged as
-        // holding blob values under exactly the same condition. Tagging is
-        // what makes the entry take its own share and give it back at the
-        // entry's death; under-tagging leaves the stored blob owned by the
-        // inserting frame alone, which then frees it out from under the map.
-        let structural = format!("gos_rc_meta_boxaggr_{}", value.as_u32());
-        if tcx.aggr_copy_meta(*value).is_some()
-            || tcx.rc_meta(&structural).is_some()
-            || tcx.is_counted_node(*value)
-        {
-            Some(VecMeta::MapBlob)
-        } else if let TyKind::Vec(elem) | TyKind::Slice(elem) = tcx.kind_of(*value) {
-            // A byte sequence is stored as the bytes themselves - the insert
-            // copies them out and the entry owns no handle - so tagging the
-            // map as holding vec shares would release something no entry
-            // holds. Every other element keeps its handle, and its share.
-            let bytes = matches!(tcx.kind_of(*elem), TyKind::Int(gossamer_types::IntTy::U8));
-            (!bytes).then_some(VecMeta::MapVec)
-        } else if matches!(tcx.kind_of(*value), TyKind::HashMap { .. }) {
-            // A table carries no reference count, so each entry owns a copy.
-            Some(VecMeta::MapMapValues)
-        } else {
-            match handle_container(tcx, *value) {
-                Some(HandleContainer::Set) => Some(VecMeta::MapSetValues),
-                Some(HandleContainer::Deque) => Some(VecMeta::MapDequeValues),
-                Some(HandleContainer::Heap) => Some(VecMeta::MapHeapValues),
-                None => None,
-            }
-        }
+        map_value_owner_marker(tcx, *value).map(VecMeta::MapValues)
     };
 
     // A float-keyed map sorts its keys by value in every ordered traversal.
@@ -593,7 +621,7 @@ pub(crate) fn insert_vec_elem_metas(
         // vec owns outright: push moves the frame's share in
         // (`gos_rt_vec_push` is a consuming call for RC-managed locals), so
         // the vec's free releases each element. String elements keep their
-        // dedicated `STRING` kind; `Weak` elements are not strong owners.
+        // dedicated `STRING` kind; `Weak` elements take the weak kind below.
         if elem_ty_of(l, tcx).is_some_and(|e| tcx.is_counted_node(e)) {
             return Some(VecMeta::RcElems);
         }
@@ -604,6 +632,10 @@ pub(crate) fn insert_vec_elem_metas(
             .is_some_and(|e| matches!(tcx.kind_of(e), TyKind::Vec(_) | TyKind::Slice(_)))
         {
             return Some(VecMeta::VecElems);
+        }
+        // A `Weak` element holds a weak share the vec gives back at its death.
+        if elem_ty_of(l, tcx).is_some_and(|e| tcx.is_weak_ty(e)) {
+            return Some(VecMeta::WeakElems);
         }
         None
     };
@@ -693,28 +725,8 @@ pub(crate) fn insert_vec_elem_metas(
         let dest = Local(u32::try_from(*next_unit).expect("local overflow"));
         *next_unit += 1;
         let rvalue = match meta {
-            VecMeta::MapBlob => Rvalue::CallIntrinsic {
-                name: "gos_rt_map_set_blob_values",
-                args: vec![Operand::Copy(Place::local(l))],
-            },
-            VecMeta::MapVec => Rvalue::CallIntrinsic {
-                name: "gos_rt_map_set_vec_values",
-                args: vec![Operand::Copy(Place::local(l))],
-            },
-            VecMeta::MapMapValues => Rvalue::CallIntrinsic {
-                name: "gos_rt_map_set_map_values",
-                args: vec![Operand::Copy(Place::local(l))],
-            },
-            VecMeta::MapSetValues => Rvalue::CallIntrinsic {
-                name: "gos_rt_map_set_set_values",
-                args: vec![Operand::Copy(Place::local(l))],
-            },
-            VecMeta::MapDequeValues => Rvalue::CallIntrinsic {
-                name: "gos_rt_map_set_deque_values",
-                args: vec![Operand::Copy(Place::local(l))],
-            },
-            VecMeta::MapHeapValues => Rvalue::CallIntrinsic {
-                name: "gos_rt_map_set_heap_values",
+            VecMeta::MapValues(marker) => Rvalue::CallIntrinsic {
+                name: marker,
                 args: vec![Operand::Copy(Place::local(l))],
             },
             VecMeta::MapFloatKeys => Rvalue::CallIntrinsic {
@@ -777,6 +789,10 @@ pub(crate) fn insert_vec_elem_metas(
             },
             VecMeta::VecElems => Rvalue::CallIntrinsic {
                 name: "gos_rt_vec_mark_vec_elems",
+                args: vec![Operand::Copy(Place::local(l))],
+            },
+            VecMeta::WeakElems => Rvalue::CallIntrinsic {
+                name: "gos_rt_vec_mark_weak_elems",
                 args: vec![Operand::Copy(Place::local(l))],
             },
         };

@@ -38,7 +38,7 @@ pub struct GosU8Vec {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_heap_u8_new(len: i64) -> *mut GosU8Vec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if len < 0 {
             return std::ptr::null_mut();
         }
@@ -52,7 +52,7 @@ pub extern "C" fn gos_rt_heap_u8_new(len: i64) -> *mut GosU8Vec {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_heap_u8_free(v: *mut GosU8Vec) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() {
             return;
         }
@@ -72,7 +72,7 @@ pub unsafe extern "C" fn gos_rt_heap_u8_free(v: *mut GosU8Vec) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_heap_u8_get(v: *const GosU8Vec, idx: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if v.is_null() || idx < 0 {
             return 0;
         }
@@ -88,7 +88,7 @@ pub unsafe extern "C" fn gos_rt_heap_u8_get(v: *const GosU8Vec, idx: i64) -> i64
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_heap_u8_set(v: *mut GosU8Vec, idx: i64, val: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() || idx < 0 {
             return;
         }
@@ -106,7 +106,7 @@ pub unsafe extern "C" fn gos_rt_heap_u8_set(v: *mut GosU8Vec, idx: i64, val: i64
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_heap_u8_len(v: *const GosU8Vec) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if v.is_null() {
             return 0;
         }
@@ -129,7 +129,7 @@ pub unsafe extern "C" fn gos_rt_heap_u8_len(v: *const GosU8Vec) -> i64 {
 /// buffer's nominal length.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_heap_u8_to_string(v: *const GosU8Vec, len: i64) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if v.is_null() || len <= 0 {
             return alloc_cstring(b"");
         }
@@ -156,7 +156,7 @@ pub unsafe extern "C" fn gos_rt_heap_u8_write_lines_to_stdout(
     count: i64,
     line_width: i64,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() || start < 0 || count <= 0 || line_width <= 0 {
             return;
         }
@@ -255,7 +255,7 @@ pub unsafe extern "C" fn gos_rt_heap_u8_write_bytes_to_stdout(
     start: i64,
     count: i64,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() || start < 0 || count <= 0 {
             return;
         }
@@ -349,7 +349,7 @@ unsafe fn u8_slice<'a>(v: *const GosU8Vec, limit: i64) -> &'a [u8] {
 /// loop it replaces.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_heap_u8_window_key(v: *const GosU8Vec, index: i64, k: i64) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if v.is_null() || index < 0 || k <= 0 {
             return 0;
         }
@@ -382,7 +382,7 @@ pub unsafe extern "C" fn gos_rt_heap_u8_count_singles(
     v: *const GosU8Vec,
     length: i64,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let out = gos_rt_vec_new(8);
         let mut counts = [0i64; 4];
         // SAFETY: `v` is this shim's argument, null or a live vector (C-ABI contract), which
@@ -409,7 +409,7 @@ pub unsafe extern "C" fn gos_rt_heap_u8_count_pairs(
     v: *const GosU8Vec,
     length: i64,
 ) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let out = gos_rt_vec_new(8);
         let mut counts = [0i64; 16];
         // SAFETY: `v` is this shim's argument, null or a live vector (C-ABI contract), which
@@ -439,7 +439,7 @@ pub unsafe extern "C" fn gos_rt_heap_u8_count_kmers(
     length: i64,
     k: i64,
 ) -> *mut GosMap {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let out = gos_rt_map_new(8, 8);
         // SAFETY: `v` is this shim's argument, null or a live vector (C-ABI contract), which
         // `u8_slice` accepts.

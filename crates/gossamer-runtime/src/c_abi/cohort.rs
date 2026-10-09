@@ -671,7 +671,7 @@ pub extern "C" fn gos_rt_cohort_push(
     uncancellable: i64,
     drain_ms: i64,
 ) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         push(
             policy,
             timeout_ms,
@@ -687,7 +687,7 @@ pub extern "C" fn gos_rt_cohort_push(
 /// answers `Result<(), errors::Error>`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_cohort_join() -> i128 {
-    ffi_entry!(super::result::pack_result(0, 0), {
+    ffi_entry!({
         match join_current() {
             None => super::result::pack_result(0, 0),
             Some(message) => {
@@ -701,7 +701,7 @@ pub extern "C" fn gos_rt_cohort_join() -> i128 {
 /// `runtime::cohort_pop()` - closes the cohort.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_cohort_pop() {
-    ffi_entry!((), { pop_current() });
+    ffi_entry!({ pop_current() });
 }
 
 /// `runtime::cohort_cancelled()` - whether the running goroutine's
@@ -709,7 +709,7 @@ pub extern "C" fn gos_rt_cohort_pop() {
 /// cooperate at a point of its own choosing.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_cohort_cancelled() -> i64 {
-    ffi_entry!(0, { i64::from(current_is_cancelled()) })
+    ffi_entry!({ i64::from(current_is_cancelled()) })
 }
 
 /// `runtime::cohort_cancel()` - cancels the running goroutine's cohort
@@ -717,7 +717,7 @@ pub extern "C" fn gos_rt_cohort_cancelled() -> i64 {
 /// others down without failing.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_cohort_cancel() {
-    ffi_entry!((), {
+    ffi_entry!({
         let id = current_cohort();
         if id != 0 {
             cancel(id);
@@ -949,7 +949,7 @@ fn on_error_name(on_error: i64) -> &'static str {
 /// `runtime::cohorts()` - the live cohort descriptors as a `Vec<String>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_cohorts() -> *mut crate::c_abi::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let vec = {
             crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::STRING)
         };
@@ -968,9 +968,7 @@ pub unsafe extern "C" fn gos_rt_cohorts() -> *mut crate::c_abi::vec::GosVec {
 /// `runtime::root()` - the root cohort's descriptor line as a String.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_cohort_root() -> *mut std::os::raw::c_char {
-    ffi_entry!(std::ptr::null_mut(), {
-        crate::c_abi::string::alloc_cstring(root_report_line().as_bytes())
-    })
+    ffi_entry!({ crate::c_abi::string::alloc_cstring(root_report_line().as_bytes()) })
 }
 
 /// Renders a panic payload the way the join handle does, for a child

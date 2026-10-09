@@ -101,6 +101,32 @@ pub(super) const fn is_table_kind(kind: i64) -> bool {
     matches!(kind, 5..=7)
 }
 
+/// The free for a `Set`, deque, or heap a Gossamer function or closure
+/// answers: always the caller's own, one the callee built or the copy it makes
+/// of one it was lent (see `copy_returned_lent_tables`).
+fn answered_table_free(
+    tcx: &gossamer_types::TyCtxt,
+    ty: gossamer_types::Ty,
+    callee: &Operand,
+) -> Option<&'static str> {
+    let gossamer_callee = match callee {
+        Operand::FnRef { .. } => true,
+        Operand::Const(ConstValue::Str(s)) => {
+            (!s.starts_with("gos_rt_") && !s.starts_with("__"))
+                || s.starts_with(gossamer_hir::LIFTED_CLOSURE_PREFIX)
+        }
+        _ => false,
+    };
+    if !gossamer_callee {
+        return None;
+    }
+    match handle_container(tcx, ty)? {
+        HandleContainer::Set => Some("gos_rt_set_free"),
+        HandleContainer::Deque => Some("gos_rt_deque_free"),
+        HandleContainer::Heap => Some("gos_rt_vec_free"),
+    }
+}
+
 /// The free a table payload's binding owes, or `None` for a non-table type.
 pub(super) fn table_free(
     tcx: &gossamer_types::TyCtxt,
@@ -320,6 +346,75 @@ pub(crate) fn own_returned_map_payloads(body: &mut Body, tcx: &gossamer_types::T
     }
 }
 
+/// The carriers this frame owns, by local: their table payloads are the
+/// frame's own.
+///
+/// A channel receive hands over a table of its own, and so does a Gossamer
+/// call, whose return normalises the carrier it answers (see
+/// `own_returned_map_payloads`). A copy of such a carrier carries that with
+/// it. Any other carrier - a parameter, or a `get` on a container - lends its
+/// payload.
+pub(super) fn frame_owned_carriers(body: &Body) -> Vec<bool> {
+    let n_all = body.locals.len();
+    let mut owned_carrier = vec![false; n_all];
+    for block in &body.blocks {
+        if let Terminator::Call {
+            callee,
+            destination,
+            ..
+        } = &block.terminator
+            && destination.projection.is_empty()
+            && (destination.local.0 as usize) < n_all
+            && answers_owned_table_carrier(callee)
+        {
+            owned_carrier[destination.local.0 as usize] = true;
+        }
+    }
+    loop {
+        let mut changed = false;
+        for stmt in body.blocks.iter().flat_map(|b| &b.stmts) {
+            if let StatementKind::Assign {
+                place,
+                rvalue: Rvalue::Use(Operand::Copy(src)),
+            } = &stmt.kind
+                && place.projection.is_empty()
+                && src.projection.is_empty()
+                && (place.local.0 as usize) < n_all
+                && (src.local.0 as usize) < n_all
+                && owned_carrier[src.local.0 as usize]
+                && !owned_carrier[place.local.0 as usize]
+            {
+                owned_carrier[place.local.0 as usize] = true;
+                changed = true;
+            }
+        }
+        for block in &body.blocks {
+            if let Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(name)),
+                args,
+                destination,
+                ..
+            } = &block.terminator
+                && passes_table_through(name)
+                && destination.projection.is_empty()
+                && (destination.local.0 as usize) < n_all
+                && !owned_carrier[destination.local.0 as usize]
+                && matches!(args.first(), Some(Operand::Copy(src))
+                    if src.projection.is_empty()
+                        && (src.local.0 as usize) < n_all
+                        && owned_carrier[src.local.0 as usize])
+            {
+                owned_carrier[destination.local.0 as usize] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    owned_carrier
+}
+
 pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
     use gossamer_types::TyKind;
 
@@ -433,6 +528,8 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
             | "gos_rt_bheap_max_from_vec_i64"
             | "gos_rt_bheap_min_new_i64"
             | "gos_rt_bheap_min_from_vec_i64"
+            | "gos_rt_bheap_max_from_vec_f64"
+            | "gos_rt_bheap_min_from_vec_f64"
             | "gos_rt_bheap_new_typed"
             | "gos_rt_bheap_max_from_vec_desc"
             | "gos_rt_bheap_min_from_vec_desc" => Some("gos_rt_vec_free"),
@@ -456,6 +553,10 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
             }
             "gos_rt_set_new"
             | "gos_rt_btree_set_new"
+            | "gos_rt_set_from_vec_i64"
+            | "gos_rt_set_from_vec_str"
+            | "gos_rt_btree_set_from_vec_i64"
+            | "gos_rt_btree_set_from_vec_str"
             | "gos_rt_set_union"
             | "gos_rt_set_intersection"
             | "gos_rt_set_intersection_skey"
@@ -523,68 +624,8 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
     let arity = body.arity as usize;
     let last_block = body.blocks.len();
 
-    // A carrier this frame's own answers a map the frame owns: a channel
-    // receive hands over a table of its own, and so does a Gossamer call,
-    // whose return normalises the carrier it answers (see
-    // `own_returned_map_payloads`). A copy of such a carrier carries that
-    // with it.
     let n_all = body.locals.len();
-    let mut owned_carrier = vec![false; n_all];
-    for block in &body.blocks {
-        if let Terminator::Call {
-            callee,
-            destination,
-            ..
-        } = &block.terminator
-            && destination.projection.is_empty()
-            && (destination.local.0 as usize) < n_all
-            && answers_owned_table_carrier(callee)
-        {
-            owned_carrier[destination.local.0 as usize] = true;
-        }
-    }
-    loop {
-        let mut changed = false;
-        for stmt in body.blocks.iter().flat_map(|b| &b.stmts) {
-            if let StatementKind::Assign {
-                place,
-                rvalue: Rvalue::Use(Operand::Copy(src)),
-            } = &stmt.kind
-                && place.projection.is_empty()
-                && src.projection.is_empty()
-                && (place.local.0 as usize) < n_all
-                && (src.local.0 as usize) < n_all
-                && owned_carrier[src.local.0 as usize]
-                && !owned_carrier[place.local.0 as usize]
-            {
-                owned_carrier[place.local.0 as usize] = true;
-                changed = true;
-            }
-        }
-        for block in &body.blocks {
-            if let Terminator::Call {
-                callee: Operand::Const(ConstValue::Str(name)),
-                args,
-                destination,
-                ..
-            } = &block.terminator
-                && passes_table_through(name)
-                && destination.projection.is_empty()
-                && (destination.local.0 as usize) < n_all
-                && !owned_carrier[destination.local.0 as usize]
-                && matches!(args.first(), Some(Operand::Copy(src))
-                    if src.projection.is_empty()
-                        && (src.local.0 as usize) < n_all
-                        && owned_carrier[src.local.0 as usize])
-            {
-                owned_carrier[destination.local.0 as usize] = true;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
+    let owned_carrier = frame_owned_carriers(body);
     // A table read out of a carrier this frame owns is this frame's to free.
     let takes_owned_table = |rvalue: &Rvalue, dest: usize| -> Option<&'static str> {
         let free = table_free(tcx, body.locals[dest].ty)?;
@@ -739,7 +780,8 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
                     TyKind::Vec(_) => Some("gos_rt_vec_free"),
                     TyKind::Slice(_) if gossamer_callee => Some("gos_rt_vec_free"),
                     _ if unwrapped_table.is_some() => unwrapped_table,
-                    _ => iterator_free(dest_ty, callee),
+                    _ => answered_table_free(tcx, dest_ty, callee)
+                        .or_else(|| iterator_free(dest_ty, callee)),
                 }
             };
             // A constructor the program declares shares its spelling with a
@@ -1014,7 +1056,9 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
                             TyKind::HashMap { .. } => Some("gos_rt_map_free"),
                             TyKind::Vec(_) | TyKind::Slice(_) => Some("gos_rt_vec_free"),
                             _ => {
-                                iterator_free(body.locals[destination.local.0 as usize].ty, callee)
+                                let ty = body.locals[destination.local.0 as usize].ty;
+                                answered_table_free(tcx, ty, callee)
+                                    .or_else(|| iterator_free(ty, callee))
                             }
                         }
                     });

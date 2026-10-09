@@ -625,7 +625,7 @@ pub unsafe extern "C" fn gos_rt_jwt_verify(
     issuer: *const c_char,
     audience: *const c_char,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `alg` is this shim's argument, null or a live string body (C-ABI contract),
         // which `cstr` accepts.
         let expected = match Alg::parse(unsafe { cstr(alg) }) {
@@ -704,7 +704,7 @@ pub unsafe extern "C" fn gos_rt_jwt_verify(
 /// algorithm as its own argument rather than reading it here.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_jwt_header(token: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `token` is this shim's argument, null or a live string body (C-ABI contract),
         // which `cstr` accepts.
         let token = unsafe { cstr(token) };
@@ -735,7 +735,7 @@ pub unsafe extern "C" fn gos_rt_jwt_sign_hs(
     claims_json: *const c_char,
     key: *const GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `alg` is this shim's argument, null or a live string body (C-ABI contract),
         // which `cstr` accepts.
         let alg = match Alg::parse(unsafe { cstr(alg) }) {
@@ -773,7 +773,7 @@ pub unsafe extern "C" fn gos_rt_jwt_verify_hs(
     key: *const GosVec,
     leeway_secs: i64,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `alg` is this shim's argument, null or a live string body (C-ABI contract),
         // which `cstr` accepts.
         let expected = match Alg::parse(unsafe { cstr(alg) }) {
@@ -831,7 +831,7 @@ pub unsafe extern "C" fn gos_rt_jwt_sign_es256(
     claims_json: *const c_char,
     signing_key_pem: *const c_char,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use p256::ecdsa::{Signature, SigningKey, signature::Signer};
         use p256::pkcs8::DecodePrivateKey;
 
@@ -862,7 +862,7 @@ pub unsafe extern "C" fn gos_rt_jwt_verify_es256(
     verifying_key_pem: *const c_char,
     leeway_secs: i64,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
         use p256::pkcs8::DecodePublicKey;
 
@@ -925,7 +925,7 @@ pub unsafe extern "C" fn gos_rt_jwt_sign_eddsa(
     claims_json: *const c_char,
     signing_key_pem: *const c_char,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use ed25519_dalek::pkcs8::DecodePrivateKey;
         use ed25519_dalek::{Signer, SigningKey};
 
@@ -957,7 +957,7 @@ pub unsafe extern "C" fn gos_rt_jwt_verify_eddsa(
     verifying_key_pem: *const c_char,
     leeway_secs: i64,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use ed25519_dalek::pkcs8::DecodePublicKey;
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 

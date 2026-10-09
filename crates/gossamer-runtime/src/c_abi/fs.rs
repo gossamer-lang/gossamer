@@ -182,7 +182,7 @@ fn temp_resource_path(prefix: &str) -> std::path::PathBuf {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_read_to_string(path: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if path.is_null() {
             return alloc_cstring(b"");
         }
@@ -205,7 +205,7 @@ pub unsafe extern "C" fn gos_rt_fs_read_to_string(path: *const c_char) -> *mut c
 /// already builds its error.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_read_to_string_result(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() {
             let err =
                 crate::c_abi::errors::error_new_from_bytes("read_to_string: null path".as_bytes());
@@ -233,7 +233,7 @@ pub unsafe extern "C" fn gos_rt_fs_read_to_string_result(path: *const c_char) ->
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_write(path: *const c_char, contents: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if path.is_null() || contents.is_null() {
             return 0;
         }
@@ -250,7 +250,7 @@ pub unsafe extern "C" fn gos_rt_fs_write(path: *const c_char, contents: *const c
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_create_dir_all(path: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if path.is_null() {
             return 0;
         }
@@ -269,7 +269,7 @@ pub unsafe extern "C" fn gos_rt_fs_create_dir_all(path: *const c_char) -> i64 {
 /// non-existent symbol and corrupts the destination slot.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_os_remove_file(path: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if path.is_null() {
             return 0;
         }
@@ -303,7 +303,7 @@ pub fn classify_io_error(err: &std::io::Error, context: &str) -> String {
 /// `fs::File::open(path) -> Result<File, Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_file_open(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() {
             return fs_err("File::open: null path");
         }
@@ -321,7 +321,7 @@ pub unsafe extern "C" fn gos_rt_fs_file_open(path: *const c_char) -> i128 {
 /// `fs::File::create(path) -> Result<File, Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_file_create(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() {
             return fs_err("File::create: null path");
         }
@@ -339,7 +339,7 @@ pub unsafe extern "C" fn gos_rt_fs_file_create(path: *const c_char) -> i128 {
 /// `fs::temp_dir(prefix) -> Result<String, Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_temp_dir(prefix: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `prefix` is this shim's argument, null or a live string body (C-ABI contract).
         let prefix = match unsafe { temp_prefix(prefix, "fs::temp_dir") } {
             Ok(prefix) => prefix,
@@ -372,7 +372,7 @@ static TEMP_FILE_PAIR_META: [i64; 6] = [
 /// `fs::temp_file(prefix) -> Result<(File, String), Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_temp_file(prefix: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `prefix` is this shim's argument, null or a live string body (C-ABI contract).
         let prefix = match unsafe { temp_prefix(prefix, "fs::temp_file") } {
             Ok(prefix) => prefix,
@@ -411,7 +411,7 @@ macro_rules! open_option_setter {
     ($name:ident, $field:ident) => {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(h: i64, enabled: i32) -> i64 {
-            ffi_entry!(h, {
+            ffi_entry!({
                 if let Some(opts) = open_options_clone(h) {
                     opts.lock().$field = enabled != 0;
                 }
@@ -441,7 +441,7 @@ open_option_setter!(gos_rt_fs_open_options_create_new, create_new);
 /// `fs::OpenOptions::open(path) -> Result<File, Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_open_options_open(h: i64, path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() {
             return fs_err("OpenOptions::open: null path");
         }
@@ -463,7 +463,7 @@ pub unsafe extern "C" fn gos_rt_fs_open_options_open(h: i64, path: *const c_char
 /// `fs::File::read(max) -> Result<Vec<u8>, Error>`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_fs_file_read(h: i64, max: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let cap = max.clamp(1, 1 << 24) as usize;
         match with_file_cursor(h, "File::read", move |file| {
             let mut buf = vec![0u8; cap];
@@ -482,7 +482,7 @@ pub extern "C" fn gos_rt_fs_file_read(h: i64, max: i64) -> i128 {
 /// `fs::File::read_to_string() -> Result<String, Error>`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_fs_file_read_to_string(h: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         match with_file_cursor(h, "File::read_to_string", |file| {
             let mut text = String::new();
             file.read_to_string(&mut text).map(|_| text)
@@ -498,7 +498,7 @@ pub extern "C" fn gos_rt_fs_file_read_to_string(h: i64) -> i128 {
 /// is written, so the answer is its byte length.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_file_write(h: i64, data: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if data.is_null() {
             return fs_err("File::write: null data");
         }
@@ -516,7 +516,7 @@ pub unsafe extern "C" fn gos_rt_fs_file_write(h: i64, data: *const c_char) -> i1
 /// `fs::File::flush() -> Result<(), Error>`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_fs_file_flush(h: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         match with_file_cursor(h, "File::flush", |file| std::io::Write::flush(file)) {
             Ok(Ok(())) => gos_rt_result_new(0, 0),
             Ok(Err(e)) => fs_io_err(&e, "File::flush"),
@@ -528,7 +528,7 @@ pub extern "C" fn gos_rt_fs_file_flush(h: i64) -> i128 {
 /// `fs::File::close()`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_fs_file_close(h: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         retire_file(super::registry_key::key_id(h));
     });
 }
@@ -543,7 +543,7 @@ pub unsafe extern "C" fn gos_rt_os_write_file_result(
     path: *const c_char,
     contents: *const c_char,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() || contents.is_null() {
             let err = crate::c_abi::errors::error_new_from_bytes("write_file: null arg".as_bytes());
             return gos_rt_result_new(1, err as i64);
@@ -575,7 +575,7 @@ pub unsafe extern "C" fn gos_rt_os_write_file_bytes_result(
     path: *const c_char,
     contents: *const crate::c_abi::vec::GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() || contents.is_null() {
             let err = crate::c_abi::errors::error_new_from_bytes("write_file: null arg".as_bytes());
             return gos_rt_result_new(1, err as i64);
@@ -606,7 +606,7 @@ pub unsafe extern "C" fn gos_rt_os_write_file_bytes_result(
 /// `fs::read_to_string` instead.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_read_bytes_result(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() {
             let err = crate::c_abi::errors::error_new_from_bytes("read_file: null path".as_bytes());
             return gos_rt_result_new(1, err as i64);
@@ -714,7 +714,7 @@ fn read_file_into_vec(p: String) -> Result<std::io::Result<*mut GosVec>, String>
 /// `.map_err(...)` chains.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_os_mkdir_all_result(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() {
             let err = crate::c_abi::errors::error_new_from_bytes("mkdir_all: null path".as_bytes());
             return gos_rt_result_new(1, err as i64);
@@ -738,7 +738,7 @@ pub unsafe extern "C" fn gos_rt_os_mkdir_all_result(path: *const c_char) -> i128
 /// `fs::remove_all(path) -> Result<(), IoError>` - removes a directory tree or file.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_os_remove_dir_all_result(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() {
             let err =
                 crate::c_abi::errors::error_new_from_bytes("remove_all: null path".as_bytes());
@@ -767,7 +767,7 @@ pub unsafe extern "C" fn gos_rt_os_remove_dir_all_result(path: *const c_char) ->
 /// interp's `fs::create_dir` builtin (`std::fs::create_dir`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_create_dir(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() {
             let err =
                 crate::c_abi::errors::error_new_from_bytes("create_dir: null path".as_bytes());
@@ -795,7 +795,7 @@ pub unsafe extern "C" fn gos_rt_fs_create_dir(path: *const c_char) -> i128 {
 /// (`std::fs::remove_dir`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_remove_dir(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() {
             let err =
                 crate::c_abi::errors::error_new_from_bytes("remove_dir: null path".as_bytes());
@@ -819,7 +819,7 @@ pub unsafe extern "C" fn gos_rt_fs_remove_dir(path: *const c_char) -> i128 {
 /// `os::remove_file(path) -> Result<(), IoError>` - Result shape.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_os_remove_file_result(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() {
             let err =
                 crate::c_abi::errors::error_new_from_bytes("remove_file: null path".as_bytes());
@@ -843,7 +843,7 @@ pub unsafe extern "C" fn gos_rt_os_remove_file_result(path: *const c_char) -> i1
 /// `os::rename(from, to)` / `fs::rename(from, to)` -> Result<(), Error>.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_rename(from: *const c_char, to: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if from.is_null() || to.is_null() {
             let err = crate::c_abi::errors::error_new_from_bytes("rename: null path".as_bytes());
             return gos_rt_result_new(1, err as i64);
@@ -868,7 +868,7 @@ pub unsafe extern "C" fn gos_rt_fs_rename(from: *const c_char, to: *const c_char
 /// `env::set_current_dir(path) -> Result<(), Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_env_set_current_dir(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let p = if path.is_null() {
             String::new()
         } else {
@@ -904,7 +904,7 @@ pub extern "C" fn gos_rt_os_family() -> *const c_char {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_path_join(a: *const c_char, b: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let a = if a.is_null() {
             ""
         } else {
@@ -945,7 +945,7 @@ pub(crate) fn path_last_separator_on(path: &str, windows: bool) -> Option<usize>
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_path_base(p: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let s = if p.is_null() {
             ""
         } else {
@@ -964,7 +964,7 @@ pub unsafe extern "C" fn gos_rt_path_base(p: *const c_char) -> *mut c_char {
 /// Returns `"."` when no separator is present.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_path_dir(p: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let s = if p.is_null() {
             ""
         } else {
@@ -988,7 +988,7 @@ pub unsafe extern "C" fn gos_rt_path_dir(p: *const c_char) -> *mut c_char {
 /// matching `gossamer_std::path::split`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_path_split(p: *const c_char) -> *mut i64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let s = if p.is_null() {
             ""
         } else {
@@ -1016,7 +1016,7 @@ pub unsafe extern "C" fn gos_rt_path_split(p: *const c_char) -> *mut i64 {
 /// `path::components(p) -> Vec<String>` - Rust-like lexical components.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_path_components(p: *const c_char) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let s = if p.is_null() {
             ""
         } else {
@@ -1030,7 +1030,7 @@ pub unsafe extern "C" fn gos_rt_path_components(p: *const c_char) -> *mut GosVec
 /// `path::prefixes(p) -> Vec<String>` - cumulative Rust-like lexical prefixes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_path_prefixes(p: *const c_char) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let s = if p.is_null() {
             ""
         } else {
@@ -1045,7 +1045,7 @@ pub unsafe extern "C" fn gos_rt_path_prefixes(p: *const c_char) -> *mut GosVec {
 /// prefixes for newline-delimited paths.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_path_unique_prefixes(p: *const c_char) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let s = if p.is_null() {
             ""
         } else {
@@ -1062,7 +1062,7 @@ pub unsafe extern "C" fn gos_rt_path_unique_prefixes(p: *const c_char) -> *mut G
 /// `path::extension` Option-returning shape.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_path_ext(p: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let s = if p.is_null() {
             ""
         } else {
@@ -1091,7 +1091,7 @@ pub unsafe extern "C" fn gos_rt_path_ext(p: *const c_char) -> i128 {
 /// single-component path). Mirrors `gossamer_std::path::parent`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_path_parent(p: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let s = if p.is_null() {
             ""
         } else {
@@ -1117,7 +1117,7 @@ pub unsafe extern "C" fn gos_rt_path_parent(p: *const c_char) -> i128 {
 /// extension. Returns None when the basename is empty.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_path_stem(p: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let s = if p.is_null() {
             ""
         } else {
@@ -1144,7 +1144,7 @@ pub unsafe extern "C" fn gos_rt_path_stem(p: *const c_char) -> i128 {
 /// Returns None for empty paths or trailing-slash directories.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_path_file_name(p: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let s = if p.is_null() {
             ""
         } else {
@@ -1169,7 +1169,7 @@ pub unsafe extern "C" fn gos_rt_path_file_name(p: *const c_char) -> i128 {
 /// runtime crate stays free of a dep on `gossamer-std`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_path_clean(p: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let path = if p.is_null() {
             ""
         } else {
@@ -1183,7 +1183,7 @@ pub unsafe extern "C" fn gos_rt_path_clean(p: *const c_char) -> *mut c_char {
 /// `path::is_absolute(p) -> bool`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_path_is_absolute(p: *const c_char) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         let path = if p.is_null() {
             ""
         } else {
@@ -1197,7 +1197,7 @@ pub unsafe extern "C" fn gos_rt_path_is_absolute(p: *const c_char) -> i32 {
 /// `path::starts_with(p, prefix) -> bool` - path-aware prefix test.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_path_has_prefix(p: *const c_char, prefix: *const c_char) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         let path = if p.is_null() {
             String::new()
         } else {
@@ -1228,7 +1228,7 @@ pub unsafe extern "C" fn gos_rt_path_has_prefix(p: *const c_char, prefix: *const
 /// - copies the file contents and returns the byte count.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_copy(src: *const c_char, dst: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let src = if src.is_null() {
             String::new()
         } else {
@@ -1257,7 +1257,7 @@ pub unsafe extern "C" fn gos_rt_fs_copy(src: *const c_char, dst: *const c_char) 
 /// `os::canonicalize(p) / fs::canonicalize(p) -> Result<String, Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_canonicalize(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let p = if path.is_null() {
             String::new()
         } else {
@@ -1315,7 +1315,7 @@ fn err_io(e: &std::io::Error) -> i128 {
 /// `bufio::read_to_string(path) -> Result<String, Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bufio_read_to_string(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let p = if path.is_null() {
             String::new()
         } else {
@@ -1335,7 +1335,7 @@ pub unsafe extern "C" fn gos_rt_bufio_read_to_string(path: *const c_char) -> i12
 /// `bufio::read_lines_of(path) -> Result<[String], Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bufio_read_lines_of(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let p = if path.is_null() {
             String::new()
         } else {
@@ -1359,7 +1359,7 @@ pub unsafe extern "C" fn gos_rt_bufio_read_lines_of(path: *const c_char) -> i128
 /// - resolves a host (optionally `host:port`) to IP address strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_net_resolve(host: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use std::net::ToSocketAddrs;
         let h = if host.is_null() {
             String::new()
@@ -1715,7 +1715,7 @@ fn path_glob_expand(pattern: &str) -> std::io::Result<Vec<String>> {
 /// `path::matches(pattern, name) -> bool` - Go `filepath.Match`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_path_matches(pattern: *const c_char, name: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         let pat = if pattern.is_null() {
             ""
         } else {
@@ -1736,7 +1736,7 @@ pub unsafe extern "C" fn gos_rt_path_matches(pattern: *const c_char, name: *cons
 /// matching paths.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_path_glob(pattern: *const c_char) -> i128 {
-    ffi_entry!(gos_rt_result_new(1, 0), {
+    ffi_entry!({
         let pat = if pattern.is_null() {
             ""
         } else {
@@ -1801,7 +1801,7 @@ where
 /// `len` at end of file.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_file_read_at(h: i64, len: i64, offset: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if len < 0 || offset < 0 {
             return fs_err("File::read_at: length and offset must be non-negative");
         }
@@ -1839,7 +1839,7 @@ pub unsafe extern "C" fn gos_rt_fs_file_read_at_into(
     len: i64,
     offset: i64,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if len < 0 || offset < 0 {
             return fs_err("File::read_at_into: length and offset must be non-negative");
         }
@@ -1923,7 +1923,7 @@ pub unsafe extern "C" fn gos_rt_fs_file_write_at(
     data: *const crate::c_abi::vec::GosVec,
     offset: i64,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if offset < 0 {
             return fs_err("File::write_at: offset must be non-negative");
         }
@@ -1949,7 +1949,7 @@ pub unsafe extern "C" fn gos_rt_fs_file_write_bytes(
     h: i64,
     data: *const crate::c_abi::vec::GosVec,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `data` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `vec_bytes` accepts.
         let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
@@ -1967,7 +1967,7 @@ pub unsafe extern "C" fn gos_rt_fs_file_write_bytes(
 /// `fs::SEEK_CUR`, `fs::SEEK_END`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_fs_file_seek(h: i64, offset: i64, whence: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let from = match whence {
             0 => std::io::SeekFrom::Start(offset.max(0) as u64),
             1 => std::io::SeekFrom::Current(offset),
@@ -1985,7 +1985,7 @@ pub extern "C" fn gos_rt_fs_file_seek(h: i64, offset: i64, whence: i64) -> i128 
 /// `fs::File::set_len(len) -> Result<(), Error>`: truncate or extend.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_fs_file_set_len(h: i64, len: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if len < 0 {
             return fs_err("File::set_len: length must be non-negative");
         }
@@ -2001,7 +2001,7 @@ pub extern "C" fn gos_rt_fs_file_set_len(h: i64, len: i64) -> i128 {
 /// `fs::File::len() -> Result<i64, Error>`: the open file's current size.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_fs_file_len(h: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         match with_file_cursor(h, "File::len", |file| file.metadata().map(|m| m.len())) {
             Ok(Ok(len)) => gos_rt_result_new(0, len as i64),
             Ok(Err(e)) => fs_io_err(&e, "File::len"),
@@ -2035,7 +2035,7 @@ pub fn raw_descriptor(file: &std::fs::File) -> Option<i64> {
 /// handle on Windows), for the calls that take one.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_fs_file_fd(h: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let Some(entry) = file_clone(h) else {
             return fs_err("File::fd: stale handle");
         };
@@ -2050,7 +2050,7 @@ pub extern "C" fn gos_rt_fs_file_fd(h: i64) -> i128 {
 /// metadata to the storage device.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_fs_file_sync_all(h: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         match with_file_cursor(h, "File::sync_all", |file| file.sync_all()) {
             Ok(Ok(())) => gos_rt_result_new(0, 0),
             Ok(Err(e)) => fs_io_err(&e, "File::sync_all"),
@@ -2063,7 +2063,7 @@ pub extern "C" fn gos_rt_fs_file_sync_all(h: i64) -> i128 {
 /// leaving metadata the platform considers inessential unwritten.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_fs_file_sync_data(h: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         match with_file_cursor(h, "File::sync_data", |file| file.sync_data()) {
             Ok(Ok(())) => gos_rt_result_new(0, 0),
             Ok(Err(e)) => fs_io_err(&e, "File::sync_data"),
@@ -2077,7 +2077,7 @@ pub extern "C" fn gos_rt_fs_file_sync_data(h: i64) -> i128 {
 /// file sync.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_sync_dir(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() {
             return fs_err("fs::sync_dir: null path");
         }
@@ -2102,7 +2102,7 @@ pub extern "C" fn gos_rt_fs_file_try_lock_range(
     len: i64,
     exclusive: i32,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if start < 0 || len < 0 {
             return fs_err("File::try_lock_range: start and len must be non-negative");
         }
@@ -2125,7 +2125,7 @@ pub extern "C" fn gos_rt_fs_file_try_lock_range(
 /// `fs::File::unlock_range(start, len) -> Result<(), Error>`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_fs_file_unlock_range(h: i64, start: i64, len: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if start < 0 || len < 0 {
             return fs_err("File::unlock_range: start and len must be non-negative");
         }
@@ -2160,7 +2160,7 @@ pub unsafe extern "C" fn gos_rt_fs_file_try_lock_exclusive(h: i64) -> i128 {
 /// handle holds, whole-file or otherwise.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_fs_file_unlock(h: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         let held = HELD_LOCKS
             .lock()
             .as_mut()
@@ -2454,7 +2454,7 @@ fn fs_unit_result(outcome: std::io::Result<()>, context: &str) -> i128 {
 /// permission bits of `path`, in the chmod(2) encoding.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_permissions(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() {
             return fs_err("permissions: null path");
         }
@@ -2476,7 +2476,7 @@ pub unsafe extern "C" fn gos_rt_fs_permissions(path: *const c_char) -> i128 {
 /// sets or clears the read-only attribute.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_set_permissions(path: *const c_char, mode: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() {
             return fs_err("set_permissions: null path");
         }
@@ -2498,7 +2498,7 @@ pub unsafe extern "C" fn gos_rt_fs_set_permissions(path: *const c_char, mode: i6
 /// creates one directory and gives it exactly `mode`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_create_dir_mode(path: *const c_char, mode: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() {
             return fs_err("create_dir_mode: null path");
         }
@@ -2520,7 +2520,7 @@ pub unsafe extern "C" fn gos_rt_fs_create_dir_mode(path: *const c_char, mode: i6
 /// - creates `path` and every missing parent with exactly `mode`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_create_dir_all_mode(path: *const c_char, mode: i64) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() {
             return fs_err("create_dir_all_mode: null path");
         }
@@ -2546,7 +2546,7 @@ pub unsafe extern "C" fn gos_rt_fs_write_mode(
     contents: *const super::vec::GosVec,
     mode: i64,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if path.is_null() {
             return fs_err("write_mode: null argument");
         }

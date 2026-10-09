@@ -193,7 +193,7 @@ unsafe fn call_guard(env: *const u8, value: i64) -> i64 {
 /// share for the caller.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_rwlock_new(value: i64) -> *mut GosRwLock {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         super::rc::alloc_managed(GosRwLock {
             state: parking_lot::Mutex::new(RwState {
                 value,
@@ -209,7 +209,7 @@ pub extern "C" fn gos_rt_rwlock_new(value: i64) -> *mut GosRwLock {
 /// `lock.get()` - read the guarded value under a shared lock.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_rwlock_get(lock: *mut GosRwLock) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if lock.is_null() {
             return 0;
         }
@@ -224,7 +224,7 @@ pub unsafe extern "C" fn gos_rt_rwlock_get(lock: *mut GosRwLock) -> i64 {
 /// exclusive lock.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_rwlock_set(lock: *mut GosRwLock, value: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if lock.is_null() {
             return;
         }
@@ -243,7 +243,7 @@ pub unsafe extern "C-unwind" fn gos_rt_rwlock_with_read(
     lock: *mut GosRwLock,
     env: *const u8,
 ) -> i64 {
-    ffi_entry_passthrough!(0, {
+    ffi_entry_passthrough!({
         if lock.is_null() {
             return 0;
         }
@@ -266,7 +266,7 @@ pub unsafe extern "C-unwind" fn gos_rt_rwlock_with_write(
     lock: *mut GosRwLock,
     env: *const u8,
 ) -> i64 {
-    ffi_entry_passthrough!(0, {
+    ffi_entry_passthrough!({
         if lock.is_null() {
             return 0;
         }

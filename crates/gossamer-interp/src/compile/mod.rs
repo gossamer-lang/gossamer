@@ -687,6 +687,10 @@ pub(crate) struct FnBuilder<'tcx> {
     /// the body reads them from an enclosing binding and their type is
     /// one the compiled tiers share by pointer.
     pub(crate) capture_cell_names: std::collections::HashSet<String>,
+    /// Names a closure body reads from its enclosing scope: each one is the
+    /// enclosing binding itself, so a body answering one whole hands that
+    /// binding's storage out.
+    pub(crate) closure_capture_names: std::collections::HashSet<String>,
     /// Active capture-cell bindings as `(home register, cell register)`,
     /// innermost scope last. Every emitted instruction that names a home
     /// register is bracketed with the cell's load / store.

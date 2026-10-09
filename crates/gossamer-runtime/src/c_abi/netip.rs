@@ -41,12 +41,12 @@ unsafe fn netip_parse_ip(s: *const c_char) -> Option<std::net::IpAddr> {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_netip_is_valid(s: *const c_char) -> i64 {
     // SAFETY: `s` is this shim's argument, as `netip_parse_ip` requires (C-ABI contract).
-    ffi_entry!(0, { i64::from(unsafe { netip_parse_ip(s) }.is_some()) })
+    ffi_entry!({ i64::from(unsafe { netip_parse_ip(s) }.is_some()) })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_netip_is_v4(s: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, as `netip_parse_ip` requires (C-ABI contract).
         i64::from(matches!(
             unsafe { netip_parse_ip(s) },
@@ -57,7 +57,7 @@ pub unsafe extern "C" fn gos_rt_netip_is_v4(s: *const c_char) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_netip_is_v6(s: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, as `netip_parse_ip` requires (C-ABI contract).
         i64::from(matches!(
             unsafe { netip_parse_ip(s) },
@@ -68,7 +68,7 @@ pub unsafe extern "C" fn gos_rt_netip_is_v6(s: *const c_char) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_netip_is_loopback(s: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, as `netip_parse_ip` requires (C-ABI contract).
         i64::from(unsafe { netip_parse_ip(s) }.is_some_and(|ip| ip.is_loopback()))
     })
@@ -76,7 +76,7 @@ pub unsafe extern "C" fn gos_rt_netip_is_loopback(s: *const c_char) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_netip_is_unspecified(s: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, as `netip_parse_ip` requires (C-ABI contract).
         i64::from(unsafe { netip_parse_ip(s) }.is_some_and(|ip| ip.is_unspecified()))
     })
@@ -84,7 +84,7 @@ pub unsafe extern "C" fn gos_rt_netip_is_unspecified(s: *const c_char) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_netip_is_multicast(s: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, as `netip_parse_ip` requires (C-ABI contract).
         i64::from(unsafe { netip_parse_ip(s) }.is_some_and(|ip| ip.is_multicast()))
     })
@@ -92,7 +92,7 @@ pub unsafe extern "C" fn gos_rt_netip_is_multicast(s: *const c_char) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_netip_is_private(s: *const c_char) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, as `netip_parse_ip` requires (C-ABI contract).
         let priv_ = match unsafe { netip_parse_ip(s) } {
             Some(std::net::IpAddr::V4(v4)) => v4.is_private(),
@@ -105,7 +105,7 @@ pub unsafe extern "C" fn gos_rt_netip_is_private(s: *const c_char) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_netip_normalize(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, as `netip_parse_ip` requires (C-ABI contract).
         let out = match unsafe { netip_parse_ip(s) } {
             Some(ip) => ip.to_string(),
@@ -117,7 +117,7 @@ pub unsafe extern "C" fn gos_rt_netip_normalize(s: *const c_char) -> *mut c_char
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_netip_host_of(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if s.is_null() {
             return alloc_cstring(b"");
         }
@@ -133,7 +133,7 @@ pub unsafe extern "C" fn gos_rt_netip_host_of(s: *const c_char) -> *mut c_char {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_netip_port_of(s: *const c_char) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if s.is_null() {
             return -1;
         }
@@ -151,7 +151,7 @@ pub unsafe extern "C" fn gos_rt_netip_join_addr_port(
     host: *const c_char,
     port: i64,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if host.is_null() {
             return alloc_cstring(b"");
         }

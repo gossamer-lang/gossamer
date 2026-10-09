@@ -49,7 +49,7 @@ fn handshake_err(msg: &str) -> i128 {
 /// `builtin_ws_is_upgrade` so both tiers classify identically.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_ws_is_upgrade(req: *const GosHttpRequest) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         if req.is_null() {
             return 0;
         }
@@ -73,7 +73,7 @@ pub unsafe extern "C" fn gos_rt_ws_is_upgrade(req: *const GosHttpRequest) -> i64
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_ws_accept(req: *const GosHttpRequest) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         if req.is_null() {
             return handshake_err("missing Upgrade header");
         }

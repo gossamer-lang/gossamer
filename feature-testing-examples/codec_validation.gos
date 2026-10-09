@@ -1,0 +1,90 @@
+// Decoders accept what an encoder writes and refuse everything else with
+// the same error text on every tier: out-of-range ASCII85 groups, non-ASCII
+// digits, data after Base32 padding, impossible lengths, nonzero unused
+// bits, and stray characters in hex and Base64.
+
+use std::encoding
+use std::encoding::csv
+use std::errors
+use std::html
+use std::net::url
+
+fn show(label: String, input: String, r: Result<Vec<u8>, errors::Error>) {
+    match r {
+        Ok(bytes) => println("{} {:?} -> ok {}", label, input, bytes)
+        Err(e) => println("{} {:?} -> err {}", label, input, e)
+    }
+}
+
+fn main() {
+    let ascii85 = #[
+        "<~9jqo^~>", "9jqo^", "<~z~>", "<~!!!!!~>", "<~s8W-!~>", "<~~>"
+        "<~\u{121}\u{121}\u{121}\u{121}\u{121}~>", "<~uuuuu~>", "<~s8W-\"~>", "<~uu~>"
+        "<~9jqo^", "9jqo^~>", "<~9z~>", "<~9~>", "<~9jqo^v~>", "<~9k~>"
+    ]
+    for t in ascii85 {
+        show("ascii85", t, encoding::ascii85::decode(t))
+    }
+    for n in 0..9 {
+        let data = (0..n).map(|i| (250 - i * 31) as u8).collect()
+        let text = encoding::ascii85::encode(data)
+        show("ascii85 round trip", text, encoding::ascii85::decode(text))
+    }
+
+    let base32 = #[
+        "MY======", "MY", "my======", "MZXW6YTBOI======", "MZXW6YTB", ""
+        "MY======!", "MY=A====", "A", "AAA", "AAAAAA", "MY=", "MY======="
+        "MZ======", "MZXW6YR=", "M\u{e9}======", "!!!!"
+    ]
+    for t in base32 {
+        show("base32", t, encoding::base32::decode(t))
+    }
+    show("base32 hex", "CPNMUOJ1E8======", encoding::base32::decode_hex("CPNMUOJ1E8======"))
+    show("base32 hex", "MY======", encoding::base32::decode_hex("MY======"))
+    match encoding::base32::decode_string("MZXW6===") {
+        Ok(s) => println("base32 string ok {}", s)
+        Err(e) => println("base32 string err {}", e)
+    }
+    match encoding::base32::decode_string("A") {
+        Ok(s) => println("base32 string ok {:?}", s)
+        Err(e) => println("base32 string err {}", e)
+    }
+
+    let base64 = #["Zg==", " Zm9v \n", "Zh==", "Zm9=", "Zg", "Zg===", "Zg==Zg==", "Zm9v*", "===="]
+    for t in base64 {
+        show("base64", t, encoding::base64::decode(t))
+    }
+
+    let hex = #["DEADbeef", "de ad\nbe ef", "abc", "zz", ""]
+    for t in hex {
+        show("hex", t, encoding::hex::decode(t))
+    }
+
+    let entities = #["&lt;b&gt; &amp; &#65;&#x41;&nbsp;|", "&&amp;", "a & b; c", "&#xD800;", "&unknown;"]
+    for t in entities {
+        println("html {:?} -> {:?}", t, html::unescape(t))
+    }
+
+    let records = #[#["plain", "with,comma"], #["line\nbreak", "quote\"d"], #["cr\rlf", ""], #[""], #["  "]]
+    let text = csv::write(records)
+    println("csv {:?}", text)
+    match csv::read(text) {
+        Ok(back) => println("csv round trip {}", back == records)
+        Err(e) => println("csv err {}", e)
+    }
+    match csv::read("a,b\r\n\r\nc,\"d\r\ne\"\n") {
+        Ok(rows) => println("csv crlf {:?}", rows)
+        Err(e) => println("csv err {}", e)
+    }
+    match csv::read("a,b\nc,\"d\ne") {
+        Ok(rows) => println("csv ok {:?}", rows)
+        Err(e) => println("csv err {}", e)
+    }
+
+    for t in #["a b/c:d@e+f&g", "\u{e9}"] {
+        println("url escape {:?} -> {:?} {:?}", t, url::query_escape(t), url::path_escape(t))
+    }
+    for t in #["a+b%20c%C3%A9", "100%", "%zz%4", "%FF"] {
+        println("url unescape {:?} -> {:?} {:?}", t, url::query_unescape(t), url::path_unescape(t))
+    }
+}

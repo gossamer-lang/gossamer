@@ -1397,7 +1397,7 @@ impl<'a> Lowerer<'a> {
         .unwrap();
         // The ownership tag goes on before the entries do, so each insert
         // takes the share (or, for a table, the copy) the tag says it keeps.
-        if let Some(marker) = self.hashmap_value_owner_marker(*val_ty) {
+        if let Some(marker) = gossamer_mir::map_value_owner_marker(self.tcx, *val_ty) {
             declare_rt(&mut self.runtime_refs, marker);
             writeln!(self.out, "  call void @{marker}(ptr {map})").unwrap();
         }
@@ -1490,33 +1490,6 @@ impl<'a> Lowerer<'a> {
             // An enum whose variants carry no payload is its variant index,
             // one word keyed and stored as an integer is.
             Some(TyKind::Adt { .. }) if self.is_unit_only_enum(ty) => Some(0),
-            _ => None,
-        }
-    }
-
-    /// True when a map value is a `Vec` handle, so the map owns one Vec
-    /// share per entry and releases it when an entry or the map dies.
-    /// The runtime marker naming how a map holding `ty` values owns them, or
-    /// `None` for a value the map stores as plain words or bytes.
-    fn hashmap_value_owner_marker(&self, ty: Ty) -> Option<&'static str> {
-        match self.tcx.kind(self.unwrap_ref(ty)) {
-            Some(TyKind::Vec(_) | TyKind::Slice(_)) => Some("gos_rt_map_set_vec_values"),
-            Some(TyKind::HashMap { .. }) => Some("gos_rt_map_set_map_values"),
-            Some(TyKind::Adt { def, .. })
-                if def.local == u32::MAX - 7 || def.local == u32::MAX - 18 =>
-            {
-                Some("gos_rt_map_set_set_values")
-            }
-            Some(TyKind::Adt { def, .. })
-                if [u32::MAX - 19, u32::MAX - 31, u32::MAX - 32].contains(&def.local) =>
-            {
-                Some("gos_rt_map_set_deque_values")
-            }
-            Some(TyKind::Adt { def, .. })
-                if [u32::MAX - 28, u32::MAX - 30].contains(&def.local) =>
-            {
-                Some("gos_rt_map_set_heap_values")
-            }
             _ => None,
         }
     }

@@ -114,7 +114,7 @@ unsafe fn deque_compact_dead_prefix(d: *mut GosDeque) {
 /// `d` is a live `GosDeque` or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_vec(d: *mut GosDeque) -> *mut GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if d.is_null() {
             return std::ptr::null_mut();
         }
@@ -129,23 +129,21 @@ pub unsafe extern "C" fn gos_rt_deque_vec(d: *mut GosDeque) -> *mut GosVec {
 /// Create a new empty deque whose elements are one word wide.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_deque_new() -> *mut GosDeque {
-    ffi_entry!(std::ptr::null_mut(), {
-        deque_alloc(8, vec_elem_kind::PRIMITIVE)
-    })
+    ffi_entry!({ deque_alloc(8, vec_elem_kind::PRIMITIVE) })
 }
 
 /// Create a new empty deque holding elements of `elem_bytes` bytes, owned
 /// per `elem_kind` (the `Vec` element-kind tags).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_new_typed(elem_bytes: i32, elem_kind: u8) -> *mut GosDeque {
-    ffi_entry!(std::ptr::null_mut(), { deque_alloc(elem_bytes, elem_kind) })
+    ffi_entry!({ deque_alloc(elem_bytes, elem_kind) })
 }
 
 /// Create a deque from a `Vec`, preserving iteration order. The deque takes
 /// its own copy, retaining whatever each element owns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_from_vec(v: *const GosVec) -> *mut GosDeque {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let vec = if v.is_null() {
             crate::c_abi::vec::gos_rt_vec_new_typed(8u32, vec_elem_kind::PRIMITIVE)
         } else {
@@ -191,7 +189,7 @@ pub unsafe extern "C" fn gos_rt_stack_from_vec_i64(v: *const GosVec) -> *mut Gos
 /// Appends the one-word element `value` to the back.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_push_back(d: *mut GosDeque, value: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         let word = value;
         // SAFETY: `d` is this shim's argument, null or live for the call (C-ABI contract), which
         // `deque_push_back_slot` accepts; a wider element takes `gos_rt_deque_push_back_wide`, so
@@ -204,7 +202,7 @@ pub unsafe extern "C" fn gos_rt_deque_push_back(d: *mut GosDeque, value: i64) {
 /// holds the bits, and the read on the way out reinterprets them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_push_back_f64(d: *mut GosDeque, value: f64) {
-    ffi_entry!((), {
+    ffi_entry!({
         let word = value.to_bits() as i64;
         // SAFETY: `d` is this shim's argument, null or live for the call (C-ABI contract), which
         // `deque_push_back_slot` accepts, and `word` covers a float store's one-word width.
@@ -219,7 +217,7 @@ pub unsafe extern "C" fn gos_rt_deque_push_back_f64(d: *mut GosDeque, value: f64
 pub unsafe extern "C" fn gos_rt_deque_push_back_wide(d: *mut GosDeque, elem: *const u8) {
     // SAFETY: `d`, `elem` are this shim's arguments, live for the call (C-ABI contract) or null,
     // which `deque_push_back_slot` accepts.
-    ffi_entry!((), { unsafe { deque_push_back_slot(d, elem) } });
+    ffi_entry!({ unsafe { deque_push_back_slot(d, elem) } });
 }
 
 unsafe fn deque_push_back_slot(d: *mut GosDeque, elem: *const u8) {
@@ -246,7 +244,7 @@ unsafe fn deque_push_back_slot(d: *mut GosDeque, elem: *const u8) {
 /// Prepends the one-word element `value` to the front.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_push_front(d: *mut GosDeque, value: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         let word = value;
         // SAFETY: `d` is this shim's argument, null or live for the call (C-ABI contract), which
         // `deque_push_front_slot` accepts; a wider element takes `gos_rt_deque_push_front_wide`,
@@ -258,7 +256,7 @@ pub unsafe extern "C" fn gos_rt_deque_push_front(d: *mut GosDeque, value: i64) {
 /// Prepends a float to the front, stored as its bit pattern.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_push_front_f64(d: *mut GosDeque, value: f64) {
-    ffi_entry!((), {
+    ffi_entry!({
         let word = value.to_bits() as i64;
         // SAFETY: `d` is this shim's argument, null or live for the call (C-ABI contract), which
         // `deque_push_front_slot` accepts, and `word` covers a float store's one-word width.
@@ -271,7 +269,7 @@ pub unsafe extern "C" fn gos_rt_deque_push_front_f64(d: *mut GosDeque, value: f6
 pub unsafe extern "C" fn gos_rt_deque_push_front_wide(d: *mut GosDeque, elem: *const u8) {
     // SAFETY: `d`, `elem` are this shim's arguments, live for the call (C-ABI contract) or null,
     // which `deque_push_front_slot` accepts.
-    ffi_entry!((), { unsafe { deque_push_front_slot(d, elem) } });
+    ffi_entry!({ unsafe { deque_push_front_slot(d, elem) } });
 }
 
 unsafe fn deque_push_front_slot(d: *mut GosDeque, elem: *const u8) {
@@ -348,7 +346,7 @@ unsafe fn deque_payload_at(d: *const GosDeque, idx: i64, shared: bool) -> Option
 /// the address of its slots, which stay readable until the next mutation.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_pop_front(d: *mut GosDeque) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // A wide element's payload is a copy of its slots rather than an
         // address into the store, so the live range may start anywhere and
         // the dead prefix is reclaimed only once it is half the store. Every
@@ -374,7 +372,7 @@ pub unsafe extern "C" fn gos_rt_deque_pop_front(d: *mut GosDeque) -> i128 {
 /// Removes and returns the back element as `Option<T>` packed into i128.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_pop_back(d: *mut GosDeque) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `d` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `deque_live_len` accepts.
         let len = unsafe { deque_live_len(d) };
@@ -423,7 +421,7 @@ unsafe fn deque_elem_ptr(d: *const GosDeque, idx: i64) -> *mut u8 {
 /// discriminant (0 written, 1 empty).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_pop_front_into(d: *mut GosDeque, out: *mut u8) -> i64 {
-    ffi_entry!(1, {
+    ffi_entry!({
         if out.is_null() {
             return 1;
         }
@@ -454,7 +452,7 @@ pub unsafe extern "C" fn gos_rt_deque_pop_front_into(d: *mut GosDeque, out: *mut
 /// discriminant (0 written, 1 empty).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_pop_back_into(d: *mut GosDeque, out: *mut u8) -> i64 {
-    ffi_entry!(1, {
+    ffi_entry!({
         if out.is_null() {
             return 1;
         }
@@ -481,7 +479,7 @@ pub unsafe extern "C" fn gos_rt_deque_pop_back_into(d: *mut GosDeque, out: *mut 
 /// Returns the front element as `Option<T>` without removing it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_peek_front(d: *const GosDeque) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `d` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `deque_payload_at` accepts.
         match unsafe { deque_payload_at(d, 0, true) } {
@@ -494,7 +492,7 @@ pub unsafe extern "C" fn gos_rt_deque_peek_front(d: *const GosDeque) -> i128 {
 /// Returns the back element as `Option<T>` without removing it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_peek_back(d: *const GosDeque) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `d` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `deque_live_len` accepts.
         let len = unsafe { deque_live_len(d) };
@@ -515,7 +513,7 @@ pub unsafe extern "C" fn gos_rt_deque_peek_back(d: *const GosDeque) -> i128 {
 pub unsafe extern "C" fn gos_rt_deque_len(d: *const GosDeque) -> i64 {
     // SAFETY: `d` is this shim's argument, live for the call (C-ABI contract) or null, which
     // `deque_live_len` accepts.
-    ffi_entry!(0, { unsafe { deque_live_len(d) } })
+    ffi_entry!({ unsafe { deque_live_len(d) } })
 }
 
 /// Return 1 if the deque is empty, 0 otherwise.
@@ -523,13 +521,13 @@ pub unsafe extern "C" fn gos_rt_deque_len(d: *const GosDeque) -> i64 {
 pub unsafe extern "C" fn gos_rt_deque_is_empty(d: *const GosDeque) -> i32 {
     // SAFETY: `d` is this shim's argument, live for the call (C-ABI contract) or null, which
     // `deque_live_len` accepts.
-    ffi_entry!(1, { i32::from(unsafe { deque_live_len(d) } <= 0) })
+    ffi_entry!({ i32::from(unsafe { deque_live_len(d) } <= 0) })
 }
 
 /// Remove all elements from the deque, releasing whatever they own.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_clear(d: *mut GosDeque) {
-    ffi_entry!((), {
+    ffi_entry!({
         if d.is_null() {
             return;
         }
@@ -631,7 +629,7 @@ pub(crate) unsafe fn deque_format_at(
 /// Format a `Deque` of one-word integer elements for `{}` / `{:?}`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_deque_format(d: *mut GosDeque) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         // SAFETY: `d` is this shim's argument, null or live for the call (C-ABI contract), and
         // the null descriptor selects the word rendering.
         unsafe { deque_format_with(d, "Deque", std::ptr::null()) }
@@ -641,7 +639,7 @@ pub unsafe extern "C-unwind" fn gos_rt_deque_format(d: *mut GosDeque) -> *mut c_
 /// Format a `Queue` of one-word integer elements for `{}` / `{:?}`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_queue_format(d: *mut GosDeque) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         // SAFETY: `d` is this shim's argument, null or live for the call (C-ABI contract), and
         // the null descriptor selects the word rendering.
         unsafe { deque_format_with(d, "Queue", std::ptr::null()) }
@@ -651,7 +649,7 @@ pub unsafe extern "C-unwind" fn gos_rt_queue_format(d: *mut GosDeque) -> *mut c_
 /// Format a `Stack` of one-word integer elements for `{}` / `{:?}`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_stack_format(d: *mut GosDeque) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         // SAFETY: `d` is this shim's argument, null or live for the call (C-ABI contract), and
         // the null descriptor selects the word rendering.
         unsafe { deque_format_with(d, "Stack", std::ptr::null()) }
@@ -664,7 +662,7 @@ pub unsafe extern "C-unwind" fn gos_rt_deque_format_desc(
     d: *mut GosDeque,
     tags: *const u8,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         // SAFETY: `d` is this shim's argument, null or live for the call, and `tags` null or its
         // element descriptor (C-ABI contract).
         unsafe { deque_format_with(d, "Deque", tags) }
@@ -677,7 +675,7 @@ pub unsafe extern "C-unwind" fn gos_rt_queue_format_desc(
     d: *mut GosDeque,
     tags: *const u8,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         // SAFETY: `d` is this shim's argument, null or live for the call, and `tags` null or its
         // element descriptor (C-ABI contract).
         unsafe { deque_format_with(d, "Queue", tags) }
@@ -690,7 +688,7 @@ pub unsafe extern "C-unwind" fn gos_rt_stack_format_desc(
     d: *mut GosDeque,
     tags: *const u8,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         // SAFETY: `d` is this shim's argument, null or live for the call, and `tags` null or its
         // element descriptor (C-ABI contract).
         unsafe { deque_format_with(d, "Stack", tags) }
@@ -706,7 +704,7 @@ pub unsafe extern "C-unwind" fn gos_rt_stack_format_desc(
 /// `d` is a live `GosDeque` or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_clone(d: *mut GosDeque) -> *mut GosDeque {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         if d.is_null() {
             return gos_rt_deque_new();
         }
@@ -736,7 +734,7 @@ pub unsafe extern "C" fn gos_rt_deque_clone(d: *mut GosDeque) -> *mut GosDeque {
 /// `dst` and `src` are live `GosDeque`s or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_assign(dst: *mut GosDeque, src: *mut GosDeque) {
-    ffi_entry!((), {
+    ffi_entry!({
         if dst.is_null() || src.is_null() || std::ptr::addr_eq(dst, src) {
             return;
         }
@@ -779,7 +777,7 @@ pub unsafe extern "C" fn gos_rt_deque_assign(dst: *mut GosDeque, src: *mut GosDe
 /// `slot` addresses a `*mut GosDeque` field, or is null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_field_clone(slot: *mut *mut GosDeque) {
-    ffi_entry!((), {
+    ffi_entry!({
         if slot.is_null() {
             return;
         }
@@ -807,7 +805,7 @@ pub unsafe extern "C" fn gos_rt_deque_field_clone(slot: *mut *mut GosDeque) {
 /// `slot` addresses a `*mut GosDeque` field, or is null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_field_release(slot: *mut *mut GosDeque) {
-    ffi_entry!((), {
+    ffi_entry!({
         if slot.is_null() {
             return;
         }
@@ -866,7 +864,7 @@ pub unsafe extern "C" fn gos_rt_stack_clone(d: *mut GosDeque) -> *mut GosDeque {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_free(d: *mut GosDeque) {
-    ffi_entry!((), {
+    ffi_entry!({
         if d.is_null() {
             return;
         }

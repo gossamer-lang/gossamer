@@ -37,7 +37,7 @@ const EMITTED_CODES: &[&str] = &[
     "GM0001", "GM0002", // Arena-escape safety (gossamer-types/src/arena_escape.rs).
     "GM0003", // Runtime (gossamer-interp/src/value.rs).
     "GX0001", "GX0002", "GX0003", "GX0004", "GX0005", "GX0006", "GX0007", "GX0008", "GX0009",
-    "GX0010", "GX0011", "GX0012", "GX0013", "GX0014",
+    "GX0010", "GX0011", "GX0012", "GX0013", "GX0014", "GX0015",
     // Lint registry (gossamer-lint/src/lib.rs::lint_code).
     "GL0001", "GL0002", "GL0003", "GL0004", "GL0005", "GL0006", "GL0007", "GL0008", "GL0009",
     "GL0010", "GL0011", "GL0012", "GL0013", "GL0014", "GL0015", "GL0016", "GL0017", "GL0018",

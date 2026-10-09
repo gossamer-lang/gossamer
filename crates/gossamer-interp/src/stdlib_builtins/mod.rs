@@ -156,8 +156,6 @@ pub(crate) fn install(globals: &mut Vec<(&'static str, Value)>) {
     install_encoding_xml(globals);
     #[cfg(not(target_arch = "wasm32"))]
     install_crypto_insecure(globals);
-    #[cfg(not(target_arch = "wasm32"))]
-    install_compress_bzip2(globals);
     install_math_big(globals);
     install_http_chunked(globals);
     #[cfg(not(target_arch = "wasm32"))]
@@ -242,8 +240,7 @@ pub(crate) fn string_array(values: Vec<String>) -> Value {
 // ----------------------------------------------------------------------
 // strings
 
-pub mod archive_tar;
-pub mod archive_zip;
+pub mod archive;
 pub mod bufio;
 pub mod bytes_builder;
 pub mod cohort;
@@ -329,6 +326,7 @@ pub mod sort;
 pub mod strconv;
 pub mod strings;
 pub mod sync;
+pub mod sync_atomic_u64;
 pub mod sync_barrier;
 pub mod thread;
 pub mod time;
@@ -340,10 +338,7 @@ pub mod url_escape;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod uuid;
 pub mod validate;
-pub(crate) use archive_tar::install_archive_tar;
-pub use archive_tar::*;
-pub(crate) use archive_zip::install_archive_zip;
-pub use archive_zip::*;
+pub(crate) use archive::{install_archive_tar, install_archive_zip};
 pub(crate) use bufio::install_bufio_extras;
 pub use bufio::*;
 pub(crate) use bytes_builder::install_bytes_builder;
@@ -490,6 +485,7 @@ pub(crate) use strings::install_strings;
 pub use strings::*;
 pub(crate) use sync::install_sync_extras;
 pub use sync::*;
+pub(crate) use sync_atomic_u64::install_sync_atomic_u64;
 pub(crate) use sync_barrier::install_sync_barrier;
 pub use sync_barrier::*;
 pub(crate) use thread::install_thread;

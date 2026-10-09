@@ -147,14 +147,15 @@ impl<'a> Builder<'a> {
     /// out of a fresh function result allocated a new non-region buffer on
     /// every loop iteration, while the dead temporary's region cleanup could
     /// not release that detached buffer.
-    /// Re-points a fold's accumulator at the binding its result initialises.
+    /// Re-points a fresh result (see `fresh_results`) at the binding it
+    /// initialises.
     ///
-    /// The accumulator is a loop-private local that no other name reads, so
-    /// the binding can be that local rather than a copy of it. As a copy it
-    /// would alias the accumulator, and the frame could then free neither the
-    /// values the loop replaced nor the one it kept.
-    fn try_rebind_fold_result(&mut self, value: Local, binding: Local) -> bool {
-        if self.named_locals.contains(&value) || !self.fresh_loop_results.remove(&value) {
+    /// The result is a local no other name reads, so the binding can be that
+    /// local rather than a copy of it. As a copy it would alias the result,
+    /// and the frame could then free neither the values a loop replaced nor
+    /// the one it kept.
+    fn try_rebind_fresh_result(&mut self, value: Local, binding: Local) -> bool {
+        if self.named_locals.contains(&value) || !self.fresh_results.remove(&value) {
             return false;
         }
         for block in &mut self.blocks {
@@ -218,18 +219,29 @@ impl<'a> Builder<'a> {
         let Some(cur) = self.current else {
             return false;
         };
-        self.blocks.iter().any(|block| {
-            matches!(
-                &block.terminator,
-                Terminator::Call {
-                    callee: Operand::FnRef { .. },
-                    destination,
-                    target: Some(target),
-                    ..
-                } if *target == cur
-                    && destination.local == value
-                    && destination.projection.is_empty()
-            )
+        // A closure answers a table of the caller's own, as every Gossamer
+        // body does (see `copy_returned_lent_tables`).
+        let answers_table =
+            crate::lower::helpers::is_table_ty(self.tcx, self.locals[value.0 as usize].ty);
+        self.blocks.iter().any(|block| match &block.terminator {
+            Terminator::Call {
+                callee,
+                destination,
+                target: Some(target),
+                ..
+            } if *target == cur
+                && destination.local == value
+                && destination.projection.is_empty() =>
+            {
+                match callee {
+                    Operand::FnRef { .. } => true,
+                    Operand::Const(ConstValue::Str(name)) => {
+                        answers_table && name.starts_with(gossamer_hir::LIFTED_CLOSURE_PREFIX)
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
         })
     }
 
@@ -812,7 +824,13 @@ impl<'a> Builder<'a> {
                         if self.local_aggr_iter.contains(&value) {
                             self.local_aggr_iter.insert(local);
                         }
-                        if !self.try_rebind_fold_result(value, local)
+                        // A map literal's block answers the map it built
+                        // under a name that leaves scope with the block.
+                        if gossamer_hir::is_map_literal_block(init) {
+                            self.named_locals.remove(&value);
+                            self.fresh_results.insert(value);
+                        }
+                        if !self.try_rebind_fresh_result(value, local)
                             && !self.try_rebind_ctor_call(value, local)
                         {
                             let init_ty = self.locals[value.0 as usize].ty;
@@ -828,7 +846,7 @@ impl<'a> Builder<'a> {
                                 );
                             } else if gossamer_hir::is_capture_env_load(init)
                                 || self.is_fresh_user_call_result(value)
-                                || self.fresh_loop_results.contains(&value)
+                                || self.fresh_results.contains(&value)
                                 || self.is_owned_carrier_payload(value)
                                 || self.holds_owned_carrier_payload(value)
                                 // A `.clone()` result already took its deep
@@ -965,9 +983,24 @@ fn is_container_ctor(name: &str) -> bool {
             | "collections::BTreeSet::new"
             | "BTreeMap::new"
             | "collections::BTreeMap::new"
+            | "Map::from"
+            | "collections::Map::from"
+            | "HashMap::from"
+            | "collections::HashMap::from"
+            | "BTreeMap::from"
+            | "collections::BTreeMap::from"
             | "gos_rt_map_new"
             | "gos_rt_map_new_with_capacity"
             | "gos_rt_set_new"
+            | "gos_rt_deque_from_vec_i64"
+            | "gos_rt_queue_from_vec_i64"
+            | "gos_rt_stack_from_vec_i64"
+            | "gos_rt_bheap_min_from_vec_i64"
+            | "gos_rt_bheap_max_from_vec_i64"
+            | "gos_rt_bheap_min_from_vec_f64"
+            | "gos_rt_bheap_max_from_vec_f64"
+            | "gos_rt_bheap_min_from_vec_desc"
+            | "gos_rt_bheap_max_from_vec_desc"
     )
 }
 

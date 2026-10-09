@@ -49,7 +49,7 @@ fn ip_err(msg: &str) -> i128 {
 /// `net::ip: <reason>` message.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_net_ip_parse(s: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
         let text = unsafe { cstr_to_str(s) };
         match text.parse::<IpAddr>() {
@@ -67,7 +67,7 @@ pub unsafe extern "C" fn gos_rt_net_ip_parse(s: *const c_char) -> i128 {
 /// string produced by `parse` (or any valid IP literal).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_net_ip_octets(s: *const c_char) -> *mut super::vec::GosVec {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
         let text = unsafe { cstr_to_str(s) };
         let bytes: Vec<u8> = match text.parse::<IpAddr>() {

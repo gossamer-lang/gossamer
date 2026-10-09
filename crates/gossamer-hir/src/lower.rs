@@ -607,6 +607,7 @@ enum NominalInto {
 mod for_loop;
 mod items;
 mod literals;
+pub use literals::is_map_literal_block;
 mod map_index;
 mod patterns;
 mod simd;

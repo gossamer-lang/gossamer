@@ -6,6 +6,7 @@ For receiver methods on built-in types, see [`Methods by type`](../method_suppor
 
 | Module | Summary |
 |---|---|
+| [`std::archive`](archive.md) | Helpers shared by the archive formats. |
 | [`std::archive::tar`](archive_tar.md) | Unix tar reader and writer (USTAR / PAX-aware decode). |
 | [`std::archive::zip`](archive_zip.md) | ZIP archive reader and writer. |
 | [`std::bufio`](bufio.md) | Buffered readers, writers, and line scanners. |

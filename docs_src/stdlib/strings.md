@@ -12,7 +12,7 @@ String operations.
 | `splitn` | `fn splitn(text: String, n: i64, sep: String | char) -> Vec<String>` | Splits a string into at most `n` parts. |
 | `trim` | `fn trim(text: String) -> String` | Removes leading and trailing whitespace. |
 | `contains` | `fn contains(text: String, needle: String | char) -> bool` | Returns whether the string contains a substring. |
-| `find` | `fn find(text: String, needle: String | char) -> Option<i64>` | Returns the character index of the first match, or None. |
+| `find` | `fn find(text: String, needle: String | char) -> Option<i64>` | Returns the Unicode scalar index of the first match, or None; `byte_find` answers the byte offset `substring` and `slice` take. |
 | `replace` | `fn replace(text: String, from: String | char, to: String | char) -> String` | Replaces every occurrence of `from` with `to`. |
 | `to_lowercase` | `fn to_lowercase(text: String) -> String` | Lowercases every character. |
 | `to_uppercase` | `fn to_uppercase(text: String) -> String` | Uppercases every character. |
@@ -23,6 +23,10 @@ String operations.
 | `count` | `fn count(text: String, needle: String | char) -> i64` | Counts non-overlapping occurrences of `needle`. |
 | `byte_len` | `fn byte_len(text: String) -> i64` | Returns the UTF-8 byte length. |
 | `byte_at` | `fn byte_at(text: String, index: i64) -> i64` | Returns the UTF-8 byte at an index. |
+| `byte_find` | `fn byte_find(text: String, needle: String | char) -> Option<i64>` | Byte offset of the first match, in the unit `substring`, `slice`, and `byte_at` take; `find` answers a scalar index instead. |
+| `byte_rfind` | `fn byte_rfind(text: String, needle: String | char) -> Option<i64>` | Byte offset of the last match. |
+| `byte_offset` | `fn byte_offset(text: String, char_index: i64) -> Option<i64>` | `byte_offset(text, char_index) -> Option<i64>`: where a scalar index (a `find` answer) starts in bytes; one past the last scalar answers the byte length. |
+| `char_index` | `fn char_index(text: String, byte_offset: i64) -> Option<i64>` | `char_index(text, byte_offset) -> Option<i64>`: the scalar index starting at a byte offset, or `None` inside a scalar or past the end. |
 | `bytes` | `fn bytes(text: String) -> Vec<u8>` | Returns the UTF-8 bytes of the string. |
 | `chars` | `fn chars(text: String) -> Iterator<char>` | Returns a cursor over the string's Unicode scalar values; `collect` materialises it. |
 | `center` | `fn center(text: String, width: i64, fill: char) -> String` | Symmetric pad to `width` using the given pad character. |

@@ -47,7 +47,7 @@ fn record_atomic_release(a: &GosAtomicI64) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_atomic_i64_new(initial: i64) -> *mut GosAtomicI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         super::rc::alloc_managed(GosAtomicI64 {
             inner: AtomicI64::new(initial),
             last_release_gid: AtomicI64::new(-1),
@@ -57,7 +57,7 @@ pub extern "C" fn gos_rt_atomic_i64_new(initial: i64) -> *mut GosAtomicI64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_atomic_i64_load(a: *const GosAtomicI64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if a.is_null() {
             return 0;
         }
@@ -71,7 +71,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_load(a: *const GosAtomicI64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_atomic_i64_store(a: *mut GosAtomicI64, val: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if a.is_null() {
             return;
         }
@@ -84,7 +84,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_store(a: *mut GosAtomicI64, val: i64)
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_atomic_i64_fetch_add(a: *mut GosAtomicI64, delta: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if a.is_null() {
             return 0;
         }
@@ -110,7 +110,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_fetch_add(a: *mut GosAtomicI64, delta
 /// Allocate a new atomic boolean initialised to `initial`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_atomic_bool_new(initial: bool) -> *mut GosAtomicI64 {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         super::rc::alloc_managed(GosAtomicI64 {
             inner: AtomicI64::new(i64::from(initial)),
             last_release_gid: AtomicI64::new(-1),
@@ -121,7 +121,7 @@ pub extern "C" fn gos_rt_atomic_bool_new(initial: bool) -> *mut GosAtomicI64 {
 /// Load an atomic boolean with sequentially-consistent ordering.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_atomic_bool_load(a: *const GosAtomicI64) -> bool {
-    ffi_entry!(false, {
+    ffi_entry!({
         if a.is_null() {
             return false;
         }
@@ -136,7 +136,7 @@ pub unsafe extern "C" fn gos_rt_atomic_bool_load(a: *const GosAtomicI64) -> bool
 /// Store into an atomic boolean with sequentially-consistent ordering.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_atomic_bool_store(a: *mut GosAtomicI64, val: bool) {
-    ffi_entry!((), {
+    ffi_entry!({
         if a.is_null() {
             return;
         }
@@ -150,7 +150,7 @@ pub unsafe extern "C" fn gos_rt_atomic_bool_store(a: *mut GosAtomicI64, val: boo
 /// Atomically subtract from an i64 and answer the previous value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_atomic_i64_fetch_sub(a: *mut GosAtomicI64, delta: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if a.is_null() {
             return 0;
         }
@@ -167,7 +167,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_fetch_sub(a: *mut GosAtomicI64, delta
 /// cell is i64 storage holding an i32, so the sum wraps at 32 bits.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_atomic_i32_fetch_add(a: *mut GosAtomicI64, delta: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if a.is_null() {
             return 0;
         }
@@ -184,7 +184,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i32_fetch_add(a: *mut GosAtomicI64, delta
 /// wrapping at 32 bits.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_atomic_i32_fetch_sub(a: *mut GosAtomicI64, delta: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if a.is_null() {
             return 0;
         }
@@ -225,7 +225,7 @@ pub unsafe extern "C" fn gos_rt_atomic_bool_cas(
     expected: bool,
     new: bool,
 ) -> bool {
-    ffi_entry!(false, {
+    ffi_entry!({
         if a.is_null() {
             return false;
         }
@@ -254,7 +254,7 @@ pub unsafe extern "C" fn gos_rt_atomic_bool_cas(
 /// pattern (`Mutex`-like handoff, lock-free queue head, etc.).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_atomic_i64_load_acquire(a: *const GosAtomicI64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if a.is_null() {
             return 0;
         }
@@ -269,7 +269,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_load_acquire(a: *const GosAtomicI64) 
 /// Release-ordered store, paired with `_load_acquire`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_atomic_i64_store_release(a: *mut GosAtomicI64, val: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if a.is_null() {
             return;
         }
@@ -285,7 +285,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_store_release(a: *mut GosAtomicI64, v
 /// from-anywhere values where ordering is enforced separately.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_atomic_i64_load_relaxed(a: *const GosAtomicI64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if a.is_null() {
             return 0;
         }
@@ -298,7 +298,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_load_relaxed(a: *const GosAtomicI64) 
 /// Relaxed store, paired with `_load_relaxed`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_atomic_i64_store_relaxed(a: *mut GosAtomicI64, val: i64) {
-    ffi_entry!((), {
+    ffi_entry!({
         if a.is_null() {
             return;
         }
@@ -315,7 +315,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_fetch_add_acqrel(
     a: *mut GosAtomicI64,
     delta: i64,
 ) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if a.is_null() {
             return 0;
         }
@@ -338,7 +338,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_cas(
     expected: i64,
     new: i64,
 ) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if a.is_null() {
             return 0;
         }
@@ -366,7 +366,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_cas_acq_rel(
     expected: i64,
     new: i64,
 ) -> i32 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if a.is_null() {
             return 0;
         }
@@ -389,7 +389,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_cas_acq_rel(
 /// Atomic exchange - returns the previous value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_atomic_i64_swap(a: *mut GosAtomicI64, val: i64) -> i64 {
-    ffi_entry!(-1, {
+    ffi_entry!({
         if a.is_null() {
             return 0;
         }

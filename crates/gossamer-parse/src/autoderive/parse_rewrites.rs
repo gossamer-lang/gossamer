@@ -536,8 +536,10 @@ const MANGLED_STDLIB_NAMES: &[(&str, &str, &str)] = &[
     // tar/zip `read` route through the struct wrapper; `write`
     // lowers directly (no struct), so it is NOT rewritten.
     ("tar", "read", "__gos_tar_read"),
+    ("tar", "read_limited", "__gos_tar_read_limited"),
     ("tar", "TarEntry", "__gos_tar_TarEntry"),
     ("zip", "read", "__gos_zip_read"),
+    ("zip", "read_limited", "__gos_zip_read_limited"),
     ("zip", "ZipEntry", "__gos_zip_ZipEntry"),
     ("sql", "open", "__gos_sql_open"),
     ("sql", "drivers", "__gos_sql_drivers"),

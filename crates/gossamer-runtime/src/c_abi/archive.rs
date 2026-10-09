@@ -5,15 +5,15 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_ptr_alignment)]
 
-//! `std::archive::{tar,zip}` leaf intrinsics. `read` returns a
-//! `[(String, [u8], bool)]` tuple-vec (the injected wrapper folds
-//! each into a real `TarEntry` / `ZipEntry` struct); `write` takes a
-//! `[(String, [u8])]` tuple-vec and returns `Result<[u8], Error>`.
-//! Mirrors `gossamer_std::archive` so the compiled tier matches the
-//! VM byte-for-byte.
+//! `std::archive::{tar,zip}` leaf intrinsics over `crate::codec::archive`,
+//! the implementation the bytecode VM shares. `read` returns a
+//! `[(String, [u8], bool)]` tuple-vec (the injected wrapper folds each into a
+//! real `TarEntry` / `ZipEntry` struct); `write` takes a `[(String, [u8])]`
+//! tuple-vec and returns `Result<[u8], Error>`.
 
-use std::io::{Cursor, Read, Write};
 use std::os::raw::c_char;
+
+use crate::codec::archive::{self, Entry, EntryKind, Limits};
 
 use super::result::gos_rt_result_new;
 use super::string::alloc_cstring;
@@ -80,13 +80,13 @@ static ENTRY_SLOT_CHILDREN: [crate::c_abi::vec::VecSlotChild; 2] = [
 /// 3-slot elements `[name_ptr, data_vec_ptr, is_dir]`. The vec owns
 /// the name strings and data vecs (slot-children layout registered
 /// after the pushes), so `gos_rt_vec_free` deep-frees them.
-fn build_entry_vec(entries: &[(String, Vec<u8>, bool)]) -> *mut GosVec {
+fn build_entry_vec(entries: &[Entry]) -> *mut GosVec {
     let v = gos_rt_vec_with_capacity(24, entries.len() as i64);
-    for (name, data, is_dir) in entries {
+    for entry in entries {
         let tup: [i64; 3] = [
-            alloc_cstring(name.as_bytes()) as i64,
-            byte_vec(data) as i64,
-            i64::from(*is_dir),
+            alloc_cstring(entry.name.as_bytes()) as i64,
+            byte_vec(&entry.data) as i64,
+            i64::from(entry.kind == EntryKind::Dir),
         ];
         // SAFETY: `v` is the fresh vec made above, or null, which `gos_rt_vec_push` accepts, and
         // `tup` is one 24-byte element.
@@ -110,121 +110,165 @@ fn err(msg: &str) -> i128 {
     gos_rt_result_new(1, e as i64)
 }
 
-// ----------------------------------------------------------------- tar
+/// The carrier a codec answer becomes.
+fn result_of<T>(answer: Result<T, String>, ok: impl FnOnce(T) -> i128) -> i128 {
+    match answer {
+        Ok(value) => ok(value),
+        Err(msg) => err(&msg),
+    }
+}
 
-/// `archive::tar::read(data) -> Result<[(String,[u8],bool)], Error>`.
+type Reader = fn(&[u8], Limits) -> Result<Vec<Entry>, String>;
+
+/// A raw read under the limits three count arguments name (negative is
+/// unbounded).
+///
+/// # Safety
+/// `data` is null or a live `Vec` for the call.
+unsafe fn read_raw(
+    read: Reader,
+    data: *const GosVec,
+    entries: i64,
+    entry_bytes: i64,
+    total: i64,
+) -> i128 {
+    // SAFETY: the caller passes `data` null or live, which `vec_bytes_cow` accepts.
+    let bytes = unsafe { crate::c_abi::vec::vec_bytes_cow(data) };
+    let limits = Limits::from_counts(entries, entry_bytes, total);
+    result_of(read(&bytes, limits), |list| ok_vec(build_entry_vec(&list)))
+}
+
+/// Writes the archive in `data` under `dir`.
+///
+/// # Safety
+/// `data` is null or a live `Vec`, and `dir` null or a live string, for the call.
+unsafe fn extract_raw(read: Reader, data: *const GosVec, dir: *const c_char) -> i128 {
+    // SAFETY: the caller passes `data` null or live, which `vec_bytes_cow` accepts.
+    let bytes = unsafe { crate::c_abi::vec::vec_bytes_cow(data) };
+    // SAFETY: the caller passes `dir` null or a live string body.
+    let dir = unsafe { crate::c_abi::gos_str_arg_text(dir) };
+    let written = read(&bytes, Limits::default())
+        .and_then(|list| archive::extract(&list, std::path::Path::new(dir)));
+    result_of(written, |n| {
+        gos_rt_result_new(0, i64::try_from(n).unwrap_or(i64::MAX))
+    })
+}
+
+/// `archive::tar::read` leaf: `(data, max_entries, max_entry_bytes,
+/// max_total_bytes) -> Result<[(String, [u8], bool)], Error>`.
+///
+/// # Safety
+/// `data` is null or a live `Vec` for the call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_tar_read_raw(data: *const GosVec) -> i128 {
-    ffi_entry!(0i128, {
-        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
-        // contract), which `vec_bytes` accepts.
-        let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
-        let mut archive = tar::Archive::new(Cursor::new(bytes));
-        let iter = match archive.entries() {
-            Ok(it) => it,
-            Err(e) => return err(&format!("tar entries: {e}")),
-        };
-        let mut out: Vec<(String, Vec<u8>, bool)> = Vec::new();
-        for entry in iter {
-            let mut entry = match entry {
-                Ok(en) => en,
-                Err(e) => return err(&format!("tar entry: {e}")),
-            };
-            let name = match entry.path() {
-                Ok(p) => p.to_string_lossy().into_owned(),
-                Err(e) => return err(&format!("tar entry path: {e}")),
-            };
-            let kind = entry.header().entry_type();
-            let is_dir = kind.is_dir();
-            let mut buf = Vec::new();
-            if kind.is_file() && entry.read_to_end(&mut buf).is_err() {
-                return err(&format!("tar read {name}"));
-            }
-            out.push((name, buf, is_dir));
+pub unsafe extern "C" fn gos_rt_tar_read_raw(
+    data: *const GosVec,
+    max_entries: i64,
+    max_entry_bytes: i64,
+    max_total_bytes: i64,
+) -> i128 {
+    ffi_entry!({
+        // SAFETY: `data` is this shim's argument, null or live for the call (C-ABI contract).
+        unsafe {
+            read_raw(
+                archive::tar_read,
+                data,
+                max_entries,
+                max_entry_bytes,
+                max_total_bytes,
+            )
         }
-        ok_vec(build_entry_vec(&out))
+    })
+}
+
+/// `archive::zip::read` leaf, with the arguments of [`gos_rt_tar_read_raw`].
+///
+/// # Safety
+/// `data` is null or a live `Vec` for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_zip_read_raw(
+    data: *const GosVec,
+    max_entries: i64,
+    max_entry_bytes: i64,
+    max_total_bytes: i64,
+) -> i128 {
+    ffi_entry!({
+        // SAFETY: `data` is this shim's argument, null or live for the call (C-ABI contract).
+        unsafe {
+            read_raw(
+                archive::zip_read,
+                data,
+                max_entries,
+                max_entry_bytes,
+                max_total_bytes,
+            )
+        }
     })
 }
 
 /// `archive::tar::write(files) -> Result<[u8], Error>`.
+///
+/// # Safety
+/// `files` is null or a live `[(String, [u8])]` for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_tar_write(files: *const GosVec) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `files` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `read_name_data_pairs` accepts.
         let pairs = unsafe { read_name_data_pairs(files) };
-        let mut builder = tar::Builder::new(Vec::new());
-        for (name, data) in &pairs {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(data.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            if builder
-                .append_data(&mut header, name, data.as_slice())
-                .is_err()
-            {
-                return err(&format!("tar append {name}"));
-            }
-        }
-        match builder.into_inner() {
-            Ok(out) => ok_bytes(&out),
-            Err(e) => err(&format!("tar finish: {e}")),
-        }
-    })
-}
-
-// ----------------------------------------------------------------- zip
-
-/// `archive::zip::read(data) -> Result<[(String,[u8],bool)], Error>`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_zip_read_raw(data: *const GosVec) -> i128 {
-    ffi_entry!(0i128, {
-        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
-        // contract), which `vec_bytes` accepts.
-        let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
-        let mut archive = match zip::ZipArchive::new(Cursor::new(bytes)) {
-            Ok(a) => a,
-            Err(e) => return err(&format!("zip read: {e}")),
-        };
-        let mut out: Vec<(String, Vec<u8>, bool)> = Vec::with_capacity(archive.len());
-        for i in 0..archive.len() {
-            let mut file = match archive.by_index(i) {
-                Ok(f) => f,
-                Err(e) => return err(&format!("zip entry {i}: {e}")),
-            };
-            let name = file.name().to_owned();
-            let is_dir = file.is_dir();
-            let mut buf = Vec::new();
-            if !is_dir && file.read_to_end(&mut buf).is_err() {
-                return err(&format!("zip read entry {name}"));
-            }
-            out.push((name, buf, is_dir));
-        }
-        ok_vec(build_entry_vec(&out))
+        result_of(archive::tar_write(&pairs), |bytes| ok_bytes(&bytes))
     })
 }
 
 /// `archive::zip::write(files) -> Result<[u8], Error>`.
+///
+/// # Safety
+/// `files` is null or a live `[(String, [u8])]` for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_zip_write(files: *const GosVec) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         // SAFETY: `files` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `read_name_data_pairs` accepts.
         let pairs = unsafe { read_name_data_pairs(files) };
-        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        let opts = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
-        for (name, data) in &pairs {
-            if zip.start_file(name.as_str(), opts).is_err() {
-                return err(&format!("zip start_file {name}"));
-            }
-            if zip.write_all(data).is_err() {
-                return err(&format!("zip write {name}"));
-            }
-        }
-        match zip.finish() {
-            Ok(c) => ok_bytes(&c.into_inner()),
-            Err(e) => err(&format!("zip finish: {e}")),
+        result_of(archive::zip_write(&pairs), |bytes| ok_bytes(&bytes))
+    })
+}
+
+/// `archive::tar::extract(data, dir) -> Result<i64, Error>`.
+///
+/// # Safety
+/// `data` is null or a live `Vec`, and `dir` null or a live string, for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_tar_extract(data: *const GosVec, dir: *const c_char) -> i128 {
+    ffi_entry!({
+        // SAFETY: both arguments are this shim's, null or live for the call (C-ABI contract).
+        unsafe { extract_raw(archive::tar_read, data, dir) }
+    })
+}
+
+/// `archive::zip::extract(data, dir) -> Result<i64, Error>`.
+///
+/// # Safety
+/// `data` is null or a live `Vec`, and `dir` null or a live string, for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_zip_extract(data: *const GosVec, dir: *const c_char) -> i128 {
+    ffi_entry!({
+        // SAFETY: both arguments are this shim's, null or live for the call (C-ABI contract).
+        unsafe { extract_raw(archive::zip_read, data, dir) }
+    })
+}
+
+/// `archive::enclosed_path(name) -> Option<String>`.
+///
+/// # Safety
+/// `name` is null or a live string body for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_archive_enclosed_path(name: *const c_char) -> i128 {
+    ffi_entry!({
+        // SAFETY: `name` is this shim's argument, null or a live string body (C-ABI contract).
+        let name = unsafe { crate::c_abi::gos_str_arg_text(name) };
+        match archive::enclosed_path(name) {
+            Some(path) => gos_rt_result_new(0, alloc_cstring(path.as_bytes()) as i64),
+            None => gos_rt_result_new(1, 0),
         }
     })
 }

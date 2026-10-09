@@ -79,7 +79,7 @@ impl Drop for WakeEntry {
 /// cohort was cancelled, `Err` otherwise.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_fd_wait_raw(fd: i64, writable: i64, timeout_ms: i64) -> i128 {
-    ffi_entry!(super::result::gos_rt_result_new(1, 0), {
+    ffi_entry!({
         // A goroutine's wait runs on a pool thread, so it asks about the
         // caller's cohort by id rather than about the pool thread's. Any other
         // caller waits inline and asks its own tier.

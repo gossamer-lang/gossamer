@@ -13,7 +13,7 @@ use super::vec::GosVec;
 /// Returns SHA-256 of the input bytes as lowercase hex.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sha256_hex(input: *const GosVec) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `input` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `vec_bytes` accepts.
         let bytes = unsafe { crate::c_abi::vec::vec_bytes(input) };
@@ -26,7 +26,7 @@ pub unsafe extern "C" fn gos_rt_sha256_hex(input: *const GosVec) -> *mut c_char 
 /// Returns SHA-512 of the input bytes as lowercase hex.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sha512_hex(input: *const GosVec) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         use sha2::Digest;
         // SAFETY: `input` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `vec_bytes` accepts.
@@ -42,7 +42,7 @@ pub unsafe extern "C" fn gos_rt_sha512_hex(input: *const GosVec) -> *mut c_char 
 /// Returns BLAKE3 of the input bytes as lowercase hex.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_blake3_hex(input: *const GosVec) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `input` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `vec_bytes` accepts.
         let bytes = unsafe { crate::c_abi::vec::vec_bytes(input) };
@@ -61,7 +61,7 @@ pub unsafe extern "C" fn gos_rt_hmac_sha256_hex(
     key: *const GosVec,
     message: *const GosVec,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `vec_bytes` accepts.
         let key_bytes = unsafe { crate::c_abi::vec::vec_bytes(key) };
@@ -226,7 +226,7 @@ fn password_err(msg: &str) -> i128 {
 /// tier verifies on another.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_crypto_password_hash(plaintext: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use argon2::password_hash::{PasswordHasher, SaltString};
         use argon2::{Algorithm, Argon2, Params, Version};
         let pw = if plaintext.is_null() {
@@ -262,7 +262,7 @@ pub unsafe extern "C" fn gos_rt_crypto_password_verify(
     plaintext: *const c_char,
     phc: *const c_char,
 ) -> i128 {
-    ffi_entry!(0i128, {
+    ffi_entry!({
         use argon2::Argon2;
         use argon2::password_hash::{PasswordHash, PasswordVerifier};
         let pw = if plaintext.is_null() {
@@ -291,7 +291,7 @@ pub unsafe extern "C" fn gos_rt_crypto_password_verify(
 /// params → true).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_crypto_password_needs_rehash(phc: *const c_char) -> i8 {
-    ffi_entry!(0, {
+    ffi_entry!({
         use argon2::Params;
         use argon2::password_hash::PasswordHash;
         let phc_s = if phc.is_null() {

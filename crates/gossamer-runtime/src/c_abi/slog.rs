@@ -105,7 +105,7 @@ unsafe fn slog_emit(level: &str, msg: *const c_char, fields: *const GosVec) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_slog_info(msg: *const c_char, fields: *const GosVec) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `msg` and `fields` are this shim's arguments, each null or live for the call
         // (C-ABI contract), which `slog_emit` accepts.
         unsafe { slog_emit("INFO", msg, fields) };
@@ -114,7 +114,7 @@ pub unsafe extern "C" fn gos_rt_slog_info(msg: *const c_char, fields: *const Gos
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_slog_warn(msg: *const c_char, fields: *const GosVec) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `msg` and `fields` are this shim's arguments, each null or live for the call
         // (C-ABI contract), which `slog_emit` accepts.
         unsafe { slog_emit("WARN", msg, fields) };
@@ -123,7 +123,7 @@ pub unsafe extern "C" fn gos_rt_slog_warn(msg: *const c_char, fields: *const Gos
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_slog_error(msg: *const c_char, fields: *const GosVec) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `msg` and `fields` are this shim's arguments, each null or live for the call
         // (C-ABI contract), which `slog_emit` accepts.
         unsafe { slog_emit("ERROR", msg, fields) };
@@ -132,7 +132,7 @@ pub unsafe extern "C" fn gos_rt_slog_error(msg: *const c_char, fields: *const Go
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_slog_debug(msg: *const c_char, fields: *const GosVec) {
-    ffi_entry!((), {
+    ffi_entry!({
         // SAFETY: `msg` and `fields` are this shim's arguments, each null or live for the call
         // (C-ABI contract), which `slog_emit` accepts.
         unsafe { slog_emit("DEBUG", msg, fields) };

@@ -1,12 +1,14 @@
-//! Memory-leak gate matrix (Phase 0 of the leak-plugging plan in
-//! `~/dev/contexts/gos/leaks.md`).
+//! Memory-leak gate matrix.
 //!
 //! Each shape allocates heap memory inside a loop that runs many iterations.
 //! If the per-iteration heap is reclaimed at scope end, peak RSS stays bounded
 //! regardless of the iteration count; if it leaks, RSS grows with N and blows
-//! past the cap. The control shape (`enum_tree`) is RC-managed today and MUST
-//! stay bounded - it proves the harness and the existing RC both work. The
-//! other shapes are flipped into `MUST_BE_BOUNDED` as each phase fixes them.
+//! past the cap. Every shape is gated three ways: peak RSS under the cap, no
+//! reference-counted object left at exit (`RC_LIVE_AT_EXIT`), and the leak
+//! ledger at the compiled baseline - one counter family alone misses leaks
+//! the others see. The caught-panic shape is the one documented exemption:
+//! compiled code does not reclaim the values of frames a contained panic
+//! unwinds, and the gate pins that to the exact counts so it cannot grow.
 //!
 //! Run just this gate: `cargo test -p gossamer-cli --test leak_matrix -- --nocapture`
 
@@ -25,15 +27,34 @@ const CAP_KB: u64 = 60_000;
 /// Shapes whose per-iteration heap MUST be reclaimed. Grows as phases land.
 /// Phase 0: only the RC-managed control. Strings/Vec/Map/payloads are added by
 /// their phases.
-const MUST_BE_BOUNDED: &[&str] = &[
-    "enum_tree_control",
-    "transient_string",
-    "returned_string",
-    "string_in_struct",
-    "string_in_nested_struct",
-    "map_in_struct_in_vec",
-    "set_in_struct_in_vec",
-];
+/// What a shape may leave behind at exit, beyond the runtime's own baseline.
+struct Allowance {
+    /// Live `String`s the leak ledger may report.
+    strings: u64,
+    /// Live `Vec`s the leak ledger may report.
+    vecs: u64,
+}
+
+/// The compiled baseline: the runtime keeps one string and one vector.
+const BASELINE: Allowance = Allowance {
+    strings: 1,
+    vecs: 1,
+};
+
+/// Shapes whose residue is documented rather than reclaimed, with the exact
+/// counts the gate holds them to.
+fn allowance(name: &str) -> Allowance {
+    match name {
+        // Forty contained panics, each unwinding a frame that holds two
+        // strings in a vector: compiled code does not reclaim them (SPEC
+        // section 8.5), and these counts must not grow.
+        "caught_panic_frames" => Allowance {
+            strings: 81,
+            vecs: 41,
+        },
+        _ => BASELINE,
+    }
+}
 
 /// (name, source). N is baked into each source, sized so a leak clears the cap.
 const SHAPES: &[(&str, &str)] = &[
@@ -234,6 +255,204 @@ fn main() {
 }
 "#,
     ),
+    (
+        "weak_in_vec",
+        r#"
+enum Node { Leaf(i64), Pair(Node, Node) }
+fn fan(k: i64) -> i64 {
+    let n = Node::Leaf(k)
+    let mut ws = #[]
+    ws.push(n.downgrade())
+    ws.push(n.downgrade())
+    ws.len()
+}
+fn main() {
+    let mut total: i64 = 0
+    let mut i: i64 = 0
+    while i < 400000 {
+        total += fan(i)
+        i += 1
+    }
+    println("{}", total)
+}
+"#,
+    ),
+    (
+        "weak_fanout_past_the_header",
+        r#"
+enum Node { Leaf(i64), Pair(Node, Node) }
+fn fan(k: i64) -> i64 {
+    let n = Node::Leaf(k)
+    let mut ws = #[]
+    for _ in 0..300 { ws.push(n.downgrade()) }
+    ws.len()
+}
+fn main() {
+    let mut total: i64 = 0
+    let mut i: i64 = 0
+    while i < 2000 {
+        total += fan(i)
+        i += 1
+    }
+    println("{}", total)
+}
+"#,
+    ),
+    (
+        "weak_in_map_and_option",
+        r#"
+enum Node { Leaf(i64), Pair(Node, Node) }
+struct Holder { w: Weak<Node>, tag: i64 }
+fn fan(k: i64) -> i64 {
+    let n = Node::Leaf(k)
+    let mut m = Map::new()
+    m[k] = n.downgrade()
+    let mut hm = Map::new()
+    hm[k] = Holder { w: n.downgrade(), tag: k }
+    let o = Some(n.downgrade())
+    let mut hs = #[Holder { w: n.downgrade(), tag: k }]
+    hs.push(Holder { w: n.downgrade(), tag: k })
+    if o.is_some() { m.len() + hm.len() + hs.len() } else { 0 }
+}
+fn main() {
+    let mut total: i64 = 0
+    let mut i: i64 = 0
+    while i < 200000 {
+        total += fan(i)
+        i += 1
+    }
+    println("{}", total)
+}
+"#,
+    ),
+    (
+        "lent_carrier_payloads",
+        r#"
+use std::errors
+fn mk(n: i64) -> Vec<u8> {
+    let mut v: Vec<u8> = Vec::from([])
+    for i in 0..n { v.push(i as u8) }
+    v
+}
+fn q(r: Result<Vec<u8>, errors::Error>) -> Result<i64, errors::Error> {
+    let v = r?
+    Ok(v.len())
+}
+fn keep(r: Result<Vec<u8>, errors::Error>) -> Vec<u8> {
+    match r {
+        Ok(v) => v,
+        Err(_) => Vec::from([]),
+    }
+}
+fn main() {
+    let mut total: i64 = 0
+    let mut i: i64 = 0
+    while i < 300000 {
+        match q(Ok(mk(8))) { Ok(n) => total += n, Err(_) => {} }
+        total += keep(Ok(mk(4))).len()
+        i += 1
+    }
+    println("{}", total)
+}
+"#,
+    ),
+    (
+        "returned_tables",
+        r#"
+fn pass_map(m: Map<i64, i64>) -> Map<i64, i64> { m }
+fn pass_set(s: Set<i64>) -> Set<i64> { s }
+fn pass_deque(d: Deque<i64>) -> Deque<i64> { d }
+fn pass_heap(h: MinHeap<i64>) -> MinHeap<i64> { h }
+fn pick(m: Map<i64, i64>, fresh: bool) -> Map<i64, i64> {
+    if fresh { {1: 1} } else { m }
+}
+fn main() {
+    let m = {1: 10, 2: 20}
+    let s = #{1, 2, 3}
+    let mut d = Deque::new()
+    d.push_back(1)
+    let h = MinHeap::from([5, 3, 9])
+    let mut total: i64 = 0
+    let mut i: i64 = 0
+    while i < 100000 {
+        let a = pass_map(m)
+        let b = pass_set(s)
+        let c = pass_deque(d)
+        let e = pass_heap(h)
+        let p = pick(m, i % 2 == 0)
+        let lit = {1: (2, "x")}
+        total += a.len() + b.len() + c.len() + e.len() + p.len() + lit.len()
+        i += 1
+    }
+    println("{}", total)
+}
+"#,
+    ),
+    (
+        "borrowed_tables",
+        r#"
+struct State { s: Set<i64>, d: Deque<i64> }
+impl State {
+    fn set(&self) -> Set<i64> { self.s }
+}
+fn first(v: Vec<Set<i64>>) -> Set<i64> { v[0] }
+fn value_of(m: Map<i64, Set<i64>>) -> Set<i64> { m[1] }
+fn unwrap_deque(o: Option<Deque<i64>>) -> Deque<i64> {
+    match o {
+        Some(d) => d,
+        None => Deque::new(),
+    }
+}
+fn local_field() -> Set<i64> {
+    let st = State { s: #{1}, d: Deque::new() }
+    st.s
+}
+fn main() {
+    let st = State { s: #{1, 2}, d: Deque::new() }
+    let vs = #[#{7}]
+    let ms = {1: #{3}}
+    let od = Some(st.d)
+    let mut total: i64 = 0
+    let mut i: i64 = 0
+    while i < 100000 {
+        let a = st.set()
+        let b = first(vs)
+        let c = value_of(ms)
+        let d = unwrap_deque(od)
+        let e = local_field()
+        let read = || st.s
+        let f = read()
+        let mut held = Vec::new()
+        held.push(Some(#{i}))
+        total += a.len() + b.len() + c.len() + d.len() + e.len() + f.len() + held.len()
+        i += 1
+    }
+    println("{}", total)
+}
+"#,
+    ),
+    (
+        "caught_panic_frames",
+        r#"
+fn work(fail: bool) -> i64 {
+    let s = "x".repeat(10000)
+    let xs = #[s, s]
+    if fail { panic("boom {}", xs.len()) }
+    xs.len()
+}
+fn main() {
+    let mut errors = 0
+    for i in 0..40 {
+        let h = spawn(|| work(true))
+        match h.join() {
+            Ok(_) => {}
+            Err(_) => { errors += 1 }
+        }
+    }
+    println("{}", errors)
+}
+"#,
+    ),
 ];
 
 fn gnu_time_ok() -> bool {
@@ -266,33 +485,82 @@ fn build_release(dir: &Path, name: &str, source: &str) -> Option<PathBuf> {
     bin.exists().then_some(bin)
 }
 
-fn peak_rss_kb(bin: &Path) -> u64 {
+/// What a run left behind: peak RSS, reference-counted objects still live,
+/// and the leak ledger's live `String` and `Vec` counts with the rest of the
+/// ledger line.
+struct Residue {
+    rss_kb: u64,
+    rc_live: u64,
+    strings: u64,
+    vecs: u64,
+    ledger: String,
+}
+
+fn ledger_field(line: &str, name: &str) -> u64 {
+    line.split_whitespace()
+        .find_map(|word| word.strip_prefix(&format!("{name}=")))
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(u64::MAX)
+}
+
+fn measure(bin: &Path) -> Residue {
     let out = Command::new("/usr/bin/time")
         .arg("-v")
         .arg(bin)
+        .env("GOS_RC_DEBUG", "1")
+        .env("GOS_LEAK_LEDGER", "1")
         .output()
         .expect("spawn /usr/bin/time");
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success(),
-        "binary {} failed: {}",
-        bin.display(),
-        String::from_utf8_lossy(&out.stderr)
+        "binary {} failed: {stderr}",
+        bin.display()
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    for line in stderr.lines() {
-        if let Some(rest) = line
-            .trim()
-            .strip_prefix("Maximum resident set size (kbytes):")
-        {
-            return rest.trim().parse().unwrap();
-        }
+    let rss_kb = stderr
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("Maximum resident set size (kbytes):")
+                .and_then(|rest| rest.trim().parse().ok())
+        })
+        .unwrap_or_else(|| panic!("no RSS line for {}", bin.display()));
+    let rc_live = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("RC_LIVE_AT_EXIT="))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(u64::MAX);
+    let ledger = stderr
+        .lines()
+        .find(|line| line.starts_with("LEAK LEDGER"))
+        .unwrap_or("")
+        .to_string();
+    let others_clear = ["aggr", "rc", "map", "set", "deque"]
+        .iter()
+        .all(|name| ledger_field(&ledger, name) == 0);
+    Residue {
+        rss_kb,
+        rc_live,
+        strings: ledger_field(&ledger, "str"),
+        vecs: if others_clear {
+            ledger_field(&ledger, "vec")
+        } else {
+            u64::MAX
+        },
+        ledger,
     }
-    panic!("no RSS line for {}", bin.display());
 }
 
 #[test]
 fn leak_matrix_report() {
     if !gnu_time_ok() {
+        // Linux CI is where this gate is required, so a missing measurement
+        // there is a failure rather than a skip.
+        assert!(
+            !(cfg!(target_os = "linux") && env::var_os("CI").is_some()),
+            "GNU /usr/bin/time -v is required for the leak gate on Linux CI"
+        );
         eprintln!("skipping: GNU /usr/bin/time -v not available");
         return;
     }
@@ -301,29 +569,36 @@ fn leak_matrix_report() {
 
     let mut failures = Vec::new();
     eprintln!("\n  leak matrix (cap {CAP_KB} KB)");
-    eprintln!("  {:<22} {:>10}  verdict", "shape", "peak KB");
     for (name, source) in SHAPES {
-        let gated = MUST_BE_BOUNDED.contains(name);
         let Some(bin) = build_release(&dir, name, source) else {
-            let dash: &str = "-";
-            eprintln!("  {name:<22} {dash:>10}  BUILD FAIL");
-            if gated {
-                failures.push(*name);
-            }
+            eprintln!("  {name:<28} BUILD FAIL");
+            failures.push(format!("{name}: build failed"));
             continue;
         };
-        let rss = peak_rss_kb(&bin);
-        let bounded = rss < CAP_KB;
-        let verdict = match (bounded, gated) {
-            (true, _) => "bounded",
-            (false, true) => "LEAK (gated!)",
-            (false, false) => "leak (not yet gated)",
-        };
-        eprintln!("  {name:<22} {rss:>10}  {verdict}");
-        if gated && !bounded {
-            failures.push(*name);
+        let residue = measure(&bin);
+        let allowed = allowance(name);
+        let ok = residue.rss_kb < CAP_KB
+            && residue.rc_live == 0
+            && residue.strings <= allowed.strings
+            && residue.vecs <= allowed.vecs;
+        eprintln!(
+            "  {name:<28} {:>8} KB  rc_live={}  {}  {}",
+            residue.rss_kb,
+            residue.rc_live,
+            residue.ledger,
+            if ok { "ok" } else { "LEAK" }
+        );
+        if !ok {
+            failures.push(format!(
+                "{name}: rss {} KB, rc_live {}, {}",
+                residue.rss_kb, residue.rc_live, residue.ledger
+            ));
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(failures.is_empty(), "gated shapes leaked: {failures:?}");
+    assert!(
+        failures.is_empty(),
+        "leaking shapes:\n{}",
+        failures.join("\n")
+    );
 }

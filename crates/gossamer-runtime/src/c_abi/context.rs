@@ -339,7 +339,7 @@ pub(crate) fn shared_background() -> CtxHandle {
 /// no deadline.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_ctx_background() -> *mut GosCtx {
-    ffi_entry!(std::ptr::null_mut(), { as_ptr(alloc_ctx(None, None)) })
+    ffi_entry!({ as_ptr(alloc_ctx(None, None)) })
 }
 
 /// `context::Context::with_cancel(parent)` - a child whose
@@ -347,7 +347,7 @@ pub extern "C" fn gos_rt_ctx_background() -> *mut GosCtx {
 /// also cancels it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_ctx_with_cancel(parent: *mut GosCtx) -> *mut GosCtx {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `parent` is null or a handle the caller holds.
         as_ptr(alloc_ctx(None, unsafe {
             node_of(parent.expose_provenance())
@@ -359,7 +359,7 @@ pub unsafe extern "C" fn gos_rt_ctx_with_cancel(parent: *mut GosCtx) -> *mut Gos
 /// `is_cancelled` flips `true` once `millis` have elapsed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_ctx_with_timeout(parent: *mut GosCtx, millis: i64) -> *mut GosCtx {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         let deadline = Instant::now() + Duration::from_millis(millis.max(0) as u64);
         // SAFETY: `parent` is null or a handle the caller holds.
         as_ptr(alloc_ctx(Some(deadline), unsafe {
@@ -394,7 +394,7 @@ fn cancel_node(root: &Arc<CtxNode>) {
 /// `ctx.cancel()` - cancel this context and every descendant.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_ctx_cancel(ctx: *mut GosCtx) {
-    ffi_entry!((), { cancel_handle(ctx.expose_provenance()) });
+    ffi_entry!({ cancel_handle(ctx.expose_provenance()) });
 }
 
 /// Whether `node` or any ancestor is cancelled or past its deadline. The
@@ -419,9 +419,7 @@ fn node_is_cancelled(node: &CtxNode) -> bool {
 /// cancelled or its deadline has passed, else `0`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_ctx_is_cancelled(ctx: *mut GosCtx) -> i64 {
-    ffi_entry!(0, {
-        i64::from(handle_is_cancelled(ctx.expose_provenance()))
-    })
+    ffi_entry!({ i64::from(handle_is_cancelled(ctx.expose_provenance())) })
 }
 
 /// `ctx.done()` - non-blocking cancellation check; identical to
@@ -429,9 +427,7 @@ pub unsafe extern "C" fn gos_rt_ctx_is_cancelled(ctx: *mut GosCtx) -> i64 {
 /// `gos_rt_ctx_cancelled` / `ctx.done_chan()`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_ctx_done(ctx: *mut GosCtx) -> i64 {
-    ffi_entry!(0, {
-        i64::from(handle_is_cancelled(ctx.expose_provenance()))
-    })
+    ffi_entry!({ i64::from(handle_is_cancelled(ctx.expose_provenance())) })
 }
 
 /// `ctx.done_chan()` - returns the context's "done" channel as a
@@ -441,7 +437,7 @@ pub unsafe extern "C" fn gos_rt_ctx_done(ctx: *mut GosCtx) -> i64 {
 /// the same channel on every call for a given context.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_ctx_cancelled(ctx: *mut GosCtx) -> *mut GosChan {
-    ffi_entry!(std::ptr::null_mut(), {
+    ffi_entry!({
         // SAFETY: `ctx` is null or a handle the caller holds.
         let chan = match unsafe { node_of(ctx.expose_provenance()) } {
             Some(node) => done_chan_of(&node),

@@ -217,7 +217,7 @@ pub unsafe extern "C-unwind" fn gos_rt_tuple_format_desc(
     slots: *const i64,
     desc: *const u8,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if slots.is_null() || desc.is_null() {
             return alloc_cstring(b"()");
         }
@@ -751,7 +751,7 @@ pub unsafe extern "C-unwind" fn gos_rt_tuple_format(
     n: i64,
     tags: *const u8,
 ) -> *mut c_char {
-    ffi_entry_passthrough!(std::ptr::null_mut(), {
+    ffi_entry_passthrough!({
         if p.is_null() || tags.is_null() || n <= 0 {
             return alloc_cstring(b"()");
         }
@@ -787,7 +787,7 @@ pub unsafe extern "C-unwind" fn gos_rt_tuple_cmp(
     n: i64,
     tags: *const u8,
 ) -> i64 {
-    ffi_entry_passthrough!(0, {
+    ffi_entry_passthrough!({
         if a.is_null() || b.is_null() || tags.is_null() || n <= 0 {
             return 0;
         }
@@ -819,7 +819,7 @@ pub unsafe extern "C-unwind" fn gos_rt_tuple_eq(
     n: i64,
     tags: *const u8,
 ) -> i64 {
-    ffi_entry_passthrough!(0, {
+    ffi_entry_passthrough!({
         if a.is_null() || b.is_null() || tags.is_null() || n <= 0 {
             return i64::from(a == b || n <= 0);
         }
@@ -989,7 +989,7 @@ unsafe fn sort_tuple_buffer(base: *mut u8, len: usize, stride: usize, n: i64, ta
 /// flattened slots rather than the tuples they belong to.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_sort_tuple(v: *mut GosVec, n: i64, tags: *const u8) {
-    ffi_entry!((), {
+    ffi_entry!({
         if v.is_null() || tags.is_null() || n <= 0 {
             return;
         }
@@ -1018,7 +1018,7 @@ pub unsafe extern "C" fn gos_rt_arr_sort_tuple(
     n: i64,
     tags: *const u8,
 ) {
-    ffi_entry!((), {
+    ffi_entry!({
         if p.is_null() || tags.is_null() || n <= 0 || len <= 1 || elem_bytes <= 0 {
             return;
         }
@@ -1035,7 +1035,7 @@ pub unsafe extern "C" fn gos_rt_arr_sort_tuple(
 /// compiled tiers for `[T] == [T]` / `!=`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_eq(a: *const GosVec, b: *const GosVec, elem_tag: u8) -> bool {
-    ffi_entry!(false, {
+    ffi_entry!({
         if a.is_null() || b.is_null() {
             return std::ptr::eq(a, b);
         }
@@ -1085,7 +1085,7 @@ pub unsafe extern "C" fn gos_rt_vec_eq(a: *const GosVec, b: *const GosVec, elem_
 /// sub-shape never reaches this walk.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_enum_struct_eq(a: *mut u8, b: *mut u8, desc: *const i64) -> i64 {
-    ffi_entry!(0, {
+    ffi_entry!({
         let raw_a = a as usize;
         let raw_b = b as usize;
         let a = crate::c_abi::rc::untag_rc(a);
