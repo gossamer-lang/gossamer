@@ -11,8 +11,8 @@ use gossamer_codegen_cranelift::{NativeObject, compile_to_object, emit_module};
 use gossamer_hir::{lift_closures, lower_source_file};
 use gossamer_lex::{FileId, SourceMap};
 use gossamer_mir::{
-    Body, check_generic_layouts, inline_general, inline_small_callees, inline_trivial_wrappers,
-    lower_program, optimise, optimise_debug,
+    Body, check_generic_layouts, collect_program_effects, inline_general, inline_small_callees,
+    inline_trivial_wrappers, lower_program, optimise_debug, optimise_with_effects,
 };
 use gossamer_resolve::Resolutions;
 use gossamer_types::{TyCtxt, TypeTable};
@@ -385,17 +385,21 @@ fn lower_to_mir_reporting_prune(
             for body in &mut bodies {
                 optimise_debug(body, &tcx);
             }
+            gossamer_mir::report_bounds_sites(&bodies, &gossamer_mir::ProgramEffects::default());
         }
         // Whole-program inlining is a release-only transformation. Keeping
         // it here, rather than relying solely on LLVM, lets release simplify
         // language-level ownership and bounds-check shapes before IR emission.
         MirProfile::Release => {
+            let effects = collect_program_effects(&hir, &tcx);
             inline_trivial_wrappers(&mut bodies);
             inline_small_callees(&mut bodies, &tcx);
             inline_general(&mut bodies, &tcx);
             for body in &mut bodies {
-                optimise(body, &tcx);
+                optimise_with_effects(body, &tcx, &effects);
             }
+            gossamer_mir::propagate_entry_bounds(&mut bodies, &tcx, &effects);
+            gossamer_mir::report_bounds_sites(&bodies, &effects);
         }
     }
     gossamer_mir::rc_verify::check_program(&bodies);

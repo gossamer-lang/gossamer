@@ -3,6 +3,8 @@ mod elision_tests {
     use gossamer_lex::{SourceMap, Span};
     use gossamer_types::TyCtxt;
 
+    use crate::ProgramEffects;
+
     use super::{
         bounds_check_elim, elide_borrowed_holder_rc, elide_moved_aggregate_shares,
         elide_redundant_rc_pairs, elide_settled_guarded_walks, move_stored_rc_shares, move_vec_clone_of_dead_local,
@@ -1499,7 +1501,7 @@ mod elision_tests {
     fn bounds_rewrites_counted_loop_get() {
         let mut tcx = TyCtxt::new();
         let mut body = counted_loop_body(&mut tcx);
-        bounds_check_elim(&mut body, &tcx);
+        bounds_check_elim(&mut body, &tcx, &ProgramEffects::default());
         let Terminator::Call { callee, .. } = &body.blocks[2].terminator else {
             panic!("expected call terminator")
         };
@@ -1521,7 +1523,7 @@ mod elision_tests {
             Place::local(Local(2)),
             Rvalue::Use(Operand::Const(ConstValue::Int(3))),
         ));
-        bounds_check_elim(&mut body, &tcx);
+        bounds_check_elim(&mut body, &tcx, &ProgramEffects::default());
         let Terminator::Call { callee, .. } = &body.blocks[2].terminator else {
             panic!("expected call terminator")
         };
@@ -1624,7 +1626,7 @@ mod elision_tests {
             blocks,
             span: sp,
         };
-        local_branch_bounds_check_elim(&mut body, &tcx);
+        local_branch_bounds_check_elim(&mut body, &tcx, &ProgramEffects::default());
         let Terminator::Call { callee, .. } = &body.blocks[2].terminator else {
             panic!("expected call terminator")
         };
@@ -1720,7 +1722,7 @@ mod elision_tests {
             blocks,
             span: sp,
         };
-        local_branch_bounds_check_elim(&mut body, &tcx);
+        local_branch_bounds_check_elim(&mut body, &tcx, &ProgramEffects::default());
         let Terminator::Call { callee, .. } = &body.blocks[2].terminator else {
             panic!("expected call terminator")
         };
@@ -1830,7 +1832,7 @@ mod elision_tests {
             span: sp,
         };
 
-        local_branch_bounds_check_elim(&mut body, &tcx);
+        local_branch_bounds_check_elim(&mut body, &tcx, &ProgramEffects::default());
         let Terminator::Call { callee, .. } = &body.blocks[2].terminator else {
             panic!("expected call terminator")
         };
@@ -1850,7 +1852,7 @@ mod elision_tests {
         if let Terminator::Call { callee, .. } = &mut body.blocks[2].terminator {
             *callee = Operand::Const(ConstValue::Str("gos_rt_vec_get_i64".to_string()));
         }
-        local_branch_bounds_check_elim(&mut body, &tcx);
+        local_branch_bounds_check_elim(&mut body, &tcx, &ProgramEffects::default());
         assert!(matches!(
             &body.blocks[2].terminator,
             Terminator::Call {
@@ -1937,7 +1939,7 @@ mod elision_tests {
             span: sp,
         };
 
-        local_branch_bounds_check_elim(&mut body, &tcx);
+        local_branch_bounds_check_elim(&mut body, &tcx, &ProgramEffects::default());
         let Terminator::Call { callee, .. } = &body.blocks[2].terminator else {
             panic!("expected call terminator")
         };
@@ -2046,7 +2048,7 @@ mod elision_tests {
             span: sp,
         };
 
-        local_branch_bounds_check_elim(&mut body, &tcx);
+        local_branch_bounds_check_elim(&mut body, &tcx, &ProgramEffects::default());
         for block in [&body.blocks[2], &body.blocks[4]] {
             assert!(matches!(
                 &block.terminator,

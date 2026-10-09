@@ -298,8 +298,8 @@ fn run(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
     let build_key = build_artifact_key(file, &source, cross_target, opts, &out_path);
     let stamp_path = build_stamp_path(file, &out_path);
     // A report is about this compile, so a current build does not stand in.
-    let unchanged = (!request.uniqueness_report)
-        .then(|| load_unchanged_build(&stamp_path, &out_path, &build_key));
+    let reporting = request.uniqueness_report || gossamer_mir::remarks::any_enabled();
+    let unchanged = (!reporting).then(|| load_unchanged_build(&stamp_path, &out_path, &build_key));
     if let Some(outcome) = unchanged.flatten() {
         build_timings.stamp = phase_started.elapsed();
         build_timings.total = started.elapsed();

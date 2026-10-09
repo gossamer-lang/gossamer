@@ -17,6 +17,7 @@ mod opt;
 mod ownership;
 pub mod preempt;
 pub mod rc_verify;
+pub mod remarks;
 pub mod uniqueness;
 pub mod verify;
 
@@ -41,7 +42,10 @@ pub use lower::builder::unwind::{
     CLEANUP_PAD_ARM, NOTE_PAD_ARM, UNWIND_PROBE_NAME, UNWIND_REGION_NAME, UnwindPads,
     statement_locals,
 };
-pub use lower::helpers::escape::{ParamShare, collect_region_unsafe_fns, collect_shareable_params};
+pub use lower::helpers::effects::{
+    FnEffects, ParamEffects, ProgramEffects, collect_program_effects,
+};
+pub use lower::helpers::escape::{ParamShare, collect_shareable_params};
 pub use lower::map_value_owner_marker;
 pub use lower::{lower_program, mangle_callable_shape};
 pub use monomorph::{
@@ -52,5 +56,6 @@ pub use opt::{
     UniquenessReport, carrier_payload_views, const_branch_elim, const_fold, const_value_of,
     copy_propagate, dead_block_sweep, dead_store_elim, enable_uniqueness_report, inline_general,
     inline_small_callees, inline_trivial_wrappers, optimise, optimise_debug, optimise_for_jit,
-    statement_count,
+    optimise_for_jit_with_effects, optimise_with_effects, propagate_entry_bounds,
+    report_bounds_sites, statement_count,
 };

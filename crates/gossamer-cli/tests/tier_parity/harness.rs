@@ -936,6 +936,13 @@ const SPECS: &[Spec] = &[
     // fallback both stay bit-identical across the three tiers.
     spec("feature-testing-examples/bce_loop_versioning.gos"),
     spec("feature-testing-examples/bce_affine_shapes.gos"),
+    // Counted-loop and caller-proven bounds facts across calls, read through
+    // the per-parameter effect summaries.
+    spec("feature-testing-examples/bce_across_calls.gos"),
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/bce_across_calls_shrink_panic.gos")
+    },
     // Out-of-range read of an aggregate-element Vec panics identically on
     // every tier (was a compiled segfault / VM field-access error).
     Spec {
@@ -1296,6 +1303,7 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/auto_regions_for.gos"),
     spec("feature-testing-examples/auto_regions_map_iter.gos"),
     spec("feature-testing-examples/auto_regions_closure_body.gos"),
+    spec("feature-testing-examples/auto_regions_exits_calls.gos"),
     spec("feature-testing-examples/bool_vec_byte_stride.gos"),
     spec("feature-testing-examples/tuple_extract_region.gos"),
     spec("feature-testing-examples/defer_unwind_order.gos"),

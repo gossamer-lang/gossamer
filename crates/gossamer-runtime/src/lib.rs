@@ -262,7 +262,8 @@ pub fn allocator_purge_delay() -> std::time::Duration {
     }
 }
 
-/// Returns to the kernel the freed memory whose purge delay has expired.
+/// Returns to the kernel the freed memory whose purge delay has expired,
+/// large vector buffers included.
 ///
 /// The allocator applies an expired delay only from inside an allocation or a
 /// free, so a process that has stopped allocating would hold memory it freed
@@ -270,6 +271,7 @@ pub fn allocator_purge_delay() -> std::time::Duration {
 /// that do not use mimalloc.
 pub fn purge_expired_allocator_memory() {
     collect_process_allocator(false);
+    c_abi::vec::purge_mapped_buffers();
 }
 
 /// Hands the calling thread's freed allocator pages back to the arena before

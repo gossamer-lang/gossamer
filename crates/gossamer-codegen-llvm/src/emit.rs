@@ -14,14 +14,15 @@ use crate::lower::{Lowerer, StringPool};
 mod debug_info;
 use debug_info::emit_dwarf_metadata;
 mod settings;
+pub(crate) use gossamer_lex::source_position;
+pub use gossamer_lex::{SourcePositions, set_source_positions};
 pub(crate) use settings::{
-    DEBUG_LOCATION_MARKER, DEBUG_VARIABLE_MARKER, opt_profile, source_position, want_dwarf,
-    want_stack_frames,
+    DEBUG_LOCATION_MARKER, DEBUG_VARIABLE_MARKER, opt_profile, want_dwarf, want_stack_frames,
 };
 pub use settings::{
-    OptProfile, PgoMode, SourcePositions, loop_idiom_disabled, pgo_mode, reproducible_enabled,
-    set_debug_info, set_opt_profile, set_pgo_mode, set_race_instrumentation, set_reproducible,
-    set_source_positions, set_static_musl_link, set_strict_lowering, want_race_instrumentation,
+    OptProfile, PgoMode, loop_idiom_disabled, pgo_mode, reproducible_enabled, set_debug_info,
+    set_opt_profile, set_pgo_mode, set_race_instrumentation, set_reproducible,
+    set_static_musl_link, set_strict_lowering, want_race_instrumentation,
 };
 use settings::{disable_loop_idiom_for_target, static_musl_link_enabled, want_reproducible};
 mod symbol_audit;

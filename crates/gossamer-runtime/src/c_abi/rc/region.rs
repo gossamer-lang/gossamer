@@ -470,6 +470,12 @@ struct RegionSlabs {
     /// to the heap so a recycled slab cannot land on its own source, and the
     /// slab sweep at pop cannot reclaim it. Freed one by one at pop.
     promoted: Vec<*mut std::ffi::c_char>,
+    /// Element buffers of this region's vectors too large to bump-allocate,
+    /// as `(buffer, bytes)`. They come from the allocator, so a slab never
+    /// holds one and a freed one is reused by the next iteration; a growing
+    /// vector replaces its entry rather than abandoning the old buffer.
+    /// Freed one by one at pop.
+    buffers: Vec<(*mut u8, usize)>,
 }
 
 /// Arena state owned by one running goroutine.
@@ -808,6 +814,7 @@ pub extern "C" fn gos_rt_arena_push() {
             saved: BumpState::EMPTY,
             objs: 0,
             promoted: Vec::new(),
+            buffers: Vec::new(),
         });
     });
     BUMP.with(|b| b.set(BumpState::EMPTY));
@@ -822,6 +829,45 @@ pub(crate) fn region_track_promoted(body: *mut std::ffi::c_char) {
             top.promoted.push(body);
         }
     });
+}
+
+/// Vec element buffers at least this large belong to the allocator rather
+/// than to a slab: bump allocation buys a single large buffer nothing, and a
+/// slab sized for one is decommitted at every pop and faulted back in by the
+/// next iteration.
+const REGION_BUFFER_BYTES: usize = 64 << 10;
+
+/// Whether a region vector's buffer of `bytes` is one the region owns
+/// through [`region_own_buffer`] rather than bump-allocates.
+pub(crate) fn region_owns_buffers_of(bytes: usize) -> bool {
+    bytes >= REGION_BUFFER_BYTES
+}
+
+/// Records `buf`, an allocator buffer of `bytes`, as owned by the innermost
+/// region, to be freed at its pop.
+pub(crate) fn region_own_buffer(buf: *mut u8, bytes: usize) {
+    REGIONS.with(|r| {
+        if let Some(top) = r.borrow_mut().last_mut() {
+            top.buffers.push((buf, bytes));
+        }
+    });
+}
+
+/// Replaces `old`, a buffer an open region owns, with `new` of `bytes` in
+/// that same region, innermost first; `false` when no open region owns
+/// `old`. The replacement stays with the region the vector belongs to,
+/// whichever region is innermost when it grows.
+pub(crate) fn region_replace_buffer(old: *mut u8, new: *mut u8, bytes: usize) -> bool {
+    REGIONS.with(|r| {
+        let mut regions = r.borrow_mut();
+        for region in regions.iter_mut().rev() {
+            if let Some(entry) = region.buffers.iter_mut().find(|(p, _)| *p == old) {
+                *entry = (new, bytes);
+                return true;
+            }
+        }
+        false
+    })
 }
 
 /// Close the innermost region: free/recycle every slab in O(slabs). No
@@ -850,6 +896,13 @@ pub extern "C" fn gos_rt_arena_pop() {
         // region was open, is reachable from nothing after the pop (the escape
         // analysis is what licenses the region), and is freed once, here.
         unsafe { crate::c_abi::string::free_promoted_string(body) };
+    }
+    for (buf, bytes) in region.buffers {
+        // SAFETY: each buffer was recorded by `region_own_buffer` or
+        // `region_replace_buffer` with the size `alloc_vec_buffer` gave it,
+        // belongs to a vector of this region that nothing reaches after the
+        // pop, and is freed once, here.
+        unsafe { crate::c_abi::vec::free_vec_buffer(buf, bytes) };
     }
     if rc_live_enabled() {
         #[cfg(test)]

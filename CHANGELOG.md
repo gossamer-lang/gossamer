@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.71.0 - Arena regions and bounds proofs that see through calls
+
+- Automatic arena regions reach many more loop bodies: one that builds structs, formats strings, calls a function or method that only reads the outer values it is handed (a method on `self` that updates scalar fields, a helper that iterates a collection), or leaves through `break`, `continue`, or `return` carrying a scalar is regioned, and so is one whose nested loop is regioned itself.
+- A loop body that bound a value from outside the loop and placed it inside an enum, struct, or collection it built leaked that value's share once per iteration in compiled code; such a body now keeps the reference-counted path.
+- `GOS_ARENA_TRACE` names the file, line, and column of each loop, and the call or method that kept a body from being regioned.
+- `GOS_BOUNDS_REMARKS=1` reports every index access on a vector of scalars as removed, versioned, or kept, with the construct that kept a check inside a counted loop.
+- Setting `GOS_ARENA_TRACE` or `GOS_BOUNDS_REMARKS` makes `gos build` skip its artifact cache, so the remarks always describe the compile that just ran; a cached build printed nothing.
+- An index check inside `for i in 0..xs.len()` is removed even when the loop calls a function, as long as the function cannot change the length of `xs`: one that reads it, works on its own copy, or writes its elements through `&mut`, including a helper inlined into the loop that indexes its own parameter.
+- A function whose every caller passes a loop counter below the length of the vector it also passes drops the index check on its own `xs[i]`.
+- A vector larger than 1 MiB keeps its elements in memory of its own, grown in place rather than copied on Linux. Peak memory no longer depends on how the buffers an earlier phase freed happened to fit the next phase: two spellings of the same program could differ by tens of megabytes. Building and dropping large vectors in a loop also takes less time and memory.
+- Large vectors a program frees go back to the system once the allocator's purge delay passes, even while the program sleeps or waits on input or a channel; they were held until it next allocated.
+
 ## 0.70.0 - Hardened codecs, one failure contract, and reclaimed weak references
 
 - A `Weak` stored in a `Vec`, a `Map` value, an `Option`, or a `Result` gives its weak share back when its holder dies in compiled code; each one kept its target's allocation for the life of the process.

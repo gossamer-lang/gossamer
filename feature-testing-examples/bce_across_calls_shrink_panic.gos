@@ -1,0 +1,29 @@
+// A callee two calls deep shrinks the vector a counted loop indexes: the
+// loop's index check must stay, and the access past the new end panics with
+// the same report on every tier.
+
+fn shrink(ys: &mut Vec<i64>, k: i64) -> i64 {
+    if k == 2 { let _ = ys.pop() }
+    k
+}
+
+fn relay(ys: &mut Vec<i64>, k: i64) -> i64 { shrink(ys, k) }
+
+fn guarded(xs: &mut Vec<i64>, i: i64) -> i64 {
+    if i < xs.len() {
+        relay(xs, i)
+        return xs[i]
+    }
+    -1
+}
+
+fn main() {
+    let mut a = #[1, 2, 3, 4]
+    println(guarded(&mut a, 3))
+    let mut xs = #[10, 20, 30]
+    let mut total = 0
+    for i in 0..xs.len() {
+        total += relay(&mut xs, i) + xs[i]
+    }
+    println(total)
+}

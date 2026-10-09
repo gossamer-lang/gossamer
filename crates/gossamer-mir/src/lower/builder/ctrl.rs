@@ -53,6 +53,8 @@ use crate::ir::{
     Statement, StatementKind, Terminator, UnOp,
 };
 
+use crate::remarks::{self, RemarkKind};
+
 use super::*;
 
 use super::Builder;
@@ -3054,6 +3056,7 @@ impl<'a> Builder<'a> {
         // `break` jumps to `exit`; `continue` jumps back to the
         // condition test (`header`).
         self.loop_stack.push(LoopContext {
+            region: self.loop_region_slot(regioned),
             continue_to: header,
             break_to: exit,
             result: None,
@@ -3120,30 +3123,29 @@ impl<'a> Builder<'a> {
     /// `_array`, `_vec`, `_enumerate`) call this where `lower_while` inlines
     /// the same logic, so idiomatic `for x in 0..n { build; consume }` gets
     /// the same iteration-scoped bulk-free as the `while` form. Pair with
-    /// `end_auto_region` on the body's fall-through. Eligibility rejects any
-    /// `break` / `continue` / `return`, so the only body exit is that
-    /// fall-through, where the pop is emitted.
+    /// `end_auto_region` on the body's fall-through; every other edge out of
+    /// an iteration - `break`, `continue`, `return` - pops through
+    /// `emit_loop_region_exits`, and eligibility admits those edges only when
+    /// the value they carry holds no region storage.
     pub(crate) fn begin_loop_region(&mut self, body: &HirExpr, span: Span) -> bool {
         use crate::lower::helpers::{LoopEligibility, RegionDecision};
-        let decision = LoopEligibility::new(&*self.tcx, self.region_unsafe).decide(body);
-        if std::env::var_os("GOS_ARENA_TRACE").is_some() {
-            let b = body.span;
-            match decision {
-                RegionDecision::Region => eprintln!(
-                    "[arena] file {} bytes {}..{}: auto-regioned (iteration heap bulk-freed)",
-                    b.file.as_u32(),
-                    b.start,
-                    b.end
+        let decision = LoopEligibility::new(&*self.tcx, self.region_effects).decide(body);
+        match &decision {
+            RegionDecision::Region => remarks::emit(
+                RemarkKind::Arena,
+                span,
+                "auto-regioned (iteration heap bulk-freed)",
+            ),
+            RegionDecision::Reject(r, detail) => remarks::emit(
+                RemarkKind::Arena,
+                span,
+                format_args!(
+                    "NOT regioned - allocates each iteration on the slow per-node RC path: {}{}. Wrap the body in `arena {{ }}` to bulk-free it.",
+                    r.reason(),
+                    reject_detail(detail.as_deref())
                 ),
-                RegionDecision::Reject(r) => eprintln!(
-                    "[arena] file {} bytes {}..{}: NOT regioned - allocates each iteration on the slow per-node RC path: {}. Wrap the body in `arena {{ }}` to bulk-free it.",
-                    b.file.as_u32(),
-                    b.start,
-                    b.end,
-                    r.reason()
-                ),
-                RegionDecision::NoAlloc => {}
-            }
+            ),
+            RegionDecision::NoAlloc => {}
         }
         let regioned = matches!(decision, RegionDecision::Region);
         if regioned {
@@ -3168,24 +3170,23 @@ impl<'a> Builder<'a> {
     ) -> bool {
         use crate::lower::helpers::{LoopEligibility, RegionDecision};
         let decision =
-            LoopEligibility::new(&*self.tcx, self.region_unsafe).decide_lexical_block(block);
-        if std::env::var_os("GOS_ARENA_TRACE").is_some() {
-            match decision {
-                RegionDecision::Region => eprintln!(
-                    "[arena] file {} bytes {}..{}: closure body auto-regioned (per-call heap bulk-freed)",
-                    span.file.as_u32(),
-                    span.start,
-                    span.end
+            LoopEligibility::new(&*self.tcx, self.region_effects).decide_lexical_block(block);
+        match &decision {
+            RegionDecision::Region => remarks::emit(
+                RemarkKind::Arena,
+                span,
+                "closure body auto-regioned (per-call heap bulk-freed)",
+            ),
+            RegionDecision::Reject(r, detail) => remarks::emit(
+                RemarkKind::Arena,
+                span,
+                format_args!(
+                    "closure body NOT regioned - allocates on each call on the slow per-node RC path: {}{}. Wrap the body in `arena {{ }}` to bulk-free it.",
+                    r.reason(),
+                    reject_detail(detail.as_deref())
                 ),
-                RegionDecision::Reject(r) => eprintln!(
-                    "[arena] file {} bytes {}..{}: closure body NOT regioned - allocates on each call on the slow per-node RC path: {}. Wrap the body in `arena {{ }}` to bulk-free it.",
-                    span.file.as_u32(),
-                    span.start,
-                    span.end,
-                    r.reason()
-                ),
-                RegionDecision::NoAlloc => {}
-            }
+            ),
+            RegionDecision::NoAlloc => {}
         }
         let regioned = matches!(decision, RegionDecision::Region);
         if regioned {
@@ -3194,6 +3195,41 @@ impl<'a> Builder<'a> {
             self.deferred_auto_region_collections.push(false);
         }
         regioned
+    }
+
+    /// The region slot a loop context records for a body `begin_loop_region`
+    /// just answered for.
+    pub(crate) fn loop_region_slot(&self, regioned: bool) -> Option<usize> {
+        if regioned {
+            self.deferred_auto_region_collections.len().checked_sub(1)
+        } else {
+            None
+        }
+    }
+
+    /// Pops, innermost first, the automatic region of every loop from the
+    /// innermost out to `loop_stack[outermost]` - the iterations an exit edge
+    /// leaves. A collection the body deferred to after its pop runs there too.
+    pub(crate) fn emit_loop_region_exits(&mut self, outermost: usize, span: Span) {
+        let slots: Vec<usize> = self.loop_stack[outermost..]
+            .iter()
+            .rev()
+            .filter_map(|ctx| ctx.region)
+            .collect();
+        for slot in slots {
+            if self.current.is_none() {
+                return;
+            }
+            self.emit_region_call("gos_rt_arena_pop", span);
+            if self
+                .deferred_auto_region_collections
+                .get(slot)
+                .copied()
+                .unwrap_or(false)
+            {
+                self.emit_region_call("gos_rt_collect_cycles", span);
+            }
+        }
     }
 
     /// Closes a region opened by `begin_loop_region` or
@@ -3254,12 +3290,12 @@ impl<'a> Builder<'a> {
         let result_local = self.fresh(ty);
         self.terminate(Terminator::Goto { target: header });
         self.set_current(header);
-        // Auto-region the body. Eligibility rejects any `break` / `continue` /
-        // `return`, so a terminating `loop { ... break }` is never regioned;
-        // the gate fires only for a break-free allocating body, whose sole exit
-        // is the fall-through to the back-edge where the pop is emitted.
+        // Auto-region the body. The fall-through to the back-edge pops the
+        // region, and so does every `break` / `continue` / `return` leaving
+        // the iteration.
         let regioned = self.begin_loop_region(body, span);
         self.loop_stack.push(LoopContext {
+            region: self.loop_region_slot(regioned),
             continue_to: header,
             break_to: exit,
             result: Some(result_local),
@@ -4239,4 +4275,9 @@ fn pattern_range_bound(literal: &HirLiteral) -> Option<i128> {
         HirLiteral::Char(c) => Some(i128::from(u32::from(*c))),
         _ => None,
     }
+}
+
+/// The construct a region rejection names, as a suffix to its reason.
+fn reject_detail(detail: Option<&str>) -> String {
+    detail.map_or_else(String::new, |d| format!(" (`{d}`)"))
 }

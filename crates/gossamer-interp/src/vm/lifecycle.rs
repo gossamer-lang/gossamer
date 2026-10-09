@@ -1043,6 +1043,7 @@ impl Vm {
                 .filter_map(|body| Some((body.def?.local, body.name.clone())))
                 .collect();
             gossamer_mir::monomorphise(&lifted, &mut bodies, &mut jit_tcx);
+            let effects = gossamer_mir::collect_program_effects(&lifted, &jit_tcx);
             drop(lifted);
             if !roots.is_empty() {
                 gossamer_mir::prune_unreachable(&mut bodies, &roots);
@@ -1073,8 +1074,9 @@ impl Vm {
                 // JIT must hand it the same MIR shape or the tiers can
                 // diverge on constructs only one shape exercises.
                 for body in &mut bodies {
-                    gossamer_mir::optimise_for_jit(body, &jit_tcx);
+                    gossamer_mir::optimise_for_jit_with_effects(body, &jit_tcx, &effects);
                 }
+                gossamer_mir::propagate_entry_bounds(&mut bodies, &jit_tcx, &effects);
                 let mut compile_names =
                     jit_backend::jit_compile_body_names(&bodies, &jit_tcx, &shapes, &struct_shapes);
                 compile_names.retain(|name| pre_inline_names.contains(name));

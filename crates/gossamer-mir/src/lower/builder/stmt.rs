@@ -58,7 +58,7 @@ impl<'a> Builder<'a> {
         let lexical_region = self.scopes.len() > 1
             && self.region_depth == 0
             && matches!(
-                crate::lower::helpers::LoopEligibility::new(&*self.tcx, self.region_unsafe)
+                crate::lower::helpers::LoopEligibility::new(&*self.tcx, self.region_effects)
                     .decide_lexical_block(block),
                 crate::lower::helpers::RegionDecision::Region
             );
