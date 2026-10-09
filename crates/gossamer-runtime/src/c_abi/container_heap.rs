@@ -155,7 +155,9 @@ pub unsafe extern "C" fn gos_rt_bheap_field_clone(slot: *mut *mut GosVec) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_field_release(slot: *mut *mut GosVec) {
     ffi_entry!({
-        if slot.is_null() {
+        // A field of an aggregate in region storage is reclaimed by its
+        // region's pop, which may already have run.
+        if slot.is_null() || crate::c_abi::rc::in_region_arena(slot.cast()) {
             return;
         }
         // SAFETY: `slot` is this shim's field argument, non-null (checked above), holding a heap

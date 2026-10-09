@@ -504,6 +504,10 @@ fn release_share(shares: &AtomicUsize) -> bool {
 /// # Safety
 /// `iter` must be null or a live handle from a lazy iterator helper.
 pub(crate) unsafe fn lazy_iter_retain(iter: *mut GosLazyIterI64) {
+    // A handle in region storage counts no holders; its pop drops it.
+    if crate::c_abi::rc::in_region_arena(iter.cast()) {
+        return;
+    }
     // SAFETY: this `unsafe fn`'s caller passes `iter` null or a live lazy iterator.
     if let Some(state) = unsafe { iter.as_ref() } {
         state.shares.fetch_add(1, Ordering::Relaxed);
@@ -515,6 +519,10 @@ pub(crate) unsafe fn lazy_iter_retain(iter: *mut GosLazyIterI64) {
 /// # Safety
 /// `iter` must be null or a live handle from a lazy pair helper.
 pub(crate) unsafe fn lazy_iter_pair_retain(iter: *mut GosLazyIterPairI64) {
+    // A handle in region storage counts no holders; its pop drops it.
+    if crate::c_abi::rc::in_region_arena(iter.cast()) {
+        return;
+    }
     // SAFETY: this `unsafe fn`'s caller passes `iter` null or a live pair iterator.
     if let Some(state) = unsafe { iter.as_ref() } {
         state.shares.fetch_add(1, Ordering::Relaxed);
@@ -571,11 +579,23 @@ fn lazy_tagged<I>(tag: LazyElemTag, iter: I) -> *mut GosLazyIterI64
 where
     I: Iterator<Item = i64> + 'static,
 {
-    Box::into_raw(Box::new(GosLazyIterI64 {
+    let state = GosLazyIterI64 {
         inner: Box::new(iter),
         tag,
         shares: AtomicUsize::new(1),
-    }))
+    };
+    crate::c_abi::rc::region_alloc_handle(state, finalize_region_iter::<GosLazyIterI64>)
+        .unwrap_or_else(|state| Box::into_raw(Box::new(state)))
+}
+
+/// Drops a lazy iterator handle its region placed, and its adapter chain.
+///
+/// # Safety
+///
+/// `p` is a `T` handle placed in a region, finalized once, at its pop.
+unsafe fn finalize_region_iter<T>(p: *mut u8) {
+    // SAFETY: the handle is dropped once, in place; its region reclaims the storage.
+    unsafe { std::ptr::drop_in_place(p.cast::<T>()) };
 }
 
 /// Wrap an element source as a lazy handle tagged with its ABI class.
@@ -638,11 +658,13 @@ fn lazy_pair_i64<I>(classes: [u8; 2], iter: I) -> *mut GosLazyIterPairI64
 where
     I: Iterator<Item = (i64, i64)> + 'static,
 {
-    Box::into_raw(Box::new(GosLazyIterPairI64 {
+    let state = GosLazyIterPairI64 {
         inner: Box::new(iter),
         classes,
         shares: AtomicUsize::new(1),
-    }))
+    };
+    crate::c_abi::rc::region_alloc_handle(state, finalize_region_iter::<GosLazyIterPairI64>)
+        .unwrap_or_else(|state| Box::into_raw(Box::new(state)))
 }
 
 /// Gives back the share a pulled element carries when its consumer does not
@@ -799,7 +821,9 @@ unsafe fn take_lazy_tagged(
     } else {
         // SAFETY: the caller hands over its share of a live handle.
         let held = unsafe { &mut *iter };
-        if !release_share(&held.shares) {
+        // A handle in region storage counts no holders and is dropped by its
+        // pop, so its consumer reads through a cursor shared with it.
+        if crate::c_abi::rc::in_region_arena(iter.cast()) || !release_share(&held.shares) {
             // Another holder keeps the handle, so both read one cursor.
             return (share_cursor(&mut held.inner), held.tag);
         }
@@ -973,7 +997,9 @@ unsafe fn take_lazy_pair_i64(
     } else {
         // SAFETY: the caller hands over its share of a live handle.
         let held = unsafe { &mut *iter };
-        if !release_share(&held.shares) {
+        // A handle in region storage counts no holders and is dropped by its
+        // pop, so its consumer reads through a cursor shared with it.
+        if crate::c_abi::rc::in_region_arena(iter.cast()) || !release_share(&held.shares) {
             // Another holder keeps the handle, so both read one cursor.
             return (share_cursor(&mut held.inner), held.classes);
         }
@@ -1003,6 +1029,10 @@ pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_retain_pair_i64(iter: *mut GosL
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_drop_i64(iter: *mut GosLazyIterI64) {
     ffi_entry_passthrough!({
+        // A handle in region storage is dropped by its region's pop.
+        if crate::c_abi::rc::in_region_arena(iter.cast()) {
+            return;
+        }
         // SAFETY: the caller gives up its share of a live handle; the last
         // share drops the box and with it every upstream adapter.
         if let Some(state) = unsafe { iter.as_ref() }
@@ -1019,6 +1049,10 @@ pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_drop_i64(iter: *mut GosLazyIter
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_drop_pair_i64(iter: *mut GosLazyIterPairI64) {
     ffi_entry_passthrough!({
+        // A handle in region storage is dropped by its region's pop.
+        if crate::c_abi::rc::in_region_arena(iter.cast()) {
+            return;
+        }
         // SAFETY: as for `gos_rt_lazy_iter_drop_i64`.
         if let Some(state) = unsafe { iter.as_ref() }
             && release_share(&state.shares)

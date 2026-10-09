@@ -67,6 +67,10 @@ pub struct FnEffects {
     /// The function may let a value outlive its call through a goroutine, a
     /// channel, a static, a closure, or a callee it cannot vet.
     pub escapes: bool,
+    /// The function may build a value whose region-allocatable parts hold a
+    /// heap-only object (see [`strands_heap_child`]): run inside an arena
+    /// region, the region's bulk free would drop that object unreleased.
+    pub strands: bool,
     /// One entry per parameter; a method's receiver is the first.
     pub params: Vec<ParamEffects>,
 }
@@ -75,6 +79,7 @@ impl FnEffects {
     fn unknown(arity: usize) -> Self {
         Self {
             escapes: true,
+            strands: true,
             params: vec![ParamEffects::ALL; arity],
         }
     }
@@ -88,6 +93,7 @@ impl FnEffects {
 
     fn join(&mut self, other: &Self) {
         self.escapes |= other.escapes;
+        self.strands |= other.strands;
         if self.params.len() < other.params.len() {
             self.params
                 .resize(other.params.len(), ParamEffects::default());
@@ -344,8 +350,8 @@ pub fn collect_program_effects(program: &HirProgram, tcx: &TyCtxt) -> ProgramEff
         for (caller, caller_edges) in &edges {
             for edge in caller_edges {
                 let effect = summaries.get(&edge.callee).map_or_else(
-                    || (true, ParamEffects::ALL),
-                    |callee| (callee.escapes, callee.param(edge.pos)),
+                    || (true, true, ParamEffects::ALL),
+                    |callee| (callee.escapes, callee.strands, callee.param(edge.pos)),
                 );
                 let Some(summary) = summaries.get_mut(caller) else {
                     continue;
@@ -354,9 +360,13 @@ pub fn collect_program_effects(program: &HirProgram, tcx: &TyCtxt) -> ProgramEff
                     summary.escapes = true;
                     changed = true;
                 }
+                if effect.1 && !summary.strands {
+                    summary.strands = true;
+                    changed = true;
+                }
                 for &p in &edge.params {
                     if let Some(slot) = summary.params.get_mut(p) {
-                        changed |= slot.join(effect.1);
+                        changed |= slot.join(effect.2);
                     }
                 }
             }
@@ -514,6 +524,72 @@ pub(crate) fn is_for_loop_step(tcx: &TyCtxt, recv: Ty, name: &str, args: &[HirEx
         )
 }
 
+/// Whether a value of `ty` built inside an arena region keeps a heap-only
+/// object - a runtime handle such as a channel, lock, or file, which is
+/// always allocated outside the region - inside storage the region does
+/// allocate: a vector's elements or a user type's fields. The region's bulk
+/// free reclaims that storage without releasing what it holds, so such an
+/// object would never be freed. A map, a JSON value, and a lazy iterator made
+/// in a region belong to it and are finalized at its pop. A heap-only object
+/// held directly by a local, a tuple, or an `Option` / `Result` carrier is
+/// released with its holder.
+#[must_use]
+pub fn strands_heap_child(tcx: &TyCtxt, ty: Ty) -> bool {
+    strands_within(tcx, ty, false, &mut Vec::new())
+}
+
+fn strands_within(tcx: &TyCtxt, ty: Ty, in_region: bool, seen: &mut Vec<DefId>) -> bool {
+    match tcx.kind_of(ty) {
+        TyKind::Int(_)
+        | TyKind::Float(_)
+        | TyKind::Bool
+        | TyKind::Char
+        | TyKind::Unit
+        | TyKind::Never
+        | TyKind::String
+        | TyKind::Duration
+        | TyKind::Instant
+        | TyKind::Range(_)
+        | TyKind::Simd { .. } => false,
+        TyKind::HashMap { key, value, .. } => {
+            strands_within(tcx, *key, true, seen) || strands_within(tcx, *value, true, seen)
+        }
+        TyKind::JsonValue => false,
+        TyKind::Iterator(elem) => strands_within(tcx, *elem, true, seen),
+        TyKind::Vec(elem) | TyKind::Slice(elem) => strands_within(tcx, *elem, true, seen),
+        TyKind::Array { elem, .. } => strands_within(tcx, *elem, in_region, seen),
+        TyKind::Tuple(elems) => elems
+            .iter()
+            .any(|e| strands_within(tcx, *e, in_region, seen)),
+        TyKind::Ref { inner, .. } => strands_within(tcx, *inner, in_region, seen),
+        TyKind::Adt { def, substs } if is_sentinel_adt(*def) => substs
+            .types()
+            .iter()
+            .any(|t| strands_within(tcx, *t, in_region, seen)),
+        // The other reserved ids are the opaque runtime handles.
+        TyKind::Adt { def, .. } if def.local >= u32::MAX - 32 => in_region,
+        TyKind::Adt { def, substs } => {
+            if seen.contains(def) {
+                return false;
+            }
+            seen.push(*def);
+            let fields: Vec<Ty> = match tcx.adt_field_tys(*def, substs) {
+                Some(fields) => fields.to_vec(),
+                None => tcx
+                    .enum_variant_tys(*def)
+                    .map(|variants| variants.iter().flatten().copied().collect())
+                    .unwrap_or_default(),
+            };
+            let strands = fields.iter().any(|f| strands_within(tcx, *f, true, seen));
+            seen.pop();
+            strands
+        }
+        // Maps, iterators, channels, callables, dynamic values, and anything
+        // not yet resolved live outside the region.
+        _ => in_region,
+    }
+}
+
 /// Builtin mutators that rearrange or overwrite elements in place without
 /// changing how many there are.
 pub(crate) fn keeps_length(method: &str) -> bool {
@@ -559,6 +635,7 @@ fn scan_fn(ctx: &ScanCtx<'_>, f: &HirFn) -> (FnEffects, Vec<Edge>) {
         names: HashMap::new(),
         effects: FnEffects {
             escapes: false,
+            strands: false,
             params: vec![ParamEffects::default(); f.params.len()],
         },
         edges: Vec::new(),
@@ -649,6 +726,13 @@ impl FnScan<'_, '_> {
     }
 
     fn expr(&mut self, e: &HirExpr) {
+        if matches!(
+            e.kind,
+            HirExprKind::Call { .. } | HirExprKind::MethodCall { .. } | HirExprKind::Array(_)
+        ) && strands_heap_child(self.tcx(), e.ty)
+        {
+            self.effects.strands = true;
+        }
         match &e.kind {
             HirExprKind::Select { .. }
             | HirExprKind::Closure { .. }

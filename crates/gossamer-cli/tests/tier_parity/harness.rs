@@ -1304,6 +1304,7 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/auto_regions_map_iter.gos"),
     spec("feature-testing-examples/auto_regions_closure_body.gos"),
     spec("feature-testing-examples/auto_regions_exits_calls.gos"),
+    spec("feature-testing-examples/arena_held_handles.gos"),
     spec("feature-testing-examples/bool_vec_byte_stride.gos"),
     spec("feature-testing-examples/tuple_extract_region.gos"),
     spec("feature-testing-examples/defer_unwind_order.gos"),

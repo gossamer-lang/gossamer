@@ -71,3 +71,12 @@ length gets the same proof for its own `xs[i]`.
 `GOS_ARENA_TRACE=1` reports which loop and closure bodies were given an
 automatic arena region, and why an allocating one was not; see
 [Automatic arenas](language/arena.md#automatic-arenas-no-annotation-needed).
+
+## Arena memory after its block
+
+An arena's memory is unreadable once its block ends, on every platform: a
+program that still read it would crash. `GOS_ARENA_POISON=1` also stops the
+runtime from keeping a finished arena's memory for the next one, so that
+such a read crashes every time rather than only when the memory was not
+reused. It is meant for chasing a crash near an `arena { }` block or a loop
+`GOS_ARENA_TRACE` reports as auto-regioned.

@@ -23,11 +23,32 @@ pub struct GosDeque {
     head: i64,
 }
 
-/// Boxes a deque over `vec` as a runtime handle, counted by the leak ledger
-/// until [`gos_rt_deque_free`] reclaims it.
+/// Boxes a deque over `vec` as a runtime handle, or places it in the
+/// innermost open region, counted by the leak ledger until
+/// [`gos_rt_deque_free`] or the region's pop reclaims it.
 fn deque_handle(vec: *mut GosVec) -> *mut GosDeque {
     crate::c_abi::ledger::deque_inc();
-    Box::into_raw(Box::new(GosDeque { vec, head: 0 }))
+    crate::c_abi::rc::region_alloc_handle(GosDeque { vec, head: 0 }, finalize_region_deque)
+        .unwrap_or_else(|deque| Box::into_raw(Box::new(deque)))
+}
+
+/// Releases the store of a deque its region placed.
+///
+/// # Safety
+///
+/// `p` is a deque `deque_handle` placed in a region, finalized once, at its
+/// pop.
+unsafe fn finalize_region_deque(p: *mut u8) {
+    let d = p.cast::<GosDeque>();
+    // SAFETY: `d` is the live deque this finalizer was registered for.
+    unsafe { deque_compact(d) };
+    crate::c_abi::ledger::deque_dec();
+    // SAFETY: as above.
+    let store = unsafe { (*d).vec };
+    if !store.is_null() {
+        // SAFETY: the store is the vec the deque owned, released with it.
+        unsafe { crate::c_abi::map::gos_rt_vec_free(store) };
+    }
 }
 
 fn deque_alloc(elem_bytes: i32, elem_kind: u8) -> *mut GosDeque {
@@ -806,7 +827,9 @@ pub unsafe extern "C" fn gos_rt_deque_field_clone(slot: *mut *mut GosDeque) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_field_release(slot: *mut *mut GosDeque) {
     ffi_entry!({
-        if slot.is_null() {
+        // A field of an aggregate in region storage is reclaimed by its
+        // region's pop, which may already have run.
+        if slot.is_null() || crate::c_abi::rc::in_region_arena(slot.cast()) {
             return;
         }
         // SAFETY: `slot` is non-null (checked above) and addresses a deque field (this shim's
@@ -865,7 +888,8 @@ pub unsafe extern "C" fn gos_rt_stack_clone(d: *mut GosDeque) -> *mut GosDeque {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_free(d: *mut GosDeque) {
     ffi_entry!({
-        if d.is_null() {
+        // A deque in region storage is finalized by its region's pop.
+        if d.is_null() || crate::c_abi::rc::in_region_arena(d.cast()) {
             return;
         }
         // Compacting first leaves the store holding exactly the live range,

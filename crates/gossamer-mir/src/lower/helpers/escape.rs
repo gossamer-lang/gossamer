@@ -19,6 +19,7 @@ use gossamer_types::{ParamIdx, Ty, TyCtxt, TyKind};
 
 use super::effects::{
     ProgramEffects, STATELESS_STD_MODULES, StdCall, is_automatic_method, is_builtin_data, std_call,
+    strands_heap_child,
 };
 use super::for_loop::detect_for_loop;
 use gossamer_types::is_mutating_method_name;
@@ -113,6 +114,7 @@ pub(crate) enum RegionReject {
     UnsafeCallee,
     UnresolvedCallee,
     DeferGoOrItem,
+    StrandedChild,
 }
 
 impl RegionReject {
@@ -140,6 +142,9 @@ impl RegionReject {
             }
             Self::UnresolvedCallee => "body calls through an unresolved/indirect callee",
             Self::DeferGoOrItem => "body contains a defer, go, or nested item",
+            Self::StrandedChild => {
+                "body builds a value that keeps a runtime handle (a set, deque, channel, lock, or file) inside region storage, which the bulk free would never release"
+            }
         }
     }
 }
@@ -353,6 +358,14 @@ impl<'a> LoopEligibility<'a> {
         }
     }
 
+    /// Rejects a body that builds a value of `ty` keeping a heap-only object
+    /// inside region storage.
+    fn reject_stranding(&mut self, ty: Ty) {
+        if strands_heap_child(self.tcx, ty) {
+            self.reject(RegionReject::StrandedChild);
+        }
+    }
+
     /// Requires a non-Copy value placed inside something the region builds
     /// to be fresh, so no region object ends up holding an outer share.
     fn require_fresh(&mut self, arg: &HirExpr, origin: Origin) {
@@ -496,6 +509,7 @@ impl<'a> LoopEligibility<'a> {
                 if self.is_alloc_ty(e.ty) {
                     self.allocates = true;
                 }
+                self.reject_stranding(e.ty);
                 let heap = matches!(self.tcx.kind_of(e.ty), TyKind::Vec(_) | TyKind::Slice(_));
                 let items: Vec<&HirExpr> = match arr {
                     gossamer_hir::HirArrayExpr::List(items) => items.iter().collect(),
@@ -576,6 +590,7 @@ impl<'a> LoopEligibility<'a> {
         if self.is_alloc_ty(e.ty) {
             self.allocates = true;
         }
+        self.reject_stranding(e.ty);
         let origins: Vec<Origin> = args.iter().map(|a| self.expr(a)).collect();
         match &callee.kind {
             HirExprKind::Path {
@@ -585,6 +600,9 @@ impl<'a> LoopEligibility<'a> {
                 if let Some(summary) = self.effects.of_fn(*d) {
                     if summary.escapes {
                         self.reject_at(RegionReject::UnsafeCallee, Some(path_text(segments)));
+                    }
+                    if summary.strands {
+                        self.reject_at(RegionReject::StrandedChild, Some(path_text(segments)));
                     }
                     for (pos, (arg, origin)) in args.iter().zip(&origins).enumerate() {
                         if *origin == Origin::Outer
@@ -644,6 +662,7 @@ impl<'a> LoopEligibility<'a> {
         if self.is_alloc_ty(e.ty) {
             self.allocates = true;
         }
+        self.reject_stranding(e.ty);
         let recv_origin = self.expr(receiver);
         let origins: Vec<Origin> = args.iter().map(|a| self.expr(a)).collect();
         let arity = args.len() + 1;
@@ -655,6 +674,9 @@ impl<'a> LoopEligibility<'a> {
         {
             if summary.escapes {
                 self.reject_at(RegionReject::UnsafeCallee, detail());
+            }
+            if summary.strands {
+                self.reject_at(RegionReject::StrandedChild, detail());
             }
             let operands = std::iter::once((receiver, recv_origin))
                 .chain(args.iter().zip(origins.iter().copied()));

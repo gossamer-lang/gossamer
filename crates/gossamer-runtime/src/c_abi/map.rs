@@ -890,7 +890,7 @@ pub unsafe extern "C" fn gos_rt_map_eq(
 pub extern "C" fn gos_rt_map_new(_key_bytes: u32, _val_bytes: u32) -> *mut GosMap {
     ffi_entry!({
         crate::c_abi::ledger::map_inc();
-        Box::into_raw(Box::new(GosMap {
+        map_handle(GosMap {
             len_cache: 0,
             storage: BiasedLock::new(MapStorage::Empty),
             value_owner: AtomicU8::new(MAP_VALUE_NONE),
@@ -898,7 +898,7 @@ pub extern "C" fn gos_rt_map_new(_key_bytes: u32, _val_bytes: u32) -> *mut GosMa
             ordered: AtomicU8::new(MAP_HASHED),
             user_cmp: std::sync::atomic::AtomicUsize::new(0),
             user_cmp_by_address: std::sync::atomic::AtomicBool::new(false),
-        }))
+        })
     })
 }
 
@@ -931,7 +931,7 @@ pub extern "C-unwind" fn gos_rt_map_new_with_capacity(
             MapStorage::Empty
         };
         crate::c_abi::ledger::map_inc();
-        Box::into_raw(Box::new(GosMap {
+        map_handle(GosMap {
             len_cache: 0,
             storage: BiasedLock::new(storage),
             value_owner: AtomicU8::new(MAP_VALUE_NONE),
@@ -939,7 +939,7 @@ pub extern "C-unwind" fn gos_rt_map_new_with_capacity(
             ordered: AtomicU8::new(MAP_HASHED),
             user_cmp: std::sync::atomic::AtomicUsize::new(0),
             user_cmp_by_address: std::sync::atomic::AtomicBool::new(false),
-        }))
+        })
     })
 }
 
@@ -970,7 +970,7 @@ pub extern "C-unwind" fn gos_rt_map_new_with_capacity_typed(
             _ => MapStorage::Empty,
         };
         crate::c_abi::ledger::map_inc();
-        Box::into_raw(Box::new(GosMap {
+        map_handle(GosMap {
             len_cache: 0,
             storage: BiasedLock::new(storage),
             value_owner: AtomicU8::new(MAP_VALUE_NONE),
@@ -978,7 +978,7 @@ pub extern "C-unwind" fn gos_rt_map_new_with_capacity_typed(
             ordered: AtomicU8::new(MAP_HASHED),
             user_cmp: std::sync::atomic::AtomicUsize::new(0),
             user_cmp_by_address: std::sync::atomic::AtomicBool::new(false),
-        }))
+        })
     })
 }
 
@@ -3364,7 +3364,7 @@ pub unsafe extern "C" fn gos_rt_map_clone(src: *const GosMap) -> *mut GosMap {
         let cloned_storage = clone_map_storage(&guard, owner);
         drop(guard);
         crate::c_abi::ledger::map_inc();
-        Box::into_raw(Box::new(GosMap {
+        map_handle(GosMap {
             len_cache: source.len_cache,
             storage: BiasedLock::new(cloned_storage),
             value_owner: AtomicU8::new(owner),
@@ -3376,7 +3376,7 @@ pub unsafe extern "C" fn gos_rt_map_clone(src: *const GosMap) -> *mut GosMap {
             user_cmp_by_address: std::sync::atomic::AtomicBool::new(
                 source.user_cmp_by_address.load(Ordering::Acquire),
             ),
-        }))
+        })
     })
 }
 
@@ -3479,10 +3479,37 @@ pub unsafe extern "C" fn gos_rt_map_mark_shared(m: *mut GosMap) {
     });
 }
 
+/// Boxes `map` as a runtime handle, or places it in the innermost open
+/// region, which finalizes it at its pop.
+fn map_handle(map: GosMap) -> *mut GosMap {
+    crate::c_abi::rc::region_alloc_handle(map, finalize_region_map)
+        .unwrap_or_else(|map| Box::into_raw(Box::new(map)))
+}
+
+/// Releases the entries of a map its region placed and drops it in place.
+///
+/// # Safety
+///
+/// `p` is a map `map_handle` placed in a region, finalized once, at its pop.
+unsafe fn finalize_region_map(p: *mut u8) {
+    let m = p.cast::<GosMap>();
+    crate::c_abi::ledger::map_dec();
+    {
+        // SAFETY: `m` is the live map this finalizer was registered for.
+        let map = unsafe { &*m };
+        let storage = map.storage.lock();
+        // SAFETY: the storage belongs to the map being finalized, of its value class.
+        unsafe { release_storage_entries(map_value_owner(map), &storage) };
+    }
+    // SAFETY: the map is dropped once, in place; its region reclaims the storage.
+    unsafe { std::ptr::drop_in_place(m) };
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_free(m: *mut GosMap) {
     ffi_entry!({
-        if m.is_null() {
+        // A map in region storage is finalized by its region's pop.
+        if m.is_null() || crate::c_abi::rc::in_region_arena(m.cast()) {
             return;
         }
         crate::c_abi::ledger::map_dec();
@@ -3506,7 +3533,9 @@ pub unsafe extern "C" fn gos_rt_map_free(m: *mut GosMap) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_field_release(slot: *mut *mut GosMap) {
     ffi_entry!({
-        if slot.is_null() {
+        // A field of an aggregate in region storage is reclaimed by its
+        // region's pop, which may already have run.
+        if slot.is_null() || crate::c_abi::rc::in_region_arena(slot.cast()) {
             return;
         }
         // SAFETY: `slot` is this shim's field argument, non-null (checked above), holding a `Map`
@@ -3613,7 +3642,10 @@ pub unsafe extern "C" fn gos_rt_binding_map_free(m: *mut u8) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
     ffi_entry!({
-        if v.is_null() {
+        // A header in region storage is reclaimed by its region's pop, which
+        // may already have run: the address alone decides, before the header
+        // is read.
+        if v.is_null() || crate::c_abi::rc::in_region_arena(v.cast()) {
             return;
         }
         // Region-allocated vecs (header + buffer in arena slabs) are freed
@@ -3797,7 +3829,8 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_free(s: *mut GosSet) {
     ffi_entry!({
-        if s.is_null() {
+        // A set in region storage is finalized by its region's pop.
+        if s.is_null() || crate::c_abi::rc::in_region_arena(s.cast()) {
             return;
         }
         crate::c_abi::ledger::set_dec();
@@ -4077,7 +4110,7 @@ pub unsafe extern "C" fn gos_rt_map_window(
             map.len_cache -= count;
         }
         crate::c_abi::ledger::map_inc();
-        Box::into_raw(Box::new(GosMap {
+        map_handle(GosMap {
             len_cache: count,
             storage: BiasedLock::new(window),
             value_owner: AtomicU8::new(owner),
@@ -4087,7 +4120,7 @@ pub unsafe extern "C" fn gos_rt_map_window(
             user_cmp_by_address: std::sync::atomic::AtomicBool::new(
                 map.user_cmp_by_address.load(Ordering::Acquire),
             ),
-        }))
+        })
     })
 }
 

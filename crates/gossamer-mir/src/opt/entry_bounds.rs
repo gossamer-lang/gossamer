@@ -19,8 +19,9 @@ struct EntryRange {
 /// does can change the vector's length.
 ///
 /// The set of call sites must be the whole program's, so a function whose
-/// name is also used as a value - a callback, a spawned body, an export - is
-/// left alone, and so is one no call site names.
+/// name is also used as a value - a callback, a spawned body, an export, an
+/// adapter a C-ABI entry runs - is left alone, and so is one no call site
+/// names.
 pub fn propagate_entry_bounds(bodies: &mut [Body], tcx: &TyCtxt, effects: &ProgramEffects) {
     let by_name: HashMap<&str, usize> = bodies
         .iter()
@@ -55,6 +56,20 @@ pub fn propagate_entry_bounds(bodies: &mut [Body], tcx: &TyCtxt, effects: &Progr
                 for op in statement_operands(stmt) {
                     if let Some(target) = resolve(op) {
                         used_as_value.insert(target);
+                    }
+                }
+                // A C-ABI entry runs its adapter from outside the program,
+                // and names the function it was made for.
+                if let StatementKind::Assign {
+                    rvalue: Rvalue::CallIntrinsic { name, .. },
+                    ..
+                } = &stmt.kind
+                    && let Some(callback) = crate::ir::ForeignCallback::parse(name)
+                {
+                    for named in [callback.adapter, callback.name] {
+                        if let Some(&target) = by_name.get(named) {
+                            used_as_value.insert(target);
+                        }
                     }
                 }
             }

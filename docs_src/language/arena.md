@@ -163,7 +163,10 @@ arena {
 
 Edge cases, pinned: `Weak` references to arena values upgrade to
 `None`; unit-variant singletons (`Tree::Nil`) are process-immortal and
-safe to reference anywhere.
+safe to reference anywhere. Maps, sets, deques, JSON values, and lazy
+iterators made inside the block belong to it like every other value and
+are released at the closing brace, including when another arena value
+holds them.
 
 ## The primitive
 

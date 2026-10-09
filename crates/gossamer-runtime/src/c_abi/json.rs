@@ -146,20 +146,20 @@ impl GosJson {
     pub(crate) fn into_raw(value: serde_json::Value) -> *mut GosJson {
         let tree = std::sync::Arc::new(JsonTree::Value(value));
         let view = std::ptr::from_ref(tree.value());
-        Box::into_raw(Box::new(GosJson {
+        json_box(GosJson {
             tree,
             view: SyncRawPtr::new(view.cast_mut()),
-        }))
+        })
     }
 
     fn raw(text: &str) -> *mut GosJson {
-        Box::into_raw(Box::new(GosJson {
+        json_box(GosJson {
             tree: std::sync::Arc::new(JsonTree::Raw {
                 text: text.into(),
                 parsed: std::sync::OnceLock::new(),
             }),
             view: SyncRawPtr::NULL,
-        }))
+        })
     }
 
     /// Builds a child handle that shares the same tree as `self`
@@ -169,10 +169,10 @@ impl GosJson {
     /// caller below derives `child` via `serde_json::Value::get`
     /// on `self.view`'s subtree, which is sound).
     fn child(&self, child: &serde_json::Value) -> *mut GosJson {
-        Box::into_raw(Box::new(GosJson {
+        json_box(GosJson {
             tree: std::sync::Arc::clone(&self.tree),
             view: SyncRawPtr::new(std::ptr::from_ref(child).cast_mut()),
-        }))
+        })
     }
 
     fn value(&self) -> &serde_json::Value {
@@ -188,6 +188,23 @@ impl GosJson {
     fn null_ptr() -> *mut GosJson {
         Self::into_raw(serde_json::Value::Null)
     }
+}
+
+/// Boxes a JSON handle, or places it in the innermost open region, which
+/// drops it at its pop.
+fn json_box(handle: GosJson) -> *mut GosJson {
+    crate::c_abi::rc::region_alloc_handle(handle, finalize_region_json)
+        .unwrap_or_else(|handle| Box::into_raw(Box::new(handle)))
+}
+
+/// Drops a JSON handle its region placed, giving back its share of the tree.
+///
+/// # Safety
+///
+/// `p` is a handle `json_box` placed in a region, finalized once, at its pop.
+unsafe fn finalize_region_json(p: *mut u8) {
+    // SAFETY: the handle is dropped once, in place; its region reclaims the storage.
+    unsafe { std::ptr::drop_in_place(p.cast::<GosJson>()) };
 }
 
 pub(crate) unsafe fn json_borrow<'a>(p: *const GosJson) -> Option<&'a serde_json::Value> {
@@ -273,7 +290,8 @@ pub unsafe extern "C" fn gos_rt_json_parse(text: *const c_char) -> i128 {
 /// Emitted by the drop pass for provably single-owner JSON locals.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_free(j: *mut GosJson) {
-    if j.is_null() {
+    // A handle in region storage is dropped by its region's pop.
+    if j.is_null() || crate::c_abi::rc::in_region_arena(j.cast()) {
         return;
     }
     // SAFETY: `j` is non-null (checked above), a handle a constructor boxed, which this call
@@ -292,6 +310,11 @@ pub unsafe extern "C" fn gos_rt_json_free(j: *mut GosJson) {
 unsafe fn take_json_value(p: *mut GosJson) -> serde_json::Value {
     if p.is_null() {
         return serde_json::Value::Null;
+    }
+    if crate::c_abi::rc::in_region_arena(p.cast()) {
+        // Its region drops the handle at pop; the value is read, not moved.
+        // SAFETY: `p` is a live handle in region storage.
+        return unsafe { &*p }.value().clone();
     }
     // SAFETY: `p` is non-null (checked above), a builder box this `unsafe fn`'s caller hands
     // over.
@@ -422,10 +445,10 @@ pub(crate) unsafe fn json_clone_handle(p: *const GosJson) -> *mut GosJson {
     // SAFETY: `p` is non-null (checked above), and this `unsafe fn`'s caller passes a live JSON
     // value.
     let src = unsafe { &*p };
-    Box::into_raw(Box::new(GosJson {
+    json_box(GosJson {
         tree: std::sync::Arc::clone(&src.tree),
         view: SyncRawPtr::new(src.view.as_const_ptr().cast_mut()),
-    }))
+    })
 }
 
 /// Frees the `GosJson` handles a builder vector holds, then the vector.

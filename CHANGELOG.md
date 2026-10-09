@@ -11,6 +11,9 @@
 - A function whose every caller passes a loop counter below the length of the vector it also passes drops the index check on its own `xs[i]`.
 - A vector larger than 1 MiB keeps its elements in memory of its own, grown in place rather than copied on Linux. Peak memory no longer depends on how the buffers an earlier phase freed happened to fit the next phase: two spellings of the same program could differ by tens of megabytes. Building and dropping large vectors in a loop also takes less time and memory.
 - Large vectors a program frees go back to the system once the allocator's purge delay passes, even while the program sleeps or waits on input or a channel; they were held until it next allocated.
+- A map, set, deque, JSON value, or lazy iterator made inside an `arena { }` block is released at the block's end even when another value made there holds it; one held by an arena vector or enum was never freed.
+- A string, vector, table, or struct copy made inside an arena and released after the arena ends no longer reads the arena's freed memory, which crashed compiled programs on Windows.
+- An arena's memory is unreadable after its block ends on every platform, as it already was on Windows, and `GOS_ARENA_POISON=1` keeps it from being reused so a stray read crashes every time.
 
 ## 0.70.0 - Hardened codecs, one failure contract, and reclaimed weak references
 

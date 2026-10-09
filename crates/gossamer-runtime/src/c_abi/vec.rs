@@ -2571,7 +2571,10 @@ unsafe fn vec_reserve_to(vec: &mut GosVec, min_cap: i64, exact: bool) {
         // Region-allocated vecs grow into a fresh region buffer and leave the
         // old one to the enclosing region's wholesale reclamation.
         let region_buf = crate::c_abi::rc::region_alloc_bytes(new_bytes);
+        let old = vec.ptr.as_ptr();
         let new_buf = if region_buf.is_null() {
+            // No slab could take it: the buffer comes from the allocator and
+            // is owned by the region like a large one.
             let new_buf = alloc_vec_buffer(new_bytes);
             crate::c_abi::ledger::vec_split_alloc(
                 new_bytes,
@@ -2583,12 +2586,26 @@ unsafe fn vec_reserve_to(vec: &mut GosVec, min_cap: i64, exact: bool) {
             crate::c_abi::ledger::vec_region_alloc(new_bytes);
             region_buf
         };
-        if !vec.ptr.is_null() && old_bytes > 0 {
+        if !old.is_null() && old_bytes > 0 {
             // SAFETY: `new_buf` holds at least `old_bytes` bytes, and the old buffer holds
             // `old_bytes`; they do not overlap.
             unsafe {
-                std::ptr::copy_nonoverlapping(vec.ptr.as_ptr(), new_buf, old_bytes);
+                std::ptr::copy_nonoverlapping(old, new_buf, old_bytes);
             }
+        }
+        if region_buf.is_null() {
+            if !old.is_null() && crate::c_abi::rc::region_replace_buffer(old, new_buf, new_bytes) {
+                // SAFETY: the region owned `old`, an `alloc_vec_buffer` block of
+                // `old_bytes` that only this vector referenced.
+                unsafe { free_vec_buffer(old, old_bytes) };
+            } else {
+                crate::c_abi::rc::region_own_buffer(new_buf, new_bytes);
+            }
+        } else if !old.is_null() && crate::c_abi::rc::region_disown_buffer(old) {
+            // The elements moved from a buffer the region owned into a slab.
+            // SAFETY: the region owned `old`, an `alloc_vec_buffer` block of
+            // `old_bytes` that only this vector referenced.
+            unsafe { free_vec_buffer(old, old_bytes) };
         }
         vec.ptr = SyncRawPtr::new(new_buf);
         vec.cap = new_cap;
@@ -3839,6 +3856,96 @@ mod mapped_buffer_tests {
         if !in_region {
             // SAFETY: an ordinary vec holds its one share, given back here.
             unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
+        }
+    }
+
+    /// Makes the pages holding `p` unreadable, as a decommit on Windows does,
+    /// or readable again.
+    #[cfg(all(unix, not(miri)))]
+    fn protect_page_of(p: *const u8, readable: bool) {
+        // SAFETY: `sysconf` reads a process constant.
+        let page = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap_or(4096);
+        let base = (p as usize) & !(page - 1);
+        let prot = if readable {
+            libc::PROT_READ | libc::PROT_WRITE
+        } else {
+            libc::PROT_NONE
+        };
+        // SAFETY: `base` is the page of a region slab inside the arena's own
+        // reservation, which nothing else maps.
+        let rc = unsafe { libc::mprotect(base as *mut libc::c_void, page, prot) };
+        assert_eq!(rc, 0);
+    }
+
+    #[test]
+    #[cfg(all(unix, not(miri)))]
+    fn a_release_after_its_regions_pop_reads_nothing_of_it() {
+        crate::c_abi::rc::gos_rt_arena_push();
+        let v = gos_rt_vec_new(8);
+        // SAFETY: `v` is the live vec made above.
+        unsafe { gos_rt_vec_push_i64(v, 7) };
+        // SAFETY: both arguments are NUL-terminated host strings.
+        let s = unsafe { crate::c_abi::string::gos_rt_str_concat(c"ab".as_ptr(), c"cd".as_ptr()) };
+        let m = crate::c_abi::map::gos_rt_map_new(8, 8);
+        let set = crate::c_abi::set::gos_rt_set_new();
+        // SAFETY: the argument is a NUL-terminated host string.
+        let parsed = unsafe { crate::c_abi::json::gos_rt_json_parse(c"[1, 2]".as_ptr()) };
+        let doc =
+            crate::c_abi::result::gos_rt_result_payload(parsed) as *mut crate::c_abi::json::GosJson;
+        let child_meta = [gossamer_abi::rc::RC_KIND_STRUCT_GUARDED, 0];
+        let source = [17_u64];
+        // SAFETY: `child_meta` and `source` are live and describe one word.
+        let blob = unsafe {
+            crate::c_abi::rc::gos_rt_rc_alloc_copy(8, child_meta.as_ptr(), source.as_ptr().cast())
+        };
+        // A stack aggregate outliving the region holds the blob as its one
+        // unconditional guarded child, and an `Option` slot holds it as `Some`.
+        let holder_meta = [gossamer_abi::rc::RC_KIND_STRUCT_GUARDED, 1, -1, 0, 0];
+        let mut holder = [blob as i64];
+        let option_slot = [0_i64, blob as i64];
+        let blob_header = blob.wrapping_sub(crate::c_abi::rc::RC_HEADER_SIZE);
+        let pointers: [*const u8; 7] = [
+            v.cast(),
+            s.cast(),
+            m.cast(),
+            set.cast(),
+            doc.cast(),
+            blob.cast(),
+            blob_header.cast(),
+        ];
+        let in_region = pointers
+            .iter()
+            .all(|&p| crate::c_abi::rc::in_region_arena(p));
+        crate::c_abi::rc::gos_rt_arena_pop();
+        assert!(
+            in_region,
+            "each value made while the region ran lives in its storage"
+        );
+        for &p in &pointers {
+            protect_page_of(p, false);
+        }
+        // SAFETY: each pointer is region storage its pop reclaimed; a release
+        // must answer from the address alone.
+        unsafe {
+            crate::c_abi::map::gos_rt_vec_free(v);
+            crate::c_abi::string::gos_rt_str_free_typed(s);
+            crate::c_abi::string::gos_rt_str_free(s);
+            crate::c_abi::map::gos_rt_map_free(m);
+            crate::c_abi::map::gos_rt_set_free(set);
+            crate::c_abi::json::gos_rt_json_free(doc);
+            crate::c_abi::rc::gos_rt_aggr_retain_children(
+                holder.as_mut_ptr().cast(),
+                holder_meta.as_ptr(),
+            );
+            crate::c_abi::rc::gos_rt_aggr_release_children(
+                holder.as_mut_ptr().cast(),
+                holder_meta.as_ptr(),
+            );
+            crate::c_abi::rc::gos_rt_option_slot_retain(option_slot.as_ptr());
+            crate::c_abi::rc::gos_rt_option_slot_release(option_slot.as_ptr());
+        }
+        for &p in &pointers {
+            protect_page_of(p, true);
         }
     }
 
