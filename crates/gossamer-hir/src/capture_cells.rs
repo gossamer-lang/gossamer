@@ -12,7 +12,7 @@
 //! takes a snapshot of each local it captures where the `spawn` is written.
 //! The checker rejects a write to a capture inside one.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use gossamer_ast::Ident;
 use gossamer_lex::Span;
@@ -88,6 +88,21 @@ fn mut_self_method_names(program: &HirProgram) -> HashSet<String> {
         }
     }
     names
+}
+
+/// The bindings a scope introduces, each with whether it is declared `mut`.
+type Scope = HashMap<String, bool>;
+
+/// Records each binding `pat` introduces in `scope`.
+fn note_pattern(pat: &HirPat, scope: &mut Scope) {
+    let mut names: HashSet<String> = HashSet::new();
+    crate::lift::collect_pattern_names(pat, &mut names);
+    let mut mutable: HashSet<String> = HashSet::new();
+    crate::lift::collect_mutable_pattern_names(pat, &mut mutable);
+    for name in names {
+        let is_mut = mutable.contains(&name);
+        scope.insert(name, is_mut);
+    }
 }
 
 /// Every name `pat` binds, in a stable order.
@@ -183,16 +198,11 @@ impl CellPass<'_> {
             body.block.stmts = stmts;
         }
         self.visit_block(&mut body.block);
-        let mut locals: Vec<HashSet<String>> = vec![
-            decl.params
-                .iter()
-                .flat_map(|p| {
-                    let mut names: HashSet<String> = HashSet::new();
-                    crate::lift::collect_pattern_names(&p.pattern, &mut names);
-                    names
-                })
-                .collect(),
-        ];
+        let mut params = Scope::new();
+        for param in &decl.params {
+            note_pattern(&param.pattern, &mut params);
+        }
+        let mut locals: Vec<Scope> = vec![params];
         self.snapshot_block(&mut body.block, &mut locals);
     }
 
@@ -499,9 +509,9 @@ impl CellPass<'_> {
     }
 
     /// Gives each spawned closure in `block` snapshots of the locals it
-    /// captures. `locals` holds the names bound around it.
-    fn snapshot_block(&mut self, block: &mut HirBlock, locals: &mut Vec<HashSet<String>>) {
-        locals.push(HashSet::new());
+    /// captures. `locals` holds the bindings around it.
+    fn snapshot_block(&mut self, block: &mut HirBlock, locals: &mut Vec<Scope>) {
+        locals.push(Scope::new());
         for stmt in &mut block.stmts {
             match &mut stmt.kind {
                 HirStmtKind::Let { pattern, init, .. } => {
@@ -509,7 +519,7 @@ impl CellPass<'_> {
                         self.snapshot_expr(init, locals);
                     }
                     if let Some(scope) = locals.last_mut() {
-                        crate::lift::collect_pattern_names(pattern, scope);
+                        note_pattern(pattern, scope);
                     }
                 }
                 HirStmtKind::Expr { expr, .. } | HirStmtKind::Defer(expr) => {
@@ -524,7 +534,7 @@ impl CellPass<'_> {
         locals.pop();
     }
 
-    fn snapshot_expr(&mut self, expr: &mut HirExpr, locals: &mut Vec<HashSet<String>>) {
+    fn snapshot_expr(&mut self, expr: &mut HirExpr, locals: &mut Vec<Scope>) {
         if is_spawn_of_closure(expr) {
             self.snapshot_spawn(expr, locals);
             return;
@@ -532,9 +542,9 @@ impl CellPass<'_> {
         match &mut expr.kind {
             HirExprKind::Block(block) => self.snapshot_block(block, locals),
             HirExprKind::Closure { params, body, .. } => {
-                let mut scope = HashSet::new();
+                let mut scope = Scope::new();
                 for param in params.iter() {
-                    crate::lift::collect_pattern_names(&param.pattern, &mut scope);
+                    note_pattern(&param.pattern, &mut scope);
                 }
                 locals.push(scope);
                 self.snapshot_expr(body, locals);
@@ -543,8 +553,8 @@ impl CellPass<'_> {
             HirExprKind::Match { scrutinee, arms } => {
                 self.snapshot_expr(scrutinee, locals);
                 for arm in arms.iter_mut() {
-                    let mut scope = HashSet::new();
-                    crate::lift::collect_pattern_names(&arm.pattern, &mut scope);
+                    let mut scope = Scope::new();
+                    note_pattern(&arm.pattern, &mut scope);
                     locals.push(scope);
                     if let Some(guard) = &mut arm.guard {
                         self.snapshot_expr(guard, locals);
@@ -559,7 +569,7 @@ impl CellPass<'_> {
 
     /// Rewrites `spawn(|| body, ..)` to bind a snapshot of each local the
     /// closure captures, as the closure's own, ahead of the call.
-    fn snapshot_spawn(&mut self, expr: &mut HirExpr, locals: &mut Vec<HashSet<String>>) {
+    fn snapshot_spawn(&mut self, expr: &mut HirExpr, locals: &mut Vec<Scope>) {
         let HirExprKind::Call { args, .. } = &mut expr.kind else {
             return;
         };
@@ -572,11 +582,11 @@ impl CellPass<'_> {
         let HirExprKind::Closure { params, body, .. } = &mut closure.kind else {
             return;
         };
-        let mut bound: HashSet<String> = HashSet::new();
+        let mut params_scope = Scope::new();
         for param in params.iter() {
-            crate::lift::collect_pattern_names(&param.pattern, &mut bound);
+            note_pattern(&param.pattern, &mut params_scope);
         }
-        let in_scope: HashSet<String> = locals.iter().flatten().cloned().collect();
+        let bound: HashSet<String> = params_scope.keys().cloned().collect();
         let mut captured: Vec<(String, Ty)> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         let mut on = |occurrence: &HirExpr, _depth: u32| {
@@ -587,7 +597,18 @@ impl CellPass<'_> {
                 && segments.len() == 1
             {
                 let name = &segments[0].name;
-                if in_scope.contains(name) && !bound.contains(name) && seen.insert(name.clone()) {
+                // A binding nothing can change after the spawn reads the same
+                // value on the goroutine as a snapshot of it would, so the
+                // goroutine shares it. A `&mut` reaches storage another
+                // holder writes.
+                let changeable = locals
+                    .iter()
+                    .rev()
+                    .find_map(|scope| scope.get(name).copied());
+                let snapshot = changeable.is_some_and(|mutable| {
+                    mutable || matches!(self.tcx.kind_of(occurrence.ty), TyKind::Ref { .. })
+                });
+                if snapshot && !bound.contains(name) && seen.insert(name.clone()) {
                     captured.push((name.clone(), occurrence.ty));
                 }
             }
@@ -596,7 +617,7 @@ impl CellPass<'_> {
         // A spawned closure inside the spawned one takes its snapshots from
         // this closure's own.
         let mut inner_locals = locals.clone();
-        inner_locals.push(bound.clone());
+        inner_locals.push(params_scope);
         self.snapshot_expr(body, &mut inner_locals);
         if captured.is_empty() {
             return;

@@ -1,0 +1,38 @@
+// A `let` that takes a parameter or a binding declared without `mut`, and
+// binds nothing `mut` itself, shares the value: neither side can be written.
+// A `mut` binding, or a `mut` parameter, still works on a value of its own.
+
+struct Grid { rows: Vec<Vec<i64>>, label: String }
+
+fn grow(mut xs: Vec<i64>) -> i64 {
+    xs.push(9)
+    xs.len()
+}
+
+fn read_only(g: Grid) -> String {
+    let Grid { rows, label } = g
+    f"{label}: {rows.len()} rows, first {rows[0]}"
+}
+
+fn split(g: Grid) -> String {
+    let Grid { rows, label } = g
+    let mut first = rows[0]
+    first.push(5)
+    let n = grow(rows[1])
+    f"{label} {rows} {first} {n} {g.rows}"
+}
+
+fn alias(a: Vec<i64>) -> String {
+    let b = a
+    let mut c = b
+    c.push(4)
+    f"{a} {b} {c} {grow(b)} {b}"
+}
+
+fn main() {
+    println(read_only(Grid { rows: #[#[7, 8]], label: "r" }))
+    println(split(Grid { rows: #[#[1, 2], #[3]], label: "g" }))
+    for n in 1..4 {
+        println(alias(#[1, 2, n]))
+    }
+}

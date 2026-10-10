@@ -59,6 +59,40 @@ fn allowance(name: &str) -> Allowance {
 /// (name, source). N is baked into each source, sized so a leak clears the cap.
 const SHAPES: &[(&str, &str)] = &[
     (
+        "spawn_shared_read",
+        r"
+fn rows(n: i64) -> Vec<Vec<f64>> {
+    let mut out: Vec<Vec<f64>> = #[]
+    for i in 0..n { out.push(#[i as f64; n]) }
+    out
+}
+fn band(m: Vec<Vec<f64>>, lo: i64, hi: i64) -> f64 {
+    let mut s = 0.0
+    for i in lo..hi { s += m[i][0] }
+    s
+}
+fn fan(m: Vec<Vec<f64>>) -> f64 {
+    let mut total = 0.0
+    let joined = cohort {
+        let mut hs = #[]
+        for w in 0..8 {
+            let lo = 25 * w
+            hs.push(spawn(|| band(m, lo, lo + 25)))
+        }
+        for h in hs { total += h.join().unwrap_or(0.0) }
+    }
+    if joined.is_err() { return -1.0 }
+    total
+}
+fn main() {
+    let m = rows(200)
+    let mut total = 0.0
+    for _ in 0..2000 { total += fan(m) }
+    println(total)
+}
+",
+    ),
+    (
         "enum_tree_control",
         r#"
 enum Tree { Node(i64, Tree, Tree), Leaf }

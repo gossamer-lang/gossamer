@@ -109,6 +109,7 @@ impl<'a> Builder<'a> {
             fresh_results: std::collections::HashSet::new(),
             local_define_layout: HashMap::new(),
             param_locals: std::collections::HashSet::new(),
+            immutable_let_locals: std::collections::HashSet::new(),
             loop_stack: Vec::new(),
             pending_loop_label: None,
             payload_defer_block: None,

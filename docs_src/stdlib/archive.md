@@ -1,6 +1,6 @@
 # `std::archive`
 
-Status: unproven
+Status: experimental
 
 Helpers shared by the archive formats.
 

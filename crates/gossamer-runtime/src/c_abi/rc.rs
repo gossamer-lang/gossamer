@@ -171,6 +171,29 @@ fn rc_live_enabled_slow() -> bool {
     enabled
 }
 
+/// Under `GOS_RC_DEBUG`, reports the RC-managed objects still alive as the
+/// process exits. Called once, after the goroutines have drained, so an
+/// object a finished goroutine was still giving back is not counted.
+pub fn report_live_at_exit() {
+    if std::env::var_os("GOS_RC_DEBUG").is_none() {
+        return;
+    }
+    let live = rc_live_count();
+    let shared = rc_shared_live_count();
+    let reused = rc_reuse_count();
+    eprintln!("RC_LIVE_AT_EXIT={live} shared_live={shared} reused={reused}");
+    if live > 0 && shared > 0 {
+        // Cross-goroutine objects are excluded from the per-thread cycle
+        // collector, so a shared reference cycle leaks. This is the only
+        // leak class the collector cannot reach; break a back-edge with
+        // `Weak` to fix it.
+        eprintln!(
+            "RC_HINT: {shared} live cross-goroutine object(s) at exit; a shared \
+             reference cycle is not collected - break a back-edge with Weak<T>"
+        );
+    }
+}
+
 /// Number of RC-managed objects currently alive. Diagnostic hook;
 /// meaningful only when counting is enabled (tests / `GOS_RC_DEBUG`).
 pub fn rc_live_count() -> usize {

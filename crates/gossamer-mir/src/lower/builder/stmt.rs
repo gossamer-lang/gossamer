@@ -326,6 +326,27 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// Whether `let pattern = init` may share `value` rather than copy it:
+    /// `init` names a parameter or a single-binding `let` declared without
+    /// `mut` that is not a reference, and `pattern` binds nothing `mut`, so
+    /// no write can reach either side.
+    fn shares_unwritable_source(&self, init: &HirExpr, value: Local, pattern: &HirPat) -> bool {
+        let bare_local = matches!(
+            &init.kind,
+            HirExprKind::Path { segments, def: None } if segments.len() == 1
+        );
+        let decl = &self.locals[value.0 as usize];
+        let unwritable_source = !decl.mutable
+            && (self.param_locals.contains(&value) || self.immutable_let_locals.contains(&value))
+            && !matches!(
+                self.tcx.kind_of(init.ty),
+                gossamer_types::TyKind::Ref { .. }
+            );
+        let mut mutable = std::collections::HashSet::new();
+        gossamer_hir::collect_mutable_pattern_names(pattern, &mut mutable);
+        bare_local && unwritable_source && mutable.is_empty()
+    }
+
     fn is_vec_like_ty(&self, ty: gossamer_types::Ty) -> bool {
         matches!(self.tcx.kind_of(ty), gossamer_types::TyKind::Vec(_))
     }
@@ -519,6 +540,9 @@ impl<'a> Builder<'a> {
         match &stmt.kind {
             HirStmtKind::Let { pattern, ty, init } => {
                 let local = self.push_local(*ty, param_name(pattern), param_mutable(pattern));
+                if matches!(pattern.kind, HirPatKind::Binding { mutable: false, .. }) {
+                    self.immutable_let_locals.insert(local);
+                }
                 // NOTE: do NOT bind the name yet. `let x = expr`
                 // must evaluate `expr` in the *outer* scope so a
                 // shadowing form like `let x = x + 1` reads the
@@ -869,6 +893,15 @@ impl<'a> Builder<'a> {
                                 // rather than deep-cloning a nested Vec into a
                                 // detached buffer whose element metadata no
                                 // longer describes the original.
+                                self.emit_assign(
+                                    Place::local(local),
+                                    Rvalue::Use(Operand::Copy(Place::local(value))),
+                                    stmt.span,
+                                );
+                            } else if self.shares_unwritable_source(init, value, pattern) {
+                                // Neither binding can be written, so both
+                                // read one value; RC insertion retains the
+                                // share the new binding holds.
                                 self.emit_assign(
                                     Place::local(local),
                                     Rvalue::Use(Operand::Copy(Place::local(value))),

@@ -42,6 +42,9 @@ pub mod features;
 /// project layout from disk, so it is native-only.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod bundle;
+/// Where each byte range of a bundled unit was read from. Plain data, so
+/// a tool that never bundles still names it on every target.
+pub mod bundled_span;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cache;

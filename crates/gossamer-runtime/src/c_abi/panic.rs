@@ -583,6 +583,7 @@ fn raise_with_trace(code: &str, prefix: &str, text: String, trace: Option<String
     gos_rt_flush_stdout();
     crate::c_abi::exit_hooks::run_exit_hooks();
     gos_rt_flush_stdout();
+    crate::c_abi::rc::report_live_at_exit();
     if !hooked {
         // Match the unified diagnostic-code prefix the VM uses so both
         // execution modes tag a fault with the same code.
@@ -764,6 +765,7 @@ pub extern "C" fn gos_rt_exit(code: i32) -> ! {
     // skips the C++/atexit handlers that would normally drain
     // stdio.
     gos_rt_flush_stdout();
+    crate::c_abi::rc::report_live_at_exit();
 
     std::process::exit(code);
 }

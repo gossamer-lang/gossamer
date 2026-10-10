@@ -893,6 +893,53 @@ impl Lifter {
     }
 }
 
+/// The names `pat` binds as `mut`. A struct field shorthand binds
+/// immutably.
+pub fn collect_mutable_pattern_names<S: std::hash::BuildHasher>(
+    pat: &HirPat,
+    out: &mut HashSet<String, S>,
+) {
+    match &pat.kind {
+        HirPatKind::Binding { name, mutable } => {
+            if *mutable {
+                out.insert(name.name.clone());
+            }
+        }
+        HirPatKind::At { name, mutable, sub } => {
+            if *mutable {
+                out.insert(name.name.clone());
+            }
+            collect_mutable_pattern_names(sub, out);
+        }
+        HirPatKind::Tuple(subs)
+        | HirPatKind::Variant { fields: subs, .. }
+        | HirPatKind::Or(subs) => {
+            for sub in subs {
+                collect_mutable_pattern_names(sub, out);
+            }
+        }
+        HirPatKind::Slice {
+            prefix,
+            rest,
+            suffix,
+        } => {
+            for sub in prefix.iter().chain(rest.as_deref()).chain(suffix) {
+                collect_mutable_pattern_names(sub, out);
+            }
+        }
+        HirPatKind::Struct { fields, .. } => {
+            for sub in fields.iter().filter_map(|field| field.pattern.as_ref()) {
+                collect_mutable_pattern_names(sub, out);
+            }
+        }
+        HirPatKind::Ref { inner, .. } => collect_mutable_pattern_names(inner, out),
+        HirPatKind::Literal(_)
+        | HirPatKind::Wildcard
+        | HirPatKind::Rest
+        | HirPatKind::Range { .. } => {}
+    }
+}
+
 /// Collects every binding name introduced by `pat` into `out`.
 ///
 /// Used by free-variable analysis: a name is "bound" if it's

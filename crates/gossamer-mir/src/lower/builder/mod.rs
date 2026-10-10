@@ -149,6 +149,8 @@ pub(crate) struct Builder<'a> {
     /// `flag::Cell::*` runtime kind tag.
     pub(crate) local_define_layout: HashMap<Local, Vec<(String, &'static str)>>,
     pub(crate) param_locals: std::collections::HashSet<Local>,
+    /// Locals a `let` with a single binding not declared `mut` introduced.
+    pub(crate) immutable_let_locals: std::collections::HashSet<Local>,
     /// Loop contexts visible at the current lowering point. The
     /// innermost loop is at the back. Each entry pairs the
     /// `continue`-target (the loop header) with the `break`-target

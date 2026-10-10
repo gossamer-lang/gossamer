@@ -359,6 +359,7 @@ feature-testing-examples/sort_nested_sequences.gos	aggregate print
 feature-testing-examples/sort_with_closure.gos	no hot body
 feature-testing-examples/spawn_join.gos	no hot body
 feature-testing-examples/spawn_operand_order.gos	cross-goroutine
+feature-testing-examples/spawn_shared_captures.gos	cross-goroutine
 feature-testing-examples/static_mut_basic.gos	no hot body
 feature-testing-examples/static_mut_goroutines.gos	bytecode-only local
 feature-testing-examples/static_values_across_threads.gos	cross-goroutine

@@ -150,8 +150,9 @@ pub extern "C" fn gos_rt_chan_new(elem_bytes: u32, cap: i64) -> *mut GosChan {
         };
         // A counted node: every sender, receiver, and join handle holding the
         // channel owns a share, and the last share out runs the teardown in
-        // `Drop`.
-        super::rc::alloc_managed(GosChan {
+        // `Drop`. A channel exists to be reached from more than one
+        // goroutine, so its shares are counted atomically from birth.
+        let chan = super::rc::alloc_managed(GosChan {
             elem_bytes,
             cap,
             closed: PlMutex::new(false),
@@ -168,7 +169,11 @@ pub extern "C" fn gos_rt_chan_new(elem_bytes: u32, cap: i64) -> *mut GosChan {
             elem_kind: AtomicI64::new(0),
             elem_desc: PlMutex::new(Vec::new()),
             wakers: crate::wake::WakerSet::new(),
-        })
+        });
+        // SAFETY: `chan` is the counted node just allocated, or null, which
+        // `gos_rt_rc_mark_shared` accepts.
+        unsafe { super::rc::gos_rt_rc_mark_shared(chan.cast()) };
+        chan
     })
 }
 
@@ -1492,6 +1497,18 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn a_new_channel_counts_its_shares_atomically() {
+        // A runtime-made channel, such as a spawn's join handle, is released by
+        // the goroutine on each end without passing through a capture.
+        let chan = gos_rt_chan_new(8, 1);
+        assert!(!chan.is_null());
+        // SAFETY: `chan` is the live counted node just made.
+        assert!(unsafe { super::super::rc::rc_payload_is_shared(chan.cast()) });
+        // SAFETY: this test holds the channel's one share.
+        unsafe { chan_release(chan) };
+    }
 
     #[test]
     fn cap_zero_channel_send_waits_for_receiver() {

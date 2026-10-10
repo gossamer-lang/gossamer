@@ -111,15 +111,28 @@ fn a_vector_captured_by_a_closure_is_shared() {
 
 #[test]
 fn a_vector_a_goroutine_takes_a_snapshot_of_stays_unique() {
-    // A spawned closure captures a snapshot of `xs`, a copy of a value still
-    // read afterwards, so the goroutine never observes `xs` itself.
+    // `xs` is written after the spawn, so the spawned closure captures a
+    // snapshot of it, and the goroutine never observes `xs` itself.
+    let u = uniqueness_of(
+        "use std::errors\nfn f() -> Result<(), errors::Error> {\n cohort {\n let mut xs = #[1]\n spawn(|| xs.len())\n xs.push(2)\n println(\"{}\", xs.len())\n }\n}\n",
+        "f",
+        "xs",
+        return_point,
+    );
+    assert_eq!(u, Uniqueness::Unique);
+}
+
+#[test]
+fn a_vector_a_goroutine_reads_unchanged_is_shared() {
+    // Nothing can change `xs` after the spawn, so the goroutine reads `xs`
+    // itself rather than a copy.
     let u = uniqueness_of(
         "use std::errors\nfn f() -> Result<(), errors::Error> {\n cohort {\n let xs = #[1]\n spawn(|| xs.len())\n println(\"{}\", xs.len())\n }\n}\n",
         "f",
         "xs",
         return_point,
     );
-    assert_eq!(u, Uniqueness::Unique);
+    assert_eq!(u, Uniqueness::Shared);
 }
 
 #[test]

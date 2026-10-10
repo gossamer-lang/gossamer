@@ -56,9 +56,6 @@ unsafe fn deliver_outcome(ch_addr: usize, disc: i64, payload: i64) {
     }
 }
 
-/// The child's share of the one-shot handle channel. Declared first in
-/// the spawned body so it drops last: every other guard has already
-/// delivered its outcome by the time this releases, whichever path the
 /// Releases the child's share of a spawned callable's environment when the
 /// goroutine leaves, by any edge. The spawn site takes that share, so the
 /// spawning frame's own release and this one are the environment's two
@@ -80,6 +77,9 @@ impl Drop for ChildEnvRef {
     }
 }
 
+/// The child's share of the one-shot handle channel. Declared first in
+/// the spawned body so it drops last: every other guard has already
+/// delivered its outcome by the time this releases, whichever path the
 /// body left by.
 struct ChildChanRef {
     ch_addr: usize,

@@ -183,8 +183,8 @@ fn aggregate_walk_rc_calls_are_pinned() {
                 "main",
                 RcCounts {
                     retain: 0,
-                    release: 11,
-                    clone: 2,
+                    release: 7,
+                    clone: 0,
                 },
             ),
         ],
@@ -314,5 +314,42 @@ fn struct_field_borrow_rc_calls_are_pinned() {
                 },
             ),
         ],
+    );
+}
+
+#[test]
+fn a_spawn_shares_captures_nothing_writes_after_it() {
+    let functions = ["parallel_sum", "labelled", "written_after_spawn"];
+    let counts = rc_call_counts(
+        "feature-testing-examples/spawn_shared_captures.gos",
+        &functions,
+    );
+    for function in ["parallel_sum", "labelled"] {
+        assert_eq!(
+            counts[function].clone, 0,
+            "{function} copies a capture no code can change after the spawn"
+        );
+    }
+    assert!(
+        counts["written_after_spawn"].clone > 0,
+        "a capture the spawning code writes afterwards needs a snapshot"
+    );
+}
+
+#[test]
+fn a_let_neither_side_can_write_shares_its_value() {
+    let counts = rc_call_counts(
+        "feature-testing-examples/immutable_let_shares.gos",
+        &["read_only", "alias"],
+    );
+    assert_eq!(
+        counts["read_only"].clone, 0,
+        "read_only copies a value no binding can write"
+    );
+    // `let b = a` shares; `let mut c = b` and the `mut` parameter `grow`
+    // takes each need a value of their own.
+    assert_eq!(
+        counts["alias"].clone, 2,
+        "alias copies only for its `mut` binding and its `mut` parameter"
     );
 }

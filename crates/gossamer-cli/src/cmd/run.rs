@@ -110,6 +110,7 @@ fn run_source_on_vm(
     let hooked =
         fault.is_some_and(|err| vm.invoke_panic_hook(&gossamer_interp::panic_message(err)));
     vm.with_active_trace(gossamer_interp::run_exit_hooks);
+    gossamer_runtime::c_abi::rc::report_live_at_exit();
     match r {
         Ok(val) => {
             // An entry point returning `Err(e)` - an explicit `fn main() ->
