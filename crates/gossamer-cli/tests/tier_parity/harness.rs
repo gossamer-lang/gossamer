@@ -1253,6 +1253,9 @@ const SPECS: &[Spec] = &[
     // A closure reads and writes the bindings it captures, whatever their
     // types; a spawned closure takes a snapshot of each at the spawn.
     spec("feature-testing-examples/closure_binding_capture.gos"),
+    // A spawned closure shares a binding nothing changes after the spawn
+    // and snapshots one the spawning code still writes.
+    spec("feature-testing-examples/spawn_shared_captures.gos"),
     spec("feature-testing-examples/closure_capture_mutation.gos"),
     spec("feature-testing-examples/closure_lifetime_inference.gos"),
     spec("feature-testing-examples/closure_payload_typing.gos"),

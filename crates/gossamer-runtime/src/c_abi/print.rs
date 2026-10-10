@@ -444,22 +444,6 @@ pub fn flush_stdout_buffer() {
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_flush_stdout() {
     ffi_entry!({
-        if std::env::var_os("GOS_RC_DEBUG").is_some() {
-            let live = crate::c_abi::rc::rc_live_count();
-            let shared = crate::c_abi::rc::rc_shared_live_count();
-            let reused = crate::c_abi::rc::rc_reuse_count();
-            eprintln!("RC_LIVE_AT_EXIT={live} shared_live={shared} reused={reused}");
-            if live > 0 && shared > 0 {
-                // Cross-goroutine objects are excluded from the per-thread cycle
-                // collector, so a shared reference cycle leaks. This is the only
-                // leak class the collector cannot reach; break a back-edge with
-                // `Weak` to fix it.
-                eprintln!(
-                    "RC_HINT: {shared} live cross-goroutine object(s) at exit; a shared \
-                     reference cycle is not collected - break a back-edge with Weak<T>"
-                );
-            }
-        }
         flush_stdout_buffer();
         flush_terminal_stdout();
     });

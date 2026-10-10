@@ -68,7 +68,7 @@ pub struct FnEffects {
     /// channel, a static, a closure, or a callee it cannot vet.
     pub escapes: bool,
     /// The function may build a value whose region-allocatable parts hold a
-    /// heap-only object (see [`strands_heap_child`]): run inside an arena
+    /// heap-only object (see `strands_heap_child`): run inside an arena
     /// region, the region's bulk free would drop that object unreleased.
     pub strands: bool,
     /// One entry per parameter; a method's receiver is the first.

@@ -12,7 +12,7 @@ use std::rc::Rc;
 use gossamer_ast::SourceFile;
 use gossamer_diagnostics::Diagnostic;
 use gossamer_lex::{FileId, SourceMap, Span};
-use gossamer_pkg::bundle::BundledSpan;
+use gossamer_pkg::bundled_span::BundledSpan;
 use gossamer_resolve::{Resolutions, resolve_source_file};
 use gossamer_types::{TyCtxt, TypeTable};
 

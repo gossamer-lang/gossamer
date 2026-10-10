@@ -316,3 +316,22 @@ fn struct_field_borrow_rc_calls_are_pinned() {
         ],
     );
 }
+
+#[test]
+fn a_spawn_shares_captures_nothing_writes_after_it() {
+    let functions = ["parallel_sum", "labelled", "written_after_spawn"];
+    let counts = rc_call_counts(
+        "feature-testing-examples/spawn_shared_captures.gos",
+        &functions,
+    );
+    for function in ["parallel_sum", "labelled"] {
+        assert_eq!(
+            counts[function].clone, 0,
+            "{function} copies a capture no code can change after the spawn"
+        );
+    }
+    assert!(
+        counts["written_after_spawn"].clone > 0,
+        "a capture the spawning code writes afterwards needs a snapshot"
+    );
+}
