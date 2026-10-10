@@ -98,54 +98,10 @@ fn note_pattern(pat: &HirPat, scope: &mut Scope) {
     let mut names: HashSet<String> = HashSet::new();
     crate::lift::collect_pattern_names(pat, &mut names);
     let mut mutable: HashSet<String> = HashSet::new();
-    mutable_names(pat, &mut mutable);
+    crate::lift::collect_mutable_pattern_names(pat, &mut mutable);
     for name in names {
         let is_mut = mutable.contains(&name);
         scope.insert(name, is_mut);
-    }
-}
-
-/// The names `pat` binds as `mut`. A struct field shorthand binds
-/// immutably.
-fn mutable_names(pat: &HirPat, out: &mut HashSet<String>) {
-    match &pat.kind {
-        HirPatKind::Binding { name, mutable } => {
-            if *mutable {
-                out.insert(name.name.clone());
-            }
-        }
-        HirPatKind::At { name, mutable, sub } => {
-            if *mutable {
-                out.insert(name.name.clone());
-            }
-            mutable_names(sub, out);
-        }
-        HirPatKind::Tuple(subs)
-        | HirPatKind::Variant { fields: subs, .. }
-        | HirPatKind::Or(subs) => {
-            for sub in subs {
-                mutable_names(sub, out);
-            }
-        }
-        HirPatKind::Slice {
-            prefix,
-            rest,
-            suffix,
-        } => {
-            for sub in prefix.iter().chain(rest.as_deref()).chain(suffix) {
-                mutable_names(sub, out);
-            }
-        }
-        HirPatKind::Struct { fields, .. } => {
-            for sub in fields.iter().filter_map(|field| field.pattern.as_ref()) {
-                mutable_names(sub, out);
-            }
-        }
-        HirPatKind::Ref { inner, .. } => mutable_names(inner, out),
-        HirPatKind::Literal(_)
-        | HirPatKind::Wildcard
-        | HirPatKind::Rest
-        | HirPatKind::Range { .. } => {}
     }
 }
 

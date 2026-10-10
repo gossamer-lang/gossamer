@@ -1256,6 +1256,8 @@ const SPECS: &[Spec] = &[
     // A spawned closure shares a binding nothing changes after the spawn
     // and snapshots one the spawning code still writes.
     spec("feature-testing-examples/spawn_shared_captures.gos"),
+    // A `let` that neither side can write shares the value it names.
+    spec("feature-testing-examples/immutable_let_shares.gos"),
     spec("feature-testing-examples/closure_capture_mutation.gos"),
     spec("feature-testing-examples/closure_lifetime_inference.gos"),
     spec("feature-testing-examples/closure_payload_typing.gos"),

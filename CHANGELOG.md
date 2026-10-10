@@ -1,8 +1,9 @@
 # Changelog
 
-## 0.71.1 - Goroutine value sharing
+## 0.71.1 - Goroutine and channel fixes
 
 - A spawned closure no longer copies a captured binding that nothing can change after the `spawn` (a parameter, or a `let` without `mut`): the goroutine reads that value directly. Each goroutine had taken a full copy, so spawning workers over one large read-only vector or matrix used memory and time that grew with the number of workers. A `mut` binding is still captured as a snapshot taken at the `spawn`.
+- `let b = a` no longer copies `a` when neither binding is declared `mut` and `a` is a parameter or a `let`: the two names read one value, as no write can reach either. Destructuring a struct parameter, `let Grid { rows, label } = g`, likewise shares its vector fields instead of copying them.
 - A channel counts its holders atomically from the moment it is made. A `spawn`'s join handle and a context's done channel are released from more than one goroutine without passing through a capture, so two releases at once could lose a count and keep the channel alive for the life of the process, or free it while a holder still used it, in native builds.
 
 ## 0.71.0 - Arena regions and bounds proofs that see through calls
