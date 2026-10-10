@@ -284,11 +284,25 @@ pub unsafe extern "C" fn gos_rt_set_mark_shared(set: *mut GosSet) {
     });
 }
 
-/// Boxes `set` as a runtime handle, counted by the leak ledger until
-/// [`gos_rt_set_free`](crate::c_abi::map::gos_rt_set_free) reclaims it.
+/// Boxes `set` as a runtime handle, or places it in the innermost open
+/// region, counted by the leak ledger until
+/// [`gos_rt_set_free`](crate::c_abi::map::gos_rt_set_free) or the region's pop
+/// reclaims it.
 fn set_handle(set: GosSet) -> *mut GosSet {
     crate::c_abi::ledger::set_inc();
-    Box::into_raw(Box::new(set))
+    crate::c_abi::rc::region_alloc_handle(set, finalize_region_set)
+        .unwrap_or_else(|set| Box::into_raw(Box::new(set)))
+}
+
+/// Drops a set its region placed, in place.
+///
+/// # Safety
+///
+/// `p` is a set `set_handle` placed in a region, finalized once, at its pop.
+unsafe fn finalize_region_set(p: *mut u8) {
+    crate::c_abi::ledger::set_dec();
+    // SAFETY: the set is dropped once, in place; its region reclaims the storage.
+    unsafe { std::ptr::drop_in_place(p.cast::<GosSet>()) };
 }
 
 #[unsafe(no_mangle)]
@@ -397,7 +411,9 @@ pub unsafe extern "C" fn gos_rt_set_field_clone(slot: *mut *mut GosSet) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_field_release(slot: *mut *mut GosSet) {
     ffi_entry!({
-        if slot.is_null() {
+        // A field of an aggregate in region storage is reclaimed by its
+        // region's pop, which may already have run.
+        if slot.is_null() || crate::c_abi::rc::in_region_arena(slot.cast()) {
             return;
         }
         // SAFETY: `slot` is non-null (checked above) and addresses a set field (this shim's

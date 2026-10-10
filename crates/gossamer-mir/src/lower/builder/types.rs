@@ -69,7 +69,7 @@ impl<'a> Builder<'a> {
         consts: &'a HashMap<gossamer_resolve::DefId, ConstValue>,
         mut_statics: &'a HashMap<gossamer_resolve::DefId, crate::ir::StaticRef>,
         const_inits: &'a HashMap<gossamer_resolve::DefId, HirExpr>,
-        region_unsafe: &'a std::collections::HashSet<gossamer_resolve::DefId>,
+        region_effects: &'a crate::lower::helpers::effects::ProgramEffects,
         effect_free_pair_keys: &'a HashMap<String, bool>,
     ) -> Self {
         Self {
@@ -95,7 +95,7 @@ impl<'a> Builder<'a> {
             consts,
             mut_statics,
             const_inits,
-            region_unsafe,
+            region_effects,
             effect_free_pair_keys,
             local_struct: HashMap::new(),
             mut_receiver_reloads: HashMap::new(),

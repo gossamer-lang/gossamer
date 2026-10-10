@@ -1307,7 +1307,9 @@ pub(crate) unsafe fn free_promoted_string(body: *mut c_char) {
 /// be distinguished without a generation-bearing carrier type.
 unsafe fn str_free_impl(s: *mut c_char, typed: bool) {
     ffi_entry!({
-        if s.is_null() {
+        // Region storage is reclaimed by its region's pop, which may already
+        // have run: the address alone decides, before any header is read.
+        if s.is_null() || crate::c_abi::rc::in_region_arena(s.cast()) {
             return;
         }
         let is_managed = if typed {

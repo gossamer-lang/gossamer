@@ -1374,7 +1374,7 @@ fn main() {
 }
 
 #[test]
-fn auto_regions_reject_early_exit_and_only_region_the_inner_nested_loop() {
+fn auto_regions_pop_on_every_early_exit_and_only_region_the_inner_nested_loop() {
     let early_exit = r"
 enum Node { Leaf(i64), Pair(Node, Node) }
 
@@ -1397,9 +1397,39 @@ fn main() {
         .find(|body| body.name == "main")
         .expect("main");
     let names = call_names(main);
+    let count = |sym: &str| names.iter().filter(|name| name.as_str() == sym).count();
+    assert_eq!(count("gos_rt_arena_push"), 1, "{names:?}");
+    assert_eq!(
+        count("gos_rt_arena_pop"),
+        2,
+        "the break edge and the fall-through each pop the region: {names:?}"
+    );
+
+    let heap_break = r"
+enum Node { Leaf(i64), Pair(Node, Node) }
+
+fn build(depth: i64) -> Node {
+    if depth == 0 { return Node::Leaf(1) }
+    Node::Pair(build(depth - 1), build(depth - 1))
+}
+
+fn main() {
+    let found = loop {
+        let tree = build(3)
+        break tree
+    }
+    println(found)
+}
+";
+    let (bodies, _) = build(heap_break);
+    let main = bodies
+        .iter()
+        .find(|body| body.name == "main")
+        .expect("main");
+    let names = call_names(main);
     assert!(
         !names.iter().any(|name| name == "gos_rt_arena_push"),
-        "an early exit must not leave an automatic region open: {names:?}"
+        "a break carrying a region value out must keep the loop unregioned: {names:?}"
     );
 
     let nested = r"

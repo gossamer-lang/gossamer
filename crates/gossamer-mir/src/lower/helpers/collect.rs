@@ -1267,7 +1267,7 @@ pub(crate) fn collect_item(
     consts: &HashMap<gossamer_resolve::DefId, ConstValue>,
     mut_statics: &HashMap<gossamer_resolve::DefId, crate::ir::StaticRef>,
     const_inits: &HashMap<gossamer_resolve::DefId, HirExpr>,
-    region_unsafe: &std::collections::HashSet<gossamer_resolve::DefId>,
+    region_effects: &crate::lower::helpers::effects::ProgramEffects,
     effect_free_pair_keys: &HashMap<String, bool>,
     out: &mut Vec<Body>,
 ) {
@@ -1309,7 +1309,7 @@ pub(crate) fn collect_item(
                 consts,
                 mut_statics,
                 const_inits,
-                region_unsafe,
+                region_effects,
                 effect_free_pair_keys,
             ) {
                 out.push(body);
@@ -1360,7 +1360,7 @@ pub(crate) fn collect_item(
                     consts,
                     mut_statics,
                     const_inits,
-                    region_unsafe,
+                    region_effects,
                     effect_free_pair_keys,
                 ) {
                     out.push(body);
@@ -1391,7 +1391,7 @@ pub(crate) fn collect_item(
                         consts,
                         mut_statics,
                         const_inits,
-                        region_unsafe,
+                        region_effects,
                         effect_free_pair_keys,
                     ) {
                         out.push(body);
@@ -1428,7 +1428,7 @@ pub(crate) fn lower_fn(
     consts: &HashMap<gossamer_resolve::DefId, ConstValue>,
     mut_statics: &HashMap<gossamer_resolve::DefId, crate::ir::StaticRef>,
     const_inits: &HashMap<gossamer_resolve::DefId, HirExpr>,
-    region_unsafe: &std::collections::HashSet<gossamer_resolve::DefId>,
+    region_effects: &crate::lower::helpers::effects::ProgramEffects,
     effect_free_pair_keys: &HashMap<String, bool>,
 ) -> Option<Body> {
     let body = decl.body.as_ref()?;
@@ -1449,7 +1449,7 @@ pub(crate) fn lower_fn(
         consts,
         mut_statics,
         const_inits,
-        region_unsafe,
+        region_effects,
         effect_free_pair_keys,
     );
     // A const generic array return (`-> [T; N]`) is carried as a runtime

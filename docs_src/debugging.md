@@ -43,3 +43,40 @@ debugger.
 
 `lldb` works the same way: `lldb ./target/debug/main`, then
 `breakpoint set --name area`, `run`, and `frame variable`.
+
+## Optimization remarks
+
+Two variables make `gos build --release` explain what it did with a loop,
+one line per site, with the file, line, and column it was written at.
+Setting either makes the build skip its artifact cache, so the remarks always
+describe the compile that just ran.
+
+`GOS_BOUNDS_REMARKS=1` reports every index access `xs[i]` on a vector of
+scalars: whether its bounds check was removed, versioned (an unchecked copy of
+the loop runs behind one check at loop entry, with the checked loop as the
+fallback), or kept. A check inside a `for i in 0..xs.len()` loop that stays
+because something in the loop could change the vector's length names that
+construct:
+
+```text
+[bounds] main.gos:12:19: index check removed in `kernel`
+[bounds] main.gos:24:17: index check kept in `rebuild`: `grow` may resize the vector
+```
+
+A call inside such a loop keeps the proof when the called function cannot
+change the length of the vector it is handed, however deep the calls go, and a
+function whose every caller indexes it with a loop counter below the vector's
+length gets the same proof for its own `xs[i]`.
+
+`GOS_ARENA_TRACE=1` reports which loop and closure bodies were given an
+automatic arena region, and why an allocating one was not; see
+[Automatic arenas](language/arena.md#automatic-arenas-no-annotation-needed).
+
+## Arena memory after its block
+
+An arena's memory is unreadable once its block ends, on every platform: a
+program that still read it would crash. `GOS_ARENA_POISON=1` also stops the
+runtime from keeping a finished arena's memory for the next one, so that
+such a read crashes every time rather than only when the memory was not
+reused. It is meant for chasing a crash near an `arena { }` block or a loop
+`GOS_ARENA_TRACE` reports as auto-regioned.

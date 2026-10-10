@@ -219,6 +219,7 @@ impl<'a> Builder<'a> {
         }
         let regioned = self.begin_loop_region(body, span);
         self.loop_stack.push(LoopContext {
+            region: self.loop_region_slot(regioned),
             continue_to: step_block,
             break_to: exit,
             result: None,
@@ -440,6 +441,7 @@ impl<'a> Builder<'a> {
 
         let regioned = self.begin_loop_region(body, span);
         self.loop_stack.push(LoopContext {
+            region: self.loop_region_slot(regioned),
             continue_to: step_block,
             break_to: exit,
             result: None,
@@ -675,6 +677,7 @@ impl<'a> Builder<'a> {
         }
         let regioned = self.begin_loop_region(body, span);
         self.loop_stack.push(LoopContext {
+            region: self.loop_region_slot(regioned),
             continue_to: step_block,
             break_to: exit,
             result: None,
@@ -1019,6 +1022,7 @@ impl<'a> Builder<'a> {
         // advance the counter, so it lands on `step_block`, not
         // on `header` directly. `break` exits the loop entirely.
         self.loop_stack.push(LoopContext {
+            region: self.loop_region_slot(regioned),
             continue_to: step_block,
             break_to: exit,
             result: None,
@@ -1203,6 +1207,7 @@ impl<'a> Builder<'a> {
         }
         let regioned = self.begin_loop_region(body, span);
         self.loop_stack.push(LoopContext {
+            region: self.loop_region_slot(regioned),
             continue_to: step_block,
             break_to: exit,
             result: None,
@@ -1312,6 +1317,7 @@ impl<'a> Builder<'a> {
             }
             let regioned = self.begin_loop_region(body, span);
             self.loop_stack.push(LoopContext {
+                region: self.loop_region_slot(regioned),
                 continue_to: next,
                 break_to: exit,
                 result: None,
@@ -1406,6 +1412,7 @@ impl<'a> Builder<'a> {
         let step_block = self.new_block(span);
         let regioned = self.begin_loop_region(body, span);
         self.loop_stack.push(LoopContext {
+            region: self.loop_region_slot(regioned),
             continue_to: step_block,
             break_to: exit,
             result: None,

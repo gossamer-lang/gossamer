@@ -215,9 +215,13 @@ pub(super) unsafe fn copy_blob_owner(payload: *mut u8) -> Option<&'static CopyBl
 /// Whether `payload` is a live copy blob's payload. The arena holds only copy
 /// blobs, each a header followed by its payload, so a word-aligned address
 /// whose header lies in it needs only the header's own marks; anywhere else
-/// the owner tag decides.
+/// the owner tag decides. Region storage is never a counted blob: its
+/// region's pop reclaims it, possibly already, so its bytes are never read.
 #[inline]
 pub(super) unsafe fn is_copy_blob(payload: *mut u8) -> bool {
+    if in_region_arena(payload) {
+        return false;
+    }
     let header = payload.wrapping_sub(RC_HEADER_SIZE).cast::<RcHeader>();
     if in_copy_blob_arena(header.cast()) {
         return (payload as usize).is_multiple_of(std::mem::align_of::<usize>())
@@ -262,9 +266,9 @@ pub(super) fn owner_blob_header(total: usize, zeroed: bool) -> *mut RcHeader {
     reason = "the per-node child walk of every guarded teardown: left to the heuristic, LLVM keeps it out of line, which callgrind measured as a call per node on a tree workload"
 )]
 #[inline(always)]
-/// Whether a structural `meta` names a `Map` child. A map is never allocated in
-/// a region, so a blob whose words name one cannot take the region's no-owner
-/// shortcut: its copy needs a table of its own and a release that frees it.
+/// Whether a structural `meta` names a `Map` child. A blob whose words name one
+/// cannot take the region's no-owner shortcut: its copy clones the map into a
+/// table of its own, which the copy's release has to free.
 ///
 /// # Safety
 /// `meta` must be null or a well-formed RC meta blob.
@@ -652,7 +656,9 @@ pub(crate) unsafe fn release_blob_moved(payload: *mut u8) {
 /// (a stack aggregate dying or being overwritten). Null-safe.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_aggr_release_children(base: *mut u8, meta: *const i64) {
-    if base.is_null() || meta.is_null() {
+    // An aggregate in region storage is reclaimed, children and all, by its
+    // region's pop, which may already have run.
+    if base.is_null() || meta.is_null() || in_region_arena(base) {
         return;
     }
     // SAFETY: `base` and `meta` are this shim's arguments, non-null (checked above), with `base`
@@ -852,7 +858,9 @@ pub unsafe extern "C" fn gos_rt_aggr_zero_guarded(base: *mut u8, meta: *const i6
 /// overwritten, or an owning field slot is replaced. Null-safe.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_option_slot_release(slot: *const i64) {
-    if slot.is_null() {
+    // A slot or payload in region storage is reclaimed by its region's pop,
+    // which may already have run: the addresses decide before either is read.
+    if slot.is_null() || in_region_arena(slot.cast()) {
         return;
     }
     // SAFETY: `slot` is this shim's two-word carrier argument, non-null (checked above; C-ABI

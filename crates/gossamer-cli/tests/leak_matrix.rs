@@ -432,6 +432,78 @@ fn main() {
 "#,
     ),
     (
+        "arena_held_handles",
+        r"
+enum Holder { Has(Map<i64, i64>), Nothing }
+fn main() {
+    let mut t = 0
+    for i in 0..2000 {
+        arena {
+            let mut m: Map<i64, i64> = Map::new()
+            m.insert(i, i)
+            let v = #[m]
+            let mut s = Set::new()
+            s.insert(i)
+            let sets = #[s]
+            let mut q: Deque<i64> = Deque::new()
+            q.push_back(i)
+            let qs = #[q]
+            let mut m2: Map<i64, i64> = Map::new()
+            m2.insert(i, i + 1)
+            let h = Holder::Has(m2)
+            let held = match h { Holder::Has(x) => x.len(), Holder::Nothing => 0 }
+            t += v.len() + sets.len() + qs.len() + held
+        }
+    }
+    println(t)
+}
+",
+    ),
+    (
+        "auto_region_map_containers",
+        r#"
+enum Box2 { Has(Map<i64, i64>), Empty }
+fn size(b: Box2) -> i64 {
+    match b { Box2::Has(m) => m.len(), Box2::Empty => 0 }
+}
+fn main() {
+    let mut t = 0
+    for i in 0..2000 {
+        let mut m: Map<i64, i64> = Map::new()
+        m.insert(i, i)
+        t += size(Box2::Has(m))
+    }
+    for i in 0..2000 {
+        let mut v: Vec<Map<i64, i64>> = Vec::new()
+        v.push(Map::new())
+        let label = f"{i}"
+        t += v.len() + label.len()
+    }
+    println(t)
+}
+"#,
+    ),
+    (
+        "arena_held_json_and_iterators",
+        r#"
+use std::encoding::json
+fn main() {
+    let mut t = 0
+    for i in 0..400000 {
+        arena {
+            let doc = json::parse(f"{{\"a\": {i}}}").unwrap()
+            let docs = #[doc]
+            let xs = #[1, 2, 3]
+            let it = xs.iter().map(|x| x + i)
+            let its = #[it]
+            t += docs.len() + its.len()
+        }
+    }
+    println(t)
+}
+"#,
+    ),
+    (
         "caught_panic_frames",
         r#"
 fn work(fail: bool) -> i64 {

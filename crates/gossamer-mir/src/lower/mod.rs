@@ -463,7 +463,7 @@ pub(crate) struct ProgramTables {
     consts: HashMap<gossamer_resolve::DefId, ConstValue>,
     mut_statics: HashMap<gossamer_resolve::DefId, crate::ir::StaticRef>,
     const_inits: HashMap<gossamer_resolve::DefId, HirExpr>,
-    region_unsafe: std::collections::HashSet<gossamer_resolve::DefId>,
+    region_effects: crate::lower::helpers::effects::ProgramEffects,
     effect_free_pair_keys: HashMap<String, bool>,
 }
 
@@ -496,7 +496,7 @@ impl ProgramTables {
             mut_statics,
             const_inits: collect_const_init_exprs(program),
             // Conservative escape summary driving automatic arena regions.
-            region_unsafe: collect_region_unsafe_fns(program, tcx),
+            region_effects: crate::lower::helpers::effects::collect_program_effects(program, tcx),
             fn_param_shareable: collect_shareable_params(program, tcx),
             effect_free_pair_keys: collect_effect_free_pair_keys(program),
         }
@@ -525,7 +525,7 @@ impl ProgramTables {
             &self.consts,
             &self.mut_statics,
             &self.const_inits,
-            &self.region_unsafe,
+            &self.region_effects,
             &self.effect_free_pair_keys,
             out,
         );
@@ -557,7 +557,7 @@ impl ProgramTables {
             &self.consts,
             &self.mut_statics,
             &self.const_inits,
-            &self.region_unsafe,
+            &self.region_effects,
             &self.effect_free_pair_keys,
         )
     }

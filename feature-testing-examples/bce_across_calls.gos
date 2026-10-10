@@ -1,0 +1,69 @@
+// Bounds checks inside `for i in 0..xs.len()` survive or fall depending on
+// what the calls in the loop can do to `xs`: a callee that only reads it, a
+// callee working on its own copy, and a `&mut` callee that writes elements
+// keep the length; a `&mut` callee that grows the vector does not. A helper
+// every caller indexes with the loop counter gets the proof for its own
+// `xs[i]`. Every tier must print the same lines.
+
+fn weigh(xs: Vec<i64>, k: i64) -> i64 {
+    let mut acc = 0
+    let mut j = 0
+    while j < 8 {
+        if k % 3 == 0 { acc += j * k } else if k % 5 == 0 { acc -= j } else { acc += k ^ j }
+        if acc > 1000000 { acc = acc % 9973 }
+        j += 1
+    }
+    acc + xs.len()
+}
+
+fn bump(mut ys: Vec<i64>, k: i64) -> i64 {
+    ys.push(k)
+    ys.len() + k
+}
+
+fn touch(ys: &mut Vec<i64>, k: i64) -> i64 {
+    ys[0] = ys[0] + 1
+    k * 2
+}
+
+fn stretch(ys: &mut Vec<i64>, k: i64) -> i64 {
+    if k % 4 == 0 { ys.push(k) }
+    k
+}
+
+fn process(xs: Vec<i64>, i: i64) -> i64 {
+    let mut acc = xs[i]
+    let mut j = 0
+    while j < 6 {
+        acc = (acc * 31 + j) % 1000003
+        if acc % 7 == 3 { acc += xs[i] }
+        j += 1
+    }
+    acc + xs[i]
+}
+
+fn main() {
+    let mut xs: Vec<i64> = Vec::new()
+    for i in 0..200 { xs.push(i * 7 % 13) }
+
+    let mut a = 0
+    for i in 0..xs.len() { a +%= xs[i] + weigh(xs, i) }
+    println(f"by value {a}")
+
+    let mut b = 0
+    for i in 0..xs.len() { b +%= xs[i] + bump(xs, i) }
+    println(f"own copy {b} len {xs.len()}")
+
+    let mut c = 0
+    for i in 0..xs.len() { c +%= xs[i] + touch(&mut xs, i) }
+    println(f"element writes {c} first {xs[0]}")
+
+    let mut d = 0
+    let mut grown = xs
+    for i in 0..grown.len() { d +%= grown[i] + stretch(&mut grown, i) }
+    println(f"growth {d} len {grown.len()}")
+
+    let mut e = 0
+    for i in 0..xs.len() { e +%= process(xs, i) }
+    println(f"entry range {e}")
+}

@@ -277,10 +277,14 @@ unsafe fn arena_commit(p: *mut u8, len: usize) -> bool {
 /// contents nothing reads again before they are written.
 #[cfg(unix)]
 unsafe fn arena_decommit(p: *mut u8, len: usize) {
-    // Return the physical pages; keep the address range reserved.
+    // Return the physical pages and make the range inaccessible until
+    // `arena_commit` takes it again, as a decommit does on Windows: a read
+    // of retired region memory faults on every platform rather than
+    // answering zeros on this one.
     // SAFETY: range lies inside our reservation.
     unsafe {
         libc::madvise(p.cast(), len, libc::MADV_DONTNEED);
+        libc::mprotect(p.cast(), len, libc::PROT_NONE);
     }
 }
 
@@ -456,6 +460,9 @@ pub(super) unsafe fn arena_retire(p: *mut u8, slab_size: usize) {
     }
 }
 
+/// Releases what a runtime handle placed in region storage holds.
+type Finalizer = unsafe fn(*mut u8);
+
 struct RegionSlabs {
     /// `(base, layout_size)` for each slab, freed at pop.
     slabs: Vec<(*mut u8, usize)>,
@@ -470,6 +477,16 @@ struct RegionSlabs {
     /// to the heap so a recycled slab cannot land on its own source, and the
     /// slab sweep at pop cannot reclaim it. Freed one by one at pop.
     promoted: Vec<*mut std::ffi::c_char>,
+    /// Element buffers of this region's vectors too large to bump-allocate,
+    /// as `(buffer, bytes)`. They come from the allocator, so a slab never
+    /// holds one and a freed one is reused by the next iteration; a growing
+    /// vector replaces its entry rather than abandoning the old buffer.
+    /// Freed one by one at pop.
+    buffers: Vec<(*mut u8, usize)>,
+    /// Runtime handles placed in this region's storage by
+    /// [`region_alloc_handle`], each with the function that releases what it
+    /// holds. Run at pop, last created first, before the slabs go.
+    finalizers: Vec<(*mut u8, Finalizer)>,
 }
 
 /// Arena state owned by one running goroutine.
@@ -808,6 +825,8 @@ pub extern "C" fn gos_rt_arena_push() {
             saved: BumpState::EMPTY,
             objs: 0,
             promoted: Vec::new(),
+            buffers: Vec::new(),
+            finalizers: Vec::new(),
         });
     });
     BUMP.with(|b| b.set(BumpState::EMPTY));
@@ -822,6 +841,95 @@ pub(crate) fn region_track_promoted(body: *mut std::ffi::c_char) {
             top.promoted.push(body);
         }
     });
+}
+
+/// Places `value`, a runtime handle such as a map or set, in the innermost
+/// open region, to be finalized by `finalize` at that region's pop. A handle
+/// created while a region runs belongs to the region like every other value
+/// made there: a region object can hold it, and the bulk free at pop must
+/// release what it holds. Living in region storage, it answers the same
+/// address test every free path makes, so a release after the pop reads
+/// nothing. Gives `value` back when no region is open or its alignment
+/// exceeds the region's.
+pub(crate) fn region_alloc_handle<T>(value: T, finalize: Finalizer) -> Result<*mut T, T> {
+    if std::mem::align_of::<T>() > RC_ALIGN {
+        return Err(value);
+    }
+    let p = region_alloc_bytes(std::mem::size_of::<T>().max(1));
+    if p.is_null() {
+        return Err(value);
+    }
+    let handle = p.cast::<T>();
+    // SAFETY: `p` is fresh region storage of `T`'s size at `RC_ALIGN`, which
+    // covers `T`'s alignment (checked above).
+    unsafe { handle.write(value) };
+    REGIONS.with(|r| {
+        if let Some(top) = r.borrow_mut().last_mut() {
+            top.finalizers.push((p, finalize));
+        }
+    });
+    Ok(handle)
+}
+
+/// Vec element buffers at least this large belong to the allocator rather
+/// than to a slab: bump allocation buys a single large buffer nothing, and a
+/// slab sized for one is decommitted at every pop and faulted back in by the
+/// next iteration.
+const REGION_BUFFER_BYTES: usize = 64 << 10;
+
+/// Whether a region vector's buffer of `bytes` is one the region owns
+/// through [`region_own_buffer`] rather than bump-allocates.
+pub(crate) fn region_owns_buffers_of(bytes: usize) -> bool {
+    bytes >= REGION_BUFFER_BYTES
+}
+
+/// Records `buf`, an allocator buffer of `bytes`, as owned by the innermost
+/// region, to be freed at its pop.
+pub(crate) fn region_own_buffer(buf: *mut u8, bytes: usize) {
+    REGIONS.with(|r| {
+        if let Some(top) = r.borrow_mut().last_mut() {
+            top.buffers.push((buf, bytes));
+        }
+    });
+}
+
+/// Replaces `old`, a buffer an open region owns, with `new` of `bytes` in
+/// that same region, innermost first; `false` when no open region owns
+/// `old`. The replacement stays with the region the vector belongs to,
+/// whichever region is innermost when it grows.
+pub(crate) fn region_replace_buffer(old: *mut u8, new: *mut u8, bytes: usize) -> bool {
+    REGIONS.with(|r| {
+        let mut regions = r.borrow_mut();
+        for region in regions.iter_mut().rev() {
+            if let Some(entry) = region.buffers.iter_mut().find(|(p, _)| *p == old) {
+                *entry = (new, bytes);
+                return true;
+            }
+        }
+        false
+    })
+}
+
+/// Removes `buf` from whichever open region owns it, without freeing it,
+/// for the caller to free; `false` when no open region owns `buf`.
+pub(crate) fn region_disown_buffer(buf: *mut u8) -> bool {
+    REGIONS.with(|r| {
+        for region in r.borrow_mut().iter_mut().rev() {
+            if let Some(i) = region.buffers.iter().position(|(p, _)| *p == buf) {
+                region.buffers.swap_remove(i);
+                return true;
+            }
+        }
+        false
+    })
+}
+
+/// Whether `GOS_ARENA_POISON` asks every pop to retire its slabs rather than
+/// keep them for the next region, so that any read of a region's memory
+/// after its pop faults instead of finding a recycled slab.
+fn arena_poison() -> bool {
+    static POISON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *POISON.get_or_init(|| std::env::var_os("GOS_ARENA_POISON").is_some())
 }
 
 /// Close the innermost region: free/recycle every slab in O(slabs). No
@@ -851,6 +959,19 @@ pub extern "C" fn gos_rt_arena_pop() {
         // analysis is what licenses the region), and is freed once, here.
         unsafe { crate::c_abi::string::free_promoted_string(body) };
     }
+    for (handle, finalize) in region.finalizers.into_iter().rev() {
+        // SAFETY: each handle was placed by `region_alloc_handle` with its own
+        // finalizer while this region was open, is reachable from nothing
+        // after the pop, and is finalized once, here, before its slab goes.
+        unsafe { finalize(handle) };
+    }
+    for (buf, bytes) in region.buffers {
+        // SAFETY: each buffer was recorded by `region_own_buffer` or
+        // `region_replace_buffer` with the size `alloc_vec_buffer` gave it,
+        // belongs to a vector of this region that nothing reaches after the
+        // pop, and is freed once, here.
+        unsafe { crate::c_abi::vec::free_vec_buffer(buf, bytes) };
+    }
     if rc_live_enabled() {
         #[cfg(test)]
         let _guard = rc_live_mutation_guard();
@@ -861,11 +982,15 @@ pub extern "C" fn gos_rt_arena_pop() {
         .iter()
         .filter(|(_, size)| *size == REGION_SLAB_BYTES)
         .count();
-    let retain = SLAB_RETAIN.with(|r| {
-        let widened = r.get().max(width).min(FREE_SLAB_CEILING);
-        r.set(widened);
-        widened
-    });
+    let retain = if arena_poison() {
+        0
+    } else {
+        SLAB_RETAIN.with(|r| {
+            let widened = r.get().max(width).min(FREE_SLAB_CEILING);
+            r.set(widened);
+            widened
+        })
+    };
     for (base, size) in region.slabs {
         // Recycle standard-size slabs into the thread-local pool so the
         // next region of this width reuses them without an mmap.

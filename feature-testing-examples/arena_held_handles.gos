@@ -1,0 +1,66 @@
+// Maps, sets, deques, JSON values, and lazy iterators made inside an
+// `arena { }` block belong to it: one held by another arena value - a
+// vector element, an enum payload - is released at the closing brace with
+// everything else, and a release after the block reads nothing of it.
+// Every tier must print the same lines.
+
+use std::encoding::json
+
+enum Holder { Has(Map<i64, i64>), Nothing }
+
+fn weigh(h: Holder) -> i64 {
+    match h {
+        Holder::Has(m) => m.len()
+        Holder::Nothing => 0
+    }
+}
+
+fn round(i: i64) -> i64 {
+    let mut t = 0
+    arena {
+        let mut m: Map<i64, i64> = Map::new()
+        m.insert(i, i * 2)
+        m.insert(i + 1, i * 3)
+        let maps = #[m]
+        let mut s = Set::new()
+        s.insert(i)
+        s.insert(i + 7)
+        let sets = #[s]
+        let mut q: Deque<i64> = Deque::new()
+        q.push_back(i)
+        q.push_front(i - 1)
+        let queues = #[q]
+        let mut inner: Map<i64, i64> = Map::new()
+        inner.insert(i, 1)
+        let held = weigh(Holder::Has(inner))
+        let doc = json::parse(f"{{\"n\": {i}}}").unwrap()
+        let docs = #[doc]
+        let xs = #[1, 2, 3]
+        let it = xs.iter().map(|x| x * i)
+        let iters = #[it]
+        t = maps[0].len() + sets[0].len() + queues[0].len() + held + docs.len() + iters.len()
+    }
+    t
+}
+
+fn checksum(seed: i64, n: i64) -> i64 {
+    let mut s = seed
+    for k in 0..n {
+        s = (s *% 31 +% k) % 1000003
+    }
+    s
+}
+
+fn main() {
+    let mut total = 0
+    for i in 0..400 {
+        total += round(i)
+    }
+    println(f"total {total} checksum {checksum(total, 200000)}")
+    let mut tags = #[]
+    for i in 0..3 {
+        let label = f"tag-{i}"
+        tags.push(label.len())
+    }
+    println(f"tags {tags}")
+}

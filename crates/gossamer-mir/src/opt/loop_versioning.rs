@@ -351,22 +351,45 @@ fn bound_traces_to_len(
     }
 }
 
-/// Verifies the indexed vec `xs` is not mutated, reassigned, aliased, or
-/// captured anywhere in the loop. Inside the loop `xs` may appear only as
-/// the receiver (first argument) of an indexed get/set or a length read;
-/// any other appearance (a push/pop, a copy, a borrow, a user call, a
-/// reassignment) is disqualifying.
-fn verify_vec_unmodified(body: &Body, region: &[usize], header: usize, xs: Local) -> bool {
+/// Verifies the indexed vec `xs` keeps its length through the loop: it is
+/// not resized, reassigned, aliased, or captured anywhere in it.
+fn verify_vec_unmodified(
+    body: &Body,
+    effects: &ProgramEffects,
+    region: &[usize],
+    header: usize,
+    xs: Local,
+) -> bool {
+    vec_length_blocker(body, effects, region, header, xs).is_none()
+}
+
+/// The first construct in the loop that may change `xs`'s length, named for
+/// a bounds remark, or `None` when nothing can. Inside the loop `xs` may
+/// appear as the receiver of an indexed get/set, a length read, or a copy,
+/// or as the argument of a Gossamer function whose summary leaves that
+/// parameter's length alone.
+fn vec_length_blocker(
+    body: &Body,
+    effects: &ProgramEffects,
+    region: &[usize],
+    header: usize,
+    xs: Local,
+) -> Option<String> {
     let in_loop = |b: usize| b == header || region.contains(&b);
+    let family = vec_family(body, region, header, xs);
+    let mentions = |stmt: &Statement| family.iter().any(|&m| stmt_mentions_local(stmt, m));
     for (bi, block) in body.blocks.iter().enumerate() {
         if !in_loop(bi) {
             continue;
         }
         for stmt in &block.stmts {
-            if stmt_mentions_local(stmt, xs) {
-                return false;
+            if mentions(stmt) && !defines_family_member(stmt, &family) {
+                return Some("a statement uses the vector".to_string());
             }
         }
+        let term_mentions = family
+            .iter()
+            .any(|&m| term_mentions_local(&block.terminator, m));
         match &block.terminator {
             Terminator::Call {
                 callee: Operand::Const(ConstValue::Str(name)),
@@ -374,27 +397,206 @@ fn verify_vec_unmodified(body: &Body, region: &[usize], header: usize, xs: Local
                 destination,
                 ..
             } if is_receiver_safe_call(name) => {
-                if destination.local == xs && destination.projection.is_empty() {
-                    return false;
+                if family.contains(&destination.local) && destination.projection.is_empty() {
+                    return Some(format!("`{name}` writes the vector"));
                 }
-                // `xs` may appear only as arg0 (the receiver).
-                for (i, a) in args.iter().enumerate() {
-                    if i == 0 {
-                        continue;
-                    }
-                    if operand_mentions_local(a, xs) {
-                        return false;
-                    }
+                // A member may appear only as arg0 (the receiver).
+                if args
+                    .iter()
+                    .skip(1)
+                    .any(|a| family.iter().any(|&m| operand_mentions_local(a, m)))
+                {
+                    return Some(format!("`{name}` takes the vector as an argument"));
                 }
             }
-            other => {
-                if term_mentions_local(other, xs) {
-                    return false;
+            Terminator::Call {
+                callee,
+                args,
+                destination,
+                ..
+            } if term_mentions => {
+                if let Err(reason) =
+                    call_keeps_vec_length(effects, callee, args, destination, &family)
+                {
+                    return Some(reason);
+                }
+            }
+            _ if term_mentions => return Some("control flow uses the vector".to_string()),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `xs` and every local the loop defines once as a bare copy of a member,
+/// transitively: an inlined parameter, or a `let` naming the same vector
+/// inside the loop. Each copy is taken after the header compared against
+/// `xs`'s length, with `xs` unchanged since, so every member has that length
+/// while nothing in the loop resizes one.
+fn vec_family(body: &Body, region: &[usize], header: usize, xs: Local) -> Vec<Local> {
+    let in_loop = |b: usize| b == header || region.contains(&b);
+    let mut family = vec![xs];
+    loop {
+        let mut grew = false;
+        for (bi, block) in body.blocks.iter().enumerate() {
+            if !in_loop(bi) {
+                continue;
+            }
+            for stmt in &block.stmts {
+                let StatementKind::Assign {
+                    place,
+                    rvalue: Rvalue::Use(Operand::Copy(src)),
+                } = &stmt.kind
+                else {
+                    continue;
+                };
+                if place.projection.is_empty()
+                    && src.projection.is_empty()
+                    && family.contains(&src.local)
+                    && !family.contains(&place.local)
+                    && definition_count(body, place.local) == 1
+                    && !address_taken(body, place.local)
+                {
+                    family.push(place.local);
+                    grew = true;
                 }
             }
         }
+        if !grew {
+            return family;
+        }
     }
-    true
+}
+
+/// Whether `stmt` is the copy that defines a member of `family` from another.
+fn defines_family_member(stmt: &Statement, family: &[Local]) -> bool {
+    matches!(
+        &stmt.kind,
+        StatementKind::Assign {
+            place,
+            rvalue: Rvalue::Use(Operand::Copy(src)),
+        } if place.projection.is_empty()
+            && src.projection.is_empty()
+            && family.contains(&place.local)
+            && family.contains(&src.local)
+            && place.local != src.local
+    )
+}
+
+/// How many statements and call destinations write `local` bare.
+fn definition_count(body: &Body, local: Local) -> usize {
+    body.blocks
+        .iter()
+        .map(|b| {
+            b.stmts.iter().filter(|s| stmt_writes_bare(s, local)).count()
+                + usize::from(term_writes_bare(&b.terminator, local))
+        })
+        .sum()
+}
+
+/// Whether a call that mentions a member of `family` leaves its length
+/// unchanged.
+fn call_keeps_vec_length(
+    effects: &ProgramEffects,
+    callee: &Operand,
+    args: &[Operand],
+    destination: &Place,
+    family: &[Local],
+) -> Result<(), String> {
+    let (def, symbol) = match callee {
+        Operand::FnRef { def, .. } => (Some(*def), String::new()),
+        Operand::Const(ConstValue::Str(name)) if is_gossamer_function_symbol(name) => {
+            (None, name.clone())
+        }
+        Operand::Const(ConstValue::Str(name)) => {
+            return Err(format!("`{name}` may change the vector"));
+        }
+        _ => return Err("an indirect call may change the vector".to_string()),
+    };
+    let label = || {
+        if symbol.is_empty() {
+            "a call".to_string()
+        } else {
+            format!("`{symbol}`")
+        }
+    };
+    if family.contains(&destination.local) {
+        return Err(format!("{} replaces the vector", label()));
+    }
+    let positions: Vec<usize> = args
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| family.iter().any(|&m| operand_mentions_local(a, m)))
+        .map(|(i, _)| i)
+        .collect();
+    if positions.iter().any(|&i| {
+        !matches!(&args[i], Operand::Copy(p) if family.contains(&p.local) && p.projection.is_empty())
+    }) {
+        return Err(format!("{} takes part of the vector", label()));
+    }
+    // A `&mut` container argument crosses as the handle itself, so a bare
+    // copy of `xs` reads the same whether the parameter is by value or by
+    // reference: only the callee's summary can say its length survives.
+    let Some(summary) = effects.of_symbol(def, &symbol, args.len()) else {
+        return Err(format!("{} is not summarised", label()));
+    };
+    if positions.iter().any(|&i| summary.param(i).resizes) {
+        return Err(format!("{} may resize the vector", label()));
+    }
+    Ok(())
+}
+
+/// For each index access inside a counted `for i in 0..xs.len()` loop whose
+/// vector the loop may resize, the construct that blocks the proof, keyed by
+/// the access's span. Feeds the bounds remarks.
+pub(crate) fn counted_loop_blockers(
+    body: &Body,
+    effects: &ProgramEffects,
+) -> HashMap<(u32, u32), String> {
+    let succs: Vec<Vec<usize>> = body
+        .blocks
+        .iter()
+        .map(|b| successor_indices(&b.terminator))
+        .collect();
+    let mut out = HashMap::new();
+    for h in 0..body.blocks.len() {
+        let Some(header) = recognise_counted_header(&body.blocks[h]) else {
+            continue;
+        };
+        let Some((region, _)) =
+            counted_loop_region(body, &succs, h, header.body_entry, header.exit)
+        else {
+            continue;
+        };
+        let Some(xs) = bound_traces_to_len(body, &region, h, header.bound) else {
+            continue;
+        };
+        let Some(reason) = vec_length_blocker(body, effects, &region, h, xs) else {
+            continue;
+        };
+        let family = vec_family(body, &region, h, xs);
+        for &b in &region {
+            let block = &body.blocks[b];
+            if let Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(name)),
+                args,
+                ..
+            } = &block.terminator
+                && matches!(name.as_str(), "gos_rt_vec_get_i64" | "gos_rt_vec_set_i64")
+                && matches!(args.first(), Some(Operand::Copy(p)) if family.contains(&p.local))
+            {
+                let span = block.terminator_span.unwrap_or(block.span);
+                out.entry((span.start, span.end)).or_insert_with(|| reason.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Whether a callee symbol names a Gossamer function rather than a runtime
+/// entry point, whose contract is per symbol.
+fn is_gossamer_function_symbol(name: &str) -> bool {
+    !name.starts_with("gos_rt_") && name != "gos_load" && name != "gos_store"
 }
 
 /// Runtime calls that read or write `xs` in place without changing its
@@ -411,6 +613,7 @@ fn is_receiver_safe_call(name: &str) -> bool {
             | "gos_rt_vec_swap_unchecked"
             | "gos_rt_vec_len"
             | "gos_rt_len"
+            | "gos_rt_vec_clone"
     )
 }
 
@@ -481,7 +684,7 @@ fn vec_elem_is_unchecked_scalar(body: &Body, tcx: &TyCtxt, xs: Local) -> bool {
 /// store/load is behaviour-identical to the checked one. Bails closed on
 /// anything unprovable; the compiled tiers that do not honour the
 /// unchecked form resolve it back to the checked symbol.
-pub(crate) fn bounds_check_elim(body: &mut Body, tcx: &TyCtxt) {
+pub(crate) fn bounds_check_elim(body: &mut Body, tcx: &TyCtxt, effects: &ProgramEffects) {
     let n_blocks = body.blocks.len();
     if n_blocks == 0 {
         return;
@@ -510,12 +713,13 @@ pub(crate) fn bounds_check_elim(body: &mut Body, tcx: &TyCtxt) {
         let Some(xs) = bound_traces_to_len(body, &region, h, header.bound) else {
             continue;
         };
-        if !verify_vec_unmodified(body, &region, h, xs) {
+        if !verify_vec_unmodified(body, effects, &region, h, xs) {
             continue;
         }
         if !vec_elem_is_unchecked_scalar(body, tcx, xs) {
             continue;
         }
+        let family = vec_family(body, &region, h, xs);
         for &b in &region {
             let Terminator::Call {
                 callee: Operand::Const(ConstValue::Str(name)),
@@ -534,8 +738,7 @@ pub(crate) fn bounds_check_elim(body: &mut Body, tcx: &TyCtxt) {
                 }
                 _ => continue,
             };
-            if !operand_mentions_local(&args[0], xs)
-                || !matches!(&args[0], Operand::Copy(p) if p.local == xs && p.projection.is_empty())
+            if !matches!(&args[0], Operand::Copy(p) if family.contains(&p.local) && p.projection.is_empty())
             {
                 continue;
             }
@@ -730,7 +933,11 @@ fn guarded_successor_has_no_vec_side_effects(block: &BasicBlock, xs: Local) -> b
 /// through a straight-line chain of side-effect-free access blocks, so
 /// repeated heap sift/BFS accesses do not each pay the same guard. It stops
 /// before any mutation, aliasing/unknown call, branch, or cycle.
-pub(crate) fn local_branch_bounds_check_elim(body: &mut Body, tcx: &TyCtxt) {
+pub(crate) fn local_branch_bounds_check_elim(
+    body: &mut Body,
+    tcx: &TyCtxt,
+    effects: &ProgramEffects,
+) {
     let mut rewrites: Vec<(usize, &'static str)> = Vec::new();
     for h in 0..body.blocks.len() {
         let Some((successor, fact)) = branch_bound_fact(body, h) else {
@@ -764,6 +971,10 @@ pub(crate) fn local_branch_bounds_check_elim(body: &mut Body, tcx: &TyCtxt) {
                     break;
                 }
                 current = target.0 as usize;
+                continue;
+            }
+            if let Some(next) = call_preserving_fact(body, effects, block, &fact) {
+                current = next;
                 continue;
             }
             let Terminator::Call {
@@ -825,6 +1036,75 @@ pub(crate) fn local_branch_bounds_check_elim(body: &mut Body, tcx: &TyCtxt) {
             *callee = Operand::Const(ConstValue::Str(name.to_string()));
         }
     }
+}
+
+/// The block a guarded fact flows into past `block`, when `block` ends in a
+/// call to a Gossamer function that can neither change the guarded vector's
+/// length nor write the locals the fact is about.
+fn call_preserving_fact(
+    body: &Body,
+    effects: &ProgramEffects,
+    block: &BasicBlock,
+    fact: &BranchBoundFact,
+) -> Option<usize> {
+    let Terminator::Call {
+        callee,
+        args,
+        destination,
+        target: Some(target),
+    } = &block.terminator
+    else {
+        return None;
+    };
+    match callee {
+        Operand::FnRef { .. } => {}
+        Operand::Const(ConstValue::Str(name)) if is_gossamer_function_symbol(name) => {}
+        // An automatic region opens, closes, or collects with no operands:
+        // it reaches neither the vector nor the guarded local.
+        Operand::Const(ConstValue::Str(name))
+            if args.is_empty()
+                && matches!(
+                    name.as_str(),
+                    "gos_rt_arena_push" | "gos_rt_arena_pop" | "gos_rt_collect_cycles"
+                ) => {}
+        _ => return None,
+    }
+    let (xs, guarded) = match fact {
+        BranchBoundFact::IndexLtLen { index, xs } => (*xs, *index),
+        BranchBoundFact::LenPositive { len, xs } => (*xs, *len),
+    };
+    let watched = [xs, guarded];
+    if block
+        .stmts
+        .iter()
+        .any(|stmt| watched.iter().any(|&l| stmt_mentions_local(stmt, l)))
+        || watched.iter().any(|&l| block_writes_local(block, l))
+        || watched.iter().any(|&l| address_taken(body, l))
+    {
+        return None;
+    }
+    // The guarded local crosses only as a by-value scalar, which the callee
+    // cannot write back.
+    if args.iter().any(|a| {
+        operand_mentions_local(a, guarded)
+            && !matches!(a, Operand::Copy(p) if p.local == guarded && p.projection.is_empty())
+    }) {
+        return None;
+    }
+    if term_mentions_local(&block.terminator, xs) {
+        call_keeps_vec_length(effects, callee, args, destination, &[xs]).ok()?;
+    }
+    Some(target.0 as usize)
+}
+
+/// Whether any statement of `body` takes a reference to `local`, through
+/// which a call could write it.
+fn address_taken(body: &Body, local: Local) -> bool {
+    body.blocks.iter().any(|block| {
+        block.stmts.iter().any(|stmt| {
+            matches!(&stmt.kind, StatementKind::Assign { rvalue: Rvalue::Ref { place, .. }, .. } if place.local == local)
+        })
+    })
 }
 
 /// A scalar vec element access that can be guarded once before a counted-loop
@@ -1364,20 +1644,21 @@ fn field_read_is_hoistable(
 /// vectoriser can prove independent. Semantics are preserved: the
 /// unchecked path runs only when every index is proven in `[0, len)`,
 /// matching the checked path's in-bounds behaviour exactly.
-pub(crate) fn bounds_check_versioning(body: &mut Body, tcx: &TyCtxt) {
-    bounds_check_versioning_with_limit(body, tcx, Some(versioning_candidate_limit()));
+pub(crate) fn bounds_check_versioning(body: &mut Body, tcx: &TyCtxt, effects: &ProgramEffects) {
+    bounds_check_versioning_with_limit(body, tcx, Some(versioning_candidate_limit()), effects);
 }
 
 pub(crate) fn bounds_check_versioning_with_limit(
     body: &mut Body,
     tcx: &TyCtxt,
     candidate_limit: Option<usize>,
+    effects: &ProgramEffects,
 ) {
     let headers: Vec<usize> = (0..body.blocks.len())
         .filter(|&h| recognise_counted_header(&body.blocks[h]).is_some())
         .collect();
     for h in headers {
-        try_version_loop(body, tcx, h, candidate_limit);
+        try_version_loop(body, tcx, h, candidate_limit, effects);
     }
 }
 
@@ -1403,6 +1684,7 @@ fn try_version_loop(
     tcx: &TyCtxt,
     h: usize,
     candidate_limit: Option<usize>,
+    effects: &ProgramEffects,
 ) {
     if h == 0 {
         return;
@@ -1441,7 +1723,7 @@ fn try_version_loop(
     }
 
     let loop_blocks: Vec<usize> = std::iter::once(h).chain(region.iter().copied()).collect();
-    let cands = collect_affine_candidates(body, tcx, h, counter, &region, &loop_blocks);
+    let cands = collect_affine_candidates(body, tcx, effects, h, counter, &region, &loop_blocks);
     if cands.is_empty() {
         return;
     }
@@ -1475,6 +1757,7 @@ fn index_call_arity(name: &str) -> usize {
 fn collect_affine_candidates(
     body: &Body,
     tcx: &TyCtxt,
+    effects: &ProgramEffects,
     h: usize,
     counter: Local,
     region: &[usize],
@@ -1503,7 +1786,7 @@ fn collect_affine_candidates(
         }
         let xs = recv.local;
         let ok = *verified.entry(xs).or_insert_with(|| {
-            verify_vec_unmodified(body, region, h, xs)
+            verify_vec_unmodified(body, effects, region, h, xs)
                 && vec_elem_is_unchecked_scalar(body, tcx, xs)
         });
         if !ok {

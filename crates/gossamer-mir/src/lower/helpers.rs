@@ -51,6 +51,7 @@ use super::*;
 
 mod collect;
 mod drops;
+pub mod effects;
 pub mod escape;
 mod for_loop;
 mod index;

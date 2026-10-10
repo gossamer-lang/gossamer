@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 gossamer-abi = { workspace = true }
+gossamer-lex = { workspace = true }
 gossamer-mir = { workspace = true }
 gossamer-resolve = { workspace = true }
 gossamer-types = { workspace = true }
@@ -22,7 +23,6 @@ sha2 = { workspace = true }
 wait-timeout = { workspace = true }
 
 [dev-dependencies]
-gossamer-lex = { workspace = true }
 gossamer-parse = { workspace = true }
 gossamer-hir = { workspace = true }
 gossamer-types = { workspace = true }

@@ -419,6 +419,7 @@ impl<'a> Builder<'a> {
         // Without this context the body's `break` / `continue` finds no
         // target: it reaches an outer loop's, or none at all.
         self.loop_stack.push(LoopContext {
+            region: self.loop_region_slot(regioned),
             continue_to: step_block,
             break_to: exit,
             result: None,
@@ -612,6 +613,7 @@ impl<'a> Builder<'a> {
         // Without this context the body's `break` / `continue` finds no
         // target: it reaches an outer loop's, or none at all.
         self.loop_stack.push(LoopContext {
+            region: self.loop_region_slot(regioned),
             continue_to: step_block,
             break_to: exit,
             result: None,
@@ -786,6 +788,7 @@ impl<'a> Builder<'a> {
         // Without this context the body's `break` / `continue` finds no
         // target: it reaches an outer loop's, or none at all.
         self.loop_stack.push(LoopContext {
+            region: self.loop_region_slot(regioned),
             continue_to: step_block,
             break_to: exit,
             result: None,

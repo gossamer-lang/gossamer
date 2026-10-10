@@ -1,0 +1,234 @@
+// Automatic arena regions under the per-parameter effect summaries: struct
+// literals and formatting inside the body, an outer receiver whose method
+// writes only scalars, continue/break/return carrying scalars out, nested
+// regioned loops, and fresh accumulators rebuilt each iteration all region;
+// pushing into an outer vec, growing an outer string, a method storing its
+// argument, a heap value leaving the loop, a getter's share of an outer value,
+// a callee keeping an outer value, and a callee filling an outer vec do not.
+// Every tier must print the same lines.
+
+struct Point { x: i64, y: i64, label: String }
+
+enum Node { Leaf(i64), Pair(Node, Node) }
+
+struct Rng { state: i64 }
+
+impl Rng {
+    fn next_int(&mut self, max: i64) -> i64 {
+        self.state = (self.state *% 1103515245 +% 12345) % 2147483648
+        if self.state < 0 { self.state = -self.state }
+        self.state % max
+    }
+}
+
+struct Bag { items: Vec<Point> }
+
+impl Bag {
+    fn add(&mut self, p: Point) { self.items.push(p) }
+    fn first_label(&self) -> String { self.items[0].label }
+    fn size(&self) -> i64 { self.items.len() }
+}
+
+struct Config { scale: i64, name: String }
+
+fn build(depth: i64) -> Node {
+    if depth == 0 { return Node::Leaf(1) }
+    Node::Pair(build(depth - 1), build(depth - 1))
+}
+
+fn count(n: Node) -> i64 {
+    match n {
+        Node::Leaf(v) => v
+        Node::Pair(a, b) => count(a) + count(b)
+    }
+}
+
+fn score(cfg: Config, p: Point) -> i64 { cfg.scale * (p.x + p.y) + cfg.name.len() + p.label.len() }
+
+fn wrap(cfg: Config) -> Vec<Config> { #[cfg] }
+
+fn fill(out: &mut Vec<Point>, n: i64) {
+    for i in 0..n { out.push(Point { x: i, y: i, label: f"p{i}" }) }
+}
+
+fn first_heavy(limit: i64) -> i64 {
+    for i in 0..100 {
+        let tree = build(3)
+        let c = count(tree)
+        if i == limit { return c + i }
+    }
+    -1
+}
+
+fn find_tree(limit: i64) -> Option<Node> {
+    for i in 0..100 {
+        let tree = build(2)
+        if i == limit { return Some(tree) }
+    }
+    None
+}
+
+fn main() {
+    let cfg = Config { scale: 3, name: "cfg" }
+    let mut rng = Rng { state: 7 }
+
+    // P1: struct literal with fresh fields consumed by a reading callee.
+    let mut s1 = 0
+    for i in 0..2000 {
+        let p = Point { x: i, y: i * 2, label: f"pt{i}" }
+        s1 += score(cfg, p)
+    }
+    println(f"p1 {s1}")
+
+    // P2: user method on an outer receiver that writes only scalars.
+    let mut s2 = 0
+    for i in 0..2000 {
+        let label = f"r{rng.next_int(100)}"
+        s2 += label.len() + i
+    }
+    println(f"p2 {s2}")
+
+    // P3: continue, Copy break.
+    let mut s3 = 0
+    let mut i = 0
+    while i < 5000 {
+        i += 1
+        let tree = build(2)
+        if i % 3 == 0 { continue }
+        s3 += count(tree)
+        if s3 > 6000 { break }
+    }
+    println(f"p3 {s3} {i}")
+
+    // P4: return of a Copy value from inside a regioned loop.
+    println(f"p4 {first_heavy(17)}")
+
+    // P5: nested loops, inner regioned.
+    let mut s5 = 0
+    for a in 0..20 {
+        let tag = f"outer{a}"
+        for b in 0..20 {
+            let t = build(2)
+            s5 += count(t) + b
+        }
+        s5 += tag.len()
+    }
+    println(f"p5 {s5}")
+
+    // P6: fresh accumulators rebuilt inside the iteration.
+    let mut s6 = 0
+    for i in 0..1000 {
+        let mut text = ""
+        text = text + f"a{i}"
+        text = text + "b"
+        let mut nums = Vec::new()
+        nums.push(i)
+        nums.push(i + 1)
+        s6 += text.len() + nums.len()
+    }
+    println(f"p6 {s6}")
+
+    // A1: fresh value pushed into an outer vec must survive.
+    let mut kept: Vec<Point> = Vec::new()
+    for i in 0..300 {
+        kept.push(Point { x: i, y: 0, label: f"k{i}" })
+    }
+    let mut a1 = 0
+    for p in kept { a1 += p.label.len() + p.x }
+    println(f"a1 {a1}")
+
+    // A2: an outer string grown inside the loop.
+    let mut log = ""
+    for i in 0..400 {
+        let piece = f"[{i}]"
+        log = log + piece
+    }
+    println(f"a2 {log.len()}")
+
+    // A3: a method storing its argument into an outer receiver.
+    let mut bag = Bag { items: Vec::new() }
+    for i in 0..200 {
+        bag.add(Point { x: i, y: i, label: f"b{i}" })
+    }
+    println(f"a3 {bag.size()} {bag.first_label()}")
+
+    // A4: a break carrying a heap value out.
+    let mut n = 0
+    let found = loop {
+        n += 1
+        let tree = build(2)
+        if n == 5 { break tree }
+    }
+    println(f"a4 {count(found)}")
+
+    // A5: a return of a fresh heap value.
+    match find_tree(9) {
+        Some(t) => println(f"a5 {count(t)}")
+        None => println("a5 none")
+    }
+
+    // A6: a getter answering a share of an outer value.
+    let mut a6 = 0
+    for i in 0..300 {
+        let first = bag.first_label()
+        let extra = f"{first}{i}"
+        a6 += extra.len()
+    }
+    println(f"a6 {a6}")
+
+    // A7: an outer value handed to a callee that keeps it.
+    let mut a7 = 0
+    for i in 0..300 {
+        let held = wrap(cfg)
+        let tag = f"{i}"
+        a7 += held.len() + tag.len()
+    }
+    println(f"a7 {a7}")
+
+    // A8: an outer vec filled through a &mut parameter.
+    let mut out: Vec<Point> = Vec::new()
+    for i in 0..30 {
+        let tmp = f"round{i}"
+        fill(&mut out, 3)
+        a7 += tmp.len()
+    }
+    println(f"a8 {out.len()} {out[89].label}")
+
+    // A9: a labeled break from an inner loop out of the regioned one.
+    let mut a9 = 0
+    'outer: for a in 0..50 {
+        let t = build(2)
+        a9 += count(t)
+        for b in 0..10 {
+            if a * 10 + b == 237 { break 'outer }
+            a9 += 1
+        }
+    }
+    println(f"a9 {a9}")
+
+    // A10: a shadowing binding from a match over an outer value.
+    let maybe = Some(Point { x: 1, y: 2, label: "outer" })
+    let mut a10 = 0
+    for i in 0..200 {
+        let p = Point { x: i, y: i, label: f"in{i}" }
+        match maybe {
+            Some(p) => {
+                let wrapped = #[p]
+                a10 += wrapped.len()
+            }
+            None => {}
+        }
+        a10 += p.x
+    }
+    println(f"a10 {a10}")
+
+    // A11: an outer vec of strings indexed and formatted each iteration.
+    let names = #["alpha", "beta", "gamma"]
+    let mut a11 = 0
+    for i in 0..3000 {
+        let s = names[i % 3]
+        let shown = f"{s}-{i}"
+        a11 += shown.len()
+    }
+    println(f"a11 {a11}")
+}

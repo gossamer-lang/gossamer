@@ -91,10 +91,10 @@ pub(crate) struct Builder<'a> {
     /// [`ConstValue`] cannot represent) re-lowers this expression at the
     /// reference site instead of falling through to the function-value path.
     pub(crate) const_inits: &'a HashMap<gossamer_resolve::DefId, HirExpr>,
-    /// Free functions that may let a value escape (spawn / channel / static
-    /// write / param-stash). A loop calling any of these is never
-    /// auto-regioned. See `collect_region_unsafe_fns`.
-    pub(crate) region_unsafe: &'a std::collections::HashSet<gossamer_resolve::DefId>,
+    /// What each function may do with its arguments, which decides whether a
+    /// call inside a loop body keeps the body eligible for an automatic arena
+    /// region. See `collect_program_effects`.
+    pub(crate) region_effects: &'a crate::lower::helpers::effects::ProgramEffects,
     /// Lifted one-parameter closures whose body has no observable effect,
     /// valued by whether the body reads the parameter's first tuple field.
     /// See `collect_effect_free_pair_keys`.
@@ -216,6 +216,10 @@ pub(crate) struct LoopContext {
     /// in frames at indices `>= defer_depth` (the blocks inside the loop body)
     /// before jumping, but not the loop's enclosing frames.
     pub(crate) defer_depth: usize,
+    /// The slot in `deferred_auto_region_collections` of the automatic arena
+    /// region the loop's body runs in, when it was regioned. Every edge that
+    /// leaves an iteration pops it.
+    pub(crate) region: Option<usize>,
 }
 
 /// The runtime conversion a value of this integer type renders through: an

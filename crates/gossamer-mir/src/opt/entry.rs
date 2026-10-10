@@ -10,6 +10,8 @@ use gossamer_types::{TyCtxt, TyKind};
 
 use gossamer_types::Ty;
 
+use crate::lower::helpers::effects::ProgramEffects;
+
 use crate::ir::{
     BasicBlock, BinOp, BlockId, Body, ConstValue, Local, LocalDecl, Operand, Place, Projection,
     Rvalue, Statement, StatementKind, Terminator,
@@ -67,20 +69,33 @@ fn callee_body_name(callee: &Operand, def_to_name: &HashMap<u32, String>) -> Opt
 /// into the two-constant form folding recognises. A second copy-prop
 /// pass after folding propagates the newly-created constants.
 pub fn optimise(body: &mut Body, tcx: &TyCtxt) {
-    optimise_with_bounds_limit(body, tcx, Some(versioning_candidate_limit()));
+    optimise_with_effects(body, tcx, &ProgramEffects::default());
+}
+
+/// [`optimise`] with the program's effect summaries, which let the bounds
+/// proofs see through calls whose callee leaves an indexed vector's length
+/// alone.
+pub fn optimise_with_effects(body: &mut Body, tcx: &TyCtxt, effects: &ProgramEffects) {
+    optimise_with_bounds_limit(body, tcx, Some(versioning_candidate_limit()), effects);
 }
 
 /// JIT preparation optimises for Cranelift promotion admission and hot-loop
 /// dispatch, where the unchecked clone is often required to make a body
 /// lowerable. Keep the general versioning pass aggressive for this path.
 pub fn optimise_for_jit(body: &mut Body, tcx: &TyCtxt) {
-    optimise_with_bounds_limit(body, tcx, None);
+    optimise_for_jit_with_effects(body, tcx, &ProgramEffects::default());
+}
+
+/// [`optimise_for_jit`] with the program's effect summaries.
+pub fn optimise_for_jit_with_effects(body: &mut Body, tcx: &TyCtxt, effects: &ProgramEffects) {
+    optimise_with_bounds_limit(body, tcx, None, effects);
 }
 
 fn optimise_with_bounds_limit(
     body: &mut Body,
     tcx: &TyCtxt,
     versioning_candidate_limit: Option<usize>,
+    effects: &ProgramEffects,
 ) {
     crate::verify::debug_verify_body(body);
     copy_propagate(body, tcx);
@@ -105,14 +120,14 @@ fn optimise_with_bounds_limit(
     tabulate_nested_row_reads(body, tcx);
     crate::verify::debug_verify_body(body);
     let bounds_before = bounds_access_counts(body);
-    bounds_check_elim(body, tcx);
+    bounds_check_elim(body, tcx, effects);
     let after_counted = bounds_access_counts(body);
     crate::verify::debug_verify_body(body);
-    local_branch_bounds_check_elim(body, tcx);
+    local_branch_bounds_check_elim(body, tcx, effects);
     let after_local = bounds_access_counts(body);
     crate::verify::debug_verify_body(body);
     if bounds_versioning_enabled() {
-        bounds_check_versioning_with_limit(body, tcx, versioning_candidate_limit);
+        bounds_check_versioning_with_limit(body, tcx, versioning_candidate_limit, effects);
     }
     elide_overflow_checks_by_ranges(body, tcx);
     elide_overflow_checks_by_facts(body);
@@ -153,6 +168,63 @@ fn bounds_access_counts(body: &Body) -> (usize, usize) {
     })
 }
 
+/// Writes a bounds remark for every index access site of the finished
+/// program when `GOS_BOUNDS_REMARKS` asks for them.
+pub fn report_bounds_sites(bodies: &[Body], effects: &ProgramEffects) {
+    if !crate::remarks::RemarkKind::Bounds.enabled() {
+        return;
+    }
+    for body in bodies {
+        emit_bounds_site_remarks(body, effects);
+    }
+}
+
+/// Reports every index access site in `body` once: removed (only the
+/// unchecked form survives), versioned (an unchecked fast path behind a
+/// preheader guard, with the checked loop as fallback), or kept.
+fn emit_bounds_site_remarks(body: &Body, effects: &ProgramEffects) {
+    let blockers = counted_loop_blockers(body, effects);
+    let mut sites: BTreeMap<(u32, u32), (bool, bool)> = BTreeMap::new();
+    for block in &body.blocks {
+        let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            ..
+        } = &block.terminator
+        else {
+            continue;
+        };
+        let checked = match name.as_str() {
+            "gos_rt_vec_get_i64" | "gos_rt_vec_set_i64" => true,
+            "gos_rt_vec_get_i64_unchecked" | "gos_rt_vec_set_i64_unchecked" => false,
+            _ => continue,
+        };
+        let span = block.terminator_span.unwrap_or(block.span);
+        let entry = sites.entry((span.start, span.end)).or_default();
+        if checked {
+            entry.0 = true;
+        } else {
+            entry.1 = true;
+        }
+    }
+    let file = body.span.file;
+    for ((start, end), (checked, unchecked)) in sites {
+        let status = match (checked, unchecked) {
+            (true, true) => "index check versioned (unchecked behind a loop-entry guard)",
+            (false, true) => "index check removed",
+            _ => "index check kept",
+        };
+        let reason = match blockers.get(&(start, end)) {
+            Some(reason) if !unchecked => format!(": {reason}"),
+            _ => String::new(),
+        };
+        crate::remarks::emit(
+            crate::remarks::RemarkKind::Bounds,
+            Span::new(file, start, end),
+            format_args!("{status} in `{}`{reason}", body.name),
+        );
+    }
+}
+
 /// Fast canonicalisation for unoptimised native builds.
 ///
 /// Monomorphisation and ownership lowering happen outside this function and
@@ -173,12 +245,13 @@ pub fn optimise_debug(body: &mut Body, tcx: &TyCtxt) {
     crate::verify::debug_verify_body(body);
     dead_store_elim(body, tcx);
     crate::verify::debug_verify_body(body);
-    bounds_check_elim(body, tcx);
+    let effects = ProgramEffects::default();
+    bounds_check_elim(body, tcx, &effects);
     crate::verify::debug_verify_body(body);
-    local_branch_bounds_check_elim(body, tcx);
+    local_branch_bounds_check_elim(body, tcx, &effects);
     crate::verify::debug_verify_body(body);
     if bounds_versioning_enabled() {
-        bounds_check_versioning(body, tcx);
+        bounds_check_versioning(body, tcx, &effects);
     }
     crate::verify::debug_verify_body(body);
 }

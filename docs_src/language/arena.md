@@ -67,36 +67,58 @@ let total = (0..iterations).map(|_| check(build_tree(depth))).sum()
 A closure qualifies only when the value it hands back cannot point into
 the region - a scalar result is fine, a returned tree keeps the ordinary
 reference-counted path - and a captured value counts as an outer one, so
-passing a captured collection into a call disqualifies the body.
+handing a captured collection to a call that may keep it disqualifies the
+body.
 
-This is **sound by construction**. The analysis over-approximates
-escapes: if it cannot prove a body's allocations stay local - the body
-calls a method, stores a value into an outer binding, breaks/returns,
-spawns a goroutine, or calls a function that might stash a pointer - it
-does **not** region, and the values keep the ordinary reference-counted
-path. So automatic regioning can only make a program faster; it never
-changes a result. The trade-off is the reverse of the manual block: the
-worst case is a *missed speedup*, not a dangling pointer.
+This is **sound by construction**. A region is freed wholesale, so two
+things must hold for a body to get one: nothing it builds may still be
+reachable once the iteration ends, and nothing it builds may hold a share
+of a value from outside the loop, because the bulk free never gives that
+share back. The analysis over-approximates both:
+
+- A value from outside the loop may be read, bound, or passed to a
+  function that only reads it, but not stored inside anything the body
+  builds, mutated through a method, or taken back out of a call that may
+  answer a share of it.
+- A value the body builds may be passed to any function that cannot let
+  it escape - a goroutine, a channel, a static, or a closure - and may be
+  mutated and rebuilt inside the iteration, but not assigned to a binding
+  that outlives it.
+- `break`, `continue`, and `return` leave a regioned body only with a
+  scalar value (or none); the region is closed on each such edge.
+- A nested loop is fine when it is regioned itself or allocates nothing,
+  so its own temporaries are still freed each inner iteration.
+
+Whether a function "only reads" a value, or "cannot let it escape", comes
+from a summary of what every function and method does with each of its
+parameters, followed through the calls it makes. When the analysis cannot
+prove a rule, it does **not** region, and the values keep the ordinary
+reference-counted path. So automatic regioning can only make a program
+faster; it never changes a result. The trade-off is the reverse of the
+manual block: the worst case is a *missed speedup*, not a dangling pointer.
 
 ### Seeing the decision
 
 When an allocation-heavy loop runs slower than expected, set
 `GOS_ARENA_TRACE=1` at build time. Every loop and closure body prints
-whether it was auto-regioned, and if an allocating one was not, why:
+whether it was auto-regioned, and if an allocating one was not, why,
+naming the call that decided it:
 
 ```text
-[arena] file 0 bytes 992..993: auto-regioned (iteration heap bulk-freed)
-[arena] file 0 bytes 806..1087: NOT regioned - allocates each iteration on the
-  slow per-node RC path: body contains a nested loop. Wrap the body in `arena { }`.
-[arena] file 0 bytes 1418..1437: closure body auto-regioned (per-call heap
-  bulk-freed)
+[arena] main.gos:14:5: auto-regioned (iteration heap bulk-freed)
+[arena] main.gos:31:9: NOT regioned - allocates each iteration on the slow
+  per-node RC path: body mutates a value from outside the loop through a
+  method, or calls a method nothing vets (`.push()`). Wrap the body in `arena { }`.
+[arena] main.gos:40:18: closure body auto-regioned (per-call heap bulk-freed)
 ```
 
-The reason names the exact rule that disqualified the body (a method
-call, an escaping value, a nested loop, an early exit, an unvetted
-callee), so you know whether to restructure the loop or reach for an
-explicit `arena { }` - which always works, because you are then making
-the no-escape guarantee yourself.
+The reason names the exact rule that disqualified the body (an outer
+value mutated or handed to a function that keeps it, a heap value leaving
+the loop, a nested loop without a region of its own, an unvetted callee),
+so you know whether to restructure the loop or reach for an explicit
+`arena { }` - which always works, because you are then making the
+no-escape guarantee yourself. Setting the variable makes the build skip its
+artifact cache, so the trace always describes the compile that just ran.
 
 ## Exit behavior
 
@@ -141,7 +163,10 @@ arena {
 
 Edge cases, pinned: `Weak` references to arena values upgrade to
 `None`; unit-variant singletons (`Tree::Nil`) are process-immortal and
-safe to reference anywhere.
+safe to reference anywhere. Maps, sets, deques, JSON values, and lazy
+iterators made inside the block belong to it like every other value and
+are released at the closing brace, including when another arena value
+holds them.
 
 ## The primitive
 

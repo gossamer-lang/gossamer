@@ -8,6 +8,7 @@ include!("opt/simple_passes.rs");
 include!("opt/rc_cleanup.rs");
 include!("opt/share_transfer.rs");
 include!("opt/loop_versioning.rs");
+include!("opt/entry_bounds.rs");
 include!("opt/overflow_versioning.rs");
 include!("opt/overflow_facts.rs");
 include!("opt/overflow_ranges.rs");

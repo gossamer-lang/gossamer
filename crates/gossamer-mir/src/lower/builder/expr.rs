@@ -155,6 +155,7 @@ impl<'a> Builder<'a> {
                 // frames (LIFO, innermost first) after the return value is
                 // computed, before the actual Return.
                 self.emit_defers_above(0);
+                self.emit_loop_region_exits(0, expr.span);
                 self.terminate(Terminator::Return);
                 None
             }
@@ -184,6 +185,7 @@ impl<'a> Builder<'a> {
                 // Run the defers of the blocks being exited (loop body and any
                 // nested blocks), but not the loop's enclosing frames.
                 self.emit_defers_above(defer_depth);
+                self.emit_loop_region_exits(idx, expr.span);
                 self.terminate(Terminator::Goto { target: break_to });
                 None
             }
@@ -192,6 +194,7 @@ impl<'a> Builder<'a> {
                     let continue_to = self.loop_stack[idx].continue_to;
                     let defer_depth = self.loop_stack[idx].defer_depth;
                     self.emit_defers_above(defer_depth);
+                    self.emit_loop_region_exits(idx, expr.span);
                     self.terminate(Terminator::Goto {
                         target: continue_to,
                     });
