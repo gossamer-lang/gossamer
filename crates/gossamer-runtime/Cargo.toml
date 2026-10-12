@@ -114,7 +114,7 @@ sha2 = { version = "0.10", default-features = false, features = ["std"] }
 # leaf intrinsics produce byte-identical results to the VM tier.
 x509-parser = "0.18"
 tar = "0.4"
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 
 # The browser has a clock; Rust's `std::time` shims for
 # wasm32-unknown-unknown panic instead of reading it. `web-time` is the

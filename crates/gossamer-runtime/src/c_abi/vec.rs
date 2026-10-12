@@ -3822,6 +3822,10 @@ mod mapped_buffer_tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "mapped buffers are compiled out under Miri, so there is no mapped size to cross and the fallback length is millions of interpreted pushes"
+    )]
     fn a_vec_grows_across_the_mapped_size_and_frees_cleanly() {
         let words = (mapped::MAPPED_BYTES / 8).min(1 << 23) * 2 + 3;
         let v = gos_rt_vec_new(8);
@@ -3886,16 +3890,21 @@ mod mapped_buffer_tests {
     #[test]
     #[cfg(all(unix, not(miri)))]
     fn a_release_after_its_regions_pop_reads_nothing_of_it() {
+        // The inputs are heap strings made before the region opens: a copy of
+        // region-backed bytes goes to the heap, and the concatenation must not.
+        let ab = crate::c_abi::string::alloc_cstring(b"ab");
+        let cd = crate::c_abi::string::alloc_cstring(b"cd");
+        let text = crate::c_abi::string::alloc_cstring(b"[1, 2]");
         crate::c_abi::rc::gos_rt_arena_push();
         let v = gos_rt_vec_new(8);
         // SAFETY: `v` is the live vec made above.
         unsafe { gos_rt_vec_push_i64(v, 7) };
-        // SAFETY: both arguments are NUL-terminated host strings.
-        let s = unsafe { crate::c_abi::string::gos_rt_str_concat(c"ab".as_ptr(), c"cd".as_ptr()) };
+        // SAFETY: both arguments are live heap strings made above.
+        let s = unsafe { crate::c_abi::string::gos_rt_str_concat(ab, cd) };
         let m = crate::c_abi::map::gos_rt_map_new(8, 8);
         let set = crate::c_abi::set::gos_rt_set_new();
-        // SAFETY: the argument is a NUL-terminated host string.
-        let parsed = unsafe { crate::c_abi::json::gos_rt_json_parse(c"[1, 2]".as_ptr()) };
+        // SAFETY: the argument is a live heap string made above.
+        let parsed = unsafe { crate::c_abi::json::gos_rt_json_parse(text) };
         let doc =
             crate::c_abi::result::gos_rt_result_payload(parsed) as *mut crate::c_abi::json::GosJson;
         let child_meta = [gossamer_abi::rc::RC_KIND_STRUCT_GUARDED, 0];
@@ -3952,6 +3961,12 @@ mod mapped_buffer_tests {
         }
         for &p in &pointers {
             protect_page_of(p, true);
+        }
+        // SAFETY: each input holds its one share, given back here.
+        unsafe {
+            crate::c_abi::string::gos_rt_str_free(ab);
+            crate::c_abi::string::gos_rt_str_free(cd);
+            crate::c_abi::string::gos_rt_str_free(text);
         }
     }
 

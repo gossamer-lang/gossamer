@@ -117,7 +117,7 @@ pub const REGISTERED_TARGETS: &[(&str, &str, &str, u32, bool, ObjectFormat)] = &
         ObjectFormat::Wasm,
     ),
     (
-        "wasm32-wasi",
+        "wasm32-wasip1",
         "wasi",
         "wasm32",
         4,
@@ -204,7 +204,7 @@ pub const REGISTERED_TARGETS: &[(&str, &str, &str, u32, bool, ObjectFormat)] = &
         ObjectFormat::Wasm,
     ),
     (
-        "wasm32-wasi",
+        "wasm32-wasip1",
         "wasi",
         "wasm32",
         4,

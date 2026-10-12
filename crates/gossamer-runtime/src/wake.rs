@@ -41,7 +41,10 @@ impl WakerSet {
     /// Removes one registration of `waker`.
     pub fn deregister(&self, waker: &Waker) {
         let mut wakers = self.wakers.lock();
-        if let Some(at) = wakers.iter().position(|w| w.will_wake(waker)) {
+        // A registration is identified by the object its waker wakes. Vtable
+        // addresses are not unique per type, so two clones of one waker can
+        // carry different ones and `will_wake` can answer false for them.
+        if let Some(at) = wakers.iter().position(|w| w.data() == waker.data()) {
             wakers.swap_remove(at);
         }
         self.len.store(wakers.len(), Ordering::Release);

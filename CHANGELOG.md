@@ -1,8 +1,14 @@
 # Changelog
 
-## 0.71.2 - Miri fix for the region-arena mapped-buffer test
+## 0.71.2 - Miri fixes
 
 - Miri: `a_region_vec_grows_through_buffers_its_region_owns` now ignores itself under Miri like the other arena tests, because the arena reserves `PROT_NONE` virtual address space and commits slabs via `mprotect`, which Miri does not support.
+- Miri: `a_vec_grows_across_the_mapped_size_and_frees_cleanly` ignores itself under Miri, where mapped buffers are compiled out and the test's fallback length is millions of interpreted pushes, which ran the weekly job past its time limit.
+- Miri: `many_ampersands_stay_linear` ignores itself under Miri; its 200,000-byte input is a running-time bound, and the C-backed bzip2 and zstd formats drop out of the compression round-trip tests there because Miri cannot call foreign functions.
+- A thread waiting on a channel, `select`, wait group, or context withdraws its waker by the object the waker wakes. The match compared vtable addresses too, which Rust does not keep unique per type, so a withdrawal could miss and leave a stale waker that every later change of that channel or context ran.
+- The registered WASI target is `wasm32-wasip1`, the name Rust and the CI cross-check use; `gos build --target wasm32-wasi` now reports an unknown target.
+- `std::compress` (gzip, zlib, flate) and `std::archive::zip` now deflate through `miniz_oxide`, the backend the runtime selects. The `zip` dependency's `deflate` feature had switched every `flate2` user to `zlib-rs`, whose stream teardown Miri reports as undefined behavior. Decompression results and error messages are unchanged; compressed bytes can differ from 0.71.1.
+- Runtime string readers that take a `String` from compiled code no longer read the header in front of a foreign C string whose address happens to share a string body's alignment, wherever the runtime can enumerate its string bodies (Miri). The runtime tests that passed host C strings to those readers now pass runtime strings.
 
 ## 0.71.1 - Goroutine and channel fixes
 

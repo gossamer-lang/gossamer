@@ -184,6 +184,31 @@ fn has_body_shape(s: *const c_char) -> bool {
     (s as usize & 7) == STRING_BODY_TAG
 }
 
+/// Whether a typed reader may read the header in front of `s`: the pointer
+/// has a body's shape and, where the runtime can enumerate every body, is one.
+#[inline]
+fn has_typed_body_shape(s: *const c_char) -> bool {
+    has_body_shape(s) && typed_body_is_known(s)
+}
+
+// Miri runs no compiled code, so every body that exists is a registered heap
+// body or a region body. A body-shaped pointer that is neither is a foreign C
+// string with no alignment promise, whose leading bytes belong to another
+// allocation.
+#[cfg(miri)]
+#[inline]
+fn typed_body_is_known(s: *const c_char) -> bool {
+    body_is_probeable(s) || crate::c_abi::rc::in_region_arena(s.cast())
+}
+
+// Compiled code's static literals are bodies the runtime cannot enumerate, so
+// the shape alone selects the header.
+#[cfg(not(miri))]
+#[inline]
+fn typed_body_is_known(_s: *const c_char) -> bool {
+    true
+}
+
 #[inline]
 fn str_owner(s: *const c_char) -> Option<&'static StringOwner> {
     if s.is_null() || !has_body_shape(s) {
@@ -206,7 +231,7 @@ fn str_owner(s: *const c_char) -> Option<&'static StringOwner> {
 
 #[inline]
 unsafe fn typed_str_owner(s: *const c_char) -> Option<&'static StringOwner> {
-    if s.is_null() || !has_body_shape(s) {
+    if s.is_null() || !has_typed_body_shape(s) {
         return None;
     }
     // SAFETY: `s` is non-null (checked above), and this `unsafe fn`'s caller passes a live string
@@ -251,15 +276,18 @@ pub(crate) unsafe fn c_str_len(s: *const c_char) -> usize {
 /// reading it rather than scanning for a NUL is what lets a `String` hold
 /// interior NUL bytes. The body shape selects the carrier before the header
 /// read, so a foreign C string - one a runtime shim received from a host API -
-/// takes the `strlen` fallback without any backwards probe. A host allocation
-/// is at least 8-byte aligned, so its address never has a body's shape; a
-/// foreign pointer that is not so aligned must not reach this reader.
+/// takes the `strlen` fallback without any backwards probe. A heap allocation
+/// is at least 8-byte aligned, so its address never has a body's shape. A
+/// foreign pointer with no alignment promise (a `c"..."` literal, an interior
+/// pointer) can have that shape; where the runtime can enumerate its bodies
+/// such a pointer is recognised and scanned, and elsewhere it must not reach
+/// this reader.
 #[inline]
 unsafe fn typed_str_len(s: *const c_char) -> usize {
     if s.is_null() {
         return 0;
     }
-    if !has_body_shape(s) {
+    if !has_typed_body_shape(s) {
         // SAFETY: this `unsafe fn`'s caller passes `s` live; non-null, checked above.
         return unsafe { c_str_len(s) };
     }
@@ -754,7 +782,7 @@ unsafe fn extend_str_index(s: *mut c_char, old_len: usize, added: &[u8], cap: us
 
 #[inline]
 unsafe fn typed_str_cap(s: *const c_char) -> Option<usize> {
-    if s.is_null() || !has_body_shape(s) {
+    if s.is_null() || !has_typed_body_shape(s) {
         return None;
     }
     // SAFETY: `s` is non-null (checked above), and this `unsafe fn`'s caller passes a live string
