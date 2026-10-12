@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.71.2 - Miri fix for the region-arena mapped-buffer test
+
+- Miri: `a_region_vec_grows_through_buffers_its_region_owns` now ignores itself under Miri like the other arena tests, because the arena reserves `PROT_NONE` virtual address space and commits slabs via `mprotect`, which Miri does not support.
+
 ## 0.71.1 - Goroutine and channel fixes
 
 - A spawned closure no longer copies a captured binding that nothing can change after the `spawn` (a parameter, or a `let` without `mut`): the goroutine reads that value directly. Each goroutine had taken a full copy, so spawning workers over one large read-only vector or matrix used memory and time that grew with the number of workers. A `mut` binding is still captured as a snapshot taken at the `spawn`.

@@ -3840,6 +3840,10 @@ mod mapped_buffer_tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "the arena reserves PROT_NONE virtual address space and commits slabs via mprotect, which Miri does not support"
+    )]
     fn a_region_vec_grows_through_buffers_its_region_owns() {
         crate::c_abi::rc::gos_rt_arena_push();
         let v = gos_rt_vec_new(8);
