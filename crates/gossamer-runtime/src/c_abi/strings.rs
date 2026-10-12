@@ -68,12 +68,28 @@ fn str_vec_from_words(parts: &[i64]) -> *mut GosVec {
 /// only ASCII characters Unicode counts as whitespace are `\t` through `\r`
 /// and the space, and every piece of an ASCII input is itself ASCII.
 fn split_whitespace_vec(text: &str) -> *mut GosVec {
-    let bytes = text.as_bytes();
-    if !bytes.is_ascii() {
+    if !text.is_ascii() {
         return alloc_str_vec(text.split_whitespace());
     }
-    let is_space = |b: u8| matches!(b, b' ' | b'\t'..=b'\r');
     let mut parts: Vec<i64> = Vec::new();
+    for_each_whitespace_field(text, |field| {
+        parts.push(alloc_ascii_cstring(field) as usize as i64);
+    });
+    str_vec_from_words(&parts)
+}
+
+/// Hands each whitespace-separated piece of `text` to `field`, split exactly
+/// as `str::split_whitespace` splits. An ASCII input is split on bytes: the
+/// only ASCII characters Unicode counts as whitespace are `\t` through `\r`
+/// and the space.
+pub(crate) fn for_each_whitespace_field(text: &str, mut field: impl FnMut(&[u8])) {
+    let bytes = text.as_bytes();
+    if !bytes.is_ascii() {
+        text.split_whitespace()
+            .for_each(|piece| field(piece.as_bytes()));
+        return;
+    }
+    let is_space = |b: u8| matches!(b, b' ' | b'\t'..=b'\r');
     let mut i = 0;
     while i < bytes.len() {
         while i < bytes.len() && is_space(bytes[i]) {
@@ -84,10 +100,9 @@ fn split_whitespace_vec(text: &str) -> *mut GosVec {
             i += 1;
         }
         if i > start {
-            parts.push(alloc_ascii_cstring(&bytes[start..i]) as usize as i64);
+            field(&bytes[start..i]);
         }
     }
-    str_vec_from_words(&parts)
 }
 
 /// `strings::splitn(s, n, sep) -> [String]`.

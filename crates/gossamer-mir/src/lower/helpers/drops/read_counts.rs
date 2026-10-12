@@ -146,73 +146,89 @@ pub(super) fn collect_local_read_counts(body: &Body) -> HashMap<u32, usize> {
     counts
 }
 
-/// Fuses `kmer = seq.substring(i, i + k); m.inc(kmer, by)` into a single
-/// borrowed-slice probe `gos_rt_map_inc_at_str_i64(m, seq, i, len, by)`, where
-/// `len = (i + k) - i`. The scratch String the substring would allocate on
-/// every probe is removed; the borrowed shim materialises a key only on the
-/// first occurrence of each distinct k-mer (k-nucleotide's hot `count_kmers`
-/// loop). Runs before the RC passes so no retain/release is emitted for the
-/// String that no longer exists.
+/// Fuses a map probe keyed by a substring, `m.inc(seq.substring(i, j), by)`
+/// or `m.get_or(seq.substring(i, j), d)`, with an optional `.trim()` of the
+/// substring between, into one call that reads the key in place out of `seq`.
+/// The scratch Strings the substring and the trim would allocate on every
+/// probe are removed; the map makes an owned key only for a key it has not
+/// seen. Runs before the RC passes so no retain/release is emitted for the
+/// Strings that no longer exist.
 ///
-/// The rewrite only fires when the scratch String flows *only* into the probe
-/// (read exactly once through the copy, and the key read exactly once by the
-/// `inc`), so a k-mer observed elsewhere keeps the allocating path.
+/// The rewrite only fires when each scratch String flows *only* into the next
+/// step (read exactly once), so a key observed elsewhere keeps the allocating
+/// path.
 pub(crate) fn fuse_substring_map_inc(body: &mut Body) {
     let n = body.blocks.len();
     let reads = collect_local_read_counts(body);
+    let reads_of = |local: Local| reads.get(&local.0).copied().unwrap_or(0);
 
     struct Plan {
         substr_idx: usize,
-        inc_idx: usize,
+        probe_idx: usize,
+        fused: &'static str,
+        m: Operand,
         seq: Operand,
         start: Operand,
         end: Operand,
-        start_ty: Ty,
-        m: Operand,
-        by: Operand,
-        inc_dest: Place,
-        inc_target: Option<BlockId>,
-        subst_local: Local,
+        trim: bool,
+        last: Operand,
+        dest: Place,
+        target: Option<BlockId>,
+        scratch: Vec<Local>,
         remove_copy_local: Option<Local>,
     }
 
+    // The single-successor call in block `idx` producing `local`, by name.
+    let producer = |local: Local, target_idx: usize, wanted: &str| {
+        (0..n).find_map(|idx| {
+            let Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(name)),
+                args,
+                destination,
+                target: Some(target),
+            } = &body.blocks[idx].terminator
+            else {
+                return None;
+            };
+            (name == wanted
+                && destination.local == local
+                && destination.projection.is_empty()
+                && target.0 as usize == target_idx)
+                .then(|| (idx, args.clone()))
+        })
+    };
+
     let mut plans: Vec<Plan> = Vec::new();
-    for inc_idx in 0..n {
+    for probe_idx in 0..n {
         let Terminator::Call {
-            callee,
+            callee: Operand::Const(ConstValue::Str(name)),
             args,
-            destination: inc_dest,
-            target: inc_target,
-        } = &body.blocks[inc_idx].terminator
+            destination,
+            target,
+        } = &body.blocks[probe_idx].terminator
         else {
             continue;
         };
-        let Operand::Const(ConstValue::Str(name)) = callee else {
-            continue;
+        let fused = match name.as_str() {
+            "gos_rt_map_inc_str_i64" | "gos_rt_map_inc_typed_str_i64" => {
+                "gos_rt_map_inc_substring_str_i64"
+            }
+            "gos_rt_map_get_or_str_str" => "gos_rt_map_get_or_substring_str_str",
+            _ => continue,
         };
-        if !matches!(
-            name.as_str(),
-            "gos_rt_map_inc_str_i64" | "gos_rt_map_inc_typed_str_i64"
-        ) || args.len() != 3
-        {
-            continue;
-        }
-        let Operand::Copy(key_place) = &args[1] else {
+        let [m, Operand::Copy(key_place), last] = args.as_slice() else {
             continue;
         };
         if !key_place.projection.is_empty() {
             continue;
         }
         let key_local = key_place.local;
-        let m = args[0].clone();
-        let by = args[2].clone();
 
-        // Resolve the String source: either the key is copied from the
-        // substring result inside this block (`key = Copy(subst)`), or the
-        // substring result is used as the key directly.
-        let mut subst_local = key_local;
+        // The key is the producing call's result, or a copy of it made in
+        // this block (`key = Copy(src)`, a `let` binding).
+        let mut src_local = key_local;
         let mut remove_copy_local: Option<Local> = None;
-        for stmt in &body.blocks[inc_idx].stmts {
+        for stmt in &body.blocks[probe_idx].stmts {
             if let StatementKind::Assign {
                 place,
                 rvalue: Rvalue::Use(Operand::Copy(src)),
@@ -221,148 +237,109 @@ pub(crate) fn fuse_substring_map_inc(body: &mut Body) {
                 && place.projection.is_empty()
                 && src.projection.is_empty()
             {
-                subst_local = src.local;
+                src_local = src.local;
                 remove_copy_local = Some(key_local);
             }
         }
+        if reads_of(key_local) != 1 || (src_local != key_local && reads_of(src_local) != 1) {
+            continue;
+        }
 
-        // Find the `gos_rt_str_substring` producing `subst_local`, whose sole
-        // successor is this inc block.
-        let mut found: Option<(usize, Operand, Operand, Operand)> = None;
-        for substr_idx in 0..n {
-            let Terminator::Call {
-                callee: sc,
-                args: sa,
-                destination: sd,
-                target: Some(st),
-            } = &body.blocks[substr_idx].terminator
-            else {
-                continue;
-            };
-            let Operand::Const(ConstValue::Str(sname)) = sc else {
-                continue;
-            };
-            if sname != "gos_rt_str_substring"
-                || sa.len() != 3
-                || sd.local != subst_local
-                || !sd.projection.is_empty()
-                || st.0 as usize != inc_idx
+        // `src = substring(seq, i, j)` straight into this block, or
+        // `sub = substring(..)` into a block that only computes
+        // `src = trim(sub)` into this one.
+        let (substr_idx, substr_args, trim, scratch) =
+            if let Some((idx, sa)) = producer(src_local, probe_idx, "gos_rt_str_substring") {
+                (idx, sa, false, vec![src_local])
+            } else if let Some((trim_idx, ta)) = producer(src_local, probe_idx, "gos_rt_str_trim")
+                && body.blocks[trim_idx].stmts.iter().all(|stmt| {
+                    matches!(
+                        stmt.kind,
+                        StatementKind::Nop
+                            | StatementKind::StorageLive(_)
+                            | StatementKind::StorageDead(_)
+                    )
+                })
+                && let [Operand::Copy(sub_place)] = ta.as_slice()
+                && sub_place.projection.is_empty()
+                && reads_of(sub_place.local) == 1
+                && let Some((idx, sa)) = producer(sub_place.local, trim_idx, "gos_rt_str_substring")
             {
+                (idx, sa, true, vec![sub_place.local, src_local])
+            } else {
                 continue;
-            }
-            found = Some((substr_idx, sa[0].clone(), sa[1].clone(), sa[2].clone()));
-            break;
-        }
-        let Some((substr_idx, seq, start, end)) = found else {
+            };
+        let [seq, start, end] = substr_args.as_slice() else {
             continue;
         };
-
-        // `start` must be a bare local so `len = end - start` is well-typed
-        // and readable at the inc block (its i64 type also types `len`).
-        let Operand::Copy(start_place) = &start else {
-            continue;
-        };
-        if !start_place.projection.is_empty() {
-            continue;
-        }
-        let start_ty = body.locals[start_place.local.0 as usize].ty;
-
-        // The scratch String must flow only into the probe.
-        let subst_reads = reads.get(&subst_local.0).copied().unwrap_or(0);
-        let key_reads = reads.get(&key_local.0).copied().unwrap_or(0);
-        if subst_local == key_local {
-            if key_reads != 1 {
-                continue;
-            }
-        } else if subst_reads != 1 || key_reads != 1 {
-            continue;
-        }
-
         plans.push(Plan {
             substr_idx,
-            inc_idx,
-            seq,
-            start,
-            end,
-            start_ty,
-            m,
-            by,
-            inc_dest: inc_dest.clone(),
-            inc_target: *inc_target,
-            subst_local,
+            probe_idx,
+            fused,
+            m: m.clone(),
+            seq: seq.clone(),
+            start: start.clone(),
+            end: end.clone(),
+            trim,
+            last: last.clone(),
+            dest: destination.clone(),
+            target: *target,
+            scratch,
             remove_copy_local,
         });
     }
 
     for plan in plans {
-        // Fresh `len` local (i64), computed where `start`/`end` are live.
-        let len_local = Local(body.locals.len() as u32);
-        body.locals.push(LocalDecl {
-            ty: plan.start_ty,
-            debug_name: None,
-            mutable: false,
-            region: false,
-        });
         let substr_span = body.blocks[plan.substr_idx].span;
-        let inc_block_id = body.blocks[plan.inc_idx].id;
+        let probe_block_id = body.blocks[plan.probe_idx].id;
         {
             let substr_block = &mut body.blocks[plan.substr_idx];
-            substr_block.stmts.push(Statement {
-                kind: StatementKind::Assign {
-                    place: Place::local(len_local),
-                    rvalue: Rvalue::BinaryOp {
-                        op: BinOp::Sub,
-                        lhs: plan.end.clone(),
-                        rhs: plan.start.clone(),
+            // Null each scratch String slot so it is a defined null: any
+            // release the RC pass may still schedule for its declared `String`
+            // type is then a no-op rather than a read of an unassigned slot.
+            for &local in &plan.scratch {
+                substr_block.stmts.push(Statement {
+                    kind: StatementKind::Assign {
+                        place: Place::local(local),
+                        rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
                     },
-                },
-                span: substr_span,
-                inlined: None,
-            });
-            // Null the scratch String slot so it is a defined null: any release
-            // the RC pass may still schedule for its declared `String` type is
-            // then a no-op rather than a read of an unassigned slot.
-            substr_block.stmts.push(Statement {
-                kind: StatementKind::Assign {
-                    place: Place::local(plan.subst_local),
-                    rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
-                },
-                span: substr_span,
-                inlined: None,
-            });
-            substr_block.terminator = Terminator::Goto {
-                target: inc_block_id,
-            };
-        }
-        {
-            let inc_block = &mut body.blocks[plan.inc_idx];
-            if let Some(copy_local) = plan.remove_copy_local {
-                inc_block.stmts.retain(|stmt| {
-                    !matches!(
-                        &stmt.kind,
-                        StatementKind::Assign {
-                            place,
-                            rvalue: Rvalue::Use(Operand::Copy(src)),
-                        } if place.local == copy_local
-                            && place.projection.is_empty()
-                            && src.local == plan.subst_local
-                            && src.projection.is_empty()
-                    )
+                    span: substr_span,
+                    inlined: None,
                 });
             }
-            inc_block.terminator = Terminator::Call {
-                callee: Operand::Const(ConstValue::Str("gos_rt_map_inc_at_str_i64".to_string())),
-                args: vec![
-                    plan.m,
-                    plan.seq,
-                    plan.start,
-                    Operand::Copy(Place::local(len_local)),
-                    plan.by,
-                ],
-                destination: plan.inc_dest,
-                target: plan.inc_target,
+            substr_block.terminator = Terminator::Goto {
+                target: probe_block_id,
             };
         }
+        let probe_block = &mut body.blocks[plan.probe_idx];
+        if let Some(copy_local) = plan.remove_copy_local {
+            let src = *plan.scratch.last().unwrap_or(&copy_local);
+            probe_block.stmts.retain(|stmt| {
+                !matches!(
+                    &stmt.kind,
+                    StatementKind::Assign {
+                        place,
+                        rvalue: Rvalue::Use(Operand::Copy(from)),
+                    } if place.local == copy_local
+                        && place.projection.is_empty()
+                        && from.local == src
+                        && from.projection.is_empty()
+                )
+            });
+        }
+        probe_block.terminator = Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(plan.fused.to_string())),
+            args: vec![
+                plan.m,
+                plan.seq,
+                plan.start,
+                plan.end,
+                Operand::Const(ConstValue::Int(i128::from(plan.trim))),
+                plan.last,
+            ],
+            destination: plan.dest,
+            target: plan.target,
+        };
     }
 }
 

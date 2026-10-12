@@ -416,9 +416,6 @@ fn __gos_time_days_in_month(year: i64, month: i64) -> i64 {
         31
     }
 }
-fn __gos_time_two(n: i64) -> String {
-    if n < 10 { format("0{}", n) } else { format("{}", n) }
-}
 impl __gos_time_Time {
     fn now() -> __gos_time_Time {
         __gos_time_Time { unix_ns: time::now_nanos(), location: __gos_time_Location::utc() }
@@ -526,24 +523,7 @@ impl __gos_time_Time {
         Ok(__gos_time_Time { unix_ns: secs * 1000000000 + nanos, location: location })
     }
     fn format_rfc3339(&self) -> Result<String, errors::Error> {
-        let c = self.civil()?
-        let mut out = format("{:04}-{}-{}T{}:{}:{}", c.year, __gos_time_two(c.month), __gos_time_two(c.day), __gos_time_two(c.hour), __gos_time_two(c.minute), __gos_time_two(c.second))
-        if c.nanosecond != 0 {
-            let mut frac = format("{:09}", c.nanosecond)
-            while frac.ends_with("0") {
-                frac = frac.substring(0, frac.byte_len() - 1)
-            }
-            out += "."
-            out += frac
-        }
-        if c.offset_seconds == 0 && self.location.spec == "UTC" {
-            out += "Z"
-        } else {
-            let sign = if c.offset_seconds < 0 { "-" } else { "+" }
-            let a = if c.offset_seconds < 0 { 0 - c.offset_seconds } else { c.offset_seconds }
-            out += format("{}{}:{}", sign, __gos_time_two(a / 3600), __gos_time_two((a % 3600) / 60))
-        }
-        Ok(out)
+        __gos_time_format_rfc3339_raw(self.unix_ns, self.location.spec)
     }
 }
 impl Add<time::Duration> for __gos_time_Time {

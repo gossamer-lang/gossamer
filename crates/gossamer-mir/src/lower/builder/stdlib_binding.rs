@@ -961,11 +961,16 @@ impl<'a> Builder<'a> {
     /// drop pass leaves it non-owning: a borrow must not free the element
     /// children the source array still owns. Nested-array borrows fall back
     /// to the owning conversion (exotic; the inner vecs need real headers).
+    ///
+    /// With `frame` set, the callee is known to neither keep nor resize the
+    /// view, so its header goes in a slot of this frame rather than on the
+    /// heap; its release is then a no-op.
     pub(crate) fn coerce_borrow_array_to_vec(
         &mut self,
         raw: Local,
         elem_ty: Ty,
         len: gossamer_types::ArrayLen,
+        frame: bool,
         span: Span,
     ) -> Local {
         use gossamer_types::TyKind;
@@ -989,19 +994,56 @@ impl<'a> Builder<'a> {
         );
         let vec_ty = self.tcx.intern(TyKind::Vec(elem_ty));
         let dest = self.fresh(vec_ty);
+        let mut args = vec![
+            Operand::Copy(Place::local(elem_bytes_local)),
+            Operand::Copy(Place::local(raw)),
+            Operand::Copy(Place::local(len_local)),
+        ];
+        let callee = if frame {
+            args.insert(0, Operand::Copy(Place::local(self.frame_view_slot())));
+            "gos_rt_vec_borrow_arr_into"
+        } else {
+            "gos_rt_vec_borrow_arr"
+        };
         let next = self.new_block(span);
         self.terminate(Terminator::Call {
-            callee: Operand::Const(ConstValue::Str("gos_rt_vec_borrow_arr".to_string())),
-            args: vec![
-                Operand::Copy(Place::local(elem_bytes_local)),
-                Operand::Copy(Place::local(raw)),
-                Operand::Copy(Place::local(len_local)),
-            ],
+            callee: Operand::Const(ConstValue::Str(callee.to_string())),
+            args,
             destination: Place::local(dest),
             target: Some(next),
         });
         self.set_current(next);
         dest
+    }
+
+    /// A slot of this frame sized for one `GosVec` header.
+    ///
+    /// The slot is never assigned here: `gos_rt_vec_borrow_arr_into` writes
+    /// the whole header, and in a loop the view made on the previous pass is
+    /// released before the next call rebuilds it, so that release must still
+    /// read the header the slot holds.
+    fn frame_view_slot(&mut self) -> Local {
+        use gossamer_types::TyKind;
+        let word = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let words = gossamer_abi::VEC_HEADER_BYTES / 8;
+        let slot_ty = self.tcx.intern(TyKind::Array {
+            elem: word,
+            len: gossamer_types::ArrayLen::Concrete(words),
+        });
+        self.fresh(slot_ty)
+    }
+
+    /// Whether an array argument at `pos` may be viewed through a header in
+    /// this frame: the callee lets nothing escape, and neither keeps, stores
+    /// into, nor resizes that parameter.
+    pub(crate) fn frame_view_ok(
+        summary: Option<&crate::lower::helpers::effects::FnEffects>,
+        pos: usize,
+    ) -> bool {
+        summary.is_some_and(|s| {
+            let param = s.param(pos);
+            !s.escapes && param.leaves_untouched() && !param.resizes
+        })
     }
 
     pub(crate) fn resolve_external_binding(

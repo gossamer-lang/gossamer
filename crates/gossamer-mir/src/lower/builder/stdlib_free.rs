@@ -1515,6 +1515,10 @@ impl<'a> Builder<'a> {
                 "gos_rt_time_format_in_raw",
                 self.result_string_error_adt_ty(),
             ),
+            "__gos_time_format_rfc3339_raw" => (
+                "gos_rt_time_format_rfc3339_raw",
+                self.result_string_error_adt_ty(),
+            ),
             "__gos_time_add_date_raw" => {
                 ("gos_rt_time_add_date_raw", self.result_i64_error_adt_ty())
             }

@@ -16,5 +16,6 @@ include!("opt/overflow_accumulators.rs");
 include!("opt/row_tables.rs");
 include!("opt/payload_views.rs");
 include!("opt/byte_append_loops.rs");
+include!("opt/field_count_loops.rs");
 include!("opt/pop_into.rs");
 include!("opt/tests.rs");

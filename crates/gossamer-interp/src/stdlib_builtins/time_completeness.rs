@@ -123,6 +123,10 @@ pub(crate) fn install_time_completeness(globals: &mut Vec<(&'static str, Value)>
             ("__gos_time_civil_raw", builtin_time_civil_raw),
             ("__gos_time_resolve_raw", builtin_time_resolve_raw),
             ("__gos_time_format_in_raw", builtin_time_format_in_raw),
+            (
+                "__gos_time_format_rfc3339_raw",
+                builtin_time_format_rfc3339_raw,
+            ),
             ("__gos_time_add_date_raw", builtin_time_add_date_raw),
         ],
         globals,
@@ -130,36 +134,10 @@ pub(crate) fn install_time_completeness(globals: &mut Vec<(&'static str, Value)>
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn time_location(spec: &str) -> Result<gossamer_std::time::tz::Location, String> {
-    if spec == "UTC" {
-        return Ok(gossamer_std::time::tz::Location::utc());
-    }
-    if let Some(offset) = spec.strip_prefix("UTC") {
-        let sign = if offset.starts_with('-') { -1 } else { 1 };
-        let value = offset.trim_start_matches(['+', '-']);
-        let (hours, minutes) = value
-            .split_once(':')
-            .ok_or_else(|| format!("invalid fixed location `{spec}`"))?;
-        let seconds = hours
-            .parse::<i32>()
-            .ok()
-            .and_then(|hours| {
-                minutes
-                    .parse::<i32>()
-                    .ok()
-                    .map(|minutes| sign * (hours * 3600 + minutes * 60))
-            })
-            .ok_or_else(|| format!("invalid fixed location `{spec}`"))?;
-        return gossamer_std::time::tz::Location::fixed(seconds).map_err(|error| error.to_string());
-    }
-    gossamer_std::time::tz::Location::lookup(spec).map_err(|error| error.to_string())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn builtin_time_location_raw(args: &[Value]) -> RuntimeResult<Value> {
     let name = args.first().and_then(as_str).unwrap_or("");
-    match time_location(name) {
-        Ok(location) => Ok(ok_variant(Value::String(location.name().into()))),
+    match gossamer_runtime::c_abi::time::location_name(name) {
+        Ok(name) => Ok(ok_variant(Value::String(name.into()))),
         Err(error) => Ok(err_variant(error)),
     }
 }
@@ -172,14 +150,9 @@ fn builtin_time_location_raw(_args: &[Value]) -> RuntimeResult<Value> {
 #[cfg(not(target_arch = "wasm32"))]
 fn builtin_time_fixed_location_raw(args: &[Value]) -> RuntimeResult<Value> {
     let offset = args.first().and_then(value_to_int).unwrap_or(i64::MAX);
-    match i32::try_from(offset)
-        .ok()
-        .and_then(|offset| gossamer_std::time::tz::Location::fixed(offset).ok())
-    {
-        Some(location) => Ok(ok_variant(Value::String(location.name().into()))),
-        None => Ok(err_variant(format!(
-            "fixed UTC offset {offset} seconds is outside the supported range"
-        ))),
+    match gossamer_runtime::c_abi::time::fixed_location_name(offset) {
+        Ok(name) => Ok(ok_variant(Value::String(name.into()))),
+        Err(error) => Ok(err_variant(error)),
     }
 }
 
@@ -194,23 +167,10 @@ fn builtin_time_fixed_location_raw(_args: &[Value]) -> RuntimeResult<Value> {
 fn builtin_time_civil_raw(args: &[Value]) -> RuntimeResult<Value> {
     let unix_ms = args.first().and_then(value_to_int).unwrap_or(0);
     let spec = args.get(1).and_then(as_str).unwrap_or("");
-    let result = time_location(spec).and_then(|location| {
-        location
-            .civil(gossamer_std::time::SystemTime::from_unix_millis(unix_ms))
-            .map_err(|error| error.to_string())
-    });
-    match result {
-        Ok(civil) => Ok(ok_variant(Value::Tuple(Arc::new(vec![
-            Value::Int(i64::from(civil.year)),
-            Value::Int(i64::from(civil.month)),
-            Value::Int(i64::from(civil.day)),
-            Value::Int(i64::from(civil.hour)),
-            Value::Int(i64::from(civil.minute)),
-            Value::Int(i64::from(civil.second)),
-            Value::Int(i64::from(civil.nanosecond)),
-            Value::Int(i64::from(civil.offset_seconds)),
-            Value::Int(i64::from(civil.weekday)),
-        ])))),
+    match gossamer_runtime::c_abi::time::civil_fields(unix_ms, spec) {
+        Ok(fields) => Ok(ok_variant(Value::Tuple(Arc::new(
+            fields.into_iter().map(Value::Int).collect(),
+        )))),
         Err(error) => Ok(err_variant(error)),
     }
 }
@@ -224,39 +184,21 @@ fn builtin_time_civil_raw(_args: &[Value]) -> RuntimeResult<Value> {
 fn builtin_time_resolve_raw(args: &[Value]) -> RuntimeResult<Value> {
     let spec = args.first().and_then(as_str).unwrap_or("");
     let field = |index| args.get(index).and_then(value_to_int).unwrap_or(-1);
-    let converted = || -> Result<gossamer_std::time::tz::CivilTime, String> {
-        Ok(gossamer_std::time::tz::CivilTime {
-            year: i32::try_from(field(1)).map_err(|_| "year out of range")?,
-            month: u32::try_from(field(2)).map_err(|_| "month out of range")?,
-            day: u32::try_from(field(3)).map_err(|_| "day out of range")?,
-            hour: u32::try_from(field(4)).map_err(|_| "hour out of range")?,
-            minute: u32::try_from(field(5)).map_err(|_| "minute out of range")?,
-            second: u32::try_from(field(6)).map_err(|_| "second out of range")?,
-            nanosecond: u32::try_from(field(7)).map_err(|_| "nanosecond out of range")?,
-            offset_seconds: 0,
-            weekday: 0,
-        })
-    };
-    let result = time_location(spec).and_then(|location| {
-        converted().and_then(|civil| location.resolve(civil).map_err(|error| error.to_string()))
-    });
-    let tuple = match result {
-        Ok(gossamer_std::time::tz::CivilResolution::Gap) => {
-            vec![Value::Int(0), Value::Int(0), Value::Int(0)]
-        }
-        Ok(gossamer_std::time::tz::CivilResolution::Unique(value)) => vec![
-            Value::Int(1),
-            Value::Int(value.unix_millis()),
-            Value::Int(0),
-        ],
-        Ok(gossamer_std::time::tz::CivilResolution::Fold { earlier, later }) => vec![
-            Value::Int(2),
-            Value::Int(earlier.unix_millis()),
-            Value::Int(later.unix_millis()),
-        ],
-        Err(error) => return Ok(err_variant(error)),
-    };
-    Ok(ok_variant(Value::Tuple(Arc::new(tuple))))
+    let fields = [
+        field(1),
+        field(2),
+        field(3),
+        field(4),
+        field(5),
+        field(6),
+        field(7),
+    ];
+    match gossamer_runtime::c_abi::time::resolve_fields(spec, fields) {
+        Ok(values) => Ok(ok_variant(Value::Tuple(Arc::new(
+            values.into_iter().map(Value::Int).collect(),
+        )))),
+        Err(error) => Ok(err_variant(error)),
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -269,15 +211,7 @@ fn builtin_time_format_in_raw(args: &[Value]) -> RuntimeResult<Value> {
     let layout = args.first().and_then(as_str).unwrap_or("");
     let unix_ms = args.get(1).and_then(value_to_int).unwrap_or(0);
     let spec = args.get(2).and_then(as_str).unwrap_or("");
-    let result = time_location(spec).and_then(|location| {
-        gossamer_std::time::tz::format_in(
-            layout,
-            gossamer_std::time::SystemTime::from_unix_millis(unix_ms),
-            location,
-        )
-        .map_err(|error| error.to_string())
-    });
-    match result {
+    match gossamer_runtime::c_abi::time::format_in(layout, unix_ms, spec) {
         Ok(value) => Ok(ok_variant(Value::String(value.into()))),
         Err(error) => Ok(err_variant(error)),
     }
@@ -289,27 +223,27 @@ fn builtin_time_format_in_raw(_args: &[Value]) -> RuntimeResult<Value> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn builtin_time_format_rfc3339_raw(args: &[Value]) -> RuntimeResult<Value> {
+    let unix_ns = args.first().and_then(value_to_int).unwrap_or(0);
+    let spec = args.get(1).and_then(as_str).unwrap_or("");
+    match gossamer_runtime::c_abi::time::format_rfc3339(unix_ns, spec) {
+        Ok(value) => Ok(ok_variant(Value::String(value.into()))),
+        Err(error) => Ok(err_variant(error)),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn builtin_time_format_rfc3339_raw(_args: &[Value]) -> RuntimeResult<Value> {
+    Ok(err_variant("civil time is unsupported on wasm32"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn builtin_time_add_date_raw(args: &[Value]) -> RuntimeResult<Value> {
     let unix_ms = args.first().and_then(value_to_int).unwrap_or(0);
     let spec = args.get(1).and_then(as_str).unwrap_or("");
-    let int_arg = |index| {
-        args.get(index)
-            .and_then(value_to_int)
-            .and_then(|value| i32::try_from(value).ok())
-            .ok_or_else(|| format!("calendar argument {index} is out of range"))
-    };
-    let result = time_location(spec).and_then(|location| {
-        gossamer_std::time::tz::add_date(
-            gossamer_std::time::SystemTime::from_unix_millis(unix_ms),
-            location,
-            int_arg(2)?,
-            int_arg(3)?,
-            int_arg(4)?,
-        )
-        .map(|value| value.unix_millis())
-        .map_err(|error| error.to_string())
-    });
-    match result {
+    let int_arg = |index| args.get(index).and_then(value_to_int).unwrap_or(0);
+    match gossamer_runtime::c_abi::time::add_date(unix_ms, spec, int_arg(2), int_arg(3), int_arg(4))
+    {
         Ok(value) => Ok(ok_variant(Value::Int(value))),
         Err(error) => Ok(err_variant(error)),
     }

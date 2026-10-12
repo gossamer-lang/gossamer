@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.71.2 - Miri fixes
+## 0.71.2 - Miri fixes and faster standard-library hot paths
 
 - Miri: `a_region_vec_grows_through_buffers_its_region_owns` now ignores itself under Miri like the other arena tests, because the arena reserves `PROT_NONE` virtual address space and commits slabs via `mprotect`, which Miri does not support.
 - Miri: `a_vec_grows_across_the_mapped_size_and_frees_cleanly` ignores itself under Miri, where mapped buffers are compiled out and the test's fallback length is millions of interpreted pushes, which ran the weekly job past its time limit.
@@ -9,6 +9,16 @@
 - The registered WASI target is `wasm32-wasip1`, the name Rust and the CI cross-check use; `gos build --target wasm32-wasi` now reports an unknown target.
 - `std::compress` (gzip, zlib, flate) and `std::archive::zip` now deflate through `miniz_oxide`, the backend the runtime selects. The `zip` dependency's `deflate` feature had switched every `flate2` user to `zlib-rs`, whose stream teardown Miri reports as undefined behavior. Decompression results and error messages are unchanged; compressed bytes can differ from 0.71.1.
 - Runtime string readers that take a `String` from compiled code no longer read the header in front of a foreign C string whose address happens to share a string body's alignment, wherever the runtime can enumerate its string bodies (Miri). The runtime tests that passed host C strings to those readers now pass runtime strings.
+- HTTP/3: a peer can no longer make a connection queue connection-ID retirements without bound (RUSTSEC advisory against `quinn-proto` 0.11.16; now 0.11.19).
+- `encoding::base64::encode` and `decode` run on the CPU's vector instructions when it has them, and encode writes straight into the result instead of copying its input and then its output. Decode still skips whitespace and refuses malformed text with the same messages.
+- `json::encode` gathers a document in one buffer and makes the string once, rather than updating the string's character index after every token. Floats are written by the formatter `{}` uses, with the same text as before.
+- A fixed array passed to a `[T]` parameter that the callee only reads is viewed through a header in the caller's stack frame, instead of one allocated and freed per call, in compiled code.
+- Runtime functions that take a `String` no longer recheck it for UTF-8 when the string already records that it is valid.
+- `for word in s.split_whitespace() { m.inc(word) }` counts each word in place, without building a `String` per word. `m.inc(s.substring(i, j))` and `m.get_or(s.substring(i, j).trim(), d)`, with or without the key bound by `let`, read the key out of `s` in place.
+- In compiled code, `m.inc(s.substring(i, j))` panicked when `j < i`, and skipped the count for an empty key or a window past the end of `s`; it now clamps exactly as `substring` does, matching the VM.
+- `time::Time::format_rfc3339` is one runtime call that builds its text in one allocation.
+- The bytecode VM's civil-time functions (`Location::lookup`, `civil`, `resolve`, `format_in`, `add_date`) share the compiled tiers' implementation, so an unknown location or an out-of-range date reports the same message on every tier.
+- A vector pushed into another at its last use moves instead of being copied, including when a loop rebuilds it on every pass. A nested vector whose rows already sit in memory in index order is no longer copied row by row to put them there.
 
 ## 0.71.1 - Goroutine and channel fixes
 

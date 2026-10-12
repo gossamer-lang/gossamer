@@ -4362,7 +4362,7 @@ impl TypeChecker<'_> {
                 let i = self.tcx.int_ty(IntTy::I64);
                 self.tcx.intern(TyKind::Tuple(vec![i; 3]))
             }
-            "__gos_time_format_in_raw" => self.tcx.string_ty(),
+            "__gos_time_format_in_raw" | "__gos_time_format_rfc3339_raw" => self.tcx.string_ty(),
             "__gos_time_add_date_raw" | "__gos_fd_wait_raw" => self.tcx.int_ty(IntTy::I64),
             _ => return None,
         };

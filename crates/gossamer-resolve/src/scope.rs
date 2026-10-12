@@ -329,6 +329,7 @@ const PRELUDE_VALUES: &[&str] = &[
     "__gos_time_civil_raw",
     "__gos_time_resolve_raw",
     "__gos_time_format_in_raw",
+    "__gos_time_format_rfc3339_raw",
     "__gos_time_add_date_raw",
     "__gos_tar_read_raw",
     "__gos_zip_read_raw",

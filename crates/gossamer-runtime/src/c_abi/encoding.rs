@@ -116,9 +116,17 @@ pub unsafe extern "C" fn gos_rt_encoding_base64_encode(
 ) -> *mut c_char {
     ffi_entry!({
         // SAFETY: `data` is this shim's argument, live for the call (C-ABI contract) or null,
-        // which `vec_bytes` accepts.
-        let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
-        alloc_cstring(base64::encode(&bytes).as_bytes())
+        // which `vec_bytes_cow` accepts.
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes_cow(data) };
+        let len = base64::encoded_len(bytes.len());
+        let force_heap = crate::c_abi::rc::in_region_arena(bytes.as_ptr());
+        super::string::alloc_ascii_with_fill(len, force_heap, |out| {
+            // SAFETY: the allocation passes `len` writable content bytes at `out`.
+            let dst = unsafe {
+                std::slice::from_raw_parts_mut(out.cast::<std::mem::MaybeUninit<u8>>(), len)
+            };
+            let _ = base64::encode_into(&bytes, base64_simd::Out::from_uninit_slice(dst));
+        })
     })
 }
 
@@ -143,12 +151,23 @@ pub unsafe extern "C" fn gos_rt_encoding_base64_decode(s: *const c_char) -> i128
         }
         let bound = base64::decoded_bound(text.len());
         // SAFETY: the vec was just built with room for the decoded bound, and its buffer is live
-        // and uniquely held here; the bytes are zeroed before a slice is formed over them.
-        let out = unsafe {
-            std::ptr::write_bytes(vref.ptr.as_ptr(), 0, bound);
-            std::slice::from_raw_parts_mut(vref.ptr.as_ptr(), bound)
+        // and uniquely held here.
+        let spare = unsafe {
+            std::slice::from_raw_parts_mut(
+                vref.ptr.as_ptr().cast::<std::mem::MaybeUninit<u8>>(),
+                bound,
+            )
         };
-        match base64::decode_into(text, out) {
+        let decoded =
+            match base64::decode_canonical(text, base64_simd::Out::from_uninit_slice(spare)) {
+                Some(written) => Ok(written),
+                // SAFETY: as above; the bytes are zeroed before a slice is formed over them.
+                None => base64::decode_into(text, unsafe {
+                    std::ptr::write_bytes(vref.ptr.as_ptr(), 0, bound);
+                    std::slice::from_raw_parts_mut(vref.ptr.as_ptr(), bound)
+                }),
+            };
+        match decoded {
             Ok(written) => {
                 vref.len = written as i64;
                 super::result::gos_rt_result_new(0, v as i64)

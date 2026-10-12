@@ -597,6 +597,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         crate::opt::reserve_vecs_for_counted_push_loops(body);
         // After the reservation, so a vector sized for the loop keeps that size.
         crate::opt::fuse_byte_append_loops(body, tcx);
+        crate::opt::fuse_field_count_loops(body, tcx);
         crate::opt::reserve_hashmaps_for_counted_insert_loops(body, tcx);
         // Fuse `seq.substring(i, i+k)` + `m.inc(kmer)` into the borrowed-slice
         // probe before the RC passes, so the eliminated scratch String gets no

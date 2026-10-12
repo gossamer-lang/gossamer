@@ -1669,6 +1669,8 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/stdlib_pem.gos"),
     spec("feature-testing-examples/stdlib_x509.gos"),
     spec("feature-testing-examples/stdlib_archive.gos"),
+    spec("feature-testing-examples/frame_array_views.gos"),
+    spec("feature-testing-examples/map_slice_keys.gos"),
     spec("feature-testing-examples/struct_update_base.gos"),
     spec("feature-testing-examples/at_binding_subpattern.gos"),
     spec("feature-testing-examples/scheduler_drain.gos"),

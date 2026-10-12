@@ -59,6 +59,7 @@ unnecessary_safety_comment = "deny"
 [dependencies]
 gossamer-core = { workspace = true }
 itoa = "1"
+base64-simd = "0.8"
 zmij = "1"
 num-bigint = "0.4"
 num-integer = "0.1"

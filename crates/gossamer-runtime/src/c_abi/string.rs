@@ -362,7 +362,15 @@ pub(crate) unsafe fn gos_str_arg_text<'a>(s: *const c_char) -> &'a str {
 pub(crate) unsafe fn gos_str_arg_lossy<'a>(s: *const c_char) -> std::borrow::Cow<'a, str> {
     // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `gos_str_arg_bytes`
     // accepts.
-    String::from_utf8_lossy(unsafe { gos_str_arg_bytes(s) })
+    let bytes = unsafe { gos_str_arg_bytes(s) };
+    // SAFETY: this `unsafe fn`'s caller passes `s` null or live, which `typed_str_known_utf8`
+    // accepts.
+    if unsafe { typed_str_known_utf8(s) } {
+        // SAFETY: an index footer other than `u32::MAX` is written only for
+        // content validated, or built from validated pieces, as UTF-8.
+        return std::borrow::Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(bytes) });
+    }
+    String::from_utf8_lossy(bytes)
 }
 
 /// Copies a Gossamer `String` argument into an owned `String`, replacing
@@ -414,7 +422,7 @@ pub(crate) unsafe fn typed_str_text<'a>(s: *const c_char) -> &'a str {
 ///
 /// `s` is null or a Gossamer string body.
 #[inline]
-unsafe fn typed_str_known_utf8(s: *const c_char) -> bool {
+pub(crate) unsafe fn typed_str_known_utf8(s: *const c_char) -> bool {
     // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_cap` accepts.
     let Some(cap) = (unsafe { typed_str_cap(s) }) else {
         return false;
@@ -1095,6 +1103,16 @@ where
     F: FnOnce(*mut u8),
 {
     alloc_growable_filled(content_len, cap, force_heap, KnownText::Unchecked, fill)
+}
+
+/// Allocates a string of `len` ASCII bytes that `fill` writes in full.
+/// `force_heap` keeps the string out of the open region, as a copy of
+/// region-backed bytes must be.
+pub(crate) fn alloc_ascii_with_fill<F>(len: usize, force_heap: bool, fill: F) -> *mut c_char
+where
+    F: FnOnce(*mut u8),
+{
+    alloc_growable_filled(len, len, force_heap, KnownText::Ascii, fill)
 }
 
 /// Copies `bytes`, which the caller has proven ASCII, into a fresh string.
@@ -2128,7 +2146,7 @@ pub unsafe extern "C" fn gos_rt_str_substring(
     reason = "shared by `substring` and `push_substring`, each called once per slice a program cuts: left to the heuristic, LLVM keeps it out of line and every substring pays a call"
 )]
 #[inline(always)]
-unsafe fn substring_bytes<'a>(s: *const c_char, start: i64, end: i64) -> &'a [u8] {
+pub(crate) unsafe fn substring_bytes<'a>(s: *const c_char, start: i64, end: i64) -> &'a [u8] {
     // O(1) length from the string's length header (every runtime-built
     // string carries one); an untagged rodata literal falls back to
     // strlen. Sizing the slice from the header keeps `substring`
@@ -2412,46 +2430,6 @@ pub unsafe extern "C" fn gos_rt_str_append_bytes(
         unsafe { gos_rt_str_free(acc.cast_mut()) };
     }
     result
-}
-
-/// Writes `bytes` into an exclusively owned builder whose caller already
-/// reserved enough capacity, then publishes the new length and terminator.
-/// This is the internal bulk-writer path used by serializers that own the
-/// builder for their entire lifetime. It avoids repeating ownership and
-/// capacity checks for every small formatter fragment.
-///
-/// # Safety
-///
-/// `acc` must be a live, uniquely owned growable Gossamer string. `offset`
-/// must equal its current length, and `offset + bytes.len()` must not exceed
-/// its capacity.
-pub(crate) unsafe fn str_builder_write_reserved(acc: *mut c_char, offset: usize, bytes: &[u8]) {
-    let new_len = offset
-        .checked_add(bytes.len())
-        .expect("reserved string length overflow");
-    // SAFETY: this `unsafe fn`'s caller passes `acc` a live string body.
-    debug_assert!(unsafe { is_typed_builder(acc) });
-    debug_assert!(u32::try_from(new_len).is_ok());
-    // SAFETY: this `unsafe fn`'s caller passes `acc` a uniquely held builder whose reserved
-    // capacity covers `offset + bytes.len()`.
-    unsafe {
-        let dst = acc.cast::<u8>().add(offset);
-        copy_small_bytes(bytes.as_ptr(), dst, bytes.len());
-        *dst.add(bytes.len()) = 0;
-        let len_header = acc.cast::<u8>().sub(5);
-        std::ptr::copy_nonoverlapping((new_len as u32).to_le_bytes().as_ptr(), len_header, 4);
-        let cap_header = acc.cast::<u8>().sub(9);
-        let cap = u32::from_le_bytes([
-            *cap_header,
-            *cap_header.add(1),
-            *cap_header.add(2),
-            *cap_header.add(3),
-        ]) as usize;
-        // `offset` is the builder's current length, so the index extends from
-        // the fragment alone. Rescanning the whole buffer per fragment would
-        // make a serializer quadratic in document size.
-        extend_str_index(acc, offset, bytes, cap);
-    }
 }
 
 /// Appends the decimal form of `n` straight onto growable string `acc`
