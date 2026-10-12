@@ -219,6 +219,153 @@ fn parse_location(spec: &str) -> Result<CivilLocation, String> {
         .ok_or_else(|| format!("time: invalid fixed location {spec:?}"))
 }
 
+/// The name a location is stored under once `spec` is known to name one.
+///
+/// # Errors
+/// When `spec` is neither `UTC`, an IANA zone, nor a `UTC±hh:mm` offset.
+pub fn location_name(spec: &str) -> Result<String, String> {
+    parse_location(spec)?;
+    Ok(spec.to_string())
+}
+
+/// The `UTC±hh:mm` name of a fixed offset of `offset_seconds` east of UTC.
+///
+/// # Errors
+/// When the offset is a day or more.
+pub fn fixed_location_name(offset_seconds: i64) -> Result<String, String> {
+    let offset = i32::try_from(offset_seconds)
+        .ok()
+        .filter(|&offset| FixedOffset::east_opt(offset).is_some())
+        .ok_or_else(|| "time: fixed offset out of range".to_string())?;
+    let sign = if offset < 0 { '-' } else { '+' };
+    let magnitude = offset.unsigned_abs();
+    Ok(format!(
+        "UTC{sign}{:02}:{:02}",
+        magnitude / 3_600,
+        (magnitude / 60) % 60
+    ))
+}
+
+/// The civil fields of Unix milliseconds `ms` in `spec`: year, month, day,
+/// hour, minute, second, nanosecond, offset seconds east of UTC, and weekday
+/// counted from Monday.
+///
+/// # Errors
+/// An unknown location, or a timestamp out of range.
+pub fn civil_fields(ms: i64, spec: &str) -> Result<[i64; 9], String> {
+    let location = parse_location(spec)?;
+    let utc = DateTime::<Utc>::from_timestamp_millis(ms)
+        .ok_or_else(|| "time: timestamp out of range".to_string())?;
+    let (local, offset) = match location {
+        CivilLocation::Iana(zone) => {
+            let value = utc.with_timezone(&zone);
+            (value.naive_local(), value.offset().fix().local_minus_utc())
+        }
+        CivilLocation::Fixed(fixed) => {
+            let value = utc.with_timezone(&fixed);
+            (value.naive_local(), value.offset().local_minus_utc())
+        }
+    };
+    Ok([
+        i64::from(local.year()),
+        i64::from(local.month()),
+        i64::from(local.day()),
+        i64::from(local.hour()),
+        i64::from(local.minute()),
+        i64::from(local.second()),
+        i64::from(local.nanosecond()),
+        i64::from(offset),
+        i64::from(local.weekday().num_days_from_monday()),
+    ])
+}
+
+/// How the civil time `fields` (year, month, day, hour, minute, second,
+/// nanosecond) reads in `spec`: `[1, ms, 0]` for one instant, `[0, 0, 0]` for
+/// a gap, `[2, earlier, later]` for a fold.
+///
+/// # Errors
+/// An unknown location, or fields naming no calendar time.
+pub fn resolve_fields(spec: &str, fields: [i64; 7]) -> Result<[i64; 3], String> {
+    let location = parse_location(spec)?;
+    let [year, month, day, hour, minute, second, nanos] = fields;
+    let civil = naive_civil(year, month, day, hour, minute, second, nanos)?;
+    Ok(match resolve_civil(&location, civil) {
+        LocalResult::Single(value) => [1, value.timestamp_millis(), 0],
+        LocalResult::None => [0, 0, 0],
+        LocalResult::Ambiguous(a, b) => {
+            let mut values = [a.timestamp_millis(), b.timestamp_millis()];
+            values.sort_unstable();
+            [2, values[0], values[1]]
+        }
+    })
+}
+
+/// Unix milliseconds `ms` in `spec`, written by a Go-style `layout`.
+///
+/// # Errors
+/// An unknown location, or a timestamp out of range.
+pub fn format_in(layout: &str, ms: i64, spec: &str) -> Result<String, String> {
+    let location = parse_location(spec)?;
+    let utc = DateTime::<Utc>::from_timestamp_millis(ms)
+        .ok_or_else(|| "time: timestamp out of range".to_string())?;
+    let format = chrono_layout(layout);
+    Ok(match location {
+        CivilLocation::Iana(zone) => utc.with_timezone(&zone).format(&format).to_string(),
+        CivilLocation::Fixed(offset) => utc.with_timezone(&offset).format(&format).to_string(),
+    })
+}
+
+/// Unix milliseconds `ms` moved by whole years, months, and days on the
+/// calendar of `spec`, the day clamped to the target month's last.
+///
+/// # Errors
+/// An unknown location, a result out of range, or one that lands in a gap or
+/// a fold of the location's clock.
+pub fn add_date(ms: i64, spec: &str, years: i64, months: i64, days: i64) -> Result<i64, String> {
+    let location = parse_location(spec)?;
+    let utc = DateTime::<Utc>::from_timestamp_millis(ms)
+        .ok_or_else(|| "time: timestamp out of range".to_string())?;
+    let local = match &location {
+        CivilLocation::Iana(zone) => utc.with_timezone(zone).naive_local(),
+        CivilLocation::Fixed(offset) => utc.with_timezone(offset).naive_local(),
+    };
+    let total_month = i64::from(local.year()) * 12
+        + i64::from(local.month0())
+        + years.saturating_mul(12)
+        + months;
+    let year = i32::try_from(total_month.div_euclid(12))
+        .map_err(|_| "time: resulting year out of range".to_string())?;
+    let month = u32::try_from(total_month.rem_euclid(12) + 1).unwrap_or(1);
+    let next_month = if month == 12 {
+        NaiveDate::from_ymd_opt(year + 1, 1, 1)
+    } else {
+        NaiveDate::from_ymd_opt(year, month + 1, 1)
+    }
+    .ok_or_else(|| "time: resulting date out of range".to_string())?;
+    let last_day = next_month.pred_opt().map_or(28, |date| date.day());
+    let base = NaiveDate::from_ymd_opt(year, month, local.day().min(last_day))
+        .and_then(|date| {
+            date.and_hms_nano_opt(
+                local.hour(),
+                local.minute(),
+                local.second(),
+                local.nanosecond(),
+            )
+        })
+        .ok_or_else(|| "time: resulting date out of range".to_string())?;
+    let shifted = base
+        .checked_add_signed(
+            chrono::Duration::try_days(days)
+                .ok_or_else(|| "time: day offset out of range".to_string())?,
+        )
+        .ok_or_else(|| "time: resulting date out of range".to_string())?;
+    match resolve_civil(&location, shifted) {
+        LocalResult::Single(value) => Ok(value.timestamp_millis()),
+        LocalResult::None => Err("time: resulting civil time falls in a gap".to_string()),
+        LocalResult::Ambiguous(_, _) => Err("time: resulting civil time is ambiguous".to_string()),
+    }
+}
+
 fn time_error(message: &str) -> i128 {
     let error = crate::c_abi::errors::error_new_from_bytes(message.as_bytes());
     gos_rt_result_new(1, error as i64)
@@ -269,10 +416,7 @@ pub unsafe extern "C" fn gos_rt_time_location_raw(name: *const c_char) -> i128 {
     ffi_entry!({
         // SAFETY: `name` is this shim's argument, as `read_time_string` requires (C-ABI
         // contract).
-        match unsafe { read_time_string(name) }.and_then(|name| {
-            parse_location(&name)?;
-            Ok(name)
-        }) {
+        match unsafe { read_time_string(name) }.and_then(|name| location_name(&name)) {
             Ok(name) => time_ok_string(&name),
             Err(error) => time_error(&error),
         }
@@ -282,19 +426,10 @@ pub unsafe extern "C" fn gos_rt_time_location_raw(name: *const c_char) -> i128 {
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_time_fixed_location_raw(offset_seconds: i64) -> i128 {
     ffi_entry!({
-        let Ok(offset) = i32::try_from(offset_seconds) else {
-            return time_error("time: fixed offset out of range");
-        };
-        if FixedOffset::east_opt(offset).is_none() {
-            return time_error("time: fixed offset out of range");
+        match fixed_location_name(offset_seconds) {
+            Ok(name) => time_ok_string(&name),
+            Err(error) => time_error(&error),
         }
-        let sign = if offset < 0 { '-' } else { '+' };
-        let magnitude = offset.unsigned_abs();
-        time_ok_string(&format!(
-            "UTC{sign}{:02}:{:02}",
-            magnitude / 3_600,
-            (magnitude / 60) % 60
-        ))
     })
 }
 
@@ -304,42 +439,8 @@ pub unsafe extern "C" fn gos_rt_time_civil_raw(ms: i64, location: *const c_char)
         // SAFETY: `location` is this shim's argument, as `read_time_string` requires (C-ABI
         // contract).
         let result = unsafe { read_time_string(location) }
-            .and_then(|spec| parse_location(&spec))
-            .and_then(|location| {
-                let utc = DateTime::<Utc>::from_timestamp_millis(ms)
-                    .ok_or_else(|| "time: timestamp out of range".to_string())?;
-                let fields = match location {
-                    CivilLocation::Iana(zone) => {
-                        let value = utc.with_timezone(&zone);
-                        [
-                            value.year() as i64,
-                            value.month() as i64,
-                            value.day() as i64,
-                            value.hour() as i64,
-                            value.minute() as i64,
-                            value.second() as i64,
-                            value.nanosecond() as i64,
-                            value.offset().fix().local_minus_utc() as i64,
-                            value.weekday().num_days_from_monday() as i64,
-                        ]
-                    }
-                    CivilLocation::Fixed(offset) => {
-                        let value = utc.with_timezone(&offset);
-                        [
-                            value.year() as i64,
-                            value.month() as i64,
-                            value.day() as i64,
-                            value.hour() as i64,
-                            value.minute() as i64,
-                            value.second() as i64,
-                            value.nanosecond() as i64,
-                            value.offset().local_minus_utc() as i64,
-                            value.weekday().num_days_from_monday() as i64,
-                        ]
-                    }
-                };
-                Ok(alloc_i64_words(&fields))
-            });
+            .and_then(|spec| civil_fields(ms, &spec))
+            .map(|fields| alloc_i64_words(&fields));
         match result {
             Ok(payload) if payload != 0 => gos_rt_result_new(0, payload),
             Ok(_) => time_error("time: allocation failed"),
@@ -363,20 +464,8 @@ pub unsafe extern "C" fn gos_rt_time_resolve_raw(
         // SAFETY: `location` is this shim's argument, as `read_time_string` requires (C-ABI
         // contract).
         let result = unsafe { read_time_string(location) }
-            .and_then(|spec| parse_location(&spec))
-            .and_then(|location| {
-                let civil = naive_civil(year, month, day, hour, minute, second, nanos)?;
-                let values = match resolve_civil(&location, civil) {
-                    LocalResult::Single(value) => [1, value.timestamp_millis(), 0],
-                    LocalResult::None => [0, 0, 0],
-                    LocalResult::Ambiguous(a, b) => {
-                        let mut values = [a.timestamp_millis(), b.timestamp_millis()];
-                        values.sort_unstable();
-                        [2, values[0], values[1]]
-                    }
-                };
-                Ok(alloc_i64_words(&values))
-            });
+            .and_then(|spec| resolve_fields(&spec, [year, month, day, hour, minute, second, nanos]))
+            .map(|fields| alloc_i64_words(&fields));
         match result {
             Ok(payload) if payload != 0 => gos_rt_result_new(0, payload),
             Ok(_) => time_error("time: allocation failed"),
@@ -422,17 +511,81 @@ pub unsafe extern "C" fn gos_rt_time_format_in_raw(
             // SAFETY: `location` is this shim's argument, as `read_time_string` requires (C-ABI
             // contract).
             let spec = unsafe { read_time_string(location) }?;
-            let location = parse_location(&spec)?;
-            let utc = DateTime::<Utc>::from_timestamp_millis(ms)
-                .ok_or_else(|| "time: timestamp out of range".to_string())?;
-            let format = chrono_layout(&layout);
-            Ok(match location {
-                CivilLocation::Iana(zone) => utc.with_timezone(&zone).format(&format).to_string(),
-                CivilLocation::Fixed(offset) => {
-                    utc.with_timezone(&offset).format(&format).to_string()
-                }
-            })
+            format_in(&layout, ms, &spec)
         });
+        match result {
+            Ok(value) => time_ok_string(&value),
+            Err(error) => time_error(&error),
+        }
+    })
+}
+
+/// RFC 3339 text of the instant `unix_ns` read in the location `spec`: whole
+/// seconds, the fraction with its trailing zeros dropped when there is one,
+/// and `Z` for UTC itself or the numeric offset otherwise. This is
+/// `time::Time::format_rfc3339`, shared by every tier.
+///
+/// # Errors
+/// The location's refusal when `spec` names none, or a timestamp out of range.
+pub fn format_rfc3339(unix_ns: i64, spec: &str) -> Result<String, String> {
+    use std::fmt::Write;
+    let location = parse_location(spec)?;
+    let utc = DateTime::<Utc>::from_timestamp_millis(unix_ns.div_euclid(1_000_000))
+        .ok_or_else(|| "time: timestamp out of range".to_string())?;
+    let (naive, offset) = match location {
+        CivilLocation::Iana(zone) => {
+            let value = utc.with_timezone(&zone);
+            (value.naive_local(), value.offset().fix().local_minus_utc())
+        }
+        CivilLocation::Fixed(fixed) => {
+            let value = utc.with_timezone(&fixed);
+            (value.naive_local(), value.offset().local_minus_utc())
+        }
+    };
+    let mut out = String::with_capacity(35);
+    let _ = write!(
+        out,
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        naive.year(),
+        naive.month(),
+        naive.day(),
+        naive.hour(),
+        naive.minute(),
+        naive.second()
+    );
+    let nanos = unix_ns.rem_euclid(1_000_000_000);
+    if nanos != 0 {
+        let mut digits = [0u8; 9];
+        let mut rest = nanos;
+        for slot in digits.iter_mut().rev() {
+            *slot = b'0' + (rest % 10) as u8;
+            rest /= 10;
+        }
+        let kept = 9 - digits.iter().rev().take_while(|&&d| d == b'0').count();
+        out.push('.');
+        out.extend(digits[..kept].iter().map(|&d| char::from(d)));
+    }
+    if offset == 0 && spec == "UTC" {
+        out.push('Z');
+    } else {
+        let sign = if offset < 0 { '-' } else { '+' };
+        let a = offset.unsigned_abs();
+        let _ = write!(out, "{sign}{:02}:{:02}", a / 3600, (a % 3600) / 60);
+    }
+    Ok(out)
+}
+
+/// `__gos_time_format_rfc3339_raw(unix_ns, location)`: [`format_rfc3339`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_time_format_rfc3339_raw(
+    unix_ns: i64,
+    location: *const c_char,
+) -> i128 {
+    ffi_entry!({
+        // SAFETY: `location` is this shim's argument, as `read_time_string` requires (C-ABI
+        // contract).
+        let result =
+            unsafe { read_time_string(location) }.and_then(|spec| format_rfc3339(unix_ns, &spec));
         match result {
             Ok(value) => time_ok_string(&value),
             Err(error) => time_error(&error),
@@ -452,54 +605,7 @@ pub unsafe extern "C" fn gos_rt_time_add_date_raw(
         // SAFETY: `location` is this shim's argument, as `read_time_string` requires (C-ABI
         // contract).
         let result = unsafe { read_time_string(location) }
-            .and_then(|spec| parse_location(&spec))
-            .and_then(|location| {
-                let utc = DateTime::<Utc>::from_timestamp_millis(ms)
-                    .ok_or_else(|| "time: timestamp out of range".to_string())?;
-                let local = match &location {
-                    CivilLocation::Iana(zone) => utc.with_timezone(zone).naive_local(),
-                    CivilLocation::Fixed(offset) => utc.with_timezone(offset).naive_local(),
-                };
-                let total_month = i64::from(local.year()) * 12
-                    + i64::from(local.month0())
-                    + years.saturating_mul(12)
-                    + months;
-                let year = i32::try_from(total_month.div_euclid(12))
-                    .map_err(|_| "time: resulting year out of range".to_string())?;
-                let month = u32::try_from(total_month.rem_euclid(12) + 1).unwrap_or(1);
-                let next_month = if month == 12 {
-                    NaiveDate::from_ymd_opt(year + 1, 1, 1)
-                } else {
-                    NaiveDate::from_ymd_opt(year, month + 1, 1)
-                }
-                .ok_or_else(|| "time: resulting date out of range".to_string())?;
-                let last_day = next_month.pred_opt().map_or(28, |date| date.day());
-                let base = NaiveDate::from_ymd_opt(year, month, local.day().min(last_day))
-                    .and_then(|date| {
-                        date.and_hms_nano_opt(
-                            local.hour(),
-                            local.minute(),
-                            local.second(),
-                            local.nanosecond(),
-                        )
-                    })
-                    .ok_or_else(|| "time: resulting date out of range".to_string())?;
-                let shifted = base
-                    .checked_add_signed(
-                        chrono::Duration::try_days(days)
-                            .ok_or_else(|| "time: day offset out of range".to_string())?,
-                    )
-                    .ok_or_else(|| "time: resulting date out of range".to_string())?;
-                match resolve_civil(&location, shifted) {
-                    LocalResult::Single(value) => Ok(value.timestamp_millis()),
-                    LocalResult::None => {
-                        Err("time: resulting civil time falls in a gap".to_string())
-                    }
-                    LocalResult::Ambiguous(_, _) => {
-                        Err("time: resulting civil time is ambiguous".to_string())
-                    }
-                }
-            });
+            .and_then(|spec| add_date(ms, &spec, years, months, days));
         match result {
             Ok(value) => gos_rt_result_new(0, value),
             Err(error) => time_error(&error),
@@ -705,4 +811,39 @@ fn parse_rfc3339_ms(s: &str) -> Option<i64> {
     let unix_secs = civil_to_days(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second
         - offset_seconds;
     unix_secs.checked_mul(1_000)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_rfc3339;
+
+    #[test]
+    fn rfc3339_trims_the_fraction_and_names_utc_as_z() {
+        assert_eq!(format_rfc3339(0, "UTC").unwrap(), "1970-01-01T00:00:00Z");
+        assert_eq!(
+            format_rfc3339(1_700_000_000_100_000_000, "UTC").unwrap(),
+            "2023-11-14T22:13:20.1Z"
+        );
+        assert_eq!(
+            format_rfc3339(-1, "UTC").unwrap(),
+            "1969-12-31T23:59:59.999999999Z"
+        );
+    }
+
+    #[test]
+    fn rfc3339_writes_the_offset_of_any_other_location() {
+        assert_eq!(
+            format_rfc3339(0, "UTC-00:00").unwrap(),
+            "1970-01-01T00:00:00+00:00"
+        );
+        assert_eq!(
+            format_rfc3339(0, "UTC-09:30").unwrap(),
+            "1969-12-31T14:30:00-09:30"
+        );
+        assert_eq!(
+            format_rfc3339(0, "America/New_York").unwrap(),
+            "1969-12-31T19:00:00-05:00"
+        );
+        assert!(format_rfc3339(0, "Bogus/Zone").is_err());
+    }
 }

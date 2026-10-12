@@ -486,54 +486,28 @@ pub unsafe extern "C" fn gos_rt_json_free_slots(vec: *mut GosVec, first: i64, st
     unsafe { crate::c_abi::gos_rt_vec_free(vec) };
 }
 
-/// `serde_json::to_writer` sink backed directly by the compiled String ABI.
-/// Each write consumes the current unique builder and returns its possibly
-/// reallocated pointer. HTML-sensitive characters are escaped inline, so no
-/// whole-document replacement buffer is needed afterwards.
+/// `serde_json::to_writer` sink that gathers a document's bytes and makes one
+/// runtime string of them when it finishes, so each token costs a slice copy
+/// rather than a runtime-string append. HTML-sensitive characters are escaped
+/// inline, so no whole-document replacement buffer is needed afterwards.
 struct RuntimeJsonWriter {
-    string: *mut c_char,
-    len: usize,
-    capacity: usize,
+    bytes: Vec<u8>,
 }
 
 impl RuntimeJsonWriter {
     fn new(capacity: usize) -> Self {
-        let capacity = capacity.min(u32::MAX as usize);
         Self {
-            string: gos_rt_str_with_capacity(i64::try_from(capacity).unwrap_or(i64::MAX)),
-            len: 0,
-            capacity,
+            bytes: Vec::with_capacity(capacity),
         }
     }
 
+    #[inline]
     fn append(&mut self, bytes: &[u8]) {
-        if bytes.is_empty() {
-            return;
-        }
-        let new_len = self.len.saturating_add(bytes.len());
-        if new_len <= self.capacity {
-            // SAFETY: `string` is this writer's own builder, `len` its length, and `new_len` fits
-            // its capacity (checked above).
-            unsafe { str_builder_write_reserved(self.string, self.len, bytes) };
-        } else {
-            // SAFETY: `string` is this writer's own builder, whose share the append consumes and
-            // answers.
-            self.string = unsafe {
-                gos_rt_str_append_bytes(
-                    self.string,
-                    bytes.as_ptr(),
-                    i64::try_from(bytes.len()).unwrap_or(i64::MAX),
-                )
-            };
-            self.capacity = new_len.saturating_mul(2).max(64).min(u32::MAX as usize);
-        }
-        self.len = new_len;
+        self.bytes.extend_from_slice(bytes);
     }
 
-    fn finish(mut self) -> *mut c_char {
-        let string = self.string;
-        self.string = std::ptr::null_mut();
-        string
+    fn finish(self) -> *mut c_char {
+        alloc_cstring(&self.bytes)
     }
 }
 
@@ -608,15 +582,6 @@ fn write_html_safe(bytes: &[u8], mut append: impl FnMut(&[u8])) {
     append(&bytes[start..]);
 }
 
-impl Drop for RuntimeJsonWriter {
-    fn drop(&mut self) {
-        if !self.string.is_null() {
-            // SAFETY: `string` is the non-null builder this writer still owns.
-            unsafe { gos_rt_str_free(self.string) };
-        }
-    }
-}
-
 /// Writes a JSON float the way the language writes the same value, so a
 /// number inside a document reads as the one `{}` shows for it. Rust's
 /// shortest-round-trip float writer would spell large and small magnitudes in
@@ -630,11 +595,12 @@ fn write_language_float<W: std::io::Write + ?Sized>(
     if !value.is_finite() {
         return writer.write_all(b"null");
     }
+    let mut text = crate::builtins::FloatText::new();
+    writer.write_all(crate::builtins::f64_display(value, &mut text))?;
     if value.fract() == 0.0 {
-        write!(writer, "{value}.0")
-    } else {
-        write!(writer, "{value}")
+        writer.write_all(b".0")?;
     }
+    Ok(())
 }
 
 /// Compact JSON with the language's own float spelling. Every method but the
@@ -2078,6 +2044,56 @@ pub unsafe extern "C" fn gos_rt_json_writer_finish(w: *mut JsonTokenWriter) -> *
 mod tests {
     use super::*;
     use std::ffi::CStr;
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "two hundred thousand formatted floats compare text, which Miri interprets far too slowly to finish"
+    )]
+    fn a_json_float_reads_as_the_language_spells_it() {
+        let reference = |value: f64| {
+            if !value.is_finite() {
+                "null".to_string()
+            } else if value.fract() == 0.0 {
+                format!("{value}.0")
+            } else {
+                format!("{value}")
+            }
+        };
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let specials = [
+            0.0,
+            -0.0,
+            1.0,
+            -1.5,
+            0.1,
+            1e21,
+            1e-7,
+            123.25,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+            5e-324,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.30000000000000004,
+        ];
+        let randoms = (0..200_000).map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            f64::from_bits(state)
+        });
+        for value in specials.into_iter().chain(randoms) {
+            let mut written = Vec::new();
+            write_language_float(&mut written, value).expect("writes to a Vec");
+            assert_eq!(
+                String::from_utf8(written).unwrap(),
+                reference(value),
+                "{value:e}"
+            );
+        }
+    }
 
     /// Refcount word of an `alloc_cstring` builder-layout string:
     /// `[rc:u32][cap:u32][len:u32][tag][content][NUL]`, body at +13.

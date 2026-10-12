@@ -1672,11 +1672,13 @@ impl<'a> Builder<'a> {
             let rhs_vec = self.vec_elem_cmp_tag(self.locals[rhs_local.0 as usize].ty);
             match (lhs_arr, rhs_arr, lhs_vec, rhs_vec) {
                 (Some((elem, len)), None, None, Some(tag)) => {
-                    let coerced = self.coerce_borrow_array_to_vec(lhs_local, elem, len, span);
+                    let coerced =
+                        self.coerce_borrow_array_to_vec(lhs_local, elem, len, false, span);
                     return Some(self.lower_vec_eq(op, coerced, rhs_local, tag, span));
                 }
                 (None, Some((elem, len)), Some(tag), None) => {
-                    let coerced = self.coerce_borrow_array_to_vec(rhs_local, elem, len, span);
+                    let coerced =
+                        self.coerce_borrow_array_to_vec(rhs_local, elem, len, false, span);
                     return Some(self.lower_vec_eq(op, lhs_local, coerced, tag, span));
                 }
                 _ => {}
@@ -4100,7 +4102,7 @@ impl<'a> Builder<'a> {
             span,
         )?;
         let vec_local = match array_len {
-            Some(len) => self.coerce_borrow_array_to_vec(base_local, elem, len, span),
+            Some(len) => self.coerce_borrow_array_to_vec(base_local, elem, len, false, span),
             None => base_local,
         };
         let window_ty = self.tcx.intern(TyKind::Slice(elem));

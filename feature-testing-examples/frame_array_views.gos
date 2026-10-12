@@ -1,0 +1,51 @@
+// A fixed array handed to a `[T]` parameter is viewed through a header the
+// caller reserves in its own frame when the callee only reads it, and through
+// a heap header when the callee keeps it. Both must read the same elements on
+// every tier, in loops, through nested calls, and for packed byte arrays.
+
+const WEIGHTS: [f64; 3] = [0.5, 1.5, -2.0]
+const BYTES: [u8; 4] = [1u8, 2u8, 250u8, 4u8]
+
+struct Acc {
+    total: f64
+    kept: Vec<Vec<f64>>
+}
+
+impl Acc {
+    fn add(&mut self, xs: [f64]) { self.add_inner(xs) }
+
+    fn add_inner(&mut self, xs: [f64]) {
+        for x in xs { self.total += x }
+    }
+
+    fn keep(&mut self, xs: [f64]) { self.kept.push(xs.to_vec()) }
+}
+
+fn sum_f(xs: [f64]) -> f64 {
+    let mut s = 0.0
+    for x in xs { s += x }
+    s
+}
+
+fn sum_bytes(bs: [u8]) -> i64 {
+    let mut s = 0
+    for b in bs { s += b as i64 }
+    s
+}
+
+fn first_two(xs: [f64]) -> (f64, f64) { (xs[0], xs[1]) }
+
+fn main() {
+    let mut acc = Acc { total: 0.0, kept: #[] }
+    let local = [1.0, 2.0, 3.0]
+    let mut grand = 0.0
+    for i in 0..1000 {
+        acc.add(WEIGHTS)
+        acc.add(local)
+        grand += sum_f(WEIGHTS) + sum_f(local)
+        if i % 250 == 0 { acc.keep(local) }
+    }
+    let a, b = first_two(WEIGHTS)
+    println(f"total {acc.total} grand {grand} kept {acc.kept.len()} first {acc.kept[0]}")
+    println(f"bytes {sum_bytes(BYTES)} pair {a} {b}")
+}

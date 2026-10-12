@@ -18,6 +18,11 @@ pub mod string_layout;
 /// Core ABI types: [`AbiType`], [`AbiSig`], [`RuntimeEntry`].
 pub mod types;
 
+/// Bytes of the stack slot a compiled caller reserves for a borrowing
+/// `GosVec` view that lives for one call: the header's size on a 64-bit
+/// target, and room to spare on a 32-bit one.
+pub const VEC_HEADER_BYTES: usize = 64;
+
 /// Tag byte introducing a nested tuple in a `gos_rt_tuple_format` /
 /// `gos_rt_tuple_cmp` tag stream. The next byte is the nested tuple's
 /// element count, followed by that many tags, recursively. A nested

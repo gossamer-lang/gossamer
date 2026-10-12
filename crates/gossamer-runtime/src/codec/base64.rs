@@ -14,38 +14,23 @@ static VALUES: [u8; 256] = {
     table
 };
 
+/// Byte length of the Base64 text of `len` input bytes.
+#[must_use]
+pub const fn encoded_len(len: usize) -> usize {
+    len.div_ceil(3) * 4
+}
+
 /// Base64 text of `data`, padded with `=` to a multiple of four characters.
 #[must_use]
 pub fn encode(data: &[u8]) -> String {
-    // The output is pure ASCII from the alphabet, so it is built as bytes at
-    // its final length rather than pushed a `char` at a time.
-    let mut out = vec![0u8; data.len().div_ceil(3) * 4];
-    let mut written = 0usize;
-    let mut chunks = data.chunks_exact(3);
-    for chunk in &mut chunks {
-        let n = (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]);
-        out[written] = ALPHA[((n >> 18) & 0x3f) as usize];
-        out[written + 1] = ALPHA[((n >> 12) & 0x3f) as usize];
-        out[written + 2] = ALPHA[((n >> 6) & 0x3f) as usize];
-        out[written + 3] = ALPHA[(n & 0x3f) as usize];
-        written += 4;
-    }
-    let tail = chunks.remainder();
-    if !tail.is_empty() {
-        let b1 = tail.get(1).copied().unwrap_or(0);
-        let n = (u32::from(tail[0]) << 16) | (u32::from(b1) << 8);
-        out[written] = ALPHA[((n >> 18) & 0x3f) as usize];
-        out[written + 1] = ALPHA[((n >> 12) & 0x3f) as usize];
-        out[written + 2] = if tail.len() > 1 {
-            ALPHA[((n >> 6) & 0x3f) as usize]
-        } else {
-            b'='
-        };
-        out[written + 3] = b'=';
-    }
-    // SAFETY: every byte written comes from the base64 alphabet or `=`, all
-    // of which are ASCII.
-    unsafe { String::from_utf8_unchecked(out) }
+    base64_simd::STANDARD.encode_to_string(data)
+}
+
+/// Writes the Base64 text of `data` into `out`, which holds at least
+/// [`encoded_len`] bytes, and answers the text.
+#[must_use]
+pub fn encode_into<'d>(data: &[u8], out: base64_simd::Out<'d, [u8]>) -> &'d mut [u8] {
+    base64_simd::STANDARD.encode(data, out)
 }
 
 /// Decodes Base64 text, skipping ASCII whitespace anywhere in it.
@@ -93,6 +78,15 @@ pub fn decode_into(bytes: &[u8], out: &mut [u8]) -> Result<usize, String> {
         out.len() >= decoded_bound(bytes.len()),
         "base64 output buffer is shorter than the decoded bound"
     );
+    match decode_canonical(bytes, base64_simd::Out::from_slice(out)) {
+        Some(written) => Ok(written),
+        None => decode_scalar(bytes, out),
+    }
+}
+
+/// The character-at-a-time reader behind [`decode_into`], which accepts
+/// whitespace and names the fault in what it refuses.
+fn decode_scalar(bytes: &[u8], out: &mut [u8]) -> Result<usize, String> {
     let mut bits: u32 = 0;
     let mut nbits = 0u32;
     let mut i = 0usize;
@@ -154,6 +148,21 @@ pub fn decode_into(bytes: &[u8], out: &mut [u8]) -> Result<usize, String> {
     Ok(written)
 }
 
+/// Decodes `bytes` into `out` when they are Base64 exactly as an encoder writes
+/// it: padded, with zero leftover bits and no whitespace. `None` for anything
+/// else, which [`decode_into`] then reads; on every input this one decodes, the
+/// two agree.
+///
+/// # Panics
+/// If `out` is shorter than [`decoded_bound`] of the input length.
+#[must_use]
+pub fn decode_canonical(bytes: &[u8], out: base64_simd::Out<'_, [u8]>) -> Option<usize> {
+    base64_simd::STANDARD
+        .decode(bytes, out)
+        .ok()
+        .map(|decoded| decoded.len())
+}
+
 /// Whether `data` alphabet characters followed by `pad` padding characters
 /// spell whole groups of four, padded only where the last group is short:
 /// `xx==` and `xxx=` end an encoding, and nothing else may.
@@ -189,7 +198,7 @@ fn invalid_character(bytes: &[u8], at: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode, encode};
+    use super::{decode, decode_canonical, decode_scalar, decoded_bound, encode};
 
     #[test]
     fn round_trips_every_byte_and_padding_length() {
@@ -259,5 +268,41 @@ mod tests {
         assert!(decode("Zh==").is_err());
         assert!(decode("Zm9=").is_err());
         assert!(decode("Zm8=").is_ok());
+    }
+
+    #[test]
+    fn the_canonical_reader_agrees_with_the_scalar_one() {
+        // Text drawn from the alphabet, padding, whitespace, and a refused
+        // byte, so every shape either reader can meet comes up.
+        let pool = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/== \n*";
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        for _ in 0..20_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let len = (state % 41) as usize;
+            let text: Vec<u8> = (0..len)
+                .map(|i| pool[((state >> (i % 50)) as usize + i * 7) % pool.len()])
+                .collect();
+            let mut fast = vec![0u8; decoded_bound(text.len())];
+            let mut slow = vec![0u8; decoded_bound(text.len())];
+            if let Some(n) = decode_canonical(&text, base64_simd::Out::from_slice(&mut fast)) {
+                let m = decode_scalar(&text, &mut slow).expect("scalar accepts canonical text");
+                assert_eq!(
+                    &fast[..n],
+                    &slow[..m],
+                    "{:?}",
+                    String::from_utf8_lossy(&text)
+                );
+            }
+        }
+        for len in 0..=96usize {
+            let data: Vec<u8> = (0..len).map(|i| (i * 37 + 11) as u8).collect();
+            let text = encode(&data);
+            let mut fast = vec![0u8; decoded_bound(text.len())];
+            let n = decode_canonical(text.as_bytes(), base64_simd::Out::from_slice(&mut fast))
+                .expect("an encoder's text is canonical");
+            assert_eq!(&fast[..n], data.as_slice());
+        }
     }
 }

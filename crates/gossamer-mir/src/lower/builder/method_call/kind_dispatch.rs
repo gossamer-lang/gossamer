@@ -1441,12 +1441,19 @@ impl<'a> Builder<'a> {
                 .get(&format!("{name}::{}", method.name))
         })
         .map(|inputs| inputs.get(1..).unwrap_or_default());
+        let callee_effects = if runtime_symbol.is_none() {
+            self.region_effects
+                .of_method_call(self.tcx, receiver.ty, &method.name, args.len() + 1)
+        } else {
+            None
+        };
         let (receiver_local, mut arg_operands) = self.build_fallback_arg_operands(
             runtime_symbol,
             receiver_local,
             receiver,
             args,
             method_inputs,
+            callee_effects.as_ref(),
             span,
         )?;
         let runtime_symbol =
@@ -1741,6 +1748,7 @@ impl<'a> Builder<'a> {
         receiver: &HirExpr,
         args: &[HirExpr],
         expected_args: Option<&[Ty]>,
+        callee_effects: Option<&crate::lower::helpers::effects::FnEffects>,
         span: Span,
     ) -> Option<(Local, Vec<Operand>)> {
         // A `&mut` for-loop binds a heap-container element to its slot
@@ -1956,7 +1964,9 @@ impl<'a> Builder<'a> {
                 if let TyKind::Array { elem, len } = self.tcx.kind_of(source_inner).clone() {
                     if matches!(self.tcx.kind_of(expected_inner), TyKind::Slice(_)) {
                         if matches!(self.tcx.kind_of(expected), TyKind::Ref { .. }) {
-                            self.coerce_borrow_array_to_vec(a, elem, len, span)
+                            // The receiver is parameter 0 of the summary.
+                            let frame = Self::frame_view_ok(callee_effects, index + 1);
+                            self.coerce_borrow_array_to_vec(a, elem, len, frame, span)
                         } else {
                             self.coerce_array_to_vec(a, elem, len, span)
                         }

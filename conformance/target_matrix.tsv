@@ -13,4 +13,4 @@ tier2	aarch64-unknown-linux-musl	AOT under QEMU VM differential	ci:cross-from-li
 artifact	x86_64-apple-darwin	release artifact build only	ci:release-build-macos-x86_64
 registered	riscv64gc-unknown-linux-gnu	compile-check only	ci:cross-targets
 registered	wasm32-unknown-unknown	platform-agnostic crate check only	ci:cross-targets
-registered	wasm32-wasi	platform-agnostic crate check only	ci:cross-targets
+registered	wasm32-wasip1	platform-agnostic crate check only	ci:cross-targets

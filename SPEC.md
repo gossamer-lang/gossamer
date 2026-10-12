@@ -3299,7 +3299,7 @@ registered rows are not supported execution targets.
 | Artifact only | `x86_64-apple-darwin` | release artifact build only |
 | Registered | `riscv64gc-unknown-linux-gnu` | compile check only |
 | Registered | `wasm32-unknown-unknown` | platform-agnostic crate check only |
-| Registered | `wasm32-wasi` | platform-agnostic crate check only |
+| Registered | `wasm32-wasip1` | platform-agnostic crate check only |
 
 ### 11.2 Linking
 

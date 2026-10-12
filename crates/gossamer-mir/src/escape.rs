@@ -73,10 +73,13 @@ const NON_CAPTURING_RUNTIME_CALLEES: &[&str] = &[
     // map pointer is mutated but not captured.
     "gos_rt_map_get_or_i64_i64",
     "gos_rt_map_get_or_str_i64",
+    "gos_rt_map_get_or_substring_str_str",
     "gos_rt_map_get_or_typed_str_i64",
     "gos_rt_map_inc_at_str_i64",
+    "gos_rt_map_inc_fields_str_i64",
     "gos_rt_map_inc_i64",
     "gos_rt_map_inc_str_i64",
+    "gos_rt_map_inc_substring_str_i64",
     "gos_rt_map_inc_typed_str_i64",
     "gos_rt_map_or_insert_i64_i64",
     "gos_rt_map_or_insert_str_i64",

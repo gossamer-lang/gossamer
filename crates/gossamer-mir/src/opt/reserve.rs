@@ -1058,62 +1058,103 @@ fn block_reads_vec_local(
     from_stmt: usize,
     skip: &[(usize, usize)],
 ) -> bool {
+    block
+        .stmts
+        .iter()
+        .enumerate()
+        .skip(from_stmt)
+        .any(|(stmt_index, stmt)| {
+            !skip.contains(&(block_index, stmt_index)) && stmt_reads_vec_local(stmt, local)
+        })
+        || terminator_reads_vec_local(&block.terminator, local)
+}
+
+/// Whether `stmt` reads `local` other than through the reference-count
+/// helpers that bracket an ownership transfer.
+fn stmt_reads_vec_local(stmt: &Statement, local: Local) -> bool {
     let mentions = |op: &Operand| matches!(op, Operand::Copy(p) if p.local == local);
-    for (stmt_index, stmt) in block.stmts.iter().enumerate().skip(from_stmt) {
-        if skip.contains(&(block_index, stmt_index)) {
-            continue;
-        }
-        let StatementKind::Assign { place, rvalue } = &stmt.kind else {
-            continue;
-        };
-        if place.local == local && !place.projection.is_empty() {
-            return true;
-        }
-        match rvalue {
-            Rvalue::CallIntrinsic { name, args } => {
-                if matches!(
-                    name,
-                    &"gos_rt_vec_retain" | &"gos_rt_vec_free" | &"gos_rt_vec_mark_shared"
-                ) {
-                    continue;
-                }
-                if args.iter().any(mentions) {
-                    return true;
-                }
-            }
-            Rvalue::Use(op) | Rvalue::UnaryOp { operand: op, .. } | Rvalue::Cast { operand: op, .. } => {
-                if mentions(op) {
-                    return true;
-                }
-            }
-            Rvalue::BinaryOp { lhs, rhs, .. } => {
-                if mentions(lhs) || mentions(rhs) {
-                    return true;
-                }
-            }
-            Rvalue::Aggregate { operands, .. } => {
-                if operands.iter().any(mentions) {
-                    return true;
-                }
-            }
-            Rvalue::Repeat { value, .. } => {
-                if mentions(value) {
-                    return true;
-                }
-            }
-            Rvalue::Ref { place: p, .. } | Rvalue::Len(p) => {
-                if p.local == local {
-                    return true;
-                }
-            }
-            Rvalue::StaticLoad(_) => {}
-        }
+    let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+        return false;
+    };
+    if place.local == local && !place.projection.is_empty() {
+        return true;
     }
-    match &block.terminator {
+    match rvalue {
+        Rvalue::CallIntrinsic { name, args } => {
+            !matches!(
+                name,
+                &"gos_rt_vec_retain" | &"gos_rt_vec_free" | &"gos_rt_vec_mark_shared"
+            ) && args.iter().any(mentions)
+        }
+        Rvalue::Use(op) | Rvalue::UnaryOp { operand: op, .. } | Rvalue::Cast { operand: op, .. } => {
+            mentions(op)
+        }
+        Rvalue::BinaryOp { lhs, rhs, .. } => mentions(lhs) || mentions(rhs),
+        Rvalue::Aggregate { operands, .. } => operands.iter().any(mentions),
+        Rvalue::Repeat { value, .. } => mentions(value),
+        Rvalue::Ref { place: p, .. } | Rvalue::Len(p) => p.local == local,
+        Rvalue::StaticLoad(_) => false,
+    }
+}
+
+fn terminator_reads_vec_local(terminator: &Terminator, local: Local) -> bool {
+    let mentions = |op: &Operand| matches!(op, Operand::Copy(p) if p.local == local);
+    match terminator {
         Terminator::Call { args, .. } => args.iter().any(mentions),
         Terminator::SwitchInt { discriminant, .. } => mentions(discriminant),
         _ => false,
     }
+}
+
+/// Whether some path from the start of block `start` reads `local` before
+/// assigning it a whole new value: the value `local` holds on entry to
+/// `start` is still wanted. A loop that rebinds the local at the top of each
+/// iteration does not keep the previous iteration's value alive.
+fn vec_local_live_into(body: &Body, start: usize, local: Local) -> bool {
+    let n = body.blocks.len();
+    let mut seen = vec![false; n];
+    let mut queue = vec![start];
+    if start < n {
+        seen[start] = true;
+    }
+    while let Some(bi) = queue.pop() {
+        let Some(block) = body.blocks.get(bi) else {
+            continue;
+        };
+        let mut redefined = false;
+        for stmt in &block.stmts {
+            if stmt_reads_vec_local(stmt, local) {
+                return true;
+            }
+            if let StatementKind::Assign { place, .. } = &stmt.kind
+                && place.local == local
+                && place.projection.is_empty()
+            {
+                redefined = true;
+                break;
+            }
+        }
+        if redefined {
+            continue;
+        }
+        if terminator_reads_vec_local(&block.terminator, local) {
+            return true;
+        }
+        if let Terminator::Call { destination, .. } = &block.terminator
+            && destination.local == local
+            && destination.projection.is_empty()
+        {
+            continue;
+        }
+        for succ in block_successors(&block.terminator) {
+            let idx = succ.as_u32() as usize;
+            if idx < n && !seen[idx] {
+                seen[idx] = true;
+                queue.push(idx);
+            }
+        }
+    }
+    false
 }
 
 /// Shares a vector bound out of a container instead of copying it, when neither
@@ -1463,13 +1504,7 @@ pub(crate) fn move_vec_clone_of_dead_local(
         {
             continue;
         }
-        let reachable = blocks_reachable_from(body, bi);
-        let read_later = body
-            .blocks
-            .iter()
-            .enumerate()
-            .any(|(idx, b)| reachable[idx] && block_reads_vec_local(b, idx, src, 0, &[]));
-        if read_later {
+        if vec_local_live_into(body, target.as_u32() as usize, src) {
             continue;
         }
         rewrites.push((bi, src, dst, *target));

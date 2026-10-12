@@ -166,12 +166,14 @@ mod tests {
             .collect()
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(any(target_arch = "wasm32", miri)))]
     fn native_formats() -> Vec<Format> {
         vec![Format::Bzip2, Format::Zstd]
     }
 
-    #[cfg(target_arch = "wasm32")]
+    // wasm32 links no C libraries, and Miri cannot execute the ones bzip2 and
+    // zstd call into.
+    #[cfg(any(target_arch = "wasm32", miri))]
     fn native_formats() -> Vec<Format> {
         Vec::new()
     }

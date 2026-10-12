@@ -123,6 +123,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "a 200,000-byte input is a running-time bound, which Miri interprets far too slowly to measure"
+    )]
     fn many_ampersands_stay_linear() {
         let text = "&".repeat(200_000);
         assert_eq!(unescape(&text), text);

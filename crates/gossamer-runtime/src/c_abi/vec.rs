@@ -340,6 +340,16 @@ const VEC_WINDOW_FLAG: u8 = 4;
 /// Header was allocated as `Box<GosVec>` without an unused inline buffer.
 const VEC_COMPACT_HEADER_FLAG: u8 = 8;
 
+/// `region_flag` bit marking a borrowing view whose header lives in its
+/// caller's stack frame: it owns neither its header nor its buffer, so
+/// `gos_rt_vec_free` leaves it alone.
+const VEC_FRAME_FLAG: u8 = 16;
+
+// A caller reserving a header in its own frame sizes and aligns the slot by
+// the ABI's figures.
+const _: () = assert!(std::mem::size_of::<GosVec>() <= gossamer_abi::VEC_HEADER_BYTES);
+const _: () = assert!(std::mem::align_of::<GosVec>() <= 8);
+
 /// Element words held inline, immediately after the [`GosVec`] header, in a
 /// single [`InlineVec`] allocation. Six words is the selected default from the
 /// audited game/stress matrix; `inline-vec-words-8` remains available for
@@ -901,6 +911,86 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_borrow_packed_arr(
             (*v).ptr = SyncRawPtr::new(data.cast_mut());
         }
         v
+    })
+}
+
+/// True when this header is a borrowing view in its caller's stack frame.
+pub(crate) fn vec_is_frame(v: &GosVec) -> bool {
+    v.region_flag & VEC_FRAME_FLAG != 0
+}
+
+/// Builds in `header` a borrowing view over `len` elements of `stride` bytes
+/// at `data`, for a parameter the callee neither keeps nor resizes. The view
+/// lives for the call it is passed to, in storage the caller reserved.
+///
+/// # Safety
+///
+/// `header` addresses [`gossamer_abi::VEC_HEADER_BYTES`] writable, 8-aligned
+/// bytes that outlive every use of the answer, and `data` holds `len`
+/// elements of `stride` bytes for as long.
+unsafe fn init_frame_view(
+    header: *mut GosVec,
+    stride: u32,
+    data: *const u8,
+    len: i64,
+) -> *mut GosVec {
+    if len < 0 {
+        crate::c_abi::panic::panic_text("Vec length must be non-negative");
+    }
+    // SAFETY: this `unsafe fn`'s caller passes `header` writable storage for one header.
+    unsafe {
+        header.write(GosVec {
+            len,
+            cap: len,
+            elem_bytes: stride,
+            elem_kind: vec_elem_kind::PRIMITIVE,
+            region_flag: VEC_FRAME_FLAG,
+            rc: std::sync::atomic::AtomicU16::new(1),
+            ptr: SyncRawPtr::new(data.cast_mut()),
+            generation: 0,
+            mutation_generation: 0,
+            elem_meta: SyncRawPtr::NULL,
+            owner: SyncRawPtr::NULL,
+        });
+    }
+    header
+}
+
+/// [`gos_rt_vec_borrow_arr`] with its header in storage the caller reserved,
+/// so the view costs no allocation.
+///
+/// # Safety
+///
+/// As [`init_frame_view`], with `data` a word-slot array.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn gos_rt_vec_borrow_arr_into(
+    header: *mut GosVec,
+    elem_bytes: u32,
+    data: *const u8,
+    len: i64,
+) -> *mut GosVec {
+    ffi_entry_passthrough!({
+        // SAFETY: this shim's caller passes the storage and data the contract names.
+        unsafe { init_frame_view(header, elem_bytes.max(8), data, len) }
+    })
+}
+
+/// [`gos_rt_vec_borrow_packed_arr`] with its header in storage the caller
+/// reserved, so the view costs no allocation.
+///
+/// # Safety
+///
+/// As [`init_frame_view`], with `data` a packed array.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn gos_rt_vec_borrow_packed_arr_into(
+    header: *mut GosVec,
+    elem_bytes: u32,
+    data: *const u8,
+    len: i64,
+) -> *mut GosVec {
+    ffi_entry_passthrough!({
+        // SAFETY: this shim's caller passes the storage and data the contract names.
+        unsafe { init_frame_view(header, elem_bytes.max(1), data, len) }
     })
 }
 
@@ -1496,6 +1586,34 @@ pub unsafe extern "C" fn gos_rt_vec_header_table(v: *const GosVec) -> *mut GosVe
     })
 }
 
+/// Whether a walk of `vec`'s nested vectors in index order already meets
+/// their headers and their element storage at ascending addresses, the order
+/// a rebuild would hand the allocator them in, so rebuilding gains nothing.
+///
+/// # Safety
+///
+/// `vec` is a live vec whose 8-byte elements are null or live `Vec` handles.
+unsafe fn elements_in_reading_order(vec: &GosVec) -> bool {
+    let mut last_header = 0usize;
+    let mut last_buffer = 0usize;
+    for i in 0..vec.len.max(0) as usize {
+        // SAFETY: `i` is below the vec's length, so its 8-byte slot is in bounds.
+        let child = unsafe { slot_read_word(vec.ptr.add(i * 8)) }.cast::<GosVec>();
+        if child.is_null() {
+            continue;
+        }
+        // SAFETY: a non-null element of this nested vec is a live `Vec`.
+        let buffer = unsafe { (*child).ptr.as_const_ptr() } as usize;
+        let header = child as usize;
+        if header <= last_header || (buffer != 0 && buffer <= last_buffer) {
+            return false;
+        }
+        last_header = header;
+        last_buffer = last_buffer.max(buffer);
+    }
+    true
+}
+
 /// Rebuilds every nested-vector element of `v` in index order, in place.
 ///
 /// A `Vec<Vec<T>>` grown element by element has its element storage scattered
@@ -1521,6 +1639,10 @@ pub unsafe extern "C" fn gos_rt_vec_compact_elems(v: *mut GosVec) {
         || vec.elem_bytes != 8
         || vec.ptr.is_null()
     {
+        return;
+    }
+    // SAFETY: `vec` is the live nested vec checked above.
+    if unsafe { elements_in_reading_order(vec) } {
         return;
     }
     for i in 0..vec.len.max(0) as usize {
@@ -3822,6 +3944,10 @@ mod mapped_buffer_tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "mapped buffers are compiled out under Miri, so there is no mapped size to cross and the fallback length is millions of interpreted pushes"
+    )]
     fn a_vec_grows_across_the_mapped_size_and_frees_cleanly() {
         let words = (mapped::MAPPED_BYTES / 8).min(1 << 23) * 2 + 3;
         let v = gos_rt_vec_new(8);
@@ -3886,16 +4012,21 @@ mod mapped_buffer_tests {
     #[test]
     #[cfg(all(unix, not(miri)))]
     fn a_release_after_its_regions_pop_reads_nothing_of_it() {
+        // The inputs are heap strings made before the region opens: a copy of
+        // region-backed bytes goes to the heap, and the concatenation must not.
+        let ab = crate::c_abi::string::alloc_cstring(b"ab");
+        let cd = crate::c_abi::string::alloc_cstring(b"cd");
+        let text = crate::c_abi::string::alloc_cstring(b"[1, 2]");
         crate::c_abi::rc::gos_rt_arena_push();
         let v = gos_rt_vec_new(8);
         // SAFETY: `v` is the live vec made above.
         unsafe { gos_rt_vec_push_i64(v, 7) };
-        // SAFETY: both arguments are NUL-terminated host strings.
-        let s = unsafe { crate::c_abi::string::gos_rt_str_concat(c"ab".as_ptr(), c"cd".as_ptr()) };
+        // SAFETY: both arguments are live heap strings made above.
+        let s = unsafe { crate::c_abi::string::gos_rt_str_concat(ab, cd) };
         let m = crate::c_abi::map::gos_rt_map_new(8, 8);
         let set = crate::c_abi::set::gos_rt_set_new();
-        // SAFETY: the argument is a NUL-terminated host string.
-        let parsed = unsafe { crate::c_abi::json::gos_rt_json_parse(c"[1, 2]".as_ptr()) };
+        // SAFETY: the argument is a live heap string made above.
+        let parsed = unsafe { crate::c_abi::json::gos_rt_json_parse(text) };
         let doc =
             crate::c_abi::result::gos_rt_result_payload(parsed) as *mut crate::c_abi::json::GosJson;
         let child_meta = [gossamer_abi::rc::RC_KIND_STRUCT_GUARDED, 0];
@@ -3952,6 +4083,12 @@ mod mapped_buffer_tests {
         }
         for &p in &pointers {
             protect_page_of(p, true);
+        }
+        // SAFETY: each input holds its one share, given back here.
+        unsafe {
+            crate::c_abi::string::gos_rt_str_free(ab);
+            crate::c_abi::string::gos_rt_str_free(cd);
+            crate::c_abi::string::gos_rt_str_free(text);
         }
     }
 

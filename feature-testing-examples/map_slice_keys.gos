@@ -1,0 +1,66 @@
+// Map probes keyed by a piece of a string read the piece in place: a word
+// count over `split_whitespace`, `inc` and `get_or` keyed by a substring or
+// its `trim()`. Each must count and answer exactly as the allocating form,
+// including substring bounds that clamp or cross.
+
+fn sorted_counts(m: Map<String, i64>) -> String {
+    let mut keys = m.keys()
+    keys.sort()
+    let mut out = ""
+    for k in keys { out += f"[{k}]={m[k]} " }
+    out
+}
+
+fn count_words(text: String) -> Map<String, i64> {
+    let mut freq: Map<String, i64> = Map::new()
+    for word in text.split_whitespace() { freq.inc(word) }
+    freq
+}
+
+fn count_words_logged(text: String) -> Map<String, i64> {
+    let mut freq: Map<String, i64> = Map::new()
+    let mut seen = 0
+    for word in text.split_whitespace() {
+        freq.inc(word)
+        seen += 1
+    }
+    freq.inc("total", seen)
+    freq
+}
+
+fn main() {
+    println(sorted_counts(count_words("the cat  the\that\nthe end")))
+    println(sorted_counts(count_words("")))
+    println(sorted_counts(count_words("   ")))
+    println(sorted_counts(count_words("caf\u{e9} na\u{ef}ve\u{2003}caf\u{e9}\u{a0}x")))
+    println(sorted_counts(count_words_logged("a b a")))
+
+    let s = "abcdef"
+    let mut m: Map<String, i64> = Map::new()
+    let ends = [3, 10, 2, 6]
+    for e in ends { m.inc(s.substring(4, e)) }
+    m.inc(s.substring(2, 2))
+    m.inc(s.substring(-3, 2))
+    println(sorted_counts(m))
+
+    let doc = "<p>{{ name }} and {{age}} and {{  missing }}</p>"
+    let mut vars: Map<String, String> = Map::new()
+    vars.insert("name", "Ada")
+    vars.insert("age", "36")
+    let mut rendered = ""
+    let mut i = 0
+    while i < doc.byte_len() {
+        if doc.byte_at(i) == 123 && doc.byte_at(i + 1) == 123 {
+            let mut j = i + 2
+            while !(doc.byte_at(j) == 125 && doc.byte_at(j + 1) == 125) { j += 1 }
+            let key = doc.substring(i + 2, j).trim()
+            rendered += vars.get_or(key, "?")
+            i = j + 2
+        } else {
+            rendered.push_char(doc[i])
+            i += 1
+        }
+    }
+    println(rendered)
+    println(vars.get_or(doc.substring(5, 9), "untrimmed"))
+}

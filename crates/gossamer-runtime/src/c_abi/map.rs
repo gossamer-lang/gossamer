@@ -1141,18 +1141,55 @@ pub unsafe extern "C" fn gos_rt_map_get_or_str_str(
         if m.is_null() || key.is_null() {
             return alloc_cstring(default_bytes);
         }
-        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
-        let map = unsafe { &*m };
         // SAFETY: `key` is a String argument from compiled code, null or a live string body for the whole call.
         let key_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(key) };
-        let storage = map.storage.lock();
-        let MapStorage::StrStr(inner) = &*storage else {
-            return alloc_cstring(default_bytes);
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
+        map_get_or_str_str_bytes(unsafe { &*m }, key_bytes, default_bytes)
+    })
+}
+
+/// `get_or` on a `Map<String, String>` whose key arrives as bytes.
+fn map_get_or_str_str_bytes(map: &GosMap, key_bytes: &[u8], default_bytes: &[u8]) -> *mut c_char {
+    let storage = map.storage.lock();
+    let MapStorage::StrStr(inner) = &*storage else {
+        return alloc_cstring(default_bytes);
+    };
+    match inner.get(ByteKeyRef::new(key_bytes)) {
+        Some(v) => alloc_cstring(v),
+        None => alloc_cstring(default_bytes),
+    }
+}
+
+/// `m.get_or(s.substring(start, end), default)`, or with the key's `trim()`
+/// when `trim` is nonzero, without building the substring.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_get_or_substring_str_str(
+    m: *const GosMap,
+    s: *const c_char,
+    start: i64,
+    end: i64,
+    trim: i64,
+    default: *const c_char,
+) -> *mut c_char {
+    ffi_entry!({
+        let default_bytes: &[u8] = if default.is_null() {
+            b""
+        } else {
+            // SAFETY: `default` is a String argument from compiled code, null or a live string body for the whole call.
+            unsafe { crate::c_abi::gos_str_arg_bytes(default) }
         };
-        match inner.get(ByteKeyRef::new(key_bytes)) {
-            Some(v) => alloc_cstring(v),
-            None => alloc_cstring(default_bytes),
+        if m.is_null() {
+            return alloc_cstring(default_bytes);
         }
+        let key: &[u8] = if s.is_null() {
+            b""
+        } else {
+            // SAFETY: `s` is a String argument from compiled code, live for the whole call.
+            unsafe { substring_key(s, start, end, trim != 0) }
+        };
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the
+        // whole call.
+        map_get_or_str_str_bytes(unsafe { &*m }, key, default_bytes)
     })
 }
 
@@ -2130,28 +2167,105 @@ unsafe fn map_inc_str_i64_impl(m: *mut GosMap, key: *const c_char, by: i64) -> i
         if m.is_null() || key.is_null() {
             return 0;
         }
-        crate::c_abi::ledger::map_str_probe();
         // SAFETY: this `unsafe fn`'s caller passes `key` live; non-null, checked above.
         let key_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(key) };
         // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
         // `Map` not otherwise accessed during the call.
-        let map = unsafe { &mut *m };
-        let mut storage = map.storage.lock();
-        if matches!(*storage, MapStorage::Empty) {
-            *storage = MapStorage::StrI64(Table::for_order(map.byte_order()));
-        }
-        let MapStorage::StrI64(inner) = &mut *storage else {
-            return 0;
-        };
-        if let Some(v) = inner.get_mut(ByteKeyRef::new(key_bytes)) {
-            *v += by;
-            return *v;
-        }
-        crate::c_abi::ledger::map_str_key_copy(key_bytes.len());
-        inner.insert(crate::c_abi::string::boxed_bytes(key_bytes).into(), by);
-        map.len_cache += 1;
-        by
+        map_inc_str_bytes(unsafe { &mut *m }, key_bytes, by)
     })
+}
+
+/// `map.inc(key, by)` on a `Map<String, i64>` whose key arrives as bytes; an
+/// owned key is made only when the key is new.
+fn map_inc_str_bytes(map: &mut GosMap, key_bytes: &[u8], by: i64) -> i64 {
+    crate::c_abi::ledger::map_str_probe();
+    let mut storage = map.storage.lock();
+    if matches!(*storage, MapStorage::Empty) {
+        *storage = MapStorage::StrI64(Table::for_order(map.byte_order()));
+    }
+    let MapStorage::StrI64(inner) = &mut *storage else {
+        return 0;
+    };
+    if let Some(v) = inner.get_mut(ByteKeyRef::new(key_bytes)) {
+        *v += by;
+        return *v;
+    }
+    crate::c_abi::ledger::map_str_key_copy(key_bytes.len());
+    inner.insert(crate::c_abi::string::boxed_bytes(key_bytes).into(), by);
+    drop(storage);
+    map.len_cache += 1;
+    by
+}
+
+/// The key `s.substring(start, end)` names, trimmed when `trim` is set, read
+/// in place: the same bytes the substring, and its `trim()`, would hold.
+///
+/// # Safety
+///
+/// `s` is a live, non-null Gossamer string body.
+unsafe fn substring_key<'a>(s: *const c_char, start: i64, end: i64, trim: bool) -> &'a [u8] {
+    // SAFETY: this `unsafe fn`'s caller passes `s` a live string body.
+    let bytes = unsafe { crate::c_abi::string::substring_bytes(s, start, end) };
+    if !trim {
+        return bytes;
+    }
+    // A substring is cut on character boundaries, so the piece of a string
+    // known to be UTF-8 is UTF-8 too.
+    // SAFETY: this `unsafe fn`'s caller passes `s` a live string body.
+    let text = if unsafe { crate::c_abi::string::typed_str_known_utf8(s) } {
+        // SAFETY: `bytes` is a whole-character piece of UTF-8 text.
+        unsafe { std::str::from_utf8_unchecked(bytes) }
+    } else {
+        std::str::from_utf8(bytes).unwrap_or("")
+    };
+    text.trim().as_bytes()
+}
+
+/// `m.inc(s.substring(start, end), by)`, or of its `trim()` when `trim` is
+/// nonzero, without building the substring.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_inc_substring_str_i64(
+    m: *mut GosMap,
+    s: *const c_char,
+    start: i64,
+    end: i64,
+    trim: i64,
+    by: i64,
+) -> i64 {
+    ffi_entry!({
+        if m.is_null() {
+            return 0;
+        }
+        let key: &[u8] = if s.is_null() {
+            b""
+        } else {
+            // SAFETY: `s` is a String argument from compiled code, live for the whole call.
+            unsafe { substring_key(s, start, end, trim != 0) }
+        };
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the
+        // whole call.
+        map_inc_str_bytes(unsafe { &mut *m }, key, by)
+    })
+}
+
+/// `for word in s.split_whitespace() { m.inc(word, by) }` without building
+/// the words: each whitespace-separated piece is counted in place.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_inc_fields_str_i64(m: *mut GosMap, s: *const c_char, by: i64) {
+    ffi_entry!({
+        if m.is_null() || s.is_null() {
+            return;
+        }
+        // Read as `split_whitespace` reads its receiver, so the pieces are the same.
+        // SAFETY: `s` is a String argument from compiled code, live for the whole call.
+        let text = unsafe { crate::c_abi::gos_str_arg_text(s) };
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the
+        // whole call.
+        let map = unsafe { &mut *m };
+        crate::c_abi::strings::for_each_whitespace_field(text, |word| {
+            map_inc_str_bytes(map, word, by);
+        });
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -3654,6 +3768,11 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
         // global allocator (the memory isn't its).
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         if crate::c_abi::vec::vec_is_region(unsafe { &*v }) {
+            return;
+        }
+        // A view whose header sits in its caller's frame owns nothing to free.
+        // SAFETY: as above.
+        if crate::c_abi::vec::vec_is_frame(unsafe { &*v }) {
             return;
         }
         // RC: atomic decrement. Reclaim only when this thread held the last

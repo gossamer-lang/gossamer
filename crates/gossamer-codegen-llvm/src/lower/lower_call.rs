@@ -1292,6 +1292,25 @@ impl<'a> Lowerer<'a> {
             self.lower_hashmap_from_array(&args[0], destination, target)?;
             return Ok(());
         }
+        // A frame view over packed `[u8; N]` storage takes the packed stride.
+        if name == "gos_rt_vec_borrow_arr_into"
+            && args.get(2).is_some_and(|arg| {
+                matches!(
+                    arg,
+                    Operand::Copy(place)
+                        if place.projection.is_empty()
+                            && packed_byte_array_len(self.tcx, self.body.local_ty(place.local))
+                                .is_some()
+                )
+            })
+        {
+            return self.emit_named_call(
+                "gos_rt_vec_borrow_packed_arr_into",
+                args,
+                destination,
+                target,
+            );
+        }
         if matches!(
             name.as_str(),
             "gos_rt_vec_from_arr" | "gos_rt_vec_borrow_arr"

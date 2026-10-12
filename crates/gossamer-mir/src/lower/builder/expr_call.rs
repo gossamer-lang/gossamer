@@ -1081,6 +1081,10 @@ impl<'a> Builder<'a> {
             }
             _ => None,
         };
+        let callee_effects = match &callee.kind {
+            HirExprKind::Path { def: Some(def), .. } => self.region_effects.of_fn(*def),
+            _ => None,
+        };
         let callee_param_tys: Option<Vec<Ty>> = match &callee.kind {
             HirExprKind::Path { def: Some(def), .. } => self.fn_inputs.get(def).cloned(),
             _ => None,
@@ -1268,7 +1272,8 @@ impl<'a> Builder<'a> {
                             let param_is_borrow =
                                 matches!(self.tcx.kind_of(expected), TyKind::Ref { .. });
                             if param_is_borrow {
-                                self.coerce_borrow_array_to_vec(local, elem, len, span)
+                                let frame = Self::frame_view_ok(callee_effects, idx);
+                                self.coerce_borrow_array_to_vec(local, elem, len, frame, span)
                             } else {
                                 self.coerce_array_to_vec(local, elem, len, span)
                             }

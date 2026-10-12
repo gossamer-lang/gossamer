@@ -40,7 +40,7 @@ is added.
 ## Registered, unsupported
 
 The driver also recognises `riscv64gc-unknown-linux-gnu`,
-`wasm32-unknown-unknown`, and `wasm32-wasi` for targeted compile checks. They
+`wasm32-unknown-unknown`, and `wasm32-wasip1` for targeted compile checks. They
 are not supported execution targets: the full runtime/scheduler and all-tier
 conformance suite do not run there. In particular, `gos build --target
 wasm32-...` is not a supported deployment path.
