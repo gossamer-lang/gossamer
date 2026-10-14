@@ -1567,6 +1567,7 @@ fn build_static_bindings_lib(
     let lib = lib.with_cargo_target(cargo_target.map(str::to_string));
     let built = lib.ensure_built()?;
     libraries.staticlib_args = built.native_libs;
+    libraries.search.extend(built.search);
     Ok(Some(built.archive))
 }
 

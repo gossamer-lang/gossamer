@@ -125,6 +125,10 @@ pub struct StaticBindingsArchive {
     /// naming the system libraries the archive's foreign code calls, in the
     /// order rustc reports them. They follow the archive on the link line.
     pub native_libs: Vec<String>,
+    /// Directories the archive's build scripts name for native libraries,
+    /// such as the import libraries of the `windows-targets` crates, which
+    /// the link searches for `native_libs`.
+    pub search: Vec<PathBuf>,
 }
 
 /// Profile (debug / release) for the runner build.
@@ -286,13 +290,16 @@ impl BindingRunner {
             return Ok(WorkdirLease::take(&self.workdir, bin_path)?);
         }
         run_cargo_build(
-            &cargo_toml,
-            &dir.join("target"),
-            self.profile,
+            &CargoBuild {
+                manifest_path: &cargo_toml,
+                target_dir: &dir.join("target"),
+                profile: self.profile,
+                cargo_target: None,
+                target_args: &["--bin", "gos-runner"],
+                crate_label: "<runner>",
+                rustc_args: &[],
+            },
             None,
-            &["--bin", "gos-runner"],
-            "<runner>",
-            &[],
         )?;
         write_stamp(&stamp, &self.fingerprint_hex, self.profile, "runner")?;
         // A single Cargo invocation can cross the runner budget after the
@@ -346,13 +353,16 @@ impl BindingRunner {
             return Ok(WorkdirLease::take(&self.workdir, json_path)?);
         }
         run_cargo_build(
-            &cargo_toml,
-            &dir.join("target"),
-            self.profile,
+            &CargoBuild {
+                manifest_path: &cargo_toml,
+                target_dir: &dir.join("target"),
+                profile: self.profile,
+                cargo_target: None,
+                target_args: &["--bin", "gos-sigs-dump"],
+                crate_label: "<sigs>",
+                rustc_args: &[],
+            },
             None,
-            &["--bin", "gos-sigs-dump"],
-            "<sigs>",
-            &[],
         )?;
         if let Some(root) = self.workdir.parent() {
             let _ = crate::cache_maintenance::prune_runner_root(
@@ -571,6 +581,10 @@ impl StaticBindingsLib {
         self.archive_path().with_file_name("native-static-libs.txt")
     }
 
+    fn native_search_path(&self) -> PathBuf {
+        self.archive_path().with_file_name("native-link-search.txt")
+    }
+
     /// Idempotently builds the staticlib. Returns the produced archive
     /// (`.a` on Unix / Windows-GNU, `.lib` on Windows MSVC) with the native
     /// libraries a link that takes it must also name.
@@ -597,27 +611,37 @@ impl StaticBindingsLib {
 
         let archive = self.archive_path();
         let native_libs_path = self.native_libs_path();
+        let search_path = self.native_search_path();
         let stamp = self.workdir.join("stamp.json");
         if self.is_fresh(&archive, &stamp)?
             && let Ok(recorded) = fs::read_to_string(&native_libs_path)
+            && let Ok(searched) = fs::read_to_string(&search_path)
         {
             return Ok(StaticBindingsArchive {
                 archive,
                 native_libs: recorded.split_whitespace().map(str::to_string).collect(),
+                search: searched.lines().map(PathBuf::from).collect(),
             });
         }
+        let mut messages = Vec::new();
         let output = run_cargo_build(
-            &cargo_toml,
-            &self.workdir.join("target"),
-            self.profile,
-            self.cargo_target.as_deref(),
-            &["--lib"],
-            "<staticlib>",
-            &["--print", "native-static-libs"],
+            &CargoBuild {
+                manifest_path: &cargo_toml,
+                target_dir: &self.workdir.join("target"),
+                profile: self.profile,
+                cargo_target: self.cargo_target.as_deref(),
+                target_args: &["--lib"],
+                crate_label: "<staticlib>",
+                rustc_args: &["--print", "native-static-libs"],
+            },
+            Some(&mut messages),
         )?;
         let native_libs = parse_native_static_libs(&output)
             .ok_or_else(|| BindingRunnerError::MissingNativeLibs(archive.display().to_string()))?;
+        let search = native_search_dirs(&String::from_utf8_lossy(&messages));
         fs::write(&native_libs_path, native_libs.join("\n"))?;
+        let search_lines: Vec<String> = search.iter().map(|d| d.display().to_string()).collect();
+        fs::write(&search_path, search_lines.join("\n"))?;
         link_archive_exception_tables(&archive)?;
         let kind = match &self.cargo_target {
             Some(t) => format!("staticlib:{t}"),
@@ -635,6 +659,7 @@ impl StaticBindingsLib {
         Ok(StaticBindingsArchive {
             archive,
             native_libs,
+            search,
         })
     }
 
@@ -1220,15 +1245,33 @@ fn write_stamp(path: &Path, fingerprint_hex: &str, profile: Profile, kind: &str)
     write_if_different(path, &body)
 }
 
-fn run_cargo_build(
-    manifest_path: &Path,
-    target_dir: &Path,
+/// One `cargo` build of a generated project.
+struct CargoBuild<'a> {
+    manifest_path: &'a Path,
+    target_dir: &'a Path,
     profile: Profile,
-    cargo_target: Option<&str>,
-    target_args: &[&str],
-    crate_label: &str,
-    rustc_args: &[&str],
+    cargo_target: Option<&'a str>,
+    /// Which of the project's targets to build (`--lib`, `--bin NAME`).
+    target_args: &'a [&'a str],
+    /// How a failure names the crate.
+    crate_label: &'a str,
+    /// Arguments for the final crate's rustc alone.
+    rustc_args: &'a [&'a str],
+}
+
+fn run_cargo_build(
+    build: &CargoBuild<'_>,
+    messages: Option<&mut Vec<u8>>,
 ) -> Result<String, BindingRunnerError> {
+    let CargoBuild {
+        manifest_path,
+        target_dir,
+        profile,
+        cargo_target,
+        target_args,
+        crate_label,
+        rustc_args,
+    } = *build;
     let cargo = which::which("cargo").map_err(|_| BindingRunnerError::CargoMissing)?;
     let mut cmd = Command::new(cargo);
     // `cargo rustc` hands its trailing arguments to the final crate's rustc alone.
@@ -1253,10 +1296,15 @@ fn run_cargo_build(
     if io::stderr().is_terminal() {
         cmd.arg("--color").arg("always");
     }
+    // Cargo still renders diagnostics on stderr; its JSON messages go to
+    // stdout, which `run_streamed` hands to `messages` instead of the terminal.
+    if messages.is_some() {
+        cmd.arg("--message-format=json-render-diagnostics");
+    }
     if !rustc_args.is_empty() {
         cmd.arg("--").args(rustc_args);
     }
-    let (status, output_tail) = run_streamed(cmd, &mut io::stderr())?;
+    let (status, output_tail) = run_streamed(cmd, &mut io::stderr(), messages)?;
     if !status.success() {
         return Err(BindingRunnerError::CargoBuildFailed {
             crate_name: crate_label.to_string(),
@@ -1265,6 +1313,43 @@ fn run_cargo_build(
         });
     }
     Ok(output_tail)
+}
+
+/// The native library directories the build scripts in cargo's JSON
+/// `messages` add to the link (`cargo:rustc-link-search`), in the order
+/// cargo reports them.
+fn native_search_dirs(messages: &str) -> Vec<PathBuf> {
+    #[derive(serde::Deserialize)]
+    struct Message {
+        reason: String,
+        #[serde(default)]
+        linked_paths: Vec<String>,
+    }
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for line in messages.lines() {
+        // Every line is a message; one of a kind this reader does not model
+        // carries nothing it needs.
+        let Ok(message) = serde_json::from_str::<Message>(line) else {
+            continue;
+        };
+        if message.reason != "build-script-executed" {
+            continue;
+        }
+        for path in &message.linked_paths {
+            // `KIND=PATH`, where a crate or framework kind names no native
+            // library directory.
+            let dir = match path.split_once('=') {
+                Some(("native" | "all", dir)) => dir,
+                Some(_) => continue,
+                None => path,
+            };
+            let dir = PathBuf::from(dir);
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    }
+    dirs
 }
 
 /// The linker arguments rustc reports in its `native-static-libs` note: the
@@ -1308,7 +1393,8 @@ const STREAMED_TAIL_BYTES: usize = 16 * 1024;
 
 /// Runs `command` with both of its output streams copied to `sink` as they
 /// arrive, and answers how it exited with the last [`STREAMED_TAIL_BYTES`] of
-/// its output.
+/// its output. With `messages`, the child's stdout is collected there in full
+/// instead of reaching `sink` or the tail.
 ///
 /// Each pipe is drained on its own thread, so a child that fills one pipe
 /// while this side reads the other never blocks on its write. The threads
@@ -1317,23 +1403,28 @@ const STREAMED_TAIL_BYTES: usize = 16 * 1024;
 fn run_streamed(
     mut command: Command,
     sink: &mut impl Write,
+    mut messages: Option<&mut Vec<u8>>,
 ) -> io::Result<(std::process::ExitStatus, String)> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn()?;
-    let (sender, chunks) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (sender, chunks) = std::sync::mpsc::channel::<(bool, Vec<u8>)>();
     let readers = [
         child
             .stdout
             .take()
-            .map(|s| forward_chunks(s, sender.clone())),
+            .map(|s| forward_chunks(s, true, sender.clone())),
         child
             .stderr
             .take()
-            .map(|s| forward_chunks(s, sender.clone())),
+            .map(|s| forward_chunks(s, false, sender.clone())),
     ];
     drop(sender);
     let mut tail: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
-    for chunk in chunks {
+    for (from_stdout, chunk) in chunks {
+        if from_stdout && let Some(collected) = messages.as_deref_mut() {
+            collected.extend_from_slice(&chunk);
+            continue;
+        }
         // A closed terminal must not stop the drain, or the child blocks.
         let _ = sink.write_all(&chunk).and_then(|()| sink.flush());
         tail.extend(chunk);
@@ -1351,10 +1442,11 @@ fn run_streamed(
 }
 
 /// Reads `stream` to its end on a thread of its own, sending each chunk as
-/// it arrives.
+/// it arrives, marked with whether it is the child's stdout.
 fn forward_chunks<R: Read + Send + 'static>(
     mut stream: R,
-    sender: std::sync::mpsc::Sender<Vec<u8>>,
+    is_stdout: bool,
+    sender: std::sync::mpsc::Sender<(bool, Vec<u8>)>,
 ) -> std::thread::JoinHandle<io::Result<()>> {
     std::thread::spawn(move || {
         let mut buf = vec![0u8; 8192];
@@ -1364,7 +1456,7 @@ fn forward_chunks<R: Read + Send + 'static>(
                 Ok(n) => {
                     // The receiver outlives every reader, so a send only
                     // fails if it panicked, and then nobody is listening.
-                    let _ = sender.send(buf[..n].to_vec());
+                    let _ = sender.send((is_stdout, buf[..n].to_vec()));
                 }
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
                 Err(err) => return Err(err),
@@ -1782,6 +1874,29 @@ mod tests {
     }
 
     #[test]
+    fn native_search_dirs_come_from_build_script_messages() {
+        let messages = concat!(
+            r#"{"reason":"compiler-artifact","package_id":"a","filenames":[]}"#,
+            "\n",
+            r#"{"reason":"build-script-executed","linked_libs":["windows.0.53.0"],"#,
+            r#""linked_paths":["native=C:\\w\\lib","dependency=C:\\deps"],"cfgs":[]}"#,
+            "\n",
+            r#"{"reason":"build-script-executed","linked_paths":["/ring/out","all=/x","native=C:\\w\\lib"]}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":true}"#,
+            "\n",
+        );
+        assert_eq!(
+            native_search_dirs(messages),
+            vec![
+                PathBuf::from(r"C:\w\lib"),
+                PathBuf::from("/ring/out"),
+                PathBuf::from("/x")
+            ],
+        );
+    }
+
+    #[test]
     fn native_static_libs_keep_framework_pairs_in_order() {
         let output = "note: native-static-libs: -framework AppKit -liconv -lSystem\n";
         assert_eq!(
@@ -1929,15 +2044,19 @@ mod tests {
             .arg("-c")
             .arg(format!("yes X | head -c {STDERR_BYTES} 1>&2; printf DONE"));
         let mut sink = Vec::new();
-        let (status, tail) = run_streamed(command, &mut sink).expect("run sh");
+        let (status, tail) = run_streamed(command, &mut sink, None).expect("run sh");
         assert!(status.success());
-        assert_eq!(sink.len(), STDERR_BYTES + "DONE".len());
-        assert!(
-            sink.ends_with(b"DONE"),
-            "stdout arrives after the stderr it followed"
-        );
+        // Each pipe has a reader of its own, so the two streams interleave in
+        // whatever order their chunks arrive; what is fixed is that both are
+        // read to the end.
+        let done = sink
+            .windows(4)
+            .position(|w| w == b"DONE")
+            .expect("stdout is drained");
+        let mut stderr = sink.clone();
+        stderr.drain(done..done + 4);
+        assert_eq!(stderr, b"X\n".repeat(STDERR_BYTES / 2));
         assert_eq!(tail.len(), STREAMED_TAIL_BYTES);
-        assert!(tail.ends_with("DONE"));
     }
 
     /// A sink that releases the child once the child's first line reaches it.
@@ -1981,7 +2100,7 @@ mod tests {
             seen: Vec::new(),
             release,
         };
-        let (status, tail) = run_streamed(command, &mut sink).expect("run sh");
+        let (status, tail) = run_streamed(command, &mut sink, None).expect("run sh");
         assert_eq!(
             status.code(),
             Some(0),
