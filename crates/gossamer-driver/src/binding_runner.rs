@@ -1528,27 +1528,16 @@ impl AdvisoryLock {
         }
     }
 
-    /// With `file` locked, writes this holder's token into it and answers the
-    /// guard if `path` still names that file. `None` when the file was removed
-    /// from the path while it was being locked: nothing else can reach it, so
-    /// the lock on it guards nothing.
-    fn claim(path: &Path, mut file: fs::File) -> io::Result<Option<Self>> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let token = format!(
-            "{} {}\n",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        );
-        file.set_len(0)?;
-        file.write_all(token.as_bytes())?;
-        file.flush()?;
-        match fs::read_to_string(path) {
-            Ok(text) if text == token => Ok(Some(Self {
+    /// With `file` locked, answers the guard if `path` still names that file.
+    /// `None` when the file was removed from the path while it was being
+    /// locked: nothing else can reach it, so the lock on it guards nothing.
+    fn claim(path: &Path, file: fs::File) -> io::Result<Option<Self>> {
+        match names_same_file(&file, path) {
+            Ok(true) => Ok(Some(Self {
                 path: path.to_path_buf(),
                 _file: file,
             })),
-            Ok(_) => Ok(None),
+            Ok(false) => Ok(None),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
             // Windows refuses to open a file whose removal waits on handles
             // still open, and the handle this holder keeps is one of them.
@@ -1557,6 +1546,52 @@ impl AdvisoryLock {
             Err(err) => Err(err),
         }
     }
+}
+
+/// Whether `path` names the file `file` has open.
+#[cfg(unix)]
+fn names_same_file(file: &fs::File, path: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let held = file.metadata()?;
+    let named = fs::metadata(path)?;
+    Ok(held.dev() == named.dev() && held.ino() == named.ino())
+}
+
+/// Whether `path` names the file `file` has open.
+// A file's identity on Windows is only reachable through
+// `GetFileInformationByHandle`; the unsafe is contained to this function.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn names_same_file(file: &fs::File, path: &Path) -> io::Result<bool> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        GetFileInformationByHandle,
+    };
+
+    fn identity(file: &fs::File) -> io::Result<(u32, u32, u32)> {
+        // SAFETY: `BY_HANDLE_FILE_INFORMATION` is plain integers, for which all zeroes is valid.
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: the handle belongs to `file`, open for the call, and `info` is the out-parameter
+        // the call fills.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((
+            info.dwVolumeSerialNumber,
+            info.nFileIndexHigh,
+            info.nFileIndexLow,
+        ))
+    }
+    // A byte-range lock refuses reads through every other handle, the locking
+    // process's own included, but not an open that asks for no data access.
+    let named = fs::OpenOptions::new()
+        .access_mode(0)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .open(path)?;
+    Ok(identity(file)? == identity(&named)?)
 }
 
 /// Opens the lock file at `path`, creating it and the workdir around it as
@@ -1906,11 +1941,13 @@ mod tests {
     }
 
     /// A sink that releases the child once the child's first line reaches it.
+    #[cfg(unix)]
     struct ReleasingSink {
         seen: Vec<u8>,
         release: PathBuf,
     }
 
+    #[cfg(unix)]
     impl Write for ReleasingSink {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             self.seen.extend_from_slice(buf);

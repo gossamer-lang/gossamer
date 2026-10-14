@@ -2,7 +2,9 @@
 //! the Gossamer runtime once, the library's calls resolve against it, and
 //! the archive's only global definitions are its C entry points.
 
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 
 fn gos_bin() -> PathBuf {
@@ -41,6 +43,9 @@ fn hl_sum(n: i64) -> i64 {
 }
 "#;
 
+// The host and the helpers below serve the tests that link with the Linux
+// toolchain flags `gos build` uses.
+#[cfg(target_os = "linux")]
 const HOST: &str = r#"
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,6 +65,7 @@ int main(void) {
 }
 "#;
 
+#[cfg(target_os = "linux")]
 fn runtime_archive() -> PathBuf {
     let out = Command::new(gos_bin())
         .arg("env")
@@ -79,6 +85,7 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+#[cfg(target_os = "linux")]
 fn build_library(dir: &Path) -> PathBuf {
     std::fs::write(
         dir.join("project.toml"),
@@ -191,6 +198,7 @@ fn a_host_runs_a_host_runtime_library_on_its_one_runtime() {
 
 /// The ledger line an empty compiled program reports, which counts what the
 /// runtime itself keeps for the life of the process.
+#[cfg(target_os = "linux")]
 fn baseline_ledger() -> String {
     let dir = scratch("baseline");
     let source = dir.join("empty.gos");
