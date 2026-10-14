@@ -10,6 +10,7 @@ include!("builtins/core_io_http.rs");
 include!("builtins/os_exec_signal.rs");
 include!("builtins/par.rs");
 include!("builtins/json.rs");
+include!("builtins/typed_serde.rs");
 include!("builtins/strings_collections_a.rs");
 include!("builtins/strings_collections_b.rs");
 include!("builtins/strings_collections_c.rs");

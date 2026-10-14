@@ -99,6 +99,12 @@ enum Command {
         /// written for another platform is checked from this one.
         #[arg(long, value_name = "TRIPLE")]
         target: Option<String>,
+        /// Write the frontend's output for an accepted unit to PATH: the
+        /// blob a cached check restores, in the schema `cargo xtask schema`
+        /// exports. `GOS_EMIT_FRONTEND_BLOB` does the same for `gos run` and
+        /// `gos build`.
+        #[arg(long, value_name = "PATH")]
+        emit_frontend_blob: Option<PathBuf>,
     },
     /// Execute a program by invoking its `main` function.
     ///
@@ -1168,11 +1174,18 @@ fn dispatch(
             message_format,
             fix,
             target,
+            emit_frontend_blob,
         }) => {
             if let Some(triple) = &target {
                 gossamer_resolve::set_cfg_target_triple(triple);
             }
-            cmd::check::dispatch(file, timings, message_format, fix)
+            let options = cmd::check::CheckOptions {
+                timings,
+                message_format,
+                fix,
+                emit_frontend_blob,
+            };
+            cmd::check::dispatch(file, &options)
         }
         Some(Command::Fix {
             file,

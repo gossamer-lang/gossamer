@@ -998,6 +998,9 @@ impl<'tcx> FnBuilder<'tcx> {
         if !self.scrutinee_is_writable_place(scrutinee) {
             return Ok(());
         }
+        if let HirPatKind::Struct { fields, .. } = &arm.pattern.kind {
+            return self.writeback_struct_variant_payload(scrutinee, scrut, arm, fields);
+        }
         let HirPatKind::Variant { fields, .. } = &arm.pattern.kind else {
             return Ok(());
         };
@@ -1041,7 +1044,75 @@ impl<'tcx> FnBuilder<'tcx> {
             wrote_any = true;
         }
         if wrote_any {
-            self.compile_place_store(scrutinee, scrut)?;
+            // `match &mut place` writes the place the reference names.
+            let place = match &scrutinee.kind {
+                HirExprKind::Unary {
+                    op: HirUnaryOp::RefMut,
+                    operand,
+                } => operand,
+                _ => scrutinee,
+            };
+            self.compile_place_store(place, scrut)?;
+        }
+        Ok(())
+    }
+
+    /// [`Self::writeback_variant_payload`] for a struct-variant pattern: each
+    /// field bound by name that the arm writes is published back by name.
+    fn writeback_struct_variant_payload(
+        &mut self,
+        scrutinee: &HirExpr,
+        scrut: Reg,
+        arm: &gossamer_hir::HirMatchArm,
+        fields: &[gossamer_hir::HirFieldPat],
+    ) -> RuntimeResult<()> {
+        if self
+            .scrutinee_root_name(scrutinee)
+            .is_some_and(|root| self.name_is_written(&arm.body, &root))
+        {
+            return Ok(());
+        }
+        let mut wrote_any = false;
+        for field in fields {
+            let bound = match &field.pattern {
+                None => field.name.name.clone(),
+                Some(gossamer_hir::HirPat {
+                    kind:
+                        HirPatKind::Binding {
+                            name,
+                            mutable: false,
+                        },
+                    ..
+                }) => name.name.clone(),
+                Some(_) => continue,
+            };
+            if !self.name_is_written(&arm.body, &bound) {
+                continue;
+            }
+            let Some(local) = self.lookup_local(&bound) else {
+                continue;
+            };
+            let value = self.as_value(local);
+            let name_idx = self.const_idx(
+                ConstKey::String(field.name.name.clone()),
+                Value::String(SmolStr::from(field.name.name.as_str())),
+            );
+            self.emit(Op::FieldSet {
+                receiver: scrut,
+                name_idx,
+                value,
+            });
+            wrote_any = true;
+        }
+        if wrote_any {
+            let place = match &scrutinee.kind {
+                HirExprKind::Unary {
+                    op: HirUnaryOp::RefMut,
+                    operand,
+                } => operand,
+                _ => scrutinee,
+            };
+            self.compile_place_store(place, scrut)?;
         }
         Ok(())
     }

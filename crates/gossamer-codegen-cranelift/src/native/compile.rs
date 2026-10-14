@@ -565,7 +565,8 @@ pub(crate) fn lower_program_full(
         for body in bodies {
             eprintln!("=== MIR {} ===", body.name);
             for (i, local) in body.locals.iter().enumerate() {
-                eprintln!("  _{i}: {:?}", tcx.kind_of(local.ty));
+                let region = if local.region { " (region)" } else { "" };
+                eprintln!("  _{i}{region}: {:?}", tcx.kind_of(local.ty));
             }
             for block in &body.blocks {
                 eprintln!("  bb{}:", block.id.as_u32());

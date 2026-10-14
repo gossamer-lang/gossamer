@@ -93,6 +93,85 @@ fn main() {
 ",
     ),
     (
+        "vec_of_option_structs",
+        r#"
+struct Pt { x: i64, label: String }
+fn fill(n: i64) -> i64 {
+    let mut keep: Vec<Option<Pt>> = #[]
+    for i in 0..n { keep.push(Some(Pt { x: i, label: f"label-{i}" })) }
+    keep.len()
+}
+fn main() {
+    let mut total = 0
+    let mut round = 0
+    while round < 2000 {
+        total += fill(500)
+        round += 1
+    }
+    println(total)
+}
+"#,
+    ),
+    (
+        "returned_tuple_option_fields",
+        r#"
+struct Span { file: u32, start: u32, end: u32 }
+struct Node { id: u32, span: Span, label: String }
+fn split(i: i64) -> (Vec<i64>, Option<Node>, String) {
+    let node = Node { id: 1, span: Span { file: 0, start: 1, end: 2 }, label: f"node-{i}" }
+    (#[i], Some(node), f"tail-{i}")
+}
+fn main() {
+    let mut total = 0
+    let mut i = 0
+    while i < 400000 {
+        let xs, node, tail = split(i)
+        if let Some(n) = node { total += n.label.len() }
+        total += xs.len() + tail.len()
+        i += 1
+    }
+    println(total)
+}
+"#,
+    ),
+    (
+        "enum_carrier_payloads",
+        r#"
+struct Pt { x: i64, label: String }
+enum Kind {
+    Let { name: Pt, init: Option<Pt> },
+    Text(Option<String>),
+    Mixed(Result<String, i64>),
+    Blobby(Result<Pt, String>),
+}
+fn build(i: i64) -> Vec<Kind> {
+    #[
+        Kind::Let { name: Pt { x: i, label: f"n{i}" }, init: Some(Pt { x: i, label: f"i{i}" }) },
+        Kind::Text(Some(f"t{i}")),
+        Kind::Mixed(Ok(f"m{i}")),
+        Kind::Blobby(Err(f"e{i}")),
+    ]
+}
+fn weigh(k: Kind) -> i64 {
+    match k {
+        Kind::Let { name, init } => match init { Some(p) => name.x + p.label.len(), None => 0 },
+        Kind::Text(t) => t.unwrap_or("").len(),
+        Kind::Mixed(r) => match r { Ok(s) => s.len(), Err(n) => n },
+        Kind::Blobby(r) => match r { Ok(p) => p.x, Err(e) => e.len() },
+    }
+}
+fn main() {
+    let mut total = 0
+    let mut i = 0
+    while i < 200000 {
+        for k in build(i) { total += weigh(k) }
+        i += 1
+    }
+    println(total)
+}
+"#,
+    ),
+    (
         "enum_tree_control",
         r#"
 enum Tree { Node(i64, Tree, Tree), Leaf }
@@ -110,6 +189,59 @@ fn main() {
         total += count(t)
         i += 1
     }
+    println("{}", total)
+}
+"#,
+    ),
+    (
+        // Shared subtrees decrement to a non-zero count on every release, the
+        // case a cycle collector buffers; an expression tree cannot form a
+        // cycle, so its nodes are never buffered and the tree frees by count.
+        "acyclic_tree_shared_subtrees",
+        r#"
+enum Expr { Num(i64), Add(Expr, Expr), Mul(Expr, Expr) }
+fn grow(base: Expr, d: i64) -> Expr {
+    if d == 0 { base } else { Expr::Add(grow(base, d - 1), Expr::Mul(base, Expr::Num(d))) }
+}
+fn eval(e: Expr) -> i64 {
+    match e {
+        Expr::Num(n) => n,
+        Expr::Add(a, b) => eval(a) + eval(b),
+        Expr::Mul(a, b) => eval(a) * eval(b),
+    }
+}
+fn main() {
+    let mut total: i64 = 0
+    let mut i: i64 = 0
+    while i < 200000 {
+        let shared = Expr::Add(Expr::Num(i), Expr::Num(2))
+        total +%= eval(grow(shared, 6))
+        i += 1
+    }
+    println("{}", total)
+}
+"#,
+    ),
+    (
+        // A recursive struct can close a cycle, so its nodes stay cycle
+        // candidates and the collector still reclaims each round's pair.
+        "struct_cycle_still_collected",
+        r#"
+use std::runtime
+struct Node { id: i64, next: Option<Node> }
+fn main() {
+    let mut total: i64 = 0
+    let mut round: i64 = 0
+    while round < 200000 {
+        let mut a = Node { id: round, next: None }
+        let mut b = Node { id: round * 3, next: None }
+        b.next = Some(a)
+        a.next = Some(b)
+        total += a.id
+        if round % 1000 == 0 { runtime::collect_cycles() }
+        round += 1
+    }
+    runtime::collect_cycles()
     println("{}", total)
 }
 "#,
@@ -556,6 +688,226 @@ fn main() {
         }
     }
     println("{}", errors)
+}
+"#,
+    ),
+    (
+        "variant_option_struct_layout",
+        r#"
+struct Ty { id: i64, name: String }
+enum Stmt { Let { name: String, ty: Option<Ty>, n: i64 }, Empty }
+fn empty_let(n: i64) -> Stmt { Stmt::Let { name: "e", ty: None, n: n } }
+fn typed_let(n: i64) -> Stmt {
+    let ty = Some(Ty { id: n, name: "t" + n.to_string() })
+    Stmt::Let { name: "l", ty: ty, n: n }
+}
+fn weigh(s: Stmt) -> i64 {
+    match s {
+        Stmt::Let { ty, n, .. } => match ty { Some(t) => t.id + n, None => n },
+        Stmt::Empty => 0,
+    }
+}
+fn main() {
+    let mut total = 0
+    for i in 0..200000 {
+        total += weigh(empty_let(i)) + weigh(typed_let(i))
+    }
+    println(total)
+}
+"#,
+    ),
+    (
+        "option_string_field_through_mut",
+        r#"
+struct P { pos: i64, current: Option<String> }
+fn work(p: &mut P, name: String) {
+    let outer = p.current
+    p.current = Some(name)
+    p.pos += 1
+    p.current = outer
+}
+fn main() {
+    let mut p = P { pos: 0, current: None }
+    for i in 0..200000 {
+        work(&mut p, "trait" + i.to_string())
+    }
+    println(p.pos)
+}
+"#,
+    ),
+    (
+        "argument_copy_in_loop",
+        r#"
+struct Seg { name: String, generics: Vec<i64> }
+struct PathExpr { segments: Vec<Seg> }
+struct Attribute { path: PathExpr, tokens: Option<String> }
+fn attr_is_named(a: Attribute, name: String) -> bool {
+    a.path.segments.len() == 1 && a.path.segments[0].name == name
+}
+fn has_word(attrs: Vec<Attribute>, name: String) -> bool {
+    for a in attrs {
+        if attr_is_named(a, name) { return true }
+    }
+    false
+}
+fn main() {
+    let mut hits = 0
+    for i in 0..100000 {
+        let a = Attribute { path: PathExpr { segments: #[Seg { name: "n" + i.to_string(), generics: #[] }] }, tokens: None }
+        let b = Attribute { path: PathExpr { segments: #[Seg { name: "test", generics: #[] }] }, tokens: None }
+        if has_word(#[a, b], "nope") { hits += 1 }
+    }
+    println(hits)
+}
+"#,
+    ),
+    (
+        "mut_payload_copy_on_write",
+        r#"
+enum Node { List(Vec<i64>), Name(String), Pair(Node, Node) }
+fn grow(n: &mut Node) {
+    match n {
+        Node::List(v) => v.push(1),
+        Node::Name(s) => s.push_str("!"),
+        Node::Pair(a, b) => {
+            grow(a)
+            grow(b)
+        }
+    }
+}
+fn size(n: Node) -> i64 {
+    match n {
+        Node::List(v) => v.len(),
+        Node::Name(s) => s.len(),
+        Node::Pair(a, b) => size(a) + size(b),
+    }
+}
+fn main() {
+    let mut total = 0
+    for i in 0..100000 {
+        let mut n = Node::Pair(Node::List(#[i]), Node::Name("x" + i.to_string()))
+        let kept = n
+        grow(&mut n)
+        total += size(n) - size(kept)
+    }
+    println(total)
+}
+"#,
+    ),
+    (
+        "fixed_array_of_blob_carriers",
+        r"
+fn fill(base: i64) -> i64 {
+    let mut xs: [Option<(i64, i64)>; 8] = [None; 8]
+    let mut i = 0
+    while i < 8 {
+        xs[i] = Some((base + i, base))
+        i += 1
+    }
+    let mut total = 0
+    for k in 0..8 {
+        match xs[k] {
+            Some((a, b)) => total += a - b
+            None => total += 1000
+        }
+    }
+    total
+}
+fn main() {
+    let mut total = 0
+    for r in 0..40000 { total += fill(r) }
+    println(total)
+}
+",
+    ),
+    (
+        "vec_of_blob_carriers_read_by_index",
+        r"
+fn fill(base: i64) -> i64 {
+    let mut xs: Vec<Option<(i64, i64)>> = #[None; 8]
+    let mut i = 0
+    while i < 8 {
+        xs[i] = Some((base + i, base))
+        i += 1
+    }
+    let mut total = 0
+    for k in 0..8 {
+        match xs[k] {
+            Some((a, b)) => total += a - b
+            None => total += 1000
+        }
+    }
+    total
+}
+fn main() {
+    let mut total = 0
+    for r in 0..40000 { total += fill(r) }
+    println(total)
+}
+",
+    ),
+    (
+        "regioned_loop_boxes_packed_struct",
+        r#"
+struct Span { start: u32, end: u32 }
+struct Expr { id: u32, span: Span, kind: Kind }
+enum Kind { Lit(String), Bin { lhs: Expr, rhs: Expr } }
+fn mk(id: u32, kind: Kind) -> Expr {
+    Expr { id: id, span: Span { start: id, end: id + 1 }, kind: kind }
+}
+fn condition(n: i64) -> (Vec<i64>, Option<Expr>) {
+    let e = mk(1, Kind::Bin { lhs: mk(2, Kind::Lit("i")), rhs: mk(3, Kind::Lit("n")) })
+    if n % 2 == 0 {
+        return (#[n], None)
+    }
+    (#[], Some(e))
+}
+fn main() {
+    let mut total = 0
+    for n in 0..60000 {
+        let rest, cond = condition(n)
+        match cond {
+            Some(e) => total += e.id as i64
+            None => total += rest.len()
+        }
+    }
+    println(total)
+}
+"#,
+    ),
+    (
+        "arena_node_holds_outside_values",
+        r#"
+enum Tree {
+    Leaf(String),
+    Items(Vec<i64>),
+    Node(Tree, Tree),
+}
+fn size(t: Tree) -> i64 {
+    match t {
+        Tree::Leaf(s) => s.len(),
+        Tree::Items(v) => v.len(),
+        Tree::Node(a, b) => size(a) + size(b),
+    }
+}
+fn wrap(t: Tree, s: String, v: Vec<i64>) -> i64 {
+    let mut total = 0
+    arena {
+        let n = Tree::Node(t, Tree::Node(Tree::Leaf(s), Tree::Items(v)))
+        total = size(n)
+    }
+    total
+}
+fn main() {
+    let mut s = String::new()
+    s += "outside"
+    let leaf = Tree::Leaf(s)
+    let mut t = String::new()
+    t += "str"
+    let v = #[1, 2, 3]
+    let mut k = 0
+    for i in 0..100000 { k += wrap(leaf, t, v) }
+    println(k)
 }
 "#,
     ),

@@ -903,7 +903,13 @@ fn insert_item() {
     let meta = tcx
         .rc_meta(&symbol)
         .expect("aggregate map values need structural copy metadata");
-    assert_eq!(meta[0], gossamer_abi::rc::RC_KIND_STRUCT);
+    assert_eq!(
+        gossamer_abi::rc::rc_kind(meta[0]),
+        gossamer_abi::rc::RC_KIND_STRUCT
+    );
+    // A struct of strings and a vector of strings cannot reach itself, so
+    // its boxes are never cycle candidates.
+    assert_ne!(meta[0] & gossamer_abi::rc::RC_KIND_ACYCLIC, 0);
     assert!(
         meta[4..].contains(&0),
         "String child word missing: {meta:?}"

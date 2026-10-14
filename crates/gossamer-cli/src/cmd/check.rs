@@ -6,25 +6,34 @@
 //! when any stage produces error-severity output.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
+use serde::{Deserialize, Serialize};
 
-use crate::loaders::print_timings;
+use crate::loaders::timings_line;
 use crate::paths::{
     collect_lint_targets, default_test_root, friendly_io_error, resolve_project_entry,
     stderr_supports_colour,
 };
 
+/// How one `gos check` reports and what it does besides checking.
+pub(crate) struct CheckOptions {
+    /// Print per-stage timings on success.
+    pub timings: bool,
+    /// Diagnostic output format.
+    pub message_format: crate::cli::MessageFormat,
+    /// Apply machine-applicable suggestions.
+    pub fix: bool,
+    /// Where to write the frontend blob of an accepted unit.
+    pub emit_frontend_blob: Option<PathBuf>,
+}
+
 /// `gos check` dispatcher: routes between single-file and
 /// whole-project walks.
-pub(crate) fn dispatch(
-    path: Option<PathBuf>,
-    timings: bool,
-    message_format: crate::cli::MessageFormat,
-    fix: bool,
-) -> Result<()> {
+pub(crate) fn dispatch(path: Option<PathBuf>, options: &CheckOptions) -> Result<()> {
     if let Err(err) = crate::binding_dispatch::ensure_external_signatures() {
         eprintln!("warning: failed to load rust-binding signatures: {err}");
     }
@@ -40,7 +49,7 @@ pub(crate) fn dispatch(
         // the unit `gos run` and `gos build` assemble. A loose file and an
         // integration test under `tests/` are their own roots.
         let target = crate::paths::enclosing_project_entry(&resolved).unwrap_or(resolved);
-        return run(&target, timings, message_format, fix);
+        return run(&target, options);
     }
     // A project directory is checked as one bundled unit (the entry plus
     // its auto-bundled sibling / subdirectory modules), so cross-module
@@ -50,7 +59,7 @@ pub(crate) fn dispatch(
     // error. A directory without a single resolvable entry falls back to
     // the per-file sweep below.
     if let Ok(entry) = resolve_project_entry(&resolved) {
-        return run(&entry, timings, message_format, fix);
+        return run(&entry, options);
     }
     let files = collect_lint_targets(&resolved)?;
     if files.is_empty() {
@@ -69,7 +78,7 @@ pub(crate) fn dispatch(
         if files.len() > 1 {
             outln!("=== {} ===", file.display());
         }
-        match run(file, timings, message_format, fix) {
+        match run(file, options) {
             Ok(()) => {}
             Err(err) => {
                 eprintln!("{err}");
@@ -94,45 +103,185 @@ pub(crate) fn dispatch(
 
 /// Single-file `gos check`. Public to the crate so the dispatcher
 /// above and the `cmd::watch` re-runner can share it.
-pub(crate) fn run(
-    file: &Path,
-    timings: bool,
-    message_format: crate::cli::MessageFormat,
-    fix: bool,
-) -> Result<()> {
+///
+/// A verdict is a function of the unit's text, the files its comptime
+/// regions read, and how it is rendered, so an unchanged unit replays the
+/// output it produced last time instead of checking again. `--timings`
+/// and `--fix` always do the work, as measuring and rewriting it is their
+/// purpose.
+pub(crate) fn run(file: &Path, options: &CheckOptions) -> Result<()> {
+    let CheckOptions {
+        timings,
+        message_format,
+        fix,
+        ref emit_frontend_blob,
+    } = *options;
     let unit = crate::paths::read_entry_unit(file)?;
+    let colour = stderr_supports_colour();
+    // Emitting a blob needs the frontend to run, which a replayed verdict
+    // skips.
+    let emits =
+        emit_frontend_blob.is_some() || std::env::var_os("GOS_EMIT_FRONTEND_BLOB").is_some();
+    let key = (!timings && !fix && !emits && gossamer_driver::cache_enabled())
+        .then(|| verdict_key(file, &unit, message_format, colour))
+        .flatten();
+    if let Some(key) = &key
+        && let Some(verdict) = gossamer_driver::load_blob::<Verdict>(key)
+        && crate::unit_cache::inputs_unchanged(&verdict.inputs).is_some()
+    {
+        gossamer_driver::trace_cache_hit("check verdict replayed", key);
+        verdict.transcript.replay();
+        return verdict_result(verdict.errors);
+    }
+    let mut transcript = Transcript::default();
+    let checked = check_unit(file, unit, options, colour, &mut transcript);
+    transcript.replay();
+    match checked? {
+        Checked::Rewritten => run(
+            file,
+            &CheckOptions {
+                fix: false,
+                emit_frontend_blob: emit_frontend_blob.clone(),
+                ..*options
+            },
+        ),
+        Checked::Verdict { errors, inputs } => {
+            if let Some(key) = &key
+                && let Some(inputs) = crate::unit_cache::input_lines(&inputs)
+            {
+                gossamer_driver::store_blob(
+                    key,
+                    &Verdict {
+                        inputs,
+                        transcript,
+                        errors,
+                    },
+                );
+            }
+            verdict_result(errors)
+        }
+    }
+}
+
+/// What `gos check` printed for a unit, in the order each stream saw it.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Transcript {
+    stdout: String,
+    stderr: String,
+}
+
+impl Transcript {
+    fn out(&mut self, line: std::fmt::Arguments<'_>) {
+        let _ = writeln!(self.stdout, "{line}");
+    }
+
+    fn err(&mut self, text: std::fmt::Arguments<'_>) {
+        let _ = write!(self.stderr, "{text}");
+    }
+
+    /// Writes the recorded output to the process's own streams, stderr
+    /// first as diagnostics precede the summary line.
+    fn replay(&self) {
+        if !self.stderr.is_empty() {
+            eprint!("{}", self.stderr);
+        }
+        if !self.stdout.is_empty() {
+            crate::write_stdout(format_args!("{}", self.stdout));
+        }
+    }
+}
+
+/// A check's recorded outcome: what it printed, how many errors it found,
+/// and the stamp lines of the files its comptime regions read.
+#[derive(Debug, Serialize, Deserialize)]
+struct Verdict {
+    inputs: Vec<String>,
+    transcript: Transcript,
+    errors: usize,
+}
+
+/// How a check that ran to its verdict ended.
+enum Checked {
+    /// The front end answered, with this many errors, after the comptime
+    /// fold read `inputs`.
+    Verdict { errors: usize, inputs: Vec<PathBuf> },
+    /// `--fix` rewrote the unit, which is checked afresh.
+    Rewritten,
+}
+
+fn verdict_result(errors: usize) -> Result<()> {
+    if errors == 0 {
+        Ok(())
+    } else {
+        Err(anyhow!("check failed with {errors} diagnostic(s)"))
+    }
+}
+
+/// The key of `file`'s verdict: the unit's text, where each region of it
+/// came from, the entry's own text the lints read, and how diagnostics
+/// render. `None` when the entry cannot be read, which the check reports.
+fn verdict_key(
+    file: &Path,
+    unit: &crate::paths::EntryUnit,
+    message_format: crate::cli::MessageFormat,
+    colour: bool,
+) -> Option<gossamer_driver::FrontendCacheKey> {
+    let entry_text = crate::paths::read_source(file).ok()?;
+    let label = format!(
+        "path={}|format={message_format:?}|colour={colour}|entry={}|origins={:?}|lint={}",
+        std::path::absolute(file)
+            .unwrap_or_else(|_| file.to_path_buf())
+            .display(),
+        unit.entry.display(),
+        unit.origins,
+        entry_text,
+    );
+    Some(gossamer_driver::unit_key(
+        &unit.source,
+        "check-verdict",
+        &label,
+    ))
+}
+
+fn check_unit(
+    file: &Path,
+    unit: crate::paths::EntryUnit,
+    options: &CheckOptions,
+    colour: bool,
+    transcript: &mut Transcript,
+) -> Result<Checked> {
+    let CheckOptions {
+        timings,
+        message_format,
+        fix,
+        ref emit_frontend_blob,
+    } = *options;
     let user_source = unit.source;
-    // Augment with the synthesized serde free functions (`__gos_serde_*`)
-    // so `to_json::<T>(..)` / `from_json::<T>(..)` resolve, exactly as
-    // `gos` / `gos build` do before reaching the source map.
-    let source = gossamer_parse::autoderive::augment_source(&user_source);
-    let generated_len = source.len().saturating_sub(user_source.len());
-    // Comptime fold makes `gos check` authoritative for comptime: a
-    // region that is not compile-time-known is reported here, not
-    // deferred to `run` / `build`. The fold runs the program, so a failure
-    // is reported only once the front end has accepted the unfolded unit -
-    // the order the editor uses - and the front end's warnings are reported
-    // alongside it.
-    let (source, fold_error) =
-        match crate::comptime_fold::fold_comptime(source.clone(), &file.to_string_lossy()) {
-            Ok(folded) => (folded, None),
-            Err(err) => (source, Some(err)),
-        };
+    // Augment with the serde stubs (`__gos_serde_*`) and derives so
+    // `to_json::<T>(..)` / `from_json::<T>(..)` resolve, exactly as
+    // `gos` / `gos build` do before reaching the source map. The comptime
+    // fold makes `gos check` authoritative for comptime: a region that is
+    // not compile-time-known is reported here, not deferred to `run` /
+    // `build`. The fold runs the program, so a failure is reported only
+    // once the front end has accepted the unfolded unit - the order the
+    // editor uses - and the front end's warnings are reported alongside it.
+    let prepared = crate::unit_cache::prepare(&user_source, &file.to_string_lossy());
+    let source = prepared.source;
     let mut map = gossamer_lex::SourceMap::new();
     let file_id = map.add_file(file.to_string_lossy().into_owned(), source.clone());
     crate::paths::register_unit_origins(&mut map, file_id, &unit.entry, &unit.origins);
-    crate::paths::register_generated_tail(&mut map, file_id, generated_len);
-    let render_opts = gossamer_diagnostics::RenderOptions {
-        colour: stderr_supports_colour(),
-    };
+    crate::paths::register_generated_tail(&mut map, file_id, prepared.generated_len);
+    let render_opts = gossamer_diagnostics::RenderOptions { colour };
     // `check` runs the same authoritative front-end gate as `run` /
     // `build` / `test` / `bench`: one parse + resolve + typecheck +
     // exhaustiveness pass under a single fatal-error policy. Sharing the
     // gate is what keeps `check` from drifting looser than the tiers it
     // is meant to guard.
-    let stage = std::time::Instant::now();
-    let outcome = gossamer_driver::check_frontend(&source, file_id);
-    let elapsed = stage.elapsed();
+    let outcome = gossamer_driver::check_frontend_with_program(&source, file_id, prepared.program);
+    if let Some(path) = emit_frontend_blob {
+        gossamer_driver::write_frontend_blob(&outcome, path)
+            .map_err(|e| anyhow!("--emit-frontend-blob {}: {e}", path.display()))?;
+    }
     if fix {
         // A unit is many files, and a rewrite lands in whichever ones
         // carried the diagnostics. Naming only the entry leaves a reader
@@ -148,23 +297,29 @@ pub(crate) fn run(
             &mut edited,
         )?;
         if edited.is_empty() {
-            outln!("fix: 0 edit(s) applied");
+            transcript.out(format_args!("fix: 0 edit(s) applied"));
         } else {
             for (path, count) in &edited {
-                outln!("fix: {count} edit(s) applied to {}", display_path(path));
+                transcript.out(format_args!(
+                    "fix: {count} edit(s) applied to {}",
+                    display_path(path)
+                ));
             }
             if edited.len() > 1 {
-                outln!("fix: {applied} edit(s) across {} file(s)", edited.len());
+                transcript.out(format_args!(
+                    "fix: {applied} edit(s) across {} file(s)",
+                    edited.len()
+                ));
             }
             // The verdict belongs to the source as rewritten: what the edits
             // resolved is gone, and what remains is reported afresh.
-            return run(file, timings, message_format, false);
+            return Ok(Checked::Rewritten);
         }
     }
     for diag in outcome.diagnostics.iter().chain(&outcome.warnings) {
-        emit_diag(diag, &map, render_opts, message_format);
+        emit_diag(diag, &map, render_opts, message_format, transcript);
     }
-    if let Some(err) = fold_error
+    if let Some(err) = prepared.fold_error
         && outcome.diagnostics.is_empty()
     {
         return Err(err);
@@ -174,28 +329,30 @@ pub(crate) fn run(
     // here: they report at warning severity and never move the exit code,
     // which `gos lint --deny-warnings` remains the gate for.
     for diag in lint_diagnostics(file, &mut map)? {
-        emit_diag(&diag, &map, render_opts, message_format);
+        emit_diag(&diag, &map, render_opts, message_format, transcript);
     }
-    if !outcome.diagnostics.is_empty() {
-        return Err(anyhow!(
-            "check failed with {} diagnostic(s)",
-            outcome.diagnostics.len()
+    if outcome.diagnostics.is_empty() {
+        transcript.out(format_args!(
+            "check: ok ({} items typed)",
+            outcome.checked.sf.items.len()
         ));
+        if timings {
+            transcript.out(format_args!(
+                "{}",
+                timings_line(
+                    source.len(),
+                    prepared.autoderive,
+                    prepared.comptime,
+                    prepared.reused,
+                    &outcome.timings,
+                )
+            ));
+        }
     }
-    outln!("check: ok ({} items typed)", outcome.checked.sf.items.len());
-    if timings {
-        // The shared gate runs the stages back-to-back, so only the total
-        // is meaningful here; the per-stage split is reported as a single
-        // typeck bucket.
-        print_timings(
-            source.len(),
-            std::time::Duration::ZERO,
-            std::time::Duration::ZERO,
-            elapsed,
-            std::time::Duration::ZERO,
-        );
-    }
-    Ok(())
+    Ok(Checked::Verdict {
+        errors: outcome.diagnostics.len(),
+        inputs: prepared.comptime_inputs,
+    })
 }
 
 /// Runs the default lint registry over `path`'s own text and returns
@@ -225,7 +382,7 @@ fn lint_diagnostics(
     Ok(diagnostics)
 }
 
-/// Renders a structured diagnostic to stderr, branching on
+/// Renders a structured diagnostic for stderr, branching on
 /// `--message-format`. Plain mode uses the colour-aware text
 /// frame; JSON mode writes the single-line JSON object directly
 /// (the trailing newline is part of `render_json`'s output).
@@ -234,18 +391,22 @@ fn emit_diag(
     map: &gossamer_lex::SourceMap,
     render_opts: gossamer_diagnostics::RenderOptions,
     message_format: crate::cli::MessageFormat,
+    transcript: &mut Transcript,
 ) {
     match message_format {
         crate::cli::MessageFormat::Plain => {
-            eprintln!(
-                "{}",
+            transcript.err(format_args!(
+                "{}\n",
                 gossamer_diagnostics::render(structured, map, render_opts)
-            );
+            ));
         }
         crate::cli::MessageFormat::Json => {
             // Single-line JSON envelope; `render_json` adds the
             // trailing `\n` so consumers can read line-delimited.
-            eprint!("{}", gossamer_diagnostics::render_json(structured, map));
+            transcript.err(format_args!(
+                "{}",
+                gossamer_diagnostics::render_json(structured, map)
+            ));
         }
     }
 }
@@ -425,8 +586,11 @@ fn recheck(file: &Path) -> usize {
 /// worse outcome than any diagnostic and is never an improvement.
 fn recheck_codes(file: &Path) -> Option<BTreeMap<String, usize>> {
     let unit = crate::paths::read_entry_unit(file).ok()?;
-    let augmented = gossamer_parse::autoderive::augment_source(&unit.source);
-    let folded = crate::comptime_fold::fold_comptime(augmented, &file.to_string_lossy()).ok()?;
+    let prepared = crate::unit_cache::prepare(&unit.source, &file.to_string_lossy());
+    if prepared.fold_error.is_some() {
+        return None;
+    }
+    let folded = prepared.source;
     let mut map = gossamer_lex::SourceMap::new();
     let id = map.add_file(file.to_string_lossy().into_owned(), folded.clone());
     let outcome = gossamer_driver::check_frontend(&folded, id);

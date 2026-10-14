@@ -1,0 +1,112 @@
+// An enum node owns the payload of an `Option` or `Result` it holds,
+// whichever arm carries a heap value, so a `Some(value)` built from a
+// parameter outlives the function that built it, and reading it back takes
+// nothing from the node. A vector of `Option<struct>` gives back what each
+// element holds.
+
+struct Pt {
+    x: i64
+    label: String
+}
+
+enum Kind {
+    Leaf(i64)
+    Let { name: Pt, ty: Option<i64>, init: Option<Pt> }
+    Text(Option<String>)
+    Items(Option<Vec<i64>>)
+    Child(Option<Kind>)
+    Outcome(Result<Pt, Pt>)
+    Mixed(Result<String, i64>)
+    Blobby(Result<Pt, String>)
+}
+
+fn make_let(name: Pt, init: Pt) -> Kind {
+    Kind::Let { name: name, ty: None, init: Some(init) }
+}
+
+fn make_text(s: String) -> Kind {
+    Kind::Text(Some(s))
+}
+
+fn make_items(xs: Vec<i64>) -> Kind {
+    Kind::Items(Some(xs))
+}
+
+fn make_child(k: Kind) -> Kind {
+    Kind::Child(Some(k))
+}
+
+fn make_outcome(p: Pt, ok: bool) -> Kind {
+    if ok {
+        return Kind::Outcome(Ok(p))
+    }
+    Kind::Outcome(Err(p))
+}
+
+fn make_mixed(s: String, ok: bool) -> Kind {
+    if ok {
+        return Kind::Mixed(Ok(s))
+    }
+    Kind::Mixed(Err(s.len()))
+}
+
+fn make_blobby(p: Pt, e: String, ok: bool) -> Kind {
+    if ok {
+        return Kind::Blobby(Ok(p))
+    }
+    Kind::Blobby(Err(e))
+}
+
+/// Allocates and drops many blocks the size of the payloads above.
+fn churn(n: i64) -> i64 {
+    let mut pts: Vec<Option<Pt>> = #[]
+    let mut strs: Vec<String> = #[]
+    for i in 0..n {
+        pts.push(Some(Pt { x: i * 1000, label: f"junk{i}" }))
+        strs.push(f"junk-junk-{i}")
+    }
+    pts.len() + strs.len()
+}
+
+fn show(k: Kind) -> String {
+    match k {
+        Kind::Leaf(v) => f"leaf {v}"
+        Kind::Let { name, init, .. } => match init {
+            Some(pt) => f"let {name.label} = {pt.x} {pt.label}"
+            None => "let none"
+        }
+        Kind::Text(t) => "text " + t.unwrap_or("-")
+        Kind::Items(xs) => match xs {
+            Some(v) => f"items {v}"
+            None => "items none"
+        }
+        Kind::Child(c) => match c {
+            Some(inner) => "child " + show(inner)
+            None => "child none"
+        }
+        Kind::Outcome(r) => match r {
+            Ok(p) => f"ok {p.x} {p.label}"
+            Err(p) => f"err {p.x} {p.label}"
+        }
+        Kind::Mixed(r) => match r {
+            Ok(s) => "mixed ok " + s
+            Err(n) => f"mixed err {n}"
+        }
+        Kind::Blobby(r) => match r {
+            Ok(p) => f"blobby ok {p.x} {p.label}"
+            Err(e) => "blobby err " + e
+        }
+    }
+}
+
+fn main() {
+    let kinds = #[make_let(Pt { x: 1, label: "nm" }, Pt { x: 42, label: "init" }), make_text(f"t{3}"), make_items(#[4, 5]), make_child(make_let(Pt { x: 2, label: "in" }, Pt { x: 7, label: "nested" })), make_outcome(Pt { x: 8, label: "good" }, true), make_outcome(Pt { x: 9, label: "bad" }, false), make_mixed(f"str{1}", true), make_mixed("x", false), make_blobby(Pt { x: 3, label: f"lab{3}" }, f"e{3}", true), make_blobby(Pt { x: 4, label: "l4" }, f"err{4}", false)]
+    let mut total = 0
+    for round in 0..3 {
+        total += churn(200 + round)
+        for k in kinds {
+            println(show(k))
+        }
+    }
+    println(total)
+}

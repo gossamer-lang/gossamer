@@ -193,11 +193,13 @@ run_step "cargo clippy --workspace --all-targets"          cargo clippy --worksp
 # workspace build.
 phase "generated-artifact gates"
 run_step "cargo build --bin gos"                           cargo build --bin gos
-run_step "gos doc --emit-stdlib --check"                   ./target/debug/gos doc --emit-stdlib docs_src/stdlib --check
+built_gos="${CARGO_TARGET_DIR:-./target}/debug/gos"
+run_step "gos doc --emit-stdlib --check"                   "$built_gos" doc --emit-stdlib docs_src/stdlib --check
 run_step "cargo xtask docs-llm --check"                    cargo xtask docs-llm --check
 run_step "cargo xtask item-fixtures --check"               cargo xtask item-fixtures --check
+run_step "cargo xtask schema --check"                      cargo xtask schema --check
 # Do not filter by status: a filtered check can hide a broken contract class.
-run_step "gos feature-status --check"                      ./target/debug/gos feature-status --check
+run_step "gos feature-status --check"                      "$built_gos" feature-status --check
 run_step "cargo test -p gossamer-std --test resolver_manifest_items" \
     cargo test -p gossamer-std --test resolver_manifest_items
 run_step "cargo test -p gossamer-resolve --lib stdlib_exports" \
@@ -220,7 +222,7 @@ run_step "cargo test -p gossamer-cli --lib" cargo test -p gossamer-cli --lib
 # run likely failed because of a workflow file issue" - no job, no log,
 # no annotation. This gate costs milliseconds and names the line.
 run_step "GitHub workflow files parse" \
-    "${GOS_HARNESS_BIN:-./target/debug/gos}" run scripts/check_workflows.gos
+    "${GOS_HARNESS_BIN:-$built_gos}" run scripts/check_workflows.gos
 
 # Every fixture through both execution paths of `gos run`. The full
 # tier-parity walk also builds each fixture natively and takes tens of
@@ -233,7 +235,7 @@ if [[ $run_sweep -eq 1 ]]; then
     # The sweep is itself a Gossamer program. `GOS_HARNESS_BIN` runs it
     # on a different toolchain than the one under test, so a compiler
     # bug fails the fixtures rather than the harness that reports them.
-    harness_gos="${GOS_HARNESS_BIN:-./target/debug/gos}"
+    harness_gos="${GOS_HARNESS_BIN:-$built_gos}"
     run_step "VM-vs-JIT fixture sweep" \
         "$harness_gos" run scripts/jit_parity_sweep.gos "${sweep_args[@]}"
 fi

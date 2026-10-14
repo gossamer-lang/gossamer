@@ -71,8 +71,11 @@ const NON_CAPTURING_RUNTIME_CALLEES: &[&str] = &[
     // copy the key into a fresh `Box<[u8]>` before stashing it in
     // the map, so the caller's key buffer is not retained. The
     // map pointer is mutated but not captured.
+    "gos_rt_map_contains_substring_str",
+    "gos_rt_map_get_opt_substring_str",
     "gos_rt_map_get_or_i64_i64",
     "gos_rt_map_get_or_str_i64",
+    "gos_rt_map_get_or_substring_str_i64",
     "gos_rt_map_get_or_substring_str_str",
     "gos_rt_map_get_or_typed_str_i64",
     "gos_rt_map_inc_at_str_i64",
@@ -83,6 +86,7 @@ const NON_CAPTURING_RUNTIME_CALLEES: &[&str] = &[
     "gos_rt_map_inc_typed_str_i64",
     "gos_rt_map_or_insert_i64_i64",
     "gos_rt_map_or_insert_str_i64",
+    "gos_rt_map_or_insert_substring_str_i64",
     "gos_rt_map_or_insert_typed_str_i64",
     "gos_rt_str_byte_at",
     "gos_rt_str_is_empty",

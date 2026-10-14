@@ -125,6 +125,32 @@ pub struct LibTarget {
     /// library's `#[export]` functions. Empty for a library only other
     /// Gossamer packages use.
     pub kind: Vec<LibKind>,
+    /// `lib.runtime` - where the library's runtime comes from.
+    pub runtime: LibRuntime,
+}
+
+/// Where a `[lib]` artifact's runtime comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LibRuntime {
+    /// The archive carries the runtime's objects, so a C program links it
+    /// alone.
+    #[default]
+    Bundled,
+    /// The archive carries no runtime: its host already links the Gossamer
+    /// runtime, which the library's calls resolve against, so one process
+    /// keeps one allocator and one scheduler.
+    Host,
+}
+
+impl LibRuntime {
+    /// The manifest spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bundled => "bundled",
+            Self::Host => "host",
+        }
+    }
 }
 
 /// A native artifact a `[lib]` target builds.
@@ -306,6 +332,9 @@ pub enum ManifestError {
     /// A `[lib] kind` the toolchain does not build.
     #[error("unknown lib.kind {0:?}; write \"staticlib\", \"cdylib\", or both")]
     UnknownLibKind(String),
+    /// A `[lib] runtime` the toolchain does not build.
+    #[error("unknown lib.runtime {0:?}; write \"bundled\" or \"host\"")]
+    UnknownLibRuntime(String),
     /// A line could not be parsed.
     #[error("malformed line {line_no}: {line}")]
     Malformed {
@@ -590,6 +619,13 @@ impl Manifest {
                     name: optional_toml_str(raw, "name", "lib.name")?,
                     path: optional_toml_str(raw, "path", "lib.path")?,
                     kind: parse_lib_kinds(raw.get("kind"))?,
+                    runtime: match optional_toml_str(raw, "runtime", "lib.runtime")?.as_deref() {
+                        None | Some("bundled") => LibRuntime::Bundled,
+                        Some("host") => LibRuntime::Host,
+                        Some(other) => {
+                            return Err(ManifestError::UnknownLibRuntime(other.to_string()));
+                        }
+                    },
                 })
             })
             .transpose()?;
@@ -766,6 +802,9 @@ impl Manifest {
             if !lib.kind.is_empty() {
                 let kinds: Vec<String> = lib.kind.iter().map(|k| quoted(k.as_str())).collect();
                 out.push_str(&format!("kind = [{}]\n", kinds.join(", ")));
+            }
+            if lib.runtime != LibRuntime::Bundled {
+                out.push_str(&format!("runtime = {}\n", quoted(lib.runtime.as_str())));
             }
         }
     }

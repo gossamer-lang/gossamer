@@ -37,6 +37,40 @@ pub(crate) fn push_quoted_char(out: &mut String, word: i64) {
     }
 }
 
+/// Renders one element of `vec` at `elem` by the element descriptor at
+/// `elem_desc`. A packed scalar renders from the word it reads as, which a
+/// read of a whole word at its address would run past.
+///
+/// # Safety
+/// `elem` is one element of `vec`, laid out as the descriptor describes.
+unsafe fn render_vec_elem(
+    out: &mut String,
+    vec: &crate::c_abi::GosVec,
+    elem: *const u8,
+    tags: DescStream,
+    elem_desc: usize,
+) {
+    let mut c = elem_desc;
+    let elem_tag = tags.byte(elem_desc);
+    let word = if crate::c_abi::vec::vec_packs_f32(vec) {
+        // SAFETY: `elem` addresses one 4-byte element (contract).
+        let bits = unsafe { elem.cast::<u32>().read_unaligned() };
+        Some(crate::c_abi::vec::f32_bits_to_word(bits))
+    } else if vec.elem_bytes < 8 && matches!(elem_tag, 0 | 1 | 3 | 4) {
+        // The descriptor's tag says whether a narrow integer is signed.
+        // SAFETY: `elem` addresses one element of `elem_bytes` bytes (contract).
+        Some(unsafe { crate::c_abi::desc_cmp::narrow_scalar(elem, vec.elem_bytes, elem_tag == 0) })
+    } else {
+        None
+    };
+    match word {
+        // SAFETY: `word` is a word on the stack holding the element.
+        Some(word) => unsafe { render_desc_value(out, (&raw const word).cast(), tags, &mut c) },
+        // SAFETY: `elem` is laid out as the element descriptor describes (contract).
+        None => unsafe { render_desc_value(out, elem, tags, &mut c) },
+    }
+}
+
 /// Renders one value word per the tuple tag encoding. Container tags read
 /// the word as a handle; a tag with no handle shape renders as an integer.
 pub(crate) unsafe fn render_tagged_word(out: &mut String, word: i64, tag: u8) {
@@ -371,10 +405,9 @@ pub(crate) unsafe fn render_desc_storage(
                     // SAFETY: `i` is below the vec's length, so the element lies inside its
                     // buffer.
                     let elem = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
-                    let mut c = elem_desc;
-                    // SAFETY: `elem` is one element of the vec, laid out as the element
-                    // descriptor describes.
-                    unsafe { render_desc_value(out, elem, tags, &mut c) };
+                    // SAFETY: `elem` is one element of `vec`, laid out as the element descriptor
+                    // at `elem_desc` describes.
+                    unsafe { render_vec_elem(out, vec, elem, tags, elem_desc) };
                 }
             }
             out.push(']');

@@ -382,11 +382,11 @@ fn record_vec_bytes(requested: usize, usable: usize) {
 /// it owns the allocation; sanitizer/Miri/wasm builds report the requested
 /// layout size instead because they intentionally use a different allocator.
 #[inline]
-pub fn vec_inline_alloc(requested: usize, usable: usize) {
+pub fn vec_inline_alloc(requested: usize, usable: impl FnOnce() -> usize) {
     if !instrumentation_armed() {
         return;
     }
-    vec_inline_alloc_slow(requested, usable);
+    vec_inline_alloc_slow(requested, usable());
 }
 
 #[cold]
@@ -402,11 +402,11 @@ fn vec_inline_alloc_slow(requested: usize, usable: usize) {
 }
 
 #[inline]
-pub fn vec_split_alloc(requested: usize, usable: usize) {
+pub fn vec_split_alloc(requested: usize, usable: impl FnOnce() -> usize) {
     if !instrumentation_armed() {
         return;
     }
-    vec_split_alloc_slow(requested, usable);
+    vec_split_alloc_slow(requested, usable());
 }
 
 #[cold]
@@ -422,11 +422,11 @@ fn vec_split_alloc_slow(requested: usize, usable: usize) {
 }
 
 #[inline]
-pub fn vec_owner_alloc(requested: usize, usable: usize) {
+pub fn vec_owner_alloc(requested: usize, usable: impl FnOnce() -> usize) {
     if !instrumentation_armed() {
         return;
     }
-    vec_owner_alloc_slow(requested, usable);
+    vec_owner_alloc_slow(requested, usable());
 }
 
 #[cold]

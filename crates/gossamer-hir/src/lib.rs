@@ -21,6 +21,7 @@ mod lift;
 mod lower;
 mod par;
 mod place_refs;
+mod serde;
 mod tree;
 
 pub use foreign::{FOREIGN_DISPATCHER, foreign_layouts, foreign_signature, route_foreign_calls};
@@ -43,6 +44,7 @@ pub use lift::{
 };
 pub use lower::{is_map_literal_block, lower_source_file};
 pub use par::PAR_RUN;
+pub use serde::{HirSerdeField, serde_step_symbol};
 pub use tree::FnOrigin;
 pub use tree::{
     HirAdt, HirAdtKind, HirArrayExpr, HirBinaryOp, HirBlock, HirBody, HirConst, HirExpr,

@@ -2,7 +2,8 @@
 //!
 //! A warm run must skip the front end, and every edit that changes the
 //! program - including one in a sibling module the entry imports - must be
-//! observed on the next invocation.
+//! observed on the next invocation. A warm `gos check` goes further and
+//! replays the verdict it reached for the same unit.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -49,8 +50,13 @@ impl Project {
     }
 
     fn check(&self) -> Output {
+        self.check_with(&[])
+    }
+
+    fn check_with(&self, flags: &[&str]) -> Output {
         Command::new(gos_bin())
             .arg("check")
+            .args(flags)
             .arg(".")
             .current_dir(&self.root)
             .env("GOSSAMER_CACHE_DIR", &self.cache)
@@ -71,8 +77,22 @@ impl Drop for Project {
     }
 }
 
+/// Whether the check reused earlier work instead of running the front end.
 fn restored(out: &Output) -> bool {
-    String::from_utf8_lossy(&out.stderr).contains("cache: frontend restored")
+    replayed(out) || String::from_utf8_lossy(&out.stderr).contains("cache: frontend restored")
+}
+
+fn replayed(out: &Output) -> bool {
+    String::from_utf8_lossy(&out.stderr).contains("cache: check verdict replayed")
+}
+
+/// Stderr without the cache trace lines, as a user sees it.
+fn reported(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .filter(|line| !line.starts_with("cache: "))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn assert_ok(out: &Output, what: &str) {
@@ -201,4 +221,47 @@ fn a_warm_check_reports_the_warnings_a_cold_one_did() {
         String::from_utf8_lossy(&cold.stderr)
     );
     assert_eq!(warnings(&warm), warnings(&cold));
+}
+
+#[test]
+fn a_warm_check_replays_the_verdict_of_an_unchanged_unit() {
+    let project = Project::new("verdict");
+    let cold = project.check();
+    assert_ok(&cold, "cold check");
+    assert!(!replayed(&cold), "the first check has no verdict to replay");
+    let warm = project.check();
+    assert_ok(&warm, "warm check");
+    assert!(replayed(&warm), "an unchanged unit must replay its verdict");
+    assert_eq!(cold.stdout, warm.stdout);
+}
+
+#[test]
+fn a_replayed_failing_verdict_reports_the_same_diagnostics_and_fails() {
+    let project = Project::new("failing-verdict");
+    project.write("main.gos", "fn main() { let x: bool = util::double(21) }\n");
+    let cold = project.check();
+    let warm = project.check();
+    assert!(replayed(&warm), "a failing verdict is a verdict too");
+    assert!(!cold.status.success() && !warm.status.success());
+    assert_eq!(cold.status.code(), warm.status.code());
+    assert_eq!(reported(&cold), reported(&warm));
+    assert!(reported(&warm).contains("GT0001"), "{}", reported(&warm));
+}
+
+#[test]
+fn a_timed_check_runs_the_front_end_and_restores_it_from_the_cache() {
+    let project = Project::new("timed");
+    assert_ok(&project.check(), "cold check");
+    let timed = project.check_with(&["--timings"]);
+    assert_ok(&timed, "timed check");
+    assert!(
+        !replayed(&timed),
+        "a timed check measures the work, so it does it"
+    );
+    assert!(
+        String::from_utf8_lossy(&timed.stderr).contains("cache: frontend restored"),
+        "{}",
+        String::from_utf8_lossy(&timed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&timed.stdout).contains("(prepared unit reused)"));
 }

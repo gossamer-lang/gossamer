@@ -1085,19 +1085,24 @@ unsafe fn map_get_or_str_i64_impl(m: *const GosMap, key: *const c_char, default:
         // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
         // `Map`.
         let map = unsafe { &*m };
-        crate::c_abi::ledger::map_str_probe();
         // SAFETY: `key` is null or a live string body, per this `unsafe fn`'s caller, which
         // `gos_str_arg_bytes` accepts.
         let key_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(key) };
-        let storage = map.storage.lock();
-        match &*storage {
-            MapStorage::StrI64(inner) => inner
-                .get(ByteKeyRef::new(key_bytes))
-                .copied()
-                .unwrap_or(default),
-            _ => default,
-        }
+        map_get_or_str_i64_bytes(map, key_bytes, default)
     })
+}
+
+/// `get_or` on a string-keyed, word-valued map, by the key's bytes.
+fn map_get_or_str_i64_bytes(map: &GosMap, key_bytes: &[u8], default: i64) -> i64 {
+    crate::c_abi::ledger::map_str_probe();
+    let storage = map.storage.lock();
+    match &*storage {
+        MapStorage::StrI64(inner) => inner
+            .get(ByteKeyRef::new(key_bytes))
+            .copied()
+            .unwrap_or(default),
+        _ => default,
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -1331,6 +1336,29 @@ pub(crate) unsafe fn build_skey_for_set(key: *const u8, desc: *const c_char) -> 
                     // SAFETY: a non-null `V` slot holds a live `Vec`.
                     let v = unsafe { &*vec };
                     let len = v.len.max(0) as usize;
+                    // A narrow integer, `char`, or `f32` element folds as the word it
+                    // reads as, so one value keys one slot whether its vector
+                    // packs it or holds it whole, and a signed element orders
+                    // by its sign. `u8` and `bool` keep the byte that every
+                    // vector of them holds.
+                    let packed_scalar = matches!(
+                        v.elem_kind,
+                        crate::c_abi::vec::vec_elem_kind::SIGNED
+                            | crate::c_abi::vec::vec_elem_kind::F32
+                    ) || (v.elem_kind
+                        == crate::c_abi::vec::vec_elem_kind::PRIMITIVE
+                        && matches!(v.elem_bytes, 2 | 4));
+                    if packed_scalar {
+                        out.extend_from_slice(&(len as u64).to_le_bytes());
+                        out.extend_from_slice(&8u64.to_le_bytes());
+                        for i in 0..len {
+                            // SAFETY: `i` is below the vec's length.
+                            let word = unsafe { crate::c_abi::vec::vec_elem_load_i64(v, i as i64) };
+                            out.extend_from_slice(&word.to_le_bytes());
+                        }
+                        off += 8;
+                        continue;
+                    }
                     let stride = (v.elem_bytes as usize).max(1);
                     out.extend_from_slice(&(len as u64).to_le_bytes());
                     out.extend_from_slice(&(stride as u64).to_le_bytes());
@@ -1880,6 +1908,17 @@ unsafe fn map_get_str_opt_impl(m: *const GosMap, key: *const c_char) -> i128 {
         let map = unsafe { &*m };
         // SAFETY: this `unsafe fn`'s caller passes `key` live; non-null, checked above.
         let key_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(key) };
+        // SAFETY: `map` is live for the call (checked above).
+        unsafe { map_get_str_opt_bytes(map, key_bytes) }
+    })
+}
+
+/// `get` on a string-keyed map, by the key's bytes, as an `Option`.
+///
+/// # Safety
+/// `map` is a live map no other thread mutates during the call.
+unsafe fn map_get_str_opt_bytes(map: &GosMap, key_bytes: &[u8]) -> i128 {
+    {
         let storage = map.storage.lock();
         let payload: Option<i64> = match &*storage {
             MapStorage::StrI64(inner) => inner.get(ByteKeyRef::new(key_bytes)).copied(),
@@ -1906,7 +1945,7 @@ unsafe fn map_get_str_opt_impl(m: *const GosMap, key: *const c_char) -> i128 {
             Some(v) => gos_rt_result_new(0, v),
             None => gos_rt_result_new(1, 0),
         }
-    })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -2007,17 +2046,22 @@ unsafe fn map_contains_key_str_impl(m: *const GosMap, key: *const c_char) -> boo
         // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
         // `Map`.
         let map = unsafe { &*m };
-        crate::c_abi::ledger::map_str_probe();
         // SAFETY: this `unsafe fn`'s caller passes `key` live; non-null, checked above.
         let key_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(key) };
-        let storage = map.storage.lock();
-        match &*storage {
-            MapStorage::StrI64(inner) => inner.contains_key(ByteKeyRef::new(key_bytes)),
-            MapStorage::StrStr(inner) => inner.contains_key(ByteKeyRef::new(key_bytes)),
-            MapStorage::StrBytes(inner) => inner.contains_key(key_bytes),
-            _ => false,
-        }
+        map_contains_key_str_bytes(map, key_bytes)
     })
+}
+
+/// `contains_key` on a string-keyed map, by the key's bytes.
+fn map_contains_key_str_bytes(map: &GosMap, key_bytes: &[u8]) -> bool {
+    crate::c_abi::ledger::map_str_probe();
+    let storage = map.storage.lock();
+    match &*storage {
+        MapStorage::StrI64(inner) => inner.contains_key(ByteKeyRef::new(key_bytes)),
+        MapStorage::StrStr(inner) => inner.contains_key(ByteKeyRef::new(key_bytes)),
+        MapStorage::StrBytes(inner) => inner.contains_key(key_bytes),
+        _ => false,
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -2245,6 +2289,121 @@ pub unsafe extern "C" fn gos_rt_map_inc_substring_str_i64(
         // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the
         // whole call.
         map_inc_str_bytes(unsafe { &mut *m }, key, by)
+    })
+}
+
+/// The key a fused substring probe names: `s.substring(start, end)`, or its
+/// `trim()` when `trim` is set, read in place out of `s`.
+///
+/// # Safety
+/// `s` is null or a live string body that outlives the answer.
+unsafe fn fused_substring_key<'a>(s: *const c_char, start: i64, end: i64, trim: i64) -> &'a [u8] {
+    if s.is_null() {
+        return b"";
+    }
+    // SAFETY: `s` is a live string body (contract).
+    unsafe { substring_key(s, start, end, trim != 0) }
+}
+
+/// `get` on a `Map<String, _>` keyed by `s.substring(start, end)` (trimmed
+/// when `trim` is set), without building the key.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_get_opt_substring_str(
+    m: *const GosMap,
+    s: *const c_char,
+    start: i64,
+    end: i64,
+    trim: i64,
+) -> i128 {
+    ffi_entry!({
+        if m.is_null() {
+            return gos_rt_result_new(1, 0);
+        }
+        // SAFETY: `s` is null or a live string body (C-ABI contract).
+        let key = unsafe { fused_substring_key(s, start, end, trim) };
+        // SAFETY: `m` is non-null (checked above) and live for the call (C-ABI contract).
+        unsafe { map_get_str_opt_bytes(&*m, key) }
+    })
+}
+
+/// `contains_key` on a `Map<String, _>` keyed by `s.substring(start, end)`
+/// (trimmed when `trim` is set), without building the key.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_contains_substring_str(
+    m: *const GosMap,
+    s: *const c_char,
+    start: i64,
+    end: i64,
+    trim: i64,
+) -> bool {
+    ffi_entry!({
+        if m.is_null() {
+            return false;
+        }
+        // SAFETY: `s` is null or a live string body (C-ABI contract).
+        let key = unsafe { fused_substring_key(s, start, end, trim) };
+        // SAFETY: `m` is non-null (checked above) and live for the call (C-ABI contract).
+        map_contains_key_str_bytes(unsafe { &*m }, key)
+    })
+}
+
+/// `get_or` on a `Map<String, V>` with a word value, keyed by
+/// `s.substring(start, end)` (trimmed when `trim` is set), without building
+/// the key.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_get_or_substring_str_i64(
+    m: *const GosMap,
+    s: *const c_char,
+    start: i64,
+    end: i64,
+    trim: i64,
+    default: i64,
+) -> i64 {
+    ffi_entry!({
+        if m.is_null() {
+            return default;
+        }
+        // SAFETY: `s` is null or a live string body (C-ABI contract).
+        let key = unsafe { fused_substring_key(s, start, end, trim) };
+        // SAFETY: `m` is non-null (checked above) and live for the call (C-ABI contract).
+        map_get_or_str_i64_bytes(unsafe { &*m }, key, default)
+    })
+}
+
+/// `or_insert` on a `Map<String, V>` whose value is a scalar owning nothing,
+/// keyed by `s.substring(start, end)` (trimmed when `trim` is set): the key
+/// is copied into the map only when it is absent.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_or_insert_substring_str_i64(
+    m: *mut GosMap,
+    s: *const c_char,
+    start: i64,
+    end: i64,
+    trim: i64,
+    default: i64,
+) -> i64 {
+    ffi_entry!({
+        if m.is_null() {
+            return default;
+        }
+        // SAFETY: `s` is null or a live string body (C-ABI contract).
+        let key = unsafe { fused_substring_key(s, start, end, trim) };
+        // SAFETY: `m` is non-null (checked above) and live for the call, not otherwise accessed
+        // (C-ABI contract).
+        let map = unsafe { &mut *m };
+        let mut storage = map.storage.lock();
+        if matches!(*storage, MapStorage::Empty) {
+            *storage = MapStorage::StrI64(Table::for_order(map.byte_order()));
+        }
+        let MapStorage::StrI64(inner) = &mut *storage else {
+            return default;
+        };
+        if let Some(v) = inner.get(ByteKeyRef::new(key)).copied() {
+            return v;
+        }
+        inner.insert(crate::c_abi::string::boxed_bytes(key).into(), default);
+        map.len_cache += 1;
+        default
     })
 }
 
@@ -3807,6 +3966,12 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
         }
         std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
         crate::c_abi::ledger::vec_dec();
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
+        if crate::c_abi::vec::vec_is_str_view(unsafe { &*v }) {
+            // SAFETY: this was the view's last reference.
+            unsafe { crate::c_abi::vec::free_str_view(v) };
+            return;
+        }
         // A window owns its header alone: the elements, buffer, and owner
         // metadata belong to the vec it aliases.
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
@@ -3850,7 +4015,11 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
                 // says.
                 unsafe { crate::c_abi::vec::vec_release_owned_children(boxed) };
             }
-            if boxed.elem_kind != vec_elem_kind::PRIMITIVE && boxed.elem_bytes as usize == 8 {
+            if !matches!(
+                boxed.elem_kind,
+                vec_elem_kind::PRIMITIVE | vec_elem_kind::SIGNED | vec_elem_kind::F32
+            ) && boxed.elem_bytes as usize == 8
+            {
                 let count = boxed.len.max(0) as usize;
                 // `ptr` is non-null and `cap > 0` (checked above); the loop
                 // reads only the `count <= len <= cap` initialised 8-byte slots.

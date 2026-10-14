@@ -1,0 +1,1150 @@
+// The parser's tree, flat: every node is a record of words in one vector,
+// and a node names its children by their record's index. Building a tree
+// allocates nothing per node and tearing it down frees one vector.
+//
+// A record is the fields of one value in declaration order. A struct value's
+// record holds its fields; an enum value's record holds the variant's index
+// and then that variant's fields. A field is one word:
+//
+// - a number, a `bool` (0 or 1), a `char` (its code), or a unit-only enum
+//   (its variant's index) is itself;
+// - a node, a struct, an enum with a payload, a string, or a list is the
+//   index of its record;
+// - an absent `Option` is -1;
+// - a node's span is two words, its start and its end.
+//
+// A list's record is its length and then its elements. Record 0 is the empty
+// list. A string's record is a byte range: of the source text when it starts
+// at or after 0, and of `extra` (the text the parser made up) at `-start - 1`
+// otherwise. `encode_source_file` writes the tree as postcard writes the
+// `SourceFile` the Rust parser builds for the same text.
+
+use ast::{put_varint}
+
+/// A tree under construction, and the text its strings point into.
+pub struct Tree {
+    pub w: Vec<i64>
+    pub extra: Vec<u8>
+    pub src: String
+    pub file: i64
+}
+
+// Variant indexes of the enums with a payload, as the blob numbers them.
+pub const AE_LIST: i64 = 0
+pub const AE_REPEAT: i64 = 1
+
+pub const EK_LITERAL: i64 = 0
+pub const EK_PATH: i64 = 1
+pub const EK_CALL: i64 = 2
+pub const EK_METHOD_CALL: i64 = 3
+pub const EK_FIELD_ACCESS: i64 = 4
+pub const EK_INDEX: i64 = 5
+pub const EK_UNARY: i64 = 6
+pub const EK_BINARY: i64 = 7
+pub const EK_ASSIGN: i64 = 8
+pub const EK_CAST: i64 = 9
+pub const EK_IF: i64 = 10
+pub const EK_MATCH: i64 = 11
+pub const EK_LOOP: i64 = 12
+pub const EK_WHILE: i64 = 13
+pub const EK_FOR: i64 = 14
+pub const EK_BLOCK: i64 = 15
+pub const EK_CLOSURE: i64 = 16
+pub const EK_RETURN: i64 = 17
+pub const EK_BREAK: i64 = 18
+pub const EK_CONTINUE: i64 = 19
+pub const EK_TUPLE: i64 = 20
+pub const EK_MAP_LITERAL: i64 = 21
+pub const EK_SET_LITERAL: i64 = 22
+pub const EK_STRUCT: i64 = 23
+pub const EK_ARRAY: i64 = 24
+pub const EK_FIXED_ARRAY: i64 = 25
+pub const EK_RANGE: i64 = 26
+pub const EK_UNSAFE: i64 = 27
+pub const EK_TRY: i64 = 28
+pub const EK_SELECT: i64 = 29
+pub const EK_ERROR: i64 = 30
+
+pub const FS_NAMED: i64 = 0
+pub const FS_INDEX: i64 = 1
+
+pub const FP_RECEIVER: i64 = 0
+pub const FP_TYPED: i64 = 1
+
+pub const GA_TYPE: i64 = 0
+pub const GA_CONST: i64 = 1
+
+pub const GP_LIFETIME: i64 = 0
+pub const GP_TYPE: i64 = 1
+pub const GP_CONST: i64 = 2
+
+pub const II_FN: i64 = 0
+pub const II_TYPE: i64 = 1
+pub const II_CONST: i64 = 2
+
+pub const IK_FN: i64 = 0
+pub const IK_STRUCT: i64 = 1
+pub const IK_ENUM: i64 = 2
+pub const IK_TRAIT: i64 = 3
+pub const IK_IMPL: i64 = 4
+pub const IK_TYPE_ALIAS: i64 = 5
+pub const IK_CONST: i64 = 6
+pub const IK_STATIC: i64 = 7
+pub const IK_MOD: i64 = 8
+pub const IK_ATTR_ITEM: i64 = 9
+
+pub const LIT_INT: i64 = 0
+pub const LIT_FLOAT: i64 = 1
+pub const LIT_STRING: i64 = 2
+pub const LIT_RAW_STRING: i64 = 3
+pub const LIT_CHAR: i64 = 4
+pub const LIT_BYTE: i64 = 5
+pub const LIT_BYTE_STRING: i64 = 6
+pub const LIT_RAW_BYTE_STRING: i64 = 7
+pub const LIT_BOOL: i64 = 8
+pub const LIT_UNIT: i64 = 9
+
+pub const MB_INLINE: i64 = 0
+pub const MB_EXTERNAL: i64 = 1
+
+pub const PK_WILDCARD: i64 = 0
+pub const PK_LITERAL: i64 = 1
+pub const PK_IDENT: i64 = 2
+pub const PK_PATH: i64 = 3
+pub const PK_TUPLE: i64 = 4
+pub const PK_SLICE: i64 = 5
+pub const PK_STRUCT: i64 = 6
+pub const PK_TUPLE_STRUCT: i64 = 7
+pub const PK_RANGE: i64 = 8
+pub const PK_OR: i64 = 9
+pub const PK_REST: i64 = 10
+pub const PK_REF: i64 = 11
+pub const PK_ERROR: i64 = 12
+
+pub const SO_RECV: i64 = 0
+pub const SO_SEND: i64 = 1
+pub const SO_DEFAULT: i64 = 2
+
+pub const SK_LET: i64 = 0
+pub const SK_EXPR: i64 = 1
+pub const SK_ITEM: i64 = 2
+pub const SK_DEFER: i64 = 3
+
+pub const SB_NAMED: i64 = 0
+pub const SB_TUPLE: i64 = 1
+pub const SB_UNIT: i64 = 2
+
+pub const TI_FN: i64 = 0
+pub const TI_TYPE: i64 = 1
+pub const TI_CONST: i64 = 2
+
+pub const TK_UNIT: i64 = 0
+pub const TK_NEVER: i64 = 1
+pub const TK_INFER: i64 = 2
+pub const TK_PATH: i64 = 3
+pub const TK_TUPLE: i64 = 4
+pub const TK_ARRAY: i64 = 5
+pub const TK_SLICE: i64 = 6
+pub const TK_REF: i64 = 7
+pub const TK_FN: i64 = 8
+
+pub const UT_MODULE: i64 = 0
+pub const UT_PROJECT: i64 = 1
+
+// Variant indexes of the unit-only enums the parser tests.
+pub const BLOCK_PLAIN: i64 = 0
+pub const BLOCK_ARENA: i64 = 1
+pub const BLOCK_COHORT: i64 = 2
+pub const BLOCK_COMPTIME: i64 = 3
+
+pub const IMMUTABLE: i64 = 0
+pub const MUTABLE: i64 = 1
+
+pub const EXCLUSIVE: i64 = 0
+pub const INCLUSIVE: i64 = 1
+
+pub const RECV_OWNED: i64 = 0
+pub const RECV_REF_SHARED: i64 = 1
+pub const RECV_REF_MUT: i64 = 2
+
+pub const PARENTHESIZED: i64 = 0
+pub const BRACED: i64 = 1
+
+pub const UN_NEG: i64 = 0
+pub const UN_NOT: i64 = 1
+pub const UN_REF_SHARED: i64 = 2
+pub const UN_REF_MUT: i64 = 3
+pub const UN_DEREF: i64 = 4
+
+pub const VIS_INHERITED: i64 = 0
+pub const VIS_PACKAGE: i64 = 1
+pub const VIS_PUBLIC: i64 = 2
+
+pub const FN_PLAIN: i64 = 0
+pub const FN_CLOSURE: i64 = 1
+pub const FN_CLOSURE_MUT: i64 = 2
+pub const FN_CLOSURE_ONCE: i64 = 3
+
+// Field offsets of the four node records: `[id, start, end, kind]`.
+pub const N_ID: i64 = 0
+pub const N_START: i64 = 1
+pub const N_END: i64 = 2
+pub const N_KIND: i64 = 3
+
+/// An empty tree over `src`, sized for a parse of it.
+pub fn new_tree(src: String, file: i64) -> Tree {
+    let mut w: Vec<i64> = Vec::with_capacity(src.byte_len() + 16)
+    w.push(0)
+    Tree { w: w, extra: #[], src: src, file: file }
+}
+
+impl Tree {
+    pub fn rec1(&mut self, a: i64) -> i64 {
+        let r = self.w.len()
+        self.w.push(a)
+        r
+    }
+
+    pub fn rec2(&mut self, a: i64, b: i64) -> i64 {
+        let r = self.w.len()
+        self.w.push(a)
+        self.w.push(b)
+        r
+    }
+
+    pub fn rec3(&mut self, a: i64, b: i64, c: i64) -> i64 {
+        let r = self.w.len()
+        self.w.push(a)
+        self.w.push(b)
+        self.w.push(c)
+        r
+    }
+
+    pub fn rec4(&mut self, a: i64, b: i64, c: i64, d: i64) -> i64 {
+        let r = self.w.len()
+        self.w.push(a)
+        self.w.push(b)
+        self.w.push(c)
+        self.w.push(d)
+        r
+    }
+
+    pub fn rec5(&mut self, a: i64, b: i64, c: i64, d: i64, e: i64) -> i64 {
+        let r = self.w.len()
+        self.w.push(a)
+        self.w.push(b)
+        self.w.push(c)
+        self.w.push(d)
+        self.w.push(e)
+        r
+    }
+
+    pub fn rec6(&mut self, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 {
+        let r = self.w.len()
+        self.w.push(a)
+        self.w.push(b)
+        self.w.push(c)
+        self.w.push(d)
+        self.w.push(e)
+        self.w.push(f)
+        r
+    }
+
+    /// A record of `fields`, for the few with more than six.
+    pub fn rec(&mut self, fields: Vec<i64>) -> i64 {
+        let r = self.w.len()
+        for f in fields {
+            self.w.push(f)
+        }
+        r
+    }
+
+    /// The list record of `items`; record 0 when there are none.
+    pub fn list(&mut self, items: Vec<i64>) -> i64 {
+        let n = items.len()
+        if n == 0 {
+            return 0
+        }
+        let r = self.w.len()
+        self.w.push(n)
+        for x in items {
+            self.w.push(x)
+        }
+        r
+    }
+
+    /// The list record of one item.
+    pub fn list1(&mut self, a: i64) -> i64 {
+        self.rec2(1, a)
+    }
+
+    /// A node record: `[id, start, end, kind]`.
+    pub fn node(&mut self, id: i64, start: i64, end: i64, kind: i64) -> i64 {
+        self.rec4(id, start, end, kind)
+    }
+
+    /// The string naming the source bytes `start..end`.
+    pub fn src_str(&mut self, start: i64, end: i64) -> i64 {
+        self.rec2(start, end)
+    }
+
+    /// A string holding `text`, which the source does not spell.
+    pub fn str_of(&mut self, text: String) -> i64 {
+        let at = self.extra.len()
+        self.extra.extend_from_slice(text.as_bytes())
+        self.rec2(-at - 1, self.extra.len())
+    }
+
+    /// A string holding `bytes`.
+    pub fn bytes_of(&mut self, bytes: Vec<u8>) -> i64 {
+        let at = self.extra.len()
+        self.extra.extend_from_slice(bytes)
+        self.rec2(-at - 1, self.extra.len())
+    }
+
+    /// The byte length of string `s`.
+    pub fn str_len(&mut self, s: i64) -> i64 {
+        let lo = self.w[s]
+        let hi = self.w[s + 1]
+        if lo >= 0 { hi - lo } else { hi + lo + 1 }
+    }
+
+    /// Byte `i` of string `s`.
+    pub fn str_byte(&mut self, s: i64, i: i64) -> i64 {
+        let lo = self.w[s]
+        if lo >= 0 {
+            self.src.byte_at(lo + i)
+        } else {
+            self.extra[-lo - 1 + i] as i64
+        }
+    }
+
+    /// Whether string `s` holds the bytes of `word`.
+    pub fn str_is(&mut self, s: i64, word: String) -> bool {
+        let n = self.str_len(s)
+        if n != word.byte_len() {
+            return false
+        }
+        for i in 0..n {
+            if self.str_byte(s, i) != word.byte_at(i) {
+                return false
+            }
+        }
+        true
+    }
+
+    /// Whether strings `a` and `b` hold the same bytes.
+    pub fn str_eq(&mut self, a: i64, b: i64) -> bool {
+        let n = self.str_len(a)
+        if n != self.str_len(b) {
+            return false
+        }
+        for i in 0..n {
+            if self.str_byte(a, i) != self.str_byte(b, i) {
+                return false
+            }
+        }
+        true
+    }
+
+    /// The text of string `s`.
+    pub fn text(&mut self, s: i64) -> String {
+        let lo = self.w[s]
+        let hi = self.w[s + 1]
+        if lo >= 0 {
+            return self.src.substring(lo, hi)
+        }
+        let mut bytes: Vec<u8> = Vec::with_capacity(hi + lo + 1)
+        for i in (-lo - 1)..hi {
+            bytes.push(self.extra[i])
+        }
+        String::from_utf8(bytes).unwrap_or("")
+    }
+
+    /// The length of list `l`.
+    pub fn len(&mut self, l: i64) -> i64 {
+        self.w[l]
+    }
+
+    /// Item `i` of list `l`.
+    pub fn item(&mut self, l: i64, i: i64) -> i64 {
+        self.w[l + 1 + i]
+    }
+
+    /// The items of list `l`.
+    pub fn items(&mut self, l: i64) -> Vec<i64> {
+        let n = self.w[l]
+        let mut out: Vec<i64> = Vec::with_capacity(n)
+        for i in 0..n {
+            out.push(self.w[l + 1 + i])
+        }
+        out
+    }
+}
+
+// ---- the blob ------------------------------------------------------------
+
+fn put_bool(out: &mut Vec<u8>, b: i64) {
+    out.push(if b != 0 { 1 } else { 0 })
+}
+
+fn put_string(out: &mut Vec<u8>, t: Tree, s: i64) {
+    let lo = t.w[s]
+    let hi = t.w[s + 1]
+    if lo >= 0 {
+        put_varint(out, (hi - lo) as u64)
+        for i in lo..hi {
+            out.push(t.src.byte_at(i) as u8)
+        }
+    } else {
+        put_varint(out, (hi + lo + 1) as u64)
+        for i in (-lo - 1)..hi {
+            out.push(t.extra[i])
+        }
+    }
+}
+
+fn put_span(out: &mut Vec<u8>, t: Tree, start: i64, end: i64) {
+    put_varint(out, t.file as u64)
+    put_varint(out, start as u64)
+    put_varint(out, end as u64)
+}
+
+fn put_opt_string(out: &mut Vec<u8>, t: Tree, s: i64) {
+    if s < 0 {
+        out.push(0)
+    } else {
+        out.push(1)
+        put_string(out, t, s)
+    }
+}
+
+fn enc_opt_expr(out: &mut Vec<u8>, t: Tree, e: i64) {
+    if e < 0 {
+        out.push(0)
+    } else {
+        out.push(1)
+        enc_expr(out, t, e)
+    }
+}
+
+fn enc_opt_type(out: &mut Vec<u8>, t: Tree, e: i64) {
+    if e < 0 {
+        out.push(0)
+    } else {
+        out.push(1)
+        enc_type(out, t, e)
+    }
+}
+
+fn enc_opt_pattern(out: &mut Vec<u8>, t: Tree, e: i64) {
+    if e < 0 {
+        out.push(0)
+    } else {
+        out.push(1)
+        enc_pattern(out, t, e)
+    }
+}
+
+fn enc_exprs(out: &mut Vec<u8>, t: Tree, l: i64) {
+    let n = t.w[l]
+    put_varint(out, n as u64)
+    for i in 0..n {
+        enc_expr(out, t, t.w[l + 1 + i])
+    }
+}
+
+fn enc_types(out: &mut Vec<u8>, t: Tree, l: i64) {
+    let n = t.w[l]
+    put_varint(out, n as u64)
+    for i in 0..n {
+        enc_type(out, t, t.w[l + 1 + i])
+    }
+}
+
+fn enc_patterns(out: &mut Vec<u8>, t: Tree, l: i64) {
+    let n = t.w[l]
+    put_varint(out, n as u64)
+    for i in 0..n {
+        enc_pattern(out, t, t.w[l + 1 + i])
+    }
+}
+
+fn enc_strings(out: &mut Vec<u8>, t: Tree, l: i64) {
+    let n = t.w[l]
+    put_varint(out, n as u64)
+    for i in 0..n {
+        put_string(out, t, t.w[l + 1 + i])
+    }
+}
+
+fn enc_generic_args(out: &mut Vec<u8>, t: Tree, l: i64) {
+    let n = t.w[l]
+    put_varint(out, n as u64)
+    for i in 0..n {
+        enc_generic_arg(out, t, t.w[l + 1 + i])
+    }
+}
+
+fn enc_trait_bounds(out: &mut Vec<u8>, t: Tree, l: i64) {
+    let n = t.w[l]
+    put_varint(out, n as u64)
+    for i in 0..n {
+        enc_trait_bound(out, t, t.w[l + 1 + i])
+    }
+}
+
+fn enc_assoc_bindings(out: &mut Vec<u8>, t: Tree, l: i64) {
+    let n = t.w[l]
+    put_varint(out, n as u64)
+    for i in 0..n {
+        let b = t.w[l + 1 + i]
+        put_string(out, t, t.w[b])
+        enc_type(out, t, t.w[b + 1])
+    }
+}
+
+fn enc_attrs(out: &mut Vec<u8>, t: Tree, r: i64) {
+    enc_attribute_list(out, t, t.w[r])
+    enc_attribute_list(out, t, t.w[r + 1])
+}
+
+fn enc_attribute_list(out: &mut Vec<u8>, t: Tree, l: i64) {
+    let n = t.w[l]
+    put_varint(out, n as u64)
+    for i in 0..n {
+        enc_attribute(out, t, t.w[l + 1 + i])
+    }
+}
+
+fn enc_attribute(out: &mut Vec<u8>, t: Tree, r: i64) {
+    enc_path_expr(out, t, t.w[r])
+    put_opt_string(out, t, t.w[r + 1])
+}
+
+fn enc_block(out: &mut Vec<u8>, t: Tree, r: i64) {
+    let stmts = t.w[r]
+    let n = t.w[stmts]
+    put_varint(out, n as u64)
+    for i in 0..n {
+        enc_stmt(out, t, t.w[stmts + 1 + i])
+    }
+    enc_opt_expr(out, t, t.w[r + 1])
+    put_bool(out, t.w[r + 2])
+    put_varint(out, t.w[r + 3] as u64)
+}
+
+fn enc_array_expr(out: &mut Vec<u8>, t: Tree, r: i64) {
+    let tag = t.w[r]
+    put_varint(out, tag as u64)
+    if tag == AE_LIST {
+        enc_exprs(out, t, t.w[r + 1])
+    } else {
+        enc_expr(out, t, t.w[r + 1])
+        enc_expr(out, t, t.w[r + 2])
+    }
+}
+
+pub fn enc_expr(out: &mut Vec<u8>, t: Tree, r: i64) {
+    put_varint(out, t.w[r] as u64)
+    put_span(out, t, t.w[r + 1], t.w[r + 2])
+    enc_expr_kind(out, t, t.w[r + 3])
+}
+
+fn enc_label(out: &mut Vec<u8>, t: Tree, l: i64) {
+    put_opt_string(out, t, l)
+}
+
+fn enc_expr_kind(out: &mut Vec<u8>, t: Tree, k: i64) {
+    let tag = t.w[k]
+    put_varint(out, tag as u64)
+    if tag == EK_LITERAL {
+        enc_literal(out, t, t.w[k + 1])
+    } else if tag == EK_PATH {
+        enc_path_expr(out, t, t.w[k + 1])
+    } else if tag == EK_CALL {
+        enc_expr(out, t, t.w[k + 1])
+        enc_exprs(out, t, t.w[k + 2])
+    } else if tag == EK_METHOD_CALL {
+        enc_expr(out, t, t.w[k + 1])
+        put_string(out, t, t.w[k + 2])
+        put_span(out, t, t.w[k + 3], t.w[k + 4])
+        put_opt_string(out, t, t.w[k + 5])
+        enc_generic_args(out, t, t.w[k + 6])
+        enc_exprs(out, t, t.w[k + 7])
+    } else if tag == EK_FIELD_ACCESS {
+        enc_expr(out, t, t.w[k + 1])
+        let f = t.w[k + 2]
+        put_varint(out, t.w[f] as u64)
+        if t.w[f] == FS_NAMED {
+            put_string(out, t, t.w[f + 1])
+        } else {
+            put_varint(out, t.w[f + 1] as u64)
+        }
+    } else if tag == EK_INDEX {
+        enc_expr(out, t, t.w[k + 1])
+        enc_expr(out, t, t.w[k + 2])
+    } else if tag == EK_UNARY {
+        put_varint(out, t.w[k + 1] as u64)
+        enc_expr(out, t, t.w[k + 2])
+    } else if tag == EK_BINARY || tag == EK_ASSIGN {
+        put_varint(out, t.w[k + 1] as u64)
+        enc_expr(out, t, t.w[k + 2])
+        enc_expr(out, t, t.w[k + 3])
+    } else if tag == EK_CAST {
+        enc_expr(out, t, t.w[k + 1])
+        enc_type(out, t, t.w[k + 2])
+    } else if tag == EK_IF {
+        enc_expr(out, t, t.w[k + 1])
+        enc_expr(out, t, t.w[k + 2])
+        enc_opt_expr(out, t, t.w[k + 3])
+    } else if tag == EK_MATCH {
+        enc_expr(out, t, t.w[k + 1])
+        let arms = t.w[k + 2]
+        let n = t.w[arms]
+        put_varint(out, n as u64)
+        for i in 0..n {
+            let a = t.w[arms + 1 + i]
+            enc_pattern(out, t, t.w[a])
+            enc_opt_expr(out, t, t.w[a + 1])
+            enc_expr(out, t, t.w[a + 2])
+        }
+    } else if tag == EK_LOOP {
+        enc_label(out, t, t.w[k + 1])
+        enc_expr(out, t, t.w[k + 2])
+    } else if tag == EK_WHILE {
+        enc_label(out, t, t.w[k + 1])
+        enc_expr(out, t, t.w[k + 2])
+        enc_expr(out, t, t.w[k + 3])
+    } else if tag == EK_FOR {
+        enc_label(out, t, t.w[k + 1])
+        enc_pattern(out, t, t.w[k + 2])
+        enc_expr(out, t, t.w[k + 3])
+        enc_expr(out, t, t.w[k + 4])
+    } else if tag == EK_BLOCK || tag == EK_UNSAFE {
+        enc_block(out, t, t.w[k + 1])
+    } else if tag == EK_CLOSURE {
+        let params = t.w[k + 1]
+        let n = t.w[params]
+        put_varint(out, n as u64)
+        for i in 0..n {
+            let c = t.w[params + 1 + i]
+            enc_pattern(out, t, t.w[c])
+            enc_opt_type(out, t, t.w[c + 1])
+        }
+        enc_opt_type(out, t, t.w[k + 2])
+        enc_expr(out, t, t.w[k + 3])
+    } else if tag == EK_RETURN {
+        enc_opt_expr(out, t, t.w[k + 1])
+    } else if tag == EK_BREAK {
+        enc_label(out, t, t.w[k + 1])
+        enc_opt_expr(out, t, t.w[k + 2])
+    } else if tag == EK_CONTINUE {
+        enc_label(out, t, t.w[k + 1])
+    } else if tag == EK_TUPLE || tag == EK_MAP_LITERAL || tag == EK_SET_LITERAL {
+        enc_exprs(out, t, t.w[k + 1])
+    } else if tag == EK_STRUCT {
+        enc_path_expr(out, t, t.w[k + 1])
+        let fields = t.w[k + 2]
+        let n = t.w[fields]
+        put_varint(out, n as u64)
+        for i in 0..n {
+            let f = t.w[fields + 1 + i]
+            put_string(out, t, t.w[f])
+            enc_opt_expr(out, t, t.w[f + 1])
+        }
+        enc_opt_expr(out, t, t.w[k + 3])
+        put_varint(out, t.w[k + 4] as u64)
+    } else if tag == EK_ARRAY || tag == EK_FIXED_ARRAY {
+        enc_array_expr(out, t, t.w[k + 1])
+    } else if tag == EK_RANGE {
+        enc_opt_expr(out, t, t.w[k + 1])
+        enc_opt_expr(out, t, t.w[k + 2])
+        put_varint(out, t.w[k + 3] as u64)
+    } else if tag == EK_TRY {
+        enc_expr(out, t, t.w[k + 1])
+    } else if tag == EK_SELECT {
+        let arms = t.w[k + 1]
+        let n = t.w[arms]
+        put_varint(out, n as u64)
+        for i in 0..n {
+            let a = t.w[arms + 1 + i]
+            let op = t.w[a]
+            let otag = t.w[op]
+            put_varint(out, otag as u64)
+            if otag == SO_RECV {
+                enc_pattern(out, t, t.w[op + 1])
+                enc_expr(out, t, t.w[op + 2])
+            } else if otag == SO_SEND {
+                enc_expr(out, t, t.w[op + 1])
+                enc_expr(out, t, t.w[op + 2])
+            }
+            enc_expr(out, t, t.w[a + 1])
+        }
+    }
+}
+
+fn enc_literal(out: &mut Vec<u8>, t: Tree, r: i64) {
+    let tag = t.w[r]
+    put_varint(out, tag as u64)
+    if tag == LIT_INT || tag == LIT_FLOAT || tag == LIT_STRING || tag == LIT_BYTE_STRING {
+        put_string(out, t, t.w[r + 1])
+    } else if tag == LIT_RAW_STRING || tag == LIT_RAW_BYTE_STRING {
+        out.push(t.w[r + 1] as u8)
+        put_string(out, t, t.w[r + 2])
+    } else if tag == LIT_CHAR {
+        let c = char::from_u32(t.w[r + 1] as u32).unwrap_or('\u{fffd}')
+        let s = c.to_string()
+        put_varint(out, s.byte_len() as u64)
+        out.extend_from_slice(s.as_bytes())
+    } else if tag == LIT_BYTE {
+        out.push(t.w[r + 1] as u8)
+    } else if tag == LIT_BOOL {
+        put_bool(out, t.w[r + 1])
+    }
+}
+
+fn enc_path_expr(out: &mut Vec<u8>, t: Tree, r: i64) {
+    let segments = t.w[r]
+    let n = t.w[segments]
+    put_varint(out, n as u64)
+    for i in 0..n {
+        let s = t.w[segments + 1 + i]
+        put_string(out, t, t.w[s])
+        enc_generic_args(out, t, t.w[s + 1])
+    }
+}
+
+fn enc_generic_arg(out: &mut Vec<u8>, t: Tree, r: i64) {
+    let tag = t.w[r]
+    put_varint(out, tag as u64)
+    if tag == GA_TYPE {
+        enc_type(out, t, t.w[r + 1])
+    } else {
+        enc_expr(out, t, t.w[r + 1])
+    }
+}
+
+pub fn enc_pattern(out: &mut Vec<u8>, t: Tree, r: i64) {
+    put_varint(out, t.w[r] as u64)
+    put_span(out, t, t.w[r + 1], t.w[r + 2])
+    let k = t.w[r + 3]
+    let tag = t.w[k]
+    put_varint(out, tag as u64)
+    if tag == PK_LITERAL {
+        enc_literal(out, t, t.w[k + 1])
+    } else if tag == PK_IDENT {
+        put_varint(out, t.w[k + 1] as u64)
+        put_string(out, t, t.w[k + 2])
+        enc_opt_pattern(out, t, t.w[k + 3])
+    } else if tag == PK_PATH {
+        enc_type_path(out, t, t.w[k + 1])
+    } else if tag == PK_TUPLE || tag == PK_OR {
+        enc_patterns(out, t, t.w[k + 1])
+    } else if tag == PK_SLICE {
+        enc_patterns(out, t, t.w[k + 1])
+        enc_opt_pattern(out, t, t.w[k + 2])
+        enc_patterns(out, t, t.w[k + 3])
+    } else if tag == PK_STRUCT {
+        enc_type_path(out, t, t.w[k + 1])
+        let fields = t.w[k + 2]
+        let n = t.w[fields]
+        put_varint(out, n as u64)
+        for i in 0..n {
+            let f = t.w[fields + 1 + i]
+            put_string(out, t, t.w[f])
+            enc_opt_pattern(out, t, t.w[f + 1])
+        }
+        put_bool(out, t.w[k + 3])
+    } else if tag == PK_TUPLE_STRUCT {
+        enc_type_path(out, t, t.w[k + 1])
+        enc_patterns(out, t, t.w[k + 2])
+    } else if tag == PK_RANGE {
+        let lo = t.w[k + 1]
+        if lo < 0 {
+            out.push(0)
+        } else {
+            out.push(1)
+            enc_literal(out, t, lo)
+        }
+        let hi = t.w[k + 2]
+        if hi < 0 {
+            out.push(0)
+        } else {
+            out.push(1)
+            enc_literal(out, t, hi)
+        }
+        put_varint(out, t.w[k + 3] as u64)
+    } else if tag == PK_REF {
+        put_varint(out, t.w[k + 1] as u64)
+        enc_pattern(out, t, t.w[k + 2])
+    }
+}
+
+pub fn enc_type(out: &mut Vec<u8>, t: Tree, r: i64) {
+    put_varint(out, t.w[r] as u64)
+    put_span(out, t, t.w[r + 1], t.w[r + 2])
+    let k = t.w[r + 3]
+    let tag = t.w[k]
+    put_varint(out, tag as u64)
+    if tag == TK_PATH {
+        enc_type_path(out, t, t.w[k + 1])
+    } else if tag == TK_TUPLE {
+        enc_types(out, t, t.w[k + 1])
+    } else if tag == TK_ARRAY {
+        enc_type(out, t, t.w[k + 1])
+        enc_expr(out, t, t.w[k + 2])
+    } else if tag == TK_SLICE {
+        enc_type(out, t, t.w[k + 1])
+    } else if tag == TK_REF {
+        put_varint(out, t.w[k + 1] as u64)
+        enc_type(out, t, t.w[k + 2])
+    } else if tag == TK_FN {
+        put_varint(out, t.w[k + 1] as u64)
+        enc_types(out, t, t.w[k + 2])
+        enc_opt_type(out, t, t.w[k + 3])
+    }
+}
+
+fn enc_type_path(out: &mut Vec<u8>, t: Tree, r: i64) {
+    let segments = t.w[r]
+    let n = t.w[segments]
+    put_varint(out, n as u64)
+    for i in 0..n {
+        let s = t.w[segments + 1 + i]
+        put_string(out, t, t.w[s])
+        enc_generic_args(out, t, t.w[s + 1])
+        enc_assoc_bindings(out, t, t.w[s + 2])
+    }
+}
+
+fn enc_trait_bound(out: &mut Vec<u8>, t: Tree, r: i64) {
+    enc_type_path(out, t, t.w[r])
+    enc_assoc_bindings(out, t, t.w[r + 1])
+}
+
+pub fn enc_stmt(out: &mut Vec<u8>, t: Tree, r: i64) {
+    put_varint(out, t.w[r] as u64)
+    put_span(out, t, t.w[r + 1], t.w[r + 2])
+    let k = t.w[r + 3]
+    let tag = t.w[k]
+    put_varint(out, tag as u64)
+    if tag == SK_LET {
+        enc_pattern(out, t, t.w[k + 1])
+        enc_opt_type(out, t, t.w[k + 2])
+        enc_opt_expr(out, t, t.w[k + 3])
+    } else if tag == SK_EXPR {
+        enc_expr(out, t, t.w[k + 1])
+        put_bool(out, t.w[k + 2])
+    } else if tag == SK_ITEM {
+        enc_item(out, t, t.w[k + 1])
+    } else {
+        enc_expr(out, t, t.w[k + 1])
+    }
+}
+
+fn enc_generics(out: &mut Vec<u8>, t: Tree, r: i64) {
+    let params = t.w[r]
+    let n = t.w[params]
+    put_varint(out, n as u64)
+    for i in 0..n {
+        let g = t.w[params + 1 + i]
+        let tag = t.w[g]
+        put_varint(out, tag as u64)
+        if tag == GP_LIFETIME {
+            put_string(out, t, t.w[g + 1])
+        } else if tag == GP_TYPE {
+            put_string(out, t, t.w[g + 1])
+            enc_trait_bounds(out, t, t.w[g + 2])
+            enc_opt_type(out, t, t.w[g + 3])
+        } else {
+            put_string(out, t, t.w[g + 1])
+            enc_type(out, t, t.w[g + 2])
+            enc_opt_expr(out, t, t.w[g + 3])
+        }
+    }
+}
+
+fn enc_where(out: &mut Vec<u8>, t: Tree, r: i64) {
+    let preds = t.w[r]
+    let n = t.w[preds]
+    put_varint(out, n as u64)
+    for i in 0..n {
+        let p = t.w[preds + 1 + i]
+        enc_type(out, t, t.w[p])
+        enc_trait_bounds(out, t, t.w[p + 1])
+    }
+}
+
+fn enc_fn_decl(out: &mut Vec<u8>, t: Tree, r: i64) {
+    enc_attrs(out, t, t.w[r])
+    put_span(out, t, t.w[r + 1], t.w[r + 2])
+    put_bool(out, t.w[r + 3])
+    put_bool(out, t.w[r + 4])
+    put_varint(out, t.w[r + 5] as u64)
+    put_string(out, t, t.w[r + 6])
+    enc_generics(out, t, t.w[r + 7])
+    let params = t.w[r + 8]
+    let n = t.w[params]
+    put_varint(out, n as u64)
+    for i in 0..n {
+        let fp = t.w[params + 1 + i]
+        let tag = t.w[fp]
+        put_varint(out, tag as u64)
+        if tag == FP_RECEIVER {
+            put_varint(out, t.w[fp + 1] as u64)
+        } else {
+            enc_pattern(out, t, t.w[fp + 1])
+            enc_type(out, t, t.w[fp + 2])
+            put_bool(out, t.w[fp + 3])
+            enc_opt_expr(out, t, t.w[fp + 4])
+        }
+    }
+    enc_opt_type(out, t, t.w[r + 9])
+    enc_where(out, t, t.w[r + 10])
+    enc_opt_expr(out, t, t.w[r + 11])
+    put_opt_string(out, t, t.w[r + 12])
+}
+
+fn enc_struct_body(out: &mut Vec<u8>, t: Tree, r: i64) {
+    let tag = t.w[r]
+    put_varint(out, tag as u64)
+    if tag == SB_NAMED {
+        let fields = t.w[r + 1]
+        let n = t.w[fields]
+        put_varint(out, n as u64)
+        for i in 0..n {
+            let f = t.w[fields + 1 + i]
+            enc_attrs(out, t, t.w[f])
+            put_varint(out, t.w[f + 1] as u64)
+            put_string(out, t, t.w[f + 2])
+            enc_type(out, t, t.w[f + 3])
+        }
+    } else if tag == SB_TUPLE {
+        let fields = t.w[r + 1]
+        let n = t.w[fields]
+        put_varint(out, n as u64)
+        for i in 0..n {
+            let f = t.w[fields + 1 + i]
+            enc_attrs(out, t, t.w[f])
+            put_varint(out, t.w[f + 1] as u64)
+            enc_type(out, t, t.w[f + 2])
+        }
+    }
+}
+
+fn enc_module_path(out: &mut Vec<u8>, t: Tree, r: i64) {
+    enc_strings(out, t, t.w[r])
+}
+
+pub fn enc_item(out: &mut Vec<u8>, t: Tree, r: i64) {
+    put_varint(out, t.w[r] as u64)
+    put_span(out, t, t.w[r + 1], t.w[r + 2])
+    enc_attrs(out, t, t.w[r + 3])
+    put_varint(out, t.w[r + 4] as u64)
+    let k = t.w[r + 5]
+    let tag = t.w[k]
+    put_varint(out, tag as u64)
+    let d = t.w[k + 1]
+    if tag == IK_FN {
+        enc_fn_decl(out, t, d)
+    } else if tag == IK_STRUCT {
+        put_string(out, t, t.w[d])
+        enc_generics(out, t, t.w[d + 1])
+        enc_where(out, t, t.w[d + 2])
+        enc_struct_body(out, t, t.w[d + 3])
+    } else if tag == IK_ENUM {
+        put_string(out, t, t.w[d])
+        enc_generics(out, t, t.w[d + 1])
+        enc_where(out, t, t.w[d + 2])
+        let variants = t.w[d + 3]
+        let n = t.w[variants]
+        put_varint(out, n as u64)
+        for i in 0..n {
+            let v = t.w[variants + 1 + i]
+            enc_attrs(out, t, t.w[v])
+            put_string(out, t, t.w[v + 1])
+            enc_struct_body(out, t, t.w[v + 2])
+            enc_opt_expr(out, t, t.w[v + 3])
+        }
+        let repr = t.w[d + 4]
+        put_bool(out, t.w[repr])
+        let bits = t.w[repr + 1]
+        if bits < 0 {
+            out.push(0)
+        } else {
+            out.push(1)
+            put_varint(out, bits as u64)
+        }
+    } else if tag == IK_TRAIT {
+        put_string(out, t, t.w[d])
+        enc_generics(out, t, t.w[d + 1])
+        enc_trait_bounds(out, t, t.w[d + 2])
+        enc_where(out, t, t.w[d + 3])
+        let items = t.w[d + 4]
+        let n = t.w[items]
+        put_varint(out, n as u64)
+        for i in 0..n {
+            let ti = t.w[items + 1 + i]
+            let itag = t.w[ti]
+            put_varint(out, itag as u64)
+            if itag == TI_FN {
+                enc_fn_decl(out, t, t.w[ti + 1])
+            } else if itag == TI_TYPE {
+                enc_attrs(out, t, t.w[ti + 1])
+                put_string(out, t, t.w[ti + 2])
+                enc_trait_bounds(out, t, t.w[ti + 3])
+                enc_opt_type(out, t, t.w[ti + 4])
+            } else {
+                enc_attrs(out, t, t.w[ti + 1])
+                put_string(out, t, t.w[ti + 2])
+                enc_type(out, t, t.w[ti + 3])
+                enc_opt_expr(out, t, t.w[ti + 4])
+            }
+        }
+    } else if tag == IK_IMPL {
+        enc_generics(out, t, t.w[d])
+        let trait_ref = t.w[d + 1]
+        if trait_ref < 0 {
+            out.push(0)
+        } else {
+            out.push(1)
+            enc_trait_bound(out, t, trait_ref)
+        }
+        enc_type(out, t, t.w[d + 2])
+        enc_where(out, t, t.w[d + 3])
+        let items = t.w[d + 4]
+        let n = t.w[items]
+        put_varint(out, n as u64)
+        for i in 0..n {
+            let ii = t.w[items + 1 + i]
+            let itag = t.w[ii]
+            put_varint(out, itag as u64)
+            if itag == II_FN {
+                enc_fn_decl(out, t, t.w[ii + 1])
+            } else if itag == II_TYPE {
+                enc_attrs(out, t, t.w[ii + 1])
+                put_string(out, t, t.w[ii + 2])
+                enc_type(out, t, t.w[ii + 3])
+            } else {
+                enc_attrs(out, t, t.w[ii + 1])
+                put_string(out, t, t.w[ii + 2])
+                enc_type(out, t, t.w[ii + 3])
+                enc_expr(out, t, t.w[ii + 4])
+            }
+        }
+    } else if tag == IK_TYPE_ALIAS {
+        put_string(out, t, t.w[d])
+        enc_generics(out, t, t.w[d + 1])
+        enc_type(out, t, t.w[d + 2])
+        put_bool(out, t.w[d + 3])
+    } else if tag == IK_CONST {
+        put_string(out, t, t.w[d])
+        enc_type(out, t, t.w[d + 1])
+        enc_expr(out, t, t.w[d + 2])
+    } else if tag == IK_STATIC {
+        put_varint(out, t.w[d] as u64)
+        put_string(out, t, t.w[d + 1])
+        enc_type(out, t, t.w[d + 2])
+        enc_expr(out, t, t.w[d + 3])
+    } else if tag == IK_MOD {
+        put_string(out, t, t.w[d])
+        let body = t.w[d + 1]
+        put_varint(out, t.w[body] as u64)
+        if t.w[body] == MB_INLINE {
+            let items = t.w[body + 1]
+            let n = t.w[items]
+            put_varint(out, n as u64)
+            for i in 0..n {
+                enc_item(out, t, t.w[items + 1 + i])
+            }
+        }
+    } else {
+        enc_attribute(out, t, d)
+    }
+}
+
+fn enc_use_decl(out: &mut Vec<u8>, t: Tree, r: i64) {
+    put_varint(out, t.w[r] as u64)
+    put_span(out, t, t.w[r + 1], t.w[r + 2])
+    let target = t.w[r + 3]
+    put_varint(out, t.w[target] as u64)
+    if t.w[target] == UT_MODULE {
+        enc_module_path(out, t, t.w[target + 1])
+    } else {
+        put_string(out, t, t.w[target + 1])
+        let module = t.w[target + 2]
+        if module < 0 {
+            out.push(0)
+        } else {
+            out.push(1)
+            enc_module_path(out, t, module)
+        }
+    }
+    put_opt_string(out, t, t.w[r + 4])
+    let list = t.w[r + 5]
+    if list < 0 {
+        out.push(0)
+    } else {
+        out.push(1)
+        let n = t.w[list]
+        put_varint(out, n as u64)
+        for i in 0..n {
+            let e = t.w[list + 1 + i]
+            enc_strings(out, t, t.w[e])
+            put_string(out, t, t.w[e + 1])
+            put_opt_string(out, t, t.w[e + 2])
+        }
+    }
+    enc_strings(out, t, t.w[r + 6])
+    put_opt_string(out, t, t.w[r + 7])
+}
+
+/// A named argument: its position, its name, and the span of `name:`.
+pub struct NamedArg {
+    pub index: i64
+    pub name: i64
+    pub start: i64
+    pub end: i64
+}
+
+/// Writes the `SourceFile` whose attributes, uses, items, and top-level
+/// statements are the records and lists given.
+pub fn encode_source_file(
+    out: &mut Vec<u8>,
+    t: Tree,
+    attrs: i64,
+    uses: Vec<i64>,
+    items: Vec<i64>,
+    stmts: Vec<i64>,
+    next_node_id: i64,
+    named: Map<i64, Vec<NamedArg>>,
+) {
+    put_varint(out, t.file as u64)
+    enc_attrs(out, t, attrs)
+    put_varint(out, uses.len() as u64)
+    for u in uses {
+        enc_use_decl(out, t, u)
+    }
+    put_varint(out, items.len() as u64)
+    for i in items {
+        enc_item(out, t, i)
+    }
+    put_varint(out, stmts.len() as u64)
+    for s in stmts {
+        enc_stmt(out, t, s)
+    }
+    put_varint(out, next_node_id as u64)
+    let mut keys = named.keys()
+    keys.sort()
+    put_varint(out, keys.len() as u64)
+    for k in keys {
+        put_varint(out, k as u64)
+        put_varint(out, named[k].len() as u64)
+        for a in named[k] {
+            put_varint(out, a.index as u64)
+            put_string(out, t, a.name)
+            put_span(out, t, a.start, a.end)
+        }
+    }
+}

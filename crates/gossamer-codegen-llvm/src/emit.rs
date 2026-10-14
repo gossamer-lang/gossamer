@@ -274,6 +274,7 @@ pub fn compile_to_object(bodies: &[Body], tcx: &TyCtxt) -> Result<NativeObject> 
     let tmp_dir = pipeline_tmp_dir()?;
     let ll_path = tmp_dir.join("unit.ll");
     let _ = render_module_to_path(bodies, tcx, &ll_path, /*allow_fallback=*/ false)?;
+    keep_ir_file(&ll_path);
     let obj_path = tmp_dir.join("unit.o");
     invoke_llc_pipeline(&ll_path, &obj_path, &llvm_triple, /*announce=*/ true)?;
     let bytes =
@@ -282,6 +283,34 @@ pub fn compile_to_object(bodies: &[Body], tcx: &TyCtxt) -> Result<NativeObject> 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
     Ok(NativeObject { triple, bytes })
+}
+
+/// Copies a rendered IR unit into `GOS_LLVM_IR_DIR`, when set, under `name`,
+/// so a comparison of two compilers can read every unit a build rendered,
+/// whether or not its object came from the cache.
+fn keep_ir(name: &str, ir: &str) {
+    if let Some(dir) = std::env::var_os("GOS_LLVM_IR_DIR") {
+        let dir = std::path::Path::new(&dir);
+        if let Err(err) =
+            std::fs::create_dir_all(dir).and_then(|()| std::fs::write(dir.join(name), ir))
+        {
+            eprintln!("warning: GOS_LLVM_IR_DIR: {err}");
+        }
+    }
+}
+
+/// [`keep_ir`] for a unit already written to `path`.
+fn keep_ir_file(path: &std::path::Path) {
+    if std::env::var_os("GOS_LLVM_IR_DIR").is_some()
+        && let Ok(ir) = std::fs::read_to_string(path)
+    {
+        keep_ir(
+            &path
+                .file_name()
+                .map_or_else(|| "unit.ll".into(), |n| n.to_string_lossy().into_owned()),
+            &ir,
+        );
+    }
 }
 
 /// Path-oriented variant of [`compile_to_object`]: writes the LLVM
@@ -301,6 +330,7 @@ pub fn compile_to_object_at_path(
     let tmp_dir = pipeline_tmp_dir()?;
     let ll_path = tmp_dir.join("unit.ll");
     let _ = render_module_to_path(bodies, tcx, &ll_path, /*allow_fallback=*/ false)?;
+    keep_ir_file(&ll_path);
     invoke_llc_pipeline(&ll_path, obj_out, &llvm_triple, /*announce=*/ true)?;
     if std::env::var("GOS_LLVM_DUMP").is_err() {
         let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -652,7 +682,19 @@ pub fn set_library_name(name: String) {
     let _ = LIBRARY_NAME.set(name);
 }
 
-/// `define <name>_shutdown`, for the chunk holding the export entries of a
+static LIBRARY_HOST_FINGERPRINT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+/// Builds the library for a host that links the runtime itself: the module
+/// that defines the `#[export]` entries also defines
+/// `gos_lib_abi_fingerprint`, answering `fingerprint`, the runtime registry
+/// digest of the compiler building it, which the host compares with its own
+/// before calling in.
+pub fn set_library_host_runtime(fingerprint: u64) {
+    let _ = LIBRARY_HOST_FINGERPRINT.set(fingerprint);
+}
+
+/// `define <name>_shutdown`, and for a host-runtime library
+/// `gos_lib_abi_fingerprint`, for the chunk holding the export entries of a
 /// library build.
 fn library_shutdown_entry(bodies: &[&Body]) -> Option<String> {
     let name = LIBRARY_NAME.get()?;
@@ -665,11 +707,19 @@ fn library_shutdown_entry(bodies: &[&Body]) -> Option<String> {
             } else {
                 "dso_local"
             };
-            format!(
+            let mut entries = format!(
                 "declare void @gos_rt_library_shutdown()\n\
                  define {linkage} void @\"{name}_shutdown\"() {{\n  \
                  call void @gos_rt_library_shutdown()\n  ret void\n}}\n"
-            )
+            );
+            if let Some(fingerprint) = LIBRARY_HOST_FINGERPRINT.get() {
+                // Two's complement: LLVM spells an `i64` constant signed.
+                let word = i64::from_ne_bytes(fingerprint.to_ne_bytes());
+                entries.push_str(&format!(
+                    "define {linkage} i64 @gos_lib_abi_fingerprint() {{\n  ret i64 {word}\n}}\n"
+                ));
+            }
+            entries
         })
 }
 
@@ -1341,6 +1391,7 @@ fn compile_bodies_parallel_incremental(
                 BuildError::Io(err) => err,
             })?;
         record_phase(&RENDER_US, started);
+        keep_ir(&format!("chunk{chunk_idx}.ll"), &ir);
         let key = chunk_cache_key(&ir, &llvm_triple, profile);
         let hit = cache_dir
             .as_ref()
@@ -1522,6 +1573,7 @@ pub fn compile_with_fallback_at_path(
         let obj_path = obj_dir.join("unit.o");
         let fallback_bodies =
             render_module_to_path(bodies, tcx, &ll_path, /*allow_fallback=*/ true)?;
+        keep_ir_file(&ll_path);
         invoke_llc_pipeline(&ll_path, &obj_path, &llvm_triple, /*announce=*/ true)?;
         if std::env::var("GOS_LLVM_DUMP").is_err() {
             let _ = std::fs::remove_file(&ll_path);

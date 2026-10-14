@@ -89,7 +89,29 @@ impl<'src> Parser<'src> {
         // editors emit a BOM by default; `SourceMap`'s `SourceFile::new`
         // strips the same prefix so diagnostic line/columns stay aligned.
         let source = source.strip_prefix('\u{feff}').unwrap_or(source);
-        let mut tokens = TokenStream::new(source, file);
+        Self::over(
+            source,
+            TokenStream::new(source, file),
+            NodeIdGenerator::new(),
+        )
+    }
+
+    /// A parser over `source` from byte `start` of the text after a leading
+    /// byte order mark, numbering nodes from `first_id`: the parser that
+    /// reaches `start` having read everything before it, when nothing
+    /// before it is still open.
+    #[must_use]
+    pub(crate) fn from_offset(source: &'src str, file: FileId, start: u32, first_id: u32) -> Self {
+        let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+        let end = u32::try_from(source.len()).unwrap_or(u32::MAX);
+        Self::over(
+            source,
+            TokenStream::range(source, file, start, end),
+            NodeIdGenerator::starting_at(first_id),
+        )
+    }
+
+    fn over(source: &'src str, mut tokens: TokenStream, ids: NodeIdGenerator) -> Self {
         // Tokenization errors (unterminated comment/string, bad escape,
         // ...) become parse diagnostics here; dropping them with the
         // lexer made a file with an unterminated `/*` parse as an
@@ -109,7 +131,7 @@ impl<'src> Parser<'src> {
         Self {
             source,
             tokens,
-            ids: NodeIdGenerator::new(),
+            ids,
             diagnostics,
             no_struct_literal_depth: 0,
             impl_trait_name: None,

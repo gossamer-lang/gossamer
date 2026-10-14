@@ -80,10 +80,22 @@ impl<'a> Builder<'a> {
         // match was the root cause of the
         // control_flow / data_structures crash - the match read
         // disc from offset 0 of a value that didn't have one.
-        let is_free_struct = self.structs.contains_key(struct_name);
+        // The literal's own type names the enum, so a variant name two enums
+        // both declare resolves to the variant of the enum being built.
+        let typed_variant = self.enum_index_name_of(ty).and_then(|en| {
+            let idx = self.enums.variant_of_enum(&en, struct_name)?;
+            let fields = self.enums.field_names_of(&en, struct_name)?;
+            Some((en, idx, fields))
+        });
+        let is_free_struct = typed_variant.is_none() && self.structs.contains_key(struct_name);
         let mut variant_idx: Option<usize> = None;
         let mut variant_enum_name: Option<String> = None;
-        if !is_free_struct {
+        let mut variant_order: Option<Vec<String>> = None;
+        if let Some((en, idx, fields)) = typed_variant {
+            variant_idx = Some(idx);
+            variant_enum_name = Some(en);
+            variant_order = Some(fields);
+        } else if !is_free_struct {
             // The variant-fields map is keyed by the bare variant
             // name; look up its declaration index in the parent
             // enum so the constructor writes the right disc.
@@ -121,11 +133,14 @@ impl<'a> Builder<'a> {
         {
             return self.lower_expr(&pairs[1]);
         }
-        let order = self
-            .structs
-            .get(struct_name)
-            .cloned()
-            .or_else(|| self.enums.variant_fields.get(struct_name).cloned())?;
+        let order = match variant_order {
+            Some(order) => order,
+            None => self
+                .structs
+                .get(struct_name)
+                .cloned()
+                .or_else(|| self.enums.variant_fields.get(struct_name).cloned())?,
+        };
         let mut provided: HashMap<String, &HirExpr> = HashMap::new();
         let mut base_expr: Option<&HirExpr> = None;
         let mut chunks = pairs.chunks_exact(2);

@@ -76,7 +76,13 @@ pub fn check_resolved_unit(
         fatal.extend(resolve_diags.iter().map(|d| d.to_diagnostic(&in_scope)));
     }
 
+    // The checker reads only the items this build compiles. Setting the
+    // rest aside lets it read the tree in place rather than a filtered copy.
+    let inactive = gossamer_ast::cfg::SetAside::take(&mut sf.items, &|item| {
+        gossamer_ast::cfg::item_is_active(&item.attrs)
+    });
     let (table, type_diags) = crate::typecheck_source_file(sf, resolutions, tcx);
+    inactive.restore(&mut sf.items);
     observer.phase_done(CheckPhase::Typecheck);
     if !parse_failed {
         for diag in &type_diags {

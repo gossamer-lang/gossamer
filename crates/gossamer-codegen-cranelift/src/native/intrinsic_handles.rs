@@ -208,6 +208,7 @@ pub(super) fn lower_intrinsic_call_handles(
         | "gos_rt_vec_free"
         | "gos_rt_vec_retain"
         | "gos_rt_vec_mark_rc_elems"
+        | "gos_rt_vec_mark_signed_elems"
         | "gos_rt_vec_mark_vec_elems"
         | "gos_rt_vec_mark_weak_elems"
         | "gos_rt_vec_compact_elems"
@@ -218,6 +219,7 @@ pub(super) fn lower_intrinsic_call_handles(
                 "gos_rt_vec_free" => "gos_rt_vec_free",
                 "gos_rt_vec_retain" => "gos_rt_vec_retain",
                 "gos_rt_vec_mark_rc_elems" => "gos_rt_vec_mark_rc_elems",
+                "gos_rt_vec_mark_signed_elems" => "gos_rt_vec_mark_signed_elems",
                 "gos_rt_vec_mark_vec_elems" => "gos_rt_vec_mark_vec_elems",
                 "gos_rt_vec_mark_weak_elems" => "gos_rt_vec_mark_weak_elems",
                 "gos_rt_vec_compact_elems" => "gos_rt_vec_compact_elems",

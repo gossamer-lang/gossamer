@@ -14,6 +14,7 @@ pub mod common;
 pub mod expr;
 pub mod items;
 pub mod node_id;
+pub mod ordered;
 pub mod path;
 pub mod pattern;
 pub mod printer;

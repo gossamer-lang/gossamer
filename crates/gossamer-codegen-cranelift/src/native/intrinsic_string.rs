@@ -1578,6 +1578,22 @@ pub(super) fn lower_intrinsic_call_string(
                     let slot_addr = builder.ins().stack_addr(ptr_ty, slot, 0);
                     store_i128_words(builder, value, slot_addr, 0);
                     slot_addr
+                } else if callee == "gos_rt_vec_push" {
+                    // A scalar crosses as its word, which the runtime stores at
+                    // the vector's own width (a packed `f32` narrows from it).
+                    let v64 = coerce_arg_to(builder, value, types::I64)?;
+                    let push_word = intrinsics.extern_fn_by_name(module, "gos_rt_vec_push_i64")?;
+                    let fref = module.declare_func_in_func(push_word, builder.func);
+                    let _ = builder.ins().call(fref, &[vec_p, v64]);
+                    let unit = builder.ins().iconst(types::I64, 0);
+                    define_var_to(
+                        builder,
+                        locals,
+                        &intrinsics.body_cl_types,
+                        destination.local,
+                        unit,
+                    );
+                    return Ok(true);
                 } else {
                     let v64 = coerce_arg_to(builder, value, types::I64)?;
                     let slot = builder.create_sized_stack_slot(StackSlotData::new(
@@ -1776,6 +1792,37 @@ pub(super) fn lower_intrinsic_call_string(
                 let call = builder.ins().call(fref, &[vec_p, i]);
                 builder.inst_results(call)[0]
             };
+            // An aggregate destination is a copy of the element, as on the LLVM
+            // tier: the drop pass gives it shares of its own, so it must not
+            // name the vector's storage.
+            if destination.projection.is_empty()
+                && intrinsics.stack_slotted.contains(&destination.local)
+                && !super::lowering_stmt_term::storage_leaves_through_return(
+                    body,
+                    intrinsics,
+                    destination.local,
+                )
+                && super::lowering_stmt_term::payload_takes_own_storage(
+                    tcx,
+                    body,
+                    destination.local,
+                )
+                && let Some(&dst_var) = locals.get(&destination.local)
+            {
+                let slots = type_slot_count(tcx, body.local_ty(destination.local)).max(1);
+                let dst_raw = builder.use_var(dst_var);
+                let dst_ptr = coerce_arg_to(builder, dst_raw, ptr_ty)?;
+                for slot_idx in 0..slots {
+                    let off = ir::immediates::Offset32::new((slot_idx as i32) * 8);
+                    let word = builder
+                        .ins()
+                        .load(types::I64, MemFlagsData::trusted(), ptr, off);
+                    builder
+                        .ins()
+                        .store(MemFlagsData::trusted(), word, dst_ptr, off);
+                }
+                return Ok(true);
+            }
             define_var_to(
                 builder,
                 locals,

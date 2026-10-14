@@ -19,6 +19,7 @@
 
 use gossamer_diagnostics::Diagnostic;
 use gossamer_lex::FileId;
+use gossamer_parse::autoderive::ParsedProgram;
 use gossamer_resolve::resolve_source_file;
 use gossamer_types::{CheckPhase, PhaseObserver, TyCtxt, check_resolved_unit};
 use std::time::{Duration, Instant};
@@ -72,11 +73,52 @@ impl FrontendOutcome {
     }
 }
 
+/// Writes the blob of an accepted pass to `path`, as
+/// [`crate::encode_frontend`] answers it. A rejected pass has no blob, and
+/// writes nothing.
+///
+/// # Errors
+///
+/// The blob cannot be encoded or the file cannot be written.
+pub fn write_frontend_blob(
+    outcome: &FrontendOutcome,
+    path: &std::path::Path,
+) -> std::io::Result<()> {
+    if !outcome.is_ok() {
+        return Ok(());
+    }
+    let checked = &outcome.checked;
+    let bytes = crate::encode_frontend(
+        &checked.sf,
+        &checked.resolutions,
+        &checked.table,
+        &checked.tcx,
+        &outcome.warnings,
+    )
+    .map_err(std::io::Error::other)?;
+    std::fs::write(path, bytes)
+}
+
+/// Writes the blob `GOS_EMIT_FRONTEND_BLOB` asks for, so `gos run` and
+/// `gos build` can hand their frontend's output to a comparison.
+fn emit_requested_blob(outcome: &FrontendOutcome) {
+    if let Some(path) = std::env::var_os("GOS_EMIT_FRONTEND_BLOB")
+        && let Err(err) = write_frontend_blob(outcome, std::path::Path::new(&path))
+    {
+        eprintln!("warning: GOS_EMIT_FRONTEND_BLOB: {err}");
+    }
+}
+
 /// Parses `source` with its derived items. Answers the tree, its parse
 /// diagnostics plus any foreign declaration the project does not allow, and
 /// whether the parse failed.
-fn parse_phase(source: &str, file_id: FileId) -> (gossamer_ast::SourceFile, Vec<Diagnostic>, bool) {
-    let (sf, parse_diags) = gossamer_parse::autoderive::parse_with_autoderive(source, file_id);
+fn parse_phase(
+    source: &str,
+    file_id: FileId,
+    program: Option<ParsedProgram>,
+) -> (gossamer_ast::SourceFile, Vec<Diagnostic>, bool) {
+    let (sf, parse_diags) =
+        gossamer_parse::autoderive::parse_with_autoderive_from(source, file_id, program);
     let mut diagnostics: Vec<Diagnostic> = parse_diags
         .iter()
         .map(gossamer_parse::ParseDiagnostic::to_diagnostic)
@@ -107,20 +149,33 @@ fn parse_phase(source: &str, file_id: FileId) -> (gossamer_ast::SourceFile, Vec<
 /// - **Arena escape**: a value allocated in an `arena { }` block that is
 ///   used after the block (GM0003) is fatal.
 ///
-/// `source` must already carry the autoderive augmentation (the synthesized
-/// `__gos_serde_*` free functions and the implicit-`main` folding); the CLI
-/// applies `autoderive::augment_source` before calling.
+/// `source` must already carry the autoderive augmentation (the declared
+/// `__gos_serde_*` stubs and the synthesized derives); the CLI applies
+/// `autoderive::augment_source` before calling.
 #[must_use]
 pub fn check_frontend(source: &str, file_id: FileId) -> FrontendOutcome {
+    check_frontend_with_program(source, file_id, None)
+}
+
+/// [`check_frontend`] over the text autoderive answered with `program`, the
+/// tree of the program's own text it already parsed, so the parse reads
+/// only what autoderive appended.
+#[must_use]
+pub fn check_frontend_with_program(
+    source: &str,
+    file_id: FileId,
+    program: Option<ParsedProgram>,
+) -> FrontendOutcome {
     let cache_key = cache_enabled().then(|| frontend_key(source, file_id));
     if let Some(key) = &cache_key
         && let Some(restored) = restore_frontend(key)
     {
+        emit_requested_blob(&restored);
         return restored;
     }
 
     let phase_started = Instant::now();
-    let (mut sf, mut diagnostics, parse_failed) = parse_phase(source, file_id);
+    let (mut sf, mut diagnostics, parse_failed) = parse_phase(source, file_id, program);
     let parse = phase_started.elapsed();
 
     let phase_started = Instant::now();
@@ -165,7 +220,7 @@ pub fn check_frontend(source: &str, file_id: FileId) -> FrontendOutcome {
         );
     }
 
-    FrontendOutcome {
+    let outcome = FrontendOutcome {
         checked,
         diagnostics,
         warnings,
@@ -177,7 +232,9 @@ pub fn check_frontend(source: &str, file_id: FileId) -> FrontendOutcome {
             arena_escape: clock.analysis,
             parse_cache_hit: false,
         },
-    }
+    };
+    emit_requested_blob(&outcome);
+    outcome
 }
 
 /// Answers a cached frontend for `key`, when one was published.
@@ -187,9 +244,7 @@ pub fn check_frontend(source: &str, file_id: FileId) -> FrontendOutcome {
 fn restore_frontend(key: &crate::FrontendCacheKey) -> Option<FrontendOutcome> {
     let restore_started = Instant::now();
     let cached = load_blob::<CachedFrontend>(key)?;
-    if std::env::var_os("GOSSAMER_CACHE_TRACE").is_some() {
-        eprintln!("cache: frontend restored for {}", key.as_hex());
-    }
+    crate::trace_cache_hit("frontend restored", key);
     Some(FrontendOutcome {
         checked: CheckedFrontend {
             sf: cached.sf,

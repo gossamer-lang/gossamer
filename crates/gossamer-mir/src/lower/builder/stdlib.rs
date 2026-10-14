@@ -1324,10 +1324,20 @@ impl<'a> Builder<'a> {
         // (mutual recursion / forward reference).
         let mut payload_locals = Vec::with_capacity(n_args);
         let mut vec_payloads = vec![false; n_args];
+        let mut blob_carrier_payloads = vec![false; n_args];
         let mut child_offsets: Vec<i64> = Vec::new();
         for (i, value) in payload.iter().copied().enumerate() {
             let payload_local = self.coerce_enum_payload(value, field_tys.get(i).copied(), span);
-            let payload_ty = self.locals[payload_local.0 as usize].ty;
+            // The variant's child layout is registered once and shared by
+            // every construction of it, so it follows the declared field type
+            // rather than one argument's: a bare `None` argument carries an
+            // `Option` whose payload type was never settled. A generic enum's
+            // declared fields name its parameters, which only the argument
+            // resolves.
+            let payload_ty = match field_tys.get(i) {
+                Some(&declared) if !self.adt_has_type_args(ty) => declared,
+                _ => self.locals[payload_local.0 as usize].ty,
+            };
             // A child entry names the field's WORD within the slot slab, so
             // it follows the field's placement rather than its position.
             let child_word = payload_offsets.get(i).copied().unwrap_or((i * 8) as i64) / 8;
@@ -1362,6 +1372,24 @@ impl<'a> Builder<'a> {
                     use gossamer_abi::rc::{RC_CHILD_KIND_SHIFT, RC_CHILD_VEC};
                     child_offsets.push(child_word | (RC_CHILD_VEC << RC_CHILD_KIND_SHIFT));
                     vec_payloads[i] = true;
+                } else if let Some(gate) = self.carrier_blob_gate(payload_ty) {
+                    // An `Option` / `Result` holding an aggregate: the payload
+                    // word names a counted blob on the gated arm, and the node
+                    // takes a share of its own beside the carrier's. A heap
+                    // value on the other arm is named as well.
+                    use gossamer_abi::rc::{RC_CHILD_KIND_SHIFT, rc_child_blob_kind};
+                    child_offsets
+                        .push((rc_child_blob_kind(gate) << RC_CHILD_KIND_SHIFT) | (child_word + 1));
+                    child_offsets.extend(crate::lower::helpers::carrier_heap_child_entries(
+                        self.tcx, payload_ty, child_word,
+                    ));
+                    blob_carrier_payloads[i] = true;
+                } else {
+                    // An `Option` / `Result` holding a heap value hands the
+                    // carrier's share to the node, whose release gives it back.
+                    child_offsets.extend(crate::lower::helpers::carrier_heap_child_entries(
+                        self.tcx, payload_ty, child_word,
+                    ));
                 }
                 payload_locals.push(payload_local);
             }
@@ -1374,7 +1402,8 @@ impl<'a> Builder<'a> {
         let meta_symbol = if child_offsets.is_empty() {
             String::new()
         } else {
-            self.register_rc_variant_meta(enum_name, variant_idx, &child_offsets)
+            let acyclic = !self.tcx.can_join_cycle(ty);
+            self.register_rc_variant_meta(enum_name, variant_idx, &child_offsets, acyclic)
         };
 
         let size_local = self.fresh(i64_ty);
@@ -1433,6 +1462,19 @@ impl<'a> Builder<'a> {
                     Place::local(retain_dest),
                     Rvalue::CallIntrinsic {
                         name: "gos_rt_vec_retain",
+                        args: vec![Operand::Copy(Place::local(payload_local))],
+                    },
+                    span,
+                );
+            }
+            // The node's share of a carrier's blob payload, which the blob
+            // child entry above has the node's release give back.
+            if blob_carrier_payloads[i] {
+                let retain_dest = self.fresh(unit_ty);
+                self.emit_assign(
+                    Place::local(retain_dest),
+                    Rvalue::CallIntrinsic {
+                        name: "gos_rt_option_slot_retain",
                         args: vec![Operand::Copy(Place::local(payload_local))],
                     },
                     span,
@@ -1499,6 +1541,11 @@ impl<'a> Builder<'a> {
     /// bodies - and 8-byte alignment frees exactly bits 0-2. Larger
     /// enums keep the header-disc representation. Every construction
     /// and match site for a type must agree, so both consult this.
+    /// Whether `ty` is an instantiation of a generic type.
+    fn adt_has_type_args(&self, ty: Ty) -> bool {
+        matches!(self.tcx.kind_of(ty), gossamer_types::TyKind::Adt { substs, .. } if !substs.is_empty())
+    }
+
     pub(crate) fn enum_repr_tagged(&self, enum_name: &str) -> bool {
         self.enums
             .by_enum
@@ -1511,19 +1558,20 @@ impl<'a> Builder<'a> {
         enum_name: &str,
         variant_idx: u32,
         child_offsets: &[i64],
+        acyclic: bool,
     ) -> String {
-        use gossamer_abi::rc::RC_KIND_STRUCT;
+        use gossamer_abi::rc::{RC_KIND_ACYCLIC, RC_KIND_STRUCT};
         let sanitised: String = enum_name
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
             .collect();
         let symbol = format!("gos_rc_meta_{sanitised}_v{variant_idx}");
-        let mut blob = vec![
-            RC_KIND_STRUCT,
-            1,
-            i64::from(variant_idx),
-            child_offsets.len() as i64,
-        ];
+        let kind = if acyclic {
+            RC_KIND_STRUCT | RC_KIND_ACYCLIC
+        } else {
+            RC_KIND_STRUCT
+        };
+        let mut blob = vec![kind, 1, i64::from(variant_idx), child_offsets.len() as i64];
         blob.extend_from_slice(child_offsets);
         self.tcx.register_rc_meta(symbol.clone(), blob);
         symbol

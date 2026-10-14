@@ -153,9 +153,8 @@ pub unsafe extern "C" fn gos_rt_iter_sum_f64(v: *const GosVec) -> f64 {
         if vec.ptr.is_null() || vec.len <= 0 {
             return 0.0;
         }
-        // SAFETY: `vec` holds `len` initialised 8-byte floats at a non-null `ptr` (checked
-        // above).
-        let slice = unsafe { std::slice::from_raw_parts(vec.ptr.cast::<f64>(), vec.len as usize) };
+        // SAFETY: `vec` holds `len` initialised floats at a non-null `ptr` (checked above).
+        let slice = unsafe { crate::c_abi::vec::vec_f64_elems(vec) };
         // A float sum starts from +0.0, the value a written `acc += x` loop
         // starts from, so negative zeros sum to +0.0 on every tier.
         slice.iter().fold(0.0, |total, value| total + value)
@@ -191,9 +190,8 @@ pub unsafe extern "C" fn gos_rt_iter_product_f64(v: *const GosVec) -> f64 {
         if vec.ptr.is_null() || vec.len <= 0 {
             return 1.0;
         }
-        // SAFETY: `vec` holds `len` initialised 8-byte floats at a non-null `ptr` (checked
-        // above).
-        let slice = unsafe { std::slice::from_raw_parts(vec.ptr.cast::<f64>(), vec.len as usize) };
+        // SAFETY: `vec` holds `len` initialised floats at a non-null `ptr` (checked above).
+        let slice = unsafe { crate::c_abi::vec::vec_f64_elems(vec) };
         slice.iter().copied().product()
     })
 }
@@ -302,9 +300,8 @@ pub unsafe extern "C" fn gos_rt_iter_min_f64(v: *const GosVec) -> i128 {
         if vec.ptr.is_null() || vec.len <= 0 {
             return 1i128;
         }
-        // SAFETY: `vec` holds `len` initialised 8-byte floats at a non-null `ptr` (checked
-        // above).
-        let slice = unsafe { std::slice::from_raw_parts(vec.ptr.cast::<f64>(), vec.len as usize) };
+        // SAFETY: `vec` holds `len` initialised floats at a non-null `ptr` (checked above).
+        let slice = unsafe { crate::c_abi::vec::vec_f64_elems(vec) };
         match slice
             .iter()
             .copied()
@@ -329,9 +326,8 @@ pub unsafe extern "C" fn gos_rt_iter_max_f64(v: *const GosVec) -> i128 {
         if vec.ptr.is_null() || vec.len <= 0 {
             return 1i128;
         }
-        // SAFETY: `vec` holds `len` initialised 8-byte floats at a non-null `ptr` (checked
-        // above).
-        let slice = unsafe { std::slice::from_raw_parts(vec.ptr.cast::<f64>(), vec.len as usize) };
+        // SAFETY: `vec` holds `len` initialised floats at a non-null `ptr` (checked above).
+        let slice = unsafe { crate::c_abi::vec::vec_f64_elems(vec) };
         match slice
             .iter()
             .copied()

@@ -3908,6 +3908,9 @@ impl<'a> Builder<'a> {
             operands.push(Operand::Copy(Place::local(local)));
         }
         let dest = self.fresh(ty);
+        // A tuple owns its fields' children the way a struct does, so the
+        // drop pass hands the caller of a returned tuple its share of each.
+        let _ = self.ensure_aggr_copy_meta(ty);
         self.emit_assign(
             Place::local(dest),
             Rvalue::Aggregate {

@@ -50,7 +50,7 @@ fi
 if [ "$BUILD_WASM" = 1 ]; then
   if cargo build --release --target wasm32-unknown-unknown -p gossamer-playground \
        && command -v wasm-bindgen >/dev/null 2>&1; then
-    wasm-bindgen "$ROOT/target/wasm32-unknown-unknown/release/gossamer_playground.wasm" \
+    wasm-bindgen "${CARGO_TARGET_DIR:-$ROOT/target}/wasm32-unknown-unknown/release/gossamer_playground.wasm" \
       --out-dir "$SERVE_DIR/playground" --target web
     echo "built the real wasm VM into $SERVE_DIR/playground"
   else

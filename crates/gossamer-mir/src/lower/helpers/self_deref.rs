@@ -296,7 +296,7 @@ fn visit_rvalue_operands(rvalue: &mut Rvalue, f: &mut impl FnMut(&Operand) -> Op
         // The receiver's own load reads the reference by construction, and a
         // taken reference is asking for the reference itself.
         Rvalue::CallIntrinsic { name, args } => {
-            if *name == "gos_load" {
+            if matches!(*name, "gos_load" | "gos_rt_rc_make_unique") {
                 return;
             }
             for operand in args {

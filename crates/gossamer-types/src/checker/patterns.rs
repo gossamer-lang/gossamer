@@ -1702,8 +1702,28 @@ impl TypeChecker<'_> {
         if n < 2 {
             return false;
         }
-        let enum_name = path.segments[n - 2].name.name.as_str();
-        let variant = path.segments[n - 1].name.name.as_str();
+        let enum_name = path.segments[n - 2].name.name.clone();
+        let variant = path.segments[n - 1].name.name.clone();
+        self.reject_unknown_variant(&enum_name, &variant, span)
+    }
+
+    /// Reports GT0019 when a pattern names a variant its enum does not
+    /// declare, and answers whether it did.
+    pub(super) fn reject_unknown_variant_pattern(
+        &mut self,
+        path: &gossamer_ast::TypePath,
+        span: Span,
+    ) -> bool {
+        let n = path.segments.len();
+        if n < 2 {
+            return false;
+        }
+        let enum_name = path.segments[n - 2].name.name.clone();
+        let variant = path.segments[n - 1].name.name.clone();
+        self.reject_unknown_variant(&enum_name, &variant, span)
+    }
+
+    fn reject_unknown_variant(&mut self, enum_name: &str, variant: &str, span: Span) -> bool {
         let unknown = self.enum_variants.get(enum_name).is_some_and(|variants| {
             !variants.contains(variant)
                 && !self

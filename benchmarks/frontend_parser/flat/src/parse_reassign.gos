@@ -1,0 +1,508 @@
+// Fresh node ids for a copied subtree, handed out in the order
+// `gossamer_ast`'s `VisitorMut` walk reaches each expression, statement,
+// pattern, type, and item: a node takes its id before its children. The
+// copy is new records; a part of the subtree the walk does not renumber is
+// shared with the original, which no record write reaches.
+
+use parse
+use parse::Parser
+use tree
+
+fn w(p: &mut Parser, r: i64, i: i64) -> i64 {
+    p.t.w[r + i]
+}
+
+/// A copy of node `n` with id `id` and kind `kind`.
+fn renode(p: &mut Parser, n: i64, id: i64, kind: i64) -> i64 {
+    let start = w(p, n, 1)
+    let end = w(p, n, 2)
+    p.t.node(id, start, end, kind)
+}
+
+pub fn expr(p: &mut Parser, e: i64) -> i64 {
+    let id = parse::alloc(p)
+    let k = w(p, e, 3)
+    let t = w(p, k, 0)
+    let kind = if t == tree::EK_PATH {
+        let path = path_expr(p, w(p, k, 1))
+        p.t.rec2(t, path)
+    } else if t == tree::EK_BLOCK || t == tree::EK_UNSAFE {
+        let b = block(p, w(p, k, 1))
+        p.t.rec2(t, b)
+    } else if t == tree::EK_TRY {
+        let inner = expr(p, w(p, k, 1))
+        p.t.rec2(t, inner)
+    } else if t == tree::EK_UNARY {
+        let operand = expr(p, w(p, k, 2))
+        p.t.rec3(t, w(p, k, 1), operand)
+    } else if t == tree::EK_FIELD_ACCESS {
+        let receiver = expr(p, w(p, k, 1))
+        p.t.rec3(t, receiver, w(p, k, 2))
+    } else if t == tree::EK_LOOP {
+        let body = expr(p, w(p, k, 2))
+        p.t.rec3(t, w(p, k, 1), body)
+    } else if t == tree::EK_TUPLE || t == tree::EK_MAP_LITERAL || t == tree::EK_SET_LITERAL {
+        let items = exprs(p, w(p, k, 1))
+        p.t.rec2(t, items)
+    } else if t == tree::EK_ARRAY || t == tree::EK_FIXED_ARRAY {
+        let a = array(p, w(p, k, 1))
+        p.t.rec2(t, a)
+    } else if t == tree::EK_SELECT {
+        let arms = w(p, k, 1)
+        let n = p.t.len(arms)
+        let mut out: Vec<i64> = #[]
+        for i in 0..n {
+            out.push(select_arm(p, p.t.item(arms, i)))
+        }
+        let list = p.t.list(out)
+        p.t.rec2(t, list)
+    } else if t == tree::EK_CALL {
+        let c = expr(p, w(p, k, 1))
+        let args = exprs(p, w(p, k, 2))
+        p.t.rec3(t, c, args)
+    } else if t == tree::EK_METHOD_CALL {
+        let r = expr(p, w(p, k, 1))
+        let args = exprs(p, w(p, k, 7))
+        p.t.rec(#[t, r, w(p, k, 2), w(p, k, 3), w(p, k, 4), w(p, k, 5), w(p, k, 6), args])
+    } else if t == tree::EK_INDEX {
+        let b = expr(p, w(p, k, 1))
+        let i = expr(p, w(p, k, 2))
+        p.t.rec3(t, b, i)
+    } else if t == tree::EK_BINARY || t == tree::EK_ASSIGN {
+        let l = expr(p, w(p, k, 2))
+        let r = expr(p, w(p, k, 3))
+        p.t.rec4(t, w(p, k, 1), l, r)
+    } else if t == tree::EK_CAST {
+        let v = expr(p, w(p, k, 1))
+        let ty = type_(p, w(p, k, 2))
+        p.t.rec3(t, v, ty)
+    } else if t == tree::EK_IF {
+        let c = expr(p, w(p, k, 1))
+        let th = expr(p, w(p, k, 2))
+        let el = opt_expr(p, w(p, k, 3))
+        p.t.rec4(t, c, th, el)
+    } else if t == tree::EK_MATCH {
+        let s = expr(p, w(p, k, 1))
+        let arms = w(p, k, 2)
+        let n = p.t.len(arms)
+        let mut out: Vec<i64> = #[]
+        for i in 0..n {
+            let arm = p.t.item(arms, i)
+            let pat = pattern(p, w(p, arm, 0))
+            let guard = opt_expr(p, w(p, arm, 1))
+            let body = expr(p, w(p, arm, 2))
+            out.push(p.t.rec3(pat, guard, body))
+        }
+        let list = p.t.list(out)
+        p.t.rec3(t, s, list)
+    } else if t == tree::EK_WHILE {
+        let c = expr(p, w(p, k, 2))
+        let body = expr(p, w(p, k, 3))
+        p.t.rec4(t, w(p, k, 1), c, body)
+    } else if t == tree::EK_FOR {
+        let pt = pattern(p, w(p, k, 2))
+        let it = expr(p, w(p, k, 3))
+        let body = expr(p, w(p, k, 4))
+        p.t.rec5(t, w(p, k, 1), pt, it, body)
+    } else if t == tree::EK_CLOSURE {
+        let params = w(p, k, 1)
+        let n = p.t.len(params)
+        let mut out: Vec<i64> = #[]
+        for i in 0..n {
+            let param = p.t.item(params, i)
+            let pt = pattern(p, w(p, param, 0))
+            let ty = opt_type(p, w(p, param, 1))
+            out.push(p.t.rec2(pt, ty))
+        }
+        let ret = opt_type(p, w(p, k, 2))
+        let body = expr(p, w(p, k, 3))
+        let list = p.t.list(out)
+        p.t.rec4(t, list, ret, body)
+    } else if t == tree::EK_RETURN {
+        let v = opt_expr(p, w(p, k, 1))
+        p.t.rec2(t, v)
+    } else if t == tree::EK_BREAK {
+        let v = opt_expr(p, w(p, k, 2))
+        p.t.rec3(t, w(p, k, 1), v)
+    } else if t == tree::EK_STRUCT {
+        let fields = w(p, k, 2)
+        let n = p.t.len(fields)
+        let mut out: Vec<i64> = #[]
+        for i in 0..n {
+            let f = p.t.item(fields, i)
+            let v = opt_expr(p, w(p, f, 1))
+            out.push(p.t.rec2(w(p, f, 0), v))
+        }
+        let base = opt_expr(p, w(p, k, 3))
+        let list = p.t.list(out)
+        p.t.rec5(t, w(p, k, 1), list, base, w(p, k, 4))
+    } else if t == tree::EK_RANGE {
+        let s = opt_expr(p, w(p, k, 1))
+        let en = opt_expr(p, w(p, k, 2))
+        p.t.rec4(t, s, en, w(p, k, 3))
+    } else {
+        k
+    }
+    renode(p, e, id, kind)
+}
+
+fn opt_expr(p: &mut Parser, e: i64) -> i64 {
+    if e < 0 { -1 } else { expr(p, e) }
+}
+
+fn opt_type(p: &mut Parser, ty: i64) -> i64 {
+    if ty < 0 { -1 } else { type_(p, ty) }
+}
+
+fn opt_pattern(p: &mut Parser, pat: i64) -> i64 {
+    if pat < 0 { -1 } else { pattern(p, pat) }
+}
+
+/// A copy of expression list `items`.
+fn exprs(p: &mut Parser, items: i64) -> i64 {
+    let n = p.t.len(items)
+    let mut out: Vec<i64> = #[]
+    for i in 0..n {
+        out.push(expr(p, p.t.item(items, i)))
+    }
+    p.t.list(out)
+}
+
+fn array(p: &mut Parser, a: i64) -> i64 {
+    if w(p, a, 0) == tree::AE_LIST {
+        let items = exprs(p, w(p, a, 1))
+        return p.t.rec2(tree::AE_LIST, items)
+    }
+    let v = expr(p, w(p, a, 1))
+    let c = expr(p, w(p, a, 2))
+    p.t.rec3(tree::AE_REPEAT, v, c)
+}
+
+fn select_arm(p: &mut Parser, arm: i64) -> i64 {
+    let op = w(p, arm, 0)
+    let t = w(p, op, 0)
+    let new_op = if t == tree::SO_RECV {
+        let pt = pattern(p, w(p, op, 1))
+        let c = expr(p, w(p, op, 2))
+        p.t.rec3(t, pt, c)
+    } else if t == tree::SO_SEND {
+        let c = expr(p, w(p, op, 1))
+        let v = expr(p, w(p, op, 2))
+        p.t.rec3(t, c, v)
+    } else {
+        op
+    }
+    let body = expr(p, w(p, arm, 1))
+    p.t.rec2(new_op, body)
+}
+
+pub fn block(p: &mut Parser, b: i64) -> i64 {
+    let stmts = w(p, b, 0)
+    let n = p.t.len(stmts)
+    let mut out: Vec<i64> = #[]
+    for i in 0..n {
+        out.push(stmt(p, p.t.item(stmts, i)))
+    }
+    let tail = opt_expr(p, w(p, b, 1))
+    let list = p.t.list(out)
+    p.t.rec4(list, tail, w(p, b, 2), w(p, b, 3))
+}
+
+fn stmt(p: &mut Parser, s: i64) -> i64 {
+    let id = parse::alloc(p)
+    let k = w(p, s, 3)
+    let t = w(p, k, 0)
+    let kind = if t == tree::SK_LET {
+        let pt = pattern(p, w(p, k, 1))
+        let ty = opt_type(p, w(p, k, 2))
+        let init = opt_expr(p, w(p, k, 3))
+        p.t.rec4(t, pt, ty, init)
+    } else if t == tree::SK_EXPR {
+        let e = expr(p, w(p, k, 1))
+        p.t.rec3(t, e, w(p, k, 2))
+    } else if t == tree::SK_DEFER {
+        let e = expr(p, w(p, k, 1))
+        p.t.rec2(t, e)
+    } else {
+        let i = item(p, w(p, k, 1))
+        p.t.rec2(t, i)
+    }
+    renode(p, s, id, kind)
+}
+
+fn generic_args(p: &mut Parser, args: i64) -> i64 {
+    let n = p.t.len(args)
+    let mut out: Vec<i64> = #[]
+    for i in 0..n {
+        let a = p.t.item(args, i)
+        let t = w(p, a, 0)
+        let inner = if t == tree::GA_TYPE { type_(p, w(p, a, 1)) } else { expr(p, w(p, a, 1)) }
+        out.push(p.t.rec2(t, inner))
+    }
+    p.t.list(out)
+}
+
+fn path_expr(p: &mut Parser, path: i64) -> i64 {
+    let segments = w(p, path, 0)
+    let n = p.t.len(segments)
+    let mut out: Vec<i64> = #[]
+    for i in 0..n {
+        let s = p.t.item(segments, i)
+        let g = generic_args(p, w(p, s, 1))
+        out.push(p.t.rec2(w(p, s, 0), g))
+    }
+    let list = p.t.list(out)
+    p.t.rec1(list)
+}
+
+fn type_path(p: &mut Parser, path: i64) -> i64 {
+    let segments = w(p, path, 0)
+    let n = p.t.len(segments)
+    let mut out: Vec<i64> = #[]
+    for i in 0..n {
+        let s = p.t.item(segments, i)
+        let g = generic_args(p, w(p, s, 1))
+        out.push(p.t.rec3(w(p, s, 0), g, w(p, s, 2)))
+    }
+    let list = p.t.list(out)
+    p.t.rec1(list)
+}
+
+/// A copy of type list `items`.
+fn types(p: &mut Parser, items: i64) -> i64 {
+    let n = p.t.len(items)
+    let mut out: Vec<i64> = #[]
+    for i in 0..n {
+        out.push(type_(p, p.t.item(items, i)))
+    }
+    p.t.list(out)
+}
+
+fn type_(p: &mut Parser, ty: i64) -> i64 {
+    let id = parse::alloc(p)
+    let k = w(p, ty, 3)
+    let t = w(p, k, 0)
+    let kind = if t == tree::TK_PATH {
+        let path = type_path(p, w(p, k, 1))
+        p.t.rec2(t, path)
+    } else if t == tree::TK_TUPLE {
+        let items = types(p, w(p, k, 1))
+        p.t.rec2(t, items)
+    } else if t == tree::TK_ARRAY {
+        let e = type_(p, w(p, k, 1))
+        let len = expr(p, w(p, k, 2))
+        p.t.rec3(t, e, len)
+    } else if t == tree::TK_SLICE {
+        let e = type_(p, w(p, k, 1))
+        p.t.rec2(t, e)
+    } else if t == tree::TK_REF {
+        let inner = type_(p, w(p, k, 2))
+        p.t.rec3(t, w(p, k, 1), inner)
+    } else if t == tree::TK_FN {
+        let params = types(p, w(p, k, 2))
+        let ret = opt_type(p, w(p, k, 3))
+        p.t.rec4(t, w(p, k, 1), params, ret)
+    } else {
+        k
+    }
+    renode(p, ty, id, kind)
+}
+
+/// A copy of pattern list `items`.
+fn patterns(p: &mut Parser, items: i64) -> i64 {
+    let n = p.t.len(items)
+    let mut out: Vec<i64> = #[]
+    for i in 0..n {
+        out.push(pattern(p, p.t.item(items, i)))
+    }
+    p.t.list(out)
+}
+
+fn pattern(p: &mut Parser, pat: i64) -> i64 {
+    let id = parse::alloc(p)
+    let k = w(p, pat, 3)
+    let t = w(p, k, 0)
+    let kind = if t == tree::PK_IDENT {
+        let sub = opt_pattern(p, w(p, k, 3))
+        p.t.rec4(t, w(p, k, 1), w(p, k, 2), sub)
+    } else if t == tree::PK_PATH {
+        let path = type_path(p, w(p, k, 1))
+        p.t.rec2(t, path)
+    } else if t == tree::PK_TUPLE || t == tree::PK_OR {
+        let items = patterns(p, w(p, k, 1))
+        p.t.rec2(t, items)
+    } else if t == tree::PK_SLICE {
+        let pre = patterns(p, w(p, k, 1))
+        let rest = opt_pattern(p, w(p, k, 2))
+        let suf = patterns(p, w(p, k, 3))
+        p.t.rec4(t, pre, rest, suf)
+    } else if t == tree::PK_STRUCT {
+        let fields = w(p, k, 2)
+        let n = p.t.len(fields)
+        let mut out: Vec<i64> = #[]
+        for i in 0..n {
+            let f = p.t.item(fields, i)
+            let sub = opt_pattern(p, w(p, f, 1))
+            out.push(p.t.rec2(w(p, f, 0), sub))
+        }
+        let list = p.t.list(out)
+        p.t.rec4(t, w(p, k, 1), list, w(p, k, 3))
+    } else if t == tree::PK_TUPLE_STRUCT {
+        let elems = patterns(p, w(p, k, 2))
+        p.t.rec3(t, w(p, k, 1), elems)
+    } else if t == tree::PK_REF {
+        let inner = pattern(p, w(p, k, 2))
+        p.t.rec3(t, w(p, k, 1), inner)
+    } else {
+        k
+    }
+    renode(p, pat, id, kind)
+}
+
+fn item(p: &mut Parser, it: i64) -> i64 {
+    let id = parse::alloc(p)
+    let k = w(p, it, 5)
+    let t = w(p, k, 0)
+    let d = w(p, k, 1)
+    let kind = if t == tree::IK_FN {
+        let decl = fn_decl(p, d)
+        p.t.rec2(t, decl)
+    } else if t == tree::IK_STRUCT {
+        let body = struct_body(p, w(p, d, 3))
+        let decl = p.t.rec4(w(p, d, 0), w(p, d, 1), w(p, d, 2), body)
+        p.t.rec2(t, decl)
+    } else if t == tree::IK_ENUM {
+        let variants = w(p, d, 3)
+        let n = p.t.len(variants)
+        let mut out: Vec<i64> = #[]
+        for i in 0..n {
+            let v = p.t.item(variants, i)
+            let body = struct_body(p, w(p, v, 2))
+            let disc = opt_expr(p, w(p, v, 3))
+            out.push(p.t.rec4(w(p, v, 0), w(p, v, 1), body, disc))
+        }
+        let list = p.t.list(out)
+        let decl = p.t.rec5(w(p, d, 0), w(p, d, 1), w(p, d, 2), list, w(p, d, 4))
+        p.t.rec2(t, decl)
+    } else if t == tree::IK_TRAIT {
+        let items = w(p, d, 4)
+        let n = p.t.len(items)
+        let mut out: Vec<i64> = #[]
+        for i in 0..n {
+            let ti = p.t.item(items, i)
+            let tt = w(p, ti, 0)
+            out.push(if tt == tree::TI_FN {
+                let f = fn_decl(p, w(p, ti, 1))
+                p.t.rec2(tt, f)
+            } else if tt == tree::TI_TYPE {
+                let df = opt_type(p, w(p, ti, 4))
+                p.t.rec5(tt, w(p, ti, 1), w(p, ti, 2), w(p, ti, 3), df)
+            } else {
+                let ty = type_(p, w(p, ti, 3))
+                let df = opt_expr(p, w(p, ti, 4))
+                p.t.rec5(tt, w(p, ti, 1), w(p, ti, 2), ty, df)
+            })
+        }
+        let list = p.t.list(out)
+        let decl = p.t.rec5(w(p, d, 0), w(p, d, 1), w(p, d, 2), w(p, d, 3), list)
+        p.t.rec2(t, decl)
+    } else if t == tree::IK_IMPL {
+        let self_ty = type_(p, w(p, d, 2))
+        let items = w(p, d, 4)
+        let n = p.t.len(items)
+        let mut out: Vec<i64> = #[]
+        for i in 0..n {
+            let ii = p.t.item(items, i)
+            let tt = w(p, ii, 0)
+            out.push(if tt == tree::II_FN {
+                let f = fn_decl(p, w(p, ii, 1))
+                p.t.rec2(tt, f)
+            } else if tt == tree::II_TYPE {
+                let ty = type_(p, w(p, ii, 3))
+                p.t.rec4(tt, w(p, ii, 1), w(p, ii, 2), ty)
+            } else {
+                let ty = type_(p, w(p, ii, 3))
+                let v = expr(p, w(p, ii, 4))
+                p.t.rec5(tt, w(p, ii, 1), w(p, ii, 2), ty, v)
+            })
+        }
+        let list = p.t.list(out)
+        let decl = p.t.rec5(w(p, d, 0), w(p, d, 1), self_ty, w(p, d, 3), list)
+        p.t.rec2(t, decl)
+    } else if t == tree::IK_TYPE_ALIAS {
+        let ty = type_(p, w(p, d, 2))
+        let decl = p.t.rec4(w(p, d, 0), w(p, d, 1), ty, w(p, d, 3))
+        p.t.rec2(t, decl)
+    } else if t == tree::IK_CONST {
+        let ty = type_(p, w(p, d, 1))
+        let v = expr(p, w(p, d, 2))
+        let decl = p.t.rec3(w(p, d, 0), ty, v)
+        p.t.rec2(t, decl)
+    } else if t == tree::IK_STATIC {
+        let ty = type_(p, w(p, d, 2))
+        let v = expr(p, w(p, d, 3))
+        let decl = p.t.rec4(w(p, d, 0), w(p, d, 1), ty, v)
+        p.t.rec2(t, decl)
+    } else if t == tree::IK_MOD {
+        let body = w(p, d, 1)
+        let new_body = if w(p, body, 0) == tree::MB_INLINE {
+            let items = w(p, body, 1)
+            let n = p.t.len(items)
+            let mut out: Vec<i64> = #[]
+            for i in 0..n {
+                out.push(item(p, p.t.item(items, i)))
+            }
+            let list = p.t.list(out)
+            p.t.rec2(tree::MB_INLINE, list)
+        } else {
+            body
+        }
+        let decl = p.t.rec2(w(p, d, 0), new_body)
+        p.t.rec2(t, decl)
+    } else {
+        k
+    }
+    p.t.rec6(id, w(p, it, 1), w(p, it, 2), w(p, it, 3), w(p, it, 4), kind)
+}
+
+fn struct_body(p: &mut Parser, body: i64) -> i64 {
+    let t = w(p, body, 0)
+    if t == tree::SB_UNIT {
+        return body
+    }
+    let fields = w(p, body, 1)
+    let n = p.t.len(fields)
+    let mut out: Vec<i64> = #[]
+    for i in 0..n {
+        let f = p.t.item(fields, i)
+        if t == tree::SB_NAMED {
+            let ty = type_(p, w(p, f, 3))
+            out.push(p.t.rec4(w(p, f, 0), w(p, f, 1), w(p, f, 2), ty))
+        } else {
+            let ty = type_(p, w(p, f, 2))
+            out.push(p.t.rec3(w(p, f, 0), w(p, f, 1), ty))
+        }
+    }
+    let list = p.t.list(out)
+    p.t.rec2(t, list)
+}
+
+fn fn_decl(p: &mut Parser, d: i64) -> i64 {
+    let params = w(p, d, 8)
+    let n = p.t.len(params)
+    let mut out: Vec<i64> = #[]
+    for i in 0..n {
+        let param = p.t.item(params, i)
+        if w(p, param, 0) == tree::FP_TYPED {
+            let pt = pattern(p, w(p, param, 1))
+            let ty = type_(p, w(p, param, 2))
+            out.push(p.t.rec5(tree::FP_TYPED, pt, ty, w(p, param, 3), w(p, param, 4)))
+        } else {
+            out.push(param)
+        }
+    }
+    let list = p.t.list(out)
+    let ret = opt_type(p, w(p, d, 9))
+    let body = opt_expr(p, w(p, d, 11))
+    p.t.rec(#[w(p, d, 0), w(p, d, 1), w(p, d, 2), w(p, d, 3), w(p, d, 4), w(p, d, 5), w(p, d, 6), w(p, d, 7), list, ret, w(p, d, 10), body, w(p, d, 12)])
+}

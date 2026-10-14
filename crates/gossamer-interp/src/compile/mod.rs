@@ -728,6 +728,9 @@ pub(crate) struct FnBuilder<'tcx> {
     /// type, routing to the `time::Duration::<accessor>` global with the
     /// cell auto-deref'd to its backing `i64`-of-ms value.
     pub(crate) duration_cell_locals: std::collections::HashSet<Reg>,
+    /// Whether each type asked about reaches a map, set, deque, or heap, by
+    /// [`FnBuilder::ty_holds_shared_container`].
+    pub(crate) shared_container_tys: std::cell::RefCell<HashMap<gossamer_types::Ty, bool>>,
     pub(crate) instrs: Vec<Op>,
     pub(crate) consts: Vec<Value>,
     pub(crate) const_cache: HashMap<ConstKey, ConstIdx>,

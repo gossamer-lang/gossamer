@@ -113,6 +113,8 @@ pub(crate) fn install_unicode(globals: &mut Vec<(&'static str, Value)>) {
         "unicode",
         &[
             ("is_letter", builtin_unicode_is_letter),
+            ("is_xid_start", builtin_unicode_is_xid_start),
+            ("is_xid_continue", builtin_unicode_is_xid_continue),
             ("char_width", builtin_unicode_char_width),
             ("str_width", builtin_unicode_str_width),
             ("is_digit", builtin_unicode_is_digit),
@@ -164,6 +166,12 @@ pub(crate) fn builtin_unicode_str_width(args: &[Value]) -> RuntimeResult<Value> 
 }
 pub(crate) fn builtin_unicode_is_letter(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Bool(unicode_std::is_letter(arg_char(args, 0))))
+}
+pub(crate) fn builtin_unicode_is_xid_start(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Bool(unicode_std::is_xid_start(arg_char(args, 0))))
+}
+pub(crate) fn builtin_unicode_is_xid_continue(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Bool(unicode_std::is_xid_continue(arg_char(args, 0))))
 }
 pub(crate) fn builtin_unicode_is_digit(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Bool(unicode_std::is_digit(arg_char(args, 0))))

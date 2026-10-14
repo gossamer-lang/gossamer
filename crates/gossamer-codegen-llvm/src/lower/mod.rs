@@ -510,39 +510,16 @@ fn int_ty_is_unsigned_llvm(t: IntTy) -> bool {
     )
 }
 
-/// 0.6.0 deep-free element-kind tags. Mirrors `vec_elem_kind` in
-/// `gossamer-runtime/src/c_abi.rs`. Keep in sync with the runtime
-/// constants and the Cranelift backend's `vec_elem_kind_codegen`.
-mod vec_elem_kind_llvm {
-    pub(super) const PRIMITIVE: i32 = 0;
-    pub(super) const STRING: i32 = 1;
-    pub(super) const VEC: i32 = 2;
-    pub(super) const MAP: i32 = 3;
-    pub(super) const ERROR: i32 = 4;
-    /// A struct, tuple, or fixed array of a single slot, held inline.
-    pub(super) const AGGR_FLAT: i32 = 10;
-}
-
-/// Derives the `elem_kind` discriminator for a `Vec<T>` destination
-/// local. Inspects the local's MIR type and returns the tag the
-/// runtime's deep-free path uses to reclaim element payloads.
-///
-/// Returns `PRIMITIVE` for unresolved types and non-Vec shapes -
-/// the runtime treats PRIMITIVE as shallow-free, which is correct
-/// for any element type that owns no further heap memory.
-fn llvm_vec_elem_kind_from_local(body: &Body, tcx: &TyCtxt, dest_local: Local) -> i32 {
+/// The `elem_kind` discriminator for a `Vec<T>` destination local: the tag
+/// the runtime's deep-free path uses to reclaim element payloads, or
+/// `PRIMITIVE` for a local that is not a vector.
+fn llvm_vec_elem_kind_from_local(body: &Body, tcx: &TyCtxt, dest_local: Local) -> u8 {
     let ty = body.local_ty(dest_local);
-    let inner = match tcx.kind(ty) {
-        Some(TyKind::Vec(inner) | TyKind::Slice(inner) | TyKind::Iterator(inner)) => *inner,
-        _ => return vec_elem_kind_llvm::PRIMITIVE,
-    };
-    match tcx.kind(inner) {
-        Some(TyKind::String) => vec_elem_kind_llvm::STRING,
-        Some(TyKind::Vec(_) | TyKind::Slice(_) | TyKind::Iterator(_)) => vec_elem_kind_llvm::VEC,
-        Some(TyKind::HashMap { .. }) => vec_elem_kind_llvm::MAP,
-        Some(TyKind::DynError) => vec_elem_kind_llvm::ERROR,
-        _ if tcx.is_flat_inline_aggregate(inner) => vec_elem_kind_llvm::AGGR_FLAT,
-        _ => vec_elem_kind_llvm::PRIMITIVE,
+    match tcx.kind(ty) {
+        Some(TyKind::Vec(inner) | TyKind::Slice(inner) | TyKind::Iterator(inner)) => {
+            tcx.vec_elem_kind(*inner)
+        }
+        _ => gossamer_types::vec_elem_kind::PRIMITIVE,
     }
 }
 
@@ -558,26 +535,40 @@ fn llvm_vec_elem_kind_from_local(body: &Body, tcx: &TyCtxt, dest_local: Local) -
 /// unresolved one, or an opaque handle whose width only the header records -
 /// so an index into such a vector reads the width the header carries.
 pub(crate) fn settled_elem_bytes(tcx: &TyCtxt, elem: Ty) -> Option<i64> {
+    // A vector a runtime shim builds may hold a packing element type as
+    // whole words, so its width is the header's to say.
+    if tcx.vec_narrow_scalar(elem).is_some() || tcx.vec_packs_f32(elem) {
+        return None;
+    }
     match tcx.kind(elem) {
-        Some(TyKind::Bool | TyKind::Int(gossamer_types::IntTy::U8)) => Some(1),
         Some(
-            TyKind::Char
+            TyKind::Bool
+            | TyKind::Char
             | TyKind::Int(_)
             | TyKind::Float(_)
             | TyKind::String
             | TyKind::Vec(_)
             | TyKind::Slice(_)
             | TyKind::Iterator(_)
-            | TyKind::HashMap { .. },
-        ) => Some(8),
-        Some(TyKind::Tuple(_) | TyKind::Array { .. }) => Some(i64::from(tcx.slot_bytes(elem))),
+            | TyKind::HashMap { .. }
+            | TyKind::Tuple(_)
+            | TyKind::Array { .. },
+        ) => Some(llvm_elem_bytes(tcx, elem)),
         // A user aggregate is stored as its own slots. The sentinel Adts - an
         // opaque stdlib handle, `Option`, `Result` - are not user aggregates.
         Some(TyKind::Adt { def, .. }) if def.local < u32::MAX - 16 => {
-            Some(i64::from(tcx.slot_bytes(elem)))
+            Some(llvm_elem_bytes(tcx, elem))
         }
         _ => None,
     }
+}
+
+/// The stride of a `Vec<elem>` element, as every tier lays it out.
+fn llvm_elem_bytes(tcx: &TyCtxt, elem: Ty) -> i64 {
+    i64::from(
+        tcx.vec_scalar_elem_bytes(elem)
+            .unwrap_or_else(|| tcx.slot_bytes(elem)),
+    )
 }
 
 fn llvm_vec_elem_bytes_from_local(body: &Body, tcx: &TyCtxt, dest_local: Local) -> Option<i64> {
@@ -586,15 +577,7 @@ fn llvm_vec_elem_bytes_from_local(body: &Body, tcx: &TyCtxt, dest_local: Local) 
         Some(TyKind::Vec(inner) | TyKind::Slice(inner) | TyKind::Iterator(inner)) => *inner,
         _ => return None,
     };
-    let bytes = match tcx.kind(inner) {
-        Some(TyKind::Bool | TyKind::Int(gossamer_types::IntTy::U8)) => 1,
-        Some(TyKind::Char | TyKind::Int(_) | TyKind::Float(_) | TyKind::String) => 8,
-        Some(TyKind::Tuple(_) | TyKind::Array { .. } | TyKind::Adt { .. }) => {
-            i64::from(tcx.slot_bytes(inner))
-        }
-        _ => 8,
-    };
-    Some(bytes)
+    Some(llvm_elem_bytes(tcx, inner))
 }
 
 /// `!tbaa` suffix for a load/store of an aggregate *header* field: a `GosVec`

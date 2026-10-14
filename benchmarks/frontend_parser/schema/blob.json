@@ -1,0 +1,3699 @@
+{
+  "containers": {
+    "ArrayExpr": {
+      "ENUM": {
+        "0": {
+          "List": {
+            "NEWTYPE": {
+              "SEQ": {
+                "TYPENAME": "Expr"
+              }
+            }
+          }
+        },
+        "1": {
+          "Repeat": {
+            "STRUCT": [
+              {
+                "value": {
+                  "TYPENAME": "Expr"
+                }
+              },
+              {
+                "count": {
+                  "TYPENAME": "Expr"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "ArrayLen": {
+      "ENUM": {
+        "0": {
+          "Concrete": {
+            "NEWTYPE": "U64"
+          }
+        },
+        "1": {
+          "Param": {
+            "NEWTYPE": {
+              "TYPENAME": "ParamIdx"
+            }
+          }
+        }
+      }
+    },
+    "AssignOp": {
+      "ENUM": {
+        "0": {
+          "Assign": "UNIT"
+        },
+        "1": {
+          "AddAssign": "UNIT"
+        },
+        "10": {
+          "ShrAssign": "UNIT"
+        },
+        "11": {
+          "WrappingAddAssign": "UNIT"
+        },
+        "12": {
+          "WrappingSubAssign": "UNIT"
+        },
+        "13": {
+          "WrappingMulAssign": "UNIT"
+        },
+        "14": {
+          "WrappingShlAssign": "UNIT"
+        },
+        "15": {
+          "WrappingShrAssign": "UNIT"
+        },
+        "2": {
+          "SubAssign": "UNIT"
+        },
+        "3": {
+          "MulAssign": "UNIT"
+        },
+        "4": {
+          "DivAssign": "UNIT"
+        },
+        "5": {
+          "RemAssign": "UNIT"
+        },
+        "6": {
+          "BitAndAssign": "UNIT"
+        },
+        "7": {
+          "BitOrAssign": "UNIT"
+        },
+        "8": {
+          "BitXorAssign": "UNIT"
+        },
+        "9": {
+          "ShlAssign": "UNIT"
+        }
+      }
+    },
+    "AssocBinding": {
+      "STRUCT": [
+        {
+          "name": {
+            "TYPENAME": "Ident"
+          }
+        },
+        {
+          "ty": {
+            "TYPENAME": "Type"
+          }
+        }
+      ]
+    },
+    "Attribute": {
+      "STRUCT": [
+        {
+          "path": {
+            "TYPENAME": "PathExpr"
+          }
+        },
+        {
+          "tokens": {
+            "OPTION": "STR"
+          }
+        }
+      ]
+    },
+    "Attrs": {
+      "STRUCT": [
+        {
+          "outer": {
+            "SEQ": {
+              "TYPENAME": "Attribute"
+            }
+          }
+        },
+        {
+          "inner": {
+            "SEQ": {
+              "TYPENAME": "Attribute"
+            }
+          }
+        }
+      ]
+    },
+    "BinaryOp": {
+      "ENUM": {
+        "0": {
+          "Mul": "UNIT"
+        },
+        "1": {
+          "Div": "UNIT"
+        },
+        "10": {
+          "WrappingShl": "UNIT"
+        },
+        "11": {
+          "WrappingShr": "UNIT"
+        },
+        "12": {
+          "BitAnd": "UNIT"
+        },
+        "13": {
+          "BitXor": "UNIT"
+        },
+        "14": {
+          "BitOr": "UNIT"
+        },
+        "15": {
+          "Eq": "UNIT"
+        },
+        "16": {
+          "Ne": "UNIT"
+        },
+        "17": {
+          "Lt": "UNIT"
+        },
+        "18": {
+          "Le": "UNIT"
+        },
+        "19": {
+          "Gt": "UNIT"
+        },
+        "2": {
+          "Rem": "UNIT"
+        },
+        "20": {
+          "Ge": "UNIT"
+        },
+        "21": {
+          "And": "UNIT"
+        },
+        "22": {
+          "Or": "UNIT"
+        },
+        "23": {
+          "PipeGt": "UNIT"
+        },
+        "3": {
+          "WrappingMul": "UNIT"
+        },
+        "4": {
+          "Add": "UNIT"
+        },
+        "5": {
+          "Sub": "UNIT"
+        },
+        "6": {
+          "WrappingAdd": "UNIT"
+        },
+        "7": {
+          "WrappingSub": "UNIT"
+        },
+        "8": {
+          "Shl": "UNIT"
+        },
+        "9": {
+          "Shr": "UNIT"
+        }
+      }
+    },
+    "Block": {
+      "STRUCT": [
+        {
+          "stmts": {
+            "SEQ": {
+              "TYPENAME": "Stmt"
+            }
+          }
+        },
+        {
+          "tail": {
+            "OPTION": {
+              "TYPENAME": "Expr"
+            }
+          }
+        },
+        {
+          "synthetic": "BOOL"
+        },
+        {
+          "kind": {
+            "TYPENAME": "BlockKind"
+          }
+        }
+      ]
+    },
+    "BlockKind": {
+      "ENUM": {
+        "0": {
+          "Plain": "UNIT"
+        },
+        "1": {
+          "Arena": "UNIT"
+        },
+        "2": {
+          "Cohort": "UNIT"
+        },
+        "3": {
+          "Comptime": "UNIT"
+        }
+      }
+    },
+    "CachedFrontend": {
+      "STRUCT": [
+        {
+          "sf": {
+            "TYPENAME": "SourceFile"
+          }
+        },
+        {
+          "resolutions": {
+            "TYPENAME": "Resolutions"
+          }
+        },
+        {
+          "table": {
+            "TYPENAME": "TypeTable"
+          }
+        },
+        {
+          "tcx": {
+            "TYPENAME": "TyCtxt"
+          }
+        },
+        {
+          "warnings": {
+            "SEQ": {
+              "TYPENAME": "Diagnostic"
+            }
+          }
+        }
+      ]
+    },
+    "ClosureKind": {
+      "ENUM": {
+        "0": {
+          "Fn": "UNIT"
+        },
+        "1": {
+          "FnMut": "UNIT"
+        },
+        "2": {
+          "FnOnce": "UNIT"
+        }
+      }
+    },
+    "ClosureParam": {
+      "STRUCT": [
+        {
+          "pattern": {
+            "TYPENAME": "Pattern"
+          }
+        },
+        {
+          "ty": {
+            "OPTION": {
+              "TYPENAME": "Type"
+            }
+          }
+        }
+      ]
+    },
+    "ConstDecl": {
+      "STRUCT": [
+        {
+          "name": {
+            "TYPENAME": "Ident"
+          }
+        },
+        {
+          "ty": {
+            "TYPENAME": "Type"
+          }
+        },
+        {
+          "value": {
+            "TYPENAME": "Expr"
+          }
+        }
+      ]
+    },
+    "ConstGenericArg": {
+      "ENUM": {
+        "0": {
+          "Value": {
+            "STRUCT": [
+              {
+                "value": "I128"
+              },
+              {
+                "ty": {
+                  "TYPENAME": "Ty"
+                }
+              }
+            ]
+          }
+        },
+        "1": {
+          "Param": {
+            "STRUCT": [
+              {
+                "name": "STR"
+              },
+              {
+                "ty": {
+                  "TYPENAME": "Ty"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "CrateId": {
+      "NEWTYPESTRUCT": "U32"
+    },
+    "DefId": {
+      "STRUCT": [
+        {
+          "krate": {
+            "TYPENAME": "CrateId"
+          }
+        },
+        {
+          "local": "U32"
+        }
+      ]
+    },
+    "DefKind": {
+      "ENUM": {
+        "0": {
+          "Fn": "UNIT"
+        },
+        "1": {
+          "Struct": "UNIT"
+        },
+        "2": {
+          "Enum": "UNIT"
+        },
+        "3": {
+          "Trait": "UNIT"
+        },
+        "4": {
+          "TypeAlias": "UNIT"
+        },
+        "5": {
+          "Const": "UNIT"
+        },
+        "6": {
+          "Static": "UNIT"
+        },
+        "7": {
+          "Mod": "UNIT"
+        },
+        "8": {
+          "TypeParam": "UNIT"
+        },
+        "9": {
+          "Variant": "UNIT"
+        }
+      }
+    },
+    "Diagnostic": {
+      "STRUCT": [
+        {
+          "severity": {
+            "TYPENAME": "Severity"
+          }
+        },
+        {
+          "code": "STR"
+        },
+        {
+          "title": "STR"
+        },
+        {
+          "labels": {
+            "SEQ": {
+              "TYPENAME": "DiagnosticLabel"
+            }
+          }
+        },
+        {
+          "notes": {
+            "SEQ": "STR"
+          }
+        },
+        {
+          "helps": {
+            "SEQ": "STR"
+          }
+        },
+        {
+          "suggestions": {
+            "SEQ": {
+              "TYPENAME": "Suggestion"
+            }
+          }
+        }
+      ]
+    },
+    "DiagnosticLabel": {
+      "STRUCT": [
+        {
+          "location": {
+            "TYPENAME": "Location"
+          }
+        },
+        {
+          "primary": "BOOL"
+        },
+        {
+          "message": {
+            "OPTION": "STR"
+          }
+        }
+      ]
+    },
+    "EnumDecl": {
+      "STRUCT": [
+        {
+          "name": {
+            "TYPENAME": "Ident"
+          }
+        },
+        {
+          "generics": {
+            "TYPENAME": "Generics"
+          }
+        },
+        {
+          "where_clause": {
+            "TYPENAME": "WhereClause"
+          }
+        },
+        {
+          "variants": {
+            "SEQ": {
+              "TYPENAME": "EnumVariant"
+            }
+          }
+        },
+        {
+          "repr": {
+            "TYPENAME": "EnumRepr"
+          }
+        }
+      ]
+    },
+    "EnumRepr": {
+      "STRUCT": [
+        {
+          "packed": "BOOL"
+        },
+        {
+          "declared_bits": {
+            "OPTION": "U32"
+          }
+        }
+      ]
+    },
+    "EnumVariant": {
+      "STRUCT": [
+        {
+          "attrs": {
+            "TYPENAME": "Attrs"
+          }
+        },
+        {
+          "name": {
+            "TYPENAME": "Ident"
+          }
+        },
+        {
+          "body": {
+            "TYPENAME": "StructBody"
+          }
+        },
+        {
+          "discriminant": {
+            "OPTION": {
+              "TYPENAME": "Expr"
+            }
+          }
+        }
+      ]
+    },
+    "Expr": {
+      "STRUCT": [
+        {
+          "id": {
+            "TYPENAME": "NodeId"
+          }
+        },
+        {
+          "span": {
+            "TYPENAME": "Span"
+          }
+        },
+        {
+          "kind": {
+            "TYPENAME": "ExprKind"
+          }
+        }
+      ]
+    },
+    "ExprKind": {
+      "ENUM": {
+        "0": {
+          "Literal": {
+            "NEWTYPE": {
+              "TYPENAME": "Literal"
+            }
+          }
+        },
+        "1": {
+          "Path": {
+            "NEWTYPE": {
+              "TYPENAME": "PathExpr"
+            }
+          }
+        },
+        "10": {
+          "If": {
+            "STRUCT": [
+              {
+                "condition": {
+                  "TYPENAME": "Expr"
+                }
+              },
+              {
+                "then_branch": {
+                  "TYPENAME": "Expr"
+                }
+              },
+              {
+                "else_branch": {
+                  "OPTION": {
+                    "TYPENAME": "Expr"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "11": {
+          "Match": {
+            "STRUCT": [
+              {
+                "scrutinee": {
+                  "TYPENAME": "Expr"
+                }
+              },
+              {
+                "arms": {
+                  "SEQ": {
+                    "TYPENAME": "MatchArm"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "12": {
+          "Loop": {
+            "STRUCT": [
+              {
+                "label": {
+                  "OPTION": {
+                    "TYPENAME": "Label"
+                  }
+                }
+              },
+              {
+                "body": {
+                  "TYPENAME": "Expr"
+                }
+              }
+            ]
+          }
+        },
+        "13": {
+          "While": {
+            "STRUCT": [
+              {
+                "label": {
+                  "OPTION": {
+                    "TYPENAME": "Label"
+                  }
+                }
+              },
+              {
+                "condition": {
+                  "TYPENAME": "Expr"
+                }
+              },
+              {
+                "body": {
+                  "TYPENAME": "Expr"
+                }
+              }
+            ]
+          }
+        },
+        "14": {
+          "For": {
+            "STRUCT": [
+              {
+                "label": {
+                  "OPTION": {
+                    "TYPENAME": "Label"
+                  }
+                }
+              },
+              {
+                "pattern": {
+                  "TYPENAME": "Pattern"
+                }
+              },
+              {
+                "iter": {
+                  "TYPENAME": "Expr"
+                }
+              },
+              {
+                "body": {
+                  "TYPENAME": "Expr"
+                }
+              }
+            ]
+          }
+        },
+        "15": {
+          "Block": {
+            "NEWTYPE": {
+              "TYPENAME": "Block"
+            }
+          }
+        },
+        "16": {
+          "Closure": {
+            "STRUCT": [
+              {
+                "params": {
+                  "SEQ": {
+                    "TYPENAME": "ClosureParam"
+                  }
+                }
+              },
+              {
+                "ret": {
+                  "OPTION": {
+                    "TYPENAME": "Type"
+                  }
+                }
+              },
+              {
+                "body": {
+                  "TYPENAME": "Expr"
+                }
+              }
+            ]
+          }
+        },
+        "17": {
+          "Return": {
+            "NEWTYPE": {
+              "OPTION": {
+                "TYPENAME": "Expr"
+              }
+            }
+          }
+        },
+        "18": {
+          "Break": {
+            "STRUCT": [
+              {
+                "label": {
+                  "OPTION": {
+                    "TYPENAME": "Label"
+                  }
+                }
+              },
+              {
+                "value": {
+                  "OPTION": {
+                    "TYPENAME": "Expr"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "19": {
+          "Continue": {
+            "STRUCT": [
+              {
+                "label": {
+                  "OPTION": {
+                    "TYPENAME": "Label"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "2": {
+          "Call": {
+            "STRUCT": [
+              {
+                "callee": {
+                  "TYPENAME": "Expr"
+                }
+              },
+              {
+                "args": {
+                  "SEQ": {
+                    "TYPENAME": "Expr"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "20": {
+          "Tuple": {
+            "NEWTYPE": {
+              "SEQ": {
+                "TYPENAME": "Expr"
+              }
+            }
+          }
+        },
+        "21": {
+          "MapLiteral": {
+            "NEWTYPE": {
+              "SEQ": {
+                "TYPENAME": "Expr"
+              }
+            }
+          }
+        },
+        "22": {
+          "SetLiteral": {
+            "NEWTYPE": {
+              "SEQ": {
+                "TYPENAME": "Expr"
+              }
+            }
+          }
+        },
+        "23": {
+          "Struct": {
+            "STRUCT": [
+              {
+                "path": {
+                  "TYPENAME": "PathExpr"
+                }
+              },
+              {
+                "fields": {
+                  "SEQ": {
+                    "TYPENAME": "StructExprField"
+                  }
+                }
+              },
+              {
+                "base": {
+                  "OPTION": {
+                    "TYPENAME": "Expr"
+                  }
+                }
+              },
+              {
+                "syntax": {
+                  "TYPENAME": "StructExprSyntax"
+                }
+              }
+            ]
+          }
+        },
+        "24": {
+          "Array": {
+            "NEWTYPE": {
+              "TYPENAME": "ArrayExpr"
+            }
+          }
+        },
+        "25": {
+          "FixedArray": {
+            "NEWTYPE": {
+              "TYPENAME": "ArrayExpr"
+            }
+          }
+        },
+        "26": {
+          "Range": {
+            "STRUCT": [
+              {
+                "start": {
+                  "OPTION": {
+                    "TYPENAME": "Expr"
+                  }
+                }
+              },
+              {
+                "end": {
+                  "OPTION": {
+                    "TYPENAME": "Expr"
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "TYPENAME": "RangeKind"
+                }
+              }
+            ]
+          }
+        },
+        "27": {
+          "Unsafe": {
+            "NEWTYPE": {
+              "TYPENAME": "Block"
+            }
+          }
+        },
+        "28": {
+          "Try": {
+            "NEWTYPE": {
+              "TYPENAME": "Expr"
+            }
+          }
+        },
+        "29": {
+          "Select": {
+            "NEWTYPE": {
+              "SEQ": {
+                "TYPENAME": "SelectArm"
+              }
+            }
+          }
+        },
+        "3": {
+          "MethodCall": {
+            "STRUCT": [
+              {
+                "receiver": {
+                  "TYPENAME": "Expr"
+                }
+              },
+              {
+                "name": {
+                  "TYPENAME": "Ident"
+                }
+              },
+              {
+                "name_span": {
+                  "TYPENAME": "Span"
+                }
+              },
+              {
+                "desugared_from": {
+                  "OPTION": {
+                    "TYPENAME": "Ident"
+                  }
+                }
+              },
+              {
+                "generics": {
+                  "SEQ": {
+                    "TYPENAME": "GenericArg"
+                  }
+                }
+              },
+              {
+                "args": {
+                  "SEQ": {
+                    "TYPENAME": "Expr"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "30": {
+          "Error": "UNIT"
+        },
+        "4": {
+          "FieldAccess": {
+            "STRUCT": [
+              {
+                "receiver": {
+                  "TYPENAME": "Expr"
+                }
+              },
+              {
+                "field": {
+                  "TYPENAME": "FieldSelector"
+                }
+              }
+            ]
+          }
+        },
+        "5": {
+          "Index": {
+            "STRUCT": [
+              {
+                "base": {
+                  "TYPENAME": "Expr"
+                }
+              },
+              {
+                "index": {
+                  "TYPENAME": "Expr"
+                }
+              }
+            ]
+          }
+        },
+        "6": {
+          "Unary": {
+            "STRUCT": [
+              {
+                "op": {
+                  "TYPENAME": "UnaryOp"
+                }
+              },
+              {
+                "operand": {
+                  "TYPENAME": "Expr"
+                }
+              }
+            ]
+          }
+        },
+        "7": {
+          "Binary": {
+            "STRUCT": [
+              {
+                "op": {
+                  "TYPENAME": "BinaryOp"
+                }
+              },
+              {
+                "lhs": {
+                  "TYPENAME": "Expr"
+                }
+              },
+              {
+                "rhs": {
+                  "TYPENAME": "Expr"
+                }
+              }
+            ]
+          }
+        },
+        "8": {
+          "Assign": {
+            "STRUCT": [
+              {
+                "op": {
+                  "TYPENAME": "AssignOp"
+                }
+              },
+              {
+                "place": {
+                  "TYPENAME": "Expr"
+                }
+              },
+              {
+                "value": {
+                  "TYPENAME": "Expr"
+                }
+              }
+            ]
+          }
+        },
+        "9": {
+          "Cast": {
+            "STRUCT": [
+              {
+                "value": {
+                  "TYPENAME": "Expr"
+                }
+              },
+              {
+                "ty": {
+                  "TYPENAME": "Type"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "FieldPattern": {
+      "STRUCT": [
+        {
+          "name": {
+            "TYPENAME": "Ident"
+          }
+        },
+        {
+          "pattern": {
+            "OPTION": {
+              "TYPENAME": "Pattern"
+            }
+          }
+        }
+      ]
+    },
+    "FieldSelector": {
+      "ENUM": {
+        "0": {
+          "Named": {
+            "NEWTYPE": {
+              "TYPENAME": "Ident"
+            }
+          }
+        },
+        "1": {
+          "Index": {
+            "NEWTYPE": "U32"
+          }
+        }
+      }
+    },
+    "FileId": {
+      "NEWTYPESTRUCT": "U32"
+    },
+    "FloatTy": {
+      "ENUM": {
+        "0": {
+          "F32": "UNIT"
+        },
+        "1": {
+          "F64": "UNIT"
+        }
+      }
+    },
+    "FloatWidth": {
+      "ENUM": {
+        "0": {
+          "W32": "UNIT"
+        },
+        "1": {
+          "W64": "UNIT"
+        }
+      }
+    },
+    "FnDecl": {
+      "STRUCT": [
+        {
+          "attrs": {
+            "TYPENAME": "Attrs"
+          }
+        },
+        {
+          "span": {
+            "TYPENAME": "Span"
+          }
+        },
+        {
+          "is_unsafe": "BOOL"
+        },
+        {
+          "is_comptime": "BOOL"
+        },
+        {
+          "visibility": {
+            "TYPENAME": "Visibility"
+          }
+        },
+        {
+          "name": {
+            "TYPENAME": "Ident"
+          }
+        },
+        {
+          "generics": {
+            "TYPENAME": "Generics"
+          }
+        },
+        {
+          "params": {
+            "SEQ": {
+              "TYPENAME": "FnParam"
+            }
+          }
+        },
+        {
+          "ret": {
+            "OPTION": {
+              "TYPENAME": "Type"
+            }
+          }
+        },
+        {
+          "where_clause": {
+            "TYPENAME": "WhereClause"
+          }
+        },
+        {
+          "body": {
+            "OPTION": {
+              "TYPENAME": "Expr"
+            }
+          }
+        },
+        {
+          "extern_abi": {
+            "OPTION": "STR"
+          }
+        }
+      ]
+    },
+    "FnParam": {
+      "ENUM": {
+        "0": {
+          "Receiver": {
+            "NEWTYPE": {
+              "TYPENAME": "Receiver"
+            }
+          }
+        },
+        "1": {
+          "Typed": {
+            "STRUCT": [
+              {
+                "pattern": {
+                  "TYPENAME": "Pattern"
+                }
+              },
+              {
+                "ty": {
+                  "TYPENAME": "Type"
+                }
+              },
+              {
+                "is_comptime": "BOOL"
+              },
+              {
+                "default": {
+                  "OPTION": {
+                    "TYPENAME": "Expr"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "FnSig": {
+      "STRUCT": [
+        {
+          "inputs": {
+            "SEQ": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        {
+          "output": {
+            "TYPENAME": "Ty"
+          }
+        }
+      ]
+    },
+    "FnTypeKind": {
+      "ENUM": {
+        "0": {
+          "Fn": "UNIT"
+        },
+        "1": {
+          "ClosureFn": "UNIT"
+        },
+        "2": {
+          "ClosureFnMut": "UNIT"
+        },
+        "3": {
+          "ClosureFnOnce": "UNIT"
+        }
+      }
+    },
+    "GenericArg": {
+      "ENUM": {
+        "0": {
+          "Type": {
+            "NEWTYPE": {
+              "TYPENAME": "Type"
+            }
+          }
+        },
+        "1": {
+          "Const": {
+            "NEWTYPE": {
+              "TYPENAME": "Expr"
+            }
+          }
+        }
+      }
+    },
+    "GenericParam": {
+      "ENUM": {
+        "0": {
+          "Lifetime": {
+            "STRUCT": [
+              {
+                "name": "STR"
+              }
+            ]
+          }
+        },
+        "1": {
+          "Type": {
+            "STRUCT": [
+              {
+                "name": {
+                  "TYPENAME": "Ident"
+                }
+              },
+              {
+                "bounds": {
+                  "SEQ": {
+                    "TYPENAME": "TraitBound"
+                  }
+                }
+              },
+              {
+                "default": {
+                  "OPTION": {
+                    "TYPENAME": "Type"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "2": {
+          "Const": {
+            "STRUCT": [
+              {
+                "name": {
+                  "TYPENAME": "Ident"
+                }
+              },
+              {
+                "ty": {
+                  "TYPENAME": "Type"
+                }
+              },
+              {
+                "default": {
+                  "OPTION": {
+                    "TYPENAME": "Expr"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "Generics": {
+      "STRUCT": [
+        {
+          "params": {
+            "SEQ": {
+              "TYPENAME": "GenericParam"
+            }
+          }
+        }
+      ]
+    },
+    "Ident": {
+      "STRUCT": [
+        {
+          "name": "STR"
+        }
+      ]
+    },
+    "ImplDecl": {
+      "STRUCT": [
+        {
+          "generics": {
+            "TYPENAME": "Generics"
+          }
+        },
+        {
+          "trait_ref": {
+            "OPTION": {
+              "TYPENAME": "TraitBound"
+            }
+          }
+        },
+        {
+          "self_ty": {
+            "TYPENAME": "Type"
+          }
+        },
+        {
+          "where_clause": {
+            "TYPENAME": "WhereClause"
+          }
+        },
+        {
+          "items": {
+            "SEQ": {
+              "TYPENAME": "ImplItem"
+            }
+          }
+        }
+      ]
+    },
+    "ImplItem": {
+      "ENUM": {
+        "0": {
+          "Fn": {
+            "NEWTYPE": {
+              "TYPENAME": "FnDecl"
+            }
+          }
+        },
+        "1": {
+          "Type": {
+            "STRUCT": [
+              {
+                "attrs": {
+                  "TYPENAME": "Attrs"
+                }
+              },
+              {
+                "name": {
+                  "TYPENAME": "Ident"
+                }
+              },
+              {
+                "ty": {
+                  "TYPENAME": "Type"
+                }
+              }
+            ]
+          }
+        },
+        "2": {
+          "Const": {
+            "STRUCT": [
+              {
+                "attrs": {
+                  "TYPENAME": "Attrs"
+                }
+              },
+              {
+                "name": {
+                  "TYPENAME": "Ident"
+                }
+              },
+              {
+                "ty": {
+                  "TYPENAME": "Type"
+                }
+              },
+              {
+                "value": {
+                  "TYPENAME": "Expr"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "IntTy": {
+      "ENUM": {
+        "0": {
+          "I8": "UNIT"
+        },
+        "1": {
+          "I16": "UNIT"
+        },
+        "10": {
+          "U128": "UNIT"
+        },
+        "11": {
+          "Usize": "UNIT"
+        },
+        "2": {
+          "I32": "UNIT"
+        },
+        "3": {
+          "I64": "UNIT"
+        },
+        "4": {
+          "I128": "UNIT"
+        },
+        "5": {
+          "Isize": "UNIT"
+        },
+        "6": {
+          "U8": "UNIT"
+        },
+        "7": {
+          "U16": "UNIT"
+        },
+        "8": {
+          "U32": "UNIT"
+        },
+        "9": {
+          "U64": "UNIT"
+        }
+      }
+    },
+    "IntWidth": {
+      "ENUM": {
+        "0": {
+          "Size": "UNIT"
+        },
+        "1": {
+          "W8": "UNIT"
+        },
+        "2": {
+          "W16": "UNIT"
+        },
+        "3": {
+          "W32": "UNIT"
+        },
+        "4": {
+          "W64": "UNIT"
+        },
+        "5": {
+          "W128": "UNIT"
+        }
+      }
+    },
+    "Item": {
+      "STRUCT": [
+        {
+          "id": {
+            "TYPENAME": "NodeId"
+          }
+        },
+        {
+          "span": {
+            "TYPENAME": "Span"
+          }
+        },
+        {
+          "attrs": {
+            "TYPENAME": "Attrs"
+          }
+        },
+        {
+          "visibility": {
+            "TYPENAME": "Visibility"
+          }
+        },
+        {
+          "kind": {
+            "TYPENAME": "ItemKind"
+          }
+        }
+      ]
+    },
+    "ItemKind": {
+      "ENUM": {
+        "0": {
+          "Fn": {
+            "NEWTYPE": {
+              "TYPENAME": "FnDecl"
+            }
+          }
+        },
+        "1": {
+          "Struct": {
+            "NEWTYPE": {
+              "TYPENAME": "StructDecl"
+            }
+          }
+        },
+        "2": {
+          "Enum": {
+            "NEWTYPE": {
+              "TYPENAME": "EnumDecl"
+            }
+          }
+        },
+        "3": {
+          "Trait": {
+            "NEWTYPE": {
+              "TYPENAME": "TraitDecl"
+            }
+          }
+        },
+        "4": {
+          "Impl": {
+            "NEWTYPE": {
+              "TYPENAME": "ImplDecl"
+            }
+          }
+        },
+        "5": {
+          "TypeAlias": {
+            "NEWTYPE": {
+              "TYPENAME": "TypeAliasDecl"
+            }
+          }
+        },
+        "6": {
+          "Const": {
+            "NEWTYPE": {
+              "TYPENAME": "ConstDecl"
+            }
+          }
+        },
+        "7": {
+          "Static": {
+            "NEWTYPE": {
+              "TYPENAME": "StaticDecl"
+            }
+          }
+        },
+        "8": {
+          "Mod": {
+            "NEWTYPE": {
+              "TYPENAME": "ModDecl"
+            }
+          }
+        },
+        "9": {
+          "AttrItem": {
+            "NEWTYPE": {
+              "TYPENAME": "Attribute"
+            }
+          }
+        }
+      }
+    },
+    "Label": {
+      "STRUCT": [
+        {
+          "name": "STR"
+        }
+      ]
+    },
+    "Literal": {
+      "ENUM": {
+        "0": {
+          "Int": {
+            "NEWTYPE": "STR"
+          }
+        },
+        "1": {
+          "Float": {
+            "NEWTYPE": "STR"
+          }
+        },
+        "2": {
+          "String": {
+            "NEWTYPE": "STR"
+          }
+        },
+        "3": {
+          "RawString": {
+            "STRUCT": [
+              {
+                "hashes": "U8"
+              },
+              {
+                "value": "STR"
+              }
+            ]
+          }
+        },
+        "4": {
+          "Char": {
+            "NEWTYPE": "CHAR"
+          }
+        },
+        "5": {
+          "Byte": {
+            "NEWTYPE": "U8"
+          }
+        },
+        "6": {
+          "ByteString": {
+            "NEWTYPE": {
+              "SEQ": "U8"
+            }
+          }
+        },
+        "7": {
+          "RawByteString": {
+            "STRUCT": [
+              {
+                "hashes": "U8"
+              },
+              {
+                "value": {
+                  "SEQ": "U8"
+                }
+              }
+            ]
+          }
+        },
+        "8": {
+          "Bool": {
+            "NEWTYPE": "BOOL"
+          }
+        },
+        "9": {
+          "Unit": "UNIT"
+        }
+      }
+    },
+    "Location": {
+      "STRUCT": [
+        {
+          "file": {
+            "TYPENAME": "FileId"
+          }
+        },
+        {
+          "span": {
+            "TYPENAME": "Span"
+          }
+        }
+      ]
+    },
+    "MatchArm": {
+      "STRUCT": [
+        {
+          "pattern": {
+            "TYPENAME": "Pattern"
+          }
+        },
+        {
+          "guard": {
+            "OPTION": {
+              "TYPENAME": "Expr"
+            }
+          }
+        },
+        {
+          "body": {
+            "TYPENAME": "Expr"
+          }
+        }
+      ]
+    },
+    "ModBody": {
+      "ENUM": {
+        "0": {
+          "Inline": {
+            "NEWTYPE": {
+              "SEQ": {
+                "TYPENAME": "Item"
+              }
+            }
+          }
+        },
+        "1": {
+          "External": "UNIT"
+        }
+      }
+    },
+    "ModDecl": {
+      "STRUCT": [
+        {
+          "name": {
+            "TYPENAME": "Ident"
+          }
+        },
+        {
+          "body": {
+            "TYPENAME": "ModBody"
+          }
+        }
+      ]
+    },
+    "ModulePath": {
+      "STRUCT": [
+        {
+          "segments": {
+            "SEQ": {
+              "TYPENAME": "Ident"
+            }
+          }
+        }
+      ]
+    },
+    "Mutability": {
+      "ENUM": {
+        "0": {
+          "Immutable": "UNIT"
+        },
+        "1": {
+          "Mutable": "UNIT"
+        }
+      }
+    },
+    "Mutbl": {
+      "ENUM": {
+        "0": {
+          "Not": "UNIT"
+        },
+        "1": {
+          "Mut": "UNIT"
+        }
+      }
+    },
+    "NamedArg": {
+      "STRUCT": [
+        {
+          "index": "U64"
+        },
+        {
+          "name": {
+            "TYPENAME": "Ident"
+          }
+        },
+        {
+          "span": {
+            "TYPENAME": "Span"
+          }
+        }
+      ]
+    },
+    "NodeId": {
+      "NEWTYPESTRUCT": "U32"
+    },
+    "ParamIdx": {
+      "NEWTYPESTRUCT": "U32"
+    },
+    "PathExpr": {
+      "STRUCT": [
+        {
+          "segments": {
+            "SEQ": {
+              "TYPENAME": "PathSegment"
+            }
+          }
+        }
+      ]
+    },
+    "PathSegment": {
+      "STRUCT": [
+        {
+          "name": {
+            "TYPENAME": "Ident"
+          }
+        },
+        {
+          "generics": {
+            "SEQ": {
+              "TYPENAME": "GenericArg"
+            }
+          }
+        }
+      ]
+    },
+    "Pattern": {
+      "STRUCT": [
+        {
+          "id": {
+            "TYPENAME": "NodeId"
+          }
+        },
+        {
+          "span": {
+            "TYPENAME": "Span"
+          }
+        },
+        {
+          "kind": {
+            "TYPENAME": "PatternKind"
+          }
+        }
+      ]
+    },
+    "PatternKind": {
+      "ENUM": {
+        "0": {
+          "Wildcard": "UNIT"
+        },
+        "1": {
+          "Literal": {
+            "NEWTYPE": {
+              "TYPENAME": "Literal"
+            }
+          }
+        },
+        "10": {
+          "Rest": "UNIT"
+        },
+        "11": {
+          "Ref": {
+            "STRUCT": [
+              {
+                "mutability": {
+                  "TYPENAME": "Mutability"
+                }
+              },
+              {
+                "inner": {
+                  "TYPENAME": "Pattern"
+                }
+              }
+            ]
+          }
+        },
+        "12": {
+          "Error": "UNIT"
+        },
+        "2": {
+          "Ident": {
+            "STRUCT": [
+              {
+                "mutability": {
+                  "TYPENAME": "Mutability"
+                }
+              },
+              {
+                "name": {
+                  "TYPENAME": "Ident"
+                }
+              },
+              {
+                "subpattern": {
+                  "OPTION": {
+                    "TYPENAME": "Pattern"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "3": {
+          "Path": {
+            "NEWTYPE": {
+              "TYPENAME": "TypePath"
+            }
+          }
+        },
+        "4": {
+          "Tuple": {
+            "NEWTYPE": {
+              "SEQ": {
+                "TYPENAME": "Pattern"
+              }
+            }
+          }
+        },
+        "5": {
+          "Slice": {
+            "STRUCT": [
+              {
+                "prefix": {
+                  "SEQ": {
+                    "TYPENAME": "Pattern"
+                  }
+                }
+              },
+              {
+                "rest": {
+                  "OPTION": {
+                    "TYPENAME": "Pattern"
+                  }
+                }
+              },
+              {
+                "suffix": {
+                  "SEQ": {
+                    "TYPENAME": "Pattern"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "6": {
+          "Struct": {
+            "STRUCT": [
+              {
+                "path": {
+                  "TYPENAME": "TypePath"
+                }
+              },
+              {
+                "fields": {
+                  "SEQ": {
+                    "TYPENAME": "FieldPattern"
+                  }
+                }
+              },
+              {
+                "rest": "BOOL"
+              }
+            ]
+          }
+        },
+        "7": {
+          "TupleStruct": {
+            "STRUCT": [
+              {
+                "path": {
+                  "TYPENAME": "TypePath"
+                }
+              },
+              {
+                "elems": {
+                  "SEQ": {
+                    "TYPENAME": "Pattern"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "8": {
+          "Range": {
+            "STRUCT": [
+              {
+                "lo": {
+                  "OPTION": {
+                    "TYPENAME": "Literal"
+                  }
+                }
+              },
+              {
+                "hi": {
+                  "OPTION": {
+                    "TYPENAME": "Literal"
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "TYPENAME": "RangeKind"
+                }
+              }
+            ]
+          }
+        },
+        "9": {
+          "Or": {
+            "NEWTYPE": {
+              "SEQ": {
+                "TYPENAME": "Pattern"
+              }
+            }
+          }
+        }
+      }
+    },
+    "PrimitiveTy": {
+      "ENUM": {
+        "0": {
+          "Bool": "UNIT"
+        },
+        "1": {
+          "Char": "UNIT"
+        },
+        "2": {
+          "String": "UNIT"
+        },
+        "3": {
+          "Int": {
+            "NEWTYPE": {
+              "TYPENAME": "IntWidth"
+            }
+          }
+        },
+        "4": {
+          "UInt": {
+            "NEWTYPE": {
+              "TYPENAME": "IntWidth"
+            }
+          }
+        },
+        "5": {
+          "Float": {
+            "NEWTYPE": {
+              "TYPENAME": "FloatWidth"
+            }
+          }
+        },
+        "6": {
+          "Never": "UNIT"
+        },
+        "7": {
+          "Unit": "UNIT"
+        }
+      }
+    },
+    "Primitives": {
+      "STRUCT": [
+        {
+          "unit": {
+            "OPTION": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        {
+          "never": {
+            "OPTION": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        {
+          "bool_": {
+            "OPTION": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        {
+          "char_": {
+            "OPTION": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        {
+          "string_": {
+            "OPTION": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        {
+          "error": {
+            "OPTION": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        {
+          "json_value": {
+            "OPTION": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        {
+          "dyn_value": {
+            "OPTION": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        {
+          "dyn_error": {
+            "OPTION": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        {
+          "duration": {
+            "OPTION": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        {
+          "instant": {
+            "OPTION": {
+              "TYPENAME": "Ty"
+            }
+          }
+        }
+      ]
+    },
+    "RangeKind": {
+      "ENUM": {
+        "0": {
+          "Exclusive": "UNIT"
+        },
+        "1": {
+          "Inclusive": "UNIT"
+        }
+      }
+    },
+    "Receiver": {
+      "ENUM": {
+        "0": {
+          "Owned": "UNIT"
+        },
+        "1": {
+          "RefShared": "UNIT"
+        },
+        "2": {
+          "RefMut": "UNIT"
+        }
+      }
+    },
+    "Resolution": {
+      "ENUM": {
+        "0": {
+          "Local": {
+            "NEWTYPE": {
+              "TYPENAME": "NodeId"
+            }
+          }
+        },
+        "1": {
+          "Def": {
+            "STRUCT": [
+              {
+                "def": {
+                  "TYPENAME": "DefId"
+                }
+              },
+              {
+                "kind": {
+                  "TYPENAME": "DefKind"
+                }
+              }
+            ]
+          }
+        },
+        "2": {
+          "Primitive": {
+            "NEWTYPE": {
+              "TYPENAME": "PrimitiveTy"
+            }
+          }
+        },
+        "3": {
+          "Import": {
+            "STRUCT": [
+              {
+                "use_id": {
+                  "TYPENAME": "NodeId"
+                }
+              }
+            ]
+          }
+        },
+        "4": {
+          "Err": "UNIT"
+        }
+      }
+    },
+    "Resolutions": {
+      "STRUCT": [
+        {
+          "entries": {
+            "MAP": {
+              "KEY": {
+                "TYPENAME": "NodeId"
+              },
+              "VALUE": {
+                "TYPENAME": "Resolution"
+              }
+            }
+          }
+        },
+        {
+          "bindings": {
+            "MAP": {
+              "KEY": {
+                "TYPENAME": "NodeId"
+              },
+              "VALUE": {
+                "TYPENAME": "DefId"
+              }
+            }
+          }
+        },
+        {
+          "definitions": {
+            "MAP": {
+              "KEY": {
+                "TYPENAME": "DefId"
+              },
+              "VALUE": {
+                "TYPENAME": "DefKind"
+              }
+            }
+          }
+        },
+        {
+          "project_aliases": {
+            "MAP": {
+              "KEY": "STR",
+              "VALUE": "STR"
+            }
+          }
+        },
+        {
+          "module_aliases": {
+            "MAP": {
+              "KEY": "STR",
+              "VALUE": "STR"
+            }
+          }
+        },
+        {
+          "scoped_module_aliases": {
+            "MAP": {
+              "KEY": "STR",
+              "VALUE": {
+                "MAP": {
+                  "KEY": "STR",
+                  "VALUE": "STR"
+                }
+              }
+            }
+          }
+        },
+        {
+          "import_defs": {
+            "MAP": {
+              "KEY": {
+                "TYPENAME": "NodeId"
+              },
+              "VALUE": {
+                "TYPENAME": "DefId"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "SelectArm": {
+      "STRUCT": [
+        {
+          "op": {
+            "TYPENAME": "SelectOp"
+          }
+        },
+        {
+          "body": {
+            "TYPENAME": "Expr"
+          }
+        }
+      ]
+    },
+    "SelectOp": {
+      "ENUM": {
+        "0": {
+          "Recv": {
+            "STRUCT": [
+              {
+                "pattern": {
+                  "TYPENAME": "Pattern"
+                }
+              },
+              {
+                "channel": {
+                  "TYPENAME": "Expr"
+                }
+              }
+            ]
+          }
+        },
+        "1": {
+          "Send": {
+            "STRUCT": [
+              {
+                "channel": {
+                  "TYPENAME": "Expr"
+                }
+              },
+              {
+                "value": {
+                  "TYPENAME": "Expr"
+                }
+              }
+            ]
+          }
+        },
+        "2": {
+          "Default": "UNIT"
+        }
+      }
+    },
+    "Severity": {
+      "ENUM": {
+        "0": {
+          "Error": "UNIT"
+        },
+        "1": {
+          "Warning": "UNIT"
+        },
+        "2": {
+          "Note": "UNIT"
+        },
+        "3": {
+          "Help": "UNIT"
+        }
+      }
+    },
+    "SourceFile": {
+      "STRUCT": [
+        {
+          "file": {
+            "TYPENAME": "FileId"
+          }
+        },
+        {
+          "attrs": {
+            "TYPENAME": "Attrs"
+          }
+        },
+        {
+          "uses": {
+            "SEQ": {
+              "TYPENAME": "UseDecl"
+            }
+          }
+        },
+        {
+          "items": {
+            "SEQ": {
+              "TYPENAME": "Item"
+            }
+          }
+        },
+        {
+          "top_level_stmts": {
+            "SEQ": {
+              "TYPENAME": "Stmt"
+            }
+          }
+        },
+        {
+          "next_node_id": "U32"
+        },
+        {
+          "named_args": {
+            "MAP": {
+              "KEY": {
+                "TYPENAME": "NodeId"
+              },
+              "VALUE": {
+                "SEQ": {
+                  "TYPENAME": "NamedArg"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Span": {
+      "STRUCT": [
+        {
+          "file": {
+            "TYPENAME": "FileId"
+          }
+        },
+        {
+          "start": "U32"
+        },
+        {
+          "end": "U32"
+        }
+      ]
+    },
+    "StaticDecl": {
+      "STRUCT": [
+        {
+          "mutability": {
+            "TYPENAME": "Mutability"
+          }
+        },
+        {
+          "name": {
+            "TYPENAME": "Ident"
+          }
+        },
+        {
+          "ty": {
+            "TYPENAME": "Type"
+          }
+        },
+        {
+          "value": {
+            "TYPENAME": "Expr"
+          }
+        }
+      ]
+    },
+    "Stmt": {
+      "STRUCT": [
+        {
+          "id": {
+            "TYPENAME": "NodeId"
+          }
+        },
+        {
+          "span": {
+            "TYPENAME": "Span"
+          }
+        },
+        {
+          "kind": {
+            "TYPENAME": "StmtKind"
+          }
+        }
+      ]
+    },
+    "StmtKind": {
+      "ENUM": {
+        "0": {
+          "Let": {
+            "STRUCT": [
+              {
+                "pattern": {
+                  "TYPENAME": "Pattern"
+                }
+              },
+              {
+                "ty": {
+                  "OPTION": {
+                    "TYPENAME": "Type"
+                  }
+                }
+              },
+              {
+                "init": {
+                  "OPTION": {
+                    "TYPENAME": "Expr"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "1": {
+          "Expr": {
+            "STRUCT": [
+              {
+                "expr": {
+                  "TYPENAME": "Expr"
+                }
+              },
+              {
+                "has_semi": "BOOL"
+              }
+            ]
+          }
+        },
+        "2": {
+          "Item": {
+            "NEWTYPE": {
+              "TYPENAME": "Item"
+            }
+          }
+        },
+        "3": {
+          "Defer": {
+            "NEWTYPE": {
+              "TYPENAME": "Expr"
+            }
+          }
+        }
+      }
+    },
+    "StructBody": {
+      "ENUM": {
+        "0": {
+          "Named": {
+            "NEWTYPE": {
+              "SEQ": {
+                "TYPENAME": "StructField"
+              }
+            }
+          }
+        },
+        "1": {
+          "Tuple": {
+            "NEWTYPE": {
+              "SEQ": {
+                "TYPENAME": "TupleField"
+              }
+            }
+          }
+        },
+        "2": {
+          "Unit": "UNIT"
+        }
+      }
+    },
+    "StructDecl": {
+      "STRUCT": [
+        {
+          "name": {
+            "TYPENAME": "Ident"
+          }
+        },
+        {
+          "generics": {
+            "TYPENAME": "Generics"
+          }
+        },
+        {
+          "where_clause": {
+            "TYPENAME": "WhereClause"
+          }
+        },
+        {
+          "body": {
+            "TYPENAME": "StructBody"
+          }
+        }
+      ]
+    },
+    "StructExprField": {
+      "STRUCT": [
+        {
+          "name": {
+            "TYPENAME": "Ident"
+          }
+        },
+        {
+          "value": {
+            "OPTION": {
+              "TYPENAME": "Expr"
+            }
+          }
+        }
+      ]
+    },
+    "StructExprSyntax": {
+      "ENUM": {
+        "0": {
+          "Parenthesized": "UNIT"
+        },
+        "1": {
+          "Braced": "UNIT"
+        }
+      }
+    },
+    "StructField": {
+      "STRUCT": [
+        {
+          "attrs": {
+            "TYPENAME": "Attrs"
+          }
+        },
+        {
+          "visibility": {
+            "TYPENAME": "Visibility"
+          }
+        },
+        {
+          "name": {
+            "TYPENAME": "Ident"
+          }
+        },
+        {
+          "ty": {
+            "TYPENAME": "Type"
+          }
+        }
+      ]
+    },
+    "Substs": {
+      "STRUCT": [
+        {
+          "args": {
+            "SEQ": {
+              "TYPENAME": "TyGenericArg"
+            }
+          }
+        }
+      ]
+    },
+    "Suggestion": {
+      "STRUCT": [
+        {
+          "location": {
+            "TYPENAME": "Location"
+          }
+        },
+        {
+          "message": "STR"
+        },
+        {
+          "replacement": "STR"
+        }
+      ]
+    },
+    "TraitBound": {
+      "STRUCT": [
+        {
+          "path": {
+            "TYPENAME": "TypePath"
+          }
+        },
+        {
+          "bindings": {
+            "SEQ": {
+              "TYPENAME": "AssocBinding"
+            }
+          }
+        }
+      ]
+    },
+    "TraitDecl": {
+      "STRUCT": [
+        {
+          "name": {
+            "TYPENAME": "Ident"
+          }
+        },
+        {
+          "generics": {
+            "TYPENAME": "Generics"
+          }
+        },
+        {
+          "supertraits": {
+            "SEQ": {
+              "TYPENAME": "TraitBound"
+            }
+          }
+        },
+        {
+          "where_clause": {
+            "TYPENAME": "WhereClause"
+          }
+        },
+        {
+          "items": {
+            "SEQ": {
+              "TYPENAME": "TraitItem"
+            }
+          }
+        }
+      ]
+    },
+    "TraitItem": {
+      "ENUM": {
+        "0": {
+          "Fn": {
+            "NEWTYPE": {
+              "TYPENAME": "FnDecl"
+            }
+          }
+        },
+        "1": {
+          "Type": {
+            "STRUCT": [
+              {
+                "attrs": {
+                  "TYPENAME": "Attrs"
+                }
+              },
+              {
+                "name": {
+                  "TYPENAME": "Ident"
+                }
+              },
+              {
+                "bounds": {
+                  "SEQ": {
+                    "TYPENAME": "TraitBound"
+                  }
+                }
+              },
+              {
+                "default": {
+                  "OPTION": {
+                    "TYPENAME": "Type"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "2": {
+          "Const": {
+            "STRUCT": [
+              {
+                "attrs": {
+                  "TYPENAME": "Attrs"
+                }
+              },
+              {
+                "name": {
+                  "TYPENAME": "Ident"
+                }
+              },
+              {
+                "ty": {
+                  "TYPENAME": "Type"
+                }
+              },
+              {
+                "default": {
+                  "OPTION": {
+                    "TYPENAME": "Expr"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "TraitRef": {
+      "STRUCT": [
+        {
+          "def": {
+            "TYPENAME": "DefId"
+          }
+        },
+        {
+          "substs": {
+            "TYPENAME": "Substs"
+          }
+        }
+      ]
+    },
+    "TupleField": {
+      "STRUCT": [
+        {
+          "attrs": {
+            "TYPENAME": "Attrs"
+          }
+        },
+        {
+          "visibility": {
+            "TYPENAME": "Visibility"
+          }
+        },
+        {
+          "ty": {
+            "TYPENAME": "Type"
+          }
+        }
+      ]
+    },
+    "Ty": {
+      "NEWTYPESTRUCT": "U32"
+    },
+    "TyCtxt": {
+      "STRUCT": [
+        {
+          "kinds": {
+            "SEQ": {
+              "TYPENAME": "TyKind"
+            }
+          }
+        },
+        {
+          "index": {
+            "MAP": {
+              "KEY": {
+                "TYPENAME": "TyKind"
+              },
+              "VALUE": {
+                "TYPENAME": "Ty"
+              }
+            }
+          }
+        },
+        {
+          "primitives": {
+            "TYPENAME": "Primitives"
+          }
+        },
+        {
+          "struct_fields": {
+            "MAP": {
+              "KEY": {
+                "TYPENAME": "DefId"
+              },
+              "VALUE": {
+                "SEQ": {
+                  "TYPENAME": "Ty"
+                }
+              }
+            }
+          }
+        },
+        {
+          "enum_variant_tys": {
+            "MAP": {
+              "KEY": {
+                "TYPENAME": "DefId"
+              },
+              "VALUE": {
+                "SEQ": {
+                  "SEQ": {
+                    "TYPENAME": "Ty"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "enum_variant_names": {
+            "MAP": {
+              "KEY": {
+                "TYPENAME": "DefId"
+              },
+              "VALUE": {
+                "SEQ": "STR"
+              }
+            }
+          }
+        },
+        {
+          "enum_repr_bits": {
+            "MAP": {
+              "KEY": {
+                "TYPENAME": "DefId"
+              },
+              "VALUE": "U32"
+            }
+          }
+        },
+        {
+          "enum_ty_by_name": {
+            "MAP": {
+              "KEY": "STR",
+              "VALUE": {
+                "TYPENAME": "Ty"
+              }
+            }
+          }
+        },
+        {
+          "struct_fields_inst": {
+            "MAP": {
+              "KEY": {
+                "TUPLE": [
+                  {
+                    "TYPENAME": "DefId"
+                  },
+                  {
+                    "TYPENAME": "Substs"
+                  }
+                ]
+              },
+              "VALUE": {
+                "SEQ": {
+                  "TYPENAME": "Ty"
+                }
+              }
+            }
+          }
+        },
+        {
+          "def_names": {
+            "MAP": {
+              "KEY": {
+                "TYPENAME": "DefId"
+              },
+              "VALUE": "STR"
+            }
+          }
+        },
+        {
+          "type_param_defs": {
+            "MAP": {
+              "KEY": {
+                "TYPENAME": "DefId"
+              },
+              "VALUE": {
+                "TYPENAME": "Ty"
+              }
+            }
+          }
+        },
+        {
+          "rc_metas": {
+            "MAP": {
+              "KEY": "STR",
+              "VALUE": {
+                "SEQ": "I64"
+              }
+            }
+          }
+        },
+        {
+          "aggr_copy_metas": {
+            "MAP": {
+              "KEY": {
+                "TYPENAME": "Ty"
+              },
+              "VALUE": "STR"
+            }
+          }
+        },
+        {
+          "boxed_enum_payload_tys": {
+            "SEQ": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        {
+          "rc_managed_tys": {
+            "SEQ": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        {
+          "rc_managed_enum_defs": {
+            "SEQ": "U32"
+          }
+        },
+        {
+          "tuple_struct_defs": {
+            "SEQ": "U32"
+          }
+        },
+        {
+          "inline_enum_defs": {
+            "SEQ": "U32"
+          }
+        }
+      ]
+    },
+    "TyGenericArg": {
+      "ENUM": {
+        "0": {
+          "Type": {
+            "NEWTYPE": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        "1": {
+          "Const": {
+            "NEWTYPE": "I128"
+          }
+        },
+        "2": {
+          "ConstParam": {
+            "NEWTYPE": {
+              "TYPENAME": "ParamIdx"
+            }
+          }
+        }
+      }
+    },
+    "TyKind": {
+      "ENUM": {
+        "0": {
+          "Bool": "UNIT"
+        },
+        "1": {
+          "Char": "UNIT"
+        },
+        "10": {
+          "Slice": {
+            "NEWTYPE": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        "11": {
+          "Vec": {
+            "NEWTYPE": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        "12": {
+          "Iterator": {
+            "NEWTYPE": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        "13": {
+          "Range": {
+            "NEWTYPE": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        "14": {
+          "HashMap": {
+            "STRUCT": [
+              {
+                "key": {
+                  "TYPENAME": "Ty"
+                }
+              },
+              {
+                "value": {
+                  "TYPENAME": "Ty"
+                }
+              },
+              {
+                "ordered": "BOOL"
+              }
+            ]
+          }
+        },
+        "15": {
+          "Sender": {
+            "NEWTYPE": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        "16": {
+          "Receiver": {
+            "NEWTYPE": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        "17": {
+          "JoinHandle": {
+            "NEWTYPE": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        "18": {
+          "Duration": "UNIT"
+        },
+        "19": {
+          "Instant": "UNIT"
+        },
+        "2": {
+          "String": "UNIT"
+        },
+        "20": {
+          "JsonValue": "UNIT"
+        },
+        "21": {
+          "DynValue": "UNIT"
+        },
+        "22": {
+          "DynError": "UNIT"
+        },
+        "23": {
+          "Ref": {
+            "STRUCT": [
+              {
+                "mutability": {
+                  "TYPENAME": "Mutbl"
+                }
+              },
+              {
+                "inner": {
+                  "TYPENAME": "Ty"
+                }
+              }
+            ]
+          }
+        },
+        "24": {
+          "FnDef": {
+            "STRUCT": [
+              {
+                "def": {
+                  "TYPENAME": "DefId"
+                }
+              },
+              {
+                "substs": {
+                  "TYPENAME": "Substs"
+                }
+              }
+            ]
+          }
+        },
+        "25": {
+          "FnPtr": {
+            "NEWTYPE": {
+              "TYPENAME": "FnSig"
+            }
+          }
+        },
+        "26": {
+          "FnTrait": {
+            "NEWTYPE": {
+              "TYPENAME": "FnSig"
+            }
+          }
+        },
+        "27": {
+          "Closure": {
+            "STRUCT": [
+              {
+                "def": {
+                  "TYPENAME": "DefId"
+                }
+              },
+              {
+                "substs": {
+                  "TYPENAME": "Substs"
+                }
+              },
+              {
+                "kind": {
+                  "TYPENAME": "ClosureKind"
+                }
+              }
+            ]
+          }
+        },
+        "28": {
+          "Adt": {
+            "STRUCT": [
+              {
+                "def": {
+                  "TYPENAME": "DefId"
+                }
+              },
+              {
+                "substs": {
+                  "TYPENAME": "Substs"
+                }
+              }
+            ]
+          }
+        },
+        "29": {
+          "Alias": {
+            "STRUCT": [
+              {
+                "def": {
+                  "TYPENAME": "DefId"
+                }
+              },
+              {
+                "substs": {
+                  "TYPENAME": "Substs"
+                }
+              }
+            ]
+          }
+        },
+        "3": {
+          "Int": {
+            "NEWTYPE": {
+              "TYPENAME": "IntTy"
+            }
+          }
+        },
+        "30": {
+          "Nominal": {
+            "STRUCT": [
+              {
+                "def": {
+                  "TYPENAME": "DefId"
+                }
+              },
+              {
+                "repr": {
+                  "TYPENAME": "Ty"
+                }
+              }
+            ]
+          }
+        },
+        "31": {
+          "Dyn": {
+            "NEWTYPE": {
+              "TYPENAME": "TraitRef"
+            }
+          }
+        },
+        "32": {
+          "Var": {
+            "NEWTYPE": {
+              "TYPENAME": "TyVid"
+            }
+          }
+        },
+        "33": {
+          "Param": {
+            "STRUCT": [
+              {
+                "idx": {
+                  "TYPENAME": "ParamIdx"
+                }
+              },
+              {
+                "name": "STR"
+              }
+            ]
+          }
+        },
+        "34": {
+          "Error": "UNIT"
+        },
+        "4": {
+          "Float": {
+            "NEWTYPE": {
+              "TYPENAME": "FloatTy"
+            }
+          }
+        },
+        "5": {
+          "Unit": "UNIT"
+        },
+        "6": {
+          "Never": "UNIT"
+        },
+        "7": {
+          "Tuple": {
+            "NEWTYPE": {
+              "SEQ": {
+                "TYPENAME": "Ty"
+              }
+            }
+          }
+        },
+        "8": {
+          "Array": {
+            "STRUCT": [
+              {
+                "elem": {
+                  "TYPENAME": "Ty"
+                }
+              },
+              {
+                "len": {
+                  "TYPENAME": "ArrayLen"
+                }
+              }
+            ]
+          }
+        },
+        "9": {
+          "Simd": {
+            "STRUCT": [
+              {
+                "elem": {
+                  "TYPENAME": "Ty"
+                }
+              },
+              {
+                "lanes": {
+                  "TYPENAME": "ArrayLen"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "TyVid": {
+      "NEWTYPESTRUCT": "U32"
+    },
+    "Type": {
+      "STRUCT": [
+        {
+          "id": {
+            "TYPENAME": "NodeId"
+          }
+        },
+        {
+          "span": {
+            "TYPENAME": "Span"
+          }
+        },
+        {
+          "kind": {
+            "TYPENAME": "TypeKind"
+          }
+        }
+      ]
+    },
+    "TypeAliasDecl": {
+      "STRUCT": [
+        {
+          "name": {
+            "TYPENAME": "Ident"
+          }
+        },
+        {
+          "generics": {
+            "TYPENAME": "Generics"
+          }
+        },
+        {
+          "ty": {
+            "TYPENAME": "Type"
+          }
+        },
+        {
+          "nominal": "BOOL"
+        }
+      ]
+    },
+    "TypeKind": {
+      "ENUM": {
+        "0": {
+          "Unit": "UNIT"
+        },
+        "1": {
+          "Never": "UNIT"
+        },
+        "2": {
+          "Infer": "UNIT"
+        },
+        "3": {
+          "Path": {
+            "NEWTYPE": {
+              "TYPENAME": "TypePath"
+            }
+          }
+        },
+        "4": {
+          "Tuple": {
+            "NEWTYPE": {
+              "SEQ": {
+                "TYPENAME": "Type"
+              }
+            }
+          }
+        },
+        "5": {
+          "Array": {
+            "STRUCT": [
+              {
+                "elem": {
+                  "TYPENAME": "Type"
+                }
+              },
+              {
+                "len": {
+                  "TYPENAME": "Expr"
+                }
+              }
+            ]
+          }
+        },
+        "6": {
+          "Slice": {
+            "NEWTYPE": {
+              "TYPENAME": "Type"
+            }
+          }
+        },
+        "7": {
+          "Ref": {
+            "STRUCT": [
+              {
+                "mutability": {
+                  "TYPENAME": "Mutability"
+                }
+              },
+              {
+                "inner": {
+                  "TYPENAME": "Type"
+                }
+              }
+            ]
+          }
+        },
+        "8": {
+          "Fn": {
+            "STRUCT": [
+              {
+                "kind": {
+                  "TYPENAME": "FnTypeKind"
+                }
+              },
+              {
+                "params": {
+                  "SEQ": {
+                    "TYPENAME": "Type"
+                  }
+                }
+              },
+              {
+                "ret": {
+                  "OPTION": {
+                    "TYPENAME": "Type"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "TypePath": {
+      "STRUCT": [
+        {
+          "segments": {
+            "SEQ": {
+              "TYPENAME": "TypePathSegment"
+            }
+          }
+        }
+      ]
+    },
+    "TypePathSegment": {
+      "STRUCT": [
+        {
+          "name": {
+            "TYPENAME": "Ident"
+          }
+        },
+        {
+          "generics": {
+            "SEQ": {
+              "TYPENAME": "GenericArg"
+            }
+          }
+        },
+        {
+          "assoc_bindings": {
+            "SEQ": {
+              "TYPENAME": "AssocBinding"
+            }
+          }
+        }
+      ]
+    },
+    "TypeTable": {
+      "STRUCT": [
+        {
+          "entries": {
+            "MAP": {
+              "KEY": {
+                "TYPENAME": "NodeId"
+              },
+              "VALUE": {
+                "TYPENAME": "Ty"
+              }
+            }
+          }
+        },
+        {
+          "method_owners": {
+            "MAP": {
+              "KEY": {
+                "TYPENAME": "NodeId"
+              },
+              "VALUE": "STR"
+            }
+          }
+        },
+        {
+          "operator_methods": {
+            "MAP": {
+              "KEY": {
+                "TYPENAME": "NodeId"
+              },
+              "VALUE": "STR"
+            }
+          }
+        },
+        {
+          "const_generic_args": {
+            "MAP": {
+              "KEY": {
+                "TYPENAME": "NodeId"
+              },
+              "VALUE": {
+                "SEQ": {
+                  "TYPENAME": "ConstGenericArg"
+                }
+              }
+            }
+          }
+        },
+        {
+          "receiver_writes": {
+            "SEQ": {
+              "TYPENAME": "NodeId"
+            }
+          }
+        }
+      ]
+    },
+    "UnaryOp": {
+      "ENUM": {
+        "0": {
+          "Neg": "UNIT"
+        },
+        "1": {
+          "Not": "UNIT"
+        },
+        "2": {
+          "RefShared": "UNIT"
+        },
+        "3": {
+          "RefMut": "UNIT"
+        },
+        "4": {
+          "Deref": "UNIT"
+        }
+      }
+    },
+    "UseDecl": {
+      "STRUCT": [
+        {
+          "id": {
+            "TYPENAME": "NodeId"
+          }
+        },
+        {
+          "span": {
+            "TYPENAME": "Span"
+          }
+        },
+        {
+          "target": {
+            "TYPENAME": "UseTarget"
+          }
+        },
+        {
+          "alias": {
+            "OPTION": {
+              "TYPENAME": "Ident"
+            }
+          }
+        },
+        {
+          "list": {
+            "OPTION": {
+              "SEQ": {
+                "TYPENAME": "UseListEntry"
+              }
+            }
+          }
+        },
+        {
+          "module": {
+            "SEQ": "STR"
+          }
+        },
+        {
+          "cfg": {
+            "OPTION": "STR"
+          }
+        }
+      ]
+    },
+    "UseListEntry": {
+      "STRUCT": [
+        {
+          "prefix": {
+            "SEQ": {
+              "TYPENAME": "Ident"
+            }
+          }
+        },
+        {
+          "name": {
+            "TYPENAME": "Ident"
+          }
+        },
+        {
+          "alias": {
+            "OPTION": {
+              "TYPENAME": "Ident"
+            }
+          }
+        }
+      ]
+    },
+    "UseTarget": {
+      "ENUM": {
+        "0": {
+          "Module": {
+            "NEWTYPE": {
+              "TYPENAME": "ModulePath"
+            }
+          }
+        },
+        "1": {
+          "Project": {
+            "STRUCT": [
+              {
+                "id": "STR"
+              },
+              {
+                "module": {
+                  "OPTION": {
+                    "TYPENAME": "ModulePath"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "Visibility": {
+      "ENUM": {
+        "0": {
+          "Inherited": "UNIT"
+        },
+        "1": {
+          "Package": "UNIT"
+        },
+        "2": {
+          "Public": "UNIT"
+        }
+      }
+    },
+    "WhereClause": {
+      "STRUCT": [
+        {
+          "predicates": {
+            "SEQ": {
+              "TYPENAME": "WherePredicate"
+            }
+          }
+        }
+      ]
+    },
+    "WherePredicate": {
+      "STRUCT": [
+        {
+          "bounded": {
+            "TYPENAME": "Type"
+          }
+        },
+        {
+          "bounds": {
+            "SEQ": {
+              "TYPENAME": "TraitBound"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "encoding": "postcard",
+  "root": "CachedFrontend"
+}

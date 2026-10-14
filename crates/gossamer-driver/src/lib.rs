@@ -6,9 +6,9 @@
 //! deterministic [`link::Artifact`]; package management and
 //! cross-compilation hang new options off [`link::LinkerOptions`].
 
-// `deny` rather than `forbid` so the single FFI liveness probe in
-// `binding_runner::pid_alive` (`libc::kill` / Win32 `OpenProcess`) can opt in
-// via a scoped, documented `#[allow(unsafe_code)]`. Every other site stays
+// `deny` rather than `forbid` so the FFI liveness probe in
+// `binding_runner::pid_alive` (`libc::kill` / Win32 `OpenProcess`) can opt
+// in via a scoped, documented `#[allow(unsafe_code)]`. Every other site stays
 // unsafe-free.
 #![deny(unsafe_code)]
 
@@ -25,16 +25,19 @@ pub mod target;
 
 pub use binding_runner::{
     BindingRunner, BindingRunnerError, DumpedItem, DumpedModule, DumpedType,
-    Profile as RunnerProfile, RenderedBinding, SignatureDump, StaticBindingsLib,
-    parse_signature_dump,
+    Profile as RunnerProfile, RenderedBinding, SignatureDump, StaticBindingsArchive,
+    StaticBindingsLib, parse_signature_dump,
 };
 
 pub use foreign_policy::{foreign_policy, set_foreign_policy};
-pub use frontend::{FrontendOutcome, check_frontend};
+pub use frontend::{
+    FrontendOutcome, check_frontend, check_frontend_with_program, write_frontend_blob,
+};
 pub use frontend_cache::{
-    CachedFrontend, FrontendCacheKey, cache_dir, cache_enabled, frontend_key, load_blob,
-    load_blob_in, raw_blob_path, raw_blob_path_in, store_blob, store_blob_in, store_frontend,
-    store_frontend_in, store_raw, store_raw_in, user_cache_root,
+    CachedFrontend, FrontendCacheKey, cache_dir, cache_enabled, encode_frontend, frontend_key,
+    load_blob, load_blob_in, raw_blob_path, raw_blob_path_in, store_blob, store_blob_in,
+    store_frontend, store_frontend_in, store_raw, store_raw_in, trace_cache_hit, unit_key,
+    user_cache_root,
 };
 pub use gossamer_types::ForeignPolicy;
 pub use link::{

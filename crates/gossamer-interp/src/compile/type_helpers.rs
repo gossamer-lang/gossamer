@@ -102,7 +102,7 @@ impl<'tcx> FnBuilder<'tcx> {
     /// its source, so the binding takes a deep clone the way a bare container
     /// binding does.
     pub(crate) fn expr_is_aggregate_with_container(&self, expr: &HirExpr) -> bool {
-        self.ty_holds_shared_container(self.unwrap_ref(expr.ty), 0)
+        self.ty_holds_shared_container(self.unwrap_ref(expr.ty))
     }
 
     /// The register a value stored into another value reads from. A binding
@@ -162,7 +162,26 @@ impl<'tcx> FnBuilder<'tcx> {
         dst
     }
 
-    fn ty_holds_shared_container(&self, ty: gossamer_types::Ty, depth: u32) -> bool {
+    /// Whether a value of `ty` reaches a map, set, deque, queue, stack, or
+    /// heap, through any depth of fields, variant payloads, elements, and
+    /// type arguments.
+    fn ty_holds_shared_container(&self, ty: gossamer_types::Ty) -> bool {
+        if let Some(&known) = self.shared_container_tys.borrow().get(&ty) {
+            return known;
+        }
+        let mut seen = std::collections::HashSet::new();
+        let holds = self.reaches_shared_container(ty, &mut seen);
+        self.shared_container_tys.borrow_mut().insert(ty, holds);
+        holds
+    }
+
+    /// The walk behind [`Self::ty_holds_shared_container`]. A type already
+    /// on the walk answers `false`, so a recursive type is visited once.
+    fn reaches_shared_container(
+        &self,
+        ty: gossamer_types::Ty,
+        seen: &mut std::collections::HashSet<gossamer_types::Ty>,
+    ) -> bool {
         const HASH_SET_DEF_LOCAL: u32 = u32::MAX - 7;
         const BTREE_SET_DEF_LOCAL: u32 = u32::MAX - 18;
         const VEC_DEQUE_DEF_LOCAL: u32 = u32::MAX - 19;
@@ -170,7 +189,7 @@ impl<'tcx> FnBuilder<'tcx> {
         const MIN_HEAP_DEF_LOCAL: u32 = u32::MAX - 30;
         const VEC_QUEUE_DEF_LOCAL: u32 = u32::MAX - 31;
         const VEC_STACK_DEF_LOCAL: u32 = u32::MAX - 32;
-        if depth > 8 {
+        if !seen.insert(ty) {
             return false;
         }
         match self.tcx.kind(ty) {
@@ -193,27 +212,30 @@ impl<'tcx> FnBuilder<'tcx> {
             // a generic type (`Option<Set<_>>`, `Result<Map<..>, E>`) the
             // values its type arguments name.
             Some(TyKind::Adt { def, substs }) => {
-                let holds = |tys: &[gossamer_types::Ty]| {
-                    tys.iter()
-                        .any(|f| self.ty_holds_shared_container(*f, depth + 1))
-                };
-                self.tcx.struct_field_tys(*def).is_some_and(holds)
-                    || self
-                        .tcx
-                        .enum_variant_tys(*def)
-                        .is_some_and(|variants| variants.iter().any(|payload| holds(payload)))
-                    || holds(&substs.types())
+                let mut reached: Vec<gossamer_types::Ty> = substs.types();
+                if let Some(fields) = self.tcx.struct_field_tys(*def) {
+                    reached.extend_from_slice(fields);
+                }
+                if let Some(variants) = self.tcx.enum_variant_tys(*def) {
+                    for payload in variants {
+                        reached.extend_from_slice(payload);
+                    }
+                }
+                reached
+                    .into_iter()
+                    .any(|t| self.reaches_shared_container(t, seen))
             }
             Some(TyKind::Tuple(elems)) => elems
                 .clone()
-                .iter()
-                .any(|e| self.ty_holds_shared_container(*e, depth + 1)),
+                .into_iter()
+                .any(|e| self.reaches_shared_container(e, seen)),
             // A fixed array or vector reaches its elements the way a tuple
             // reaches its own, so one holding a table needs the same deep
             // copy - the compiled tiers give a cloned vector's map elements
             // tables of their own for the same reason.
             Some(TyKind::Array { elem, .. } | TyKind::Vec(elem)) => {
-                self.ty_holds_shared_container(*elem, depth + 1)
+                let elem = *elem;
+                self.reaches_shared_container(elem, seen)
             }
             _ => false,
         }
@@ -642,6 +664,26 @@ impl<'tcx> FnBuilder<'tcx> {
                 ..
             } if hir_place_root_is(receiver, name)
                 && self.method_writes_receiver(receiver, method) =>
+            {
+                found = true;
+            }
+            // A `&mut` handed on to a call is written by the callee.
+            HirExprKind::Call { args, .. }
+                if args.iter().any(|arg| {
+                    let reborrowed = matches!(&arg.kind, HirExprKind::Unary {
+                        op: gossamer_hir::HirUnaryOp::RefMut,
+                        operand,
+                    } if hir_place_root_is(operand, name));
+                    let passed = hir_place_root_is(arg, name)
+                        && matches!(
+                            self.tcx.kind_of(arg.ty),
+                            gossamer_types::TyKind::Ref {
+                                mutability: gossamer_types::Mutbl::Mut,
+                                ..
+                            }
+                        );
+                    reborrowed || passed
+                }) =>
             {
                 found = true;
             }

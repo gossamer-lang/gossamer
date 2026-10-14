@@ -215,7 +215,7 @@ fn run_one_inner(target: &BenchTarget) -> Result<BenchRecord> {
     let source = read_source(&target.file)?;
     let mut map = gossamer_lex::SourceMap::new();
     let file_id = map.add_file(target.file.to_string_lossy().into_owned(), source.clone());
-    let (program, _sf, tcx) = load_and_check_with_sf(&source, file_id, &map)?;
+    let (program, _sf, tcx) = load_and_check_with_sf(&source, file_id, &map, None)?;
     let mut vm = gossamer_interp::Vm::new();
     // A benchmark run enters the one function it times, so that is the body
     // the promotion snapshot is built around.
@@ -311,7 +311,7 @@ fn collect_bench_names(file: &Path) -> Result<Vec<String>> {
     let source = read_source(file)?;
     let mut map = gossamer_lex::SourceMap::new();
     let file_id = map.add_file(file.to_string_lossy().into_owned(), source.clone());
-    let (_program, sf, _tcx) = load_and_check_with_sf(&source, file_id, &map)?;
+    let (_program, sf, _tcx) = load_and_check_with_sf(&source, file_id, &map, None)?;
     let mut names = Vec::new();
     collect_selected_fn_names(&sf.items, &|item| item_has_attr(item, "bench"), &mut names);
     Ok(names)

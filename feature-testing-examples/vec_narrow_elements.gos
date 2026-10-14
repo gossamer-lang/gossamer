@@ -1,0 +1,318 @@
+// Sequences of narrow scalars - `i8`, `i16`, `u16`, `i32`, `u32`, `char` -
+// keep their values through every way a sequence is built, read, written,
+// searched, ordered, formatted, and serialized, on every tier. Signed
+// elements come back with their sign and unsigned ones above the signed
+// range come back whole.
+
+use std::encoding::json
+use std::sort
+
+struct Ids {
+    ids: Vec<i32>
+    small: Vec<u16>
+    weights: Vec<f32>
+}
+
+struct Holder {
+    ids: Vec<i32>
+    fixed: [i16; 3]
+    tag: char
+}
+
+fn sum_i32(xs: [i32]) -> i64 {
+    let mut total = 0
+    for x in xs {
+        total += x as i64
+    }
+    total
+}
+
+fn bump_all(xs: &mut [i16]) {
+    for i in 0..xs.len() {
+        xs[i] = xs[i] - 1
+    }
+}
+
+fn build_u32(n: i64) -> Vec<u32> {
+    let mut out: Vec<u32> = Vec::with_capacity(n)
+    for i in 0..n {
+        out.push((4_000_000_000 - i * 1_000_000_000) as u32)
+    }
+    out
+}
+
+fn count_where(xs: [i8], keep: Fn(i8) -> bool) -> i64 {
+    let mut n = 0
+    for x in xs {
+        if keep(x) {
+            n += 1
+        }
+    }
+    n
+}
+
+fn widths() {
+    let a: Vec<i8> = #[-128, -1, 0, 1, 127]
+    let b: Vec<i16> = #[-32_768, -2, 0, 2, 32_767]
+    let c: Vec<u16> = #[0, 1, 40_000, 65_535]
+    let d: Vec<i32> = #[-2_147_483_648, -3, 0, 3, 2_147_483_647]
+    let e: Vec<u32> = #[0, 7, 3_000_000_000, 4_294_967_295]
+    let f: Vec<char> = #['a', 'Z', 'é', '😀']
+    println(f"literals: {a} {b} {c} {d} {e} {f}")
+    println(f"index: {a[0]} {b[1]} {c[2]} {d[0]} {e[3]} {f[3]}")
+    println(f"lens: {a.len()} {b.len()} {c.len()} {d.len()} {e.len()} {f.len()}")
+    println(f"negatives through a function value: {count_where(a, |x| x < 0)}")
+}
+
+fn construction() {
+    let mut pushed: Vec<i32> = Vec::new()
+    for i in 0..10 {
+        pushed.push(((i - 5) * 100_000) as i32)
+    }
+    println(f"pushed: {pushed}")
+    let collected: Vec<i16> = (0..6).map(|i| (i * -1000) as i16).collect()
+    println(f"collected: {collected}")
+    let mapped = pushed.map(|x| x / 100_000)
+    println(f"mapped: {mapped}")
+    let filtered = pushed.filter(|x| x < 0)
+    println(f"filtered: {filtered}")
+    let repeated: Vec<i8> = #[-7; 4]
+    println(f"repeated: {repeated}")
+    let caps = build_u32(5)
+    println(f"with_capacity: {caps}")
+    let arr: [i32; 4] = [-1, -2, 3, 4]
+    let from_arr = arr.to_vec()
+    println(f"to_vec: {from_arr} {arr}")
+    let chars: Vec<char> = "héllo".chars().collect()
+    println(f"chars: {chars}")
+    let cloned = pushed.clone()
+    println(f"cloned eq: {cloned == pushed}")
+}
+
+fn reads_and_writes() {
+    let mut v: Vec<i16> = #[10, -20, 30, -40, 50]
+    v[1] = -32_768
+    v[4] = v[4] - 51
+    println(f"set: {v} first {v.first()} last {v.last()} get {v.get(2)} miss {v.get(9)}")
+    let popped = v.pop()
+    println(f"pop: {popped} rest {v}")
+    if v.insert(0, -1).is_err() {
+        println("insert failed")
+    }
+    let removed = v.remove(2)
+    println(f"insert/remove: {v} {removed}")
+    v.swap(0, 1)
+    println(f"swap: {v}")
+    bump_all(&mut v)
+    println(f"bumped: {v}")
+    bump_all(&mut v[1..3])
+    println(f"window: {v}")
+    let view = v[1..4]
+    println(f"view: {view} len {view.len()}")
+    let mut total = 0
+    for x in v {
+        total += x as i64
+    }
+    for i in 0..v.len() {
+        total += v[i] as i64
+    }
+    println(f"iterated: {total}")
+    v.truncate(2)
+    v.extend(#[-9, 9])
+    println(f"extend: {v}")
+    v.clear()
+    println(f"clear: {v} {v.is_empty()}")
+}
+
+fn search_and_order() {
+    let mut v: Vec<i32> = #[5, -3, 2_147_483_647, -2_147_483_648, 0, -3]
+    println(f"contains: {v.contains(-3)} {v.contains(4)} {v.contains(-2_147_483_648)}")
+    println(f"index_of: {v.index_of(-3)} {v.index_of(9)}")
+    println(f"min/max: {v.min()} {v.max()} sum {v.map(|x| x as i64).sum()}")
+    v.sort()
+    println(f"sorted: {v}")
+    println(f"binary_search: {v.binary_search(0)} {v.binary_search(1)}")
+    v.reverse()
+    println(f"reversed: {v}")
+    v = v.dedup()
+    println(f"dedup: {v}")
+    v.sort_by_key(|x| -x)
+    println(f"sort_by_key: {v}")
+    let mut u: Vec<u32> = #[3_000_000_000, 5, 4_294_967_295, 0]
+    u.sort()
+    println(f"unsigned sort: {u} max {u.max()} min {u.min()}")
+    let mut w: Vec<u16> = #[65_535, 1, 40_000]
+    w.sort()
+    println(f"u16 sort: {w} contains {w.contains(40_000)}")
+    let mut s: Vec<i8> = #[1, -128, 127, -1]
+    s.sort()
+    println(f"i8 sort: {s}")
+    let mut cs: Vec<char> = #['z', 'a', '😀', 'é']
+    cs.sort()
+    println(f"char sort: {cs} contains {cs.contains('é')}")
+    let bytes: Vec<u8> = #[1, 3, 5, 7]
+    let shuffled: Vec<u8> = #[3, 1, 2]
+    println(f"bytes: {bytes.binary_search(5)} {sort::binary_search(bytes, 5)} {sort::sort_stable(shuffled)} {sort::partition_point(bytes, 4)}")
+    let joined = v.map(|x| f"<{x}>").join(",")
+    println(f"joined: {joined}")
+    println(f"any/all: {v.any(|x| x < 0)} {v.all(|x| x < 0)} position {v.position(|x| x == 0)}")
+}
+
+fn equality_and_keys() {
+    let a: Vec<i32> = #[-1, 2, -3]
+    let mut b: Vec<i32> = Vec::new()
+    b.push(-1)
+    b.push(2)
+    b.push(-3)
+    println(f"eq: {a == b} lt: {a < #[-1, 2, 0]}")
+    let mut counts: Map<Vec<i16>, i64> = Map::new()
+    counts.inc(#[-1, 1])
+    counts.inc(#[-1, 1])
+    let key: Vec<i16> = #[-1, 1]
+    println(f"map key: {counts[key]}")
+    let seen: Set<i32> = #{ -5, 5 }
+    let mut members = seen.to_vec()
+    members.sort()
+    println(f"set to_vec: {members}")
+    let mut by_char: Map<char, Vec<i32>> = Map::new()
+    by_char.or_insert('x', #[])
+    by_char['x'].push(-42)
+    println(f"map value: {by_char['x']}")
+}
+
+fn runtime_built() {
+    // Sequences a runtime shim builds, mixed with ones compiled code packs.
+    let mut m: Map<i32, i64> = Map::new()
+    m[-7] = 1
+    m[3] = 2
+    m[-1] = 3
+    let mut keys = m.keys()
+    keys.sort()
+    println(f"keys: {keys} contains {keys.contains(-7)} eq {keys == #[-7, -1, 3]}")
+    let mut packed: Vec<i32> = #[100]
+    packed.extend(keys)
+    println(f"extend mixed: {packed}")
+    let mut counts: Map<Vec<i32>, i64> = Map::new()
+    counts.inc(keys)
+    counts.inc(#[-7, -1, 3])
+    println(f"mixed key: {counts.len()} {counts[#[-7, -1, 3]]}")
+    let s: Set<i16> = #{ -300, 7 }
+    let mut members = s.to_vec()
+    members.sort()
+    println(f"members: {members} max {members.max()}")
+    let v: Vec<i16> = #[-4, -3, -2, -1, 0, 1, 2]
+    let chunks = v.chunks(3)
+    let windows = v.windows(2)
+    println(f"chunks: {chunks} windows {windows.len()} first {windows[0]}")
+    println(f"step/take/skip: {v.iter().step_by(2).collect::<Vec<i16>>()} {v.iter().take(2).collect::<Vec<i16>>()} {v.iter().skip(5).collect::<Vec<i16>>()}")
+    let nested: Vec<Vec<i8>> = #[#[-1, -2], #[3]]
+    println(f"flatten: {nested.flatten()}")
+    let mut rev = v.iter().rev().collect::<Vec<i16>>()
+    rev.sort()
+    println(f"rev sorted: {rev} index {rev.index_of(-4)}")
+}
+
+fn scaled(xs: [f32], k: f32) -> Vec<f32> {
+    let mut out: Vec<f32> = Vec::with_capacity(xs.len())
+    for x in xs {
+        out.push(x * k)
+    }
+    out
+}
+
+fn floats() {
+    let a: f32 = 0.1
+    let mut v: Vec<f32> = #[a, a * 3.0, 1.0 / 3.0, -0.0, 16_777_217.0]
+    println(f"f32 literal: {v} {v[1] == a * 3.0} {v[2] as f64}")
+    v[0] = v[0] + 0.2
+    v.push(2.5)
+    println(f"f32 set/push: {v[0]} {v.last()} {v.len()} {v.pop()}")
+    let mut total: f32 = 0.0
+    for x in v {
+        total += x
+    }
+    for i in 0..v.len() {
+        total += v[i]
+    }
+    println(f"f32 iterate: {total}")
+    let doubled = v.map(|x| x * 2.0)
+    let kept = v.filter(|x| x > 0.2)
+    println(f"f32 map/filter: {doubled} {kept}")
+    let mut sorted = v.clone()
+    sorted.sort()
+    println(f"f32 sort: {sorted} contains {sorted.contains(0.5)} max {sorted.max()}")
+    let s = scaled(#[1.5, -2.25], 2.0)
+    println(f"f32 built in a loop: {s} {s[1]}")
+    let repeated: Vec<f32> = #[0.1; 3]
+    let collected: Vec<f32> = (0..4).map(|i| (i as f32) * 0.5).collect()
+    println(f"f32 repeat/collect: {repeated} {collected}")
+    let mut grown: Vec<f32> = #[1.0]
+    grown.extend(collected)
+    if grown.insert(1, -1.5).is_err() {
+        println("insert failed")
+    }
+    println(f"f32 extend/insert: {grown} {grown:?}")
+    let mut by: Map<Vec<f32>, i64> = Map::new()
+    by.inc(#[0.5, -1.0])
+    by.inc(#[0.5, -1.0])
+    println(f"f32 key: {by.len()} {grown == #[1.0, -1.5, 0.0, 0.5, 1.0, 1.5]}")
+}
+
+fn nested_and_aggregates() {
+    let mut adj: Vec<Vec<i32>> = #[#[], #[], #[]]
+    adj[0].push(1)
+    adj[0].push(2)
+    adj[2].push(-7)
+    let mut walked = 0
+    for row in adj {
+        for x in row {
+            walked += x as i64
+        }
+    }
+    println(f"adjacency: {adj} walked {walked} sum0 {sum_i32(adj[0])}")
+    let h = Holder { ids: #[-1, 70_000], fixed: [-1, 0, 1], tag: 'q' }
+    let mut copy = h.ids.clone()
+    copy.push(-2)
+    println(f"holder: {h.ids} {h.fixed} {h.tag} {copy}")
+    let pairs: Vec<(i16, char)> = #[(-1, 'a'), (2, 'b')]
+    println(f"pairs: {pairs}")
+    let fixed = h.fixed.to_vec()
+    println(f"fixed to_vec: {fixed} sum {sum_i32(#[1, -2, 3])}")
+}
+
+fn serialization() {
+    let v: Vec<i32> = #[-1, 0, 2_147_483_647]
+    let wrapped = Ids { ids: v.clone(), small: #[65_535, 0], weights: #[0.1, -2.5] }
+    let text = json::encode(wrapped)
+    println(f"json: {text}")
+    match json::decode::<Ids>(text) {
+        Ok(back) => println(f"decoded: {back.ids} {back.small} {back.weights} {back.ids == v}")
+        Err(e) => println(f"decode failed: {e}")
+    }
+    let h = Holder { ids: #[-9], fixed: [1, -1, 0], tag: 'z' }
+    println(f"debug: {h.ids:?} {v:?}")
+}
+
+fn joins() {
+    let a: Vec<i8> = #[-1, 2, -128]
+    let b: Vec<i16> = #[-300, 7]
+    let c: Vec<i32> = #[-70000, 5]
+    let d: Vec<u32> = #[4000000000, 1]
+    let e: Vec<char> = #['h', '\u{e9}']
+    let f: Vec<f32> = #[0.1, -2.5]
+    let g: Vec<u16> = #[65535, 0]
+    println(f"joins: {a.join(",")} {b.join(",")} {c.join(",")} {d.join(",")} {e.join(",")} {f.join(",")} {g.join(",")}")
+}
+
+fn main() {
+    widths()
+    construction()
+    reads_and_writes()
+    search_and_order()
+    equality_and_keys()
+    runtime_built()
+    floats()
+    nested_and_aggregates()
+    serialization()
+    joins()
+}

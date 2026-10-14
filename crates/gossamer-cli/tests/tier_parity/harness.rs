@@ -715,6 +715,10 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/from_json_infer.gos"),
     // Auto-derived serde over Option / tuple / Vec / nested-struct fields.
     spec("feature-testing-examples/serde_more_field_kinds.gos"),
+    spec("feature-testing-examples/serde_typed_reader.gos"),
+    // Sequences of narrow integers and chars keep each element's sign and
+    // range through construction, closures, search, order, and serde.
+    spec("feature-testing-examples/vec_narrow_elements.gos"),
     // The inline Option/Result enum payload crosses fn boundaries as i128;
     // combined with wide shifts and comparisons this pins the i128 ABI and
     // instruction lowering bit-identically across tiers (the aarch64 backend
@@ -1671,6 +1675,27 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/stdlib_archive.gos"),
     spec("feature-testing-examples/frame_array_views.gos"),
     spec("feature-testing-examples/map_slice_keys.gos"),
+    spec("feature-testing-examples/map_slice_key_lookups.gos"),
+    spec("feature-testing-examples/string_byte_views.gos"),
+    spec("feature-testing-examples/vec_range_copies.gos"),
+    spec("feature-testing-examples/json_parsed_reads.gos"),
+    spec("feature-testing-examples/csv_indexed_reads.gos"),
+    spec("feature-testing-examples/unicode_xid.gos"),
+    spec("feature-testing-examples/imported_type_shadows_builtin.gos"),
+    spec("feature-testing-examples/shared_struct_variant_names.gos"),
+    spec("feature-testing-examples/returned_tuple_option_fields.gos"),
+    spec("feature-testing-examples/packed_nested_struct_jit.gos"),
+    spec("feature-testing-examples/vec_copies_into_holders.gos"),
+    spec("feature-testing-examples/vec_elem_option_one_field_struct.gos"),
+    spec("feature-testing-examples/deeply_nested_map_copy.gos"),
+    spec("feature-testing-examples/mut_enum_payload_writes.gos"),
+    spec("feature-testing-examples/closure_capture_writes.gos"),
+    spec("feature-testing-examples/arena_local_sink_calls.gos"),
+    spec("feature-testing-examples/const_string_tables.gos"),
+    spec("feature-testing-examples/aggregate_option_fields_at_entry.gos"),
+    spec("feature-testing-examples/enum_carrier_payloads.gos"),
+    spec("feature-testing-examples/region_vec_clone.gos"),
+    spec("feature-testing-examples/enum_struct_variant_guarded_fields.gos"),
     spec("feature-testing-examples/struct_update_base.gos"),
     spec("feature-testing-examples/at_binding_subpattern.gos"),
     spec("feature-testing-examples/scheduler_drain.gos"),

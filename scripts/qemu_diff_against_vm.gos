@@ -108,7 +108,7 @@ fn main() {
     }
     let bins_root = args[0]
     let root = repo_root()
-    let gos = env::var("GOS_BIN").unwrap_or(path::join(root, "target/debug/gos"))
+    let gos = env::var("GOS_BIN").unwrap_or(path::join(target_dir(root), "debug/gos"))
     let list = match fs::read_to_string(path::join(root, FIXTURE_LIST)) {
         Ok(text) => text
         Err(e) => {
@@ -175,4 +175,11 @@ fn main() {
     if failed {
         process::exit(1)
     }
+}
+
+/// Where `cargo build` writes: `CARGO_TARGET_DIR` when set, taken relative to
+/// `root` unless absolute, else `<root>/target`.
+fn target_dir(root: String) -> String {
+    let dir = env::var("CARGO_TARGET_DIR").unwrap_or("target")
+    if path::is_absolute(dir) { dir } else { path::join(root, dir) }
 }

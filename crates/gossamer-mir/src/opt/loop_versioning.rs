@@ -655,9 +655,8 @@ fn index_is_counter(body: &Body, region: &[usize], counter: Local, op: &Operand)
 }
 
 /// Element kind of `xs` is a single-slot scalar safe for the unchecked
-/// i64-shaped path: integer, bool, char, or `f64` (all read/written as an
-/// 8-byte or 1-byte word by the unchecked inline). Excludes RC-managed
-/// elements and `f32` (a 4-byte slot the word/byte inline does not cover).
+/// i64-shaped path: integer, bool, char, or float, each read and written at
+/// the width the vector's header records. Excludes RC-managed elements.
 fn vec_elem_is_unchecked_scalar(body: &Body, tcx: &TyCtxt, xs: Local) -> bool {
     let mut ty = body.local_ty(xs);
     if let TyKind::Ref { inner, .. } = tcx.kind_of(ty) {
@@ -669,7 +668,7 @@ fn vec_elem_is_unchecked_scalar(body: &Body, tcx: &TyCtxt, xs: Local) -> bool {
     };
     matches!(
         tcx.kind_of(elem),
-        TyKind::Int(_) | TyKind::Bool | TyKind::Char | TyKind::Float(gossamer_types::FloatTy::F64)
+        TyKind::Int(_) | TyKind::Bool | TyKind::Char | TyKind::Float(_)
     )
 }
 

@@ -21,6 +21,7 @@ musl = []
 
 [dependencies]
 anyhow = { workspace = true }
+gossamer-abi = { workspace = true }
 gossamer-ast = { workspace = true }
 gossamer-codegen-cranelift = { workspace = true }
 gossamer-codegen-llvm = { workspace = true }

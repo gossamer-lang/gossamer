@@ -128,6 +128,12 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
          in `stdlib_builtins/crypto*.rs` over the same crates",
     ),
     (
+        "gos_rt_csv_table*",
+        "the compiled tiers read `csv::read`'s answer as a table of field spans \
+         when the program only indexes it; the VM runs `csv::read` itself and \
+         indexes the rows it answers",
+    ),
+    (
         "gos_rt_ctx_*",
         "the VM implements `context` in `stdlib_builtins/context.rs` on the same \
          cancellation tree these shims reach",
@@ -452,6 +458,11 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
     (
         "gos_rt_regex_*",
         "the VM compiles and matches patterns in `regex_builtins.rs`",
+    ),
+    (
+        "gos_rt_retain_held",
+        "the VM's values are counted by `Arc`, and an `arena` block's values are \
+         ordinary VM values that a node holding one keeps alive by its own `Arc`",
     ),
     (
         "gos_rt_result_*",

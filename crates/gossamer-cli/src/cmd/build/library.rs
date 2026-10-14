@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
-use gossamer_pkg::LibKind;
+use gossamer_pkg::{LibKind, LibRuntime};
 
 use super::c_header::{self, Export};
 use super::{
@@ -32,6 +32,7 @@ pub(super) struct LibraryTarget {
     /// with `-` written `_`.
     name: String,
     kinds: Vec<LibKind>,
+    runtime: LibRuntime,
 }
 
 /// The library build `file` is the entry of, when its manifest's `[lib]`
@@ -72,6 +73,7 @@ pub(super) fn target_for(file: &Path) -> Result<Option<LibraryTarget>> {
     Ok(Some(LibraryTarget {
         name,
         kinds: lib.kind.clone(),
+        runtime: lib.runtime,
     }))
 }
 
@@ -96,12 +98,14 @@ pub(super) fn build(file: &Path, request: &BuildRequest<'_>, target: &LibraryTar
         (unit.entry.as_path(), unit.origins.as_slice()),
     )?;
     let exports = library_exports(&sf, file, &target.name)?;
+    let host = target.runtime == LibRuntime::Host;
+    if host {
+        check_host_runtime_target(target, &lt)?;
+        gossamer_codegen_llvm::set_library_host_runtime(gossamer_abi::registry_fingerprint());
+    }
     let header = c_header::render(&sf, &exports, &target.name);
     let links = gossamer_driver::foreign_link_libraries(&sf, program_end);
-    let libraries = NativeLinks {
-        search: crate::paths::foreign_search_dirs(file, &links),
-        libraries: links.libraries,
-    };
+    let mut libraries = NativeLinks::foreign(file, links);
     let out_dir = output_dir(file, opts.release)?;
     let tmp_dir = std::env::temp_dir().join(format!(
         "gos-build-{}-lib{}",
@@ -126,22 +130,8 @@ pub(super) fn build(file: &Path, request: &BuildRequest<'_>, target: &LibraryTar
             checked,
             &mut timings,
         )?;
-        let runtime = if lt.is_cross {
-            find_runtime_lib_for_target(&lt.triple)?
-        } else {
-            find_runtime_lib()?
-        };
-        let native =
-            crate::native_sources::archives(file, lt.is_cross.then_some(lt.triple.as_str()))
-                .map_err(|err| NativeBuildError::BackendFailed(format!("{err:#}")))?;
-        let native: Vec<PathBuf> = native
-            .archives
-            .into_iter()
-            .map(|archive| archive.path)
-            .collect();
-        let bindings_target = lt.is_cross.then_some(lt.triple.as_str());
-        let bindings = build_static_bindings_lib(file, opts.release, bindings_target)
-            .map_err(|err| NativeBuildError::LinkerMissing(format!("rust-bindings: {err}")))?;
+        let (runtime, native, bindings) =
+            link_inputs(file, host, &lt, opts.release, &mut libraries)?;
         let parts = Parts {
             lt: &lt,
             objects: &objects,
@@ -158,6 +148,7 @@ pub(super) fn build(file: &Path, request: &BuildRequest<'_>, target: &LibraryTar
             let path = out_dir.join(artifact_file_name(&target.name, *kind, lt.os));
             ensure_output_dir(&path)?;
             match kind {
+                LibKind::Staticlib if host => host_archive(&parts, &target.name, &path)?,
                 LibKind::Staticlib => archive(&parts, &path)?,
                 LibKind::Cdylib => shared(&parts, &target.name, &path)?,
             }
@@ -175,6 +166,64 @@ pub(super) fn build(file: &Path, request: &BuildRequest<'_>, target: &LibraryTar
     if request.timings {
         timings.total = started.elapsed();
         timings.print(false);
+    }
+    Ok(())
+}
+
+/// What a library's artifacts link besides its own objects: the runtime
+/// archive (none for a host-runtime library, which resolves against its
+/// host's), the archives of its native sources, and its `[rust-bindings]`
+/// archive.
+fn link_inputs(
+    file: &Path,
+    host: bool,
+    lt: &LinkTarget,
+    release: bool,
+    libraries: &mut NativeLinks,
+) -> std::result::Result<(PathBuf, Vec<PathBuf>, Option<PathBuf>), NativeBuildError> {
+    let runtime = if host {
+        PathBuf::new()
+    } else if lt.is_cross {
+        find_runtime_lib_for_target(&lt.triple)?
+    } else {
+        find_runtime_lib()?
+    };
+    let native = crate::native_sources::archives(file, lt.is_cross.then_some(lt.triple.as_str()))
+        .map_err(|err| NativeBuildError::BackendFailed(format!("{err:#}")))?;
+    let native: Vec<PathBuf> = native
+        .archives
+        .into_iter()
+        .map(|archive| archive.path)
+        .collect();
+    let bindings_target = lt.is_cross.then_some(lt.triple.as_str());
+    let bindings = build_static_bindings_lib(file, release, bindings_target, libraries)
+        .map_err(|err| NativeBuildError::LinkerMissing(format!("rust-bindings: {err}")))?;
+    if host && bindings.is_some() {
+        return Err(NativeBuildError::BackendFailed(
+            "a host-runtime library cannot carry `[rust-bindings]`: their archive bundles \
+             a runtime of its own"
+                .to_string(),
+        ));
+    }
+    Ok((runtime, native, bindings))
+}
+
+/// Refuses a host-runtime library its host could not link: one that is not
+/// only a static archive, or one for a platform whose objects this build
+/// cannot merge and hide symbols in.
+fn check_host_runtime_target(target: &LibraryTarget, lt: &LinkTarget) -> Result<()> {
+    if target.kinds != [LibKind::Staticlib] {
+        return Err(anyhow!(
+            "build: a `runtime = \"host\"` library is a static archive alone; a shared \
+             library carries a runtime of its own"
+        ));
+    }
+    if !matches!(lt.os, TargetOs::Linux | TargetOs::MacOs) {
+        return Err(anyhow!(
+            "build: a `runtime = \"host\"` library is built for Linux and macOS hosts; `{}` is \
+             neither",
+            lt.triple
+        ));
     }
     Ok(())
 }
@@ -236,7 +285,12 @@ fn report(
         println!("build: {size}B library at {}", path.display());
     }
     println!("build: C header at {}", header_path.display());
-    if target.kinds.contains(&LibKind::Staticlib) {
+    if target.runtime == LibRuntime::Host {
+        println!(
+            "build: the archive calls the runtime of its host, which must link the Gossamer \
+             runtime and check `gos_lib_abi_fingerprint` before calling in"
+        );
+    } else if target.kinds.contains(&LibKind::Staticlib) {
         println!(
             "build: link the archive with: {}",
             static_link_libraries(lt, libraries).join(" ")
@@ -290,6 +344,7 @@ fn static_link_libraries(lt: &LinkTarget, libraries: &NativeLinks) -> Vec<String
             format!("-l{library}")
         });
     }
+    flags.extend(libraries.staticlib_args.iter().cloned());
     let system: &[&str] = match lt.os {
         TargetOs::Linux => &["-lpthread", "-ldl", "-lm"],
         TargetOs::Windows if cfg!(target_env = "msvc") => &[
@@ -378,6 +433,110 @@ fn archive(parts: &Parts<'_>, out: &Path) -> std::result::Result<(), NativeBuild
         }
         _ => mri_archive(parts, out),
     }
+}
+
+/// Writes a host-runtime archive: the library's objects and its `[native]`
+/// sources merged into one object whose only global definitions are the C
+/// entry points - the `#[export]` functions, `<name>_shutdown`, and
+/// `gos_lib_abi_fingerprint` - so nothing else it defines can meet a symbol
+/// of its host. Its `gos_rt_*` references stay undefined for the host's
+/// runtime to answer.
+fn host_archive(
+    parts: &Parts<'_>,
+    name: &str,
+    out: &Path,
+) -> std::result::Result<(), NativeBuildError> {
+    let io = |what: &str, path: &Path, err: std::io::Error| {
+        NativeBuildError::Io(anyhow!("{what} {}: {err}", path.display()))
+    };
+    let staged = parts.tmp_dir.join("host-archive");
+    fs::create_dir_all(&staged).map_err(|e| io("creating", &staged, e))?;
+    let merged = staged.join(format!("{name}.o"));
+    let mut entries: Vec<String> = parts.exports.iter().map(|e| e.symbol.clone()).collect();
+    entries.push(format!("{name}_shutdown"));
+    entries.push("gos_lib_abi_fingerprint".to_string());
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let mut link = std::process::Command::new(&cc);
+    link.arg("-r").arg("-nostdlib").arg("-o").arg(&merged);
+    link.args(parts.objects);
+    if parts.lt.os == TargetOs::MacOs {
+        // ld64 keeps only the listed symbols global in a relocatable link.
+        let list = staged.join("entries.txt");
+        let names: Vec<String> = entries.iter().map(|s| format!("_{s}")).collect();
+        fs::write(&list, names.join("\n")).map_err(|e| io("writing", &list, e))?;
+        for native in parts.native {
+            link.arg(format!("-Wl,-force_load,{}", native.display()));
+        }
+        link.arg(format!("-Wl,-exported_symbols_list,{}", list.display()));
+        run_tool(link)?;
+    } else {
+        if !parts.native.is_empty() {
+            link.arg("-Wl,--whole-archive");
+            link.args(parts.native);
+            link.arg("-Wl,--no-whole-archive");
+        }
+        run_tool(link)?;
+        // Weak and COMDAT definitions, such as the personality reference
+        // every object with unwind tables carries, stay global so the link
+        // can merge them with the host's copies.
+        let strong = strong_global_definitions(&merged)?;
+        let hidden: Vec<&String> = strong.iter().filter(|s| !entries.contains(s)).collect();
+        // A response file rather than `--localize-symbols`, whose list
+        // syntax reads `#` as a comment: a generic body's symbol holds one.
+        let list = staged.join("localize.rsp");
+        let args: Vec<String> = hidden
+            .iter()
+            .map(|name| {
+                let quoted = name.replace('\\', "\\\\").replace('"', "\\\"");
+                format!("\"--localize-symbol={quoted}\"")
+            })
+            .collect();
+        fs::write(&list, args.join("\n")).map_err(|e| io("writing", &list, e))?;
+        let objcopy = std::env::var("OBJCOPY").unwrap_or_else(|_| "objcopy".to_string());
+        let mut hide = std::process::Command::new(objcopy);
+        hide.arg(format!("@{}", list.display()));
+        hide.arg(&merged);
+        run_tool(hide)?;
+    }
+    let _ = fs::remove_file(out);
+    let mut pack = if parts.lt.os == TargetOs::MacOs {
+        let mut cmd = std::process::Command::new("libtool");
+        cmd.arg("-static").arg("-o").arg(out);
+        cmd
+    } else {
+        let mut cmd =
+            std::process::Command::new(std::env::var("AR").unwrap_or_else(|_| "ar".to_string()));
+        cmd.arg("rcs").arg(out);
+        cmd
+    };
+    pack.arg(&merged);
+    run_tool(pack)
+}
+
+/// The symbols `object` defines globally and not weakly.
+fn strong_global_definitions(object: &Path) -> std::result::Result<Vec<String>, NativeBuildError> {
+    let nm = std::env::var("NM").unwrap_or_else(|_| "nm".to_string());
+    let mut cmd = std::process::Command::new(&nm);
+    cmd.args(["--defined-only", "-P"]).arg(object);
+    trace_link_command(&cmd);
+    let out = cmd
+        .output()
+        .map_err(|err| NativeBuildError::LinkerMissing(format!("{nm}: {err}")))?;
+    if !out.status.success() {
+        return Err(NativeBuildError::LinkerFailed(format!(
+            "{nm} exited with {}",
+            out.status
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let name = fields.next()?;
+            let kind = fields.next()?;
+            matches!(kind, "T" | "D" | "B" | "R" | "C" | "G" | "S").then(|| name.to_string())
+        })
+        .collect())
 }
 
 /// Merges archives with an `ar` MRI script, which keeps members of the same
@@ -491,6 +650,7 @@ fn shared(parts: &Parts<'_>, name: &str, out: &Path) -> std::result::Result<(), 
     for library in &parts.libraries.libraries {
         cmd.arg(format!("-l{library}"));
     }
+    cmd.args(&parts.libraries.staticlib_args);
     cmd.arg("-o").arg(out);
     cmd.arg("-lpthread");
     if parts.lt.os == TargetOs::Linux {
@@ -559,6 +719,7 @@ fn shared_msvc(
     for library in &parts.libraries.libraries {
         cmd.arg(format!("{library}.lib"));
     }
+    cmd.args(&parts.libraries.staticlib_args);
     for lib in super::MSVC_SYSTEM_LIBRARIES {
         cmd.arg(lib);
     }

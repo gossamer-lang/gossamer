@@ -280,7 +280,7 @@ unsafe fn meta_names_map_child(meta: *const i64) -> bool {
     // SAFETY: `meta` is non-null (checked above) and, per this `unsafe fn`'s contract, a
     // well-formed meta table, which the variant and child counts it records keep this read
     // inside.
-    if unsafe { *meta } == gossamer_abi::rc::RC_KIND_SLOT_CHILDREN {
+    if gossamer_abi::rc::rc_kind(unsafe { *meta }) == gossamer_abi::rc::RC_KIND_SLOT_CHILDREN {
         use crate::c_abi::vec::vec_elem_kind;
         // SAFETY: `meta` is non-null (checked above) and, per this `unsafe fn`'s contract, a
         // well-formed meta table, which the variant and child counts it records keep this read
@@ -306,7 +306,7 @@ unsafe fn meta_names_map_child(meta: *const i64) -> bool {
     // SAFETY: `meta` is non-null (checked above) and, per this `unsafe fn`'s contract, a
     // well-formed meta table, which the variant and child counts it records keep this read
     // inside.
-    if unsafe { *meta } != RC_KIND_STRUCT {
+    if gossamer_abi::rc::rc_kind(unsafe { *meta }) != RC_KIND_STRUCT {
         return false;
     }
     // SAFETY: `meta` is non-null (checked above) and, per this `unsafe fn`'s contract, a
@@ -579,7 +579,7 @@ unsafe fn heap_blob_from(
 unsafe fn retain_blob_children(payload: *mut u8, meta: *const i64) {
     // SAFETY: this `unsafe fn`'s caller passes `payload` laid out as `meta` describes.
     unsafe {
-        if *meta == gossamer_abi::rc::RC_KIND_STRUCT_GUARDED {
+        if gossamer_abi::rc::rc_kind(*meta) == gossamer_abi::rc::RC_KIND_STRUCT_GUARDED {
             visit_guarded_children(payload, meta, |child| {
                 gos_rt_rc_retain(child);
             });
@@ -610,8 +610,12 @@ pub(crate) unsafe fn boxed_carrier_child_kind(payload: *mut u8) -> Option<i64> {
     // (this `unsafe fn`'s caller).
     let meta = unsafe { meta_of(header_ptr(payload)) };
     // `[RC_KIND_STRUCT, variants, disc, child_count, entry..]`.
-    // SAFETY: `meta` is non-null (checked first), a meta table of at least a variant header.
-    if meta.is_null() || unsafe { *meta } != RC_KIND_STRUCT || unsafe { *meta.add(3) } != 1 {
+    if meta.is_null() {
+        return None;
+    }
+    // SAFETY: `meta` is non-null (checked above), a meta table of at least a variant header.
+    let (kind, child_count) = unsafe { (*meta, *meta.add(3)) };
+    if gossamer_abi::rc::rc_kind(kind) != RC_KIND_STRUCT || child_count != 1 {
         return None;
     }
     // SAFETY: a one-child struct meta holds its entry at word 4.
@@ -728,6 +732,128 @@ pub unsafe extern "C" fn gos_rt_enum_box_aggr(
         clone_map_children(payload);
     }
     payload
+}
+
+/// Heap-box a multi-slot aggregate the way [`gos_rt_enum_box_aggr`] does, for
+/// a source that hands the box its own share of every child: the source is
+/// read for the last time here and its child words are zeroed after the call,
+/// so the box takes the counts the source held instead of minting new ones.
+///
+/// Inside a `region { … }` the box is region storage, which holds its
+/// children without a count. The shares the source handed over then live in a
+/// cell of their own that the region gives back at pop, the point the box's
+/// storage goes away.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_enum_box_aggr_take(
+    size: u64,
+    meta: *const i64,
+    src: *const u8,
+) -> *mut u8 {
+    if region_active() {
+        // SAFETY: the arguments are this shim's own, passed through (C-ABI contract).
+        let boxed = unsafe { gos_rt_enum_box_aggr(size, meta, src) };
+        if src.is_null() || meta.is_null() {
+            return boxed;
+        }
+        // SAFETY: `meta` is a live meta table (C-ABI contract).
+        let shares = unsafe { rc_alloc_global(size, meta) };
+        if !shares.is_null() {
+            // SAFETY: `shares` is a fresh block of `size` bytes, and `src` is this shim's
+            // `size`-byte argument (C-ABI contract).
+            unsafe { std::ptr::copy_nonoverlapping(src, shares, size as usize) };
+            // A child the region allocated carries no count, so the cell keeps
+            // and gives back only the shares of children on the heap.
+            // SAFETY: `shares` is the live cell just filled, laid out as `meta` describes, and
+            // each slot the walk hands over is a child word inside it.
+            unsafe {
+                visit_entry_slots(shares, |_, slot, child| {
+                    if !slot.is_null() && in_region_arena(child) {
+                        slot.cast::<u64>().write_unaligned(0);
+                    }
+                });
+            }
+            region_release_at_pop(shares);
+        }
+        return boxed;
+    }
+    // SAFETY: `meta` is this shim's argument, null or a live meta table (C-ABI contract).
+    let payload = unsafe { gos_rt_rc_alloc(size, meta) };
+    if payload.is_null() || src.is_null() {
+        return payload;
+    }
+    // SAFETY: `payload` is a fresh block of `size` bytes, and `src` is this shim's `size`-byte
+    // argument (C-ABI contract).
+    unsafe { std::ptr::copy_nonoverlapping(src, payload, size as usize) };
+    payload
+}
+
+/// Makes the node `*slot` names one that slot alone holds, and each vector
+/// the node holds one the node alone holds, so a write through a `&mut` view
+/// of the node's payload reaches no other holder.
+///
+/// A node with another holder is copied: the slot takes a fresh node of
+/// `size` payload bytes carrying a share of every child, and the old node
+/// gives up the slot's share. A vector the node shares is replaced by a copy
+/// of its own the same way, since a write through the view reaches its
+/// storage. The slot's tag bits are kept.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_rc_make_unique(slot: *mut u64, size: u64) {
+    if slot.is_null() {
+        return;
+    }
+    // SAFETY: `slot` is this shim's argument, the live word a `&mut` names (C-ABI contract).
+    let word = unsafe { slot.read() };
+    let node = untag_rc(word as *mut u8);
+    if node.is_null() || is_odd_string_repr(node) || in_region_arena(node) {
+        return;
+    }
+    // SAFETY: `node` is the live counted node the slot holds.
+    let h = unsafe { header_ptr(node) };
+    // SAFETY: `h` is the header of the live node `node`.
+    let held_elsewhere = unsafe { strong_count(h) > 1 || is_shared(h) };
+    let node = if held_elsewhere {
+        // SAFETY: `h` is the header of the live node `node`.
+        let meta = unsafe { meta_of(h) };
+        // SAFETY: `meta` is the node's own meta table.
+        let copy = unsafe { rc_alloc_global(size, meta) };
+        if copy.is_null() {
+            return;
+        }
+        // SAFETY: both nodes hold `size` payload bytes, and the headers are live.
+        unsafe {
+            std::ptr::copy_nonoverlapping(node, copy, size as usize);
+            (*header_ptr(copy)).disc = (*h).disc;
+            visit_children_raw(copy, |c| {
+                gos_rt_rc_retain(c);
+            });
+            visit_vec_children(copy, |v| {
+                crate::c_abi::vec::vec_retain_header(v.cast());
+            });
+            retain_weak_children(copy);
+            clone_map_children(copy);
+            slot.write(copy as u64 | (word & 6));
+            gos_rt_rc_release(node);
+        }
+        copy
+    } else {
+        node
+    };
+    // SAFETY: `node` is the live node the slot alone holds now.
+    unsafe {
+        visit_entry_slots(node, |kind, at, child| {
+            if kind != gossamer_abi::rc::RC_CHILD_VEC || at.is_null() || child.is_null() {
+                return;
+            }
+            let vec = child.cast::<crate::c_abi::vec::GosVec>();
+            if (*vec).rc.load(std::sync::atomic::Ordering::Relaxed) <= 1 {
+                return;
+            }
+            let own = crate::c_abi::string::gos_rt_vec_clone(vec);
+            at.cast::<*mut crate::c_abi::vec::GosVec>()
+                .write_unaligned(own);
+            crate::c_abi::map::gos_rt_vec_free(vec);
+        });
+    }
 }
 
 /// Copy a by-value aggregate's slot bytes into the RC cell a `Weak` observes:

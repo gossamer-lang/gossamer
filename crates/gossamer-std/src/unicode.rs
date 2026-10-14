@@ -28,6 +28,20 @@ pub fn is_letter(r: char) -> bool {
     matches!(r.general_category_group(), GeneralCategoryGroup::Letter)
 }
 
+/// Returns `true` if `r` may begin an identifier: Unicode `XID_Start`
+/// (UAX #31), the rule Gossamer's own lexer applies, with `_` added.
+#[must_use]
+pub fn is_xid_start(r: char) -> bool {
+    r == '_' || unicode_ident::is_xid_start(r)
+}
+
+/// Returns `true` if `r` may continue an identifier: Unicode
+/// `XID_Continue` (UAX #31), the rule Gossamer's own lexer applies.
+#[must_use]
+pub fn is_xid_continue(r: char) -> bool {
+    unicode_ident::is_xid_continue(r)
+}
+
 /// Returns `true` if `r` is in category Nd (decimal digit) - covers
 /// ASCII `0`..`9`, Arabic-Indic `٠`..`٩`, Devanagari `०`..`९`, etc.
 #[must_use]

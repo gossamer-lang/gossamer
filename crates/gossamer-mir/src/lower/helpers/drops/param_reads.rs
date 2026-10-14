@@ -406,8 +406,17 @@ pub(crate) fn copy_stored_containers(body: &mut Body, tcx: &gossamer_types::TyCt
         let value_local = value.local;
         let decl = &body.locals[value_local.0 as usize];
         // A binding or a parameter names a value something else can still
-        // reach; a temporary the lowering made for this store does not.
-        if decl.debug_name.is_none() || decl.region {
+        // reach, and so does a temporary read out of another place; a
+        // temporary the lowering built for this store does not.
+        if decl.debug_name.is_none()
+            && !super::holder_copies::source_outlives_store(
+                body,
+                tcx,
+                value_local,
+                (bi, body.blocks[bi].stmts.len()),
+                false,
+            )
+        {
             continue;
         }
         let mut container = body.locals[receiver.local.0 as usize].ty;
@@ -451,12 +460,13 @@ pub(crate) fn copy_stored_containers(body: &mut Body, tcx: &gossamer_types::TyCt
         } else {
             elem
         };
+        let in_region = decl.region;
         let copy = Local(u32::try_from(body.locals.len()).expect("local overflow"));
         body.locals.push(crate::ir::LocalDecl {
             ty: copy_ty,
             debug_name: None,
             mutable: false,
-            region: false,
+            region: in_region,
         });
         let store_id = BlockId(u32::try_from(body.blocks.len()).expect("block overflow"));
         let block = &mut body.blocks[bi];

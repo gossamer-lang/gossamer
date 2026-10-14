@@ -1,0 +1,12 @@
+// `unicode::is_xid_start` and `unicode::is_xid_continue` classify a
+// character as Gossamer's own lexer does for identifiers: Unicode
+// XID_Start (with `_`) and XID_Continue.
+
+use std::unicode
+
+fn main() {
+    let cs = ['a', '_', '1', '\u{e9}', '\u{540d}', ' ', '-', '\u{300}', '\u{1d7d8}']
+    for c in cs {
+        println(f"{c:?} start {unicode::is_xid_start(c)} continue {unicode::is_xid_continue(c)}")
+    }
+}

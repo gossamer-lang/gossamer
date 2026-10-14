@@ -361,6 +361,7 @@ impl<'a> Lowerer<'a> {
                         | "gos_enum_untag"
                         | "gos_enum_load"
                         | "gos_enum_slot_ptr"
+                        | "gos_enum_word_addr"
                 )
             {
                 return self.lower_raw_intrinsic(name, args, place, None);
@@ -464,6 +465,7 @@ impl<'a> Lowerer<'a> {
                         | "gos_enum_untag"
                         | "gos_enum_load"
                         | "gos_enum_slot_ptr"
+                        | "gos_enum_word_addr"
                 ) =>
             {
                 return self.lower_raw_intrinsic(name, args, place, None);

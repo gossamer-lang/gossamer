@@ -184,6 +184,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                 | "gos_rt_option_unwrap_carrier"
                 | "gos_enum_load"
                 | "gos_enum_slot_ptr"
+                | "gos_enum_word_addr"
         )
     };
     let receiver_local = |args: &[Operand]| match args.first() {

@@ -1,0 +1,61 @@
+// `s.as_bytes()` answers the string's bytes. A sequence that is only
+// measured and indexed reads them in place, one that is written or handed on
+// gets bytes of its own, and either way the answers are the same, including
+// after the string the bytes came from is replaced.
+
+struct Doc {
+    text: String
+}
+
+fn braces(d: Doc) -> i64 {
+    let bytes = d.text.as_bytes()
+    let mut n = 0
+    let mut i = 0
+    while i < bytes.len() {
+        if bytes[i] == 123 {
+            n += 1
+        }
+        i += 1
+    }
+    for b in bytes {
+        if b == 125 {
+            n += 10
+        }
+    }
+    n
+}
+
+fn total(xs: Vec<u8>) -> i64 {
+    let mut t = 0
+    for x in xs {
+        t += x as i64
+    }
+    t
+}
+
+fn main() {
+    println(f"braces: {braces(Doc { text: "a{b}c{{d}}" })}")
+    println(f"empty: {braces(Doc { text: "" })}")
+
+    let mut text = "hello"
+    let view = text.as_bytes()
+    text = "world"
+    println(f"after replace: {view[0]} {view.len()} {text}")
+
+    let mut written = text.as_bytes()
+    written[0] = 87
+    println(f"written: {written[0]} {text}")
+
+    let passed = text.as_bytes()
+    println(f"passed on: {total(passed)} {passed.len()}")
+
+    let wide = "h\u{e9}llo \u{1F600}"
+    let b = wide.as_bytes()
+    let mut high = 0
+    for i in 0..b.len() {
+        if b[i] >= 128 {
+            high += 1
+        }
+    }
+    println(f"utf-8 bytes: {b.len()} high {high} first {b[0]} last {b[b.len() - 1]}")
+}

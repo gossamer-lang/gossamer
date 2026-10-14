@@ -42,22 +42,28 @@ pub struct PackedLayout {
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TyCtxt {
     kinds: Vec<TyKind>,
+    #[serde(serialize_with = "gossamer_ast::ordered::map_by_value")]
     index: HashMap<TyKind, Ty>,
     primitives: Primitives,
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     struct_fields: HashMap<gossamer_resolve::DefId, Vec<Ty>>,
     /// Per-variant field types of a user enum, in declaration (discriminant)
     /// order - variant `i` at index `i`, unit variants an empty vec. Populated
     /// by the typechecker; consumed by MIR to build the structural-equality
     /// descriptor for heap (recursive / `Box`) enum `==` / `!=`.
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     enum_variant_tys: HashMap<gossamer_resolve::DefId, Vec<Vec<Ty>>>,
     /// Declared variant names for each user enum.
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     enum_variant_names: HashMap<gossamer_resolve::DefId, Vec<String>>,
     /// Bits each enum stores its discriminant in, keyed by definition.
     /// Absent for an enum whose declaration asked for nothing special.
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     enum_repr_bits: HashMap<gossamer_resolve::DefId, u32>,
     /// Concrete non-generic user-enum `Adt` type by name. Lets MIR recover the
     /// enum type from the name its `==` dispatch resolves (operand types are
     /// often still inference vars at lowering time).
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     enum_ty_by_name: HashMap<String, Ty>,
     /// Per-instantiation field types of a generic struct, keyed by
     /// `(def, substs)`. A generic struct's `struct_fields` entry holds
@@ -68,15 +74,18 @@ pub struct TyCtxt {
     /// composite substituted field types. Consulted through
     /// `adt_field_tys` so every layout / field-projection site sees the
     /// concrete field shape instead of an opaque `Param`.
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     struct_fields_inst: HashMap<(gossamer_resolve::DefId, crate::Substs), Vec<Ty>>,
     /// Human-readable names for ADT / alias / fn `DefId`s, indexed by
     /// the local component. Populated by the type checker for user
     /// structs and by sentinel registrations for `Result`/`Option`.
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     def_names: HashMap<gossamer_resolve::DefId, String>,
     /// The `Param` type each generic type parameter's resolver `DefId`
     /// stands for, recorded by the type checker where a path is headed by
     /// the parameter (`T::zero`). Lowering reads it to name the parameter's
     /// position without re-deriving the enclosing generic scope.
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     type_param_defs: HashMap<gossamer_resolve::DefId, Ty>,
     /// Reference-counting type-meta blobs, keyed by the codegen symbol
     /// name (`gos_rc_meta_<id>`). Populated by MIR lowering when it
@@ -85,23 +94,27 @@ pub struct TyCtxt {
     /// reference its address at the allocation site. The blob is the
     /// flat `[i64]` child-layout format the runtime's `gos_rt_rc_release`
     /// walks (see `gossamer-runtime` `c_abi::rc`).
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     rc_metas: HashMap<String, Vec<i64>>,
     /// Guarded copy-blob meta symbol per aggregate type, for struct /
     /// tuple values whose escaped heap copies are reference counted
     /// (`RC_KIND_STRUCT_GUARDED`). Populated by MIR lowering; consulted
     /// by the LLVM backend at the heap-copy site and by the drop pass
     /// when emitting guarded retain/release walks for stack aggregates.
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     aggr_copy_metas: HashMap<Ty, String>,
     /// Aggregate types an enum variant payload holds by pointer to a
     /// heap-boxed copy rather than inline in the payload word. Populated by
     /// MIR lowering at the boxing site; consulted by the LLVM backend, whose
     /// payload read has to materialise the binding through the box.
+    #[serde(serialize_with = "gossamer_ast::ordered::set")]
     boxed_enum_payload_tys: std::collections::HashSet<Ty>,
     /// Interned self-types of every heap-allocated (RC-managed) user
     /// enum. Populated by MIR lowering from the enum index; consulted by
     /// the drop pass to recognise locals holding RC pointers that need a
     /// `gos_rt_rc_release` at end of life. Membership must stay
     /// conservative - see `rc_enum_tys` in the MIR enum index.
+    #[serde(serialize_with = "gossamer_ast::ordered::set")]
     rc_managed_tys: std::collections::HashSet<Ty>,
     /// `DefId.local`s of payload-bearing user enums, registered
     /// eagerly by the typechecker's enum collection. Heap-enum
@@ -111,10 +124,12 @@ pub struct TyCtxt {
     /// lowering, which made RC accounting depend on item order (a
     /// body lowered before the enum's first constructor skipped
     /// every retain/release for it).
+    #[serde(serialize_with = "gossamer_ast::ordered::set")]
     rc_managed_enum_defs: std::collections::HashSet<u32>,
     /// `DefId.local` of tuple structs (`struct Pt(i64, i64)`), whose fields
     /// are modelled as named "0".."N-1". Lets HIR lowering route positional
     /// access `p.0` on a tuple struct through the named-field path.
+    #[serde(serialize_with = "gossamer_ast::ordered::set")]
     tuple_struct_defs: std::collections::HashSet<u32>,
     /// `DefId.local` of user enums whose every variant has at most one
     /// field that fits in a single 8-byte slot. Such enums use the 2-word
@@ -122,12 +137,14 @@ pub struct TyCtxt {
     /// `render_ty` / `cl_type_of` map them to `i128` and `is_rc_managed`
     /// reports them as values (their payload, if a managed pointer, is
     /// released per-discriminant on drop).
+    #[serde(serialize_with = "gossamer_ast::ordered::set")]
     inline_enum_defs: std::collections::HashSet<u32>,
     /// Structs a program takes a `&mut` to a narrow field of. The borrow hands
     /// its callee an address a whole word is written through, so such a
     /// struct keeps one word per field. MIR lowering records these before it
     /// reads a layout; they are not part of the front-end result.
     #[serde(skip)]
+    #[serde(serialize_with = "gossamer_ast::ordered::set")]
     word_field_structs: std::collections::HashSet<gossamer_resolve::DefId>,
 }
 
@@ -632,6 +649,119 @@ impl TyCtxt {
         }
     }
 
+    /// Whether a value of `ty` can be part of a reference cycle, which is what
+    /// decides if the cycle collector has to consider it.
+    ///
+    /// A cycle needs a path of references from a value back to itself that a
+    /// program can close after the values exist. Values cannot close one: every
+    /// in-place write into a struct field, an element, an enum payload, or a
+    /// map value lands in storage its writer alone holds, since a write
+    /// through a shared one copies it first, and a value holding the target
+    /// shares it, so the write reaches a copy. Only a reference written in
+    /// place closes one, and so does anything whose contents the type does not
+    /// state - a closure environment, a channel, a shared or locked cell, a
+    /// `Weak`, a dynamic value, an unresolved type - which is assumed able to.
+    #[must_use]
+    pub fn can_join_cycle(&self, ty: Ty) -> bool {
+        let mut seen: Vec<(Ty, bool)> = Vec::new();
+        let mut stack: Vec<(Ty, bool)> = vec![(ty, false)];
+        while let Some((current, through_write)) = stack.pop() {
+            if seen.contains(&(current, through_write)) {
+                continue;
+            }
+            seen.push((current, through_write));
+            let Some(edges) = self.cycle_edges(current) else {
+                return true;
+            };
+            for (next, writable) in edges {
+                let through = through_write || writable;
+                if next == ty && through {
+                    return true;
+                }
+                stack.push((next, through));
+            }
+        }
+        false
+    }
+
+    /// The types a value of `ty` holds references to, each with whether the
+    /// program can write that reference in place where another holder sees
+    /// it; `None` for a type whose references the type does not state.
+    fn cycle_edges(&self, ty: Ty) -> Option<Vec<(Ty, bool)>> {
+        let values = |items: &[Ty]| items.iter().map(|t| (*t, false)).collect::<Vec<_>>();
+        Some(match self.kind_of(ty) {
+            TyKind::Bool
+            | TyKind::Char
+            | TyKind::String
+            | TyKind::Int(_)
+            | TyKind::Float(_)
+            | TyKind::Unit
+            | TyKind::Never
+            | TyKind::Duration
+            | TyKind::Instant
+            | TyKind::JsonValue
+            | TyKind::DynError
+            | TyKind::FnDef { .. }
+            | TyKind::Range(_) => Vec::new(),
+            TyKind::Tuple(items) => values(items),
+            TyKind::Array { elem, .. }
+            | TyKind::Simd { elem, .. }
+            | TyKind::Slice(elem)
+            | TyKind::Vec(elem) => vec![(*elem, false)],
+            TyKind::HashMap { key, value, .. } => vec![(*key, false), (*value, false)],
+            TyKind::Ref { inner, .. } => vec![(*inner, true)],
+            TyKind::Nominal { repr, .. } => vec![(*repr, false)],
+            TyKind::Adt { def, substs } => return self.adt_cycle_edges(*def, substs),
+            _ => return None,
+        })
+    }
+
+    fn adt_cycle_edges(
+        &self,
+        def: gossamer_resolve::DefId,
+        substs: &crate::Substs,
+    ) -> Option<Vec<(Ty, bool)>> {
+        // `Option` and `Result` hold their payloads as enums do.
+        if def.local == u32::MAX || def.local == u32::MAX - 1 {
+            return Some(substs.types().into_iter().map(|t| (t, false)).collect());
+        }
+        if def.local >= u32::MAX - 64 {
+            // The standard library's element containers hold what their
+            // arguments name; every other built-in handle hides its contents.
+            let container = matches!(
+                self.def_name(def),
+                Some(
+                    "Set"
+                        | "BTreeSet"
+                        | "BTreeMap"
+                        | "Queue"
+                        | "Stack"
+                        | "Deque"
+                        | "MinHeap"
+                        | "MaxHeap"
+                )
+            );
+            return container.then(|| substs.types().into_iter().map(|t| (t, false)).collect());
+        }
+        if let Some(variants) = self.enum_variant_tys(def) {
+            let args = substs.types();
+            let mut edges = Vec::new();
+            for payload in variants.iter().flatten() {
+                let payload = match self.kind_of(*payload) {
+                    TyKind::Param { idx, .. } => *args.get(idx.as_u32() as usize)?,
+                    _ if args.is_empty() => *payload,
+                    // A generic enum's payload that is not one of its own
+                    // parameters is not substituted here.
+                    _ => return None,
+                };
+                edges.push((payload, false));
+            }
+            return Some(edges);
+        }
+        let fields = self.adt_field_tys(def, substs)?;
+        Some(fields.iter().map(|t| (*t, false)).collect())
+    }
+
     /// Whether a value of this type is plain data: every leaf a scalar, through
     /// tuples, fixed arrays, `Simd` lanes, and structs, with no handle, `Weak`,
     /// or heap child anywhere and no cycle through its own definition. Moving
@@ -1016,6 +1146,73 @@ impl TyCtxt {
             TyKind::Char => 4,
             TyKind::Int(_) | TyKind::Float(_) | TyKind::String => 8,
             _ => 8,
+        }
+    }
+
+    /// Bytes one element of a `Vec<elem>` or slice occupies in its buffer
+    /// when the element is not held inline as an aggregate: a `bool`, a
+    /// narrow integer, or a `char` packs to its own width and every other
+    /// such element is one word. `None` for a tuple, a fixed array, or an
+    /// ADT, which occupies its slot bytes.
+    ///
+    /// The width a vector is built with. A vector a runtime shim builds may
+    /// hold narrow elements as whole words, so a read takes the width from
+    /// the vector's header.
+    #[must_use]
+    pub fn vec_scalar_elem_bytes(&self, elem: Ty) -> Option<u32> {
+        match self.kind_of(elem) {
+            TyKind::Bool | TyKind::Int(IntTy::I8 | IntTy::U8) => Some(1),
+            TyKind::Int(IntTy::I16 | IntTy::U16) => Some(2),
+            TyKind::Int(IntTy::I32 | IntTy::U32) | TyKind::Char | TyKind::Float(FloatTy::F32) => {
+                Some(4)
+            }
+            TyKind::Tuple(_) | TyKind::Array { .. } | TyKind::Adt { .. } => None,
+            _ => Some(8),
+        }
+    }
+
+    /// Whether a vector of `elem` packs it as a four-byte `f32`, which a read
+    /// widens to the `f64` compiled code carries an `f32` in.
+    #[must_use]
+    pub fn vec_packs_f32(&self, elem: Ty) -> bool {
+        matches!(self.kind_of(elem), TyKind::Float(FloatTy::F32))
+    }
+
+    /// The narrow width and signedness of a vector element read as an
+    /// integer word, for an element type a vector may pack: `None` for an
+    /// element that is always a whole word or a `bool` or `u8` byte.
+    #[must_use]
+    pub fn vec_narrow_scalar(&self, elem: Ty) -> Option<(u32, bool)> {
+        match self.kind_of(elem) {
+            TyKind::Int(IntTy::I8) => Some((1, true)),
+            TyKind::Int(IntTy::I16) => Some((2, true)),
+            TyKind::Int(IntTy::U16) => Some((2, false)),
+            TyKind::Int(IntTy::I32) => Some((4, true)),
+            TyKind::Int(IntTy::U32) | TyKind::Char => Some((4, false)),
+            _ => None,
+        }
+    }
+
+    /// The element-kind tag (see [`crate::vec_elem_kind`]) a vector of
+    /// `elem` carries in its header, naming what one element owns.
+    #[must_use]
+    pub fn vec_elem_kind(&self, elem: Ty) -> u8 {
+        use crate::vec_elem_kind as kind;
+        match self.kind_of(elem) {
+            TyKind::String => kind::STRING,
+            TyKind::Vec(_) | TyKind::Slice(_) | TyKind::Iterator(_) => kind::VEC,
+            TyKind::HashMap { .. } => kind::MAP,
+            TyKind::DynError => kind::ERROR,
+            // A `json::Value` element is a handle holding a share of the
+            // document it views, so the vector's teardown gives each back.
+            TyKind::JsonValue => kind::JSON,
+            // A single-slot struct, tuple, or fixed array is held inline
+            // and its slot address is the value; the store has to know,
+            // since a one-word scalar element is the value itself.
+            _ if self.is_flat_inline_aggregate(elem) => kind::AGGR_FLAT,
+            TyKind::Int(IntTy::I8 | IntTy::I16 | IntTy::I32) => kind::SIGNED,
+            TyKind::Float(FloatTy::F32) => kind::F32,
+            _ => kind::PRIMITIVE,
         }
     }
 

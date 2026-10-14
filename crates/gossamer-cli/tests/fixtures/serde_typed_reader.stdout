@@ -1,0 +1,119 @@
+inner: {"n":7,"label":"a \"quoted\" \u003cb\u003e\u0026\u003c/b\u003e \n tab\t é ✓"}
+widths: {"a":-8,"b":-300,"c":70000,"d":200,"e":60000,"f":4000000000,"g":18446744073709551615,"h":12,"i":-9007199254740993,"x":1,"y":0.1}
+specials: {"a":0,"b":0,"c":0,"d":0,"e":0,"f":0,"g":0,"h":0,"i":0,"x":null,"y":null}
+widths back: -8 -300 70000 200 60000 4000000000 18446744073709551615 12 -9007199254740993 100 0.1
+narrowing: 44 4464 705032704 255 4464 4294967295 1 2 3 4 5
+i64 fraction: ERR field `i`: expected i64
+u64 negative: ERR field `g`: expected u64
+float string: ERR field `x`: expected f64
+big i64: ERR field `i`: expected i64
+plain: Inner n=1 label=x
+reordered: Inner n=2 label=y
+unknown keys: Inner n=3 label=z
+duplicate: Inner n=9 label=last
+escapes: Inner n=0 label=é
+"\ 😀
+missing: ERR missing field `n`
+missing both: ERR missing field `n`
+null field: ERR field `n`: expected i64
+wrong type: ERR field `n`: expected i64
+wrong both: ERR field `n`: expected i64
+not object: ERR missing field `n`
+scalar: ERR missing field `n`
+invalid: ERR expected string at 1:9
+trailing: ERR trailing input at 1:24
+empty: ERR unexpected end of input at 1:1
+kinds: {"flag":true,"text":"hi","nums":[1,-2,3],"grid":[[1,2],[],[3]],"inners":[{"n":1,"label":"x"},{"n":2,"label":"y"}],"maybe":5,"maybe_inner":null,"pair":[4,"four"],"counts":{"\u003chtml\u003e":3,"alpha":1,"zeta":26},"by_name":{"a":{"n":1,"label":"one"},"b":{"n":2,"label":"two"}},"raw":{"z":[1,2.5,"s",null,{"k":false}]},"inner":{"n":9,"label":"nine"}}
+kinds back: {"flag":true,"text":"hi","nums":[1,-2,3],"grid":[[1,2],[],[3]],"inners":[{"n":1,"label":"x"},{"n":2,"label":"y"}],"maybe":5,"maybe_inner":null,"pair":[4,"four"],"counts":{"\u003chtml\u003e":3,"alpha":1,"zeta":26},"by_name":{"a":{"n":1,"label":"one"},"b":{"n":2,"label":"two"}},"raw":{"z":[1,2.5,"s",null,{"k":false}]},"inner":{"n":9,"label":"nine"}}
+maybe missing: {"flag":false,"text":"","nums":[],"grid":[],"inners":[],"maybe":null,"maybe_inner":{"n":1,"label":"l"},"pair":[0,""],"counts":{},"by_name":{},"raw":null,"inner":{"n":0,"label":""}}
+maybe null: {"flag":false,"text":"","nums":[],"grid":[],"inners":[],"maybe":null,"maybe_inner":null,"pair":[0,""],"counts":{},"by_name":{},"raw":7,"inner":{"n":0,"label":""}}
+vec elem: ERR field `nums`[index]: expected i64
+vec not array: ERR field `nums`: expected array
+grid inner: ERR field `grid`[index][index]: expected i64
+inners elem: ERR field `inners`[index]: field `n`: expected i64
+maybe inner bad: ERR field `maybe_inner`: missing field `n`
+pair short: ERR field `pair`: expected 2-element array
+pair elem: ERR field `pair`.1: expected string
+pair not array: ERR field `pair`: expected array
+map value: ERR field `counts`[key]: expected i64
+map not object: ERR field `counts`: expected object
+map struct: ERR field `by_name`[key]: missing field `label`
+map dup: {"flag":false,"text":"","nums":[],"grid":[],"inners":[],"maybe":null,"maybe_inner":null,"pair":[0,""],"counts":{"q":5},"by_name":{},"raw":null,"inner":{"n":0,"label":""}}
+nested inner: ERR field `inner`: field `label`: expected string
+bool wrong: ERR field `flag`: expected bool
+first error wins: ERR field `flag`: expected bool
+attrs: {"full name":"Ada","retries":3,"tags":["x"],"note":null}
+attrs back: name=Ada cache=0 retries=3 tags=1 note=-
+attrs defaults: name=Bo cache=0 retries=0 tags=0 note=-
+attrs old key: ERR missing field `full name`
+attrs bad default: ERR field `retries`: expected i64
+drawing: {"shapes":["Empty",{"Circle":1.5},{"Segment":[1,2]},{"Rect":{"w":3,"h":4}}],"main":{"Rect":{"w":1,"h":1}}}
+drawing back: {"shapes":["Empty",{"Circle":1.5},{"Segment":[1,2]},{"Rect":{"w":3,"h":4}}],"main":{"Rect":{"w":1,"h":1}}}
+unit: "Empty"
+unknown unit: ERR unknown variant `Triangle` of `Shape`
+payload name as string: ERR unknown variant `Circle` of `Shape`
+unit as object: ERR unknown variant `Empty` of `Shape`
+two keys: ERR expected a variant of `Shape`: a name, or an object with one key
+no keys: ERR expected a variant of `Shape`: a name, or an object with one key
+array: ERR expected a variant of `Shape`: a name, or an object with one key
+number: ERR expected a variant of `Shape`: a name, or an object with one key
+null: ERR expected a variant of `Shape`: a name, or an object with one key
+circle bad: ERR variant `Circle`: expected f64
+segment short: ERR variant `Segment`: expected i64
+segment not array: ERR variant `Segment`: expected i64
+segment bad elem: ERR variant `Segment`: expected i64
+rect missing: ERR missing field `h` of variant `Rect`
+rect bad: ERR variant `Rect` field `h`: expected i64
+rect not object: ERR missing field `w` of variant `Rect`
+unknown payload: ERR unknown variant `Hexagon` of `Shape`
+drawing nested bad: ERR field `shapes`[index]: variant `Circle`: expected f64
+pair: {"0":1,"1":"one"}
+pair back: 5 five
+pair short: ERR missing element `1`
+pair bad: ERR element `0`: expected i64
+unit: {}
+unit back: ok
+module: {"x":1,"y":-1}
+module back: 3 4
+newtype: {"distance":42}
+newtype back: 7
+alias: {"n":1,"label":"al"}
+inferred: 11 inf
+infer result: ERR missing field `label`
+toml: label = "toml"
+n = 3
+
+toml back: 3 toml
+toml bad: ERR field `n`: expected i64
+toml invalid: ERR toml::to_json: TOML parse error at line 1, column 5
+  |
+1 | n = = 1
+  |     ^
+extra `=`, expected nothing
+
+yaml: by_name: {}
+counts: {}
+flag: false
+grid: []
+inner:
+  label: i
+  n: 2
+inners: []
+maybe: null
+maybe_inner:
+  label: m
+  n: 1
+nums:
+- 1
+pair:
+- 1
+- p
+raw:
+- true
+text: y
+
+yaml back: {"flag":false,"text":"y","nums":[1],"grid":[],"inners":[],"maybe":null,"maybe_inner":{"n":1,"label":"m"},"pair":[1,"p"],"counts":{},"by_name":{},"raw":[true],"inner":{"n":2,"label":"i"}}
+yaml invalid: ERR yaml::to_json: did not find expected ',' or ']' at line 2 column 1, while parsing a flow sequence at line 1 column 4
+yaml qualified: 4 q
+toml qualified: 5 r
+json qualified: {"n":6,"label":"s"}

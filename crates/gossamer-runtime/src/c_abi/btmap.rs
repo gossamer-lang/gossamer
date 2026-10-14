@@ -234,16 +234,19 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_format_desc(
                 crate::c_abi::desc_format::Storage::ByWord
             };
             let mut cursor = desc as usize;
-            // SAFETY: the element is stored as `storage` names and laid out as the descriptor at
-            // `desc` describes (C-ABI contract).
+            // A packed scalar renders from the word it reads as, which a read
+            // of a whole word at its address would run past.
+            let packed = (storage == crate::c_abi::desc_format::Storage::ByWord
+                && elems.width() < 8)
+                .then(|| elems.word(i));
+            let at = packed.as_ref().map_or_else(
+                || elems.elem(i).as_ptr(),
+                |word| std::ptr::from_ref(word).cast(),
+            );
+            // SAFETY: the element (or the word it reads as) is stored as `storage` names and laid
+            // out as the descriptor at `desc` describes (C-ABI contract).
             unsafe {
-                crate::c_abi::desc_format::render_desc_storage(
-                    out,
-                    elems.elem(i).as_ptr(),
-                    tags,
-                    &mut cursor,
-                    storage,
-                );
+                crate::c_abi::desc_format::render_desc_storage(out, at, tags, &mut cursor, storage);
             }
         });
         alloc_cstring(out.as_bytes())

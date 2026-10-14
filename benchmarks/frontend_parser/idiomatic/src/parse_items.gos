@@ -1,0 +1,1156 @@
+// Items, attributes, `use` declarations, and the file entry: what
+// `gossamer_parse`'s `items.rs`, `use_decls.rs`, and `lib.rs` parse.
+
+use ast::{Attribute, Attrs, ConstDecl, EnumDecl, EnumRepr, EnumVariant, Expr, ExprKind, FileId, FnDecl, FnParam, Generics, Ident, ImplDecl, ImplItem, Item, ItemKind, Literal, ModBody, ModDecl, ModulePath, Mutability, NamedArg, NodeId, PathExpr, Receiver, SourceFile, Span, StaticDecl, Stmt, StructBody, StructDecl, StructField, TraitBound, TraitDecl, TraitItem, TupleField, Type, TypeAliasDecl, TypeKind, TypePath, UseDecl, UseListEntry, UseTarget, Visibility}
+use lex
+use parse
+use parse::Parser
+use parse_expr
+use parse_format
+use parse_stmt
+
+/// The raw tree of `source`, before package features are settled.
+pub fn parse_source_file(source: String, file: u32) -> (SourceFile, Vec<parse::Diag>) {
+    let mut p = parse::new_parser(source, file)
+    let file_attrs = parse_file_attrs(&mut p)
+    let mut uses: Vec<UseDecl> = #[]
+    loop {
+        if parse::at(&mut p, parse::KW_USE) {
+            uses.push(parse_use_decl(&mut p))
+        } else if at_attributed_use(&mut p) {
+            uses.push(parse_attributed_use(&mut p))
+        } else {
+            break
+        }
+    }
+    let mut items: Vec<Item> = #[]
+    let mut stmts: Vec<Stmt> = #[]
+    while !parse::at_eof(&mut p) {
+        let before = p.pos
+        if parse::is_item_start(&mut p) {
+            items.extend(parse_item_group(&mut p))
+        } else {
+            stmts.push(parse_stmt::parse_stmt(&mut p))
+        }
+        if p.pos == before {
+            parse::bump(&mut p)
+            parse::recover_to_item_start(&mut p)
+        }
+    }
+    uses.extend(p.hoisted)
+    let sf = SourceFile {
+        file: FileId(file),
+        attrs: file_attrs,
+        uses: uses,
+        items: items,
+        top_level_stmts: stmts,
+        next_node_id: p.next_id as u32,
+        named_args: p.named,
+    }
+    (sf, p.diags)
+}
+
+// ---- visibility and attributes -------------------------------------------
+
+fn parse_visibility(p: &mut Parser) -> Visibility {
+    if !parse::eat(p, parse::KW_PUB) {
+        return Visibility::Inherited
+    }
+    if !parse::at(p, parse::P_LPAREN) {
+        return Visibility::Public
+    }
+    let start = parse::peek_span(p)
+    parse::eat(p, parse::P_LPAREN)
+    if parse::at(p, parse::KW_PACKAGE) {
+        parse::bump(p)
+        if parse::eat(p, parse::P_RPAREN) {
+            return Visibility::Package
+        }
+    }
+    let mut depth = 1
+    while !parse::at_eof(p) {
+        if parse::at(p, parse::P_LPAREN) {
+            depth += 1
+        } else if parse::at(p, parse::P_RPAREN) {
+            depth -= 1
+            parse::bump(p)
+            if depth == 0 {
+                break
+            }
+            continue
+        }
+        parse::bump(p)
+    }
+    let end = parse::last_span(p)
+    let span = parse::join(p, start, end)
+    parse::record(p, "UnsupportedVisibilityRestriction", span)
+    Visibility::Package
+}
+
+pub fn at_attribute_start(p: &mut Parser) -> bool {
+    if !parse::at(p, parse::P_HASH) {
+        return false
+    }
+    let n = parse::kind_at(p, 1)
+    if n == parse::P_LBRACKET {
+        return true
+    }
+    if n == parse::P_BANG {
+        return parse::kind_at(p, 2) == parse::P_LBRACKET
+    }
+    false
+}
+
+fn at_inner_attribute_start(p: &mut Parser) -> bool {
+    parse::at(p, parse::P_HASH) && parse::kind_at(p, 1) == parse::P_BANG &&
+        parse::kind_at(p, 2) == parse::P_LBRACKET
+}
+
+pub fn parse_attrs(p: &mut Parser) -> Attrs {
+    let mut outer: Vec<Attribute> = #[]
+    while at_attribute_start(p) {
+        let span = parse::peek_span(p)
+        let Some(attribute) = parse_attribute(p) else {
+            break
+        }
+        let last = attribute.path.segments[attribute.path.segments.len() - 1].name.name
+        if last == "proc_macro" || last == "proc_macro_derive" || last == "proc_macro_attribute" {
+            parse::report_declined(p, span)
+        }
+        outer.push(attribute)
+    }
+    Attrs { outer: outer, inner: #[] }
+}
+
+fn parse_file_attrs(p: &mut Parser) -> Attrs {
+    let mut inner: Vec<Attribute> = #[]
+    while at_inner_attribute_start(p) {
+        let Some(attribute) = parse_attribute(p) else {
+            break
+        }
+        inner.push(attribute)
+    }
+    Attrs { outer: #[], inner: inner }
+}
+
+fn parse_attribute(p: &mut Parser) -> Option<Attribute> {
+    if !parse::eat(p, parse::P_HASH) {
+        return None
+    }
+    parse::eat(p, parse::P_BANG)
+    if !parse::eat(p, parse::P_LBRACKET) {
+        let s = parse::peek_span(p)
+        parse::record(p, "MalformedAttribute", s)
+        return None
+    }
+    let path = parse_expr::parse_path_expr(p)
+    let tokens = if parse::at(p, parse::P_LPAREN) {
+        parse::bump(p)
+        let body = parse_expr::collect_delimited_tokens(p, parse::P_LPAREN, parse::P_RPAREN)
+        parse::expect(p, parse::P_RPAREN)
+        Some(body)
+    } else if parse::at(p, parse::P_EQ) {
+        parse::bump(p)
+        let mut output = ""
+        while !parse::at_eof(p) && !parse::at(p, parse::P_RBRACKET) {
+            let s = parse::peek_span(p)
+            output.push_str(parse::text(p, s))
+            output.push(' ')
+            parse::bump(p)
+        }
+        Some("= " + output.trim_end())
+    } else {
+        None
+    }
+    parse::expect(p, parse::P_RBRACKET)
+    Some(Attribute { path: path, tokens: tokens })
+}
+
+fn has_word(attrs: Attrs, name: String) -> bool {
+    for a in attrs.outer {
+        if parse::attr_is_word(a, name) {
+            return true
+        }
+    }
+    for a in attrs.inner {
+        if parse::attr_is_word(a, name) {
+            return true
+        }
+    }
+    false
+}
+
+// ---- items ---------------------------------------------------------------
+
+pub fn parse_item_group(p: &mut Parser) -> Vec<Item> {
+    let start_span = parse::peek_span(p)
+    let attrs = parse_attrs(p)
+    let visibility = parse_visibility(p)
+    if parse::at(p, parse::KW_UNSAFE) && parse::kind_at(p, 1) == parse::KW_EXTERN &&
+        ((parse::kind_at(p, 2) == lex::STRING_LIT && parse::kind_at(p, 3) == parse::P_LBRACE) ||
+            parse::kind_at(p, 2) == parse::P_LBRACE) {
+        return parse_extern_block(p, start_span, attrs)
+    }
+    if parse::at(p, parse::KW_EXTERN) && parse::kind_at(p, 1) == lex::STRING_LIT &&
+        parse::kind_at(p, 2) == parse::KW_FN {
+        return #[parse_extern_fn_definition(p, start_span, attrs, visibility)]
+    }
+    #[parse_item_after(p, start_span, attrs, visibility)]
+}
+
+fn parse_extern_fn_definition(p: &mut Parser, start_span: Span, attrs: Attrs, visibility: Visibility) -> Item {
+    let extern_span = parse::peek_span(p)
+    parse::bump(p)
+    let abi_span = parse::peek_span(p)
+    parse::bump(p)
+    let lone_no_mangle = attrs.inner.len() == 0 && attrs.outer.len() == 1 &&
+        parse::attr_is_word(attrs.outer[0], "no_mangle") && matches(visibility, Visibility::Inherited)
+    let from = if lone_no_mangle { start_span } else { extern_span }
+    let span = parse::join(p, from, abi_span)
+    parse::record(p, "ExternFnDefinition", span)
+    parse_item_after(p, start_span, attrs, visibility)
+}
+
+fn parse_extern_block(p: &mut Parser, start_span: Span, block_attrs: Attrs) -> Vec<Item> {
+    parse::bump(p)
+    let extern_span = parse::peek_span(p)
+    parse::bump(p)
+    let abi = if parse::at(p, parse::P_LBRACE) {
+        parse::record(p, "ExternReserved", extern_span)
+        "C"
+    } else {
+        let abi_span = parse::peek_span(p)
+        let abi = parse::text(p, abi_span).trim_matches("\"")
+        parse::bump(p)
+        if abi != "C" && abi != "system" {
+            parse::record(p, "ExternReserved", abi_span)
+        }
+        abi
+    }
+    parse::expect(p, parse::P_LBRACE)
+    let mut items: Vec<Item> = #[]
+    while !parse::at_eof(p) && !parse::at(p, parse::P_RBRACE) {
+        let before = p.pos
+        let item_start = parse::peek_span(p)
+        let mut attrs = block_attrs
+        attrs.outer.extend(parse_attrs(p).outer)
+        let visibility = parse_visibility(p)
+        if parse::at(p, parse::KW_TYPE) {
+            items.push(parse_foreign_type(p, item_start, attrs, visibility))
+            continue
+        }
+        if parse::at(p, parse::KW_STATIC) {
+            items.push(parse_foreign_static(p, item_start, attrs, visibility))
+            continue
+        }
+        if !parse::at(p, parse::KW_FN) {
+            let s = parse::peek_span(p)
+            parse::record(p, "ExternItemShape", s)
+            parse::recover_to_item_start(p)
+            if p.pos == before {
+                parse::bump(p)
+            }
+            continue
+        }
+        let mut decl = parse_fn_decl(p, visibility)
+        if decl.body.is_some() || decl.generics.params.len() > 0 {
+            parse::record(p, "ExternItemShape", decl.span)
+            decl.body = None
+        }
+        decl.attrs = attrs
+        decl.extern_abi = Some(abi)
+        let end = parse::last_span(p)
+        let span = parse::join(p, item_start, end)
+        let id = parse::alloc(p)
+        items.push(Item { id: id, span: span, attrs: attrs, visibility: visibility, kind: ItemKind::Fn(decl) })
+    }
+    parse::expect(p, parse::P_RBRACE)
+    if items.len() == 0 {
+        let end = parse::last_span(p)
+        let span = parse::join(p, start_span, end)
+        parse::record(p, "ExternItemShape", span)
+    }
+    items
+}
+
+fn parse_foreign_type(p: &mut Parser, item_start: Span, attrs_in: Attrs, visibility: Visibility) -> Item {
+    let mut attrs = attrs_in
+    parse::bump(p)
+    let name = parse_ident_required(p)
+    if !parse::at(p, parse::P_RBRACE) && !parse::at(p, parse::KW_FN) {
+        let generics_or_body = parse::peek_span(p)
+        if parse::eat(p, parse::P_SEMI) {
+            // A `;` closes the declaration.
+        } else if !at_attribute_start(p) && !parse::at(p, parse::KW_TYPE) &&
+            !parse::at(p, parse::KW_STATIC) && !parse::at(p, parse::KW_PUB) {
+            parse::record(p, "ExternItemShape", generics_or_body)
+            parse::recover_to_item_start(p)
+        }
+    }
+    attrs.outer.push(Attribute { path: parse::path_single("__gos_foreign_type"), tokens: None })
+    let decl = StructDecl { name: name, generics: parse::empty_generics(), where_clause: parse::empty_where(), body: StructBody::Unit }
+    let end = parse::last_span(p)
+    let span = parse::join(p, item_start, end)
+    let id = parse::alloc(p)
+    Item { id: id, span: span, attrs: attrs, visibility: visibility, kind: ItemKind::Struct(decl) }
+}
+
+fn parse_foreign_static(p: &mut Parser, item_start: Span, attrs_in: Attrs, visibility: Visibility) -> Item {
+    let mut attrs = attrs_in
+    parse::bump(p)
+    let mutability = if parse::eat(p, parse::KW_MUT) { Mutability::Mutable } else { Mutability::Immutable }
+    let name = parse_ident_required(p)
+    parse::expect(p, parse::P_COLON)
+    let ty = parse::parse_type(p)
+    if parse::at(p, parse::P_EQ) {
+        let s = parse::peek_span(p)
+        parse::record(p, "ExternItemShape", s)
+        parse::bump(p)
+        let _ = parse_expr::parse_expr(p)
+    }
+    parse::eat(p, parse::P_SEMI)
+    let message = parse_expr::alloc_literal_expr(p, Literal::String("a foreign static has no Gossamer value; reach it with `ffi::addr_of`"))
+    let placeholder = parse_format::expand_format_macro(p, "panic", #[message])
+    let end = parse::last_span(p)
+    let span = parse::join(p, item_start, end)
+    let vid = parse::alloc(p)
+    let value = parse::mk_expr(vid, span, placeholder)
+    attrs.outer.push(Attribute { path: parse::path_single("__gos_foreign_static"), tokens: None })
+    let decl = StaticDecl { mutability: mutability, name: name, ty: ty, value: value }
+    let id = parse::alloc(p)
+    Item { id: id, span: span, attrs: attrs, visibility: visibility, kind: ItemKind::Static(decl) }
+}
+
+pub fn parse_item(p: &mut Parser) -> Item {
+    let start_span = parse::peek_span(p)
+    let attrs = parse_attrs(p)
+    let visibility = parse_visibility(p)
+    parse_item_after(p, start_span, attrs, visibility)
+}
+
+fn parse_item_after(p: &mut Parser, start_span: Span, attrs: Attrs, visibility: Visibility) -> Item {
+    let synthesized = has_word(attrs, "gos_synthesized")
+    if synthesized {
+        p.synth += 1
+    }
+    let mut kind = parse_item_kind(p, visibility)
+    if synthesized && p.synth > 0 {
+        p.synth -= 1
+    }
+    kind = match kind {
+        ItemKind::Fn(decl) => {
+            let mut d = decl
+            d.attrs = attrs
+            ItemKind::Fn(d)
+        }
+        other => other,
+    }
+    let end_span = parse::last_span(p)
+    let span = parse::join(p, start_span, end_span)
+    let id = parse::alloc(p)
+    Item { id: id, span: span, attrs: attrs, visibility: visibility, kind: kind }
+}
+
+fn unit_struct(name: Ident) -> ItemKind {
+    ItemKind::Struct(StructDecl { name: name, generics: parse::empty_generics(), where_clause: parse::empty_where(), body: StructBody::Unit })
+}
+
+fn parse_declined_type_item(p: &mut Parser) -> Option<ItemKind> {
+    if parse::at_word(p, "macro_rules") && parse::kind_at(p, 1) == parse::P_BANG {
+        let s = parse::peek_span(p)
+        parse::report_declined(p, s)
+        parse::bump(p)
+        parse::bump(p)
+        let name = parse_ident_required(p)
+        let open, close = if parse::at(p, parse::P_LPAREN) {
+            (parse::P_LPAREN, parse::P_RPAREN)
+        } else if parse::at(p, parse::P_LBRACKET) {
+            (parse::P_LBRACKET, parse::P_RBRACKET)
+        } else {
+            (parse::P_LBRACE, parse::P_RBRACE)
+        }
+        if parse::eat(p, open) {
+            parse::recover_to_close(p, open, close)
+        }
+        return Some(unit_struct(name))
+    }
+    let declined = parse::at_word(p, "union") || parse::at_word(p, "class")
+    if declined && parse::kind_at(p, 1) == lex::IDENT {
+        let s = parse::peek_span(p)
+        parse::report_declined(p, s)
+        parse::bump(p)
+        let name = parse_ident_required(p)
+        while !parse::at_eof(p) && !parse::at(p, parse::P_LBRACE) {
+            parse::bump(p)
+        }
+        if parse::eat(p, parse::P_LBRACE) {
+            parse::recover_to_close(p, parse::P_LBRACE, parse::P_RBRACE)
+        }
+        return Some(unit_struct(name))
+    }
+    None
+}
+
+fn parse_reserved_extern(p: &mut Parser) -> ItemKind {
+    let s = parse::peek_span(p)
+    parse::record(p, "ExternReserved", s)
+    parse::eat(p, parse::KW_UNSAFE)
+    parse::bump(p)
+    if parse::peek(p) == lex::STRING_LIT {
+        parse::bump(p)
+    }
+    if parse::at(p, parse::P_LBRACE) {
+        parse::bump(p)
+        let mut depth = 1
+        while !parse::at_eof(p) && depth > 0 {
+            if parse::at(p, parse::P_LBRACE) {
+                depth += 1
+            } else if parse::at(p, parse::P_RBRACE) {
+                depth -= 1
+            }
+            parse::bump(p)
+        }
+    }
+    ItemKind::Mod(ModDecl { name: parse::ident("<extern-error>"), body: ModBody::External })
+}
+
+fn parse_item_kind(p: &mut Parser, visibility: Visibility) -> ItemKind {
+    let declined_fn = parse::at(p, parse::KW_ASYNC) || parse::at_word(p, "gen")
+    if declined_fn && parse::kind_at(p, 1) == parse::KW_FN {
+        let s = parse::peek_span(p)
+        parse::report_declined(p, s)
+        parse::bump(p)
+    }
+    if let Some(kind) = parse_declined_type_item(p) {
+        return kind
+    }
+    if parse::at(p, parse::KW_UNSAFE) &&
+        (parse::kind_at(p, 1) == parse::KW_IMPL || parse::kind_at(p, 1) == parse::KW_TRAIT) {
+        let s = parse::peek_span(p)
+        parse::bump(p)
+        let span = parse::through_trailing_space(p, s)
+        parse::record(p, "UnsafeGrantsNothing", span)
+    }
+    if parse::at(p, parse::KW_FN) || parse::at(p, parse::KW_UNSAFE) || at_comptime_fn(p) {
+        return ItemKind::Fn(parse_fn_decl(p, visibility))
+    }
+    if parse::at(p, parse::KW_STRUCT) {
+        return ItemKind::Struct(parse_struct_decl(p))
+    }
+    if parse::at(p, parse::KW_ENUM) {
+        return ItemKind::Enum(parse_enum_decl(p, false))
+    }
+    if parse::peek(p) == lex::IDENT && parse::peek_text_is(p, 0, "packed") && parse::kind_at(p, 1) == parse::KW_ENUM {
+        parse::bump(p)
+        return ItemKind::Enum(parse_enum_decl(p, true))
+    }
+    if parse::at(p, parse::KW_TRAIT) {
+        return ItemKind::Trait(parse_trait_decl(p))
+    }
+    if parse::at(p, parse::KW_IMPL) {
+        return ItemKind::Impl(parse_impl_decl(p))
+    }
+    if parse::at(p, parse::KW_TYPE) {
+        return ItemKind::TypeAlias(parse_type_alias_decl(p, false))
+    }
+    if parse::peek(p) == lex::IDENT && parse::peek_text_is(p, 0, "newtype") && parse::kind_at(p, 1) == lex::IDENT {
+        return ItemKind::TypeAlias(parse_type_alias_decl(p, true))
+    }
+    if parse::at(p, parse::KW_CONST) {
+        return ItemKind::Const(parse_const_decl(p))
+    }
+    if parse::at(p, parse::KW_STATIC) {
+        return ItemKind::Static(parse_static_decl(p))
+    }
+    if parse::at(p, parse::KW_MOD) {
+        return ItemKind::Mod(parse_mod_decl(p))
+    }
+    if parse::at(p, parse::KW_EXTERN) || (parse::at(p, parse::KW_UNSAFE) && parse::kind_at(p, 1) == parse::KW_EXTERN) {
+        return parse_reserved_extern(p)
+    }
+    let s = parse::peek_span(p)
+    parse::record(p, "Unexpected", s)
+    if !parse::at_eof(p) {
+        parse::bump(p)
+    }
+    parse::recover_to_item_start(p)
+    ItemKind::Mod(ModDecl { name: parse::ident("<error>"), body: ModBody::External })
+}
+
+fn at_comptime_fn(p: &mut Parser) -> bool {
+    parse::at_word(p, "comptime") &&
+        (parse::kind_at(p, 1) == parse::KW_FN || parse::kind_at(p, 1) == parse::KW_UNSAFE)
+}
+
+fn parse_fn_decl(p: &mut Parser, visibility: Visibility) -> FnDecl {
+    let start = parse::peek_span(p)
+    let is_comptime = parse::eat_word(p, "comptime")
+    let unsafe_span = parse::peek_span(p)
+    let is_unsafe = parse::eat(p, parse::KW_UNSAFE)
+    if is_unsafe {
+        let span = parse::through_trailing_space(p, unsafe_span)
+        parse::record(p, "UnsafeGrantsNothing", span)
+    }
+    parse::expect(p, parse::KW_FN)
+    let name_span = parse::peek_span(p)
+    let name = parse_ident_required(p)
+    let synthesized_fn = name.name.starts_with("__gos_")
+    if synthesized_fn {
+        p.synth += 1
+    }
+    if name.name == "to_string" && p.impl_trait == Some("Display") {
+        parse::record(p, "DisplayContractMethod", name_span)
+    }
+    let generics = parse::parse_generics(p)
+    parse::expect(p, parse::P_LPAREN)
+    let params = parse_fn_params(p)
+    if !parse::expect(p, parse::P_RPAREN) {
+        parse::recover_to_close(p, parse::P_LPAREN, parse::P_RPAREN)
+    }
+    let ret = if parse::eat(p, parse::P_ARROW) { Some(parse::parse_type(p)) } else { None }
+    let where_clause = parse::parse_where_clause(p)
+    let body = if parse::at(p, parse::P_LBRACE) {
+        let open = parse::peek_span(p)
+        parse::bump(p)
+        let block = parse_expr::parse_block_body(p)
+        let end = parse::last_span(p)
+        let span = parse::join(p, open, end)
+        let id = parse::alloc(p)
+        Some(parse::mk_expr(id, span, ExprKind::ExprBlock(block)))
+    } else {
+        parse::eat(p, parse::P_SEMI)
+        None
+    }
+    if synthesized_fn && p.synth > 0 {
+        p.synth -= 1
+    }
+    let end = parse::last_span(p)
+    FnDecl {
+        attrs: parse::empty_attrs(),
+        span: Span { file: start.file, start: start.start.min(end.start), end: start.end.max(end.end) },
+        is_unsafe: is_unsafe,
+        is_comptime: is_comptime,
+        visibility: visibility,
+        name: name,
+        generics: generics,
+        params: params,
+        ret: ret,
+        where_clause: where_clause,
+        body: body,
+        extern_abi: None,
+    }
+}
+
+fn parse_fn_params(p: &mut Parser) -> Vec<FnParam> {
+    let mut params: Vec<FnParam> = #[]
+    if at_receiver_start(p) {
+        if let Some(receiver) = parse_receiver(p) {
+            params.push(FnParam::FnParamReceiver(receiver))
+            if !parse::eat_list_separator(p) {
+                return params
+            }
+        }
+    }
+    while !parse::at(p, parse::P_RPAREN) && !parse::at_eof(p) {
+        let before = p.pos
+        let is_comptime = parse::at_word(p, "comptime") && parse::kind_at(p, 1) != parse::P_COLON
+        if is_comptime {
+            parse::bump(p)
+        }
+        let pattern = parse::parse_pattern_no_or(p)
+        if !parse::expect(p, parse::P_COLON) {
+            break
+        }
+        let amp = parse::peek_span(p)
+        let raw = parse::parse_type(p)
+        let ty = parse::strip_shared_parameter_reference(p, raw, amp)
+        while parse::at(p, parse::P_PIPE) {
+            let s = parse::peek_span(p)
+            parse::report_declined(p, s)
+            parse::bump(p)
+            let _ = parse::parse_type(p)
+        }
+        let default = if parse::eat(p, parse::P_EQ) { Some(parse_expr::parse_expr_no_assign(p)) } else { None }
+        params.push(FnParam::Typed { pattern: pattern, ty: ty, is_comptime: is_comptime, default: default })
+        if p.pos == before {
+            parse::bump(p)
+            continue
+        }
+        if !parse::eat_list_separator(p) {
+            break
+        }
+    }
+    params
+}
+
+fn at_receiver_start(p: &mut Parser) -> bool {
+    if parse::at(p, parse::KW_SELF_LOWER) {
+        return true
+    }
+    if parse::at(p, parse::P_AMP) {
+        let n = parse::kind_at(p, 1)
+        if n == parse::KW_SELF_LOWER {
+            return true
+        }
+        if n == parse::KW_MUT && parse::kind_at(p, 2) == parse::KW_SELF_LOWER {
+            return true
+        }
+    }
+    false
+}
+
+fn parse_receiver(p: &mut Parser) -> Option<Receiver> {
+    if parse::eat(p, parse::KW_SELF_LOWER) {
+        return Some(Receiver::Owned)
+    }
+    if parse::eat(p, parse::P_AMP) {
+        let mutability = parse::eat(p, parse::KW_MUT)
+        parse::eat(p, parse::KW_SELF_LOWER)
+        return Some(if mutability { Receiver::RefMut } else { Receiver::RefShared })
+    }
+    None
+}
+
+fn at_item_keyword(p: &mut Parser) -> bool {
+    let k = parse::peek(p)
+    k == parse::KW_FN || k == parse::KW_STRUCT || k == parse::KW_ENUM || k == parse::KW_TRAIT ||
+        k == parse::KW_IMPL || k == parse::KW_TYPE || k == parse::KW_CONST ||
+        k == parse::KW_STATIC || k == parse::KW_MOD || k == parse::KW_USE
+}
+
+fn parse_struct_decl(p: &mut Parser) -> StructDecl {
+    parse::bump(p)
+    let name = parse_ident_required(p)
+    let generics = parse::parse_generics(p)
+    if parse::at(p, parse::KW_WHERE) {
+        let where_clause = parse::parse_where_clause(p)
+        let body = parse_struct_body(p)
+        return StructDecl { name: name, generics: generics, where_clause: where_clause, body: body }
+    }
+    let body = parse_struct_body(p)
+    let where_clause = parse::parse_where_clause(p)
+    StructDecl { name: name, generics: generics, where_clause: where_clause, body: body }
+}
+
+fn parse_named_fields(p: &mut Parser, stop_at_item: bool) -> Vec<StructField> {
+    let mut fields: Vec<StructField> = #[]
+    while !parse::at(p, parse::P_RBRACE) && !parse::at_eof(p) && !(stop_at_item && at_item_keyword(p)) {
+        let before = p.pos
+        let attrs = parse_attrs(p)
+        let visibility = parse_visibility(p)
+        let name = parse_ident_required(p)
+        parse::expect(p, parse::P_COLON)
+        let ty = parse::parse_type(p)
+        fields.push(StructField { attrs: attrs, visibility: visibility, name: name, ty: ty })
+        if p.pos == before {
+            parse::bump(p)
+            continue
+        }
+        if !parse::eat_list_separator(p) {
+            break
+        }
+    }
+    parse::expect(p, parse::P_RBRACE)
+    fields
+}
+
+fn parse_tuple_fields(p: &mut Parser) -> Vec<TupleField> {
+    let mut fields: Vec<TupleField> = #[]
+    while !parse::at(p, parse::P_RPAREN) && !parse::at_eof(p) {
+        let before = p.pos
+        let attrs = parse_attrs(p)
+        let visibility = parse_visibility(p)
+        let ty = parse::parse_type(p)
+        fields.push(TupleField { attrs: attrs, visibility: visibility, ty: ty })
+        if p.pos == before {
+            parse::bump(p)
+            continue
+        }
+        if !parse::eat_list_separator(p) {
+            break
+        }
+    }
+    parse::expect(p, parse::P_RPAREN)
+    fields
+}
+
+fn parse_struct_body(p: &mut Parser) -> StructBody {
+    if parse::eat(p, parse::P_LBRACE) {
+        return StructBody::Named(parse_named_fields(p, true))
+    }
+    if parse::eat(p, parse::P_LPAREN) {
+        return StructBody::Tuple(parse_tuple_fields(p))
+    }
+    parse::eat(p, parse::P_SEMI)
+    StructBody::Unit
+}
+
+fn parse_enum_decl(p: &mut Parser, packed: bool) -> EnumDecl {
+    parse::bump(p)
+    let name = parse_ident_required(p)
+    let generics = parse::parse_generics(p)
+    let declared_bits = if parse::at(p, parse::P_COLON) {
+        parse::bump(p)
+        parse_enum_repr_width(p)
+    } else {
+        None
+    }
+    let repr = EnumRepr { packed: packed, declared_bits: declared_bits }
+    let where_clause = parse::parse_where_clause(p)
+    if !parse::expect(p, parse::P_LBRACE) {
+        return EnumDecl { name: name, generics: generics, where_clause: where_clause, variants: #[], repr: repr }
+    }
+    let mut variants: Vec<EnumVariant> = #[]
+    while !parse::at(p, parse::P_RBRACE) && !parse::at_eof(p) {
+        let before = p.pos
+        let attrs = parse_attrs(p)
+        let variant_name = parse_ident_required(p)
+        let body = if parse::eat(p, parse::P_LBRACE) {
+            StructBody::Named(parse_named_fields(p, false))
+        } else if parse::eat(p, parse::P_LPAREN) {
+            StructBody::Tuple(parse_tuple_fields(p))
+        } else {
+            StructBody::Unit
+        }
+        let discriminant = if parse::eat(p, parse::P_EQ) { Some(parse_expr::parse_expr_no_assign(p)) } else { None }
+        variants.push(EnumVariant { attrs: attrs, name: variant_name, body: body, discriminant: discriminant })
+        if p.pos == before {
+            parse::bump(p)
+            continue
+        }
+        if !parse::eat_list_separator(p) {
+            break
+        }
+    }
+    parse::expect(p, parse::P_RBRACE)
+    EnumDecl { name: name, generics: generics, where_clause: where_clause, variants: variants, repr: repr }
+}
+
+fn parse_enum_repr_width(p: &mut Parser) -> Option<u32> {
+    let span = parse::peek_span(p)
+    let written = parse::text(p, span)
+    let mut bits: Option<u32> = None
+    if written.starts_with("u") && written.byte_len() > 1 {
+        let digits = written.substring(1, written.byte_len())
+        let mut all = true
+        let mut value = 0
+        for i in 0..digits.byte_len() {
+            let b = digits.byte_at(i)
+            if b < 48 || b > 57 {
+                all = false
+            } else if value < 1000000 {
+                value = value * 10 + (b - 48)
+            }
+        }
+        if all && value >= 1 && value <= 64 {
+            bits = Some(value as u32)
+        }
+    }
+    if bits.is_none() {
+        parse::record(p, "EnumReprWidth", span)
+    }
+    if parse::peek(p) == lex::IDENT {
+        parse::bump(p)
+    }
+    bits
+}
+
+fn parse_trait_decl(p: &mut Parser) -> TraitDecl {
+    parse::bump(p)
+    let name = parse_ident_required(p)
+    let generics = parse::parse_generics(p)
+    let supertraits = if parse::eat(p, parse::P_COLON) { parse::parse_trait_bound_list(p) } else { #[] }
+    let where_clause = parse::parse_where_clause(p)
+    if !parse::expect(p, parse::P_LBRACE) {
+        return TraitDecl { name: name, generics: generics, supertraits: supertraits, where_clause: where_clause, items: #[] }
+    }
+    let mut items: Vec<TraitItem> = #[]
+    while !parse::at(p, parse::P_RBRACE) && !parse::at_eof(p) {
+        let attrs = parse_attrs(p)
+        if parse::eat(p, parse::KW_TYPE) {
+            let item_name = parse_ident_required(p)
+            if parse::at(p, parse::P_LT) {
+                let s = parse::peek_span(p)
+                parse::report_declined(p, s)
+                parse::bump(p)
+                parse::recover_to_close_angle(p)
+            }
+            let bounds = if parse::eat(p, parse::P_COLON) { parse::parse_trait_bound_list(p) } else { #[] }
+            let default = if parse::eat(p, parse::P_EQ) { Some(parse::parse_type(p)) } else { None }
+            parse::eat(p, parse::P_SEMI)
+            items.push(TraitItem::TraitItemType { attrs: attrs, name: item_name, bounds: bounds, default: default })
+            continue
+        }
+        if parse::eat(p, parse::KW_CONST) {
+            let item_name = parse_ident_required(p)
+            parse::expect(p, parse::P_COLON)
+            let ty = parse::parse_type(p)
+            let default = if parse::eat(p, parse::P_EQ) { Some(parse_expr::parse_expr(p)) } else { None }
+            parse::eat(p, parse::P_SEMI)
+            items.push(TraitItem::Const { attrs: attrs, name: item_name, ty: ty, default: default })
+            continue
+        }
+        let mut decl = parse_fn_decl(p, Visibility::Public)
+        decl.attrs = attrs
+        items.push(TraitItem::Fn(decl))
+    }
+    parse::expect(p, parse::P_RBRACE)
+    TraitDecl { name: name, generics: generics, supertraits: supertraits, where_clause: where_clause, items: items }
+}
+
+fn parse_impl_decl(p: &mut Parser) -> ImplDecl {
+    parse::bump(p)
+    let generics = parse::parse_generics(p)
+    let first_type = parse::parse_type(p)
+    let mut trait_ref: Option<TraitBound> = None
+    let mut self_ty = first_type
+    if parse::eat(p, parse::KW_FOR) {
+        self_ty = parse::parse_type(p)
+        trait_ref = Some(match first_type.kind {
+            TypeKind::Path(path) => TraitBound { path: path, bindings: #[] },
+            _ => TraitBound { path: TypePath { segments: #[parse::type_segment("<error>")] }, bindings: #[] },
+        })
+    }
+    let where_clause = parse::parse_where_clause(p)
+    if !parse::expect(p, parse::P_LBRACE) {
+        return ImplDecl { generics: generics, trait_ref: trait_ref, self_ty: self_ty, where_clause: where_clause, items: #[] }
+    }
+    let mut items: Vec<ImplItem> = #[]
+    let trait_name = match trait_ref {
+        Some(bound) => bound.path.segments[bound.path.segments.len() - 1].name.name,
+        None => "",
+    }
+    let outer_trait = p.impl_trait
+    p.impl_trait = Some(trait_name)
+    while !parse::at(p, parse::P_RBRACE) && !parse::at_eof(p) {
+        items.push(parse_impl_item(p))
+    }
+    p.impl_trait = outer_trait
+    parse::expect(p, parse::P_RBRACE)
+    ImplDecl { generics: generics, trait_ref: trait_ref, self_ty: self_ty, where_clause: where_clause, items: items }
+}
+
+fn parse_impl_item(p: &mut Parser) -> ImplItem {
+    let attrs = parse_attrs(p)
+    let visibility = parse_visibility(p)
+    if parse::at_word(p, "default") && parse::kind_at(p, 1) == parse::KW_FN {
+        let s = parse::peek_span(p)
+        parse::report_declined(p, s)
+        parse::bump(p)
+    }
+    if parse::eat(p, parse::KW_TYPE) {
+        let name = parse_ident_required(p)
+        parse::expect(p, parse::P_EQ)
+        let ty = parse::parse_type(p)
+        parse::eat(p, parse::P_SEMI)
+        return ImplItem::ImplItemType { attrs: attrs, name: name, ty: ty }
+    }
+    if parse::eat(p, parse::KW_CONST) {
+        let name = parse_ident_required(p)
+        parse::expect(p, parse::P_COLON)
+        let ty = parse::parse_type(p)
+        parse::expect(p, parse::P_EQ)
+        let value = parse_expr::parse_expr(p)
+        parse::eat(p, parse::P_SEMI)
+        return ImplItem::Const { attrs: attrs, name: name, ty: ty, value: value }
+    }
+    let mut decl = parse_fn_decl(p, visibility)
+    decl.attrs = attrs
+    ImplItem::Fn(decl)
+}
+
+fn at_contextual_new_before_type(p: &mut Parser) -> bool {
+    if parse::peek(p) != lex::IDENT || !parse::peek_text_is(p, 0, "new") {
+        return false
+    }
+    let n = parse::kind_at(p, 1)
+    n == lex::IDENT || n == parse::KW_FN || n == parse::KW_SELF_UPPER || n == parse::P_AMP ||
+        n == parse::P_BANG || n == parse::P_LBRACKET || n == parse::P_LPAREN
+}
+
+fn parse_type_alias_decl(p: &mut Parser, newtype: bool) -> TypeAliasDecl {
+    parse::bump(p)
+    let name = parse_ident_required(p)
+    let generics = parse::parse_generics(p)
+    parse::expect(p, parse::P_EQ)
+    let mut nominal = newtype
+    if at_contextual_new_before_type(p) {
+        let s = parse::peek_span(p)
+        parse::bump(p)
+        parse::record(p, "OpaqueAliasSpelling", s)
+        nominal = true
+    }
+    let ty = parse::parse_type(p)
+    parse::eat(p, parse::P_SEMI)
+    TypeAliasDecl { name: name, generics: generics, ty: ty, nominal: nominal }
+}
+
+/// `NAME = value` with the type left out: the value parses, the type is
+/// inferred, and the omission is reported.
+fn recover_missing_item_type(p: &mut Parser, name: Ident, name_span: Span) -> Option<(Type, Expr)> {
+    if !parse::at(p, parse::P_EQ) {
+        return None
+    }
+    parse::bump(p)
+    let value = parse_expr::parse_expr(p)
+    parse::eat(p, parse::P_SEMI)
+    if !(name.name == "" || name.name == "<error>") {
+        parse::record(p, "MissingItemType", name_span)
+    }
+    let id = parse::alloc(p)
+    Some((parse::mk_type(id, name_span, TypeKind::Infer), value))
+}
+
+fn parse_const_decl(p: &mut Parser) -> ConstDecl {
+    parse::bump(p)
+    let name_span = parse::peek_span(p)
+    let name = parse_ident_required(p)
+    if let Some((ty, value)) = recover_missing_item_type(p, name, name_span) {
+        return ConstDecl { name: name, ty: ty, value: value }
+    }
+    parse::expect(p, parse::P_COLON)
+    let ty = parse::parse_type(p)
+    parse::expect(p, parse::P_EQ)
+    let value = parse_expr::parse_expr(p)
+    parse::eat(p, parse::P_SEMI)
+    ConstDecl { name: name, ty: ty, value: value }
+}
+
+fn parse_static_decl(p: &mut Parser) -> StaticDecl {
+    parse::bump(p)
+    let mutability = if parse::eat(p, parse::KW_MUT) { Mutability::Mutable } else { Mutability::Immutable }
+    let name_span = parse::peek_span(p)
+    let name = parse_ident_required(p)
+    if let Some((ty, value)) = recover_missing_item_type(p, name, name_span) {
+        return StaticDecl { mutability: mutability, name: name, ty: ty, value: value }
+    }
+    parse::expect(p, parse::P_COLON)
+    let ty = parse::parse_type(p)
+    parse::expect(p, parse::P_EQ)
+    let value = parse_expr::parse_expr(p)
+    parse::eat(p, parse::P_SEMI)
+    StaticDecl { mutability: mutability, name: name, ty: ty, value: value }
+}
+
+fn parse_mod_decl(p: &mut Parser) -> ModDecl {
+    parse::bump(p)
+    let name = parse_ident_required(p)
+    if parse::at(p, parse::P_SEMI) {
+        let s = parse::peek_span(p)
+        parse::bump(p)
+        parse::record(p, "ModDeclSemicolon", s)
+        return ModDecl { name: name, body: ModBody::External }
+    }
+    if !parse::at(p, parse::P_LBRACE) {
+        return ModDecl { name: name, body: ModBody::External }
+    }
+    parse::bump(p)
+    p.mod_stack.push(name.name)
+    let mut items: Vec<Item> = #[]
+    while !parse::at(p, parse::P_RBRACE) && !parse::at_eof(p) {
+        let before = p.pos
+        if parse::at(p, parse::KW_USE) {
+            let decl = parse_use_decl(p)
+            p.hoisted.push(decl)
+            continue
+        }
+        if at_attributed_use(p) {
+            let decl = parse_attributed_use(p)
+            p.hoisted.push(decl)
+            continue
+        }
+        if !parse::is_item_start(p) {
+            let s = parse::peek_span(p)
+            parse::record(p, "StatementOutsideEntry", s)
+            parse::bump(p)
+            parse::recover_to_item_start(p)
+            continue
+        }
+        items.extend(parse_item_group(p))
+        if p.pos == before {
+            parse::bump(p)
+        }
+    }
+    parse::expect(p, parse::P_RBRACE)
+    p.mod_stack.pop()
+    ModDecl { name: name, body: ModBody::Inline(items) }
+}
+
+pub fn parse_ident_required(p: &mut Parser) -> Ident {
+    let s = parse::peek_span(p)
+    if parse::peek(p) == lex::IDENT {
+        parse::bump(p)
+        return parse::ident(parse::text(p, s))
+    }
+    parse::record(p, "Unexpected", s)
+    parse::ident("<error>")
+}
+
+// ---- use declarations ----------------------------------------------------
+
+pub fn parse_use_decl(p: &mut Parser) -> UseDecl {
+    let start_span = parse::peek_span(p)
+    parse::bump(p)
+    let target = if parse::peek(p) == lex::STRING_LIT {
+        parse_project_use_target(p)
+    } else {
+        let path = parse_module_path(p)
+        reject_hyphenated_use_path(p)
+        UseTarget::Module(path)
+    }
+    let alias = if parse::eat(p, parse::KW_AS) { Some(parse_use_ident(p)) } else { None }
+    if parse::at(p, parse::P_COLON_COLON) && parse::kind_at(p, 1) == parse::P_LBRACE {
+        parse::bump(p)
+    }
+    let list = if parse::at(p, parse::P_LBRACE) { Some(parse_use_list(p)) } else { None }
+    parse::eat(p, parse::P_SEMI)
+    let end_span = parse::last_span(p)
+    let span = parse::join(p, start_span, end_span)
+    let id = parse::alloc(p)
+    UseDecl { id: id, span: span, target: target, alias: alias, list: list, module: p.mod_stack, cfg: None }
+}
+
+pub fn at_attributed_use(p: &mut Parser) -> bool {
+    let mut index = 0
+    let mut saw = false
+    loop {
+        if parse::kind_at(p, index) != parse::P_HASH || parse::kind_at(p, index + 1) != parse::P_LBRACKET {
+            break
+        }
+        saw = true
+        index += 2
+        let mut depth = 1
+        while depth > 0 {
+            let k = parse::kind_at(p, index)
+            if k == parse::P_LBRACKET {
+                depth += 1
+            } else if k == parse::P_RBRACKET {
+                depth -= 1
+            } else if k == lex::EOF {
+                return false
+            }
+            index += 1
+        }
+    }
+    saw && parse::kind_at(p, index) == parse::KW_USE
+}
+
+pub fn parse_attributed_use(p: &mut Parser) -> UseDecl {
+    let attrs = parse_attrs(p)
+    let mut conditions: Vec<String> = #[]
+    for a in attrs.outer {
+        if parse::attr_is_named(a, "cfg") {
+            if let Some(t) = a.tokens {
+                conditions.push(t)
+            }
+        }
+    }
+    let mut decl = parse_use_decl(p)
+    decl.cfg = if conditions.len() == 0 {
+        None
+    } else if conditions.len() == 1 {
+        Some(conditions[0])
+    } else {
+        Some("all(" + conditions.join(", ") + ")")
+    }
+    decl
+}
+
+fn parse_project_use_target(p: &mut Parser) -> UseTarget {
+    let lit_span = parse::peek_span(p)
+    parse::bump(p)
+    let raw = parse::text(p, lit_span)
+    let n = raw.byte_len()
+    let id = if n >= 2 && raw.starts_with("\"") && raw.ends_with("\"") { raw.substring(1, n - 1) } else { raw }
+    let module = if parse::eat(p, parse::P_COLON_COLON) { Some(parse_module_path(p)) } else { None }
+    UseTarget::Project { id: id, module: module }
+}
+
+fn reject_hyphenated_use_path(p: &mut Parser) {
+    if !parse::at(p, parse::P_MINUS) || parse::newline_before_peek(p) || parse::kind_at(p, 1) != lex::IDENT {
+        return
+    }
+    let start = parse::peek_span(p)
+    while parse::at(p, parse::P_MINUS) && !parse::newline_before_peek(p) && parse::kind_at(p, 1) == lex::IDENT {
+        parse::bump(p)
+        parse::bump(p)
+    }
+    let end = parse::last_span(p)
+    let span = parse::join(p, start, end)
+    parse::record(p, "HyphenInUsePath", span)
+}
+
+fn parse_module_path(p: &mut Parser) -> ModulePath {
+    let mut segments = #[parse_use_ident(p)]
+    while parse::at(p, parse::P_COLON_COLON) {
+        let checkpoint = p.pos
+        parse::bump(p)
+        if parse::at(p, parse::P_LBRACE) {
+            p.pos = checkpoint
+            break
+        }
+        segments.push(parse_use_ident(p))
+    }
+    ModulePath { segments: segments }
+}
+
+fn parse_use_ident(p: &mut Parser) -> Ident {
+    let s = parse::peek_span(p)
+    let k = parse::peek(p)
+    if k == lex::IDENT {
+        parse::bump(p)
+        return parse::ident(parse::text(p, s))
+    }
+    if k == parse::KW_CRATE {
+        parse::bump(p)
+        return parse::ident("crate")
+    }
+    if k == parse::KW_SUPER {
+        parse::bump(p)
+        return parse::ident("super")
+    }
+    if k == parse::KW_SELF_LOWER {
+        parse::bump(p)
+        return parse::ident("self")
+    }
+    parse::record(p, "MalformedUse", s)
+    parse::ident("<error>")
+}
+
+fn parse_use_list(p: &mut Parser) -> Vec<UseListEntry> {
+    parse::bump(p)
+    let mut entries: Vec<UseListEntry> = #[]
+    while !parse::at(p, parse::P_RBRACE) && !parse::at_eof(p) {
+        parse_use_list_entry(p, #[], &mut entries)
+        if !parse::eat_list_separator(p) {
+            break
+        }
+    }
+    parse::expect(p, parse::P_RBRACE)
+    entries
+}
+
+fn parse_use_list_entry(p: &mut Parser, outer: Vec<Ident>, entries: &mut Vec<UseListEntry>) {
+    let mut prefix = outer
+    let mut name = parse_use_ident(p)
+    while parse::at(p, parse::P_COLON_COLON) {
+        parse::bump(p)
+        if parse::at(p, parse::P_LBRACE) {
+            let mut nested = prefix
+            nested.push(name)
+            parse::bump(p)
+            while !parse::at(p, parse::P_RBRACE) && !parse::at_eof(p) {
+                parse_use_list_entry(p, nested, entries)
+                if !parse::eat_list_separator(p) {
+                    break
+                }
+            }
+            parse::expect(p, parse::P_RBRACE)
+            return
+        }
+        prefix.push(name)
+        name = parse_use_ident(p)
+    }
+    let alias = if parse::eat(p, parse::KW_AS) { Some(parse_use_ident(p)) } else { None }
+    entries.push(UseListEntry { prefix: prefix, name: name, alias: alias })
+}

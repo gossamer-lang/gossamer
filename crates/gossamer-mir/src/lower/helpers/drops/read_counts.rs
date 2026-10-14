@@ -146,8 +146,9 @@ pub(super) fn collect_local_read_counts(body: &Body) -> HashMap<u32, usize> {
     counts
 }
 
-/// Fuses a map probe keyed by a substring, `m.inc(seq.substring(i, j), by)`
-/// or `m.get_or(seq.substring(i, j), d)`, with an optional `.trim()` of the
+/// Fuses a map probe keyed by a substring - `m.inc(seq.substring(i, j), by)`,
+/// `m.get_or(..)`, `m.get(..)`, `m.contains_key(..)`, or `m.or_insert(..)`
+/// on a map whose values own nothing - with an optional `.trim()` of the
 /// substring between, into one call that reads the key in place out of `seq`.
 /// The scratch Strings the substring and the trim would allocate on every
 /// probe are removed; the map makes an owned key only for a key it has not
@@ -157,7 +158,7 @@ pub(super) fn collect_local_read_counts(body: &Body) -> HashMap<u32, usize> {
 /// The rewrite only fires when each scratch String flows *only* into the next
 /// step (read exactly once), so a key observed elsewhere keeps the allocating
 /// path.
-pub(crate) fn fuse_substring_map_inc(body: &mut Body) {
+pub(crate) fn fuse_substring_map_inc(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
     let n = body.blocks.len();
     let reads = collect_local_read_counts(body);
     let reads_of = |local: Local| reads.get(&local.0).copied().unwrap_or(0);
@@ -171,7 +172,7 @@ pub(crate) fn fuse_substring_map_inc(body: &mut Body) {
         start: Operand,
         end: Operand,
         trim: bool,
-        last: Operand,
+        last: Option<Operand>,
         dest: Place,
         target: Option<BlockId>,
         scratch: Vec<Local>,
@@ -209,15 +210,33 @@ pub(crate) fn fuse_substring_map_inc(body: &mut Body) {
         else {
             continue;
         };
-        let fused = match name.as_str() {
+        let (fused, takes_last) = match name.as_str() {
             "gos_rt_map_inc_str_i64" | "gos_rt_map_inc_typed_str_i64" => {
-                "gos_rt_map_inc_substring_str_i64"
+                ("gos_rt_map_inc_substring_str_i64", true)
             }
-            "gos_rt_map_get_or_str_str" => "gos_rt_map_get_or_substring_str_str",
+            "gos_rt_map_get_or_str_str" => ("gos_rt_map_get_or_substring_str_str", true),
+            "gos_rt_map_get_or_str_i64" | "gos_rt_map_get_or_typed_str_i64" => {
+                ("gos_rt_map_get_or_substring_str_i64", true)
+            }
+            "gos_rt_map_get_str_opt" | "gos_rt_map_get_typed_str_opt" => {
+                ("gos_rt_map_get_opt_substring_str", false)
+            }
+            "gos_rt_map_contains_key_str" | "gos_rt_map_contains_key_typed_str" => {
+                ("gos_rt_map_contains_substring_str", false)
+            }
+            "gos_rt_map_or_insert_str_i64" | "gos_rt_map_or_insert_typed_str_i64"
+                if args
+                    .first()
+                    .is_some_and(|m| map_values_own_nothing(body, tcx, m)) =>
+            {
+                ("gos_rt_map_or_insert_substring_str_i64", true)
+            }
             _ => continue,
         };
-        let [m, Operand::Copy(key_place), last] = args.as_slice() else {
-            continue;
+        let (m, key_place, last) = match args.as_slice() {
+            [m, Operand::Copy(key_place)] if !takes_last => (m, key_place, None),
+            [m, Operand::Copy(key_place), last] if takes_last => (m, key_place, Some(last)),
+            _ => continue,
         };
         if !key_place.projection.is_empty() {
             continue;
@@ -281,7 +300,7 @@ pub(crate) fn fuse_substring_map_inc(body: &mut Body) {
             start: start.clone(),
             end: end.clone(),
             trim,
-            last: last.clone(),
+            last: last.cloned(),
             dest: destination.clone(),
             target: *target,
             scratch,
@@ -327,20 +346,48 @@ pub(crate) fn fuse_substring_map_inc(body: &mut Body) {
                 )
             });
         }
+        let mut args = vec![
+            plan.m,
+            plan.seq,
+            plan.start,
+            plan.end,
+            Operand::Const(ConstValue::Int(i128::from(plan.trim))),
+        ];
+        args.extend(plan.last);
         probe_block.terminator = Terminator::Call {
             callee: Operand::Const(ConstValue::Str(plan.fused.to_string())),
-            args: vec![
-                plan.m,
-                plan.seq,
-                plan.start,
-                plan.end,
-                Operand::Const(ConstValue::Int(i128::from(plan.trim))),
-                plan.last,
-            ],
+            args,
             destination: plan.dest,
             target: plan.target,
         };
     }
+}
+
+/// Whether `map` is a `Map<String, V>` whose `V` owns nothing: an integer,
+/// float, `bool`, or `char`, which an `or_insert` stores as the word itself.
+fn map_values_own_nothing(body: &Body, tcx: &gossamer_types::TyCtxt, map: &Operand) -> bool {
+    use gossamer_types::TyKind;
+    let Operand::Copy(place) = map else {
+        return false;
+    };
+    if !place.projection.is_empty() {
+        return false;
+    }
+    let Some(decl) = body.locals.get(place.local.0 as usize) else {
+        return false;
+    };
+    let mut ty = decl.ty;
+    while let TyKind::Ref { inner, .. } = tcx.kind_of(ty) {
+        ty = *inner;
+    }
+    matches!(
+        tcx.kind_of(ty),
+        TyKind::HashMap { value, .. }
+            if matches!(
+                tcx.kind_of(*value),
+                TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char
+            )
+    )
 }
 
 pub(crate) fn rewrite_str_concat_consuming(body: &mut Body) {

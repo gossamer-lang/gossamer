@@ -591,6 +591,8 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         // pass cannot tell it owns a `String` and never releases it (a leak).
         propagate_copy_types(body, tcx);
         copy_stored_containers(body, tcx);
+        copy_values_into_holders(body, tcx);
+        borrow_lent_payload_reads(body, tcx);
         copy_returned_lent_tables(body, tcx);
         rewrite_str_concat_consuming(body);
         crate::opt::elide_vec_clone_in_three_way_swaps(body);
@@ -602,7 +604,9 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         // Fuse `seq.substring(i, i+k)` + `m.inc(kmer)` into the borrowed-slice
         // probe before the RC passes, so the eliminated scratch String gets no
         // retain/release.
-        fuse_substring_map_inc(body);
+        fuse_substring_map_inc(body, tcx);
+        view_read_only_string_bytes(body);
+        read_packed_elements_by_value(body, tcx);
         release_mapped_payloads(body, tcx);
         own_carrier_payloads(body, tcx);
         record_channel_elem_kind(body, tcx);
@@ -616,6 +620,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         insert_aggr_copy_drops(body, tcx);
         insert_json_frees(body, tcx, &json_borrowing_fns);
         insert_vec_elem_metas(body, tcx, &user_fn_names);
+        insert_signed_vec_marks(body, tcx, &user_fn_names);
         insert_early_releases(body, tcx);
         insert_copied_key_releases(body, tcx);
         drop_unread_map_insert_results(body, tcx);
@@ -642,6 +647,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         // Follows the drop passes, so the carrier releases they place are part
         // of what it accounts for.
         crate::opt::pop_scalar_aggregates_in_place(body, tcx);
+        hold_region_node_shares(body);
         if std::env::var("GOS_DUMP_MIR_RC").is_ok() {
             eprintln!("=== MIR(post-rc) {} ===", body.name);
             for block in &body.blocks {
@@ -673,7 +679,8 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
             let summaries = crate::uniqueness::CallSummaries::compute(bodies, tcx);
             for body in &mut bodies[start..] {
                 let report = crate::opt::UniquenessReport {
-                    shares_transferred: crate::opt::transfer_last_use_shares(body, tcx, &summaries),
+                    shares_transferred: crate::opt::transfer_last_use_shares(body, tcx, &summaries)
+                        + crate::opt::move_boxed_payload_sources(body, tcx, &summaries),
                     clones_moved: crate::opt::move_unique_clones(body, tcx, &summaries),
                 };
                 crate::opt::record_uniqueness(&body.name, report);
@@ -688,6 +695,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
             crate::opt::move_stored_rc_shares(body, tcx);
             crate::opt::elide_settled_guarded_walks(body);
             crate::opt::reduce_materialised_counts(body);
+            crate::opt::sink_exit_releases(body, tcx);
         }
     }
     // Perceus reuse: recycle a uniquely-owned block being released into a

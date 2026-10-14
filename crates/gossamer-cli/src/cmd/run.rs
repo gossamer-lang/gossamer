@@ -42,15 +42,17 @@ fn run_source_on_vm(
     forwarded: &[String],
     origins: Option<(&Path, &[gossamer_pkg::bundle::BundledSpan])>,
 ) -> Result<()> {
-    // Compile-time codegen pass: synthesize `from_json` / `to_json`
-    // for every user struct so the resulting program has real
-    // methods (no VM-only intercept).
-    let source = gossamer_parse::autoderive::augment_source(user_source);
-    let generated_len = source.len().saturating_sub(user_source.len());
-    // Comptime fold: evaluate `comptime { ... }` / `comptime fn` calls
-    // now and splice their result literals in, so the VM compiles a
-    // constant identical to what the compiled tiers see.
-    let source = crate::comptime_fold::fold_comptime(source, file_label)?;
+    // Autoderive synthesizes the derives and serde entry points, and the
+    // comptime fold evaluates `comptime { ... }` / `comptime fn` calls now
+    // and splices their result literals in, so the VM compiles a constant
+    // identical to what the compiled tiers see.
+    let prepared = crate::unit_cache::prepare(user_source, file_label);
+    if let Some(err) = prepared.fold_error {
+        return Err(err);
+    }
+    let generated_len = prepared.generated_len;
+    let program = prepared.program;
+    let source = prepared.source;
     profile_rss_stage("source_prepared");
     let mut map = gossamer_lex::SourceMap::new();
     let file_id = map.add_file(file_label, source);
@@ -61,7 +63,7 @@ fn run_source_on_vm(
     // Static checks always run first. A program with parse / resolve /
     // type errors has no business reaching the VM - execution would
     // either crash or produce unsound output.
-    let (program, tcx) = load_and_check(map.source(file_id), file_id, &map)?;
+    let (program, tcx) = load_and_check(map.source(file_id), file_id, &map, program)?;
     gossamer_interp::set_program_name(file_label);
     gossamer_interp::set_program_args(forwarded);
     gossamer_interp::reset_lazy_iterator_state();

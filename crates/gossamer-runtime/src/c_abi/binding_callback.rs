@@ -50,8 +50,8 @@ impl Class {
     }
 }
 
-/// One registered closure: its environment and the classes it was compiled
-/// against.
+/// One registered closure: its environment, of which the registration holds a
+/// share, and the classes it was compiled against.
 struct ClosureCallback {
     env: *const u8,
     params: Vec<Class>,
@@ -87,11 +87,13 @@ fn contexts() -> &'static Mutex<HashMap<u64, usize>> {
 
 /// Registers the closure `env`, compiled against `signature`, as a binding
 /// callback. Answers the handle the binding receives, or `0` for a signature
-/// the runtime cannot call through.
+/// the runtime cannot call through. The registration keeps a share of `env`
+/// until [`gos_rt_binding_callback_release`], since the caller's last use of
+/// the closure is this call.
 ///
 /// # Safety
-/// `env` is a live closure environment for the duration of the registration,
-/// and `signature` is a NUL-terminated class string.
+/// `env` is a live counted closure environment, and `signature` is a
+/// NUL-terminated class string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_binding_callback_register(
     env: *const u8,
@@ -106,6 +108,8 @@ pub unsafe extern "C" fn gos_rt_binding_callback_register(
         let Some((params, ret)) = parse_signature(text) else {
             return 0;
         };
+        // SAFETY: `env` is a live counted environment (contract).
+        unsafe { super::rc::gos_rt_rc_retain(env.cast_mut()) };
         let context = Box::into_raw(Box::new(ClosureCallback { env, params, ret }));
         let handle =
             super::signal::gos_rt_callback_register(context.cast_const().cast(), invoke_closure);
@@ -126,7 +130,9 @@ pub extern "C" fn gos_rt_binding_callback_release(handle: u64) {
         if let Some(context) = contexts().lock().remove(&handle) {
             // SAFETY: the context was boxed at registration, and unregistering
             // waited for every call through the handle to leave it.
-            drop(unsafe { Box::from_raw(context as *mut ClosureCallback) });
+            let callback = unsafe { Box::from_raw(context as *mut ClosureCallback) };
+            // SAFETY: this gives back the share of `env` the registration took.
+            unsafe { super::rc::gos_rt_rc_release(callback.env.cast_mut()) };
         }
     });
 }
@@ -294,7 +300,43 @@ fn release_strings(strings: &[*mut c_char]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Class, parse_signature};
+    use super::{
+        Class, gos_rt_binding_callback_register, gos_rt_binding_callback_release, parse_signature,
+    };
+    use crate::c_abi::rc::{gos_rt_rc_alloc, rc_strong_count};
+
+    /// The caller's last use of a closure it hands a binding is the
+    /// registration, so the scope that built it may release its share before
+    /// the binding calls it. The registration's own share keeps it live.
+    #[test]
+    fn a_registered_callback_holds_a_share_of_its_closure_environment() {
+        let meta: [i64; 2] = [8, 0];
+        // SAFETY: `meta` describes an 8-byte payload with no counted fields.
+        let env = unsafe { gos_rt_rc_alloc(8, meta.as_ptr()) };
+        assert!(!env.is_null(), "the test environment allocated");
+        // SAFETY: `env` is the live environment allocated above.
+        let before = unsafe { rc_strong_count(env) };
+        let signature = crate::c_abi::string::test_gos_str(">u");
+
+        // SAFETY: `env` is live and counted; `signature` is a runtime string.
+        let handle = unsafe { gos_rt_binding_callback_register(env, signature) };
+        assert_ne!(handle, 0, "a `>u` signature registers");
+        // SAFETY: as above; the registration's share keeps `env` live.
+        let registered = unsafe { rc_strong_count(env) };
+        assert_eq!(
+            registered,
+            before + 1,
+            "registering takes one share of the environment"
+        );
+
+        gos_rt_binding_callback_release(handle);
+        // SAFETY: the test's own share still keeps `env` live.
+        let released = unsafe { rc_strong_count(env) };
+        assert_eq!(
+            released, before,
+            "releasing gives the registration's share back"
+        );
+    }
 
     #[test]
     fn signature_names_each_parameter_and_the_return() {

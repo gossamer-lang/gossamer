@@ -1,0 +1,66 @@
+// Map lookups keyed by a piece of a string read the piece in place: `get`,
+// `contains_key`, `get_or`, and `or_insert` keyed by a substring or its
+// `trim()`. Each must answer exactly as the same lookup with the key built
+// first, including substring bounds that clamp or cross.
+
+fn intern(text: String) -> (Map<String, i64>, Vec<i64>) {
+    let mut ids: Map<String, i64> = Map::new()
+    let mut out: Vec<i64> = #[]
+    let mut start = 0
+    let mut i = 0
+    while i <= text.byte_len() {
+        if i == text.byte_len() || text.byte_at(i) == 32 {
+            if i > start {
+                let next = ids.len()
+                let id = ids.or_insert(text.substring(start, i), next)
+                out.push(id)
+            }
+            start = i + 1
+        }
+        i += 1
+    }
+    (ids, out)
+}
+
+fn sorted_keys(m: Map<String, i64>) -> String {
+    let mut keys = m.keys()
+    keys.sort()
+    let mut out = ""
+    for k in keys {
+        out += f"[{k}]={m[k]} "
+    }
+    out
+}
+
+fn main() {
+    let ids, seq = intern("let x = x + let y")
+    println(f"interned: {sorted_keys(ids)} seq {seq}")
+
+    let s = "  alpha beta  "
+    let mut m: Map<String, i64> = Map::new()
+    m["alpha"] = 1
+    m["beta"] = 2
+    m[""] = 7
+    let windows = [(2, 7), (8, 12), (8, 100), (-5, 7), (7, 2), (0, 0)]
+    for w in windows {
+        let a, b = w
+        let fused_get = m.get(s.substring(a, b))
+        let fused_has = m.contains_key(s.substring(a, b))
+        let fused_or = m.get_or(s.substring(a, b), -1)
+        let trimmed = m.get_or(s.substring(a, b).trim(), -1)
+        let key = s.substring(a, b)
+        let built_get = m.get(key)
+        let built_has = m.contains_key(key)
+        let built_or = m.get_or(key, -1)
+        println(f"[{a},{b}) {fused_get} {fused_has} {fused_or} {trimmed} | {built_get} {built_has} {built_or} {key:?}")
+    }
+
+    let mut counts: Map<String, i64> = Map::new()
+    let words = "a bb a ccc bb a"
+    for w in [(0, 1), (2, 4), (5, 6), (7, 10), (11, 13), (14, 15)] {
+        let a, b = w
+        let seen = counts.or_insert(words.substring(a, b), 0)
+        counts[words.substring(a, b)] = seen + 1
+    }
+    println(f"or_insert counts: {sorted_keys(counts)}")
+}

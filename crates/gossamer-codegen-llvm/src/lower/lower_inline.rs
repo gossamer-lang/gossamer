@@ -72,6 +72,16 @@ use gossamer_mir::{BasicBlock, Body, ConstValue, Operand, Place, Projection, UnO
 use gossamer_types::{FloatTy, IntTy, Ty, TyCtxt, TyKind};
 
 /// The width one Vec element occupies, as an indexed access sees it.
+/// How a vector of a packing element type holds each element when its
+/// header records the packed width.
+#[derive(Clone, Copy)]
+enum PackedElem {
+    /// A narrow integer of `width` bytes, extended by its signedness.
+    Int { width: u32, signed: bool },
+    /// A four-byte `f32`, widened to the `f64` that carries it.
+    F32,
+}
+
 enum ElemStride {
     /// Eight bytes, settled by the element type.
     Word,
@@ -431,25 +441,144 @@ impl<'a> Lowerer<'a> {
         matches!(
             self.tcx.kind(elem),
             Some(
-                TyKind::Char
-                    | TyKind::Int(
-                        IntTy::I8
-                            | IntTy::I16
-                            | IntTy::I32
-                            | IntTy::I64
-                            | IntTy::I128
-                            | IntTy::Isize
-                            | IntTy::U16
-                            | IntTy::U32
-                            | IntTy::U64
-                            | IntTy::U128
-                            | IntTy::Usize
-                    )
-                    | TyKind::Float(FloatTy::F64)
+                TyKind::Int(
+                    IntTy::I64
+                        | IntTy::I128
+                        | IntTy::Isize
+                        | IntTy::U64
+                        | IntTy::U128
+                        | IntTy::Usize
+                ) | TyKind::Float(FloatTy::F64)
                     | TyKind::Vec(_)
                     | TyKind::Slice(_)
             )
         )
+    }
+
+    /// The width a vector of `op`'s element type is built with and whether
+    /// its value is signed, for an element type that packs narrower than a
+    /// word. A vector a runtime shim builds may still hold such elements as
+    /// words, so an access compares this width with the header's.
+    fn vec_operand_narrow_elem(&self, op: &Operand) -> Option<PackedElem> {
+        let Operand::Copy(pl) = op else {
+            return None;
+        };
+        let mut ty = self.place_leaf_ty(pl);
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(ty) {
+            ty = *inner;
+        }
+        let elem = match self.tcx.kind(ty) {
+            Some(TyKind::Vec(e) | TyKind::Slice(e)) => *e,
+            _ => return None,
+        };
+        if self.tcx.vec_packs_f32(elem) {
+            return Some(PackedElem::F32);
+        }
+        self.tcx
+            .vec_narrow_scalar(elem)
+            .map(|(width, signed)| PackedElem::Int { width, signed })
+    }
+
+    /// Loads the element at `ea` of a vector whose header records the width
+    /// `eb`, as a word: an element type that packs (`narrow`) reads its own
+    /// width when the header records it and a word otherwise; any other reads
+    /// a byte when the header records one and a word otherwise.
+    fn emit_header_elem_load(
+        &mut self,
+        ea: &str,
+        eb: &str,
+        narrow: Option<PackedElem>,
+        labels: &str,
+    ) -> String {
+        let (width, ext) = match narrow {
+            Some(PackedElem::Int { width, signed }) => {
+                (width, if signed { "sext" } else { "zext" })
+            }
+            Some(PackedElem::F32) => (4, "fpext"),
+            None => (1, "zext"),
+        };
+        let bits = width * 8;
+        let (narrow_b, word_b, join_b) = (
+            format!("{labels}_narrow"),
+            format!("{labels}_word"),
+            format!("{labels}_join"),
+        );
+        let is_narrow = self.fresh();
+        writeln!(self.out, "  {is_narrow} = icmp eq i64 {eb}, {width}").unwrap();
+        writeln!(
+            self.out,
+            "  br i1 {is_narrow}, label %{narrow_b}, label %{word_b}"
+        )
+        .unwrap();
+        writeln!(self.out, "{narrow_b}:").unwrap();
+        let small = self.fresh();
+        let widened = self.fresh();
+        if matches!(narrow, Some(PackedElem::F32)) {
+            // The word carries the `f64` holding the `f32`'s value.
+            writeln!(self.out, "  {small} = load float, ptr {ea}{TBAA_DATA}").unwrap();
+            let double = self.fresh();
+            writeln!(self.out, "  {double} = fpext float {small} to double").unwrap();
+            writeln!(self.out, "  {widened} = bitcast double {double} to i64").unwrap();
+        } else {
+            writeln!(self.out, "  {small} = load i{bits}, ptr {ea}{TBAA_DATA}").unwrap();
+            writeln!(self.out, "  {widened} = {ext} i{bits} {small} to i64").unwrap();
+        }
+        writeln!(self.out, "  br label %{join_b}").unwrap();
+        writeln!(self.out, "{word_b}:").unwrap();
+        let word = self.fresh();
+        writeln!(self.out, "  {word} = load i64, ptr {ea}{TBAA_DATA}").unwrap();
+        writeln!(self.out, "  br label %{join_b}").unwrap();
+        writeln!(self.out, "{join_b}:").unwrap();
+        let loaded = self.fresh();
+        writeln!(
+            self.out,
+            "  {loaded} = phi i64 [ {widened}, %{narrow_b} ], [ {word}, %{word_b} ]"
+        )
+        .unwrap();
+        loaded
+    }
+
+    /// Stores the word `val` as the element at `ea` of a vector whose header
+    /// records the width `eb`, at the width [`Self::emit_header_elem_load`]
+    /// reads it with, then branches to `done`.
+    fn emit_header_elem_store(
+        &mut self,
+        ea: &str,
+        eb: &str,
+        val: &str,
+        narrow: Option<PackedElem>,
+        labels: &str,
+        done: &str,
+    ) {
+        let width = match narrow {
+            Some(PackedElem::Int { width, .. }) => width,
+            Some(PackedElem::F32) => 4,
+            None => 1,
+        };
+        let bits = width * 8;
+        let (narrow_b, word_b) = (format!("{labels}_narrow"), format!("{labels}_word"));
+        let is_narrow = self.fresh();
+        writeln!(self.out, "  {is_narrow} = icmp eq i64 {eb}, {width}").unwrap();
+        writeln!(
+            self.out,
+            "  br i1 {is_narrow}, label %{narrow_b}, label %{word_b}"
+        )
+        .unwrap();
+        writeln!(self.out, "{narrow_b}:").unwrap();
+        let small = self.fresh();
+        if matches!(narrow, Some(PackedElem::F32)) {
+            let double = self.fresh();
+            writeln!(self.out, "  {double} = bitcast i64 {val} to double").unwrap();
+            writeln!(self.out, "  {small} = fptrunc double {double} to float").unwrap();
+            writeln!(self.out, "  store float {small}, ptr {ea}{TBAA_DATA}").unwrap();
+        } else {
+            writeln!(self.out, "  {small} = trunc i64 {val} to i{bits}").unwrap();
+            writeln!(self.out, "  store i{bits} {small}, ptr {ea}{TBAA_DATA}").unwrap();
+        }
+        writeln!(self.out, "  br label %{done}").unwrap();
+        writeln!(self.out, "{word_b}:").unwrap();
+        writeln!(self.out, "  store i64 {val}, ptr {ea}{TBAA_DATA}").unwrap();
+        writeln!(self.out, "  br label %{done}").unwrap();
     }
 
     /// True when the operand is a `Vec`/`[T]` whose element word is a handle
@@ -794,36 +923,8 @@ impl<'a> Lowerer<'a> {
                 b64
             }
             ElemStride::Header(eb) => {
-                let (byte_b, word_b, join_b) = (
-                    format!("vg_byte_{s}"),
-                    format!("vg_word_{s}"),
-                    format!("vg_join_{s}"),
-                );
-                let is_byte = self.fresh();
-                writeln!(self.out, "  {is_byte} = icmp eq i64 {eb}, 1").unwrap();
-                writeln!(
-                    self.out,
-                    "  br i1 {is_byte}, label %{byte_b}, label %{word_b}"
-                )
-                .unwrap();
-                writeln!(self.out, "{byte_b}:").unwrap();
-                let b8 = self.fresh();
-                writeln!(self.out, "  {b8} = load i8, ptr {ea}{TBAA_DATA}").unwrap();
-                let b64 = self.fresh();
-                writeln!(self.out, "  {b64} = zext i8 {b8} to i64").unwrap();
-                writeln!(self.out, "  br label %{join_b}").unwrap();
-                writeln!(self.out, "{word_b}:").unwrap();
-                let w64 = self.fresh();
-                writeln!(self.out, "  {w64} = load i64, ptr {ea}{TBAA_DATA}").unwrap();
-                writeln!(self.out, "  br label %{join_b}").unwrap();
-                writeln!(self.out, "{join_b}:").unwrap();
-                let loaded = self.fresh();
-                writeln!(
-                    self.out,
-                    "  {loaded} = phi i64 [ {b64}, %{byte_b} ], [ {w64}, %{word_b} ]"
-                )
-                .unwrap();
-                loaded
+                let narrow = self.vec_operand_narrow_elem(&args[0]);
+                self.emit_header_elem_load(&ea, &eb, narrow, &format!("vg_{s}"))
             }
         };
         self.store_i64_as(&loaded, &dest_ty, &dest_slot);
@@ -919,36 +1020,8 @@ impl<'a> Lowerer<'a> {
         } else {
             let (off, eb) = self.vec_elem_offset(&vec_ptr, &idx, &args[0]);
             let ea = self.vec_elem_addr(&vec_ptr, &off);
-            let (byte_b, word_b, join_b) = (
-                format!("vgu_byte_{s}"),
-                format!("vgu_word_{s}"),
-                format!("vgu_join_{s}"),
-            );
-            let is_byte = self.fresh();
-            writeln!(self.out, "  {is_byte} = icmp eq i64 {eb}, 1").unwrap();
-            writeln!(
-                self.out,
-                "  br i1 {is_byte}, label %{byte_b}, label %{word_b}"
-            )
-            .unwrap();
-            writeln!(self.out, "{byte_b}:").unwrap();
-            let b8 = self.fresh();
-            writeln!(self.out, "  {b8} = load i8, ptr {ea}{TBAA_DATA}").unwrap();
-            let b64 = self.fresh();
-            writeln!(self.out, "  {b64} = zext i8 {b8} to i64").unwrap();
-            writeln!(self.out, "  br label %{join_b}").unwrap();
-            writeln!(self.out, "{word_b}:").unwrap();
-            let w64 = self.fresh();
-            writeln!(self.out, "  {w64} = load i64, ptr {ea}{TBAA_DATA}").unwrap();
-            writeln!(self.out, "  br label %{join_b}").unwrap();
-            writeln!(self.out, "{join_b}:").unwrap();
-            let loaded = self.fresh();
-            writeln!(
-                self.out,
-                "  {loaded} = phi i64 [ {b64}, %{byte_b} ], [ {w64}, %{word_b} ]"
-            )
-            .unwrap();
-            loaded
+            let narrow = self.vec_operand_narrow_elem(&args[0]);
+            self.emit_header_elem_load(&ea, &eb, narrow, &format!("vgu_{s}"))
         };
         self.store_i64_as(&loaded, &dest_ty, &dest_slot);
         emit_terminator_branch(&mut self.out, target);
@@ -1068,21 +1141,10 @@ impl<'a> Lowerer<'a> {
                 writeln!(self.out, "  store i8 {v8}, ptr {ea}{TBAA_DATA}").unwrap();
             }
             ElemStride::Header(eb) => {
-                let (byte_b, word_b) = (format!("vs_byte_{s}"), format!("vs_word_{s}"));
-                let is_byte = self.fresh();
-                writeln!(self.out, "  {is_byte} = icmp eq i64 {eb}, 1").unwrap();
-                writeln!(
-                    self.out,
-                    "  br i1 {is_byte}, label %{byte_b}, label %{word_b}"
-                )
-                .unwrap();
-                writeln!(self.out, "{byte_b}:").unwrap();
-                let v8 = self.fresh();
-                writeln!(self.out, "  {v8} = trunc i64 {val} to i8").unwrap();
-                writeln!(self.out, "  store i8 {v8}, ptr {ea}{TBAA_DATA}").unwrap();
-                writeln!(self.out, "  br label %{cont}").unwrap();
-                writeln!(self.out, "{word_b}:").unwrap();
-                writeln!(self.out, "  store i64 {val}, ptr {ea}{TBAA_DATA}").unwrap();
+                let narrow = self.vec_operand_narrow_elem(&args[0]);
+                let tail = format!("vs_tail_{s}");
+                self.emit_header_elem_store(&ea, &eb, &val, narrow, &format!("vs_{s}"), &tail);
+                writeln!(self.out, "{tail}:").unwrap();
             }
         }
         writeln!(self.out, "  br label %{cont}").unwrap();
@@ -1170,26 +1232,9 @@ impl<'a> Lowerer<'a> {
         } else {
             let (off, eb) = self.vec_elem_offset(&vec_ptr, &idx, &args[0]);
             let ea = self.vec_elem_addr(&vec_ptr, &off);
-            let (byte_b, word_b, join_b) = (
-                format!("vsu_byte_{s}"),
-                format!("vsu_word_{s}"),
-                format!("vsu_join_{s}"),
-            );
-            let is_byte = self.fresh();
-            writeln!(self.out, "  {is_byte} = icmp eq i64 {eb}, 1").unwrap();
-            writeln!(
-                self.out,
-                "  br i1 {is_byte}, label %{byte_b}, label %{word_b}"
-            )
-            .unwrap();
-            writeln!(self.out, "{byte_b}:").unwrap();
-            let v8 = self.fresh();
-            writeln!(self.out, "  {v8} = trunc i64 {val} to i8").unwrap();
-            writeln!(self.out, "  store i8 {v8}, ptr {ea}{TBAA_DATA}").unwrap();
-            writeln!(self.out, "  br label %{join_b}").unwrap();
-            writeln!(self.out, "{word_b}:").unwrap();
-            writeln!(self.out, "  store i64 {val}, ptr {ea}{TBAA_DATA}").unwrap();
-            writeln!(self.out, "  br label %{join_b}").unwrap();
+            let narrow = self.vec_operand_narrow_elem(&args[0]);
+            let join_b = format!("vsu_join_{s}");
+            self.emit_header_elem_store(&ea, &eb, &val, narrow, &format!("vsu_{s}"), &join_b);
             writeln!(self.out, "{join_b}:").unwrap();
         }
         let _ = destination;
@@ -3358,6 +3403,10 @@ impl<'a> Lowerer<'a> {
         // for this element stride. A statically-known stride branches straight
         // there, skipping the per-push `elem_bytes` header load and the two
         // runtime stride compares; an unknown stride keeps the dynamic dispatch.
+        let packed = (!word_elem && !byte_elem)
+            .then(|| self.vec_operand_narrow_elem(&args[0]))
+            .flatten();
+        let packed_fast = format!("vp_packed_{s_id}");
         if word_elem {
             writeln!(
                 self.out,
@@ -3370,6 +3419,62 @@ impl<'a> Lowerer<'a> {
                 "  br i1 {full}, label %{slow}, label %{byte_fast}"
             )
             .unwrap();
+        } else if let Some(packed) = packed {
+            // A vector built packed takes the element at its own width; one
+            // a runtime shim built with whole words takes the runtime push.
+            let width = match packed {
+                PackedElem::Int { width, .. } => width,
+                PackedElem::F32 => 4,
+            };
+            let eb_addr = self.fresh();
+            writeln!(
+                self.out,
+                "  {eb_addr} = getelementptr i8, ptr {vec_ptr}, i64 16"
+            )
+            .unwrap();
+            let eb32 = self.fresh();
+            writeln!(self.out, "  {eb32} = load i32, ptr {eb_addr}{TBAA_HEADER}").unwrap();
+            writeln!(self.out, "  br i1 {full}, label %{slow}, label %{chk2}").unwrap();
+            writeln!(self.out, "{chk2}:").unwrap();
+            let is_packed = self.fresh();
+            writeln!(self.out, "  {is_packed} = icmp eq i32 {eb32}, {width}").unwrap();
+            writeln!(
+                self.out,
+                "  br i1 {is_packed}, label %{packed_fast}, label %{slow}"
+            )
+            .unwrap();
+            writeln!(self.out, "{packed_fast}:").unwrap();
+            let dptr_addr = self.fresh();
+            writeln!(
+                self.out,
+                "  {dptr_addr} = getelementptr i8, ptr {vec_ptr}, i64 24"
+            )
+            .unwrap();
+            let dptr = self.fresh();
+            writeln!(
+                self.out,
+                "  {dptr} = load ptr, ptr {dptr_addr}{TBAA_HEADER}"
+            )
+            .unwrap();
+            let off = self.fresh();
+            writeln!(self.out, "  {off} = mul i64 {len}, {width}").unwrap();
+            let ea = self.fresh();
+            writeln!(self.out, "  {ea} = getelementptr i8, ptr {dptr}, i64 {off}").unwrap();
+            let small = self.fresh();
+            if matches!(packed, PackedElem::F32) {
+                let double = self.fresh();
+                writeln!(self.out, "  {double} = bitcast i64 {val_i64} to double").unwrap();
+                writeln!(self.out, "  {small} = fptrunc double {double} to float").unwrap();
+                writeln!(self.out, "  store float {small}, ptr {ea}{TBAA_DATA}").unwrap();
+            } else {
+                let bits = width * 8;
+                writeln!(self.out, "  {small} = trunc i64 {val_i64} to i{bits}").unwrap();
+                writeln!(self.out, "  store i{bits} {small}, ptr {ea}{TBAA_DATA}").unwrap();
+            }
+            let len1 = self.fresh();
+            writeln!(self.out, "  {len1} = add i64 {len}, 1").unwrap();
+            writeln!(self.out, "  store i64 {len1}, ptr {vec_ptr}{TBAA_HEADER}").unwrap();
+            writeln!(self.out, "  br label %{cont}").unwrap();
         } else {
             let eb_addr = self.fresh();
             writeln!(
@@ -3391,7 +3496,7 @@ impl<'a> Lowerer<'a> {
         }
         // Word-stride (8-byte) fast path: store i64 directly. Emitted for a
         // statically word-strided vec and for the dynamic dispatch.
-        if word_elem || !byte_elem {
+        if word_elem || (!byte_elem && packed.is_none()) {
             writeln!(self.out, "{word_fast}:").unwrap();
             let dptr_addr = self.fresh();
             writeln!(
@@ -3418,7 +3523,7 @@ impl<'a> Lowerer<'a> {
         // Byte-stride (1-byte) fast path for bool and byte-buffer elements.
         // Element address is data_ptr + len (stride == 1, no multiply). Emitted
         // for a statically byte-strided vec and for the dynamic dispatch.
-        if byte_elem || !word_elem {
+        if byte_elem || (!word_elem && packed.is_none()) {
             writeln!(self.out, "{byte_fast}:").unwrap();
             let dptr_addr2 = self.fresh();
             writeln!(

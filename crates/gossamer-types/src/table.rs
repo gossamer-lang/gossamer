@@ -11,10 +11,15 @@ use crate::ty::Ty;
 /// Persistent `NodeId → Ty` map produced by the type checker.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TypeTable {
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     entries: HashMap<NodeId, Ty>,
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     method_owners: HashMap<NodeId, String>,
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     operator_methods: HashMap<NodeId, String>,
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     const_generic_args: HashMap<NodeId, Vec<ConstGenericArg>>,
+    #[serde(serialize_with = "gossamer_ast::ordered::set")]
     receiver_writes: HashSet<NodeId>,
 }
 

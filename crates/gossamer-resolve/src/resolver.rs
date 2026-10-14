@@ -2066,6 +2066,7 @@ impl Resolver {
             self.check_visibility(resolution, Some(name), span);
         }
         if let Some(anchor) = anchor {
+            self.record_import_def(resolution, name, anchor);
             self.resolutions.insert(anchor, resolution);
         }
         for segment in &path.segments {

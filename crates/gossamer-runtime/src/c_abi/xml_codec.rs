@@ -308,7 +308,7 @@ pub unsafe extern "C" fn gos_rt_xml_encode(node: i64) -> *mut c_char {
         // SAFETY: `node` is a `json::Value` handle (or null), which is what
         // the checker admits for `encode`'s parameter.
         let value = unsafe { super::json::json_borrow(node as *const super::json::GosJson) };
-        match value.and_then(json_to_node) {
+        match value.and_then(|value| json_to_node(&value.as_value())) {
             Some(node) => alloc_cstring(encode(&node).as_bytes()),
             None => alloc_cstring(b""),
         }

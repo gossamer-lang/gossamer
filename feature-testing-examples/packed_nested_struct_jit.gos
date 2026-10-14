@@ -1,0 +1,96 @@
+// A struct whose nested struct packs narrow fields, built in a JIT-compiled
+// body, keeps every later field at the packed layout's offsets.
+
+struct Span {
+    start: u32
+    end: u32
+}
+
+struct Pat {
+    id: u32
+    span: Span
+    kind: PatKind
+}
+
+enum PatKind {
+    Wild
+    Name(String)
+}
+
+struct Expr {
+    id: u32
+    span: Span
+    kind: ExprKind
+}
+
+enum ExprKind {
+    Lit(i64)
+    Match { scrutinee: Expr, arms: Vec<Arm> }
+}
+
+struct Arm {
+    pattern: Pat
+    guard: Option<Expr>
+    body: Expr
+}
+
+enum Clause {
+    Let { pattern: Pat, scrutinee: Expr }
+    Plain(Expr)
+}
+
+fn lit(id: u32, v: i64) -> Expr {
+    Expr { id: id, span: Span { start: id, end: id + 1 }, kind: ExprKind::Lit(v) }
+}
+
+fn make_match(pattern: Pat, scrutinee: Expr, acc: Expr, fail: Expr) -> Expr {
+    let wildcard = Pat { id: 90, span: fail.span, kind: PatKind::Wild }
+    let arms = #[Arm { pattern: pattern, guard: None, body: acc }, Arm { pattern: wildcard, guard: None, body: fail }]
+    Expr { id: 91, span: scrutinee.span, kind: ExprKind::Match { scrutinee: scrutinee, arms: arms } }
+}
+
+fn chain(clauses: Vec<Clause>, then_expr: Expr) -> ExprKind {
+    let mut acc = then_expr
+    let mut i = clauses.len() - 1
+    while i >= 0 {
+        acc = match clauses[i] {
+            Clause::Plain(cond) => make_match(Pat { id: 5, span: cond.span, kind: PatKind::Wild }, cond, acc, lit(70, 7))
+            Clause::Let { pattern, scrutinee } => make_match(pattern, scrutinee, acc, lit(80, 8))
+        }
+        i -= 1
+    }
+    acc.kind
+}
+
+fn sum(e: Expr) -> i64 {
+    match e.kind {
+        ExprKind::Lit(v) => v
+        ExprKind::Match { scrutinee, arms } => {
+            let mut total = sum(scrutinee)
+            for arm in arms {
+                total += sum(arm.body) + arm.pattern.id as i64
+            }
+            total
+        }
+    }
+}
+
+fn main() {
+    let mut total = 0
+    for n in 0..3 {
+        let clauses = #[Clause::Let { pattern: Pat { id: 1, span: Span { start: 0, end: 1 }, kind: PatKind::Name(f"x{n}") }, scrutinee: lit(2, 20) }, Clause::Plain(lit(3, 30))]
+        let k = chain(clauses, lit(4, 40))
+        let filler = #[Some(lit(6, 1)), Some(lit(7, 2)), Some(lit(8, 3)), Some(lit(9, 4))]
+        total += sum(Expr { id: 0, span: Span { start: 0, end: 0 }, kind: k }) + filler.len()
+    }
+    println(total)
+    let mut pats = 0
+    for i in 0..3 {
+        let p = Pat { id: 7, span: Span { start: 1, end: 2 }, kind: PatKind::Name(f"p{i}") }
+        pats += match p.kind {
+            PatKind::Wild => p.id as i64
+            PatKind::Name(s) => s.len() + p.id as i64 + p.span.end as i64
+        }
+    }
+    println(pats)
+}

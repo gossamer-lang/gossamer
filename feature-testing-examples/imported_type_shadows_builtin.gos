@@ -1,0 +1,39 @@
+// A type brought in by `use` is that type, even when a standard-library
+// handle shares its name: `Pattern` here is the module's struct, not
+// `regex::Pattern`, and `Context` its enum, not `context::Context`.
+
+use shapes::{Context, Pattern}
+
+mod shapes {
+    pub struct Pattern {
+        pub id: i64
+        pub text: String
+    }
+
+    pub enum Context {
+        Quiet
+        Loud(i64)
+    }
+}
+
+fn make(id: i64) -> Pattern {
+    Pattern { id: id, text: f"p{id}" }
+}
+
+fn level(c: Context) -> i64 {
+    match c {
+        Context::Quiet => 0
+        Context::Loud(n) => n
+    }
+}
+
+fn main() {
+    let mut total = 0
+    for i in 0..4 {
+        let p = make(i)
+        total += p.id + level(Context::Loud(i))
+        println(p.text)
+    }
+    println(total)
+    println(level(Context::Quiet))
+}

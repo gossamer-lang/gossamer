@@ -184,9 +184,19 @@ fn main() {
     // whichever runtime a previous release build happened to leave behind.
     // The archive itself is always the release build, which is what the link
     // consumes.
+    // The link reads the musl CRT and `rust-lld` from the toolchain the
+    // runtime archives were compiled with, so `gos` records where it is
+    // rather than asking `rustc` on every build.
+    let sysroot = rust_sysroot();
+    if let Some(sysroot) = &sysroot {
+        println!(
+            "cargo:rustc-env=GOSSAMER_RUST_SYSROOT={}",
+            sysroot.display()
+        );
+    }
     if cfg!(target_os = "linux") && !sanitizer_toolchain {
         let musl_triple = "x86_64-unknown-linux-musl";
-        if rustup_target_installed(musl_triple) {
+        if rustup_target_installed(sysroot.as_deref(), musl_triple) {
             let musl_lib_path =
                 build_runtime_into(&workspace_root, &target_dir, "release", Some(musl_triple));
             publish_archive(&musl_lib_path, &lib_dir.join("libgossamer_runtime-musl.a"));
@@ -212,26 +222,30 @@ fn emit_rerun_if_changed_tree(root: &Path) {
     }
 }
 
-/// Returns true when the rustup `<triple>` target's std library is
-/// installed locally - checked by probing for the rustlib dir, not
-/// by shelling out to `rustup`.
-fn rustup_target_installed(triple: &str) -> bool {
-    let Ok(out) = Command::new(env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string()))
+/// The sysroot of the toolchain building this crate, from
+/// `rustc --print sysroot`.
+fn rust_sysroot() -> Option<PathBuf> {
+    let out = Command::new(env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string()))
         .args(["--print", "sysroot"])
         .output()
-    else {
-        return false;
-    };
-    if !out.status.success() {
-        return false;
-    }
-    let sysroot = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let probe = PathBuf::from(&sysroot)
-        .join("lib")
-        .join("rustlib")
-        .join(triple)
-        .join("lib");
-    probe.exists()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+}
+
+/// Returns true when the rustup `<triple>` target's std library is
+/// installed under `sysroot` - checked by probing for the rustlib dir, not
+/// by shelling out to `rustup`.
+fn rustup_target_installed(sysroot: Option<&Path>, triple: &str) -> bool {
+    sysroot.is_some_and(|sysroot| {
+        sysroot
+            .join("lib")
+            .join("rustlib")
+            .join(triple)
+            .join("lib")
+            .exists()
+    })
 }
 
 /// Invokes `cargo rustc -p gossamer-runtime --crate-type staticlib` with an

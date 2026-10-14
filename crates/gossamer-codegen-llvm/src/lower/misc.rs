@@ -589,6 +589,20 @@ impl<'a> Lowerer<'a> {
             writeln!(self.out, "  call void @{name}(ptr {slot})").unwrap();
             return Ok(());
         }
+        // Zeroing the guarded words is a fixed set of stores the meta names,
+        // written in place rather than walked at run time on every entry.
+        if name == "gos_rt_aggr_zero_guarded"
+            && let Some(Operand::Const(ConstValue::Str(sym))) = args.get(1)
+            && let Some(blob) = self.tcx.rc_meta(sym).map(<[i64]>::to_vec)
+        {
+            for (gate, disc_word, payload_word) in guarded_entries(&blob) {
+                if gate >= 0 && disc_word >= 0 {
+                    self.store_word_at(&base, disc_word, -1);
+                }
+                self.store_word_at(&base, payload_word, 0);
+            }
+            return Ok(());
+        }
         let meta = match args.get(1) {
             Some(Operand::Const(ConstValue::Str(sym))) if !sym.is_empty() => {
                 format!("@\"{sym}\"")
@@ -597,6 +611,18 @@ impl<'a> Lowerer<'a> {
         };
         writeln!(self.out, "  call void @{name}(ptr {base}, ptr {meta})").unwrap();
         Ok(())
+    }
+
+    /// Stores `value` into word `word` of the storage at `base`.
+    fn store_word_at(&mut self, base: &str, word: i64, value: i64) {
+        let at = self.fresh();
+        writeln!(
+            self.out,
+            "  {at} = getelementptr inbounds i8, ptr {base}, i64 {}",
+            word * 8
+        )
+        .unwrap();
+        writeln!(self.out, "  store i64 {value}, ptr {at}, align 8").unwrap();
     }
 
     #[allow(
@@ -2227,6 +2253,18 @@ pub(crate) fn container_ctor_format_symbol(ctor: &str) -> Option<&'static str> {
         "gos_rt_bheap_min_new_i64" | "gos_rt_bheap_min_from_vec_i64" => "gos_rt_bheap_min_format",
         _ => return None,
     })
+}
+
+/// The `(gate, discriminant word, payload word)` entries of a guarded
+/// copy-blob meta: `[kind, count, (gate, disc, payload)*]`.
+fn guarded_entries(blob: &[i64]) -> Vec<(i64, i64, i64)> {
+    let count = blob.get(1).copied().unwrap_or(0).max(0) as usize;
+    blob.get(2..)
+        .unwrap_or(&[])
+        .chunks_exact(3)
+        .take(count)
+        .map(|entry| (entry[0], entry[1], entry[2]))
+        .collect()
 }
 
 #[cfg(test)]

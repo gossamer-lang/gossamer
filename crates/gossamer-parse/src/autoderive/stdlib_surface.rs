@@ -125,177 +125,219 @@ fn imported_wrapper_names(sf: &SourceFile) -> std::collections::HashMap<String, 
     out
 }
 
+/// Collapses a stdlib path in expression position onto the injected wrapper it
+/// reaches, when it reaches one.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one table of stdlib path shapes, each collapsing onto its wrapper"
+)]
+fn collapse_expr(
+    path: &mut gossamer_ast::PathExpr,
+    scope: &std::collections::HashMap<String, String>,
+) {
+    let n = path.segments.len();
+    if n < 2 {
+        return;
+    }
+    // A path rooted at a module this unit imported from `std` names the
+    // stdlib the whole way down: `archive::tar::read` is the stdlib's
+    // `read` wherever `archive` came from `std`. A `std::` spelling counts
+    // only for a module the unit imported, so an unimported one is
+    // reported as written.
+    let root = path.segments[0].name.name.as_str();
+    let rooted = scope.contains_key(root)
+        || (root == "std"
+            && path
+                .segments
+                .get(1)
+                .is_some_and(|module| scope.contains_key(module.name.name.as_str())));
+    let key = |i: usize| stdlib_module_key(scope, path.segments[i].name.name.as_str(), rooted);
+    let head3 = if n >= 3 { key(n - 3) } else { None };
+    let head2 = key(n - 2);
+    let head3 = head3.as_deref();
+    let head2 = head2.as_deref();
+    // Enum-variant paths: `sql::Value::Int(..)` /
+    // `sql::IsolationLevel::Serializable` collapse to the
+    // injected enum + variant, guarded on the `sql` segment so
+    // a user's own `Value::Int` is untouched.
+    if n >= 3 && head3 == Some("sql") {
+        let enum_name = path.segments[n - 2].name.name.as_str();
+        if let Some(mangled) = match enum_name {
+            "Value" => Some("__gos_sql_Value"),
+            "IsolationLevel" => Some("__gos_sql_IsolationLevel"),
+            _ => None,
+        } {
+            let variant = std::mem::replace(
+                &mut path.segments[n - 1],
+                gossamer_ast::PathSegment::new(""),
+            );
+            path.segments = vec![gossamer_ast::PathSegment::new(mangled), variant];
+            return;
+        }
+        // Associated free functions: `sql::Select::new(..)`,
+        // `sql::Pool::open(..)`, `sql::migrate::up(..)` collapse
+        // to their injected free-fn wrappers.
+        let assoc = (enum_name, path.segments[n - 1].name.name.as_str());
+        if let Some(mangled) = match assoc {
+            ("Select", "new") => Some("__gos_sql_select_new"),
+            ("Pool", "open") => Some("__gos_sql_pool_open"),
+            ("Pool", "open_with") => Some("__gos_sql_pool_open_with"),
+            ("migrate", "up") => Some("__gos_sql_migrate_up"),
+            _ => None,
+        } {
+            path.segments = vec![gossamer_ast::PathSegment::new(mangled)];
+            return;
+        }
+    }
+    if n >= 3
+        && head3 == Some("path")
+        && path.segments[n - 2].name.name.as_str() == "Path"
+    {
+        let method = std::mem::replace(
+            &mut path.segments[n - 1],
+            gossamer_ast::PathSegment::new(""),
+        );
+        path.segments = vec![gossamer_ast::PathSegment::new("__gos_path_Path"), method];
+        return;
+    }
+    if n >= 3 && head3 == Some("time") {
+        let public_type = path.segments[n - 2].name.name.as_str();
+        if let Some(mangled) = match public_type {
+            "Location" => Some("__gos_time_Location"),
+            "Time" => Some("__gos_time_Time"),
+            "CivilResolution" => Some("__gos_time_CivilResolution"),
+            _ => None,
+        } {
+            let member = std::mem::replace(
+                &mut path.segments[n - 1],
+                gossamer_ast::PathSegment::new(""),
+            );
+            path.segments = vec![gossamer_ast::PathSegment::new(mangled), member];
+            return;
+        }
+    }
+    if n >= 3 && head3 == Some("ffi") {
+        let public_type = path.segments[n - 2].name.name.as_str();
+        if let Some(mangled) = match public_type {
+            "Ptr" => Some("__gos_ffi_Ptr"),
+            "Handle" => Some("__gos_ffi_Handle"),
+            "Union" => Some("__gos_ffi_Union"),
+            "View" => Some("__gos_ffi_View"),
+            _ => None,
+        } {
+            // `ffi::Handle::<T>::from_ptr` names the handle's type on the
+            // type segment, which the collapsed path keeps.
+            let mut owner = gossamer_ast::PathSegment::new(mangled);
+            owner.generics = std::mem::take(&mut path.segments[n - 2].generics);
+            let member = std::mem::replace(
+                &mut path.segments[n - 1],
+                gossamer_ast::PathSegment::new(""),
+            );
+            path.segments = vec![owner, member];
+            return;
+        }
+    }
+    if n >= 3
+        && matches!(head3, Some("csrf" | "form"))
+        && collapse_http_security_path(path)
+    {
+        return;
+    }
+    if let Some(name) = head2
+        .and_then(|parent| mangled_stdlib_name(parent, path.segments[n - 1].name.name.as_str()))
+    {
+        let mut seg = gossamer_ast::PathSegment::new(name);
+        seg.generics = std::mem::take(&mut path.segments[n - 1].generics);
+        path.segments = vec![seg];
+    }
+}
+
+/// Collapses a stdlib path in type position onto the injected wrapper it
+/// reaches, when it reaches one.
+fn collapse_type(
+    path: &mut gossamer_ast::ty::TypePath,
+    scope: &std::collections::HashMap<String, String>,
+) {
+    let n = path.segments.len();
+    if n < 2 {
+        return;
+    }
+    let root = path.segments[0].name.name.as_str();
+    let rooted = scope.contains_key(root)
+        || (root == "std"
+            && path
+                .segments
+                .get(1)
+                .is_some_and(|module| scope.contains_key(module.name.name.as_str())));
+    let parent = stdlib_module_key(scope, path.segments[n - 2].name.name.as_str(), rooted);
+    let parent = parent.as_deref();
+    // `sql::Error` is the standard error type at the language
+    // level - redirect to `errors::Error`.
+    if parent == Some("sql") && path.segments[n - 1].name.name.as_str() == "Error" {
+        path.segments = vec![
+            gossamer_ast::ty::TypePathSegment::new("errors"),
+            gossamer_ast::ty::TypePathSegment::new("Error"),
+        ];
+        return;
+    }
+    if let Some(name) = parent
+        .and_then(|parent| mangled_stdlib_name(parent, path.segments[n - 1].name.name.as_str()))
+    {
+        let mut seg = gossamer_ast::ty::TypePathSegment::new(name);
+        seg.generics = std::mem::take(&mut path.segments[n - 1].generics);
+        path.segments = vec![seg];
+    }
+}
+
+/// Rewrites a bare expression-position name a `use std::<module>::<item>`
+/// bound onto the injected wrapper it reaches, and the type segment of an
+/// associated call on an imported injected type.
+fn bare_import_expr(
+    path: &mut gossamer_ast::PathExpr,
+    imported: &std::collections::HashMap<String, &'static str>,
+) {
+    if path.segments.len() == 1
+        && let Some(mangled) = imported.get(path.segments[0].name.name.as_str())
+    {
+        let mut seg = gossamer_ast::PathSegment::new(*mangled);
+        seg.generics = std::mem::take(&mut path.segments[0].generics);
+        path.segments = vec![seg];
+    }
+    // `Ptr::from_address(..)` after `use std::ffi::Ptr`: an associated
+    // function of an imported injected type.
+    if path.segments.len() == 2
+        && let Some(mangled) = imported.get(path.segments[0].name.name.as_str())
+    {
+        path.segments[0].name.name = (*mangled).to_string();
+    }
+}
+
+/// Rewrites a bare type name a `use std::<module>::<item>` bound onto the
+/// injected wrapper it reaches.
+fn bare_import_type(
+    path: &mut gossamer_ast::ty::TypePath,
+    imported: &std::collections::HashMap<String, &'static str>,
+) {
+    if path.segments.len() == 1
+        && let Some(mangled) = imported.get(path.segments[0].name.name.as_str())
+    {
+        let mut seg = gossamer_ast::ty::TypePathSegment::new(*mangled);
+        seg.generics = std::mem::take(&mut path.segments[0].generics);
+        path.segments = vec![seg];
+    }
+}
+
 /// Redirects the user-facing stdlib struct surface
 /// (`encoding::pem::decode(..)`, the `pem::Block { .. }` literal,
 /// `pem::Block` type annotations) onto the injected real-struct
 /// wrappers. Mirrors `rewrite_serde_generic_calls` but covers
 /// multi-segment module paths in call, struct-literal, and type
 /// positions.
-#[allow(
-    clippy::too_many_lines,
-    reason = "the nested visitor helpers form one closed stdlib path-rewrite pass"
-)]
 pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
     use gossamer_ast::VisitorMut;
     use gossamer_ast::expr::{Expr, ExprKind};
     use gossamer_ast::ty::{Type, TypeKind};
     use gossamer_ast::visitor::{walk_expr_mut, walk_type_mut};
-
-    fn collapse_expr(
-        path: &mut gossamer_ast::PathExpr,
-        scope: &std::collections::HashMap<String, String>,
-    ) {
-        let n = path.segments.len();
-        if n < 2 {
-            return;
-        }
-        // A path rooted at a module this unit imported from `std` names the
-        // stdlib the whole way down: `archive::tar::read` is the stdlib's
-        // `read` wherever `archive` came from `std`. A `std::` spelling counts
-        // only for a module the unit imported, so an unimported one is
-        // reported as written.
-        let root = path.segments[0].name.name.as_str();
-        let rooted = scope.contains_key(root)
-            || (root == "std"
-                && path
-                    .segments
-                    .get(1)
-                    .is_some_and(|module| scope.contains_key(module.name.name.as_str())));
-        let key = |i: usize| stdlib_module_key(scope, path.segments[i].name.name.as_str(), rooted);
-        let head3 = if n >= 3 { key(n - 3) } else { None };
-        let head2 = key(n - 2);
-        let head3 = head3.as_deref();
-        let head2 = head2.as_deref();
-        // Enum-variant paths: `sql::Value::Int(..)` /
-        // `sql::IsolationLevel::Serializable` collapse to the
-        // injected enum + variant, guarded on the `sql` segment so
-        // a user's own `Value::Int` is untouched.
-        if n >= 3 && head3 == Some("sql") {
-            let enum_name = path.segments[n - 2].name.name.as_str();
-            if let Some(mangled) = match enum_name {
-                "Value" => Some("__gos_sql_Value"),
-                "IsolationLevel" => Some("__gos_sql_IsolationLevel"),
-                _ => None,
-            } {
-                let variant = std::mem::replace(
-                    &mut path.segments[n - 1],
-                    gossamer_ast::PathSegment::new(""),
-                );
-                path.segments = vec![gossamer_ast::PathSegment::new(mangled), variant];
-                return;
-            }
-            // Associated free functions: `sql::Select::new(..)`,
-            // `sql::Pool::open(..)`, `sql::migrate::up(..)` collapse
-            // to their injected free-fn wrappers.
-            let assoc = (enum_name, path.segments[n - 1].name.name.as_str());
-            if let Some(mangled) = match assoc {
-                ("Select", "new") => Some("__gos_sql_select_new"),
-                ("Pool", "open") => Some("__gos_sql_pool_open"),
-                ("Pool", "open_with") => Some("__gos_sql_pool_open_with"),
-                ("migrate", "up") => Some("__gos_sql_migrate_up"),
-                _ => None,
-            } {
-                path.segments = vec![gossamer_ast::PathSegment::new(mangled)];
-                return;
-            }
-        }
-        if n >= 3
-            && head3 == Some("path")
-            && path.segments[n - 2].name.name.as_str() == "Path"
-        {
-            let method = std::mem::replace(
-                &mut path.segments[n - 1],
-                gossamer_ast::PathSegment::new(""),
-            );
-            path.segments = vec![gossamer_ast::PathSegment::new("__gos_path_Path"), method];
-            return;
-        }
-        if n >= 3 && head3 == Some("time") {
-            let public_type = path.segments[n - 2].name.name.as_str();
-            if let Some(mangled) = match public_type {
-                "Location" => Some("__gos_time_Location"),
-                "Time" => Some("__gos_time_Time"),
-                "CivilResolution" => Some("__gos_time_CivilResolution"),
-                _ => None,
-            } {
-                let member = std::mem::replace(
-                    &mut path.segments[n - 1],
-                    gossamer_ast::PathSegment::new(""),
-                );
-                path.segments = vec![gossamer_ast::PathSegment::new(mangled), member];
-                return;
-            }
-        }
-        if n >= 3 && head3 == Some("ffi") {
-            let public_type = path.segments[n - 2].name.name.as_str();
-            if let Some(mangled) = match public_type {
-                "Ptr" => Some("__gos_ffi_Ptr"),
-                "Handle" => Some("__gos_ffi_Handle"),
-                "Union" => Some("__gos_ffi_Union"),
-                "View" => Some("__gos_ffi_View"),
-                _ => None,
-            } {
-                // `ffi::Handle::<T>::from_ptr` names the handle's type on the
-                // type segment, which the collapsed path keeps.
-                let mut owner = gossamer_ast::PathSegment::new(mangled);
-                owner.generics = std::mem::take(&mut path.segments[n - 2].generics);
-                let member = std::mem::replace(
-                    &mut path.segments[n - 1],
-                    gossamer_ast::PathSegment::new(""),
-                );
-                path.segments = vec![owner, member];
-                return;
-            }
-        }
-        if n >= 3
-            && matches!(head3, Some("csrf" | "form"))
-            && collapse_http_security_path(path)
-        {
-            return;
-        }
-        if let Some(name) = head2
-            .and_then(|parent| mangled_stdlib_name(parent, path.segments[n - 1].name.name.as_str()))
-        {
-            let mut seg = gossamer_ast::PathSegment::new(name);
-            seg.generics = std::mem::take(&mut path.segments[n - 1].generics);
-            path.segments = vec![seg];
-        }
-    }
-
-    fn collapse_type(
-        path: &mut gossamer_ast::ty::TypePath,
-        scope: &std::collections::HashMap<String, String>,
-    ) {
-        let n = path.segments.len();
-        if n < 2 {
-            return;
-        }
-        let root = path.segments[0].name.name.as_str();
-        let rooted = scope.contains_key(root)
-            || (root == "std"
-                && path
-                    .segments
-                    .get(1)
-                    .is_some_and(|module| scope.contains_key(module.name.name.as_str())));
-        let parent = stdlib_module_key(scope, path.segments[n - 2].name.name.as_str(), rooted);
-        let parent = parent.as_deref();
-        // `sql::Error` is the standard error type at the language
-        // level - redirect to `errors::Error`.
-        if parent == Some("sql") && path.segments[n - 1].name.name.as_str() == "Error" {
-            path.segments = vec![
-                gossamer_ast::ty::TypePathSegment::new("errors"),
-                gossamer_ast::ty::TypePathSegment::new("Error"),
-            ];
-            return;
-        }
-        if let Some(name) = parent
-            .and_then(|parent| mangled_stdlib_name(parent, path.segments[n - 1].name.name.as_str()))
-        {
-            let mut seg = gossamer_ast::ty::TypePathSegment::new(name);
-            seg.generics = std::mem::take(&mut path.segments[n - 1].generics);
-            path.segments = vec![seg];
-        }
-    }
 
     /// Rewrites a bare name a `use std::<module>::<item>` bound, which
     /// reaches the same injected wrapper the qualified path does. Without
@@ -308,33 +350,15 @@ pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
     impl VisitorMut for BareImportRewriter {
         fn visit_expr(&mut self, expr: &mut Expr) {
             walk_expr_mut(self, expr);
-            if let ExprKind::Path(path) = &mut expr.kind
-                && path.segments.len() == 1
-                && let Some(mangled) = self.imported.get(path.segments[0].name.name.as_str())
-            {
-                let mut seg = gossamer_ast::PathSegment::new(*mangled);
-                seg.generics = std::mem::take(&mut path.segments[0].generics);
-                path.segments = vec![seg];
-            }
-            // `Ptr::from_address(..)` after `use std::ffi::Ptr`: an associated
-            // function of an imported injected type.
-            if let ExprKind::Path(path) = &mut expr.kind
-                && path.segments.len() == 2
-                && let Some(mangled) = self.imported.get(path.segments[0].name.name.as_str())
-            {
-                path.segments[0].name.name = (*mangled).to_string();
+            if let ExprKind::Path(path) = &mut expr.kind {
+                bare_import_expr(path, &self.imported);
             }
         }
 
         fn visit_type(&mut self, ty: &mut Type) {
             walk_type_mut(self, ty);
-            if let TypeKind::Path(path) = &mut ty.kind
-                && path.segments.len() == 1
-                && let Some(mangled) = self.imported.get(path.segments[0].name.name.as_str())
-            {
-                let mut seg = gossamer_ast::ty::TypePathSegment::new(*mangled);
-                seg.generics = std::mem::take(&mut path.segments[0].generics);
-                path.segments = vec![seg];
+            if let TypeKind::Path(path) = &mut ty.kind {
+                bare_import_type(path, &self.imported);
             }
         }
     }
@@ -380,6 +404,118 @@ pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
     if !imported.is_empty() {
         BareImportRewriter { imported }.visit_source_file(sf);
     }
+}
+
+/// The injected wrapper names `sf` spells once
+/// [`rewrite_stdlib_struct_surface`] has rewritten it, found without
+/// rewriting it: each path the rewrite would change is rewritten alone, by
+/// the same functions, and every other path is read as written.
+fn stdlib_wrapper_names(sf: &SourceFile) -> std::collections::HashSet<String> {
+    use gossamer_ast::Visitor;
+    use gossamer_ast::expr::{Expr, ExprKind};
+    use gossamer_ast::ty::{Type, TypeKind, TypePath};
+    use gossamer_ast::visitor::{walk_expr, walk_path_expr, walk_type, walk_type_path};
+
+    struct Names {
+        scope: std::collections::HashMap<String, String>,
+        imported: std::collections::HashMap<String, &'static str>,
+        found: std::collections::HashSet<String>,
+    }
+
+    impl Names {
+        fn note(&mut self, name: &str) {
+            if name.starts_with("__gos_") && !self.found.contains(name) {
+                self.found.insert(name.to_string());
+            }
+        }
+
+        /// Whether the rewrite can change a path whose first segment is
+        /// `first` and that has `len` segments.
+        fn may_rewrite(&self, len: usize, first: &str) -> bool {
+            len >= 2 || self.imported.contains_key(first)
+        }
+    }
+
+    impl Visitor for Names {
+        fn visit_expr(&mut self, expr: &Expr) {
+            match &expr.kind {
+                // `r.form_file(name)` becomes a call of the multipart wrapper
+                // with the receiver and argument; the turbofish is dropped.
+                ExprKind::MethodCall {
+                    receiver,
+                    name,
+                    args,
+                    ..
+                } if name.name.as_str() == "form_file" && args.len() == 1 => {
+                    self.visit_expr(receiver);
+                    for arg in args {
+                        self.visit_expr(arg);
+                    }
+                    self.note("__gos_http_request_form_file");
+                }
+                ExprKind::Path(path)
+                    if self.may_rewrite(path.segments.len(), &path.segments[0].name.name) =>
+                {
+                    let mut path = path.clone();
+                    collapse_expr(&mut path, &self.scope);
+                    bare_import_expr(&mut path, &self.imported);
+                    self.visit_path_expr(&path);
+                }
+                ExprKind::Struct {
+                    path, fields, base, ..
+                } if path.segments.len() >= 2 => {
+                    let mut path = path.clone();
+                    collapse_expr(&mut path, &self.scope);
+                    self.visit_path_expr(&path);
+                    for field in fields {
+                        if let Some(value) = &field.value {
+                            self.visit_expr(value);
+                        }
+                    }
+                    if let Some(base) = base {
+                        self.visit_expr(base);
+                    }
+                }
+                _ => walk_expr(self, expr),
+            }
+        }
+
+        fn visit_type(&mut self, ty: &Type) {
+            match &ty.kind {
+                TypeKind::Path(path)
+                    if self.may_rewrite(path.segments.len(), &path.segments[0].name.name) =>
+                {
+                    let mut path = path.clone();
+                    collapse_type(&mut path, &self.scope);
+                    bare_import_type(&mut path, &self.imported);
+                    self.visit_type_path(&path);
+                }
+                _ => walk_type(self, ty),
+            }
+        }
+
+        fn visit_path_expr(&mut self, path: &gossamer_ast::PathExpr) {
+            for segment in &path.segments {
+                self.note(&segment.name.name);
+            }
+            walk_path_expr(self, path);
+        }
+
+        fn visit_type_path(&mut self, path: &TypePath) {
+            for segment in &path.segments {
+                self.note(&segment.name.name);
+            }
+            walk_type_path(self, path);
+        }
+    }
+
+    let mut names = Names {
+        scope: stdlib_modules_in_scope(sf),
+        imported: imported_wrapper_names(sf),
+        found: std::collections::HashSet::new(),
+    };
+    names.visit_source_file(sf);
+    names.found
 }
 
 /// Desugars `xs.sort_by_key(f)` / `xs.sort_by_key_desc(f)` method calls into
@@ -884,7 +1020,7 @@ pub fn infer_serde_turbofish(sf: &mut SourceFile) {
 
 /// Rewrites the generic serde call surface - `to_json::<T>(v)`,
 /// `from_json::<T>(s)`, and the toml/yaml variants - into calls to the
-/// per-type free functions synthesized by [`synthesize_serde_impls`]
+/// per-type stubs [`synthesize_serde_impls`] declares
 /// (`__gos_serde_<op>_<T>`). This is the single public spelling; there
 /// are no `Type::to_json` methods.
 pub fn rewrite_serde_generic_calls(sf: &mut SourceFile) {

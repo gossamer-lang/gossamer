@@ -184,7 +184,28 @@ impl gossamer_ast::VisitorMut for TupleCtorRewriter<'_> {
 /// resolution to work.
 #[must_use]
 pub fn parse_with_autoderive(source: &str, file: FileId) -> (SourceFile, Vec<ParseDiagnostic>) {
-    let (mut sf, mut diags) = crate::parse_source_file(source, file);
+    parse_with_autoderive_from(source, file, None)
+}
+
+/// [`parse_with_autoderive`] over `source`, the text
+/// [`augment_source_with_program`] answered with `program`: the program's
+/// own text is taken from that tree and only what autoderive appended is
+/// parsed. The tree answered is the one a parse of the whole of `source`
+/// gives. A `program` from another file, or `None`, parses everything.
+#[must_use]
+pub fn parse_with_autoderive_from(
+    source: &str,
+    file: FileId,
+    program: Option<ParsedProgram>,
+) -> (SourceFile, Vec<ParseDiagnostic>) {
+    let (mut sf, mut diags) = match program {
+        Some(ParsedProgram { tree, len })
+            if tree.file == file && source.is_char_boundary(len) =>
+        {
+            crate::parse_appended(source, file, tree, len)
+        }
+        _ => crate::parse_source_file(source, file),
+    };
     // `augment_source` synthesizes nothing from a tree that did not parse, so
     // a missing serde codec there says nothing about the type it names.
     let parsed_cleanly = diags.is_empty();
@@ -286,9 +307,9 @@ fn number_synthesized_nodes(sf: &mut SourceFile) {
 }
 
 /// Reports serde turbofish calls (`to_json::<T>(v)`, `from_json::<T>(s)`, and
-/// the toml/yaml forms) whose struct `T` has a field the synthesizer cannot
-/// classify. Such a struct is silently skipped by `synthesize_serde_impls`, so
-/// without this the call would surface only as an opaque unknown-name error.
+/// the toml/yaml forms) whose struct `T` has a field serde cannot classify.
+/// Such a struct gets no stub from `synthesize_serde_impls`, so without this
+/// the call would surface only as an opaque unknown-name error.
 /// Gated on use - a struct with an unsupported field is fine until it actually
 /// flows through a serde call - and deduplicated to one diagnostic per struct,
 /// pointing at the first offending field.
@@ -313,8 +334,8 @@ fn serde_unsupported_field_diags(sf: &SourceFile) -> Vec<ParseDiagnostic> {
             .entry(decl.name.name.clone())
             .or_insert_with(|| (module, decl));
     }
-    // `augment_source` has already appended a `__gos_serde_to_json_<T>` for every
-    // struct the synthesizer accepted (and the user may hand-provide one), so its
+    // `augment_source` has already declared a `__gos_serde_to_json_<T>` for every
+    // named type serde accepts (and the user may hand-provide one), so its
     // presence means the type is serializable - only its absence is a dropped
     // struct worth diagnosing.
     let synthesized: HashSet<&str> = sf

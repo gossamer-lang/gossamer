@@ -253,6 +253,10 @@ fn unmodelled_entries_are_all_still_present() {
 /// take a fresh reference to, each with the reason.
 const UNOWNED_STRING_RETURNS: &[(&str, &str)] = &[
     (
+        "gos_rt_csv_table_field",
+        "lends a field the table owns until its next text read",
+    ),
+    (
         "gos_rt_flag_cell_load_str",
         "reads the String a flag cell holds",
     ),

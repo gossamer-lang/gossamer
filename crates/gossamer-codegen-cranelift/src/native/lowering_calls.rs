@@ -342,23 +342,36 @@ fn lower_inline_result_carrier_call(
                         Operand::Copy(place) if place.projection.is_empty() => {
                             let ty = body.local_ty(place.local);
                             let structural = format!("gos_rc_meta_boxaggr_{}", ty.as_u32());
-                            tcx.rc_meta(&structural).map(|_| structural).or_else(|| {
-                                tcx.aggr_copy_meta(ty)
-                                    .filter(|sym| !sym.is_empty())
-                                    .map(str::to_owned)
-                            })
+                            tcx.rc_meta(&structural)
+                                .map(|_| structural)
+                                .or_else(|| tcx.aggr_copy_meta(ty).map(str::to_owned))
                         }
                         _ => None,
                     };
-                    match copy_meta.and_then(|sym| tcx.rc_meta(&sym).map(|blob| (sym, blob))) {
+                    // An empty copy meta names a payload with no children to
+                    // walk, which still travels as a counted blob, under a
+                    // null meta, as on LLVM.
+                    let copy_meta = copy_meta.and_then(|sym| {
+                        if sym.is_empty() {
+                            Some(None)
+                        } else {
+                            tcx.rc_meta(&sym).map(|blob| Some((sym, blob)))
+                        }
+                    });
+                    match copy_meta {
                         // A payload type with a copy meta travels as a counted
                         // blob holding its own shares of the children, the
                         // shape the carrier's release gives back.
-                        Some((sym, blob)) => {
+                        Some(meta_blob) => {
                             let ptr_ty = module.target_config().pointer_type();
-                            let data_id = intrinsics.intern_rc_meta(module, &sym, blob)?;
-                            let gv = module.declare_data_in_func(data_id, builder.func);
-                            let meta = builder.ins().symbol_value(ptr_ty, gv);
+                            let meta = match meta_blob {
+                                Some((sym, blob)) => {
+                                    let data_id = intrinsics.intern_rc_meta(module, &sym, blob)?;
+                                    let gv = module.declare_data_in_func(data_id, builder.func);
+                                    builder.ins().symbol_value(ptr_ty, gv)
+                                }
+                                None => builder.ins().iconst(ptr_ty, 0),
+                            };
                             let allocator = if name == "gos_rt_result_new_owned" {
                                 "gos_rt_rc_alloc_move"
                             } else {
@@ -527,7 +540,11 @@ fn lower_inline_result_carrier_call(
             if name == "gos_rt_result_payload"
                 && destination.projection.is_empty()
                 && intrinsics.stack_slotted.contains(&destination.local)
-                && !super::lowering_stmt_term::local_flows_to_return(body, destination.local)
+                && !super::lowering_stmt_term::storage_leaves_through_return(
+                    body,
+                    intrinsics,
+                    destination.local,
+                )
                 && super::lowering_stmt_term::payload_takes_own_storage(
                     tcx,
                     body,
@@ -795,7 +812,11 @@ pub(super) fn lower_generic_rt_call(
         && matches!(name, "gos_rt_result_unwrap" | "gos_rt_option_unwrap")
         && destination.projection.is_empty()
         && intrinsics.stack_slotted.contains(&destination.local)
-        && !super::lowering_stmt_term::local_flows_to_return(body, destination.local)
+        && !super::lowering_stmt_term::storage_leaves_through_return(
+            body,
+            intrinsics,
+            destination.local,
+        )
         && super::lowering_stmt_term::payload_takes_own_storage(tcx, body, destination.local)
     {
         let slots = super::ty_layout::type_slot_count(tcx, body.local_ty(destination.local)).max(1);

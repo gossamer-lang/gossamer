@@ -13,6 +13,9 @@
 //! - `docs-llm` - regenerate the checked-in, machine-readable
 //!   public-stdlib catalogue for LLM and MCP consumers.
 //! - `docs-all` - run every generator above in one invocation.
+//! - `schema` - regenerate `benchmarks/frontend_parser/schema/blob.json`,
+//!   the frontend blob's schema, and the parser benchmarks' generated AST,
+//!   from the serde types the cache encodes.
 
 #![forbid(unsafe_code)]
 
@@ -20,6 +23,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+mod schema;
 
 use anyhow::{Context, Result};
 use gossamer_std::{StdItemKind, StdModule, modules};
@@ -56,6 +61,7 @@ fn main() -> Result<()> {
             regenerate_stdlib_coverage()?;
             regenerate_llm_docs(false)
         }
+        Some("schema") => schema::export(args.get(1).map(String::as_str) == Some("--check")),
         Some("item-fixtures") => {
             regenerate_item_fixtures(args.get(1).map(String::as_str) == Some("--check"))
         }

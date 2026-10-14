@@ -1,0 +1,885 @@
+// The lexer: the token stream `gossamer-lex` produces for the same text,
+// span for span. It scans bytes and decodes a character only where the text
+// leaves ASCII.
+//
+// Tokens are kept as parallel vectors, one entry per token: its kind, the
+// `#` count of a raw string, and its byte span.
+
+use std::unicode
+
+// Token kinds, numbered as `self_hosted::token_code` numbers the Rust
+// lexer's: a keyword is KEYWORD + its index in KEYWORDS, a punctuation token
+// PUNCT + its index in PUNCTS.
+pub const EOF: i64 = 0
+pub const IDENT: i64 = 1
+pub const INT_LIT: i64 = 2
+pub const FLOAT_LIT: i64 = 3
+pub const STRING_LIT: i64 = 4
+pub const TRIPLE_STRING_LIT: i64 = 5
+pub const F_STRING_LIT: i64 = 6
+pub const F_TRIPLE_STRING_LIT: i64 = 7
+pub const RAW_STRING_LIT: i64 = 8
+pub const CHAR_LIT: i64 = 9
+pub const BYTE_LIT: i64 = 10
+pub const LABEL: i64 = 11
+pub const BYTE_STRING_LIT: i64 = 12
+pub const RAW_BYTE_STRING_LIT: i64 = 13
+pub const LINE_COMMENT: i64 = 14
+pub const BLOCK_COMMENT: i64 = 15
+pub const WHITESPACE: i64 = 16
+pub const INVALID: i64 = 17
+pub const KEYWORD: i64 = 32
+pub const PUNCT: i64 = 96
+
+// Lexer diagnostics, numbered as `self_hosted::lex_error_code` numbers
+// `LexError`'s variants.
+pub const E_UNEXPECTED_CHAR: i64 = 1
+pub const E_UNTERMINATED_BLOCK_COMMENT: i64 = 2
+pub const E_UNTERMINATED_STRING: i64 = 3
+pub const E_UNTERMINATED_TRIPLE_STRING: i64 = 4
+pub const E_UNTERMINATED_RAW_STRING: i64 = 5
+pub const E_UNTERMINATED_CHAR: i64 = 6
+pub const E_BAD_CHAR_LITERAL_LENGTH: i64 = 7
+pub const E_BAD_ESCAPE: i64 = 8
+pub const E_BAD_UNICODE_ESCAPE: i64 = 9
+
+/// Every keyword, in the order `Keyword`'s variants are declared.
+pub const KEYWORDS: [String; 37] = ["as", "async", "await", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "mut", "package", "pub", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while", "yield"]
+
+/// Every punctuation token, in the order `Punct`'s variants are declared.
+pub const PUNCTS: [String; 61] = ["+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>", "+%", "-%", "*%", "<<%", ">>%", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "+%=", "-%=", "*%=", "<<%=", ">>%=", "=", "==", "!=", "<", "<=", ">", ">=", "!", "&&", "||", "|>", ".", "..", "..=", "...", "::", "->", "=>", "(", ")", "[", "]", "{", "}", ",", ";", ":", "?", "#", "@", "$"]
+
+/// The tokens of one text, and what the lexer reported about it.
+pub struct Tokens {
+    pub kinds: Vec<i32>
+    pub hashes: Vec<u8>
+    pub starts: Vec<i32>
+    pub ends: Vec<i32>
+    pub errors: Vec<i32>
+    pub error_starts: Vec<i32>
+    pub error_ends: Vec<i32>
+}
+
+/// A text being scanned.
+struct Lexer {
+    b: Vec<u8>
+    n: i64
+    i: i64
+    errors: Vec<i32>
+    error_starts: Vec<i32>
+    error_ends: Vec<i32>
+}
+
+/// The character at byte `i` and its width in bytes; `(0, 0)` at the end.
+fn char_at(b: Vec<u8>, n: i64, i: i64) -> (i64, i64) {
+    if i >= n {
+        return (0, 0)
+    }
+    let lead = b[i] as i64
+    if lead < 128 {
+        return (lead, 1)
+    }
+    if lead >= 240 && i + 3 < n {
+        let cp = ((lead & 7) << 18) | ((b[i + 1] as i64 & 63) << 12) | ((b[i + 2] as i64 & 63) << 6) | (b[i + 3] as i64 & 63)
+        return (cp, 4)
+    }
+    if lead >= 224 && i + 2 < n {
+        let cp = ((lead & 15) << 12) | ((b[i + 1] as i64 & 63) << 6) | (b[i + 2] as i64 & 63)
+        return (cp, 3)
+    }
+    if i + 1 < n {
+        return (((lead & 31) << 6) | (b[i + 1] as i64 & 63), 2)
+    }
+    (lead, 1)
+}
+
+/// The character `k` characters past byte `i`; 0 past the end.
+fn char_nth(b: Vec<u8>, n: i64, i: i64, k: i64) -> i64 {
+    let mut at = i
+    let mut left = k
+    while left > 0 {
+        let c, w = char_at(b, n, at)
+        if w == 0 {
+            return 0
+        }
+        at += w
+        left -= 1
+    }
+    let c, _ = char_at(b, n, at)
+    c
+}
+
+fn as_char(cp: i64) -> char {
+    char::from_u32(cp as u32).unwrap_or('\0')
+}
+
+fn is_ident_start(cp: i64) -> bool {
+    if cp < 128 {
+        return (cp >= 97 && cp <= 122) || (cp >= 65 && cp <= 90) || cp == 95
+    }
+    unicode::is_xid_start(as_char(cp))
+}
+
+fn is_ident_continue(cp: i64) -> bool {
+    if cp < 128 {
+        return (cp >= 97 && cp <= 122) || (cp >= 65 && cp <= 90) || (cp >= 48 && cp <= 57) || cp == 95
+    }
+    unicode::is_xid_continue(as_char(cp))
+}
+
+fn is_digit(c: i64) -> bool {
+    c >= 48 && c <= 57
+}
+
+fn is_hex(c: i64) -> bool {
+    is_digit(c) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70)
+}
+
+fn peek(l: &mut Lexer) -> i64 {
+    if l.i >= l.n {
+        return 0
+    }
+    let c, _ = char_at(l.b, l.n, l.i)
+    c
+}
+
+fn byte_ahead(l: &mut Lexer, k: i64) -> i64 {
+    if l.i + k >= l.n {
+        return -1
+    }
+    l.b[l.i + k] as i64
+}
+
+fn bump(l: &mut Lexer) {
+    let _, w = char_at(l.b, l.n, l.i)
+    l.i += w
+}
+
+fn bump_ident_continue(l: &mut Lexer) {
+    while l.i < l.n {
+        let c, w = char_at(l.b, l.n, l.i)
+        if !is_ident_continue(c) {
+            return
+        }
+        l.i += w
+    }
+}
+
+fn report(l: &mut Lexer, code: i64, start: i64) {
+    l.errors.push(code as i32)
+    l.error_starts.push(start as i32)
+    l.error_ends.push(l.i as i32)
+}
+
+fn starts_with_at(l: &mut Lexer, at: i64, text: String) -> bool {
+    let m = text.byte_len()
+    if at + m > l.n {
+        return false
+    }
+    for k in 0..m {
+        if l.b[at + k] as i64 != text.byte_at(k) {
+            return false
+        }
+    }
+    true
+}
+
+fn consume_escape(l: &mut Lexer) {
+    let start = l.i
+    l.i += 1
+    let c = peek(l)
+    if c == 110 || c == 116 || c == 114 || c == 92 || c == 39 || c == 34 || c == 48 {
+        bump(l)
+    } else if c == 120 {
+        bump(l)
+        let mut ok = true
+        for _ in 0..2 {
+            if ok && l.i < l.n && is_hex(l.b[l.i] as i64) {
+                l.i += 1
+            } else {
+                ok = false
+            }
+        }
+        if !ok {
+            report(l, E_BAD_ESCAPE, start)
+        }
+    } else if c == 117 {
+        bump(l)
+        if !consume_unicode_escape(l) {
+            report(l, E_BAD_UNICODE_ESCAPE, start)
+        }
+    } else {
+        bump(l)
+        report(l, E_BAD_ESCAPE, start)
+    }
+}
+
+fn consume_unicode_escape(l: &mut Lexer) -> bool {
+    if peek(l) != 123 {
+        return false
+    }
+    l.i += 1
+    let mut digits = 0
+    while digits < 6 && l.i < l.n && is_hex(l.b[l.i] as i64) {
+        l.i += 1
+        digits += 1
+    }
+    if digits == 0 {
+        return false
+    }
+    if peek(l) == 125 {
+        l.i += 1
+        return true
+    }
+    false
+}
+
+fn lex_string(l: &mut Lexer, start: i64) -> i64 {
+    l.i += 1
+    loop {
+        if l.i >= l.n {
+            report(l, E_UNTERMINATED_STRING, start)
+            return STRING_LIT
+        }
+        let c = l.b[l.i] as i64
+        if c == 34 {
+            l.i += 1
+            return STRING_LIT
+        }
+        if c == 92 {
+            consume_escape(l)
+        } else {
+            bump(l)
+        }
+    }
+}
+
+fn lex_triple_string(l: &mut Lexer, start: i64) -> i64 {
+    l.i += 3
+    loop {
+        if l.i >= l.n {
+            report(l, E_UNTERMINATED_TRIPLE_STRING, start)
+            return TRIPLE_STRING_LIT
+        }
+        if starts_with_at(l, l.i, "\"\"\"") {
+            l.i += 3
+            return TRIPLE_STRING_LIT
+        }
+        if l.b[l.i] == 92 {
+            consume_escape(l)
+        } else {
+            bump(l)
+        }
+    }
+}
+
+fn lex_interpolated(l: &mut Lexer, start: i64) -> i64 {
+    let triple = starts_with_at(l, l.i, "\"\"\"")
+    let width = if triple { 3 } else { 1 }
+    l.i += width
+    loop {
+        if l.i >= l.n {
+            report(l, if triple { E_UNTERMINATED_TRIPLE_STRING } else { E_UNTERMINATED_STRING }, start)
+            return if triple { F_TRIPLE_STRING_LIT } else { F_STRING_LIT }
+        }
+        if (triple && starts_with_at(l, l.i, "\"\"\"")) || (!triple && l.b[l.i] == 34) {
+            l.i += width
+            return if triple { F_TRIPLE_STRING_LIT } else { F_STRING_LIT }
+        }
+        let c = l.b[l.i] as i64
+        if (c == 123 || c == 125) && byte_ahead(l, 1) == c {
+            l.i += 2
+        } else if c == 123 {
+            let len = scan_placeholder(l.b, l.n, l.i, triple)
+            if len > 0 {
+                l.i += len
+            } else {
+                l.i += 1
+            }
+        } else if c == 92 {
+            consume_escape(l)
+        } else {
+            bump(l)
+        }
+    }
+}
+
+/// The byte length of the `{..}` placeholder at `at`, or 0 when it does not
+/// close: a nested string or character literal holds no delimiter of its own.
+pub fn scan_placeholder(b: Vec<u8>, n: i64, at: i64, multiline: bool) -> i64 {
+    let len, _ = placeholder_parts(b, n, at, multiline)
+    len
+}
+
+/// The `{..}` placeholder at `at`: its byte length (0 when it does not
+/// close) and the offset of the `:` that opens its spec (-1 without one),
+/// both from `at`.
+pub fn placeholder_parts(b: Vec<u8>, n: i64, at: i64, multiline: bool) -> (i64, i64) {
+    let mut depth = 0
+    let mut i = at + 1
+    while i < n {
+        let c = b[i] as i64
+        if c == 10 && !multiline {
+            return (0, -1)
+        } else if c == 40 || c == 91 || c == 123 {
+            depth += 1
+        } else if c == 41 || c == 93 {
+            if depth > 0 {
+                depth -= 1
+            }
+        } else if c == 125 {
+            if depth == 0 {
+                return (i + 1 - at, -1)
+            }
+            depth -= 1
+        } else if c == 58 && i + 1 < n && b[i + 1] == 58 {
+            i += 1
+        } else if c == 58 && depth == 0 {
+            let mut k = i + 1
+            while k < n && b[k] != 125 {
+                k += 1
+            }
+            if k >= n {
+                return (0, -1)
+            }
+            return (k + 1 - at, i - at)
+        } else if c == 34 {
+            let interpolated = i > at && b[i - 1] == 102 && starts_word(b, i - 1, at)
+            let end = string_end(b, n, i, interpolated, multiline)
+            if end < 0 {
+                return (0, -1)
+            }
+            i = end
+            continue
+        } else if c == 114 && starts_word(b, i, at) && i + 1 < n && (b[i + 1] == 34 || b[i + 1] == 35) {
+            let end = raw_string_end(b, n, i + 1)
+            if end < 0 {
+                return (0, -1)
+            }
+            i = end
+            continue
+        } else if c == 39 {
+            let end = char_literal_end(b, n, i)
+            i = if end < 0 { i + 1 } else { end }
+            continue
+        }
+        i += 1
+    }
+    (0, -1)
+}
+
+/// Whether the byte at `at` begins a word; `base` is where the text the
+/// placeholder scan reads begins.
+fn starts_word(b: Vec<u8>, at: i64, base: i64) -> bool {
+    if at == base {
+        return true
+    }
+    let p = b[at - 1] as i64
+    !((p >= 48 && p <= 57) || (p >= 65 && p <= 90) || (p >= 97 && p <= 122) || p == 95)
+}
+
+pub fn escape_end(b: Vec<u8>, n: i64, at: i64) -> i64 {
+    if at + 1 >= n {
+        return at + 1
+    }
+    if b[at + 1] == 117 && at + 2 < n && b[at + 2] == 123 {
+        let mut k = at + 3
+        while k < n {
+            if b[k] == 125 {
+                return k + 1
+            }
+            k += 1
+        }
+        return n
+    }
+    at + 2
+}
+
+fn string_end(b: Vec<u8>, n: i64, at: i64, interpolated: bool, multiline: bool) -> i64 {
+    let triple = at + 2 < n && b[at + 1] == 34 && b[at + 2] == 34
+    let mut i = at + if triple { 3 } else { 1 }
+    while i < n {
+        let c = b[i] as i64
+        if c == 92 {
+            i = escape_end(b, n, i)
+        } else if c == 10 && !triple && !multiline {
+            return -1
+        } else if c == 34 && !triple {
+            return i + 1
+        } else if c == 34 && i + 2 < n && b[i + 1] == 34 && b[i + 2] == 34 {
+            return i + 3
+        } else if (c == 123 || c == 125) && interpolated && i + 1 < n && b[i + 1] as i64 == c {
+            i += 2
+        } else if c == 123 && interpolated {
+            let len = scan_placeholder(b, n, i, multiline || triple)
+            if len == 0 {
+                return -1
+            }
+            i += len
+        } else {
+            i += 1
+        }
+    }
+    -1
+}
+
+fn raw_string_end(b: Vec<u8>, n: i64, at: i64) -> i64 {
+    let mut hashes = 0
+    while at + hashes < n && b[at + hashes] == 35 {
+        hashes += 1
+    }
+    let open = at + hashes
+    if open >= n || b[open] != 34 {
+        return -1
+    }
+    let mut i = open + 1
+    while i < n {
+        if b[i] == 34 && i + hashes < n {
+            let mut ok = true
+            for k in 0..hashes {
+                if b[i + 1 + k] != 35 {
+                    ok = false
+                }
+            }
+            if ok {
+                return i + 1 + hashes
+            }
+        } else if b[i] == 34 && hashes == 0 {
+            return i + 1
+        }
+        i += 1
+    }
+    -1
+}
+
+fn char_literal_end(b: Vec<u8>, n: i64, at: i64) -> i64 {
+    if at + 1 < n && b[at + 1] == 92 {
+        let after = escape_end(b, n, at + 1)
+        if after < n && b[after] == 39 {
+            return after + 1
+        }
+        return -1
+    }
+    if at + 1 >= n {
+        return -1
+    }
+    let lead = b[at + 1] as i64
+    let width = if lead >= 240 { 4 } else if lead >= 224 { 3 } else if lead >= 192 { 2 } else { 1 }
+    if at + 1 + width < n && b[at + 1 + width] == 39 {
+        return at + 2 + width
+    }
+    -1
+}
+
+fn lex_raw_string(l: &mut Lexer, start: i64) -> (i64, i64) {
+    l.i += 1
+    let mut hashes = 0
+    while l.i < l.n && l.b[l.i] == 35 && hashes < 255 {
+        l.i += 1
+        hashes += 1
+    }
+    if l.i >= l.n || l.b[l.i] != 34 {
+        report(l, E_UNTERMINATED_RAW_STRING, start)
+        return (RAW_STRING_LIT, hashes)
+    }
+    l.i += 1
+    while l.i < l.n {
+        if l.b[l.i] == 34 {
+            let rest = l.n - (l.i + 1)
+            let mut closes = rest >= hashes
+            if closes {
+                for k in 0..hashes {
+                    if l.b[l.i + 1 + k] != 35 {
+                        closes = false
+                    }
+                }
+            }
+            if closes {
+                l.i += 1 + hashes
+                return (RAW_STRING_LIT, hashes)
+            }
+        }
+        bump(l)
+    }
+    report(l, E_UNTERMINATED_RAW_STRING, start)
+    (RAW_STRING_LIT, hashes)
+}
+
+fn lex_char(l: &mut Lexer, start: i64) -> i64 {
+    l.i += 1
+    let mut count = 0
+    loop {
+        if l.i >= l.n {
+            report(l, E_UNTERMINATED_CHAR, start)
+            return CHAR_LIT
+        }
+        let c = l.b[l.i] as i64
+        if c == 10 {
+            report(l, E_UNTERMINATED_CHAR, start)
+            return CHAR_LIT
+        }
+        if c == 39 {
+            l.i += 1
+            if count != 1 {
+                report(l, E_BAD_CHAR_LITERAL_LENGTH, start)
+            }
+            return CHAR_LIT
+        }
+        if c == 92 {
+            consume_escape(l)
+        } else {
+            bump(l)
+        }
+        count += 1
+    }
+}
+
+fn at_label(l: &mut Lexer) -> bool {
+    let first = char_nth(l.b, l.n, l.i, 1)
+    if !is_ident_start(first) {
+        return false
+    }
+    let mut k = 2
+    loop {
+        let c = char_nth(l.b, l.n, l.i, k)
+        if is_ident_continue(c) {
+            k += 1
+            continue
+        }
+        return c != 39
+    }
+}
+
+fn lex_number(l: &mut Lexer) -> i64 {
+    let mut base = 10
+    if l.b[l.i] == 48 && l.i + 1 < l.n {
+        let p = l.b[l.i + 1] as i64
+        if p == 98 || p == 66 {
+            base = 2
+        } else if p == 111 || p == 79 {
+            base = 8
+        } else if p == 120 || p == 88 {
+            base = 16
+        }
+        if base != 10 {
+            l.i += 2
+        }
+    }
+    while l.i < l.n && accepts(base, l.b[l.i] as i64) {
+        l.i += 1
+    }
+    let next = peek(l)
+    let float = base == 10 && ((next == 46 && is_digit(char_nth(l.b, l.n, l.i, 1))) || next == 101 || next == 69)
+    if float {
+        if peek(l) == 46 {
+            l.i += 1
+            while l.i < l.n && accepts(10, l.b[l.i] as i64) {
+                l.i += 1
+            }
+        }
+        let e = peek(l)
+        if e == 101 || e == 69 {
+            l.i += 1
+            let s = peek(l)
+            if s == 43 || s == 45 {
+                l.i += 1
+            }
+            while l.i < l.n && accepts(10, l.b[l.i] as i64) {
+                l.i += 1
+            }
+        }
+    }
+    let first = peek(l)
+    if (first >= 97 && first <= 122) || (first >= 65 && first <= 90) || first == 95 {
+        while l.i < l.n {
+            let c = l.b[l.i] as i64
+            if (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 95 {
+                l.i += 1
+            } else {
+                break
+            }
+        }
+    }
+    if float { FLOAT_LIT } else { INT_LIT }
+}
+
+fn accepts(base: i64, c: i64) -> bool {
+    if c == 95 {
+        return true
+    }
+    match base {
+        2 => c == 48 || c == 49
+        8 => c >= 48 && c <= 55
+        16 => is_hex(c)
+        _ => is_digit(c)
+    }
+}
+
+/// The punctuation token at the cursor, as its index in PUNCTS and its
+/// width; (-1, 0) when there is none.
+fn punct_at(l: &mut Lexer) -> (i64, i64) {
+    let a = byte_ahead(l, 0)
+    let b2 = byte_ahead(l, 1)
+    let c3 = byte_ahead(l, 2)
+    let d4 = byte_ahead(l, 3)
+    if a == 60 && b2 == 60 && c3 == 37 && d4 == 61 {
+        return (28, 4)
+    }
+    if a == 62 && b2 == 62 && c3 == 37 && d4 == 61 {
+        return (29, 4)
+    }
+    // Three bytes.
+    if a == 60 && b2 == 60 && c3 == 61 { return (23, 3) }
+    if a == 62 && b2 == 62 && c3 == 61 { return (24, 3) }
+    if a == 46 && b2 == 46 && c3 == 61 { return (43, 3) }
+    if a == 46 && b2 == 46 && c3 == 46 { return (44, 3) }
+    if a == 43 && b2 == 37 && c3 == 61 { return (25, 3) }
+    if a == 45 && b2 == 37 && c3 == 61 { return (26, 3) }
+    if a == 42 && b2 == 37 && c3 == 61 { return (27, 3) }
+    if a == 60 && b2 == 60 && c3 == 37 { return (13, 3) }
+    if a == 62 && b2 == 62 && c3 == 37 { return (14, 3) }
+    // Two bytes.
+    if a == 43 && b2 == 61 { return (15, 2) }
+    if a == 43 && b2 == 37 { return (10, 2) }
+    if a == 45 && b2 == 37 { return (11, 2) }
+    if a == 42 && b2 == 37 { return (12, 2) }
+    if a == 45 && b2 == 61 { return (16, 2) }
+    if a == 45 && b2 == 62 { return (46, 2) }
+    if a == 42 && b2 == 61 { return (17, 2) }
+    if a == 47 && b2 == 61 { return (18, 2) }
+    if a == 37 && b2 == 61 { return (19, 2) }
+    if a == 38 && b2 == 61 { return (20, 2) }
+    if a == 38 && b2 == 38 { return (38, 2) }
+    if a == 124 && b2 == 61 { return (21, 2) }
+    if a == 124 && b2 == 124 { return (39, 2) }
+    if a == 124 && b2 == 62 { return (40, 2) }
+    if a == 94 && b2 == 61 { return (22, 2) }
+    if a == 60 && b2 == 60 { return (8, 2) }
+    if a == 60 && b2 == 61 { return (34, 2) }
+    if a == 62 && b2 == 62 { return (9, 2) }
+    if a == 62 && b2 == 61 { return (36, 2) }
+    if a == 61 && b2 == 61 { return (31, 2) }
+    if a == 61 && b2 == 62 { return (47, 2) }
+    if a == 33 && b2 == 61 { return (32, 2) }
+    if a == 46 && b2 == 46 { return (42, 2) }
+    if a == 58 && b2 == 58 { return (45, 2) }
+    // One byte.
+    let one = match a {
+        43 => 0
+        45 => 1
+        42 => 2
+        47 => 3
+        37 => 4
+        38 => 5
+        124 => 6
+        94 => 7
+        61 => 30
+        60 => 33
+        62 => 35
+        33 => 37
+        46 => 41
+        58 => 56
+        40 => 48
+        41 => 49
+        91 => 50
+        93 => 51
+        123 => 52
+        125 => 53
+        44 => 54
+        59 => 55
+        63 => 57
+        35 => 58
+        64 => 59
+        36 => 60
+        _ => -1
+    }
+    if one < 0 {
+        return (-1, 0)
+    }
+    (one, 1)
+}
+
+/// The keyword spelled by the bytes from `start` to `end`, as its index in
+/// KEYWORDS, or -1.
+fn keyword_index(l: &mut Lexer, start: i64, end: i64) -> i64 {
+    let len = end - start
+    if len < 2 || len > 8 {
+        return -1
+    }
+    let lo, hi = keyword_range(l.b[start])
+    for k in lo..hi {
+        let word = KEYWORDS[k]
+        if word.byte_len() == len {
+            let mut same = true
+            for j in 0..len {
+                if same && l.b[start + j] as i64 != word.byte_at(j) {
+                    same = false
+                }
+            }
+            if same {
+                return k
+            }
+        }
+    }
+    -1
+}
+
+/// The indices in KEYWORDS of the keywords that begin with byte `first`,
+/// as a half-open range: KEYWORDS keeps them adjacent.
+fn keyword_range(first: u8) -> (i64, i64) {
+    match first {
+        97 => (0, 3)
+        98 => (3, 4)
+        99 => (4, 7)
+        101 => (7, 10)
+        102 => (10, 13)
+        105 => (13, 16)
+        108 => (16, 18)
+        109 => (18, 21)
+        112 => (21, 23)
+        114 => (23, 24)
+        115 => (24, 29)
+        83 => (25, 26)
+        116 => (29, 32)
+        117 => (32, 34)
+        119 => (34, 36)
+        121 => (36, 37)
+        _ => (0, 0)
+    }
+}
+
+/// One token from the cursor: its kind and `#` count.
+fn next_token(l: &mut Lexer) -> (i64, i64) {
+    let start = l.i
+    let c, w = char_at(l.b, l.n, l.i)
+    if c == 32 || c == 9 || c == 13 || c == 10 {
+        while l.i < l.n {
+            let d = l.b[l.i]
+            if d == 32 || d == 9 || d == 13 || d == 10 {
+                l.i += 1
+            } else {
+                break
+            }
+        }
+        return (WHITESPACE, 0)
+    }
+    if start == 0 && c == 35 && byte_ahead(l, 1) == 33 && byte_ahead(l, 2) != 91 {
+        while l.i < l.n && l.b[l.i] != 10 {
+            l.i += 1
+        }
+        return (LINE_COMMENT, 0)
+    }
+    if c == 47 {
+        let next = byte_ahead(l, 1)
+        if next == 47 {
+            while l.i < l.n && l.b[l.i] != 10 {
+                l.i += 1
+            }
+            return (LINE_COMMENT, 0)
+        }
+        if next == 42 {
+            l.i += 2
+            while l.i < l.n {
+                let d = l.b[l.i]
+                l.i += 1
+                if d == 42 && l.i < l.n && l.b[l.i] == 47 {
+                    l.i += 1
+                    return (BLOCK_COMMENT, 0)
+                }
+            }
+            report(l, E_UNTERMINATED_BLOCK_COMMENT, start)
+            return (BLOCK_COMMENT, 0)
+        }
+    }
+    if c == 34 {
+        if starts_with_at(l, l.i, "\"\"\"") {
+            return (lex_triple_string(l, start), 0)
+        }
+        return (lex_string(l, start), 0)
+    }
+    if c == 39 {
+        if at_label(l) {
+            l.i += 1
+            bump_ident_continue(l)
+            return (LABEL, 0)
+        }
+        return (lex_char(l, start), 0)
+    }
+    if is_digit(c) {
+        return (lex_number(l), 0)
+    }
+    if is_ident_start(c) {
+        let next = byte_ahead(l, 1)
+        if c == 102 && next == 34 {
+            l.i += 1
+            return (lex_interpolated(l, start), 0)
+        }
+        if c == 114 && (next == 34 || next == 35) {
+            return lex_raw_string(l, start)
+        }
+        if c == 98 && next == 34 {
+            l.i += 1
+            let _ = lex_string(l, start)
+            return (BYTE_STRING_LIT, 0)
+        }
+        if c == 98 && next == 39 {
+            l.i += 1
+            let _ = lex_char(l, start)
+            return (BYTE_LIT, 0)
+        }
+        if c == 98 && next == 114 && (byte_ahead(l, 2) == 34 || byte_ahead(l, 2) == 35) {
+            l.i += 1
+            let _, hashes = lex_raw_string(l, start)
+            return (RAW_BYTE_STRING_LIT, hashes)
+        }
+        bump_ident_continue(l)
+        let k = keyword_index(l, start, l.i)
+        if k >= 0 {
+            return (KEYWORD + k, 0)
+        }
+        return (IDENT, 0)
+    }
+    let p, width = punct_at(l)
+    if p >= 0 {
+        l.i += width
+        return (PUNCT + p, 0)
+    }
+    l.i += w
+    report(l, E_UNEXPECTED_CHAR, start)
+    (INVALID, 0)
+}
+
+/// Every token of `source`, the last `EOF`.
+pub fn tokenize(source: String) -> Tokens {
+    let b = source.as_bytes()
+    let n = b.len()
+    let mut l = Lexer { b: b, n: n, i: 0, errors: #[], error_starts: #[], error_ends: #[] }
+    let mut kinds: Vec<i32> = Vec::with_capacity(n / 3 + 1)
+    let mut hashes: Vec<u8> = Vec::with_capacity(n / 3 + 1)
+    let mut starts: Vec<i32> = Vec::with_capacity(n / 3 + 1)
+    let mut ends: Vec<i32> = Vec::with_capacity(n / 3 + 1)
+    loop {
+        let start = l.i
+        if l.i >= l.n {
+            kinds.push(EOF as i32)
+            hashes.push(0)
+            starts.push(start as i32)
+            ends.push(start as i32)
+            break
+        }
+        let kind, h = next_token(&mut l)
+        kinds.push(kind as i32)
+        hashes.push(h as u8)
+        starts.push(start as i32)
+        ends.push(l.i as i32)
+    }
+    Tokens {
+        kinds: kinds
+        hashes: hashes
+        starts: starts
+        ends: ends
+        errors: l.errors
+        error_starts: l.error_starts
+        error_ends: l.error_ends
+    }
+}

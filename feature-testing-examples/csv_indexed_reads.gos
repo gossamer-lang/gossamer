@@ -1,0 +1,56 @@
+// A program that reads `csv::read`'s answer only by indexing it - its
+// length, a row, a row's length, and a field parsed or compared - sees the
+// same records as one that keeps them: quoted fields with commas, doubled
+// quotes, and line breaks, CRLF endings, blank lines, ragged rows, text
+// outside ASCII, and a document `csv::read` rejects.
+
+use std::encoding::csv
+
+struct Totals {
+    rows: i64
+    fields: i64
+    sum: f64
+    ints: i64
+    flags: i64
+    named: i64
+}
+
+fn totals(text: String) -> Totals {
+    let records = csv::read(text).unwrap_or(#[])
+    let mut t = Totals { rows: records.len(), fields: 0, sum: 0.0, ints: 0, flags: 0, named: 0 }
+    for record in records {
+        t.fields += record.len()
+        t.sum += record[1].to_f64().unwrap_or(-1.0)
+        t.ints += record[2].to_i64().unwrap_or(-100)
+        if record[3].to_bool().unwrap_or(false) {
+            t.flags += 1
+        }
+        if record[0] == "b,\"quoted\"\nline" {
+            t.named += 1
+        }
+        if record[0].len() > 2 {
+            t.named += 10
+        }
+    }
+    t
+}
+
+fn kept(text: String) -> String {
+    let records = csv::read(text).unwrap_or(#[])
+    let mut names: Vec<String> = #[]
+    for record in records {
+        names.push(record[0])
+    }
+    names.join("|")
+}
+
+fn main() {
+    let doc = "a,1.5,7,true\r\n\"b,\"\"quoted\"\"\nline\",2.25,-3,false,extra\n\nc\u{e9},x,9,true\n  \nd,1e3,abc,TRUE\n"
+    let t = totals(doc)
+    println(f"rows {t.rows} fields {t.fields} sum {t.sum} ints {t.ints} flags {t.flags} named {t.named}")
+    println(f"kept {kept(doc)}")
+    let bad = totals("a,1,2,true\n\"open,1,2,true\n")
+    println(f"rejected rows {bad.rows} sum {bad.sum}")
+    let empty = totals("")
+    println(f"empty rows {empty.rows}")
+}

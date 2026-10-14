@@ -43,6 +43,7 @@ pub struct SourceFile {
     /// declared parameter order, and empties the map; nothing
     /// downstream of that pass sees a labelled argument.
     #[serde(default)]
+    #[serde(serialize_with = "crate::ordered::map")]
     pub named_args: std::collections::HashMap<NodeId, Vec<NamedArg>>,
 }
 

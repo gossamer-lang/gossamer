@@ -1,0 +1,326 @@
+// Typed serde across every field kind: the text `to_json::<T>` writes, the
+// values `from_json::<T>` / `json::decode::<T>` read back, and the error each
+// malformed document reports, including the path a nested failure carries.
+// The same bytes on every tier.
+use std::encoding::json
+use std::encoding::toml
+use std::encoding::yaml
+use std::collections::Map
+use std::errors
+
+struct Inner { n: i64, label: String }
+
+struct Widths {
+    a: i8
+    b: i16
+    c: i32
+    d: u8
+    e: u16
+    f: u32
+    g: u64
+    h: usize
+    i: i64
+    x: f64
+    y: f32
+}
+
+struct Kinds {
+    flag: bool
+    text: String
+    nums: Vec<i64>
+    grid: Vec<Vec<i64>>
+    inners: Vec<Inner>
+    maybe: Option<i64>
+    maybe_inner: Option<Inner>
+    pair: (i64, String)
+    counts: Map<String, i64>
+    by_name: Map<String, Inner>
+    raw: json::Value
+    inner: Inner
+}
+
+struct Attrs {
+    #[rename("full name")]
+    name: String
+    #[skip]
+    cache: i64
+    #[default]
+    retries: i64
+    #[default]
+    tags: Vec<String>
+    note: Option<String>
+}
+
+enum Shape {
+    Empty
+    Circle(f64)
+    Segment(i64, i64)
+    Rect { w: i64, h: i64 }
+}
+
+struct Drawing { shapes: Vec<Shape>, main: Shape }
+
+struct Pair(i64, String)
+struct Unit
+
+mod geo {
+    pub struct Point { pub x: i64, pub y: i64 }
+}
+
+newtype Meters = i64
+struct Run { distance: Meters }
+
+type Alias = Inner
+
+fn show_err(label: String, r: Result<String, errors::Error>) {
+    match r {
+        Ok(text) => println(f"{label}: {text}")
+        Err(e) => println(f"{label}: ERR {e}")
+    }
+}
+
+fn decode_inner(label: String, text: String) {
+    match from_json::<Inner>(text) {
+        Ok(v) => println(f"{label}: Inner n={v.n} label={v.label}")
+        Err(e) => println(f"{label}: ERR {e}")
+    }
+}
+
+fn decode_widths(label: String, text: String) {
+    match json::decode::<Widths>(text) {
+        Ok(w) => println(f"{label}: {w.a} {w.b} {w.c} {w.d} {w.e} {w.f} {w.g} {w.h} {w.i} {w.x} {w.y}")
+        Err(e) => println(f"{label}: ERR {e}")
+    }
+}
+
+fn decode_kinds(label: String, text: String) {
+    match from_json::<Kinds>(text) {
+        Ok(k) => {
+            let round = to_json::<Kinds>(k).unwrap_or("ERR")
+            println(f"{label}: {round}")
+        }
+        Err(e) => println(f"{label}: ERR {e}")
+    }
+}
+
+fn decode_attrs(label: String, text: String) {
+    match from_json::<Attrs>(text) {
+        Ok(a) => println(f"{label}: name={a.name} cache={a.cache} retries={a.retries} tags={a.tags.len()} note={a.note.unwrap_or("-")}")
+        Err(e) => println(f"{label}: ERR {e}")
+    }
+}
+
+fn decode_drawing(label: String, text: String) {
+    match from_json::<Drawing>(text) {
+        Ok(d) => println(f"{label}: {to_json::<Drawing>(d).unwrap_or("ERR")}")
+        Err(e) => println(f"{label}: ERR {e}")
+    }
+}
+
+fn decode_shape(label: String, text: String) {
+    match from_json::<Shape>(text) {
+        Ok(s) => println(f"{label}: {to_json::<Shape>(s).unwrap_or("ERR")}")
+        Err(e) => println(f"{label}: ERR {e}")
+    }
+}
+
+fn infer_through_try(text: String) -> Result<Inner, errors::Error> {
+    let v: Inner = from_json(text)?
+    Ok(v)
+}
+
+fn main() {
+    let inner = Inner { n: 7, label: "a \"quoted\" <b>&</b> \n tab\t é ✓" }
+    show_err("inner", to_json::<Inner>(inner))
+
+    let w = Widths { a: -8, b: -300, c: 70_000, d: 200, e: 60_000, f: 4_000_000_000, g: 18_446_744_073_709_551_615, h: 12, i: -9_007_199_254_740_993, x: 1.0, y: 0.1 }
+    show_err("widths", to_json::<Widths>(w))
+    let specials = Widths { a: 0, b: 0, c: 0, d: 0, e: 0, f: 0, g: 0, h: 0, i: 0, x: 0.0 / 0.0, y: 1.0 / 0.0 }
+    show_err("specials", to_json::<Widths>(specials))
+    decode_widths("widths back", "{\"a\":-8,\"b\":-300,\"c\":70000,\"d\":200,\"e\":60000,\"f\":4000000000,\"g\":18446744073709551615,\"h\":12,\"i\":-9007199254740993,\"x\":1e2,\"y\":0.1}")
+    decode_widths("narrowing", "{\"a\":300,\"b\":70000,\"c\":5000000000,\"d\":-1,\"e\":70000,\"f\":-1,\"g\":1,\"h\":2,\"i\":3.0,\"x\":4,\"y\":5}")
+    decode_widths("i64 fraction", "{\"a\":1,\"b\":1,\"c\":1,\"d\":1,\"e\":1,\"f\":1,\"g\":1,\"h\":1,\"i\":1.5,\"x\":1,\"y\":1}")
+    decode_widths("u64 negative", "{\"a\":1,\"b\":1,\"c\":1,\"d\":1,\"e\":1,\"f\":1,\"g\":-1,\"h\":1,\"i\":1,\"x\":1,\"y\":1}")
+    decode_widths("float string", "{\"a\":1,\"b\":1,\"c\":1,\"d\":1,\"e\":1,\"f\":1,\"g\":1,\"h\":1,\"i\":1,\"x\":\"1\",\"y\":1}")
+    decode_widths("big i64", "{\"a\":1,\"b\":1,\"c\":1,\"d\":1,\"e\":1,\"f\":1,\"g\":1,\"h\":1,\"i\":1e30,\"x\":1,\"y\":1}")
+
+    decode_inner("plain", "{\"n\": 1, \"label\": \"x\"}")
+    decode_inner("reordered", "{\"label\": \"y\", \"n\": 2}")
+    decode_inner("unknown keys", "{\"zz\": [1, {\"a\": null}], \"n\": 3, \"label\": \"z\", \"extra\": true}")
+    decode_inner("duplicate", "{\"n\": 1, \"label\": \"first\", \"n\": 9, \"label\": \"last\"}")
+    decode_inner("escapes", "{\"n\": -0, \"label\": \"\\u00e9\\n\\\"\\\\ \\ud83d\\ude00\"}")
+    decode_inner("missing", "{\"label\": \"x\"}")
+    decode_inner("missing both", "{}")
+    decode_inner("null field", "{\"n\": null, \"label\": \"x\"}")
+    decode_inner("wrong type", "{\"n\": \"1\", \"label\": \"x\"}")
+    decode_inner("wrong both", "{\"n\": true, \"label\": 4}")
+    decode_inner("not object", "[1, 2]")
+    decode_inner("scalar", "5")
+    decode_inner("invalid", "{\"n\": 1,")
+    decode_inner("trailing", "{\"n\": 1, \"label\": \"x\"} x")
+    decode_inner("empty", "")
+
+    let mut counts: Map<String, i64> = Map::new()
+    counts.insert("zeta", 26)
+    counts.insert("alpha", 1)
+    counts.insert("<html>", 3)
+    let mut by_name: Map<String, Inner> = Map::new()
+    by_name.insert("b", Inner { n: 2, label: "two" })
+    by_name.insert("a", Inner { n: 1, label: "one" })
+    let k = Kinds {
+        flag: true
+        text: "hi"
+        nums: #[1, -2, 3]
+        grid: #[#[1, 2], #[], #[3]]
+        inners: #[Inner { n: 1, label: "x" }, Inner { n: 2, label: "y" }]
+        maybe: Some(5)
+        maybe_inner: None
+        pair: (4, "four")
+        counts: counts
+        by_name: by_name
+        raw: json::parse("{\"z\": [1, 2.5, \"s\", null, {\"k\": false}]}").unwrap()
+        inner: Inner { n: 9, label: "nine" }
+    }
+    let text = to_json::<Kinds>(k).unwrap_or("ERR")
+    println(f"kinds: {text}")
+    decode_kinds("kinds back", text)
+    decode_kinds("maybe missing", "{\"flag\":false,\"text\":\"\",\"nums\":[],\"grid\":[],\"inners\":[],\"maybe_inner\":{\"n\":1,\"label\":\"l\"},\"pair\":[0,\"\"],\"counts\":{},\"by_name\":{},\"raw\":null,\"inner\":{\"n\":0,\"label\":\"\"}}")
+    decode_kinds("maybe null", "{\"flag\":false,\"text\":\"\",\"nums\":[],\"grid\":[],\"inners\":[],\"maybe\":null,\"maybe_inner\":null,\"pair\":[0,\"\"],\"counts\":{},\"by_name\":{},\"raw\":7,\"inner\":{\"n\":0,\"label\":\"\"}}")
+    decode_kinds("vec elem", "{\"flag\":false,\"text\":\"\",\"nums\":[1,\"x\"],\"grid\":[],\"inners\":[],\"pair\":[0,\"\"],\"counts\":{},\"by_name\":{},\"raw\":null,\"inner\":{\"n\":0,\"label\":\"\"}}")
+    decode_kinds("vec not array", "{\"flag\":false,\"text\":\"\",\"nums\":{},\"grid\":[],\"inners\":[],\"pair\":[0,\"\"],\"counts\":{},\"by_name\":{},\"raw\":null,\"inner\":{\"n\":0,\"label\":\"\"}}")
+    decode_kinds("grid inner", "{\"flag\":false,\"text\":\"\",\"nums\":[],\"grid\":[[1],[true]],\"inners\":[],\"pair\":[0,\"\"],\"counts\":{},\"by_name\":{},\"raw\":null,\"inner\":{\"n\":0,\"label\":\"\"}}")
+    decode_kinds("inners elem", "{\"flag\":false,\"text\":\"\",\"nums\":[],\"grid\":[],\"inners\":[{\"n\":1,\"label\":\"a\"},{\"n\":\"bad\",\"label\":\"b\"}],\"pair\":[0,\"\"],\"counts\":{},\"by_name\":{},\"raw\":null,\"inner\":{\"n\":0,\"label\":\"\"}}")
+    decode_kinds("maybe inner bad", "{\"flag\":false,\"text\":\"\",\"nums\":[],\"grid\":[],\"inners\":[],\"maybe_inner\":{\"label\":\"b\"},\"pair\":[0,\"\"],\"counts\":{},\"by_name\":{},\"raw\":null,\"inner\":{\"n\":0,\"label\":\"\"}}")
+    decode_kinds("pair short", "{\"flag\":false,\"text\":\"\",\"nums\":[],\"grid\":[],\"inners\":[],\"pair\":[0],\"counts\":{},\"by_name\":{},\"raw\":null,\"inner\":{\"n\":0,\"label\":\"\"}}")
+    decode_kinds("pair elem", "{\"flag\":false,\"text\":\"\",\"nums\":[],\"grid\":[],\"inners\":[],\"pair\":[0,1],\"counts\":{},\"by_name\":{},\"raw\":null,\"inner\":{\"n\":0,\"label\":\"\"}}")
+    decode_kinds("pair not array", "{\"flag\":false,\"text\":\"\",\"nums\":[],\"grid\":[],\"inners\":[],\"pair\":\"p\",\"counts\":{},\"by_name\":{},\"raw\":null,\"inner\":{\"n\":0,\"label\":\"\"}}")
+    decode_kinds("map value", "{\"flag\":false,\"text\":\"\",\"nums\":[],\"grid\":[],\"inners\":[],\"pair\":[0,\"\"],\"counts\":{\"a\":1,\"b\":\"x\"},\"by_name\":{},\"raw\":null,\"inner\":{\"n\":0,\"label\":\"\"}}")
+    decode_kinds("map not object", "{\"flag\":false,\"text\":\"\",\"nums\":[],\"grid\":[],\"inners\":[],\"pair\":[0,\"\"],\"counts\":[1],\"by_name\":{},\"raw\":null,\"inner\":{\"n\":0,\"label\":\"\"}}")
+    decode_kinds("map struct", "{\"flag\":false,\"text\":\"\",\"nums\":[],\"grid\":[],\"inners\":[],\"pair\":[0,\"\"],\"counts\":{\"q\":2,\"p\":1},\"by_name\":{\"k\":{\"n\":1}},\"raw\":null,\"inner\":{\"n\":0,\"label\":\"\"}}")
+    decode_kinds("map dup", "{\"flag\":false,\"text\":\"\",\"nums\":[],\"grid\":[],\"inners\":[],\"pair\":[0,\"\"],\"counts\":{\"q\":2,\"q\":5},\"by_name\":{},\"raw\":null,\"inner\":{\"n\":0,\"label\":\"\"}}")
+    decode_kinds("nested inner", "{\"flag\":false,\"text\":\"\",\"nums\":[],\"grid\":[],\"inners\":[],\"pair\":[0,\"\"],\"counts\":{},\"by_name\":{},\"raw\":null,\"inner\":{\"n\":0,\"label\":5}}")
+    decode_kinds("bool wrong", "{\"flag\":1,\"text\":\"\",\"nums\":[],\"grid\":[],\"inners\":[],\"pair\":[0,\"\"],\"counts\":{},\"by_name\":{},\"raw\":null,\"inner\":{\"n\":0,\"label\":\"\"}}")
+    decode_kinds("first error wins", "{\"inner\":{\"n\":\"x\"},\"flag\":\"no\",\"text\":3}")
+
+    let attrs = Attrs { name: "Ada", cache: 99, retries: 3, tags: #["x"], note: None }
+    show_err("attrs", to_json::<Attrs>(attrs))
+    decode_attrs("attrs back", "{\"full name\":\"Ada\",\"retries\":3,\"tags\":[\"x\"],\"note\":null}")
+    decode_attrs("attrs defaults", "{\"full name\":\"Bo\",\"cache\":5}")
+    decode_attrs("attrs old key", "{\"name\":\"Bo\"}")
+    decode_attrs("attrs bad default", "{\"full name\":\"Bo\",\"retries\":\"x\"}")
+
+    let d = Drawing { shapes: #[Shape::Empty, Shape::Circle(1.5), Shape::Segment(1, 2), Shape::Rect { w: 3, h: 4 }], main: Shape::Rect { w: 1, h: 1 } }
+    let dt = to_json::<Drawing>(d).unwrap_or("ERR")
+    println(f"drawing: {dt}")
+    decode_drawing("drawing back", dt)
+    decode_shape("unit", "\"Empty\"")
+    decode_shape("unknown unit", "\"Triangle\"")
+    decode_shape("payload name as string", "\"Circle\"")
+    decode_shape("unit as object", "{\"Empty\": null}")
+    decode_shape("two keys", "{\"Circle\": 1, \"Segment\": [1, 2]}")
+    decode_shape("no keys", "{}")
+    decode_shape("array", "[1]")
+    decode_shape("number", "3")
+    decode_shape("null", "null")
+    decode_shape("circle bad", "{\"Circle\": \"r\"}")
+    decode_shape("segment short", "{\"Segment\": [1]}")
+    decode_shape("segment not array", "{\"Segment\": 4}")
+    decode_shape("segment bad elem", "{\"Segment\": [1, \"x\"]}")
+    decode_shape("rect missing", "{\"Rect\": {\"w\": 1}}")
+    decode_shape("rect bad", "{\"Rect\": {\"w\": 1, \"h\": false}}")
+    decode_shape("rect not object", "{\"Rect\": 5}")
+    decode_shape("unknown payload", "{\"Hexagon\": 6}")
+    decode_drawing("drawing nested bad", "{\"shapes\": [\"Empty\", {\"Circle\": true}], \"main\": \"Empty\"}")
+
+    show_err("pair", to_json::<Pair>(Pair(1, "one")))
+    match from_json::<Pair>("{\"0\": 5, \"1\": \"five\"}") {
+        Ok(p) => println(f"pair back: {p.0} {p.1}")
+        Err(e) => println(f"pair back: ERR {e}")
+    }
+    match from_json::<Pair>("{\"0\": 5}") {
+        Ok(p) => println(f"pair short: {p.0} {p.1}")
+        Err(e) => println(f"pair short: ERR {e}")
+    }
+    match from_json::<Pair>("{\"0\": \"5\", \"1\": \"x\"}") {
+        Ok(p) => println(f"pair bad: {p.0} {p.1}")
+        Err(e) => println(f"pair bad: ERR {e}")
+    }
+    show_err("unit", to_json::<Unit>(Unit))
+    match from_json::<Unit>("{\"anything\": 1}") {
+        Ok(_) => println("unit back: ok")
+        Err(e) => println(f"unit back: ERR {e}")
+    }
+
+    show_err("module", to_json::<geo::Point>(geo::Point { x: 1, y: -1 }))
+    match from_json::<geo::Point>("{\"x\": 3, \"y\": 4}") {
+        Ok(p) => println(f"module back: {p.x} {p.y}")
+        Err(e) => println(f"module back: ERR {e}")
+    }
+    show_err("newtype", to_json::<Run>(Run { distance: 42.into() }))
+    match from_json::<Run>("{\"distance\": 7}") {
+        Ok(r) => {
+            let raw: i64 = r.distance.into()
+            println(f"newtype back: {raw}")
+        }
+        Err(e) => println(f"newtype back: ERR {e}")
+    }
+    show_err("alias", to_json::<Alias>(Inner { n: 1, label: "al" }))
+    match infer_through_try("{\"n\": 11, \"label\": \"inf\"}") {
+        Ok(v) => println(f"inferred: {v.n} {v.label}")
+        Err(e) => println(f"inferred: ERR {e}")
+    }
+    let infer_result: Result<Inner, errors::Error> = from_json("{\"n\": 12}")
+    match infer_result {
+        Ok(v) => println(f"infer result: {v.n}")
+        Err(e) => println(f"infer result: ERR {e}")
+    }
+
+    let t = Inner { n: 3, label: "toml" }
+    let tt = to_toml::<Inner>(t).unwrap_or("ERR")
+    println(f"toml: {tt}")
+    match from_toml::<Inner>(tt) {
+        Ok(v) => println(f"toml back: {v.n} {v.label}")
+        Err(e) => println(f"toml back: ERR {e}")
+    }
+    match from_toml::<Inner>("n = \"x\"\nlabel = \"y\"") {
+        Ok(v) => println(f"toml bad: {v.n}")
+        Err(e) => println(f"toml bad: ERR {e}")
+    }
+    match from_toml::<Inner>("n = = 1") {
+        Ok(v) => println(f"toml invalid: {v.n}")
+        Err(e) => println(f"toml invalid: ERR {e}")
+    }
+    let y = Kinds {
+        flag: false
+        text: "y"
+        nums: #[1]
+        grid: #[]
+        inners: #[]
+        maybe: None
+        maybe_inner: Some(Inner { n: 1, label: "m" })
+        pair: (1, "p")
+        counts: Map::new()
+        by_name: Map::new()
+        raw: json::parse("[true]").unwrap()
+        inner: Inner { n: 2, label: "i" }
+    }
+    let yt = to_yaml::<Kinds>(y).unwrap_or("ERR")
+    println(f"yaml: {yt}")
+    match from_yaml::<Kinds>(yt) {
+        Ok(v) => println(f"yaml back: {to_json::<Kinds>(v).unwrap_or("ERR")}")
+        Err(e) => println(f"yaml back: ERR {e}")
+    }
+    match from_yaml::<Inner>("n: [1\n") {
+        Ok(v) => println(f"yaml invalid: {v.n}")
+        Err(e) => println(f"yaml invalid: ERR {e}")
+    }
+    match yaml::from_yaml::<Inner>("n: 4\nlabel: q") {
+        Ok(v) => println(f"yaml qualified: {v.n} {v.label}")
+        Err(e) => println(f"yaml qualified: ERR {e}")
+    }
+    match toml::from_toml::<Inner>("n = 5\nlabel = \"r\"") {
+        Ok(v) => println(f"toml qualified: {v.n} {v.label}")
+        Err(e) => println(f"toml qualified: ERR {e}")
+    }
+    show_err("json qualified", json::encode::<Inner>(Inner { n: 6, label: "s" }))
+}

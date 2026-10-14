@@ -2049,11 +2049,10 @@ fn jit_local_ty_needs_bytecode_inner(
         // where the body itself built it - `body_builds_every_iterator_local`
         // proves that before this check is consulted.
         TyKind::Iterator(elem) => jit_local_ty_needs_bytecode_inner(tcx, *elem, visiting),
-        // A `json::Value` is a runtime handle - one word, declared non-RC -
-        // so a local holding one has a native representation. It stays on
-        // bytecode all the same: the derived `__gos_serde_from_json_*` bodies
-        // are the ones that hold it, and their lowering answers a different
-        // total once compiled alongside their callers.
+        // A `json::Value` is one word natively, the runtime's document
+        // handle, but the bytecode tier holds the same type as its own
+        // counted value, so a body holding one stays on bytecode, where both
+        // sides of every call agree on what the word is.
         TyKind::JsonValue
         | TyKind::Adt { .. }
         | TyKind::Range(_)
@@ -2181,6 +2180,7 @@ fn compute_returns_fresh(bodies: &[Body], tcx: &TyCtxt) -> HashMap<String, bool>
                     false
                 } else if *name == "gos_enum_load"
                     || *name == "gos_enum_slot_ptr"
+                    || *name == "gos_enum_word_addr"
                     || name.starts_with("gos_enum_tag")
                     || name.starts_with("gos_enum_set_disc")
                     || name.starts_with("gos_enum_disc_tag")
@@ -2460,22 +2460,23 @@ fn carrier_box_meta(tcx: &TyCtxt, ty: Ty) -> Option<&[i64]> {
 /// discriminant.
 fn box_meta_owns_payloads(shape: CarrierShape, at: usize, blob: &[i64]) -> bool {
     use gossamer_abi::rc::{
-        RC_CHILD_KIND_SHIFT, RC_CHILD_RC, RC_KIND_STRUCT, RC_KIND_STRUCT_GUARDED,
+        RC_CHILD_KIND_SHIFT, RC_CHILD_RC, RC_KIND_STRUCT, RC_KIND_STRUCT_GUARDED, rc_kind,
     };
     const PAYLOAD_WORD: i64 = 1;
+    let kind = blob.first().copied().map(rc_kind);
     (0..2).all(|disc| {
         let Some(arm) = shape.arm(at, disc) else {
             return true;
         };
         match shape.node(arm) {
             CarrierNode::Str => {
-                blob.first() == Some(&RC_KIND_STRUCT)
+                kind == Some(RC_KIND_STRUCT)
                     && blob.get(4..).is_some_and(|entries| {
                         entries.contains(&((RC_CHILD_RC << RC_CHILD_KIND_SHIFT) | PAYLOAD_WORD))
                     })
             }
             node if node.is_carrier() => {
-                blob.first() == Some(&RC_KIND_STRUCT_GUARDED)
+                kind == Some(RC_KIND_STRUCT_GUARDED)
                     && blob.get(2..).is_some_and(|entries| {
                         entries.chunks_exact(3).any(|entry| {
                             entry[2] == PAYLOAD_WORD && (entry[0] == -1 || entry[0] == disc)

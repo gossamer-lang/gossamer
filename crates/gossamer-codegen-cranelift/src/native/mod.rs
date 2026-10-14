@@ -143,7 +143,6 @@ pub use intrinsic::*;
 pub use module::*;
 pub use operand::*;
 pub use ty::*;
-pub use vec_elem_kind::vec_elem_kind_codegen;
 
 mod intrinsic_io_math;
 pub use intrinsic_io_math::*;

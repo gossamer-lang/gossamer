@@ -67,11 +67,15 @@ impl<'a> Builder<'a> {
             self.region_depth += 1;
             self.deferred_auto_region_collections.push(false);
         }
+        // A region a statement of this block opens - `arena { }` is a block
+        // that pushes one and defers its pop - ends with the block.
+        let region_depth = self.region_depth;
         self.push_scope();
         self.defer_stack.push(Vec::new());
         for stmt in &block.stmts {
             self.lower_stmt(stmt);
             if self.current.is_none() {
+                self.region_depth = region_depth;
                 // Diverged mid-block (a `return` / `break` / `continue` inside
                 // a statement). That construct already emitted the defers it
                 // needed; drop this frame without re-emitting.
@@ -132,6 +136,7 @@ impl<'a> Builder<'a> {
         }
         self.pop_defer_frame(block.span);
         self.pop_scope();
+        self.region_depth = region_depth;
         self.end_auto_region(lexical_region, block.span);
         if self.current.is_none() { None } else { result }
     }
@@ -273,6 +278,7 @@ impl<'a> Builder<'a> {
                         | "gos_rt_result_payload_f64"
                         | "gos_enum_load"
                         | "gos_enum_slot_ptr"
+                        | "gos_enum_word_addr"
                 ) {
                     return None;
                 }

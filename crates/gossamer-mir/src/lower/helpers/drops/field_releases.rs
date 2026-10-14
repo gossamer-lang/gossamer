@@ -109,8 +109,24 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
             None
         }
     };
+    // A binding a payload view defines holds no share of the box it reads,
+    // so it has no children of its own to give back.
+    let mut payload_view = vec![false; n_locals];
+    for stmt in body.blocks.iter().flat_map(|b| &b.stmts) {
+        if let StatementKind::Assign {
+            place,
+            rvalue: Rvalue::CallIntrinsic { name, args },
+        } = &stmt.kind
+            && *name == "gos_enum_load"
+            && super::is_payload_view(args)
+            && place.projection.is_empty()
+            && (place.local.0 as usize) < n_locals
+        {
+            payload_view[place.local.0 as usize] = true;
+        }
+    }
     let guarded_locals: Vec<(Local, String)> = ((arity + 1)..n_locals)
-        .filter(|&i| !body.locals[i].region)
+        .filter(|&i| !body.locals[i].region && !payload_view[i])
         .filter_map(|i| {
             walk_meta(body.locals[i].ty).map(|sym| (Local(u32::try_from(i).unwrap_or(0)), sym))
         })
@@ -343,6 +359,30 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
         ]
     };
 
+    // The entry block opens with the zero stores that initialise each owned
+    // slot of a fresh local. Nothing was stored there before them, so they
+    // replace nothing: the slot's old words are uninitialised stack.
+    let entry_initialisers = body.blocks.first().map_or(0, |entry| {
+        entry
+            .stmts
+            .iter()
+            .take_while(|stmt| {
+                matches!(
+                    &stmt.kind,
+                    StatementKind::Assign {
+                        place,
+                        rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                    } if place.local != Local::RETURN
+                        && (place.local.0 as usize) > arity
+                        && place
+                            .projection
+                            .iter()
+                            .all(|p| matches!(p, crate::ir::Projection::Field(_)))
+                )
+            })
+            .count()
+    });
+
     for (bi, block) in body.blocks.iter().enumerate() {
         let len = block.stmts.len();
         let span = block.span;
@@ -350,6 +390,9 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
             let StatementKind::Assign { place, rvalue } = &stmt.kind else {
                 continue;
             };
+            if bi == 0 && si < entry_initialisers {
+                continue;
+            }
             if place.projection.is_empty() {
                 // Whole-local (re)initialisation of a guarded aggregate:
                 // release the previous children, retain the new ones.
@@ -362,8 +405,14 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
                         &mut extra_locals,
                     ));
                 }
+                // A boxed payload read copies the box's words with a share of
+                // each counted field already, a view with none to take.
+                let payload_read = matches!(rvalue,
+                    Rvalue::CallIntrinsic { name, .. } if *name == "gos_enum_load");
                 if let Some(sym) = retain_meta_of(place.local)
                     && !matches!(rvalue, Rvalue::Use(Operand::Const(_)))
+                    && !payload_read
+                    && !payload_view[place.local.0 as usize]
                 {
                     gaps[bi][si + 1].push(call_stmt(
                         "gos_rt_aggr_retain_children",
@@ -441,12 +490,25 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
         // the return sweep. `xs[i] = v` also drops what the element held.
         // A by-value parameter is lent, so the caller keeps its share and the
         // container takes one of its own exactly as from a local.
+        // A push onto a vector whose slot layout owns the carrier's payload
+        // takes the vector's share itself.
+        let push_takes_share = |name: &str, args: &[Operand]| {
+            is_element_push(name)
+                && name.starts_with("gos_rt_vec_push")
+                && matches!(args.first(), Some(Operand::Copy(recv))
+                    if recv.projection.is_empty()
+                        && (recv.local.0 as usize) < n_locals
+                        && matches!(tcx.kind_of(body.locals[recv.local.0 as usize].ty),
+                            gossamer_types::TyKind::Vec(elem)
+                                if super::slots::owned_slot_children(tcx, *elem).is_some()))
+        };
         if let Terminator::Call {
             callee: Operand::Const(ConstValue::Str(name)),
             args,
             ..
         } = &block.terminator
             && is_consuming_call(name)
+            && !push_takes_share(name, args)
         {
             for arg in args.iter().skip(1) {
                 let Operand::Copy(p) = arg else { continue };
@@ -542,8 +604,9 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
                 &mut extra_locals,
             ));
         }
-        // A carrier read out of a box is a view of words the box keeps, so
-        // the destination takes its own share once the call has answered.
+        // A carrier read out of a box, or out of a container's own element,
+        // is a view of words the box or the container keeps, so the
+        // destination takes its own share once the call has answered.
         if let Terminator::Call {
             callee: Operand::Const(ConstValue::Str(name)),
             destination,
@@ -552,7 +615,9 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
         } = &block.terminator
             && destination.projection.is_empty()
             && option_holder(destination.local)
-            && reads_boxed_carrier(name)
+            && (reads_boxed_carrier(name)
+                || (answers_borrowed_element(name)
+                    && !answers_counted_blob(name, destination.local, body, tcx)))
             && let Some(head) = gaps.get_mut(target.0 as usize).and_then(|g| g.first_mut())
         {
             head.push(call_stmt(

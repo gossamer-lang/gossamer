@@ -125,6 +125,53 @@ pub mod vec_elem_kind {
     /// one per element, and `gos_rt_vec_free` gives each back. Also a
     /// slot-child kind, for a `Weak` field of an `AGGR_OWNED` element.
     pub const WEAK: u8 = 17;
+    /// Element is a one-, two-, or four-byte two's-complement integer
+    /// (`i8`, `i16`, `i32`) that a read sign-extends to the word compiled
+    /// code computes in. Owns nothing, as [`PRIMITIVE`]; a narrow element of
+    /// any other kind is unsigned and zero-extends.
+    pub const SIGNED: u8 = 18;
+    /// Element is a four-byte `f32`. Compiled code carries an `f32` as the
+    /// `f64` holding the same value, so a read widens it to that `f64`'s
+    /// bits and a write narrows them back. Owns nothing, as [`PRIMITIVE`].
+    pub const F32: u8 = 19;
+}
+
+/// The elements of a non-empty float vec as `f64`s: borrowed where they are
+/// already words, widened where the vec packs `f32`s.
+///
+/// Reached from the sequence shims, which are native-only.
+///
+/// # Safety
+/// `v` holds `len` initialised elements of `elem_bytes` at a non-null `ptr`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) unsafe fn vec_f64_elems(v: &GosVec) -> std::borrow::Cow<'_, [f64]> {
+    let len = usize::try_from(v.len).unwrap_or(0);
+    if vec_packs_f32(v) {
+        let bits = (0..len).map(|i| {
+            // SAFETY: `i` is below the vec's length (contract).
+            let word = unsafe { vec_elem_load_i64(v, i as i64) };
+            f64::from_bits(word as u64)
+        });
+        return std::borrow::Cow::Owned(bits.collect());
+    }
+    // SAFETY: a vec of word floats holds `len` initialised `f64`s at `ptr` (contract).
+    std::borrow::Cow::Borrowed(unsafe { std::slice::from_raw_parts(v.ptr.cast::<f64>(), len) })
+}
+
+/// Whether `v` holds its elements as four-byte `f32`s.
+pub(crate) fn vec_packs_f32(v: &GosVec) -> bool {
+    v.elem_kind == vec_elem_kind::F32 && v.elem_bytes == 4
+}
+
+/// The word compiled code carries for the `f32` with `bits`: the bits of the
+/// `f64` holding the same value.
+pub(crate) fn f32_bits_to_word(bits: u32) -> i64 {
+    f64::from(f32::from_bits(bits)).to_bits() as i64
+}
+
+/// The `f32` bits of the value a word carrying an `f32` holds.
+pub(crate) fn word_to_f32_bits(word: i64) -> u32 {
+    (f64::from_bits(word as u64) as f32).to_bits()
 }
 
 #[repr(C)]
@@ -220,11 +267,10 @@ fn new_vec_owner() -> SyncRawPtr<VecOwner> {
         slot_children: None,
     });
     let owner = Box::into_raw(owner);
-    crate::c_abi::ledger::vec_owner_alloc(
-        std::mem::size_of::<VecOwner>(),
+    crate::c_abi::ledger::vec_owner_alloc(std::mem::size_of::<VecOwner>(), || {
         // SAFETY: `owner` is the block `Box::into_raw` just returned.
-        unsafe { allocator_usable_bytes(owner.cast(), std::mem::size_of::<VecOwner>()) },
-    );
+        unsafe { allocator_usable_bytes(owner.cast(), std::mem::size_of::<VecOwner>()) }
+    });
     SyncRawPtr::new(owner)
 }
 
@@ -345,6 +391,12 @@ const VEC_COMPACT_HEADER_FLAG: u8 = 8;
 /// `gos_rt_vec_free` leaves it alone.
 const VEC_FRAME_FLAG: u8 = 16;
 
+/// `region_flag` bit marking a read-only view of a string's bytes: a compact
+/// header whose `ptr` points into the string body `elem_meta` names. The view
+/// owns its header and a share of that string, which keeps the bytes alive;
+/// compiled code builds one only for a `Vec<u8>` it never writes.
+const VEC_STR_VIEW_FLAG: u8 = 32;
+
 // A caller reserving a header in its own frame sizes and aligns the slot by
 // the ABI's figures.
 const _: () = assert!(std::mem::size_of::<GosVec>() <= gossamer_abi::VEC_HEADER_BYTES);
@@ -427,19 +479,20 @@ pub(crate) fn alloc_box_vec(elem_bytes: u32, elem_kind: u8, cap: i64, len: i64) 
             owner: SyncRawPtr::NULL,
         });
         let boxed_ptr = Box::into_raw(boxed);
-        crate::c_abi::ledger::vec_inline_alloc(
-            std::mem::size_of::<GosVec>(),
+        crate::c_abi::ledger::vec_inline_alloc(std::mem::size_of::<GosVec>(), || {
             // SAFETY: `boxed_ptr` is the block `Box::into_raw` just returned.
-            unsafe { allocator_usable_bytes(boxed_ptr.cast(), std::mem::size_of::<GosVec>()) },
-        );
+            unsafe { allocator_usable_bytes(boxed_ptr.cast(), std::mem::size_of::<GosVec>()) }
+        });
         crate::c_abi::ledger::vec_split_alloc(
             checked_buffer_bytes(cap as usize, elem_bytes as usize),
-            // SAFETY: `init_ptr` is the buffer the global allocator returned above.
-            unsafe {
-                allocator_usable_bytes(
-                    init_ptr.as_const_ptr(),
-                    checked_buffer_bytes(cap as usize, elem_bytes as usize),
-                )
+            || {
+                // SAFETY: `init_ptr` is the buffer the global allocator returned above.
+                unsafe {
+                    allocator_usable_bytes(
+                        init_ptr.as_const_ptr(),
+                        checked_buffer_bytes(cap as usize, elem_bytes as usize),
+                    )
+                }
             },
         );
         return boxed_ptr;
@@ -461,20 +514,21 @@ pub(crate) fn alloc_box_vec(elem_bytes: u32, elem_kind: u8, cap: i64, len: i64) 
         buf: [0u64; INLINE_BUF_WORDS],
     });
     let boxed_ptr = Box::into_raw(boxed);
-    crate::c_abi::ledger::vec_inline_alloc(
-        std::mem::size_of::<InlineVec>(),
+    crate::c_abi::ledger::vec_inline_alloc(std::mem::size_of::<InlineVec>(), || {
         // SAFETY: `boxed_ptr` is the block `Box::into_raw` just returned.
-        unsafe { allocator_usable_bytes(boxed_ptr.cast(), std::mem::size_of::<InlineVec>()) },
-    );
+        unsafe { allocator_usable_bytes(boxed_ptr.cast(), std::mem::size_of::<InlineVec>()) }
+    });
     if flag != 0 {
         crate::c_abi::ledger::vec_split_alloc(
             checked_buffer_bytes(cap as usize, elem_bytes as usize),
-            // SAFETY: `init_ptr` is the buffer the global allocator returned above.
-            unsafe {
-                allocator_usable_bytes(
-                    init_ptr.as_const_ptr(),
-                    checked_buffer_bytes(cap as usize, elem_bytes as usize),
-                )
+            || {
+                // SAFETY: `init_ptr` is the buffer the global allocator returned above.
+                unsafe {
+                    allocator_usable_bytes(
+                        init_ptr.as_const_ptr(),
+                        checked_buffer_bytes(cap as usize, elem_bytes as usize),
+                    )
+                }
             },
         );
     }
@@ -508,6 +562,170 @@ pub(crate) fn vec_is_split(v: &GosVec) -> bool {
 #[inline]
 pub(crate) fn vec_has_compact_header(v: &GosVec) -> bool {
     v.region_flag & VEC_COMPACT_HEADER_FLAG != 0
+}
+
+/// True when this header views a string's bytes (see [`VEC_STR_VIEW_FLAG`]).
+#[inline]
+pub(crate) fn vec_is_str_view(v: &GosVec) -> bool {
+    v.region_flag & VEC_STR_VIEW_FLAG != 0
+}
+
+/// Gives back what a string view owns: the share of its string and its header.
+///
+/// # Safety
+/// `v` is a string view whose last reference the caller gives up.
+pub(crate) unsafe fn free_str_view(v: *mut GosVec) {
+    // SAFETY: `v` is a live string view (contract), and `elem_meta` names the string it holds a
+    // share of.
+    let text = unsafe { (*v).elem_meta.as_ptr() }.cast::<std::ffi::c_char>();
+    // SAFETY: the view holds one share of `text`, given back here.
+    unsafe { crate::c_abi::string::gos_rt_str_free(text) };
+    // SAFETY: a string view's header is the compact `Box<GosVec>` `gos_rt_str_as_bytes_view`
+    // made, freed only here.
+    drop(unsafe { Box::from_raw(v) });
+}
+
+/// `s.as_bytes()` for a `Vec<u8>` compiled code only reads: a view of the
+/// string's own bytes rather than a copy of them. A string is immutable, so
+/// the view cannot be invalidated, and the view holds a share of it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_str_as_bytes_view(s: *const std::ffi::c_char) -> *mut GosVec {
+    ffi_entry!({
+        if s.is_null() {
+            return crate::c_abi::gos_rt_vec_new(1);
+        }
+        // SAFETY: `s` is a live string body (C-ABI contract).
+        let len = unsafe { crate::c_abi::gos_str_arg_len(s) };
+        // SAFETY: `s` is live; the view takes a share of it, given back by `free_str_view`.
+        unsafe { crate::c_abi::string::gos_rt_str_retain(s) };
+        crate::c_abi::ledger::vec_inc();
+        let view = Box::into_raw(Box::new(GosVec {
+            len: len as i64,
+            cap: len as i64,
+            elem_bytes: 1,
+            elem_kind: vec_elem_kind::PRIMITIVE,
+            region_flag: VEC_COMPACT_HEADER_FLAG | VEC_STR_VIEW_FLAG,
+            rc: std::sync::atomic::AtomicU16::new(1),
+            ptr: SyncRawPtr::new(s.cast::<u8>().cast_mut()),
+            generation: next_vec_generation(),
+            mutation_generation: 0,
+            elem_meta: SyncRawPtr::new(s.cast::<i64>().cast_mut()),
+            owner: SyncRawPtr::NULL,
+        }));
+        crate::c_abi::ledger::vec_inline_alloc(std::mem::size_of::<GosVec>(), || {
+            // SAFETY: `view` is the block `Box::into_raw` just returned.
+            unsafe { allocator_usable_bytes(view.cast(), std::mem::size_of::<GosVec>()) }
+        });
+        view
+    })
+}
+
+/// `for i in 0..count { dst[dst_start + i] = src[src_start + i] }` over
+/// vectors of scalars owning nothing, for a loop whose indices were proven in
+/// range. Where `dst` and `src` share a buffer and the copy would overwrite
+/// elements the loop has yet to read, it copies forward one element at a
+/// time, as the loop does; otherwise it moves the block at once. Vectors that
+/// hold their elements at different widths copy element by element.
+///
+/// # Safety
+/// Both vectors are live, and the `count` elements from each start lie inside
+/// its length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_copy_range_unchecked(
+    dst: *mut GosVec,
+    dst_start: i64,
+    src: *const GosVec,
+    src_start: i64,
+    count: i64,
+) {
+    ffi_entry!({
+        if count <= 0 {
+            return;
+        }
+        // SAFETY: both are live vecs (contract).
+        let (dst_ref, src_ref) = unsafe { (&*dst, &*src) };
+        let same_layout = dst_ref.elem_bytes == src_ref.elem_bytes
+            && vec_packs_f32(dst_ref) == vec_packs_f32(src_ref)
+            && (dst_ref.elem_kind == vec_elem_kind::SIGNED)
+                == (src_ref.elem_kind == vec_elem_kind::SIGNED);
+        if same_layout {
+            let stride = dst_ref.elem_bytes as usize;
+            let bytes = count as usize * stride;
+            // SAFETY: the ranges lie inside both buffers (contract).
+            let (from, to) = unsafe {
+                (
+                    src_ref.ptr.as_ptr().add(src_start as usize * stride),
+                    dst_ref.ptr.as_ptr().add(dst_start as usize * stride),
+                )
+            };
+            let gap = (to as usize).wrapping_sub(from as usize);
+            if to > from && gap < bytes {
+                // The loop reads each element after the writes before it, so
+                // a destination `gap` bytes ahead of its source repeats the
+                // first `gap` bytes: copy them one disjoint block at a time.
+                let mut done = 0;
+                while done < bytes {
+                    let block = gap.min(bytes - done);
+                    // SAFETY: `done + block` stays inside both ranges, and a
+                    // block of at most `gap` bytes does not overlap the block
+                    // `gap` bytes before it.
+                    unsafe { std::ptr::copy_nonoverlapping(from.add(done), to.add(done), block) };
+                    done += block;
+                }
+            } else {
+                // SAFETY: both ranges hold `bytes` bytes; `copy` allows overlap.
+                unsafe { std::ptr::copy(from, to, bytes) };
+            }
+        } else {
+            for i in 0..count {
+                // SAFETY: the indices lie inside both lengths (contract).
+                unsafe {
+                    let value = vec_elem_load_i64(src_ref, src_start + i);
+                    vec_elem_store_i64(dst_ref, dst_start + i, value);
+                }
+            }
+        }
+        // SAFETY: `dst` is a live vec (contract).
+        bump_vec_mutation_generation(unsafe { &mut *dst });
+    });
+}
+
+/// `for i in 0..count { dst[start + i] = value }` over a vector of scalars
+/// owning nothing, for a loop whose indices were proven in range.
+///
+/// # Safety
+/// `dst` is live, and the `count` elements from `start` lie inside its length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_fill_range_unchecked(
+    dst: *mut GosVec,
+    start: i64,
+    count: i64,
+    value: i64,
+) {
+    ffi_entry!({
+        if count <= 0 {
+            return;
+        }
+        // SAFETY: `dst` is a live vec (contract).
+        let dst_ref = unsafe { &*dst };
+        if dst_ref.elem_bytes == 1 {
+            // SAFETY: the range lies inside the buffer (contract).
+            unsafe {
+                std::ptr::write_bytes(
+                    dst_ref.ptr.as_ptr().add(start as usize),
+                    value as u8,
+                    count as usize,
+                );
+            }
+        } else {
+            for i in 0..count {
+                // SAFETY: the index lies inside the length (contract).
+                unsafe { vec_elem_store_i64(dst_ref, start + i, value) };
+            }
+        }
+        // SAFETY: `dst` is a live vec (contract).
+        bump_vec_mutation_generation(unsafe { &mut *dst });
+    });
 }
 
 /// True when this header is a mutable window into another vec's buffer.
@@ -600,11 +818,10 @@ pub unsafe extern "C" fn gos_rt_vec_window(v: *mut GosVec, lo: i64, hi: i64) -> 
             elem_meta: parent.elem_meta,
             owner: SyncRawPtr::new(parent.owner.as_ptr()),
         }));
-        crate::c_abi::ledger::vec_inline_alloc(
-            std::mem::size_of::<GosVec>(),
+        crate::c_abi::ledger::vec_inline_alloc(std::mem::size_of::<GosVec>(), || {
             // SAFETY: `window` is the block `Box::into_raw` just returned.
-            unsafe { allocator_usable_bytes(window.cast(), std::mem::size_of::<GosVec>()) },
-        );
+            unsafe { allocator_usable_bytes(window.cast(), std::mem::size_of::<GosVec>()) }
+        });
         window
     })
 }
@@ -676,7 +893,7 @@ unsafe fn alloc_vec_header(mut v: GosVec) -> *mut GosVec {
 /// from `with_capacity` bypasses the arena even when the caller's loop is
 /// regioned.  Start from the ordinary region-aware empty constructor, then
 /// reserve the requested capacity through the shared growth path.
-fn alloc_vec_with_capacity(elem_bytes: u32, elem_kind: u8, cap: i64) -> *mut GosVec {
+pub(crate) fn alloc_vec_with_capacity(elem_bytes: u32, elem_kind: u8, cap: i64) -> *mut GosVec {
     if cap < 0 {
         crate::c_abi::panic::panic_text("Vec::with_capacity: capacity must be non-negative");
     }
@@ -1307,6 +1524,16 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
     // SAFETY: `src` is non-null (checked above), and this `unsafe fn`'s caller passes a live
     // `Vec`.
     let s = unsafe { &*src };
+    // A copy of narrow signed or `f32` elements reads them as the source does.
+    if matches!(s.elem_kind, vec_elem_kind::SIGNED | vec_elem_kind::F32) {
+        // SAFETY: `out` is non-null (checked above) and, by this function's caller, a live `Vec`
+        // not otherwise accessed during the call.
+        let o = unsafe { &mut *out };
+        if o.elem_bytes == s.elem_bytes {
+            o.elem_kind = s.elem_kind;
+        }
+        return;
+    }
     match s.elem_kind {
         vec_elem_kind::STRING
         | vec_elem_kind::VEC
@@ -1452,6 +1679,22 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
             }
         }
         _ => {}
+    }
+}
+
+/// Tags a vec of `i8`, `i16`, or `i32` elements as signed, so a read of a
+/// narrow element sign-extends (see [`vec_elem_kind::SIGNED`]). A vec whose
+/// elements are whole words, or that already carries a kind, is left alone,
+/// so a vec built signed is never written here.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_mark_signed_elems(v: *mut GosVec) {
+    if v.is_null() {
+        return;
+    }
+    // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
+    let vec = unsafe { &mut *v };
+    if vec.elem_kind == vec_elem_kind::PRIMITIVE && matches!(vec.elem_bytes, 1 | 2 | 4) {
+        vec.elem_kind = vec_elem_kind::SIGNED;
     }
 }
 
@@ -1837,19 +2080,21 @@ impl<'a> VecView<'a> {
         &self.buffer()[i * width..(i + 1) * width]
     }
 
-    /// Element `i` as the word its slot holds: a narrower element zero-extends,
-    /// a wider one answers its first word, as [`vec_elem_load_i64`] reads it.
+    /// Element `i` as the word its slot holds: a narrower element extends by
+    /// the vec's signedness, a wider one answers its first word, as
+    /// [`vec_elem_load_i64`] reads it.
     pub(crate) fn word(self, i: usize) -> i64 {
-        slot_word(self.elem(i))
+        slot_word(self.elem(i), self.header.elem_kind)
     }
 
     /// Every element as the word its slot holds.
     pub(crate) fn words(self) -> impl Iterator<Item = i64> + 'a {
         let width = self.width();
+        let kind = self.header.elem_kind;
         let zero_width = if width == 0 { self.len() } else { 0 };
         self.buffer()
             .chunks_exact(width.max(1))
-            .map(slot_word)
+            .map(move |elem| slot_word(elem, kind))
             .chain(std::iter::repeat_n(0, zero_width))
     }
 
@@ -1861,16 +2106,26 @@ impl<'a> VecView<'a> {
     }
 }
 
-/// The word an element's bytes hold: a narrower element zero-extends and a
-/// wider one answers its first word. Each width is a fixed-size load.
-fn slot_word(elem: &[u8]) -> i64 {
+/// The word an element's bytes hold in a vec of element kind `kind`: a
+/// narrow `f32` widens to its `f64`, a narrower integer sign-extends when the
+/// kind is [`vec_elem_kind::SIGNED`] and zero-extends otherwise, and a wider
+/// element answers its first word. Each width is a fixed-size load.
+fn slot_word(elem: &[u8], kind: u8) -> i64 {
     if let Some(word) = elem.first_chunk::<8>() {
         return i64::from_ne_bytes(*word);
     }
-    match *elem {
-        [b] => i64::from(b),
-        [a, b] => i64::from(u16::from_ne_bytes([a, b])),
-        [a, b, c, d] => i64::from(u32::from_ne_bytes([a, b, c, d])),
+    if kind == vec_elem_kind::F32
+        && let &[a, b, c, d] = elem
+    {
+        return f32_bits_to_word(u32::from_ne_bytes([a, b, c, d]));
+    }
+    match (elem, kind == vec_elem_kind::SIGNED) {
+        (&[b], true) => i64::from(i8::from_ne_bytes([b])),
+        (&[a, b], true) => i64::from(i16::from_ne_bytes([a, b])),
+        (&[a, b, c, d], true) => i64::from(i32::from_ne_bytes([a, b, c, d])),
+        (&[b], false) => i64::from(b),
+        (&[a, b], false) => i64::from(u16::from_ne_bytes([a, b])),
+        (&[a, b, c, d], false) => i64::from(u32::from_ne_bytes([a, b, c, d])),
         _ => {
             let mut word = [0u8; 8];
             word[..elem.len()].copy_from_slice(elem);
@@ -1926,20 +2181,32 @@ impl<'a> StrVecView<'a> {
 }
 
 /// Reads element `idx` of `v` as an i64, honoring the header's
-/// `elem_bytes` (packed byte vecs zero-extend, word vecs read the
-/// full 8 bytes). `idx` must already be bounds-checked by the
-/// caller. 16-byte elements are regex-internal and never reach the
-/// scalar helpers; reading their first word is a safe fallback.
+/// `elem_bytes`: a narrow element extends by the vec's signedness (see
+/// [`vec_elem_kind::SIGNED`]), a word element reads the full 8 bytes.
+/// `idx` must already be bounds-checked by the caller. 16-byte elements are
+/// regex-internal and never reach the scalar helpers; reading their first
+/// word is a safe fallback.
 pub(crate) unsafe fn vec_elem_load_i64(v: &GosVec, idx: i64) -> i64 {
     // SAFETY: this `unsafe fn`'s caller passes `idx` below the vec's length.
     let p = unsafe { v.ptr.add((idx as usize) * (v.elem_bytes as usize)) };
-    match v.elem_bytes {
-        // SAFETY: `p` addresses one 1-byte element.
-        1 => i64::from(unsafe { p.read() }),
-        // SAFETY: `p` addresses one 2-byte element.
-        2 => i64::from(unsafe { p.cast::<u16>().read_unaligned() }),
+    if vec_packs_f32(v) {
         // SAFETY: `p` addresses one 4-byte element.
-        4 => i64::from(unsafe { p.cast::<u32>().read_unaligned() }),
+        return f32_bits_to_word(unsafe { p.cast::<u32>().read_unaligned() });
+    }
+    let signed = v.elem_kind == vec_elem_kind::SIGNED;
+    match (v.elem_bytes, signed) {
+        // SAFETY: `p` addresses one 1-byte element.
+        (1, true) => i64::from(unsafe { p.cast::<i8>().read() }),
+        // SAFETY: `p` addresses one 2-byte element.
+        (2, true) => i64::from(unsafe { p.cast::<i16>().read_unaligned() }),
+        // SAFETY: `p` addresses one 4-byte element.
+        (4, true) => i64::from(unsafe { p.cast::<i32>().read_unaligned() }),
+        // SAFETY: `p` addresses one 1-byte element.
+        (1, false) => i64::from(unsafe { p.read() }),
+        // SAFETY: `p` addresses one 2-byte element.
+        (2, false) => i64::from(unsafe { p.cast::<u16>().read_unaligned() }),
+        // SAFETY: `p` addresses one 4-byte element.
+        (4, false) => i64::from(unsafe { p.cast::<u32>().read_unaligned() }),
         _ => {
             debug_assert!(
                 v.elem_bytes >= 8,
@@ -2120,6 +2387,11 @@ pub(crate) unsafe fn vec_release_owned_elem(v: &GosVec, idx: i64, incoming: i64)
 pub(crate) unsafe fn vec_elem_store_i64(v: &GosVec, idx: i64, value: i64) {
     // SAFETY: this `unsafe fn`'s caller passes `idx` below the vec's length.
     let p = unsafe { v.ptr.add((idx as usize) * (v.elem_bytes as usize)) };
+    if vec_packs_f32(v) {
+        // SAFETY: `p` addresses one 4-byte element.
+        unsafe { p.cast::<u32>().write_unaligned(word_to_f32_bits(value)) };
+        return;
+    }
     match v.elem_bytes {
         // SAFETY: `p` addresses one 1-byte element.
         1 => unsafe { p.write(value as u8) },
@@ -2228,7 +2500,9 @@ fn header_elem_kind(requested: u8, site: &str) -> u8 {
             || kind == vec_elem_kind::RC_ENUM
             || kind == vec_elem_kind::WEAK
             || kind == vec_elem_kind::AGGR_FLAT
-            || kind == vec_elem_kind::JSON =>
+            || kind == vec_elem_kind::JSON
+            || kind == vec_elem_kind::SIGNED
+            || kind == vec_elem_kind::F32 =>
         {
             kind
         }
@@ -2562,6 +2836,13 @@ pub unsafe extern "C" fn gos_rt_vec_capacity(v: *const GosVec) -> i64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_push_i64(v: *mut GosVec, value: i64) {
     ffi_entry!({
+        // SAFETY: `v` is null or a live vec (C-ABI contract).
+        if unsafe { v.as_ref() }.is_some_and(vec_packs_f32) {
+            let bits = word_to_f32_bits(value).to_ne_bytes();
+            // SAFETY: `bits` is one 4-byte element of the packed vec.
+            unsafe { gos_rt_vec_push(v, bits.as_ptr()) };
+            return;
+        }
         let bytes = value.to_ne_bytes();
         // SAFETY: `v` is this shim's `Vec` argument, null or live (C-ABI contract), and `bytes`
         // one 8-byte element.
@@ -2680,11 +2961,10 @@ unsafe fn vec_reserve_to(vec: &mut GosVec, min_cap: i64, exact: bool) {
             }
             new_buf
         };
-        crate::c_abi::ledger::vec_split_alloc(
-            new_bytes,
+        crate::c_abi::ledger::vec_split_alloc(new_bytes, || {
             // SAFETY: `new_buf` is the block just allocated or remapped.
-            unsafe { allocator_usable_bytes(new_buf, new_bytes) },
-        );
+            unsafe { allocator_usable_bytes(new_buf, new_bytes) }
+        });
         vec.ptr = SyncRawPtr::new(new_buf);
         vec.cap = new_cap;
         return;
@@ -2698,11 +2978,10 @@ unsafe fn vec_reserve_to(vec: &mut GosVec, min_cap: i64, exact: bool) {
             // No slab could take it: the buffer comes from the allocator and
             // is owned by the region like a large one.
             let new_buf = alloc_vec_buffer(new_bytes);
-            crate::c_abi::ledger::vec_split_alloc(
-                new_bytes,
+            crate::c_abi::ledger::vec_split_alloc(new_bytes, || {
                 // SAFETY: `new_buf` is the block the global allocator just returned.
-                unsafe { allocator_usable_bytes(new_buf, new_bytes) },
-            );
+                unsafe { allocator_usable_bytes(new_buf, new_bytes) }
+            });
             new_buf
         } else {
             crate::c_abi::ledger::vec_region_alloc(new_bytes);
@@ -2741,8 +3020,10 @@ unsafe fn vec_reserve_to(vec: &mut GosVec, min_cap: i64, exact: bool) {
         // SAFETY: a split buffer of `old_bytes` at the mapped size came from
         // `mapped::map` or `remap`, and the vec's pointer is replaced below.
         let new_buf = unsafe { mapped::remap(vec.ptr.as_ptr(), old_bytes, new_bytes) };
-        // SAFETY: `new_buf` is the live buffer `remap` just answered.
-        crate::c_abi::ledger::vec_split_alloc(new_bytes, unsafe { mapped::usable(new_buf) });
+        crate::c_abi::ledger::vec_split_alloc(new_bytes, || {
+            // SAFETY: `new_buf` is the live buffer `remap` just answered.
+            unsafe { mapped::usable(new_buf) }
+        });
         vec.ptr = SyncRawPtr::new(new_buf);
         vec.cap = new_cap;
         return;
@@ -2750,9 +3031,9 @@ unsafe fn vec_reserve_to(vec: &mut GosVec, min_cap: i64, exact: bool) {
     // Spare split capacity is intentionally uninitialised; only the old live
     // slots copied below are readable.
     let new_buf = alloc_vec_buffer(new_bytes);
-    // SAFETY: `new_buf` is the block the global allocator just returned.
-    crate::c_abi::ledger::vec_split_alloc(new_bytes, unsafe {
-        allocator_usable_bytes(new_buf, new_bytes)
+    crate::c_abi::ledger::vec_split_alloc(new_bytes, || {
+        // SAFETY: `new_buf` is the block the global allocator just returned.
+        unsafe { allocator_usable_bytes(new_buf, new_bytes) }
     });
     if !vec.ptr.is_null() && old_bytes > 0 {
         // SAFETY: `new_buf` holds at least `old_bytes` bytes, and the old buffer holds
@@ -3085,6 +3366,8 @@ fn vec_elems_copy_without_retain(vec: &GosVec) -> bool {
     matches!(
         vec.elem_kind,
         vec_elem_kind::PRIMITIVE
+            | vec_elem_kind::SIGNED
+            | vec_elem_kind::F32
             | vec_elem_kind::AGGR_GUARDED
             | vec_elem_kind::AGGR_OWNED
             | vec_elem_kind::AGGR_FLAT
@@ -3219,6 +3502,8 @@ unsafe fn vec_retain_elem_at_for_copy(v: *const GosVec, idx: i64) -> bool {
     if matches!(
         vec.elem_kind,
         vec_elem_kind::PRIMITIVE
+            | vec_elem_kind::SIGNED
+            | vec_elem_kind::F32
             | vec_elem_kind::AGGR_GUARDED
             | vec_elem_kind::AGGR_OWNED
             | vec_elem_kind::AGGR_FLAT
@@ -3410,7 +3695,30 @@ pub unsafe extern "C" fn gos_rt_vec_extend(dst: *mut GosVec, src: *const GosVec)
         let src_ref = unsafe { &*src };
         // SAFETY: `dst` is a handle from compiled code, checked non-null above and live for the whole call.
         let dst_ref = unsafe { &*dst };
-        if src_ref.elem_bytes != dst_ref.elem_bytes || src_ref.elem_kind != dst_ref.elem_kind {
+        let scalar = |kind: u8| {
+            matches!(
+                kind,
+                vec_elem_kind::PRIMITIVE | vec_elem_kind::SIGNED | vec_elem_kind::F32
+            )
+        };
+        if scalar(src_ref.elem_kind)
+            && scalar(dst_ref.elem_kind)
+            && src_ref.elem_bytes != dst_ref.elem_bytes
+        {
+            // One vector holds its scalars packed and the other as words:
+            // each value moves across at the width `dst` stores.
+            for idx in 0..src_ref.len.max(0) {
+                // SAFETY: `idx` is below `src`'s length.
+                let value = unsafe { vec_elem_load_i64(src_ref, idx) };
+                // SAFETY: `dst` is a live vec (C-ABI contract), not `src` (checked above).
+                unsafe { gos_rt_vec_push_i64(dst, value) };
+            }
+            return;
+        }
+        if src_ref.elem_bytes != dst_ref.elem_bytes
+            || (src_ref.elem_kind != dst_ref.elem_kind
+                && !(scalar(src_ref.elem_kind) && scalar(dst_ref.elem_kind)))
+        {
             return;
         }
         if src_ref.elem_kind == vec_elem_kind::MAP {
@@ -3425,7 +3733,10 @@ pub unsafe extern "C" fn gos_rt_vec_extend(dst: *mut GosVec, src: *const GosVec)
         // `dst` exactly as a push per element would.
         if matches!(
             src_ref.elem_kind,
-            vec_elem_kind::PRIMITIVE | vec_elem_kind::AGGR_FLAT
+            vec_elem_kind::PRIMITIVE
+                | vec_elem_kind::SIGNED
+                | vec_elem_kind::F32
+                | vec_elem_kind::AGGR_FLAT
         ) {
             if len == 0 {
                 return;

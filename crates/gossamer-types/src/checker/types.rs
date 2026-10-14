@@ -250,7 +250,29 @@ impl TypeChecker<'_> {
                     let substs = self.substs_from_ast(path);
                     return self.tcx.intern(TyKind::Adt { def, substs });
                 }
-                Resolution::Import { .. } | Resolution::Err | Resolution::Local(_) => {}
+                // A `use` of this unit's own type keeps its `Import`
+                // resolution; the definition it names is the type, ahead of
+                // any built-in that shares the name.
+                Resolution::Import { .. } => {
+                    if let Some(def) = self.resolutions.import_def(node) {
+                        match self.resolutions.kind_of(def) {
+                            Some(
+                                gossamer_resolve::DefKind::Struct | gossamer_resolve::DefKind::Enum,
+                            ) => {
+                                let substs = self.substs_from_ast(path);
+                                return self.tcx.intern(TyKind::Adt { def, substs });
+                            }
+                            Some(gossamer_resolve::DefKind::TypeAlias) => {
+                                if let Some(ty) = self.expand_type_alias(def, head_name, span, path)
+                                {
+                                    return ty;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Resolution::Err | Resolution::Local(_) => {}
             }
         }
         // A built-in type constructor may be written bare (`Deque<i64>`)
@@ -1347,9 +1369,11 @@ impl TypeChecker<'_> {
                 }
             }
             PatternKind::Struct { path, fields, .. } => {
+                self.reject_unknown_variant_pattern(path, pattern.span);
                 self.bind_struct_pattern(path, fields, ty);
             }
             PatternKind::TupleStruct { path, elems } => {
+                self.reject_unknown_variant_pattern(path, pattern.span);
                 // For built-in generic enums (`Option<T>`,
                 // `Result<T, E>`) pull the payload type out of the
                 // scrutinee's substs and bind it to the matching
@@ -1406,9 +1430,11 @@ impl TypeChecker<'_> {
                 };
                 self.bind_pattern(inner, inner_ty);
             }
+            PatternKind::Path(path) => {
+                self.reject_unknown_variant_pattern(path, pattern.span);
+            }
             PatternKind::Wildcard
             | PatternKind::Literal(_)
-            | PatternKind::Path(_)
             | PatternKind::Range { .. }
             | PatternKind::Rest
             | PatternKind::Error => {}

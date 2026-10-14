@@ -136,44 +136,19 @@ use super::*;
 
 use super::*;
 
+/// The `elem_kind` discriminator for a `Vec<T>` destination local, or
+/// `PRIMITIVE` for a local that is not a vector.
 pub(super) fn vec_elem_kind_from_dest(
     body: &Body,
     tcx: &TyCtxt,
     dest_local: gossamer_mir::Local,
-) -> i32 {
+) -> u8 {
     let ty = body.local_ty(dest_local);
-    let inner = match tcx.kind_of(ty) {
-        TyKind::Vec(inner) => *inner,
-        _ => return vec_elem_kind_codegen::PRIMITIVE,
-    };
-    match tcx.kind_of(inner) {
-        TyKind::String => vec_elem_kind_codegen::STRING,
-        TyKind::Vec(_) => vec_elem_kind_codegen::VEC,
-        TyKind::HashMap { .. } => vec_elem_kind_codegen::MAP,
-        TyKind::DynError => vec_elem_kind_codegen::ERROR,
-        // `errors::Error` is a pointer-bearing opaque type whose
-        // payload (message + cause chain) lives on the heap. The
-        // runtime's deep-free path drops the outer Box; the inner
-        // chain's Drop impl reclaims the rest.
-        TyKind::Adt { .. } => {
-            // No structural way to tell "this Adt is `errors::Error`"
-            // from a TyKind::Adt without DefId comparison. Default
-            // to PRIMITIVE - Adts whose payload is reference-only
-            // (i.e. every field is a primitive) won't leak, and
-            // Adts containing heap fields will leak the inner
-            // payload either way (the codegen doesn't currently
-            // emit aggregate-typed vec elements). This is an
-            // additional safety boundary, not the primary leak fix.
-            if tcx.is_flat_inline_aggregate(inner) {
-                vec_elem_kind_codegen::AGGR_FLAT
-            } else {
-                vec_elem_kind_codegen::PRIMITIVE
-            }
+    match tcx.kind_of(ty) {
+        TyKind::Vec(inner) | TyKind::Slice(inner) | TyKind::Iterator(inner) => {
+            tcx.vec_elem_kind(*inner)
         }
-        TyKind::Tuple(_) | TyKind::Array { .. } if tcx.is_flat_inline_aggregate(inner) => {
-            vec_elem_kind_codegen::AGGR_FLAT
-        }
-        _ => vec_elem_kind_codegen::PRIMITIVE,
+        _ => gossamer_types::vec_elem_kind::PRIMITIVE,
     }
 }
 
@@ -196,32 +171,11 @@ pub(super) fn vec_elem_bytes_from_dest(
     Some(elem_bytes_of_ty(tcx, inner))
 }
 
-/// Byte stride of a single element of element type `ty`, matching
-/// `Builder::elem_bytes_of` in `gossamer-mir`: bool packs to 1 byte,
-/// char occupies a full 8-byte slot, scalars/strings are 8, and
-/// aggregates take `slot_bytes`.
+/// Byte stride of a single element of element type `ty`, the one every
+/// tier lays a `Vec` out with.
 fn elem_bytes_of_ty(tcx: &TyCtxt, ty: Ty) -> i64 {
-    match tcx.kind_of(ty) {
-        TyKind::Bool => 1,
-        TyKind::Char | TyKind::Int(_) | TyKind::Float(_) | TyKind::String => 8,
-        TyKind::Tuple(_) | TyKind::Array { .. } | TyKind::Adt { .. } => {
-            i64::from(tcx.slot_bytes(ty))
-        }
-        _ => 8,
-    }
-}
-
-/// 0.6.0 deep-free element-kind tags. Mirrors `vec_elem_kind` in
-/// `gossamer-runtime/src/c_abi.rs` so the codegen can pass the
-/// right discriminator to `gos_rt_vec_new_typed`. Keep these in
-/// sync with the runtime constants.
-pub mod vec_elem_kind_codegen {
-    pub const PRIMITIVE: i32 = 0;
-    pub const STRING: i32 = 1;
-    pub const VEC: i32 = 2;
-    pub const MAP: i32 = 3;
-    #[allow(dead_code, reason = "reserved for errors::Error deep-free wiring")]
-    pub const ERROR: i32 = 4;
-    /// A struct, tuple, or fixed array of a single slot, held inline.
-    pub const AGGR_FLAT: i32 = 10;
+    i64::from(
+        tcx.vec_scalar_elem_bytes(ty)
+            .unwrap_or_else(|| tcx.slot_bytes(ty)),
+    )
 }

@@ -1014,19 +1014,18 @@ fn validate_test_file(file: &Path) -> Result<()> {
     // references stay valid and a real static error is surfaced with its
     // "refusing to execute" trailer rather than swallowed.
     let unit = crate::paths::read_entry_unit(file)?;
-    let augmented = gossamer_parse::autoderive::augment_source(&unit.source);
-    let generated_len = augmented.len().saturating_sub(unit.source.len());
-    let augmented = if augmented.contains("comptime") {
-        // A comptime region that will not evaluate is a static failure, and
-        // the constant it should have produced is what the tests run
-        // against. Falling back to the unfolded source runs them against a
-        // program the compiled tiers refuse to build.
-        crate::comptime_fold::fold_comptime(augmented, &file.to_string_lossy())?
-    } else {
-        augmented
-    };
+    let prepared = crate::unit_cache::prepare(&unit.source, &file.to_string_lossy());
+    // A comptime region that will not evaluate is a static failure, and the
+    // constant it should have produced is what the tests run against.
+    // Falling back to the unfolded source runs them against a program the
+    // compiled tiers refuse to build.
+    if let Some(err) = prepared.fold_error {
+        return Err(err);
+    }
+    let generated_len = prepared.generated_len;
+    let augmented = prepared.source;
     let (check_map, check_id) = unit_source_map(file, &unit, augmented.clone(), generated_len);
-    let _ = load_and_check_with_sf(&augmented, check_id, &check_map)?;
+    let _ = load_and_check_with_sf(&augmented, check_id, &check_map, prepared.program)?;
     Ok(())
 }
 
@@ -1091,36 +1090,32 @@ fn run_tests_filtered_inner(
     let Ok(unit) = crate::paths::read_entry_unit(file) else {
         return Vec::new();
     };
-    let augmented = gossamer_parse::autoderive::augment_source(&unit.source);
-    let generated_len = augmented.len().saturating_sub(unit.source.len());
     // Comptime fold so a `#[test]` compiles the same constant the run /
     // build tiers do. A failure here is reported as a failing record rather
     // than skipped: `--parallel` reaches this without the static validator,
     // and a suite that answers green because its bodies never ran is the
     // one outcome a test command must never produce.
-    let augmented = if augmented.contains("comptime") {
-        match crate::comptime_fold::fold_comptime(augmented.clone(), &file.to_string_lossy()) {
-            Ok(folded) => folded,
-            Err(error) => {
-                return vec![TestRecord {
-                    file: file.display().to_string(),
-                    name: "comptime".to_string(),
-                    passed: false,
-                    elapsed_ms: 0,
-                    failure_message: Some(format!(
-                        "compile-time evaluation failed, so no test in this file ran: {error}"
-                    )),
-                    assertions: 0,
-                    timed_out: false,
-                    status: TestStatus::Failed,
-                }];
-            }
-        }
-    } else {
-        augmented
-    };
+    let prepared = crate::unit_cache::prepare(&unit.source, &file.to_string_lossy());
+    if let Some(error) = prepared.fold_error {
+        return vec![TestRecord {
+            file: file.display().to_string(),
+            name: "comptime".to_string(),
+            passed: false,
+            elapsed_ms: 0,
+            failure_message: Some(format!(
+                "compile-time evaluation failed, so no test in this file ran: {error}"
+            )),
+            assertions: 0,
+            timed_out: false,
+            status: TestStatus::Failed,
+        }];
+    }
+    let generated_len = prepared.generated_len;
+    let augmented = prepared.source;
     let (map, file_id) = unit_source_map(file, &unit, augmented.clone(), generated_len);
-    let Ok((program, _sf, tcx)) = load_and_check_with_sf(&augmented, file_id, &map) else {
+    let Ok((program, _sf, tcx)) =
+        load_and_check_with_sf(&augmented, file_id, &map, prepared.program)
+    else {
         return Vec::new();
     };
     let mut vm = gossamer_interp::Vm::new();
@@ -1811,7 +1806,7 @@ fn run_one_doc_test(
     let file_id = map.add_file(unit.entry.to_string_lossy().into_owned(), augmented.clone());
     register_region_origins(&mut map, file_id, &regions);
     crate::paths::register_generated_tail(&mut map, file_id, generated_len);
-    let Ok((program, tcx)) = load_and_check(&augmented, file_id, &map) else {
+    let Ok((program, tcx)) = load_and_check(&augmented, file_id, &map, None) else {
         return DocTestOutcome::CompileFailed;
     };
     let mut vm = gossamer_interp::Vm::new();

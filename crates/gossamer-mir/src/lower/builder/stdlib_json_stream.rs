@@ -91,7 +91,13 @@ impl<'a> Builder<'a> {
     }
 
     /// One runtime call whose result lands in a fresh local of `dest_ty`.
-    fn emit_rt_call(&mut self, name: &str, args: Vec<Local>, dest_ty: Ty, span: Span) -> Local {
+    pub(crate) fn emit_rt_call(
+        &mut self,
+        name: &str,
+        args: Vec<Local>,
+        dest_ty: Ty,
+        span: Span,
+    ) -> Local {
         let dest = self.fresh(dest_ty);
         let next = self.new_block(span);
         self.terminate(Terminator::Call {

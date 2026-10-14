@@ -1,0 +1,49 @@
+// A vector of structs holding an Option of a one-field struct beside other
+// heap fields owns that Option's payload: pushing an element takes its share.
+
+struct Ident {
+    name: String
+}
+
+struct Decl {
+    id: u32
+    alias: Option<Ident>
+    module: Vec<String>
+}
+
+fn make(src: String, i: i64) -> Decl {
+    let alias = if i % 2 == 0 { Some(Ident { name: src.substring(i, i + 1) }) } else { None }
+    Decl { id: i as u32, alias: alias, module: #[] }
+}
+
+fn run(src: String) -> String {
+    let mut decls: Vec<Decl> = #[]
+    for i in 0..4 {
+        decls.push(make(src, i))
+    }
+    let mut filler: Vec<String> = #[]
+    for i in 4..10 {
+        filler.push(src.substring(i, i + 1))
+    }
+    let mut out = ""
+    for d in decls {
+        match d.alias {
+            Some(a) => out += f"{a.name},"
+            None => out += "-,"
+        }
+    }
+    out
+}
+
+fn main() {
+    let src = "abcdefghijk"
+    let want = run(src)
+    for round in 0..2000 {
+        let got = run(src)
+        if got != want {
+            println(f"round {round}: {got} vs {want}")
+            return
+        }
+    }
+    println(f"stable {want}")
+}

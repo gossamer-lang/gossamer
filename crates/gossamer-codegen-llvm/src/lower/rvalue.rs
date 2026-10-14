@@ -502,6 +502,50 @@ impl<'a> Lowerer<'a> {
         args: &[Operand],
         dest_local: Local,
     ) -> Result<String, BuildError> {
+        // A handle's retain or release is a no-op on null, and a frame's exit
+        // sweep reaches the bindings of every arm it did not take with nothing
+        // in them: test inline, and call only for a live handle.
+        let counts_one_handle = matches!(
+            name,
+            "gos_rt_rc_release"
+                | "gos_rt_rc_retain"
+                | "gos_rt_vec_free"
+                | "gos_rt_vec_retain"
+                | "gos_rt_str_free_typed"
+                | "gos_rt_str_retain_typed"
+        );
+        if counts_one_handle
+            && let [arg @ Operand::Copy(_)] = args
+            && matches!(self.operand_llvm_ty(arg).as_str(), "ptr" | "i64")
+        {
+            let ty = self.operand_llvm_ty(arg);
+            let handle = self.lower_operand(arg)?;
+            let zero = if ty == "ptr" { "null" } else { "0" };
+            let is_null = self.fresh();
+            writeln!(self.out, "  {is_null} = icmp eq {ty} {handle}, {zero}").unwrap();
+            let live_l = self.fresh_label("handle_live");
+            let done_l = self.fresh_label("handle_done");
+            writeln!(
+                self.out,
+                "  br i1 {is_null}, label %{done_l}, label %{live_l}"
+            )
+            .unwrap();
+            writeln!(self.out, "{live_l}:").unwrap();
+            let result = self.emit_runtime_call_intrinsic(name, args, dest_local)?;
+            writeln!(self.out, "  br label %{done_l}").unwrap();
+            writeln!(self.out, "{done_l}:").unwrap();
+            return Ok(result);
+        }
+        self.emit_runtime_call_intrinsic(name, args, dest_local)
+    }
+
+    /// The runtime call [`Self::lower_runtime_call_intrinsic`] makes.
+    fn emit_runtime_call_intrinsic(
+        &mut self,
+        name: &str,
+        args: &[Operand],
+        dest_local: Local,
+    ) -> Result<String, BuildError> {
         let name = if name == "gos_rt_bytearr_slice_result" {
             "gos_rt_packed_bytearr_slice_result"
         } else {
@@ -595,12 +639,15 @@ impl<'a> Lowerer<'a> {
                 | "gos_rt_map_or_insert_skey"
                 | "gos_rt_map_or_insert_ekey"
         );
-        // `gos_rt_enum_box_aggr(size, meta, src)` and its weak-cell sibling
-        // `gos_rt_rc_weak_cell`: the second argument names a module-global
+        // `gos_rt_enum_box_aggr(size, meta, src)`, its share-taking form, and
+        // its weak-cell sibling `gos_rt_rc_weak_cell`: the second argument names a module-global
         // `RC_KIND_STRUCT` meta blob (the cell's child layout), and the third
         // is the source aggregate's stack slot ADDRESS - not the value its
         // first word holds.
-        let enum_box_aggr = matches!(name, "gos_rt_enum_box_aggr" | "gos_rt_rc_weak_cell");
+        let enum_box_aggr = matches!(
+            name,
+            "gos_rt_enum_box_aggr" | "gos_rt_enum_box_aggr_take" | "gos_rt_rc_weak_cell"
+        );
         // An ordered container's push takes the address of the element's
         // slots: the store copies its own stride from it, and the sift
         // compares through the descriptor that follows.
@@ -963,6 +1010,7 @@ impl<'a> Lowerer<'a> {
             }
             RawIntrinsic::EnumLoad
             | RawIntrinsic::EnumSlotPtr
+            | RawIntrinsic::EnumWordAddr
             | RawIntrinsic::EnumTag
             | RawIntrinsic::EnumDiscTag
             | RawIntrinsic::EnumUntag

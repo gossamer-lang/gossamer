@@ -26,20 +26,27 @@ pub fn float_order(a: f64, b: f64) -> std::cmp::Ordering {
     canonical(a).total_cmp(&canonical(b))
 }
 
-/// Read the `i64` slots of a Vec whose elements are 8-byte primitives.
-unsafe fn i64_slots<'a>(v: *const GosVec) -> &'a [i64] {
-    if v.is_null() {
-        return &[];
+/// The elements of a Vec of scalars as words, each extended by the vec's
+/// signedness: borrowed where the elements already are words, copied
+/// where they are narrower.
+unsafe fn i64_slots<'a>(v: *const GosVec) -> std::borrow::Cow<'a, [i64]> {
+    use std::borrow::Cow;
+    // SAFETY: this function's caller passes `v` null or a live `Vec`, which `VecView::of`
+    // accepts.
+    let Some(view) = (unsafe { crate::c_abi::vec::VecView::of(v) }) else {
+        return Cow::Borrowed(&[]);
+    };
+    let header = view.header();
+    let len = view.len();
+    if len == 0 {
+        return Cow::Borrowed(&[]);
     }
-    // SAFETY: `v` is non-null (checked above) and, by this function's caller, a live `Vec`.
-    let header = unsafe { &*v };
-    let len = header.len.max(0) as usize;
-    if len == 0 || header.elem_bytes != 8 {
-        return &[];
+    if header.elem_bytes == 8 {
+        // SAFETY: a `Vec` of 8-byte elements holds `len` initialised words at `ptr`, and the
+        // slice lives no longer than the caller's borrow of `v`.
+        return Cow::Borrowed(unsafe { std::slice::from_raw_parts(header.ptr.cast::<i64>(), len) });
     }
-    // SAFETY: a `Vec` of 8-byte elements holds `len` initialised words at `ptr`, and the slice
-    // lives no longer than the caller's borrow of `v`.
-    unsafe { std::slice::from_raw_parts(header.ptr.cast::<i64>(), len) }
+    Cow::Owned(view.words().collect())
 }
 
 /// Borrow slot `i` of a `String` Vec as a `&str`; an empty string for
@@ -131,7 +138,7 @@ pub unsafe extern "C" fn gos_rt_sort_stable_str(v: *const GosVec) -> *mut GosVec
         let slots = unsafe { i64_slots(v) };
         let mut order: Vec<usize> = (0..slots.len()).collect();
         // SAFETY: `a` and `b` are indices of `slots`, a `String` vec's slots.
-        order.sort_by(|&a, &b| unsafe { str_slot(slots, a).cmp(str_slot(slots, b)) });
+        order.sort_by(|&a, &b| unsafe { str_slot(&slots, a).cmp(str_slot(&slots, b)) });
         // SAFETY: `v` is live, and `order` is a permutation of its indices.
         unsafe { clone_vec(v, &order) }
     })
@@ -170,11 +177,11 @@ pub unsafe extern "C" fn gos_rt_sort_binary_search_str(
         let needle = unsafe { borrowed_str(target) };
         // SAFETY: `mid` is below `slots.len()`, an index of a `String` vec's slots.
         let at = lower_bound(slots.len(), |mid| unsafe {
-            str_slot(slots, mid).cmp(needle)
+            str_slot(&slots, mid).cmp(needle)
         });
         // SAFETY: `at` is below `slots.len()` (checked just before), an index of a `String` vec's
         // slots.
-        if at < slots.len() && unsafe { str_slot(slots, at) } == needle {
+        if at < slots.len() && unsafe { str_slot(&slots, at) } == needle {
             gos_rt_result_new(0, at as i64)
         } else {
             gos_rt_result_new(1, 0)
@@ -211,25 +218,36 @@ pub unsafe extern "C" fn gos_rt_sort_partition_point_str(
         let needle = unsafe { borrowed_str(pivot) };
         // SAFETY: `mid` is below `slots.len()`, an index of a `String` vec's slots.
         lower_bound(slots.len(), |mid| unsafe {
-            str_slot(slots, mid).cmp(needle)
+            str_slot(&slots, mid).cmp(needle)
         }) as i64
     })
 }
 
-/// Read the `f64` slots of a Vec whose elements are 8-byte floats.
-unsafe fn f64_slots<'a>(v: *const GosVec) -> &'a [f64] {
-    if v.is_null() {
-        return &[];
+/// The elements of a Vec of floats as `f64`s: borrowed where they already
+/// are, widened where the vec packs `f32`s.
+unsafe fn f64_slots<'a>(v: *const GosVec) -> std::borrow::Cow<'a, [f64]> {
+    use std::borrow::Cow;
+    // SAFETY: this function's caller passes `v` null or a live `Vec`, which `VecView::of`
+    // accepts.
+    let Some(view) = (unsafe { crate::c_abi::vec::VecView::of(v) }) else {
+        return Cow::Borrowed(&[]);
+    };
+    let header = view.header();
+    let len = view.len();
+    if len == 0 {
+        return Cow::Borrowed(&[]);
     }
-    // SAFETY: `v` is non-null (checked above) and, by this function's caller, a live `Vec`.
-    let header = unsafe { &*v };
-    let len = header.len.max(0) as usize;
-    if len == 0 || header.elem_bytes != 8 {
-        return &[];
+    if header.elem_bytes == 8 {
+        // SAFETY: a `Vec` of 8-byte elements holds `len` initialised words at `ptr`, and the
+        // slice lives no longer than the caller's borrow of `v`.
+        return Cow::Borrowed(unsafe { std::slice::from_raw_parts(header.ptr.cast::<f64>(), len) });
     }
-    // SAFETY: a `Vec` of 8-byte elements holds `len` initialised words at `ptr`, and the slice
-    // lives no longer than the caller's borrow of `v`.
-    unsafe { std::slice::from_raw_parts(header.ptr.cast::<f64>(), len) }
+    // Packed `f32`s widen to the `f64`s they read as.
+    Cow::Owned(
+        view.words()
+            .map(|word| f64::from_bits(word as u64))
+            .collect(),
+    )
 }
 
 /// `sort::sort_stable(xs) -> Vec<f64>` - ascending by total order, equal
@@ -323,11 +341,11 @@ pub unsafe extern "C" fn gos_rt_vec_binary_search_str(
         let needle = unsafe { borrowed_str(target) };
         // SAFETY: `mid` is below `slots.len()`, an index of a `String` vec's slots.
         let at = lower_bound(slots.len(), |mid| unsafe {
-            str_slot(slots, mid).cmp(needle)
+            str_slot(&slots, mid).cmp(needle)
         });
         // SAFETY: `at` is below `slots.len()` (checked just before), an index of a `String` vec's
         // slots.
-        let found = at < slots.len() && unsafe { str_slot(slots, at) } == needle;
+        let found = at < slots.len() && unsafe { str_slot(&slots, at) } == needle;
         gos_rt_result_new(i64::from(!found), at as i64)
     })
 }

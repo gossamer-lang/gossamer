@@ -675,7 +675,7 @@ pub(super) fn lower_intrinsic_call_collections(
             };
             let eb_i64 = coerce_arg_to(builder, eb_raw, types::I64)?;
             let eb = builder.ins().ireduce(types::I32, eb_i64);
-            let ptr = if kind == vec_elem_kind_codegen::PRIMITIVE {
+            let ptr = if kind == gossamer_types::vec_elem_kind::PRIMITIVE {
                 let new_fn = intrinsics.extern_fn_by_name(module, "gos_rt_vec_new")?;
                 let fref = module.declare_func_in_func(new_fn, builder.func);
                 let call = builder.ins().call(fref, &[eb]);
@@ -734,7 +734,7 @@ pub(super) fn lower_intrinsic_call_collections(
                 None => builder.ins().iconst(types::I64, 0),
             };
             let cap64 = coerce_arg_to(builder, cap, types::I64)?;
-            let ptr = if kind == vec_elem_kind_codegen::PRIMITIVE {
+            let ptr = if kind == gossamer_types::vec_elem_kind::PRIMITIVE {
                 let new_fn = intrinsics.extern_fn(
                     module,
                     "gos_rt_vec_with_capacity",

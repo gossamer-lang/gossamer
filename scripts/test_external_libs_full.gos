@@ -103,7 +103,7 @@ fn main() {
         }
         Err(e) => fail(format("cargo build: {}", e))
     }
-    let gos = path::join(root, "target/debug/gos")
+    let gos = path::join(target_dir(root), "debug/gos")
     if !fs::is_file(gos) {
         fail(format("gos binary not produced at {}", gos))
     }
@@ -195,4 +195,11 @@ fn main() {
     let _ = fs::remove_dir_all(cache)
 
     println("=> all matrix cells green")
+}
+
+/// Where `cargo build` writes: `CARGO_TARGET_DIR` when set, taken relative to
+/// `root` unless absolute, else `<root>/target`.
+fn target_dir(root: String) -> String {
+    let dir = env::var("CARGO_TARGET_DIR").unwrap_or("target")
+    if path::is_absolute(dir) { dir } else { path::join(root, dir) }
 }

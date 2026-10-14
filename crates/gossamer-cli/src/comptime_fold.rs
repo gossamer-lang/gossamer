@@ -55,7 +55,7 @@ fn install_level(file_label: &str) -> ComptimeIo {
 /// Returns `Err` when a comptime region is not compile-time-known or
 /// does not evaluate to a scalar or string.
 pub(crate) fn fold_comptime(augmented: String, file_label: &str) -> Result<String> {
-    if !augmented.contains("comptime") {
+    if !gossamer_lex::mentions_comptime(&augmented) {
         return Ok(augmented);
     }
     install_level(file_label);

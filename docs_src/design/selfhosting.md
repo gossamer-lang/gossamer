@@ -8,6 +8,14 @@
 > the `matches` / `format` desugar calls - and the `examples/selfhost/`
 > ports it references are no longer in the tree. Read it as a record of
 > where self-hosting stood then, not as the current surface.
+>
+> In 0.72.0 the parser was ported in full, byte-identical with the Rust
+> parser's output on every file of the repository and the build corpus, and
+> measured inside `gos check`. Even rewritten onto a flat, index-addressed
+> tree it ran at 1.07x to 1.41x the Rust frontend, so no part of the
+> frontend is self-hosted yet. Both ports now live in
+> `benchmarks/frontend_parser/`, where the cost of reference-counted trees
+> is measured.
 
 ## Scope
 

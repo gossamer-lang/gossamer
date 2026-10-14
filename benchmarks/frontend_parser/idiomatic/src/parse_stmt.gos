@@ -1,0 +1,600 @@
+// Statements and the blocks that desugar into runtime calls (`arena`,
+// `cohort`): what `gossamer_parse`'s `statements.rs` and `cohort.rs` parse.
+
+use ast::{AssignOp, Block, BlockKind, Expr, ExprKind, Ident, Literal, MatchArm, Mutability, PathExpr, PathSegment, Pattern, PatternKind, Span, Stmt, StmtKind}
+use lex
+use parse
+use parse::Parser
+use parse_expr
+use parse_items
+
+pub fn parse_stmt(p: &mut Parser) -> Stmt {
+    let start_span = parse::peek_span(p)
+    let before = p.diags.len()
+    let kind = parse_stmt_kind(p)
+    let last = parse::last_span(p)
+    let consumed_semicolon = parse::text(p, last) == ";"
+    if requires_statement_separator(kind) && !consumed_semicolon && !parse::at_eof(p) &&
+        !parse::at(p, parse::P_RBRACE) && !parse::newline_before_peek(p) && p.diags.len() == before {
+        let s = parse::peek_span(p)
+        parse::record(p, "Unexpected", s)
+    }
+    let end_span = parse::last_span(p)
+    let span = parse::join(p, start_span, end_span)
+    let id = parse::alloc(p)
+    parse::mk_stmt(id, span, kind)
+}
+
+fn requires_statement_separator(kind: StmtKind) -> bool {
+    match kind {
+        StmtKind::Let { .. } => true,
+        StmtKind::Defer(_) => true,
+        StmtKind::StmtItem(_) => false,
+        StmtKind::StmtExpr { expr, has_semi } => {
+            if has_semi {
+                return false
+            }
+            match expr.kind {
+                ExprKind::ExprBlock(_) => false,
+                ExprKind::Unsafe(_) => false,
+                ExprKind::If { .. } => false,
+                ExprKind::Match { .. } => false,
+                ExprKind::Loop { .. } => false,
+                ExprKind::While { .. } => false,
+                ExprKind::For { .. } => false,
+                ExprKind::Select(_) => false,
+                _ => true,
+            }
+        }
+    }
+}
+
+fn parse_stmt_kind(p: &mut Parser) -> StmtKind {
+    if parse::at(p, parse::KW_LET) {
+        return parse_let_stmt(p)
+    }
+    if at_defer_stmt(p) {
+        parse::bump(p)
+        let body = parse_expr::parse_expr(p)
+        parse::eat(p, parse::P_SEMI)
+        return StmtKind::Defer(body)
+    }
+    if at_arena_block(p) {
+        return parse_arena_block(p)
+    }
+    if parse::is_item_start(p) {
+        return StmtKind::StmtItem(parse_items::parse_item(p))
+    }
+    let before = p.pos
+    p.empty_brace += 1
+    let mut expression = parse_expr::parse_expr(p)
+    p.empty_brace -= 1
+    if parse::at(p, parse::P_COMMA) {
+        expression = parse_comma_assignment(p, expression)
+    }
+    reject_parenthesised_assign_targets(p, expression)
+    if p.pos == before && !parse::is_stmt_start(p) {
+        parse::recover_in_block(p)
+    }
+    let has_semi = parse::eat(p, parse::P_SEMI)
+    StmtKind::StmtExpr { expr: expression, has_semi: has_semi }
+}
+
+fn at_defer_stmt(p: &mut Parser) -> bool {
+    if !parse::at_word(p, "defer") {
+        return false
+    }
+    let n = parse::kind_at(p, 1)
+    n == lex::IDENT || parse::is_keyword(n) || n == parse::P_LBRACE
+}
+
+fn at_arena_block(p: &mut Parser) -> bool {
+    if !parse::at_word(p, "arena") {
+        return false
+    }
+    let n = parse::kind_at(p, 1)
+    if n == parse::P_LBRACE {
+        return true
+    }
+    parse::is_keyword(n) && parse::is_stmt_start_keyword(n)
+}
+
+/// `runtime::name()`, the path allocated before the call.
+fn runtime_call0(p: &mut Parser, name: String, span: Span) -> Expr {
+    let pid = parse::alloc(p)
+    let path = parse::mk_expr(pid, span, ExprKind::Path(parse::path_of(#["runtime", name])))
+    let cid = parse::alloc(p)
+    parse::mk_expr(cid, span, ExprKind::Call { callee: path, args: #[] })
+}
+
+fn parse_arena_block(p: &mut Parser) -> StmtKind {
+    let start = parse::peek_span(p)
+    parse::bump(p)
+    if !parse::expect(p, parse::P_LBRACE) {
+        let id = parse::alloc(p)
+        return StmtKind::StmtExpr { expr: parse::mk_expr(id, start, ExprKind::Error), has_semi: true }
+    }
+    let mut block = parse_expr::parse_block_body(p)
+    block.kind = BlockKind::Arena
+    let push_call = runtime_call0(p, "arena_push", start)
+    let pop_call = runtime_call0(p, "arena_pop", start)
+    let mut stmts: Vec<Stmt> = #[]
+    let push_id = parse::alloc(p)
+    stmts.push(parse::mk_stmt(push_id, start, StmtKind::StmtExpr { expr: push_call, has_semi: true }))
+    let pop_id = parse::alloc(p)
+    stmts.push(parse::mk_stmt(pop_id, start, StmtKind::Defer(pop_call)))
+    stmts.extend(block.stmts)
+    if let Some(tail) = block.tail {
+        let tid = parse::alloc(p)
+        stmts.push(parse::mk_stmt(tid, tail.span, StmtKind::StmtExpr { expr: tail, has_semi: true }))
+    }
+    block.stmts = stmts
+    block.tail = None
+    let end = parse::peek_span(p)
+    let eid = parse::alloc(p)
+    let span = parse::join(p, start, end)
+    StmtKind::StmtExpr { expr: parse::mk_expr(eid, span, ExprKind::ExprBlock(block)), has_semi: true }
+}
+
+fn is_refutable_pattern(pattern: Pattern) -> bool {
+    match pattern.kind {
+        PatternKind::PatternLiteral(_) => true,
+        PatternKind::Range { .. } => true,
+        PatternKind::TupleStruct { .. } => true,
+        PatternKind::Path(path) => path.segments.len() > 1,
+        PatternKind::Or(alternatives) => {
+            for a in alternatives {
+                if is_refutable_pattern(a) {
+                    return true
+                }
+            }
+            false
+        }
+        PatternKind::Ref { inner, .. } => is_refutable_pattern(inner),
+        _ => false,
+    }
+}
+
+fn parse_let_stmt(p: &mut Parser) -> StmtKind {
+    parse::bump(p)
+    let pattern = parse_let_pattern(p)
+    let ty = if parse::eat(p, parse::P_COLON) { Some(parse::parse_type(p)) } else { None }
+    let refutable = is_refutable_pattern(pattern)
+    let init = if parse::eat(p, parse::P_EQ) {
+        if refutable {
+            p.no_struct += 1
+        }
+        let saved = p.empty_brace
+        p.empty_brace = 0
+        let expr = parse_comma_value_list(p)
+        p.empty_brace = saved
+        if refutable && p.no_struct > 0 {
+            p.no_struct -= 1
+        }
+        Some(expr)
+    } else {
+        None
+    }
+    if refutable && !parse::at(p, parse::KW_ELSE) && parse::at(p, parse::P_LBRACE) {
+        let s = parse::peek_span(p)
+        parse::record(p, "RefutableLetNeedsElse", s)
+        if let Some(value) = init {
+            return parse_let_else_block(p, pattern, value)
+        }
+    }
+    if parse::at(p, parse::KW_ELSE) {
+        if let Some(value) = init {
+            parse::bump(p)
+            return parse_let_else_block(p, pattern, value)
+        }
+    }
+    parse::eat(p, parse::P_SEMI)
+    StmtKind::Let { pattern: pattern, ty: ty, init: init }
+}
+
+fn parse_comma_assignment(p: &mut Parser, first: Expr) -> Expr {
+    let start = first.span
+    let mut places = #[first]
+    while parse::eat(p, parse::P_COMMA) {
+        p.empty_brace += 1
+        places.push(parse_expr::parse_expr_no_assign(p))
+        p.empty_brace -= 1
+    }
+    let last = parse::last_span(p)
+    let places_span = parse::join(p, start, last)
+    let pid = parse::alloc(p)
+    let place = parse::mk_expr(pid, places_span, ExprKind::Tuple(places))
+    let Some(op) = parse_expr::eat_assign_op(p) else {
+        let s = parse::peek_span(p)
+        parse::record(p, "Unexpected", s)
+        return place
+    }
+    p.empty_brace += 1
+    let value = parse_comma_value_list(p)
+    p.empty_brace -= 1
+    let span = parse::join(p, start, value.span)
+    let id = parse::alloc(p)
+    parse::mk_expr(id, span, ExprKind::Assign { op: op, place: place, value: value })
+}
+
+pub fn parse_comma_value_list(p: &mut Parser) -> Expr {
+    let first = parse_expr::parse_expr(p)
+    if !parse::at(p, parse::P_COMMA) {
+        return first
+    }
+    let start = first.span
+    let mut elements = #[first]
+    while parse::eat(p, parse::P_COMMA) {
+        elements.push(parse_expr::parse_expr_no_assign(p))
+    }
+    let last = parse::last_span(p)
+    let span = parse::join(p, start, last)
+    let id = parse::alloc(p)
+    parse::mk_expr(id, span, ExprKind::Tuple(elements))
+}
+
+fn parse_let_pattern(p: &mut Parser) -> Pattern {
+    let parenthesised = parse::at(p, parse::P_LPAREN)
+    let first = parse::parse_pattern(p)
+    if !parse::at(p, parse::P_COMMA) {
+        if parenthesised && matches(first.kind, PatternKind::Tuple(_)) {
+            parse::record(p, "LetPatternParens", first.span)
+        }
+        return first
+    }
+    let start = first.span
+    let mut elements = #[first]
+    while parse::eat(p, parse::P_COMMA) {
+        elements.push(parse::parse_pattern(p))
+    }
+    let last = parse::last_span(p)
+    let span = parse::join(p, start, last)
+    let id = parse::alloc(p)
+    parse::mk_pat(id, span, PatternKind::Tuple(elements))
+}
+
+fn reject_parenthesised_assign_targets(p: &mut Parser, expr: Expr) {
+    match expr.kind {
+        ExprKind::Assign { place, .. } => {
+            if !matches(place.kind, ExprKind::Tuple(_)) {
+                return
+            }
+            if !parse::text(p, place.span).starts_with("(") {
+                return
+            }
+            parse::record(p, "LetPatternParens", place.span)
+        }
+        _ => {}
+    }
+}
+
+fn parse_let_else_block(p: &mut Parser, pattern: Pattern, init: Expr) -> StmtKind {
+    parse::expect(p, parse::P_LBRACE)
+    let start = parse::last_span(p)
+    let block = parse_expr::parse_block_body(p)
+    let last = parse::last_span(p)
+    let else_span = parse::join(p, start, last)
+    let eid = parse::alloc(p)
+    let else_expr = parse::mk_expr(eid, else_span, ExprKind::ExprBlock(block))
+    parse::eat(p, parse::P_SEMI)
+    let mut names: Vec<Ident> = #[]
+    let mut muts: Vec<Mutability> = #[]
+    collect_pattern_bindings(pattern, &mut names, &mut muts)
+    let pat_span = pattern.span
+    let success_body = make_var_tuple_expr(p, names, pat_span)
+    let outer_pat = make_binding_pattern(p, names, muts, pat_span)
+    let wid = parse::alloc(p)
+    let wildcard = parse::mk_pat(wid, else_span, PatternKind::Wildcard)
+    let mid = parse::alloc(p)
+    let arms = #[MatchArm { pattern: pattern, guard: None, body: success_body }, MatchArm { pattern: wildcard, guard: None, body: else_expr }]
+    let match_expr = parse::mk_expr(mid, pat_span, ExprKind::Match { scrutinee: init, arms: arms })
+    StmtKind::Let { pattern: outer_pat, ty: None, init: Some(match_expr) }
+}
+
+fn make_var_tuple_expr(p: &mut Parser, names: Vec<Ident>, span: Span) -> Expr {
+    let mut refs: Vec<Expr> = #[]
+    for name in names {
+        let path = PathExpr { segments: #[PathSegment { name: name, generics: #[] }] }
+        let id = parse::alloc(p)
+        refs.push(parse::mk_expr(id, span, ExprKind::Path(path)))
+    }
+    if refs.len() == 1 {
+        return refs[0]
+    }
+    let id = parse::alloc(p)
+    parse::mk_expr(id, span, ExprKind::Tuple(refs))
+}
+
+fn make_binding_pattern(p: &mut Parser, names: Vec<Ident>, muts: Vec<Mutability>, span: Span) -> Pattern {
+    if names.len() == 0 {
+        let id = parse::alloc(p)
+        return parse::mk_pat(id, span, PatternKind::Wildcard)
+    }
+    let mut pats: Vec<Pattern> = #[]
+    for i in 0..names.len() {
+        let id = parse::alloc(p)
+        pats.push(parse::mk_pat(id, span, PatternKind::PatternIdent { mutability: muts[i], name: names[i], subpattern: None }))
+    }
+    if pats.len() == 1 {
+        return pats[0]
+    }
+    let id = parse::alloc(p)
+    parse::mk_pat(id, span, PatternKind::Tuple(pats))
+}
+
+fn collect_pattern_bindings(pat: Pattern, names: &mut Vec<Ident>, muts: &mut Vec<Mutability>) {
+    match pat.kind {
+        PatternKind::PatternIdent { mutability, name, subpattern } => {
+            names.push(name)
+            muts.push(mutability)
+            if let Some(sub) = subpattern {
+                collect_pattern_bindings(sub, names, muts)
+            }
+        }
+        PatternKind::Tuple(ps) => {
+            for q in ps {
+                collect_pattern_bindings(q, names, muts)
+            }
+        }
+        PatternKind::TupleStruct { elems, .. } => {
+            for q in elems {
+                collect_pattern_bindings(q, names, muts)
+            }
+        }
+        PatternKind::Slice { prefix, rest, suffix } => {
+            for q in prefix {
+                collect_pattern_bindings(q, names, muts)
+            }
+            if let Some(r) = rest {
+                collect_pattern_bindings(r, names, muts)
+            }
+            for q in suffix {
+                collect_pattern_bindings(q, names, muts)
+            }
+        }
+        PatternKind::Struct { fields, .. } => {
+            for f in fields {
+                match f.pattern {
+                    Some(q) => collect_pattern_bindings(q, names, muts),
+                    None => {
+                        names.push(f.name)
+                        muts.push(Mutability::Immutable)
+                    }
+                }
+            }
+        }
+        PatternKind::Or(ps) => {
+            if ps.len() > 0 {
+                collect_pattern_bindings(ps[0], names, muts)
+            }
+        }
+        PatternKind::Ref { inner, .. } => collect_pattern_bindings(inner, names, muts),
+        _ => {}
+    }
+}
+
+// ---- cohort --------------------------------------------------------------
+
+pub fn at_cohort_block(p: &mut Parser) -> bool {
+    if !parse::at_word(p, "cohort") {
+        return false
+    }
+    let n = parse::kind_at(p, 1)
+    if n == parse::P_LBRACE {
+        return !parse::struct_forbidden(p)
+    }
+    if n == parse::P_LPAREN {
+        let mut depth = 0
+        let mut index = 1
+        loop {
+            let k = parse::kind_at(p, index)
+            if k == parse::P_LPAREN {
+                depth += 1
+            } else if k == parse::P_RPAREN {
+                depth -= 1
+                if depth == 0 {
+                    return parse::kind_at(p, index + 1) == parse::P_LBRACE
+                }
+            } else if k == lex::EOF {
+                return false
+            }
+            index += 1
+            if index > 64 {
+                return false
+            }
+        }
+    }
+    false
+}
+
+/// `runtime::name(args..)`: the path, then each argument, then the call.
+fn runtime_call(p: &mut Parser, name: String, args: Vec<i64>, span: Span) -> Expr {
+    let pid = parse::alloc(p)
+    let path = parse::mk_expr(pid, span, ExprKind::Path(parse::path_of(#["runtime", name])))
+    let mut values: Vec<Expr> = #[]
+    for v in args {
+        let id = parse::alloc(p)
+        values.push(parse::mk_expr(id, span, ExprKind::ExprLiteral(Literal::Int(f"{v}"))))
+    }
+    let cid = parse::alloc(p)
+    parse::mk_expr(cid, span, ExprKind::Call { callee: path, args: values })
+}
+
+pub fn parse_cohort_expr(p: &mut Parser) -> ExprKind {
+    let start = parse::peek_span(p)
+    parse::bump(p)
+    let header = if parse::at(p, parse::P_LPAREN) { parse_cohort_header(p) } else { #[0, 0, 0, 0, 0, 0] }
+    if !parse::expect(p, parse::P_LBRACE) {
+        return ExprKind::Error
+    }
+    let saved = p.no_struct
+    p.no_struct = 0
+    let mut block = parse_expr::parse_block_body(p)
+    p.no_struct = saved
+    let mut stmts: Vec<Stmt> = #[]
+    let push = runtime_call(p, "cohort_push", header, start)
+    let push_id = parse::alloc(p)
+    stmts.push(parse::mk_stmt(push_id, start, StmtKind::StmtExpr { expr: push, has_semi: true }))
+    let pop_id = parse::alloc(p)
+    let pop = runtime_call(p, "cohort_pop", #[], start)
+    stmts.push(parse::mk_stmt(pop_id, start, StmtKind::Defer(pop)))
+    stmts.extend(block.stmts)
+    if let Some(tail) = block.tail {
+        let tid = parse::alloc(p)
+        stmts.push(parse::mk_stmt(tid, tail.span, StmtKind::StmtExpr { expr: tail, has_semi: true }))
+    }
+    block.stmts = stmts
+    block.tail = Some(runtime_call(p, "cohort_join", #[], start))
+    block.kind = BlockKind::Cohort
+    ExprKind::ExprBlock(block)
+}
+
+/// The header's six settings: policy, timeout, isolation, on_error,
+/// uncancellable, drain.
+fn parse_cohort_header(p: &mut Parser) -> Vec<i64> {
+    let mut h = #[0, 0, 0, 0, 0, 0]
+    parse::bump(p)
+    while !parse::at(p, parse::P_RPAREN) && !parse::at_eof(p) {
+        let name_span = parse::peek_span(p)
+        let name = parse::text(p, name_span)
+        if parse::peek(p) != lex::IDENT {
+            parse::record(p, "Unexpected", name_span)
+            break
+        }
+        parse::bump(p)
+        if !parse::expect(p, parse::P_COLON) {
+            break
+        }
+        if name == "policy" {
+            h[0] = parse_cohort_enum_arg(p, "Policy", #["FailFast", "CollectAll", "Race"])
+        } else if name == "isolation" {
+            h[2] = parse_cohort_enum_arg(p, "Isolation", #["Shared", "Thread"])
+        } else if name == "on_error" {
+            h[3] = parse_cohort_enum_arg(p, "OnError", #["Propagate", "Log", "Ignore"])
+        } else if name == "cancellable" {
+            h[4] = if parse_cohort_bool_arg(p) { 0 } else { 1 }
+        } else if name == "drain" {
+            h[5] = parse_cohort_int_arg(p)
+        } else if name == "context" {
+            h[2] = parse_retired_context_arg(p, name_span)
+        } else if name == "timeout" {
+            h[1] = parse_cohort_int_arg(p)
+        } else {
+            parse::record(p, "Unexpected", name_span)
+            skip_cohort_header_value(p)
+        }
+        if !parse::eat(p, parse::P_COMMA) && !parse::newline_before_peek(p) {
+            break
+        }
+    }
+    parse::expect(p, parse::P_RPAREN)
+    h
+}
+
+/// The text after the last `::` of `text`, or all of it.
+fn last_path_part(text: String) -> String {
+    let n = text.byte_len()
+    let mut i = n - 1
+    while i > 0 {
+        if text.byte_at(i) == 58 && text.byte_at(i - 1) == 58 {
+            return text.substring(i + 1, n)
+        }
+        i -= 1
+    }
+    text
+}
+
+/// The text before the last `::` of `text`, or "" with no `::`.
+fn path_owner(text: String) -> Option<String> {
+    let n = text.byte_len()
+    let mut i = n - 1
+    while i > 0 {
+        if text.byte_at(i) == 58 && text.byte_at(i - 1) == 58 {
+            return Some(text.substring(0, i - 1))
+        }
+        i -= 1
+    }
+    None
+}
+
+fn read_cohort_path(p: &mut Parser) -> (String, Span) {
+    let mut span = parse::peek_span(p)
+    let mut written = ""
+    while (parse::peek(p) == lex::IDENT || parse::at(p, parse::P_COLON_COLON)) &&
+        (written.byte_len() == 0 || !parse::newline_before_peek(p)) {
+        span = parse::peek_span(p)
+        written.push_str(parse::text(p, span))
+        parse::bump(p)
+    }
+    (written, span)
+}
+
+fn parse_cohort_enum_arg(p: &mut Parser, enum_name: String, variants: Vec<String>) -> i64 {
+    let span = parse::peek_span(p)
+    let written, _ = read_cohort_path(p)
+    let qualified = match path_owner(written) {
+        Some(owner) => owner == enum_name || owner == "cohort::" + enum_name,
+        None => true,
+    }
+    let variant = last_path_part(written)
+    if qualified {
+        for i in 0..variants.len() {
+            if variants[i] == variant {
+                return i
+            }
+        }
+    }
+    parse::record(p, "Unexpected", span)
+    0
+}
+
+fn parse_retired_context_arg(p: &mut Parser, name_span: Span) -> i64 {
+    let written, value_span = read_cohort_path(p)
+    let last = last_path_part(written)
+    if last == "Default" {
+        let s = parse::join(p, name_span, value_span)
+        parse::record(p, "CohortIsolationSpelling", s)
+        return 0
+    }
+    if last == "Isolated" {
+        let s = parse::join(p, name_span, value_span)
+        parse::record(p, "CohortIsolationSpelling", s)
+        return 1
+    }
+    parse::record(p, "Unexpected", value_span)
+    0
+}
+
+fn parse_cohort_bool_arg(p: &mut Parser) -> bool {
+    let span = parse::peek_span(p)
+    let written = parse::text(p, span)
+    if written == "true" || written == "false" {
+        parse::bump(p)
+        return written == "true"
+    }
+    parse::record(p, "Unexpected", span)
+    true
+}
+
+fn parse_cohort_int_arg(p: &mut Parser) -> i64 {
+    let span = parse::peek_span(p)
+    let written = parse::text(p, span).replace("_", "")
+    if parse::peek(p) == lex::INT_LIT {
+        if let Some(value) = written.to_i64() {
+            if value >= 0 {
+                parse::bump(p)
+                return value
+            }
+        }
+    }
+    parse::record(p, "Unexpected", span)
+    skip_cohort_header_value(p)
+    0
+}
+
+fn skip_cohort_header_value(p: &mut Parser) {
+    while !parse::at(p, parse::P_COMMA) && !parse::at(p, parse::P_RPAREN) && !parse::at_eof(p) &&
+        !parse::newline_before_peek(p) {
+        parse::bump(p)
+    }
+}

@@ -76,7 +76,11 @@ pub(crate) fn is_aggregate_ctor_callee(callee: &Operand) -> bool {
 pub(crate) fn appends_through_container(name: &str) -> bool {
     matches!(
         name,
-        "gos_rt_vec_push" | "gos_rt_vec_push_i64" | "gos_rt_vec_push_i128"
+        "gos_rt_vec_push"
+            | "gos_rt_vec_push_i64"
+            | "gos_rt_vec_push_i128"
+            | "gos_rt_vec_extend"
+            | "gos_rt_vec_extend_str_bytes"
     )
 }
 

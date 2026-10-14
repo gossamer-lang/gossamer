@@ -390,6 +390,26 @@ impl<'a> Builder<'a> {
                     span,
                 );
             }
+        } else if self.tcx.vec_packs_f32(elem_ty) || self.tcx.vec_narrow_scalar(elem_ty).is_some() {
+            // A packed element is read at the width the vector's header
+            // records, which a load through its address cannot know.
+            if let HirPatKind::Binding { name, mutable } = &val_pat.kind {
+                let bind_local = self.push_local(elem_ty, Some(name.clone()), *mutable);
+                self.bind_local(&name.name, bind_local);
+                let after_read = self.new_block(span);
+                self.terminate(Terminator::Call {
+                    callee: Operand::Const(ConstValue::Str(
+                        "gos_rt_vec_get_i64_unchecked".to_string(),
+                    )),
+                    args: vec![
+                        Operand::Copy(Place::local(inner_local)),
+                        Operand::Copy(Place::local(counter)),
+                    ],
+                    destination: Place::local(bind_local),
+                    target: Some(after_read),
+                });
+                self.set_current(after_read);
+            }
         } else {
             let ptr_local = self.fresh(i64_ty);
             let after_ptr = self.new_block(span);

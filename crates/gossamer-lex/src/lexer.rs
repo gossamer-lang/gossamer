@@ -277,6 +277,29 @@ fn is_ident_continue(character: char) -> bool {
     unicode_ident::is_xid_continue(character)
 }
 
+/// Whether `source` writes `comptime` as code: a comptime block, function,
+/// or parameter, rather than inside a string or comment.
+#[must_use]
+pub fn mentions_comptime(source: &str) -> bool {
+    if !source.contains("comptime") {
+        return false;
+    }
+    let mut lexer = Lexer::new(source, FileId(0));
+    loop {
+        let token = lexer.next_token();
+        match token.kind {
+            TokenKind::Eof => return false,
+            TokenKind::Ident
+                if source.get(token.span.start as usize..token.span.end as usize)
+                    == Some("comptime") =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Convenience helper: collect every token of `source` into a `Vec`.
 #[must_use]
 pub fn tokenize(source: &str, file: FileId) -> (Vec<Token>, Vec<LexError>) {

@@ -65,6 +65,17 @@ pub const RC_KIND_SLOT_CHILDREN: i64 = 7;
 /// block is freed.
 pub const RC_KIND_FINALIZED: i64 = 8;
 
+/// `meta[0]` flag above the kind bits: no object laid out by this meta can
+/// be part of a reference cycle, so the cycle collector never buffers one as
+/// a candidate. Read the kind itself through [`rc_kind`].
+pub const RC_KIND_ACYCLIC: i64 = 1 << 32;
+
+/// The kind a `meta[0]` word names, without the flags above it.
+#[must_use]
+pub const fn rc_kind(word: i64) -> i64 {
+    word & 0xffff_ffff
+}
+
 /// Slot-child gate naming a child that is the whole element: a `Set` or deque
 /// stored in a container occupies its one slot as the table handle itself.
 /// Like any negative gate it is unconditional; it also tells an element read
@@ -128,6 +139,53 @@ pub const RC_CHILD_ITER_PAIR: i64 = 11;
 /// copy takes a weak share, the blob's death gives it back, and no walk that
 /// follows strong edges - the cycle collector's included - crosses it.
 pub const RC_CHILD_WEAK: i64 = 12;
+
+/// Child kind: a counted node or `String` in a carrier field's payload word,
+/// live when the carrier's discriminant is 0, the `Ok` / `Some` arm.
+pub const RC_CHILD_RC_OK: i64 = 13;
+/// Child kind: a counted node or `String` in a carrier field's payload word,
+/// live when the carrier's discriminant is 1, the `Err` arm.
+pub const RC_CHILD_RC_ERR: i64 = 14;
+/// Child kind: a `Vec` in a carrier field's payload word on the `Ok` arm.
+pub const RC_CHILD_VEC_OK: i64 = 15;
+/// Child kind: a `Vec` in a carrier field's payload word on the `Err` arm.
+pub const RC_CHILD_VEC_ERR: i64 = 16;
+/// Child kind: a `Weak` in a carrier field's payload word on the `Ok` arm.
+pub const RC_CHILD_WEAK_OK: i64 = 17;
+/// Child kind: a `Weak` in a carrier field's payload word on the `Err` arm.
+pub const RC_CHILD_WEAK_ERR: i64 = 18;
+
+/// The child kind for a carrier field whose payload is a heap value of child
+/// kind `base` (`RC_CHILD_RC`, `RC_CHILD_VEC`, or `RC_CHILD_WEAK`) on the arm
+/// `gate` names (0 or 1), or `None` for another base kind.
+#[must_use]
+pub const fn rc_child_gated_heap_kind(gate: i64, base: i64) -> Option<i64> {
+    match (base, gate) {
+        (RC_CHILD_RC, 0) => Some(RC_CHILD_RC_OK),
+        (RC_CHILD_RC, 1) => Some(RC_CHILD_RC_ERR),
+        (RC_CHILD_VEC, 0) => Some(RC_CHILD_VEC_OK),
+        (RC_CHILD_VEC, 1) => Some(RC_CHILD_VEC_ERR),
+        (RC_CHILD_WEAK, 0) => Some(RC_CHILD_WEAK_OK),
+        (RC_CHILD_WEAK, 1) => Some(RC_CHILD_WEAK_ERR),
+        _ => None,
+    }
+}
+
+/// The arm and base kind of a gated heap child kind, or `None` for any other
+/// kind: the payload word holds a value of the base kind only while the
+/// carrier's discriminant equals the arm.
+#[must_use]
+pub const fn rc_child_gated_heap(kind: i64) -> Option<(i64, i64)> {
+    match kind {
+        RC_CHILD_RC_OK => Some((0, RC_CHILD_RC)),
+        RC_CHILD_RC_ERR => Some((1, RC_CHILD_RC)),
+        RC_CHILD_VEC_OK => Some((0, RC_CHILD_VEC)),
+        RC_CHILD_VEC_ERR => Some((1, RC_CHILD_VEC)),
+        RC_CHILD_WEAK_OK => Some((0, RC_CHILD_WEAK)),
+        RC_CHILD_WEAK_ERR => Some((1, RC_CHILD_WEAK)),
+        _ => None,
+    }
+}
 
 /// The copy-blob child kind for a carrier field whose payload is a blob under
 /// discriminant `gate` (0, 1, or negative for both arms).

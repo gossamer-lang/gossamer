@@ -419,7 +419,8 @@ fn use_it() -> i64 {
          then set to null"
     );
     assert!(
-        field_rc_calls_on(body, "gos_rt_rc_release", slot, 0) > 0,
+        field_rc_calls_on(body, "gos_rt_rc_release", slot, 0) > 0
+            || field_rc_calls_on(body, "gos_rt_str_free_typed", slot, 0) > 0,
         "the tuple slot's String field must be released at the slot's end of life"
     );
     let retains = rc_calls_on(body, "gos_rt_rc_retain", dest)
@@ -2617,7 +2618,9 @@ fn make(base: String) -> Fn() -> String {
     let (bodies, tcx) = build_with_lift(source);
     let body = bodies.iter().find(|b| b.name == "make").expect("body");
     assert!(
-        call_symbol_names(body).iter().any(|n| n == "gos_rt_enum_box_aggr"),
+        call_symbol_names(body)
+            .iter()
+            .any(|n| n == "gos_rt_enum_box_aggr" || n == "gos_rt_enum_box_aggr_take"),
         "the struct capture is boxed with its child meta"
     );
     let metas = closure_env_metas(body);

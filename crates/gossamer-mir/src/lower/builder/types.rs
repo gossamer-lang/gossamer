@@ -1811,7 +1811,7 @@ impl<'a> Builder<'a> {
     /// The shape has to match what the backend actually copies. A one-field
     /// struct is a single slot and is copied like any other, so its owner keeps
     /// a share of it too.
-    fn carrier_blob_gate(&self, ty: Ty) -> Option<i64> {
+    pub(crate) fn carrier_blob_gate(&self, ty: Ty) -> Option<i64> {
         use gossamer_types::TyKind;
         let TyKind::Adt { def, substs } = self.tcx.kind_of(ty) else {
             return None;
@@ -1883,20 +1883,24 @@ impl<'a> Builder<'a> {
         if depth > 8 {
             return;
         }
-        let TyKind::Adt { def, substs } = self.tcx.kind_of(ty) else {
-            return;
+        let field_tys: Vec<Ty> = match self.tcx.kind_of(ty) {
+            TyKind::Tuple(elems) => elems.clone(),
+            TyKind::Adt { def, substs } if def.local != u32::MAX && def.local != u32::MAX - 1 => {
+                let Some(field_tys) = self.tcx.struct_field_tys(*def) else {
+                    return;
+                };
+                let type_args = crate::monomorph::subst_type_arguments(substs);
+                field_tys
+                    .iter()
+                    .map(|field| self.instantiated_ty(*field, &type_args))
+                    .collect()
+            }
+            TyKind::Array {
+                elem,
+                len: gossamer_types::ArrayLen::Concrete(len),
+            } => vec![*elem; *len],
+            _ => return,
         };
-        if def.local == u32::MAX || def.local == u32::MAX - 1 {
-            return;
-        }
-        let Some(field_tys) = self.tcx.struct_field_tys(*def) else {
-            return;
-        };
-        let type_args = crate::monomorph::subst_type_arguments(substs);
-        let field_tys: Vec<Ty> = field_tys
-            .iter()
-            .map(|field| self.instantiated_ty(*field, &type_args))
-            .collect();
         let mut word = base_word;
         for fty in field_tys {
             let fwords = i64::from(self.type_slot_bytes(fty).max(8) / 8);
@@ -1911,9 +1915,9 @@ impl<'a> Builder<'a> {
                         out.push((gate, word, word + 1));
                     }
                 }
-                TyKind::Adt { .. } if fwords > 1 => {
-                    // Multi-slot inline sub-struct: its fields occupy this
-                    // struct's slots directly.
+                TyKind::Adt { .. } | TyKind::Tuple(_) | TyKind::Array { .. } if fwords > 1 => {
+                    // Multi-slot inline sub-struct, tuple, or array: its fields
+                    // occupy this aggregate's slots directly.
                     self.collect_guarded_pairs(fty, word, depth + 1, out);
                 }
                 _ => {}
@@ -1955,6 +1959,15 @@ impl<'a> Builder<'a> {
             );
         }
         Some(symbol)
+    }
+
+    /// Registers the guarded copy-blob meta of a fixed array whose elements
+    /// hold copy blobs, so a local of it owns them as a struct of the same
+    /// fields does. An array of anything else keeps no meta.
+    pub(crate) fn ensure_array_copy_meta(&mut self, ty: Ty) {
+        if !self.guarded_child_pairs(ty).is_empty() {
+            let _ = self.ensure_aggr_copy_meta(ty);
+        }
     }
 
     /// Registers (idempotently) the `RC_KIND_STRUCT_GUARDED` copy-blob
@@ -2024,8 +2037,10 @@ impl<'a> Builder<'a> {
         if depth > 16 {
             return;
         }
-        if let Some(entry) = self.carrier_payload_child(ty, base_word) {
-            out.push(entry);
+        let carrier_entries =
+            crate::lower::helpers::carrier_heap_child_entries(self.tcx, ty, base_word);
+        if !carrier_entries.is_empty() {
+            out.extend(carrier_entries);
             return;
         }
         let field_tys: Vec<Ty> = match self.tcx.kind_of(ty) {
@@ -2083,14 +2098,19 @@ impl<'a> Builder<'a> {
                 out.push(
                     (gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | word,
                 );
-            } else if let Some(entry) = self.carrier_payload_child(fty, word) {
-                out.push(entry);
             } else if let Some(gate) = self.carrier_blob_gate(fty) {
                 out.push(
                     (gossamer_abi::rc::rc_child_blob_kind(gate)
                         << gossamer_abi::rc::RC_CHILD_KIND_SHIFT)
                         | (word + 1),
                 );
+                out.extend(crate::lower::helpers::carrier_heap_child_entries(
+                    self.tcx, fty, word,
+                ));
+            } else if crate::lower::helpers::carrier_arm_child_kinds(self.tcx, fty).is_some() {
+                out.extend(crate::lower::helpers::carrier_heap_child_entries(
+                    self.tcx, fty, word,
+                ));
             } else if matches!(
                 self.tcx.kind_of(fty),
                 TyKind::Tuple(_) | TyKind::Adt { .. } | TyKind::Array { .. }
@@ -2101,34 +2121,6 @@ impl<'a> Builder<'a> {
             }
             word += fwords;
         }
-    }
-
-    /// The child entry for the payload word of an `Option` / `Result` at
-    /// `word`, when that word holds a heap value on every arm that has one: an
-    /// `Option`'s `None` payload word is zero, which the child walk skips, and a
-    /// `Result` qualifies only when both arms carry the same heap kind.
-    fn carrier_payload_child(&self, ty: Ty, word: i64) -> Option<i64> {
-        use gossamer_types::TyKind;
-        let TyKind::Adt { def, substs } = self.tcx.kind_of(ty) else {
-            return None;
-        };
-        let child_kind = |t: Ty| match self.tcx.kind_of(t) {
-            _ if self.tcx.is_weak_ty(t) => Some(gossamer_abi::rc::RC_CHILD_WEAK),
-            _ if self.tcx.is_counted_node(t) => Some(gossamer_abi::rc::RC_CHILD_RC),
-            TyKind::String => Some(gossamer_abi::rc::RC_CHILD_RC),
-            TyKind::Vec(_) | TyKind::Slice(_) => Some(gossamer_abi::rc::RC_CHILD_VEC),
-            _ => None,
-        };
-        let tys = substs.types();
-        let kind = if def.local == u32::MAX - 1 {
-            child_kind(*tys.first()?)?
-        } else if def.local == u32::MAX {
-            let ok = child_kind(*tys.first()?)?;
-            (child_kind(*tys.get(1)?)? == ok).then_some(ok)?
-        } else {
-            return None;
-        };
-        Some((kind << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | (word + 1))
     }
 
     /// Registers the metas a channel send boxes an aggregate value under.
@@ -2157,7 +2149,12 @@ impl<'a> Builder<'a> {
         if self.tcx.rc_meta(&symbol).is_some() {
             return Some(symbol);
         }
-        let mut blob = vec![gossamer_abi::rc::RC_KIND_STRUCT, 1, 0, entries.len() as i64];
+        let kind = if self.tcx.can_join_cycle(ty) {
+            gossamer_abi::rc::RC_KIND_STRUCT
+        } else {
+            gossamer_abi::rc::RC_KIND_STRUCT | gossamer_abi::rc::RC_KIND_ACYCLIC
+        };
+        let mut blob = vec![kind, 1, 0, entries.len() as i64];
         blob.extend_from_slice(&entries);
         self.tcx.register_rc_meta(symbol.clone(), blob);
         Some(symbol)
@@ -2254,45 +2251,9 @@ impl<'a> Builder<'a> {
     }
 
     pub(crate) fn elem_bytes_of(&self, ty: Ty) -> u32 {
-        use gossamer_types::TyKind;
-        match self.tcx.kind_of(ty) {
-            // Bool uses a 1-byte element stride: each element occupies
-            // exactly 1 byte in the GosVec data buffer. The inline
-            // get/set paths read and write via the header-driven byte
-            // path (`elem_bytes == 1` branch), and the push path uses
-            // `gos_rt_vec_push_i64` which memcpys only `elem_bytes`
-            // bytes from the i64 payload, so a bool push correctly
-            // stores the low byte (0 or 1) with no overflow.
-            TyKind::Bool => 1,
-            // `u8` is byte-packed (stride 1): a `[u8]` / `Vec<u8>` stores one
-            // byte per element like Go's `[]byte`, not an 8-byte word per byte.
-            // u8 is unsigned, so the runtime's byte get path (`load i8` +
-            // zero-extend, shared with `bool`) reconstructs the value exactly.
-            // Signed `i8` and the wider narrow ints stay 8-byte: the get path
-            // only distinguishes byte (1) from word (8) stride, and a signed
-            // byte would need sign-extension. Removes the 8x RAM overhead on
-            // byte buffers (the unbounded-cache leak benchmark + all binary/IO
-            // buffers).
-            TyKind::Int(gossamer_types::IntTy::U8) => 1,
-            // Char occupies a full 8-byte slot so it aligns with the
-            // word-stride fast paths throughout the codegen.
-            TyKind::Char => 8,
-            TyKind::Int(_) | TyKind::Float(_) => 8,
-            TyKind::String => 8,
-            // Tuples / aggregate ADTs occupy `slot_count * 8` bytes
-            // in the flat-stack representation the native codegen
-            // uses (mirrors `type_slot_count` in cranelift's
-            // native.rs). A `(String, String)` tuple is two i64
-            // slots = 16 bytes; treating it as 8 like any other
-            // compound type would make `[(a, b), (c, d)].to_vec()`
-            // copy only half of each pair.
-            TyKind::Tuple(_) | TyKind::Array { .. } | TyKind::Adt { .. } => {
-                self.type_slot_bytes(ty)
-            }
-            // Default to pointer-sized for everything else (refs,
-            // enums-as-handles, channels, …).
-            _ => 8,
-        }
+        self.tcx
+            .vec_scalar_elem_bytes(ty)
+            .unwrap_or_else(|| self.type_slot_bytes(ty))
     }
 
     /// Builds the `Weak<T>` sentinel Adt (def `u32::MAX - 6`), matching

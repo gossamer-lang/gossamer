@@ -42,7 +42,7 @@ use gossamer_types::{TyCtxt, TypeTable};
 
 /// Bumped whenever the payload layout or the key recipe changes, so blobs
 /// written by an older schema are rejected instead of mis-decoded.
-const BLOB_MAGIC: &[u8; 8] = b"GOSFC003";
+const BLOB_MAGIC: &[u8; 8] = b"GOSFC004";
 const MAX_BLOB_BYTES: usize = 64 * 1024 * 1024;
 static CACHE_WRITE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -110,6 +110,28 @@ pub fn store_frontend_in(
             warnings,
         },
     );
+}
+
+/// The frontend's whole output for an accepted pass, in the blob's schema:
+/// the bytes the cache stores under a key, without the header.
+///
+/// # Errors
+///
+/// A value postcard cannot encode.
+pub fn encode_frontend(
+    sf: &SourceFile,
+    resolutions: &Resolutions,
+    table: &TypeTable,
+    tcx: &TyCtxt,
+    warnings: &[Diagnostic],
+) -> Result<Vec<u8>, postcard::Error> {
+    postcard::to_allocvec(&FrontendView {
+        sf,
+        resolutions,
+        table,
+        tcx,
+        warnings,
+    })
 }
 
 /// Content-addressed identifier for one frontend compile. The key
@@ -202,21 +224,45 @@ fn exe_fingerprint() -> &'static str {
 /// a single bundled source containing every sibling module.
 #[must_use]
 pub fn frontend_key(source: &str, file_id: FileId) -> FrontendCacheKey {
+    let context = format!("file={}|{}", file_id.as_u32(), compile_context());
+    FrontendCacheKey::new_with_context(source, env!("CARGO_PKG_VERSION"), &context)
+}
+
+/// The key of a cache entry derived from a unit's own text before any stage
+/// rewrites it: `purpose` names the cache and `label` the unit, and the rest
+/// is every input [`frontend_key`] covers besides the source.
+#[must_use]
+pub fn unit_key(source: &str, purpose: &str, label: &str) -> FrontendCacheKey {
+    let context = format!("unit={purpose}|label={label}|{}", compile_context());
+    FrontendCacheKey::new_with_context(source, env!("CARGO_PKG_VERSION"), &context)
+}
+
+/// Every input of a frontend pass besides the source text and the file:
+/// the compile target, the `#[cfg]` answers, the foreign-function policy,
+/// whether `#[cfg(test)]` items are visible, and the registered
+/// Rust-binding signatures.
+fn compile_context() -> String {
     let bindings = gossamer_resolve::all_external_modules();
     let bindings_digest = if bindings.is_empty() {
         String::new()
     } else {
         sha256::hex(format!("{bindings:?}").as_bytes())
     };
-    let context = format!(
-        "file={}|target={}|cfg={}|ffi={}|cfg_test={}|bindings={bindings_digest}",
-        file_id.as_u32(),
+    format!(
+        "target={}|cfg={}|ffi={}|cfg_test={}|bindings={bindings_digest}",
         gossamer_codegen_llvm::active_target_triple(),
         gossamer_resolve::cfg_target_key(),
         crate::foreign_policy::foreign_policy().cache_term(),
         gossamer_resolve::test_cfg_enabled(),
-    );
-    FrontendCacheKey::new_with_context(source, env!("CARGO_PKG_VERSION"), &context)
+    )
+}
+
+/// Names a cache hit on stderr when `GOSSAMER_CACHE_TRACE` is set, so a
+/// test can tell which cache answered.
+pub fn trace_cache_hit(what: &str, key: &FrontendCacheKey) {
+    if std::env::var_os("GOSSAMER_CACHE_TRACE").is_some() {
+        eprintln!("cache: {what} for {}", key.as_hex());
+    }
 }
 
 /// Reports whether the frontend cache is enabled. `GOS_NO_CACHE` turns it

@@ -7,7 +7,9 @@
 /// `NodeId` is opaque and cheap to copy. It is not meaningful across files:
 /// two nodes in different source files may share the same numeric value. Use
 /// the enclosing `FileId` to disambiguate when necessary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct NodeId(u32);
 
 impl NodeId {
@@ -47,6 +49,13 @@ impl NodeIdGenerator {
     #[must_use]
     pub const fn new() -> Self {
         Self { next: 0 }
+    }
+
+    /// Returns a generator whose next id is `first`, continuing the
+    /// numbering of a parse that issued `first` ids.
+    #[must_use]
+    pub const fn starting_at(first: u32) -> Self {
+        Self { next: first }
     }
 
     /// Produces the next identifier and advances the counter.

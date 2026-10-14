@@ -18,11 +18,15 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+gossamer-ast = { workspace = true }
 gossamer-diagnostics = { workspace = true }
+gossamer-driver = { workspace = true }
 gossamer-lint = { workspace = true }
 gossamer-lex = { workspace = true }
 gossamer-parse = { workspace = true }
+gossamer-resolve = { workspace = true }
 gossamer-std = { workspace = true }
 gossamer-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde-reflection = "0.6"
