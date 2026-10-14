@@ -535,10 +535,14 @@ pub(crate) fn is_for_loop_step(tcx: &TyCtxt, recv: Ty, name: &str, args: &[HirEx
 /// released with its holder.
 #[must_use]
 pub fn strands_heap_child(tcx: &TyCtxt, ty: Ty) -> bool {
-    strands_within(tcx, ty, false, &mut Vec::new())
+    strands_within(tcx, ty, false, &mut HashSet::new())
 }
 
-fn strands_within(tcx: &TyCtxt, ty: Ty, in_region: bool, seen: &mut Vec<DefId>) -> bool {
+/// The walk behind [`strands_heap_child`]. A user type's fields are always
+/// read as region storage, so whether one strands a handle depends on the
+/// type alone: each is walked once per query, and a type already visited -
+/// finished without stranding, or still being walked - adds nothing.
+fn strands_within(tcx: &TyCtxt, ty: Ty, in_region: bool, seen: &mut HashSet<Ty>) -> bool {
     match tcx.kind_of(ty) {
         TyKind::Int(_)
         | TyKind::Float(_)
@@ -569,10 +573,9 @@ fn strands_within(tcx: &TyCtxt, ty: Ty, in_region: bool, seen: &mut Vec<DefId>) 
         // The other reserved ids are the opaque runtime handles.
         TyKind::Adt { def, .. } if def.local >= u32::MAX - 32 => in_region,
         TyKind::Adt { def, substs } => {
-            if seen.contains(def) {
+            if !seen.insert(ty) {
                 return false;
             }
-            seen.push(*def);
             let fields: Vec<Ty> = match tcx.adt_field_tys(*def, substs) {
                 Some(fields) => fields.to_vec(),
                 None => tcx
@@ -580,9 +583,7 @@ fn strands_within(tcx: &TyCtxt, ty: Ty, in_region: bool, seen: &mut Vec<DefId>) 
                     .map(|variants| variants.iter().flatten().copied().collect())
                     .unwrap_or_default(),
             };
-            let strands = fields.iter().any(|f| strands_within(tcx, *f, true, seen));
-            seen.pop();
-            strands
+            fields.iter().any(|f| strands_within(tcx, *f, true, seen))
         }
         // Maps, iterators, channels, callables, dynamic values, and anything
         // not yet resolved live outside the region.

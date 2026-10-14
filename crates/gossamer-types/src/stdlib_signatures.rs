@@ -3725,6 +3725,16 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::unicode",
+        name: "is_xid_continue",
+        signature: "fn is_xid_continue(rune: char) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::unicode",
+        name: "is_xid_start",
+        signature: "fn is_xid_start(rune: char) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::unicode",
         name: "is_lower",
         signature: "fn is_lower(rune: char) -> bool",
     },

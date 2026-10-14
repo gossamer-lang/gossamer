@@ -1,0 +1,115 @@
+// A vector read out of a field, a reference, or a binding and stored into
+// another holder is a value of its own: a later write through either side
+// leaves the other as it was.
+
+struct Parser {
+    pos: i64
+    stack: Vec<String>
+}
+
+struct Decl {
+    module: Vec<String>
+}
+
+struct Inner {
+    items: Vec<i64>
+    tag: String
+}
+
+struct Outer {
+    inner: Inner
+}
+
+enum Node {
+    Items(Vec<String>)
+    Empty
+}
+
+fn parser() -> Parser {
+    Parser { pos: 0, stack: #["x"] }
+}
+
+fn outer() -> Outer {
+    Outer { inner: Inner { items: #[1], tag: "t" } }
+}
+
+fn decl_of(p: &mut Parser) -> Decl {
+    p.pos += 1
+    Decl { module: p.stack }
+}
+
+fn stack_of(p: &mut Parser) -> Vec<String> {
+    p.stack
+}
+
+fn inner_of(o: &mut Outer) -> Inner {
+    o.inner
+}
+
+fn whole(v: &mut Vec<String>) -> Decl {
+    Decl { module: *v }
+}
+
+fn nested(p: &mut Parser, out: &mut Vec<Decl>) {
+    p.stack.push("inner")
+    out.push(decl_of(p))
+    let _ = p.stack.pop()
+}
+
+fn main() {
+    for round in 0..2 {
+        let mut p = parser()
+        let d = Decl { module: p.stack }
+        p.stack.pop()
+        let t = (p.stack, round)
+        p.stack.push("y")
+        println(f"literal {d.module} tuple {t.0}")
+
+        let mut p = parser()
+        let o = Some(p.stack)
+        let n = Node::Items(p.stack)
+        let mut held: Vec<Vec<String>> = #[]
+        held.push(p.stack)
+        let mut q = parser()
+        q.stack = p.stack
+        p.stack.pop()
+        println(f"some {o} node {n} push {held} assign {q.stack}")
+
+        let mut p = parser()
+        let from_ref = decl_of(&mut p)
+        let returned = stack_of(&mut p)
+        p.stack.pop()
+        println(f"through a reference {from_ref.module} {returned}")
+
+        let mut v = #["x"]
+        let w = whole(&mut v)
+        v.pop()
+        println(f"whole {w.module}")
+
+        let mut p = parser()
+        let mut out: Vec<Decl> = #[]
+        out.push(decl_of(&mut p))
+        nested(&mut p, &mut out)
+        for decl in out {
+            println(f"decl {decl.module}")
+        }
+
+        let mut a = #["x"]
+        let some_a = Some(a)
+        let mut holder = Decl { module: #[] }
+        holder.module = a
+        a.pop()
+        holder.module.push("z")
+        println(f"binding {some_a} {holder.module} {a}")
+
+        let mut o = outer()
+        let s = Some(o.inner)
+        let mut inners: Vec<Inner> = #[]
+        inners.push(o.inner)
+        let got = inner_of(&mut o)
+        let mut q = outer()
+        q.inner = o.inner
+        o.inner.items.push(2)
+        println(f"aggregate {s} {inners} {got} {q.inner} {o.inner}")
+    }
+}

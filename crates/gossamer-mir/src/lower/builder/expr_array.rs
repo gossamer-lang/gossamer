@@ -246,6 +246,7 @@ impl<'a> Builder<'a> {
             },
         };
         let dest = self.fresh(dest_ty);
+        self.ensure_array_copy_meta(dest_ty);
         if let Some(name) = elem_struct {
             self.local_elem_struct.insert(dest, name);
         }
@@ -332,6 +333,7 @@ impl<'a> Builder<'a> {
                     _ => ty,
                 };
                 let dest = self.fresh(dest_ty);
+                self.ensure_array_copy_meta(dest_ty);
                 if let Some(name) = value_struct {
                     self.local_elem_struct.insert(dest, name);
                 }

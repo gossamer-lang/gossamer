@@ -211,7 +211,7 @@ fn main() {
     }
     let root = repo_root()
     if gos.is_empty() {
-        gos = path::join(root, "target/debug/gos")
+        gos = path::join(target_dir(root), "debug/gos")
     }
     if !fs::is_file(gos) {
         eprintln("jit parity sweep: no gos binary at {} (cargo build --bin gos)", gos)
@@ -263,4 +263,11 @@ fn main() {
         process::exit(1)
     }
     println("jit parity sweep: every fixture agrees between the VM and the JIT")
+}
+
+/// Where `cargo build` writes: `CARGO_TARGET_DIR` when set, taken relative to
+/// `root` unless absolute, else `<root>/target`.
+fn target_dir(root: String) -> String {
+    let dir = env::var("CARGO_TARGET_DIR").unwrap_or("target")
+    if path::is_absolute(dir) { dir } else { path::join(root, dir) }
 }

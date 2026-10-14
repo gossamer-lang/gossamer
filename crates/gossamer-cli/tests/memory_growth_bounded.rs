@@ -2085,3 +2085,66 @@ fn main() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(lines[0], lines[1], "live values grew with the line count");
 }
+
+/// A JIT-compiled function answering a struct through the result slot copies
+/// the words its frame built into the caller's slot, so no block it allocated
+/// outlives the call: the live-aggregate count stays flat however many calls
+/// the loop makes.
+#[test]
+fn jit_struct_returning_call_leaves_no_live_aggregate_per_call() {
+    let dir = env::temp_dir().join(format!("gos-jit-sret-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("jit_sret.gos");
+    std::fs::write(
+        &source,
+        "
+use std::env
+
+struct Id { name: String }
+struct Seg { name: Id, generics: Vec<Ty> }
+struct Ty { kind: TyKind }
+enum TyKind { Path(Vec<Seg>) }
+
+fn parse_type() -> Ty {
+    Ty { kind: TyKind::Path(#[Seg { name: Id { name: \"i64\" }, generics: #[] }]) }
+}
+
+fn main() {
+    let n = env::args().first().unwrap_or(\"64\").to_i64().unwrap_or(64)
+    let mut keep: Vec<Ty> = #[]
+    for i in 0..n { keep.push(parse_type()) }
+    println(keep.len())
+}
+",
+    )
+    .unwrap();
+    let live = |iterations: &str| -> usize {
+        let out = Command::new(gos_bin())
+            .arg("run")
+            .arg(&source)
+            .arg(iterations)
+            .env("GOS_LEAK_LEDGER", "1")
+            .output()
+            .expect("gos run with the allocation ledger");
+        assert!(
+            out.status.success(),
+            "run failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        stderr
+            .split("aggr=")
+            .nth(1)
+            .and_then(|tail| tail.split_whitespace().next())
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or_else(|| panic!("ledger must report a live aggregate count: {stderr}"))
+    };
+    let small = live("8");
+    let large = live("512");
+    assert_eq!(
+        (small, large),
+        (0, 0),
+        "a struct-returning call leaves an aggregate block per call"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -140,3 +140,58 @@ fn main() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A check's verdict depends on what a comptime region read, so a warm
+/// `gos check` and `gos run` both observe an edited input.
+#[test]
+fn editing_a_file_a_comptime_region_read_rechecks_and_reruns_the_unit() {
+    let dir = workspace("verdict");
+    std::fs::write(
+        dir.join("app.gos"),
+        r#"use std::fs
+
+comptime fn level() -> String {
+    let text = fs::read_to_string("profiles/standard.toml").unwrap_or("missing")
+    if text.trim() == "broken" {
+        panic("the profile is broken")
+    }
+    text.trim()
+}
+
+fn main() {
+    println("{}", level())
+}
+"#,
+    )
+    .expect("write source");
+    let profile = dir.join("profiles").join("standard.toml");
+    std::fs::write(&profile, "one\n").expect("write profile");
+    let gos = |command: &str| {
+        Command::new(gos_bin())
+            .current_dir(&dir)
+            .args([command, "app.gos"])
+            .env_remove("GOS_NO_CACHE")
+            .output()
+            .expect("spawn gos")
+    };
+    assert!(gos("check").status.success());
+    assert!(gos("check").status.success());
+    assert_eq!(String::from_utf8_lossy(&gos("run").stdout).trim(), "one");
+
+    std::fs::write(&profile, "two\n").expect("edit profile");
+    assert_eq!(
+        String::from_utf8_lossy(&gos("run").stdout).trim(),
+        "two",
+        "a warm run must fold the edited bytes"
+    );
+
+    std::fs::write(&profile, "broken\n").expect("break profile");
+    let broken = gos("check");
+    assert!(
+        !broken.status.success(),
+        "a warm check must fold the edited bytes: {}",
+        String::from_utf8_lossy(&broken.stdout)
+    );
+    assert!(String::from_utf8_lossy(&broken.stderr).contains("the profile is broken"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

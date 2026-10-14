@@ -23,7 +23,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::SystemTime;
@@ -83,6 +83,19 @@ pub enum BindingRunnerError {
         /// Captured cargo stderr, verbatim.
         stderr: String,
     },
+    /// `cargo build` exited unsuccessfully. Its diagnostics were streamed to
+    /// the terminal as the build ran, so the message does not repeat them.
+    #[error("cargo build failed for binding `{crate_name}` ({status}); its output is above")]
+    CargoBuildFailed {
+        /// Crate that failed (or `<runner>` / `<staticlib>` when the
+        /// failure can't be attributed to one binding).
+        crate_name: String,
+        /// How cargo exited.
+        status: std::process::ExitStatus,
+        /// The last part of what cargo wrote, for a caller that reports the
+        /// failure somewhere other than the terminal.
+        output_tail: String,
+    },
     /// I/O error while preparing the cache.
     #[error("cache i/o error: {0}")]
     Io(#[from] io::Error),
@@ -97,6 +110,25 @@ pub enum BindingRunnerError {
     /// Signatures dump produced unparseable JSON.
     #[error("signature dump produced invalid json: {0}")]
     BadSignatureJson(String),
+    /// rustc built the staticlib without reporting the native libraries it
+    /// needs, so a link that takes the archive cannot name them.
+    #[error("rustc did not report the native libraries `{0}` needs")]
+    MissingNativeLibs(String),
+}
+
+/// A built `[rust-bindings]` staticlib and what linking it requires.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticBindingsArchive {
+    /// The archive itself.
+    pub archive: PathBuf,
+    /// Linker driver arguments (`-lxcb`, `-framework AppKit`, `kernel32.lib`)
+    /// naming the system libraries the archive's foreign code calls, in the
+    /// order rustc reports them. They follow the archive on the link line.
+    pub native_libs: Vec<String>,
+    /// Directories the archive's build scripts name for native libraries,
+    /// such as the import libraries of the `windows-targets` crates, which
+    /// the link searches for `native_libs`.
+    pub search: Vec<PathBuf>,
 }
 
 /// Profile (debug / release) for the runner build.
@@ -258,13 +290,16 @@ impl BindingRunner {
             return Ok(WorkdirLease::take(&self.workdir, bin_path)?);
         }
         run_cargo_build(
-            &cargo_toml,
-            &dir.join("target"),
-            self.profile,
+            &CargoBuild {
+                manifest_path: &cargo_toml,
+                target_dir: &dir.join("target"),
+                profile: self.profile,
+                cargo_target: None,
+                target_args: &["--bin", "gos-runner"],
+                crate_label: "<runner>",
+                rustc_args: &[],
+            },
             None,
-            "--bin",
-            "gos-runner",
-            "<runner>",
         )?;
         write_stamp(&stamp, &self.fingerprint_hex, self.profile, "runner")?;
         // A single Cargo invocation can cross the runner budget after the
@@ -318,13 +353,16 @@ impl BindingRunner {
             return Ok(WorkdirLease::take(&self.workdir, json_path)?);
         }
         run_cargo_build(
-            &cargo_toml,
-            &dir.join("target"),
-            self.profile,
+            &CargoBuild {
+                manifest_path: &cargo_toml,
+                target_dir: &dir.join("target"),
+                profile: self.profile,
+                cargo_target: None,
+                target_args: &["--bin", "gos-sigs-dump"],
+                crate_label: "<sigs>",
+                rustc_args: &[],
+            },
             None,
-            "--bin",
-            "gos-sigs-dump",
-            "<sigs>",
         )?;
         if let Some(root) = self.workdir.parent() {
             let _ = crate::cache_maintenance::prune_runner_root(
@@ -537,10 +575,20 @@ impl StaticBindingsLib {
             .join(staticlib_archive_filename())
     }
 
-    /// Idempotently builds the staticlib. Returns the path to the
-    /// produced archive (`.a` on Unix / Windows-GNU, `.lib` on
-    /// Windows MSVC).
-    pub fn ensure_built(&self) -> Result<PathBuf, BindingRunnerError> {
+    /// Where the native libraries rustc reported for the archive are recorded,
+    /// beside the archive of the same target and profile.
+    fn native_libs_path(&self) -> PathBuf {
+        self.archive_path().with_file_name("native-static-libs.txt")
+    }
+
+    fn native_search_path(&self) -> PathBuf {
+        self.archive_path().with_file_name("native-link-search.txt")
+    }
+
+    /// Idempotently builds the staticlib. Returns the produced archive
+    /// (`.a` on Unix / Windows-GNU, `.lib` on Windows MSVC) with the native
+    /// libraries a link that takes it must also name.
+    pub fn ensure_built(&self) -> Result<StaticBindingsArchive, BindingRunnerError> {
         // The staticlib sits inside the runner workdir, which is reclaimed
         // as one piece, so it takes that workdir's lock rather than one of
         // its own.
@@ -562,19 +610,38 @@ impl StaticBindingsLib {
         seed_lockfile(&self.workdir, &self.gossamer_root)?;
 
         let archive = self.archive_path();
+        let native_libs_path = self.native_libs_path();
+        let search_path = self.native_search_path();
         let stamp = self.workdir.join("stamp.json");
-        if self.is_fresh(&archive, &stamp)? {
-            return Ok(archive);
+        if self.is_fresh(&archive, &stamp)?
+            && let Ok(recorded) = fs::read_to_string(&native_libs_path)
+            && let Ok(searched) = fs::read_to_string(&search_path)
+        {
+            return Ok(StaticBindingsArchive {
+                archive,
+                native_libs: recorded.split_whitespace().map(str::to_string).collect(),
+                search: searched.lines().map(PathBuf::from).collect(),
+            });
         }
-        run_cargo_build(
-            &cargo_toml,
-            &self.workdir.join("target"),
-            self.profile,
-            self.cargo_target.as_deref(),
-            "--lib",
-            "",
-            "<staticlib>",
+        let mut messages = Vec::new();
+        let output = run_cargo_build(
+            &CargoBuild {
+                manifest_path: &cargo_toml,
+                target_dir: &self.workdir.join("target"),
+                profile: self.profile,
+                cargo_target: self.cargo_target.as_deref(),
+                target_args: &["--lib"],
+                crate_label: "<staticlib>",
+                rustc_args: &["--print", "native-static-libs"],
+            },
+            Some(&mut messages),
         )?;
+        let native_libs = parse_native_static_libs(&output)
+            .ok_or_else(|| BindingRunnerError::MissingNativeLibs(archive.display().to_string()))?;
+        let search = native_search_dirs(&String::from_utf8_lossy(&messages));
+        fs::write(&native_libs_path, native_libs.join("\n"))?;
+        let search_lines: Vec<String> = search.iter().map(|d| d.display().to_string()).collect();
+        fs::write(&search_path, search_lines.join("\n"))?;
         link_archive_exception_tables(&archive)?;
         let kind = match &self.cargo_target {
             Some(t) => format!("staticlib:{t}"),
@@ -589,7 +656,11 @@ impl StaticBindingsLib {
                 Some(&self.workdir),
             );
         }
-        Ok(archive)
+        Ok(StaticBindingsArchive {
+            archive,
+            native_libs,
+            search,
+        })
     }
 
     fn is_fresh(&self, artifact: &Path, stamp: &Path) -> Result<bool, BindingRunnerError> {
@@ -1174,18 +1245,41 @@ fn write_stamp(path: &Path, fingerprint_hex: &str, profile: Profile, kind: &str)
     write_if_different(path, &body)
 }
 
-fn run_cargo_build(
-    manifest_path: &Path,
-    target_dir: &Path,
+/// One `cargo` build of a generated project.
+struct CargoBuild<'a> {
+    manifest_path: &'a Path,
+    target_dir: &'a Path,
     profile: Profile,
-    cargo_target: Option<&str>,
-    kind_flag: &str,
-    kind_value: &str,
-    crate_label: &str,
-) -> Result<(), BindingRunnerError> {
+    cargo_target: Option<&'a str>,
+    /// Which of the project's targets to build (`--lib`, `--bin NAME`).
+    target_args: &'a [&'a str],
+    /// How a failure names the crate.
+    crate_label: &'a str,
+    /// Arguments for the final crate's rustc alone.
+    rustc_args: &'a [&'a str],
+}
+
+fn run_cargo_build(
+    build: &CargoBuild<'_>,
+    messages: Option<&mut Vec<u8>>,
+) -> Result<String, BindingRunnerError> {
+    let CargoBuild {
+        manifest_path,
+        target_dir,
+        profile,
+        cargo_target,
+        target_args,
+        crate_label,
+        rustc_args,
+    } = *build;
     let cargo = which::which("cargo").map_err(|_| BindingRunnerError::CargoMissing)?;
     let mut cmd = Command::new(cargo);
-    cmd.arg("build");
+    // `cargo rustc` hands its trailing arguments to the final crate's rustc alone.
+    cmd.arg(if rustc_args.is_empty() {
+        "build"
+    } else {
+        "rustc"
+    });
     if matches!(profile, Profile::Release) {
         cmd.arg("--release");
     }
@@ -1194,37 +1288,181 @@ fn run_cargo_build(
     }
     configure_macos_cargo_build(&mut cmd, cargo_target);
     cmd.arg("--manifest-path").arg(manifest_path);
-    if kind_value.is_empty() {
-        cmd.arg(kind_flag);
-    } else {
-        cmd.arg(kind_flag).arg(kind_value);
-    }
+    cmd.args(target_args);
     cmd.env("CARGO_TARGET_DIR", target_dir);
-    // Capture both streams so cargo's progress and diagnostics are shown
-    // only when the build fails, keeping the user's terminal clean on
-    // success while still surfacing errors.
-    cmd.stderr(Stdio::piped());
-    cmd.stdout(Stdio::piped());
-    let mut child = cmd.spawn().map_err(BindingRunnerError::Io)?;
-    // Each pipe is drained by its own reader started before `wait`, so a
-    // pipe that fills to its OS buffer limit cannot back-pressure cargo
-    // into blocking on `write` while we block on `wait`. cargo routinely
-    // emits more than a pipe buffer's worth of warnings on stderr.
-    let stdout_reader = spawn_stream_reader(child.stdout.take());
-    let stderr_reader = spawn_stream_reader(child.stderr.take());
-    let status = child.wait()?;
-    let stdout_text = stdout_reader.join().unwrap_or_default();
-    let stderr_text = stderr_reader.join().unwrap_or_default();
+    // Both streams pass through to the terminal while cargo runs, so a long
+    // build shows its progress and a failing one its diagnostics as they
+    // happen. Cargo colours them only when told to, its stderr being a pipe.
+    if io::stderr().is_terminal() {
+        cmd.arg("--color").arg("always");
+    }
+    // Cargo still renders diagnostics on stderr; its JSON messages go to
+    // stdout, which `run_streamed` hands to `messages` instead of the terminal.
+    if messages.is_some() {
+        cmd.arg("--message-format=json-render-diagnostics");
+    }
+    if !rustc_args.is_empty() {
+        cmd.arg("--").args(rustc_args);
+    }
+    let (status, output_tail) = run_streamed(cmd, &mut io::stderr(), messages)?;
     if !status.success() {
-        // Forward both streams so the user sees what went wrong.
-        let _ = writeln!(io::stderr(), "{stdout_text}");
-        let _ = writeln!(io::stderr(), "{stderr_text}");
-        return Err(BindingRunnerError::CargoFailed {
+        return Err(BindingRunnerError::CargoBuildFailed {
             crate_name: crate_label.to_string(),
-            stderr: stderr_text,
+            status,
+            output_tail,
         });
     }
-    Ok(())
+    Ok(output_tail)
+}
+
+/// The native library directories the build scripts in cargo's JSON
+/// `messages` add to the link (`cargo:rustc-link-search`), in the order
+/// cargo reports them.
+fn native_search_dirs(messages: &str) -> Vec<PathBuf> {
+    #[derive(serde::Deserialize)]
+    struct Message {
+        reason: String,
+        #[serde(default)]
+        linked_paths: Vec<String>,
+    }
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for line in messages.lines() {
+        // Every line is a message; one of a kind this reader does not model
+        // carries nothing it needs.
+        let Ok(message) = serde_json::from_str::<Message>(line) else {
+            continue;
+        };
+        if message.reason != "build-script-executed" {
+            continue;
+        }
+        for path in &message.linked_paths {
+            // `KIND=PATH`, where a crate or framework kind names no native
+            // library directory.
+            let dir = match path.split_once('=') {
+                Some(("native" | "all", dir)) => dir,
+                Some(_) => continue,
+                None => path,
+            };
+            let dir = PathBuf::from(dir);
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    }
+    dirs
+}
+
+/// The linker arguments rustc reports in its `native-static-libs` note: the
+/// system libraries and frameworks a staticlib's foreign code needs, which a
+/// link that takes the archive must name itself.
+///
+/// Cargo replays a fresh unit's cached diagnostics, so the note is present
+/// whether or not the final crate was recompiled.
+fn parse_native_static_libs(output: &str) -> Option<Vec<String>> {
+    const MARKER: &str = "native-static-libs:";
+    let plain = strip_ansi(output);
+    let line = plain.lines().rev().find(|l| l.contains(MARKER))?;
+    let (_, libs) = line.split_once(MARKER)?;
+    Some(libs.split_whitespace().map(str::to_string).collect())
+}
+
+/// `text` with its ANSI escape sequences removed.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        // A CSI sequence (`ESC [ params final`) ends at its first byte in `@..=~`.
+        if chars.next() == Some('[') {
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// How much of a streamed child's output [`run_streamed`] keeps for a
+/// failure report.
+const STREAMED_TAIL_BYTES: usize = 16 * 1024;
+
+/// Runs `command` with both of its output streams copied to `sink` as they
+/// arrive, and answers how it exited with the last [`STREAMED_TAIL_BYTES`] of
+/// its output. With `messages`, the child's stdout is collected there in full
+/// instead of reaching `sink` or the tail.
+///
+/// Each pipe is drained on its own thread, so a child that fills one pipe
+/// while this side reads the other never blocks on its write. The threads
+/// hand their chunks to this one, which alone writes `sink`, so a chunk
+/// reaches it whole.
+fn run_streamed(
+    mut command: Command,
+    sink: &mut impl Write,
+    mut messages: Option<&mut Vec<u8>>,
+) -> io::Result<(std::process::ExitStatus, String)> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let (sender, chunks) = std::sync::mpsc::channel::<(bool, Vec<u8>)>();
+    let readers = [
+        child
+            .stdout
+            .take()
+            .map(|s| forward_chunks(s, true, sender.clone())),
+        child
+            .stderr
+            .take()
+            .map(|s| forward_chunks(s, false, sender.clone())),
+    ];
+    drop(sender);
+    let mut tail: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
+    for (from_stdout, chunk) in chunks {
+        if from_stdout && let Some(collected) = messages.as_deref_mut() {
+            collected.extend_from_slice(&chunk);
+            continue;
+        }
+        // A closed terminal must not stop the drain, or the child blocks.
+        let _ = sink.write_all(&chunk).and_then(|()| sink.flush());
+        tail.extend(chunk);
+        let excess = tail.len().saturating_sub(STREAMED_TAIL_BYTES);
+        tail.drain(..excess);
+    }
+    for reader in readers.into_iter().flatten() {
+        reader
+            .join()
+            .map_err(|_| io::Error::other("cargo output reader panicked"))??;
+    }
+    let status = child.wait()?;
+    let tail: Vec<u8> = tail.into();
+    Ok((status, String::from_utf8_lossy(&tail).into_owned()))
+}
+
+/// Reads `stream` to its end on a thread of its own, sending each chunk as
+/// it arrives, marked with whether it is the child's stdout.
+fn forward_chunks<R: Read + Send + 'static>(
+    mut stream: R,
+    is_stdout: bool,
+    sender: std::sync::mpsc::Sender<(bool, Vec<u8>)>,
+) -> std::thread::JoinHandle<io::Result<()>> {
+    std::thread::spawn(move || {
+        let mut buf = vec![0u8; 8192];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => return Ok(()),
+                Ok(n) => {
+                    // The receiver outlives every reader, so a send only
+                    // fails if it panicked, and then nobody is listening.
+                    let _ = sender.send((is_stdout, buf[..n].to_vec()));
+                }
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(err) => return Err(err),
+            }
+        }
+    })
 }
 
 fn configure_macos_cargo_build(command: &mut Command, cargo_target: Option<&str>) {
@@ -1232,22 +1470,6 @@ fn configure_macos_cargo_build(command: &mut Command, cargo_target: Option<&str>
         let deployment_target = crate::macos_deployment::effective_deployment_target();
         crate::macos_deployment::set_command_deployment_target(command, &deployment_target);
     }
-}
-
-/// Reads `stream` to EOF on its own thread, returning the join handle so
-/// callers can start a reader for every child pipe before waiting on the
-/// child. Concurrent readers keep any one pipe from filling and blocking
-/// the child mid-write.
-fn spawn_stream_reader<R: Read + Send + 'static>(
-    stream: Option<R>,
-) -> std::thread::JoinHandle<String> {
-    std::thread::spawn(move || {
-        let mut buf = String::new();
-        if let Some(mut s) = stream {
-            let _ = s.read_to_string(&mut buf);
-        }
-        buf
-    })
 }
 
 fn max_path_dep_mtime(
@@ -1328,32 +1550,43 @@ fn leaked_entries(rendered: &[RenderedBinding]) -> &'static [BindingEntry] {
     leaked
 }
 
-/// Cross-process advisory lock.
+/// Cross-process advisory lock on a file in a workdir.
 ///
-/// We avoid pulling in `fs2` / `fd-lock` for one-shot use: a
-/// best-effort exclusive create-on-open is sufficient for the
-/// intended "two `gos` processes started seconds apart" case, and
-/// it doesn't require the workspace to permit unsafe.
+/// The operating system holds the lock (`File::lock`) and releases it when
+/// the holder's process ends, so a build that dies leaves nothing to reclaim.
+/// The file itself is removed when the guard drops, and reclamation removes
+/// it with the rest of its workdir. A process that waited on a file that has
+/// since been removed holds a lock on nothing anyone else can see, so a new
+/// holder writes a token of its own into the file and checks the path still
+/// reads it back before it counts the lock as taken.
 pub(crate) struct AdvisoryLock {
     path: PathBuf,
+    /// The locked file; closing it releases the lock.
+    _file: fs::File,
 }
 
 impl AdvisoryLock {
     fn acquire(path: &Path) -> io::Result<Self> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_mins(5);
+        let mut announced = false;
         loop {
-            match Self::take(path) {
-                Ok(Some(lock)) => return Ok(lock),
-                Ok(None) => {
-                    if std::time::Instant::now() > deadline {
-                        return Err(io::Error::other(format!(
-                            "another `gos` process holds {} for >5 min",
-                            path.display()
-                        )));
+            let file = open_lock_file(path)?;
+            match file.try_lock() {
+                Ok(()) => {}
+                Err(fs::TryLockError::WouldBlock) => {
+                    if !announced {
+                        let _ = writeln!(
+                            io::stderr(),
+                            "gos: waiting for another `gos` process to finish with {}",
+                            path.parent().unwrap_or(path).display()
+                        );
+                        announced = true;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    file.lock()?;
                 }
-                Err(err) => return Err(err),
+                Err(fs::TryLockError::Error(err)) => return Err(err),
+            }
+            if let Some(lock) = Self::claim(path, file)? {
+                return Ok(lock);
             }
         }
     }
@@ -1370,55 +1603,110 @@ impl AdvisoryLock {
         &self.path
     }
 
-    /// One attempt: `Ok(None)` means a live process holds the lock.
+    /// Takes the lock without waiting: `Ok(None)` means another holder has
+    /// it. A file removed from the path between the open and the lock is
+    /// opened afresh, and each retry follows such a removal.
     fn take(path: &Path) -> io::Result<Option<Self>> {
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-        {
-            Ok(mut f) => {
-                let _ = writeln!(f, "{}", std::process::id());
-                Ok(Some(Self {
-                    path: path.to_path_buf(),
-                }))
+        loop {
+            let file = open_lock_file(path)?;
+            match file.try_lock() {
+                Ok(()) => {}
+                Err(fs::TryLockError::WouldBlock) => return Ok(None),
+                Err(fs::TryLockError::Error(err)) => return Err(err),
             }
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                // Best-effort: stale lock detection - if the PID
-                // in the file no longer exists, take it.
-                if let Ok(text) = fs::read_to_string(path)
-                    && let Ok(pid) = text.trim().parse::<u32>()
-                    && !pid_alive(pid)
-                {
-                    let _ = fs::remove_file(path);
-                    return Self::take(path);
-                }
-                Ok(None)
+            if let Some(lock) = Self::claim(path, file)? {
+                return Ok(Some(lock));
             }
-            // The workdir is reclaimed as a whole, so the directory holding
-            // the lock can be gone between one build and the next.
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                let Some(parent) = path.parent() else {
-                    return Err(err);
-                };
-                fs::create_dir_all(parent)?;
-                match fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(path)
-                {
-                    Ok(mut f) => {
-                        let _ = writeln!(f, "{}", std::process::id());
-                        Ok(Some(Self {
-                            path: path.to_path_buf(),
-                        }))
-                    }
-                    Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Ok(None),
-                    Err(err) => Err(err),
-                }
-            }
+        }
+    }
+
+    /// With `file` locked, answers the guard if `path` still names that file.
+    /// `None` when the file was removed from the path while it was being
+    /// locked: nothing else can reach it, so the lock on it guards nothing.
+    fn claim(path: &Path, file: fs::File) -> io::Result<Option<Self>> {
+        match names_same_file(&file, path) {
+            Ok(true) => Ok(Some(Self {
+                path: path.to_path_buf(),
+                _file: file,
+            })),
+            Ok(false) => Ok(None),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            // Windows refuses to open a file whose removal waits on handles
+            // still open, and the handle this holder keeps is one of them.
+            #[cfg(windows)]
+            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => Ok(None),
             Err(err) => Err(err),
         }
+    }
+}
+
+/// Whether `path` names the file `file` has open.
+#[cfg(unix)]
+fn names_same_file(file: &fs::File, path: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let held = file.metadata()?;
+    let named = fs::metadata(path)?;
+    Ok(held.dev() == named.dev() && held.ino() == named.ino())
+}
+
+/// Whether `path` names the file `file` has open.
+// A file's identity on Windows is only reachable through
+// `GetFileInformationByHandle`; the unsafe is contained to this function.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn names_same_file(file: &fs::File, path: &Path) -> io::Result<bool> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        GetFileInformationByHandle,
+    };
+
+    fn identity(file: &fs::File) -> io::Result<(u32, u32, u32)> {
+        // SAFETY: `BY_HANDLE_FILE_INFORMATION` is plain integers, for which all zeroes is valid.
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: the handle belongs to `file`, open for the call, and `info` is the out-parameter
+        // the call fills.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((
+            info.dwVolumeSerialNumber,
+            info.nFileIndexHigh,
+            info.nFileIndexLow,
+        ))
+    }
+    // A byte-range lock refuses reads through every other handle, the locking
+    // process's own included, but not an open that asks for no data access.
+    let named = fs::OpenOptions::new()
+        .access_mode(0)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .open(path)?;
+    Ok(identity(file)? == identity(&named)?)
+}
+
+/// Opens the lock file at `path`, creating it and the workdir around it as
+/// needed: the workdir is reclaimed as a whole, so it can be gone between one
+/// build and the next.
+fn open_lock_file(path: &Path) -> io::Result<fs::File> {
+    let open = || {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+    };
+    match open() {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            let Some(parent) = path.parent() else {
+                return Err(err);
+            };
+            fs::create_dir_all(parent)?;
+            open()
+        }
+        opened => opened,
     }
 }
 
@@ -1567,6 +1855,68 @@ fn link_archive_exception_tables(archive: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_static_libs_parse_from_coloured_cargo_output() {
+        let output = "   Compiling gos-static v0.0.0\n\
+            \u{1b}[0m\u{1b}[1m\u{1b}[38;5;14mnote\u{1b}[0m\u{1b}[0m\u{1b}[1m: \
+            native-static-libs: -lxcb -lxkbcommon -lgcc_s -lc\u{1b}[0m\n\
+            \u{1b}[1m\u{1b}[32m    Finished\u{1b}[0m `dev` profile\n";
+        assert_eq!(
+            parse_native_static_libs(output),
+            Some(vec![
+                "-lxcb".into(),
+                "-lxkbcommon".into(),
+                "-lgcc_s".into(),
+                "-lc".into()
+            ]),
+        );
+    }
+
+    #[test]
+    fn native_search_dirs_come_from_build_script_messages() {
+        let messages = concat!(
+            r#"{"reason":"compiler-artifact","package_id":"a","filenames":[]}"#,
+            "\n",
+            r#"{"reason":"build-script-executed","linked_libs":["windows.0.53.0"],"#,
+            r#""linked_paths":["native=C:\\w\\lib","dependency=C:\\deps"],"cfgs":[]}"#,
+            "\n",
+            r#"{"reason":"build-script-executed","linked_paths":["/ring/out","all=/x","native=C:\\w\\lib"]}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":true}"#,
+            "\n",
+        );
+        assert_eq!(
+            native_search_dirs(messages),
+            vec![
+                PathBuf::from(r"C:\w\lib"),
+                PathBuf::from("/ring/out"),
+                PathBuf::from("/x")
+            ],
+        );
+    }
+
+    #[test]
+    fn native_static_libs_keep_framework_pairs_in_order() {
+        let output = "note: native-static-libs: -framework AppKit -liconv -lSystem\n";
+        assert_eq!(
+            parse_native_static_libs(output),
+            Some(vec![
+                "-framework".into(),
+                "AppKit".into(),
+                "-liconv".into(),
+                "-lSystem".into()
+            ]),
+        );
+    }
+
+    #[test]
+    fn native_static_libs_absent_without_the_note() {
+        assert_eq!(
+            parse_native_static_libs("    Finished `dev` profile\n"),
+            None
+        );
+    }
     use gossamer_pkg::Manifest;
 
     fn write_manifest(dir: &Path, body: &str) -> PathBuf {
@@ -1575,29 +1925,190 @@ mod tests {
         path
     }
 
-    // A child that fills its stderr pipe before writing stdout must be
-    // drained by concurrent readers; draining the pipes one after the
-    // other lets the unread pipe fill and wedges the child mid-write,
-    // matching the deadlock `run_cargo_build` avoids for cargo's stderr.
+    fn lock_scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("gos-lock-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // A lock file left by a dead process on a location this process cannot
+    // write is an error the caller reports, not a lock taken or a retry.
     #[cfg(unix)]
     #[test]
-    fn stream_readers_drain_concurrently_without_deadlock() {
+    fn a_lock_left_on_a_read_only_location_is_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = lock_scratch("read-only");
+        let path = build_lock_path(&dir);
+        fs::write(&path, format!("{}\n", u32::MAX)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        // A process that may write anything regardless (root) cannot observe
+        // the refusal this test is about.
+        let writable = fs::OpenOptions::new().write(true).open(&path).is_ok();
+        if !writable {
+            assert!(AdvisoryLock::take(&path).is_err());
+            assert!(AdvisoryLock::acquire(&path).is_err());
+            assert!(AdvisoryLock::try_acquire(&path).is_none());
+        }
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // A dead process's lock file is no lock: the operating system released
+    // the lock with the process, so the next build takes it.
+    #[test]
+    fn a_lock_file_left_by_a_dead_process_is_taken() {
+        let dir = lock_scratch("dead-holder");
+        let path = build_lock_path(&dir);
+        fs::write(&path, format!("{}\n", u32::MAX)).unwrap();
+        let lock = AdvisoryLock::take(&path)
+            .unwrap()
+            .expect("a released lock is free");
+        assert!(AdvisoryLock::take(&path).unwrap().is_none());
+        drop(lock);
+        assert!(!path.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // Competing acquirers each hold the lock alone, however their attempts
+    // interleave with the removal of the file by the holder before them.
+    #[test]
+    fn concurrent_acquirers_never_hold_the_lock_together() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = lock_scratch("concurrent");
+        let path = build_lock_path(&dir);
+        let holders = Arc::new(AtomicUsize::new(0));
+        let taken = Arc::new(AtomicUsize::new(0));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                let holders = Arc::clone(&holders);
+                let taken = Arc::clone(&taken);
+                std::thread::spawn(move || {
+                    for _ in 0..25 {
+                        let lock = AdvisoryLock::acquire(&path).expect("acquire");
+                        assert_eq!(holders.fetch_add(1, Ordering::SeqCst), 0);
+                        std::thread::yield_now();
+                        assert_eq!(holders.fetch_sub(1, Ordering::SeqCst), 1);
+                        taken.fetch_add(1, Ordering::SeqCst);
+                        drop(lock);
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("acquirer");
+        }
+        assert_eq!(taken.load(Ordering::SeqCst), 8 * 25);
+        assert!(!path.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // A waiter whose lock file is removed with its workdir while it waits
+    // holds the lock on the file at the path once it gets it, and nobody
+    // else can take that one.
+    #[test]
+    fn a_waiter_whose_lock_file_is_removed_takes_the_new_one() {
+        let dir = lock_scratch("removed-while-waiting");
+        let path = build_lock_path(&dir);
+        let first = AdvisoryLock::take(&path).unwrap().expect("free");
+        let waiter = {
+            let path = path.clone();
+            std::thread::spawn(move || AdvisoryLock::acquire(&path).expect("acquire"))
+        };
+        std::thread::yield_now();
+        let _ = fs::remove_dir_all(&dir);
+        drop(first);
+        let second = waiter.join().expect("waiter");
+        assert!(
+            path.exists(),
+            "the waiter's lock is on the file at the path"
+        );
+        assert!(AdvisoryLock::take(&path).unwrap().is_none());
+        drop(second);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // A child that fills its stderr pipe before writing stdout must be
+    // drained by concurrent readers; draining the pipes one after the
+    // other lets the unread pipe fill and wedges the child mid-write.
+    #[cfg(unix)]
+    #[test]
+    fn streamed_output_drains_both_pipes_without_deadlock() {
         const STDERR_BYTES: usize = 256 * 1024;
-        let mut child = Command::new("sh")
+        let mut command = Command::new("sh");
+        command
             .arg("-c")
-            .arg(format!("yes X | head -c {STDERR_BYTES} 1>&2; printf DONE"))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn sh");
-        let stdout_reader = spawn_stream_reader(child.stdout.take());
-        let stderr_reader = spawn_stream_reader(child.stderr.take());
-        let status = child.wait().expect("wait");
-        let stdout_text = stdout_reader.join().unwrap();
-        let stderr_text = stderr_reader.join().unwrap();
+            .arg(format!("yes X | head -c {STDERR_BYTES} 1>&2; printf DONE"));
+        let mut sink = Vec::new();
+        let (status, tail) = run_streamed(command, &mut sink, None).expect("run sh");
         assert!(status.success());
-        assert_eq!(stdout_text, "DONE");
-        assert_eq!(stderr_text.len(), STDERR_BYTES);
+        // Each pipe has a reader of its own, so the two streams interleave in
+        // whatever order their chunks arrive; what is fixed is that both are
+        // read to the end.
+        let done = sink
+            .windows(4)
+            .position(|w| w == b"DONE")
+            .expect("stdout is drained");
+        let mut stderr = sink.clone();
+        stderr.drain(done..done + 4);
+        assert_eq!(stderr, b"X\n".repeat(STDERR_BYTES / 2));
+        assert_eq!(tail.len(), STREAMED_TAIL_BYTES);
+    }
+
+    /// A sink that releases the child once the child's first line reaches it.
+    #[cfg(unix)]
+    struct ReleasingSink {
+        seen: Vec<u8>,
+        release: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl Write for ReleasingSink {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.seen.extend_from_slice(buf);
+            if self.seen.windows(5).any(|w| w == b"first") {
+                fs::write(&self.release, b"")?;
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    // Output reaches the terminal while the child still runs: the child
+    // waits for a file the sink creates only after seeing its first line,
+    // and gives up with status 3 if that never happens.
+    #[cfg(unix)]
+    #[test]
+    fn streamed_output_arrives_before_the_child_exits() {
+        let dir = std::env::temp_dir().join(format!("gos-stream-live-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let release = dir.join("released");
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(format!(
+            "echo first 1>&2; i=0; while [ ! -f '{}' ]; do i=$((i+1)); [ $i -gt 200 ] && exit 3; sleep 0.05; done; echo second",
+            release.display()
+        ));
+        let mut sink = ReleasingSink {
+            seen: Vec::new(),
+            release,
+        };
+        let (status, tail) = run_streamed(command, &mut sink, None).expect("run sh");
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "the first line reached the sink only at exit"
+        );
+        assert_eq!(String::from_utf8_lossy(&sink.seen), "first\nsecond\n");
+        assert_eq!(tail, "first\nsecond\n");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -907,6 +907,7 @@ pub(crate) fn collect_enum_variants(program: &HirProgram, tcx: &mut TyCtxt) -> E
     let mut by_enum: HashMap<String, Vec<String>> = HashMap::new();
     let mut variant_index: HashMap<String, (String, usize)> = HashMap::new();
     let mut variant_fields: HashMap<String, Vec<String>> = HashMap::new();
+    let mut variant_fields_owned: HashMap<String, Vec<String>> = HashMap::new();
     let mut variant_field_tys: HashMap<String, Vec<Ty>> = HashMap::new();
     let mut variant_field_tys_owned: HashMap<String, Vec<Ty>> = HashMap::new();
     let mut variant_has_payload: HashMap<String, bool> = HashMap::new();
@@ -923,6 +924,10 @@ pub(crate) fn collect_enum_variants(program: &HirProgram, tcx: &mut TyCtxt) -> E
                     if let Some(fields) = &v.struct_fields {
                         let field_names: Vec<String> =
                             fields.iter().map(|f| f.name.clone()).collect();
+                        variant_fields_owned.insert(
+                            format!("{}::{}", adt.name.name, v.name.name),
+                            field_names.clone(),
+                        );
                         variant_fields.insert(v.name.name.clone(), field_names);
                     }
                     if let Some(tys) = &v.struct_field_tys {
@@ -1133,6 +1138,7 @@ pub(crate) fn collect_enum_variants(program: &HirProgram, tcx: &mut TyCtxt) -> E
         by_enum,
         variant_index,
         variant_fields,
+        variant_fields_owned,
         variant_field_tys,
         variant_field_tys_owned,
         variant_has_payload,

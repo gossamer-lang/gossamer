@@ -1116,7 +1116,7 @@ impl<'a> Lowerer<'a> {
             let eb_i32 = self.fresh();
             writeln!(self.out, "  {eb_i32} = trunc i64 {eb_i64} to i32").unwrap();
             let tmp = self.fresh();
-            if kind == vec_elem_kind_llvm::PRIMITIVE {
+            if kind == gossamer_types::vec_elem_kind::PRIMITIVE {
                 declare_rt(&mut self.runtime_refs, "gos_rt_vec_new");
                 writeln!(
                     self.out,
@@ -1157,7 +1157,7 @@ impl<'a> Lowerer<'a> {
             let eb_i32 = self.fresh();
             writeln!(self.out, "  {eb_i32} = trunc i64 {eb_i64} to i32").unwrap();
             let tmp = self.fresh();
-            if kind == vec_elem_kind_llvm::PRIMITIVE {
+            if kind == gossamer_types::vec_elem_kind::PRIMITIVE {
                 declare_rt(&mut self.runtime_refs, "gos_rt_vec_with_capacity");
                 writeln!(
                     self.out,
@@ -1846,7 +1846,7 @@ impl<'a> Lowerer<'a> {
         let dest_ty_mir = self.place_leaf_ty(destination);
         let dest_ty = render_ty(self.tcx, dest_ty_mir);
         match name {
-            "gos_enum_slot_ptr" => {
+            "gos_enum_slot_ptr" | "gos_enum_word_addr" => {
                 // The LLVM tier writes a payload aggregate's words into the
                 // slot itself, so the slot's address is where they live. A
                 // tagged null answers null, the read a unit variant gives.
@@ -1978,12 +1978,15 @@ impl<'a> Lowerer<'a> {
                         "  call void @llvm.memcpy.p0.p0.i64(ptr {slot}, ptr {boxp}, i64 {bytes}, i1 false)"
                     )
                     .unwrap();
-                    declare_rt(&mut self.runtime_refs, "gos_rt_rc_retain_children");
-                    writeln!(
-                        self.out,
-                        "  call void @gos_rt_rc_retain_children(ptr {boxp})"
-                    )
-                    .unwrap();
+                    // A view of a box its caller keeps takes no shares.
+                    if !gossamer_mir::is_payload_view(args) {
+                        declare_rt(&mut self.runtime_refs, "gos_rt_rc_retain_children");
+                        writeln!(
+                            self.out,
+                            "  call void @gos_rt_rc_retain_children(ptr {boxp})"
+                        )
+                        .unwrap();
+                    }
                     writeln!(self.out, "  br label %{after_l}").unwrap();
                     writeln!(self.out, "{after_l}:").unwrap();
                     return Ok(());

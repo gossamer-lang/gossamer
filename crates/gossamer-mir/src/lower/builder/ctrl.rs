@@ -457,11 +457,12 @@ impl<'a> Builder<'a> {
             } else {
                 "gos_enum_disc"
             };
+            let node = self.enum_node_of(scrutinee_local, span);
             self.emit_assign(
                 Place::local(disc),
                 Rvalue::CallIntrinsic {
                     name: intrinsic,
-                    args: vec![Operand::Copy(Place::local(scrutinee_local))],
+                    args: vec![Operand::Copy(Place::local(node))],
                 },
                 span,
             );
@@ -524,11 +525,25 @@ impl<'a> Builder<'a> {
             default,
         });
 
+        // `match &mut x` over a local the reference copies into a slot of its
+        // own: the binding may give the slot a node of its own, which the
+        // local then takes back.
+        let reload = self.mut_ref_reload_target(scrutinee);
         for (arm_block, arm) in bodies {
             self.set_current(arm_block);
             match &arm.pattern.kind {
                 HirPatKind::Variant { name, fields } if !fields.is_empty() => {
                     self.bind_variant_let_payload(scrutinee_local, name, fields, span);
+                    if let Some(target) = reload {
+                        self.emit_assign(
+                            Place::local(target),
+                            Rvalue::Use(Operand::Copy(Place {
+                                local: scrutinee_local,
+                                projection: vec![crate::ir::Projection::Deref],
+                            })),
+                            span,
+                        );
+                    }
                 }
                 HirPatKind::Binding { name, .. } => {
                     self.bind_local(&name.name, scrutinee_local);
@@ -680,6 +695,10 @@ impl<'a> Builder<'a> {
         let scrutinee_local = self.lower_expr(scrutinee)?;
         let result_local = self.fresh(ty);
         let join = self.new_block(span);
+        // `match &mut x` over a local the reference copies into a slot of its
+        // own: a pattern may give the slot a node of its own, which the local
+        // then takes back.
+        let reload = self.mut_ref_reload_target(scrutinee);
 
         for arm in arms {
             let setup_block = self.new_block(span);
@@ -733,6 +752,16 @@ impl<'a> Builder<'a> {
             });
 
             self.set_current(setup_block);
+            if let Some(target) = reload {
+                self.emit_assign(
+                    Place::local(target),
+                    Rvalue::Use(Operand::Copy(Place {
+                        local: scrutinee_local,
+                        projection: vec![crate::ir::Projection::Deref],
+                    })),
+                    span,
+                );
+            }
             // A guard reads the names the pattern bound, and those are
             // extracted in this block rather than in the header, so the guard
             // belongs where they are live. That is also where the language
@@ -1124,23 +1153,23 @@ impl<'a> Builder<'a> {
                 // verified by the type-checker). Each named-field
                 // sub-pattern reads through a
                 // `Projection::Field(idx)` of the scrutinee.
-                let order = self
-                    .structs
-                    .get(&name.name)
-                    .cloned()
-                    .or_else(|| self.enums.variant_fields.get(&name.name).cloned());
                 // The scrutinee's own type names the enum, so a variant
                 // name two enums both declare resolves to this value's own
                 // variant rather than to whichever enum the program-wide
                 // map holds.
-                let matched = self
+                let typed = self
                     .enum_index_name_of(self.locals[scrutinee.0 as usize].ty)
                     .and_then(|en| {
                         self.enums
                             .variant_of_enum(&en, &name.name)
                             .map(|idx| (en, idx))
-                    })
-                    .or_else(|| self.enums.lookup(std::slice::from_ref(name)));
+                    });
+                let order = typed
+                    .as_ref()
+                    .and_then(|(en, _)| self.enums.field_names_of(en, &name.name))
+                    .or_else(|| self.structs.get(&name.name).cloned())
+                    .or_else(|| self.enums.variant_fields.get(&name.name).cloned());
+                let matched = typed.or_else(|| self.enums.lookup(std::slice::from_ref(name)));
                 let matched_enum = matched.clone().map(|(en, _)| en).unwrap_or_default();
                 let variant_idx = matched.map(|(_, i)| i);
                 // Whether ANY sibling variant of this enum carries
@@ -1179,11 +1208,12 @@ impl<'a> Builder<'a> {
                         } else {
                             "gos_enum_disc"
                         };
+                        let node = self.enum_node_of(scrutinee, span);
                         self.emit_assign(
                             Place::local(disc_load),
                             Rvalue::CallIntrinsic {
                                 name: disc_intrinsic,
-                                args: vec![Operand::Copy(Place::local(scrutinee))],
+                                args: vec![Operand::Copy(Place::local(node))],
                             },
                             span,
                         );
@@ -1218,6 +1248,29 @@ impl<'a> Builder<'a> {
                         span,
                     );
                 }
+                // A variant's fields are read only once its discriminant
+                // says the value is that variant: another variant's payload
+                // may be shorter, and an aggregate field is materialised by
+                // dereferencing its word as a box. The loads and the
+                // sub-patterns run behind the test, reporting through a
+                // local the header seeds as `false`.
+                let guard = (scrut_is_payload_enum && !fields.is_empty()).then(|| {
+                    let guarded = self.new_block(span);
+                    let merge = self.new_block(span);
+                    let answer = self.fresh(bool_ty);
+                    self.emit_assign(
+                        Place::local(answer),
+                        Rvalue::Use(Operand::Const(ConstValue::Bool(false))),
+                        span,
+                    );
+                    self.terminate(Terminator::SwitchInt {
+                        discriminant: Operand::Copy(Place::local(acc)),
+                        arms: vec![(0, merge)],
+                        default: guarded,
+                    });
+                    self.set_current(guarded);
+                    (answer, merge)
+                });
                 if let Some(order) = order {
                     let declared_tys = self.enums.field_tys_of(&matched_enum, &name.name);
                     let payload_offsets = self.variant_payload_offsets(
@@ -1229,6 +1282,7 @@ impl<'a> Builder<'a> {
                         &matched_enum,
                         &name.name,
                     );
+                    let mut through_mut_node: Option<Local> = None;
                     for f in fields {
                         let pos = order.iter().position(|n| n == &f.name.name);
                         let Some(pos) = pos else { continue };
@@ -1277,6 +1331,54 @@ impl<'a> Builder<'a> {
                         let field_ty = declared_field_ty
                             .or_else(|| f.pattern.as_ref().map(|sub| sub.ty))
                             .unwrap_or(i64_ty);
+                        // Through a `&mut` an arm writes the node in place: the
+                        // node is made the slot's alone once, and a field bound
+                        // by name is read in place.
+                        let in_place_name =
+                            if scrut_is_payload_enum && self.is_mut_enum_slot(scrutinee) {
+                                match &f.pattern {
+                                    None => Some(f.name.name.clone()),
+                                    Some(HirPat {
+                                        kind: HirPatKind::Binding { name: bname, .. },
+                                        ..
+                                    }) => Some(bname.name.clone()),
+                                    Some(_) => None,
+                                }
+                            } else {
+                                None
+                            };
+                        if let Some(bound) = in_place_name {
+                            let node = match through_mut_node {
+                                Some(node) => node,
+                                None => {
+                                    let bytes = self.variant_payload_bytes(
+                                        declared_tys.as_deref().unwrap_or(&[]),
+                                        order.len(),
+                                    );
+                                    self.emit_make_unique(scrutinee, i128::from(bytes), span);
+                                    let peeled =
+                                        self.peel_ref_ty(self.locals[scrutinee.0 as usize].ty);
+                                    let node = self.load_slot_value(scrutinee, peeled, span);
+                                    through_mut_node = Some(node);
+                                    node
+                                }
+                            };
+                            let off_local = self.fresh(i64_ty);
+                            self.emit_assign(
+                                Place::local(off_local),
+                                Rvalue::Use(Operand::Const(ConstValue::Int(i128::from(
+                                    payload_offsets
+                                        .get(pos)
+                                        .copied()
+                                        .unwrap_or(i64::from(field_idx) * 8),
+                                )))),
+                                span,
+                            );
+                            let bound_local =
+                                self.payload_field_through_mut(node, off_local, field_ty, span);
+                            self.bind_local(&bound, bound_local);
+                            continue;
+                        }
                         let elem = self.fresh(field_ty);
                         if scrut_is_real_struct {
                             // Free struct: real field projection.
@@ -1359,6 +1461,18 @@ impl<'a> Builder<'a> {
                             self.bind_local(&f.name.name, elem);
                         }
                     }
+                }
+                if let Some((answer, merge)) = guard {
+                    // Inside the guarded block the discriminant matched, so
+                    // `acc` carries the sub-patterns' answer alone.
+                    self.emit_assign(
+                        Place::local(answer),
+                        Rvalue::Use(Operand::Copy(Place::local(acc))),
+                        span,
+                    );
+                    self.terminate(Terminator::Goto { target: merge });
+                    self.set_current(merge);
+                    return Some(answer);
                 }
                 Some(acc)
             }
@@ -1446,11 +1560,12 @@ impl<'a> Builder<'a> {
                         } else {
                             "gos_enum_disc"
                         };
+                        let node = self.enum_node_of(scrutinee, span);
                         self.emit_assign(
                             Place::local(disc_load),
                             Rvalue::CallIntrinsic {
                                 name: disc_intrinsic,
-                                args: vec![Operand::Copy(Place::local(scrutinee))],
+                                args: vec![Operand::Copy(Place::local(node))],
                             },
                             span,
                         );
@@ -1488,6 +1603,7 @@ impl<'a> Builder<'a> {
                         &name.name,
                     );
                     let mut acc = cmp;
+                    let mut through_mut_node: Option<Local> = None;
                     for (i, field) in fields.iter().enumerate() {
                         if let HirPatKind::Binding { name: bname, .. } = &field.kind {
                             // A payload word is only this variant's to read once
@@ -1544,6 +1660,41 @@ impl<'a> Builder<'a> {
                                     },
                                     span,
                                 );
+                                self.bind_local(&bname.name, payload_local);
+                            } else if (any_payload || !fields.is_empty())
+                                && self.is_mut_enum_slot(scrutinee)
+                            {
+                                // Through a `&mut` the arm writes the node in
+                                // place, so it is first made the slot's alone.
+                                let node = match through_mut_node {
+                                    Some(node) => node,
+                                    None => {
+                                        let bytes = self.variant_payload_bytes(
+                                            declared_tys.as_deref().unwrap_or(&[]),
+                                            fields.len(),
+                                        );
+                                        self.emit_make_unique(scrutinee, i128::from(bytes), span);
+                                        let peeled =
+                                            self.peel_ref_ty(self.locals[scrutinee.0 as usize].ty);
+                                        let node = self.load_slot_value(scrutinee, peeled, span);
+                                        through_mut_node = Some(node);
+                                        node
+                                    }
+                                };
+                                let off_local = self.fresh(i64_ty);
+                                self.emit_assign(
+                                    Place::local(off_local),
+                                    Rvalue::Use(Operand::Const(ConstValue::Int(i128::from(
+                                        payload_offsets.get(i).copied().unwrap_or((i * 8) as i64),
+                                    )))),
+                                    span,
+                                );
+                                let binding_ty = payload_tys
+                                    .as_ref()
+                                    .and_then(|tys| tys.get(i).copied())
+                                    .unwrap_or(i64_ty);
+                                let payload_local = self
+                                    .payload_field_through_mut(node, off_local, binding_ty, span);
                                 self.bind_local(&bname.name, payload_local);
                             } else if any_payload || !fields.is_empty() {
                                 let off_local = self.fresh(i64_ty);
@@ -1665,6 +1816,13 @@ impl<'a> Builder<'a> {
                                                 | gossamer_types::TyKind::Char
                                         )
                                     });
+                                // A `Result` / `Option` payload is read as the
+                                // carrier it is, so a nested `None` / `Ok(..)`
+                                // tests its discriminant rather than a word.
+                                let carrier_ty = payload_tys
+                                    .as_ref()
+                                    .and_then(|tys| tys.get(i).copied())
+                                    .filter(|&t| self.is_result_or_option_adt(t));
                                 let field_local = match nested_ty {
                                     Some(t) => {
                                         let fl = self.fresh(t);
@@ -1673,7 +1831,7 @@ impl<'a> Builder<'a> {
                                         }
                                         fl
                                     }
-                                    None => self.fresh(scalar_ty.unwrap_or(i64_ty)),
+                                    None => self.fresh(carrier_ty.or(scalar_ty).unwrap_or(i64_ty)),
                                 };
                                 // Reading a payload word is side-effect-free
                                 // whatever variant the value turned out to be,
@@ -1686,7 +1844,10 @@ impl<'a> Builder<'a> {
                                 // the slot. The sub-pattern reads the aggregate,
                                 // so it comes along and reports through a local
                                 // the header seeds as `false`.
-                                let guard = nested_ty.map(|_| {
+                                // A carrier spans two words, which a shorter
+                                // sibling payload does not have, so its read
+                                // waits for the test too.
+                                let guard = nested_ty.or(carrier_ty).map(|_| {
                                     let guarded = self.new_block(span);
                                     let merge = self.new_block(span);
                                     let answer = self.fresh(bool_ty);
@@ -2605,6 +2766,129 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The node a payload-enum scrutinee holds: a `&mut` to one names the
+    /// slot it lives in, which is loaded; any other scrutinee is the node.
+    fn enum_node_of(&mut self, scrutinee: Local, span: Span) -> Local {
+        use gossamer_types::TyKind;
+        match self.tcx.kind_of(self.locals[scrutinee.0 as usize].ty) {
+            TyKind::Ref {
+                mutability: gossamer_types::Mutbl::Mut,
+                inner,
+            } if self.tcx.is_payload_enum(*inner) => {
+                let inner = *inner;
+                self.load_slot_value(scrutinee, inner, span)
+            }
+            _ => scrutinee,
+        }
+    }
+
+    /// Reads the payload field at `off_local` of `node`, a node a `&mut`
+    /// scrutinee's slot holds and has made its own, for a binding of
+    /// `binding_ty` the arm may write: a nested node or a string by the
+    /// address of its word, a boxed aggregate by its box (made the node's
+    /// alone first), a slot-resident aggregate by each back end's slot form,
+    /// and anything else - a vector, a scalar - by value.
+    fn payload_field_through_mut(
+        &mut self,
+        node: Local,
+        off_local: Local,
+        binding_ty: gossamer_types::Ty,
+        span: Span,
+    ) -> Local {
+        use gossamer_types::TyKind;
+        let by_word = self.tcx.is_payload_enum(binding_ty)
+            || matches!(self.tcx.kind_of(binding_ty), TyKind::String);
+        let aggregate = matches!(
+            self.tcx.kind_of(binding_ty),
+            TyKind::Adt { .. } | TyKind::Tuple(_) | TyKind::Array { .. }
+        ) && !self.tcx.is_inline_enum_ty(binding_ty)
+            && !self.is_by_value_enum_ty(binding_ty)
+            && self.type_slot_bytes(binding_ty) >= 8;
+        let read = |b: &mut Self, name: &'static str, dest: Local, from: Local| {
+            b.emit_assign(
+                Place::local(dest),
+                Rvalue::CallIntrinsic {
+                    name,
+                    args: vec![
+                        Operand::Copy(Place::local(from)),
+                        Operand::Copy(Place::local(off_local)),
+                    ],
+                },
+                span,
+            );
+        };
+        if !by_word && !aggregate {
+            let dest = self.fresh(binding_ty);
+            read(self, "gos_enum_load", dest, node);
+            return dest;
+        }
+        let ref_ty = self.tcx.intern(TyKind::Ref {
+            mutability: gossamer_types::Mutbl::Mut,
+            inner: binding_ty,
+        });
+        let dest = self.fresh(ref_ty);
+        if by_word {
+            read(self, "gos_enum_word_addr", dest, node);
+        } else if self.is_boxable_aggregate_payload(binding_ty) {
+            let ptr_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+            let box_slot = self.fresh(ptr_ty);
+            read(self, "gos_enum_word_addr", box_slot, node);
+            let bytes = i128::from(self.type_slot_bytes(binding_ty));
+            self.emit_make_unique(box_slot, bytes, span);
+            let zero = self.fresh(ptr_ty);
+            self.emit_assign(
+                Place::local(zero),
+                Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                span,
+            );
+            self.emit_assign(
+                Place::local(dest),
+                Rvalue::CallIntrinsic {
+                    name: "gos_load",
+                    args: vec![
+                        Operand::Copy(Place::local(box_slot)),
+                        Operand::Copy(Place::local(zero)),
+                    ],
+                },
+                span,
+            );
+        } else {
+            read(self, "gos_enum_slot_ptr", dest, node);
+        }
+        dest
+    }
+
+    /// Whether `scrutinee` is a `&mut` naming the slot of a counted enum
+    /// node, which a payload binding writes in place.
+    fn is_mut_enum_slot(&self, scrutinee: Local) -> bool {
+        use gossamer_types::TyKind;
+        matches!(
+            self.tcx.kind_of(self.locals[scrutinee.0 as usize].ty),
+            TyKind::Ref {
+                mutability: gossamer_types::Mutbl::Mut,
+                inner,
+            } if self.tcx.is_payload_enum(*inner) && !self.tcx.is_inline_enum_ty(*inner)
+        )
+    }
+
+    /// Makes the node the `&mut` slot `slot` names the slot's alone, so a
+    /// write through a view of its payload reaches no other holder.
+    fn emit_make_unique(&mut self, slot: Local, payload_bytes: i128, span: Span) {
+        let unit_ty = self.tcx.unit();
+        let sink = self.fresh(unit_ty);
+        self.emit_assign(
+            Place::local(sink),
+            Rvalue::CallIntrinsic {
+                name: "gos_rt_rc_make_unique",
+                args: vec![
+                    Operand::Copy(Place::local(slot)),
+                    Operand::Const(ConstValue::Int(payload_bytes)),
+                ],
+            },
+            span,
+        );
+    }
+
     /// Binds an enum tuple-variant's payload in an irrefutable `let`
     /// (`let E::P(m, n) = e`), discriminant-aware. A payload-bearing enum is
     /// a pointer to `[disc, p0, p1, ...]`, so field `i` is read with
@@ -2643,6 +2927,44 @@ impl<'a> Builder<'a> {
             Some(en) => self.instantiated_variant_field_tys(scrut_ty, en, &name.name),
             None => declared_tys.clone(),
         };
+        // Through a `&mut` the scrutinee names the slot holding the node. A
+        // payload bound there is written in place, so the node is first made
+        // the slot's alone, and every read goes through the node the slot
+        // then holds.
+        let through_mut_slot = !scrut_is_inline
+            && self.tcx.is_payload_enum(peeled)
+            && matches!(
+                self.tcx.kind_of(scrut_ty),
+                TyKind::Ref {
+                    mutability: gossamer_types::Mutbl::Mut,
+                    ..
+                }
+            );
+        let source = if through_mut_slot {
+            let scalar = |b: &Self, ty: Option<gossamer_types::Ty>| {
+                ty.is_none_or(|ty| {
+                    matches!(
+                        b.tcx.kind_of(ty),
+                        TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char
+                    )
+                })
+            };
+            let writes_in_place = fields.iter().enumerate().any(|(i, field)| {
+                !matches!(field.kind, HirPatKind::Wildcard | HirPatKind::Rest)
+                    && !scalar(
+                        self,
+                        payload_tys.as_ref().and_then(|tys| tys.get(i).copied()),
+                    )
+            });
+            if writes_in_place {
+                let bytes = self
+                    .variant_payload_bytes(declared_tys.as_deref().unwrap_or(&[]), fields.len());
+                self.emit_make_unique(aggregate, i128::from(bytes), span);
+            }
+            self.load_slot_value(aggregate, peeled, span)
+        } else {
+            aggregate
+        };
         for (i, field) in fields.iter().enumerate() {
             if matches!(field.kind, HirPatKind::Wildcard | HirPatKind::Rest) {
                 continue;
@@ -2674,6 +2996,12 @@ impl<'a> Builder<'a> {
             ) && !self.tcx.is_inline_enum_ty(binding_ty)
                 && !self.is_by_value_enum_ty(binding_ty)
                 && self.type_slot_bytes(binding_ty) >= 8;
+            // A nested node and a string are named through their slot by a
+            // `&mut`, the way a `&mut` parameter of either names its caller's.
+            let payload_is_aggregate = payload_is_aggregate
+                || (through_mut_slot
+                    && (self.tcx.is_payload_enum(binding_ty)
+                        || matches!(self.tcx.kind_of(binding_ty), TyKind::String)));
             let bind_in_place = !scrut_is_inline
                 && payload_is_aggregate
                 && matches!(
@@ -2720,22 +3048,70 @@ impl<'a> Builder<'a> {
                 // A boxed payload's slot holds the block its words live in,
                 // which the load answers. A slot-resident payload's words are
                 // the slot, whose home each back end names for itself.
-                let reader = if bind_in_place && !self.is_boxable_aggregate_payload(binding_ty) {
-                    "gos_enum_slot_ptr"
+                let boxed = self.is_boxable_aggregate_payload(binding_ty)
+                    && !self.tcx.is_payload_enum(binding_ty)
+                    && !matches!(self.tcx.kind_of(binding_ty), TyKind::String);
+                if through_mut_slot && bind_in_place && boxed {
+                    // The box the node holds is written in place too, so it is
+                    // made the node's alone before the binding names it.
+                    let ptr_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+                    let box_slot = self.fresh(ptr_ty);
+                    self.emit_assign(
+                        Place::local(box_slot),
+                        Rvalue::CallIntrinsic {
+                            name: "gos_enum_word_addr",
+                            args: vec![
+                                Operand::Copy(Place::local(source)),
+                                Operand::Copy(Place::local(off_local)),
+                            ],
+                        },
+                        span,
+                    );
+                    let bytes = i128::from(self.type_slot_bytes(binding_ty));
+                    self.emit_make_unique(box_slot, bytes, span);
+                    let zero = self.fresh(ptr_ty);
+                    self.emit_assign(
+                        Place::local(zero),
+                        Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                        span,
+                    );
+                    self.emit_assign(
+                        Place::local(payload_local),
+                        Rvalue::CallIntrinsic {
+                            name: "gos_load",
+                            args: vec![
+                                Operand::Copy(Place::local(box_slot)),
+                                Operand::Copy(Place::local(zero)),
+                            ],
+                        },
+                        span,
+                    );
                 } else {
-                    "gos_enum_load"
-                };
-                self.emit_assign(
-                    Place::local(payload_local),
-                    Rvalue::CallIntrinsic {
-                        name: reader,
-                        args: vec![
-                            Operand::Copy(Place::local(aggregate)),
-                            Operand::Copy(Place::local(off_local)),
-                        ],
-                    },
-                    span,
-                );
+                    // A nested node or a string is named by the address of
+                    // the word it lives in; an aggregate held in the slot by
+                    // each back end's own representation of it.
+                    let by_word = through_mut_slot
+                        && (self.tcx.is_payload_enum(binding_ty)
+                            || matches!(self.tcx.kind_of(binding_ty), TyKind::String));
+                    let reader = if bind_in_place && by_word {
+                        "gos_enum_word_addr"
+                    } else if bind_in_place && !boxed {
+                        "gos_enum_slot_ptr"
+                    } else {
+                        "gos_enum_load"
+                    };
+                    self.emit_assign(
+                        Place::local(payload_local),
+                        Rvalue::CallIntrinsic {
+                            name: reader,
+                            args: vec![
+                                Operand::Copy(Place::local(source)),
+                                Operand::Copy(Place::local(off_local)),
+                            ],
+                        },
+                        span,
+                    );
+                }
             } else {
                 continue;
             }

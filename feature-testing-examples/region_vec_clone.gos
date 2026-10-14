@@ -1,0 +1,52 @@
+// A vector copied while a loop's region is open lives in that region, so the
+// region node that stores the copy holds memory that lasts exactly as long as
+// it does.
+
+struct Expr {
+    id: u32
+    kind: ExprKind
+}
+
+enum ExprKind {
+    Lit(i64)
+    Blk(Block)
+}
+
+struct Block {
+    stmts: Vec<i64>
+    tail: Option<Expr>
+}
+
+fn lit(v: i64) -> Expr {
+    Expr { id: 1, kind: ExprKind::Lit(v) }
+}
+
+fn wrap(acc: Expr, n: i64) -> Expr {
+    let block = Block { stmts: #[n, n + 1], tail: Some(acc) }
+    Expr { id: 11, kind: ExprKind::Blk(block) }
+}
+
+fn sum(e: Expr) -> i64 {
+    match e.kind {
+        ExprKind::Lit(v) => v
+        ExprKind::Blk(b) => {
+            let mut t = 0
+            for s in b.stmts {
+                t += s
+            }
+            t + match b.tail {
+                Some(x) => sum(x)
+                None => 0
+            }
+        }
+    }
+}
+
+fn main() {
+    let mut total = 0
+    for n in 0..6 {
+        let e = wrap(wrap(lit(n), n * 10), n * 100)
+        total += sum(e)
+    }
+    println(total)
+}

@@ -1,0 +1,432 @@
+// Fresh node ids for a copied subtree, handed out in the order
+// `gossamer_ast`'s `VisitorMut` walk reaches each expression, statement,
+// pattern, type, and item: a node takes its id before its children.
+
+use ast::{ArrayExpr, Block, ClosureParam, EnumDecl, EnumVariant, Expr, ExprKind, FnDecl, FnParam, GenericArg, ImplDecl, ImplItem, Item, ItemKind, MatchArm, ModBody, ModDecl, PathExpr, PathSegment, Pattern, PatternKind, SelectArm, SelectOp, Stmt, StmtKind, StructBody, StructExprField, StructField, TraitDecl, TraitItem, TupleField, Type, TypeKind, TypePath, TypePathSegment}
+use parse
+use parse::Parser
+
+pub fn expr(p: &mut Parser, e: Expr) -> Expr {
+    let id = parse::alloc(p)
+    let kind = match e.kind {
+        ExprKind::Path(path) => ExprKind::Path(path_expr(p, path)),
+        ExprKind::ExprBlock(b) => ExprKind::ExprBlock(block(p, b)),
+        ExprKind::Unsafe(b) => ExprKind::Unsafe(block(p, b)),
+        ExprKind::Try(inner) => ExprKind::Try(expr(p, inner)),
+        ExprKind::Unary { op, operand } => ExprKind::Unary { op: op, operand: expr(p, operand) },
+        ExprKind::FieldAccess { receiver, field } => ExprKind::FieldAccess { receiver: expr(p, receiver), field: field },
+        ExprKind::Loop { label, body } => ExprKind::Loop { label: label, body: expr(p, body) },
+        ExprKind::Tuple(items) => ExprKind::Tuple(exprs(p, items)),
+        ExprKind::MapLiteral(items) => ExprKind::MapLiteral(exprs(p, items)),
+        ExprKind::SetLiteral(items) => ExprKind::SetLiteral(exprs(p, items)),
+        ExprKind::Array(a) => ExprKind::Array(array(p, a)),
+        ExprKind::FixedArray(a) => ExprKind::FixedArray(array(p, a)),
+        ExprKind::Select(arms) => {
+            let mut out: Vec<SelectArm> = #[]
+            for arm in arms {
+                out.push(select_arm(p, arm))
+            }
+            ExprKind::Select(out)
+        }
+        ExprKind::Call { callee, args } => {
+            let c = expr(p, callee)
+            ExprKind::Call { callee: c, args: exprs(p, args) }
+        }
+        ExprKind::MethodCall { receiver, name, name_span, desugared_from, generics, args } => {
+            let r = expr(p, receiver)
+            ExprKind::MethodCall { receiver: r, name: name, name_span: name_span, desugared_from: desugared_from, generics: generics, args: exprs(p, args) }
+        }
+        ExprKind::Index { base, index } => {
+            let b = expr(p, base)
+            ExprKind::Index { base: b, index: expr(p, index) }
+        }
+        ExprKind::Binary { op, lhs, rhs } => {
+            let l = expr(p, lhs)
+            ExprKind::Binary { op: op, lhs: l, rhs: expr(p, rhs) }
+        }
+        ExprKind::Assign { op, place, value } => {
+            let pl = expr(p, place)
+            ExprKind::Assign { op: op, place: pl, value: expr(p, value) }
+        }
+        ExprKind::Cast { value, ty } => {
+            let v = expr(p, value)
+            ExprKind::Cast { value: v, ty: type_(p, ty) }
+        }
+        ExprKind::If { condition, then_branch, else_branch } => {
+            let c = expr(p, condition)
+            let t = expr(p, then_branch)
+            let e2 = match else_branch {
+                Some(x) => Some(expr(p, x)),
+                None => None,
+            }
+            ExprKind::If { condition: c, then_branch: t, else_branch: e2 }
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            let s = expr(p, scrutinee)
+            let mut out: Vec<MatchArm> = #[]
+            for arm in arms {
+                let pat = pattern(p, arm.pattern)
+                let guard = match arm.guard {
+                    Some(g) => Some(expr(p, g)),
+                    None => None,
+                }
+                out.push(MatchArm { pattern: pat, guard: guard, body: expr(p, arm.body) })
+            }
+            ExprKind::Match { scrutinee: s, arms: out }
+        }
+        ExprKind::While { label, condition, body } => {
+            let c = expr(p, condition)
+            ExprKind::While { label: label, condition: c, body: expr(p, body) }
+        }
+        ExprKind::For { label, pattern: pat, iter, body } => {
+            let pt = pattern(p, pat)
+            let it = expr(p, iter)
+            ExprKind::For { label: label, pattern: pt, iter: it, body: expr(p, body) }
+        }
+        ExprKind::Closure { params, ret, body } => {
+            let mut out: Vec<ClosureParam> = #[]
+            for param in params {
+                let pt = pattern(p, param.pattern)
+                let ty = match param.ty {
+                    Some(t) => Some(type_(p, t)),
+                    None => None,
+                }
+                out.push(ClosureParam { pattern: pt, ty: ty })
+            }
+            let r = match ret {
+                Some(t) => Some(type_(p, t)),
+                None => None,
+            }
+            ExprKind::Closure { params: out, ret: r, body: expr(p, body) }
+        }
+        ExprKind::Return(value) => ExprKind::Return(opt_expr(p, value)),
+        ExprKind::Break { label, value } => ExprKind::Break { label: label, value: opt_expr(p, value) },
+        ExprKind::Struct { path, fields, base, syntax } => {
+            let mut out: Vec<StructExprField> = #[]
+            for f in fields {
+                out.push(StructExprField { name: f.name, value: opt_expr(p, f.value) })
+            }
+            ExprKind::Struct { path: path, fields: out, base: opt_expr(p, base), syntax: syntax }
+        }
+        ExprKind::Range { start, end, kind } => {
+            let s = opt_expr(p, start)
+            ExprKind::Range { start: s, end: opt_expr(p, end), kind: kind }
+        }
+        other => other,
+    }
+    parse::mk_expr(id, e.span, kind)
+}
+
+fn opt_expr(p: &mut Parser, e: Option<Expr>) -> Option<Expr> {
+    match e {
+        Some(x) => Some(expr(p, x)),
+        None => None,
+    }
+}
+
+fn exprs(p: &mut Parser, items: Vec<Expr>) -> Vec<Expr> {
+    let mut out: Vec<Expr> = #[]
+    for e in items {
+        out.push(expr(p, e))
+    }
+    out
+}
+
+fn array(p: &mut Parser, a: ArrayExpr) -> ArrayExpr {
+    match a {
+        ArrayExpr::List(items) => ArrayExpr::List(exprs(p, items)),
+        ArrayExpr::Repeat { value, count } => {
+            let v = expr(p, value)
+            ArrayExpr::Repeat { value: v, count: expr(p, count) }
+        }
+    }
+}
+
+fn select_arm(p: &mut Parser, arm: SelectArm) -> SelectArm {
+    let op = match arm.op {
+        SelectOp::Recv { pattern: pat, channel } => {
+            let pt = pattern(p, pat)
+            SelectOp::Recv { pattern: pt, channel: expr(p, channel) }
+        }
+        SelectOp::Send { channel, value } => {
+            let c = expr(p, channel)
+            SelectOp::Send { channel: c, value: expr(p, value) }
+        }
+        SelectOp::Default => SelectOp::Default,
+    }
+    SelectArm { op: op, body: expr(p, arm.body) }
+}
+
+pub fn block(p: &mut Parser, b: Block) -> Block {
+    let mut stmts: Vec<Stmt> = #[]
+    for s in b.stmts {
+        stmts.push(stmt(p, s))
+    }
+    let tail = opt_expr(p, b.tail)
+    Block { stmts: stmts, tail: tail, synthetic: b.synthetic, kind: b.kind }
+}
+
+fn stmt(p: &mut Parser, s: Stmt) -> Stmt {
+    let id = parse::alloc(p)
+    let kind = match s.kind {
+        StmtKind::Let { pattern: pat, ty, init } => {
+            let pt = pattern(p, pat)
+            let t = match ty {
+                Some(x) => Some(type_(p, x)),
+                None => None,
+            }
+            StmtKind::Let { pattern: pt, ty: t, init: opt_expr(p, init) }
+        }
+        StmtKind::StmtExpr { expr: e, has_semi } => StmtKind::StmtExpr { expr: expr(p, e), has_semi: has_semi },
+        StmtKind::Defer(e) => StmtKind::Defer(expr(p, e)),
+        StmtKind::StmtItem(i) => StmtKind::StmtItem(item(p, i)),
+    }
+    parse::mk_stmt(id, s.span, kind)
+}
+
+fn generic_args(p: &mut Parser, args: Vec<GenericArg>) -> Vec<GenericArg> {
+    let mut out: Vec<GenericArg> = #[]
+    for a in args {
+        out.push(match a {
+            GenericArg::GenericArgType(t) => GenericArg::GenericArgType(type_(p, t)),
+            GenericArg::Const(e) => GenericArg::Const(expr(p, e)),
+        })
+    }
+    out
+}
+
+fn path_expr(p: &mut Parser, path: PathExpr) -> PathExpr {
+    let mut segments: Vec<PathSegment> = #[]
+    for s in path.segments {
+        segments.push(PathSegment { name: s.name, generics: generic_args(p, s.generics) })
+    }
+    PathExpr { segments: segments }
+}
+
+fn type_path(p: &mut Parser, path: TypePath) -> TypePath {
+    let mut segments: Vec<TypePathSegment> = #[]
+    for s in path.segments {
+        segments.push(TypePathSegment { name: s.name, generics: generic_args(p, s.generics), assoc_bindings: s.assoc_bindings })
+    }
+    TypePath { segments: segments }
+}
+
+fn type_(p: &mut Parser, t: Type) -> Type {
+    let id = parse::alloc(p)
+    let kind = match t.kind {
+        TypeKind::Path(path) => TypeKind::Path(type_path(p, path)),
+        TypeKind::Tuple(items) => {
+            let mut out: Vec<Type> = #[]
+            for x in items {
+                out.push(type_(p, x))
+            }
+            TypeKind::Tuple(out)
+        }
+        TypeKind::Array { elem, len } => {
+            let e = type_(p, elem)
+            TypeKind::Array { elem: e, len: expr(p, len) }
+        }
+        TypeKind::Slice(elem) => TypeKind::Slice(type_(p, elem)),
+        TypeKind::Ref { mutability, inner } => TypeKind::Ref { mutability: mutability, inner: type_(p, inner) },
+        TypeKind::Fn { kind, params, ret } => {
+            let mut out: Vec<Type> = #[]
+            for x in params {
+                out.push(type_(p, x))
+            }
+            let r = match ret {
+                Some(x) => Some(type_(p, x)),
+                None => None,
+            }
+            TypeKind::Fn { kind: kind, params: out, ret: r }
+        }
+        other => other,
+    }
+    parse::mk_type(id, t.span, kind)
+}
+
+fn patterns(p: &mut Parser, items: Vec<Pattern>) -> Vec<Pattern> {
+    let mut out: Vec<Pattern> = #[]
+    for x in items {
+        out.push(pattern(p, x))
+    }
+    out
+}
+
+fn pattern(p: &mut Parser, pat: Pattern) -> Pattern {
+    let id = parse::alloc(p)
+    let kind = match pat.kind {
+        PatternKind::PatternIdent { mutability, name, subpattern } => {
+            let sub = match subpattern {
+                Some(x) => Some(pattern(p, x)),
+                None => None,
+            }
+            PatternKind::PatternIdent { mutability: mutability, name: name, subpattern: sub }
+        }
+        PatternKind::Path(path) => PatternKind::Path(type_path(p, path)),
+        PatternKind::Tuple(items) => PatternKind::Tuple(patterns(p, items)),
+        PatternKind::Or(items) => PatternKind::Or(patterns(p, items)),
+        PatternKind::Slice { prefix, rest, suffix } => {
+            let pre = patterns(p, prefix)
+            let r = match rest {
+                Some(x) => Some(pattern(p, x)),
+                None => None,
+            }
+            PatternKind::Slice { prefix: pre, rest: r, suffix: patterns(p, suffix) }
+        }
+        PatternKind::Struct { path, fields, rest } => {
+            let mut out: Vec<ast::FieldPattern> = #[]
+            for f in fields {
+                let sub = match f.pattern {
+                    Some(x) => Some(pattern(p, x)),
+                    None => None,
+                }
+                out.push(ast::FieldPattern { name: f.name, pattern: sub })
+            }
+            PatternKind::Struct { path: path, fields: out, rest: rest }
+        }
+        PatternKind::TupleStruct { path, elems } => PatternKind::TupleStruct { path: path, elems: patterns(p, elems) },
+        PatternKind::Ref { mutability, inner } => PatternKind::Ref { mutability: mutability, inner: pattern(p, inner) },
+        other => other,
+    }
+    parse::mk_pat(id, pat.span, kind)
+}
+
+fn item(p: &mut Parser, it: Item) -> Item {
+    let id = parse::alloc(p)
+    let kind = match it.kind {
+        ItemKind::Fn(decl) => ItemKind::Fn(fn_decl(p, decl)),
+        ItemKind::Struct(decl) => {
+            let mut d = decl
+            d.body = struct_body(p, d.body)
+            ItemKind::Struct(d)
+        }
+        ItemKind::Enum(decl) => {
+            let mut d = decl
+            let mut variants: Vec<EnumVariant> = #[]
+            for v in d.variants {
+                let mut nv = v
+                nv.body = struct_body(p, v.body)
+                nv.discriminant = opt_expr(p, v.discriminant)
+                variants.push(nv)
+            }
+            d.variants = variants
+            ItemKind::Enum(d)
+        }
+        ItemKind::Trait(decl) => {
+            let mut d = decl
+            let mut items: Vec<TraitItem> = #[]
+            for ti in d.items {
+                items.push(match ti {
+                    TraitItem::Fn(f) => TraitItem::Fn(fn_decl(p, f)),
+                    TraitItem::TraitItemType { attrs, name, bounds, default } => {
+                        let df = match default {
+                            Some(x) => Some(type_(p, x)),
+                            None => None,
+                        }
+                        TraitItem::TraitItemType { attrs: attrs, name: name, bounds: bounds, default: df }
+                    }
+                    TraitItem::Const { attrs, name, ty, default } => {
+                        let t = type_(p, ty)
+                        TraitItem::Const { attrs: attrs, name: name, ty: t, default: opt_expr(p, default) }
+                    }
+                })
+            }
+            d.items = items
+            ItemKind::Trait(d)
+        }
+        ItemKind::Impl(decl) => {
+            let mut d = decl
+            d.self_ty = type_(p, d.self_ty)
+            let mut items: Vec<ImplItem> = #[]
+            for ii in d.items {
+                items.push(match ii {
+                    ImplItem::Fn(f) => ImplItem::Fn(fn_decl(p, f)),
+                    ImplItem::ImplItemType { attrs, name, ty } => ImplItem::ImplItemType { attrs: attrs, name: name, ty: type_(p, ty) },
+                    ImplItem::Const { attrs, name, ty, value } => {
+                        let t = type_(p, ty)
+                        ImplItem::Const { attrs: attrs, name: name, ty: t, value: expr(p, value) }
+                    }
+                })
+            }
+            d.items = items
+            ItemKind::Impl(d)
+        }
+        ItemKind::TypeAlias(decl) => {
+            let mut d = decl
+            d.ty = type_(p, d.ty)
+            ItemKind::TypeAlias(d)
+        }
+        ItemKind::Const(decl) => {
+            let mut d = decl
+            d.ty = type_(p, d.ty)
+            d.value = expr(p, d.value)
+            ItemKind::Const(d)
+        }
+        ItemKind::Static(decl) => {
+            let mut d = decl
+            d.ty = type_(p, d.ty)
+            d.value = expr(p, d.value)
+            ItemKind::Static(d)
+        }
+        ItemKind::Mod(decl) => {
+            let body = match decl.body {
+                ModBody::Inline(items) => {
+                    let mut out: Vec<Item> = #[]
+                    for x in items {
+                        out.push(item(p, x))
+                    }
+                    ModBody::Inline(out)
+                }
+                ModBody::External => ModBody::External,
+            }
+            ItemKind::Mod(ModDecl { name: decl.name, body: body })
+        }
+        other => other,
+    }
+    Item { id: id, span: it.span, attrs: it.attrs, visibility: it.visibility, kind: kind }
+}
+
+fn struct_body(p: &mut Parser, body: StructBody) -> StructBody {
+    match body {
+        StructBody::Named(fields) => {
+            let mut out: Vec<StructField> = #[]
+            for f in fields {
+                let mut nf = f
+                nf.ty = type_(p, f.ty)
+                out.push(nf)
+            }
+            StructBody::Named(out)
+        }
+        StructBody::Tuple(fields) => {
+            let mut out: Vec<TupleField> = #[]
+            for f in fields {
+                let mut nf = f
+                nf.ty = type_(p, f.ty)
+                out.push(nf)
+            }
+            StructBody::Tuple(out)
+        }
+        StructBody::Unit => StructBody::Unit,
+    }
+}
+
+fn fn_decl(p: &mut Parser, decl: FnDecl) -> FnDecl {
+    let mut d = decl
+    let mut params: Vec<FnParam> = #[]
+    for param in d.params {
+        params.push(match param {
+            FnParam::Typed { pattern: pat, ty, is_comptime, default } => {
+                let pt = pattern(p, pat)
+                FnParam::Typed { pattern: pt, ty: type_(p, ty), is_comptime: is_comptime, default: default }
+            }
+            other => other,
+        })
+    }
+    d.params = params
+    d.ret = match d.ret {
+        Some(t) => Some(type_(p, t)),
+        None => None,
+    }
+    d.body = opt_expr(p, d.body)
+    d
+}

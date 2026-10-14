@@ -11,6 +11,8 @@ Unicode general-category predicates, casing, normalization, and segmentation.
 | `char_width` | `fn char_width(r: char) -> i64` | Terminal columns r occupies: 2 for wide and fullwidth characters, 0 for combining marks, zero-width, and control characters, otherwise 1. |
 | `str_width` | `fn str_width(s: String) -> i64` | Terminal columns s occupies, reading emoji and variation sequences as the clusters a terminal draws. |
 | `is_letter` | `fn is_letter(rune: char) -> bool` | True if r is in general-category group L. |
+| `is_xid_start` | `fn is_xid_start(rune: char) -> bool` | True if r may begin an identifier: Unicode XID_Start (UAX #31) or `_`. |
+| `is_xid_continue` | `fn is_xid_continue(rune: char) -> bool` | True if r may continue an identifier: Unicode XID_Continue (UAX #31). |
 | `is_digit` | `fn is_digit(rune: char) -> bool` | True if r is a decimal digit (category Nd). |
 | `is_number` | `fn is_number(rune: char) -> bool` | True if r is any numeric (Nd\|Nl\|No). |
 | `is_space` | `fn is_space(rune: char) -> bool` | True if r is whitespace (Z* plus HT/LF/VT/FF/CR/NEL). |

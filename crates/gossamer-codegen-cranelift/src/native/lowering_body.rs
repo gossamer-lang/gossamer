@@ -456,8 +456,9 @@ pub(super) fn lower_body(
         // `Aggregate` lands; without a stack slot that field store writes
         // through a null base and faults. A later whole-value assignment
         // rebinds the variable to its own (heap) storage, leaving this slot
-        // dead. Parameters (already bound to a pointer) and the return local
-        // are skipped.
+        // dead. Parameters (already bound to a pointer) are skipped, and so is
+        // the return local unless the body returns through the sret ABI, which
+        // copies the result words out of the frame at the return.
         let ptr_ty = module.target_config().pointer_type();
         let mut field_store_targets: std::collections::HashSet<u32> =
             std::collections::HashSet::new();
@@ -519,11 +520,15 @@ pub(super) fn lower_body(
                 }
             }
             // An `unwrap` answers the payload words a carrier's box keeps, and
-            // the destination copies them into storage of its own.
+            // an element address the words a vector keeps; the destination
+            // copies them into storage of its own.
             if let Operand::Const(gossamer_mir::ConstValue::Str(name)) = callee
                 && matches!(
                     name.as_str(),
-                    "gos_rt_result_unwrap" | "gos_rt_option_unwrap"
+                    "gos_rt_result_unwrap"
+                        | "gos_rt_option_unwrap"
+                        | "gos_rt_vec_get_ptr"
+                        | "gos_rt_vec_get_ptr_unchecked"
                 )
                 && destination.projection.is_empty()
             {
@@ -533,7 +538,8 @@ pub(super) fn lower_body(
         let mut targets: Vec<u32> = field_store_targets.into_iter().collect();
         targets.sort_unstable();
         for local_u32 in targets {
-            if local_u32 <= body.arity {
+            let sret_return = local_u32 == Local::RETURN.0 && intrinsics.sret_ptr.is_some();
+            if local_u32 <= body.arity && !sret_return {
                 continue;
             }
             let local = Local(local_u32);

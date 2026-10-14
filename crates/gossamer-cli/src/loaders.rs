@@ -51,23 +51,46 @@ fn proc_status_memory_bytes(status: &str, field: &str) -> Option<u64> {
     })
 }
 
-/// Pretty-prints frontend stage timings for `gos check --timings`.
-pub(crate) fn print_timings(
+/// The frontend stage timings line `gos check --timings` prints.
+/// `autoderive` and `comptime` are the source rewrites that run ahead of the
+/// frontend, and `prepared_reused` says the cache answered both; `frontend`
+/// carries the frontend's own per-stage split.
+pub(crate) fn timings_line(
     source_len: usize,
-    parse: std::time::Duration,
-    resolve: std::time::Duration,
-    typeck: std::time::Duration,
-    exhaust: std::time::Duration,
-) {
-    let total = parse + resolve + typeck + exhaust;
-    outln!(
-        "timings: {source_len} bytes source; parse {:>6.2}ms, resolve {:>6.2}ms, typeck {:>6.2}ms, exhaust {:>6.2}ms, total {:>6.2}ms",
-        parse.as_secs_f64() * 1000.0,
-        resolve.as_secs_f64() * 1000.0,
-        typeck.as_secs_f64() * 1000.0,
-        exhaust.as_secs_f64() * 1000.0,
-        total.as_secs_f64() * 1000.0,
-    );
+    autoderive: std::time::Duration,
+    comptime: std::time::Duration,
+    prepared_reused: bool,
+    frontend: &gossamer_driver::frontend::FrontendTimings,
+) -> String {
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+    let total = autoderive
+        + comptime
+        + frontend.parse
+        + frontend.resolve
+        + frontend.typecheck
+        + frontend.exhaustiveness
+        + frontend.arena_escape;
+    format!(
+        "timings: {source_len} bytes source; autoderive {:>6.2}ms, comptime {:>6.2}ms, parse {:>6.2}ms, resolve {:>6.2}ms, typeck {:>6.2}ms, exhaust {:>6.2}ms, escape {:>6.2}ms, total {:>6.2}ms{}{}",
+        ms(autoderive),
+        ms(comptime),
+        ms(frontend.parse),
+        ms(frontend.resolve),
+        ms(frontend.typecheck),
+        ms(frontend.exhaustiveness),
+        ms(frontend.arena_escape),
+        ms(total),
+        if prepared_reused {
+            " (prepared unit reused)"
+        } else {
+            ""
+        },
+        if frontend.parse_cache_hit {
+            " (frontend cache hit)"
+        } else {
+            ""
+        },
+    )
 }
 
 /// Parses, resolves, type-checks, and exhaustiveness-checks
@@ -77,12 +100,16 @@ pub(crate) fn print_timings(
 /// may happen. Used by every `gos` subcommand that runs user code
 /// so the interpreter, native build, test runner, and bench runner
 /// all reject the same static-invalid programs.
+///
+/// `program` is the tree autoderive answered alongside `source`, when the
+/// caller has it.
 pub(crate) fn load_and_check(
     source: &str,
     file_id: gossamer_lex::FileId,
     map: &gossamer_lex::SourceMap,
+    program: Option<gossamer_parse::autoderive::ParsedProgram>,
 ) -> Result<(gossamer_hir::HirProgram, gossamer_types::TyCtxt)> {
-    load_and_check_with_sf(source, file_id, map).map(|(program, _, tcx)| (program, tcx))
+    load_and_check_with_sf(source, file_id, map, program).map(|(program, _, tcx)| (program, tcx))
 }
 
 /// Same as [`load_and_check`] but also returns the parsed
@@ -92,6 +119,7 @@ pub(crate) fn load_and_check_with_sf(
     source: &str,
     file_id: gossamer_lex::FileId,
     map: &gossamer_lex::SourceMap,
+    program: Option<gossamer_parse::autoderive::ParsedProgram>,
 ) -> Result<(
     gossamer_hir::HirProgram,
     gossamer_ast::SourceFile,
@@ -105,7 +133,7 @@ pub(crate) fn load_and_check_with_sf(
     // `gos check` / `gos build` so a program rejected by any one is
     // rejected by all. `check_frontend` synthesizes the implicit `fn
     // main` for an entry file's top-level statements, so `sf` carries it.
-    let outcome = gossamer_driver::check_frontend(source, file_id);
+    let outcome = gossamer_driver::check_frontend_with_program(source, file_id, program);
     profile_rss_stage("frontend_checked");
     for diag in &outcome.warnings {
         eprintln!("{}", gossamer_diagnostics::render(diag, map, render_opts));

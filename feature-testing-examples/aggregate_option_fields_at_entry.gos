@@ -1,0 +1,80 @@
+// An aggregate local whose fields include an `Option<String>` beside
+// optional recursive values starts with no previous value to release, even
+// when the stack below it holds old words.
+
+struct Ty {
+    id: i64
+    name: String
+}
+
+struct Decl {
+    attrs: Vec<i64>
+    name: String
+    ret: Option<Ty>
+    body: Option<Expr>
+    abi: Option<String>
+}
+
+enum Expr {
+    Lit(i64)
+    Add(Expr, Expr)
+}
+
+enum Kind {
+    Func(Decl)
+    Named(String)
+}
+
+fn make(n: i64) -> Decl {
+    let body = if n % 2 == 0 { Some(Expr::Add(Expr::Lit(n), Expr::Lit(1))) } else { None }
+    let abi = if n % 3 == 0 { Some(f"abi{n}") } else { None }
+    let ret = if n % 4 == 1 { Some(Ty { id: n, name: "i64" }) } else { None }
+    Decl { attrs: #[n], name: f"f{n}", ret: ret, body: body, abi: abi }
+}
+
+fn kind_of(n: i64) -> Kind {
+    if n == 5 {
+        return Kind::Named("five")
+    }
+    Kind::Func(make(n))
+}
+
+/// Leaves non-zero words in the stack the next call reuses.
+fn dirty(seed: i64) -> i64 {
+    let words = [seed, seed * 3 + 1, seed * 7 + 5, seed * 11 + 9, seed * 13 + 3, seed * 17 + 1, seed * 19 + 7, seed * 23 + 2, seed * 29 + 4, seed * 31 + 6, seed * 37 + 8, seed * 41 + 1, seed * 43 + 3, seed * 47 + 5, seed * 53 + 7, seed * 59 + 9, seed * 61 + 2, seed * 67 + 4, seed * 71 + 6, seed * 73 + 8]
+    let mut total = 0
+    for w in words {
+        total += w % 1000
+    }
+    total
+}
+
+fn eval(e: Expr) -> i64 {
+    match e {
+        Expr::Lit(n) => n
+        Expr::Add(a, b) => eval(a) + eval(b)
+    }
+}
+
+fn main() {
+    let mut total = 0
+    for n in 0..8 {
+        total += dirty(n * 1234567891 + 98765)
+        match kind_of(n) {
+            Kind::Func(d) => {
+                let body = match d.body {
+                    Some(e) => eval(e)
+                    None => 0
+                }
+                let abi = d.abi.unwrap_or("none")
+                let ret = match d.ret {
+                    Some(t) => t.name
+                    None => "()"
+                }
+                println(f"{d.name} {d.attrs.len()} {body} {abi} {ret}")
+            }
+            Kind::Named(name) => println(name)
+        }
+    }
+    println(total > 0)
+}

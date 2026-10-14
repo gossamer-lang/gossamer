@@ -358,6 +358,79 @@ pub fn cfg_target_family() -> &'static str {
     &cfg_target().family
 }
 
+/// Items taken out of a tree so a pass reads the rest of it in place, each
+/// put back at the position it was taken from by [`SetAside::restore`].
+#[derive(Debug)]
+pub struct SetAside {
+    /// Each removed item with its index in the list before removal, in
+    /// ascending index order.
+    removed: Vec<(usize, crate::Item)>,
+    /// What was set aside inside each kept inline module, by the module's
+    /// index in the list after removal.
+    nested: Vec<(usize, SetAside)>,
+}
+
+impl SetAside {
+    /// Removes every item `keep` refuses from `items`, at any module depth.
+    #[must_use]
+    pub fn take(items: &mut Vec<crate::Item>, keep: &impl Fn(&crate::Item) -> bool) -> Self {
+        let mut removed = Vec::new();
+        if !items.iter().all(keep) {
+            let mut kept = Vec::with_capacity(items.len());
+            for (index, item) in std::mem::take(items).into_iter().enumerate() {
+                if keep(&item) {
+                    kept.push(item);
+                } else {
+                    removed.push((index, item));
+                }
+            }
+            *items = kept;
+        }
+        let mut nested = Vec::new();
+        for (index, item) in items.iter_mut().enumerate() {
+            if let crate::ItemKind::Mod(crate::ModDecl {
+                body: crate::ModBody::Inline(inner),
+                ..
+            }) = &mut item.kind
+            {
+                let inner = Self::take(inner, keep);
+                if !inner.is_empty() {
+                    nested.push((index, inner));
+                }
+            }
+        }
+        Self { removed, nested }
+    }
+
+    /// Whether nothing was set aside.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.removed.is_empty() && self.nested.is_empty()
+    }
+
+    /// Puts every removed item back where [`SetAside::take`] found it.
+    pub fn restore(self, items: &mut Vec<crate::Item>) {
+        for (index, inner) in self.nested {
+            if let Some(crate::Item {
+                kind:
+                    crate::ItemKind::Mod(crate::ModDecl {
+                        body: crate::ModBody::Inline(body),
+                        ..
+                    }),
+                ..
+            }) = items.get_mut(index)
+            {
+                inner.restore(body);
+            }
+        }
+        // Ascending original indices: each insert lands before every item
+        // that followed it, so later indices stay exact.
+        for (index, item) in self.removed {
+            items.insert(index, item);
+        }
+    }
+}
+
 /// `source` with every item inactive under the current cfg removed, at any
 /// depth, or `None` when every item is active.
 ///

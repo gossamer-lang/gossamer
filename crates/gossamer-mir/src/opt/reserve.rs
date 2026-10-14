@@ -1903,6 +1903,37 @@ fn single_write_of<'a>(body: &'a Body, local: Local, user_fns: &HashSet<String>)
     if writes == 1 { found } else { None }
 }
 
+/// Whether `local` holds a value read out of a field, element, or referent
+/// of another place, through any chain of whole-value copies. That place
+/// still names the vector after the read, whatever becomes of `local`.
+fn read_out_of_a_place(body: &Body, local: Local) -> bool {
+    let mut seen = vec![false; body.locals.len()];
+    let mut pending = vec![local];
+    while let Some(current) = pending.pop() {
+        let Some(slot) = seen.get_mut(current.0 as usize) else {
+            continue;
+        };
+        if std::mem::replace(slot, true) {
+            continue;
+        }
+        for stmt in body.blocks.iter().flat_map(|block| &block.stmts) {
+            if let StatementKind::Assign {
+                place,
+                rvalue: Rvalue::Use(Operand::Copy(src)),
+            } = &stmt.kind
+                && place.local == current
+                && place.projection.is_empty()
+            {
+                if !src.projection.is_empty() {
+                    return true;
+                }
+                pending.push(src.local);
+            }
+        }
+    }
+    false
+}
+
 /// The origin of the aggregate whose field path a binding local names.
 ///
 /// The path steps through nested aggregates, and each step follows the chain
@@ -1951,7 +1982,7 @@ fn aggregate_field_origin(
                 let Some(Operand::Copy(src)) = operands.get(index as usize) else {
                     return None;
                 };
-                if !src.projection.is_empty() {
+                if !src.projection.is_empty() || read_out_of_a_place(body, src.local) {
                     return None;
                 }
                 if chain

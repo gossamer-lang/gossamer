@@ -1,0 +1,135 @@
+// A payload matched through `&mut` names the enum's own value: writes
+// through it reach the place the reference names, and never another holder
+// of the same node.
+
+struct Point {
+    x: i64
+    y: i64
+    tag: String
+}
+
+enum Node {
+    List(Vec<Node>)
+    Leaf(i64)
+    Name(String)
+    Pair(Node, Node)
+    At(Point)
+    Bag { items: Vec<i64>, label: String }
+    Both { left: Node, right: Node }
+}
+
+fn size(n: Node) -> i64 {
+    match n {
+        Node::List(v) => {
+            let mut total = 1
+            for c in v {
+                total += size(c)
+            }
+            total
+        }
+        Node::Leaf(_) => 1
+        Node::Name(s) => s.len()
+        Node::Pair(a, b) => size(a) + size(b)
+        Node::At(p) => p.x + p.y + p.tag.len()
+        Node::Bag { items, label } => items.len() + label.len()
+        Node::Both { left, right } => size(left) + size(right)
+    }
+}
+
+fn grow(n: &mut Node) {
+    match n {
+        Node::List(v) => v.push(Node::Leaf(7))
+        Node::Name(s) => s.push_str("!")
+        Node::Pair(a, b) => {
+            grow(a)
+            grow(b)
+        }
+        Node::At(p) => {
+            p.x += 10
+            p.tag.push_str("+")
+        }
+        Node::Bag { items, label } => {
+            items.push(1)
+            label.push_str("x")
+        }
+        Node::Both { left, right } => {
+            grow(left)
+            grow(right)
+        }
+        Node::Leaf(_) => {}
+    }
+}
+
+fn grow_guarded(n: &mut Node) {
+    match n {
+        Node::List(v) if v.len() < 10 => v.push(Node::Leaf(9))
+        Node::Name(s) if s.len() < 10 => s.push_str("?")
+        Node::Bag { items, .. } if items.len() < 5 => items.push(2)
+        _ => {}
+    }
+}
+
+fn grow_if_let(n: &mut Node) {
+    if let Node::List(v) = n {
+        v.push(Node::Leaf(8))
+    }
+}
+
+fn main() {
+    let mut a = Node::List(#[Node::Leaf(1)])
+    let a0 = a
+    grow(&mut a)
+    grow_guarded(&mut a)
+    grow_if_let(&mut a)
+    println(f"list {size(a)} {size(a0)}")
+
+    let mut s = Node::Name("ab")
+    let s0 = s
+    match &mut s {
+        Node::Name(t) => t.push_str("cd")
+        _ => {}
+    }
+    grow_guarded(&mut s)
+    println(f"name {size(s)} {size(s0)}")
+
+    let mut p = Node::Pair(Node::List(#[]), Node::Name("x"))
+    let p0 = p
+    grow(&mut p)
+    println(f"pair {size(p)} {size(p0)}")
+
+    let mut q = Node::At(Point { x: 1, y: 2, tag: "t" })
+    let q0 = q
+    grow(&mut q)
+    println(f"at {size(q)} {size(q0)}")
+
+    let mut xs = #[Node::List(#[]), Node::Name("z")]
+    let ys = xs
+    for i in 0..2 {
+        grow(&mut xs[i])
+    }
+    match &mut xs[0] {
+        Node::List(v) => v.push(Node::Leaf(3))
+        _ => {}
+    }
+    println(f"vec {size(xs[0])} {size(xs[1])} {size(ys[0])} {size(ys[1])}")
+
+    let mut deep = Node::Pair(Node::Pair(Node::List(#[]), Node::Leaf(0)), Node::Leaf(0))
+    let d0 = deep
+    for _ in 0..3 {
+        grow(&mut deep)
+    }
+    println(f"deep {size(deep)} {size(d0)}")
+
+    let mut b = Node::Both { left: Node::Bag { items: #[], label: "" }, right: Node::Leaf(0) }
+    let b0 = b
+    grow(&mut b)
+    grow(&mut b)
+    let mut c = Node::Bag { items: #[], label: "q" }
+    let c0 = c
+    grow_guarded(&mut c)
+    match &mut c {
+        Node::Bag { items, .. } if items.len() == 1 => items.push(4)
+        _ => {}
+    }
+    println(f"struct {size(b)} {size(b0)} {size(c)} {size(c0)}")
+}

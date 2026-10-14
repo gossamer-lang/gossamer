@@ -24,9 +24,9 @@ fn gos_binary() -> String {
         Some(binary) => binary
         None => {
             if os::family() == "windows" {
-                "./target/debug/gos.exe"
+                path::join(target_dir("."), "debug/gos.exe")
             } else {
-                "./target/debug/gos"
+                path::join(target_dir("."), "debug/gos")
             }
         }
     }
@@ -116,4 +116,11 @@ fn main() {
             }
         }
     }
+}
+
+/// Where `cargo build` writes: `CARGO_TARGET_DIR` when set, taken relative to
+/// `root` unless absolute, else `<root>/target`.
+fn target_dir(root: String) -> String {
+    let dir = env::var("CARGO_TARGET_DIR").unwrap_or("target")
+    if path::is_absolute(dir) { dir } else { path::join(root, dir) }
 }

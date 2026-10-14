@@ -566,6 +566,165 @@ pub(crate) fn move_unique_clones(
     count
 }
 
+/// The releases that give back a share of a boxed payload's child field of
+/// `kind`, or `None` for a kind a box cannot take over.
+fn boxed_child_releases(kind: crate::lower::FieldRcKind) -> Option<&'static [&'static str]> {
+    match kind {
+        crate::lower::FieldRcKind::Rc => Some(&[
+            "gos_rt_rc_release",
+            "gos_rt_str_free_typed",
+            "gos_rt_str_free",
+        ]),
+        crate::lower::FieldRcKind::Vec => Some(&["gos_rt_vec_free"]),
+        _ => None,
+    }
+}
+
+/// Whether the child layout `meta` gives a box describes exactly the counted
+/// and vector fields in `fields`: the box takes over one share per entry, so
+/// the entries and the fields the source gives back must be the same set.
+fn box_meta_matches_fields(meta: &[i64], fields: &[(Vec<u32>, crate::lower::FieldRcKind)]) -> bool {
+    use gossamer_abi::rc::{RC_CHILD_KIND_SHIFT, RC_CHILD_RC, RC_CHILD_VEC, RC_KIND_STRUCT, rc_kind};
+    let [kind, 1, 0, count, entries @ ..] = meta else {
+        return false;
+    };
+    if rc_kind(*kind) != RC_KIND_STRUCT || usize::try_from(*count) != Ok(entries.len()) {
+        return false;
+    }
+    let mut rc = 0usize;
+    let mut vec = 0usize;
+    for entry in entries {
+        match entry >> RC_CHILD_KIND_SHIFT {
+            RC_CHILD_RC => rc += 1,
+            RC_CHILD_VEC => vec += 1,
+            _ => return false,
+        }
+    }
+    let field_rc = fields
+        .iter()
+        .filter(|(_, k)| matches!(k, crate::lower::FieldRcKind::Rc))
+        .count();
+    rc == field_rc && vec == fields.len() - field_rc
+}
+
+/// Lets a variant payload's box take the shares its source holds when the
+/// box is the source's last use.
+///
+/// Boxing a multi-slot payload copies the source aggregate's words into a
+/// counted cell and retains every child for the cell, while the source keeps
+/// its own shares until its fields are released. When nothing reads the
+/// source again, those are two shares changing holders:
+///
+/// ```text
+/// b = gos_rt_enum_box_aggr(n, meta, s)       b = gos_rt_enum_box_aggr_take(n, meta, s)
+/// ...                                    ->  s.f = 0
+/// release(s.f)                               ...
+///                                            release(s.f)     // a no-op on null
+/// ```
+///
+/// A release that leaves a count above zero is what buffers an object for
+/// the cycle collector, so the pair otherwise feeds it every node a recursive
+/// constructor builds. Every child field of the source must be released on
+/// every path after the box, so the share it gives up is its own, and the
+/// box's child layout must name those same fields.
+pub(crate) fn move_boxed_payload_sources(
+    body: &mut Body,
+    tcx: &TyCtxt,
+    summaries: &crate::uniqueness::CallSummaries,
+) -> usize {
+    use crate::uniqueness::{Point, Uniqueness};
+
+    let moves: Vec<(usize, usize, Local, Vec<Vec<u32>>)> = {
+        let facts = crate::uniqueness::analyze(body, tcx, summaries);
+        let share = crate::ownership::ShareFacts::compute(body);
+        let mut out = Vec::new();
+        for (bi, block) in body.blocks.iter().enumerate() {
+            for (i, stmt) in block.stmts.iter().enumerate() {
+                let StatementKind::Assign {
+                    rvalue: Rvalue::CallIntrinsic {
+                        name: "gos_rt_enum_box_aggr",
+                        args,
+                    },
+                    ..
+                } = &stmt.kind
+                else {
+                    continue;
+                };
+                let [_, Operand::Const(ConstValue::Str(meta)), Operand::Copy(src)] =
+                    args.as_slice()
+                else {
+                    continue;
+                };
+                let si = src.local.0 as usize;
+                if !src.projection.is_empty()
+                    || si <= body.arity as usize
+                    || si >= body.locals.len()
+                    || body.locals[si].region
+                    || share.is_goroutine_shared(src.local)
+                {
+                    continue;
+                }
+                let Some(blob) = tcx.rc_meta(meta) else {
+                    continue;
+                };
+                let fields = crate::lower::aggregate_rc_field_paths(tcx, body.locals[si].ty);
+                if fields.is_empty() || !box_meta_matches_fields(blob, &fields) {
+                    continue;
+                }
+                let point = Point {
+                    block: block.id,
+                    stmt: i,
+                };
+                if facts.at(point, src.local) == Uniqueness::Borrowed
+                    || facts.live_after(point, src.local)
+                {
+                    continue;
+                }
+                let owned = fields.iter().all(|(path, kind)| {
+                    let place = Place {
+                        local: src.local,
+                        projection: path.iter().map(|f| Projection::Field(*f)).collect(),
+                    };
+                    boxed_child_releases(*kind)
+                        .is_some_and(|releases| released_on_every_path(body, bi, i + 1, &place, releases))
+                });
+                if owned {
+                    out.push((bi, i, src.local, fields.into_iter().map(|(path, _)| path).collect()));
+                }
+            }
+        }
+        out
+    };
+    let count = moves.len();
+    // Later statements of a block first, so each insertion leaves the
+    // indices still to be visited where they were found.
+    for (bi, i, src, paths) in moves.into_iter().rev() {
+        let block = &mut body.blocks[bi];
+        let (span, inlined) = (block.stmts[i].span, block.stmts[i].inlined.clone());
+        if let StatementKind::Assign {
+            rvalue: Rvalue::CallIntrinsic { name, .. },
+            ..
+        } = &mut block.stmts[i].kind
+        {
+            *name = "gos_rt_enum_box_aggr_take";
+        }
+        let zeroes = paths.into_iter().map(|path| Statement {
+            kind: StatementKind::Assign {
+                place: Place {
+                    local: src,
+                    projection: path.into_iter().map(Projection::Field).collect(),
+                },
+                rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+            },
+            span,
+            inlined: inlined.clone(),
+        });
+        let after = i + 1;
+        block.stmts.splice(after..after, zeroes);
+    }
+    count
+}
+
 static UNIQUENESS_REPORT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Makes the compiler name, on stderr, each function whose reference-count

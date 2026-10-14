@@ -489,7 +489,7 @@ fn peak_at(gos: String, dir: String, name: String, source: String, count: i64) -
 
 fn main() {
     let args = env::args()
-    let gos = if args.len() > 0 { args[0] } else { "./target/debug/gos" }
+    let gos = if args.len() > 0 { args[0] } else { path::join(target_dir("."), "debug/gos") }
     let dir = path::join(env::temp_dir(), "gos-leak-oracle")
     // A binary left by an earlier run would be measured instead of the one
     // this run builds, so the tree starts empty.
@@ -530,4 +530,11 @@ fn main() {
         process::exit(1)
     }
     println("leak_oracle: no probe's peak grew with the loop count")
+}
+
+/// Where `cargo build` writes: `CARGO_TARGET_DIR` when set, taken relative to
+/// `root` unless absolute, else `<root>/target`.
+fn target_dir(root: String) -> String {
+    let dir = env::var("CARGO_TARGET_DIR").unwrap_or("target")
+    if path::is_absolute(dir) { dir } else { path::join(root, dir) }
 }

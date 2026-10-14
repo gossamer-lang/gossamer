@@ -1,0 +1,27 @@
+// A function that stores one argument into another may take values built
+// inside an `arena { }` when the place it stores into is the block's own:
+// both die with the block.
+
+fn append_all(out: &mut Vec<String>, words: Vec<String>) {
+    for w in words {
+        out.push(w)
+    }
+}
+
+fn collect(out: &mut Vec<String>, word: String) {
+    append_all(out, #[word])
+}
+
+fn main() {
+    let mut total = 0
+    for i in 0..3 {
+        arena {
+            let words = #["a" + i.to_string(), "b"]
+            let mut out: Vec<String> = #[]
+            append_all(&mut out, words)
+            collect(&mut out, "c" + i.to_string())
+            total += out.len() + out[0].len()
+        }
+    }
+    println(total)
+}

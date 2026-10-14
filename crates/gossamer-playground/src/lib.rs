@@ -183,7 +183,7 @@ fn run_pipeline(user_source: &str) -> Result<(), String> {
     // on the VM and splice their result literals in, exactly as the
     // `gos` pre-pass does. A front-end rejection skips the fold so
     // the authoritative gate below reports it.
-    let source = if source.contains("comptime") {
+    let source = if gossamer_lex::mentions_comptime(&source) {
         let mut fold_map = SourceMap::new();
         let fold_file = fold_map.add_file(ENTRY_NAME.to_string(), source.clone());
         match front_end(&source, fold_file) {

@@ -71,6 +71,11 @@ path = "src/lib.gos"
 # Optional: also build a C library from the `#[export]` functions - a
 # static archive, a shared library, and `include/widget.h`.
 kind = ["staticlib", "cdylib"]
+# Optional: "host" builds a static archive without the runtime, for a host
+# that already links the Gossamer runtime. Its calls resolve against the
+# host's, so the process keeps one allocator and one scheduler. The default,
+# "bundled", carries the runtime so a C program links the archive alone.
+runtime = "bundled"
 
 # Optional: C sources this package compiles and links (see Foreign code).
 [native]

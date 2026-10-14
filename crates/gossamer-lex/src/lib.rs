@@ -21,7 +21,7 @@ mod token;
 
 pub use diagnostic::LexError;
 pub use interpolation::{InterpolationPiece, Placeholder, interpolation_pieces, scan_placeholder};
-pub use lexer::{Lexer, tokenize};
+pub use lexer::{Lexer, mentions_comptime, tokenize};
 pub use positions::{SourcePositions, set_source_positions, source_position};
 pub use source_map::{OriginSpan, SourceMap};
 pub use span::{FileId, LineCol, Span};

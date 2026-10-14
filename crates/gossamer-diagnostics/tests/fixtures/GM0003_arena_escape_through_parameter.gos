@@ -1,0 +1,15 @@
+// ERROR: GM0003
+fn append_all(out: &mut Vec<String>, words: Vec<String>) {
+    for w in words {
+        out.push(w)
+    }
+}
+
+fn main() {
+    let mut kept: Vec<String> = #[]
+    arena {
+        let words = #["a" + 1.to_string(), "b"]
+        append_all(&mut kept, words)
+    }
+    println(kept.len())
+}

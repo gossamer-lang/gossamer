@@ -31,6 +31,30 @@ Only a pass that produced **zero** diagnostics publishes a blob. A cache hit
 is therefore also proof that the program was accepted, which is what lets the
 gate return early without re-running the analyses.
 
+## The blob as the frontend contract
+
+The blob is the only thing a frontend hands the rest of the compiler: HIR,
+MIR, the bytecode compiler, the JIT, and LLVM emission all read it and
+nothing else, so two frontends that write the same blob for a program build
+the same binary from it.
+
+- **Schema.** `cargo xtask schema` traces the serde types the cache encodes
+  and writes `benchmarks/frontend_parser/schema/blob.json`: the root, then
+  every struct and enum the blob reaches, by name, with field order and
+  variant indices. postcard encodes exactly that shape - fields in order, an enum as its
+  variant index, a sequence or map as a varint length and its entries - so
+  the schema is enough to write an encoder in another language.
+  `cargo xtask schema --check` fails when the types change without the file.
+- **Determinism.** Every hashed map and set in the blob is written in key
+  order (`gossamer_ast::ordered`), so the bytes are a function of the program
+  alone, not of a hasher's seed. Two processes, a cold pass, and a cache
+  restore write the same blob, and a build from a restored blob lowers the
+  same MIR and links the same binary
+  (`crates/gossamer-cli/tests/frontend_blob_determinism.rs`).
+- **Emission.** `gos check --emit-frontend-blob PATH` writes an accepted
+  unit's blob; `GOS_EMIT_FRONTEND_BLOB=PATH` does the same for `gos run` and
+  `gos build`.
+
 ## Cache key
 
 The key is a SHA-256 over every input that can change the result:

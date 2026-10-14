@@ -9,7 +9,9 @@
 /// Opaque identifier for a single crate. The current compiler only ever
 /// resolves a single crate in one pass, so every [`CrateId`] carried
 /// around inside a resolution is the [`CrateId::LOCAL`] constant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct CrateId(u32);
 
 impl CrateId {
@@ -45,7 +47,9 @@ impl ModId {
 }
 
 /// Stable identifier for a named definition, unique within a crate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct DefId {
     /// Crate the definition belongs to.
     pub krate: CrateId,

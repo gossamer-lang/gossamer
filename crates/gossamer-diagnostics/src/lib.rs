@@ -117,6 +117,8 @@ impl Location {
 
 /// One label attached to a diagnostic.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+// The AST's loop `Label` shares the name; the blob schema names each once.
+#[serde(rename = "DiagnosticLabel")]
 pub struct Label {
     /// Where the label points.
     pub location: Location,

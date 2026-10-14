@@ -980,6 +980,13 @@ impl ShareScan<'_> {
         is_copy_ty(self.tcx, ty)
     }
 
+    /// Whether a value of `ty` reaches none of the parameter's storage that a
+    /// write could change: a copy, or a string, which is never written in
+    /// place.
+    fn shares_nothing(&mut self, ty: Ty) -> bool {
+        matches!(self.tcx.kind_of(ty), TyKind::String) || self.copy(ty)
+    }
+
     /// Whether `receiver.method(..)` answers elements copied out of the
     /// receiver into storage of their own, sharing nothing with it: a copy of
     /// a sequence whose elements are scalars or strings, or one such element
@@ -1012,7 +1019,7 @@ impl ShareScan<'_> {
                             mutable: false,
                         } = &pattern.kind
                             && self.projection_of_tracked(e)
-                            && !self.copy(e.ty)
+                            && !self.shares_nothing(e.ty)
                         {
                             self.walk_projection_indices(e);
                             self.names.push(name.name.as_str().to_string());
@@ -1047,7 +1054,7 @@ impl ShareScan<'_> {
         // is. A scalar read is a copy and falls through to the walk below.
         if !matches!(e.kind, HirExprKind::Path { .. })
             && self.projection_of_tracked(e)
-            && !self.copy(e.ty)
+            && !self.shares_nothing(e.ty)
         {
             if !place || returned {
                 self.escaped = true;
@@ -1058,7 +1065,9 @@ impl ShareScan<'_> {
         }
         match &e.kind {
             HirExprKind::Path { segments, .. } => {
-                if (!place || returned) && self.is_tracked(segments) {
+                // A copy holds none of the parameter's storage, whatever
+                // binding it was read through.
+                if (!place || returned) && self.is_tracked(segments) && !self.shares_nothing(e.ty) {
                     self.escaped = true;
                 }
             }
@@ -1077,7 +1086,8 @@ impl ShareScan<'_> {
                 // field projection below follows, for the same reason.
                 // A method answering fresh storage copied out of a sequence of
                 // scalars or strings answers nothing that reaches the receiver.
-                let scalar = self.copy(e.ty) || self.answers_fresh_copy(receiver, &name.name);
+                let scalar =
+                    self.shares_nothing(e.ty) || self.answers_fresh_copy(receiver, &name.name);
                 self.expr(receiver, place || scalar, returned && !scalar);
                 // A method that only reads the argument it is handed leaves
                 // the argument's storage inside the call, exactly as a field
@@ -1088,7 +1098,7 @@ impl ShareScan<'_> {
                 }
             }
             HirExprKind::Index { base, index } => {
-                let scalar = self.copy(e.ty);
+                let scalar = self.shares_nothing(e.ty);
                 self.expr(base, true, returned && !scalar);
                 self.expr(index, false, false);
             }
@@ -1108,13 +1118,16 @@ impl ShareScan<'_> {
                     {
                         continue;
                     }
-                    // The argument that is exactly the parameter's name is a
-                    // forward: whether it stays inside the call is the
-                    // callee's own answer for that position.
+                    // An argument that is the parameter's name, or a field or
+                    // element of it, is a forward: the callee's parameter then
+                    // names storage inside this one, and whether it stays
+                    // inside the call is the callee's own answer for that
+                    // position.
                     if let Some(def) = target
-                        && let HirExprKind::Path { segments, .. } = &a.kind
-                        && self.is_tracked(segments)
+                        && self.projection_of_tracked(a)
+                        && !self.shares_nothing(a.ty)
                     {
+                        self.walk_projection_indices(a);
                         self.forwards.push((def, idx));
                         continue;
                     }
@@ -1131,7 +1144,7 @@ impl ShareScan<'_> {
                 // field type yields something that still reaches the
                 // parameter's storage, and is read-only only where the whole
                 // projection already sits in a read-only place.
-                let scalar = self.copy(e.ty);
+                let scalar = self.shares_nothing(e.ty);
                 self.expr(receiver, place || scalar, returned && !scalar);
             }
             HirExprKind::Unary { operand, .. } => self.expr(operand, false, false),
@@ -1156,21 +1169,34 @@ impl ShareScan<'_> {
                 // loop binding names storage inside the parameter exactly as
                 // `let row = grid[i]` does, so it joins the tracked names.
                 let walked = self.walked_elements(scrutinee);
+                // A match on the parameter, or on a field or element of it,
+                // binds names inside the parameter's storage, which join the
+                // tracked names the way `let` bindings of it do.
+                let destructured = !walked
+                    && self.projection_of_tracked(scrutinee)
+                    && !self.shares_nothing(scrutinee.ty);
                 if walked {
                     if let HirExprKind::MethodCall { receiver, .. } = &scrutinee.kind {
                         self.walk_projection_indices(receiver);
                     }
+                } else if destructured {
+                    self.walk_projection_indices(scrutinee);
                 } else {
                     self.expr(scrutinee, false, false);
                 }
                 for arm in arms {
+                    // An arm's bindings name storage only inside that arm.
+                    let outer_names = self.names.len();
                     if walked {
                         self.track_some_binding(&arm.pattern);
+                    } else if destructured {
+                        self.track_pattern_bindings(&arm.pattern);
                     }
                     if let Some(g) = &arm.guard {
                         self.expr(g, false, false);
                     }
                     self.expr(&arm.body, place, returned);
+                    self.names.truncate(outer_names);
                 }
             }
             HirExprKind::Loop { body, .. } => self.expr(body, false, false),
@@ -1265,6 +1291,66 @@ impl ShareScan<'_> {
             },
             HirPatKind::Wildcard => {}
             _ => self.escaped = true,
+        }
+    }
+
+    /// Tracks every name `pattern` binds out of a tracked value. A `mut`
+    /// binding takes a value of its own, which this walk does not follow, so
+    /// it counts as a use that keeps the parameter.
+    fn track_pattern_bindings(&mut self, pattern: &gossamer_hir::HirPat) {
+        use gossamer_hir::HirPatKind;
+        // A copy, or a string, read out of the parameter shares nothing a
+        // write could reach.
+        if self.shares_nothing(pattern.ty) {
+            return;
+        }
+        match &pattern.kind {
+            HirPatKind::Binding {
+                name,
+                mutable: false,
+            } => self.names.push(name.name.as_str().to_string()),
+            HirPatKind::At {
+                name,
+                mutable: false,
+                sub,
+            } => {
+                self.names.push(name.name.as_str().to_string());
+                self.track_pattern_bindings(sub);
+            }
+            HirPatKind::Binding { mutable: true, .. }
+            | HirPatKind::At { mutable: true, .. }
+            | HirPatKind::Ref { .. } => self.escaped = true,
+            HirPatKind::Tuple(subs)
+            | HirPatKind::Variant { fields: subs, .. }
+            | HirPatKind::Or(subs) => {
+                for sub in subs {
+                    self.track_pattern_bindings(sub);
+                }
+            }
+            HirPatKind::Slice {
+                prefix,
+                rest,
+                suffix,
+            } => {
+                for sub in prefix.iter().chain(suffix) {
+                    self.track_pattern_bindings(sub);
+                }
+                if let Some(rest) = rest {
+                    self.track_pattern_bindings(rest);
+                }
+            }
+            HirPatKind::Struct { fields, .. } => {
+                for field in fields {
+                    match &field.pattern {
+                        Some(sub) => self.track_pattern_bindings(sub),
+                        None => self.names.push(field.name.name.as_str().to_string()),
+                    }
+                }
+            }
+            HirPatKind::Wildcard
+            | HirPatKind::Literal(_)
+            | HirPatKind::Range { .. }
+            | HirPatKind::Rest => {}
         }
     }
 

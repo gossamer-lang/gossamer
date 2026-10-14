@@ -196,8 +196,20 @@ pub(super) fn collect_field_rc(
                     TyKind::Adt { .. } if handle_container(tcx, t).is_some() => {
                         handle_container(tcx, t).map(handle_slot_kind)
                     }
-                    TyKind::Adt { .. } | TyKind::Tuple(_)
-                        if tcx.is_rc_managed(t) || tcx.slot_bytes(t) > 8 =>
+                    TyKind::Adt { .. } if tcx.is_rc_managed(t) => Some(SLOT_KIND_RC_NODE),
+                    // A carrier boxes a struct, tuple, or nested carrier
+                    // payload into a copy blob whatever its width, a
+                    // one-field struct included.
+                    TyKind::Tuple(_) => Some(SLOT_KIND_RC_NODE),
+                    TyKind::Adt { def, .. }
+                        if def.local == u32::MAX || def.local == u32::MAX - 1 =>
+                    {
+                        Some(SLOT_KIND_RC_NODE)
+                    }
+                    TyKind::Adt { def, .. }
+                        if def.local < u32::MAX - 16
+                            && !tcx.is_inline_enum_ty(t)
+                            && tcx.struct_field_tys(*def).is_some() =>
                     {
                         Some(SLOT_KIND_RC_NODE)
                     }
@@ -326,6 +338,28 @@ pub(super) fn ensure_slot_children_meta(
     tcx: &mut gossamer_types::TyCtxt,
     elem: gossamer_types::Ty,
 ) -> Option<String> {
+    let children = owned_slot_children(tcx, elem)?;
+    let symbol = format!("gos_rc_slotchildren_{}", elem.as_u32());
+    let mut blob = Vec::with_capacity(1 + children.len() * 4);
+    blob.push(children.len() as i64);
+    for (gate, disc_word, word, kind) in &children {
+        blob.push(*gate);
+        blob.push(*disc_word);
+        blob.push(*word);
+        blob.push(*kind);
+    }
+    tcx.register_rc_meta(symbol.clone(), blob);
+    Some(symbol)
+}
+
+/// The `(gate, disc_word, word, kind)` children a vector of `elem` owns in
+/// each slot, or `None` when its elements own nothing the slot layout names:
+/// a vector built for such an element releases those children itself and
+/// takes their shares when an element is pushed in.
+pub(crate) fn owned_slot_children(
+    tcx: &gossamer_types::TyCtxt,
+    elem: gossamer_types::Ty,
+) -> Option<Vec<(i64, i64, i64, i64)>> {
     let mut children = Vec::new();
     let mut has_direct = false;
     // A bare `Set` element IS the slot: its one word holds the table handle,
@@ -345,25 +379,18 @@ pub(super) fn ensure_slot_children_meta(
         && (def.local == u32::MAX || def.local == u32::MAX - 1)
     {
         // A bare `Option` / `Result` element is one carrier: its payload word
-        // is the element's child on the arm that holds one.
+        // is the element's child on the arm that holds one. No guarded
+        // copy-blob layout describes a bare carrier, so this one owns a blob
+        // payload as well.
         collect_field_rc(tcx, elem, 0, 0, &mut children, &mut has_direct);
+        has_direct |= !children.is_empty();
     } else {
         collect_slot_rc_children(tcx, elem, 0, 0, &mut children, &mut has_direct);
     }
     if !has_direct || children.is_empty() {
         return None;
     }
-    let symbol = format!("gos_rc_slotchildren_{}", elem.as_u32());
-    let mut blob = Vec::with_capacity(1 + children.len() * 4);
-    blob.push(children.len() as i64);
-    for (gate, disc_word, word, kind) in &children {
-        blob.push(*gate);
-        blob.push(*disc_word);
-        blob.push(*word);
-        blob.push(*kind);
-    }
-    tcx.register_rc_meta(symbol.clone(), blob);
-    Some(symbol)
+    Some(children)
 }
 
 /// The runtime marker naming how a map holding `value` values owns them, or
@@ -845,6 +872,309 @@ pub(crate) fn insert_vec_elem_metas(
             mutable: false,
             region: false,
         });
+    }
+}
+
+/// Lowers `s.as_bytes()` to a view of the string's own bytes when the
+/// resulting `Vec<u8>` is only read.
+///
+/// `gos_rt_str_as_bytes` copies the string, and a `let` binding of it copies
+/// the copy. A string is immutable, so a vector that is only measured, indexed,
+/// and freed can read the string's bytes in place instead: each copy becomes
+/// `gos_rt_str_as_bytes_view`, which holds a share of the string rather than
+/// its bytes. Any other use - a write, a call that might keep or change the
+/// vector, a copy into another place - keeps the copies.
+pub(crate) fn view_read_only_string_bytes(body: &mut Body) {
+    // The calls that read a vector and keep nothing of it, by name.
+    const READS: &[&str] = &[
+        "gos_rt_len",
+        "gos_rt_len_is_zero",
+        "gos_rt_vec_len",
+        "gos_rt_vec_get_i64",
+        "gos_rt_vec_get_i64_unchecked",
+        "gos_rt_vec_free",
+    ];
+    // Each `as_bytes` result, the string it came from, and the block holding
+    // the call; then any clone of that result, with its block.
+    let mut sources: Vec<(usize, Local, Operand)> = Vec::new();
+    for (bi, block) in body.blocks.iter().enumerate() {
+        if let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            args,
+            destination,
+            ..
+        } = &block.terminator
+            && name == "gos_rt_str_as_bytes"
+            && destination.projection.is_empty()
+            && let [text] = args.as_slice()
+        {
+            sources.push((bi, destination.local, text.clone()));
+        }
+    }
+    for (source_block, bytes, text) in sources {
+        let mut views = vec![(source_block, bytes)];
+        // A binding's copy of the result is the one the program reads.
+        for (bi, block) in body.blocks.iter().enumerate() {
+            if let Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(name)),
+                args,
+                destination,
+                ..
+            } = &block.terminator
+                && name == "gos_rt_vec_clone"
+                && destination.projection.is_empty()
+                && matches!(args.as_slice(), [Operand::Copy(p)] if p.local == bytes && p.projection.is_empty())
+            {
+                views.push((bi, destination.local));
+            }
+        }
+        let viewed: Vec<Local> = views.iter().map(|&(_, local)| local).collect();
+        if !only_read(body, &viewed, READS, &views) {
+            continue;
+        }
+        for (bi, _) in views {
+            if let Terminator::Call { callee, args, .. } = &mut body.blocks[bi].terminator {
+                *callee = Operand::Const(ConstValue::Str("gos_rt_str_as_bytes_view".to_string()));
+                *args = vec![text.clone()];
+            }
+        }
+    }
+}
+
+/// Whether `locals` are written only by the calls in `defs` and read only as
+/// the first argument of a call in `reads` or of a clone `defs` lists: every
+/// read the body makes of them is one of those.
+fn only_read(body: &Body, locals: &[Local], reads: &[&str], defs: &[(usize, Local)]) -> bool {
+    let first_arg_is = |args: &[Operand], local: Local| matches!(args.first(), Some(Operand::Copy(p)) if p.local == local && p.projection.is_empty());
+    let mut allowed: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    for (bi, block) in body.blocks.iter().enumerate() {
+        for stmt in &block.stmts {
+            if let StatementKind::Assign { place, rvalue } = &stmt.kind {
+                if locals.contains(&place.local) {
+                    return false;
+                }
+                if let Rvalue::CallIntrinsic { name, args } = rvalue
+                    && reads.contains(name)
+                {
+                    for &local in locals {
+                        if first_arg_is(args, local) {
+                            *allowed.entry(local.0).or_default() += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            args,
+            destination,
+            ..
+        } = &block.terminator
+        {
+            let defines = defs.iter().any(|&(b, l)| b == bi && l == destination.local);
+            if locals.contains(&destination.local) && !defines {
+                return false;
+            }
+            let clone_listed = name == "gos_rt_vec_clone" && defines;
+            if reads.contains(&name.as_str()) || clone_listed {
+                for &local in locals {
+                    if first_arg_is(args, local) {
+                        *allowed.entry(local.0).or_default() += 1;
+                    }
+                }
+            }
+        } else if let Terminator::Call { destination, .. } = &block.terminator
+            && locals.contains(&destination.local)
+        {
+            return false;
+        }
+    }
+    let reads_seen = super::read_counts::collect_local_read_counts(body);
+    locals.iter().all(|local| {
+        reads_seen.get(&local.0).copied().unwrap_or(0)
+            == allowed.get(&local.0).copied().unwrap_or(0)
+    })
+}
+
+/// Reads a packed vector element by value rather than through its address.
+///
+/// A scalar element read lowers as the element's address
+/// (`gos_rt_vec_get_ptr`) and a word load from it (`gos_load`). A vector of
+/// narrow integers, `char`s, or `f32`s may hold each element in fewer bytes
+/// than a word, and only the vector's header says how many, so such a read
+/// becomes `gos_rt_vec_get_i64`, which reads the header's width and answers
+/// the word the element carries.
+pub(crate) fn read_packed_elements_by_value(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+    use gossamer_types::TyKind;
+    let packed_vec = |op: &Operand| -> bool {
+        let Operand::Copy(place) = op else {
+            return false;
+        };
+        if !place.projection.is_empty() {
+            return false;
+        }
+        let Some(decl) = body.locals.get(place.local.0 as usize) else {
+            return false;
+        };
+        let mut ty = decl.ty;
+        while let TyKind::Ref { inner, .. } = tcx.kind_of(ty) {
+            ty = *inner;
+        }
+        matches!(
+            tcx.kind_of(ty),
+            TyKind::Vec(e) | TyKind::Slice(e)
+                if tcx.vec_packs_f32(*e) || tcx.vec_narrow_scalar(*e).is_some()
+        )
+    };
+    // The locals a constant zero is the only value of.
+    let mut zero_locals: std::collections::HashMap<u32, bool> = std::collections::HashMap::new();
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if let StatementKind::Assign { place, rvalue } = &stmt.kind
+                && place.projection.is_empty()
+            {
+                let zero = matches!(rvalue, Rvalue::Use(Operand::Const(ConstValue::Int(0))));
+                zero_locals
+                    .entry(place.local.0)
+                    .and_modify(|z| *z &= zero)
+                    .or_insert(zero);
+            }
+        }
+    }
+    let is_zero = |op: &Operand| match op {
+        Operand::Const(ConstValue::Int(0)) => true,
+        Operand::Copy(place) => {
+            place.projection.is_empty() && zero_locals.get(&place.local.0) == Some(&true)
+        }
+        _ => false,
+    };
+    // Each element address of a packed vector, by the local it lands in.
+    let mut addresses: std::collections::HashMap<u32, (Operand, Operand)> =
+        std::collections::HashMap::new();
+    for block in &body.blocks {
+        if let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            args,
+            destination,
+            ..
+        } = &block.terminator
+            && name == "gos_rt_vec_get_ptr"
+            && destination.projection.is_empty()
+            && args.len() == 2
+            && packed_vec(&args[0])
+        {
+            addresses.insert(destination.local.0, (args[0].clone(), args[1].clone()));
+        }
+    }
+    if addresses.is_empty() {
+        return;
+    }
+    for block in &mut body.blocks {
+        if let Terminator::Call {
+            callee,
+            args,
+            destination,
+            ..
+        } = &mut block.terminator
+            && matches!(callee, Operand::Const(ConstValue::Str(name)) if name == "gos_load")
+            && args.len() == 2
+            && is_zero(&args[1])
+            && let Operand::Copy(addr) = &args[0]
+            && addr.projection.is_empty()
+            && let Some((vec, index)) = addresses.get(&addr.local.0)
+            && !tcx.is_flat_inline_aggregate(body.locals[destination.local.0 as usize].ty)
+        {
+            *callee = Operand::Const(ConstValue::Str("gos_rt_vec_get_i64".to_string()));
+            *args = vec![vec.clone(), index.clone()];
+        }
+    }
+}
+
+/// Tags each vector of `i8`, `i16`, or `i32` a runtime call answers as
+/// signed (`gos_rt_vec_mark_signed_elems`), so the runtime reads its narrow
+/// elements with their sign. A vector compiled code constructs carries the
+/// kind from its constructor and one a user function answers was tagged where
+/// it was built; this covers the vectors a runtime shim builds at the width
+/// compiled code hands it. The marker writes only a vector not yet tagged.
+pub(crate) fn insert_signed_vec_marks(
+    body: &mut Body,
+    tcx: &gossamer_types::TyCtxt,
+    user_fn_names: &std::collections::HashSet<String>,
+) {
+    use gossamer_types::{IntTy, TyKind};
+    let narrow_signed = |l: Local| -> bool {
+        body.locals.get(l.0 as usize).is_some_and(|decl| {
+            matches!(
+                tcx.kind_of(decl.ty),
+                TyKind::Vec(e) | TyKind::Slice(e)
+                    if matches!(tcx.kind_of(*e), TyKind::Int(IntTy::I8 | IntTy::I16 | IntTy::I32))
+            )
+        })
+    };
+    let runtime_call = |name: &str| !user_fn_names.contains(name);
+    let mut stmt_marks: Vec<(usize, usize, Local)> = Vec::new();
+    let mut head_marks: Vec<(usize, Local)> = Vec::new();
+    for (bi, block) in body.blocks.iter().enumerate() {
+        for (si, stmt) in block.stmts.iter().enumerate() {
+            if let StatementKind::Assign {
+                place,
+                rvalue: Rvalue::CallIntrinsic { name, .. },
+            } = &stmt.kind
+                && place.projection.is_empty()
+                && runtime_call(name)
+                && narrow_signed(place.local)
+            {
+                stmt_marks.push((bi, si + 1, place.local));
+            }
+        }
+        if let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            destination,
+            target: Some(t),
+            ..
+        } = &block.terminator
+            && destination.projection.is_empty()
+            && runtime_call(name)
+            && narrow_signed(destination.local)
+        {
+            head_marks.push((t.0 as usize, destination.local));
+        }
+    }
+    if stmt_marks.is_empty() && head_marks.is_empty() {
+        return;
+    }
+    let unit_ty = tcx.unit_interned().unwrap_or(body.locals[0].ty);
+    let mark = |body: &mut Body, l: Local, span: gossamer_lex::Span| -> Statement {
+        let dest = Local(u32::try_from(body.locals.len()).expect("local overflow"));
+        body.locals.push(LocalDecl {
+            ty: unit_ty,
+            debug_name: None,
+            mutable: false,
+            region: false,
+        });
+        Statement {
+            kind: StatementKind::Assign {
+                place: Place::local(dest),
+                rvalue: Rvalue::CallIntrinsic {
+                    name: "gos_rt_vec_mark_signed_elems",
+                    args: vec![Operand::Copy(Place::local(l))],
+                },
+            },
+            span,
+            inlined: None,
+        }
+    };
+    // Descending gaps keep the earlier indices of a block valid.
+    stmt_marks.sort_by_key(|m| std::cmp::Reverse((m.0, m.1)));
+    for (bi, gap, l) in stmt_marks {
+        let span = body.blocks[bi].span;
+        let stmt = mark(body, l, span);
+        body.blocks[bi].stmts.insert(gap, stmt);
+    }
+    for (bi, l) in head_marks {
+        let span = body.blocks[bi].span;
+        let stmt = mark(body, l, span);
+        body.blocks[bi].stmts.insert(0, stmt);
     }
 }
 

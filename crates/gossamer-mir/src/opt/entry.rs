@@ -133,6 +133,13 @@ fn optimise_with_bounds_limit(
     elide_overflow_checks_by_facts(body);
     overflow_check_versioning(body, tcx);
     crate::verify::debug_verify_body(body);
+    fuse_range_copy_loops(body, tcx);
+    crate::verify::debug_verify_body(body);
+    read_csv_as_tables(body, tcx);
+    crate::verify::debug_verify_body(body);
+    // After copy propagation has put the literals in the operand positions.
+    elide_literal_string_counts(body);
+    crate::verify::debug_verify_body(body);
     if std::env::var_os("GOS_BOUNDS_REMARKS").is_some() {
         let after_versioning = bounds_access_counts(body);
         eprintln!(
@@ -253,6 +260,10 @@ pub fn optimise_debug(body: &mut Body, tcx: &TyCtxt) {
     if bounds_versioning_enabled() {
         bounds_check_versioning(body, tcx, &effects);
     }
+    crate::verify::debug_verify_body(body);
+    fuse_range_copy_loops(body, tcx);
+    crate::verify::debug_verify_body(body);
+    read_csv_as_tables(body, tcx);
     crate::verify::debug_verify_body(body);
 }
 

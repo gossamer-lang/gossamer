@@ -40,7 +40,29 @@ use gossamer_lex::{FileId, Keyword};
 /// collected along the way.
 #[must_use]
 pub fn parse_source_file(source: &str, file: FileId) -> (SourceFile, Vec<ParseDiagnostic>) {
-    let mut parser = Parser::new(source, file);
+    parse_with(Parser::new(source, file), file)
+}
+
+/// [`parse_source_file`] that also answers the significant tokens the
+/// lexer produced (no whitespace or comments), ending with `Eof`, for a
+/// caller that scans them as well.
+///
+/// The tokens are in the coordinates of `source` without a leading byte
+/// order mark, which the parser strips.
+#[must_use]
+pub fn parse_source_file_with_tokens(
+    source: &str,
+    file: FileId,
+) -> (SourceFile, Vec<ParseDiagnostic>, Vec<gossamer_lex::Token>) {
+    let parser = Parser::new(source, file);
+    // Copied before parsing: the parser splits a `>>` closing two generic
+    // lists in its own buffer.
+    let tokens = parser.tokens.tokens().to_vec();
+    let (sf, diagnostics) = parse_with(parser, file);
+    (sf, diagnostics, tokens)
+}
+
+fn parse_with(mut parser: Parser<'_>, file: FileId) -> (SourceFile, Vec<ParseDiagnostic>) {
     let file_attrs = parser.parse_file_attrs_public();
     let mut uses = Vec::new();
     loop {
@@ -54,26 +76,7 @@ pub fn parse_source_file(source: &str, file: FileId) -> (SourceFile, Vec<ParseDi
     }
     let mut items = Vec::new();
     let mut top_level_stmts = Vec::new();
-    while !parser.at_eof_public() {
-        let before = parser.checkpoint_public();
-        if crate::recovery::is_item_start(&parser) {
-            items.extend(parser.parse_item_group());
-        } else {
-            // At file scope a non-item token begins a bare statement: the
-            // entry file is implicitly `fn main`, so its top-level code is
-            // collected here and wrapped by `synthesize_entry_main`. In a
-            // non-entry file every such token sits inside a `mod { }` body,
-            // which is parsed elsewhere as items only.
-            top_level_stmts.push(parser.parse_stmt());
-        }
-        if parser.checkpoint_public() == before {
-            // The item/stmt parser left us where we started - guarantee
-            // forward progress so an adversarial input cannot pin the loop
-            // and blow the buffers up to gigabytes of stub allocations.
-            parser.bump_public();
-            parser.recover_to_item_start_public();
-        }
-    }
+    parse_items_to_end(&mut parser, &mut items, &mut top_level_stmts);
     // Pull `use` decls hoisted out of inline `mod ... { ... }` bodies
     // up to the source-file level so the resolver's top-level
     // `collect_imports` walk picks them up. Whether a single-segment
@@ -91,6 +94,70 @@ pub fn parse_source_file(source: &str, file: FileId) -> (SourceFile, Vec<ParseDi
     gossamer_ast::cfg::apply_package_features(&mut source_file);
     let diagnostics = parser.take_diagnostics();
     (source_file, diagnostics)
+}
+
+/// The tree [`parse_source_file`] answers for `source`, built from
+/// `program`, the clean tree of its first `start` bytes, by parsing only
+/// what follows them.
+///
+/// Holds when those bytes end between items, which a clean parse of them
+/// alone proves: the parse of the rest then starts where the whole-file
+/// parse's item loop stands, with the node numbering it has reached.
+pub(crate) fn parse_appended(
+    source: &str,
+    file: FileId,
+    mut program: SourceFile,
+    start: usize,
+) -> (SourceFile, Vec<ParseDiagnostic>) {
+    let bom = if source.starts_with('\u{feff}') {
+        '\u{feff}'.len_utf8()
+    } else {
+        0
+    };
+    let start = u32::try_from(start.saturating_sub(bom)).unwrap_or(u32::MAX);
+    let mut parser = Parser::from_offset(source, file, start, program.next_node_id);
+    let mut items = Vec::new();
+    let mut top_level_stmts = Vec::new();
+    parse_items_to_end(&mut parser, &mut items, &mut top_level_stmts);
+    program.items.append(&mut items);
+    program.top_level_stmts.append(&mut top_level_stmts);
+    program.uses.extend(parser.take_hoisted_uses());
+    program.next_node_id = parser.ids.issued();
+    program.named_args.extend(parser.take_named_args());
+    // Settling is idempotent, so the program's own items, settled by its
+    // own parse, come through unchanged.
+    gossamer_ast::cfg::apply_package_features(&mut program);
+    let diagnostics = parser.take_diagnostics();
+    (program, diagnostics)
+}
+
+/// The file-scope item loop: items, and the bare statements of an entry
+/// file, until the end of input.
+fn parse_items_to_end(
+    parser: &mut Parser<'_>,
+    items: &mut Vec<gossamer_ast::Item>,
+    top_level_stmts: &mut Vec<gossamer_ast::Stmt>,
+) {
+    while !parser.at_eof_public() {
+        let before = parser.checkpoint_public();
+        if crate::recovery::is_item_start(parser) {
+            items.extend(parser.parse_item_group());
+        } else {
+            // At file scope a non-item token begins a bare statement: the
+            // entry file is implicitly `fn main`, so its top-level code is
+            // collected here and wrapped by `synthesize_entry_main`. In a
+            // non-entry file every such token sits inside a `mod { }` body,
+            // which is parsed elsewhere as items only.
+            top_level_stmts.push(parser.parse_stmt());
+        }
+        if parser.checkpoint_public() == before {
+            // The item/stmt parser left us where we started - guarantee
+            // forward progress so an adversarial input cannot pin the loop
+            // and blow the buffers up to gigabytes of stub allocations.
+            parser.bump_public();
+            parser.recover_to_item_start_public();
+        }
+    }
 }
 
 // Public shims so `parse_source_file` can talk to the parser across the

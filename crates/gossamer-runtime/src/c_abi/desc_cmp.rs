@@ -762,6 +762,31 @@ unsafe fn compare_vec_in(
         // comparison of whole words would read past.
         // SAFETY: `a` and `b` are live vecs with element `i` (checked above).
         let (wa, wb) = unsafe { ((*a).elem_bytes, (*b).elem_bytes) };
+        // SAFETY: `a` and `b` are live vecs (checked above).
+        let (fa, fb) = unsafe {
+            (
+                crate::c_abi::vec::vec_packs_f32(&*a),
+                crate::c_abi::vec::vec_packs_f32(&*b),
+            )
+        };
+        if fa || fb {
+            // A packed `f32` compares as the `f64` it reads as.
+            // SAFETY: `ea` and `eb` address one element of their vec's width.
+            let (va, vb) = unsafe { (float_elem_word(ea, fa), float_elem_word(eb, fb)) };
+            // SAFETY: `va` and `vb` are words on the stack.
+            let ord = unsafe {
+                compare_flat_in(
+                    mode,
+                    elem_tag,
+                    (&raw const va).cast(),
+                    (&raw const vb).cast(),
+                )
+            };
+            if ord != 0 {
+                return ord;
+            }
+            continue;
+        }
         if (wa < 8 || wb < 8) && matches!(elem_tag, 0 | 1 | 3 | 4) {
             let signed = elem_tag == 0;
             // SAFETY: `ea` and `eb` address one element of their vec's width.
@@ -792,12 +817,27 @@ unsafe fn compare_vec_in(
     ord_code(la.cmp(&lb))
 }
 
+/// The word a float element at `at` reads as: a packed `f32` widens to its
+/// `f64`'s bits, a word is read whole.
+///
+/// # Safety
+/// `at` addresses four readable bytes when `packed`, eight otherwise.
+unsafe fn float_elem_word(at: *const u8, packed: bool) -> i64 {
+    if packed {
+        // SAFETY: `at` addresses four bytes (contract).
+        crate::c_abi::vec::f32_bits_to_word(unsafe { at.cast::<u32>().read_unaligned() })
+    } else {
+        // SAFETY: `at` addresses eight bytes (contract).
+        unsafe { at.cast::<i64>().read_unaligned() }
+    }
+}
+
 /// The scalar of `width` bytes at `at`, widened to a word: sign-extended
 /// when `signed`, zero-extended otherwise.
 ///
 /// # Safety
 /// `at` addresses `width` readable bytes.
-unsafe fn narrow_scalar(at: *const u8, width: u32, signed: bool) -> i64 {
+pub(crate) unsafe fn narrow_scalar(at: *const u8, width: u32, signed: bool) -> i64 {
     // SAFETY: `at` addresses `width` bytes (contract).
     unsafe {
         match (width, signed) {

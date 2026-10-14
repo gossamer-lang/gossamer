@@ -15,3 +15,6 @@ workspace = true
 gossamer-abi = { workspace = true }
 gossamer-lex = { workspace = true }
 serde = { workspace = true }
+
+[dev-dependencies]
+postcard = { version = "1", default-features = false, features = ["use-std"] }

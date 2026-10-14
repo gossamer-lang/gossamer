@@ -233,6 +233,21 @@ fn basic_expression_error_cases() -> &'static [BasicErrorCase] {
             "fn main() { let pair = (1, true)\npair.2 }\n",
             |error| matches!(error, TypeError::NoTupleField { .. }),
         ),
+        (
+            "tuple-variant pattern",
+            "enum K { A(i64), B(i64) }\nfn f(k: K) -> i64 { match k { K::A(v) => v, K::Nope(v) => v, _ => 0 } }\n",
+            |error| matches!(error, TypeError::UnknownVariant { variant, .. } if variant == "Nope"),
+        ),
+        (
+            "struct-variant pattern",
+            "enum K { A { v: i64 }, B }\nfn f(k: K) -> i64 { match k { K::A { v } => v, K::C { v } => v, _ => 0 } }\n",
+            |error| matches!(error, TypeError::UnknownVariant { variant, .. } if variant == "C"),
+        ),
+        (
+            "unit-variant pattern",
+            "enum K { A, B }\nfn f(k: K) -> i64 { match k { K::A => 1, K::Gone => 2, _ => 0 } }\n",
+            |error| matches!(error, TypeError::UnknownVariant { variant, .. } if variant == "Gone"),
+        ),
     ]
 }
 

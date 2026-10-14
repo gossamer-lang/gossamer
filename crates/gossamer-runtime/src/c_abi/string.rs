@@ -1908,12 +1908,16 @@ pub unsafe extern "C" fn gos_rt_vec_clone(src: *const GosVec) -> *mut GosVec {
         // SAFETY: `src` is a handle from compiled code, checked non-null above and live for the whole call.
         let s = unsafe { &*src };
         let bytes = (s.len as usize) * (s.elem_bytes as usize);
-        // Header + element buffer in one `Box<InlineVec>` (inline for a
-        // small vec, else a separate buffer), then copy the source slots
-        // into whichever data region `ptr` lands at. Ledger + strong count
-        // are set by `alloc_box_vec`, symmetric with `gos_rt_vec_free`.
-        let out = crate::c_abi::vec::alloc_box_vec(s.elem_bytes, s.elem_kind, s.len, s.len);
-        // SAFETY: `out` is the vec `alloc_box_vec` just made.
+        // The copy is made where every other constructor makes a vec: in the
+        // open region, if any, so a region object that stores it holds memory
+        // that lives exactly as long as it does.
+        let out = crate::c_abi::vec::alloc_vec_with_capacity(s.elem_bytes, s.elem_kind, s.len);
+        if out.is_null() {
+            return out;
+        }
+        // SAFETY: `out` is the vec just made, with room for `len` elements.
+        unsafe { (*out).len = s.len.max(0) };
+        // SAFETY: `out` is the vec just made.
         let data = unsafe { (*out).ptr.as_ptr() };
         if bytes > 0 && !s.ptr.is_null() && !data.is_null() {
             // SAFETY: `out`'s buffer holds `len` elements of the source's width, and the two do
@@ -2779,7 +2783,7 @@ pub unsafe extern "C" fn gos_rt_str_to_i64_opt(s: *const c_char) -> i128 {
 /// Every byte an integer accepts is ASCII, so the text needs no UTF-8 decoding
 /// first: a byte outside ASCII fails the digit test exactly as its decoded
 /// character fails `parse`.
-fn parse_i64_bytes(bytes: &[u8]) -> Option<i64> {
+pub(crate) fn parse_i64_bytes(bytes: &[u8]) -> Option<i64> {
     let (negative, digits) = match bytes {
         [b'-', rest @ ..] => (true, rest),
         [b'+', rest @ ..] => (false, rest),
@@ -3313,18 +3317,11 @@ pub unsafe extern "C" fn gos_rt_strings_join(
     })
 }
 
-/// Reads element `i` of a scalar Vec at its declared stride: 1-byte
-/// slots widen from `u8`, everything else reads the full 8-byte word.
+/// Reads element `i` of a scalar Vec as the word its element type carries,
+/// at the width and signedness the header records.
 unsafe fn vec_scalar_word(vec: &GosVec, i: usize) -> i64 {
     // SAFETY: this `unsafe fn`'s caller passes `i` below the vec's length.
-    let p = unsafe { vec.ptr.add(i * (vec.elem_bytes as usize)) };
-    if vec.elem_bytes == 1 {
-        // SAFETY: `p` addresses one element.
-        i64::from(unsafe { *p })
-    } else {
-        // SAFETY: `p` addresses one 8-byte element.
-        unsafe { (p as *const i64).read_unaligned() }
-    }
+    unsafe { crate::c_abi::vec::vec_elem_load_i64(vec, i as i64) }
 }
 
 /// `xs.join(sep)` for an integer-element Vec: Display-render each

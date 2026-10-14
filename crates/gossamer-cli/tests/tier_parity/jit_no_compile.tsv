@@ -48,7 +48,6 @@ examples/grep.gos	bytecode-only local
 examples/hello_world.gos	no hot body
 examples/http_diagnostics_transport.gos	bytecode-only local
 examples/json_derive_test.gos	entry shape
-examples/json_structs.gos	entry shape
 examples/line_count.gos	callable local
 examples/mime_demo.gos	no hot body
 examples/netip_demo.gos	no hot body
@@ -64,6 +63,7 @@ feature-testing-examples/aggr_enum_closure_arg.gos	callable local
 feature-testing-examples/aggr_enum_vec_combinators.gos	callable local
 feature-testing-examples/aggregate_binding.gos	no hot body
 feature-testing-examples/aggregate_compare.gos	no hot body
+feature-testing-examples/arena_local_sink_calls.gos	&mut aggregate param
 feature-testing-examples/array_literal_vec_methods.gos	no hot body
 feature-testing-examples/assoc_const_read.gos	entry shape
 feature-testing-examples/assoc_missing_impl_item.gos	no hot body
@@ -100,6 +100,7 @@ feature-testing-examples/channel_semantics_conformance.gos	cross-goroutine
 feature-testing-examples/channel_timers.gos	bytecode-only local
 feature-testing-examples/clone_builtin_dispatch.gos	no hot user body
 feature-testing-examples/closure_capture_aggregate.gos	callable local
+feature-testing-examples/closure_capture_writes.gos	callable local
 feature-testing-examples/closure_env_container_capture.gos	callable local
 feature-testing-examples/closure_env_ownership.gos	cross-goroutine
 feature-testing-examples/closure_goroutine.gos	bytecode-only local
@@ -242,9 +243,9 @@ feature-testing-examples/json_encode_aggregates.gos	bytecode-only local
 feature-testing-examples/json_encode_stream_shapes.gos	bytecode-only local
 feature-testing-examples/json_null_rendering.gos	no hot body
 feature-testing-examples/json_parse_errors.gos	bytecode-only local
+feature-testing-examples/json_parsed_reads.gos	bytecode-only local
 feature-testing-examples/json_round_trip_fuzz.gos	bytecode-only local
 feature-testing-examples/json_set_update.gos	no hot body
-feature-testing-examples/json_unsigned_and_map_keys.gos	bytecode-only local
 feature-testing-examples/json_value_constructors.gos	no hot body
 feature-testing-examples/json_yaml_encode.gos	no hot body
 feature-testing-examples/jwt_roundtrip.gos	no hot body
@@ -276,7 +277,6 @@ feature-testing-examples/metrics_observability.gos	no hot body
 feature-testing-examples/module_aggregate_slots.gos	aggregate print
 feature-testing-examples/module_impl_ordering.gos	no hot body
 feature-testing-examples/module_same_fn_names.gos	no hot body
-feature-testing-examples/module_scoped_type_names.gos	entry shape
 feature-testing-examples/mut_param_is_a_copy.gos	no hot body
 feature-testing-examples/mut_ref_container_params.gos	&mut aggregate param
 feature-testing-examples/mut_ref_params.gos	callable local
@@ -333,7 +333,6 @@ feature-testing-examples/recursive_enum_walk.gos	no hot body
 feature-testing-examples/reference_alias_mutation.gos	entry shape
 feature-testing-examples/regex_unicode_categories.gos	no hot body
 feature-testing-examples/result_default.gos	no hot body
-feature-testing-examples/result_struct_payload.gos	entry shape
 feature-testing-examples/returned_tables.gos	entry shape
 feature-testing-examples/router_closure_route.gos	no hot body
 feature-testing-examples/runtime_handles_typed.gos	bytecode-only local
@@ -346,7 +345,6 @@ feature-testing-examples/select_multiplex.gos	no hot body
 feature-testing-examples/self_unit_and_generic_callbacks.gos	callable local
 feature-testing-examples/sequence_spelling.gos	admission gate
 feature-testing-examples/serde_enums_and_field_attrs.gos	entry shape
-feature-testing-examples/serde_more_field_kinds.gos	entry shape
 feature-testing-examples/serde_typed_entry_points.gos	no hot user body
 feature-testing-examples/set_from_sequence.gos	no hot body
 feature-testing-examples/set_literal_rendering.gos	no hot body
@@ -456,6 +454,7 @@ feature-testing-examples/validate_errors.gos	no hot body
 feature-testing-examples/validate_errors_return.gos	bytecode-only local
 feature-testing-examples/value_order_and_equality.gos	no hot body
 feature-testing-examples/vec_capacity_overflow.gos	no hot body
+feature-testing-examples/vec_copies_into_holders.gos	&mut aggregate param
 feature-testing-examples/vec_get_method.gos	admission gate
 feature-testing-examples/vec_literal_rendering.gos	no hot body
 feature-testing-examples/vec_method_oob_panic.gos	no hot body

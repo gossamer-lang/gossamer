@@ -1,0 +1,73 @@
+// A returned tuple owns the payload of an Option field holding a struct,
+// including one whose nested struct packs several narrow fields.
+
+struct FileId(u32)
+
+struct Span {
+    file: FileId
+    start: u32
+    end: u32
+}
+
+struct Expr {
+    id: u32
+    span: Span
+    kind: Kind
+}
+
+enum Kind {
+    Lit(String)
+    Bin { lhs: Expr, rhs: Expr }
+}
+
+fn mk(id: u32, kind: Kind) -> Expr {
+    Expr { id: id, span: Span { file: FileId(0), start: id, end: id + 1 }, kind: kind }
+}
+
+fn show(e: Expr) -> String {
+    match e.kind {
+        Kind::Lit(s) => f"{s}@{e.span.start}"
+        Kind::Bin { lhs, rhs } => f"({show(lhs)} < {show(rhs)})#{e.id}"
+    }
+}
+
+fn condition(n: i64) -> (Vec<i64>, Option<Expr>) {
+    let e = mk(1, Kind::Bin { lhs: mk(2, Kind::Lit("i")), rhs: mk(3, Kind::Lit("n")) })
+    if n == 0 {
+        return (#[n], None)
+    }
+    (#[], Some(e))
+}
+
+fn labelled(n: i64) -> (i64, Option<Expr>, String) {
+    let _, cond = condition(n)
+    (n, cond, f"label{n}")
+}
+
+fn main() {
+    let held, first = condition(1)
+    for n in 0..3 {
+        let rest, cond = condition(n)
+        match cond {
+            Some(e) => println(f"{n}: {show(e)} rest={rest.len()}")
+            None => println(f"{n}: none rest={rest.len()}")
+        }
+        let k, again, label = labelled(n)
+        if let Some(e) = again {
+            println(f"{k} {label} {show(e)}")
+        }
+    }
+    let mut total = 0
+    for n in 0..200 {
+        let _, cond = condition(n % 3)
+        let filler = mk(9, Kind::Lit(f"filler{n}"))
+        if let Some(e) = cond {
+            total += show(e).len() + show(filler).len()
+        }
+    }
+    println(f"total: {total}")
+    match first {
+        Some(e) => println(f"first: {show(e)} {held.len()}")
+        None => println("first: none")
+    }
+}

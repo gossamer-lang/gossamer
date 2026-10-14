@@ -553,6 +553,9 @@ pub enum RawIntrinsic {
     /// `gos_enum_slot_ptr(ptr, offset)` - where a payload's words live, which
     /// each back end answers in the representation its own slot holds.
     EnumSlotPtr,
+    /// `gos_enum_word_addr(ptr, offset)` - the address of the payload word at
+    /// `offset`, the same on every back end.
+    EnumWordAddr,
     /// `gos_enum_tag(ptr, disc)`.
     EnumTag,
     /// `gos_enum_disc_tag(ptr)`.
@@ -1088,6 +1091,7 @@ impl RawIntrinsic {
         let intrinsic = match name {
             "gos_enum_load" => Self::EnumLoad,
             "gos_enum_slot_ptr" => Self::EnumSlotPtr,
+            "gos_enum_word_addr" => Self::EnumWordAddr,
             "gos_enum_tag" => Self::EnumTag,
             "gos_enum_disc_tag" => Self::EnumDiscTag,
             "gos_enum_untag" => Self::EnumUntag,
@@ -1142,9 +1146,14 @@ impl RawIntrinsic {
     #[must_use]
     pub fn arity_for_name(self, name: &str) -> RawIntrinsicArity {
         match self {
-            Self::EnumLoad | Self::EnumSlotPtr | Self::EnumTag | Self::EnumSetDisc | Self::Load => {
-                RawIntrinsicArity::Exact(2)
-            }
+            // A third operand on a payload load marks it a view: see
+            // `crate::lower::helpers::borrow_lent_payload_reads`.
+            Self::EnumLoad => RawIntrinsicArity::Range { min: 2, max: 3 },
+            Self::EnumSlotPtr
+            | Self::EnumWordAddr
+            | Self::EnumTag
+            | Self::EnumSetDisc
+            | Self::Load => RawIntrinsicArity::Exact(2),
             Self::Store | Self::StoreI128 | Self::RcAllocReuse | Self::EnumStructEq => {
                 RawIntrinsicArity::Exact(3)
             }

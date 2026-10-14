@@ -1,0 +1,33 @@
+// Parses `PP_FILE` `PP_REPS` times and writes the last parse's blob and
+// diagnostics to `PP_OUT`.
+
+use std::{env, fs}
+
+use parse_items
+
+/// Parses and encodes `text`, writes the result to `dest`, and answers its
+/// length.
+fn parse_once(text: String, dest: String) -> i64 {
+    let parsed, diags = parse_items::parse_source_file(text, 0)
+    let mut out: Vec<u8> = Vec::with_capacity(text.byte_len() * 4)
+    parse_items::encode(&mut out, parsed)
+    for d in diags {
+        out.extend_from_slice(d.name.as_bytes())
+        out.push(32)
+        out.extend_from_slice(f"{d.start} {d.end}\n".as_bytes())
+    }
+    let n = out.len()
+    fs::write(dest, out).unwrap()
+    n
+}
+
+fn main() {
+    let text = fs::read_to_string(env::var("PP_FILE").unwrap_or("")).unwrap_or("")
+    let dest = env::var("PP_OUT").unwrap_or("/dev/null")
+    let reps = env::var("PP_REPS").unwrap_or("1").to_i64().unwrap_or(1)
+    let mut total = 0
+    for _ in 0..reps {
+        total += parse_once(text, dest)
+    }
+    println(total)
+}

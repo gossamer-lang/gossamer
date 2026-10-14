@@ -16,7 +16,7 @@ use std::fmt::Write;
 
 pub use gossamer_core::json::{
     DEFAULT_MAX_DEPTH, DEFAULT_MAX_SIZE, Error, Value, max_depth, max_size, parse, set_max_depth,
-    set_max_size, validate,
+    set_max_size, typed, validate,
 };
 
 /// Encodes a [`Value`] as a compact UTF-8 JSON string.

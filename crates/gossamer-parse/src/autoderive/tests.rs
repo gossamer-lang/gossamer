@@ -15,6 +15,69 @@ mod autoderive_tests {
         super::parse_with_autoderive(&augmented, file).1
     }
 
+    /// The injected names a tree spells after the stdlib surface rewrite,
+    /// read off the rewritten tree itself.
+    fn names_after_rewrite(parsed: &gossamer_ast::SourceFile) -> std::collections::HashSet<String> {
+        struct Names(std::collections::HashSet<String>);
+        impl gossamer_ast::Visitor for Names {
+            fn visit_path_expr(&mut self, path: &gossamer_ast::PathExpr) {
+                for segment in &path.segments {
+                    if segment.name.name.starts_with("__gos_") {
+                        self.0.insert(segment.name.name.clone());
+                    }
+                }
+                gossamer_ast::visitor::walk_path_expr(self, path);
+            }
+            fn visit_type_path(&mut self, path: &gossamer_ast::ty::TypePath) {
+                for segment in &path.segments {
+                    if segment.name.name.starts_with("__gos_") {
+                        self.0.insert(segment.name.name.clone());
+                    }
+                }
+                gossamer_ast::visitor::walk_type_path(self, path);
+            }
+        }
+        let mut rewritten = parsed.clone();
+        super::rewrite_stdlib_struct_surface(&mut rewritten);
+        let mut names = Names(std::collections::HashSet::new());
+        gossamer_ast::Visitor::visit_source_file(&mut names, &rewritten);
+        names.0
+    }
+
+    #[test]
+    fn wrapper_names_match_the_rewritten_tree_on_every_fixture() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut with_names = 0;
+        for dir in ["feature-testing-examples", "examples"] {
+            let Ok(entries) = std::fs::read_dir(root.join(dir)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_none_or(|ext| ext != "gos") {
+                    continue;
+                }
+                let Ok(source) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let Some(parsed) = super::clean_parse(&source) else {
+                    continue;
+                };
+                let expected = names_after_rewrite(&parsed);
+                assert_eq!(
+                    super::stdlib_wrapper_names(&parsed),
+                    expected,
+                    "{}",
+                    path.display()
+                );
+                if !expected.is_empty() {
+                    with_names += 1;
+                }
+            }
+        }
+        assert!(with_names > 10, "only {with_names} fixtures name a wrapper");
+    }
+
     fn serde_field_errors(source: &str) -> Vec<(String, String)> {
         let diags = autoderive_diags(source);
         diags
@@ -129,7 +192,7 @@ mod autoderive_tests {
                    \tlet _ = \"struct NotAType\"\n\
                    \t// enum AlsoNotAType { A }\n\
                    }\n";
-        assert!(!super::source_may_need_ast_synthesis(src));
+        assert!(!super::source_may_need_ast_synthesis(&super::SourceTokens::new(src)));
         assert_eq!(
             super::augment_source(src),
             format!("{src}{}", super::GENERATED_SECTION_MARKER)
@@ -138,12 +201,21 @@ mod autoderive_tests {
 
     #[test]
     fn prescan_detects_real_type_declarations() {
-        assert!(super::source_may_need_ast_synthesis(
-            "struct Point { x: i64 }\nfn main() {}\n"
-        ));
-        assert!(super::source_may_need_ast_synthesis(
-            "enum Color { Red }\nfn main() {}\n"
-        ));
+        for src in [
+            "struct Point { x: i64 }\nfn main() {}\n",
+            "enum Color { Red }\nfn main() {}\n",
+            "#[derive(Debug)]\nfn main() {}\n",
+        ] {
+            assert!(super::source_may_need_ast_synthesis(&super::SourceTokens::new(src)));
+            // Once the scans have lexed the source, the prescan reads their
+            // tokens and answers the same.
+            let lexed = super::SourceTokens::new(src);
+            assert!(!lexed.all().is_empty());
+            assert!(super::source_may_need_ast_synthesis(&lexed));
+        }
+        let plain = super::SourceTokens::new("fn main() { let _ = 1 }\n");
+        assert!(!plain.all().is_empty());
+        assert!(!super::source_may_need_ast_synthesis(&plain));
     }
 
     #[test]

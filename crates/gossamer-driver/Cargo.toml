@@ -21,6 +21,7 @@ musl = []
 
 [dependencies]
 anyhow = { workspace = true }
+gossamer-abi = { workspace = true }
 gossamer-ast = { workspace = true }
 gossamer-codegen-cranelift = { workspace = true }
 gossamer-codegen-llvm = { workspace = true }
@@ -49,6 +50,7 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Storage_FileSystem",
     "Win32_System_Threading",
 ] }
 

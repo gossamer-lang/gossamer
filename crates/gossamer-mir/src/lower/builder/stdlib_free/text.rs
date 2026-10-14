@@ -73,6 +73,8 @@ impl<'a> Builder<'a> {
             // returns route through `gos_rt_unicode_*` helpers that
             // build a GosVec with `elem_kind = STRING`.
             "unicode::is_letter" => ("gos_rt_unicode_is_letter", self.tcx.bool_ty()),
+            "unicode::is_xid_start" => ("gos_rt_unicode_is_xid_start", self.tcx.bool_ty()),
+            "unicode::is_xid_continue" => ("gos_rt_unicode_is_xid_continue", self.tcx.bool_ty()),
             "unicode::char_width" => (
                 "gos_rt_unicode_char_width",
                 self.tcx.int_ty(gossamer_types::IntTy::I64),

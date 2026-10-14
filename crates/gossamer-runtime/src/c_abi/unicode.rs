@@ -72,6 +72,21 @@ fn alloc_string_vec(strings: Vec<String>) -> *mut GosVec {
 // General-category predicates
 // ---------------------------------------------------------------
 
+/// `unicode::is_xid_start(r)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_unicode_is_xid_start(c: u32) -> i64 {
+    ffi_entry!({
+        let r = char_from(c);
+        i64::from(r == '_' || unicode_ident::is_xid_start(r))
+    })
+}
+
+/// `unicode::is_xid_continue(r)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_unicode_is_xid_continue(c: u32) -> i64 {
+    ffi_entry!({ i64::from(unicode_ident::is_xid_continue(char_from(c))) })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_unicode_is_letter(c: u32) -> i64 {
     ffi_entry!({

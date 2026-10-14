@@ -652,48 +652,14 @@ fn load_unchanged_build(
     // running it, which happens after the key is formed. Each one is
     // re-stated here and compared with what it says today, so an edited
     // embedded asset is a miss exactly as an edited source is.
-    for line in lines {
-        let path = line.strip_prefix(COMPTIME_INPUT_PREFIX)?;
-        let path = path.split_once(' ')?.1.split_once(' ')?.1;
-        if comptime_input_line(Path::new(path))? != line {
-            return None;
-        }
-    }
+    let recorded: Vec<String> = lines.map(str::to_string).collect();
+    crate::unit_cache::inputs_unchanged(&recorded)?;
     let size = fs::metadata(out_path).ok()?.len();
     Some(NativeBuildOutcome {
         native_inputs: Vec::new(),
         size,
         note: format!("{note}, unchanged"),
     })
-}
-
-/// How a recorded compile-time input is spelled in a stamp:
-/// `input <len> <mtime> <path>`, path last so it needs no escaping.
-const COMPTIME_INPUT_PREFIX: &str = "input ";
-
-/// The stamp line for compile-time input `path`, or `None` when the
-/// path cannot be stated on one line.
-///
-/// A path holding a newline is the one shape a line-oriented stamp
-/// cannot express; refusing to record it makes every later build a
-/// miss, which is the safe direction.
-fn comptime_input_line(path: &Path) -> Option<String> {
-    let text = path.to_string_lossy();
-    if text.contains('\n') {
-        return None;
-    }
-    let (len, mtime) = fs::metadata(path).map_or_else(
-        |_| ("-".to_string(), "-".to_string()),
-        |meta| {
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or_else(|| "-".to_string(), |since| since.as_nanos().to_string());
-            (meta.len().to_string(), mtime)
-        },
-    );
-    Some(format!("{COMPTIME_INPUT_PREFIX}{len} {mtime} {text}"))
 }
 
 fn store_successful_build(
@@ -715,7 +681,7 @@ fn store_successful_build(
         outcome.note,
     );
     for path in comptime_inputs {
-        let Some(line) = comptime_input_line(path) else {
+        let Some(line) = crate::unit_cache::comptime_input_line(path) else {
             // Nothing recorded means nothing to compare, and a stamp
             // that cannot state its whole input set must not be one a
             // later build trusts.
@@ -742,25 +708,26 @@ fn validate_source(
     timings: &mut BuildTimings,
     origins: (&Path, &[gossamer_pkg::bundle::BundledSpan]),
 ) -> Result<ValidatedSource> {
-    // Compile-time codegen pass for from_json/to_json (and friends).
-    let phase_started = Instant::now();
-    let augmented = gossamer_parse::autoderive::augment_source(&source);
-    // Autoderive appends; what it appended is generated code, not a file.
-    let generated_len = augmented.len().saturating_sub(source.len());
-    timings.autoderive = phase_started.elapsed();
-    // The augmented source supersedes the file contents for every subsequent
+    // Autoderive generates from_json/to_json (and friends), and the comptime
+    // fold evaluates `comptime` regions and splices in their result literals
+    // so the native backend compiles a constant. What the fold read is as
+    // much an input of this build as the source is: the same text over
+    // different bytes is a different program, and the stamp has to be able
+    // to tell.
+    let prepared = crate::unit_cache::prepare(&source, &file.to_string_lossy());
+    // The prepared text supersedes the file contents for every subsequent
     // frontend stage. Release the original before parsing so large generated
     // files do not overlap the resolver, type table, and backend artifacts.
     drop(source);
-    // Comptime fold: evaluate `comptime` regions and splice in their
-    // result literals so the native backend compiles a constant.
-    let phase_started = Instant::now();
-    let augmented = crate::comptime_fold::fold_comptime(augmented, &file.to_string_lossy())?;
-    // What the fold read is as much an input of this build as the
-    // source is: the same text over different bytes is a different
-    // program, and the stamp has to be able to tell.
-    let comptime_inputs = gossamer_runtime::comptime_inputs::take();
-    timings.comptime = phase_started.elapsed();
+    timings.autoderive = prepared.autoderive;
+    timings.comptime = prepared.comptime;
+    if let Some(err) = prepared.fold_error {
+        return Err(err);
+    }
+    let generated_len = prepared.generated_len;
+    let comptime_inputs = prepared.comptime_inputs;
+    let program = prepared.program;
+    let augmented = prepared.source;
     let program_end = gossamer_parse::autoderive::program_source_end(&augmented);
     let mut map = gossamer_lex::SourceMap::new();
     let file_id = map.add_file(file.to_string_lossy().into_owned(), augmented);
@@ -774,7 +741,8 @@ fn validate_source(
     // otherwise compile to a binary that segfaults on the unmatched arm)
     // and the canonical-`std`-path check (GR0005). Anything the gate
     // rejects must never reach codegen.
-    let outcome = gossamer_driver::check_frontend(map.source(file_id), file_id);
+    let outcome =
+        gossamer_driver::check_frontend_with_program(map.source(file_id), file_id, program);
     timings.parse = outcome.timings.parse;
     timings.resolve = outcome.timings.resolve;
     timings.typecheck = outcome.timings.typecheck;
@@ -1161,17 +1129,33 @@ fn ensure_output_dir(out_path: &Path) -> std::result::Result<(), NativeBuildErro
 struct NativeLinks {
     libraries: Vec<String>,
     search: Vec<PathBuf>,
+    /// Linker driver arguments rustc reported for the `[rust-bindings]`
+    /// staticlib, passed through as written after the libraries.
+    staticlib_args: Vec<String>,
+}
+
+impl NativeLinks {
+    /// The libraries and search directories the foreign declarations of the
+    /// program at `entry` name.
+    fn foreign(entry: &Path, links: gossamer_driver::ForeignLinks) -> Self {
+        Self {
+            search: crate::paths::foreign_search_dirs(entry, &links),
+            libraries: links.libraries,
+            staticlib_args: Vec::new(),
+        }
+    }
 }
 
 /// The archives a native link takes beyond the runtime: the
 /// `[rust-bindings]` staticlib and, when collecting PGO profiles, the
-/// profile runtime.
+/// profile runtime. The staticlib's own native libraries join `libraries`.
 fn extra_link_archives(
     input_path: &Path,
     opts: LinkOptions,
     static_musl: bool,
     lt: &LinkTarget,
     pgo: &PgoLinkConfig,
+    libraries: &mut NativeLinks,
 ) -> std::result::Result<Vec<PathBuf>, NativeBuildError> {
     // The bindings staticlib must match the main link's libc and arch:
     // a static-musl link cannot take a glibc-built archive (undefined
@@ -1184,10 +1168,13 @@ fn extra_link_archives(
     } else {
         None
     };
-    let bindings_archive =
-        build_static_bindings_lib(input_path, opts.release, bindings_target.as_deref()).map_err(
-            |err| NativeBuildError::LinkerMissing(format!("rust-bindings staticlib: {err}")),
-        )?;
+    let bindings_archive = build_static_bindings_lib(
+        input_path,
+        opts.release,
+        bindings_target.as_deref(),
+        libraries,
+    )
+    .map_err(|err| NativeBuildError::LinkerMissing(format!("rust-bindings staticlib: {err}")))?;
     let mut extra_archives: Vec<PathBuf> = Vec::new();
     if let Some(p) = bindings_archive {
         extra_archives.push(p);
@@ -1242,10 +1229,7 @@ fn try_native_build(
     let lt = resolve_link_target(target);
     let links = gossamer_driver::foreign_link_libraries(&checked.sf, program_end);
     let links_declares_foreign = links.declares_foreign;
-    let mut libraries = NativeLinks {
-        search: crate::paths::foreign_search_dirs(paths.input, &links),
-        libraries: links.libraries,
-    };
+    let mut libraries = NativeLinks::foreign(paths.input, links);
     let tmp_dir = std::env::temp_dir().join(format!(
         "gos-build-{}-{}",
         std::process::id(),
@@ -1283,7 +1267,8 @@ fn try_native_build(
         find_runtime_lib()?
     };
     let pgo = pgo_link_config();
-    let extra_archives = extra_link_archives(paths.input, opts, static_musl, &lt, &pgo)?;
+    let extra_archives =
+        extra_link_archives(paths.input, opts, static_musl, &lt, &pgo, &mut libraries)?;
     let native_inputs = if links_declares_foreign {
         let native_target = if static_musl {
             Some(musl_triple_for_arch(lt.arch))
@@ -1536,12 +1521,14 @@ fn find_clang_rt_profile() -> Option<PathBuf> {
 }
 
 /// Builds the per-project `libgos_static_bindings.a` if the
-/// project declares `[rust-bindings]`. Returns the archive path
-/// or `None` when bindings are absent.
+/// project declares `[rust-bindings]`, recording the native libraries it
+/// needs in `libraries`. Returns the archive path or `None` when bindings
+/// are absent.
 fn build_static_bindings_lib(
     entry: &Path,
     release: bool,
     cargo_target: Option<&str>,
+    libraries: &mut NativeLinks,
 ) -> std::result::Result<Option<PathBuf>, gossamer_driver::binding_runner::BindingRunnerError> {
     use gossamer_driver::binding_runner::{Profile as RunnerProfile, StaticBindingsLib};
 
@@ -1578,8 +1565,10 @@ fn build_static_bindings_lib(
         return Ok(None);
     };
     let lib = lib.with_cargo_target(cargo_target.map(str::to_string));
-    let archive = lib.ensure_built()?;
-    Ok(Some(archive))
+    let built = lib.ensure_built()?;
+    libraries.staticlib_args = built.native_libs;
+    libraries.search.extend(built.search);
+    Ok(Some(built.archive))
 }
 
 /// Renders a `Command` as a single readable line (program + args) for
@@ -1670,6 +1659,7 @@ fn link_posix(
     for library in &libraries.libraries {
         cmd.arg(format!("-l{library}"));
     }
+    cmd.args(&libraries.staticlib_args);
     cmd.arg("-o").arg(out_path);
     // `-ldl` only exists on Linux (libdl). macOS folds `dl*` into
     // `libSystem` and Windows/mingw has no `libdl` at all - passing
@@ -1866,6 +1856,7 @@ fn link_cross_gnu_lld(
     for library in &libraries.libraries {
         cmd.arg(format!("-l{library}"));
     }
+    cmd.args(&libraries.staticlib_args);
     cmd.arg("-lc").arg("-lpthread").arg("-ldl").arg("-lm");
     if !extra_archives.is_empty() {
         cmd.arg("--allow-multiple-definition");
@@ -1947,14 +1938,24 @@ fn link_posix_static_musl(
         cmd.arg(archive);
     }
     // A static link reads `lib<name>.a`; the linker names any it cannot find.
-    // musl's `libc.a` holds what glibc splits into these libraries.
+    // musl's `libc.a` holds what glibc splits into these libraries, and the
+    // self-contained `libunwind.a` named below is the `unwind` rustc reports.
     for dir in &libraries.search {
         cmd.arg(format!("-L{}", dir.display()));
     }
-    for library in &libraries.libraries {
+    let staticlib_libraries = libraries
+        .staticlib_args
+        .iter()
+        .filter_map(|arg| arg.strip_prefix("-l"));
+    for library in libraries
+        .libraries
+        .iter()
+        .map(String::as_str)
+        .chain(staticlib_libraries)
+    {
         if !matches!(
-            library.as_str(),
-            "c" | "m" | "pthread" | "dl" | "rt" | "util"
+            library,
+            "c" | "m" | "pthread" | "dl" | "rt" | "util" | "unwind"
         ) {
             cmd.arg(format!("-l{library}"));
         }
@@ -1993,12 +1994,22 @@ fn link_posix_static_musl(
     }
 }
 
-/// Resolves `rustc --print sysroot` once per process, as a `PathBuf`.
+/// The Rust sysroot whose musl CRT and `rust-lld` the link uses: the one
+/// `gos` was built with while it is still installed, since the runtime
+/// archives were compiled against it; otherwise `rustc --print sysroot`,
+/// resolved once per process. A `RUSTC` override names another toolchain,
+/// so it is always asked.
 fn rustc_sysroot() -> std::result::Result<PathBuf, NativeBuildError> {
     static SYSROOT: std::sync::OnceLock<std::result::Result<PathBuf, String>> =
         std::sync::OnceLock::new();
     SYSROOT
         .get_or_init(|| {
+            if std::env::var_os("RUSTC").is_none()
+                && let Some(built_with) = option_env!("GOSSAMER_RUST_SYSROOT")
+                && Path::new(built_with).is_dir()
+            {
+                return Ok(PathBuf::from(built_with));
+            }
             let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
             let out = std::process::Command::new(&rustc)
                 .args(["--print", "sysroot"])
@@ -2067,6 +2078,7 @@ fn link_windows_msvc(
     for library in &libraries.libraries {
         cmd.arg(format!("{library}.lib"));
     }
+    cmd.args(&libraries.staticlib_args);
     for lib in MSVC_SYSTEM_LIBRARIES {
         cmd.arg(lib);
     }

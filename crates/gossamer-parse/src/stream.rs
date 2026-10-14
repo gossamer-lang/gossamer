@@ -117,6 +117,12 @@ impl TokenStream {
         self.file
     }
 
+    /// Every significant token, ending with `Eof`.
+    #[must_use]
+    pub fn tokens(&self) -> &[Token] {
+        &self.tokens
+    }
+
     /// Returns the comments discovered while lexing, in source order.
     #[must_use]
     pub fn comments(&self) -> &[StoredComment] {

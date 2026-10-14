@@ -16,7 +16,7 @@ struct Outer {
     fixed: [i64; 4]
 }
 
-fn main() {
+fn checks() {
     let mut o = Outer { tables: #[], direct: #[], fixed: [0; 4] }
     o.tables.push(Inner { slots: #[] })
 
@@ -49,4 +49,11 @@ fn main() {
     plain[0] = 1
     plain.swap(0, 3)
     println("plain binding: {} {} {} {}", plain[0], plain[1], plain[2], plain[3])
+}
+
+// The checks run inside a loop so the forced-JIT tier compiles them.
+fn main() {
+    for _ in 0..1 {
+        checks()
+    }
 }

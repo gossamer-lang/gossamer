@@ -145,7 +145,7 @@ pub unsafe extern "C" fn gos_rt_yaml_encode(j: *const crate::c_abi::json::GosJso
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_value_ref` accepts.
         let yaml_val = match unsafe { crate::c_abi::json::json_value_ref(j) } {
-            Some(jv) => json_to_serde_norway(jv),
+            Some(jv) => json_to_serde_norway(&jv),
             None => serde_norway::Value::Null,
         };
         match serde_norway::to_string(&yaml_val) {

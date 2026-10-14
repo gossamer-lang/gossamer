@@ -1,0 +1,1805 @@
+// The parser: the raw tree `gossamer_parse::parse_source_file` builds for
+// the same text, node for node. Node ids are handed out in the order the
+// Rust parser hands them out, so every id, span, and synthesized node
+// matches; package-feature settlement runs on the host afterwards.
+//
+// The parser is a state record that free functions advance; the
+// expression grammar lives in `parse_expr`, the format and interpolation
+// grammar in `parse_format`.
+
+use ast::{FileId, Span}
+use lex
+use parse_expr
+use tree
+use tree::Tree
+
+// Keyword token kinds: KEYWORD + the keyword's index in `lex::KEYWORDS`.
+pub const KW_AS: i64 = 32
+pub const KW_ASYNC: i64 = 33
+pub const KW_AWAIT: i64 = 34
+pub const KW_BREAK: i64 = 35
+pub const KW_CONST: i64 = 36
+pub const KW_CONTINUE: i64 = 37
+pub const KW_CRATE: i64 = 38
+pub const KW_ELSE: i64 = 39
+pub const KW_ENUM: i64 = 40
+pub const KW_EXTERN: i64 = 41
+pub const KW_FALSE: i64 = 42
+pub const KW_FN: i64 = 43
+pub const KW_FOR: i64 = 44
+pub const KW_IF: i64 = 45
+pub const KW_IMPL: i64 = 46
+pub const KW_IN: i64 = 47
+pub const KW_LET: i64 = 48
+pub const KW_LOOP: i64 = 49
+pub const KW_MATCH: i64 = 50
+pub const KW_MOD: i64 = 51
+pub const KW_MUT: i64 = 52
+pub const KW_PACKAGE: i64 = 53
+pub const KW_PUB: i64 = 54
+pub const KW_RETURN: i64 = 55
+pub const KW_SELF_LOWER: i64 = 56
+pub const KW_SELF_UPPER: i64 = 57
+pub const KW_STATIC: i64 = 58
+pub const KW_STRUCT: i64 = 59
+pub const KW_SUPER: i64 = 60
+pub const KW_TRAIT: i64 = 61
+pub const KW_TRUE: i64 = 62
+pub const KW_TYPE: i64 = 63
+pub const KW_UNSAFE: i64 = 64
+pub const KW_USE: i64 = 65
+pub const KW_WHERE: i64 = 66
+pub const KW_WHILE: i64 = 67
+pub const KW_YIELD: i64 = 68
+
+// Punctuation token kinds: PUNCT + the token's index in `lex::PUNCTS`.
+pub const P_PLUS: i64 = 96
+pub const P_MINUS: i64 = 97
+pub const P_STAR: i64 = 98
+pub const P_SLASH: i64 = 99
+pub const P_PERCENT: i64 = 100
+pub const P_AMP: i64 = 101
+pub const P_PIPE: i64 = 102
+pub const P_CARET: i64 = 103
+pub const P_SHL: i64 = 104
+pub const P_SHR: i64 = 105
+pub const P_PLUS_PERCENT: i64 = 106
+pub const P_MINUS_PERCENT: i64 = 107
+pub const P_STAR_PERCENT: i64 = 108
+pub const P_SHL_PERCENT: i64 = 109
+pub const P_SHR_PERCENT: i64 = 110
+pub const P_PLUS_EQ: i64 = 111
+pub const P_MINUS_EQ: i64 = 112
+pub const P_STAR_EQ: i64 = 113
+pub const P_SLASH_EQ: i64 = 114
+pub const P_PERCENT_EQ: i64 = 115
+pub const P_AMP_EQ: i64 = 116
+pub const P_PIPE_EQ: i64 = 117
+pub const P_CARET_EQ: i64 = 118
+pub const P_SHL_EQ: i64 = 119
+pub const P_SHR_EQ: i64 = 120
+pub const P_PLUS_PERCENT_EQ: i64 = 121
+pub const P_MINUS_PERCENT_EQ: i64 = 122
+pub const P_STAR_PERCENT_EQ: i64 = 123
+pub const P_SHL_PERCENT_EQ: i64 = 124
+pub const P_SHR_PERCENT_EQ: i64 = 125
+pub const P_EQ: i64 = 126
+pub const P_EQ_EQ: i64 = 127
+pub const P_NOT_EQ: i64 = 128
+pub const P_LT: i64 = 129
+pub const P_LT_EQ: i64 = 130
+pub const P_GT: i64 = 131
+pub const P_GT_EQ: i64 = 132
+pub const P_BANG: i64 = 133
+pub const P_AMP_AMP: i64 = 134
+pub const P_PIPE_PIPE: i64 = 135
+pub const P_PIPE_GT: i64 = 136
+pub const P_DOT: i64 = 137
+pub const P_DOT_DOT: i64 = 138
+pub const P_DOT_DOT_EQ: i64 = 139
+pub const P_DOT_DOT_DOT: i64 = 140
+pub const P_COLON_COLON: i64 = 141
+pub const P_ARROW: i64 = 142
+pub const P_FAT_ARROW: i64 = 143
+pub const P_LPAREN: i64 = 144
+pub const P_RPAREN: i64 = 145
+pub const P_LBRACKET: i64 = 146
+pub const P_RBRACKET: i64 = 147
+pub const P_LBRACE: i64 = 148
+pub const P_RBRACE: i64 = 149
+pub const P_COMMA: i64 = 150
+pub const P_SEMI: i64 = 151
+pub const P_COLON: i64 = 152
+pub const P_QUESTION: i64 = 153
+pub const P_HASH: i64 = 154
+pub const P_AT: i64 = 155
+pub const P_DOLLAR: i64 = 156
+
+/// The depth past which the parser stops descending and reports once.
+const RECURSION_LIMIT: i64 = 256
+
+/// A parse diagnostic: the `ParseError` variant's name and its byte span.
+pub struct Diag {
+    pub name: String
+    pub start: i64
+    pub end: i64
+}
+
+/// The tokens a parse reads, trivia removed, with the lexer's reports.
+pub struct Stream {
+    pub kinds: Vec<i32>
+    pub hashes: Vec<u8>
+    pub starts: Vec<i32>
+    pub ends: Vec<i32>
+    pub errors: Vec<Diag>
+}
+
+/// The parser's state, field for field the Rust parser's.
+pub struct Parser {
+    pub src: String
+    pub file: u32
+    pub kinds: Vec<i32>
+    pub hashes: Vec<u8>
+    pub starts: Vec<i32>
+    pub ends: Vec<i32>
+    pub pos: i64
+    pub next_id: i64
+    pub diags: Vec<Diag>
+    pub no_struct: i64
+    pub pattern_pipe: i64
+    pub pipe_step: bool
+    pub arm_body: i64
+    pub empty_brace: i64
+    pub depth: i64
+    pub limit_reported: bool
+    pub hoisted: Vec<i64>
+    pub mod_stack: Vec<String>
+    pub named: Map<i64, Vec<tree::NamedArg>>
+    pub sep_at: i64
+    pub impl_trait: Option<String>
+    pub synth: i64
+    pub t: Tree
+}
+
+/// The tokens of `text`, trivia dropped, every span moved `shift` bytes on.
+pub fn stream_of(text: String, shift: i64) -> Stream {
+    let t = lex::tokenize(text)
+    let count = t.kinds.len()
+    let mut kinds: Vec<i32> = Vec::with_capacity(count)
+    let mut hashes: Vec<u8> = Vec::with_capacity(count)
+    let mut starts: Vec<i32> = Vec::with_capacity(count)
+    let mut ends: Vec<i32> = Vec::with_capacity(count)
+    for i in 0..count {
+        let k = t.kinds[i] as i64
+        if k == lex::WHITESPACE || k == lex::LINE_COMMENT || k == lex::BLOCK_COMMENT {
+            continue
+        }
+        kinds.push(t.kinds[i])
+        hashes.push(t.hashes[i])
+        starts.push((t.starts[i] as i64 + shift) as i32)
+        ends.push((t.ends[i] as i64 + shift) as i32)
+    }
+    let mut errors: Vec<Diag> = #[]
+    for i in 0..t.errors.len() {
+        errors.push(Diag { name: "Lex", start: t.error_starts[i] as i64 + shift, end: t.error_ends[i] as i64 + shift })
+    }
+    Stream { kinds: kinds, hashes: hashes, starts: starts, ends: ends, errors: errors }
+}
+
+/// A parser over `source`, its byte-order mark dropped.
+pub fn new_parser(source: String, file: u32) -> Parser {
+    let src = if source.starts_with("\u{feff}") { source.substring(3, source.byte_len()) } else { source }
+    let s = stream_of(src, 0)
+    Parser {
+        src: src,
+        file: file,
+        kinds: s.kinds,
+        hashes: s.hashes,
+        starts: s.starts,
+        ends: s.ends,
+        pos: 0,
+        next_id: 0,
+        diags: s.errors,
+        no_struct: 0,
+        pattern_pipe: 0,
+        pipe_step: false,
+        arm_body: 0,
+        empty_brace: 0,
+        depth: 0,
+        limit_reported: false,
+        hoisted: #[],
+        mod_stack: #[],
+        named: Map::new(),
+        sep_at: -1,
+        impl_trait: None,
+        synth: 0,
+        t: tree::new_tree(src, file as i64),
+    }
+}
+
+// ---- tokens --------------------------------------------------------------
+
+pub fn alloc(p: &mut Parser) -> i64 {
+    let id = p.next_id
+    p.next_id += 1
+    id
+}
+
+pub fn mk_span(p: &mut Parser, start: i64, end: i64) -> Span {
+    Span { file: FileId(p.file), start: start as u32, end: end as u32 }
+}
+
+pub fn join(p: &mut Parser, lo: Span, hi: Span) -> Span {
+    Span { file: FileId(p.file), start: lo.start.min(hi.start), end: lo.end.max(hi.end) }
+}
+
+pub fn record(p: &mut Parser, name: String, span: Span) {
+    p.diags.push(Diag { name: name, start: span.start as i64, end: span.end as i64 })
+}
+
+pub fn last_index(p: &mut Parser) -> i64 {
+    p.kinds.len() - 1
+}
+
+pub fn kind_at(p: &mut Parser, offset: i64) -> i64 {
+    let mut at = p.pos + offset
+    let last = p.kinds.len() - 1
+    if at > last {
+        at = last
+    }
+    p.kinds[at] as i64
+}
+
+pub fn peek(p: &mut Parser) -> i64 {
+    p.kinds[p.pos] as i64
+}
+
+pub fn span_at(p: &mut Parser, offset: i64) -> Span {
+    let mut at = p.pos + offset
+    let last = p.kinds.len() - 1
+    if at > last {
+        at = last
+    }
+    Span { file: FileId(p.file), start: p.starts[at] as u32, end: p.ends[at] as u32 }
+}
+
+pub fn peek_span(p: &mut Parser) -> Span {
+    span_at(p, 0)
+}
+
+pub fn bump(p: &mut Parser) {
+    if p.kinds[p.pos] as i64 != lex::EOF {
+        p.pos += 1
+    }
+}
+
+pub fn last_span(p: &mut Parser) -> Span {
+    if p.pos == 0 {
+        return peek_span(p)
+    }
+    let at = p.pos - 1
+    Span { file: FileId(p.file), start: p.starts[at] as u32, end: p.ends[at] as u32 }
+}
+
+pub fn at_eof(p: &mut Parser) -> bool {
+    peek(p) == lex::EOF
+}
+
+pub fn at(p: &mut Parser, kind: i64) -> bool {
+    peek(p) == kind
+}
+
+pub fn eat(p: &mut Parser, kind: i64) -> bool {
+    if peek(p) == kind {
+        bump(p)
+        return true
+    }
+    false
+}
+
+pub fn is_keyword(kind: i64) -> bool {
+    kind >= lex::KEYWORD && kind < lex::PUNCT
+}
+
+pub fn text(p: &mut Parser, span: Span) -> String {
+    let n = p.src.byte_len()
+    let s = span.start as i64
+    let e = span.end as i64
+    if s > e || e > n {
+        return ""
+    }
+    p.src.substring(s, e)
+}
+
+pub fn peek_text_is(p: &mut Parser, offset: i64, word: String) -> bool {
+    let s = span_at(p, offset)
+    let len = (s.end - s.start) as i64
+    if len != word.byte_len() {
+        return false
+    }
+    let base = s.start as i64
+    for i in 0..len {
+        if p.src.byte_at(base + i) != word.byte_at(i) {
+            return false
+        }
+    }
+    true
+}
+
+pub fn at_word(p: &mut Parser, word: String) -> bool {
+    peek(p) == lex::IDENT && peek_text_is(p, 0, word)
+}
+
+pub fn eat_word(p: &mut Parser, word: String) -> bool {
+    if at_word(p, word) {
+        bump(p)
+        return true
+    }
+    false
+}
+
+pub fn at_close_angle(p: &mut Parser) -> bool {
+    let k = peek(p)
+    k == P_GT || k == P_SHR || k == P_GT_EQ || k == P_SHR_EQ
+}
+
+/// Eats one `>`, splitting `>>`, `>=`, or `>>=` in place the way the Rust
+/// token stream does; a rewind does not restore the split token.
+pub fn eat_close_angle(p: &mut Parser) -> bool {
+    let k = peek(p)
+    let rest = if k == P_GT {
+        bump(p)
+        return true
+    } else if k == P_SHR {
+        P_GT
+    } else if k == P_GT_EQ {
+        P_EQ
+    } else if k == P_SHR_EQ {
+        P_GT_EQ
+    } else {
+        return false
+    }
+    p.kinds[p.pos] = rest as i32
+    p.starts[p.pos] = p.starts[p.pos] + 1
+    true
+}
+
+pub fn expect_close_angle(p: &mut Parser) -> bool {
+    if eat_close_angle(p) {
+        return true
+    }
+    let s = peek_span(p)
+    record(p, "Unexpected", s)
+    false
+}
+
+pub fn expect(p: &mut Parser, kind: i64) -> bool {
+    if eat(p, kind) {
+        return true
+    }
+    let s = peek_span(p)
+    record(p, "Unexpected", s)
+    false
+}
+
+pub fn struct_forbidden(p: &mut Parser) -> bool {
+    p.no_struct > 0
+}
+
+pub fn enter_recursion(p: &mut Parser, span: Span) -> bool {
+    if p.depth >= RECURSION_LIMIT {
+        if !p.limit_reported {
+            p.limit_reported = true
+            record(p, "RecursionLimit", span)
+        }
+        return false
+    }
+    p.depth += 1
+    true
+}
+
+pub fn leave_recursion(p: &mut Parser) {
+    if p.depth > 0 {
+        p.depth -= 1
+    }
+}
+
+/// Whether a newline sits between `from` and `to`, byte offsets in the text.
+pub fn newline_between(p: &mut Parser, from: i64, to: i64) -> bool {
+    let mut i = from
+    while i < to {
+        if p.src.byte_at(i) == 10 {
+            return true
+        }
+        i += 1
+    }
+    false
+}
+
+pub fn newline_before_peek(p: &mut Parser) -> bool {
+    let last_end = last_span(p).end as i64
+    let peek_start = peek_span(p).start as i64
+    if peek_start <= last_end || peek_start > p.src.byte_len() {
+        return false
+    }
+    newline_between(p, last_end, peek_start)
+}
+
+pub fn newline_after_peek(p: &mut Parser) -> bool {
+    let here = peek_span(p)
+    let after = span_at(p, 1)
+    if after.start < here.end {
+        return false
+    }
+    newline_between(p, here.end as i64, after.start as i64)
+}
+
+pub fn eat_list_separator(p: &mut Parser) -> bool {
+    if eat(p, P_COMMA) {
+        p.sep_at = -1
+        return true
+    }
+    if at_eof(p) || !newline_before_peek(p) {
+        return false
+    }
+    if p.sep_at == p.pos {
+        return false
+    }
+    p.sep_at = p.pos
+    true
+}
+
+pub fn through_trailing_space(p: &mut Parser, span: Span) -> Span {
+    let next = peek_span(p)
+    if next.start < span.end {
+        return span
+    }
+    let mut i = span.end as i64
+    let to = next.start as i64
+    while i < to {
+        let b = p.src.byte_at(i)
+        if b != 32 && b != 9 {
+            return span
+        }
+        i += 1
+    }
+    Span { file: span.file, start: span.start, end: next.start }
+}
+
+pub fn report_declined(p: &mut Parser, span: Span) {
+    record(p, "DeclinedFeature", span)
+}
+
+// ---- node constructors ---------------------------------------------------
+
+pub fn mk_expr(p: &mut Parser, id: i64, span: Span, kind: i64) -> i64 {
+    p.t.node(id, span.start as i64, span.end as i64, kind)
+}
+
+pub fn mk_pat(p: &mut Parser, id: i64, span: Span, kind: i64) -> i64 {
+    p.t.node(id, span.start as i64, span.end as i64, kind)
+}
+
+pub fn mk_stmt(p: &mut Parser, id: i64, span: Span, kind: i64) -> i64 {
+    p.t.node(id, span.start as i64, span.end as i64, kind)
+}
+
+pub fn mk_type(p: &mut Parser, id: i64, span: Span, kind: i64) -> i64 {
+    p.t.node(id, span.start as i64, span.end as i64, kind)
+}
+
+/// The span of node `n`.
+pub fn span_of(p: &mut Parser, n: i64) -> Span {
+    Span { file: FileId(p.file), start: p.t.w[n + 1] as u32, end: p.t.w[n + 2] as u32 }
+}
+
+/// The kind record of node `n`.
+pub fn kind_of(p: &mut Parser, n: i64) -> i64 {
+    p.t.w[n + 3]
+}
+
+/// The variant index of the enum record `k`.
+pub fn tag(p: &mut Parser, k: i64) -> i64 {
+    p.t.w[k]
+}
+
+/// Field `i` of record `r`, counting a variant's index as field 0.
+pub fn field(p: &mut Parser, r: i64, i: i64) -> i64 {
+    p.t.w[r + i]
+}
+
+/// A name the parser spells itself.
+pub fn ident(p: &mut Parser, name: String) -> i64 {
+    p.t.str_of(name)
+}
+
+/// The name the source spells at `span`.
+pub fn src_ident(p: &mut Parser, span: Span) -> i64 {
+    p.t.src_str(span.start as i64, span.end as i64)
+}
+
+/// The word an `Option` field holds: its value, or -1 for `None`.
+pub fn opt(o: Option<i64>) -> i64 {
+    o.unwrap_or(-1)
+}
+
+pub fn path_single(p: &mut Parser, name: String) -> i64 {
+    let n = ident(p, name)
+    let segment = p.t.rec2(n, 0)
+    let segments = p.t.list1(segment)
+    p.t.rec1(segments)
+}
+
+pub fn path_of(p: &mut Parser, names: Vec<String>) -> i64 {
+    let mut segments: Vec<i64> = #[]
+    for n in names {
+        let name = ident(p, n)
+        segments.push(p.t.rec2(name, 0))
+    }
+    let list = p.t.list(segments)
+    p.t.rec1(list)
+}
+
+pub fn empty_attrs(p: &mut Parser) -> i64 {
+    p.t.rec2(0, 0)
+}
+
+pub fn empty_generics(p: &mut Parser) -> i64 {
+    p.t.rec1(0)
+}
+
+pub fn empty_where(p: &mut Parser) -> i64 {
+    p.t.rec1(0)
+}
+
+pub fn type_segment(p: &mut Parser, name: String) -> i64 {
+    let n = ident(p, name)
+    p.t.rec3(n, 0, 0)
+}
+
+/// Attribute record `a`: `[path, tokens]`.
+pub fn attr_is_word(p: &mut Parser, a: i64, name: String) -> bool {
+    p.t.w[a + 1] < 0 && attr_is_named(p, a, name)
+}
+
+pub fn attr_is_named(p: &mut Parser, a: i64, name: String) -> bool {
+    let segments = p.t.w[p.t.w[a]]
+    p.t.w[segments] == 1 && p.t.str_is(p.t.w[p.t.w[segments + 1]], name)
+}
+
+// ---- recovery ------------------------------------------------------------
+
+pub fn recover_to_item_start(p: &mut Parser) {
+    while !at_eof(p) {
+        if is_item_start(p) {
+            return
+        }
+        bump(p)
+    }
+}
+
+pub fn recover_to_close(p: &mut Parser, open: i64, close: i64) -> bool {
+    let mut depth = 1
+    while !at_eof(p) {
+        if at(p, open) {
+            depth += 1
+        } else if at(p, close) {
+            depth -= 1
+            if depth == 0 {
+                bump(p)
+                return true
+            }
+        } else if depth == 1 && close != P_RBRACE && at(p, P_LBRACE) {
+            return false
+        }
+        bump(p)
+    }
+    false
+}
+
+pub fn recover_to_close_angle(p: &mut Parser) -> bool {
+    let mut depth = 1
+    while !at_eof(p) {
+        if at(p, P_LBRACE) || at(p, P_SEMI) {
+            return false
+        }
+        if at_close_angle(p) {
+            depth -= 1
+            eat_close_angle(p)
+            if depth == 0 {
+                return true
+            }
+            continue
+        }
+        if at(p, P_LT) {
+            depth += 1
+        }
+        bump(p)
+    }
+    false
+}
+
+pub fn recover_in_block(p: &mut Parser) {
+    while !at_eof(p) {
+        if at(p, P_SEMI) {
+            bump(p)
+            return
+        }
+        if at(p, P_RBRACE) {
+            return
+        }
+        if is_stmt_start(p) {
+            return
+        }
+        bump(p)
+    }
+}
+
+pub fn is_item_start(p: &mut Parser) -> bool {
+    let k = peek(p)
+    if k == P_HASH {
+        return hash_prefixed_item_start(p)
+    }
+    if k == KW_ASYNC {
+        return kind_at(p, 1) == KW_FN
+    }
+    if k == KW_UNSAFE {
+        let n = kind_at(p, 1)
+        return n == KW_FN || n == KW_EXTERN || n == KW_IMPL || n == KW_TRAIT
+    }
+    if is_keyword(k) {
+        return k == KW_PUB || k == KW_FN || k == KW_STRUCT || k == KW_ENUM || k == KW_TRAIT ||
+            k == KW_IMPL || k == KW_TYPE || k == KW_CONST || k == KW_STATIC || k == KW_MOD ||
+            k == KW_USE || k == KW_EXTERN
+    }
+    if k == lex::IDENT {
+        let n = kind_at(p, 1)
+        if peek_text_is(p, 0, "newtype") {
+            return n == lex::IDENT
+        }
+        if peek_text_is(p, 0, "union") || peek_text_is(p, 0, "class") {
+            let n2 = kind_at(p, 2)
+            return n == lex::IDENT && (n2 == P_LBRACE || n2 == P_LT)
+        }
+        if peek_text_is(p, 0, "gen") {
+            return n == KW_FN
+        }
+        if peek_text_is(p, 0, "macro_rules") {
+            return n == P_BANG
+        }
+        if peek_text_is(p, 0, "packed") {
+            return n == KW_ENUM
+        }
+        if peek_text_is(p, 0, "comptime") {
+            return n == KW_FN || n == KW_UNSAFE
+        }
+        return false
+    }
+    false
+}
+
+fn hash_prefixed_item_start(p: &mut Parser) -> bool {
+    if kind_at(p, 1) == P_LBRACE {
+        return false
+    }
+    let offset = skip_outer_attrs(p, 0)
+    if offset < 0 {
+        return true
+    }
+    kind_at(p, offset) == KW_PUB && item_start_after_attrs(p, offset + 1) ||
+        item_start_after_attrs(p, offset)
+}
+
+/// The offset past a run of outer attributes, or -1 when one is not closed.
+fn skip_outer_attrs(p: &mut Parser, from: i64) -> i64 {
+    let mut offset = from
+    while kind_at(p, offset) == P_HASH {
+        if kind_at(p, offset + 1) != P_LBRACKET {
+            return -1
+        }
+        offset += 2
+        let mut depth = 1
+        while depth > 0 {
+            let k = kind_at(p, offset)
+            if k == lex::EOF {
+                return -1
+            }
+            if k == P_LBRACKET {
+                depth += 1
+            } else if k == P_RBRACKET {
+                depth -= 1
+            }
+            offset += 1
+        }
+    }
+    offset
+}
+
+fn item_start_after_attrs(p: &mut Parser, offset: i64) -> bool {
+    let k = kind_at(p, offset)
+    if k == lex::IDENT {
+        let n = kind_at(p, offset + 1)
+        if peek_text_is(p, offset, "newtype") {
+            return n == lex::IDENT
+        }
+        if peek_text_is(p, offset, "packed") {
+            return n == KW_ENUM
+        }
+        if peek_text_is(p, offset, "comptime") {
+            return n == KW_FN || n == KW_UNSAFE
+        }
+        return false
+    }
+    k == KW_FN || k == KW_STRUCT || k == KW_ENUM || k == KW_TRAIT || k == KW_IMPL ||
+        k == KW_TYPE || k == KW_CONST || k == KW_STATIC || k == KW_MOD || k == KW_USE ||
+        k == KW_UNSAFE || k == KW_EXTERN
+}
+
+pub fn is_stmt_start(p: &mut Parser) -> bool {
+    let k = peek(p)
+    if is_keyword(k) {
+        return is_stmt_start_keyword(k)
+    }
+    if k == lex::IDENT {
+        return at_word(p, "defer")
+    }
+    false
+}
+
+pub fn is_stmt_start_keyword(k: i64) -> bool {
+    k == KW_LET || k == KW_RETURN || k == KW_BREAK || k == KW_CONTINUE || k == KW_IF ||
+        k == KW_WHILE || k == KW_FOR || k == KW_LOOP || k == KW_MATCH || k == KW_FN ||
+        k == KW_STRUCT || k == KW_ENUM || k == KW_TRAIT || k == KW_IMPL || k == KW_USE ||
+        k == KW_TYPE || k == KW_CONST || k == KW_STATIC || k == KW_MOD || k == KW_PUB
+}
+
+
+// ---- generics and types --------------------------------------------------
+
+pub fn parse_generics(p: &mut Parser) -> i64 {
+    if !at(p, P_LT) {
+        return empty_generics(p)
+    }
+    bump(p)
+    let mut params: Vec<i64> = #[]
+    while !at_close_angle(p) && !at_eof(p) {
+        if peek(p) == lex::LABEL {
+            let s = peek_span(p)
+            report_declined(p, s)
+            bump(p)
+            if !eat_list_separator(p) {
+                break
+            }
+            continue
+        }
+        params.push(parse_generic_param(p))
+        if !eat_list_separator(p) {
+            break
+        }
+    }
+    if !expect_close_angle(p) {
+        recover_to_close_angle(p)
+    }
+    let list = p.t.list(params)
+    p.t.rec1(list)
+}
+
+fn parse_generic_param(p: &mut Parser) -> i64 {
+    if eat(p, KW_CONST) {
+        let name_span = peek_span(p)
+        let name = if peek(p) == lex::IDENT {
+            bump(p)
+            src_ident(p, name_span)
+        } else {
+            record(p, "Unexpected", name_span)
+            ident(p, "")
+        }
+        expect(p, P_COLON)
+        let ty = parse_type(p)
+        let default = if eat(p, P_EQ) { parse_expr::parse_expr(p) } else { -1 }
+        return p.t.rec4(tree::GP_CONST, name, ty, default)
+    }
+    let name_span = peek_span(p)
+    let name = if peek(p) == lex::IDENT {
+        bump(p)
+        src_ident(p, name_span)
+    } else {
+        record(p, "Unexpected", name_span)
+        ident(p, "")
+    }
+    let mut bounds = 0
+    if eat(p, P_COLON) {
+        bounds = parse_trait_bound_list(p)
+    }
+    let default = if eat(p, P_EQ) { parse_type(p) } else { -1 }
+    p.t.rec4(tree::GP_TYPE, name, bounds, default)
+}
+
+/// A list of trait bound records.
+pub fn parse_trait_bound_list(p: &mut Parser) -> i64 {
+    let mut bounds = #[parse_trait_bound(p)]
+    while eat(p, P_PLUS) {
+        bounds.push(parse_trait_bound(p))
+    }
+    p.t.list(bounds)
+}
+
+fn parse_trait_bound(p: &mut Parser) -> i64 {
+    let mut bindings: Vec<i64> = #[]
+    let path = parse_type_path_inner(p, true, &mut bindings)
+    let list = p.t.list(bindings)
+    p.t.rec2(path, list)
+}
+
+pub fn parse_where_clause(p: &mut Parser) -> i64 {
+    if !eat(p, KW_WHERE) {
+        return empty_where(p)
+    }
+    let mut predicates: Vec<i64> = #[]
+    loop {
+        if at(p, P_LBRACE) || at(p, P_SEMI) || at(p, P_EQ) || at_eof(p) {
+            break
+        }
+        let bounded = parse_type(p)
+        expect(p, P_COLON)
+        let bounds = parse_trait_bound_list(p)
+        predicates.push(p.t.rec2(bounded, bounds))
+        if !eat(p, P_COMMA) {
+            break
+        }
+    }
+    let list = p.t.list(predicates)
+    p.t.rec1(list)
+}
+
+pub fn parse_type(p: &mut Parser) -> i64 {
+    let start_span = peek_span(p)
+    if !enter_recursion(p, start_span) {
+        let id = alloc(p)
+        if !at_eof(p) {
+            bump(p)
+        }
+        let kind = p.t.rec1(tree::TK_INFER)
+        return mk_type(p, id, start_span, kind)
+    }
+    let kind = parse_type_kind(p)
+    let end_span = last_span(p)
+    let span = join(p, start_span, end_span)
+    let id = alloc(p)
+    leave_recursion(p)
+    mk_type(p, id, span, kind)
+}
+
+fn parse_type_kind(p: &mut Parser) -> i64 {
+    let declined = (at_word(p, "dyn") && kind_at(p, 1) == lex::IDENT) || at(p, KW_IMPL)
+    if declined {
+        let s = peek_span(p)
+        report_declined(p, s)
+        bump(p)
+        return parse_type_kind(p)
+    }
+    if eat(p, P_LPAREN) {
+        return parse_tuple_or_unit_type(p)
+    }
+    if eat(p, P_LBRACKET) {
+        return parse_array_or_slice_type(p)
+    }
+    if at(p, P_AMP) {
+        return parse_ref_type(p)
+    }
+    if at(p, P_BANG) {
+        bump(p)
+        return p.t.rec1(tree::TK_NEVER)
+    }
+    if at(p, KW_FN) {
+        let s = peek_span(p)
+        record(p, "CallableTypeSpelling", s)
+        bump(p)
+        return parse_fn_type_after_keyword(p, tree::FN_CLOSURE)
+    }
+    if peek(p) == lex::IDENT {
+        if peek_text_is(p, 0, "Fn") {
+            bump(p)
+            return parse_fn_type_after_keyword(p, tree::FN_CLOSURE)
+        }
+        if peek_text_is(p, 0, "FnMut") || peek_text_is(p, 0, "FnOnce") {
+            let s = peek_span(p)
+            record(p, "CallableTypeSpelling", s)
+            bump(p)
+            return parse_fn_type_after_keyword(p, tree::FN_CLOSURE)
+        }
+        if peek_text_is(p, 0, "_") {
+            bump(p)
+            return p.t.rec1(tree::TK_INFER)
+        }
+    }
+    let path = parse_type_path(p)
+    p.t.rec2(tree::TK_PATH, path)
+}
+
+fn parse_tuple_or_unit_type(p: &mut Parser) -> i64 {
+    if eat(p, P_RPAREN) {
+        return p.t.rec1(tree::TK_UNIT)
+    }
+    let first = parse_type(p)
+    if eat(p, P_RPAREN) {
+        return kind_of(p, first)
+    }
+    let mut elements = #[first]
+    while eat_list_separator(p) {
+        if at(p, P_RPAREN) {
+            break
+        }
+        elements.push(parse_type(p))
+    }
+    expect(p, P_RPAREN)
+    let list = p.t.list(elements)
+    p.t.rec2(tree::TK_TUPLE, list)
+}
+
+fn parse_array_or_slice_type(p: &mut Parser) -> i64 {
+    let element = parse_type(p)
+    if eat(p, P_SEMI) {
+        let length = parse_expr::parse_expr(p)
+        expect(p, P_RBRACKET)
+        return p.t.rec3(tree::TK_ARRAY, element, length)
+    }
+    expect(p, P_RBRACKET)
+    p.t.rec2(tree::TK_SLICE, element)
+}
+
+fn parse_ref_type(p: &mut Parser) -> i64 {
+    bump(p)
+    if peek(p) == lex::LABEL {
+        let s = peek_span(p)
+        report_declined(p, s)
+        bump(p)
+    }
+    let mutability = if eat(p, KW_MUT) { tree::MUTABLE } else { tree::IMMUTABLE }
+    let inner = parse_type(p)
+    p.t.rec3(tree::TK_REF, mutability, inner)
+}
+
+fn parse_fn_type_after_keyword(p: &mut Parser, kind: i64) -> i64 {
+    if !eat(p, P_LPAREN) {
+        let s = peek_span(p)
+        record(p, "Unexpected", s)
+        return parse_fn_type_unparenthesised(p, kind)
+    }
+    let mut params: Vec<i64> = #[]
+    while !at(p, P_RPAREN) && !at_eof(p) {
+        let amp = peek_span(p)
+        let ty = parse_type(p)
+        params.push(strip_shared_parameter_reference(p, ty, amp))
+        if !eat_list_separator(p) {
+            break
+        }
+    }
+    if !expect(p, P_RPAREN) {
+        recover_to_close(p, P_LPAREN, P_RPAREN)
+    }
+    let ret = if eat(p, P_ARROW) { parse_type(p) } else { -1 }
+    let list = p.t.list(params)
+    p.t.rec4(tree::TK_FN, kind, list, ret)
+}
+
+fn closes_type_position(p: &mut Parser) -> bool {
+    let k = peek(p)
+    k == P_RPAREN || k == P_RBRACKET || k == P_RBRACE || k == P_LBRACE || k == P_COMMA ||
+        k == P_SEMI || k == P_ARROW || k == P_EQ
+}
+
+fn parse_fn_type_unparenthesised(p: &mut Parser, kind: i64) -> i64 {
+    let mut params: Vec<i64> = #[]
+    while !at_eof(p) && !at_close_angle(p) && !closes_type_position(p) {
+        params.push(parse_type(p))
+        if !eat(p, P_COMMA) {
+            break
+        }
+    }
+    let ret = if eat(p, P_ARROW) { parse_type(p) } else { -1 }
+    let list = p.t.list(params)
+    p.t.rec4(tree::TK_FN, kind, list, ret)
+}
+
+pub fn parse_type_path(p: &mut Parser) -> i64 {
+    let mut sink: Vec<i64> = #[]
+    parse_type_path_inner(p, false, &mut sink)
+}
+
+/// A type path record; associated-type bindings in its generic arguments
+/// join `bindings` when `accepts`.
+fn parse_type_path_inner(p: &mut Parser, accepts: bool, bindings: &mut Vec<i64>) -> i64 {
+    let first = parse_type_path_segment(p, accepts, bindings)
+    let mut segments = #[first]
+    while eat(p, P_COLON_COLON) {
+        segments.push(parse_type_path_segment(p, accepts, bindings))
+    }
+    let list = p.t.list(segments)
+    p.t.rec1(list)
+}
+
+fn is_non_generic_primitive(p: &mut Parser, name: i64) -> bool {
+    let n = p.t.str_len(name)
+    if n < 2 || n > 5 {
+        return false
+    }
+    let t = p.t.text(name)
+    t == "i8" || t == "i16" || t == "i32" || t == "i64" || t == "i128" ||
+        t == "isize" || t == "u8" || t == "u16" || t == "u32" || t == "u64" ||
+        t == "u128" || t == "usize" || t == "f32" || t == "f64" || t == "bool" ||
+        t == "char" || t == "str"
+}
+
+fn parse_type_path_segment(p: &mut Parser, accepts: bool, bindings: &mut Vec<i64>) -> i64 {
+    let name = parse_path_ident(p)
+    let generics = if at(p, P_LT) && !is_non_generic_primitive(p, name) {
+        parse_type_generic_args(p, accepts, bindings)
+    } else {
+        0
+    }
+    p.t.rec3(name, generics, 0)
+}
+
+/// The name of one path segment, as a string record.
+fn parse_path_ident(p: &mut Parser) -> i64 {
+    let k = peek(p)
+    let s = peek_span(p)
+    if k == lex::IDENT || k == KW_SELF_UPPER || k == KW_SELF_LOWER || k == KW_SUPER || k == KW_CRATE {
+        bump(p)
+        return src_ident(p, s)
+    }
+    record(p, "Unexpected", s)
+    ident(p, "<error>")
+}
+
+/// A list of generic argument records.
+fn parse_type_generic_args(p: &mut Parser, accepts: bool, bindings: &mut Vec<i64>) -> i64 {
+    if !eat(p, P_LT) {
+        return 0
+    }
+    let mut args: Vec<i64> = #[]
+    while !at_close_angle(p) && !at_eof(p) {
+        if accepts && peek(p) == lex::IDENT && kind_at(p, 1) == P_EQ {
+            let name_span = peek_span(p)
+            bump(p)
+            let name = src_ident(p, name_span)
+            bump(p)
+            let ty = parse_type(p)
+            bindings.push(p.t.rec2(name, ty))
+        } else {
+            args.push(parse_generic_arg(p))
+        }
+        if !eat_list_separator(p) {
+            break
+        }
+    }
+    expect_close_angle(p)
+    p.t.list(args)
+}
+
+pub fn parse_generic_arg(p: &mut Parser) -> i64 {
+    let k = peek(p)
+    if k == lex::INT_LIT || k == lex::FLOAT_LIT || k == KW_TRUE || k == KW_FALSE || k == P_LBRACE {
+        let e = parse_expr::parse_const_generic_arg(p)
+        return p.t.rec2(tree::GA_CONST, e)
+    }
+    let ty = parse_type(p)
+    p.t.rec2(tree::GA_TYPE, ty)
+}
+
+/// A parameter's `&T` is `T`: a parameter is read without a copy either
+/// way. A slice parameter keeps (or gains) its reference.
+pub fn strip_shared_parameter_reference(p: &mut Parser, ty: i64, amp: Span) -> i64 {
+    let k = kind_of(p, ty)
+    let t = tag(p, k)
+    if t == tree::TK_SLICE {
+        let kind = p.t.rec3(tree::TK_REF, tree::IMMUTABLE, ty)
+        let span = span_of(p, ty)
+        return mk_type(p, p.t.w[ty], span, kind)
+    }
+    if t == tree::TK_REF && field(p, k, 1) == tree::IMMUTABLE {
+        let inner = field(p, k, 2)
+        if p.synth == 0 {
+            record(p, "SharedReferenceParameter", amp)
+        }
+        if tag(p, kind_of(p, inner)) == tree::TK_SLICE {
+            let kind = p.t.rec3(tree::TK_REF, tree::IMMUTABLE, inner)
+            let span = span_of(p, ty)
+            return mk_type(p, p.t.w[ty], span, kind)
+        }
+        return inner
+    }
+    ty
+}
+
+// ---- patterns ------------------------------------------------------------
+
+pub fn parse_pattern(p: &mut Parser) -> i64 {
+    p.pattern_pipe += 1
+    let first = parse_pattern_no_or(p)
+    if !at(p, P_PIPE) {
+        p.pattern_pipe -= 1
+        return first
+    }
+    let mut alternatives = #[first]
+    while eat(p, P_PIPE) {
+        alternatives.push(parse_pattern_no_or(p))
+    }
+    p.pattern_pipe -= 1
+    let start = span_of(p, alternatives[0])
+    let end = span_of(p, alternatives[alternatives.len() - 1])
+    let span = join(p, start, end)
+    let id = alloc(p)
+    let list = p.t.list(alternatives)
+    let kind = p.t.rec2(tree::PK_OR, list)
+    mk_pat(p, id, span, kind)
+}
+
+pub fn parse_pattern_no_or(p: &mut Parser) -> i64 {
+    let start_span = peek_span(p)
+    if !enter_recursion(p, start_span) {
+        let id = alloc(p)
+        if !at_eof(p) {
+            bump(p)
+        }
+        let kind = p.t.rec1(tree::PK_ERROR)
+        return mk_pat(p, id, start_span, kind)
+    }
+    let kind = parse_pattern_kind(p)
+    let end_span = last_span(p)
+    let span = join(p, start_span, end_span)
+    let id = alloc(p)
+    leave_recursion(p)
+    mk_pat(p, id, span, kind)
+}
+
+fn is_path_start(p: &mut Parser) -> bool {
+    let k = peek(p)
+    k == lex::IDENT || k == KW_SELF_UPPER || k == KW_SELF_LOWER || k == KW_SUPER || k == KW_CRATE
+}
+
+fn parse_pattern_kind(p: &mut Parser) -> i64 {
+    if at(p, P_DOT_DOT) || at(p, P_DOT_DOT_EQ) {
+        return parse_range_pattern_or_rest(p)
+    }
+    if eat(p, P_AMP) {
+        let mutability = if eat(p, KW_MUT) { tree::MUTABLE } else { tree::IMMUTABLE }
+        let inner = parse_pattern_no_or(p)
+        return p.t.rec3(tree::PK_REF, mutability, inner)
+    }
+    if eat(p, P_LPAREN) {
+        return parse_tuple_pattern(p)
+    }
+    if eat(p, P_LBRACKET) {
+        return parse_slice_pattern(p)
+    }
+    if eat(p, KW_MUT) {
+        return parse_ident_pattern(p, tree::MUTABLE)
+    }
+    let literal = try_parse_range_bound(p)
+    if literal >= 0 {
+        return maybe_range_pattern(p, literal)
+    }
+    if peek(p) == lex::IDENT && peek_text_is(p, 0, "_") {
+        bump(p)
+        return p.t.rec1(tree::PK_WILDCARD)
+    }
+    if is_path_start(p) {
+        return parse_path_pattern(p)
+    }
+    let s = peek_span(p)
+    record(p, "Unexpected", s)
+    bump(p)
+    p.t.rec1(tree::PK_ERROR)
+}
+
+fn parse_range_pattern_or_rest(p: &mut Parser) -> i64 {
+    let inclusive = at(p, P_DOT_DOT_EQ)
+    bump(p)
+    let kind = if inclusive { tree::INCLUSIVE } else { tree::EXCLUSIVE }
+    let hi = try_parse_range_bound(p)
+    if hi >= 0 {
+        return p.t.rec4(tree::PK_RANGE, -1, hi, kind)
+    }
+    if inclusive && is_path_start(p) {
+        return reject_path_range_bound(p)
+    }
+    if inclusive {
+        let s = last_span(p)
+        record(p, "InclusiveRangeMissingEnd", s)
+        return p.t.rec1(tree::PK_ERROR)
+    }
+    p.t.rec1(tree::PK_REST)
+}
+
+fn parse_tuple_pattern(p: &mut Parser) -> i64 {
+    if eat(p, P_RPAREN) {
+        let unit = p.t.rec1(tree::LIT_UNIT)
+        return p.t.rec2(tree::PK_LITERAL, unit)
+    }
+    let mut elements: Vec<i64> = #[parse_pattern(p)]
+    let mut saw_comma = false
+    loop {
+        if eat(p, P_COMMA) {
+            saw_comma = true
+        } else if at_eof(p) || !newline_before_peek(p) {
+            break
+        }
+        if at(p, P_RPAREN) || at_eof(p) {
+            break
+        }
+        let before = p.pos
+        elements.push(parse_pattern(p))
+        if p.pos == before {
+            break
+        }
+    }
+    expect(p, P_RPAREN)
+    if elements.len() == 1 && !saw_comma {
+        return kind_of(p, elements[0])
+    }
+    let list = p.t.list(elements)
+    p.t.rec2(tree::PK_TUPLE, list)
+}
+
+fn parse_slice_pattern(p: &mut Parser) -> i64 {
+    let mut prefix: Vec<i64> = #[]
+    let mut suffix: Vec<i64> = #[]
+    let mut rest = -1
+    let mut seen_rest = false
+    while !at(p, P_RBRACKET) && !at_eof(p) {
+        if at(p, P_DOT_DOT) {
+            let rest_span = peek_span(p)
+            bump(p)
+            let binding = if at(p, P_COMMA) || at(p, P_RBRACKET) {
+                let id = alloc(p)
+                let kind = p.t.rec1(tree::PK_WILDCARD)
+                mk_pat(p, id, rest_span, kind)
+            } else {
+                parse_pattern_no_or(p)
+            }
+            if seen_rest {
+                record(p, "SlicePatternExtraRest", rest_span)
+            } else {
+                seen_rest = true
+                rest = binding
+            }
+        } else {
+            let pattern = parse_pattern(p)
+            if seen_rest {
+                suffix.push(pattern)
+            } else {
+                prefix.push(pattern)
+            }
+        }
+        if !eat_list_separator(p) {
+            break
+        }
+    }
+    expect(p, P_RBRACKET)
+    let pre = p.t.list(prefix)
+    let suf = p.t.list(suffix)
+    p.t.rec4(tree::PK_SLICE, pre, rest, suf)
+}
+
+fn parse_ident_pattern(p: &mut Parser, mutability: i64) -> i64 {
+    let s = peek_span(p)
+    if peek(p) != lex::IDENT {
+        record(p, "Unexpected", s)
+        return p.t.rec1(tree::PK_ERROR)
+    }
+    bump(p)
+    let name = src_ident(p, s)
+    let subpattern = if eat(p, P_AT) { parse_pattern_no_or(p) } else { -1 }
+    p.t.rec4(tree::PK_IDENT, mutability, name, subpattern)
+}
+
+/// The value of the string literal token at `s`, as a string record.
+pub fn string_literal(p: &mut Parser, s: Span) -> i64 {
+    let start = s.start as i64
+    let end = s.end as i64
+    let n = end - start
+    // A plain quoted literal without escapes is its own text.
+    if n >= 2 && p.src.byte_at(start) == 34 && p.src.byte_at(end - 1) == 34 &&
+    !(n >= 6 && p.src.byte_at(start + 1) == 34 && p.src.byte_at(start + 2) == 34) {
+        let mut plain = true
+        let mut i = start + 1
+        while i < end - 1 {
+            if p.src.byte_at(i) == 92 {
+                plain = false
+                break
+            }
+            i += 1
+        }
+        if plain {
+            return p.t.src_str(start + 1, end - 1)
+        }
+    }
+    let value = string_literal_value(text(p, s))
+    p.t.str_of(value)
+}
+
+/// A literal record, or -1 when no literal starts here.
+fn try_parse_literal_pattern(p: &mut Parser) -> i64 {
+    let k = peek(p)
+    let s = peek_span(p)
+    if k == lex::INT_LIT {
+        bump(p)
+        let v = src_ident(p, s)
+        return p.t.rec2(tree::LIT_INT, v)
+    }
+    if k == lex::FLOAT_LIT {
+        bump(p)
+        let v = src_ident(p, s)
+        return p.t.rec2(tree::LIT_FLOAT, v)
+    }
+    if k == lex::STRING_LIT || k == lex::RAW_STRING_LIT || k == lex::TRIPLE_STRING_LIT {
+        bump(p)
+        let v = string_literal(p, s)
+        return p.t.rec2(tree::LIT_STRING, v)
+    }
+    if k == lex::CHAR_LIT {
+        bump(p)
+        let c = char_literal_value(text(p, s))
+        return p.t.rec2(tree::LIT_CHAR, c as i64)
+    }
+    if k == lex::BYTE_LIT {
+        bump(p)
+        let b = byte_literal_value(text(p, s))
+        return p.t.rec2(tree::LIT_BYTE, b as i64)
+    }
+    if k == KW_TRUE {
+        bump(p)
+        return p.t.rec2(tree::LIT_BOOL, 1)
+    }
+    if k == KW_FALSE {
+        bump(p)
+        return p.t.rec2(tree::LIT_BOOL, 0)
+    }
+    if k == P_MINUS {
+        let n = kind_at(p, 1)
+        if n == lex::INT_LIT || n == lex::FLOAT_LIT {
+            bump(p)
+            let ns = peek_span(p)
+            bump(p)
+            let spelling = "-" + text(p, ns)
+            let v = p.t.str_of(spelling)
+            if n == lex::INT_LIT {
+                return p.t.rec2(tree::LIT_INT, v)
+            }
+            return p.t.rec2(tree::LIT_FLOAT, v)
+        }
+    }
+    -1
+}
+
+fn maybe_range_pattern(p: &mut Parser, lo: i64) -> i64 {
+    if at(p, P_DOT_DOT) || at(p, P_DOT_DOT_EQ) {
+        let kind = if eat(p, P_DOT_DOT_EQ) {
+            tree::INCLUSIVE
+        } else {
+            bump(p)
+            tree::EXCLUSIVE
+        }
+        let hi = try_parse_range_bound(p)
+        if hi < 0 && is_path_start(p) {
+            return reject_path_range_bound(p)
+        }
+        if hi < 0 && kind == tree::INCLUSIVE {
+            let s = last_span(p)
+            record(p, "InclusiveRangeMissingEnd", s)
+            return p.t.rec1(tree::PK_ERROR)
+        }
+        return p.t.rec4(tree::PK_RANGE, lo, hi, kind)
+    }
+    p.t.rec2(tree::PK_LITERAL, lo)
+}
+
+/// A literal record for a range bound, or -1.
+fn try_parse_range_bound(p: &mut Parser) -> i64 {
+    let literal = try_parse_literal_pattern(p)
+    if literal >= 0 {
+        return literal
+    }
+    if peek(p) != lex::IDENT || kind_at(p, 1) != P_COLON_COLON || kind_at(p, 2) != lex::IDENT {
+        return -1
+    }
+    let ty = text(p, peek_span(p))
+    let limit = text(p, span_at(p, 2))
+    let value = primitive_int_limit(ty, limit)
+    if value == "" {
+        return -1
+    }
+    if kind_at(p, 3) == P_COLON_COLON || kind_at(p, 3) == P_LPAREN {
+        return -1
+    }
+    bump(p)
+    bump(p)
+    bump(p)
+    let v = p.t.str_of(value)
+    p.t.rec2(tree::LIT_INT, v)
+}
+
+/// The decimal spelling of `ty::limit` for an integer type, or "".
+fn primitive_int_limit(ty: String, limit: String) -> String {
+    let lo, hi = if ty == "i8" {
+        ("-128", "127")
+    } else if ty == "i16" {
+        ("-32768", "32767")
+    } else if ty == "i32" {
+        ("-2147483648", "2147483647")
+    } else if ty == "i64" || ty == "isize" {
+        ("-9223372036854775808", "9223372036854775807")
+    } else if ty == "u8" {
+        ("0", "255")
+    } else if ty == "u16" {
+        ("0", "65535")
+    } else if ty == "u32" {
+        ("0", "4294967295")
+    } else if ty == "u64" || ty == "usize" {
+        ("0", "18446744073709551615")
+    } else {
+        return ""
+    }
+    if limit == "MIN" {
+        return lo
+    }
+    if limit == "MAX" {
+        return hi
+    }
+    ""
+}
+
+fn reject_path_range_bound(p: &mut Parser) -> i64 {
+    let start = peek_span(p)
+    let _ = parse_type_path(p)
+    let end = last_span(p)
+    let span = join(p, start, end)
+    record(p, "RangePatternBoundNotLiteral", span)
+    p.t.rec1(tree::PK_ERROR)
+}
+
+fn parse_path_pattern(p: &mut Parser) -> i64 {
+    let start_span = peek_span(p)
+    let path = parse_type_path(p)
+    if at(p, P_DOT_DOT) || at(p, P_DOT_DOT_EQ) {
+        let end = last_span(p)
+        let span = join(p, start_span, end)
+        record(p, "RangePatternBoundNotLiteral", span)
+        bump(p)
+        if try_parse_range_bound(p) < 0 && is_path_start(p) {
+            let _ = parse_type_path(p)
+        }
+        return p.t.rec1(tree::PK_ERROR)
+    }
+    let segments = p.t.w[path]
+    let is_single_ident = p.t.w[segments] == 1 && p.t.w[p.t.w[segments + 1] + 1] == 0
+    if eat(p, P_LPAREN) {
+        let mut elements: Vec<i64> = #[]
+        while !at(p, P_RPAREN) && !at_eof(p) {
+            elements.push(parse_pattern(p))
+            if !eat_list_separator(p) {
+                break
+            }
+        }
+        expect(p, P_RPAREN)
+        let list = p.t.list(elements)
+        return p.t.rec3(tree::PK_TUPLE_STRUCT, path, list)
+    }
+    if eat(p, P_LBRACE) {
+        let fields, rest = parse_struct_pattern_fields(p)
+        return p.t.rec4(tree::PK_STRUCT, path, fields, if rest { 1 } else { 0 })
+    }
+    if is_single_ident {
+        let name = p.t.w[p.t.w[segments + 1]]
+        let first = if p.t.str_len(name) > 0 { p.t.str_byte(name, 0) } else { 0 }
+        if first >= 65 && first <= 90 {
+            return p.t.rec2(tree::PK_PATH, path)
+        }
+        if eat(p, P_AT) {
+            let sub = parse_pattern_no_or(p)
+            return p.t.rec4(tree::PK_IDENT, tree::IMMUTABLE, name, sub)
+        }
+        return p.t.rec4(tree::PK_IDENT, tree::IMMUTABLE, name, -1)
+    }
+    p.t.rec2(tree::PK_PATH, path)
+}
+
+/// The field pattern list of a struct pattern, and whether it ends in `..`.
+fn parse_struct_pattern_fields(p: &mut Parser) -> (i64, bool) {
+    let mut fields: Vec<i64> = #[]
+    let mut rest = false
+    while !at(p, P_RBRACE) && !at_eof(p) {
+        if eat(p, P_DOT_DOT) {
+            rest = true
+            break
+        }
+        let name_span = peek_span(p)
+        if peek(p) != lex::IDENT {
+            record(p, "Unexpected", name_span)
+            bump(p)
+            break
+        }
+        let name = src_ident(p, name_span)
+        bump(p)
+        let pattern = if eat(p, P_COLON) { parse_pattern(p) } else { -1 }
+        fields.push(p.t.rec2(name, pattern))
+        if !eat_list_separator(p) {
+            break
+        }
+    }
+    expect(p, P_RBRACE)
+    (p.t.list(fields), rest)
+}
+
+// ---- literal values ------------------------------------------------------
+
+/// The characters of `s`.
+pub fn chars_of(s: String) -> Vec<char> {
+    let mut out: Vec<char> = Vec::with_capacity(s.byte_len())
+    for c in s {
+        out.push(c)
+    }
+    out
+}
+
+fn is_hex_char(c: char) -> bool {
+    (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+fn hex_value(c: char) -> i64 {
+    let v = c as i64
+    if v >= 48 && v <= 57 {
+        return v - 48
+    }
+    if v >= 97 && v <= 102 {
+        return v - 87
+    }
+    v - 55
+}
+
+pub fn decode_string_escapes(body: String) -> String {
+    let cs = chars_of(body)
+    let n = cs.len()
+    let mut out = String::with_capacity(body.byte_len())
+    let mut i = 0
+    while i < n {
+        let c = cs[i]
+        i += 1
+        if c != '\\' {
+            out.push(c)
+            continue
+        }
+        if i >= n {
+            out.push('\\')
+            continue
+        }
+        let e = cs[i]
+        i += 1
+        if e == 'n' {
+            out.push('\n')
+        } else if e == 'r' {
+            out.push('\r')
+        } else if e == 't' {
+            out.push('\t')
+        } else if e == '\\' {
+            out.push('\\')
+        } else if e == '\'' {
+            out.push('\'')
+        } else if e == '"' {
+            out.push('"')
+        } else if e == '0' {
+            out.push('\0')
+        } else if e == 'u' {
+            if i >= n || cs[i] != '{' {
+                out.push_str("\\u")
+                continue
+            }
+            i += 1
+            let mut digits = ""
+            let mut count = 0
+            let mut value = 0
+            while i < n {
+                let d = cs[i]
+                if d == '}' || !is_hex_char(d) || count >= 6 {
+                    break
+                }
+                digits.push(d)
+                value = value * 16 + hex_value(d)
+                count += 1
+                i += 1
+            }
+            let closed = i < n && cs[i] == '}'
+            if closed {
+                i += 1
+            }
+            let valid = count > 0 && value <= 1114111 && !(value >= 55296 && value <= 57343)
+            if valid && closed {
+                out.push(char::from_u32(value as u32).unwrap_or('\0'))
+            } else {
+                out.push_str("\\u{")
+                out.push_str(digits)
+                if closed {
+                    out.push('}')
+                }
+            }
+        } else if e == 'x' {
+            let mut digits = ""
+            let mut value = 0
+            let mut count = 0
+            while count < 2 && i < n && is_hex_char(cs[i]) {
+                digits.push(cs[i])
+                value = value * 16 + hex_value(cs[i])
+                count += 1
+                i += 1
+            }
+            if count == 2 && value <= 127 {
+                out.push(char::from_u32(value as u32).unwrap_or('\0'))
+            } else {
+                out.push_str("\\x")
+                out.push_str(digits)
+            }
+        } else {
+            out.push('\\')
+            out.push(e)
+        }
+    }
+    out
+}
+
+/// A triple-quoted string's dedented body, and whether text follows its
+/// opening quotes on the same line.
+pub fn triple_string(raw: String) -> (String, bool) {
+    let n = raw.byte_len()
+    let inner = if n >= 6 && raw.starts_with("\"\"\"") && raw.ends_with("\"\"\"") {
+        raw.substring(3, n - 3)
+    } else {
+        raw
+    }
+    let m = inner.byte_len()
+    let mut nl = -1
+    for i in 0..m {
+        if nl < 0 && inner.byte_at(i) == 10 {
+            nl = i
+        }
+    }
+    if nl < 0 {
+        return (inner, false)
+    }
+    let opening = inner.substring(0, nl)
+    let rest = inner.substring(nl + 1, m)
+    let opening_text = opening.trim().byte_len() > 0
+    let mut lines: Vec<String> = #[]
+    let mut from = 0
+    let rn = rest.byte_len()
+    for i in 0..rn {
+        if rest.byte_at(i) == 10 {
+            lines.push(rest.substring(from, i))
+            from = i + 1
+        }
+    }
+    lines.push(rest.substring(from, rn))
+    let closer = lines[lines.len() - 1].trim().byte_len() == 0
+    let mut measure: Option<String> = None
+    if closer {
+        measure = lines.pop()
+    }
+    for line in lines {
+        if line.trim().byte_len() == 0 {
+            continue
+        }
+        let lead = line.substring(0, line.byte_len() - line.trim_start().byte_len())
+        measure = match measure {
+            Some(current) => Some(shared_prefix(current, lead)),
+            None => Some(lead),
+        }
+    }
+    let indent = measure.unwrap_or("")
+    let mut body = ""
+    let mut first = true
+    for line in lines {
+        if !first {
+            body.push('\n')
+        }
+        first = false
+        if line.trim().byte_len() == 0 {
+            continue
+        }
+        if line.starts_with(indent) {
+            body.push_str(line.substring(indent.byte_len(), line.byte_len()))
+        } else {
+            body.push_str(line)
+        }
+    }
+    (body, opening_text)
+}
+
+fn shared_prefix(left: String, right: String) -> String {
+    let lc = chars_of(left)
+    let rc = chars_of(right)
+    let mut end = 0
+    let mut i = 0
+    while i < lc.len() && i < rc.len() {
+        if lc[i] != rc[i] {
+            break
+        }
+        end += lc[i].len_utf8()
+        i += 1
+    }
+    left.substring(0, end)
+}
+
+pub fn string_literal_value(source: String) -> String {
+    let n = source.byte_len()
+    if n >= 6 && source.starts_with("\"\"\"") && source.ends_with("\"\"\"") {
+        let body, _ = triple_string(source)
+        return decode_string_escapes(body)
+    }
+    if n >= 2 && source.starts_with("\"") && source.ends_with("\"") {
+        return decode_string_escapes(source.substring(1, n - 1))
+    }
+    if n >= 3 && source.starts_with("r\"") && source.ends_with("\"") {
+        return source.substring(2, n - 1)
+    }
+    source
+}
+
+pub fn char_literal_value(source: String) -> char {
+    let mut body = source
+    if body.starts_with("'") {
+        body = body.substring(1, body.byte_len())
+    }
+    if body.ends_with("'") {
+        body = body.substring(0, body.byte_len() - 1)
+    }
+    let decoded = chars_of(decode_string_escapes(body))
+    if decoded.len() == 0 {
+        return '\0'
+    }
+    decoded[0]
+}
+
+pub fn byte_literal_value(source: String) -> u8 {
+    let mut body = source
+    if body.starts_with("b'") {
+        body = body.substring(2, body.byte_len())
+    }
+    if body.ends_with("'") {
+        body = body.substring(0, body.byte_len() - 1)
+    }
+    let decoded = decode_string_escapes(body)
+    if decoded.byte_len() == 0 {
+        return 0
+    }
+    decoded.byte_at(0) as u8
+}
+
+pub fn byte_string_literal_value(source: String) -> Vec<u8> {
+    let mut body = source
+    if body.starts_with("b\"") {
+        body = body.substring(2, body.byte_len())
+    }
+    if body.ends_with("\"") {
+        body = body.substring(0, body.byte_len() - 1)
+    }
+    decode_string_escapes(body).as_bytes()
+}
+
+pub fn extract_raw_string_body(source: String, hashes: i64) -> String {
+    let prefix_len = 1 + hashes + 1
+    let suffix_len = 1 + hashes
+    let n = source.byte_len()
+    if n < prefix_len + suffix_len {
+        return ""
+    }
+    let mut end = n - suffix_len
+    // A char boundary: not a UTF-8 continuation byte.
+    while end > prefix_len && end < n && (source.byte_at(end) & 192) == 128 {
+        end -= 1
+    }
+    if prefix_len >= end {
+        return ""
+    }
+    source.substring(prefix_len, end)
+}

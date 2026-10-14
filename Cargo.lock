@@ -174,7 +174,7 @@ dependencies = [
  "nom",
  "num-traits",
  "rusticata-macros",
- "thiserror",
+ "thiserror 2.0.18",
  "time",
 ]
 
@@ -532,7 +532,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fa961b519f0b462e3a3b4a34b64d119eeaca1d59af726fe450bbba07a9fc0a1"
 dependencies = [
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1098,6 +1098,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
+name = "erased-discriminant"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1a6df962265a53221f29081896c412ef325c17fa7d638cd9578febe53d3c82c"
+dependencies = [
+ "typeid",
+]
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1369,20 +1378,21 @@ dependencies = [
 
 [[package]]
 name = "gossamer-abi"
-version = "0.71.2"
+version = "0.72.0"
 
 [[package]]
 name = "gossamer-ast"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "gossamer-abi",
  "gossamer-lex",
+ "postcard",
  "serde",
 ]
 
 [[package]]
 name = "gossamer-binding"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "gossamer-binding-macros",
  "gossamer-codegen-cranelift",
@@ -1397,7 +1407,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-binding-macros"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1406,7 +1416,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-cli"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1443,6 +1453,7 @@ dependencies = [
  "regex",
  "rustls",
  "rustyline",
+ "serde",
  "serde_json",
  "syn",
  "terminal_size",
@@ -1455,7 +1466,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-codegen-cranelift"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "anyhow",
  "backtrace",
@@ -1483,7 +1494,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-codegen-llvm"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "anyhow",
  "gossamer-abi",
@@ -1501,21 +1512,21 @@ dependencies = [
 
 [[package]]
 name = "gossamer-core"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "gossamer-coro"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "corosensei",
 ]
 
 [[package]]
 name = "gossamer-diagnostics"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "gossamer-ast",
  "gossamer-lex",
@@ -1528,9 +1539,10 @@ dependencies = [
 
 [[package]]
 name = "gossamer-driver"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "anyhow",
+ "gossamer-abi",
  "gossamer-ast",
  "gossamer-codegen-cranelift",
  "gossamer-codegen-llvm",
@@ -1548,7 +1560,7 @@ dependencies = [
  "postcard",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
  "toml",
  "which",
  "windows-sys 0.61.2",
@@ -1556,7 +1568,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-hir"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "gossamer-abi",
  "gossamer-ast",
@@ -1569,7 +1581,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-http3"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "bytes",
  "h3",
@@ -1578,14 +1590,14 @@ dependencies = [
  "quinn",
  "rcgen",
  "rustls",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "webpki-roots",
 ]
 
 [[package]]
 name = "gossamer-interp"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "gossamer-abi",
  "gossamer-ast",
@@ -1607,23 +1619,23 @@ dependencies = [
  "rustc-hash",
  "sha2",
  "smallvec",
- "thiserror",
+ "thiserror 2.0.18",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "gossamer-lex"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "insta",
  "serde",
- "thiserror",
+ "thiserror 2.0.18",
  "unicode-ident",
 ]
 
 [[package]]
 name = "gossamer-lint"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "gossamer-ast",
  "gossamer-diagnostics",
@@ -1633,7 +1645,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-lsp"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "gossamer-ast",
  "gossamer-diagnostics",
@@ -1653,7 +1665,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-mcp"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "gossamer-lsp",
  "gossamer-std",
@@ -1661,7 +1673,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-mir"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "gossamer-abi",
  "gossamer-ast",
@@ -1675,19 +1687,19 @@ dependencies = [
 
 [[package]]
 name = "gossamer-parse"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "gossamer-ast",
  "gossamer-diagnostics",
  "gossamer-lex",
  "proptest",
  "regex",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "gossamer-pkg"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "ed25519-dalek",
  "gossamer-resolve",
@@ -1697,7 +1709,7 @@ dependencies = [
  "rustls-pki-types",
  "serde_json",
  "sha2",
- "thiserror",
+ "thiserror 2.0.18",
  "toml",
  "url",
  "webpki-roots",
@@ -1706,7 +1718,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-playground"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "console_error_panic_hook",
  "gossamer-ast",
@@ -1724,7 +1736,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-resolve"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "gossamer-ast",
  "gossamer-diagnostics",
@@ -1732,12 +1744,12 @@ dependencies = [
  "gossamer-parse",
  "parking_lot",
  "serde",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "gossamer-runner-template"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "syn",
  "toml",
@@ -1745,7 +1757,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-runtime"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -1803,9 +1815,10 @@ dependencies = [
  "signal-hook",
  "socket2",
  "tar",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "toml",
+ "unicode-ident",
  "unicode-normalization",
  "unicode-properties",
  "unicode-segmentation",
@@ -1823,14 +1836,14 @@ dependencies = [
 
 [[package]]
 name = "gossamer-sched"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "gossamer-runtime",
 ]
 
 [[package]]
 name = "gossamer-std"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -1892,10 +1905,11 @@ dependencies = [
  "signal-hook",
  "socket2",
  "tar",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
  "toml",
+ "unicode-ident",
  "unicode-normalization",
  "unicode-properties",
  "unicode-segmentation",
@@ -1911,15 +1925,15 @@ dependencies = [
 
 [[package]]
 name = "gossamer-template"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "gossamer-types"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "gossamer-ast",
  "gossamer-diagnostics",
@@ -1928,15 +1942,15 @@ dependencies = [
  "gossamer-pkg",
  "gossamer-resolve",
  "serde",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "gossamer-ws"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "parking_lot",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2888,7 +2902,7 @@ dependencies = [
  "rustc-hash",
  "rustls",
  "socket2",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "web-time",
@@ -2910,7 +2924,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "slab",
- "thiserror",
+ "thiserror 2.0.18",
  "tinyvec",
  "tracing",
  "web-time",
@@ -3201,9 +3215,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "log",
  "once_cell",
@@ -3343,6 +3357,20 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde-reflection"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af0fdf9c543af37502581e3d6cf4e6cd1628d6616d6a1f8f4ca88aae3a405f5c"
+dependencies = [
+ "erased-discriminant",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "typeid",
 ]
 
 [[package]]
@@ -3601,11 +3629,31 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+dependencies = [
+ "thiserror-impl 1.0.69",
+]
+
+[[package]]
+name = "thiserror"
 version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 2.0.18",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -3786,6 +3834,12 @@ name = "typed-path"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
+
+[[package]]
+name = "typeid"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c"
 
 [[package]]
 name = "typenum"
@@ -4346,7 +4400,7 @@ dependencies = [
  "oid-registry",
  "ring",
  "rusticata-macros",
- "thiserror",
+ "thiserror 2.0.18",
  "time",
 ]
 
@@ -4362,16 +4416,20 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.71.2"
+version = "0.72.0"
 dependencies = [
  "anyhow",
+ "gossamer-ast",
  "gossamer-diagnostics",
+ "gossamer-driver",
  "gossamer-lex",
  "gossamer-lint",
  "gossamer-parse",
+ "gossamer-resolve",
  "gossamer-std",
  "gossamer-types",
  "serde",
+ "serde-reflection",
  "serde_json",
 ]
 

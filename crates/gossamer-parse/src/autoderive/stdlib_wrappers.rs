@@ -35,63 +35,39 @@ fn mentions_module_item(source: &str, module: &str, item: &str) -> bool {
 /// against the Rust values they mirror.
 #[must_use]
 pub fn stdlib_wrapper_source(source: &str) -> String {
-    synthesize_stdlib_wrappers(source)
+    synthesize_stdlib_wrappers(source, clean_parse(source).as_ref())
 }
 
-/// What `source` reached through `use std::...`: the stdlib modules in scope,
-/// and the wrapper names its item imports bind. `None` where the source does
-/// not parse cleanly - a tree built by error recovery answers for no import,
-/// and the parse diagnostics are that program's report.
+/// The tree of `source`, or `None` when it does not parse cleanly: a tree
+/// built through error recovery carries placeholder names and dropped
+/// items, so nothing is synthesized from it.
+fn clean_parse(source: &str) -> Option<SourceFile> {
+    clean_parse_with_tokens(source).0
+}
+
+/// [`clean_parse`] that also answers the significant tokens of `source`.
+pub(super) fn clean_parse_with_tokens(source: &str) -> (Option<SourceFile>, Vec<gossamer_lex::Token>) {
+    let mut probe = SourceMap::new();
+    let file = probe.add_file("<autoderive-probe>", String::new());
+    let (parsed, diags, tokens) = crate::parse_source_file_with_tokens(source, file);
+    (diags.is_empty().then_some(parsed), tokens)
+}
+
+/// What a program reached through `use std::...`: the stdlib modules in
+/// scope, and the wrapper names its item imports bind.
 struct StdImports {
     /// Binding name to the stdlib module it reaches.
     modules: std::collections::HashMap<String, String>,
     wrapper_names: std::collections::HashSet<String>,
 }
 
-fn imported_std(source: &str) -> Option<StdImports> {
-    let mut probe = SourceMap::new();
-    let file = probe.add_file("<stdlib-wrapper-probe>", source.to_string());
-    let (parsed, diags) = crate::parse_source_file(source, file);
-    if !diags.is_empty() {
-        return None;
-    }
-    let modules = stdlib_modules_in_scope(&parsed);
+fn imported_std(parsed: &SourceFile) -> StdImports {
     // The rewrite decides which wrapper names the program's paths become, so
     // the names it produces are the ones whose wrappers are needed: a bare
     // import, a module alias, and a qualified path all reach them the same way.
-    let mut rewritten = parsed;
-    rewrite_stdlib_struct_surface(&mut rewritten);
-    let mut collector = WrapperNameCollector::default();
-    gossamer_ast::Visitor::visit_source_file(&mut collector, &rewritten);
-    Some(StdImports {
-        modules,
-        wrapper_names: collector.names,
-    })
-}
-
-/// The injected wrapper names a rewritten tree's paths spell.
-#[derive(Default)]
-struct WrapperNameCollector {
-    names: std::collections::HashSet<String>,
-}
-
-impl WrapperNameCollector {
-    fn note<'a>(&mut self, segments: impl Iterator<Item = &'a str>) {
-        for name in segments.filter(|name| name.starts_with("__gos_")) {
-            self.names.insert(name.to_string());
-        }
-    }
-}
-
-impl gossamer_ast::Visitor for WrapperNameCollector {
-    fn visit_path_expr(&mut self, path: &gossamer_ast::PathExpr) {
-        self.note(path.segments.iter().map(|segment| segment.name.name.as_str()));
-        gossamer_ast::visitor::walk_path_expr(self, path);
-    }
-
-    fn visit_type_path(&mut self, path: &gossamer_ast::ty::TypePath) {
-        self.note(path.segments.iter().map(|segment| segment.name.name.as_str()));
-        gossamer_ast::visitor::walk_type_path(self, path);
+    StdImports {
+        modules: stdlib_modules_in_scope(parsed),
+        wrapper_names: stdlib_wrapper_names(parsed),
     }
 }
 
@@ -108,11 +84,14 @@ fn declared_wrapper_names(wrappers: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-fn synthesize_stdlib_wrappers(source: &str) -> String {
+/// `parsed` is the clean tree of `source`, or `None` when it did not parse
+/// cleanly; a tree built by error recovery answers for no import, and the
+/// parse diagnostics are that program's report.
+fn synthesize_stdlib_wrappers(source: &str, parsed: Option<&SourceFile>) -> String {
     // A wrapper set declares top-level items, so it is injected only for a
     // module the source reached through `use std::...`: a project with its
     // own `sql` module keeps its own `Value` and its own `Int`.
-    let imported = imported_std(source);
+    let imported = parsed.map(imported_std);
     let from_std = |module: &str| {
         imported.as_ref().is_none_or(|found| {
             // The module itself was imported, or it is reached through one

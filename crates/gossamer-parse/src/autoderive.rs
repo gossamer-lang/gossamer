@@ -15,7 +15,7 @@ include!("autoderive/tests.rs");
 
 #[path = "autoderive/primitive_surface.rs"]
 mod primitive_surface;
-use primitive_surface::{synthesize_format_helpers, synthesize_primitive_surface};
+use primitive_surface::{SourceTokens, synthesize_format_helpers, synthesize_primitive_surface};
 
 #[path = "autoderive/iterator_adapters.rs"]
 mod iterator_adapters;

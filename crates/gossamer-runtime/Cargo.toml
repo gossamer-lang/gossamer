@@ -57,6 +57,7 @@ unnecessary_safety_comment = "deny"
 # crates compile cleanly there even when their consuming compiled-tier
 # shim is gated out, so they stay in the unconditional table.
 [dependencies]
+unicode-ident = { workspace = true }
 gossamer-core = { workspace = true }
 itoa = "1"
 base64-simd = "0.8"

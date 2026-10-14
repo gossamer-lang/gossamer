@@ -1,0 +1,54 @@
+// Two enums declare a struct variant of the same name with different
+// fields; each literal and each pattern resolves through its own enum.
+
+enum Expr {
+    Lit(i64)
+    Unary { op: String, operand: i64 }
+    Struct { path: String, fields: Vec<i64>, base: Option<String>, braced: bool }
+}
+
+enum Pattern {
+    Wild
+    Struct { path: String, fields: Vec<String>, rest: bool }
+}
+
+fn build_expr(path: String, n: i64) -> Expr {
+    let mut fields: Vec<i64> = #[]
+    for i in 0..n {
+        fields.push(i * 10)
+    }
+    Expr::Struct { path: path, fields: fields, base: Some("base"), braced: true }
+}
+
+fn describe_expr(e: Expr) -> String {
+    match e {
+        Expr::Lit(v) => f"lit {v}"
+        Expr::Unary { op, operand } => f"unary {op}{operand}"
+        Expr::Struct { path, fields, base, braced } => {
+            f"struct {path} {fields} {base} braced={braced}"
+        }
+    }
+}
+
+fn describe_pattern(p: Pattern) -> String {
+    match p {
+        Pattern::Wild => "wild"
+        Pattern::Struct { path, fields, rest } => f"pattern {path} {fields} rest={rest}"
+    }
+}
+
+fn main() {
+    println(describe_expr(build_expr("Point", 3)))
+    println(describe_expr(Expr::Unary { op: "-", operand: 4 }))
+    println(describe_expr(Expr::Lit(7)))
+    println(describe_pattern(Pattern::Struct { path: "Point", fields: #["x", "y"], rest: true }))
+    println(describe_pattern(Pattern::Wild))
+    let exprs = #[build_expr("A", 1), Expr::Lit(2), build_expr("B", 2)]
+    let mut structs = 0
+    for e in exprs {
+        if let Expr::Struct { fields, .. } = e {
+            structs += fields.len()
+        }
+    }
+    println(f"struct fields: {structs}")
+}

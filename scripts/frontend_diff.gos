@@ -1,0 +1,440 @@
+// Runs two frontends over the same units and reports where their output
+// differs: the diagnostics, the frontend blob (decoded through the schema,
+// so a difference is named by its field path, not a byte offset), and, for
+// an accepted unit, the MIR and LLVM IR of a build.
+//
+// Usage: gos run scripts/frontend_diff.gos [--a NAME=VALUE] [--b NAME=VALUE]
+//            [--no-build] [--gos PATH] PATH...
+//
+// Each side runs `gos` with its own environment assignment. By default both
+// set `GOS_DIFF_SIDE`, which `gos` ignores, so the frontend is compared with
+// itself: any difference is nondeterminism.
+// A PATH is a `.gos` file or a directory whose `.gos` files are compared.
+// The exit code is 1 when any unit differs.
+
+use std::{env, fs, process}
+use std::encoding::json
+use std::process::Command
+
+const SCHEMA: String = "benchmarks/frontend_parser/schema/blob.json"
+
+/// One side of the comparison: the environment variable it sets.
+struct Side {
+    name: String
+    value: String
+}
+
+/// What a side answered for one unit.
+struct Run {
+    transcript: String
+    blob: Option<Vec<u8>>
+}
+
+/// A blob being read: its bytes and how far the walk has read.
+struct Reader {
+    bytes: Vec<u8>
+    at: i64
+}
+
+fn parse_side(spec: String) -> Side {
+    match spec.find("=") {
+        Some(i) => Side { name: spec.substring(0, i), value: spec.substring(i + 1, spec.byte_len()) }
+        None => {
+            eprintln("frontend_diff: `{}` is not NAME=VALUE", spec)
+            process::exit(2)
+        }
+    }
+}
+
+fn units(paths: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = #[]
+    for p in paths {
+        if p.ends_with(".gos") {
+            out.push(p)
+            continue
+        }
+        match fs::read_dir(p) {
+            Ok(entries) => {
+                let mut names: Vec<String> = #[]
+                for e in entries {
+                    if e.is_file && e.path.ends_with(".gos") {
+                        names.push(e.path)
+                    }
+                }
+                names.sort()
+                for n in names {
+                    out.push(n)
+                }
+            }
+            Err(e) => eprintln("frontend_diff: {}: {}", p, e)
+        }
+    }
+    out
+}
+
+fn check(gos: String, side: Side, unit: String, blob: String) -> Run {
+    let _ = fs::remove_file(blob)
+    let answered = Command::new(gos)
+        .arg("check")
+        .arg("--emit-frontend-blob")
+        .arg(blob)
+        .arg("--message-format")
+        .arg("json")
+        .arg(unit)
+        .env(side.name, side.value)
+        .env("GOS_NO_CACHE", "1")
+        .output()
+    let transcript = match answered {
+        Ok(out) => f"{out.code}\n{out.stdout}{out.stderr}"
+        Err(e) => f"failed to run: {e}"
+    }
+    let bytes = match fs::read(blob) {
+        Ok(b) => Some(b)
+        Err(_) => None
+    }
+    Run { transcript: transcript, blob: bytes }
+}
+
+/// The MIR dump and the IR units of a debug build of `unit`.
+fn build(gos: String, side: Side, unit: String, dir: String) -> (String, Map<String, String>) {
+    let _ = fs::remove_dir_all(dir)
+    let _ = fs::create_dir_all(dir)
+    let ir = f"{dir}/ir"
+    let answered = Command::new(gos)
+        .arg("build")
+        .arg(unit)
+        .arg("--out-dir")
+        .arg(f"{dir}/out")
+        .env(side.name, side.value)
+        .env("GOS_NO_CACHE", "1")
+        .env("GOS_LLVM_DUMP_MIR", "1")
+        .env("GOS_LLVM_IR_DIR", ir)
+        .output()
+    let mir = match answered {
+        Ok(out) => f"{out.code}\n{out.stderr}"
+        Err(e) => f"failed to run: {e}"
+    }
+    let mut units: Map<String, String> = Map::new()
+    if let Ok(entries) = fs::read_dir(ir) {
+        for e in entries {
+            if let Ok(text) = fs::read_to_string(e.path) {
+                units[e.path.substring(ir.byte_len() + 1, e.path.byte_len())] = text
+            }
+        }
+    }
+    (mir, units)
+}
+
+/// The first line where two texts differ, with its number.
+fn first_line_difference(a: String, b: String) -> String {
+    let la = a.lines()
+    let lb = b.lines()
+    let n = la.len().min(lb.len())
+    for i in 0..n {
+        if la[i] != lb[i] {
+            return f"line {i + 1}:\n    a: {la[i]}\n    b: {lb[i]}"
+        }
+    }
+    f"line {n + 1}: one text ends ({la.len()} vs {lb.len()} lines)"
+}
+
+// ---- postcard, read through the schema --------------------------------
+
+fn byte(r: &mut Reader) -> i64 {
+    if r.at >= r.bytes.len() {
+        return -1
+    }
+    let b = r.bytes[r.at] as i64
+    r.at += 1
+    b
+}
+
+/// An unsigned LEB128 varint, as postcard writes every length, index, and
+/// integer wider than a byte.
+fn varint(r: &mut Reader) -> u64 {
+    let mut value: u64 = 0
+    let mut shift: u64 = 0
+    loop {
+        let b = byte(r)
+        if b < 0 || shift >= 64 {
+            return value
+        }
+        value = value | (((b & 127) as u64) <<% shift)
+        if b < 128 {
+            return value
+        }
+        shift += 7
+    }
+}
+
+/// An unsigned LEB128 varint of up to 128 bits, as the raw bytes it spans,
+/// so two of them compare without a 128-bit integer.
+fn varint_bytes(r: &mut Reader) -> String {
+    let mut out = ""
+    loop {
+        let b = byte(r)
+        if b < 0 {
+            return out
+        }
+        out += f"{b:02x}"
+        if b < 128 {
+            return out
+        }
+    }
+}
+
+fn text(r: &mut Reader) -> String {
+    let n = varint(r) as i64
+    let end = (r.at + n).min(r.bytes.len())
+    let mut chunk: Vec<u8> = #[]
+    while r.at < end {
+        chunk.push(r.bytes[r.at])
+        r.at += 1
+    }
+    String::from_utf8(chunk).unwrap_or("<not utf-8>")
+}
+
+/// Reads one value of `format` from both readers in step and answers the
+/// path of the first difference, or "" when the two values are equal.
+fn walk(shape: json::Value, schema: json::Value, a: &mut Reader, b: &mut Reader, path: String) -> String {
+    if let Some(prim) = json::as_str(shape) {
+        return primitive(prim, a, b, path)
+    }
+    if let Some(name) = json::get(shape, "TYPENAME") {
+        let n = json::as_str(name).unwrap_or("")
+        let container = json::get(json::get(schema, "containers").unwrap(), n).unwrap()
+        return walk_container(container, schema, a, b, path)
+    }
+    if let Some(inner) = json::get(shape, "OPTION") {
+        let ta = byte(a)
+        let tb = byte(b)
+        if ta != tb {
+            return f"{path}: Some/None differ ({ta} vs {tb})"
+        }
+        if ta == 1 {
+            return walk(inner, schema, a, b, path)
+        }
+        return ""
+    }
+    if let Some(inner) = json::get(shape, "SEQ") {
+        let na = varint(a)
+        let nb = varint(b)
+        if na != nb {
+            return f"{path}: lengths differ ({na} vs {nb})"
+        }
+        for i in 0..na as i64 {
+            let d = walk(inner, schema, a, b, f"{path}[{i}]")
+            if d != "" {
+                return d
+            }
+        }
+        return ""
+    }
+    if let Some(kv) = json::get(shape, "MAP") {
+        let na = varint(a)
+        let nb = varint(b)
+        if na != nb {
+            return f"{path}: sizes differ ({na} vs {nb})"
+        }
+        let key = json::get(kv, "KEY").unwrap()
+        let value = json::get(kv, "VALUE").unwrap()
+        for i in 0..na as i64 {
+            let dk = walk(key, schema, a, b, f"{path}{{key {i}}}")
+            if dk != "" {
+                return dk
+            }
+            let dv = walk(value, schema, a, b, f"{path}{{value {i}}}")
+            if dv != "" {
+                return dv
+            }
+        }
+        return ""
+    }
+    if let Some(items) = json::get(shape, "TUPLE") {
+        return walk_tuple(items, schema, a, b, path)
+    }
+    f"{path}: unknown format {shape}"
+}
+
+fn walk_tuple(items: json::Value, schema: json::Value, a: &mut Reader, b: &mut Reader, path: String) -> String {
+    let parts = json::as_array(items).unwrap_or(#[])
+    for i in 0..parts.len() {
+        let d = walk(parts[i], schema, a, b, f"{path}.{i}")
+        if d != "" {
+            return d
+        }
+    }
+    ""
+}
+
+fn primitive(prim: String, a: &mut Reader, b: &mut Reader, path: String) -> String {
+    let va = match prim {
+        "U8" | "BOOL" => f"{byte(a)}"
+        "U16" | "U32" | "U64" | "I16" | "I32" | "I64" => f"{varint(a)}"
+        "U128" | "I128" => varint_bytes(a)
+        "STR" | "CHAR" => text(a)
+        "UNIT" => ""
+        _ => f"<unknown {prim}>"
+    }
+    let vb = match prim {
+        "U8" | "BOOL" => f"{byte(b)}"
+        "U16" | "U32" | "U64" | "I16" | "I32" | "I64" => f"{varint(b)}"
+        "U128" | "I128" => varint_bytes(b)
+        "STR" | "CHAR" => text(b)
+        "UNIT" => ""
+        _ => f"<unknown {prim}>"
+    }
+    if va != vb {
+        return f"{path}: {va:?} vs {vb:?}"
+    }
+    ""
+}
+
+fn walk_fields(fields: json::Value, schema: json::Value, a: &mut Reader, b: &mut Reader, path: String) -> String {
+    for field in json::as_array(fields).unwrap_or(#[]) {
+        let name = json::keys(field).unwrap_or(#[])[0]
+        let d = walk(json::get(field, name).unwrap(), schema, a, b, f"{path}.{name}")
+        if d != "" {
+            return d
+        }
+    }
+    ""
+}
+
+fn walk_container(container: json::Value, schema: json::Value, a: &mut Reader, b: &mut Reader, path: String) -> String {
+    if let Some(fields) = json::get(container, "STRUCT") {
+        return walk_fields(fields, schema, a, b, path)
+    }
+    if let Some(inner) = json::get(container, "NEWTYPESTRUCT") {
+        return walk(inner, schema, a, b, path)
+    }
+    let Some(variants) = json::get(container, "ENUM") else {
+        return f"{path}: unknown container"
+    }
+    let ia = varint(a)
+    let ib = varint(b)
+    let va = json::get(variants, f"{ia}").unwrap()
+    let name = json::keys(va).unwrap_or(#[])[0]
+    if ia != ib {
+        let other = match json::get(variants, f"{ib}") {
+            Some(v) => json::keys(v).unwrap_or(#[])[0]
+            None => f"#{ib}"
+        }
+        return f"{path}: variant {name} vs {other}"
+    }
+    let shape = json::get(va, name).unwrap()
+    let here = f"{path}::{name}"
+    if json::as_str(shape).is_some() {
+        return ""
+    }
+    if let Some(inner) = json::get(shape, "NEWTYPE") {
+        return walk(inner, schema, a, b, here)
+    }
+    if let Some(fields) = json::get(shape, "STRUCT") {
+        return walk_fields(fields, schema, a, b, here)
+    }
+    if let Some(items) = json::get(shape, "TUPLE") {
+        return walk_tuple(items, schema, a, b, here)
+    }
+    f"{here}: unknown variant shape"
+}
+
+fn blob_difference(schema: json::Value, a: Vec<u8>, b: Vec<u8>) -> String {
+    let mut ra = Reader { bytes: a, at: 0 }
+    let mut rb = Reader { bytes: b, at: 0 }
+    let root = json::as_str(json::get(schema, "root").unwrap()).unwrap_or("")
+    let d = walk_container(json::get(json::get(schema, "containers").unwrap(), root).unwrap(), schema, &mut ra, &mut rb, root)
+    if d != "" {
+        return d
+    }
+    f"{root}: equal values, different encodings ({ra.at} and {rb.at} bytes read)"
+}
+
+fn main() {
+    let args = env::args()
+    let mut a = Side { name: "GOS_DIFF_SIDE", value: "a" }
+    let mut b = Side { name: "GOS_DIFF_SIDE", value: "b" }
+    let mut gos = env::var("GOS").unwrap_or("gos")
+    let mut builds = true
+    let mut paths: Vec<String> = #[]
+    let mut i = 0
+    while i < args.len() {
+        let arg = args[i]
+        if arg == "--a" && i + 1 < args.len() {
+            a = parse_side(args[i + 1])
+            i += 2
+        } else if arg == "--b" && i + 1 < args.len() {
+            b = parse_side(args[i + 1])
+            i += 2
+        } else if arg == "--gos" && i + 1 < args.len() {
+            gos = args[i + 1]
+            i += 2
+        } else if arg == "--no-build" {
+            builds = false
+            i += 1
+        } else {
+            paths.push(arg)
+            i += 1
+        }
+    }
+    let schema = match fs::read_to_string(SCHEMA) {
+        Ok(text) => json::parse(text).unwrap()
+        Err(e) => {
+            eprintln("frontend_diff: {}: {} (run from the repository root)", SCHEMA, e)
+            process::exit(2)
+        }
+    }
+    let scratch = f"{env::temp_dir()}/gos-frontend-diff-{process::id()}"
+    let _ = fs::create_dir_all(scratch)
+    let mut compared = 0
+    let mut differing = 0
+    for unit in units(paths) {
+        compared += 1
+        let ra = check(gos, a, unit, f"{scratch}/a.blob")
+        let rb = check(gos, b, unit, f"{scratch}/b.blob")
+        let mut problems: Vec<String> = #[]
+        if ra.transcript != rb.transcript {
+            problems.push(f"diagnostics differ at {first_line_difference(ra.transcript, rb.transcript)}")
+        }
+        match (ra.blob, rb.blob) {
+            (Some(x), Some(y)) => {
+                if x != y {
+                    problems.push(f"blob differs at {blob_difference(schema, x, y)}")
+                } else if builds {
+                    let ma, ia = build(gos, a, unit, f"{scratch}/a")
+                    let mb, ib = build(gos, b, unit, f"{scratch}/b")
+                    if ma != mb {
+                        problems.push(f"MIR differs at {first_line_difference(ma, mb)}")
+                    }
+                    for (name, text) in ia {
+                        match ib.get(name) {
+                            Some(other) => {
+                                if other != text {
+                                    problems.push(f"{name} differs at {first_line_difference(text, other)}")
+                                }
+                            }
+                            None => problems.push(f"{name} is missing from side b")
+                        }
+                    }
+                    if ia.len() != ib.len() {
+                        problems.push(f"IR unit counts differ ({ia.len()} vs {ib.len()})")
+                    }
+                }
+            }
+            (None, None) => ()
+            _ => problems.push("one side accepted the unit and the other rejected it")
+        }
+        if !problems.is_empty() {
+            differing += 1
+            println(f"DIFF {unit}")
+            for p in problems {
+                println(f"  {p}")
+            }
+        }
+    }
+    let _ = fs::remove_dir_all(scratch)
+    println(f"frontend_diff: {compared} unit(s), {differing} differing ({a.name}={a.value} vs {b.name}={b.value})")
+    if differing > 0 {
+        process::exit(1)
+    }
+}

@@ -1,0 +1,1039 @@
+// Format templates, interpolated strings, and the compiler-known calls that
+// expand at parse time (`println`, `format`, `matches`, `dbg`, ...): what
+// `gossamer_parse`'s `expressions.rs` builds for them, node for node.
+
+use std::regex
+
+use ast::{Block, BlockKind, Expr, ExprKind, FieldSelector, Literal, Mutability, Pattern, PatternKind, Span, Stmt, StmtKind}
+use lex
+use parse
+use parse::Parser
+use parse_expr
+
+const PLACEHOLDER_MARK: char = '\u{F8FF}'
+const PAD_REQUEST_DEFAULT: i64 = 0
+const PAD_REQUEST_LEFT: i64 = 1
+const PAD_REQUEST_CENTER: i64 = 2
+const PAD_REQUEST_RIGHT: i64 = 3
+const PAD_REQUEST_ZERO_FLAG: i64 = 8
+
+/// One `{:spec}`: alignment 0 default, 1 left, 2 center, 3 right; -1 for an
+/// absent precision; radix 0 for none; exponent -1 none, 0 `e`, 1 `E`.
+struct Spec {
+    fill: char
+    align: i64
+    width: i64
+    precision: i64
+    radix: i64
+    upper: bool
+    alternate: bool
+    debug: bool
+    zero_pad: bool
+    sign_plus: bool
+    exponent: i64
+}
+
+enum Seg {
+    SLiteral(String),
+    SNamed(String),
+    SPositional,
+    SPositionalPrec(i64),
+    SNamedPrec(String, i64),
+    SPositionalSpec(Spec),
+    SNamedSpec(String, Spec),
+    SInvalid(String),
+    SIndexed(String),
+}
+
+/// Whether `pattern` fails to compile as a regular expression.
+pub fn regex_is_invalid(pattern: String) -> bool {
+    regex::new(pattern).is_err()
+}
+
+// ---- compiler-known calls ------------------------------------------------
+
+pub fn parse_builtin_call(p: &mut Parser, name: String) -> ExprKind {
+    if parse_expr::is_desugar_macro(name) {
+        return expand_builtin_macro(p, name)
+    }
+    if !parse::expect(p, parse::P_LPAREN) {
+        return ExprKind::Error
+    }
+    let args = parse_expr::parse_call_args(p)
+    if name == "codegen" {
+        return parse_expr::alloc_function_call(p, "__gos_codegen", args)
+    }
+    expand_format_macro(p, name, args)
+}
+
+fn expand_builtin_macro(p: &mut Parser, name: String) -> ExprKind {
+    if name == "matches" {
+        if !parse::expect(p, parse::P_LPAREN) {
+            return ExprKind::Error
+        }
+        let scrutinee = parse_expr::parse_expr_no_assign_structs(p)
+        if !parse::eat(p, parse::P_COMMA) && !parse::newline_before_peek(p) {
+            let s = parse::peek_span(p)
+            parse::record(p, "Unexpected", s)
+        }
+        let pattern = parse::parse_pattern(p)
+        parse::expect(p, parse::P_RPAREN)
+        let yes = parse_expr::alloc_literal_expr(p, Literal::Bool(true))
+        let no = parse_expr::alloc_literal_expr(p, Literal::Bool(false))
+        return parse_expr::make_match_clause(p, pattern, scrutinee, yes, no).kind
+    }
+    if name == "dbg" {
+        return expand_dbg_macro(p)
+    }
+    if !parse::expect(p, parse::P_LPAREN) {
+        return ExprKind::Error
+    }
+    let mut args = parse_expr::parse_call_args(p)
+    if args.len() == 0 {
+        let message = if name == "todo" {
+            "not yet implemented"
+        } else if name == "unimplemented" {
+            "not implemented"
+        } else {
+            "internal error: entered unreachable code"
+        }
+        args = #[parse_expr::alloc_literal_expr(p, Literal::String(message))]
+    }
+    expand_format_macro(p, "panic", args)
+}
+
+fn expand_dbg_macro(p: &mut Parser) -> ExprKind {
+    if !parse::expect(p, parse::P_LPAREN) {
+        return ExprKind::Error
+    }
+    let args = parse_expr::parse_call_args(p)
+    if args.len() != 1 {
+        let empty = parse_expr::alloc_literal_expr(p, Literal::String(""))
+        return expand_format_macro(p, "eprintln", #[empty])
+    }
+    let value = args[0]
+    let value_span = value.span
+    let bid = parse::alloc(p)
+    let binding = parse::mk_pat(bid, value_span, PatternKind::PatternIdent { mutability: Mutability::Immutable, name: parse::ident("__dbg"), subpattern: None })
+    let lid = parse::alloc(p)
+    let let_stmt = parse::mk_stmt(lid, value_span, StmtKind::Let { pattern: binding, ty: None, init: Some(value) })
+    let fmt = parse_expr::alloc_literal_expr(p, Literal::String("{:?}"))
+    let printed = parse_expr::alloc_path_expr(p, "__dbg")
+    let eprintln_kind = expand_format_macro(p, "eprintln", #[fmt, printed])
+    let eid = parse::alloc(p)
+    let eprintln_expr = parse::mk_expr(eid, value_span, eprintln_kind)
+    let sid = parse::alloc(p)
+    let print_stmt = parse::mk_stmt(sid, value_span, StmtKind::StmtExpr { expr: eprintln_expr, has_semi: true })
+    let tail = parse_expr::alloc_path_expr(p, "__dbg")
+    ExprKind::ExprBlock(Block { stmts: #[let_stmt, print_stmt], tail: Some(tail), synthetic: true, kind: BlockKind::Plain })
+}
+
+pub fn expand_format_macro(p: &mut Parser, name: String, args: Vec<Expr>) -> ExprKind {
+    if args.len() == 0 {
+        return parse_expr::alloc_function_call(p, name, #[])
+    }
+    let first = args[0]
+    let mut rest: Vec<Expr> = #[]
+    for i in 1..args.len() {
+        rest.push(args[i])
+    }
+    let Some(template) = parse_expr::literal_string(first) else {
+        if rest.len() == 0 {
+            let rendered = parse_expr::alloc_function_call_expr(p, "__concat", #[first])
+            return parse_expr::alloc_function_call(p, name, #[rendered])
+        }
+        if !matches(first.kind, ExprKind::Error) {
+            parse::record(p, "FormatStringMustBeLiteral", first.span)
+        }
+        return parse_expr::alloc_function_call(p, name, args)
+    }
+    let segments = parse_format_template(template)
+    let mut expected = 0
+    let mut has_invalid = false
+    for seg in segments {
+        match seg {
+            Seg::SPositional => expected += 1,
+            Seg::SPositionalPrec(_) => expected += 1,
+            Seg::SPositionalSpec(_) => expected += 1,
+            Seg::SInvalid(_) => has_invalid = true,
+            Seg::SIndexed(_) => has_invalid = true,
+            _ => {}
+        }
+    }
+    if expected != rest.len() && !has_invalid {
+        parse::record(p, "FormatArgumentCount", first.span)
+    }
+    let mut next = 0
+    let mut concat_args = format_segment_args(p, segments, rest, &mut next, first)
+    while next < rest.len() {
+        concat_args.push(rest[next])
+        next += 1
+    }
+    let concat_call = parse_expr::alloc_function_call_expr(p, "__concat", concat_args)
+    if name == "format" {
+        return concat_call.kind
+    }
+    parse_expr::alloc_function_call(p, name, #[concat_call])
+}
+
+/// The byte offset of `needle` in the text at or after `from` and before
+/// `end`, or -1.
+fn find_in_source(p: &mut Parser, needle: String, from: i64, end: i64) -> i64 {
+    let m = needle.byte_len()
+    let mut i = from
+    while i + m <= end {
+        let mut same = true
+        let mut k = 0
+        while same && k < m {
+            if p.src.byte_at(i + k) != needle.byte_at(k) {
+                same = false
+            }
+            k += 1
+        }
+        if same {
+            return i
+        }
+        i += 1
+    }
+    -1
+}
+
+fn placeholder_span(p: &mut Parser, literal: Span, written: String, cursor: &mut i64) -> Span {
+    let end = (literal.end as i64).min(p.src.byte_len())
+    let needle = "{" + written + "}"
+    if *cursor > end {
+        return literal
+    }
+    let at = find_in_source(p, needle, *cursor, end)
+    if at < 0 {
+        return literal
+    }
+    *cursor = at + needle.byte_len()
+    parse::mk_span(p, at, *cursor)
+}
+
+fn capture_span(p: &mut Parser, literal: Span, name: String, cursor: &mut i64) -> Span {
+    let end = (literal.end as i64).min(p.src.byte_len())
+    let needle = "{" + name
+    let mut from = (*cursor).max(literal.start as i64)
+    while from <= end {
+        let open = find_in_source(p, needle, from, end)
+        if open < 0 {
+            break
+        }
+        let after = open + needle.byte_len()
+        let mut opening = 0
+        let mut k = open
+        while k >= 0 && p.src.byte_at(k) == 123 {
+            opening += 1
+            k -= 1
+        }
+        let closes = after < p.src.byte_len() && (p.src.byte_at(after) == 125 || p.src.byte_at(after) == 58)
+        if opening % 2 == 1 && closes {
+            *cursor = after
+            return parse::mk_span(p, open + 1, after)
+        }
+        from = open + 1
+    }
+    literal
+}
+
+fn alloc_named_capture_expr(p: &mut Parser, name: String, span: Span) -> Expr {
+    let parts = name.split(".")
+    let head = parts[0]
+    let whole = (span.end - span.start) as i64 == name.byte_len()
+    let mut end = if whole { span.start as i64 + head.byte_len() } else { span.end as i64 }
+    let mut e = parse_expr::alloc_path_expr(p, head)
+    e.span = parse::mk_span(p, span.start as i64, end)
+    for i in 1..parts.len() {
+        let part = parts[i]
+        let index = parse_u32_text(part)
+        let selector = if index >= 0 { FieldSelector::Index(index as u32) } else { FieldSelector::Named(parse::ident(part)) }
+        let id = parse::alloc(p)
+        if whole {
+            end += 1 + part.byte_len()
+        }
+        let s = parse::mk_span(p, span.start as i64, end)
+        e = parse::mk_expr(id, s, ExprKind::FieldAccess { receiver: e, field: selector })
+    }
+    e
+}
+
+fn parse_u32_text(text: String) -> i64 {
+    let n = text.byte_len()
+    if n == 0 {
+        return -1
+    }
+    let mut v = 0
+    for i in 0..n {
+        let b = text.byte_at(i)
+        if b < 48 || b > 57 {
+            return -1
+        }
+        v = v * 10 + (b - 48)
+        if v > 4294967295 {
+            return -1
+        }
+    }
+    v
+}
+
+fn format_segment_args(p: &mut Parser, segments: Vec<Seg>, rest: Vec<Expr>, next: &mut i64, first: Expr) -> Vec<Expr> {
+    let mut out: Vec<Expr> = #[]
+    let mut cursor = first.span.start as i64
+    for seg in segments {
+        match seg {
+            Seg::SInvalid(written) => {
+                let s = placeholder_span(p, first.span, written, &mut cursor)
+                parse::record(p, "MalformedFormatPlaceholder", s)
+                out.push(parse_expr::alloc_literal_expr(p, Literal::String("{" + written + "}")))
+            }
+            Seg::SIndexed(written) => {
+                let s = placeholder_span(p, first.span, written, &mut cursor)
+                parse::record(p, "FormatArgumentIndex", s)
+                out.push(parse_expr::alloc_literal_expr(p, Literal::String("{" + written + "}")))
+            }
+            Seg::SLiteral(t) => {
+                if t.byte_len() > 0 {
+                    out.push(parse_expr::alloc_literal_expr(p, Literal::String(t)))
+                }
+            }
+            Seg::SNamed(name) => {
+                let s = capture_span(p, first.span, name, &mut cursor)
+                out.push(alloc_named_capture_expr(p, name, s))
+            }
+            Seg::SPositional => {
+                if *next < rest.len() {
+                    out.push(rest[*next])
+                    *next += 1
+                }
+            }
+            Seg::SPositionalPrec(prec) => {
+                if *next < rest.len() {
+                    let e = rest[*next]
+                    *next += 1
+                    let lit = parse_expr::alloc_literal_expr(p, Literal::Int(f"{prec}"))
+                    out.push(parse_expr::alloc_function_call_expr(p, "__fmt_prec", #[e, lit]))
+                }
+            }
+            Seg::SNamedPrec(name, prec) => {
+                let s = capture_span(p, first.span, name, &mut cursor)
+                let arg = alloc_named_capture_expr(p, name, s)
+                let lit = parse_expr::alloc_literal_expr(p, Literal::Int(f"{prec}"))
+                out.push(parse_expr::alloc_function_call_expr(p, "__fmt_prec", #[arg, lit]))
+            }
+            Seg::SPositionalSpec(spec) => {
+                if *next < rest.len() {
+                    let e = rest[*next]
+                    *next += 1
+                    out.push(build_format_spec_expr(p, e, spec))
+                }
+            }
+            Seg::SNamedSpec(name, spec) => {
+                let s = capture_span(p, first.span, name, &mut cursor)
+                let arg = alloc_named_capture_expr(p, name, s)
+                out.push(build_format_spec_expr(p, arg, spec))
+            }
+        }
+    }
+    out
+}
+
+fn build_format_spec_expr(p: &mut Parser, value: Expr, spec: Spec) -> Expr {
+    let mut rendered = if spec.exponent >= 0 {
+        let digits = parse_expr::alloc_function_call_expr(p, "__concat", #[value])
+        let precision = parse_expr::alloc_literal_expr(p, Literal::Int(f"{spec.precision}"))
+        let upper = parse_expr::alloc_literal_expr(p, Literal::Bool(spec.exponent == 1))
+        parse_expr::alloc_function_call_expr(p, "__gos_fmt_exp", #[digits, precision, upper])
+    } else if spec.radix > 0 {
+        let base = parse_expr::alloc_literal_expr(p, Literal::Int(f"{spec.radix}"))
+        let r = parse_expr::alloc_function_call_expr(p, "__fmt_radix", #[value, base])
+        if spec.upper { parse_expr::alloc_function_call_expr(p, "__fmt_upper", #[r]) } else { r }
+    } else if spec.precision >= 0 {
+        let lit = parse_expr::alloc_literal_expr(p, Literal::Int(f"{spec.precision}"))
+        parse_expr::alloc_function_call_expr(p, "__fmt_prec", #[value, lit])
+    } else if spec.debug {
+        parse_expr::alloc_function_call_expr(p, "__debug", #[value])
+    } else {
+        parse_expr::alloc_function_call_expr(p, "__concat", #[value])
+    }
+    if spec.alternate {
+        let prefix = if spec.radix == 16 && spec.upper {
+            "0X"
+        } else if spec.radix == 16 {
+            "0x"
+        } else if spec.radix == 2 {
+            "0b"
+        } else if spec.radix == 8 {
+            "0o"
+        } else {
+            ""
+        }
+        if prefix.byte_len() > 0 {
+            let lit = parse_expr::alloc_literal_expr(p, Literal::String(prefix))
+            rendered = parse_expr::alloc_function_call_expr(p, "__concat", #[lit, rendered])
+        }
+    }
+    if spec.sign_plus {
+        rendered = parse_expr::alloc_function_call_expr(p, "__gos_fmt_sign", #[rendered])
+    }
+    if spec.width == 0 {
+        return rendered
+    }
+    let width = parse_expr::alloc_literal_expr(p, Literal::Int(f"{spec.width}"))
+    let fill = parse_expr::alloc_literal_expr(p, Literal::Int(f"{spec.fill as u32}"))
+    let mut code = if spec.align == 1 {
+        PAD_REQUEST_LEFT
+    } else if spec.align == 2 {
+        PAD_REQUEST_CENTER
+    } else if spec.align == 3 {
+        PAD_REQUEST_RIGHT
+    } else {
+        PAD_REQUEST_DEFAULT
+    }
+    if spec.zero_pad {
+        code = code | PAD_REQUEST_ZERO_FLAG
+    }
+    let align = parse_expr::alloc_literal_expr(p, Literal::Int(f"{code}"))
+    parse_expr::alloc_function_call_expr(p, "__fmt_pad", #[rendered, width, fill, align])
+}
+
+// ---- template grammar ----------------------------------------------------
+
+fn is_ascii_alpha(b: i64) -> bool {
+    (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+}
+
+fn is_identifier(t: String) -> bool {
+    let n = t.byte_len()
+    if n == 0 {
+        return false
+    }
+    let b0 = t.byte_at(0)
+    if !(b0 == 95 || is_ascii_alpha(b0)) {
+        return false
+    }
+    for i in 1..n {
+        let b = t.byte_at(i)
+        if !(b == 95 || is_ascii_alpha(b) || (b >= 48 && b <= 57)) {
+            return false
+        }
+    }
+    true
+}
+
+fn all_digits(t: String) -> bool {
+    if t.byte_len() == 0 {
+        return false
+    }
+    for i in 0..t.byte_len() {
+        let b = t.byte_at(i)
+        if b < 48 || b > 57 {
+            return false
+        }
+    }
+    true
+}
+
+fn is_field_path(t: String) -> bool {
+    let parts = t.split(".")
+    if !is_identifier(parts[0]) {
+        return false
+    }
+    if parts.len() < 2 {
+        return false
+    }
+    for i in 1..parts.len() {
+        if !(is_identifier(parts[i]) || all_digits(parts[i])) {
+            return false
+        }
+    }
+    true
+}
+
+fn is_capture_name(t: String) -> bool {
+    is_identifier(t) || is_field_path(t)
+}
+
+/// The byte offset of the first `:` that is not part of a `::`, or -1.
+fn format_spec_colon(inner: String) -> i64 {
+    let n = inner.byte_len()
+    let mut i = 0
+    while i < n {
+        if inner.byte_at(i) == 58 {
+            if i + 1 < n && inner.byte_at(i + 1) == 58 {
+                i += 2
+                continue
+            }
+            return i
+        }
+        i += 1
+    }
+    -1
+}
+
+fn format_name_looks_like_expr(inner: String) -> bool {
+    let at = format_spec_colon(inner)
+    let name = (if at >= 0 { inner.substring(0, at) } else { inner }).trim()
+    if name.byte_len() == 0 || is_capture_name(name) {
+        return false
+    }
+    for c in name {
+        if !(c.is_alphanumeric() || c == '_') {
+            return true
+        }
+    }
+    false
+}
+
+fn debug_spec() -> Spec {
+    Spec { fill: ' ', align: 0, width: 0, precision: -1, radix: 0, upper: false, alternate: false, debug: true, zero_pad: false, sign_plus: false, exponent: -1 }
+}
+
+/// The byte offset of the first occurrence of `needle` in `hay`, or -1.
+fn find_text(hay: String, needle: String, from: i64) -> i64 {
+    let n = hay.byte_len()
+    let m = needle.byte_len()
+    let mut i = from
+    while i + m <= n {
+        let mut same = true
+        let mut k = 0
+        while same && k < m {
+            if hay.byte_at(i + k) != needle.byte_at(k) {
+                same = false
+            }
+            k += 1
+        }
+        if same {
+            return i
+        }
+        i += 1
+    }
+    -1
+}
+
+/// A `usize` the way Rust's `str::parse` reads one: an optional `+`, then
+/// at least one digit. -1 when it does not parse.
+fn parse_usize(t: String) -> i64 {
+    let mut s = t
+    if s.starts_with("+") {
+        s = s.substring(1, s.byte_len())
+    }
+    if !all_digits(s) {
+        return -1
+    }
+    let mut v = 0
+    for i in 0..s.byte_len() {
+        if v > 922337203685477579 {
+            return -1
+        }
+        v = v * 10 + (s.byte_at(i) - 48)
+    }
+    v
+}
+
+fn parse_precision_spec(inner: String) -> Option<Seg> {
+    let at = find_text(inner, ":.", 0)
+    if at < 0 {
+        return None
+    }
+    let head = inner.substring(0, at).trim()
+    let prec = parse_usize(inner.substring(at + 2, inner.byte_len()))
+    if prec < 0 {
+        return None
+    }
+    if head.byte_len() == 0 {
+        return Some(Seg::SPositionalPrec(prec))
+    }
+    if is_capture_name(head) {
+        return Some(Seg::SNamedPrec(head, prec))
+    }
+    None
+}
+
+fn is_align(c: char) -> bool {
+    c == '<' || c == '>' || c == '^'
+}
+
+fn align_of(c: char) -> i64 {
+    if c == '<' {
+        return 1
+    }
+    if c == '^' {
+        return 2
+    }
+    3
+}
+
+/// Digits at `pos`: their value and the position after them; -1 with the
+/// position unmoved when there are none or they overflow.
+fn spec_digits(cs: Vec<char>, pos: i64) -> (i64, i64) {
+    let mut at = pos
+    let mut value = -1
+    while at < cs.len() && cs[at] >= '0' && cs[at] <= '9' {
+        let d = (cs[at] as i64) - 48
+        let base = if value < 0 { 0 } else { value }
+        if base > 922337203685477579 {
+            return (-1, pos)
+        }
+        value = base * 10 + d
+        at += 1
+    }
+    (value, at)
+}
+
+fn parse_format_spec(inner: String) -> Option<Seg> {
+    let colon = find_text(inner, ":", 0)
+    if colon < 0 {
+        return None
+    }
+    let head = inner.substring(0, colon).trim()
+    let cs = parse::chars_of(inner.substring(colon + 1, inner.byte_len()))
+    let n = cs.len()
+    let mut pos = 0
+    let mut fill = ' '
+    let mut align = 0
+    if n >= 2 && is_align(cs[1]) {
+        fill = cs[0]
+        align = align_of(cs[1])
+        pos = 2
+    } else if n >= 1 && is_align(cs[0]) {
+        align = align_of(cs[0])
+        pos = 1
+    }
+    let sign_plus = pos < n && cs[pos] == '+'
+    if sign_plus {
+        pos += 1
+    }
+    let alternate = pos < n && cs[pos] == '#'
+    if alternate {
+        pos += 1
+    }
+    let zero_pad = pos < n && cs[pos] == '0'
+    if zero_pad {
+        pos += 1
+    }
+    let width_value, after_width = spec_digits(cs, pos)
+    pos = after_width
+    let saw_width = width_value >= 0
+    let width = if saw_width { width_value } else { 0 }
+    let mut precision = -1
+    if pos < n && cs[pos] == '.' {
+        pos += 1
+        let v, after = spec_digits(cs, pos)
+        if v < 0 {
+            return None
+        }
+        precision = v
+        pos = after
+    }
+    let mut radix = 0
+    let mut upper = false
+    let mut exponent = -1
+    if pos < n {
+        let c = cs[pos]
+        pos += 1
+        if c == 'e' {
+            exponent = 0
+        } else if c == 'E' {
+            exponent = 1
+        } else if c == 'x' {
+            radix = 16
+        } else if c == 'X' {
+            radix = 16
+            upper = true
+        } else if c == 'b' {
+            radix = 2
+        } else if c == 'o' {
+            radix = 8
+        } else if c == 'd' {
+            // Decimal is the default rendering.
+        } else {
+            return None
+        }
+    }
+    if pos != n {
+        return None
+    }
+    if align == 0 && !alternate && !saw_width && precision < 0 && radix == 0 && !sign_plus && exponent < 0 {
+        return None
+    }
+    let spec = Spec { fill: fill, align: align, width: width, precision: precision, radix: radix, upper: upper, alternate: alternate, debug: false, zero_pad: zero_pad, sign_plus: sign_plus, exponent: exponent }
+    if head.byte_len() == 0 {
+        return Some(Seg::SPositionalSpec(spec))
+    }
+    if is_capture_name(head) {
+        return Some(Seg::SNamedSpec(head, spec))
+    }
+    None
+}
+
+fn utf8_char_len(lead: i64) -> i64 {
+    if lead < 128 {
+        return 1
+    }
+    if (lead & 224) == 192 {
+        return 2
+    }
+    if (lead & 240) == 224 {
+        return 3
+    }
+    if (lead & 248) == 240 {
+        return 4
+    }
+    1
+}
+
+fn classify_placeholder(inner: String) -> Seg {
+    let at = format_spec_colon(inner)
+    let name_part = (if at >= 0 { inner.substring(0, at) } else { inner }).trim()
+    if inner.byte_len() == 0 {
+        return Seg::SPositional
+    }
+    if name_part.byte_len() > 0 && all_digits(name_part) {
+        return Seg::SIndexed(inner)
+    }
+    if is_capture_name(inner) {
+        return Seg::SNamed(inner)
+    }
+    if format_name_looks_like_expr(inner) {
+        return Seg::SInvalid(inner)
+    }
+    if let Some(seg) = parse_precision_spec(inner) {
+        return seg
+    }
+    if inner == ":?" {
+        return Seg::SPositionalSpec(debug_spec())
+    }
+    if inner.ends_with(":?") {
+        let name = inner.substring(0, inner.byte_len() - 2).trim()
+        if is_capture_name(name) {
+            return Seg::SNamedSpec(name, debug_spec())
+        }
+        return Seg::SLiteral("{" + inner + "}")
+    }
+    if let Some(seg) = parse_format_spec(inner) {
+        return seg
+    }
+    let colon = find_text(inner, ":", 0)
+    if colon >= 0 {
+        let head = inner.substring(0, colon).trim()
+        if head.byte_len() == 0 || is_capture_name(head) {
+            return Seg::SInvalid(inner)
+        }
+    }
+    Seg::SLiteral("{" + inner + "}")
+}
+
+fn parse_format_template(template: String) -> Vec<Seg> {
+    let n = template.byte_len()
+    let mut segments: Vec<Seg> = #[]
+    let mut literal = ""
+    let mut i = 0
+    while i < n {
+        let b = template.byte_at(i)
+        if b == 123 && i + 1 < n && template.byte_at(i + 1) == 123 {
+            literal.push('{')
+            i += 2
+        } else if b == 125 && i + 1 < n && template.byte_at(i + 1) == 125 {
+            literal.push('}')
+            i += 2
+        } else if b == 123 {
+            let close = find_text(template, "}", i + 1)
+            if close < 0 {
+                literal.push('{')
+                i += 1
+                continue
+            }
+            if literal.byte_len() > 0 {
+                segments.push(Seg::SLiteral(literal))
+                literal = ""
+            }
+            let inner = template.substring(i + 1, close).trim()
+            segments.push(classify_placeholder(inner))
+            i = close + 1
+        } else if b < 128 {
+            literal.push_str(template.substring(i, i + 1))
+            i += 1
+        } else {
+            let end = (i + utf8_char_len(b)).min(n)
+            literal.push_str(template.substring(i, end))
+            i = end
+        }
+    }
+    if literal.byte_len() > 0 {
+        segments.push(Seg::SLiteral(literal))
+    }
+    segments
+}
+
+// ---- interpolated strings ------------------------------------------------
+
+/// A piece of an interpolated string's body: text `start..end`, or a
+/// placeholder at `start` of `len` bytes whose spec `:` sits at `colon`
+/// (-1 without one), both relative to `start`.
+struct Piece {
+    placeholder: bool
+    start: i64
+    end: i64
+    len: i64
+    colon: i64
+}
+
+fn interpolation_pieces(body: String, multiline: bool) -> Vec<Piece> {
+    let b = body.as_bytes()
+    let n = b.len()
+    let mut pieces: Vec<Piece> = #[]
+    let mut text_start = 0
+    let mut i = 0
+    while i < n {
+        let c = b[i] as i64
+        if c == 92 {
+            i = lex::escape_end(b, n, i)
+        } else if (c == 123 || c == 125) && i + 1 < n && b[i + 1] as i64 == c {
+            i += 2
+        } else if c == 123 {
+            let len, colon = lex::placeholder_parts(b, n, i, multiline)
+            if len > 0 {
+                if text_start < i {
+                    pieces.push(Piece { placeholder: false, start: text_start, end: i, len: 0, colon: -1 })
+                }
+                pieces.push(Piece { placeholder: true, start: i, end: i + len, len: len, colon: colon })
+                i += len
+                text_start = i
+            } else {
+                i += 1
+            }
+        } else {
+            i += 1
+        }
+    }
+    if text_start < n {
+        pieces.push(Piece { placeholder: false, start: text_start, end: n, len: 0, colon: -1 })
+    }
+    pieces
+}
+
+fn decode_interpolated_text(raw: String) -> String {
+    let cs = parse::chars_of(raw)
+    let n = cs.len()
+    let mut out = ""
+    let mut chunk = ""
+    let mut i = 0
+    while i < n {
+        let c = cs[i]
+        i += 1
+        if c == '\\' {
+            chunk.push(c)
+            if i < n {
+                let next = cs[i]
+                i += 1
+                chunk.push(next)
+                if next == 'u' && i < n && cs[i] == '{' {
+                    while i < n {
+                        let inner = cs[i]
+                        i += 1
+                        chunk.push(inner)
+                        if inner == '}' {
+                            break
+                        }
+                    }
+                }
+            }
+        } else if (c == '{' || c == '}') && i < n && cs[i] == c {
+            i += 1
+            out.push_str(parse::decode_string_escapes(chunk))
+            chunk = ""
+            out.push(c)
+        } else {
+            chunk.push(c)
+        }
+    }
+    out.push_str(parse::decode_string_escapes(chunk))
+    out
+}
+
+fn interpolated_texts(body: String, pieces: Vec<Piece>, triple: bool) -> Vec<String> {
+    let mut out: Vec<String> = #[]
+    if !triple {
+        for piece in pieces {
+            if !piece.placeholder {
+                out.push(decode_interpolated_text(body.substring(piece.start, piece.end)))
+            }
+        }
+        return out
+    }
+    let mut masked = ""
+    for piece in pieces {
+        if piece.placeholder {
+            masked.push(PLACEHOLDER_MARK)
+        } else {
+            masked.push_str(body.substring(piece.start, piece.end))
+        }
+    }
+    let dedented, _ = parse::triple_string("\"\"\"" + masked + "\"\"\"")
+    let mut part = ""
+    for c in dedented {
+        if c == PLACEHOLDER_MARK {
+            out.push(decode_interpolated_text(part))
+            part = ""
+        } else {
+            part.push(c)
+        }
+    }
+    out.push(decode_interpolated_text(part))
+    out
+}
+
+/// The byte offset of an unpaired `{` or `}` in `raw`, or -1.
+fn lone_brace(raw: String) -> i64 {
+    let n = raw.byte_len()
+    let mut i = 0
+    while i < n {
+        let b = raw.byte_at(i)
+        if b == 92 && i + 2 < n && raw.byte_at(i + 1) == 117 && raw.byte_at(i + 2) == 123 {
+            let mut k = i
+            while k < n && raw.byte_at(k) != 125 {
+                k += 1
+            }
+            i = if k < n { k + 1 } else { i + n }
+        } else if b == 92 {
+            i += 2
+        } else if (b == 123 || b == 125) && i + 1 < n && raw.byte_at(i + 1) == b {
+            i += 2
+        } else if b == 123 || b == 125 {
+            return i
+        } else {
+            i += 1
+        }
+    }
+    -1
+}
+
+fn push_text(p: &mut Parser, args: &mut Vec<Expr>, texts: Vec<String>, next: &mut i64) {
+    if *next >= texts.len() {
+        return
+    }
+    let t = texts[*next]
+    *next += 1
+    if t.byte_len() > 0 {
+        args.push(parse_expr::alloc_literal_expr(p, Literal::String(t)))
+    }
+}
+
+pub fn parse_interpolated_string(p: &mut Parser) -> ExprKind {
+    let s = parse::peek_span(p)
+    let triple = parse::peek(p) == lex::F_TRIPLE_STRING_LIT
+    parse::bump(p)
+    let raw = parse::text(p, s)
+    let delimiter = if triple { 3 } else { 1 }
+    let open = 1 + delimiter
+    if triple {
+        let rest = if raw.starts_with("f") { raw.substring(1, raw.byte_len()) } else { "" }
+        let _, opening = parse::triple_string(rest)
+        if opening {
+            parse::record(p, "TripleStringOpeningLine", s)
+        }
+    }
+    let rn = raw.byte_len()
+    let body_end = (if rn > delimiter { rn - delimiter } else { 0 }).max(open)
+    let body = if body_end <= rn && open <= body_end { raw.substring(open, body_end) } else { "" }
+    let body_start = s.start as i64 + open
+    let pieces = interpolation_pieces(body, triple)
+    let texts = interpolated_texts(body, pieces, triple)
+    let mut next_text = 0
+    let mut args: Vec<Expr> = #[]
+    if triple {
+        push_text(p, &mut args, texts, &mut next_text)
+    }
+    for piece in pieces {
+        if !piece.placeholder {
+            let at = lone_brace(body.substring(piece.start, piece.end))
+            if at >= 0 {
+                let start = body_start + piece.start + at
+                let span = parse::mk_span(p, start, start + 1)
+                parse::record(p, "UnmatchedInterpolationBrace", span)
+            }
+            if !triple {
+                push_text(p, &mut args, texts, &mut next_text)
+            }
+            continue
+        }
+        let base = body_start + piece.start
+        let expr_end = if piece.colon >= 0 { piece.colon } else { piece.len - 1 }
+        let expr_text = body.substring(piece.start + 1, piece.start + expr_end)
+        if expr_text.trim().byte_len() == 0 {
+            let span = parse::mk_span(p, base, base + piece.len)
+            parse::record(p, "InterpolatedPositional", span)
+            return ExprKind::Error
+        }
+        let value = parse_embedded_expr(p, base + 1, base + expr_end)
+        let rendered = if piece.colon >= 0 {
+            let spec_text = body.substring(piece.start + piece.colon + 1, piece.start + piece.len - 1)
+            let span = parse::mk_span(p, base + piece.colon + 1, base + piece.len - 1)
+            render_through_spec(p, value, spec_text, span)
+        } else {
+            value
+        }
+        args.push(rendered)
+        if triple {
+            push_text(p, &mut args, texts, &mut next_text)
+        }
+    }
+    parse_expr::alloc_function_call(p, "__concat", args)
+}
+
+fn render_through_spec(p: &mut Parser, value: Expr, spec: String, span: Span) -> Expr {
+    let classified = parse_format_template("{v:" + spec + "}")
+    if classified.len() == 1 {
+        match classified[0] {
+            Seg::SNamedSpec(_, s) => return build_format_spec_expr(p, value, s),
+            Seg::SNamedPrec(_, precision) => {
+                let lit = parse_expr::alloc_literal_expr(p, Literal::Int(f"{precision}"))
+                return parse_expr::alloc_function_call_expr(p, "__fmt_prec", #[value, lit])
+            }
+            Seg::SNamed(_) => return value,
+            _ => {}
+        }
+    }
+    parse::record(p, "MalformedInterpolationSpec", span)
+    value
+}
+
+/// The expression in the placeholder at bytes `start..end`, parsed from
+/// its own tokens.
+fn parse_embedded_expr(p: &mut Parser, start: i64, end: i64) -> Expr {
+    let n = p.src.byte_len()
+    let piece = if start <= end && end <= n { p.src.substring(start, end) } else { "" }
+    let stream = parse::stream_of(piece, start)
+    for d in stream.errors {
+        p.diags.push(d)
+    }
+    let saved_kinds = p.kinds
+    let saved_hashes = p.hashes
+    let saved_starts = p.starts
+    let saved_ends = p.ends
+    let saved_pos = p.pos
+    let saved_sep = p.sep_at
+    let saved_pipe = p.pipe_step
+    p.kinds = stream.kinds
+    p.hashes = stream.hashes
+    p.starts = stream.starts
+    p.ends = stream.ends
+    p.pos = 0
+    p.sep_at = -1
+    p.pipe_step = false
+    let e = parse_expr::parse_expr_no_assign_structs(p)
+    if !parse::at_eof(p) {
+        let s = parse::peek_span(p)
+        parse::record(p, "Unexpected", s)
+    }
+    p.kinds = saved_kinds
+    p.hashes = saved_hashes
+    p.starts = saved_starts
+    p.ends = saved_ends
+    p.pos = saved_pos
+    p.sep_at = saved_sep
+    p.pipe_step = saved_pipe
+    e
+}

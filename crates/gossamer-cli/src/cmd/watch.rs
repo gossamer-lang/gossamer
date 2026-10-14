@@ -154,15 +154,18 @@ fn validate(entry: &Path, locked: bool, status: &Status) -> Result<BTreeSet<Path
     let source_path = entry.to_path_buf();
     let unit = crate::paths::read_entry_unit(&source_path)?;
     let user_source = unit.source;
-    let source = gossamer_parse::autoderive::augment_source(&user_source);
-    let generated_len = source.len().saturating_sub(user_source.len());
-    let source = crate::comptime_fold::fold_comptime(source, &entry.to_string_lossy())?;
-    let embedded = comptime_inputs();
+    let prepared = crate::unit_cache::prepare(&user_source, &entry.to_string_lossy());
+    if let Some(err) = prepared.fold_error {
+        return Err(err);
+    }
+    let generated_len = prepared.generated_len;
+    let source = prepared.source;
+    let embedded = comptime_inputs(prepared.comptime_inputs);
     let mut map = gossamer_lex::SourceMap::new();
     let file_id = map.add_file(entry.to_string_lossy().into_owned(), source.clone());
     crate::paths::register_unit_origins(&mut map, file_id, &unit.entry, &unit.origins);
     crate::paths::register_generated_tail(&mut map, file_id, generated_len);
-    let outcome = gossamer_driver::check_frontend(&source, file_id);
+    let outcome = gossamer_driver::check_frontend_with_program(&source, file_id, prepared.program);
     let render_opts = gossamer_diagnostics::RenderOptions {
         colour: stderr_supports_colour(),
     };
@@ -183,11 +186,10 @@ fn validate(entry: &Path, locked: bool, status: &Status) -> Result<BTreeSet<Path
     Ok(embedded)
 }
 
-/// Paths the fold just read, resolved so an event path can be compared
-/// with them.
-fn comptime_inputs() -> BTreeSet<PathBuf> {
-    gossamer_runtime::comptime_inputs::take()
-        .into_iter()
+/// Paths the fold read, resolved so an event path can be compared with
+/// them.
+fn comptime_inputs(read: Vec<PathBuf>) -> BTreeSet<PathBuf> {
+    read.into_iter()
         .map(|path| path.canonicalize().unwrap_or(path))
         .collect()
 }

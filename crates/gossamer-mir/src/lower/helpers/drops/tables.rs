@@ -895,17 +895,27 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
         // this, a container written into a field reaches only the at-return
         // drop, so a frame that fills such a field in a loop keeps every
         // buffer but the last.
+        // A field nested in a by-value field is written the same way, and
+        // given back with the aggregate the same way.
         let writes_owned_field = |place: &Place| -> bool {
-            let Some(&crate::ir::Projection::Field(idx)) = place.projection.first() else {
+            let Some(written): Option<Vec<u32>> = place
+                .projection
+                .iter()
+                .map(|step| match step {
+                    crate::ir::Projection::Field(idx) => Some(*idx),
+                    _ => None,
+                })
+                .collect()
+            else {
                 return false;
             };
-            place.projection.len() == 1
+            !written.is_empty()
                 && body.locals.get(place.local.0 as usize).is_some_and(|decl| {
                     aggregate_rc_field_paths(tcx, decl.ty)
                         .iter()
                         .any(|(path, kind)| {
                             (matches!(kind, FieldRcKind::Vec) || kind.is_value_container())
-                                && path.as_slice() == [idx]
+                                && *path == written
                         })
                 })
         };

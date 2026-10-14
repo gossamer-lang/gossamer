@@ -15,8 +15,11 @@
 
 use std::os::raw::c_char;
 
+use std::borrow::Cow;
+
 use serde::Deserialize;
 
+use super::json_ref::JsonRef;
 use super::*;
 
 /// Materializes a document [`gossamer_core::json::validate`] accepted, whose
@@ -106,82 +109,72 @@ fn narrow_numbers_to_language_range(value: &mut serde_json::Value) {
 /// Stage 2 (final form).
 enum JsonTree {
     Value(serde_json::Value),
-    Raw {
-        text: Box<str>,
-        parsed: std::sync::OnceLock<serde_json::Value>,
-    },
-}
-
-impl JsonTree {
-    fn value(&self) -> &serde_json::Value {
-        match self {
-            Self::Value(value) => value,
-            Self::Raw { text, parsed } => parsed
-                .get_or_init(|| parse_checked_json(text).expect("validated JSON must reparse")),
-        }
-    }
-
-    /// The validated text of a document no read has materialized yet.
-    fn raw_text(&self) -> Option<&str> {
-        match self {
-            Self::Raw { text, parsed } if parsed.get().is_none() => Some(text),
-            _ => None,
-        }
-    }
+    /// A parsed document, read where it lies.
+    Tape(super::json_ref::ParsedTape),
 }
 
 pub struct GosJson {
-    /// Owning shared reference to the parsed-once value tree. Kept
-    /// alive for the duration of the GosJson; cloning a GosJson
-    /// only bumps this refcount (not a deep copy).
+    /// Owning shared reference to the tree or document. Kept alive for the
+    /// duration of the GosJson; cloning a GosJson only bumps this refcount
+    /// (not a deep copy).
     tree: std::sync::Arc<JsonTree>,
-    /// View into `tree`'s subtree. Always points to a sub-Value of
-    /// `tree`'s root. Stable as long as `tree` is alive.
+    /// View into a `JsonTree::Value`'s subtree, null for its root. Always
+    /// points to a sub-Value of `tree`'s root. Stable as long as `tree` is
+    /// alive.
     view: SyncRawPtr<serde_json::Value>,
+    /// The node of a `JsonTree::Tape` this handle reads.
+    node: u32,
 }
 
 impl GosJson {
     /// Wraps a fresh `serde_json::Value` as the root of its own
     /// tree. Allocates one `Arc<Value>` and one `Box<GosJson>`.
     pub(crate) fn into_raw(value: serde_json::Value) -> *mut GosJson {
-        let tree = std::sync::Arc::new(JsonTree::Value(value));
-        let view = std::ptr::from_ref(tree.value());
         json_box(GosJson {
-            tree,
-            view: SyncRawPtr::new(view.cast_mut()),
-        })
-    }
-
-    fn raw(text: &str) -> *mut GosJson {
-        json_box(GosJson {
-            tree: std::sync::Arc::new(JsonTree::Raw {
-                text: text.into(),
-                parsed: std::sync::OnceLock::new(),
-            }),
+            tree: std::sync::Arc::new(JsonTree::Value(value)),
             view: SyncRawPtr::NULL,
+            node: 0,
         })
     }
 
-    /// Builds a child handle that shares the same tree as `self`
-    /// and points at `child` inside it. `child` must be a
-    /// reference into `self.tree`'s subtree (the type system
-    /// cannot enforce this here because we cross the FFI; every
-    /// caller below derives `child` via `serde_json::Value::get`
-    /// on `self.view`'s subtree, which is sound).
-    fn child(&self, child: &serde_json::Value) -> *mut GosJson {
+    /// A handle onto `text`, a document [`gossamer_core::json::validate`]
+    /// accepted, read into `tape` (`None` for one too long for a tape).
+    fn parsed(text: &str, tape: Option<gossamer_core::json::Tape>) -> *mut GosJson {
+        let tree = match tape {
+            Some(tape) => JsonTree::Tape(super::json_ref::ParsedTape::new(text, tape)),
+            // `text` passed the validator, whose grammar serde_json reads
+            // with its recursion guard off.
+            None => JsonTree::Value(parse_checked_json(text).expect("validated JSON must reparse")),
+        };
+        json_box(GosJson {
+            tree: std::sync::Arc::new(tree),
+            view: SyncRawPtr::NULL,
+            node: 0,
+        })
+    }
+
+    /// Builds a child handle that shares the same tree as `self` and reads
+    /// `child`, which a read of `self` answered.
+    fn child(&self, child: JsonRef<'_>) -> *mut GosJson {
+        let (view, node) = match child {
+            JsonRef::Value(v) => (SyncRawPtr::new(std::ptr::from_ref(v).cast_mut()), 0),
+            JsonRef::Tape(_, node) => (SyncRawPtr::NULL, node),
+        };
         json_box(GosJson {
             tree: std::sync::Arc::clone(&self.tree),
-            view: SyncRawPtr::new(std::ptr::from_ref(child).cast_mut()),
+            view,
+            node,
         })
     }
 
-    fn value(&self) -> &serde_json::Value {
-        if self.view.is_null() {
-            self.tree.value()
-        } else {
+    /// The value this handle reads.
+    fn json_ref(&self) -> JsonRef<'_> {
+        match &*self.tree {
+            JsonTree::Value(root) if self.view.is_null() => JsonRef::Value(root),
             // SAFETY: a non-null `view` points into the subtree of `tree`, which this handle
             // keeps alive.
-            unsafe { &*self.view.as_const_ptr() }
+            JsonTree::Value(_) => JsonRef::Value(unsafe { &*self.view.as_const_ptr() }),
+            JsonTree::Tape(tape) => JsonRef::Tape(tape, self.node),
         }
     }
 
@@ -207,27 +200,22 @@ unsafe fn finalize_region_json(p: *mut u8) {
     unsafe { std::ptr::drop_in_place(p.cast::<GosJson>()) };
 }
 
-pub(crate) unsafe fn json_borrow<'a>(p: *const GosJson) -> Option<&'a serde_json::Value> {
+pub(crate) unsafe fn json_borrow<'a>(p: *const GosJson) -> Option<JsonRef<'a>> {
     if p.is_null() {
         return None;
     }
     // SAFETY: `p` is non-null (checked above), and this `unsafe fn`'s caller passes a live JSON
     // value.
     let json = unsafe { &*p };
-    // `view` was set by `Self::into_raw` (points at the
-    // tree's root) or by `Self::child` (points at a sub-Value of
-    // `self.tree`'s subtree). Either way the pointee lives as
-    // long as `tree` does, which is at least until this `&GosJson`
-    // dies - i.e. at least until this function returns.
-    Some(json.value())
+    Some(json.json_ref())
 }
 
-/// Borrows the `serde_json::Value` a `GosJson` handle views, for
-/// sibling runtime modules (e.g. yaml encoding) that project a parsed
-/// JSON tree onto another format. `None` for a null/None handle.
-pub(crate) unsafe fn json_value_ref<'a>(p: *const GosJson) -> Option<&'a serde_json::Value> {
+/// The `serde_json::Value` a `GosJson` handle reads, for sibling runtime
+/// modules (e.g. yaml encoding) that project a JSON value onto another
+/// format. `None` for a null/None handle.
+pub(crate) unsafe fn json_value_ref<'a>(p: *const GosJson) -> Option<Cow<'a, serde_json::Value>> {
     // SAFETY: this `unsafe fn`'s caller passes `p` live or null, which `json_borrow` accepts.
-    unsafe { json_borrow(p) }
+    unsafe { json_borrow(p) }.map(JsonRef::as_value)
 }
 
 /// Resolves `p` and returns the GosJson struct itself so the
@@ -271,9 +259,9 @@ pub unsafe extern "C" fn gos_rt_json_parse(text: *const c_char) -> i128 {
         };
         // The same validator the VM's parser is, so every tier accepts,
         // rejects, and describes a document alike.
-        match gossamer_core::json::validate(bytes) {
-            Ok(s) => {
-                let ptr = GosJson::raw(s);
+        match gossamer_core::json::validate_to_tape(bytes) {
+            Ok((text, tape)) => {
+                let ptr = GosJson::parsed(text, tape);
                 gos_rt_result_new(0, ptr as i64)
             }
             Err(error) => {
@@ -314,25 +302,21 @@ unsafe fn take_json_value(p: *mut GosJson) -> serde_json::Value {
     if crate::c_abi::rc::in_region_arena(p.cast()) {
         // Its region drops the handle at pop; the value is read, not moved.
         // SAFETY: `p` is a live handle in region storage.
-        return unsafe { &*p }.value().clone();
+        return unsafe { &*p }.json_ref().to_value();
     }
     // SAFETY: `p` is non-null (checked above), a builder box this `unsafe fn`'s caller hands
     // over.
     let boxed = unsafe { Box::from_raw(p) };
-    let views_root = boxed.view.is_null()
-        || std::ptr::eq(
-            boxed.view.as_const_ptr(),
-            std::ptr::from_ref(boxed.tree.value()),
-        );
-    if !views_root {
-        // SAFETY: a `view` that is not the root points into the subtree of `tree`, which `boxed`
-        // keeps alive here.
-        return unsafe { &*boxed.view.as_const_ptr() }.clone();
+    if !boxed.view.is_null() || matches!(*boxed.tree, JsonTree::Tape(_)) {
+        return boxed.json_ref().to_value();
     }
     match std::sync::Arc::try_unwrap(boxed.tree) {
         Ok(JsonTree::Value(value)) => value,
-        Ok(other) => other.value().clone(),
-        Err(shared) => shared.value().clone(),
+        Ok(JsonTree::Tape(tape)) => JsonRef::Tape(&tape, 0).to_value(),
+        Err(shared) => match &*shared {
+            JsonTree::Value(value) => value.clone(),
+            JsonTree::Tape(tape) => JsonRef::Tape(tape, 0).to_value(),
+        },
     }
 }
 
@@ -448,6 +432,7 @@ pub(crate) unsafe fn json_clone_handle(p: *const GosJson) -> *mut GosJson {
     json_box(GosJson {
         tree: std::sync::Arc::clone(&src.tree),
         view: SyncRawPtr::new(src.view.as_const_ptr().cast_mut()),
+        node: src.node,
     })
 }
 
@@ -717,7 +702,7 @@ fn serialize_language_json<W: std::io::Write>(
     }
 }
 
-fn render_json_direct(value: &serde_json::Value, pretty: bool) -> *mut c_char {
+fn render_json_direct_bytes(value: &serde_json::Value, pretty: bool) -> Vec<u8> {
     // A recursive exact-size pass formats every number and walks the complete
     // tree before serde immediately repeats the work. Start large enough to
     // avoid churn for ordinary documents and let the builder double for large
@@ -725,32 +710,48 @@ fn render_json_direct(value: &serde_json::Value, pretty: bool) -> *mut c_char {
     let mut writer = RuntimeJsonWriter::new(64 * 1024);
     let result = serialize_language_json(&mut writer, value, pretty);
     if result.is_err() {
-        return alloc_cstring(b"");
+        return Vec::new();
     }
-    writer.finish()
+    writer.bytes
 }
 
 /// Renders a document in the language's one JSON form - keys in order,
 /// numbers and strings as `json::encode` writes them - whatever text it was
 /// parsed from, so every tier renders a parsed document identically.
 fn render_json_handle(json: &GosJson, pretty: bool) -> *mut c_char {
-    if json.view.is_null()
-        && let Some(text) = json.tree.raw_text()
-    {
-        let rendered = if pretty {
-            transcode_canonical(
-                text,
-                LanguageFloatsPretty(serde_json::ser::PrettyFormatter::new()),
-            )
-        } else {
-            transcode_canonical(text, LanguageFloatsCompact)
-        };
-        return match rendered {
-            Ok(bytes) => alloc_cstring(&bytes),
-            Err(_) => alloc_cstring(b""),
-        };
-    }
-    render_json_direct(json.value(), pretty)
+    alloc_cstring(&render_json_bytes(json, pretty))
+}
+
+/// The bytes [`render_json_handle`] makes its string of.
+pub(crate) fn render_json_bytes(json: &GosJson, pretty: bool) -> Vec<u8> {
+    render_ref_bytes(json.json_ref(), pretty)
+}
+
+/// The rendering of one value: a value read from a document streams from
+/// its text, a built one serializes its tree.
+fn render_ref_bytes(value: JsonRef<'_>, pretty: bool) -> Vec<u8> {
+    let Some(text) = value.source_text() else {
+        return render_json_direct_bytes(&value.as_value(), pretty);
+    };
+    let rendered = if pretty {
+        transcode_canonical(
+            text,
+            LanguageFloatsPretty(serde_json::ser::PrettyFormatter::new()),
+        )
+    } else {
+        transcode_canonical(text, LanguageFloatsCompact)
+    };
+    rendered.unwrap_or_default()
+}
+
+/// A handle onto `text`, a document [`gossamer_core::json::validate`]
+/// accepted, read as `json::parse` reads one.
+pub(crate) fn json_raw_handle(text: &str) -> *mut GosJson {
+    // `text` passed the validator once, and a value inside a document is
+    // within every limit the document was.
+    let (text, tape) = gossamer_core::json::validate_to_tape(text.as_bytes())
+        .expect("validated JSON must validate again");
+    GosJson::parsed(text, tape)
 }
 
 /// Renders validated JSON `text` in the form serializing its
@@ -1017,9 +1018,9 @@ pub unsafe extern "C" fn gos_rt_json_display(j: *const GosJson) -> *mut c_char {
         let Some(v) = (unsafe { json_borrow(j) }) else {
             return alloc_cstring(b"null");
         };
-        match v {
-            serde_json::Value::String(s) => alloc_cstring(s.as_bytes()),
-            other => render_json_direct(other, false),
+        match v.string() {
+            Some(s) => alloc_cstring(s.as_bytes()),
+            None => alloc_cstring(&render_ref_bytes(v, false)),
         }
     })
 }
@@ -1035,7 +1036,7 @@ pub unsafe extern "C" fn gos_rt_json_debug(j: *const GosJson) -> *mut c_char {
         let Some(v) = (unsafe { json_borrow(j) }) else {
             return alloc_cstring(b"null");
         };
-        render_json_direct(v, false)
+        alloc_cstring(&render_ref_bytes(v, false))
     })
 }
 
@@ -1053,11 +1054,7 @@ pub unsafe extern "C" fn gos_rt_json_get(j: *const GosJson, key: *const c_char) 
         let Some(parent) = (unsafe { json_handle(j) }) else {
             return GosJson::null_ptr();
         };
-        // `parent.view` is a stable interior pointer into
-        // `parent.tree`'s allocation; see `GosJson` doc. The
-        // dereference produces a borrow that lives only inside this
-        // function call.
-        let v = parent.value();
+        let v = parent.json_ref();
         let key_bytes: &[u8] = if key.is_null() {
             b""
         } else {
@@ -1087,8 +1084,8 @@ pub unsafe extern "C" fn gos_rt_json_at(j: *const GosJson, idx: i64) -> *mut Gos
         if idx < 0 {
             return GosJson::null_ptr();
         }
-        let v = parent.value();
-        match v.get(idx as usize) {
+        let v = parent.json_ref();
+        match v.at(idx as usize) {
             Some(child) => parent.child(child),
             None => GosJson::null_ptr(),
         }
@@ -1104,12 +1101,7 @@ pub unsafe extern "C" fn gos_rt_json_len(j: *const GosJson) -> i64 {
         let Some(v) = (unsafe { json_borrow(j) }) else {
             return 0;
         };
-        match v {
-            serde_json::Value::Array(a) => a.len() as i64,
-            serde_json::Value::Object(o) => o.len() as i64,
-            serde_json::Value::String(s) => s.len() as i64,
-            _ => 0,
-        }
+        v.len() as i64
     })
 }
 
@@ -1120,8 +1112,8 @@ pub unsafe extern "C" fn gos_rt_json_is_null(j: *const GosJson) -> i32 {
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
         match unsafe { json_borrow(j) } {
-            Some(serde_json::Value::Null) | None => 1,
-            Some(_) => 0,
+            Some(v) => i32::from(v.is_null()),
+            None => 1,
         }
     })
 }
@@ -1136,13 +1128,12 @@ pub unsafe extern "C" fn gos_rt_json_as_i64(j: *const GosJson) -> i64 {
         let Some(v) = (unsafe { json_borrow(j) }) else {
             return 0;
         };
-        match v {
-            serde_json::Value::Number(n) => n
-                .as_i64()
-                .unwrap_or_else(|| n.as_f64().unwrap_or(0.0) as i64),
-            serde_json::Value::Bool(b) => i64::from(*b),
-            serde_json::Value::String(s) => s.parse::<i64>().unwrap_or(0),
-            _ => 0,
+        if let Some(n) = v.number() {
+            n.as_i64().unwrap_or_else(|| n.as_f64() as i64)
+        } else if let Some(b) = v.as_bool() {
+            i64::from(b)
+        } else {
+            v.string().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0)
         }
     })
 }
@@ -1156,12 +1147,14 @@ pub unsafe extern "C" fn gos_rt_json_as_f64(j: *const GosJson) -> f64 {
         let Some(v) = (unsafe { json_borrow(j) }) else {
             return 0.0;
         };
-        match v {
-            serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0),
-            serde_json::Value::Bool(true) => 1.0,
-            serde_json::Value::Bool(false) => 0.0,
-            serde_json::Value::String(s) => s.parse::<f64>().unwrap_or(0.0),
-            _ => 0.0,
+        if let Some(n) = v.number() {
+            n.as_f64()
+        } else if let Some(b) = v.as_bool() {
+            f64::from(u8::from(b))
+        } else {
+            v.string()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0)
         }
     })
 }
@@ -1177,12 +1170,11 @@ pub unsafe extern "C" fn gos_rt_json_as_str(j: *const GosJson) -> *mut c_char {
         let Some(v) = (unsafe { json_borrow(j) }) else {
             return alloc_cstring(b"");
         };
-        match v {
-            serde_json::Value::String(s) => alloc_cstring(s.as_bytes()),
-            other => {
-                let rendered = serde_json::to_string(other).unwrap_or_default();
-                alloc_cstring(rendered.as_bytes())
-            }
+        if let Some(s) = v.string() {
+            alloc_cstring(s.as_bytes())
+        } else {
+            let rendered = serde_json::to_string(&v.as_value()).unwrap_or_default();
+            alloc_cstring(rendered.as_bytes())
         }
     })
 }
@@ -1197,21 +1189,20 @@ pub unsafe extern "C" fn gos_rt_json_as_i64_opt(j: *const GosJson) -> i128 {
     ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
-        match unsafe { json_borrow(j) } {
-            Some(serde_json::Value::Number(n)) => {
+        match unsafe { json_borrow(j) }.and_then(JsonRef::number) {
+            Some(n) => {
                 if let Some(i) = n.as_i64() {
                     gos_rt_result_new(0, i)
-                } else if let Some(f) = n.as_f64() {
+                } else {
+                    let f = n.as_f64();
                     if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
                         gos_rt_result_new(0, f as i64)
                     } else {
                         gos_rt_result_new(1, 0)
                     }
-                } else {
-                    gos_rt_result_new(1, 0)
                 }
             }
-            _ => gos_rt_result_new(1, 0),
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -1223,14 +1214,15 @@ pub unsafe extern "C" fn gos_rt_json_as_u64_opt(j: *const GosJson) -> i128 {
     ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
-        let n = match unsafe { json_borrow(j) } {
-            Some(serde_json::Value::Number(n)) => n.as_u64().or_else(|| {
-                n.as_f64()
-                    .filter(|f| f.fract() == 0.0 && *f >= 0.0 && *f <= u64::MAX as f64)
-                    .map(|f| f as u64)
-            }),
-            _ => None,
-        };
+        let n = unsafe { json_borrow(j) }
+            .and_then(JsonRef::number)
+            .and_then(|n| {
+                n.as_u64().or_else(|| {
+                    Some(n.as_f64())
+                        .filter(|f| f.fract() == 0.0 && *f >= 0.0 && *f <= u64::MAX as f64)
+                        .map(|f| f as u64)
+                })
+            });
         match n {
             Some(n) => gos_rt_result_new(0, n as i64),
             None => gos_rt_result_new(1, 0),
@@ -1245,11 +1237,9 @@ pub unsafe extern "C" fn gos_rt_json_as_f64_opt(j: *const GosJson) -> i128 {
     ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
-        match unsafe { json_borrow(j) } {
-            Some(serde_json::Value::Number(n)) => {
-                gos_rt_result_new_f64(0, n.as_f64().unwrap_or(0.0))
-            }
-            _ => gos_rt_result_new(1, 0),
+        match unsafe { json_borrow(j) }.and_then(JsonRef::number) {
+            Some(n) => gos_rt_result_new_f64(0, n.as_f64()),
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -1261,12 +1251,12 @@ pub unsafe extern "C" fn gos_rt_json_as_str_opt(j: *const GosJson) -> i128 {
     ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
-        match unsafe { json_borrow(j) } {
-            Some(serde_json::Value::String(s)) => {
+        match unsafe { json_borrow(j) }.and_then(JsonRef::string) {
+            Some(s) => {
                 let cs = alloc_cstring(s.as_bytes());
                 gos_rt_result_new(0, cs as i64)
             }
-            _ => gos_rt_result_new(1, 0),
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -1277,12 +1267,13 @@ pub unsafe extern "C" fn gos_rt_json_as_bool(j: *const GosJson) -> i32 {
     ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
-        match unsafe { json_borrow(j) } {
-            Some(serde_json::Value::Bool(true)) => 1,
-            Some(serde_json::Value::Number(n)) if n.as_f64().unwrap_or(0.0) != 0.0 => 1,
-            Some(serde_json::Value::String(s)) if !s.is_empty() => 1,
-            _ => 0,
-        }
+        let Some(v) = (unsafe { json_borrow(j) }) else {
+            return 0;
+        };
+        let truthy = v.as_bool().unwrap_or(false)
+            || v.number().is_some_and(|n| n.as_f64() != 0.0)
+            || v.string_is_empty() == Some(false);
+        i32::from(truthy)
     })
 }
 
@@ -1294,9 +1285,9 @@ pub unsafe extern "C" fn gos_rt_json_as_bool_opt(j: *const GosJson) -> i128 {
     ffi_entry!({
         // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
         // `json_borrow` accepts.
-        match unsafe { json_borrow(j) } {
-            Some(serde_json::Value::Bool(b)) => gos_rt_result_new(0, i64::from(*b)),
-            _ => gos_rt_result_new(1, 0),
+        match unsafe { json_borrow(j) }.and_then(JsonRef::as_bool) {
+            Some(b) => gos_rt_result_new(0, i64::from(b)),
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -1335,7 +1326,7 @@ pub unsafe extern "C" fn gos_rt_json_get_opt(j: *const GosJson, key: *const c_ch
         let Ok(key_str) = std::str::from_utf8(key_bytes) else {
             return gos_rt_result_new(1, 0);
         };
-        let v = parent.value();
+        let v = parent.json_ref();
         match v.get(key_str) {
             Some(child) => gos_rt_result_new(0, parent.child(child) as i64),
             None => gos_rt_result_new(1, 0),
@@ -1354,8 +1345,8 @@ pub unsafe extern "C" fn gos_rt_json_keys_opt(j: *const GosJson) -> i128 {
         let Some(v) = (unsafe { json_borrow(j) }) else {
             return gos_rt_result_new(1, 0);
         };
-        match v {
-            serde_json::Value::Object(map) => {
+        match v.keys() {
+            Some(keys) => {
                 // STRING-typed 8-byte slots (cstring pointers): the vec
                 // owns each fresh key string, so `gos_rt_vec_free`
                 // reclaims them even when a consumer loop breaks early.
@@ -1366,11 +1357,11 @@ pub unsafe extern "C" fn gos_rt_json_keys_opt(j: *const GosJson) -> i128 {
                 let vec_ptr = {
                     crate::c_abi::vec::gos_rt_vec_with_capacity_typed(
                         8,
-                        map.len().min(i64::MAX as usize) as i64,
+                        keys.len().min(i64::MAX as usize) as i64,
                         crate::c_abi::vec::vec_elem_kind::STRING,
                     )
                 };
-                for k in map.keys() {
+                for k in keys {
                     let cs = alloc_cstring(k.as_bytes()) as i64;
                     // SAFETY: `vec_ptr` is the fresh key vector made above, or null, which
                     // `gos_rt_vec_push` accepts, and `cs` is one 8-byte element.
@@ -1380,7 +1371,7 @@ pub unsafe extern "C" fn gos_rt_json_keys_opt(j: *const GosJson) -> i128 {
                 }
                 gos_rt_result_new(0, vec_ptr as i64)
             }
-            _ => gos_rt_result_new(1, 0),
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -1397,9 +1388,8 @@ pub unsafe extern "C" fn gos_rt_json_as_array_opt(j: *const GosJson) -> i128 {
         let Some(parent) = (unsafe { json_handle(j) }) else {
             return gos_rt_result_new(1, 0);
         };
-        let v = parent.value();
-        match v {
-            serde_json::Value::Array(items) => {
+        match parent.json_ref().items() {
+            Some(items) => {
                 // Each returned child handle needs one pointer slot. Reserve
                 // once from the source array's exact length instead of
                 // growing through every capacity tier.
@@ -1423,7 +1413,7 @@ pub unsafe extern "C" fn gos_rt_json_as_array_opt(j: *const GosJson) -> i128 {
                 }
                 gos_rt_result_new(0, vec_ptr as i64)
             }
-            _ => gos_rt_result_new(1, 0),
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -1501,7 +1491,7 @@ pub unsafe extern "C" fn gos_rt_json_value_array(vec: *const GosVec) -> *mut Gos
                     // SAFETY: each element of a `Vec<json::Value>` is a live handle or null
                     // (C-ABI contract), which `json_borrow` accepts.
                     unsafe { json_borrow(items.pointer_at::<GosJson>(i)) }
-                        .map_or(serde_json::Value::Null, Clone::clone)
+                        .map_or(serde_json::Value::Null, JsonRef::to_value)
                 })
                 .collect()
         });
@@ -1588,7 +1578,7 @@ pub unsafe extern "C" fn gos_rt_json_value_object_n(n: i64, pairs: *const i64) -
                 // SAFETY: each value word is a live handle or null (C-ABI contract), which
                 // `json_borrow` accepts.
                 let v = if let Some(v) = unsafe { json_borrow(val_ptr) } {
-                    v.clone()
+                    v.to_value()
                 } else {
                     serde_json::Value::Null
                 };
@@ -1666,7 +1656,7 @@ pub unsafe extern "C" fn gos_rt_json_value_object_keyed(
                     // SAFETY: each value word is a live handle or null (C-ABI contract), which
                     // `json_borrow` accepts.
                     let v = if let Some(v) = unsafe { json_borrow(val_ptr) } {
-                        v.clone()
+                        v.to_value()
                     } else {
                         serde_json::Value::Null
                     };
@@ -1693,8 +1683,11 @@ pub unsafe extern "C" fn gos_rt_json_set(
         let Some(parent) = (unsafe { json_handle(obj) }) else {
             return GosJson::null_ptr();
         };
-        let v = parent.value();
-        let serde_json::Value::Object(existing) = v else {
+        let v = parent.json_ref();
+        if v.keys().is_none() {
+            return parent.child(v);
+        }
+        let serde_json::Value::Object(mut out) = v.to_value() else {
             return parent.child(v);
         };
         let key_str = if key.is_null() {
@@ -1706,11 +1699,10 @@ pub unsafe extern "C" fn gos_rt_json_set(
         // SAFETY: `val` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `json_borrow` accepts.
         let new_val = if let Some(child) = unsafe { json_borrow(val) } {
-            child.clone()
+            child.to_value()
         } else {
             serde_json::Value::Null
         };
-        let mut out = existing.clone();
         out.insert(key_str, new_val);
         GosJson::into_raw(serde_json::Value::Object(out))
     })
@@ -2001,8 +1993,8 @@ pub unsafe extern "C" fn gos_rt_json_writer_value(w: *mut JsonTokenWriter, j: *c
                     // `to_writer_pretty` always indents from column zero, so
                     // the rendered lines are shifted to the depth this value
                     // sits at before they are appended.
-                    let mut nested = Vec::new();
-                    if serialize_language_json(&mut nested, json.value(), true).is_ok() {
+                    let nested = render_json_bytes(json, true);
+                    if !nested.is_empty() {
                         let depth = writer.open.len();
                         let text = String::from_utf8_lossy(&nested).into_owned();
                         for (i, line) in text.split('\n').enumerate() {
@@ -2016,9 +2008,7 @@ pub unsafe extern "C" fn gos_rt_json_writer_value(w: *mut JsonTokenWriter, j: *c
                         }
                     }
                 }
-                Some(json) => {
-                    let _ = serialize_language_json(&mut writer.sink, json.value(), false);
-                }
+                Some(json) => writer.sink.append(&render_json_bytes(json, false)),
                 None => writer.sink.append(b"null"),
             }
         }
@@ -2249,7 +2239,7 @@ mod tests {
     }
 
     #[test]
-    fn a_parsed_document_is_materialised_on_first_use_and_renders_canonically() {
+    fn a_parsed_document_is_read_from_its_tape_and_renders_canonically() {
         let text = crate::c_abi::string::test_gos_str(" { \"value\" : 7 } ");
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
@@ -2258,10 +2248,7 @@ mod tests {
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         let handle = unsafe { &*json };
-        assert!(matches!(
-            &*handle.tree,
-            JsonTree::Raw { parsed, .. } if parsed.get().is_none()
-        ));
+        assert!(matches!(&*handle.tree, JsonTree::Tape(_)));
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         let rendered_ptr = unsafe { gos_rt_json_render(json) };
@@ -2278,10 +2265,7 @@ mod tests {
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         assert_eq!(unsafe { gos_rt_json_as_i64(child) }, 7);
-        assert!(matches!(
-            &*handle.tree,
-            JsonTree::Raw { parsed, .. } if parsed.get().is_some()
-        ));
+        assert!(matches!(&*handle.tree, JsonTree::Tape(_)));
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         unsafe {

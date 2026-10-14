@@ -107,6 +107,9 @@ pub(crate) struct EnumIndex {
     /// declaration order even when `Rect` is an enum variant rather
     /// than a free struct.
     pub(crate) variant_fields: HashMap<String, Vec<String>>,
+    /// The same field names keyed by `Enum::Variant`, so a variant name two
+    /// enums both declare resolves to the one the value's type names.
+    pub(crate) variant_fields_owned: HashMap<String, Vec<String>>,
     /// `variant_name -> [field_ty]`, parallel to `variant_fields`.
     /// Used by struct-pattern matching so `Shape::Rect { w, h }`
     /// declares `w` / `h` MIR locals at the right MIR type - the
@@ -179,6 +182,14 @@ impl EnumIndex {
         self.variant_field_tys_owned
             .get(&format!("{enum_name}::{variant}"))
             .or_else(|| self.variant_field_tys.get(variant))
+            .cloned()
+    }
+
+    /// The declared field names of one struct-payload variant, resolved
+    /// through its own enum.
+    pub(crate) fn field_names_of(&self, enum_name: &str, variant: &str) -> Option<Vec<String>> {
+        self.variant_fields_owned
+            .get(&format!("{enum_name}::{variant}"))
             .cloned()
     }
 

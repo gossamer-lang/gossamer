@@ -46,6 +46,13 @@ pub(super) const REGION_ARENA_BYTES: usize = 1 << 30;
 /// Base address of the reserved range. 0 = not yet initialised;
 /// `usize::MAX` = reservation failed (regions disabled).
 static REGION_ARENA_BASE: AtomicUsize = AtomicUsize::new(0);
+/// Bytes the reservation at `REGION_ARENA_BASE` spans: `REGION_ARENA_BYTES`,
+/// or less where the host limits address space (`RLIMIT_AS`, valgrind).
+/// Written before the base is published, so a reader that sees a base sees
+/// its length.
+static REGION_ARENA_LEN: AtomicUsize = AtomicUsize::new(0);
+/// The smallest reservation worth having; below it regions stay counted.
+const REGION_ARENA_MIN_BYTES: usize = 1 << 30;
 /// Bump offset of the next never-used slab within the reserve.
 static REGION_ARENA_NEXT: AtomicUsize = AtomicUsize::new(0);
 /// Maximum number of standard slabs the reserved arena can hold.  The
@@ -159,7 +166,8 @@ pub fn region_arena_overflow_reuse_counts() -> (usize, usize) {
 /// load plus the pure [`addr_in_region_arena`] range test.
 #[inline]
 pub(crate) fn in_region_arena(ptr: *const u8) -> bool {
-    addr_in_region_arena(ptr as usize, REGION_ARENA_BASE.load(Ordering::Relaxed))
+    let base = REGION_ARENA_BASE.load(Ordering::Acquire);
+    addr_in_region_arena(ptr as usize, base, REGION_ARENA_LEN.load(Ordering::Relaxed))
 }
 
 /// Pure range test for [`in_region_arena`], split out so the sentinel
@@ -175,11 +183,11 @@ pub(crate) fn in_region_arena(ptr: *const u8) -> bool {
 /// hands out, which silently turned `gos_rt_rc_retain`/`release` into
 /// no-ops there - a use-after-free, since structural frees still ran.
 #[inline]
-pub(super) fn addr_in_region_arena(addr: usize, base: usize) -> bool {
+pub(super) fn addr_in_region_arena(addr: usize, base: usize, len: usize) -> bool {
     if base == 0 || base == usize::MAX {
         return false;
     }
-    addr.wrapping_sub(base) < REGION_ARENA_BYTES
+    addr.wrapping_sub(base) < len
 }
 
 /// Strip a tagged-repr enum's discriminant bits (pointer bits 1-2)
@@ -208,28 +216,30 @@ pub(super) fn is_odd_string_repr(p: *const u8) -> bool {
 /// Reserve the arena on first use. Returns the base, or `usize::MAX`
 /// when virtual reservation is unavailable.
 pub(super) fn region_arena_base() -> usize {
+    static RESERVE: std::sync::Once = std::sync::Once::new();
     let cur = REGION_ARENA_BASE.load(Ordering::Acquire);
     if cur != 0 {
         return cur;
     }
-    let reserved = arena_reserve(REGION_ARENA_BYTES);
-    let val = if reserved.is_null() {
-        usize::MAX
-    } else {
-        reserved as usize
-    };
-    match REGION_ARENA_BASE.compare_exchange(0, val, Ordering::AcqRel, Ordering::Acquire) {
-        Ok(_) => val,
-        Err(winner) => {
-            // Lost the race; release our reservation.
-            if !reserved.is_null() {
-                // SAFETY: `reserved` is the mapping `arena_reserve` made above, which lost the
-                // race and is used nowhere.
-                unsafe { arena_release(reserved, REGION_ARENA_BYTES) };
-            }
-            winner
+    RESERVE.call_once(|| {
+        // A host that caps address space refuses the full reservation; a
+        // quarter of it at a time is tried down to the smallest worth having.
+        let mut len = REGION_ARENA_BYTES;
+        let mut reserved = arena_reserve(len);
+        while reserved.is_null() && len > REGION_ARENA_MIN_BYTES {
+            len /= 4;
+            reserved = arena_reserve(len);
         }
-    }
+        if reserved.is_null() {
+            REGION_ARENA_BASE.store(usize::MAX, Ordering::Release);
+        } else {
+            // The length is stored first, so a reader that sees the base
+            // sees the span it heads.
+            REGION_ARENA_LEN.store(len, Ordering::Relaxed);
+            REGION_ARENA_BASE.store(reserved as usize, Ordering::Release);
+        }
+    });
+    REGION_ARENA_BASE.load(Ordering::Acquire)
 }
 
 #[cfg(unix)]
@@ -250,16 +260,6 @@ fn arena_reserve(len: usize) -> *mut u8 {
     } else {
         p.cast()
     }
-}
-
-/// # Safety
-///
-/// `p` and `len` name a mapping `arena_reserve` made, which nothing uses
-/// afterwards.
-#[cfg(unix)]
-unsafe fn arena_release(p: *mut u8, len: usize) {
-    // SAFETY: releasing exactly the mapping created in arena_reserve.
-    unsafe { libc::munmap(p.cast(), len) };
 }
 
 /// # Safety
@@ -297,17 +297,6 @@ fn arena_reserve(len: usize) -> *mut u8 {
 
 /// # Safety
 ///
-/// `p` and `len` name a mapping `arena_reserve` made, which nothing uses
-/// afterwards.
-#[cfg(windows)]
-unsafe fn arena_release(p: *mut u8, _len: usize) {
-    use windows_sys::Win32::System::Memory::{MEM_RELEASE, VirtualFree};
-    // SAFETY: releasing exactly the reservation from arena_reserve.
-    unsafe { VirtualFree(p.cast(), 0, MEM_RELEASE) };
-}
-
-/// # Safety
-///
 /// `p` and `len` name a range inside a reservation `arena_reserve` made.
 #[cfg(windows)]
 unsafe fn arena_commit(p: *mut u8, len: usize) -> bool {
@@ -336,13 +325,6 @@ unsafe fn arena_decommit(p: *mut u8, len: usize) {
 fn arena_reserve(_len: usize) -> *mut u8 {
     std::ptr::null_mut()
 }
-
-/// # Safety
-///
-/// `p` and `len` name a mapping `arena_reserve` made, which nothing uses
-/// afterwards.
-#[cfg(not(any(unix, windows)))]
-unsafe fn arena_release(_p: *mut u8, _len: usize) {}
 
 /// # Safety
 ///
@@ -426,7 +408,7 @@ pub(super) fn arena_acquire(slab_size: usize) -> *mut u8 {
     let slab_mask = REGION_SLAB_BYTES - 1;
     let rounded = (slab_size + slab_mask) & !slab_mask;
     let off = REGION_ARENA_NEXT.fetch_add(rounded, Ordering::Relaxed);
-    if off + rounded > REGION_ARENA_BYTES {
+    if off + rounded > REGION_ARENA_LEN.load(Ordering::Relaxed) {
         return std::ptr::null_mut();
     }
     let p = (base + off) as *mut u8;
@@ -871,6 +853,77 @@ pub(crate) fn region_alloc_handle<T>(value: T, finalize: Finalizer) -> Result<*m
     Ok(handle)
 }
 
+/// Gives back one share of `node`, a counted object outside region storage,
+/// when the innermost open region pops: a region object holds `node` without
+/// a count of its own, and this share keeps it alive exactly as long as that
+/// holder. With no region open the share is given back now.
+pub(crate) fn region_release_at_pop(node: *mut u8) {
+    unsafe fn release(node: *mut u8) {
+        // SAFETY: `node` is the counted object `region_release_at_pop` was given, whose
+        // share this release gives back once.
+        unsafe { gos_rt_rc_release(node) };
+    }
+    region_give_back_at_pop(node, release);
+}
+
+/// Runs `give_back` on `value` when the innermost open region pops, or now
+/// when no region is open: the share it returns is one a region object holds
+/// without a count of its own.
+fn region_give_back_at_pop(value: *mut u8, give_back: Finalizer) {
+    let queued = REGIONS.with(|r| {
+        r.borrow_mut()
+            .last_mut()
+            .map(|top| top.finalizers.push((value, give_back)))
+            .is_some()
+    });
+    if !queued {
+        // SAFETY: `give_back` returns the one share of `value` its caller handed over.
+        unsafe { give_back(value) };
+    }
+}
+
+/// Takes a share of `child` for `holder`, the node a store just placed it in.
+///
+/// `kind` names the child: 1 a `String`, 2 a `Vec`, anything else a counted
+/// node. A holder in region storage never gives its children back, so the
+/// share of a child outside the region is given back when the region pops,
+/// the point the holder's storage goes away.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_retain_held(holder: *mut u8, child: *mut u8, kind: i64) {
+    unsafe fn give_back_str(s: *mut u8) {
+        // SAFETY: `s` is the string whose share `gos_rt_retain_held` took.
+        unsafe { crate::c_abi::string::gos_rt_str_free_typed(s.cast()) };
+    }
+    unsafe fn give_back_vec(v: *mut u8) {
+        // SAFETY: `v` is the vector whose share `gos_rt_retain_held` took.
+        unsafe { crate::c_abi::map::gos_rt_vec_free(v.cast()) };
+    }
+    unsafe fn give_back_node(node: *mut u8) {
+        // SAFETY: `node` is the counted node whose share `gos_rt_retain_held` took.
+        unsafe { gos_rt_rc_release(node) };
+    }
+    let give_back: Finalizer = match kind {
+        1 => {
+            // SAFETY: `child` is this shim's string argument, null or live (C-ABI contract).
+            unsafe { crate::c_abi::string::gos_rt_str_retain_typed(child.cast()) };
+            give_back_str
+        }
+        2 => {
+            // SAFETY: `child` is this shim's vector argument, null or live (C-ABI contract).
+            unsafe { crate::c_abi::vec::gos_rt_vec_retain(child.cast()) };
+            give_back_vec
+        }
+        _ => {
+            // SAFETY: `child` is this shim's counted argument, null or live (C-ABI contract).
+            unsafe { gos_rt_rc_retain(child) };
+            give_back_node
+        }
+    };
+    if !child.is_null() && in_region_arena(untag_rc(holder)) && !in_region_arena(untag_rc(child)) {
+        region_give_back_at_pop(child, give_back);
+    }
+}
+
 /// Vec element buffers at least this large belong to the allocator rather
 /// than to a slab: bump allocation buys a single large buffer nothing, and a
 /// slab sized for one is decommitted at every pop and faulted back in by the
@@ -953,17 +1006,19 @@ pub extern "C" fn gos_rt_arena_pop() {
     let bump = REGIONS.with(|r| r.borrow().last().map_or(BumpState::EMPTY, |top| top.saved));
     BUMP.with(|b| b.set(bump));
     REGION_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
-    for body in region.promoted {
-        // SAFETY: each body was recorded by `region_track_promoted` while this
-        // region was open, is reachable from nothing after the pop (the escape
-        // analysis is what licenses the region), and is freed once, here.
-        unsafe { crate::c_abi::string::free_promoted_string(body) };
-    }
+    // A finalizer may release values the region owns, so it runs while all of
+    // the region's storage, promoted strings included, is still in place.
     for (handle, finalize) in region.finalizers.into_iter().rev() {
         // SAFETY: each handle was placed by `region_alloc_handle` with its own
         // finalizer while this region was open, is reachable from nothing
         // after the pop, and is finalized once, here, before its slab goes.
         unsafe { finalize(handle) };
+    }
+    for body in region.promoted {
+        // SAFETY: each body was recorded by `region_track_promoted` while this
+        // region was open, is reachable from nothing after the pop (the escape
+        // analysis is what licenses the region), and is freed once, here.
+        unsafe { crate::c_abi::string::free_promoted_string(body) };
     }
     for (buf, bytes) in region.buffers {
         // SAFETY: each buffer was recorded by `region_own_buffer` or

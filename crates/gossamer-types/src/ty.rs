@@ -14,7 +14,9 @@ use crate::traits::TraitRef;
 
 /// Interner handle for a type. Cheap to copy; meaningful only when
 /// paired with the [`crate::TyCtxt`] that produced it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct Ty(pub(crate) u32);
 
 impl Ty {
@@ -140,7 +142,9 @@ impl TyVid {
 
 /// Zero-based index of a bound generic parameter within its defining
 /// item's generics list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct ParamIdx(pub u32);
 
 impl ParamIdx {

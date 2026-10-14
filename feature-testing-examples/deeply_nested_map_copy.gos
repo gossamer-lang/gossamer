@@ -1,0 +1,51 @@
+// A copy of a struct holding a map ten structs deep owns its own map on
+// the bytecode VM, as on the compiled tiers.
+
+struct L0 {
+    inner: L1
+}
+
+struct L1 {
+    inner: L2
+}
+
+struct L2 {
+    inner: L3
+}
+
+struct L3 {
+    inner: L4
+}
+
+struct L4 {
+    inner: L5
+}
+
+struct L5 {
+    inner: L6
+}
+
+struct L6 {
+    inner: L7
+}
+
+struct L7 {
+    inner: L8
+}
+
+struct L8 {
+    inner: L9
+}
+
+struct L9 {
+    m: Map<i64, i64>
+}
+
+fn main() {
+    for round in 0..2 {
+        let a = L0 { inner: L1 { inner: L2 { inner: L3 { inner: L4 { inner: L5 { inner: L6 { inner: L7 { inner: L8 { inner: L9 { m: { 1: 1 } } } } } } } } } } }
+        let mut b = a
+        b.inner.inner.inner.inner.inner.inner.inner.inner.inner.m[1] = 2 + round
+        println(f"a {a.inner.inner.inner.inner.inner.inner.inner.inner.inner.m[1]} b {b.inner.inner.inner.inner.inner.inner.inner.inner.inner.m[1]}")
+    }
+}

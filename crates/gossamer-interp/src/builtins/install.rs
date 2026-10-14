@@ -628,6 +628,9 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
         "__gos_fs_walk_dir_raw",
         native("__gos_fs_walk_dir_raw", native_fs_walk_dir_raw),
     ));
+    for (name, call) in SERDE_BUILTINS {
+        globals.push((name, builtin(name, *call)));
+    }
     globals.push(("__gos_par_run", native("__gos_par_run", native_par_run)));
     globals.push(("__gos_par_chunks", native("__gos_par_chunks", native_par_chunks)));
     globals.push(("__gos_fd_wait_raw", builtin("__gos_fd_wait_raw", builtin_fd_wait_raw)));

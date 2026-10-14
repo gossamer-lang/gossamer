@@ -1415,6 +1415,52 @@ pub(super) fn lower_intrinsic_call_io_math(
                 lower_place_address(module, builder, locals, body, tcx, place, intrinsics)?
             };
             let target = coerce_arg_to(builder, target, ptr_ty).unwrap_or(target);
+            // Zeroing the guarded words is a fixed set of stores the meta
+            // names, written in place rather than walked at run time.
+            if name == "gos_rt_aggr_zero_guarded"
+                && let Some(Operand::Const(ConstValue::Str(meta_sym))) = args.get(1)
+                && let Some(blob) = tcx.rc_meta(meta_sym)
+            {
+                let count = usize::try_from(blob.get(1).copied().unwrap_or(0)).unwrap_or(0);
+                let entries = blob.get(2..).unwrap_or(&[]).chunks_exact(3).take(count);
+                // A slot of the frame always has an address; any other place
+                // may still be unbound, which the runtime walk answers as a
+                // no-op.
+                let has_storage = spilled.is_some()
+                    || (place.projection.is_empty()
+                        && intrinsics.stack_slotted.contains(&place.local));
+                let skip_blk = (!has_storage).then(|| {
+                    let store_blk = builder.create_block();
+                    let skip_blk = builder.create_block();
+                    builder.ins().brif(target, store_blk, &[], skip_blk, &[]);
+                    builder.switch_to_block(store_blk);
+                    builder.seal_block(store_blk);
+                    skip_blk
+                });
+                for entry in entries {
+                    let (gate, disc_word, payload_word) = (entry[0], entry[1], entry[2]);
+                    let mut store_word = |word: i64, value: i64| {
+                        let v = builder.ins().iconst(types::I64, value);
+                        let offset = i32::try_from(word * 8).unwrap_or(0);
+                        builder
+                            .ins()
+                            .store(MemFlagsData::trusted(), v, target, offset);
+                    };
+                    if gate >= 0 && disc_word >= 0 {
+                        store_word(disc_word, -1);
+                    }
+                    store_word(payload_word, 0);
+                }
+                if let Some(skip_blk) = skip_blk {
+                    builder.ins().jump(skip_blk, &[]);
+                    builder.switch_to_block(skip_blk);
+                    builder.seal_block(skip_blk);
+                }
+                if let Some((var, addr)) = spilled {
+                    reload_carrier_local(builder, var, addr);
+                }
+                return Ok(true);
+            }
             let meta = match args.get(1) {
                 Some(Operand::Const(ConstValue::Str(meta_sym))) if !meta_sym.is_empty() => {
                     match tcx.rc_meta(meta_sym) {
@@ -1494,6 +1540,34 @@ pub(super) fn lower_intrinsic_call_io_math(
                 &intrinsics.body_cl_types,
                 destination.local,
                 v,
+            );
+            Ok(true)
+        }
+        "gos_enum_word_addr" => {
+            // The address of the payload word at `off`: `(ptr & !7) + off`, or
+            // null for a tagged null.
+            let p = match args.first() {
+                Some(arg) => {
+                    lower_operand(module, builder, locals, body, tcx, arg, None, intrinsics)?
+                }
+                None => builder.ins().iconst(types::I64, 0),
+            };
+            let off = match args.get(1) {
+                Some(arg) => {
+                    lower_operand(module, builder, locals, body, tcx, arg, None, intrinsics)?
+                }
+                None => builder.ins().iconst(types::I64, 0),
+            };
+            let base = builder.ins().band_imm_s(p, -8);
+            let addr = builder.ins().iadd(base, off);
+            let zero = builder.ins().iconst(types::I64, 0);
+            let slot = builder.ins().select(base, addr, zero);
+            define_var_to(
+                builder,
+                locals,
+                &intrinsics.body_cl_types,
+                destination.local,
+                slot,
             );
             Ok(true)
         }
@@ -1593,10 +1667,17 @@ pub(super) fn lower_intrinsic_call_io_math(
                         off,
                     );
                 }
-                let retain =
-                    intrinsics.extern_fn(module, "gos_rt_rc_retain_children", &[ptr_ty], &[])?;
-                let retain_ref = module.declare_func_in_func(retain, builder.func);
-                builder.ins().call(retain_ref, &[v]);
+                // A view of a box its caller keeps takes no shares.
+                if !gossamer_mir::is_payload_view(args) {
+                    let retain = intrinsics.extern_fn(
+                        module,
+                        "gos_rt_rc_retain_children",
+                        &[ptr_ty],
+                        &[],
+                    )?;
+                    let retain_ref = module.declare_func_in_func(retain, builder.func);
+                    builder.ins().call(retain_ref, &[v]);
+                }
                 builder.ins().jump(after_b, &[]);
                 builder.switch_to_block(after_b);
                 builder.seal_block(after_b);
@@ -1914,7 +1995,7 @@ pub(super) fn lower_intrinsic_call_io_math(
             );
             Ok(true)
         }
-        "gos_rt_enum_box_aggr" | "gos_rt_rc_weak_cell" => {
+        "gos_rt_enum_box_aggr" | "gos_rt_enum_box_aggr_take" | "gos_rt_rc_weak_cell" => {
             // Copy a by-value aggregate's slot bytes into a fresh RC cell:
             // `gos_rt_enum_box_aggr(size, meta, src)`. `meta` names the
             // module-global child-layout blob (empty name => leaf => null
@@ -1952,10 +2033,10 @@ pub(super) fn lower_intrinsic_call_io_math(
             } else {
                 builder.ins().ireduce(ptr_ty, src_raw)
             };
-            let static_name: &'static str = if name == "gos_rt_rc_weak_cell" {
-                "gos_rt_rc_weak_cell"
-            } else {
-                "gos_rt_enum_box_aggr"
+            let static_name: &'static str = match name {
+                "gos_rt_rc_weak_cell" => "gos_rt_rc_weak_cell",
+                "gos_rt_enum_box_aggr_take" => "gos_rt_enum_box_aggr_take",
+                _ => "gos_rt_enum_box_aggr",
             };
             let f = intrinsics.extern_fn(
                 module,

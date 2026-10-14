@@ -674,12 +674,6 @@ fn callee_sret_slots(
     }
 }
 
-/// True when `rvalue` is a whole-value `Copy` of a place whose leaf type is a
-/// multi-slot aggregate (tuple / array / struct) held in flat slot storage -
-/// the shape that must be memcpy'd word-for-word into the destination's own
-/// slot rather than aliased by rebinding the variable. Inline two-word enums
-/// (`Result` / `Option` / inline user enums) are register-packed `i128`
-/// values, not slot storage, so they are excluded.
 /// Whether `local` is an aggregate held through the address of its words, the
 /// shape a carrier payload read answers as the box's own storage.
 pub(super) fn payload_takes_own_storage(tcx: &TyCtxt, body: &Body, local: Local) -> bool {
@@ -692,6 +686,12 @@ pub(super) fn payload_takes_own_storage(tcx: &TyCtxt, body: &Body, local: Local)
         )
 }
 
+/// True when `rvalue` is a whole-value `Copy` of a place whose leaf type is a
+/// multi-slot aggregate (tuple / array / struct) held in flat slot storage -
+/// the shape that must be memcpy'd word-for-word into the destination's own
+/// slot rather than aliased by rebinding the variable. Inline two-word enums
+/// (`Result` / `Option` / inline user enums) are register-packed `i128`
+/// values, not slot storage, so they are excluded.
 fn is_aggregate_copy_src(body: &Body, tcx: &TyCtxt, rvalue: &Rvalue) -> bool {
     let Rvalue::Use(Operand::Copy(src)) = rvalue else {
         return false;
@@ -723,14 +723,6 @@ fn is_aggregate_copy_src(body: &Body, tcx: &TyCtxt, rvalue: &Rvalue) -> bool {
         )
 }
 
-/// True when `local`'s value can reach the return slot (`Local::RETURN`)
-/// through a chain of whole-value `Copy` assignments. Such a local's backing
-/// pointer is handed to the caller by the return lowering, so it must stay a
-/// heap allocation that outlives the frame rather than a reused stack slot.
-/// Every other downstream use of an aggregate copies its words (a
-/// whole-aggregate copy memcpies, a call argument is defensively cloned, a
-/// nested-aggregate operand is memcpied into its parent), so excluding only the
-/// return-flow set keeps stack construction sound.
 /// Whether a field of `local` is written through its ADDRESS rather than by an
 /// assignment to a projected place.
 ///
@@ -759,6 +751,26 @@ pub(super) fn local_fields_written_through_address(body: &Body, local: Local) ->
     })
 }
 
+/// Whether `local`'s storage itself reaches the caller: it flows to the
+/// return slot of a body that answers the slot's pointer. A body returning
+/// through the sret ABI copies the result words into the caller's buffer, so
+/// its locals keep frame storage like any other.
+pub(super) fn storage_leaves_through_return(
+    body: &Body,
+    intrinsics: &IntrinsicContext,
+    local: Local,
+) -> bool {
+    intrinsics.sret_ptr.is_none() && local_flows_to_return(body, local)
+}
+
+/// True when `local`'s value can reach the return slot (`Local::RETURN`)
+/// through a chain of whole-value `Copy` assignments. Such a local's backing
+/// pointer is handed to the caller by the return lowering, so it must stay a
+/// heap allocation that outlives the frame rather than a reused stack slot.
+/// Every other downstream use of an aggregate copies its words (a
+/// whole-aggregate copy memcpies, a call argument is defensively cloned, a
+/// nested-aggregate operand is memcpied into its parent), so excluding only the
+/// return-flow set keeps stack construction sound.
 pub(super) fn local_flows_to_return(body: &Body, local: Local) -> bool {
     let n = body.locals.len();
     let mut in_return = vec![false; n];
@@ -885,7 +897,22 @@ pub(super) fn lower_statement(
                                 .unwrap_or(1),
                             _ => 1,
                         };
+                        // A packed struct spans its packed size, which is what
+                        // the rvalue lowering allocates for it.
+                        let packed_words = match kind {
+                            gossamer_mir::AggregateKind::Adt { def, .. } => Some(*def),
+                            gossamer_mir::AggregateKind::Tuple => {
+                                match tcx.kind_of(body.local_ty(place.local)) {
+                                    TyKind::Adt { def, .. } => Some(*def),
+                                    _ => None,
+                                }
+                            }
+                            gossamer_mir::AggregateKind::Array => None,
+                        }
+                        .and_then(|def| tcx.packed_struct_layout(def))
+                        .map(|layout| layout.size / 8);
                         let total = match kind {
+                            _ if packed_words.is_some() => packed_words.unwrap_or(1),
                             gossamer_mir::AggregateKind::Array => (operands.len() as u32) * elem,
                             // A tuple / struct's slot span is the SUM of its
                             // operands' slot widths, not the operand count: a
@@ -945,13 +972,11 @@ pub(super) fn lower_statement(
             // block is otherwise never reclaimed on the non-region path, so a
             // hot loop leaks one aggregate per iteration (the LLVM tier keeps
             // these on the stack; see `lower/mod.rs`). Only slot-backed locals
-            // that do not flow to the return qualify - the return lowering
-            // hands the pointer to the caller, which a stack slot cannot
-            // outlive.
+            // whose storage the return does not hand to the caller qualify.
             let agg_into_slot: Option<ir::Value> = if place.projection.is_empty()
                 && matches!(rvalue, Rvalue::Aggregate { .. } | Rvalue::Repeat { .. })
                 && intrinsics.stack_slotted.contains(&place.local)
-                && !local_flows_to_return(body, place.local)
+                && !storage_leaves_through_return(body, intrinsics, place.local)
             {
                 let dst_var = ensure_var(
                     builder,
@@ -994,27 +1019,15 @@ pub(super) fn lower_statement(
                 // pass's retain/release calls no-op on region objects, so no
                 // per-node free is introduced and the arena still bulk-frees
                 // at pop.
-                // A copy whose destination flows to the return slot keeps the
-                // source's storage: the return lowering hands the caller that
-                // pointer (and, for a fresh aggregate, frees it with
-                // `gos_rt_aggr_free`), which a reused stack slot can neither
-                // outlive nor be freed as. Such copies stay on the existing
-                // path; only frame-local copies memcpy into their own slot.
+                // A copy whose destination's storage the return hands to the
+                // caller keeps the source's storage, which a reused stack slot
+                // could not outlive; every other copy memcpies into its own
+                // slot.
                 let agg_copy_src = matches!(rvalue, Rvalue::Use(Operand::Copy(_)))
                     && is_aggregate_copy_src(body, tcx, rvalue);
-                // A body that returns through the sret ABI copies the result
-                // words into the caller's buffer at Return, so flowing to the
-                // return does not disqualify the stack slot - PROVIDED the
-                // Return will not also free the returned pointer as a fresh
-                // heap block (`return_local_is_fresh_aggregate`): freeing a
-                // stack slot address aborts. A Copy-built return chain is
-                // never fresh, so the `np = *pos; mutate; np` shape stays
-                // slot-backed while constructor-built returns keep their
-                // heap path.
                 let whole_agg_copy = agg_copy_src
                     && intrinsics.stack_slotted.contains(&place.local)
-                    && ((intrinsics.sret_ptr.is_some() && !return_local_is_fresh_aggregate(body))
-                        || !local_flows_to_return(body, place.local));
+                    && !storage_leaves_through_return(body, intrinsics, place.local);
                 // A copy destination that is MUTATED through a projection and
                 // flows to the return slot can take neither path above: a
                 // stack slot cannot outlive the frame, and a rebind aliases
@@ -1039,7 +1052,7 @@ pub(super) fn lower_statement(
                 };
                 let heap_agg_copy = agg_copy_src
                     && !whole_agg_copy
-                    && local_flows_to_return(body, place.local)
+                    && storage_leaves_through_return(body, intrinsics, place.local)
                     && (written_through_projection(place.local)
                         || copy_source.is_some_and(|src| {
                             src != place.local && written_through_projection(src)
@@ -1645,7 +1658,12 @@ pub(super) fn lower_terminator(
                         ir::immediates::Offset32::new(off),
                     );
                 }
-                if return_local_is_fresh_aggregate(body) {
+                // A slot-backed return local is built and copied in the frame
+                // (see `storage_leaves_through_return`), so only a heap block
+                // of its own is freed here.
+                if return_local_is_fresh_aggregate(body)
+                    && !intrinsics.stack_slotted.contains(&Local::RETURN)
+                {
                     let bytes = u64::from(slots) * 8;
                     let free_fn = intrinsics.extern_fn(
                         module,

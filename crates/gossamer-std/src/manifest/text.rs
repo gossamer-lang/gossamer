@@ -578,6 +578,16 @@ pub const UNICODE: StdModule = StdModule {
             doc: "True if r is in general-category group L.",
         },
         StdItem {
+            name: "is_xid_start",
+            kind: StdItemKind::Function,
+            doc: "True if r may begin an identifier: Unicode XID_Start (UAX #31) or `_`.",
+        },
+        StdItem {
+            name: "is_xid_continue",
+            kind: StdItemKind::Function,
+            doc: "True if r may continue an identifier: Unicode XID_Continue (UAX #31).",
+        },
+        StdItem {
             name: "is_digit",
             kind: StdItemKind::Function,
             doc: "True if r is a decimal digit (category Nd).",

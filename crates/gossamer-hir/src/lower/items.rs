@@ -348,11 +348,19 @@ impl Lowerer<'_> {
                 .collect(),
             gossamer_ast::StructBody::Unit => Vec::new(),
         };
+        let serde = match &decl.body {
+            gossamer_ast::StructBody::Named(named) => named
+                .iter()
+                .map(|f| crate::serde::HirSerdeField::of(&f.attrs))
+                .collect(),
+            _ => Vec::new(),
+        };
         HirAdt {
             name: decl.name.clone(),
             kind: HirAdtKind::Struct(fields),
             self_ty: ty,
             repr: gossamer_ast::EnumRepr::default(),
+            serde,
         }
     }
 
@@ -389,6 +397,7 @@ impl Lowerer<'_> {
             kind: HirAdtKind::Enum(variants),
             self_ty: ty,
             repr: decl.repr,
+            serde: Vec::new(),
         }
     }
 

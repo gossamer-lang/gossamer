@@ -597,6 +597,19 @@ pub unsafe extern "C" fn gos_rt_vec_sort_f64(v: *mut GosVec) {
             return;
         }
         let len = vec.len as usize;
+        if vec.elem_bytes != 8 {
+            // Packed `f32`s sort as the words they read as and go back at
+            // their own width.
+            // SAFETY: `v` is a live vec (checked non-null above).
+            let Some(view) = (unsafe { crate::c_abi::vec::VecView::of(v) }) else {
+                return;
+            };
+            let mut words: Vec<i64> = view.words().collect();
+            sort_float_words(&mut words);
+            // SAFETY: `words` came from this vec.
+            unsafe { store_elems(v, &words) };
+            return;
+        }
         // SAFETY: the vec's buffer is non-null (checked above) and holds `len` initialized word
         // slots.
         sort_float_words(unsafe { std::slice::from_raw_parts_mut(vec.ptr.cast::<i64>(), len) });
@@ -617,21 +630,35 @@ pub unsafe extern "C" fn gos_rt_vec_sort_i64(v: *mut GosVec) {
             return;
         }
         let len_usize = vec.len.max(0) as usize;
-        // A `Vec<u8>` packs its elements one byte wide; reading those slots
-        // as `i64` would order eight elements at a time and write the
-        // combined words back over the buffer.
-        if vec.elem_bytes == 1 {
-            // SAFETY: the vec's buffer is non-null (checked above) and holds `len_usize`
-            // initialized byte slots.
-            let buf = unsafe { std::slice::from_raw_parts_mut(vec.ptr.as_ptr(), len_usize) };
-            buf.sort_unstable();
-            return;
-        }
+        // A narrow element is sorted at its own width and signedness: reading
+        // packed slots as `i64` would order several elements at a time and
+        // write the combined words back over the buffer.
+        let signed = vec.elem_kind == crate::c_abi::vec::vec_elem_kind::SIGNED;
+        let data = vec.ptr.as_ptr();
         // SAFETY: the vec's buffer is non-null (checked above) and holds `len_usize` initialized
-        // word slots.
-        let buf = unsafe { std::slice::from_raw_parts_mut(vec.ptr.cast::<i64>(), len_usize) };
-        buf.sort_unstable();
+        // elements of `elem_bytes` each, aligned to that width as every vec buffer is.
+        unsafe {
+            match (vec.elem_bytes, signed) {
+                (1, false) => sort_slots::<u8>(data, len_usize),
+                (1, true) => sort_slots::<i8>(data, len_usize),
+                (2, false) => sort_slots::<u16>(data, len_usize),
+                (2, true) => sort_slots::<i16>(data, len_usize),
+                (4, false) => sort_slots::<u32>(data, len_usize),
+                (4, true) => sort_slots::<i32>(data, len_usize),
+                _ => sort_slots::<i64>(data, len_usize),
+            }
+        }
     });
+}
+
+/// Sorts the `len` elements of type `T` at `data` ascending, in place.
+///
+/// # Safety
+/// `data` addresses `len` initialized, `T`-aligned elements nothing else
+/// reads or writes during the call.
+unsafe fn sort_slots<T: Ord>(data: *mut u8, len: usize) {
+    // SAFETY: this `unsafe fn`'s caller makes `data` `len` aligned, initialized `T`s.
+    unsafe { std::slice::from_raw_parts_mut(data.cast::<T>(), len) }.sort_unstable();
 }
 
 /// Sorts a `Vec<String>` (heap `GosVec` whose 8-byte slots hold
@@ -1719,11 +1746,9 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_insert_at(v: *mut GosVec, idx: i64, v
         }
         // Grow by one (handling region/global reallocation) with the new
         // element parked at the tail, then rotate it down to `idx`.
-        let val_ptr = std::ptr::addr_of!(value).cast::<u8>();
-        // SAFETY: `v` is non-null (checked above), and `val_ptr` addresses the eight bytes of
-        // `value`: an element wider than a word is inserted through
-        // `gos_rt_vec_insert_slots_safe`, so the vec's width fits.
-        unsafe { gos_rt_vec_push(v, val_ptr) };
+        // SAFETY: `v` is non-null (checked above): the word goes in at the vec's own width, and
+        // an element wider than a word is inserted through `gos_rt_vec_insert_slots_safe`.
+        unsafe { crate::c_abi::vec::gos_rt_vec_push_i64(v, value) };
         // SAFETY: `v` is non-null (checked above) and live for the call (C-ABI contract).
         let vec = unsafe { &mut *v };
         let stride = vec.elem_bytes as usize;

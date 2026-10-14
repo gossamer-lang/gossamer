@@ -58,6 +58,7 @@ path = "src/lib.gos"
             name: Some("widget".to_string()),
             path: Some("src/lib.gos".to_string()),
             kind: Vec::new(),
+            runtime: gossamer_pkg::LibRuntime::Bundled,
         })
     );
     assert!(m.has_explicit_targets());
@@ -165,4 +166,29 @@ path = "src/main.gos"
     let m = Manifest::parse(src).expect("parse");
     assert_eq!(m.bins.len(), 1);
     assert_eq!(m.dependencies.len(), 1);
+}
+
+#[test]
+fn a_lib_names_a_host_runtime_and_writes_it_back() {
+    let src = r#"
+[project]
+id = "example.com/front"
+version = "0.1.0"
+
+[lib]
+kind = ["staticlib"]
+runtime = "host"
+"#;
+    let m = Manifest::parse(src).expect("parse");
+    let lib = m.lib.as_ref().expect("lib");
+    assert_eq!(lib.runtime, gossamer_pkg::LibRuntime::Host);
+    let again = Manifest::parse(&m.render()).expect("reparse");
+    assert_eq!(again.lib, m.lib);
+}
+
+#[test]
+fn an_unknown_lib_runtime_is_refused() {
+    let src = "[project]\nid = \"example.com/front\"\nversion = \"0.1.0\"\n\n[lib]\nruntime = \"shared\"\n";
+    let err = Manifest::parse(src).expect_err("unknown runtime");
+    assert!(err.to_string().contains("unknown lib.runtime"), "{err}");
 }

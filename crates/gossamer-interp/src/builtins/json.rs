@@ -162,6 +162,9 @@ fn builtin_json_as_i64(args: &[Value]) -> RuntimeResult<Value> {
     if let Some(Value::Int(n)) = args.first() {
         return Ok(some_variant(Value::Int(*n)));
     }
+    if let Some(Value::Uint(n)) = args.first() {
+        return Ok(i64::try_from(*n).map_or_else(|_| none_variant(), |n| some_variant(Value::Int(n))));
+    }
     if let Some(Value::Float(f)) = args.first() {
         if f.fract() == 0.0 && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
             return Ok(some_variant(Value::Int(*f as i64)));
@@ -194,6 +197,9 @@ fn builtin_json_as_f64(args: &[Value]) -> RuntimeResult<Value> {
         return Ok(some_variant(Value::Float(*f)));
     }
     if let Some(Value::Int(n)) = args.first() {
+        return Ok(some_variant(Value::Float(*n as f64)));
+    }
+    if let Some(Value::Uint(n)) = args.first() {
         return Ok(some_variant(Value::Float(*n as f64)));
     }
     Ok(none_variant())

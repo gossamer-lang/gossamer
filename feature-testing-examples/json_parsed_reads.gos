@@ -1,0 +1,50 @@
+// A parsed document answers every read as the same document built value by
+// value would: object members in key order with the last of equal keys
+// kept, escaped keys and strings resolved, each number as the narrowest of
+// i64, u64, or f64 that holds it, and any part of it rendered on its own.
+
+use std::encoding::json
+use std::encoding::yaml
+
+fn show(label: String, v: json::Value) {
+    println(f"{label}: {json::encode(v)}")
+}
+
+fn main() {
+    let doc = json::parse("""
+    {"b": 1, "a": [true, false, null, "x\\ty"], "b": 2,
+     "kAy": "escaped key", "nested": {"deep": [[1], {"z": -0}]},
+     "nums": [18446744073709551615, -9223372036854775808, 1.0, 1e2,
+              123456789012345678901234567890, 0.1, -3]}
+    """).unwrap()
+    show("root", doc)
+    println(json::encode_pretty(json::get(doc, "nested").unwrap()))
+    println(f"b = {json::as_i64(json::get(doc, "b").unwrap())}")
+    println(f"kAy = {json::as_str(json::get(doc, "kAy").unwrap())}")
+    println(f"missing = {json::get(doc, "c").is_some()}")
+    println(f"keys = {json::keys(doc).unwrap()}")
+
+    let nums = json::as_array(json::get(doc, "nums").unwrap()).unwrap()
+    for n in nums {
+        println(f"{json::encode(n)} i64 {json::as_i64(n)} u64 {json::as_u64(n)} f64 {json::as_f64(n)}")
+    }
+
+    let a = json::as_array(json::get(doc, "a").unwrap()).unwrap()
+    println(f"a: {a.len()} {json::as_bool(a[0])} {json::as_bool(a[2])} {json::as_str(a[3])} {a[2]}")
+    let deep = json::get(json::get(doc, "nested").unwrap(), "deep").unwrap()
+    let inner = json::as_array(deep).unwrap()
+    println(f"deep: {inner.len()} {inner[1]} {json::as_f64(json::get(inner[1], "z").unwrap())}")
+
+    let mut wide = "{"
+    for i in 0..20 {
+        wide += f"\"k{19 - i}\": {i}, "
+    }
+    wide += "\"k3\": 99, \"last\": \"<&>\"}"
+    let w = json::parse(wide).unwrap()
+    println(f"wide: {json::keys(w).unwrap().len()} k3 {json::as_i64(json::get(w, "k3").unwrap())} k19 {json::as_i64(json::get(w, "k19").unwrap())} none {json::get(w, "k20").is_some()}")
+    show("wide", w)
+
+    let built = json::Value::Array(#[json::get(doc, "nested").unwrap(), json::get(w, "last").unwrap()])
+    show("built", built)
+    println(yaml::encode(json::get(doc, "a").unwrap()).unwrap())
+}

@@ -170,6 +170,34 @@ pub const I128_CALLBACK_SHIMS: &[&str] = &[
 /// reads a carrier back, whichever class its symbol carries.
 const I128_CALLBACK_COMBINATORS: &[&str] = &["filter_map", "find_map", "map_carrier"];
 
+/// A digest of every runtime entry's name and C-ABI signature: what code
+/// compiled against one registry agrees with a runtime built from another
+/// only when the two digests are equal. A host-runtime library carries the
+/// digest of the compiler that built it, and its host compares it with its
+/// own before calling in.
+#[must_use]
+pub fn registry_fingerprint() -> u64 {
+    // FNV-1a: stable across builds and platforms, unlike `DefaultHasher`.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    for entry in registry::REGISTRY {
+        feed(entry.name.as_bytes());
+        for param in entry.sig.params {
+            feed(format!("{param:?}").as_bytes());
+        }
+        feed(format!("{:?}", entry.sig.ret).as_bytes());
+        feed(&[u8::from(entry.unwinds), u8::from(entry.noreturn)]);
+    }
+    hash
+}
+
 /// Whether `name` invokes a gossamer callback that answers the two-word
 /// `[disc, payload]` carrier, so a Win64 backend must hand the runtime a
 /// vector-returning wrapper in place of the callback's own address.

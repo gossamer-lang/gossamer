@@ -1,0 +1,142 @@
+// A counted loop that copies elements from one vector to another, or stores
+// one value across a range, leaves every vector exactly as an element-by-
+// element walk would: copies within one vector that overlap in either
+// direction, empty and inclusive ranges, every scalar element width, and a
+// counter the program still reads after the loop.
+
+fn copy_into(dst: &mut Vec<i64>, src: &mut Vec<i64>, a: i64, b: i64) {
+    for i in a..=b {
+        dst[i] = src[i]
+    }
+}
+
+fn shift_right(xs: &mut Vec<i64>, n: i64) {
+    for i in 0..n {
+        xs[i + 1] = xs[i]
+    }
+}
+
+fn shift_left(xs: &mut Vec<i32>, n: i64) {
+    for i in 0..n {
+        xs[i] = xs[i + 1]
+    }
+}
+
+fn place(dst: &mut Vec<u8>, src: &mut Vec<u8>, at: i64) {
+    for i in 0..src.len() {
+        dst[i + at] = src[i]
+    }
+}
+
+fn fill(xs: &mut Vec<u8>, v: u8, a: i64, b: i64) {
+    for i in a..b {
+        xs[i] = v
+    }
+}
+
+fn fill_all<T>(xs: &mut Vec<T>, v: T) {
+    for i in 0..xs.len() {
+        xs[i] = v
+    }
+}
+
+fn copy_counted(dst: &mut Vec<i16>, src: &mut Vec<i16>, n: i64) -> i64 {
+    let mut i = 0
+    while i < n {
+        dst[i] = src[i]
+        i += 1
+    }
+    i
+}
+
+fn merge_sort(arr: &mut Vec<i64>, temp: &mut Vec<i64>, left: i64, right: i64) {
+    if left >= right {
+        return
+    }
+    let mid = (left + right) / 2
+    merge_sort(arr, temp, left, mid)
+    merge_sort(arr, temp, mid + 1, right)
+    let mut i = left
+    let mut j = mid + 1
+    let mut k = left
+    while i <= mid && j <= right {
+        if arr[i] <= arr[j] {
+            temp[k] = arr[i]
+            i += 1
+        } else {
+            temp[k] = arr[j]
+            j += 1
+        }
+        k += 1
+    }
+    while i <= mid {
+        temp[k] = arr[i]
+        i += 1
+        k += 1
+    }
+    while j <= right {
+        temp[k] = arr[j]
+        j += 1
+        k += 1
+    }
+    for x in left..=right {
+        arr[x] = temp[x]
+    }
+}
+
+fn main() {
+    let mut a: Vec<i64> = #[5, 4, 3, 2, 1]
+    let mut t: Vec<i64> = #[0; 5]
+    copy_into(&mut t, &mut a, 1, 3)
+    println(f"copy: {t}")
+    copy_into(&mut t, &mut a, 3, 2)
+    println(f"empty inclusive: {t}")
+
+    let mut s: Vec<i64> = #[1, 2, 3, 4, 5]
+    shift_right(&mut s, 3)
+    println(f"overlap ahead: {s}")
+    let mut w: Vec<i32> = #[1, -2, 3, -4, 5]
+    shift_left(&mut w, 4)
+    println(f"overlap behind: {w}")
+
+    let mut frame: Vec<u8> = #[0; 8]
+    let mut word: Vec<u8> = #[250, 251, 252]
+    place(&mut frame, &mut word, 4)
+    println(f"placed: {frame}")
+
+    let mut bytes: Vec<u8> = #[0; 6]
+    fill(&mut bytes, 200, 1, 5)
+    fill(&mut bytes, 9, 4, 1)
+    println(f"fill: {bytes}")
+
+    let mut fl: Vec<f32> = #[1.0, 2.0, 3.0]
+    fill_all(&mut fl, 0.25)
+    let mut flags: Vec<bool> = #[false, false]
+    fill_all(&mut flags, true)
+    let mut letters: Vec<char> = #['a', 'b', 'c']
+    fill_all(&mut letters, 'z')
+    let mut wide: Vec<f64> = #[1.0, 2.0]
+    fill_all(&mut wide, -0.5)
+    println(f"fill all: {fl} {flags} {letters} {wide}")
+
+    let mut d: Vec<i16> = #[0; 4]
+    let mut e: Vec<i16> = #[-1, -300, 300, 7]
+    let reached = copy_counted(&mut d, &mut e, 3)
+    println(f"counted: {d} reached {reached}")
+
+    let mut big: Vec<i64> = #[]
+    let mut seed = 7
+    for _ in 0..1000 {
+        seed = (seed * 1_103_515_245 + 12_345) % 65_536
+        big.push(seed)
+    }
+    let mut tmp: Vec<i64> = #[0; 1000]
+    merge_sort(&mut big, &mut tmp, 0, 999)
+    let mut sorted = true
+    for i in 1..1000 {
+        if big[i - 1] > big[i] {
+            sorted = false
+        }
+    }
+    println(f"merge sorted: {sorted} first {big[0]} last {big[999]}")
+}

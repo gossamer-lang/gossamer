@@ -616,6 +616,11 @@ pub(super) fn render_shape_thunk_with_linkage(name: &str, linkage: &str) -> Opti
             // the callee's parameter is the carrier itself.
             let _ = writeln!(out, "  %c{i} = load i128, ptr %a{i}");
             let _ = write!(call_args, "i128 %c{i}");
+        } else if let Some(extension) = narrow_int_extension(c) {
+            // A body takes a narrow integer as the whole word it computes in
+            // (see `render_ty`), so the thunk extends it by its signedness.
+            let _ = writeln!(out, "  %w{i} = {extension} {t} %a{i} to i64");
+            let _ = write!(call_args, "i64 %w{i}");
         } else {
             let _ = write!(call_args, "{t} %a{i}");
         }
@@ -646,6 +651,16 @@ pub(super) fn render_shape_thunk_with_linkage(name: &str, linkage: &str) -> Opti
 
 /// Whether a thunk with this return shape answers a word widened from a
 /// narrower integer.
+/// The extension that turns a narrow integer shape character's value into
+/// the word a body computes it in, or `None` for any other shape.
+fn narrow_int_extension(c: char) -> Option<&'static str> {
+    match c {
+        'y' | 'k' | 'j' => Some("sext"),
+        'Y' | 'K' | 'J' => Some("zext"),
+        _ => None,
+    }
+}
+
 fn shape_char_widens(c: char) -> bool {
     matches!(c, 'b' | 'c' | 'y' | 'Y' | 'k' | 'K' | 'j' | 'J')
 }

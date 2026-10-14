@@ -97,8 +97,9 @@ fn load(file: &Path) -> Result<gossamer_interp::Vm> {
     let augmented = gossamer_parse::autoderive::augment_source(&source);
     let mut map = gossamer_lex::SourceMap::new();
     let file_id = map.add_file(file.to_string_lossy().into_owned(), augmented.clone());
-    let (program, _sf, tcx) = crate::loaders::load_and_check_with_sf(&augmented, file_id, &map)
-        .map_err(|_| anyhow!("{}: does not check; fix it before fuzzing", file.display()))?;
+    let (program, _sf, tcx) =
+        crate::loaders::load_and_check_with_sf(&augmented, file_id, &map, None)
+            .map_err(|_| anyhow!("{}: does not check; fix it before fuzzing", file.display()))?;
     let mut vm = gossamer_interp::Vm::new();
     vm.set_source_map(Arc::new(map));
     vm.load(&program, tcx, false)

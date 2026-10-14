@@ -1,6 +1,6 @@
 /// The classified body of one struct the synthesizer may emit for.
 enum SerdeShape {
-    Named(Vec<(String, FieldKind)>, HashSet<String>, HashMap<String, FieldOptions>),
+    Named(Vec<(String, FieldKind)>, HashMap<String, FieldOptions>),
     Tuple(Vec<FieldKind>),
     Enum(Vec<(String, VariantPayload)>),
 }
@@ -50,7 +50,7 @@ impl FieldOptions {
 impl SerdeShape {
     fn kinds(&self) -> Box<dyn Iterator<Item = &FieldKind> + '_> {
         match self {
-            Self::Named(fields, _, _) => Box::new(fields.iter().map(|(_, kind)| kind)),
+            Self::Named(fields, _) => Box::new(fields.iter().map(|(_, kind)| kind)),
             Self::Tuple(fields) => Box::new(fields.iter()),
             Self::Enum(variants) => Box::new(variants.iter().flat_map(|(_, payload)| {
                 let kinds: Box<dyn Iterator<Item = &FieldKind> + '_> = match payload {
@@ -83,36 +83,160 @@ fn kind_is_emittable(kind: &FieldKind, emittable: &HashSet<String>) -> bool {
     }
 }
 
-/// Walks `parsed` for struct definitions and synthesizes
-/// serialization-method source for each eligible struct. Returns the
-/// generated source text, ready to be parsed and merged.
+/// Declares the serde stubs a program's calls need: for every type a serde
+/// turbofish names whose fields all classify, `__gos_serde_<op>_<T>` for
+/// each operation, with no body. The calls are checked against them like
+/// any other, and the HIR serde pass writes their bodies from the checked
+/// types. Returns the generated source, empty when no call names a type.
 #[must_use]
 pub fn synthesize_serde_impls(parsed: &SourceFile) -> String {
-    let mut out = String::new();
-    out.push_str("// Synthesized by `gossamer-parse::autoderive`.\n");
-    out.push('\n');
-
+    let named = named_serde_symbols(parsed);
+    if named.is_empty() {
+        return String::new();
+    }
     let struct_names = struct_identities(&parsed.items);
     let aliases = alias_targets(&parsed.items);
-    let opaque = opaque_alias_names(&parsed.items);
-
-    let mut classified = classify_structs(parsed, &struct_names, &aliases, &opaque);
+    let mut classified = classify_structs(parsed, &struct_names, &aliases);
     classified.extend(classify_enums(parsed, &struct_names, &aliases));
     let emittable = settle_emittable(&classified);
-
-    for (ty, shape) in &classified {
-        if !emittable.contains(&ty.symbol) {
-            continue;
-        }
-        match shape {
-            SerdeShape::Named(typed, opaque_fields, options) => {
-                emit_impl(&mut out, ty, typed, opaque_fields, options);
-            }
-            SerdeShape::Tuple(typed) => emit_tuple_impl(&mut out, ty, typed),
-            SerdeShape::Enum(variants) => emit_enum_impl(&mut out, ty, variants),
+    let mut out = String::new();
+    for (ty, _) in &classified {
+        if emittable.contains(&ty.symbol) && named.contains(&ty.symbol) {
+            emit_stubs(&mut out, ty);
         }
     }
+    emit_default_checks(&mut out, &classified, &emittable, &named);
     out
+}
+
+/// The symbols of the types the program's serde turbofish calls name,
+/// through the same index the call rewrite resolves them with.
+fn named_serde_symbols(parsed: &SourceFile) -> HashSet<String> {
+    // Inference writes the turbofish a bare `from_json(..)` call lacks, so
+    // it runs on a copy, and only when the tree has such a call.
+    let inferred;
+    let tree = if calls_bare_from_json(parsed) {
+        let mut copy = parsed.clone();
+        infer_serde_turbofish(&mut copy);
+        inferred = copy;
+        &inferred
+    } else {
+        parsed
+    };
+    let calls = collect_serde_turbofish_calls(tree);
+    if calls.is_empty() {
+        return HashSet::new();
+    }
+    let symbols = serde_symbol_index(tree);
+    calls
+        .into_iter()
+        .map(|(_, written, _)| {
+            let bare = written.rsplit("::").next().unwrap_or(&written).to_string();
+            symbols
+                .get(&written)
+                .or_else(|| symbols.get(&bare))
+                .cloned()
+                .unwrap_or(bare)
+        })
+        .collect()
+}
+
+/// Whether `parsed` calls `from_json` by its bare name without a turbofish,
+/// the one call shape [`infer_serde_turbofish`] completes.
+fn calls_bare_from_json(parsed: &SourceFile) -> bool {
+    struct Finder(bool);
+    impl gossamer_ast::Visitor for Finder {
+        fn visit_expr(&mut self, expr: &gossamer_ast::expr::Expr) {
+            if self.0 {
+                return;
+            }
+            if let gossamer_ast::expr::ExprKind::Path(path) = &expr.kind
+                && let [segment] = path.segments.as_slice()
+                && segment.name.name == "from_json"
+                && segment.generics.is_empty()
+            {
+                self.0 = true;
+                return;
+            }
+            gossamer_ast::visitor::walk_expr(self, expr);
+        }
+    }
+    let mut finder = Finder(false);
+    gossamer_ast::Visitor::visit_source_file(&mut finder, parsed);
+    finder.0
+}
+
+/// The six operations' stubs for `ty`. A body is never run: the HIR serde
+/// pass replaces it.
+fn emit_stubs(out: &mut String, ty: &TyId) {
+    let name = ty.path.as_str();
+    for op in ["to_json", "to_toml", "to_yaml"] {
+        out.push_str(&format!(
+            "pub fn {}(value: {name}) -> Result<String, errors::Error> {{\n    panic(\"{op} is generated after checking\")\n}}\n\n",
+            serde_fn(op, &ty.symbol)
+        ));
+    }
+    for op in ["from_json", "from_toml", "from_yaml"] {
+        out.push_str(&format!(
+            "pub fn {}(text: &String) -> Result<{name}, errors::Error> {{\n    panic(\"{op} is generated after checking\")\n}}\n\n",
+            serde_fn(op, &ty.symbol)
+        ));
+    }
+}
+
+/// A `#[default]` or `#[skip]` field of a user type is filled with that
+/// type's `default()`. For each such field a type the stubs reach declares,
+/// a function the checker sees names that call, so a type without one is
+/// reported as it would be anywhere else.
+fn emit_default_checks(
+    out: &mut String,
+    classified: &[(TyId, SerdeShape)],
+    emittable: &HashSet<String>,
+    named: &HashSet<String>,
+) {
+    let shapes: HashMap<&str, &SerdeShape> =
+        classified.iter().map(|(ty, shape)| (ty.symbol.as_str(), shape)).collect();
+    let mut reached: Vec<&str> = named
+        .iter()
+        .map(String::as_str)
+        .filter(|s| emittable.contains(*s))
+        .collect();
+    let mut seen: HashSet<&str> = reached.iter().copied().collect();
+    while let Some(symbol) = reached.pop() {
+        let Some(shape) = shapes.get(symbol) else {
+            continue;
+        };
+        for kind in shape.kinds() {
+            for user in kind.user_types() {
+                if seen.insert(user.symbol.as_str()) {
+                    reached.push(user.symbol.as_str());
+                }
+            }
+        }
+    }
+    for (ty, shape) in classified {
+        if !seen.contains(ty.symbol.as_str()) {
+            continue;
+        }
+        let SerdeShape::Named(fields, options) = shape else {
+            continue;
+        };
+        let defaults: Vec<String> = fields
+            .iter()
+            .filter(|(field, kind)| {
+                options.get(field).is_some_and(|o| o.skip || o.default) && kind.reaches_user_type()
+            })
+            .map(|(_, kind)| kind.default_literal())
+            .collect();
+        if defaults.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("fn __gos_serde_defaults_{}() {{\n", ty.symbol));
+        for value in defaults {
+            out.push_str(&format!("    let _ = {value}\n"));
+        }
+        out.push_str("}\n\n");
+    }
 }
 
 /// The serde shape of every non-generic struct whose fields all classify.
@@ -120,7 +244,6 @@ fn classify_structs(
     parsed: &SourceFile,
     struct_names: &StructIdentities,
     aliases: &HashMap<String, gossamer_ast::Type>,
-    opaque: &HashSet<String>,
 ) -> Vec<(TyId, SerdeShape)> {
     let mut classified = Vec::new();
     for (module, item) in flatten_items_with_modules(&parsed.items) {
@@ -140,17 +263,12 @@ fn classify_structs(
                             .map(|k| (f.name.name.clone(), k))
                     })
                     .collect();
-                let opaque_fields: HashSet<String> = fields
-                    .iter()
-                    .filter(|f| type_names_opaque_alias(&f.ty, opaque))
-                    .map(|f| f.name.name.clone())
-                    .collect();
                 let options: HashMap<String, FieldOptions> = fields
                     .iter()
                     .map(|f| (f.name.name.clone(), FieldOptions::of(&f.attrs)))
                     .collect();
                 if let Some(typed) = typed {
-                    classified.push((ty, SerdeShape::Named(typed, opaque_fields, options)));
+                    classified.push((ty, SerdeShape::Named(typed, options)));
                 }
             }
             StructBody::Tuple(fields) => {
@@ -165,10 +283,7 @@ fn classify_structs(
             // A unit struct is the zero-field named shape, so it encodes as
             // the empty object `Unit {}` encodes as.
             StructBody::Unit => {
-                classified.push((
-                    ty,
-                    SerdeShape::Named(Vec::new(), HashSet::new(), HashMap::new()),
-                ));
+                classified.push((ty, SerdeShape::Named(Vec::new(), HashMap::new())));
             }
         }
     }
@@ -239,471 +354,6 @@ fn settle_emittable(classified: &[(TyId, SerdeShape)]) -> HashSet<String> {
             return emittable;
         }
     }
-}
-
-/// Emits the serde free functions for a tuple struct: a JSON object keyed
-/// by position (`{"0":v0,"1":v1}`), reusing the `to_json`-backed toml/yaml
-/// wrappers. Positional access `value.N` and the `Name(..)` constructor are
-/// rewritten through the tuple-struct machinery.
-fn emit_tuple_impl(out: &mut String, ty: &TyId, fields: &[FieldKind]) {
-    emit_tuple_to_json(out, ty, fields);
-    emit_tuple_from_json(out, ty, fields);
-    emit_to_toml(out, ty);
-    emit_from_toml(out, ty);
-    emit_to_yaml(out, ty);
-    emit_from_yaml(out, ty);
-}
-
-fn emit_tuple_to_json(out: &mut String, ty: &TyId, fields: &[FieldKind]) {
-    let name = ty.path.as_str();
-    out.push_str("// Render a tuple struct as a position-keyed JSON object. Auto-derived.\n");
-    out.push_str(&format!(
-        "pub fn {}(value: {name}) -> Result<String, errors::Error> {{\n",
-        to_json_fn(&ty.symbol)
-    ));
-    out.push_str("    let mut out = \"\"\n    out += \"{\"\n");
-    for (i, kind) in fields.iter().enumerate() {
-        if i > 0 {
-            out.push_str("    out += \",\"\n");
-        }
-        out.push_str(&format!("    out += \"\\\"{i}\\\":\"\n"));
-        let lit = kind.render_to_json(&format!("value.{i}"));
-        out.push_str(&format!("    out += {lit}\n"));
-    }
-    out.push_str("    out += \"}\"\n    Ok(out)\n}\n\n");
-}
-
-fn emit_tuple_from_json(out: &mut String, ty: &TyId, fields: &[FieldKind]) {
-    let name = ty.path.as_str();
-    out.push_str("// Parse a position-keyed JSON object into a tuple struct. Auto-derived.\n");
-    out.push_str(&format!(
-        "pub fn {}(text: &String) -> Result<{name}, errors::Error> {{\n",
-        from_json_fn(&ty.symbol)
-    ));
-    out.push_str("    let v = json::parse(text)?\n");
-    out.push_str(&format!(
-        "    {}(v)\n}}\n\n",
-        from_json_value_fn(&ty.symbol)
-    ));
-    out.push_str(
-        "// Parse an already-read JSON node into a tuple struct. Auto-derived.\n",
-    );
-    out.push_str(&format!(
-        "pub fn {}(v: json::Value) -> Result<{name}, errors::Error> {{\n",
-        from_json_value_fn(&ty.symbol)
-    ));
-    for (i, kind) in fields.iter().enumerate() {
-        let path = format!("element `{i}`");
-        let extract = kind.extract_strict("__child", &path);
-        let missing = if kind.tolerates_missing_key() {
-            "None".to_string()
-        } else {
-            format!("return Err(errors::new(\"missing element `{i}`\"))")
-        };
-        out.push_str(&format!(
-            "    let __f{i} = match json::get(v, \"{i}\") {{\n        Some(__child) => {extract},\n        None => {missing},\n    }}\n"
-        ));
-    }
-    let args: Vec<String> = (0..fields.len()).map(|i| format!("__f{i}")).collect();
-    out.push_str(&format!(
-        "    Ok({}({}))\n}}\n\n",
-        ty.bare,
-        args.join(", ")
-    ));
-}
-
-fn emit_impl(
-    out: &mut String,
-    ty: &TyId,
-    fields: &[(String, FieldKind)],
-    opaque: &HashSet<String>,
-    options: &HashMap<String, FieldOptions>,
-) {
-    emit_to_json(out, ty, fields, options);
-    emit_from_json(out, ty, fields, opaque, options);
-    emit_to_toml(out, ty);
-    emit_from_toml(out, ty);
-    emit_to_yaml(out, ty);
-    emit_from_yaml(out, ty);
-}
-
-fn emit_to_json(
-    out: &mut String,
-    ty: &TyId,
-    fields: &[(String, FieldKind)],
-    options: &HashMap<String, FieldOptions>,
-) {
-    let name = ty.path.as_str();
-    out.push_str(
-        "// Render a value as a JSON object. Auto-derived; reached via `to_json::<T>(value)`.\n",
-    );
-    out.push_str(&format!(
-        "pub fn {}(value: {name}) -> Result<String, errors::Error> {{\n",
-        to_json_fn(&ty.symbol)
-    ));
-    out.push_str("    let mut out = \"\"\n");
-    out.push_str("    out += \"{\"\n");
-    let written = fields
-        .iter()
-        .filter(|(fname, _)| !options.get(fname).is_some_and(|o| o.skip));
-    for (i, (fname, kind)) in written.enumerate() {
-        if i > 0 {
-            out.push_str("    out += \",\"\n");
-        }
-        let key = options
-            .get(fname)
-            .and_then(|o| o.key.clone())
-            .unwrap_or_else(|| fname.clone());
-        out.push_str(&format!("    out += {}\n", json_key_literal(&key)));
-        let lit = kind.render_to_json(&format!("value.{fname}"));
-        out.push_str(&format!("    out += {lit}\n"));
-    }
-    out.push_str("    out += \"}\"\n");
-    out.push_str("    Ok(out)\n");
-    out.push_str("}\n\n");
-}
-
-fn emit_to_toml(out: &mut String, ty: &TyId) {
-    let name = ty.path.as_str();
-    out.push_str("// Render a value as TOML. Auto-derived; reached via `to_toml::<T>(value)`.\n");
-    out.push_str(&format!(
-        "pub fn {}(value: {name}) -> Result<String, errors::Error> {{\n",
-        serde_fn("to_toml", &ty.symbol)
-    ));
-    out.push_str(&format!("    let j = {}(value)?\n", to_json_fn(&ty.symbol)));
-    out.push_str("    toml::from_json(j)\n");
-    out.push_str("}\n\n");
-}
-
-fn emit_from_toml(out: &mut String, ty: &TyId) {
-    let name = ty.path.as_str();
-    out.push_str(
-        "// Parse TOML text into a value. Auto-derived; reached via `from_toml::<T>(text)`.\n",
-    );
-    out.push_str(&format!(
-        "pub fn {}(text: &String) -> Result<{name}, errors::Error> {{\n",
-        serde_fn("from_toml", &ty.symbol)
-    ));
-    out.push_str("    let j = toml::to_json(text)?\n");
-    out.push_str(&format!("    {}(&j)\n", from_json_fn(&ty.symbol)));
-    out.push_str("}\n\n");
-}
-
-fn emit_to_yaml(out: &mut String, ty: &TyId) {
-    let name = ty.path.as_str();
-    out.push_str("// Render a value as YAML. Auto-derived; reached via `to_yaml::<T>(value)`.\n");
-    out.push_str(&format!(
-        "pub fn {}(value: {name}) -> Result<String, errors::Error> {{\n",
-        serde_fn("to_yaml", &ty.symbol)
-    ));
-    out.push_str(&format!("    let j = {}(value)?\n", to_json_fn(&ty.symbol)));
-    out.push_str("    yaml::from_json(j)\n");
-    out.push_str("}\n\n");
-}
-
-fn emit_from_yaml(out: &mut String, ty: &TyId) {
-    let name = ty.path.as_str();
-    out.push_str(
-        "// Parse YAML text into a value. Auto-derived; reached via `from_yaml::<T>(text)`.\n",
-    );
-    out.push_str(&format!(
-        "pub fn {}(text: &String) -> Result<{name}, errors::Error> {{\n",
-        serde_fn("from_yaml", &ty.symbol)
-    ));
-    out.push_str("    let j = yaml::to_json(text)?\n");
-    out.push_str(&format!("    {}(&j)\n", from_json_fn(&ty.symbol)));
-    out.push_str("}\n\n");
-}
-
-fn emit_from_json(
-    out: &mut String,
-    ty: &TyId,
-    fields: &[(String, FieldKind)],
-    opaque: &HashSet<String>,
-    options: &HashMap<String, FieldOptions>,
-) {
-    let name = ty.path.as_str();
-    out.push_str(
-        "// Parse a JSON object into a value. Auto-derived; reached via `from_json::<T>(text)`.\n// Returns `Err` when a required field is missing or a field's value\n// type does not match the declaration; the error names the field.\n",
-    );
-    out.push_str(&format!(
-        "pub fn {}(text: &String) -> Result<{name}, errors::Error> {{\n",
-        from_json_fn(&ty.symbol)
-    ));
-    out.push_str("    let v = json::parse(text)?\n");
-    out.push_str(&format!(
-        "    {}(v)\n}}\n\n",
-        from_json_value_fn(&ty.symbol)
-    ));
-    out.push_str(
-        "// Parse an already-read JSON node into a value. Auto-derived; a\n// nested member decodes from the node the walk stands on.\n",
-    );
-    out.push_str(&format!(
-        "pub fn {}(v: json::Value) -> Result<{name}, errors::Error> {{\n",
-        from_json_value_fn(&ty.symbol)
-    ));
-    // The local a field decodes into is named by position, not by the
-    // field. A field is free to carry any name the language allows -
-    // including one a compiler-known call already has (`format`,
-    // `panic`, `matches`) - and a generated binding named after it would
-    // make the compiler emit code that fails its own check, reported
-    // against a line of the user's file that does not exist.
-    for (index, (fname, kind)) in fields.iter().enumerate() {
-        let field_options = options.get(fname).cloned().unwrap_or_default();
-        if field_options.skip {
-            out.push_str(&format!("    let __f{index} = {}\n", kind.default_literal()));
-            continue;
-        }
-        let key = field_options.key.clone().unwrap_or_else(|| fname.clone());
-        let path = format!("field `{key}`");
-        let extract = kind.extract_strict("__child", &path);
-        // A missing `Option` field decodes to `None`, and a `#[default]` one
-        // to its type's zero value, rather than erroring.
-        let missing = if field_options.default {
-            kind.default_literal()
-        } else if kind.tolerates_missing_key() {
-            "None".to_string()
-        } else {
-            format!("return Err(errors::new(\"missing field `{key}`\"))")
-        };
-        out.push_str(&format!(
-            "    let __f{index} = match json::get(v, {}) {{\n        Some(__child) => {extract},\n        None => {missing},\n    }}\n",
-            string_literal(&key)
-        ));
-    }
-    // The extracted local carries the representation; an opaque alias
-    // field takes it back across the boundary, and the field's declared
-    // type is what fixes `.into()`'s target.
-    let values: Vec<String> = fields
-        .iter()
-        .enumerate()
-        .map(|(index, (field, _))| {
-            if opaque.contains(field) {
-                format!("__f{index}.into()")
-            } else {
-                format!("__f{index}")
-            }
-        })
-        .collect();
-    let fields = fields
-        .iter()
-        .zip(values.iter())
-        .map(|((field, _), value)| (field.as_str(), value.as_str()))
-        .collect::<Vec<_>>();
-    out.push_str(&format!("    Ok({})\n", named_struct_literal(name, &fields)));
-    out.push_str("}\n\n");
-}
-
-/// `text` as a Gossamer string literal.
-fn string_literal(text: &str) -> String {
-    let mut out = String::from("\"");
-    for c in text.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            other => out.push(other),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// The Gossamer string literal that writes `"key":` into JSON text.
-fn json_key_literal(key: &str) -> String {
-    string_literal(&format!("{}:", serde_json_string(key)))
-}
-
-/// `text` as a JSON string, quotes included.
-fn serde_json_string(text: &str) -> String {
-    let mut out = String::from("\"");
-    for c in text.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            other => out.push(other),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// Emits the serde functions for an enum, externally tagged: a unit variant
-/// is its name as a JSON string, a one-field variant is `{"Name": value}`, a
-/// several-field variant is `{"Name": [..]}`, and a struct variant is
-/// `{"Name": {..}}`, the shape `{:?}` prints.
-/// Emits the serde free functions for an enum, externally tagged: a unit
-/// variant is its name, any other `{"Variant": payload}`.
-fn emit_enum_impl(out: &mut String, ty: &TyId, variants: &[(String, VariantPayload)]) {
-    emit_enum_to_json(out, ty, variants);
-    emit_enum_from_json(out, ty, variants);
-    emit_to_toml(out, ty);
-    emit_from_toml(out, ty);
-    emit_to_yaml(out, ty);
-    emit_from_yaml(out, ty);
-}
-
-fn emit_enum_to_json(out: &mut String, ty: &TyId, variants: &[(String, VariantPayload)]) {
-    let name = ty.path.as_str();
-    out.push_str(&format!(
-        "pub fn {}(value: {name}) -> Result<String, errors::Error> {{\n    match value {{\n",
-        to_json_fn(&ty.symbol)
-    ));
-    for (variant, payload) in variants {
-        let tag = serde_json_string(variant);
-        match payload {
-            VariantPayload::Unit => {
-                out.push_str(&format!(
-                    "        {name}::{variant} => Ok({}),\n",
-                    string_literal(&tag)
-                ));
-            }
-            VariantPayload::Tuple(fields) => {
-                let binds: Vec<String> = (0..fields.len()).map(|i| format!("__p{i}")).collect();
-                out.push_str(&format!(
-                    "        {name}::{variant}({}) => {{\n            let mut out = {}\n",
-                    binds.join(", "),
-                    string_literal(&format!("{{{tag}:"))
-                ));
-                if fields.len() == 1 {
-                    let lit = fields[0].render_to_json("__p0");
-                    out.push_str(&format!("            out += {lit}\n"));
-                } else {
-                    out.push_str("            out += \"[\"\n");
-                    for (i, kind) in fields.iter().enumerate() {
-                        if i > 0 {
-                            out.push_str("            out += \",\"\n");
-                        }
-                        let lit = kind.render_to_json(&format!("__p{i}"));
-                        out.push_str(&format!("            out += {lit}\n"));
-                    }
-                    out.push_str("            out += \"]\"\n");
-                }
-                out.push_str("            out += \"}\"\n            Ok(out)\n        }\n");
-            }
-            VariantPayload::Named(fields) => {
-                let binds: Vec<String> = fields
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (field, _))| format!("{field}: __p{i}"))
-                    .collect();
-                out.push_str(&format!(
-                    "        {name}::{variant} {{ {} }} => {{\n            let mut out = {}\n",
-                    binds.join(", "),
-                    string_literal(&format!("{{{tag}:{{"))
-                ));
-                for (i, (field, kind)) in fields.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str("            out += \",\"\n");
-                    }
-                    out.push_str(&format!("            out += {}\n", json_key_literal(field)));
-                    let lit = kind.render_to_json(&format!("__p{i}"));
-                    out.push_str(&format!("            out += {lit}\n"));
-                }
-                out.push_str("            out += \"}}\"\n            Ok(out)\n        }\n");
-            }
-        }
-    }
-    out.push_str("    }\n}\n\n");
-}
-
-fn emit_enum_from_json(out: &mut String, ty: &TyId, variants: &[(String, VariantPayload)]) {
-    let name = ty.path.as_str();
-    out.push_str(&format!(
-        "pub fn {}(text: &String) -> Result<{name}, errors::Error> {{\n    let v = json::parse(text)?\n    {}(v)\n}}\n\n",
-        from_json_fn(&ty.symbol),
-        from_json_value_fn(&ty.symbol)
-    ));
-    let unknown = format!(
-        "Err(errors::new(format(\"unknown variant `{{}}` of `{}`\", __tag)))",
-        ty.bare
-    );
-    out.push_str(&format!(
-        "pub fn {}(v: json::Value) -> Result<{name}, errors::Error> {{\n",
-        from_json_value_fn(&ty.symbol)
-    ));
-    out.push_str("    if let Some(__tag) = json::as_str(v) {\n        return match __tag {\n");
-    for (variant, payload) in variants {
-        if matches!(payload, VariantPayload::Unit) {
-            out.push_str(&format!(
-                "            {} => Ok({name}::{variant}),\n",
-                string_literal(variant)
-            ));
-        }
-    }
-    out.push_str(&format!("            _ => {unknown},\n        }}\n    }}\n"));
-    out.push_str(&format!(
-        "    let __keys = json::keys(v).unwrap_or(#[])\n    if __keys.len() != 1 {{\n        return Err(errors::new(\"expected a variant of `{}`: a name, or an object with one key\"))\n    }}\n",
-        ty.bare
-    ));
-    out.push_str("    let __tag = __keys[0]\n");
-    out.push_str("    let __payload = match json::get(v, __tag) {\n        Some(__p) => __p,\n        None => return Err(errors::new(\"variant payload is missing\")),\n    }\n");
-    out.push_str("    match __tag {\n");
-    for (variant, payload) in variants {
-        let path = format!("variant `{variant}`");
-        match payload {
-            VariantPayload::Unit => {}
-            VariantPayload::Tuple(fields) if fields.len() == 1 => {
-                let extract = fields[0].extract_strict("__payload", &path);
-                out.push_str(&format!(
-                    "        {} => {{\n            let __p0 = {extract}\n            Ok({name}::{variant}(__p0))\n        }}\n",
-                    string_literal(variant)
-                ));
-            }
-            VariantPayload::Tuple(fields) => {
-                out.push_str(&format!("        {} => {{\n", string_literal(variant)));
-                for (i, kind) in fields.iter().enumerate() {
-                    let extract = kind.extract_strict(&format!("__e{i}"), &path);
-                    out.push_str(&format!(
-                        "            let __e{i} = json::at(__payload, {i})\n            let __p{i} = {extract}\n"
-                    ));
-                }
-                let binds: Vec<String> = (0..fields.len()).map(|i| format!("__p{i}")).collect();
-                out.push_str(&format!(
-                    "            Ok({name}::{variant}({}))\n        }}\n",
-                    binds.join(", ")
-                ));
-            }
-            VariantPayload::Named(fields) => {
-                out.push_str(&format!("        {} => {{\n", string_literal(variant)));
-                for (i, (field, kind)) in fields.iter().enumerate() {
-                    let field_path = format!("variant `{variant}` field `{field}`");
-                    let extract = kind.extract_strict("__child", &field_path);
-                    let missing = if kind.tolerates_missing_key() {
-                        "None".to_string()
-                    } else {
-                        format!(
-                            "return Err(errors::new(\"missing field `{field}` of variant `{variant}`\"))"
-                        )
-                    };
-                    out.push_str(&format!(
-                        "            let __p{i} = match json::get(__payload, {}) {{\n                Some(__child) => {extract},\n                None => {missing},\n            }}\n",
-                        string_literal(field)
-                    ));
-                }
-                let binds: Vec<String> = fields
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (field, _))| format!("{field}: __p{i}"))
-                    .collect();
-                out.push_str(&format!(
-                    "            Ok({name}::{variant} {{ {} }})\n        }}\n",
-                    binds.join(", ")
-                ));
-            }
-        }
-    }
-    out.push_str(&format!("        _ => {unknown},\n    }}\n}}\n\n"));
-}
-
-/// Whether `ty` is written as the bare name of an opaque alias.
-fn type_names_opaque_alias(ty: &gossamer_ast::Type, opaque: &HashSet<String>) -> bool {
-    let TypeKind::Path(path) = &ty.kind else {
-        return false;
-    };
-    path.segments.len() == 1
-        && path.segments[0].generics.is_empty()
-        && opaque.contains(&path.segments[0].name.name)
 }
 
 fn named_struct_literal(name: &str, fields: &[(&str, &str)]) -> String {

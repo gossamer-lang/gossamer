@@ -1200,6 +1200,57 @@ fn a_condition_continues_across_lines_only_with_a_trailing_operator() {
 }
 
 #[test]
+fn an_operator_opening_a_line_of_a_head_continues_it_with_its_rewrite() {
+    for (source, op, fixed) in [
+        (
+            "fn f(a: bool, b: bool) {\n    if a\n        || b {\n    }\n}\n",
+            "||",
+            "fn f(a: bool, b: bool) {\n    if a ||\n        b {\n    }\n}\n",
+        ),
+        (
+            "fn f(a: bool, b: bool, c: bool) {\n    while a\n        && b\n        || c {\n    }\n}\n",
+            "&&",
+            "fn f(a: bool, b: bool, c: bool) {\n    while a &&\n        b\n        || c {\n    }\n}\n",
+        ),
+        (
+            "fn f(a: i64, b: i64) {\n    match a\n        - b {\n        _ => {}\n    }\n}\n",
+            "-",
+            "fn f(a: i64, b: i64) {\n    match a -\n        b {\n        _ => {}\n    }\n}\n",
+        ),
+    ] {
+        let mut map = SourceMap::new();
+        let file = map.add_file("head.gos", source.to_string());
+        let (_, diags) = parse_source_file(source, file);
+        assert!(
+            diags
+                .iter()
+                .all(|d| matches!(&d.error, ParseError::LeadingBinaryOperator { .. })),
+            "`{source}` produced {diags:?}"
+        );
+        let ParseError::LeadingBinaryOperator {
+            op: found,
+            replacement,
+            fix_span,
+        } = &diags[0].error
+        else {
+            panic!("`{source}` produced {diags:?}");
+        };
+        assert_eq!(found, op);
+        let mut rewritten = source.to_string();
+        rewritten.replace_range(fix_span.start as usize..fix_span.end as usize, replacement);
+        assert_eq!(rewritten, fixed);
+    }
+    let block = "fn f(a: bool) -> bool {\n    if a {\n        let g = || a\n        g()\n    } else {\n        false\n    }\n}\n";
+    let mut map = SourceMap::new();
+    let file = map.add_file("block.gos", block.to_string());
+    let (_, diags) = parse_source_file(block, file);
+    assert!(
+        diags.is_empty(),
+        "a block after a head keeps statement rules: {diags:?}"
+    );
+}
+
+#[test]
 fn a_closure_whose_value_nothing_reads_is_rejected() {
     let source = "fn f(a: bool, b: bool) -> bool {\n    let x = a\n        || b\n    x\n}\n";
     let mut map = SourceMap::new();

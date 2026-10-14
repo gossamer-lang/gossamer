@@ -55,6 +55,7 @@ assets = [
 ]
 
 [dependencies]
+gossamer-abi = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 clap_complete = "4"
@@ -88,6 +89,7 @@ terminal_size = "0.4"
 syn = { version = "2", features = ["full", "extra-traits"] }
 quote = "1"
 which = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 # `[native]` sources compile with the target's C compiler, found the way
 # Cargo build scripts find it; a Windows DLL's exports are read from its
@@ -98,7 +100,6 @@ object = { version = "0.39", default-features = false, features = ["read"] }
 gossamer-std = { workspace = true }
 
 [dev-dependencies]
-gossamer-abi = { workspace = true }
 # Bounds how long a liveness test waits for a program that would hang.
 wait-timeout = { workspace = true }
 # Reads the zlib-compressed debug sections a `-g` build links.

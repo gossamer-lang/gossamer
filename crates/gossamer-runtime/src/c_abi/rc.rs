@@ -973,6 +973,11 @@ unsafe fn possible_root(payload: *mut u8) {
     if unsafe { is_shared(h) } {
         return;
     }
+    // A layout no cycle can pass through is never a candidate.
+    // SAFETY: `h` is the header of the live node `payload`.
+    if unsafe { is_statically_acyclic(h) } {
+        return;
+    }
     // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     if !unsafe { has_rc_children(payload) } {
         return;
@@ -1167,15 +1172,33 @@ const META_TABLE_CAP: usize = u16::MAX as usize;
 static META_TABLE: [std::sync::atomic::AtomicUsize; META_TABLE_CAP + 1] =
     [const { std::sync::atomic::AtomicUsize::new(0) }; META_TABLE_CAP + 1];
 
-static META_IDS: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashMap<usize, u16>>> =
-    std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+static META_IDS: std::sync::LazyLock<parking_lot::Mutex<rustc_hash::FxHashMap<usize, u16>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(rustc_hash::FxHashMap::default()));
 static META_NEXT: AtomicUsize = AtomicUsize::new(1);
+
+/// Which interned metas carry [`gossamer_abi::rc::RC_KIND_ACYCLIC`], one bit
+/// per id, read on every surviving release.
+static META_ACYCLIC: [AtomicUsize; META_TABLE_CAP / ACYCLIC_WORD_BITS + 1] =
+    [const { AtomicUsize::new(0) }; META_TABLE_CAP / ACYCLIC_WORD_BITS + 1];
+
+const ACYCLIC_WORD_BITS: usize = usize::BITS as usize;
+
+/// Whether the node with header `h` is laid out by a meta marked acyclic.
+#[inline]
+unsafe fn is_statically_acyclic(h: *const RcHeader) -> bool {
+    // SAFETY: `h` is the header of a live node (this `unsafe fn`'s caller).
+    let id = usize::from(unsafe { (*h).meta_id });
+    META_ACYCLIC[id / ACYCLIC_WORD_BITS].load(Ordering::Relaxed) & (1 << (id % ACYCLIC_WORD_BITS))
+        != 0
+}
 
 /// Slots in the per-thread intern cache. A program allocates a handful of
 /// shapes in any one loop - a node and the option that holds it, a row and its
 /// element - and interleaves them, so a single remembered pair is displaced on
-/// every other call and every allocation then takes the table lock.
-const META_MEMO_SLOTS: usize = 16;
+/// every other call and every allocation then takes the table lock. A tree
+/// builder allocates one shape per variant of each node type it builds, which
+/// is dozens in one walk.
+const META_MEMO_SLOTS: usize = 256;
 
 thread_local! {
     /// Recently interned (pointer, id) pairs, direct-mapped by pointer. One
@@ -1184,11 +1207,12 @@ thread_local! {
         const { [const { std::cell::Cell::new((0, 0)) }; META_MEMO_SLOTS] };
 }
 
-/// Cache slot for a blob pointer. Blobs are distinct allocations, so the bits
-/// above the alignment are what tell two of them apart.
+/// Cache slot for a blob pointer. Blobs are laid out back to back with sizes
+/// that differ by a word or two, so the slot mixes every address bit rather
+/// than taking a few low ones that neighbouring blobs share.
 #[inline]
 const fn meta_memo_slot(key: usize) -> usize {
-    (key >> 4) & (META_MEMO_SLOTS - 1)
+    ((key >> 3).wrapping_mul(0x9E37_79B9) >> 24) & (META_MEMO_SLOTS - 1)
 }
 
 /// Interned id for a meta blob. A type's id is resolved through the table once
@@ -1222,6 +1246,12 @@ fn meta_intern_slow(key: usize, slot: usize) -> Option<u16> {
             return None;
         }
         let id = next as u16;
+        // SAFETY: `key` is the address of a meta table, whose first word is its kind.
+        let kind_word = unsafe { *(key as *const i64) };
+        if kind_word & gossamer_abi::rc::RC_KIND_ACYCLIC != 0 {
+            META_ACYCLIC[next / ACYCLIC_WORD_BITS]
+                .fetch_or(1 << (next % ACYCLIC_WORD_BITS), Ordering::Relaxed);
+        }
         META_TABLE[next].store(key, Ordering::Release);
         ids.insert(key, id);
         id
@@ -1445,8 +1475,12 @@ pub fn alloc_managed<T: ManagedHandle>(value: T) -> *mut T {
 unsafe fn finalize(payload: *mut u8) {
     // SAFETY: this `unsafe fn`'s caller passes `payload` a node.
     let meta = unsafe { meta_of(header_ptr(payload)) };
+    if meta.is_null() {
+        return;
+    }
     // SAFETY: a non-null meta table's first word is its kind.
-    if meta.is_null() || unsafe { *meta } != gossamer_abi::rc::RC_KIND_FINALIZED {
+    let kind = unsafe { *meta };
+    if gossamer_abi::rc::rc_kind(kind) != gossamer_abi::rc::RC_KIND_FINALIZED {
         return;
     }
     // SAFETY: a finalized layout's second word is its finalizer's address.
@@ -2369,7 +2403,7 @@ unsafe fn release_children_into(payload: *mut u8, worklist: &mut Vec<*mut u8>) {
         return;
     }
     // SAFETY: `meta` is non-null (checked above), the node's meta table.
-    if unsafe { *meta } == RC_KIND_STRUCT_GUARDED {
+    if gossamer_abi::rc::rc_kind(unsafe { *meta }) == RC_KIND_STRUCT_GUARDED {
         // SAFETY: `payload` is laid out as `meta` describes.
         unsafe { visit_guarded_children(payload, meta, |child| worklist.push(child)) };
         return;
@@ -2387,7 +2421,7 @@ unsafe fn release_structural_children_into(payload: *mut u8, worklist: &mut Vec<
         return;
     }
     // SAFETY: `meta` is non-null (checked above), the node's meta table.
-    let kind = unsafe { *meta };
+    let kind = gossamer_abi::rc::rc_kind(unsafe { *meta });
     if kind != RC_KIND_ENUM && kind != RC_KIND_STRUCT {
         // SAFETY: `payload` is laid out as `meta` describes.
         unsafe {
@@ -2467,8 +2501,19 @@ unsafe fn release_gated_child(
                 unsafe { release_child_of_kind(gossamer_abi::rc::RC_CHILD_RC, child, worklist) };
             }
         }
-        // SAFETY: `child` is the dead parent's child of `child_kind`.
-        None => unsafe { release_child_of_kind(child_kind, child, worklist) },
+        None => match gossamer_abi::rc::rc_child_gated_heap(child_kind) {
+            Some((gate, base)) => {
+                // SAFETY: a gated carrier child's discriminant is the word before its payload.
+                let disc = unsafe { slot.cast::<i64>().sub(1).read_unaligned() };
+                if disc == gate {
+                    // SAFETY: on this arm `child` is a heap value of `base`, whose share the dead
+                    // parent held.
+                    unsafe { release_child_of_kind(base, child, worklist) };
+                }
+            }
+            // SAFETY: `child` is the dead parent's child of `child_kind`.
+            None => unsafe { release_child_of_kind(child_kind, child, worklist) },
+        },
     }
 }
 
@@ -2852,7 +2897,7 @@ unsafe fn visit_entry_slots(payload: *mut u8, mut f: impl FnMut(i64, *mut u8, *m
         return;
     }
     // SAFETY: `meta` is non-null (checked above), the node's meta table.
-    let kind = unsafe { *meta };
+    let kind = gossamer_abi::rc::rc_kind(unsafe { *meta });
     if kind == RC_KIND_STRUCT_GUARDED {
         // SAFETY: `payload` is laid out as `meta` describes.
         unsafe {
@@ -2894,7 +2939,7 @@ unsafe fn visit_layout_entry_slots(
     use gossamer_abi::rc::{RC_CHILD_KIND_SHIFT, RC_CHILD_WORD_MASK};
     // SAFETY: this `unsafe fn`'s caller passes `meta` a live meta table and `payload` laid out as
     // it describes.
-    let kind = unsafe { *meta };
+    let kind = gossamer_abi::rc::rc_kind(unsafe { *meta });
     // SAFETY: a meta table's second word is its variant count.
     let variant_count = unsafe { *meta.add(1) };
     let mut idx: usize = 2;
@@ -2933,7 +2978,19 @@ unsafe fn visit_layout_entry_slots(
                             f(gossamer_abi::rc::RC_CHILD_RC, slot, child);
                         }
                     }
-                    None => f(child_kind, slot, child),
+                    None => match gossamer_abi::rc::rc_child_gated_heap(child_kind) {
+                        // A heap value on one arm only: the other arm's payload
+                        // word is no pointer.
+                        Some((gate, base)) => {
+                            // SAFETY: a gated carrier child's discriminant is the word before
+                            // its payload.
+                            let disc = unsafe { slot.cast::<i64>().sub(1).read_unaligned() };
+                            if disc == gate {
+                                f(base, slot, child);
+                            }
+                        }
+                        None => f(child_kind, slot, child),
+                    },
                 }
             }
             return;
@@ -3006,11 +3063,19 @@ mod tests {
         // heap pointer as in-region, which neutralised RC retain/release on
         // platforms whose allocator hands out low addresses (Windows),
         // producing use-after-free in any handler that retains a heap value.
-        assert!(!addr_in_region_arena(0x1000, 0));
-        assert!(!addr_in_region_arena(REGION_ARENA_BYTES - 1, 0));
-        assert!(!addr_in_region_arena(0xdead_beef, 0));
+        assert!(!addr_in_region_arena(0x1000, 0, REGION_ARENA_BYTES));
+        assert!(!addr_in_region_arena(
+            REGION_ARENA_BYTES - 1,
+            0,
+            REGION_ARENA_BYTES
+        ));
+        assert!(!addr_in_region_arena(0xdead_beef, 0, REGION_ARENA_BYTES));
         // Failed-reservation sentinel disables regions just the same.
-        assert!(!addr_in_region_arena(0x2000, usize::MAX));
+        assert!(!addr_in_region_arena(
+            0x2000,
+            usize::MAX,
+            REGION_ARENA_BYTES
+        ));
     }
 
     #[test]
@@ -3018,12 +3083,20 @@ mod tests {
     #[cfg_attr(miri, ignore)] // arena uses mmap with non-RW protections; Miri can't model it
     fn region_arena_matches_only_the_reserved_window() {
         let base = 0x7000_0000_0000usize;
-        assert!(addr_in_region_arena(base, base));
-        assert!(addr_in_region_arena(base + REGION_ARENA_BYTES - 1, base));
-        assert!(!addr_in_region_arena(base - 1, base));
-        assert!(!addr_in_region_arena(base + REGION_ARENA_BYTES, base));
+        assert!(addr_in_region_arena(base, base, REGION_ARENA_BYTES));
+        assert!(addr_in_region_arena(
+            base + REGION_ARENA_BYTES - 1,
+            base,
+            REGION_ARENA_BYTES
+        ));
+        assert!(!addr_in_region_arena(base - 1, base, REGION_ARENA_BYTES));
+        assert!(!addr_in_region_arena(
+            base + REGION_ARENA_BYTES,
+            base,
+            REGION_ARENA_BYTES
+        ));
         // A pointer below the reserve (the Windows-heap shape) is outside it.
-        assert!(!addr_in_region_arena(0x1_0000, base));
+        assert!(!addr_in_region_arena(0x1_0000, base, REGION_ARENA_BYTES));
     }
 
     #[test]
@@ -3319,6 +3392,38 @@ mod tests {
         }
         assert_eq!(rc_live_count(), base, "cycle collector reclaims the cycle");
         assert_eq!(rc_cycles_freed(), freed_base + 2);
+    }
+
+    #[test]
+    fn a_node_whose_layout_is_acyclic_is_never_a_cycle_candidate() {
+        let _g = count_guard();
+        fresh_cycle_state();
+        let base = rc_live_count();
+        // The runtime keys a layout by its address, so this one has its own
+        // for the life of the process.
+        static ACYCLIC_NODE_META: [i64; 5] = [
+            RC_KIND_STRUCT | gossamer_abi::rc::RC_KIND_ACYCLIC,
+            1,
+            0,
+            1,
+            1,
+        ];
+        let meta = &ACYCLIC_NODE_META;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
+        unsafe {
+            let parent = gos_rt_rc_alloc(16, meta.as_ptr());
+            let child = gos_rt_rc_alloc(16, meta.as_ptr());
+            link(parent, child);
+            // A surviving decrement on a node with a child would buffer it as
+            // a candidate if its layout could close a cycle.
+            gos_rt_rc_retain(parent);
+            gos_rt_rc_release(parent);
+            gos_rt_rc_release(child);
+            assert_eq!(ROOTS.with(|r| r.borrow().len()), 0, "nothing buffered");
+            gos_rt_rc_release(parent);
+        }
+        assert_eq!(rc_live_count(), base, "the tree frees by count alone");
     }
 
     #[test]

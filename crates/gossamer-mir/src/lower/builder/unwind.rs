@@ -190,6 +190,10 @@ impl Builder<'_> {
             return;
         };
         let resume_here = self.current;
+        // A pad is lowered where its defers are registered, but runs only on
+        // a fault, so a region its defers close is still open for the code
+        // lowered after it.
+        let region_depth = self.region_depth;
         let pad = self.new_block(span);
         self.set_current(pad);
         self.in_unwind_pad += 1;
@@ -218,6 +222,7 @@ impl Builder<'_> {
         }
         self.terminate(Terminator::Resume);
         self.in_unwind_pad -= 1;
+        self.region_depth = region_depth;
         if let Some(state) = self.unwind.as_mut() {
             state.cleanup_arms.push((id, pad));
         }

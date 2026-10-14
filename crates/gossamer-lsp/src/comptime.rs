@@ -60,7 +60,7 @@ pub(crate) fn fold_diagnostic(
     tcx: &mut TyCtxt,
     file: FileId,
 ) -> Option<Diagnostic> {
-    if !augmented.contains("comptime") {
+    if !gossamer_lex::mentions_comptime(augmented) {
         return None;
     }
     install_level(uri);

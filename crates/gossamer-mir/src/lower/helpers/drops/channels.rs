@@ -596,6 +596,13 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
         }
         kinds[p.local.0 as usize].is_some() && box_owns_payload(body.locals[p.local.0 as usize].ty)
     };
+    // Whether a `gos_enum_load` reads a carrier whose payload the enum node
+    // owns: the variant meta names the payload word as a child.
+    let reads_node_carrier = |name: &str, ty: gossamer_types::Ty| {
+        name == "gos_enum_load"
+            && crate::lower::helpers::carrier_arm_child_kinds(tcx, ty)
+                .is_some_and(|(ok, err)| ok.is_some() || err.is_some())
+    };
     // Carriers read out of a box, which keeps its own share: each takes one
     // of its own right after the read.
     let mut views: Vec<(usize, Site)> = Vec::new();
@@ -664,7 +671,9 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
                                 && kinds[src.local.0 as usize] == kinds[dest]
                         }
                         Rvalue::CallIntrinsic { name, .. } => {
-                            *name == "gos_rt_result_new" || reads_boxed_carrier(name)
+                            *name == "gos_rt_result_new"
+                                || reads_boxed_carrier(name)
+                                || reads_node_carrier(name, body.locals[dest].ty)
                         }
                         _ => false,
                     };
@@ -676,6 +685,13 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
                         } else {
                             withdrawn[dest] = true;
                         }
+                    }
+                    // A carrier read out of an enum node, which keeps its own
+                    // share of the payload, as a field or a box does.
+                    if let Rvalue::CallIntrinsic { name, .. } = rvalue
+                        && reads_node_carrier(name, body.locals[dest].ty)
+                    {
+                        views.push((dest, Site::Stmt(bi, si)));
                     }
                     let bare_copy = matches!(rvalue,
                         Rvalue::Use(Operand::Copy(src)) if src.projection.is_empty());

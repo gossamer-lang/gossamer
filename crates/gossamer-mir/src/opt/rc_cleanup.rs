@@ -632,6 +632,15 @@ fn holder_rc_names(tcx: &TyCtxt, ty: Ty) -> Option<HolderRc> {
         TyKind::Vec(_) | TyKind::Slice(_) | TyKind::Array { .. } => {
             plain(&["gos_rt_vec_retain"], &["gos_rt_vec_free"])
         }
+        // A heap enum's value is the node pointer, counted as a whole. The
+        // sentinel range holds runtime handles with accounting of their own.
+        TyKind::Adt { def, .. }
+            if def.local < u32::MAX - 16
+                && tcx.is_rc_managed(ty)
+                && !tcx.is_inline_enum_ty(ty) =>
+        {
+            plain(&["gos_rt_rc_retain"], &["gos_rt_rc_release"])
+        }
         TyKind::Adt { .. } => {
             // A guarded aggregate's copy walks a copy-blob descriptor, which
             // names which of its words are counted. A struct whose fields the
@@ -1893,7 +1902,7 @@ pub(crate) fn reduce_materialised_counts(body: &mut Body) {
 /// a holder of the other is every share either accounts for.
 fn structural_children_are_guarded_blobs(structural: &[i64], guarded: &[i64]) -> bool {
     use gossamer_abi::rc::{
-        RC_CHILD_KIND_SHIFT, RC_KIND_STRUCT, RC_KIND_STRUCT_GUARDED, rc_child_blob_kind,
+        RC_CHILD_KIND_SHIFT, RC_KIND_STRUCT, RC_KIND_STRUCT_GUARDED, rc_child_blob_kind, rc_kind,
     };
     let [kind, variants, _, count, entries @ ..] = structural else {
         return false;
@@ -1901,9 +1910,9 @@ fn structural_children_are_guarded_blobs(structural: &[i64], guarded: &[i64]) ->
     let [guarded_kind, pairs, triples @ ..] = guarded else {
         return false;
     };
-    if *kind != RC_KIND_STRUCT
+    if rc_kind(*kind) != RC_KIND_STRUCT
         || *variants != 1
-        || *guarded_kind != RC_KIND_STRUCT_GUARDED
+        || rc_kind(*guarded_kind) != RC_KIND_STRUCT_GUARDED
         || usize::try_from(*count).ok() != Some(entries.len())
         || usize::try_from(*pairs).ok().map(|n| n * 3) != Some(triples.len())
     {
@@ -2759,6 +2768,9 @@ fn try_elide_class(
     if share.is_goroutine_shared(class.root) || eligible[class.root.0 as usize] {
         return false;
     }
+    if !root_keeps_its_share(body, class) {
+        return false;
+    }
     let mut retains = 0usize;
     let mut releases = 0usize;
     let mut sites: Vec<(Local, HolderDef)> = Vec::new();
@@ -2804,6 +2816,26 @@ fn try_elide_class(
         }
     }
     true
+}
+
+/// Whether the class's root holds a share of its own for the class to borrow:
+/// a parameter's belongs to the caller, and any other counted local's is the
+/// one its releases give back. A temporary whose value was handed to a member
+/// with no retain has moved its share into the class, and nothing outside the
+/// class would keep the value alive. A root whose type carries no count, such
+/// as the address of a vector element, holds no share for a member to take:
+/// the members borrow from the structure it addresses.
+fn root_keeps_its_share(body: &Body, class: &Class) -> bool {
+    let root = class.root;
+    if (root.0 as usize) <= body.arity as usize || class.rcs[root.0 as usize].is_none() {
+        return true;
+    }
+    body.blocks.iter().flat_map(|b| &b.stmts).any(|stmt| {
+        matches!(&stmt.kind, StatementKind::Assign {
+            rvalue: Rvalue::CallIntrinsic { name, args }, ..
+        } if is_rc_release_name(name)
+            && matches!(args.first(), Some(Operand::Copy(p)) if p.local == root))
+    })
 }
 
 /// The one-member class a local forms with the origin of its chain of copies.

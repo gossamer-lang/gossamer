@@ -66,5 +66,6 @@ pub(crate) use index::*;
 pub(crate) use misc::*;
 pub(crate) use self_deref::*;
 
+pub use drops::lent_payloads::is_payload_view;
 pub use drops::slots::map_value_owner_marker;
 pub use misc::mangle_callable_shape;

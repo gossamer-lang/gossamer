@@ -1,0 +1,652 @@
+// Statements and the blocks that desugar into runtime calls (`arena`,
+// `cohort`): what `gossamer_parse`'s `statements.rs` and `cohort.rs` parse.
+
+use ast::Span
+use lex
+use parse
+use parse::Parser
+use parse_expr
+use parse_expr::{ek, ekf}
+use parse_items
+use tree
+
+pub fn parse_stmt(p: &mut Parser) -> i64 {
+    let start_span = parse::peek_span(p)
+    let before = p.diags.len()
+    let kind = parse_stmt_kind(p)
+    let last = parse::last_span(p)
+    let consumed_semicolon = last.end == last.start + 1 && p.src.byte_at(last.start as i64) == 59
+    if requires_statement_separator(p, kind) && !consumed_semicolon && !parse::at_eof(p) &&
+        !parse::at(p, parse::P_RBRACE) && !parse::newline_before_peek(p) && p.diags.len() == before {
+        let s = parse::peek_span(p)
+        parse::record(p, "Unexpected", s)
+    }
+    let end_span = parse::last_span(p)
+    let span = parse::join(p, start_span, end_span)
+    let id = parse::alloc(p)
+    parse::mk_stmt(p, id, span, kind)
+}
+
+fn requires_statement_separator(p: &mut Parser, kind: i64) -> bool {
+    let t = p.t.w[kind]
+    if t == tree::SK_LET || t == tree::SK_DEFER {
+        return true
+    }
+    if t == tree::SK_ITEM {
+        return false
+    }
+    if p.t.w[kind + 2] != 0 {
+        return false
+    }
+    let e = ek(p, p.t.w[kind + 1])
+    !(e == tree::EK_BLOCK || e == tree::EK_UNSAFE || e == tree::EK_IF || e == tree::EK_MATCH ||
+        e == tree::EK_LOOP || e == tree::EK_WHILE || e == tree::EK_FOR || e == tree::EK_SELECT)
+}
+
+fn expr_stmt_kind(p: &mut Parser, expr: i64, has_semi: bool) -> i64 {
+    p.t.rec3(tree::SK_EXPR, expr, if has_semi { 1 } else { 0 })
+}
+
+fn parse_stmt_kind(p: &mut Parser) -> i64 {
+    if parse::at(p, parse::KW_LET) {
+        return parse_let_stmt(p)
+    }
+    if at_defer_stmt(p) {
+        parse::bump(p)
+        let body = parse_expr::parse_expr(p)
+        parse::eat(p, parse::P_SEMI)
+        return p.t.rec2(tree::SK_DEFER, body)
+    }
+    if at_arena_block(p) {
+        return parse_arena_block(p)
+    }
+    if parse::is_item_start(p) {
+        let item = parse_items::parse_item(p)
+        return p.t.rec2(tree::SK_ITEM, item)
+    }
+    let before = p.pos
+    p.empty_brace += 1
+    let mut expression = parse_expr::parse_expr(p)
+    p.empty_brace -= 1
+    if parse::at(p, parse::P_COMMA) {
+        expression = parse_comma_assignment(p, expression)
+    }
+    reject_parenthesised_assign_targets(p, expression)
+    if p.pos == before && !parse::is_stmt_start(p) {
+        parse::recover_in_block(p)
+    }
+    let has_semi = parse::eat(p, parse::P_SEMI)
+    expr_stmt_kind(p, expression, has_semi)
+}
+
+fn at_defer_stmt(p: &mut Parser) -> bool {
+    if !parse::at_word(p, "defer") {
+        return false
+    }
+    let n = parse::kind_at(p, 1)
+    n == lex::IDENT || parse::is_keyword(n) || n == parse::P_LBRACE
+}
+
+fn at_arena_block(p: &mut Parser) -> bool {
+    if !parse::at_word(p, "arena") {
+        return false
+    }
+    let n = parse::kind_at(p, 1)
+    if n == parse::P_LBRACE {
+        return true
+    }
+    parse::is_keyword(n) && parse::is_stmt_start_keyword(n)
+}
+
+/// `runtime::name()`, the path allocated before the call.
+fn runtime_call0(p: &mut Parser, name: String, span: Span) -> i64 {
+    runtime_call(p, name, #[], span)
+}
+
+/// The statements of block record `block`, with `push` and a deferred `pop`
+/// before them and its tail, if any, after them as a statement.
+fn bracketed_stmts(p: &mut Parser, block: i64, push: i64, pop: i64, start: Span) -> i64 {
+    let mut stmts: Vec<i64> = #[]
+    let push_id = parse::alloc(p)
+    let push_kind = expr_stmt_kind(p, push, true)
+    stmts.push(parse::mk_stmt(p, push_id, start, push_kind))
+    let pop_id = parse::alloc(p)
+    let pop_kind = p.t.rec2(tree::SK_DEFER, pop)
+    stmts.push(parse::mk_stmt(p, pop_id, start, pop_kind))
+    stmts.extend(p.t.items(p.t.w[block]))
+    let tail = p.t.w[block + 1]
+    if tail >= 0 {
+        let tid = parse::alloc(p)
+        let tail_span = parse::span_of(p, tail)
+        let tail_kind = expr_stmt_kind(p, tail, true)
+        stmts.push(parse::mk_stmt(p, tid, tail_span, tail_kind))
+    }
+    p.t.list(stmts)
+}
+
+fn parse_arena_block(p: &mut Parser) -> i64 {
+    let start = parse::peek_span(p)
+    parse::bump(p)
+    if !parse::expect(p, parse::P_LBRACE) {
+        let id = parse::alloc(p)
+        let kind = p.t.rec1(tree::EK_ERROR)
+        let e = parse::mk_expr(p, id, start, kind)
+        return expr_stmt_kind(p, e, true)
+    }
+    let block = parse_expr::parse_block_body(p)
+    let push_call = runtime_call0(p, "arena_push", start)
+    let pop_call = runtime_call0(p, "arena_pop", start)
+    let stmts = bracketed_stmts(p, block, push_call, pop_call, start)
+    let synthetic = p.t.w[block + 2]
+    let new_block = p.t.rec4(stmts, -1, synthetic, tree::BLOCK_ARENA)
+    let end = parse::peek_span(p)
+    let eid = parse::alloc(p)
+    let span = parse::join(p, start, end)
+    let kind = p.t.rec2(tree::EK_BLOCK, new_block)
+    let e = parse::mk_expr(p, eid, span, kind)
+    expr_stmt_kind(p, e, true)
+}
+
+fn is_refutable_pattern(p: &mut Parser, pattern: i64) -> bool {
+    let k = parse::kind_of(p, pattern)
+    let t = p.t.w[k]
+    if t == tree::PK_LITERAL || t == tree::PK_RANGE || t == tree::PK_TUPLE_STRUCT {
+        return true
+    }
+    if t == tree::PK_PATH {
+        return p.t.len(p.t.w[p.t.w[k + 1]]) > 1
+    }
+    if t == tree::PK_OR {
+        let alternatives = p.t.w[k + 1]
+        let n = p.t.len(alternatives)
+        for i in 0..n {
+            if is_refutable_pattern(p, p.t.item(alternatives, i)) {
+                return true
+            }
+        }
+        return false
+    }
+    if t == tree::PK_REF {
+        return is_refutable_pattern(p, p.t.w[k + 2])
+    }
+    false
+}
+
+fn parse_let_stmt(p: &mut Parser) -> i64 {
+    parse::bump(p)
+    let pattern = parse_let_pattern(p)
+    let ty = if parse::eat(p, parse::P_COLON) { parse::parse_type(p) } else { -1 }
+    let refutable = is_refutable_pattern(p, pattern)
+    let init = if parse::eat(p, parse::P_EQ) {
+        if refutable {
+            p.no_struct += 1
+        }
+        let saved = p.empty_brace
+        p.empty_brace = 0
+        let expr = parse_comma_value_list(p)
+        p.empty_brace = saved
+        if refutable && p.no_struct > 0 {
+            p.no_struct -= 1
+        }
+        expr
+    } else {
+        -1
+    }
+    if refutable && !parse::at(p, parse::KW_ELSE) && parse::at(p, parse::P_LBRACE) {
+        let s = parse::peek_span(p)
+        parse::record(p, "RefutableLetNeedsElse", s)
+        if init >= 0 {
+            return parse_let_else_block(p, pattern, init)
+        }
+    }
+    if parse::at(p, parse::KW_ELSE) {
+        if init >= 0 {
+            parse::bump(p)
+            return parse_let_else_block(p, pattern, init)
+        }
+    }
+    parse::eat(p, parse::P_SEMI)
+    p.t.rec4(tree::SK_LET, pattern, ty, init)
+}
+
+fn parse_comma_assignment(p: &mut Parser, first: i64) -> i64 {
+    let start = parse::span_of(p, first)
+    let mut places = #[first]
+    while parse::eat(p, parse::P_COMMA) {
+        p.empty_brace += 1
+        places.push(parse_expr::parse_expr_no_assign(p))
+        p.empty_brace -= 1
+    }
+    let last = parse::last_span(p)
+    let places_span = parse::join(p, start, last)
+    let pid = parse::alloc(p)
+    let list = p.t.list(places)
+    let tuple_kind = p.t.rec2(tree::EK_TUPLE, list)
+    let place = parse::mk_expr(p, pid, places_span, tuple_kind)
+    let op = parse_expr::eat_assign_op(p)
+    if op < 0 {
+        let s = parse::peek_span(p)
+        parse::record(p, "Unexpected", s)
+        return place
+    }
+    p.empty_brace += 1
+    let value = parse_comma_value_list(p)
+    p.empty_brace -= 1
+    let span = parse::join(p, start, parse::span_of(p, value))
+    let id = parse::alloc(p)
+    let kind = p.t.rec4(tree::EK_ASSIGN, op, place, value)
+    parse::mk_expr(p, id, span, kind)
+}
+
+pub fn parse_comma_value_list(p: &mut Parser) -> i64 {
+    let first = parse_expr::parse_expr(p)
+    if !parse::at(p, parse::P_COMMA) {
+        return first
+    }
+    let start = parse::span_of(p, first)
+    let mut elements = #[first]
+    while parse::eat(p, parse::P_COMMA) {
+        elements.push(parse_expr::parse_expr_no_assign(p))
+    }
+    let last = parse::last_span(p)
+    let span = parse::join(p, start, last)
+    let id = parse::alloc(p)
+    let list = p.t.list(elements)
+    let kind = p.t.rec2(tree::EK_TUPLE, list)
+    parse::mk_expr(p, id, span, kind)
+}
+
+fn parse_let_pattern(p: &mut Parser) -> i64 {
+    let parenthesised = parse::at(p, parse::P_LPAREN)
+    let first = parse::parse_pattern(p)
+    if !parse::at(p, parse::P_COMMA) {
+        if parenthesised && p.t.w[parse::kind_of(p, first)] == tree::PK_TUPLE {
+            let s = parse::span_of(p, first)
+            parse::record(p, "LetPatternParens", s)
+        }
+        return first
+    }
+    let start = parse::span_of(p, first)
+    let mut elements = #[first]
+    while parse::eat(p, parse::P_COMMA) {
+        elements.push(parse::parse_pattern(p))
+    }
+    let last = parse::last_span(p)
+    let span = parse::join(p, start, last)
+    let id = parse::alloc(p)
+    let list = p.t.list(elements)
+    let kind = p.t.rec2(tree::PK_TUPLE, list)
+    parse::mk_pat(p, id, span, kind)
+}
+
+fn reject_parenthesised_assign_targets(p: &mut Parser, expr: i64) {
+    if ek(p, expr) != tree::EK_ASSIGN {
+        return
+    }
+    let place = ekf(p, expr, 2)
+    if ek(p, place) != tree::EK_TUPLE {
+        return
+    }
+    let span = parse::span_of(p, place)
+    if span.end > span.start && p.src.byte_at(span.start as i64) == 40 {
+        parse::record(p, "LetPatternParens", span)
+    }
+}
+
+fn parse_let_else_block(p: &mut Parser, pattern: i64, init: i64) -> i64 {
+    parse::expect(p, parse::P_LBRACE)
+    let start = parse::last_span(p)
+    let block = parse_expr::parse_block_body(p)
+    let last = parse::last_span(p)
+    let else_span = parse::join(p, start, last)
+    let eid = parse::alloc(p)
+    let else_kind = p.t.rec2(tree::EK_BLOCK, block)
+    let else_expr = parse::mk_expr(p, eid, else_span, else_kind)
+    parse::eat(p, parse::P_SEMI)
+    let mut names: Vec<i64> = #[]
+    let mut muts: Vec<i64> = #[]
+    collect_pattern_bindings(p, pattern, &mut names, &mut muts)
+    let pat_span = parse::span_of(p, pattern)
+    let success_body = make_var_tuple_expr(p, names, pat_span)
+    let outer_pat = make_binding_pattern(p, names, muts, pat_span)
+    let wid = parse::alloc(p)
+    let wild_kind = p.t.rec1(tree::PK_WILDCARD)
+    let wildcard = parse::mk_pat(p, wid, else_span, wild_kind)
+    let mid = parse::alloc(p)
+    let arm1 = p.t.rec3(pattern, -1, success_body)
+    let arm2 = p.t.rec3(wildcard, -1, else_expr)
+    let arms = p.t.rec3(2, arm1, arm2)
+    let match_kind = p.t.rec3(tree::EK_MATCH, init, arms)
+    let match_expr = parse::mk_expr(p, mid, pat_span, match_kind)
+    p.t.rec4(tree::SK_LET, outer_pat, -1, match_expr)
+}
+
+fn make_var_tuple_expr(p: &mut Parser, names: Vec<i64>, span: Span) -> i64 {
+    let mut refs: Vec<i64> = #[]
+    for name in names {
+        let segment = p.t.rec2(name, 0)
+        let segments = p.t.list1(segment)
+        let path = p.t.rec1(segments)
+        let id = parse::alloc(p)
+        let kind = p.t.rec2(tree::EK_PATH, path)
+        refs.push(parse::mk_expr(p, id, span, kind))
+    }
+    if refs.len() == 1 {
+        return refs[0]
+    }
+    let id = parse::alloc(p)
+    let list = p.t.list(refs)
+    let kind = p.t.rec2(tree::EK_TUPLE, list)
+    parse::mk_expr(p, id, span, kind)
+}
+
+fn make_binding_pattern(p: &mut Parser, names: Vec<i64>, muts: Vec<i64>, span: Span) -> i64 {
+    if names.len() == 0 {
+        let id = parse::alloc(p)
+        let kind = p.t.rec1(tree::PK_WILDCARD)
+        return parse::mk_pat(p, id, span, kind)
+    }
+    let mut pats: Vec<i64> = #[]
+    for i in 0..names.len() {
+        let id = parse::alloc(p)
+        let kind = p.t.rec4(tree::PK_IDENT, muts[i], names[i], -1)
+        pats.push(parse::mk_pat(p, id, span, kind))
+    }
+    if pats.len() == 1 {
+        return pats[0]
+    }
+    let id = parse::alloc(p)
+    let list = p.t.list(pats)
+    let kind = p.t.rec2(tree::PK_TUPLE, list)
+    parse::mk_pat(p, id, span, kind)
+}
+
+fn collect_list_bindings(p: &mut Parser, list: i64, names: &mut Vec<i64>, muts: &mut Vec<i64>) {
+    let n = p.t.len(list)
+    for i in 0..n {
+        collect_pattern_bindings(p, p.t.item(list, i), names, muts)
+    }
+}
+
+fn collect_pattern_bindings(p: &mut Parser, pat: i64, names: &mut Vec<i64>, muts: &mut Vec<i64>) {
+    let k = parse::kind_of(p, pat)
+    let t = p.t.w[k]
+    if t == tree::PK_IDENT {
+        names.push(p.t.w[k + 2])
+        muts.push(p.t.w[k + 1])
+        let sub = p.t.w[k + 3]
+        if sub >= 0 {
+            collect_pattern_bindings(p, sub, names, muts)
+        }
+    } else if t == tree::PK_TUPLE {
+        collect_list_bindings(p, p.t.w[k + 1], names, muts)
+    } else if t == tree::PK_TUPLE_STRUCT {
+        collect_list_bindings(p, p.t.w[k + 2], names, muts)
+    } else if t == tree::PK_SLICE {
+        collect_list_bindings(p, p.t.w[k + 1], names, muts)
+        let rest = p.t.w[k + 2]
+        if rest >= 0 {
+            collect_pattern_bindings(p, rest, names, muts)
+        }
+        collect_list_bindings(p, p.t.w[k + 3], names, muts)
+    } else if t == tree::PK_STRUCT {
+        let fields = p.t.w[k + 2]
+        let n = p.t.len(fields)
+        for i in 0..n {
+            let f = p.t.item(fields, i)
+            let q = p.t.w[f + 1]
+            if q >= 0 {
+                collect_pattern_bindings(p, q, names, muts)
+            } else {
+                names.push(p.t.w[f])
+                muts.push(tree::IMMUTABLE)
+            }
+        }
+    } else if t == tree::PK_OR {
+        let ps = p.t.w[k + 1]
+        if p.t.len(ps) > 0 {
+            collect_pattern_bindings(p, p.t.item(ps, 0), names, muts)
+        }
+    } else if t == tree::PK_REF {
+        collect_pattern_bindings(p, p.t.w[k + 2], names, muts)
+    }
+}
+
+// ---- cohort --------------------------------------------------------------
+
+pub fn at_cohort_block(p: &mut Parser) -> bool {
+    if !parse::at_word(p, "cohort") {
+        return false
+    }
+    let n = parse::kind_at(p, 1)
+    if n == parse::P_LBRACE {
+        return !parse::struct_forbidden(p)
+    }
+    if n == parse::P_LPAREN {
+        let mut depth = 0
+        let mut index = 1
+        loop {
+            let k = parse::kind_at(p, index)
+            if k == parse::P_LPAREN {
+                depth += 1
+            } else if k == parse::P_RPAREN {
+                depth -= 1
+                if depth == 0 {
+                    return parse::kind_at(p, index + 1) == parse::P_LBRACE
+                }
+            } else if k == lex::EOF {
+                return false
+            }
+            index += 1
+            if index > 64 {
+                return false
+            }
+        }
+    }
+    false
+}
+
+/// `runtime::name(args..)`: the path, then each argument, then the call.
+fn runtime_call(p: &mut Parser, name: String, args: Vec<i64>, span: Span) -> i64 {
+    let pid = parse::alloc(p)
+    let rpath = parse::path_of(p, #["runtime", name])
+    let path_kind = p.t.rec2(tree::EK_PATH, rpath)
+    let path = parse::mk_expr(p, pid, span, path_kind)
+    let mut values: Vec<i64> = #[]
+    for v in args {
+        let id = parse::alloc(p)
+        let digits = p.t.str_of(f"{v}")
+        let lit = p.t.rec2(tree::LIT_INT, digits)
+        let kind = p.t.rec2(tree::EK_LITERAL, lit)
+        values.push(parse::mk_expr(p, id, span, kind))
+    }
+    let cid = parse::alloc(p)
+    let list = p.t.list(values)
+    let kind = p.t.rec3(tree::EK_CALL, path, list)
+    parse::mk_expr(p, cid, span, kind)
+}
+
+pub fn parse_cohort_expr(p: &mut Parser) -> i64 {
+    let start = parse::peek_span(p)
+    parse::bump(p)
+    let header = if parse::at(p, parse::P_LPAREN) { parse_cohort_header(p) } else { #[0, 0, 0, 0, 0, 0] }
+    if !parse::expect(p, parse::P_LBRACE) {
+        return p.t.rec1(tree::EK_ERROR)
+    }
+    let saved = p.no_struct
+    p.no_struct = 0
+    let block = parse_expr::parse_block_body(p)
+    p.no_struct = saved
+    let mut stmts: Vec<i64> = #[]
+    let push = runtime_call(p, "cohort_push", header, start)
+    let push_id = parse::alloc(p)
+    let push_kind = expr_stmt_kind(p, push, true)
+    stmts.push(parse::mk_stmt(p, push_id, start, push_kind))
+    let pop_id = parse::alloc(p)
+    let pop = runtime_call(p, "cohort_pop", #[], start)
+    let pop_kind = p.t.rec2(tree::SK_DEFER, pop)
+    stmts.push(parse::mk_stmt(p, pop_id, start, pop_kind))
+    stmts.extend(p.t.items(p.t.w[block]))
+    let tail = p.t.w[block + 1]
+    if tail >= 0 {
+        let tid = parse::alloc(p)
+        let tail_span = parse::span_of(p, tail)
+        let tail_kind = expr_stmt_kind(p, tail, true)
+        stmts.push(parse::mk_stmt(p, tid, tail_span, tail_kind))
+    }
+    let list = p.t.list(stmts)
+    let join = runtime_call(p, "cohort_join", #[], start)
+    let synthetic = p.t.w[block + 2]
+    let new_block = p.t.rec4(list, join, synthetic, tree::BLOCK_COHORT)
+    p.t.rec2(tree::EK_BLOCK, new_block)
+}
+
+/// The header's six settings: policy, timeout, isolation, on_error,
+/// uncancellable, drain.
+fn parse_cohort_header(p: &mut Parser) -> Vec<i64> {
+    let mut h = #[0, 0, 0, 0, 0, 0]
+    parse::bump(p)
+    while !parse::at(p, parse::P_RPAREN) && !parse::at_eof(p) {
+        let name_span = parse::peek_span(p)
+        let name = parse::text(p, name_span)
+        if parse::peek(p) != lex::IDENT {
+            parse::record(p, "Unexpected", name_span)
+            break
+        }
+        parse::bump(p)
+        if !parse::expect(p, parse::P_COLON) {
+            break
+        }
+        if name == "policy" {
+            h[0] = parse_cohort_enum_arg(p, "Policy", #["FailFast", "CollectAll", "Race"])
+        } else if name == "isolation" {
+            h[2] = parse_cohort_enum_arg(p, "Isolation", #["Shared", "Thread"])
+        } else if name == "on_error" {
+            h[3] = parse_cohort_enum_arg(p, "OnError", #["Propagate", "Log", "Ignore"])
+        } else if name == "cancellable" {
+            h[4] = if parse_cohort_bool_arg(p) { 0 } else { 1 }
+        } else if name == "drain" {
+            h[5] = parse_cohort_int_arg(p)
+        } else if name == "context" {
+            h[2] = parse_retired_context_arg(p, name_span)
+        } else if name == "timeout" {
+            h[1] = parse_cohort_int_arg(p)
+        } else {
+            parse::record(p, "Unexpected", name_span)
+            skip_cohort_header_value(p)
+        }
+        if !parse::eat(p, parse::P_COMMA) && !parse::newline_before_peek(p) {
+            break
+        }
+    }
+    parse::expect(p, parse::P_RPAREN)
+    h
+}
+
+/// The text after the last `::` of `text`, or all of it.
+fn last_path_part(text: String) -> String {
+    let n = text.byte_len()
+    let mut i = n - 1
+    while i > 0 {
+        if text.byte_at(i) == 58 && text.byte_at(i - 1) == 58 {
+            return text.substring(i + 1, n)
+        }
+        i -= 1
+    }
+    text
+}
+
+/// The text before the last `::` of `text`, or "" with no `::`.
+fn path_owner(text: String) -> Option<String> {
+    let n = text.byte_len()
+    let mut i = n - 1
+    while i > 0 {
+        if text.byte_at(i) == 58 && text.byte_at(i - 1) == 58 {
+            return Some(text.substring(0, i - 1))
+        }
+        i -= 1
+    }
+    None
+}
+
+fn read_cohort_path(p: &mut Parser) -> (String, Span) {
+    let mut span = parse::peek_span(p)
+    let mut written = ""
+    while (parse::peek(p) == lex::IDENT || parse::at(p, parse::P_COLON_COLON)) &&
+        (written.byte_len() == 0 || !parse::newline_before_peek(p)) {
+        span = parse::peek_span(p)
+        written.push_str(parse::text(p, span))
+        parse::bump(p)
+    }
+    (written, span)
+}
+
+fn parse_cohort_enum_arg(p: &mut Parser, enum_name: String, variants: Vec<String>) -> i64 {
+    let span = parse::peek_span(p)
+    let written, _ = read_cohort_path(p)
+    let qualified = match path_owner(written) {
+        Some(owner) => owner == enum_name || owner == "cohort::" + enum_name,
+        None => true,
+    }
+    let variant = last_path_part(written)
+    if qualified {
+        for i in 0..variants.len() {
+            if variants[i] == variant {
+                return i
+            }
+        }
+    }
+    parse::record(p, "Unexpected", span)
+    0
+}
+
+fn parse_retired_context_arg(p: &mut Parser, name_span: Span) -> i64 {
+    let written, value_span = read_cohort_path(p)
+    let last = last_path_part(written)
+    if last == "Default" {
+        let s = parse::join(p, name_span, value_span)
+        parse::record(p, "CohortIsolationSpelling", s)
+        return 0
+    }
+    if last == "Isolated" {
+        let s = parse::join(p, name_span, value_span)
+        parse::record(p, "CohortIsolationSpelling", s)
+        return 1
+    }
+    parse::record(p, "Unexpected", value_span)
+    0
+}
+
+fn parse_cohort_bool_arg(p: &mut Parser) -> bool {
+    let span = parse::peek_span(p)
+    let written = parse::text(p, span)
+    if written == "true" || written == "false" {
+        parse::bump(p)
+        return written == "true"
+    }
+    parse::record(p, "Unexpected", span)
+    true
+}
+
+fn parse_cohort_int_arg(p: &mut Parser) -> i64 {
+    let span = parse::peek_span(p)
+    let written = parse::text(p, span).replace("_", "")
+    if parse::peek(p) == lex::INT_LIT {
+        if let Some(value) = written.to_i64() {
+            if value >= 0 {
+                parse::bump(p)
+                return value
+            }
+        }
+    }
+    parse::record(p, "Unexpected", span)
+    skip_cohort_header_value(p)
+    0
+}
+
+fn skip_cohort_header_value(p: &mut Parser) {
+    while !parse::at(p, parse::P_COMMA) && !parse::at(p, parse::P_RPAREN) && !parse::at_eof(p) &&
+        !parse::newline_before_peek(p) {
+        parse::bump(p)
+    }
+}

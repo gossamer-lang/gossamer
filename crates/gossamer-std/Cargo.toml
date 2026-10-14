@@ -21,6 +21,7 @@ workspace = true
 # wasm playground links these unchanged; the I/O / crypto / network
 # stdlib modules that need native crates are gated out (see lib.rs).
 [dependencies]
+unicode-ident = { workspace = true }
 gossamer-pkg = { workspace = true }
 gossamer-runtime = { workspace = true }
 gossamer-core = { workspace = true }

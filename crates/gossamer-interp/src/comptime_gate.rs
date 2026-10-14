@@ -542,8 +542,9 @@ mod comptime_gate_tests {
         // needs the capability of the call it implements. These families
         // compute over values they are handed (rendering included), the zone database the `time`
         // leaves read is compiled in, a parallel adapter's leaf is a
-        // callback GT0090 has already proven pure, and a window check compares
-        // the bounds it is handed.
+        // callback GT0090 has already proven pure, a window check compares
+        // the bounds it is handed, and a serde step reads or writes the
+        // document text it is handed.
         let pure_prefixes: &[&str] = &[
             "__gos_codegen",
             "__gos_debug_quote",
@@ -551,6 +552,7 @@ mod comptime_gate_tests {
             "__gos_f32_",
             "__gos_par_",
             "__gos_pem_",
+            "__gos_serde_",
             "__gos_strconv_",
             "__gos_tar_",
             "__gos_time_",

@@ -18451,6 +18451,44 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-unicode-is-xid-continue",
+      "name": "std::unicode::is_xid_continue",
+      "kind": "function",
+      "signature": "fn is_xid_continue(rune: char) -> bool",
+      "description": "True if r may continue an identifier: Unicode XID_Continue (UAX #31).",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdunicode",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-unicode-is-xid-start",
+      "name": "std::unicode::is_xid_start",
+      "kind": "function",
+      "signature": "fn is_xid_start(rune: char) -> bool",
+      "description": "True if r may begin an identifier: Unicode XID_Start (UAX #31) or `_`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdunicode",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-unicode-nfc",
       "name": "std::unicode::nfc",
       "kind": "function",

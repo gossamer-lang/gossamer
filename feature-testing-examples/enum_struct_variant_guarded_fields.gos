@@ -1,0 +1,61 @@
+// A `match` arm with a struct-variant pattern reads that variant's fields
+// only once the value is that variant: a sibling variant's payload may be
+// shorter, or hold a word the arm would read as a boxed struct. Every arm
+// below is tried against every variant.
+
+struct Expr {
+    id: i64
+    kind: ExprKind
+}
+
+enum ExprKind {
+    Lit(String)
+    Binary { lhs: Expr, rhs: Expr }
+    Call { callee: Expr, args: Vec<Expr> }
+    Ret(Option<Expr>)
+    Pair { left: i64, right: i64 }
+}
+
+fn count(e: Expr) -> i64 {
+    match e.kind {
+        ExprKind::Lit(_) => 1
+        ExprKind::Binary { lhs, rhs } => 1 + count(lhs) + count(rhs)
+        ExprKind::Call { callee, args } => {
+            let mut n = 1 + count(callee)
+            for a in args {
+                n += count(a)
+            }
+            n
+        }
+        ExprKind::Ret(v) => match v {
+            Some(x) => 1 + count(x)
+            None => 1
+        }
+        ExprKind::Pair { left, right } => left + right
+    }
+}
+
+fn describe(e: Expr) -> String {
+    match e.kind {
+        ExprKind::Binary { lhs: Expr { id: 1, .. }, rhs } => f"binary from 1 then {rhs.id}"
+        ExprKind::Binary { lhs, .. } => f"binary from {lhs.id}"
+        ExprKind::Pair { left: 0, right } => f"pair from zero to {right}"
+        ExprKind::Ret(None) => "bare return"
+        _ => f"other {e.id}"
+    }
+}
+
+fn main() {
+    let a = Expr { id: 1, kind: ExprKind::Lit("x") }
+    let b = Expr { id: 2, kind: ExprKind::Lit("1") }
+    let c = Expr { id: 3, kind: ExprKind::Binary { lhs: a, rhs: b } }
+    let d = Expr { id: 4, kind: ExprKind::Call { callee: c, args: #[a, b] } }
+    let e = Expr { id: 5, kind: ExprKind::Ret(Some(d)) }
+    let bare = Expr { id: 6, kind: ExprKind::Ret(None) }
+    let p = Expr { id: 7, kind: ExprKind::Pair { left: 0, right: 9 } }
+    let flipped = Expr { id: 8, kind: ExprKind::Binary { lhs: b, rhs: a } }
+    println(f"counts {count(e)} {count(bare)} {count(p)} {count(c)}")
+    for x in #[c, flipped, p, bare, a, d] {
+        println(describe(x))
+    }
+}

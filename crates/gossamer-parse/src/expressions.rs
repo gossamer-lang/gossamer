@@ -204,7 +204,11 @@ impl Parser<'_> {
                     break;
                 }
                 if op != BinaryOp::PipeGt && self.newline_before_peek() {
-                    if begins_expression(op) {
+                    // A head that a `{` must follow (an `if` or `while`
+                    // condition, a `match` scrutinee) has no statement for
+                    // its next line to begin, so an operator there can only
+                    // continue it.
+                    if begins_expression(op) && !self.struct_literal_forbidden() {
                         break;
                     }
                     self.report_leading_operator(op);

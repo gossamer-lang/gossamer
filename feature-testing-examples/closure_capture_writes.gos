@@ -1,0 +1,25 @@
+// A closure names its captures: its writes reach the binding it captured,
+// a vector or one held in a struct field alike.
+
+struct Holder {
+    items: Vec<i64>
+    count: i64
+}
+
+fn main() {
+    let mut xs = #[1]
+    let add = || xs.push(2)
+    add()
+    add()
+    println(xs.len())
+
+    let mut ys = #[1]
+    let read = || ys.len()
+    ys.push(5)
+    println(read())
+
+    let mut h = Holder { items: #[1], count: 0 }
+    let bump = || h.items.push(3)
+    bump()
+    println(h.items.len())
+}

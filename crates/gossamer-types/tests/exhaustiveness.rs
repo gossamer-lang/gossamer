@@ -561,3 +561,90 @@ fn a_catch_all_after_ranges_that_tile_the_type_is_unreachable() {
         run("fn f(n: u8) -> i64 { match n { 0..=127 => 1, 128..=255 => 2, _ => 3 } }\n");
     assert_eq!(unreachable_count(&diagnostics), 1, "{diagnostics:?}");
 }
+
+const STRUCT_PATTERNS: &str = r"
+struct S {
+    b: bool,
+    n: i64,
+}
+enum E {
+    P { x: i64, flag: bool },
+    Q,
+}
+";
+
+#[test]
+fn a_struct_variant_pattern_testing_a_field_leaves_the_rest_reachable() {
+    let source = format!(
+        "{STRUCT_PATTERNS}
+fn main() {{
+    let e = E::Q
+    match e {{
+        E::P {{ flag: true, x }} => x,
+        E::P {{ x, .. }} => x,
+        E::Q => 2,
+    }}
+}}
+"
+    );
+    let diagnostics = run(&source);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn a_struct_variant_pattern_testing_a_field_does_not_cover_the_variant() {
+    let source = format!(
+        "{STRUCT_PATTERNS}
+fn main() {{
+    let e = E::Q
+    match e {{
+        E::P {{ flag: true, x }} => x,
+        E::Q => 2,
+    }}
+}}
+"
+    );
+    let diagnostics = run(&source);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| matches!(&d.error, ExhaustivenessError::NonExhaustive { .. })),
+        "expected a missing `P` with `flag: false`: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn struct_patterns_over_every_field_value_are_exhaustive_and_a_repeat_is_unreachable() {
+    let source = format!(
+        "{STRUCT_PATTERNS}
+fn main() {{
+    let s = S {{ b: true, n: 1 }}
+    match s {{
+        S {{ b: true, .. }} => 1,
+        S {{ b: false, n }} => n,
+    }}
+    let e = E::Q
+    match e {{
+        E::P {{ x, .. }} => x,
+        E::P {{ flag: true, .. }} => 9,
+        E::Q => 2,
+    }}
+}}
+"
+    );
+    let diagnostics = run(&source);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| matches!(&d.error, ExhaustivenessError::NonExhaustive { .. })),
+        "{diagnostics:?}"
+    );
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|d| matches!(d.error, ExhaustivenessError::UnreachableArm))
+            .count(),
+        1,
+        "{diagnostics:?}"
+    );
+}

@@ -1,18 +1,16 @@
-// Compile-time codegen for serialization (serde / kotlinx shape).
-// For every user struct whose fields the synthesizer can classify
-// (primitives, growable arrays of supported types, nested user
-// structs), we synthesize per-type free functions
-// `__gos_serde_to_json_<T>` / `__gos_serde_from_json_<T>` (plus the
-// toml / yaml variants) as real Gossamer source, parse it, and merge
-// it into the program. The public surface is the generic call form
+// Serialization surface (serde / kotlinx shape).
+// For every user type a serde turbofish names whose fields classify
+// (primitives, growable arrays of supported types, nested user types),
+// autoderive declares per-type stubs `__gos_serde_to_json_<T>` /
+// `__gos_serde_from_json_<T>` (plus the toml / yaml variants), so the
+// calls check like any other. The public surface is the generic call form
 // `to_json::<T>(value)` / `from_json::<T>(text)`, which
-// `rewrite_serde_generic_calls` rewrites into those names. There are
-// no `Type::to_json` methods - one spelling only.
+// `rewrite_serde_generic_calls` rewrites into those names. There are no
+// `Type::to_json` methods - one spelling only.
 //
-// Because the synthesized functions are ordinary Gossamer code, they
-// compile through every tier (VM + Cranelift + LLVM) automatically.
-// There is no VM-only intercept; no runtime schema registry; no
-// per-call dispatch overhead.
+// The stubs' bodies come after checking: `gossamer-hir`'s serde pass writes
+// them from the checked field types, over the runtime's typed reader and
+// writer, and every tier compiles them like any other code.
 
 
 use std::collections::{HashMap, HashSet};
@@ -22,7 +20,7 @@ use gossamer_ast::{
     ModulePath, NodeId, PARTITION_POINT_PREFIX, SourceFile, STRUCTURAL_COMPARATOR_PREFIX,
     StructBody, StructDecl, TypeKind, USER_COMPARATOR_PREFIX, UseDecl, UseTarget,
 };
-use gossamer_lex::{FileId, Keyword, Lexer, Punct, SourceMap, Span, TokenKind};
+use gossamer_lex::{FileId, Keyword, Punct, SourceMap, Span, TokenKind};
 
 use crate::{ParseDiagnostic, SerdeTargetRefusal};
 
@@ -225,104 +223,31 @@ impl FieldKind {
         }
     }
 
-    /// Source-level type spelling for a `let mut acc: ... = Vec::from([])`
-    /// declaration used while accumulating a Vec field.
-    fn type_spelling(&self) -> String {
+    /// The user types this kind reaches, at any depth.
+    fn user_types(&self) -> Vec<&TyId> {
         match self {
-            Self::I64 => "i64".to_string(),
-            Self::Int(name) | Self::U64(name) | Self::Float(name) => (*name).to_string(),
-            Self::Bool => "bool".to_string(),
-            Self::String => "String".to_string(),
-            Self::Vec(inner) => format!("Vec<{}>", inner.type_spelling()),
-            Self::Struct(ty) | Self::Enum(ty) => ty.path.clone(),
-            Self::Option(inner) => format!("Option<{}>", inner.type_spelling()),
-            Self::Tuple(elems) => format!(
-                "({})",
-                elems
-                    .iter()
-                    .map(Self::type_spelling)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            Self::Map(inner) => format!("Map<String, {}>", inner.type_spelling()),
-            Self::Json => "json::Value".to_string(),
+            Self::Struct(ty) | Self::Enum(ty) => vec![ty],
+            Self::Vec(inner) | Self::Option(inner) | Self::Map(inner) => inner.user_types(),
+            Self::Tuple(elems) => elems.iter().flat_map(Self::user_types).collect(),
+            Self::I64
+            | Self::Int(_)
+            | Self::U64(_)
+            | Self::Float(_)
+            | Self::Bool
+            | Self::String
+            | Self::Json => Vec::new(),
         }
     }
 
-    /// Gossamer source fragment that renders a single value bound to
-    /// `expr` to JSON-syntax text. Returns an expression of type
-    /// `String` - or, for nested structs, a `?`-propagating call.
-    fn render_to_json(&self, expr: &str) -> String {
+    /// Whether this kind's zero value calls a user type's `default()`: the
+    /// type itself, or a tuple holding one. A sequence, map, or `Option` is
+    /// empty and calls nothing.
+    fn reaches_user_type(&self) -> bool {
         match self {
-            Self::I64 | Self::Int(_) | Self::U64(_) | Self::Bool => {
-                format!("format(\"{{}}\", {expr})")
-            }
-            // JSON has no spelling for NaN or an infinity, which are the
-            // values `x - x` does not bring to zero, so those are `null`.
-            Self::Float(_) => format!(
-                "if {expr} - {expr} == 0.0 {{ format(\"{{}}\", {expr}) }} else {{ \"null\" }}"
-            ),
-            // The text is escaped exactly as `json::encode` escapes a string,
-            // so a quote, a control character, or `<` in it stays inside it.
-            Self::String => format!("json::encode({expr})"),
-            Self::Vec(inner) => render_vec_to_json(expr, inner),
-            Self::Struct(ty) | Self::Enum(ty) => format!("{}({expr})?", to_json_fn(&ty.symbol)),
-            Self::Option(inner) => {
-                let some_render = inner.render_to_json("__inner");
-                format!(
-                    "match {expr} {{ Some(__inner) => {some_render}, None => \"null\" }}"
-                )
-            }
-            Self::Tuple(elems) => render_tuple_to_json(expr, elems),
-            Self::Map(inner) => render_map_to_json(expr, inner),
-            Self::Json => format!("json::render({expr})"),
+            Self::Struct(_) | Self::Enum(_) => true,
+            Self::Tuple(elems) => elems.iter().any(Self::reaches_user_type),
+            _ => false,
         }
-    }
-
-    /// Gossamer source for a strict match-extract block. `value_expr`
-    /// is the `json::Value` bound name; the block evaluates to the
-    /// typed Gossamer value or `return`s a structured `errors::Error`
-    /// with `path` (e.g. "field `tags`: ...") on mismatch.
-    fn extract_strict(&self, value_expr: &str, path: &str) -> String {
-        match self {
-            Self::I64 => format!(
-                "match json::as_i64({value_expr}) {{ Some(__v) => __v, None => return Err(errors::new(\"{path}: expected i64\")) }}"
-            ),
-            Self::Int(width) => format!(
-                "match json::as_i64({value_expr}) {{ Some(__v) => __v as {width}, None => return Err(errors::new(\"{path}: expected {width}\")) }}"
-            ),
-            Self::U64(width) => format!(
-                "match json::as_u64({value_expr}) {{ Some(__v) => __v as {width}, None => return Err(errors::new(\"{path}: expected {width}\")) }}"
-            ),
-            Self::Float(width) => format!(
-                "match json::as_f64({value_expr}) {{ Some(__v) => __v as {width}, None => return Err(errors::new(\"{path}: expected {width}\")) }}"
-            ),
-            Self::Bool => format!(
-                "match json::as_bool({value_expr}) {{ Some(__v) => __v, None => return Err(errors::new(\"{path}: expected bool\")) }}"
-            ),
-            Self::String => format!(
-                "match json::as_str({value_expr}) {{ Some(__v) => __v, None => return Err(errors::new(\"{path}: expected string\")) }}"
-            ),
-            Self::Vec(inner) => extract_vec_strict(value_expr, inner, path),
-            Self::Struct(ty) | Self::Enum(ty) => format!(
-                "match {}({value_expr}) {{ Ok(__v) => __v, Err(__e) => return Err(errors::wrap(__e, \"{path}\")) }}",
-                from_json_value_fn(&ty.symbol)
-            ),
-            Self::Option(inner) => {
-                let some_extract = inner.extract_strict(value_expr, path);
-                format!("if json::is_null({value_expr}) {{ None }} else {{ Some({some_extract}) }}")
-            }
-            Self::Tuple(elems) => extract_tuple_strict(value_expr, elems, path),
-            Self::Map(inner) => extract_map_strict(value_expr, inner, path),
-            // The field already holds a parsed dynamic JSON value.
-            Self::Json => value_expr.to_string(),
-        }
-    }
-
-    /// `true` if this kind decodes a missing object key to a value (rather than
-    /// erroring). Only `Option` does - a missing optional field is `None`.
-    fn tolerates_missing_key(&self) -> bool {
-        matches!(self, Self::Option(_))
     }
 }
 
@@ -337,7 +262,7 @@ pub(crate) fn serde_fn(op: &str, ty: &str) -> String {
 /// The canonical serde operation a `module::item` turbofish spelling names,
 /// or `None` when the pair is not one. `json::decode::<T>` and
 /// `from_json::<T>` name the same typed decode, so both reach the same
-/// synthesized function rather than one of them answering a dynamic value.
+/// declared function rather than one of them answering a dynamic value.
 pub(crate) const fn qualified_serde_op(head: &str, tail: &str) -> Option<&'static str> {
     match (head.as_bytes(), tail.as_bytes()) {
         (b"json", b"decode" | b"from_json") => Some("from_json"),
@@ -348,21 +273,6 @@ pub(crate) const fn qualified_serde_op(head: &str, tail: &str) -> Option<&'stati
         (b"toml", b"to_toml") => Some("to_toml"),
         _ => None,
     }
-}
-fn to_json_fn(ty: &str) -> String {
-    serde_fn("to_json", ty)
-}
-fn from_json_fn(ty: &str) -> String {
-    serde_fn("from_json", ty)
-}
-
-/// Name of the decoder that takes an already-parsed `json::Value`.
-///
-/// A nested value the walk is standing on is a handle onto the document it
-/// came from, so the member decodes from that node directly. The text-taking
-/// decoder is the same body behind one `json::parse`.
-pub(crate) fn from_json_value_fn(ty: &str) -> String {
-    serde_fn("from_json_value", ty)
 }
 
 /// How a synthesized body names one user type: `path` is what the emitted
@@ -507,25 +417,6 @@ pub(crate) fn alias_targets(items: &[Item]) -> HashMap<String, gossamer_ast::Typ
     out
 }
 
-/// Names of the non-generic opaque aliases (`type X = new T`).
-///
-/// Serialization reads and writes the representation, so a field typed
-/// by one needs an explicit `.into()` where the synthesized code builds
-/// the value back; formatting needs none, since an opaque alias renders
-/// as its representation.
-pub(crate) fn opaque_alias_names(items: &[Item]) -> HashSet<String> {
-    let mut out = HashSet::new();
-    for (_, item) in flatten_items_with_modules(items) {
-        let ItemKind::TypeAlias(decl) = &item.kind else {
-            continue;
-        };
-        if decl.nominal && decl.generics.params.is_empty() {
-            out.insert(decl.name.name.clone());
-        }
-    }
-    out
-}
-
 /// Every item in the tree paired with the `::`-joined path of the module
 /// that declares it (empty at the unit root).
 pub(crate) fn flatten_items_with_modules(items: &[Item]) -> Vec<(String, &Item)> {
@@ -553,75 +444,6 @@ fn collect_flat_items_with_modules<'a>(
             module.truncate(restore);
         }
     }
-}
-
-fn render_vec_to_json(expr: &str, inner: &FieldKind) -> String {
-    // Inline a tiny per-Vec assembly. We emit a block expression so
-    // the surrounding `out += ...` lands a single concatenated String.
-    let elem_render = inner.render_to_json("__item");
-    format!(
-        "{{ let mut __buf = \"[\"\n            let mut __first = true\n            for __item in {expr} {{\n                if !__first {{ __buf += \",\" }}\n                __first = false\n                __buf += {elem_render}\n            }}\n            __buf += \"]\"\n            __buf }}"
-    )
-}
-
-fn extract_vec_strict(value_expr: &str, inner: &FieldKind, path: &str) -> String {
-    let elem_path = format!("{path}[index]");
-    let inner_extract = inner.extract_strict("__elem", &elem_path);
-    let elem_ty = inner.type_spelling();
-    format!(
-        "match json::as_array({value_expr}) {{\n                Some(__arr) => {{\n                    let mut __out: Vec<{elem_ty}> = Vec::from([])\n                    for __elem in __arr {{\n                        let __converted = {inner_extract}\n                        __out.push(__converted)\n                    }}\n                    __out\n                }}\n                None => return Err(errors::new(\"{path}: expected array\")),\n            }}"
-    )
-}
-
-fn render_tuple_to_json(expr: &str, elems: &[FieldKind]) -> String {
-    let mut out = String::from("{ let mut __buf = \"[\"\n");
-    for (i, k) in elems.iter().enumerate() {
-        if i > 0 {
-            out.push_str("            __buf += \",\"\n");
-        }
-        let er = k.render_to_json(&format!("{expr}.{i}"));
-        out.push_str(&format!("            __buf += {er}\n"));
-    }
-    out.push_str("            __buf += \"]\"\n            __buf }");
-    out
-}
-
-fn extract_tuple_strict(value_expr: &str, elems: &[FieldKind], path: &str) -> String {
-    let n = elems.len();
-    let mut out = format!(
-        "match json::as_array({value_expr}) {{\n                Some(__arr) => {{\n                    if __arr.len() != {n} {{ return Err(errors::new(\"{path}: expected {n}-element array\")) }}\n"
-    );
-    let mut names = Vec::with_capacity(n);
-    for (i, k) in elems.iter().enumerate() {
-        let ex = k.extract_strict(&format!("__arr[{i}]"), &format!("{path}.{i}"));
-        out.push_str(&format!("                    let __e{i} = {ex}\n"));
-        names.push(format!("__e{i}"));
-    }
-    out.push_str(&format!("                    ({})\n", names.join(", ")));
-    out.push_str(&format!(
-        "                }}\n                None => return Err(errors::new(\"{path}: expected array\")),\n            }}"
-    ));
-    out
-}
-
-fn render_map_to_json(expr: &str, inner: &FieldKind) -> String {
-    // Sort keys so the object text is deterministic across tiers (a HashMap's
-    // iteration order is not stable and differs interp-vs-compiled).
-    let vr = inner.render_to_json("__v");
-    format!(
-        "{{ let mut __ks = {expr}.keys()\n            __ks.sort()\n            let mut __buf = \"{{\"\n            let mut __first = true\n            for __k in __ks {{\n                if !__first {{ __buf += \",\" }}\n                __first = false\n                __buf += json::encode(__k)\n                __buf += \":\"\n                if let Some(__v) = {expr}.get(__k) {{ __buf += {vr} }}\n            }}\n            __buf += \"}}\"\n            __buf }}"
-    )
-}
-
-fn extract_map_strict(value_expr: &str, inner: &FieldKind, path: &str) -> String {
-    // Unique bind names (`__map*`) so nested maps and the enclosing field's own
-    // `__child` binding never collide - the compiled tier resolves shadows
-    // differently from the VM, so an ambiguous reuse silently miscompiles.
-    let vt = inner.type_spelling();
-    let ve = inner.extract_strict("__mapval", &format!("{path}[key]"));
-    format!(
-        "match json::keys({value_expr}) {{\n                Some(__mapkeys) => {{\n                    let mut __map: Map<String, {vt}> = Map::new()\n                    for __mapk in __mapkeys {{\n                        let __mapval = match json::get({value_expr}, __mapk) {{ Some(__mc) => __mc, None => return Err(errors::new(\"{path}: missing key\")) }}\n                        let __mapentry = {ve}\n                        __map.insert(__mapk, __mapentry)\n                    }}\n                    __map\n                }}\n                None => return Err(errors::new(\"{path}: expected object\")),\n            }}"
-    )
 }
 
 /// Mangled name of the synthesized field-reflection function for a

@@ -119,6 +119,18 @@ fn assign_roots(place: &Expr) -> Box<dyn Iterator<Item = &str> + '_> {
     }
 }
 
+/// The path expression a place is read through, after references,
+/// fields, and indexing.
+fn root_expr(expr: &Expr) -> Option<&Expr> {
+    match &expr.kind {
+        ExprKind::Path(_) => Some(expr),
+        ExprKind::Unary { operand, .. } => root_expr(operand),
+        ExprKind::FieldAccess { receiver, .. } => root_expr(receiver),
+        ExprKind::Index { base, .. } => root_expr(base),
+        _ => None,
+    }
+}
+
 fn root_name(expr: &Expr) -> Option<&str> {
     match &expr.kind {
         ExprKind::Path(path) => path.segments.first().map(|seg| seg.name.name.as_str()),
@@ -185,27 +197,63 @@ fn pat_binding_names(pat: &Pattern, out: &mut Vec<String>) {
 }
 
 /// Parameter binding names of a function (including a `self` receiver).
-fn param_names(decl: &FnDecl) -> HashSet<String> {
-    let mut names = HashSet::new();
-    for param in &decl.params {
+/// Each name a function's parameters bind, with the position of the
+/// parameter that binds it.
+fn param_positions(decl: &FnDecl) -> HashMap<String, usize> {
+    let mut names = HashMap::new();
+    for (position, param) in decl.params.iter().enumerate() {
         match param {
             FnParam::Receiver(_) => {
-                names.insert("self".to_string());
+                names.insert("self".to_string(), position);
             }
             FnParam::Typed { pattern, .. } => {
                 let mut bound = Vec::new();
                 pat_binding_names(pattern, &mut bound);
-                names.extend(bound);
+                for name in bound {
+                    names.insert(name, position);
+                }
             }
         }
     }
     names
 }
 
+/// How a free function may let an argument outlive the call.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct StashSummary {
+    /// It spawns, selects, writes a static, or hands an argument to a place
+    /// it cannot name: any argument may escape anywhere.
+    global: bool,
+    /// The parameters it may store an argument into. An argument escapes
+    /// through one of them only when the place passed there outlives the
+    /// caller's region.
+    sinks: HashSet<usize>,
+}
+
+impl StashSummary {
+    fn stashes(&self) -> bool {
+        self.global || !self.sinks.is_empty()
+    }
+}
+
+/// Where a call argument's value lives, as the function making the call
+/// sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArgRoot {
+    /// The function's own parameter at this position.
+    Param(usize),
+    /// A binding of the function's own body.
+    Local,
+    /// A static, or an expression with no root binding.
+    Other,
+}
+
 /// Free functions that may let an argument escape beyond their own return:
 /// they spawn goroutines, touch `select`, write a static, or stash a value
-/// through a parameter. Computed as a transitive closure over the static
-/// call graph so a function that merely calls such a function is also unsafe.
+/// through a parameter, recording which parameters receive the stash.
+/// Computed as a fixed point over the static call graph, so a function that
+/// passes its parameter to another's receiving parameter receives through
+/// it too.
 /// Methods and associated functions are not in the graph (method dispatch is
 /// name-global at this stage); calls through them are vetted conservatively at
 /// the call site instead.
@@ -214,34 +262,47 @@ fn collect_region_unsafe_fns(
     resolutions: &Resolutions,
     table: &TypeTable,
     tcx: &TyCtxt,
-) -> HashSet<DefId> {
-    let mut fns: Vec<(DefId, HashSet<String>, &Expr)> = Vec::new();
+) -> HashMap<DefId, StashSummary> {
+    let mut fns: Vec<(DefId, HashMap<String, usize>, &Expr)> = Vec::new();
     collect_fns(&source.items, resolutions, &mut fns);
 
-    let mut direct_unsafe: HashSet<DefId> = HashSet::new();
-    let mut callees: HashMap<DefId, HashSet<DefId>> = HashMap::new();
+    let mut summaries: HashMap<DefId, StashSummary> = HashMap::new();
+    let mut calls: HashMap<DefId, Vec<(DefId, Vec<ArgRoot>)>> = HashMap::new();
     for (def, params, body) in &fns {
         let mut scan = Scan {
             resolutions,
             table,
             tcx,
             params,
-            unsafe_now: false,
-            callees: HashSet::new(),
+            summary: StashSummary::default(),
+            calls: Vec::new(),
         };
         scan.expr(body);
-        if scan.unsafe_now {
-            direct_unsafe.insert(*def);
-        }
-        callees.insert(*def, scan.callees);
+        summaries.insert(*def, scan.summary);
+        calls.insert(*def, scan.calls);
     }
 
-    let mut unsafe_set = direct_unsafe;
     loop {
         let mut changed = false;
-        for (def, cs) in &callees {
-            if !unsafe_set.contains(def) && cs.iter().any(|c| unsafe_set.contains(c)) {
-                unsafe_set.insert(*def);
+        for (def, sites) in &calls {
+            let mut grown = summaries.get(def).cloned().unwrap_or_default();
+            for (callee, roots) in sites {
+                let Some(callee_summary) = summaries.get(callee) else {
+                    continue;
+                };
+                grown.global |= callee_summary.global;
+                for &sink in &callee_summary.sinks {
+                    match roots.get(sink).copied().unwrap_or(ArgRoot::Other) {
+                        ArgRoot::Param(position) => {
+                            grown.sinks.insert(position);
+                        }
+                        ArgRoot::Local => {}
+                        ArgRoot::Other => grown.global = true,
+                    }
+                }
+            }
+            if summaries.get(def) != Some(&grown) {
+                summaries.insert(*def, grown);
                 changed = true;
             }
         }
@@ -249,7 +310,8 @@ fn collect_region_unsafe_fns(
             break;
         }
     }
-    unsafe_set
+    summaries.retain(|_, summary| summary.stashes());
+    summaries
 }
 
 /// Gathers every free-function body with its `DefId` and parameter names,
@@ -257,13 +319,13 @@ fn collect_region_unsafe_fns(
 fn collect_fns<'a>(
     items: &'a [Item],
     resolutions: &Resolutions,
-    out: &mut Vec<(DefId, HashSet<String>, &'a Expr)>,
+    out: &mut Vec<(DefId, HashMap<String, usize>, &'a Expr)>,
 ) {
     for item in items {
         match &item.kind {
             ItemKind::Fn(decl) => {
                 if let (Some(def), Some(body)) = (resolutions.definition_of(item.id), &decl.body) {
-                    out.push((def, param_names(decl), body));
+                    out.push((def, param_positions(decl), body));
                 }
             }
             ItemKind::Mod(decl) => {
@@ -276,15 +338,15 @@ fn collect_fns<'a>(
     }
 }
 
-/// Per-function scan that marks a function region-unsafe and records its
-/// resolved callees.
+/// Per-function scan that summarises how a function stashes its arguments
+/// and records its resolved calls with where each argument lives.
 struct Scan<'a> {
     resolutions: &'a Resolutions,
     table: &'a TypeTable,
     tcx: &'a TyCtxt,
-    params: &'a HashSet<String>,
-    unsafe_now: bool,
-    callees: HashSet<DefId>,
+    params: &'a HashMap<String, usize>,
+    summary: StashSummary,
+    calls: Vec<(DefId, Vec<ArgRoot>)>,
 }
 
 impl Scan<'_> {
@@ -309,6 +371,32 @@ impl Scan<'_> {
         }
     }
 
+    /// Records a store into the place rooted at `root`.
+    fn stash_into(&mut self, root: &str) {
+        if let Some(&position) = self.params.get(root) {
+            self.summary.sinks.insert(position);
+        }
+    }
+
+    /// Where the value `arg` names lives.
+    fn arg_root(&self, arg: &Expr) -> ArgRoot {
+        let Some(root) = root_expr(arg) else {
+            return ArgRoot::Other;
+        };
+        let ExprKind::Path(path) = &root.kind else {
+            return ArgRoot::Other;
+        };
+        if path.segments.len() == 1
+            && let Some(&position) = self.params.get(path.segments[0].name.name.as_str())
+        {
+            return ArgRoot::Param(position);
+        }
+        match self.resolutions.get(root.id) {
+            Some(Resolution::Local(_)) => ArgRoot::Local,
+            _ => ArgRoot::Other,
+        }
+    }
+
     fn non_copy(&self, expr: &Expr) -> bool {
         self.table
             .get(expr.id)
@@ -322,7 +410,7 @@ impl Scan<'_> {
     fn expr(&mut self, expr: &Expr) {
         match &expr.kind {
             ExprKind::Select(arms) => {
-                self.unsafe_now = true;
+                self.summary.global = true;
                 for arm in arms {
                     match &arm.op {
                         SelectOp::Recv { channel, .. } => self.expr(channel),
@@ -342,7 +430,8 @@ impl Scan<'_> {
                         kind: DefKind::Fn,
                     }) = self.resolutions.get(callee.id)
                     {
-                        self.callees.insert(def);
+                        let roots = args.iter().map(|a| self.arg_root(a)).collect();
+                        self.calls.push((def, roots));
                     }
                 }
                 self.expr(callee);
@@ -357,9 +446,9 @@ impl Scan<'_> {
                 ..
             } => {
                 if MUTATOR_METHODS.contains(&name.name.as_str())
-                    && root_name(receiver).is_some_and(|r| self.params.contains(r))
+                    && let Some(root) = root_name(receiver)
                 {
-                    self.unsafe_now = true;
+                    self.stash_into(root);
                 }
                 self.expr(receiver);
                 for a in args {
@@ -372,10 +461,13 @@ impl Scan<'_> {
                     ..
                 }) = self.resolutions.get(place.id)
                 {
-                    self.unsafe_now = true;
+                    self.summary.global = true;
                 }
-                if self.non_copy(value) && assign_roots(place).any(|r| self.params.contains(r)) {
-                    self.unsafe_now = true;
+                if self.non_copy(value) {
+                    let roots: Vec<&str> = assign_roots(place).collect();
+                    for root in roots {
+                        self.stash_into(root);
+                    }
                 }
                 self.expr(place);
                 self.expr(value);
@@ -486,7 +578,7 @@ struct Finder<'a> {
     resolutions: &'a Resolutions,
     table: &'a TypeTable,
     tcx: &'a TyCtxt,
-    unsafe_fns: &'a HashSet<DefId>,
+    unsafe_fns: &'a HashMap<DefId, StashSummary>,
     diags: Vec<ArenaEscapeDiagnostic>,
 }
 
@@ -693,11 +785,11 @@ impl Finder<'_> {
 
 /// Classification of a call's callee for region-escape purposes.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum CalleeClass {
+enum CalleeClass<'s> {
     /// A vetted free function, a constructor, or a builtin/stdlib call.
     Safe,
-    /// A free function proven to possibly stash an argument.
-    Unsafe,
+    /// A free function that may stash an argument, and how.
+    Unsafe(&'s StashSummary),
     /// An indirect call (through a local, static, or non-path callee) that
     /// cannot be vetted statically.
     Indirect,
@@ -708,7 +800,7 @@ struct Analyzer<'a> {
     resolutions: &'a Resolutions,
     table: &'a TypeTable,
     tcx: &'a TyCtxt,
-    unsafe_fns: &'a HashSet<DefId>,
+    unsafe_fns: &'a HashMap<DefId, StashSummary>,
     /// Names `let`-bound lexically within this arena block.
     block_locals: HashSet<String>,
     /// Subset of `block_locals` whose value is arena-allocated.
@@ -719,7 +811,7 @@ struct Analyzer<'a> {
     diags: Vec<ArenaEscapeDiagnostic>,
 }
 
-impl Analyzer<'_> {
+impl<'a> Analyzer<'a> {
     fn flag(&mut self, span: Span, kind: ArenaEscapeKind) {
         self.diags
             .push(ArenaEscapeDiagnostic::new(ArenaEscapeError { kind }, span));
@@ -801,7 +893,7 @@ impl Analyzer<'_> {
         root_name(place).is_none_or(|root| !self.block_locals.contains(root))
     }
 
-    fn classify_callee(&self, callee: &Expr) -> CalleeClass {
+    fn classify_callee(&self, callee: &Expr) -> CalleeClass<'a> {
         let ExprKind::Path(_) = &callee.kind else {
             return CalleeClass::Indirect;
         };
@@ -809,13 +901,10 @@ impl Analyzer<'_> {
             Some(Resolution::Def {
                 def,
                 kind: DefKind::Fn,
-            }) => {
-                if self.unsafe_fns.contains(&def) {
-                    CalleeClass::Unsafe
-                } else {
-                    CalleeClass::Safe
-                }
-            }
+            }) => match self.unsafe_fns.get(&def) {
+                Some(summary) => CalleeClass::Unsafe(summary),
+                None => CalleeClass::Safe,
+            },
             Some(Resolution::Def {
                 kind: DefKind::Variant | DefKind::Struct | DefKind::Const,
                 ..
@@ -896,7 +985,17 @@ impl Analyzer<'_> {
         }
         let kind = match self.classify_callee(callee) {
             CalleeClass::Safe => return,
-            CalleeClass::Unsafe => ArenaEscapeKind::UnsafeCallee,
+            // A stash into an argument this block owns dies with the block.
+            CalleeClass::Unsafe(summary)
+                if !summary.global
+                    && summary
+                        .sinks
+                        .iter()
+                        .all(|&sink| args.get(sink).is_some_and(|a| !self.escapes_outer(a))) =>
+            {
+                return;
+            }
+            CalleeClass::Unsafe(_) => ArenaEscapeKind::UnsafeCallee,
             CalleeClass::Indirect => ArenaEscapeKind::IndirectCall,
         };
         for a in args {

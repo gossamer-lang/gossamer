@@ -125,7 +125,8 @@ fn staticlib_builds_and_archive_is_present() {
     .unwrap()
     .expect("staticlib");
 
-    let archive = staticlib.ensure_built().expect("staticlib build succeeded");
+    let built = staticlib.ensure_built().expect("staticlib build succeeded");
+    let archive = built.archive.clone();
     assert!(archive.is_file(), "archive must exist");
     let expected_ext = if cfg!(all(windows, target_env = "msvc")) {
         "lib"
@@ -150,5 +151,35 @@ fn staticlib_builds_and_archive_is_present() {
 
     // Second build short-circuits.
     let again = staticlib.ensure_built().unwrap();
-    assert_eq!(again, archive);
+    assert_eq!(again, built);
+}
+
+#[test]
+fn staticlib_reports_the_native_libraries_its_link_needs() {
+    let cache = fresh_cache();
+    let manifest_dir = fresh_cache();
+    let manifest = write_manifest_with_echo(&manifest_dir, &fixture_path());
+    let staticlib = StaticBindingsLib::from_manifest_in(
+        &manifest,
+        &manifest_dir,
+        &workspace_root(),
+        Profile::Debug,
+        &cache,
+    )
+    .unwrap()
+    .expect("staticlib");
+
+    // Every Rust staticlib needs the platform C library std is built on.
+    let built = staticlib.ensure_built().expect("staticlib build succeeded");
+    assert!(
+        !built.native_libs.is_empty(),
+        "native libs: {:?}",
+        built.native_libs
+    );
+
+    // A cache hit answers the libraries recorded by the build.
+    assert_eq!(
+        staticlib.ensure_built().unwrap().native_libs,
+        built.native_libs
+    );
 }

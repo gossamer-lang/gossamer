@@ -243,6 +243,21 @@ impl<'a> Builder<'a> {
         {
             return self.lower_ffi_intrinsic(intrinsic, args, ty, span);
         }
+        // A step of a generated serde walk is one call to the runtime entry of
+        // the same name.
+        if let HirExprKind::Path {
+            segments,
+            def: None,
+        } = &callee.kind
+            && let [only] = segments.as_slice()
+            && let Some(symbol) = gossamer_hir::serde_step_symbol(&only.name)
+        {
+            let mut locals = Vec::with_capacity(args.len());
+            for arg in args {
+                locals.push(self.lower_expr(arg)?);
+            }
+            return Some(self.emit_rt_call(&symbol, locals, ty, span));
+        }
         // A callee the resolver bound to a program function is that
         // function, whatever its path spells: a user module may declare
         // `json::render` or `fs::read`, and the standard library's lowering
@@ -1686,23 +1701,9 @@ impl<'a> Builder<'a> {
     }
 
     /// The `Vec` element-kind tag an element store of `elem` elements carries,
-    /// naming what one slot owns: a counted string, container, or error
-    /// handle, or nothing beyond the slot itself.
+    /// naming what one slot owns.
     pub(crate) fn vec_elem_kind_tag(&self, elem: Ty) -> u8 {
-        match self.tcx.kind_of(elem) {
-            TyKind::String => 1,
-            TyKind::Vec(_) | TyKind::Slice(_) | TyKind::Iterator(_) => 2,
-            TyKind::HashMap { .. } => 3,
-            TyKind::DynError => 4,
-            // A `json::Value` element is a handle holding a share of the
-            // document it views, so the vector's teardown gives each back.
-            TyKind::JsonValue => 12,
-            // A single-slot struct, tuple, or fixed array is held inline
-            // and its slot address is the value; the store has to know,
-            // since a one-word scalar element is the value itself.
-            _ if self.tcx.is_flat_inline_aggregate(elem) => 10,
-            _ => 0,
-        }
+        self.tcx.vec_elem_kind(elem)
     }
 
     pub(crate) fn mut_ref_reload_target(&self, arg: &HirExpr) -> Option<Local> {

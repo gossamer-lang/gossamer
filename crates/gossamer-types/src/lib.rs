@@ -38,6 +38,29 @@ mod trait_index;
 mod traits;
 mod ty;
 
+/// Element-kind tags a vector's header carries, naming what one element
+/// owns. The runtime's `vec_elem_kind` module defines the same values.
+pub mod vec_elem_kind {
+    /// A value owning no other heap memory.
+    pub const PRIMITIVE: u8 = 0;
+    /// A counted runtime string.
+    pub const STRING: u8 = 1;
+    /// A vector handle.
+    pub const VEC: u8 = 2;
+    /// A map handle.
+    pub const MAP: u8 = 3;
+    /// An `errors::Error` handle.
+    pub const ERROR: u8 = 4;
+    /// A struct, tuple, or fixed array of a single slot, held inline.
+    pub const AGGR_FLAT: u8 = 10;
+    /// A `json::Value` handle.
+    pub const JSON: u8 = 12;
+    /// A narrow two's-complement integer (`i8`, `i16`, `i32`).
+    pub const SIGNED: u8 = 18;
+    /// A four-byte `f32`.
+    pub const F32: u8 = 19;
+}
+
 pub use admissible::{AdmissibilityDiagnostic, Inadmissible, check_parallel_adapters};
 pub use arena_escape::{
     ArenaEscapeDiagnostic, ArenaEscapeError, ArenaEscapeKind, check_arena_escapes,

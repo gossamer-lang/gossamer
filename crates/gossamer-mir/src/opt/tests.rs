@@ -466,6 +466,81 @@ mod elision_tests {
         );
     }
 
+    /// `L2 = gos_rt_vec_get_ptr(L1, 0); L3 = Copy(L2.1); retain(L3);
+    /// L4 = gos_rt_vec_len(L3)` then `release(L3); Return`, where `L1` is a
+    /// `Vec<(i64, Vec<i64>)>` parameter: the shape of
+    /// `for x in self.rows[i].items`.
+    #[test]
+    fn elides_share_of_holder_read_through_an_element_address() {
+        let mut tcx = TyCtxt::new();
+        let unit = tcx.unit();
+        let i64_ty = tcx.int_ty(gossamer_types::IntTy::I64);
+        let vec_ty = tcx.intern(gossamer_types::TyKind::Vec(i64_ty));
+        let row = tcx.intern(gossamer_types::TyKind::Tuple(vec![i64_ty, vec_ty]));
+        let rows = tcx.intern(gossamer_types::TyKind::Vec(row));
+        let locals = vec![
+            decl(unit),   // L0 return
+            decl(rows),   // L1 parameter
+            decl(i64_ty), // L2 element address
+            decl(vec_ty), // L3 holder
+            decl(i64_ty), // L4 len
+            decl(unit),   // L5 retain dest
+            decl(unit),   // L6 release dest
+        ];
+        let mut body = Body {
+            name: "t".into(),
+            def: None,
+            arity: 1,
+            locals,
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    stmts: vec![],
+                    terminator: Terminator::Call {
+                        callee: Operand::Const(ConstValue::Str("gos_rt_vec_get_ptr".into())),
+                        args: vec![
+                            Operand::Copy(Place::local(Local(1))),
+                            Operand::Const(ConstValue::Int(0)),
+                        ],
+                        destination: Place::local(Local(2)),
+                        target: Some(BlockId(1)),
+                    },
+                    ..block_at(span())
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    stmts: vec![
+                        assign(
+                            Place::local(Local(3)),
+                            Rvalue::Use(Operand::Copy(Place {
+                                local: Local(2),
+                                projection: vec![Projection::Field(1)],
+                            })),
+                        ),
+                        rc_call(5, "gos_rt_vec_retain", Place::local(Local(3))),
+                    ],
+                    terminator: Terminator::Call {
+                        callee: Operand::Const(ConstValue::Str("gos_rt_vec_len".into())),
+                        args: vec![Operand::Copy(Place::local(Local(3)))],
+                        destination: Place::local(Local(4)),
+                        target: Some(BlockId(2)),
+                    },
+                    ..block_at(span())
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    stmts: vec![rc_call(6, "gos_rt_vec_free", Place::local(Local(3)))],
+                    terminator: Terminator::Return,
+                    ..block_at(span())
+                },
+            ],
+            span: span(),
+        };
+        elide_borrowed_holder_rc(&mut body, &tcx, &crate::opt::CalleeParams::unknown());
+        assert!(is_nop(&body.blocks[1].stmts[1]), "retain of the holder should go");
+        assert!(is_nop(&body.blocks[2].stmts[0]), "release of the holder should go");
+    }
+
     #[test]
     fn keeps_share_of_holder_when_its_source_is_written_before_the_read() {
         let mut tcx = TyCtxt::new();

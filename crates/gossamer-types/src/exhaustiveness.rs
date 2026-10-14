@@ -44,10 +44,13 @@ pub fn check_exhaustiveness(
     tcx: &TyCtxt,
 ) -> Vec<ExhaustivenessDiagnostic> {
     let enums = collect_enums(source, resolutions);
+    let mut fields = FieldOrders::default();
+    fields.collect(&source.items);
     let mut checker = Checker {
         tcx,
         table,
         enums: &enums,
+        fields: &fields,
         diagnostics: Vec::new(),
     };
     checker.walk_items(&source.items);
@@ -58,7 +61,76 @@ struct Checker<'a> {
     tcx: &'a TyCtxt,
     table: &'a TypeTable,
     enums: &'a HashMap<DefId, Vec<String>>,
+    fields: &'a FieldOrders,
     diagnostics: Vec<ExhaustivenessDiagnostic>,
+}
+
+/// The declared field order of every struct and struct-shaped enum variant,
+/// by name, so a struct pattern's named fields line up by position. A name
+/// two declarations give different orders is ambiguous and recorded as such.
+#[derive(Default)]
+struct FieldOrders {
+    variants: HashMap<String, Option<Vec<String>>>,
+    structs: HashMap<String, Option<Vec<String>>>,
+}
+
+impl FieldOrders {
+    fn collect(&mut self, items: &[Item]) {
+        let names = |body: &gossamer_ast::StructBody| match body {
+            gossamer_ast::StructBody::Named(fields) => Some(
+                fields
+                    .iter()
+                    .map(|f| f.name.name.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        };
+        let record =
+            |map: &mut HashMap<String, Option<Vec<String>>>, name: &str, order: Vec<String>| {
+                map.entry(name.to_string())
+                    .and_modify(|seen| {
+                        if seen.as_ref() != Some(&order) {
+                            *seen = None;
+                        }
+                    })
+                    .or_insert(Some(order));
+            };
+        for item in items {
+            match &item.kind {
+                ItemKind::Enum(decl) => {
+                    for variant in &decl.variants {
+                        if let Some(order) = names(&variant.body) {
+                            record(&mut self.variants, &variant.name.name, order);
+                        }
+                    }
+                }
+                ItemKind::Struct(decl) => {
+                    if let Some(order) = names(&decl.body) {
+                        record(&mut self.structs, &decl.name.name, order);
+                    }
+                }
+                ItemKind::Mod(decl) => {
+                    if let gossamer_ast::ModBody::Inline(inner) = &decl.body {
+                        self.collect(inner);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The declared field order a struct pattern naming `path` destructures:
+    /// an enum variant's when the path is qualified or names no struct, else
+    /// the struct's.
+    fn of(&self, path: &gossamer_ast::TypePath) -> Option<&[String]> {
+        let name = path.segments.last()?.name.name.as_str();
+        let order = if path.segments.len() > 1 || !self.structs.contains_key(name) {
+            self.variants.get(name)
+        } else {
+            self.structs.get(name)
+        };
+        order?.as_deref()
+    }
 }
 
 impl Checker<'_> {
@@ -243,7 +315,7 @@ impl Checker<'_> {
         let rows: Vec<Row> = arms
             .iter()
             .map(|arm| Row {
-                pat: lower_pattern(&arm.pattern),
+                pat: lower_pattern(&arm.pattern, self.fields),
                 has_guard: arm.guard.is_some(),
                 span: arm.pattern.span,
             })
@@ -922,7 +994,7 @@ fn subsumes(earlier: &Pat, later: &Pat) -> bool {
     }
 }
 
-fn lower_pattern(pattern: &Pattern) -> Pat {
+fn lower_pattern(pattern: &Pattern, fields: &FieldOrders) -> Pat {
     match &pattern.kind {
         PatternKind::Wildcard | PatternKind::Rest => Pat::Wild,
         PatternKind::Ident { subpattern, .. } => {
@@ -933,7 +1005,7 @@ fn lower_pattern(pattern: &Pattern) -> Pat {
             // reachable-only when it's actually shadowed (or vice
             // versa for unreachability).
             match subpattern {
-                Some(inner) => lower_pattern(inner),
+                Some(inner) => lower_pattern(inner, fields),
                 None => Pat::Wild,
             }
         }
@@ -957,20 +1029,14 @@ fn lower_pattern(pattern: &Pattern) -> Pat {
                 .unwrap_or_default();
             Pat::Variant {
                 name,
-                fields: elems.iter().map(lower_pattern).collect(),
+                fields: elems.iter().map(|p| lower_pattern(p, fields)).collect(),
             }
         }
-        PatternKind::Struct { path, .. } => {
-            let name = path
-                .segments
-                .last()
-                .map(|seg| seg.name.name.clone())
-                .unwrap_or_default();
-            Pat::Variant {
-                name,
-                fields: Vec::new(),
-            }
-        }
+        PatternKind::Struct {
+            path,
+            fields: named,
+            ..
+        } => lower_struct_pattern(path, named, fields),
         // `(a, .., d)` names a prefix and a suffix around a rest that spans
         // however many elements the tuple's width leaves between them.
         PatternKind::Tuple(parts) => match parts
@@ -978,10 +1044,16 @@ fn lower_pattern(pattern: &Pattern) -> Pat {
             .position(|part| matches!(part.kind, PatternKind::Rest))
         {
             Some(at) => Pat::SliceRest {
-                prefix: parts[..at].iter().map(lower_pattern).collect(),
-                suffix: parts[at + 1..].iter().map(lower_pattern).collect(),
+                prefix: parts[..at]
+                    .iter()
+                    .map(|p| lower_pattern(p, fields))
+                    .collect(),
+                suffix: parts[at + 1..]
+                    .iter()
+                    .map(|p| lower_pattern(p, fields))
+                    .collect(),
             },
-            None => Pat::Tuple(parts.iter().map(lower_pattern).collect()),
+            None => Pat::Tuple(parts.iter().map(|p| lower_pattern(p, fields)).collect()),
         },
         // A `[..]` / `[..rest]` slice (no fixed elements) matches any
         // slice, so it acts as a catch-all. A fixed-width `[a, b]` slice
@@ -996,12 +1068,12 @@ fn lower_pattern(pattern: &Pattern) -> Pat {
         } => match rest {
             Some(_) if prefix.is_empty() && suffix.is_empty() => Pat::Wild,
             Some(_) => Pat::SliceRest {
-                prefix: prefix.iter().map(lower_pattern).collect(),
-                suffix: suffix.iter().map(lower_pattern).collect(),
+                prefix: prefix.iter().map(|p| lower_pattern(p, fields)).collect(),
+                suffix: suffix.iter().map(|p| lower_pattern(p, fields)).collect(),
             },
-            None => Pat::List(prefix.iter().map(lower_pattern).collect()),
+            None => Pat::List(prefix.iter().map(|p| lower_pattern(p, fields)).collect()),
         },
-        PatternKind::Or(alts) => Pat::Or(alts.iter().map(lower_pattern).collect()),
+        PatternKind::Or(alts) => Pat::Or(alts.iter().map(|p| lower_pattern(p, fields)).collect()),
         PatternKind::Range { lo, hi, kind } => {
             let bound = |lit: &Option<Literal>, open: i128| match lit {
                 None => Some(open),
@@ -1019,8 +1091,62 @@ fn lower_pattern(pattern: &Pattern) -> Pat {
             };
             Pat::Range(lo, hi)
         }
-        PatternKind::Ref { inner, .. } => lower_pattern(inner),
+        PatternKind::Ref { inner, .. } => lower_pattern(inner, fields),
         PatternKind::Error => Pat::Opaque,
+    }
+}
+
+/// A struct pattern: its named fields set out in declaration order, with a
+/// field it leaves out or binds by shorthand matching anything. An enum
+/// variant's is that variant's constructor; a struct's is the product of its
+/// fields. Without a declared order the fields cannot be placed, so a pattern
+/// that tests one is opaque, and one that tests none is the bare name.
+fn lower_struct_pattern(
+    path: &gossamer_ast::TypePath,
+    named: &[gossamer_ast::FieldPattern],
+    fields: &FieldOrders,
+) -> Pat {
+    let name = path
+        .segments
+        .last()
+        .map(|seg| seg.name.name.clone())
+        .unwrap_or_default();
+    let lowered: Vec<(&str, Pat)> = named
+        .iter()
+        .map(|f| {
+            let pat = f
+                .pattern
+                .as_ref()
+                .map_or(Pat::Wild, |p| lower_pattern(p, fields));
+            (f.name.name.as_str(), pat)
+        })
+        .collect();
+    if lowered.iter().all(|(_, pat)| is_catch_all(pat)) {
+        return Pat::Variant {
+            name,
+            fields: Vec::new(),
+        };
+    }
+    let Some(order) = fields.of(path) else {
+        return Pat::Opaque;
+    };
+    let positional: Vec<Pat> = order
+        .iter()
+        .map(|field| {
+            lowered
+                .iter()
+                .find(|(n, _)| n == field)
+                .map_or(Pat::Wild, |(_, pat)| pat.clone())
+        })
+        .collect();
+    let is_variant = path.segments.len() > 1 || !fields.structs.contains_key(name.as_str());
+    if is_variant {
+        Pat::Variant {
+            name,
+            fields: positional,
+        }
+    } else {
+        Pat::Tuple(positional)
     }
 }
 

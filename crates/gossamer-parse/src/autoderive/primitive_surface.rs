@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use gossamer_lex::{Keyword, Lexer, Punct, SourceMap, TokenKind};
+use gossamer_lex::{Keyword, Lexer, Punct, SourceMap, Token, TokenKind};
 
 /// The types a method is declared for.
 #[derive(Clone, Copy)]
@@ -817,17 +817,70 @@ fn __gos_fmt_exp(text: String, precision: i64, upper: bool) -> String {
 
 /// The format renderers `source`'s templates call, or an empty string.
 #[must_use]
-pub(crate) fn synthesize_format_helpers(source: &str) -> String {
+/// A program's tokens, lexed on first use, so every scan of one source shares
+/// a single pass of the lexer.
+pub(crate) struct SourceTokens<'a> {
+    source: &'a str,
+    tokens: std::cell::OnceCell<Vec<Token>>,
+}
+
+impl<'a> SourceTokens<'a> {
+    pub(crate) fn new(source: &'a str) -> Self {
+        Self {
+            source,
+            tokens: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// `source`'s tokens as a lexer pass already produced them.
+    pub(crate) fn lexed(source: &'a str, tokens: Vec<Token>) -> Self {
+        Self {
+            source,
+            tokens: std::cell::OnceCell::from(tokens),
+        }
+    }
+
+    /// Every token of the source, ending with `Eof`. Whitespace and comments
+    /// may or may not be among them, so a scan skips them.
+    pub(crate) fn all(&self) -> &[Token] {
+        self.tokens.get_or_init(|| lex(self.source))
+    }
+
+    /// `true` when some token satisfies `wanted`. Before anything has lexed
+    /// the source, the lexer stops at the first match instead of reading
+    /// the rest.
+    pub(crate) fn any(&self, wanted: impl Fn(TokenKind) -> bool) -> bool {
+        if let Some(tokens) = self.tokens.get() {
+            return tokens.iter().any(|token| wanted(token.kind));
+        }
+        let mut map = SourceMap::new();
+        let file = map.add_file("<autoderive-prescan>", String::new());
+        let mut lexer = Lexer::new(self.source, file);
+        loop {
+            let kind = lexer.next_token().kind;
+            if kind == TokenKind::Eof {
+                return false;
+            }
+            if wanted(kind) {
+                return true;
+            }
+        }
+    }
+}
+
+fn lex(text: &str) -> Vec<Token> {
+    let mut map = SourceMap::new();
+    let file = map.add_file("<autoderive-scan>", String::new());
+    gossamer_lex::tokenize(text, file).0
+}
+
+pub(crate) fn synthesize_format_helpers(source: &str, tokens: &SourceTokens<'_>) -> String {
     if !source.contains(":+") && !source.contains("e}") && !source.contains("E}") {
         return String::new();
     }
-    let mut map = SourceMap::new();
-    let file = map.add_file("<format-helper-scan>", String::new());
-    let mut lexer = Lexer::new(source, file);
     let mut sign = false;
     let mut exponent = false;
-    loop {
-        let token = lexer.next_token();
+    for token in tokens.all() {
         match token.kind {
             TokenKind::Eof => break,
             TokenKind::FStringLit | TokenKind::FTripleStringLit => {
@@ -892,9 +945,9 @@ struct Mentions {
     defined: HashSet<(String, String)>,
 }
 
-fn scan(source: &str) -> Mentions {
-    let mut tokens = Vec::new();
-    code_tokens(source, &mut tokens);
+fn scan(source: &str, lexed: &SourceTokens<'_>) -> Mentions {
+    let mut tokens: Vec<(TokenKind, &str)> = Vec::new();
+    code_tokens(source, lexed.all(), &mut tokens);
     let mut called = HashSet::new();
     let mut defined = HashSet::new();
     let mut i = 0;
@@ -908,7 +961,7 @@ fn scan(source: &str) -> Mentions {
                 Some((TokenKind::Punct(Punct::LParen), _))
             )
         {
-            called.insert(name.clone());
+            called.insert((*name).to_string());
         }
         // `impl char { .. fn name .. }` and `impl Trait for char { .. }`: the
         // program's own definitions.
@@ -928,7 +981,7 @@ fn scan(source: &str) -> Mentions {
                     }
                     (TokenKind::Keyword(Keyword::Fn), _) if depth == 1 => {
                         if let Some((TokenKind::Ident, name)) = tokens.get(j + 1) {
-                            defined.insert((ty.clone(), name.clone()));
+                            defined.insert((ty.to_string(), (*name).to_string()));
                         }
                     }
                     _ => {}
@@ -944,12 +997,8 @@ fn scan(source: &str) -> Mentions {
 
 /// The tokens of `source` that are code: an f-string's interpolations are
 /// code too, so their tokens follow the literal's.
-fn code_tokens(source: &str, tokens: &mut Vec<(TokenKind, String)>) {
-    let mut map = SourceMap::new();
-    let file = map.add_file("<primitive-surface-scan>", String::new());
-    let mut lexer = Lexer::new(source, file);
-    loop {
-        let token = lexer.next_token();
+fn code_tokens<'a>(source: &'a str, lexed: &[Token], tokens: &mut Vec<(TokenKind, &'a str)>) {
+    for token in lexed {
         if token.kind == TokenKind::Eof {
             break;
         }
@@ -961,13 +1010,12 @@ fn code_tokens(source: &str, tokens: &mut Vec<(TokenKind, String)>) {
         }
         let text = source
             .get(token.span.start as usize..token.span.end as usize)
-            .unwrap_or("")
-            .to_string();
+            .unwrap_or("");
         if token.kind == TokenKind::FStringLit {
             // `f"text {expr} text"`: the text between the quotes, read as
             // code; the literal pieces only add names nothing calls.
-            let inner = text.trim_start_matches('f').trim_matches('"').to_string();
-            code_tokens(&inner, tokens);
+            let inner = text.trim_start_matches('f').trim_matches('"');
+            code_tokens(inner, &lex(inner), tokens);
         }
         tokens.push((token.kind, text));
     }
@@ -976,7 +1024,7 @@ fn code_tokens(source: &str, tokens: &mut Vec<(TokenKind, String)>) {
 /// The self type of the `impl` header starting at `at` when it is a bare
 /// name, with the index of the `{` opening the block. The name after `for`
 /// is the self type of a trait impl.
-fn impl_header_type(tokens: &[(TokenKind, String)], at: usize) -> Option<(String, usize)> {
+fn impl_header_type<'a>(tokens: &[(TokenKind, &'a str)], at: usize) -> Option<(&'a str, usize)> {
     let open = at
         + tokens[at..]
             .iter()
@@ -993,7 +1041,7 @@ fn impl_header_type(tokens: &[(TokenKind, String)], at: usize) -> Option<(String
         None => header,
     };
     match self_ty {
-        [(TokenKind::Ident, name)] => Some((name.clone(), open)),
+        [(TokenKind::Ident, name)] => Some((name, open)),
         _ => None,
     }
 }
@@ -1001,11 +1049,11 @@ fn impl_header_type(tokens: &[(TokenKind, String)], at: usize) -> Option<(String
 /// Gossamer source declaring the primitive methods `source` names, or an
 /// empty string when it names none.
 #[must_use]
-pub(crate) fn synthesize_primitive_surface(source: &str) -> String {
+pub(crate) fn synthesize_primitive_surface(source: &str, tokens: &SourceTokens<'_>) -> String {
     if !table_names().any(|name| source.contains(name)) {
         return String::new();
     }
-    let mentions = scan(source);
+    let mentions = scan(source, tokens);
     // The requested methods, closed over the methods their bodies call.
     let mut wanted: BTreeSet<&'static str> = table_names()
         .filter(|name| mentions.called.contains(*name))
@@ -1074,7 +1122,11 @@ pub(crate) fn synthesize_primitive_surface(source: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::synthesize_primitive_surface;
+    use super::SourceTokens;
+
+    fn synthesize_primitive_surface(source: &str) -> String {
+        super::synthesize_primitive_surface(source, &SourceTokens::new(source))
+    }
 
     #[test]
     fn a_trait_impl_on_a_primitive_keeps_its_own_method() {

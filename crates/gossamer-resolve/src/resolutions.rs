@@ -88,15 +88,22 @@ pub enum FloatWidth {
 /// Side table produced by [`crate::resolve_source_file`].
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Resolutions {
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     entries: HashMap<NodeId, Resolution>,
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     bindings: HashMap<NodeId, DefId>,
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     definitions: HashMap<DefId, DefKind>,
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     project_aliases: HashMap<String, String>,
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     module_aliases: HashMap<String, String>,
     /// The same bindings keyed by the `::`-joined path of the module whose
     /// `use` introduced each, so two modules may bind one name to different
     /// modules.
+    #[serde(serialize_with = "gossamer_ast::ordered::map_of_maps")]
     scoped_module_aliases: HashMap<String, HashMap<String, String>>,
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
     import_defs: HashMap<NodeId, DefId>,
 }
 

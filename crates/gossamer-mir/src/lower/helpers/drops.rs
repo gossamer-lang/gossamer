@@ -165,6 +165,23 @@ impl FieldRcKind {
     }
 }
 
+/// Whether the statement after `stmts[at]` empties `local`'s carrier, which
+/// is how a carrier that handed its payload's share on is left.
+fn emptied_right_after(stmts: &[Statement], at: usize, local: Local) -> bool {
+    matches!(
+        stmts.get(at + 1).map(|stmt| &stmt.kind),
+        Some(StatementKind::Assign {
+            place,
+            rvalue: Rvalue::CallIntrinsic { name: "gos_rt_result_new", args },
+        }) if place.projection.is_empty()
+            && place.local == local
+            && matches!(
+                args.as_slice(),
+                [Operand::Const(ConstValue::Int(1)), Operand::Const(ConstValue::Int(0))]
+            )
+    )
+}
+
 /// One field-level retain/release in the by-value-aggregate teardown:
 /// `(is_retain, aggregate_local, field_projection_path, kind)`. The path is
 /// the chain of field indices from the aggregate local down to the heap
@@ -428,6 +445,7 @@ fn aggregates_minting_their_own_share(body: &Body, tcx: &TyCtxt) -> Vec<bool> {
                     Operand::Const(ConstValue::Str(name))
                         if appends_through_container(name.as_str())
                             || reads_container_only(name.as_str())
+                            || json::borrows_vec_receiver(name.as_str())
                 );
                 // A program function borrows its arguments for the call and
                 // takes a share of any it keeps.
@@ -603,6 +621,68 @@ pub(crate) fn counted_payload_kind(tcx: &TyCtxt, t: Ty) -> Option<u8> {
         TyKind::DynError => Some(4),
         _ => None,
     }
+}
+
+/// The child kind of the payload word of an `Option` / `Result` of type `ty`,
+/// when that word holds a heap value on every arm that has one: an `Option`'s
+/// `None` payload word is zero, which the child walk skips, and a `Result`
+/// qualifies only when both arms carry the same heap kind.
+pub(crate) fn carrier_payload_child_kind(tcx: &TyCtxt, ty: Ty) -> Option<i64> {
+    let (ok, err) = carrier_arm_child_kinds(tcx, ty)?;
+    match (ok, err) {
+        (Some(ok), None) if is_option_ty(tcx, ty) => Some(ok),
+        (Some(ok), Some(err)) if ok == err => Some(ok),
+        _ => None,
+    }
+}
+
+/// The heap child kind (`RC_CHILD_RC`, `RC_CHILD_VEC`, `RC_CHILD_WEAK`) the
+/// `Ok` / `Some` and `Err` arms of carrier `ty` hold, `None` for an arm that
+/// holds no heap value, or `None` overall when `ty` is no carrier.
+pub(crate) fn carrier_arm_child_kinds(tcx: &TyCtxt, ty: Ty) -> Option<(Option<i64>, Option<i64>)> {
+    use gossamer_types::TyKind;
+    let TyKind::Adt { def, substs } = tcx.kind_of(ty) else {
+        return None;
+    };
+    if def.local != u32::MAX && def.local != u32::MAX - 1 {
+        return None;
+    }
+    let child_kind = |t: Ty| match tcx.kind_of(t) {
+        _ if tcx.is_weak_ty(t) => Some(gossamer_abi::rc::RC_CHILD_WEAK),
+        _ if tcx.is_counted_node(t) => Some(gossamer_abi::rc::RC_CHILD_RC),
+        TyKind::String => Some(gossamer_abi::rc::RC_CHILD_RC),
+        TyKind::Vec(_) | TyKind::Slice(_) => Some(gossamer_abi::rc::RC_CHILD_VEC),
+        _ => None,
+    };
+    let tys = substs.types();
+    Some((
+        tys.first().and_then(|t| child_kind(*t)),
+        tys.get(1).and_then(|t| child_kind(*t)),
+    ))
+}
+
+/// Whether `ty` is an `Option`.
+fn is_option_ty(tcx: &TyCtxt, ty: Ty) -> bool {
+    matches!(tcx.kind_of(ty), gossamer_types::TyKind::Adt { def, .. } if def.local == u32::MAX - 1)
+}
+
+/// The child entries that name the heap payload of a carrier of type `ty`
+/// whose discriminant is at `word`: one entry for a payload of one kind on
+/// every arm that has one, otherwise one gated entry per arm holding a heap
+/// value. Copy-blob arms are named by the caller's gated blob entry.
+pub(crate) fn carrier_heap_child_entries(tcx: &TyCtxt, ty: Ty, word: i64) -> Vec<i64> {
+    use gossamer_abi::rc::{RC_CHILD_KIND_SHIFT, rc_child_gated_heap_kind};
+    if let Some(kind) = carrier_payload_child_kind(tcx, ty) {
+        return vec![(kind << RC_CHILD_KIND_SHIFT) | (word + 1)];
+    }
+    let Some((ok, err)) = carrier_arm_child_kinds(tcx, ty) else {
+        return Vec::new();
+    };
+    [(0, ok), (1, err)]
+        .into_iter()
+        .filter_map(|(gate, kind)| rc_child_gated_heap_kind(gate, kind?))
+        .map(|kind| (kind << RC_CHILD_KIND_SHIFT) | (word + 1))
+        .collect()
 }
 
 /// The field kind of an `Option` / `Result` whose `Some` / `Ok` payload is a
@@ -1657,7 +1737,10 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                         disqualified[i] = true;
                     }
                     Rvalue::CallIntrinsic { name, args }
-                        if matches!(*name, "gos_enum_load" | "gos_enum_slot_ptr") =>
+                        if matches!(
+                            *name,
+                            "gos_enum_load" | "gos_enum_slot_ptr" | "gos_enum_word_addr"
+                        ) =>
                     {
                         match args.first() {
                             Some(Operand::Copy(src)) if src.projection.is_empty() => {
@@ -3229,13 +3312,17 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                         Rvalue::CallIntrinsic { name, args }
                             if matches!(
                                 *name,
-                                "gos_rt_result_payload" | "gos_enum_load" | "gos_enum_slot_ptr"
+                                "gos_rt_result_payload"
+                                    | "gos_enum_load"
+                                    | "gos_enum_slot_ptr"
+                                    | "gos_enum_word_addr"
                             ) =>
                         {
                             // A boxed aggregate payload is copied out of its box
                             // with a share of each counted field, whoever holds
                             // the node, so the binding owns what it holds.
                             let copies_box = *name == "gos_enum_load"
+                                && !is_payload_view(args)
                                 && tcx.is_boxed_payload_binding(
                                     body.locals[place.local.0 as usize].ty,
                                 );
@@ -3925,12 +4012,15 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                 // a second one is dropped for the same reason the whole-local
                 // move drops it, and the field's death frees the one share
                 // that arrived.
+                // A carrier the frame empties right after the store has
+                // handed its share over the same way.
                 let source_moved = matches!(
                     rvalue,
                     Rvalue::Use(Operand::Copy(src))
                         if src.projection.is_empty()
                             && (src.local.0 as usize) < moved.len()
-                            && moved[src.local.0 as usize]
+                            && (moved[src.local.0 as usize]
+                                || emptied_right_after(&block.stmts, si, src.local))
                 );
                 // A map cannot be co-owned, so the after-store "retain" is a
                 // clone of the field's own. It is owed only when the source
@@ -4368,7 +4458,20 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                     if *is_retain != pass_retain {
                         continue;
                     }
+                    // A `String` field takes the typed string helpers, which
+                    // read its header rather than first ruling out a foreign
+                    // C string the way the generic release must.
+                    let string_field = matches!(kind, FieldRcKind::Rc)
+                        && body
+                            .locals
+                            .get(local.0 as usize)
+                            .and_then(|decl| holder_copies::field_ty_at(tcx, decl.ty, path))
+                            .is_some_and(|t| {
+                                matches!(tcx.kind_of(t), gossamer_types::TyKind::String)
+                            });
                     let name = match (*is_retain, *kind) {
+                        (true, FieldRcKind::Rc) if string_field => "gos_rt_str_retain_typed",
+                        (false, FieldRcKind::Rc) if string_field => "gos_rt_str_free_typed",
                         (true, FieldRcKind::Rc) => "gos_rt_rc_retain",
                         (false, FieldRcKind::Rc) => "gos_rt_rc_release",
                         (true, FieldRcKind::Weak) => "gos_rt_rc_weak_retain",
@@ -4489,9 +4592,12 @@ mod answers;
 mod channels;
 mod copies;
 mod field_releases;
+mod holder_copies;
 mod json;
+pub(super) mod lent_payloads;
 mod param_reads;
 mod read_counts;
+mod region_shares;
 pub(super) mod slots;
 mod tables;
 
@@ -4499,8 +4605,11 @@ pub(crate) use answers::*;
 pub(crate) use channels::*;
 pub(crate) use copies::*;
 pub(crate) use field_releases::*;
+pub(crate) use holder_copies::*;
 pub(crate) use json::*;
+pub(crate) use lent_payloads::*;
 pub(crate) use param_reads::*;
 pub(crate) use read_counts::*;
+pub(crate) use region_shares::*;
 pub(crate) use slots::*;
 pub(crate) use tables::*;

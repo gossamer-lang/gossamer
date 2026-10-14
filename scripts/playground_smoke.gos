@@ -142,10 +142,8 @@ fn build_runtime(dir: String) -> bool {
             return false
         }
     }
-    let wasm = path::join(
-        "target/wasm32-unknown-unknown/release"
-        "gossamer_playground.wasm"
-    )
+    let target = env::var("CARGO_TARGET_DIR").unwrap_or("target")
+    let wasm = path::join(target, "wasm32-unknown-unknown/release/gossamer_playground.wasm")
     match process::run("wasm-bindgen", #[wasm, "--out-dir", dir, "--target", "nodejs"]) {
         Ok(out) => {
             if out.code != 0 {

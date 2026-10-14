@@ -40,6 +40,7 @@ pub mod repl;
 pub mod repl_handles;
 pub mod repl_helper;
 pub mod style;
+mod unit_cache;
 
 pub use binding_dispatch::{DispatchOutcome, dispatch_runner_if_needed, needs_runner_dispatch};
 

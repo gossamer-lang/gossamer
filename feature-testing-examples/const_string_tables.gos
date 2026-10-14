@@ -1,0 +1,28 @@
+// A `const` or `static` table of strings read element by element in a loop
+// answers its literals, and an element read out of it can be kept.
+
+const WORDS: [String; 6] = ["as", "async", "await", "break", "const", "continue"]
+
+static NAMES: [String; 3] = ["alpha", "beta", "gamma"]
+
+fn find(word: String) -> i64 {
+    for k in 0..6 {
+        if WORDS[k] == word {
+            return k
+        }
+    }
+    -1
+}
+
+fn main() {
+    let mut total = 0
+    let mut kept: Vec<String> = #[]
+    for i in 0..1000 {
+        total += find(if i % 3 == 0 { "await" } else { "zzz" })
+        if i % 250 == 0 {
+            kept.push(NAMES[i / 250 % 3])
+            kept.push(WORDS[i / 250])
+        }
+    }
+    println(f"{total} {kept}")
+}

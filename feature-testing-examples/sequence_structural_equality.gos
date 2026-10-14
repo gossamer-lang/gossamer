@@ -4,7 +4,7 @@
 
 struct P { a: i64, s: String }
 
-fn main() {
+fn checks() {
     let nan = "nan".to_f64().unwrap_or(0.0)
     let a = #[Some(1), Some(2)]
     let b = #[Some(1), Some(3)]
@@ -24,4 +24,11 @@ fn main() {
     assert_eq(#[1, 2].map(|n| Some(n)), a)
     assert_eq(vv, #[#[1], #[2, 3]])
     println("ok")
+}
+
+// The checks run inside a loop so the forced-JIT tier compiles them.
+fn main() {
+    for _ in 0..1 {
+        checks()
+    }
 }
