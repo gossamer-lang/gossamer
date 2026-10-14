@@ -1178,7 +1178,7 @@ unsafe fn init_frame_view(
 ///
 /// # Safety
 ///
-/// As [`init_frame_view`], with `data` a word-slot array.
+/// As `init_frame_view`, with `data` a word-slot array.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_borrow_arr_into(
     header: *mut GosVec,
@@ -1197,7 +1197,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_borrow_arr_into(
 ///
 /// # Safety
 ///
-/// As [`init_frame_view`], with `data` a packed array.
+/// As `init_frame_view`, with `data` a packed array.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_borrow_packed_arr_into(
     header: *mut GosVec,
@@ -2827,26 +2827,47 @@ pub unsafe extern "C" fn gos_rt_vec_capacity(v: *const GosVec) -> i64 {
     })
 }
 
-/// Typed-i64 wrapper around [`gos_rt_vec_push`]. Spills the value
-/// to a stack slot and forwards its address so the byte-erased
-/// push helper can `memcpy` it into the vec's storage. Used by the
-/// dynamic-count `[value; n]` lowering - passing an i64 directly
-/// to the byte-erased helper would otherwise need a per-call-site
-/// stack slot in cranelift.
+/// [`gos_rt_vec_push`] of a scalar element compiled code carries as its word,
+/// which the vector stores at its own width (a packed `f32` narrows from it).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_push_i64(v: *mut GosVec, value: i64) {
     ffi_entry!({
         // SAFETY: `v` is null or a live vec (C-ABI contract).
-        if unsafe { v.as_ref() }.is_some_and(vec_packs_f32) {
-            let bits = word_to_f32_bits(value).to_ne_bytes();
-            // SAFETY: `bits` is one 4-byte element of the packed vec.
-            unsafe { gos_rt_vec_push(v, bits.as_ptr()) };
+        let Some(vec) = (unsafe { v.as_mut() }) else {
+            return;
+        };
+        let word = if vec_packs_f32(vec) {
+            i64::from(word_to_f32_bits(value))
+        } else {
+            value
+        };
+        let bytes = word.to_ne_bytes();
+        let width = vec.elem_bytes as usize;
+        // A plain scalar element is its word's low bytes; every other kind
+        // takes the shares and checks the general push applies.
+        if width > bytes.len()
+            || !matches!(
+                vec.elem_kind,
+                vec_elem_kind::PRIMITIVE | vec_elem_kind::SIGNED | vec_elem_kind::F32
+            )
+        {
+            // SAFETY: `v` is this shim's live `Vec` argument, and `bytes` one element of its
+            // width (C-ABI contract).
+            unsafe { gos_rt_vec_push(v, bytes.as_ptr()) };
             return;
         }
-        let bytes = value.to_ne_bytes();
-        // SAFETY: `v` is this shim's `Vec` argument, null or live (C-ABI contract), and `bytes`
-        // one 8-byte element.
-        unsafe { gos_rt_vec_push(v, bytes.as_ptr()) };
+        bump_vec_mutation_generation(vec);
+        if vec.len == vec.cap {
+            // SAFETY: `vec` is this shim's live `Vec`, not otherwise accessed during the call.
+            unsafe { vec_reserve_to(vec, vec.len.saturating_add(1), false) };
+        }
+        // SAFETY: `len < cap` after the reserve above, so the slot lies inside the buffer, and
+        // `width` is at most the 8 bytes of `bytes`.
+        unsafe {
+            let dst = vec.ptr.add(vec.len as usize * width);
+            crate::c_abi::string::copy_small_bytes(bytes.as_ptr(), dst, width);
+        }
+        vec.len += 1;
     });
 }
 

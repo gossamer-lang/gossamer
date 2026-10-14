@@ -150,19 +150,19 @@ pub enum TapeKind {
     False,
     /// `true`.
     True,
-    /// An integer that fits an `i64`, its bits in [`TapeNode::word`].
+    /// An integer that fits an `i64`, its bits in [`Tape::word`].
     Int,
-    /// An integer above `i64::MAX` that fits a `u64`, in [`TapeNode::word`].
+    /// An integer above `i64::MAX` that fits a `u64`, in [`Tape::word`].
     Uint,
-    /// Any other number, the bits of its `f64` in [`TapeNode::word`].
+    /// Any other number, the bits of its `f64` in [`Tape::word`].
     Float,
     /// A string with no escape: its text is the span inside the quotes.
     Str,
     /// A string holding at least one escape.
     StrEscaped,
-    /// An array: [`TapeNode::extent`] and [`TapeNode::count`] apply.
+    /// An array: [`Tape::extent`] and [`Tape::count`] apply.
     Array,
-    /// An object: [`TapeNode::extent`] and [`TapeNode::count`] apply. Its
+    /// An object: [`Tape::extent`] and [`Tape::count`] apply. Its
     /// members follow it as key, value pairs.
     Object,
 }
@@ -189,25 +189,33 @@ const LEN_BITS: u32 = 28;
 pub const TAPE_MAX_LEN: usize = (1 << LEN_BITS) - 1;
 
 /// One value of a document read into a [`Tape`], in document order: a
-/// container comes before everything it holds.
+/// container comes before everything it holds. A number or a container is
+/// followed by one more slot holding its [`Tape::word`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TapeNode {
     /// Offset of the value's first byte in the document.
     pub start: u32,
     /// The kind (high bits) and the byte length (low [`LEN_BITS`] bits).
     packed: u32,
-    /// A number's bits, or a container's extent (low half) and member or
-    /// element count (high half).
-    pub word: u64,
 }
 
 impl TapeNode {
-    fn new(kind: TapeKind, start: u32, len: u32, word: u64) -> Self {
+    fn new(kind: TapeKind, start: u32, len: u32) -> Self {
         Self {
             start,
             packed: ((kind as u32) << LEN_BITS) | len,
-            word,
         }
+    }
+
+    fn from_word(word: u64) -> Self {
+        Self {
+            start: word as u32,
+            packed: (word >> 32) as u32,
+        }
+    }
+
+    fn word(self) -> u64 {
+        u64::from(self.start) | (u64::from(self.packed) << 32)
     }
 
     /// What the value is.
@@ -221,30 +229,59 @@ impl TapeNode {
     pub fn end(&self) -> u32 {
         self.start + (self.packed & ((1 << LEN_BITS) - 1))
     }
+}
 
-    /// Index of the first node past this value and everything it holds.
-    #[must_use]
-    pub fn extent(&self, index: u32) -> u32 {
-        match self.kind() {
-            TapeKind::Array | TapeKind::Object => self.word as u32,
-            _ => index + 1,
-        }
-    }
-
-    /// Elements of an array, or members of an object (duplicates included).
-    #[must_use]
-    pub fn count(&self) -> u32 {
-        (self.word >> 32) as u32
+impl TapeKind {
+    /// Whether a value of this kind carries a [`Tape::word`].
+    fn has_word(self) -> bool {
+        matches!(
+            self,
+            Self::Int | Self::Uint | Self::Float | Self::Array | Self::Object
+        )
     }
 }
 
 /// A document's values in document order, built by the walk that checks it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Tape {
-    /// Every value, the root first.
+    /// Every value, the root first, each number's and container's word in
+    /// the slot after it.
     pub nodes: Vec<TapeNode>,
     /// The index of every object node, ascending.
     pub objects: Vec<u32>,
+}
+
+impl Tape {
+    /// The value at `index`, which a walk of the tape answered.
+    #[must_use]
+    pub fn node(&self, index: u32) -> TapeNode {
+        self.nodes[index as usize]
+    }
+
+    /// A number's bits, or a container's extent (low half) and member or
+    /// element count (high half).
+    #[must_use]
+    pub fn word(&self, index: u32) -> u64 {
+        self.nodes[index as usize + 1].word()
+    }
+
+    /// Index of the first node past the value at `index` and everything it
+    /// holds.
+    #[must_use]
+    pub fn extent(&self, index: u32) -> u32 {
+        match self.node(index).kind() {
+            TapeKind::Array | TapeKind::Object => self.word(index) as u32,
+            TapeKind::Int | TapeKind::Uint | TapeKind::Float => index + 2,
+            _ => index + 1,
+        }
+    }
+
+    /// Elements of the array, or members of the object (duplicates
+    /// included), at `index`.
+    #[must_use]
+    pub fn count(&self, index: u32) -> u32 {
+        (self.word(index) >> 32) as u32
+    }
 }
 
 /// [`validate`], also reading the document into a [`Tape`] in the same walk.
@@ -263,11 +300,10 @@ pub fn validate_to_tape(bytes: &[u8]) -> Result<(&str, Option<Tape>), Error> {
     }
     let mut parser = Parser::new(source);
     parser.build = false;
-    // A value takes at least two bytes with its separator, and most
-    // documents average several times that; capacity a document does not
-    // fill is never touched.
+    // Sized once from a bound the walk never exceeds: growing a tape copies
+    // every node it holds while the old block is still live.
     parser.tape = Some(Tape {
-        nodes: Vec::with_capacity(source.len() / 8 + 1),
+        nodes: Vec::with_capacity(tape_bound(source.as_bytes())),
         objects: Vec::new(),
     });
     parser.skip_whitespace();
@@ -277,6 +313,23 @@ pub fn validate_to_tape(bytes: &[u8]) -> Result<(&str, Option<Tape>), Error> {
         return Err(parser.error("trailing input"));
     }
     Ok((source, parser.tape))
+}
+
+/// The most slots a [`Tape`] of `bytes` holds: every value and key but the
+/// root follows a `[`, `{`, `,`, or `:`, and each takes at most two slots.
+/// Counting those bytes inside strings too only raises the bound.
+fn tape_bound(bytes: &[u8]) -> usize {
+    // A byte-wide count per chunk keeps the scan vectorized.
+    let separators: usize = bytes
+        .chunks(usize::from(u8::MAX))
+        .map(|chunk| {
+            let n = chunk.iter().fold(0u8, |n, &b| {
+                n + u8::from(matches!(b, b'[' | b'{' | b',' | b':'))
+            });
+            usize::from(n)
+        })
+        .sum();
+    2 * (separators + 1)
 }
 
 /// The text of a string a [`Tape`] read, `raw` being its span inside the
@@ -509,12 +562,11 @@ impl<'a> Parser<'a> {
         }
         // `validate_to_tape` keeps a tape only for a document whose offsets
         // and lengths fit a node.
-        tape.nodes.push(TapeNode::new(
-            kind,
-            start as u32,
-            (end - start) as u32,
-            word,
-        ));
+        tape.nodes
+            .push(TapeNode::new(kind, start as u32, (end - start) as u32));
+        if kind.has_word() {
+            tape.nodes.push(TapeNode::from_word(word));
+        }
         Some(index)
     }
 
@@ -535,12 +587,8 @@ impl<'a> Parser<'a> {
         if let (Some(slot), Some(tape)) = (slot, self.tape.as_mut()) {
             let extent = tape.nodes.len() as u64;
             let node = tape.nodes[slot];
-            tape.nodes[slot] = TapeNode::new(
-                node.kind(),
-                node.start,
-                end - node.start,
-                extent | (u64::from(count) << 32),
-            );
+            tape.nodes[slot] = TapeNode::new(node.kind(), node.start, end - node.start);
+            tape.nodes[slot + 1] = TapeNode::from_word(extent | (u64::from(count) << 32));
         }
     }
 
@@ -850,5 +898,43 @@ impl Parser<'_> {
         while matches!(self.peek(), Some(b'0'..=b'9')) {
             self.bump();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TapeKind, tape_bound, validate_to_tape};
+
+    #[test]
+    fn a_tape_fits_the_capacity_it_starts_with() {
+        for text in [
+            "7",
+            "[1,2,3,-4.5e6,18446744073709551615]",
+            r#"{"a":{"b":[[],{},[{}]]},"c":"x,y:[{"}"#,
+            r#"[ { "k" : 1 } , [ 2 , { } ] , "s" ]"#,
+            r#""only a string with , and : inside""#,
+        ] {
+            let (_, tape) = validate_to_tape(text.as_bytes()).unwrap();
+            let tape = tape.unwrap();
+            assert!(tape.nodes.len() <= tape_bound(text.as_bytes()), "{text}");
+            assert_eq!(tape.nodes.capacity(), tape_bound(text.as_bytes()), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_container_extent_skips_every_word_slot_it_holds() {
+        let text = r#"[{"n":1,"f":2.5},"s",[]]"#;
+        let (_, tape) = validate_to_tape(text.as_bytes()).unwrap();
+        let tape = tape.unwrap();
+        assert_eq!(tape.extent(0), tape.nodes.len() as u32);
+        assert_eq!(tape.count(0), 3);
+        let object = 2;
+        assert_eq!(tape.node(object).kind(), TapeKind::Object);
+        let string = tape.extent(object);
+        assert_eq!(tape.node(string).kind(), TapeKind::Str);
+        assert_eq!(tape.node(string + 1).kind(), TapeKind::Array);
+        assert_eq!(tape.count(string + 1), 0);
+        assert_eq!(tape.node(object + 6).kind(), TapeKind::Float);
+        assert_eq!(f64::from_bits(tape.word(object + 6)), 2.5);
     }
 }

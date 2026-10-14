@@ -3,7 +3,7 @@
 use super::*;
 
 /// Whether a `gos_enum_load` carries the view marker
-/// [`borrow_lent_payload_reads`] adds.
+/// `borrow_lent_payload_reads` adds.
 #[must_use]
 pub fn is_payload_view(args: &[Operand]) -> bool {
     args.len() == 3
