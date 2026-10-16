@@ -128,6 +128,7 @@ impl TypeChecker<'_> {
         self.check_deferred_wrapping_operands();
         self.check_deferred_literal_ranges();
         self.check_deferred_integer_operands();
+        self.check_deferred_arith_operands();
         self.check_deferred_shift_amounts();
         self.check_deferred_mutating_receivers();
         self.check_deferred_private_fields();
@@ -948,6 +949,9 @@ struct TypeChecker<'a> {
     /// whether `bool` is allowed, operand spelling, span). A literal's type
     /// is settled only once inference is done.
     deferred_integer_operands: Vec<(Ty, &'static str, bool, Option<String>, Span)>,
+    /// Arithmetic results (`+ - * / %`) to check, once inference settles,
+    /// name a type the operator is defined for.
+    deferred_arith_operands: Vec<(Ty, &'static str, Span)>,
     /// `<<` / `>>` with a literal amount, as (shifted type, amount, span):
     /// the amount is judged against the width inference settles on.
     deferred_shift_amounts: Vec<(Ty, String, Span)>,
@@ -1356,6 +1360,7 @@ impl<'a> TypeChecker<'a> {
             deferred_wrapping_operands: Vec::new(),
             deferred_literal_ranges: Vec::new(),
             deferred_integer_operands: Vec::new(),
+            deferred_arith_operands: Vec::new(),
             deferred_shift_amounts: Vec::new(),
             deferred_conversion_targets: Vec::new(),
             enum_variant_payloads: HashMap::new(),

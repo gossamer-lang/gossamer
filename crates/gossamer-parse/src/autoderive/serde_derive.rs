@@ -523,6 +523,17 @@ fn ty_is_renderable_within(
     depth: u32,
 ) -> bool {
     match &ty.kind {
+        // A foreign pointer renders as its address, `Ptr(0x..)`, whatever it
+        // points at, written bare or through `ffi`.
+        TypeKind::Path(path)
+            if path.segments.last().is_some_and(|seg| {
+                seg.name.name == "Ptr" && seg.generics.len() == 1
+            }) && path.segments[..path.segments.len() - 1]
+                .iter()
+                .all(|seg| matches!(seg.name.name.as_str(), "std" | "ffi")) =>
+        {
+            true
+        }
         TypeKind::Path(path) if path.segments.len() == 1 => {
             let seg = &path.segments[0];
             let name = seg.name.name.as_str();
@@ -855,6 +866,34 @@ fn checked_default_literal(kind: &FieldKind, with_default: &HashSet<String>) -> 
     }
 }
 
+/// The zero value of a field of type `ty` declared in `module`, or `None`
+/// when it has none. A container is empty whatever it holds, so `Option`,
+/// `Vec`, a slice, and `Map` fill without looking at their element type;
+/// anything else is the zero value of its field kind.
+fn field_default_literal(
+    ty: &gossamer_ast::Type,
+    module: &str,
+    structs: &StructIdentities,
+    aliases: &HashMap<String, gossamer_ast::Type>,
+    with_default: &HashSet<String>,
+) -> Option<String> {
+    match &ty.kind {
+        gossamer_ast::TypeKind::Slice(_) => return Some("Vec::from([])".to_string()),
+        gossamer_ast::TypeKind::Path(path) if path.segments.len() == 1 => {
+            let segment = &path.segments[0];
+            match (segment.name.name.as_str(), segment.generics.len()) {
+                ("Option", 1) => return Some("None".to_string()),
+                ("Vec", 1) => return Some("Vec::from([])".to_string()),
+                ("Map", 2) => return Some("Map::new()".to_string()),
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    let kind = FieldKind::from_type(ty, module, structs, aliases)?;
+    checked_default_literal(&kind, with_default)
+}
+
 /// The first field of a `#[derive(Default)]` struct that the derive cannot
 /// fill, with the type that lacks a zero value.
 pub(crate) fn derive_default_gap(
@@ -879,9 +918,8 @@ pub(crate) fn derive_default_gap(
             printer.print_type(ty);
             printer.finish()
         };
-        match FieldKind::from_type(ty, module, structs, aliases) {
-            Some(kind) if checked_default_literal(&kind, with_default).is_some() => {}
-            _ => return Some((field, written)),
+        if field_default_literal(ty, module, structs, aliases, with_default).is_none() {
+            return Some((field, written));
         }
     }
     None
@@ -963,10 +1001,12 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
             _ => {}
         }
     }
-    // A type ends up with a `fmt` if the user wrote one or a `#[derive(Debug)]`
-    // requests one; seed the formattable set with those, then grow it to the
-    // fixpoint of types whose every field is a scalar or an already-formattable
-    // type. A struct/enum reaches a `fmt` only if all its fields actually
+    // A type ends up with a `{:?}` rendering if the user wrote one or a
+    // `#[derive(Debug)]` requests one; seed the formattable set with those,
+    // then grow it to the fixpoint of types whose every field is a scalar or
+    // an already-formattable type. A `Display` of the user's own covers `{}`
+    // only, so it seeds nothing: such a type's structural `{:?}` still needs
+    // every field to render. A struct/enum reaches a `fmt` only if all its fields actually
     // render - so a field referencing a non-formattable type (or a container)
     // never produces a `format!("{}", field)` the compiled tiers cannot lower.
     let mut formattable: HashSet<String> = HashSet::new();
@@ -982,9 +1022,7 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
             _ => None,
         };
         if let Some(n) = name
-            && (derives.iter().any(|d| d == "Debug")
-                || user_fmt.contains(n)
-                || user_to_string.contains(n))
+            && (derives.iter().any(|d| d == "Debug") || user_fmt.contains(n))
         {
             formattable.insert(n.clone());
         }
@@ -1193,9 +1231,12 @@ fn emit_comparators(
             ItemKind::Enum(decl) => (&decl.name.name, &decl.generics),
             _ => continue,
         };
+        let derives_ord = derive_list(&item.attrs)
+            .iter()
+            .any(|d| d == "Ord" || d == "PartialOrd");
         let prefix = if user_cmp.contains(name) {
             USER_COMPARATOR_PREFIX
-        } else if orderable.contains(name) {
+        } else if orderable.contains(name) || derives_ord {
             STRUCTURAL_COMPARATOR_PREFIX
         } else {
             continue;
@@ -1650,16 +1691,10 @@ fn emit_tuple_struct_derive_impl(
         out.push_str("        0\n    }\n");
     }
     if want_default {
-        let typed: Option<Vec<FieldKind>> = fields
+        let init: Option<Vec<String>> = fields
             .iter()
-            .map(|f| FieldKind::from_type(&f.ty, &ty.module, structs, aliases))
+            .map(|f| field_default_literal(&f.ty, &ty.module, structs, aliases, with_default))
             .collect();
-        let init: Option<Vec<String>> = typed.and_then(|typed| {
-            typed
-                .iter()
-                .map(|k| checked_default_literal(k, with_default))
-                .collect()
-        });
         if let Some(init) = init {
             out.push_str(&format!(
                 "    fn default() -> {self_ty} {{ {bare}({}) }}\n",
@@ -1763,24 +1798,15 @@ fn emit_struct_derive_impl(
         out.push_str("        0\n    }\n");
     }
     if want_default {
-        // Per-field default literal needs each field classified; if any
-        // field type is outside the supported set, skip Default rather
-        // than emit code that won't compile.
-        let typed: Option<Vec<(String, FieldKind)>> = fields
+        // Every field needs a zero value; a field without one leaves Default
+        // unsynthesized, and `derive_default_diags` reports it.
+        let init: Option<Vec<(String, String)>> = fields
             .iter()
             .map(|f| {
-                FieldKind::from_type(&f.ty, &ty.module, structs, aliases)
-                    .map(|k| (f.name.name.clone(), k))
+                field_default_literal(&f.ty, &ty.module, structs, aliases, with_default)
+                    .map(|v| (f.name.name.clone(), v))
             })
             .collect();
-        let init: Option<Vec<(String, String)>> = typed.and_then(|typed| {
-            typed
-                .iter()
-                .map(|(field, k)| {
-                    checked_default_literal(k, with_default).map(|v| (field.clone(), v))
-                })
-                .collect()
-        });
         if let Some(init) = init {
             let init_refs = init
                 .iter()

@@ -603,7 +603,29 @@ impl<'a> Lowerer<'a> {
                 continue;
             }
             let want = expected_param_tys.get(i).copied().flatten();
-            let (a_v, mut a_ty) = self.lower_call_arg(arg, want)?;
+            let (mut a_v, mut a_ty) = self.lower_call_arg(arg, want)?;
+            // A direct callee's by-pointer parameter is `noalias`, so it is
+            // handed storage of the argument's own: a bare local nothing else
+            // in the call names, or a copy.
+            if a_ty == "ptr"
+                && self.direct_bodies.contains(symbol)
+                && let Some(want) = want
+                && !is_unit(self.tcx, want)
+                && is_aggregate(self.tcx, want)
+                && slot_count(self.tcx, want).is_some()
+                && !self.arg_storage_unshared(arg, args, destination)
+            {
+                let bytes = aggregate_storage_bytes(self.tcx, want).unwrap_or_else(|| {
+                    u64::from(slot_count(self.tcx, want).unwrap_or(1).max(1)) * 8
+                });
+                let copy = self.entry_alloca(&format!("[{bytes} x i8], align 8"));
+                writeln!(
+                    self.out,
+                    "  call void @llvm.memcpy.p0.p0.i64(ptr {copy}, ptr {a_v}, i64 {bytes}, i1 false)"
+                )
+                .unwrap();
+                a_v = copy;
+            }
             if result_new_heap_copy
                 && i == 1
                 && let Some(heap_v) = self
@@ -805,12 +827,31 @@ impl<'a> Lowerer<'a> {
         // allocated for the value, copied out of it, or freed. Only a bare
         // local qualifies: a projected destination is an address inside
         // another value, whose own lowering owns when its slots are written.
-        let sret_slot = (!symbol.starts_with("gos_rt_")
+        let sret_bytes = (!symbol.starts_with("gos_rt_")
             && !symbol.starts_with("gos_binding_")
             && self.callee_uses_sret(symbol)
-            && destination.projection.is_empty()
-            && crate::lower::sret_return_bytes(self.tcx, dest_ty_mir).is_some())
-        .then(|| local_slot(destination.local));
+            && destination.projection.is_empty())
+        .then(|| crate::lower::sret_return_bytes(self.tcx, dest_ty_mir))
+        .flatten();
+        // The answer slot is `noalias` in the callee, so a destination the
+        // callee could also reach - through an address this body took, or as
+        // an argument of this very call - answers into a slot of its own,
+        // copied into the destination afterwards.
+        let mut sret_copy_back: Option<(String, u64)> = None;
+        let sret_slot = sret_bytes.map(|bytes| {
+            let dest = destination.local;
+            let reachable = self.local_address_taken(dest)
+                || args
+                    .iter()
+                    .any(|op| matches!(op, Operand::Copy(p) if p.local == dest));
+            if reachable {
+                let slot = self.entry_alloca(&format!("[{bytes} x i8], align 8"));
+                sret_copy_back = Some((slot.clone(), bytes));
+                slot
+            } else {
+                local_slot(dest)
+            }
+        });
         if let Some(slot) = &sret_slot {
             if !arg_text.is_empty() {
                 arg_text.push_str(", ");
@@ -874,11 +915,16 @@ impl<'a> Lowerer<'a> {
             } else {
                 &call_ret_ty
             };
-            writeln!(
-                self.out,
-                "  {tmp} = call {wire_ret_ty} @\"{symbol}\"({arg_text})"
-            )
-            .unwrap();
+            if sret_slot.is_some() {
+                // The answer is the destination's slot itself.
+                writeln!(self.out, "  call void @\"{symbol}\"({arg_text})").unwrap();
+            } else {
+                writeln!(
+                    self.out,
+                    "  {tmp} = call {wire_ret_ty} @\"{symbol}\"({arg_text})"
+                )
+                .unwrap();
+            }
             self.release_minted_blob(minted_blob.as_deref());
             let tmp = if win_fat_ret {
                 let unwrapped = self.fresh();
@@ -914,7 +960,14 @@ impl<'a> Lowerer<'a> {
                     // pointer and memcpying through the packed integer.
                     writeln!(self.out, "  store i128 {tmp}, ptr {slot}, align 8").unwrap();
                 } else if sret_slot.is_some() {
-                    // The callee wrote the slots into this destination.
+                    // The callee wrote the slots into the answer slot.
+                    if let Some((answer, bytes)) = &sret_copy_back {
+                        writeln!(
+                            self.out,
+                            "  call void @llvm.memcpy.p0.p0.i64(ptr {slot}, ptr {answer}, i64 {bytes}, i1 false)"
+                        )
+                        .unwrap();
+                    }
                 } else if let Some(slots) = slot_count(self.tcx, dest_ty_mir) {
                     // Inline aggregate (struct / tuple / array with a
                     // known field layout): the callee handed us a heap

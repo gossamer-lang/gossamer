@@ -26,8 +26,8 @@ fn run_interp(source: &str) -> Result<(), String> {
     if !parse_diags.is_empty() {
         return Err(format!("parse: {parse_diags:?}"));
     }
-    let (resolutions, _) = resolve_source_file(&sf);
-    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &resolutions);
+    let (mut resolutions, _) = resolve_source_file(&sf);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
     let mut tcx = TyCtxt::new();
     let (table, _) = typecheck_source_file(&sf, &resolutions, &mut tcx);
     let program = lower_source_file(&sf, &resolutions, &table, &mut tcx);

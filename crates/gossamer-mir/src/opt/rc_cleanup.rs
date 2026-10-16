@@ -348,14 +348,122 @@ fn local_live_after(
 /// single share into that holder without changing the object's reference
 /// count at any point outside the bracket. Both members are removed or
 /// neither; a missed pair only keeps the original (correct) timing.
-/// Drops RC accounting on a place the block just set to the null constant.
-/// Every `gos_rt_*` release null-checks its argument, so such a call cannot do
-/// anything; removing it is a pure win at the drop-elaboration entry a
-/// constructor emits. Block-local and conservative: any write reaching the
-/// place, or its root local, forgets the fact.
-pub(crate) fn elide_null_rc_accounting(body: &mut Body) {
+/// Drops the plain retains and releases of locals that only ever hold a
+/// unit-variant singleton.
+///
+/// `gos_rt_enum_unit` answers a node pinned for the process (or null when
+/// allocation fails), whose count retain and release never change, so the
+/// calls only cost their dispatch. A local qualifies when every write to it
+/// is such a call, the null constant, or a copy of another qualifying local;
+/// a parameter, which the caller fills, and a local anything borrows never
+/// do.
+pub(crate) fn elide_unit_variant_rc(body: &mut Body) {
+    let n = body.locals.len();
+    let mut immortal = vec![true; n];
+    for flag in immortal.iter_mut().take(body.arity as usize + 1) {
+        *flag = false;
+    }
+    let mut copies: Vec<(usize, usize)> = Vec::new();
+    let disqualify = |place: &Place, immortal: &mut Vec<bool>| {
+        if let Some(flag) = immortal.get_mut(place.local.0 as usize) {
+            *flag = false;
+        }
+    };
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                continue;
+            };
+            if let Rvalue::Ref { place: borrowed, .. } = rvalue {
+                disqualify(borrowed, &mut immortal);
+            }
+            if !place.projection.is_empty() {
+                disqualify(place, &mut immortal);
+                continue;
+            }
+            match rvalue {
+                Rvalue::Use(Operand::Const(ConstValue::Int(0))) => {}
+                Rvalue::Use(Operand::Copy(source)) if source.projection.is_empty() => {
+                    copies.push((place.local.0 as usize, source.local.0 as usize));
+                }
+                _ => disqualify(place, &mut immortal),
+            }
+        }
+        match &block.terminator {
+            Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(name)),
+                destination,
+                ..
+            } if name == "gos_rt_enum_unit" && destination.projection.is_empty() => {}
+            Terminator::Call { destination, .. } => disqualify(destination, &mut immortal),
+            _ => {}
+        }
+    }
+    loop {
+        let mut changed = false;
+        for &(dest, source) in &copies {
+            if immortal.get(dest) == Some(&true) && immortal.get(source) != Some(&true) {
+                immortal[dest] = false;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
     for block in &mut body.blocks {
-        let mut null_places: Vec<Place> = Vec::new();
+        for stmt in &mut block.stmts {
+            if let StatementKind::Assign {
+                rvalue: Rvalue::CallIntrinsic { name, args },
+                ..
+            } = &stmt.kind
+                && matches!(*name, "gos_rt_rc_retain" | "gos_rt_rc_release")
+                && let [Operand::Copy(target)] = args.as_slice()
+                && target.projection.is_empty()
+                && immortal.get(target.local.0 as usize) == Some(&true)
+            {
+                stmt.kind = StatementKind::Nop;
+            }
+        }
+    }
+}
+
+/// Drops RC accounting on a place already set to the null constant. Every
+/// `gos_rt_*` release null-checks its argument, so such a call cannot do
+/// anything; removing it is a pure win at the drop-elaboration entry a
+/// constructor emits. A write reaching the place, inside it, or around it
+/// forgets the fact. The facts a block ends with carry into a successor it
+/// alone reaches, through a jump or a call, except for locals something
+/// borrows or the call is handed, which it could write through.
+pub(crate) fn elide_null_rc_accounting(body: &mut Body) {
+    let n_blocks = body.blocks.len();
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n_blocks];
+    for (bi, block) in body.blocks.iter().enumerate() {
+        for succ in successor_indices(&block.terminator) {
+            if let Some(list) = preds.get_mut(succ) {
+                list.push(bi);
+            }
+        }
+    }
+    let mut borrowed: Vec<Local> = Vec::new();
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if let StatementKind::Assign {
+                rvalue: Rvalue::Ref { place, .. },
+                ..
+            } = &stmt.kind
+            {
+                borrowed.push(place.local);
+            }
+        }
+    }
+    let mut exit_facts: Vec<Option<Vec<Place>>> = vec![None; n_blocks];
+    for bi in 0..n_blocks {
+        let mut null_places: Vec<Place> = match preds[bi].as_slice() {
+            [pred] if *pred < bi => exit_facts[*pred].clone().unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let block = &mut body.blocks[bi];
         let mut drop_at: Vec<usize> = Vec::new();
         for (index, stmt) in block.stmts.iter().enumerate() {
             let StatementKind::Assign { place, rvalue } = &stmt.kind else {
@@ -370,8 +478,8 @@ pub(crate) fn elide_null_rc_accounting(body: &mut Body) {
                 continue;
             }
             // The statement writes `place`; anything previously known about
-            // it, or about a place rooted in the same local, no longer holds.
-            null_places.retain(|known| known.local != place.local);
+            // it, or about a place inside it or around it, no longer holds.
+            null_places.retain(|known| !places_overlap(known, place));
             if matches!(rvalue, Rvalue::Use(Operand::Const(ConstValue::Int(0)))) {
                 null_places.push(place.clone());
             }
@@ -379,6 +487,24 @@ pub(crate) fn elide_null_rc_accounting(body: &mut Body) {
         for index in drop_at.into_iter().rev() {
             block.stmts.remove(index);
         }
+        exit_facts[bi] = match &block.terminator {
+            Terminator::Goto { .. } => Some(null_places),
+            Terminator::Call {
+                destination, args, ..
+            } => {
+                // A callee may write a local it is handed by slot address.
+                let handed = |local: Local| {
+                    args.iter().any(|arg| matches!(arg, Operand::Copy(p) if p.local == local))
+                };
+                null_places.retain(|known| {
+                    !places_overlap(known, destination)
+                        && !borrowed.contains(&known.local)
+                        && !handed(known.local)
+                });
+                Some(null_places)
+            }
+            _ => None,
+        };
     }
 }
 

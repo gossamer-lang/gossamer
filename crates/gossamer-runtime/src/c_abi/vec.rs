@@ -2012,6 +2012,40 @@ pub(crate) unsafe fn vec_release_guarded_elements(v: &GosVec) {
     }
 }
 
+/// A header lending the `len` bytes at `data` to compiled code as a
+/// `Vec<u8>` for the length of one call. The header owns neither the bytes
+/// nor a share of them: it is marked as region storage, so `gos_rt_vec_free`
+/// and the counting paths leave it and its bytes alone, and the lender frees
+/// the header alone with [`end_bytes_view`].
+#[must_use]
+pub fn begin_bytes_view(data: *mut u8, len: usize) -> *mut GosVec {
+    let len = i64::try_from(len).unwrap_or(i64::MAX);
+    Box::into_raw(Box::new(GosVec {
+        len,
+        cap: len,
+        elem_bytes: 1,
+        elem_kind: vec_elem_kind::PRIMITIVE,
+        region_flag: VEC_REGION_FLAG,
+        rc: std::sync::atomic::AtomicU16::new(1),
+        ptr: SyncRawPtr::new(data),
+        generation: 0,
+        mutation_generation: 0,
+        elem_meta: SyncRawPtr::NULL,
+        owner: SyncRawPtr::NULL,
+    }))
+}
+
+/// Frees a header [`begin_bytes_view`] made, leaving the bytes it lent.
+///
+/// # Safety
+///
+/// `view` is a header `begin_bytes_view` answered, not freed before and not
+/// used after.
+pub unsafe fn end_bytes_view(view: *mut GosVec) {
+    // SAFETY: `view` is the box `begin_bytes_view` leaked (this fn's contract).
+    drop(unsafe { Box::from_raw(view) });
+}
+
 /// True when this GosVec was allocated inside an arena region.
 #[inline]
 pub fn vec_is_region(v: &GosVec) -> bool {

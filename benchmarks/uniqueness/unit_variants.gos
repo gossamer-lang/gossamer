@@ -1,0 +1,45 @@
+// A unit variant of an enum too large for tagged values is a process-wide
+// singleton whose count never changes, so handing one on costs no retain or
+// release.
+enum Color {
+    Red
+    Green
+    Blue
+    Cyan
+    Magenta
+    Mixed(i64)
+}
+
+struct Pair {
+    first: Color
+    second: Color
+}
+
+fn from_code(code: i64) -> Color {
+    match code {
+        0 => Color::Red
+        1 => Color::Green
+        2 => Color::Blue
+        3 => Color::Cyan
+        4 => Color::Magenta
+        _ => Color::Mixed(code)
+    }
+}
+
+fn primaries() -> Pair {
+    Pair { first: Color::Red, second: Color::Green }
+}
+
+fn main() {
+    let mut mixed = 0
+    for n in 0..100000 {
+        if let Color::Mixed(v) = from_code(n % 8) {
+            mixed += v
+        }
+        let p = primaries()
+        if let Color::Red = p.first {
+            mixed += 1
+        }
+    }
+    println(f"{mixed}")
+}

@@ -519,6 +519,12 @@ fn builtin_runtime_cycle_collection_supported(_args: &[Value]) -> RuntimeResult<
     Ok(Value::Bool(false))
 }
 
+/// `runtime::is_main_thread()`. A VM goroutine runs on a thread of its own,
+/// so only `main` and what it calls answer true.
+fn builtin_runtime_is_main_thread(_args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Bool(gossamer_runtime::sched_global::on_main_thread()))
+}
+
 /// `runtime::scheduler_stats_json()`. The counters describe the scheduler
 /// the caller's goroutines are actually running on, which under the
 /// interpreter is its own worker pool rather than the `MultiScheduler` the

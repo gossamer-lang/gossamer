@@ -425,3 +425,48 @@ fn a_native_table_without_sources_or_with_an_unknown_key_is_refused() {
         .is_err()
     );
 }
+
+#[test]
+fn a_native_cmake_build_round_trips_and_stands_without_sources() {
+    let source = r#"[project]
+id = "example.com/windowing"
+version = "0.1.0"
+
+[features]
+default = ["vendored-sdl"]
+vendored-sdl = []
+
+[native.cmake]
+source = "vendor/SDL"
+provides = ["SDL3"]
+options = { SDL_AUDIO = "OFF", SDL_TESTS = "OFF" }
+feature = "vendored-sdl"
+"#;
+    let manifest = Manifest::parse(source).unwrap();
+    let native = manifest.native.as_ref().expect("the [native] table");
+    assert!(native.sources.is_empty());
+    let cmake = native.cmake.as_ref().expect("the [native.cmake] table");
+    assert_eq!(cmake.source, "vendor/SDL");
+    assert_eq!(cmake.provides, vec!["SDL3"]);
+    assert_eq!(
+        cmake.options.get("SDL_AUDIO").map(String::as_str),
+        Some("OFF")
+    );
+    assert_eq!(cmake.feature.as_deref(), Some("vendored-sdl"));
+    let reparsed = Manifest::parse(&manifest.render()).unwrap();
+    assert_eq!(reparsed, manifest);
+}
+
+#[test]
+fn a_native_cmake_build_needs_a_source_and_what_it_provides() {
+    let base = "[project]\nid = \"example.com/x\"\nversion = \"0.1.0\"\n\n[native.cmake]\n";
+    assert!(Manifest::parse(&format!("{base}provides = [\"z\"]\n")).is_err());
+    assert!(Manifest::parse(&format!("{base}source = \"z\"\n")).is_err());
+    assert!(Manifest::parse(&format!("{base}source = \"z\"\nprovides = []\n")).is_err());
+    assert!(
+        Manifest::parse(&format!(
+            "{base}source = \"z\"\nprovides = [\"z\"]\ntarget = \"x\"\n"
+        ))
+        .is_err()
+    );
+}

@@ -542,6 +542,7 @@ pub(crate) fn emit_carrier_entry_thunk(
     module: &mut dyn Module,
     body_id: FuncId,
     body_name: &str,
+    float_words: bool,
 ) -> Result<(FuncId, crate::jit_frames::FunctionFrames)> {
     let ptr_ty = module.target_config().pointer_type();
     let body_sig = module
@@ -560,7 +561,13 @@ pub(crate) fn emit_carrier_entry_thunk(
             .extend(return_tys.iter().map(|t| AbiParam::new(*t)));
     }
     for t in &param_tys {
-        let crossing = if *t == types::I128 { ptr_ty } else { *t };
+        let crossing = if *t == types::I128 {
+            ptr_ty
+        } else if float_words && *t == types::F64 {
+            types::I64
+        } else {
+            *t
+        };
         sig.params.push(AbiParam::new(crossing));
     }
     let static_name: &'static str =
@@ -597,6 +604,12 @@ pub(crate) fn emit_carrier_entry_thunk(
                         .ins()
                         .load(types::I64, flags, *value, ir::immediates::Offset32::new(8));
                 args.push(builder.ins().iconcat(disc, payload));
+            } else if float_words && *t == types::F64 {
+                args.push(
+                    builder
+                        .ins()
+                        .bitcast(types::F64, MemFlagsData::new(), *value),
+                );
             } else {
                 args.push(*value);
             }

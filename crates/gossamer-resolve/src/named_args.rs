@@ -14,14 +14,15 @@ use std::collections::HashMap;
 
 use gossamer_ast::visitor::{VisitorMut, walk_expr_mut, walk_item_mut};
 use gossamer_ast::{
-    Expr, ExprKind, FnDecl, FnParam, ImplItem, Item, ItemKind, Literal, ModBody, NodeId,
-    NodeIdGenerator, PathExpr, SourceFile, TraitItem, Type, TypeKind,
+    ArrayExpr, Expr, ExprKind, FnDecl, FnParam, ImplItem, Item, ItemKind, Literal, ModBody, NodeId,
+    NodeIdGenerator, PathExpr, PathSegment, SourceFile, TraitItem, Type, TypeKind,
 };
 use gossamer_lex::Span;
 
-use crate::DefId;
 use crate::diagnostic::{ResolveDiagnostic, ResolveError};
 use crate::resolutions::{Resolution, Resolutions};
+use crate::scope::PRELUDE_SENTINEL;
+use crate::{DefId, DefKind};
 
 /// One callee's parameters, in declared order.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -30,6 +31,8 @@ struct Signature {
     names: Vec<String>,
     /// Constant default for each parameter, positionally.
     defaults: Vec<Option<Expr>>,
+    /// What each default denotes, so declarations compare by value.
+    default_keys: Vec<Option<String>>,
 }
 
 impl Signature {
@@ -38,26 +41,73 @@ impl Signature {
     }
 
     /// Two declarations rewrite a call identically when they agree on
-    /// parameter names and on the value of every default. Node ids differ
-    /// between declarations, so defaults are compared by their spelling.
+    /// parameter names and on the value of every default.
     fn rewrites_same_as(&self, other: &Self) -> bool {
-        self.names == other.names
-            && self.defaults.len() == other.defaults.len()
-            && self
-                .defaults
-                .iter()
-                .zip(&other.defaults)
-                .all(|(a, b)| a.as_ref().map(default_key) == b.as_ref().map(default_key))
+        self.names == other.names && self.default_keys == other.default_keys
     }
 }
 
-/// Canonical spelling of a constant default, for comparing two
-/// declarations without comparing their node ids.
-fn default_key(expr: &Expr) -> String {
+/// What a constant default denotes, for comparing two declarations without
+/// comparing their node ids: literals by value and names by the definition
+/// they resolve to. A form with no such key is keyed by its own node, so
+/// two declarations never compare equal through it.
+fn default_key(expr: &Expr, resolutions: &Resolutions) -> String {
+    let keys = |exprs: &[Expr]| {
+        exprs
+            .iter()
+            .map(|e| default_key(e, resolutions))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let array = |arr: &ArrayExpr| match arr {
+        ArrayExpr::List(elems) => keys(elems),
+        ArrayExpr::Repeat { value, count } => format!(
+            "{};{}",
+            default_key(value, resolutions),
+            default_key(count, resolutions)
+        ),
+    };
     match &expr.kind {
         ExprKind::Literal(lit) => format!("{lit:?}"),
-        ExprKind::Unary { op, operand } => format!("{op:?}{}", default_key(operand)),
-        _ => String::new(),
+        ExprKind::Unary { op, operand } => format!("{op:?}{}", default_key(operand, resolutions)),
+        // A qualified path resolves to the type at its head, so the member
+        // it names is part of what it denotes.
+        ExprKind::Path(path) => match target_def(expr.id, resolutions) {
+            Some(def) if path.segments.len() > 1 => {
+                format!("{def:?}::{}", describe_path(path))
+            }
+            Some(def) => format!("{def:?}"),
+            None => format!("{}@{:?}", describe_path(path), resolutions.get(expr.id)),
+        },
+        ExprKind::Call { callee, args } => {
+            format!("{}({})", default_key(callee, resolutions), keys(args))
+        }
+        ExprKind::Struct {
+            path,
+            fields,
+            base: None,
+            ..
+        } => {
+            let fields = fields
+                .iter()
+                .map(|field| {
+                    let value = field
+                        .value
+                        .as_ref()
+                        .map(|v| default_key(v, resolutions))
+                        .unwrap_or_default();
+                    format!("{}:{value}", field.name.name)
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{}{{{fields}}}", describe_path(path))
+        }
+        ExprKind::Tuple(elems) => format!("({})", keys(elems)),
+        ExprKind::MapLiteral(elems) => format!("{{{}}}", keys(elems)),
+        ExprKind::SetLiteral(elems) => format!("#{{{}}}", keys(elems)),
+        ExprKind::Array(arr) => format!("#[{}]", array(arr)),
+        ExprKind::FixedArray(arr) => format!("[{}]", array(arr)),
+        _ => format!("{:?}", expr.id),
     }
 }
 
@@ -93,17 +143,21 @@ pub struct DeferredMethodCall {
 /// calls whose rewrite waits on their receiver's type.
 pub fn resolve_named_arguments(
     sf: &mut SourceFile,
-    resolutions: &Resolutions,
+    resolutions: &mut Resolutions,
 ) -> (Vec<ResolveDiagnostic>, Vec<DeferredMethodCall>) {
     fold_const_defaults(sf, resolutions);
     let signatures = SignatureTable::of(sf, resolutions);
     let mut diagnostics = Vec::new();
+    let scope = DefaultScope {
+        resolutions,
+        members: TypeMembers::of(&sf.items, resolutions),
+    };
     for item in sf
         .items
         .iter()
         .filter(|item| gossamer_ast::cfg::item_is_active(&item.attrs))
     {
-        check_defaults(item, &mut diagnostics);
+        check_defaults(item, &scope, &mut diagnostics);
     }
     let labels = std::mem::take(&mut sf.named_args);
     let mut ids = NodeIdGenerator::new();
@@ -132,7 +186,7 @@ pub fn resolve_named_arguments(
 /// call it has no answer for is reported as ambiguous.
 pub fn resolve_deferred_method_arguments(
     sf: &mut SourceFile,
-    resolutions: &Resolutions,
+    resolutions: &mut Resolutions,
     deferred: Vec<DeferredMethodCall>,
     receiver: &dyn Fn(NodeId) -> Option<String>,
 ) -> Vec<ResolveDiagnostic> {
@@ -190,8 +244,8 @@ impl SignatureTable {
         signatures
     }
 
-    fn record_associated(&mut self, owner: &str, decl: &FnDecl) {
-        let sig = signature_of(decl);
+    fn record_associated(&mut self, owner: &str, decl: &FnDecl, resolutions: &Resolutions) {
+        let sig = signature_of(decl, resolutions);
         self.associated
             .insert((owner.to_string(), decl.name.name.clone()), sig.clone());
         self.methods
@@ -204,7 +258,7 @@ impl SignatureTable {
         match &item.kind {
             ItemKind::Fn(decl) => {
                 if let Some(def) = resolutions.definition_of(item.id) {
-                    self.free.insert(def, signature_of(decl));
+                    self.free.insert(def, signature_of(decl, resolutions));
                 }
             }
             ItemKind::Mod(decl) => {
@@ -221,14 +275,14 @@ impl SignatureTable {
                 let owner = type_head_name(&decl.self_ty);
                 for inner in &decl.items {
                     if let ImplItem::Fn(fn_decl) = inner {
-                        self.record_associated(&owner, fn_decl);
+                        self.record_associated(&owner, fn_decl, resolutions);
                     }
                 }
             }
             ItemKind::Trait(decl) => {
                 for inner in &decl.items {
                     if let TraitItem::Fn(fn_decl) = inner {
-                        self.record_associated(&decl.name.name, fn_decl);
+                        self.record_associated(&decl.name.name, fn_decl, resolutions);
                     }
                 }
             }
@@ -248,12 +302,13 @@ fn builtin_signature(path: &PathExpr) -> Option<Signature> {
     Some(Signature {
         names: vec!["f".to_string(), "reason".to_string()],
         defaults: vec![None, None],
+        default_keys: vec![None, None],
     })
 }
 
 /// Reads a declaration's parameter names and defaults, dropping any
 /// receiver - a method call's receiver is not one of its arguments.
-fn signature_of(decl: &FnDecl) -> Signature {
+fn signature_of(decl: &FnDecl, resolutions: &Resolutions) -> Signature {
     let mut sig = Signature::default();
     for param in &decl.params {
         if let FnParam::Typed {
@@ -262,6 +317,8 @@ fn signature_of(decl: &FnDecl) -> Signature {
         {
             sig.names.push(binding_name(pattern));
             sig.defaults.push(default.as_deref().cloned());
+            sig.default_keys
+                .push(default.as_deref().map(|d| default_key(d, resolutions)));
         }
     }
     sig
@@ -269,7 +326,7 @@ fn signature_of(decl: &FnDecl) -> Signature {
 
 struct Rewrite<'a> {
     signatures: SignatureTable,
-    resolutions: &'a Resolutions,
+    resolutions: &'a mut Resolutions,
     labels: HashMap<NodeId, Vec<gossamer_ast::NamedArg>>,
     ids: &'a mut NodeIdGenerator,
     diagnostics: Vec<ResolveDiagnostic>,
@@ -308,7 +365,9 @@ impl VisitorMut for Rewrite<'_> {
             return;
         }
         match self.plan(&sig, &written, args.len(), span) {
-            Some(Plan::Reorder(slots)) => apply(args, &slots, &sig, self.ids),
+            Some(Plan::Reorder(slots)) => {
+                apply(args, &slots, &sig, self.ids, self.resolutions);
+            }
             Some(Plan::Unchanged) | None => {}
         }
     }
@@ -542,7 +601,13 @@ impl Rewrite<'_> {
 }
 
 /// Rebuilds `args` in declared order, splicing defaults for the gaps.
-fn apply(args: &mut Vec<Expr>, slots: &[Slot], sig: &Signature, ids: &mut NodeIdGenerator) {
+fn apply(
+    args: &mut Vec<Expr>,
+    slots: &[Slot],
+    sig: &Signature,
+    ids: &mut NodeIdGenerator,
+    resolutions: &mut Resolutions,
+) {
     let mut taken: Vec<Option<Expr>> = args.drain(..).map(Some).collect();
     for slot in slots {
         match slot {
@@ -553,7 +618,7 @@ fn apply(args: &mut Vec<Expr>, slots: &[Slot], sig: &Signature, ids: &mut NodeId
             }
             Slot::Default(position) => {
                 if let Some(default) = &sig.defaults[*position] {
-                    args.push(fresh_copy(default, ids));
+                    args.push(fresh_copy(default, ids, resolutions));
                 }
             }
         }
@@ -561,23 +626,66 @@ fn apply(args: &mut Vec<Expr>, slots: &[Slot], sig: &Signature, ids: &mut NodeId
 }
 
 /// Copies a default expression for one call site, giving every node an id
-/// no other node holds.
-fn fresh_copy(expr: &Expr, ids: &mut NodeIdGenerator) -> Expr {
+/// no other node holds. Each copied node resolves as its original does, so
+/// a name in the default means what it means where the function is
+/// declared, whatever the call site has in scope.
+fn fresh_copy(expr: &Expr, ids: &mut NodeIdGenerator, resolutions: &mut Resolutions) -> Expr {
     let mut copy = expr.clone();
-    let mut renumber = Renumber { ids };
+    let mut renumber = Renumber { ids, resolutions };
     renumber.visit_expr(&mut copy);
     copy
 }
 
 struct Renumber<'a> {
     ids: &'a mut NodeIdGenerator,
+    resolutions: &'a mut Resolutions,
 }
 
 impl VisitorMut for Renumber<'_> {
     fn visit_expr(&mut self, expr: &mut Expr) {
-        expr.id = self.ids.next();
+        let copy = self.ids.next();
+        if let Some(resolution) = self.resolutions.get(expr.id) {
+            self.resolutions.insert(copy, resolution);
+        }
+        if let Some(def) = self.resolutions.import_def(expr.id) {
+            self.resolutions.insert_import_def(copy, def);
+        }
+        if let ExprKind::Path(path) | ExprKind::Struct { path, .. } = &mut expr.kind {
+            spell_from_root(path, expr.id, self.resolutions);
+        }
+        expr.id = copy;
         walk_expr_mut(self, expr);
     }
+}
+
+/// Respells `path`, written where a default is declared and resolved at
+/// `node`, as a `crate::` path to the same definition. Every tier reads a
+/// copy spliced into another module by its spelling, and that spelling
+/// names the same item from any module. A qualified path resolves to the
+/// item at its head, so the members written after that item follow it
+/// unchanged; a prelude name or a limit keeps its spelling.
+fn spell_from_root(path: &mut PathExpr, node: NodeId, resolutions: &Resolutions) {
+    let Some(home) = target_def(node, resolutions).and_then(|def| resolutions.path_of(def)) else {
+        return;
+    };
+    let Some((name, modules)) = home.split_last() else {
+        return;
+    };
+    let written = &path.segments;
+    // The written segment naming the item itself; an import alias names it
+    // by another spelling, in which case the alias is the first segment.
+    let at = written
+        .iter()
+        .rposition(|segment| segment.name.name == *name)
+        .unwrap_or(0);
+    let mut item = written[at].clone();
+    item.name.name.clone_from(name);
+    let mut segments = Vec::with_capacity(modules.len() + written.len() + 1);
+    segments.push(PathSegment::new("crate"));
+    segments.extend(modules.iter().map(PathSegment::new));
+    segments.push(item);
+    segments.extend(written[at + 1..].iter().cloned());
+    path.segments = segments;
 }
 
 /// The `const` items a parameter default may name: module-level ones by
@@ -767,7 +875,7 @@ fn fold_const_defaults(sf: &mut SourceFile, resolutions: &Resolutions) {
                     default: Some(default),
                     ..
                 } = param
-                    && !is_constant_default(default)
+                    && !is_literal_default(default)
                     && let Some(value) = table.fold(default, resolutions, module, 0)
                 {
                     folded.insert(default.id, folded_expr(value, default));
@@ -891,11 +999,9 @@ fn for_each_fn_decl_mut(items: &mut [Item], f: &mut impl FnMut(&mut FnDecl)) {
     }
 }
 
-/// True for the expression forms a parameter default accepts once
-/// [`fold_const_defaults`] has run: a literal, optionally negated. Anything
-/// else would need resolving at each call site it is spliced into, which
-/// this pass runs too late to arrange.
-fn is_constant_default(expr: &Expr) -> bool {
+/// True for a default that is a literal, optionally negated, or a
+/// `comptime` block: the forms [`fold_const_defaults`] leaves as they are.
+fn is_literal_default(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::Literal(_) => true,
         // The comptime fold evaluates the block where the default is written
@@ -912,32 +1018,190 @@ fn is_constant_default(expr: &Expr) -> bool {
     }
 }
 
+/// What a parameter default is checked against: the resolutions of the
+/// names it uses and the members those names can reach through a type.
+struct DefaultScope<'a> {
+    resolutions: &'a Resolutions,
+    members: TypeMembers,
+}
+
+/// The variants a qualified path can name through the enum at its head,
+/// which is all such a path resolves to. An associated const read was
+/// rewritten to the const it names before this pass.
+#[derive(Debug, Default)]
+struct TypeMembers {
+    /// Each enum's variant names, by the enum's definition.
+    variants: HashMap<DefId, Vec<String>>,
+}
+
+impl TypeMembers {
+    fn of(items: &[Item], resolutions: &Resolutions) -> Self {
+        let mut members = Self::default();
+        members.collect(items, resolutions);
+        members
+    }
+
+    fn collect(&mut self, items: &[Item], resolutions: &Resolutions) {
+        for item in items
+            .iter()
+            .filter(|item| gossamer_ast::cfg::item_is_active(&item.attrs))
+        {
+            match &item.kind {
+                ItemKind::Enum(decl) => {
+                    if let Some(def) = resolutions.definition_of(item.id) {
+                        let names = decl.variants.iter().map(|v| v.name.name.clone());
+                        self.variants.insert(def, names.collect());
+                    }
+                }
+                ItemKind::Mod(decl) => {
+                    if let ModBody::Inline(inner) = &decl.body {
+                        self.collect(inner, resolutions);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// What a path written in a default names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Named {
+    /// A value: a const, a function, a limit such as `i64::MAX`, or `None`.
+    Value,
+    /// A variant or struct, which a call constructs.
+    Constructor,
+    /// Anything a call to it would compute at run time, or a local.
+    Other,
+}
+
+impl DefaultScope<'_> {
+    /// True for the expression forms a parameter default accepts once
+    /// [`fold_const_defaults`] has run: a literal, a const, a function, a
+    /// limit such as `i64::MAX`, a variant or unit struct, and a variant
+    /// or struct construction, tuple, array, or collection literal built
+    /// from those. Each holds a value known while compiling, and every name
+    /// in it keeps the resolution it has where the function is declared.
+    fn is_constant(&self, expr: &Expr) -> bool {
+        let all = |exprs: &[Expr]| exprs.iter().all(|e| self.is_constant(e));
+        let array = |arr: &ArrayExpr| match arr {
+            ArrayExpr::List(elems) => all(elems),
+            ArrayExpr::Repeat { value, count } => {
+                self.is_constant(value) && self.is_constant(count)
+            }
+        };
+        match &expr.kind {
+            ExprKind::Literal(_) | ExprKind::Block(_) | ExprKind::Unary { .. } => {
+                is_literal_default(expr)
+            }
+            ExprKind::Path(path) => self.named(expr.id, path) != Named::Other,
+            ExprKind::Call { callee, args } => {
+                let ExprKind::Path(path) = &callee.kind else {
+                    return false;
+                };
+                self.named(callee.id, path) == Named::Constructor && all(args)
+            }
+            ExprKind::Struct {
+                fields, base: None, ..
+            } => fields.iter().all(|field| {
+                field
+                    .value
+                    .as_ref()
+                    .is_some_and(|value| self.is_constant(value))
+            }),
+            ExprKind::Tuple(elems) | ExprKind::MapLiteral(elems) | ExprKind::SetLiteral(elems) => {
+                all(elems)
+            }
+            ExprKind::Array(arr) | ExprKind::FixedArray(arr) => array(arr),
+            _ => false,
+        }
+    }
+
+    /// What the path `path`, written at `node`, names.
+    fn named(&self, node: NodeId, path: &PathExpr) -> Named {
+        let spelled = describe_path(path);
+        match self.resolutions.get(node) {
+            Some(Resolution::Primitive(_)) if path.segments.len() > 1 => return Named::Value,
+            Some(Resolution::Import { use_id }) if use_id == PRELUDE_SENTINEL => {
+                return match spelled.as_str() {
+                    "None" => Named::Value,
+                    "Some" | "Ok" | "Err" => Named::Constructor,
+                    _ => Named::Other,
+                };
+            }
+            _ => {}
+        }
+        let (Some(def), Some(kind)) = (
+            target_def(node, self.resolutions),
+            target_kind(node, self.resolutions),
+        ) else {
+            return Named::Other;
+        };
+        let qualified = path.segments.len() > 1;
+        let member = path.segments.last().map(|s| s.name.name.as_str());
+        match kind {
+            DefKind::Const | DefKind::Fn => Named::Value,
+            DefKind::Variant => Named::Constructor,
+            DefKind::Struct if !qualified => Named::Constructor,
+            DefKind::Enum
+                if qualified
+                    && self.members.variants.get(&def).is_some_and(|names| {
+                        member.is_some_and(|m| names.iter().any(|n| n == m))
+                    }) =>
+            {
+                Named::Constructor
+            }
+            _ => Named::Other,
+        }
+    }
+}
+
+/// The definition the path at `node` names, through an import if need be.
+fn target_def(node: NodeId, resolutions: &Resolutions) -> Option<DefId> {
+    match resolutions.get(node)? {
+        Resolution::Def { def, .. } => Some(def),
+        Resolution::Import { .. } => resolutions.import_def(node),
+        _ => None,
+    }
+}
+
+/// The kind of definition the path at `node` names.
+fn target_kind(node: NodeId, resolutions: &Resolutions) -> Option<DefKind> {
+    match resolutions.get(node)? {
+        Resolution::Def { kind, .. } => Some(kind),
+        Resolution::Import { .. } => resolutions
+            .import_def(node)
+            .and_then(|def| resolutions.kind_of(def)),
+        _ => None,
+    }
+}
+
 /// Reports any parameter default that is not a constant, everywhere a
 /// declaration can appear.
-fn check_defaults(item: &Item, out: &mut Vec<ResolveDiagnostic>) {
+fn check_defaults(item: &Item, scope: &DefaultScope<'_>, out: &mut Vec<ResolveDiagnostic>) {
     match &item.kind {
-        ItemKind::Fn(decl) => check_fn_defaults(decl, out),
+        ItemKind::Fn(decl) => check_fn_defaults(decl, scope, out),
         ItemKind::Mod(decl) => {
             if let ModBody::Inline(items) = &decl.body {
                 for inner in items
                     .iter()
                     .filter(|i| gossamer_ast::cfg::item_is_active(&i.attrs))
                 {
-                    check_defaults(inner, out);
+                    check_defaults(inner, scope, out);
                 }
             }
         }
         ItemKind::Impl(decl) => {
             for inner in &decl.items {
                 if let ImplItem::Fn(fn_decl) = inner {
-                    check_fn_defaults(fn_decl, out);
+                    check_fn_defaults(fn_decl, scope, out);
                 }
             }
         }
         ItemKind::Trait(decl) => {
             for inner in &decl.items {
                 if let TraitItem::Fn(fn_decl) = inner {
-                    check_fn_defaults(fn_decl, out);
+                    check_fn_defaults(fn_decl, scope, out);
                 }
             }
         }
@@ -945,13 +1209,13 @@ fn check_defaults(item: &Item, out: &mut Vec<ResolveDiagnostic>) {
     }
 }
 
-fn check_fn_defaults(decl: &FnDecl, out: &mut Vec<ResolveDiagnostic>) {
+fn check_fn_defaults(decl: &FnDecl, scope: &DefaultScope<'_>, out: &mut Vec<ResolveDiagnostic>) {
     for param in &decl.params {
         if let FnParam::Typed {
             pattern, default, ..
         } = param
             && let Some(default) = default
-            && !is_constant_default(default)
+            && !scope.is_constant(default)
         {
             out.push(ResolveDiagnostic::new(
                 ResolveError::NonConstantDefault {

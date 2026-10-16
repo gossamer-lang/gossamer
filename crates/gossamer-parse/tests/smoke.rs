@@ -1305,3 +1305,53 @@ fn a_line_starting_with_a_sign_inside_parentheses_begins_an_element() {
     };
     assert!(matches!(&init.kind, ExprKind::Tuple(elems) if elems.len() == 2));
 }
+
+#[test]
+fn an_attributed_item_with_package_visibility_parses_as_an_item() {
+    let mut map = SourceMap::new();
+    let source = "#[repr(C)]\npub(package) struct Point {\n    x: i32\n}\n\n#[cfg(unix)]\npub(package) fn f() {}\n\nfn main() {}\n";
+    let file = map.add_file("attr_vis.gos", source.to_string());
+    let (sf, diags) = parse_source_file(source, file);
+    assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+    assert!(
+        sf.top_level_stmts.is_empty(),
+        "an attributed `pub(package)` item was read as a top-level statement"
+    );
+    assert_eq!(sf.items.len(), 3);
+}
+
+#[test]
+fn a_line_leading_range_in_a_multiline_struct_literal_is_its_base() {
+    let source =
+        "fn f(base: P) -> P {\n    let p = P {\n        a: 1\n        ..base\n    }\n    p\n}\n";
+    let mut map = SourceMap::new();
+    let file = map.add_file("struct_base.gos", source.to_string());
+    let (sf, diags) = parse_source_file(source, file);
+    assert!(diags.is_empty(), "{diags:?}");
+    let ItemKind::Fn(decl) = &sf.items[0].kind else {
+        panic!("expected a function item");
+    };
+    let ExprKind::Block(block) = &decl.body.as_ref().expect("a body").kind else {
+        panic!("expected a block body");
+    };
+    let StmtKind::Let {
+        init: Some(init), ..
+    } = &block.stmts[0].kind
+    else {
+        panic!("expected a let");
+    };
+    let ExprKind::Struct { fields, base, .. } = &init.kind else {
+        panic!("expected a struct literal, got {:?}", init.kind);
+    };
+    assert_eq!(fields.len(), 1);
+    let value = fields[0].value.as_ref().expect("a field value");
+    assert!(
+        matches!(value.kind, ExprKind::Literal(_)),
+        "the field took the next line as a range: {:?}",
+        value.kind
+    );
+    assert!(
+        base.is_some(),
+        "the `..base` line was not the literal's base"
+    );
+}

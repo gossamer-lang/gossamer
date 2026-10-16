@@ -532,8 +532,8 @@ mod tests {
         let mut map = SourceMap::new();
         let file = map.add_file("t.gos", source.to_string());
         let (mut sf, _) = parse_source_file(source, file);
-        let (res, _) = resolve_source_file(&sf);
-        let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &res);
+        let (mut res, _) = resolve_source_file(&sf);
+        let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut res);
         let mut tcx = TyCtxt::new();
         let (tbl, _) = typecheck_source_file(&sf, &res, &mut tcx);
         let hir = lower_source_file(&sf, &res, &tbl, &mut tcx);

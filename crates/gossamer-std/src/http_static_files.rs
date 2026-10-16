@@ -43,12 +43,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::http::{Headers, Request, Response, StatusCode};
+use crate::http::{BodyStream, Headers, Request, Response, StatusCode};
 
 /// Configuration for [`FileServer`].
 #[derive(Debug, Clone)]
 pub struct FileServer {
     root: PathBuf,
+    /// `root` resolved once, when it already existed at construction.
+    root_canonical: Option<PathBuf>,
     /// Emit `Last-Modified` headers and honour
     /// `If-Modified-Since`.
     pub last_modified: bool,
@@ -66,8 +68,10 @@ impl FileServer {
     /// Creates a server rooted at `root`. All file paths are
     /// resolved beneath this directory.
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
         Self {
-            root: root.into(),
+            root_canonical: fs::canonicalize(&root).ok(),
+            root,
             last_modified: true,
             etag: true,
             range_support: true,
@@ -93,7 +97,10 @@ impl FileServer {
             Ok(c) => c,
             Err(_) => return not_found(),
         };
-        let root_canonical = fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
+        let root_canonical = match &self.root_canonical {
+            Some(root) => root.clone(),
+            None => fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone()),
+        };
         if !canonical.starts_with(&root_canonical) {
             return not_found();
         }
@@ -190,16 +197,47 @@ impl FileServer {
                     body_stream: None,
                 };
             }
+            None if len >= STREAMED_FILE_BYTES => {
+                let Ok(file) = fs::File::open(path) else {
+                    return not_found();
+                };
+                return self.file_response(
+                    path,
+                    StatusCode(200),
+                    None,
+                    FileFacts { len, etag, mtime },
+                    FileBody::Stream(file),
+                );
+            }
             None => match fs::read(path) {
                 Ok(b) => (StatusCode(200), b, None),
                 Err(_) => return not_found(),
             },
         };
+        let len = body.len() as u64;
+        self.file_response(
+            path,
+            status,
+            content_range,
+            FileFacts { len, etag, mtime },
+            FileBody::Bytes(body),
+        )
+    }
 
+    /// The response carrying a file's bytes, read whole or sent from the
+    /// open file, with its type, validators, and range headers.
+    fn file_response(
+        &self,
+        path: &Path,
+        status: StatusCode,
+        content_range: Option<String>,
+        facts: FileFacts,
+        body: FileBody,
+    ) -> Response {
+        let FileFacts { len, etag, mtime } = facts;
         let mut headers = Headers::new();
         headers.insert("content-type", mime_for_path(path));
-        let cl = body.len().to_string();
-        headers.insert("content-length", &cl);
+        headers.insert("content-length", &len.to_string());
         if self.range_support {
             headers.insert("accept-ranges", "bytes");
         }
@@ -217,14 +255,35 @@ impl FileServer {
         {
             headers.insert("last-modified", &stamp);
         }
+        let (body, body_stream) = match body {
+            FileBody::Bytes(bytes) => (bytes, None),
+            FileBody::Stream(file) => (Vec::new(), Some(BodyStream(Box::new(file)))),
+        };
         Response {
             status,
             headers,
             body,
             raw_header_pairs: Vec::new(),
-            body_stream: None,
+            body_stream,
         }
     }
+}
+
+/// Files at least this large are sent from the open file as the client
+/// reads them, so serving one holds a copy buffer rather than the file.
+const STREAMED_FILE_BYTES: u64 = 64 * 1024;
+
+/// What a file response says about the file besides its bytes.
+struct FileFacts {
+    len: u64,
+    etag: Option<String>,
+    mtime: Option<std::time::SystemTime>,
+}
+
+/// A file response's body: read whole, or still in the file.
+enum FileBody {
+    Bytes(Vec<u8>),
+    Stream(fs::File),
 }
 
 /// The `301` a directory request without a trailing slash answers.
@@ -540,6 +599,25 @@ mod tests {
         fs.max_file_bytes = 100;
         let resp = fs.serve_path("big.bin", &req("/x"));
         assert_eq!(resp.status, StatusCode(404));
+    }
+
+    #[test]
+    fn a_large_file_is_sent_from_disk_with_its_length() {
+        let dir = tmpdir();
+        let bytes: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(dir.path().join("big.bin"), &bytes).unwrap();
+        let fs = FileServer::new(dir.path());
+        let mut resp = fs.serve_path("big.bin", &req("/big.bin"));
+        assert_eq!(resp.status, StatusCode(200));
+        assert_eq!(resp.headers.get("content-length"), Some("300000"));
+        assert!(
+            resp.body.is_empty(),
+            "the bytes stay in the file until sent"
+        );
+        let mut sent = Vec::new();
+        let BodyStream(mut reader) = resp.body_stream.take().expect("a streamed body");
+        std::io::Read::read_to_end(&mut reader, &mut sent).unwrap();
+        assert_eq!(sent, bytes);
     }
 
     #[test]

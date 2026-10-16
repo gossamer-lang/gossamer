@@ -528,7 +528,7 @@ impl<'a> Builder<'a> {
             let cloned = self.fresh(field_ty);
             let next = self.new_block(span);
             self.terminate(Terminator::Call {
-                callee: Operand::Const(ConstValue::Str("gos_rt_vec_clone".to_string())),
+                callee: Operand::Const(ConstValue::Str("gos_rt_vec_clone_field".to_string())),
                 args: vec![Operand::Copy(place.clone())],
                 destination: Place::local(cloned),
                 target: Some(next),

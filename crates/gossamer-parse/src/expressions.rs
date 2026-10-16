@@ -262,6 +262,12 @@ impl Parser<'_> {
                 if RANGE_PREC >= max_prec {
                     break;
                 }
+                // `..` also begins an expression, so as the first token of a
+                // line it begins the next statement or element, such as a
+                // struct literal's base; a condition head has neither.
+                if self.newline_before_peek() && !self.struct_literal_forbidden() {
+                    break;
+                }
                 if self.at_match_arm_open_start_range_boundary() {
                     break;
                 }

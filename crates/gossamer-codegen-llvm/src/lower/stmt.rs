@@ -239,12 +239,12 @@ impl<'a> Lowerer<'a> {
                 // Hint to LLVM's register allocator that the
                 // alloca's storage becomes live. Treat unit /
                 // zero-sized locals as no-ops since they have no
-                // alloca.
-                if !is_unit(self.tcx, self.body.local_ty(*local)) {
+                // alloca, and the answer, whose storage is the caller's.
+                if !is_unit(self.tcx, self.body.local_ty(*local))
+                    && !self.answers_in_caller_storage(*local)
+                {
                     let slot = local_slot(*local);
-                    let bytes =
-                        u64::from(slot_count(self.tcx, self.body.local_ty(*local)).unwrap_or(1))
-                            * 8;
+                    let bytes = self.local_storage_bytes(*local);
                     writeln!(
                         self.out,
                         "  call void @llvm.lifetime.start.p0(i64 {bytes}, ptr {slot})"
@@ -253,11 +253,11 @@ impl<'a> Lowerer<'a> {
                 }
             }
             StatementKind::StorageDead(local) => {
-                if !is_unit(self.tcx, self.body.local_ty(*local)) {
+                if !is_unit(self.tcx, self.body.local_ty(*local))
+                    && !self.answers_in_caller_storage(*local)
+                {
                     let slot = local_slot(*local);
-                    let bytes =
-                        u64::from(slot_count(self.tcx, self.body.local_ty(*local)).unwrap_or(1))
-                            * 8;
+                    let bytes = self.local_storage_bytes(*local);
                     writeln!(
                         self.out,
                         "  call void @llvm.lifetime.end.p0(i64 {bytes}, ptr {slot})"
@@ -372,38 +372,7 @@ impl<'a> Lowerer<'a> {
             // module-global meta blob - the generic runtime-call path
             // would lower both wrongly (value load; string constant).
             if let Rvalue::CallIntrinsic { name, args } = rvalue
-                && matches!(
-                    *name,
-                    "gos_rt_aggr_release_children"
-                        | "gos_rt_aggr_retain_children"
-                        | "gos_rt_aggr_mark_shared_children"
-                        | "gos_rt_aggr_zero_guarded"
-                        | "gos_rt_option_slot_retain"
-                        | "gos_rt_option_slot_retain_ok"
-                        | "gos_rt_option_slot_release"
-                        | "gos_rt_vec_set_elem_meta"
-                        | "gos_rt_lazy_iter_set_elem_meta"
-                        | "gos_rt_vec_set_slot_children"
-                        | "gos_rt_map_set_blob_values"
-                        | "gos_rt_map_set_vec_values"
-                        | "gos_rt_map_set_map_values"
-                        | "gos_rt_map_set_set_values"
-                        | "gos_rt_map_set_deque_values"
-                        | "gos_rt_map_set_heap_values"
-                        | "gos_rt_map_set_weak_values"
-                        | "gos_rt_map_set_float_keys"
-                        | "gos_rt_map_set_ordered"
-                        | "gos_rt_map_set_ordered_by"
-                        | "gos_rt_set_ordered_by"
-                        | "gos_rt_map_field_release"
-                        | "gos_rt_map_field_clone"
-                        | "gos_rt_set_field_release"
-                        | "gos_rt_set_field_clone"
-                        | "gos_rt_deque_field_release"
-                        | "gos_rt_deque_field_clone"
-                        | "gos_rt_bheap_field_release"
-                        | "gos_rt_bheap_field_clone"
-                )
+                && takes_slot_address(name)
             {
                 return self.lower_guarded_walk_intrinsic(name, args);
             }
@@ -418,6 +387,30 @@ impl<'a> Lowerer<'a> {
             if let Rvalue::CallIntrinsic { name, args } = rvalue
                 && name.starts_with("gos_rt_")
             {
+                // A C value written at a constant offset or class answers
+                // `()`, and stores inline like its typed counterparts.
+                if matches!(
+                    *name,
+                    "gos_rt_ffi_put" | "gos_rt_ffi_put_f32" | "gos_rt_ffi_put_f64"
+                ) && self.try_inline_ffi_field(name, args)?.is_some()
+                {
+                    return Ok(());
+                }
+                if matches!(
+                    *name,
+                    "gos_rt_result_payload_release" | "gos_rt_result_ok_payload_release"
+                ) && self.lower_result_release_guarded(name, args, place.local)?
+                {
+                    return Ok(());
+                }
+                if matches!(*name, "gos_rt_ffi_store_int" | "gos_rt_ffi_store_float")
+                    && self.try_inline_ffi_scalar(name, args)?.is_some()
+                {
+                    return Ok(());
+                }
+                if *name == "gos_rt_ffi_zero" && self.try_inline_ffi_zero(args)? {
+                    return Ok(());
+                }
                 self.lower_runtime_call_intrinsic(name, args, place.local)?;
                 return Ok(());
             }
@@ -618,18 +611,10 @@ impl<'a> Lowerer<'a> {
                     self.emit_heap_spill_frees();
                     writeln!(self.out, "  ret void").unwrap();
                 } else if is_aggregate(self.tcx, ret_ty) {
-                    if let Some(bytes) = self.body_uses_sret() {
-                        // The caller named storage for this value, so the
-                        // slots go there and the pointer it already holds is
-                        // the answer.
-                        writeln!(
-                            self.out,
-                            "  call void @llvm.memcpy.p0.p0.i64(ptr %sret, ptr {slot}, i64 {bytes}, i1 false)",
-                            slot = local_slot(Local::RETURN)
-                        )
-                        .unwrap();
+                    if self.body_uses_sret().is_some() {
+                        // The answer was built in the caller's storage.
                         self.emit_heap_spill_frees();
-                        writeln!(self.out, "  ret ptr %sret").unwrap();
+                        writeln!(self.out, "  ret void").unwrap();
                     } else if let Some(slots) = slot_count(self.tcx, ret_ty) {
                         // Inline aggregate (struct / tuple / array): the
                         // callee's `%l0` is a stack alloca whose storage
@@ -762,4 +747,42 @@ impl<'a> Lowerer<'a> {
             } => self.lower_call(callee, args, destination, target.as_ref()),
         }
     }
+}
+
+/// Whether the runtime helper `name` takes its first argument by the address
+/// of the slot it names - a copy-blob walk reading the words in place, or a
+/// field helper writing the slot back - rather than by value.
+pub(crate) fn takes_slot_address(name: &str) -> bool {
+    matches!(
+        name,
+        "gos_rt_aggr_release_children"
+            | "gos_rt_aggr_retain_children"
+            | "gos_rt_aggr_mark_shared_children"
+            | "gos_rt_aggr_zero_guarded"
+            | "gos_rt_option_slot_retain"
+            | "gos_rt_option_slot_retain_ok"
+            | "gos_rt_option_slot_release"
+            | "gos_rt_vec_set_elem_meta"
+            | "gos_rt_lazy_iter_set_elem_meta"
+            | "gos_rt_vec_set_slot_children"
+            | "gos_rt_map_set_blob_values"
+            | "gos_rt_map_set_vec_values"
+            | "gos_rt_map_set_map_values"
+            | "gos_rt_map_set_set_values"
+            | "gos_rt_map_set_deque_values"
+            | "gos_rt_map_set_heap_values"
+            | "gos_rt_map_set_weak_values"
+            | "gos_rt_map_set_float_keys"
+            | "gos_rt_map_set_ordered"
+            | "gos_rt_map_set_ordered_by"
+            | "gos_rt_set_ordered_by"
+            | "gos_rt_map_field_release"
+            | "gos_rt_map_field_clone"
+            | "gos_rt_set_field_release"
+            | "gos_rt_set_field_clone"
+            | "gos_rt_deque_field_release"
+            | "gos_rt_deque_field_clone"
+            | "gos_rt_bheap_field_release"
+            | "gos_rt_bheap_field_clone"
+    )
 }

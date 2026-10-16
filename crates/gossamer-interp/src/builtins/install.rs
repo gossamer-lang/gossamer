@@ -543,6 +543,7 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
             ("arena_push", builtin_runtime_region_noop),
             ("arena_pop", builtin_runtime_region_noop),
             ("scheduler_stats_json", builtin_runtime_scheduler_stats_json),
+            ("is_main_thread", builtin_runtime_is_main_thread),
             ("set_panic_hook", builtin_runtime_set_panic_hook),
             ("at_exit", builtin_runtime_at_exit),
         ],

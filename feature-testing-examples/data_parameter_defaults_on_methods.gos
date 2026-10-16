@@ -1,0 +1,94 @@
+// Defaults on methods, trait methods, generic functions, and through an import
+// alias; same-named methods with different defaults each take their own.
+
+use shapes::Kind as K
+
+mod shapes {
+    pub enum Kind { Round, Square }
+
+    #[derive(Debug)]
+    pub struct V { pub x: i64, pub y: i64 }
+
+    impl V {
+        pub const ZERO: V = V { x: 0, y: 0 }
+    }
+
+    pub fn describe(kind: Kind = Round, at: V = V::ZERO) -> String {
+        let k = match kind {
+            Kind::Round => "round"
+            Kind::Square => "square"
+        }
+        f"{k} {at.x},{at.y}"
+    }
+}
+
+enum Mode { Fast, Slow }
+enum Level { Low, High }
+
+struct A {}
+struct B {}
+
+impl A {
+    fn go(&self, mode: Mode = Mode::Fast) -> String {
+        match mode {
+            Mode::Fast => "A fast"
+            Mode::Slow => "A slow"
+        }
+    }
+}
+
+impl B {
+    fn go(&self, mode: Mode = Mode::Slow) -> String {
+        match mode {
+            Mode::Fast => "B fast"
+            Mode::Slow => "B slow"
+        }
+    }
+}
+
+trait Speaker {
+    fn speak(&self, level: Level = Level::High) -> String
+}
+
+impl Speaker for A {
+    fn speak(&self, level: Level = Level::High) -> String {
+        match level {
+            Level::Low => "quiet"
+            Level::High => "LOUD"
+        }
+    }
+}
+
+fn first<T>(xs: Vec<T>, fallback: Option<T> = None) -> Option<T> {
+    if xs.len() > 0 { Some(xs[0]) } else { fallback }
+}
+
+fn pick(kind: K = K::Square) -> String {
+    shapes::describe(kind: kind)
+}
+
+fn table(m: Map<String, i64> = { "a": 1 }, s: Set<i64> = #{ 7 }, grid: [i64; 3] = [0; 3]) -> String {
+    f"{m["a"]} {s.len()} {grid.len()}"
+}
+
+fn main() {
+    // Each call site runs twice, so the JIT compiles `main` with its
+    // spliced defaults.
+    for round in 1..3 {
+        println(f"round {round}")
+        println(shapes::describe())
+        println(shapes::describe(at: shapes::V { x: 1, y: 2 }))
+        println(pick())
+        let a = A {}
+        let b = B {}
+        println(a.go())
+        println(b.go())
+        println(a.go(mode: Mode::Slow))
+        println(a.speak())
+        println(first(#[3, 4]))
+        let empty: Vec<String> = #[]
+        println(first(empty))
+        println(first(#["x"], fallback: Some("y")))
+        println(table())
+    }
+}

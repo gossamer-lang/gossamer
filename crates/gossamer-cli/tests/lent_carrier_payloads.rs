@@ -1,4 +1,5 @@
-//! A `Result` or `Option` handed to a Gossamer function is lent: the callee
+//! A `Result` or `Option` handed to a Gossamer function is lent, and one a
+//! function builds from its own parameter holds a share of it: the callee
 //! reads, binds, or returns its payload without the caller's share being
 //! given back twice. The runtime's reference trace reports every `Vec` free
 //! with the count it found, and a free that finds zero is a second free of an
@@ -13,16 +14,34 @@ fn gos_bin() -> PathBuf {
     PathBuf::from(std::env::var("CARGO_BIN_EXE_gos").expect("CARGO_BIN_EXE_gos"))
 }
 
-fn fixture() -> PathBuf {
+fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../feature-testing-examples/lent_carrier_payloads.gos")
+        .join("../../feature-testing-examples")
+        .join(format!("{name}.gos"))
 }
 
 #[test]
 fn lent_carrier_payloads_are_freed_once_on_native_debug_and_release() {
+    assert_freed_once("lent_carrier_payloads");
+}
+
+#[test]
+fn carrier_wrapped_parameters_are_freed_once_on_native_debug_and_release() {
+    assert_freed_once("carrier_wrapped_parameters");
+}
+
+#[test]
+fn match_tested_payloads_are_freed_once_on_native_debug_and_release() {
+    assert_freed_once("match_tested_payloads");
+}
+
+/// Runs fixture `name` on the VM and as native debug and release binaries,
+/// asserting the same output, no free of an already-freed `Vec`, and no
+/// reference-counted object left alive at exit.
+fn assert_freed_once(name: &str) {
     let vm = Command::new(gos_bin())
         .arg("run")
-        .arg(fixture())
+        .arg(fixture(name))
         .output()
         .expect("spawn gos run");
     assert!(
@@ -31,12 +50,12 @@ fn lent_carrier_payloads_are_freed_once_on_native_debug_and_release() {
         String::from_utf8_lossy(&vm.stderr)
     );
     for (profile, tag) in [(&[][..], "debug"), (&["--release"][..], "release")] {
-        let dir = std::env::temp_dir().join(format!("gos-lent-{}-{tag}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("gos-{name}-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let build = Command::new(gos_bin())
             .arg("build")
             .args(profile)
-            .arg(fixture())
+            .arg(fixture(name))
             .arg("--out-dir")
             .arg(&dir)
             .output()
@@ -47,12 +66,13 @@ fn lent_carrier_payloads_are_freed_once_on_native_debug_and_release() {
             String::from_utf8_lossy(&build.stderr)
         );
         let exe = dir.join(if cfg!(windows) {
-            "lent_carrier_payloads.exe"
+            format!("{name}.exe")
         } else {
-            "lent_carrier_payloads"
+            name.to_string()
         });
         let run = Command::new(&exe)
             .env("GOS_RC_TRACE", "1")
+            .env("GOS_RC_DEBUG", "1")
             .output()
             .expect("run native binary");
         let stderr = String::from_utf8_lossy(&run.stderr);
@@ -62,6 +82,10 @@ fn lent_carrier_payloads_are_freed_once_on_native_debug_and_release() {
         assert_eq!(
             second_frees, 0,
             "{tag}: {second_frees} frees of an already-freed Vec"
+        );
+        assert!(
+            stderr.lines().any(|l| l.starts_with("RC_LIVE_AT_EXIT=0 ")),
+            "{tag}: objects left alive at exit: {stderr}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

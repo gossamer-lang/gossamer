@@ -89,7 +89,7 @@ pub unsafe extern "C" fn gos_rt_csv_read(input: *const c_char) -> i128 {
         let mut row = new_row(fields);
         let walked = csv::for_each_record(input, &mut scratch, |event| match event {
             csv::Event::Field(field) => {
-                let pv = alloc_cstring(field) as i64;
+                let pv = alloc_cstring(field.as_bytes()) as i64;
                 // SAFETY: `row` is a fresh vec owned here, or null, which `gos_rt_vec_push`
                 // accepts, and `pv` is one 8-byte element.
                 unsafe { gos_rt_vec_push(row, std::ptr::addr_of!(pv).cast::<u8>()) };
@@ -125,8 +125,8 @@ pub unsafe extern "C" fn gos_rt_csv_read(input: *const c_char) -> i128 {
 /// once into `unquoted`. A field becomes a `String` only when the program
 /// reads one as text, and then only for the length of the call reading it.
 pub struct CsvTable {
-    text: Box<[u8]>,
-    unquoted: Vec<u8>,
+    text: Box<str>,
+    unquoted: String,
     /// Each field's span: in `text`, or in `unquoted` when the flag is set.
     fields: Vec<(u32, u32, bool)>,
     /// Index of each record's first field, then one past the last field.
@@ -139,8 +139,8 @@ impl CsvTable {
     fn read(input: &str) -> Result<Self, String> {
         let base = input.as_ptr() as usize;
         let mut table = Self {
-            text: input.as_bytes().into(),
-            unquoted: Vec::new(),
+            text: input.into(),
+            unquoted: String::new(),
             fields: Vec::new(),
             records: vec![0],
             current: std::ptr::null_mut(),
@@ -155,7 +155,7 @@ impl CsvTable {
                     (at as u32, (at + field.len()) as u32, false)
                 } else {
                     let start = table.unquoted.len();
-                    table.unquoted.extend_from_slice(field);
+                    table.unquoted.push_str(field);
                     (start as u32, table.unquoted.len() as u32, true)
                 };
                 table.fields.push(span);
@@ -187,14 +187,13 @@ impl CsvTable {
             crate::c_abi::panic::panic_oob_text("vec index", field, count);
         }
         let (start, end, unquoted) = spans[field as usize];
-        let bytes = if unquoted {
+        // A field ends only at an ASCII separator or quote of the text, so
+        // its span lies on character boundaries.
+        if unquoted {
             &self.unquoted[start as usize..end as usize]
         } else {
             &self.text[start as usize..end as usize]
-        };
-        // A field ends only at an ASCII separator or quote of UTF-8 text, so
-        // its bytes are UTF-8.
-        std::str::from_utf8(bytes).expect("a CSV field of UTF-8 text is UTF-8")
+        }
     }
 }
 
@@ -242,7 +241,7 @@ pub extern "C" fn gos_rt_csv_table_unwrap_or_empty(r: i128) -> i64 {
         }
         let empty = CsvTable {
             text: Box::default(),
-            unquoted: Vec::new(),
+            unquoted: String::new(),
             fields: Vec::new(),
             records: vec![0],
             current: std::ptr::null_mut(),

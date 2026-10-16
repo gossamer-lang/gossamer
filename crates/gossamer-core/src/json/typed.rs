@@ -649,7 +649,22 @@ fn scan_value_end(bytes: &[u8], start: usize) -> usize {
             let close = if *open == b'{' { b'}' } else { b']' };
             let mut depth = 0usize;
             let mut cursor = start;
-            while let Some(&byte) = bytes.get(cursor) {
+            loop {
+                cursor = super::scan::find(
+                    bytes,
+                    cursor,
+                    |w| {
+                        super::scan::equal(w, b'"')
+                            | super::scan::equal(w, b'[')
+                            | super::scan::equal(w, b'{')
+                            | super::scan::equal(w, b']')
+                            | super::scan::equal(w, b'}')
+                    },
+                    |b| matches!(b, b'"' | b'{' | b'[' | b'}' | b']'),
+                );
+                let Some(&byte) = bytes.get(cursor) else {
+                    return cursor;
+                };
                 match byte {
                     b'"' => {
                         cursor = string_end(bytes, cursor);
@@ -667,32 +682,43 @@ fn scan_value_end(bytes: &[u8], start: usize) -> usize {
                 }
                 cursor += 1;
             }
-            cursor
         }
-        _ => {
-            let mut cursor = start;
-            while let Some(&byte) = bytes.get(cursor) {
-                if matches!(byte, b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r') {
-                    break;
-                }
-                cursor += 1;
-            }
-            cursor
-        }
+        _ => super::scan::find(
+            bytes,
+            start,
+            |w| {
+                super::scan::equal(w, b',')
+                    | super::scan::equal(w, b'}')
+                    | super::scan::equal(w, b']')
+                    | super::scan::equal(w, b' ')
+                    | super::scan::equal(w, b'\t')
+                    | super::scan::equal(w, b'\n')
+                    | super::scan::equal(w, b'\r')
+            },
+            |b| matches!(b, b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r'),
+        ),
     }
 }
 
 /// The offset just past the string whose opening quote is at `start`.
 fn string_end(bytes: &[u8], start: usize) -> usize {
     let mut cursor = start + 1;
-    while let Some(&byte) = bytes.get(cursor) {
-        match byte {
-            b'"' => return cursor + 1,
-            b'\\' => cursor += 2,
-            _ => cursor += 1,
+    loop {
+        cursor = super::scan::find(
+            bytes,
+            cursor,
+            |w| super::scan::equal(w, b'"') | super::scan::equal(w, b'\\'),
+            |b| matches!(b, b'"' | b'\\'),
+        );
+        let Some(&byte) = bytes.get(cursor) else {
+            return cursor;
+        };
+        if byte == b'"' {
+            return cursor + 1;
         }
+        // An escape: the byte after it is never the closing quote.
+        cursor += 2;
     }
-    cursor
 }
 
 #[allow(
@@ -815,7 +841,105 @@ fn decode_variants(encoded: &str) -> Vec<(bool, &str)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TypedReader, encode_names, encode_variants};
+    use super::{TypedReader, encode_names, encode_variants, scan_value_end};
+
+    /// `scan_value_end` read byte by byte, for comparison with the scan that
+    /// skips ahead.
+    fn value_end_bytewise(bytes: &[u8], start: usize) -> usize {
+        fn string_end(bytes: &[u8], start: usize) -> usize {
+            let mut cursor = start + 1;
+            while let Some(&byte) = bytes.get(cursor) {
+                match byte {
+                    b'"' => return cursor + 1,
+                    b'\\' => cursor += 2,
+                    _ => cursor += 1,
+                }
+            }
+            cursor
+        }
+        match bytes.get(start) {
+            Some(b'"') => string_end(bytes, start),
+            Some(b'{' | b'[') => {
+                let mut depth = 0usize;
+                let mut cursor = start;
+                while let Some(&byte) = bytes.get(cursor) {
+                    match byte {
+                        b'"' => {
+                            cursor = string_end(bytes, cursor);
+                            continue;
+                        }
+                        b'{' | b'[' => depth += 1,
+                        b'}' | b']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return cursor + 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                    cursor += 1;
+                }
+                cursor
+            }
+            _ => {
+                let mut cursor = start;
+                while let Some(&byte) = bytes.get(cursor) {
+                    if matches!(byte, b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r') {
+                        break;
+                    }
+                    cursor += 1;
+                }
+                cursor
+            }
+        }
+    }
+
+    #[test]
+    fn the_skipping_scan_ends_values_where_the_bytewise_one_does() {
+        const ALPHABET: &[u8] = b"[]{}\"\\,: \t\n\r1a_\x7f";
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        for length in 1..40 {
+            for _ in 0..300 {
+                let mut text: Vec<u8> = (0..length)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        ALPHABET[(state % ALPHABET.len() as u64) as usize]
+                    })
+                    .collect();
+                // Every value kind starts the text in turn. A checked document
+                // closes each container with its own bracket, so one kind of
+                // bracket is used throughout.
+                text[0] = [b'[', b'{', b'"', b'1'][length % 4];
+                let (open, close) = if text[0] == b'{' {
+                    (b'{', b'}')
+                } else {
+                    (b'[', b']')
+                };
+                for byte in &mut text[1..] {
+                    match *byte {
+                        b'[' | b'{' => *byte = open,
+                        b']' | b'}' => *byte = close,
+                        _ => {}
+                    }
+                }
+                // Unbalanced brackets would underflow the depth, which a
+                // checked document never has; the reference shares that.
+                let opens = text.iter().filter(|b| matches!(b, b'[' | b'{')).count();
+                let closes = text.iter().filter(|b| matches!(b, b']' | b'}')).count();
+                if closes > opens {
+                    continue;
+                }
+                assert_eq!(
+                    scan_value_end(&text, 0),
+                    value_end_bytewise(&text, 0),
+                    "{:?}",
+                    String::from_utf8_lossy(&text)
+                );
+            }
+        }
+    }
 
     fn message(reader: &TypedReader) -> Option<String> {
         reader.error().map(|e| {

@@ -1,0 +1,13 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+assertion_line: 86
+expression: rendered
+---
+--- plain ---
+error[GR0024]: A `use path::*` whose path names no enum of this program. A glob - here
+--- framed ---
+error[GR0024]: A `use path::*` whose path names no enum of this program. A glob
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

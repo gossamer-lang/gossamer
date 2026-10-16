@@ -17,7 +17,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use super::vec::GosVec;
-use crate::sched_global::{SyscallGuard, syscall_enter};
+use crate::sched_global::{on_worker, syscall_mark, syscall_unmark};
 
 /// The error codes a foreign call left behind.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -29,16 +29,36 @@ pub struct ForeignErrors {
     pub os: i64,
 }
 
-thread_local! {
+/// What every foreign call on a thread reads and writes, held together so a
+/// call reaches all of it through one thread-local lookup.
+struct FfiThread {
     /// The error codes the most recent foreign call left, for the goroutine
     /// running on this worker. The scheduler saves and restores them around
     /// every goroutine switch, so they follow the goroutine across workers.
-    static FFI_ERRNO: Cell<ForeignErrors> = const {
-        Cell::new(ForeignErrors { errno: 0, os: 0 })
+    errors: Cell<ForeignErrors>,
+    /// The foreign calls in progress on this thread: a callback may make a
+    /// foreign call of its own.
+    depth: Cell<u32>,
+    /// Whether [`PENDING_CALLBACK_FAULT`] may hold a fault, so leaving a call
+    /// reads a destructor-free thread-local rather than the fault's slot.
+    fault_held: Cell<bool>,
+    /// This thread's `errno` slot, found on its first foreign call; the
+    /// address is fixed for the thread's life. Windows reads its codes
+    /// through calls instead.
+    #[cfg(unix)]
+    errno_slot: Cell<*mut core::ffi::c_int>,
+}
+
+thread_local! {
+    static FFI: FfiThread = const {
+        FfiThread {
+            errors: Cell::new(ForeignErrors { errno: 0, os: 0 }),
+            depth: Cell::new(0),
+            fault_held: Cell::new(false),
+            #[cfg(unix)]
+            errno_slot: Cell::new(std::ptr::null_mut()),
+        }
     };
-    /// The system-call marks of the foreign calls in progress on this worker,
-    /// innermost last: a callback may make a foreign call of its own.
-    static CALL_GUARDS: RefCell<Vec<SyscallGuard>> = const { RefCell::new(Vec::new()) };
     /// A fault a callback raised, held until the foreign call that ran the
     /// callback returns, so it never unwinds through native frames.
     static PENDING_CALLBACK_FAULT: RefCell<Option<super::panic::DeferredFault>> =
@@ -46,20 +66,18 @@ thread_local! {
     /// Packed copies made for byte arguments whose `Vec` stores a byte per
     /// word, keyed by the copy's address, retired by [`gos_rt_ffi_buf_end`].
     static PACKED_COPIES: RefCell<HashMap<usize, Vec<u8>>> = RefCell::new(HashMap::new());
-    /// Live struct buffers by address, with their size in words.
-    static STRUCT_BUFFERS: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
 }
 
 /// Swaps the worker's foreign-call error codes for `value`, answering the
 /// old ones. The scheduler calls this around each goroutine step.
 pub fn swap_ffi_errno(value: ForeignErrors) -> ForeignErrors {
-    FFI_ERRNO.with(|cell| cell.replace(value))
+    FFI.with(|t| t.errors.replace(value))
 }
 
 /// The error codes the current goroutine's most recent foreign call left.
 #[must_use]
 pub fn ffi_errno() -> ForeignErrors {
-    FFI_ERRNO.with(Cell::get)
+    FFI.with(|t| t.errors.get())
 }
 
 /// Marks the worker as inside a foreign call that may block, then clears the
@@ -67,9 +85,13 @@ pub fn ffi_errno() -> ForeignErrors {
 /// back zero. Every tier calls this immediately before the native function.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_ffi_enter() {
-    let guard = syscall_enter();
-    CALL_GUARDS.with(|guards| guards.borrow_mut().push(guard));
-    native_errors::clear();
+    if on_worker() {
+        syscall_mark();
+    }
+    FFI.with(|t| {
+        t.depth.set(t.depth.get() + 1);
+        native_errors::clear(t);
+    });
 }
 
 /// Captures the foreign call's `errno` and leaves the call mark, then raises
@@ -77,7 +99,9 @@ pub extern "C" fn gos_rt_ffi_enter() {
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn gos_rt_ffi_leave() {
     ffi_leave_capture();
-    if let Some(fault) = PENDING_CALLBACK_FAULT.with(|slot| slot.borrow_mut().take()) {
+    if FFI.with(|t| t.fault_held.replace(false))
+        && let Some(fault) = PENDING_CALLBACK_FAULT.with(|slot| slot.borrow_mut().take())
+    {
         super::panic::reraise_deferred_fault(&fault);
     }
 }
@@ -85,17 +109,19 @@ pub extern "C-unwind" fn gos_rt_ffi_leave() {
 /// [`gos_rt_ffi_leave`] without raising a held fault: the bytecode tier
 /// reports a callback's fault through its own error value.
 pub fn ffi_leave_capture() {
-    // First, before anything that could make a system call of its own.
-    let errors = native_errors::capture();
-    FFI_ERRNO.with(|cell| cell.set(errors));
-    CALL_GUARDS.with(|guards| {
-        guards.borrow_mut().pop();
+    FFI.with(|t| {
+        // First, before anything that could make a system call of its own.
+        t.errors.set(native_errors::capture(t));
+        t.depth.set(t.depth.get().saturating_sub(1));
     });
+    if on_worker() {
+        syscall_unmark();
+    }
 }
 
 /// The calling thread's C `errno` and operating-system error code.
 mod native_errors {
-    use super::ForeignErrors;
+    use super::{FfiThread, ForeignErrors};
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
     fn errno_location() -> *mut libc::c_int {
@@ -115,17 +141,29 @@ mod native_errors {
         unsafe { libc::__errno() }
     }
 
+    /// The calling thread's `errno` slot, looked up once per thread.
     #[cfg(unix)]
-    pub(super) fn clear() {
+    fn errno_slot(thread: &FfiThread) -> *mut libc::c_int {
+        let slot = thread.errno_slot.get();
+        if !slot.is_null() {
+            return slot;
+        }
+        let slot = errno_location();
+        thread.errno_slot.set(slot);
+        slot
+    }
+
+    #[cfg(unix)]
+    pub(super) fn clear(thread: &FfiThread) {
         // SAFETY: the slot is the calling thread's own and always writable.
-        unsafe { *errno_location() = 0 }
+        unsafe { *errno_slot(thread) = 0 }
     }
 
     // On Unix the system reports through `errno`, so the two codes agree.
     #[cfg(unix)]
-    pub(super) fn capture() -> ForeignErrors {
+    pub(super) fn capture(thread: &FfiThread) -> ForeignErrors {
         // SAFETY: the slot is the calling thread's own and always readable.
-        let errno = i64::from(unsafe { *errno_location() });
+        let errno = i64::from(unsafe { *errno_slot(thread) });
         ForeignErrors { errno, os: errno }
     }
 
@@ -137,7 +175,7 @@ mod native_errors {
     }
 
     #[cfg(windows)]
-    pub(super) fn clear() {
+    pub(super) fn clear(_thread: &FfiThread) {
         // SAFETY: `_errno` answers the calling thread's CRT `errno` slot,
         // always writable; `SetLastError` has no preconditions.
         unsafe {
@@ -147,7 +185,7 @@ mod native_errors {
     }
 
     #[cfg(windows)]
-    pub(super) fn capture() -> ForeignErrors {
+    pub(super) fn capture(_thread: &FfiThread) -> ForeignErrors {
         // The last error first: reaching the CRT's per-thread data may make
         // Win32 calls of its own.
         // SAFETY: `GetLastError` has no preconditions.
@@ -159,10 +197,10 @@ mod native_errors {
 
     // wasm32 has no foreign functions, so there is nothing to clear or read.
     #[cfg(not(any(unix, windows)))]
-    pub(super) fn clear() {}
+    pub(super) fn clear(_thread: &FfiThread) {}
 
     #[cfg(not(any(unix, windows)))]
-    pub(super) fn capture() -> ForeignErrors {
+    pub(super) fn capture(_thread: &FfiThread) -> ForeignErrors {
         ForeignErrors::default()
     }
 }
@@ -171,7 +209,7 @@ mod native_errors {
 /// may call back into the program on it.
 #[must_use]
 pub fn in_foreign_call() -> bool {
-    CALL_GUARDS.with(|guards| !guards.borrow().is_empty())
+    FFI.with(|t| t.depth.get() > 0)
 }
 
 /// Readies a thread the program did not start to run Gossamer code: the
@@ -244,6 +282,7 @@ pub unsafe extern "C" fn gos_rt_ffi_callback_run(
                     *slot = Some(fault);
                 }
             });
+            FFI.with(|t| t.fault_held.set(true));
             0
         }
     }
@@ -678,6 +717,22 @@ pub unsafe extern "C" fn gos_rt_ffi_copy(dst: *mut u8, src: *const u8, len: u64)
     unsafe { std::ptr::copy(src, dst, len as usize) };
 }
 
+/// Zeroes `len` bytes at `dst`, which an aggregate `ffi::write` then fills
+/// field by field.
+///
+/// # Safety
+///
+/// `dst` addresses `len` writable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_ffi_zero(dst: *mut u8, len: i64) {
+    let len = usize::try_from(len).unwrap_or(0);
+    if len == 0 {
+        return;
+    }
+    // SAFETY: `dst` holds `len` writable bytes (contract).
+    unsafe { std::ptr::write_bytes(dst, 0, len) };
+}
+
 /// Copies `len` bytes from `src` to the foreign address `dst`.
 ///
 /// # Safety
@@ -800,6 +855,7 @@ mod handles {
             super::super::vec::gos_rt_vec_mark_shared(cell);
             super::super::vec::gos_rt_vec_retain(cell);
         }
+        crate::sched_global::adjust_external_actors(true);
         with(|registry| {
             let id = registry.next;
             registry.next += 1;
@@ -845,6 +901,7 @@ mod handles {
         let Some(old) = with(|registry| registry.cells.remove(&id)) else {
             missing(id)
         };
+        crate::sched_global::adjust_external_actors(false);
         // SAFETY: the registry's share.
         unsafe { super::super::map::gos_rt_vec_free(old as *mut GosVec) };
     }
@@ -1023,30 +1080,38 @@ pub unsafe extern "C" fn gos_rt_ffi_buf_end(
 }
 
 /// A zeroed C buffer of `size` bytes that a struct or array argument is
-/// packed into, freed by [`gos_rt_ffi_struct_free`].
+/// packed into, freed by [`gos_rt_ffi_struct_free`]. The word before the
+/// buffer holds its length in words, so freeing it needs nothing else.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_ffi_struct_alloc(size: i64) -> *mut u8 {
-    let size = usize::try_from(size).unwrap_or(0).max(1);
-    let buffer = vec![0u64; size.div_ceil(8)].into_boxed_slice();
-    let ptr = Box::into_raw(buffer).cast::<u8>();
-    STRUCT_BUFFERS.with(|sizes| sizes.borrow_mut().insert(ptr as usize, size.div_ceil(8)));
-    ptr
+    let words = usize::try_from(size).unwrap_or(0).max(1).div_ceil(8);
+    let mut buffer = vec![0u64; words + 1].into_boxed_slice();
+    buffer[0] = words as u64;
+    let base = Box::into_raw(buffer).cast::<u64>();
+    // SAFETY: the allocation holds `words + 1` words, so one past its first is in bounds.
+    unsafe { base.add(1) }.cast::<u8>()
 }
 
 /// Frees a buffer [`gos_rt_ffi_struct_alloc`] answered.
 ///
 /// # Safety
 ///
-/// `ptr` came from [`gos_rt_ffi_struct_alloc`] on this thread and is not
-/// used again.
+/// `ptr` came from [`gos_rt_ffi_struct_alloc`] and is not used again.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_ffi_struct_free(ptr: *mut u8) {
-    let Some(words) = STRUCT_BUFFERS.with(|sizes| sizes.borrow_mut().remove(&(ptr as usize)))
-    else {
+    if ptr.is_null() {
         return;
-    };
-    // SAFETY: `ptr` is the start of a boxed `[u64]` of `words` words.
-    drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr.cast::<u64>(), words)) });
+    }
+    // SAFETY: `ptr` is one word into an allocation whose first word holds the
+    // buffer's length (contract).
+    unsafe {
+        let base = ptr.cast::<u64>().sub(1);
+        let words = usize::try_from(*base).unwrap_or(0);
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+            base,
+            words + 1,
+        )));
+    }
 }
 
 /// Writes the low `width` bytes of `bits` at `offset` in a struct buffer.
@@ -1399,5 +1464,32 @@ mod platform {
 mod platform {
     pub(super) fn resolve(_name: &str, _libraries: &[String]) -> Option<*const u8> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{gos_rt_ffi_get, gos_rt_ffi_put, gos_rt_ffi_struct_alloc, gos_rt_ffi_struct_free};
+
+    #[test]
+    fn a_struct_buffer_holds_what_is_put_and_frees_on_any_thread() {
+        let buffer = gos_rt_ffi_struct_alloc(24);
+        // SAFETY: the buffer holds 24 bytes, and each access stays inside them.
+        let (first, last) = unsafe {
+            gos_rt_ffi_put(buffer, 0, 4, -7);
+            gos_rt_ffi_put(buffer, 16, 8, 0x0102_0304_0506_0708);
+            (
+                gos_rt_ffi_get(buffer, 0, 4, 1),
+                gos_rt_ffi_get(buffer, 16, 8, 0),
+            )
+        };
+        assert_eq!((first, last), (-7, 0x0102_0304_0506_0708));
+        let address = buffer as usize;
+        std::thread::spawn(move || {
+            // SAFETY: the buffer came from `gos_rt_ffi_struct_alloc` and is not used again.
+            unsafe { gos_rt_ffi_struct_free(address as *mut u8) };
+        })
+        .join()
+        .expect("the freeing thread");
     }
 }

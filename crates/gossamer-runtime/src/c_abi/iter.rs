@@ -444,11 +444,23 @@ impl LazyElemTag {
     }
 }
 
+/// Which state a lazy iterator handle boxes. Both handle types lead with it,
+/// so a release or a share that reaches a handle through the other type's
+/// entry point still reads and frees the state it really holds.
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LazyStateKind {
+    Word,
+    Pair,
+}
+
 /// Opaque lazy `Iterator<i64>` state used by 2027 native iterator lowering.
 ///
 /// `class` is the [`lazy_elem_class`] tag the producing helper stamped on the
 /// handle; adapters carry it forward unchanged.
+#[repr(C)]
 pub struct GosLazyIterI64 {
+    kind: LazyStateKind,
     inner: Box<dyn Iterator<Item = i64>>,
     tag: LazyElemTag,
     /// Holders of this handle. A frame owns the one it builds; an aggregate
@@ -460,7 +472,9 @@ pub struct GosLazyIterI64 {
 ///
 /// `classes` names the [`lazy_elem_class`] of each half, so a consumer that
 /// discards a pair gives back the shares a counted half carries.
+#[repr(C)]
 pub struct GosLazyIterPairI64 {
+    kind: LazyStateKind,
     inner: Box<dyn Iterator<Item = (i64, i64)>>,
     classes: [u8; 2],
     /// Holders of this handle, as for [`GosLazyIterI64::shares`].
@@ -501,12 +515,63 @@ fn release_share(shares: &AtomicUsize) -> bool {
 /// `iter` must be null or a live handle from a lazy iterator helper.
 pub(crate) unsafe fn lazy_iter_retain(iter: *mut GosLazyIterI64) {
     // A handle in region storage counts no holders; its pop drops it.
-    if crate::c_abi::rc::in_region_arena(iter.cast()) {
+    if iter.is_null() || crate::c_abi::rc::in_region_arena(iter.cast()) {
         return;
     }
-    // SAFETY: this `unsafe fn`'s caller passes `iter` null or a live lazy iterator.
-    if let Some(state) = unsafe { iter.as_ref() } {
-        state.shares.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: `iter` is non-null and a live lazy handle (this `unsafe fn`'s caller), whose
+    // leading kind names the state it boxes.
+    match unsafe { lazy_state_kind(iter.cast()) } {
+        LazyStateKind::Word => {
+            // SAFETY: the handle boxes word state.
+            unsafe { &*iter }.shares.fetch_add(1, Ordering::Relaxed);
+        }
+        LazyStateKind::Pair => {
+            // SAFETY: the handle boxes pair state.
+            unsafe { &*iter.cast::<GosLazyIterPairI64>() }
+                .shares
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The state a lazy handle boxes.
+///
+/// # Safety
+/// `iter` is a non-null live handle of either lazy type.
+unsafe fn lazy_state_kind(iter: *const u8) -> LazyStateKind {
+    // SAFETY: both handle types are `repr(C)` and lead with their kind.
+    unsafe { *iter.cast::<LazyStateKind>() }
+}
+
+/// Gives back a share of a lazy handle of either type, dropping the state and
+/// its adapter chain with the last one.
+///
+/// # Safety
+/// `iter` is null or a live handle of either lazy type whose share the caller
+/// gives up.
+unsafe fn lazy_iter_release(iter: *mut u8) {
+    // A handle in region storage is dropped by its region's pop.
+    if iter.is_null() || crate::c_abi::rc::in_region_arena(iter) {
+        return;
+    }
+    // SAFETY: `iter` is non-null and a live lazy handle (this `unsafe fn`'s caller).
+    match unsafe { lazy_state_kind(iter) } {
+        LazyStateKind::Word => {
+            let iter = iter.cast::<GosLazyIterI64>();
+            // SAFETY: the handle boxes word state.
+            if release_share(&unsafe { &*iter }.shares) {
+                // SAFETY: the last share frees the box `Box::into_raw` made.
+                drop(unsafe { Box::from_raw(iter) });
+            }
+        }
+        LazyStateKind::Pair => {
+            let iter = iter.cast::<GosLazyIterPairI64>();
+            // SAFETY: the handle boxes pair state.
+            if release_share(&unsafe { &*iter }.shares) {
+                // SAFETY: the last share frees the box `Box::into_raw` made.
+                drop(unsafe { Box::from_raw(iter) });
+            }
+        }
     }
 }
 
@@ -515,14 +580,8 @@ pub(crate) unsafe fn lazy_iter_retain(iter: *mut GosLazyIterI64) {
 /// # Safety
 /// `iter` must be null or a live handle from a lazy pair helper.
 pub(crate) unsafe fn lazy_iter_pair_retain(iter: *mut GosLazyIterPairI64) {
-    // A handle in region storage counts no holders; its pop drops it.
-    if crate::c_abi::rc::in_region_arena(iter.cast()) {
-        return;
-    }
-    // SAFETY: this `unsafe fn`'s caller passes `iter` null or a live pair iterator.
-    if let Some(state) = unsafe { iter.as_ref() } {
-        state.shares.fetch_add(1, Ordering::Relaxed);
-    }
+    // SAFETY: as for `lazy_iter_retain`, which reads the state the handle boxes.
+    unsafe { lazy_iter_retain(iter.cast()) }
 }
 
 struct BorrowedGosVecI64 {
@@ -576,6 +635,7 @@ where
     I: Iterator<Item = i64> + 'static,
 {
     let state = GosLazyIterI64 {
+        kind: LazyStateKind::Word,
         inner: Box::new(iter),
         tag,
         shares: AtomicUsize::new(1),
@@ -655,6 +715,7 @@ where
     I: Iterator<Item = (i64, i64)> + 'static,
 {
     let state = GosLazyIterPairI64 {
+        kind: LazyStateKind::Pair,
         inner: Box::new(iter),
         classes,
         shares: AtomicUsize::new(1),
@@ -1024,40 +1085,16 @@ pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_retain_pair_i64(iter: *mut GosL
 /// Release an unconsumed lazy i64 iterator and its complete adapter chain.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_drop_i64(iter: *mut GosLazyIterI64) {
-    ffi_entry_passthrough!({
-        // A handle in region storage is dropped by its region's pop.
-        if crate::c_abi::rc::in_region_arena(iter.cast()) {
-            return;
-        }
-        // SAFETY: the caller gives up its share of a live handle; the last
-        // share drops the box and with it every upstream adapter.
-        if let Some(state) = unsafe { iter.as_ref() }
-            && release_share(&state.shares)
-        {
-            // SAFETY: the last share of `iter` just went, so this frees the box `Box::into_raw`
-            // made.
-            drop(unsafe { Box::from_raw(iter) });
-        }
-    });
+    // SAFETY: the caller gives up its share of a live handle or passes null; the last share
+    // drops the box and with it every upstream adapter.
+    ffi_entry_passthrough!({ unsafe { lazy_iter_release(iter.cast()) } });
 }
 
 /// Release an unconsumed lazy pair iterator and its complete adapter chain.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_drop_pair_i64(iter: *mut GosLazyIterPairI64) {
-    ffi_entry_passthrough!({
-        // A handle in region storage is dropped by its region's pop.
-        if crate::c_abi::rc::in_region_arena(iter.cast()) {
-            return;
-        }
-        // SAFETY: as for `gos_rt_lazy_iter_drop_i64`.
-        if let Some(state) = unsafe { iter.as_ref() }
-            && release_share(&state.shares)
-        {
-            // SAFETY: the last share of `iter` just went, so this frees the box `Box::into_raw`
-            // made.
-            drop(unsafe { Box::from_raw(iter) });
-        }
-    });
+    // SAFETY: as for `gos_rt_lazy_iter_drop_i64`.
+    ffi_entry_passthrough!({ unsafe { lazy_iter_release(iter.cast()) } });
 }
 
 /// Advance a lazy i64 iterator without consuming the iterator handle.

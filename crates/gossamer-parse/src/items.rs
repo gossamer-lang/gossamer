@@ -330,7 +330,7 @@ impl Parser<'_> {
     fn parse_item_after(
         &mut self,
         start_span: gossamer_lex::Span,
-        attrs: Attrs,
+        mut attrs: Attrs,
         visibility: Visibility,
     ) -> Item {
         let synthesized = attrs.has_word("gos_synthesized");
@@ -340,6 +340,9 @@ impl Parser<'_> {
         let mut kind = self.parse_item_kind(visibility);
         if synthesized {
             self.synthesized_depth = self.synthesized_depth.saturating_sub(1);
+        }
+        if matches!(kind, ItemKind::Mod(_)) {
+            attrs.inner.append(&mut self.module_inner_attrs);
         }
         // A function's attributes are its declaration's, wherever it sits:
         // a method and an extern-block function carry them the same way.
@@ -1469,6 +1472,10 @@ impl Parser<'_> {
         }
         self.bump();
         self.mod_stack.push(name.name.clone());
+        // `#![..]` first in the body applies to the module, as the same
+        // attributes first in a file apply to the file; a sibling file's
+        // module is its file's body.
+        let inner = self.parse_file_attrs().inner;
         let mut items = Vec::new();
         while !self.at_punct(Punct::RBrace) && !self.at_eof() {
             let before = self.checkpoint_public();
@@ -1505,6 +1512,7 @@ impl Parser<'_> {
         }
         self.expect_punct(Punct::RBrace, "to close inline module");
         self.mod_stack.pop();
+        self.module_inner_attrs = inner;
         ModDecl {
             name,
             body: ModBody::Inline(items),

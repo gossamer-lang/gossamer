@@ -1634,6 +1634,10 @@ fn fill_cache_slot(
         Global::Value(Value::Builtin(inner)) => Some(inner.call),
         _ => None,
     };
+    let native_fn = match g {
+        Global::Value(Value::Native(inner)) => Some((inner.call, inner.name)),
+        _ => None,
+    };
     let fn_chunk = match g {
         Global::Fn(chunk) => Some(Arc::clone(chunk)),
         Global::Value(_) | Global::MutStatic(_) => None,
@@ -1643,6 +1647,7 @@ fn fill_cache_slot(
         callee_name,
         generation,
         builtin_fn,
+        native_fn,
         fn_chunk,
     }
 }
@@ -2405,6 +2410,17 @@ pub(crate) fn value_ordering(a: &Value, b: &Value) -> RuntimeResult<std::cmp::Or
     let b_deref = auto_deref_cell(b);
     let a_ref = a_deref.as_ref().unwrap_or(a);
     let b_ref = b_deref.as_ref().unwrap_or(b);
+    // An enum orders by variant rank - the position its variant was declared
+    // at, which is the discriminant every compiled tier compares - and then
+    // by payload, field by field. A variant with named fields is held as a
+    // struct of the variant's name, so both shapes are ranked alike.
+    if let (Some(x), Some(y)) = (variant_parts(a_ref), variant_parts(b_ref)) {
+        return match (x.0, y.0) {
+            (Some(ra), Some(rb)) if ra != rb => Ok(ra.cmp(&rb)),
+            _ if x.1 != y.1 => Ok(x.1.cmp(y.1)),
+            _ => seq_ordering(&x.2, &y.2),
+        };
+    }
     match (a_ref, b_ref) {
         (Value::Int(x), Value::Int(y)) => Ok(x.cmp(y)),
         // A `Uint` is a `u64` whose bits reach past `i64::MAX`, so it orders
@@ -2439,23 +2455,38 @@ pub(crate) fn value_ordering(a: &Value, b: &Value) -> RuntimeResult<std::cmp::Or
             let y_values: Vec<_> = xb.fields.iter().map(|(_, value)| value.clone()).collect();
             seq_ordering(&x_values, &y_values)
         }
-        // An enum orders by variant rank - the position its variant was
-        // declared at, which is the discriminant every compiled tier
-        // compares - and then by payload, field by field.
-        (Value::Variant(xa), Value::Variant(xb)) => {
-            let rank = |name: &str| crate::builtins::variant_rank_of(name);
-            match (rank(xa.name.as_str()), rank(xb.name.as_str())) {
-                (Some(ra), Some(rb)) if ra != rb => Ok(ra.cmp(&rb)),
-                _ if xa.name != xb.name => Ok(xa.name.as_str().cmp(xb.name.as_str())),
-                _ => seq_ordering(&xa.fields, &xb.fields),
-            }
-        }
         _ => match (seq_elements(a_ref), seq_elements(b_ref)) {
             (Some(xa), Some(xb)) => seq_ordering(&xa, &xb),
             _ => Err(RuntimeError::Type(
                 "comparison on unsupported kinds".to_string(),
             )),
         },
+    }
+}
+
+/// An enum value's variant rank, variant name, and fields, when `value` is
+/// one: a positional variant, or a struct named for a variant one enum
+/// declares.
+fn variant_parts(value: &Value) -> Option<(Option<i64>, &str, Vec<Value>)> {
+    match value {
+        Value::Variant(v) => {
+            let name = v.name.as_str();
+            Some((
+                crate::builtins::variant_rank_of(name),
+                name,
+                v.fields.to_vec(),
+            ))
+        }
+        Value::Struct(s) => {
+            let name = s.name.as_str();
+            let rank = crate::builtins::variant_rank_of(name)?;
+            Some((
+                Some(rank),
+                name,
+                s.fields.iter().map(|(_, v)| v.clone()).collect(),
+            ))
+        }
+        _ => None,
     }
 }
 
@@ -2534,8 +2565,8 @@ mod tests {
         let file = map.add_file("jit-admission.gos", source.to_string());
         let (mut sf, parse_diagnostics) = gossamer_parse::parse_source_file(source, file);
         assert!(parse_diagnostics.is_empty(), "parse: {parse_diagnostics:?}");
-        let (resolutions, resolve_diagnostics) = gossamer_resolve::resolve_source_file(&sf);
-        let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &resolutions);
+        let (mut resolutions, resolve_diagnostics) = gossamer_resolve::resolve_source_file(&sf);
+        let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
         assert!(
             resolve_diagnostics.is_empty(),
             "resolve: {resolve_diagnostics:?}"

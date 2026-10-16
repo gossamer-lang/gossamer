@@ -16,6 +16,8 @@ mod acceptance;
 mod byvalue;
 #[path = "ffi/callbacks.rs"]
 mod callbacks;
+#[path = "ffi/cmake.rs"]
+mod cmake;
 #[path = "ffi/compile_fail.rs"]
 mod compile_fail;
 #[path = "ffi/errno.rs"]

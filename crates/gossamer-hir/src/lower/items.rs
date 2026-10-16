@@ -412,8 +412,24 @@ impl Lowerer<'_> {
                 .resolutions
                 .get(decl.self_ty.id)
                 .and_then(|resolution| match resolution {
-                    Resolution::Def { def, .. } => self.module_type_names.get(&def).cloned(),
+                    Resolution::Def { def, .. } => Some(def),
+                    Resolution::Import { .. } => self.resolutions.import_def(decl.self_ty.id),
                     _ => None,
+                })
+                // An alias names the type it stands for, whose identity the
+                // methods register under.
+                .and_then(|def| {
+                    self.alias_targets
+                        .get(&def)
+                        .map(|target| {
+                            target
+                                .spelling
+                                .iter()
+                                .map(|segment| segment.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join("::")
+                        })
+                        .or_else(|| self.module_type_names.get(&def).cloned())
                 })
                 .map(Ident::new)
                 .or_else(|| {

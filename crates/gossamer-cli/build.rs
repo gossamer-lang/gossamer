@@ -182,8 +182,9 @@ fn main() {
     // this archive whatever profile `gos` itself was built in, so tying it to
     // the outer profile leaves a debug `gos` emitting native binaries against
     // whichever runtime a previous release build happened to leave behind.
-    // The archive itself is always the release build, which is what the link
-    // consumes.
+    // The archive follows the outer profile as the host one does, so a debug
+    // `gos` links its debug assertions (the RC underflow check among them)
+    // into a static-musl program as it does into a dynamic one.
     // The link reads the musl CRT and `rust-lld` from the toolchain the
     // runtime archives were compiled with, so `gos` records where it is
     // rather than asking `rustc` on every build.
@@ -198,7 +199,7 @@ fn main() {
         let musl_triple = "x86_64-unknown-linux-musl";
         if rustup_target_installed(sysroot.as_deref(), musl_triple) {
             let musl_lib_path =
-                build_runtime_into(&workspace_root, &target_dir, "release", Some(musl_triple));
+                build_runtime_into(&workspace_root, &target_dir, &profile, Some(musl_triple));
             publish_archive(&musl_lib_path, &lib_dir.join("libgossamer_runtime-musl.a"));
             println!(
                 "cargo:rustc-env=GOSSAMER_RUNTIME_LIB_PATH_MUSL={}",

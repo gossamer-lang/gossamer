@@ -15354,6 +15354,25 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-runtime-is-main-thread",
+      "name": "std::runtime::is_main_thread",
+      "kind": "function",
+      "signature": "fn is_main_thread() -> bool",
+      "description": "Whether the caller runs on the process main thread, the one `main` starts on. Libraries whose platform APIs belong to that thread, such as windowing on macOS, check it before calling them.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdruntime",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-runtime-root",
       "name": "std::runtime::root",
       "kind": "function",
@@ -17410,7 +17429,7 @@
       "name": "std::time::Instant",
       "kind": "type",
       "signature": null,
-      "description": "A monotonic clock reading in nanoseconds: `now()`, `elapsed()`, `elapsed_ms()`, `duration_since(earlier)`.",
+      "description": "A monotonic clock reading in nanoseconds: `now()`, `elapsed()`, `elapsed_ms()`, `duration_since(earlier)`, `later - earlier` answering the `Duration` between them, `+` / `-` a `Duration`, and ordering.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",

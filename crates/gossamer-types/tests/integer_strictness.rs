@@ -15,8 +15,8 @@ fn diagnostics(body: &str) -> Vec<TypeDiagnostic> {
     let file = map.add_file("integer-strictness.gos", source.clone());
     let (mut parsed, parse_diags) = parse_source_file(&source, file);
     assert!(parse_diags.is_empty(), "parse errors: {parse_diags:?}");
-    let (resolutions, resolve_diags) = resolve_source_file(&parsed);
-    let _ = gossamer_types::normalize_caller_side_spellings(&mut parsed, &resolutions);
+    let (mut resolutions, resolve_diags) = resolve_source_file(&parsed);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut parsed, &mut resolutions);
     assert!(
         resolve_diags.is_empty(),
         "resolve errors: {resolve_diags:?}"

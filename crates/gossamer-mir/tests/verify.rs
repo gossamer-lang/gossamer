@@ -30,8 +30,8 @@ fn build(source: &str) -> (Vec<Body>, TyCtxt) {
     let file = map.add_file("verify.gos", source.to_string());
     let (mut sf, diags) = parse_source_file(source, file);
     assert!(diags.is_empty(), "parse: {diags:?}");
-    let (resolutions, _) = resolve_source_file(&sf);
-    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &resolutions);
+    let (mut resolutions, _) = resolve_source_file(&sf);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
     let mut tcx = TyCtxt::new();
     let (table, _) = typecheck_source_file(&sf, &resolutions, &mut tcx);
     let hir = lower_source_file(&sf, &resolutions, &table, &mut tcx);
@@ -58,8 +58,8 @@ fn retained_mir_lower_oom_reproducers_terminate() {
         if !parse_diagnostics.is_empty() {
             continue;
         }
-        let (resolutions, resolve_diagnostics) = resolve_source_file(&sf);
-        let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &resolutions);
+        let (mut resolutions, resolve_diagnostics) = resolve_source_file(&sf);
+        let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
         if !resolve_diagnostics.is_empty() {
             continue;
         }

@@ -99,8 +99,10 @@ version. This page is auto-generated from the catalogue in
 | [`GR0019`](#gr0019) | Resolver | two dependency packages under one module name |
 | [`GR0020`](#gr0020) | Resolver | declaration under a compiler-known call name |
 | [`GR0021`](#gr0021) | Resolve | std free call written data-last |
-| [`GR0022`](#gr0022) | Resolve | uppercase name used as a binding |
+| [`GR0022`](#gr0022) | Resolve | match arm name misspells a variant |
 | [`GR0023`](#gr0023) | Resolve | reflecting generic called without a type |
+| [`GR0024`](#gr0024) | Resolve | glob import of something other than an enum |
+| [`GR0025`](#gr0025) | Resolve | or-pattern alternatives bind different names |
 | [`GT0001`](#gt0001) | Types | type mismatch |
 | [`GT0002`](#gt0002) | Types | unresolved method |
 | [`GT0003`](#gt0003) | Types | unresolved operator |
@@ -108,6 +110,7 @@ version. This page is auto-generated from the catalogue in
 | [`GT0005`](#gt0005) | Types | non-primitive cast |
 | [`GT0044`](#gt0044) | Types | generic return type not inferred |
 | [`GT0045`](#gt0045) | Types | question mark not supported here |
+| [`GT0121`](#gt0121) | Types | `&mut` passed where a value is taken |
 
 ## `GP0001` <a id="gp0001"></a>
 
@@ -633,15 +636,27 @@ A std free function was called with its data argument in the slot it occupied be
 
 ## `GR0022` <a id="gr0022"></a>
 
-**Resolve** - uppercase name used as a binding
+**Resolve** - match arm name misspells a variant
 
-A pattern that is a single name starting with an uppercase letter names a unit variant or a constant, so it is read as a path and never introduces a binding. No variant or constant by that name is in scope. If a binding was meant, start its name with a lowercase letter; if a variant was meant, import it or qualify it.
+A `match` arm's pattern is a single name that no variant, struct, or const in scope answers, and it is one or two edits from a variant's name. A single name matches a value when it resolves to a unit variant, a struct, or a const, whatever its case, and binds otherwise, so this arm would match every value. Write the variant to match it, or a lowercase name to bind the value.
 
 ## `GR0023` <a id="gr0023"></a>
 
 **Resolve** - reflecting generic called without a type
 
 A function whose body walks `typeInfo::<T>()` over its own type parameter is specialised once per type it is called with, and the call is what names that type. A call without a turbofish names none, so there is no specialisation for it to reach. Write the type at the call: `describe::<Point>(p)`.
+
+## `GR0024` <a id="gr0024"></a>
+
+**Resolve** - glob import of something other than an enum
+
+A `use path::*` whose path names no enum of this program. A glob import brings every variant of an enum into scope, as in `use shapes::Kind::*`; a module's items are imported by name, as in `use shapes::{area, Point}`.
+
+## `GR0025` <a id="gr0025"></a>
+
+**Resolve** - or-pattern alternatives bind different names
+
+An or-pattern's alternatives bind different names. Whichever alternative matches, the arm reads the same names, so a name one alternative binds and another does not would be unbound when that other one matched. Bind the name in every alternative, or match the alternatives in separate arms.
 
 ## `GT0001` <a id="gt0001"></a>
 
@@ -684,4 +699,10 @@ A generic return payload cannot be inferred from call arguments alone. Add an ex
 **Types** - question mark not supported here
 
 The `?` operator can only unwrap `Result` inside a `Result`-returning function or `Option` inside an `Option`-returning function.
+
+## `GT0121` <a id="gt0121"></a>
+
+**Types** - `&mut` passed where a value is taken
+
+A parameter that is not `&mut` holds a value of its own, and a `mut` parameter writes only that copy, so nothing the callee writes would reach the place the argument names. Declare the parameter `&mut T`, or pass the value.
 

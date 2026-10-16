@@ -138,6 +138,11 @@ pub enum JitKind {
     /// trampoline builds it from the VM's byte storage and reads the bytes
     /// back. Integer register class.
     NativeVecU8,
+    /// A `&mut [u8]` crossing as a `*mut GosVec` header that lends the
+    /// caller's bytes for the call: the body reads and writes them in place,
+    /// so nothing is copied in or back, which a slice that cannot change
+    /// length allows. Integer register class.
+    BytesView,
     /// A `Vec<Vec<i64>>` (`[[i64]]`) crossing as a native outer `*mut GosVec`
     /// tagged `vec_elem_kind::VEC` (8-byte pointer slots), each slot a pointer
     /// to an inner `*mut GosVec` of i64 - the AOT-tier `[[i64]]` layout the
@@ -210,6 +215,11 @@ pub struct JitFn {
     /// parameter. The trampoline builds a nested carrier's box with the layout
     /// the compiled program declared for it, so the body may keep the box.
     pub carrier_box_metas: Box<[CarrierBoxMetas]>,
+    /// `true` when `ptr` is an entry thunk taking every `f64` parameter as
+    /// its bits in an integer word, so a caller needs one signature per
+    /// arity rather than one per arrangement of float and integer
+    /// parameters.
+    pub word_params: bool,
 }
 
 // SAFETY: `ptr` is read-only from any thread, but the VM is
@@ -696,11 +706,12 @@ fn jit_compile_set<'a>(
             };
             let (calls, unresolved) = body_user_calls(body, &all_names, &def_to_name);
             let calls_excluded = calls.iter().any(|c| !included.contains(c));
-            if unresolved || calls_excluded {
+            let handles = body_crosses_handle_registries(body);
+            if unresolved || calls_excluded || handles {
                 if trace {
                     eprintln!(
                         "jit: propagate-reject {name} (unresolved={unresolved} \
-                         excluded_callee={calls_excluded})"
+                         excluded_callee={calls_excluded} handles={handles})"
                     );
                 }
                 included.remove(name);
@@ -996,6 +1007,28 @@ pub fn jit_eager_loop_bodies(
         .collect()
 }
 
+/// Whether `body` makes or reads an `ffi::Handle` on a tier it could share
+/// with bytecode. The VM keeps handles in a registry of its own values and
+/// native code in the runtime's, so a handle is made and read on one tier:
+/// every such body stays on bytecode. A loop-free `main` is the exception, as
+/// its one call starts on bytecode before any entry is installed and stays
+/// there; a `main` with a loop is compiled before that call.
+fn body_crosses_handle_registries(body: &Body) -> bool {
+    use gossamer_mir::{Rvalue, StatementKind};
+    let uses_handles = body.blocks.iter().any(|block| {
+        block.stmts.iter().any(|stmt| {
+            matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    rvalue: Rvalue::CallIntrinsic { name, .. },
+                    ..
+                } if name.starts_with("gos_rt_ffi_handle_")
+            )
+        })
+    });
+    uses_handles && (body.name != "main" || body_has_loop(body))
+}
+
 fn body_has_loop(body: &Body) -> bool {
     use gossamer_mir::Terminator;
     fn successors(term: &Terminator, out: &mut Vec<usize>) {
@@ -1281,24 +1314,8 @@ fn compile_bodies(
     enum_shapes: &HashMap<u32, u32>,
     struct_shapes: &HashMap<u32, u32>,
 ) -> Result<JitArtifact> {
-    let isa = build_native_isa(false, true)?;
-    let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     let heap = NativeCodeHeap::new();
-    builder.memory_provider(Box::new(NativeCodeHeap::provider(&heap)));
-    let mut runtime_symbol_set = register_runtime_symbols(&mut builder);
-    // Register every `gos_binding_<...>` C-ABI thunk advertised by
-    // the binding crates. Without these, `JITModule::finalize_definitions`
-    // panics with `can't resolve symbol gos_binding_<...>` because
-    // the default libloading-based resolver only sees the dynamic
-    // symbol table, and Cargo binaries don't expose statically-linked
-    // `pub extern "C"` symbols there.
-    let leaked_binding_names = register_binding_symbols(&mut builder);
-    runtime_symbol_set.extend(leaked_binding_names);
-    let libraries = foreign_libraries(filtered);
-    builder.symbol_lookup_fn(Box::new(move |name| {
-        gossamer_runtime::c_abi::ffi::resolve_symbol(name, &libraries)
-    }));
-    let mut module = JITModule::new(builder);
+    let (mut module, runtime_symbol_set) = jit_module(filtered, &heap)?;
 
     // Rename the user's `main` to `gos_main` in the JIT's symbol
     // table. The host binary already exports `main` (the Rust
@@ -1325,6 +1342,9 @@ fn compile_bodies(
             .map(|frames| (module.get_finalized_function(frames.id) as usize, frames))
             .collect();
     let frames = crate::jit_frames::register(cranelift_module::Module::isa(&module), placed);
+    if std::env::var_os("GOS_JIT_TRACE").is_some() {
+        trace_placements(&module, &lowered.function_ids_by_name);
+    }
 
     let body_name_set: std::collections::HashSet<&str> =
         filtered.iter().map(|b| b.name.as_str()).collect();
@@ -1382,7 +1402,7 @@ fn compile_bodies(
         // A body that takes or answers a carrier dispatches through its entry
         // thunk; every other body is called directly.
         let ptr = match carrier_thunks.get(&body.name) {
-            Some(&thunk_id) => module.get_finalized_function(thunk_id),
+            Some(thunk) => module.get_finalized_function(thunk.id),
             None => module.get_finalized_function(id),
         };
         #[allow(
@@ -1401,6 +1421,9 @@ fn compile_bodies(
             returns,
             returns_fresh: returns_fresh.get(&body.name).copied().unwrap_or(false),
             carrier_box_metas,
+            word_params: carrier_thunks
+                .get(&body.name)
+                .is_some_and(|thunk| thunk.word_params),
         });
         functions.insert(name, handle);
     }
@@ -1423,6 +1446,47 @@ fn compile_bodies(
     })
 }
 
+/// A JIT module whose code lives in `heap` and whose symbols resolve to the
+/// runtime, the binding crates, and the foreign libraries `filtered` links,
+/// with the names of the runtime and binding symbols it registered.
+fn jit_module(
+    filtered: &[Body],
+    heap: &std::sync::Arc<NativeCodeHeap>,
+) -> Result<(JITModule, std::collections::HashSet<&'static str>)> {
+    let isa = build_native_isa(false, true)?;
+    let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+    builder.memory_provider(Box::new(NativeCodeHeap::provider(heap)));
+    let mut runtime_symbol_set = register_runtime_symbols(&mut builder);
+    // Register every `gos_binding_<...>` C-ABI thunk advertised by
+    // the binding crates. Without these, `JITModule::finalize_definitions`
+    // panics with `can't resolve symbol gos_binding_<...>` because
+    // the default libloading-based resolver only sees the dynamic
+    // symbol table, and Cargo binaries don't expose statically-linked
+    // `pub extern "C"` symbols there.
+    let leaked_binding_names = register_binding_symbols(&mut builder);
+    runtime_symbol_set.extend(leaked_binding_names);
+    let libraries = foreign_libraries(filtered);
+    builder.symbol_lookup_fn(Box::new(move |name| {
+        gossamer_runtime::c_abi::ffi::resolve_symbol(name, &libraries)
+    }));
+    Ok((JITModule::new(builder), runtime_symbol_set))
+}
+
+/// Prints where each body landed, so a native fault address names its body.
+fn trace_placements(
+    module: &JITModule,
+    function_ids_by_name: &HashMap<String, cranelift_module::FuncId>,
+) {
+    let mut addresses: Vec<(usize, &String)> = function_ids_by_name
+        .iter()
+        .map(|(name, id)| (module.get_finalized_function(*id) as usize, name))
+        .collect();
+    addresses.sort_unstable();
+    for (address, name) in addresses {
+        eprintln!("jit: placed {name} at {address:#x}");
+    }
+}
+
 /// Wraps each body that takes or answers a two-word carrier in an entry thunk,
 /// keyed by the body's name.
 ///
@@ -1436,7 +1500,7 @@ fn emit_carrier_thunks(
     function_ids_by_name: &HashMap<String, cranelift_module::FuncId>,
     (tcx, enum_shapes, struct_shapes): (&TyCtxt, &HashMap<u32, u32>, &HashMap<u32, u32>),
     frames: &mut Vec<crate::jit_frames::FunctionFrames>,
-) -> Result<HashMap<String, cranelift_module::FuncId>> {
+) -> Result<HashMap<String, EntryThunk>> {
     let mut carrier_thunks = HashMap::new();
     for body in filtered {
         let Some((params, returns)) = body_kinds(body, tcx, enum_shapes, struct_shapes) else {
@@ -1446,18 +1510,41 @@ fn emit_carrier_thunks(
             || params
                 .iter()
                 .any(|kind| matches!(kind, JitKind::Carrier(_)));
-        if !crosses_carrier {
+        // The trampoline has a signature for every arrangement of float and
+        // integer parameters only up to seven of them; past that, floats
+        // cross as words and every arity needs one.
+        let word_params = params.len() >= WORD_PARAMS_ARITY
+            && params.iter().any(|kind| matches!(kind, JitKind::F64));
+        if !crosses_carrier && !word_params {
             continue;
         }
         let Some(&body_id) = function_ids_by_name.get(&body.name) else {
             continue;
         };
         let (thunk_id, thunk_frames) =
-            crate::native::emit_carrier_entry_thunk(module, body_id, &body.name)?;
-        carrier_thunks.insert(body.name.clone(), thunk_id);
+            crate::native::emit_carrier_entry_thunk(module, body_id, &body.name, word_params)?;
+        carrier_thunks.insert(
+            body.name.clone(),
+            EntryThunk {
+                id: thunk_id,
+                word_params,
+            },
+        );
         frames.push(thunk_frames);
     }
     Ok(carrier_thunks)
+}
+
+/// The parameter count from which a body's `f64` parameters cross the entry
+/// as integer words.
+const WORD_PARAMS_ARITY: usize = 8;
+
+/// An entry thunk the trampoline calls in place of a body.
+#[derive(Clone, Copy)]
+struct EntryThunk {
+    id: cranelift_module::FuncId,
+    /// Whether the thunk takes the body's `f64` parameters as integer words.
+    word_params: bool,
 }
 
 /// Option uses the same two-word discriminant/payload carrier already handled
@@ -1519,6 +1606,9 @@ fn body_calls_jit_unsafe(
                 | "math::abs"
                 | "math::floor"
                 | "math::ceil"
+                // A float's `.abs()` under its method name, lowered as
+                // `math::abs`.
+                | "abs"
         ) {
             continue;
         }
@@ -1603,17 +1693,119 @@ fn ty_carries_payload_enum_vec(tcx: &TyCtxt, ty: Ty) -> bool {
 fn entry_copies_a_sequence(body: &Body, tcx: &TyCtxt) -> bool {
     (1..=body.arity).any(|pidx| {
         let ty = body.local_ty(gossamer_mir::Local(pidx));
+        // A byte view lends the caller's storage, so its entry copies nothing.
         let mut_seq = matches!(
             tcx.kind_of(ty),
             TyKind::Ref { mutability: gossamer_types::Mutbl::Mut, inner }
                 if matches!(tcx.kind_of(*inner), TyKind::Vec(_) | TyKind::Slice(_))
+        ) && !matches!(
+            ty_to_kind(tcx, ty, &HashMap::new(), &HashMap::new()),
+            Some(JitKind::BytesView)
         );
         mut_seq
             || matches!(
-                ty_to_kind(tcx, ty, &HashMap::new(), &HashMap::new()),
+                param_kind(body, tcx, pidx, &HashMap::new(), &HashMap::new()),
                 Some(JitKind::NativeVecU8)
             )
     })
+}
+
+/// How parameter `pidx` of `body` crosses the boundary: its type's kind,
+/// except that bytes taken by value that the body only reads are lent as a
+/// byte view, which copies nothing, since a body that never writes or grows
+/// them cannot reach the caller's bytes through it.
+fn param_kind(
+    body: &Body,
+    tcx: &TyCtxt,
+    pidx: u32,
+    enum_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<u32, u32>,
+) -> Option<JitKind> {
+    let local = gossamer_mir::Local(pidx);
+    let ty = body.local_ty(local);
+    let kind = ty_to_kind(tcx, ty, enum_shapes, struct_shapes)?;
+    // A by-value slice parameter is typed as a shared reference to it.
+    let held = match tcx.kind_of(ty) {
+        TyKind::Ref {
+            mutability: gossamer_types::Mutbl::Not,
+            inner,
+        } => *inner,
+        _ => ty,
+    };
+    let byte_slice = matches!(tcx.kind_of(held), TyKind::Slice(elem) | TyKind::Vec(elem)
+        if matches!(tcx.kind_of(*elem), TyKind::Int(gossamer_types::IntTy::U8)));
+    if matches!(kind, JitKind::NativeVecU8) && byte_slice && param_only_read(body, local) {
+        return Some(JitKind::BytesView);
+    }
+    Some(kind)
+}
+
+/// Whether every mention of `local` in `body` reads it: its length, or an
+/// element through the runtime's element reads or an index projection.
+fn param_only_read(body: &Body, local: gossamer_mir::Local) -> bool {
+    use gossamer_mir::{ConstValue, Operand, Rvalue, StatementKind, Terminator};
+    let reads = |name: &str| name == "gos_rt_len" || name.starts_with("gos_rt_vec_get");
+    let mentions_whole = |op: &Operand| matches!(op, Operand::Copy(place) if place.local == local && place.projection.is_empty());
+    let read_call = |name: &str, args: &[Operand]| {
+        reads(name) && args.iter().skip(1).all(|op| !mentions_whole(op))
+    };
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            match &stmt.kind {
+                StatementKind::Assign { place, rvalue } => {
+                    if place.local == local {
+                        return false;
+                    }
+                    let ok = match rvalue {
+                        Rvalue::CallIntrinsic { name, args } => {
+                            read_call(name, args) || !args.iter().any(mentions_whole)
+                        }
+                        Rvalue::Len(_) | Rvalue::StaticLoad(_) => true,
+                        Rvalue::Ref { place, .. } => place.local != local,
+                        Rvalue::Use(op)
+                        | Rvalue::UnaryOp { operand: op, .. }
+                        | Rvalue::Cast { operand: op, .. }
+                        | Rvalue::Repeat { value: op, .. } => !mentions_whole(op),
+                        Rvalue::BinaryOp { lhs, rhs, .. } => {
+                            !mentions_whole(lhs) && !mentions_whole(rhs)
+                        }
+                        Rvalue::Aggregate { operands, .. } => !operands.iter().any(mentions_whole),
+                    };
+                    if !ok {
+                        return false;
+                    }
+                }
+                StatementKind::Nop
+                | StatementKind::StorageLive(_)
+                | StatementKind::StorageDead(_) => {}
+                _ => {
+                    if gossamer_mir::statement_locals(stmt).contains(&local) {
+                        return false;
+                    }
+                }
+            }
+        }
+        match &block.terminator {
+            Terminator::Call {
+                callee,
+                args,
+                destination,
+                ..
+            } => {
+                if destination.local == local {
+                    return false;
+                }
+                let named_read = matches!(callee, Operand::Const(ConstValue::Str(name))
+                    if read_call(name, args));
+                if !named_read && args.iter().any(mentions_whole) {
+                    return false;
+                }
+            }
+            Terminator::Drop { place, .. } if place.local == local => return false,
+            _ => {}
+        }
+    }
+    true
 }
 
 /// Returns `true` when `body` uses a construct the JIT lowers incorrectly,
@@ -1896,7 +2088,7 @@ fn jit_map_key_descriptor_ok(tcx: &TyCtxt, ty: Ty, depth: u32) -> bool {
         // enum varies its layout per variant and keys through the separate
         // `ekey` descriptor instead, handled by [`jit_map_enum_key_ok`].
         TyKind::Adt { def, substs } if def.local < u32::MAX - 64 => {
-            tcx.enum_variant_tys(*def).is_none()
+            (tcx.enum_variant_tys(*def).is_none() || tcx.is_flat_enum_def(def.local))
                 && tcx.adt_field_tys(*def, substs).is_some_and(|fields| {
                     !fields.is_empty()
                         && fields
@@ -2279,7 +2471,7 @@ fn body_kinds(
     for pidx in 1..=body.arity {
         let local = gossamer_mir::Local(pidx);
         let ty = body.local_ty(local);
-        let kind = ty_to_kind(tcx, ty, enum_shapes, struct_shapes)?;
+        let kind = param_kind(body, tcx, pidx, enum_shapes, struct_shapes)?;
         // A lazy iterator is a runtime handle when compiled code built it and
         // a bytecode registry index when the VM did. The two are
         // indistinguishable in a parameter, so a body that takes one stays on
@@ -2551,20 +2743,35 @@ fn param_carrier_box_metas(
         .collect()
 }
 
+/// `ty` with every reference peeled off, and whether there was one.
+fn peel_refs(tcx: &TyCtxt, mut ty: Ty) -> (Ty, bool) {
+    let mut was_borrowed = false;
+    while let TyKind::Ref { inner, .. } = tcx.kind_of(ty) {
+        ty = *inner;
+        was_borrowed = true;
+    }
+    (ty, was_borrowed)
+}
+
+/// Whether `ty` is `&mut [u8]`, which crosses as a view of the caller's bytes.
+fn is_mut_byte_slice(tcx: &TyCtxt, ty: Ty) -> bool {
+    matches!(tcx.kind_of(ty), TyKind::Ref { mutability: gossamer_types::Mutbl::Mut, inner }
+        if matches!(tcx.kind_of(*inner), TyKind::Slice(elem)
+            if matches!(tcx.kind_of(*elem), TyKind::Int(gossamer_types::IntTy::U8))))
+}
+
 fn ty_to_kind(
     tcx: &TyCtxt,
     ty: Ty,
     enum_shapes: &HashMap<u32, u32>,
     struct_shapes: &HashMap<u32, u32>,
 ) -> Option<JitKind> {
+    if is_mut_byte_slice(tcx, ty) {
+        return Some(JitKind::BytesView);
+    }
     // References to heap enums / structs are the same native pointer at
     // the ABI (compiled convention) - peel before classifying.
-    let mut ty = ty;
-    let mut was_borrowed = false;
-    while let TyKind::Ref { inner, .. } = tcx.kind_of(ty) {
-        ty = *inner;
-        was_borrowed = true;
-    }
+    let (ty, was_borrowed) = peel_refs(tcx, ty);
     trace_ty_to_kind(tcx, ty);
     // A reference to a scalar is an address the body loads through, unlike
     // a reference to a heap value, which is the value's own pointer.

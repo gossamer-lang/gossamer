@@ -292,6 +292,28 @@ pub const REGISTRY: &[(&str, &str)] = &[
             parenthesise), or bind what it computes.",
     ),
     (
+        "GL0057",
+        "A type, trait, enum variant, associated type, or type parameter\n\
+            whose name is not `UpperCamelCase`, as Rust spells them: `Point`,\n\
+            `HttpServer`, `KeyA`. A foreign type keeps its C spelling.",
+    ),
+    (
+        "GL0058",
+        "A function, method, parameter, local, field, or module whose name is\n\
+            not `snake_case`, as Rust spells them. A single name in a pattern\n\
+            matches a variant, struct, or const it names and binds otherwise, so\n\
+            a binding written `Width` reads as a variant it is not. A foreign or\n\
+            `#[export]` function and a `#[repr(C)]` struct's fields keep their C\n\
+            spelling.",
+    ),
+    (
+        "GL0059",
+        "A const or static whose name is not `SCREAMING_SNAKE_CASE`, as Rust\n\
+            spells them. A single name in a pattern matches the const it names,\n\
+            so `limit =>` compares against a const `limit` rather than binding\n\
+            a new name. A foreign static keeps its C spelling.",
+    ),
+    (
         "GM0001",
         "Generic monomorphization received a type substitution that the\n\
                      compiler does not yet support - typically a generic parameter\n\
@@ -821,12 +843,16 @@ pub const REGISTRY: &[(&str, &str)] = &[
     ),
     (
         "GR0014",
-        "A parameter default was not a constant. The default is spliced\n\
-                     into every call that leaves the parameter out, so it has to be\n\
-                     a value known while compiling: a literal (`10`, `-1`, `true`,\n\
-                     `\"\"`), a `const` or associated const, integer arithmetic over\n\
-                     those, or a `comptime` expression. A const is resolved where the\n\
-                     function is declared, and its value is what every call receives.",
+        "A parameter default was not a value known while compiling. The\n\
+                     default is spliced into every call that leaves the parameter out,\n\
+                     so it has to be a literal (`10`, `-1`, `true`, `\"\"`), a `const` or\n\
+                     associated const, integer arithmetic over those, a `comptime`\n\
+                     expression, a variant (`Mode::Fast`, `None`, `Some(4)`), a\n\
+                     function, or a struct construction, tuple, array, or collection\n\
+                     literal built from those. Every name in it is resolved where the\n\
+                     function is declared, so each call receives the value the\n\
+                     declaration means. A call to a function, a closure, a `static`,\n\
+                     or another parameter's value is computed at run time and rejected.",
     ),
     (
         "GR0015",
@@ -886,11 +912,12 @@ pub const REGISTRY: &[(&str, &str)] = &[
     ),
     (
         "GR0022",
-        "A pattern that is a single name starting with an uppercase letter\n\
-            names a unit variant or a constant, so it is read as a path and\n\
-            never introduces a binding. No variant or constant by that name is\n\
-            in scope. If a binding was meant, start its name with a lowercase\n\
-            letter; if a variant was meant, import it or qualify it.",
+        "A `match` arm's pattern is a single name that no variant, struct,\n\
+            or const in scope answers, and it is one or two edits from a\n\
+            variant's name. A single name matches a value when it resolves to\n\
+            a unit variant, a struct, or a const, whatever its case, and binds\n\
+            otherwise, so this arm would match every value. Write the variant\n\
+            to match it, or a lowercase name to bind the value.",
     ),
     (
         "GR0023",
@@ -899,6 +926,21 @@ pub const REGISTRY: &[(&str, &str)] = &[
             call is what names that type. A call without a turbofish names\n\
             none, so there is no specialisation for it to reach. Write the type\n\
             at the call: `describe::<Point>(p)`.",
+    ),
+    (
+        "GR0024",
+        "A `use path::*` whose path names no enum of this program. A glob\n\
+            import brings every variant of an enum into scope, as in\n\
+            `use shapes::Kind::*`; a module's items are imported by name, as in\n\
+            `use shapes::{area, Point}`.",
+    ),
+    (
+        "GR0025",
+        "An or-pattern's alternatives bind different names. Whichever\n\
+            alternative matches, the arm reads the same names, so a name one\n\
+            alternative binds and another does not would be unbound when that\n\
+            other one matched. Bind the name in every alternative, or match the\n\
+            alternatives in separate arms.",
     ),
     (
         "GT0001",
@@ -1792,6 +1834,14 @@ pub const REGISTRY: &[(&str, &str)] = &[
             websocket call takes one. Declare it `websocket::Conn`, as a handler's\n\
             `fn handle(&self, ws: websocket::Conn)` does. `gos check --fix`\n\
             rewrites the declaration.",
+    ),
+    (
+        "GT0121",
+        "`&mut x` was passed where the parameter takes a value of its own.\n\
+            A parameter that is not `&mut` holds a value of its own, and a `mut`\n\
+            parameter writes only that copy, so nothing the callee writes would\n\
+            reach `x`. Declare the parameter `&mut T` to have its writes reach\n\
+            `x`, or pass `x` to hand the callee a value of its own.",
     ),
     (
         "GX0001",

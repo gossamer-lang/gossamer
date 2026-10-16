@@ -18,8 +18,9 @@ use gossamer_resolve::{Resolutions, ResolveDiagnostic};
 /// the diagnostics the named-argument rewrite produced.
 pub fn normalize_caller_side_spellings(
     sf: &mut SourceFile,
-    resolutions: &Resolutions,
+    resolutions: &mut Resolutions,
 ) -> Vec<ResolveDiagnostic> {
+    gossamer_resolve::settle_single_name_patterns(sf, resolutions);
     let (mut diagnostics, deferred) = gossamer_resolve::resolve_named_arguments(sf, resolutions);
     let _ = crate::std_fn_eta::expand_std_fn_values(sf, resolutions);
     diagnostics.extend(crate::data_first::rotate_data_first_calls(sf, resolutions));

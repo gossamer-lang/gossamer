@@ -1189,6 +1189,8 @@ pub unsafe extern "C" fn gos_rt_enum_struct_eq(a: *mut u8, b: *mut u8, desc: *co
                 // SAFETY: a field of kind 5 is a `Vec` of `(String, node)` pairs of the same
                 // descriptor.
                 5 => unsafe { vec_str_self_enum_eq(wa, wb, desc) },
+                // SAFETY: a field of kind 6, 7, or 8 is a `Vec` of that kind's scalars.
+                6..=8 => unsafe { vec_scalar_eq(wa, wb, kind) },
                 _ => wa == wb,
             };
             if !eq {
@@ -1197,6 +1199,43 @@ pub unsafe extern "C" fn gos_rt_enum_struct_eq(a: *mut u8, b: *mut u8, desc: *co
         }
         1
     })
+}
+
+/// The elements of a `Vec` field word, read at their stored width; a null
+/// field is an empty `Vec`.
+///
+/// # Safety
+/// `word` is null or a live `GosVec`.
+pub(crate) unsafe fn vec_field_words(word: i64) -> Vec<i64> {
+    let vec = word as *const GosVec;
+    if vec.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: `vec` is non-null and live (this `unsafe fn`'s caller).
+    let vec = unsafe { &*vec };
+    // SAFETY: each index is below the vec's length.
+    (0..vec.len)
+        .map(|i| unsafe { crate::c_abi::vec::vec_elem_load_i64(vec, i) })
+        .collect()
+}
+
+/// Element-wise equality of two `Vec` field words holding descriptor kind
+/// `kind`'s scalars: words by value (6), strings by content (7), or `f64`s by
+/// float equality (8).
+unsafe fn vec_scalar_eq(a_word: i64, b_word: i64, kind: i64) -> bool {
+    // SAFETY: both words are `Vec` fields of the same kind (this `unsafe fn`'s caller).
+    let (xs, ys) = unsafe { (vec_field_words(a_word), vec_field_words(b_word)) };
+    xs.len() == ys.len()
+        && xs.iter().zip(&ys).all(|(&x, &y)| match kind {
+            7 => {
+                let sa: *const c_char = std::ptr::with_exposed_provenance(x as usize);
+                let sb: *const c_char = std::ptr::with_exposed_provenance(y as usize);
+                // SAFETY: the elements are null or live string bodies.
+                unsafe { gos_rt_str_eq(sa, sb) }
+            }
+            8 => f64::from_bits(x as u64) == f64::from_bits(y as u64),
+            _ => x == y,
+        })
 }
 
 /// Element-wise structural equality of two `Vec<self-enum>` field words (each

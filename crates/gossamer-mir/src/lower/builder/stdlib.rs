@@ -1059,7 +1059,12 @@ impl<'a> Builder<'a> {
     /// `[T; N]`, and its inline bytes are not a GosVec header. A direct
     /// array-literal argument already lowers as a GosVec because its type is
     /// inferred in the field's `Vec`/`Slice` context.
-    fn coerce_enum_payload(&mut self, payload: Local, expected: Option<Ty>, span: Span) -> Local {
+    pub(crate) fn coerce_enum_payload(
+        &mut self,
+        payload: Local,
+        expected: Option<Ty>,
+        span: Span,
+    ) -> Local {
         use gossamer_types::TyKind;
         let Some(expected) = expected else {
             return payload;
@@ -1203,6 +1208,15 @@ impl<'a> Builder<'a> {
         ty: Ty,
         span: Span,
     ) -> Option<Local> {
+        // A variant built where the checker left its type open (a field of a
+        // literal the program fills from another package's enum) is still a
+        // value of the enum it names.
+        let ty = match self.tcx.kind_of(ty) {
+            gossamer_types::TyKind::Var(_) | gossamer_types::TyKind::Error => {
+                self.tcx.enum_ty_by_name(enum_name).unwrap_or(ty)
+            }
+            _ => ty,
+        };
         let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
         let n_args = payload.len();
 
@@ -1265,6 +1279,10 @@ impl<'a> Builder<'a> {
                 span,
             );
             return Some(dest);
+        }
+
+        if self.tcx.is_flat_enum_ty(ty) {
+            return self.lower_flat_enum_ctor(variant_idx, payload, &field_tys, ty, span);
         }
 
         // Every heap-allocated user enum is reference counted. Record

@@ -1,0 +1,67 @@
+// A `Vec` bound through `?` and moved into a struct or an enum stored by
+// value, which a vector then keeps: each holder owns its own share, so the
+// vectors survive the frames that built them.
+
+use std::errors
+
+struct Row { tag: i64, cells: Vec<i64> }
+
+enum Item {
+    Leaf(String)
+    Group(Vec<Item>)
+}
+
+fn cells(n: i64) -> Result<Vec<i64>, errors::Error> {
+    if n < 0 {
+        return Err(errors::new("negative"))
+    }
+    Ok(#[n, n + 1, n + 2])
+}
+
+fn rows(n: i64) -> Result<Vec<Row>, errors::Error> {
+    let mut out: Vec<Row> = #[]
+    let inner = cells(n)?
+    out.push(Row { tag: n, cells: inner })
+    Ok(out)
+}
+
+fn group(depth: i64) -> Result<Vec<Item>, errors::Error> {
+    let mut items: Vec<Item> = #[]
+    if depth > 0 {
+        let inner = group(depth - 1)?
+        items.push(Item::Group(inner))
+    }
+    items.push(Item::Leaf(f"d{depth}"))
+    Ok(items)
+}
+
+fn describe(items: Vec<Item>) -> String {
+    let mut out = ""
+    for item in items {
+        out += match item {
+            Item::Leaf(s) => f"{s} "
+            Item::Group(inner) => f"[{describe(inner)}] "
+        }
+    }
+    out
+}
+
+fn main() {
+    let mut kept = #[]
+    for i in 0..20 {
+        kept.push(rows(i * 10).unwrap())
+    }
+    let mut churn = #[]
+    for i in 0..100 {
+        churn.push(#[i, i, i])
+    }
+    let mut sum = 0
+    for (i, rs) in kept.iter().enumerate() {
+        for r in rs {
+            sum += r.cells[0] + r.cells.len() + r.tag - (i as i64) * 20
+        }
+    }
+    println(f"rows {sum} churn {churn.len()}")
+    println(describe(group(3).unwrap()))
+    println(f"{rows(-1).is_err()}")
+}

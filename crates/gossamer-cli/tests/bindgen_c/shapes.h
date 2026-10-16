@@ -9,6 +9,11 @@
 #define SHAPES_NAME "shapes"
 #define SHAPES_FLAG (0x10u)
 #define SHAPES_SCALE 1.5
+#define SHAPES_WIDE(x) ((unsigned long long)(x))
+#define SHAPES_BIG SHAPES_WIDE(0x100000000)
+#define SHAPES_MASK (SHAPES_FLAG | 0x3)
+#define SHAPES_NEG (-(1 << 3))
+#define SHAPES_NOWHERE ((void *)0)
 
 typedef struct shapes_registry shapes_registry;
 
@@ -38,6 +43,8 @@ typedef union shapes_value {
 } shapes_value;
 
 enum shapes_kind { SHAPES_CIRCLE, SHAPES_SQUARE = 4, SHAPES_TRIANGLE };
+
+typedef enum shapes_mode { SHAPES_FILL, SHAPES_STROKE = 3, SHAPES_BOTH } shapes_mode;
 
 typedef int (*shapes_visit)(void *context, int32_t index);
 

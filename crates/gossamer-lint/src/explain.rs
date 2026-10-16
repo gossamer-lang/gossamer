@@ -239,6 +239,26 @@ pub fn lint_explanation(id: &str) -> Option<&'static str> {
             type answers `None`, so a mechanical rewrite would keep\n\
             type-checking and change what an empty container means."
         }
+        "non_camel_case_types" => {
+            "A type, trait, enum variant, associated type, or type parameter\n\
+            whose name is not `UpperCamelCase`, as Rust spells them: `Point`,\n\
+            `HttpServer`, `KeyA`. A foreign type keeps its C spelling."
+        }
+        "non_snake_case" => {
+            "A function, method, parameter, local, field, or module whose name\n\
+            is not `snake_case`, as Rust spells them. A single name in a pattern\n\
+            matches a variant, struct, or const it names and binds otherwise, so\n\
+            a binding written `Width` reads as a variant it is not. A foreign or\n\
+            `#[export]` function and a `#[repr(C)]` struct's fields keep their C\n\
+            spelling."
+        }
+        "non_upper_case_globals" => {
+            "A const or static whose name is not `SCREAMING_SNAKE_CASE`, as Rust\n\
+            spells them. A single name in a pattern matches the const it names,\n\
+            so `limit =>` compares against a const `limit` rather than binding;\n\
+            the upper case spelling keeps that visible. A foreign static keeps\n\
+            its C spelling."
+        }
         "no_effect_statement" => {
             "An expression statement that only computes - a path, a literal,\n\
             arithmetic over them - and hands its value to nothing.\n\

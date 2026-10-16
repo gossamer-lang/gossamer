@@ -80,9 +80,13 @@ fn run_source_on_vm(
     vm.load(&program, tcx, true)
         .map_err(|err| anyhow!("vm load failed: {err}"))?;
     vm.clear_source_map();
-    profile_rss_stage("frontend_released");
     profile_rss_stage("vm_loaded");
     drop(program);
+    // The front end's working set is dead once the VM holds its chunks; its
+    // pages go back to the kernel before the program runs, not when the
+    // allocator next reuses them.
+    gossamer_runtime::collect_process_allocator(true);
+    profile_rss_stage("frontend_released");
     // `main` runs inside the root cohort, so every `spawn` has a cohort
     // to belong to: no goroutine outlives the program, and a child's
     // failure that nothing reads is reported instead of vanishing.

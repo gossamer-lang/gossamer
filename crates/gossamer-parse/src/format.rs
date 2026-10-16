@@ -863,7 +863,10 @@ fn decide_space(
 /// `true` when joining `prev` and `cur` with no space would re-lex as
 /// something other than the same two tokens (e.g. `|` + `|` → `||`).
 fn pair_merges(file: FileId, prev: &Emitted<'_>, cur: &Tok<'_>) -> bool {
-    let mut joined = String::with_capacity(prev.text.len() + cur.text.len());
+    // The pair is lexed as it sits mid-file: at the very start of input `#!`
+    // would read as a shebang line.
+    let mut joined = String::with_capacity(prev.text.len() + cur.text.len() + 1);
+    joined.push(' ');
     joined.push_str(prev.text);
     joined.push_str(cur.text);
     let (tokens, errs) = tokenize(&joined, file);
@@ -910,6 +913,16 @@ fn line_has_trailing_continuation(line: &Line<'_>) -> bool {
     };
     if matches!(token.kind, TokenKind::Punct(Punct::Gt | Punct::ShiftR))
         && closes_generic_type(line, index)
+    {
+        return false;
+    }
+    // `use path::*` ends in a glob, which continues nothing.
+    if matches!(token.kind, TokenKind::Punct(Punct::Star))
+        && index > 0
+        && matches!(
+            line.toks[index - 1].kind,
+            TokenKind::Punct(Punct::ColonColon)
+        )
     {
         return false;
     }
@@ -1348,6 +1361,18 @@ let s = #{
             "fn main() { let map: HashMap<String, i64> = HashMap::from({\"one\":1,\"two\":2}) }\n";
         let expected = "fn main() { let map: HashMap<String, i64> = HashMap::from({ \"one\": 1, \"two\": 2 }) }\n";
         assert_eq!(fmt(source), expected);
+    }
+
+    #[test]
+    fn inner_attributes_keep_their_bang() {
+        let source = "#![lint(allow(non_snake_case))]\n\nmod m {\n    #![lint(allow(non_snake_case))]\n    fn f() -> i64 { 1 }\n}\n";
+        assert_eq!(fmt(source), source);
+    }
+
+    #[test]
+    fn a_glob_import_continues_no_line() {
+        let source = "use shapes::Kind::*\nuse shapes::Other::Up as OtherUp\n\nfn main() {}\n";
+        assert_eq!(fmt(source), source);
     }
 
     #[test]

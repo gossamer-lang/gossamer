@@ -845,12 +845,32 @@ impl TypeChecker<'_> {
             let settled = self.deep_resolve(lowered);
             return crate::printer::structural_impl_owner(self.tcx, settled).map(|name| vec![name]);
         };
-        let segments: Vec<&str> = tp.segments.iter().map(|s| s.name.name.as_str()).collect();
+        let segments: Vec<&str> = tp
+            .segments
+            .iter()
+            .map(|s| s.name.name.as_str())
+            .skip_while(|s| matches!(*s, "crate" | "self" | "root"))
+            .collect();
         let bare = (*segments.last()?).to_string();
+        let mut candidates: Vec<String> = Vec::new();
+        // The type the self type lowers to names its declaration however it
+        // is spelled: imported (`use a::Point` then `impl Point`), rooted
+        // (`impl crate::a::Point`), or through an alias.
+        let lowered = self.type_from_ast(self_ty);
+        let settled = self.deep_resolve(lowered);
+        if let Some(TyKind::Adt { def, .. }) = self.tcx.kind(settled).cloned()
+            && let Some(identity) = self
+                .adt_def_by_name
+                .iter()
+                .filter(|(_, declared)| **declared == def)
+                .map(|(name, _)| name)
+                .max_by_key(|name| name.len())
+        {
+            candidates.push(identity.clone());
+        }
         // A path written with its module (`impl lib::Point`) already
         // spells the identity; a bare one names a type the enclosing
         // module declares, or an imported one that keeps its own name.
-        let mut candidates: Vec<String> = Vec::new();
         if segments.len() > 1 {
             candidates.push(segments.join("::"));
         }

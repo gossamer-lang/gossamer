@@ -1,0 +1,42 @@
+// A `static mut` map holds struct values with counted fields of their own: an
+// entry stored from one function is read back whole from another, after the
+// function that built it has returned.
+
+struct Glyph {
+    w: i64
+    h: i64
+    cov: Vec<u8>
+    name: String
+}
+
+static mut CACHE: Map<(char, i64), Glyph> = {}
+
+fn rasterise(ch: char, size: i64) -> Glyph {
+    let w = size / 2
+    let h = size
+    Glyph { w: w, h: h, cov: #[(size % 200) as u8; w * h], name: f"{ch}{size}" }
+}
+
+fn lookup(ch: char, size: i64) -> Glyph {
+    let key = (ch, size)
+    match CACHE.get(key) {
+        Some(found) => found
+        None => {
+            let made = rasterise(ch, size)
+            CACHE[key] = made
+            made
+        }
+    }
+}
+
+fn main() {
+    let mut area = 0
+    for round in 0..3 {
+        for ch in "gossamer".chars() {
+            let glyph = lookup(ch, 10 + round * 2)
+            area += glyph.cov.len() as i64 + glyph.cov[0] as i64
+        }
+    }
+    let again = lookup('g', 12)
+    println(f"entries {CACHE.len()} area {area} again {again.name} {again.w}x{again.h} {again.cov.len()}")
+}

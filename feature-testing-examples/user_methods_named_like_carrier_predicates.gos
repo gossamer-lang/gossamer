@@ -1,0 +1,53 @@
+// A struct or enum of the program's own answers `is_none`, `is_some`,
+// `is_ok`, and `is_err` through the methods it declares, as it answers any
+// other name.
+
+struct Placement {
+    width: i64
+    height: i64
+}
+
+impl Placement {
+    fn none() -> Placement {
+        Placement { width: 0, height: 0 }
+    }
+
+    fn is_none(&self) -> bool {
+        self.width == 0 && self.height == 0
+    }
+
+    fn is_some(&self) -> bool {
+        !self.is_none()
+    }
+}
+
+enum Check {
+    Passed(i64)
+    Failed(String)
+}
+
+impl Check {
+    fn is_ok(&self) -> bool {
+        match self {
+            Check::Passed(_) => true
+            Check::Failed(_) => false
+        }
+    }
+
+    fn is_err(&self) -> bool {
+        !self.is_ok()
+    }
+}
+
+fn main() {
+    let empty = Placement::none()
+    let sized = Placement { width: 640, height: 480 }
+    println(f"empty none={empty.is_none()} some={empty.is_some()}")
+    println(f"sized none={sized.is_none()} some={sized.is_some()}")
+    let checks = #[Check::Passed(3), Check::Failed("disk full")]
+    for check in checks {
+        println(f"ok={check.is_ok()} err={check.is_err()}")
+    }
+    let maybe: Option<i64> = None
+    println(f"option none={maybe.is_none()} some={maybe.is_some()}")
+}

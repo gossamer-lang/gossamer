@@ -1746,6 +1746,17 @@ fn subst_param_sig(
     }
 }
 
+/// Removes the generic templates specialisation left behind in a unit with no
+/// entry point. Such a unit keeps every body, since nothing names what its
+/// host will call, but a template is only ever reached through the
+/// instantiations its callers were rewritten to: it is never code itself.
+/// Answers how many it removed.
+pub fn drop_library_templates(bodies: &mut Vec<Body>, tcx: &TyCtxt) -> usize {
+    let before = bodies.len();
+    bodies.retain(|body| !body_has_param(body, tcx));
+    before - bodies.len()
+}
+
 /// Rejects a body that reaches code generation with a type parameter still
 /// in its locals. Every call site of a generic body is routed to an
 /// instantiation lowered with concrete types, so a template that is still

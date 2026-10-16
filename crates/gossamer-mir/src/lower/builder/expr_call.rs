@@ -1191,6 +1191,13 @@ impl<'a> Builder<'a> {
             // boundary - matches the VM tier's behaviour so
             // `f(flags.output)` passes the unwrapped value.
             let local = self.auto_deref_cell(local, span);
+            // A rendering callee prints the value a reference names, as the
+            // VM does, never the reference itself.
+            let local = if callee_renders_aggregates {
+                self.deref_for_rendering(local, span)
+            } else {
+                local
+            };
             // Wrap when the source MIR local holds a raw code
             // address (named fn item, lifted closure name, or a
             // `let f = some_fn`). Capturing closures registered
@@ -1728,6 +1735,30 @@ impl<'a> Builder<'a> {
 }
 
 impl Builder<'_> {
+    /// The value `local` refers to, read into a local of its own, when
+    /// `local` holds a `&mut` reference; `local` itself otherwise. A shared
+    /// reference is represented by the value it names, so it renders as is.
+    fn deref_for_rendering(&mut self, local: Local, span: Span) -> Local {
+        let gossamer_types::TyKind::Ref {
+            inner,
+            mutability: gossamer_types::Mutbl::Mut,
+        } = self.tcx.kind_of(self.locals[local.0 as usize].ty)
+        else {
+            return local;
+        };
+        let inner = *inner;
+        let value = self.fresh(inner);
+        self.emit_assign(
+            Place::local(value),
+            Rvalue::Use(Operand::Copy(Place {
+                local,
+                projection: vec![crate::ir::Projection::Deref],
+            })),
+            span,
+        );
+        value
+    }
+
     /// A by-value `seq[lo..hi]` argument the callee only reads, lowered as a
     /// window over `seq` instead of a copy of the range. The callee neither
     /// writes the parameter nor lets it outlive the call, and no other

@@ -20,6 +20,7 @@ mod diagnostic;
 mod external;
 mod named_args;
 mod numeric_limits;
+mod patterns;
 mod resolutions;
 mod resolver;
 mod scope;
@@ -36,6 +37,7 @@ pub use named_args::{
     DeferredMethodCall, resolve_deferred_method_arguments, resolve_named_arguments,
 };
 pub use numeric_limits::{LimitConstant, LimitLiteral, limit_constant};
+pub use patterns::settle_single_name_patterns;
 pub use resolutions::{FloatWidth, IntWidth, PrimitiveTy, Resolution, Resolutions};
 pub use resolver::{project_dep_module_name, resolve_source_file};
 pub use scope::is_prelude_value;

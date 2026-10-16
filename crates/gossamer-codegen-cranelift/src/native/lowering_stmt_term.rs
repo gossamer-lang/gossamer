@@ -1284,6 +1284,23 @@ fn vec_operand_has_word_elem(body: &Body, tcx: &TyCtxt, op: &Operand) -> bool {
     )
 }
 
+/// True when `op` is a `Vec` / `[T]` whose element is statically `bool` or
+/// `u8`, the primitives stored at a 1-byte stride.
+fn vec_operand_has_byte_elem(body: &Body, tcx: &TyCtxt, op: &Operand) -> bool {
+    let Operand::Copy(pl) = op else {
+        return false;
+    };
+    let mut ty = resolve_place_ty(tcx, body, pl);
+    while let TyKind::Ref { inner, .. } = tcx.kind_of(ty) {
+        ty = *inner;
+    }
+    let elem = match tcx.kind_of(ty) {
+        TyKind::Vec(e) | TyKind::Slice(e) => *e,
+        _ => return false,
+    };
+    matches!(tcx.kind_of(elem), TyKind::Bool | TyKind::Int(IntTy::U8))
+}
+
 /// True when the operand is a `Vec`/`[T]` whose element word is a handle the
 /// vector owns, so a store has to give back the share the slot held.
 fn vec_operand_elem_owns_word(body: &Body, tcx: &TyCtxt, op: &Operand) -> bool {
@@ -1308,7 +1325,7 @@ fn vec_operand_elem_owns_word(body: &Body, tcx: &TyCtxt, op: &Operand) -> bool {
     ) || tcx.is_rc_managed(elem)
 }
 
-/// Inline the word-stride `Vec`/`Slice` element get/set runtime calls
+/// Inline the word- and byte-stride `Vec`/`Slice` element get/set runtime calls
 /// (`gos_rt_vec_get_i64` / `gos_rt_vec_set_i64` and their `_unchecked`
 /// variants) as direct loads/stores off the `GosVec` header, mirroring the
 /// LLVM backend's inline fast path so a JIT-compiled hot loop keeps the
@@ -1316,8 +1333,8 @@ fn vec_operand_elem_owns_word(body: &Body, tcx: &TyCtxt, op: &Operand) -> bool {
 /// per-element call. Returns `Ok(true)` when handled inline; `Ok(false)`
 /// leaves the call to the generic dispatch unchanged.
 ///
-/// Only the provably-8-byte-stride elements ([`vec_operand_has_word_elem`])
-/// take this path. Semantics match the runtime exactly: a checked access
+/// Only elements of a stride the type settles ([`vec_operand_has_word_elem`],
+/// [`vec_operand_has_byte_elem`]) take this path. Semantics match the runtime exactly: a checked access
 /// outside `[0, len)`, or through a null receiver, panics with the text every
 /// tier uses for an indexed read. GosVec layout: `len@0`, `ptr@24`.
 fn try_lower_vec_index_inline(
@@ -1340,7 +1357,14 @@ fn try_lower_vec_index_inline(
         "gos_rt_vec_set_i64_unchecked" => (false, false, 3),
         _ => return Ok(false),
     };
-    if args.len() != want_args || !vec_operand_has_word_elem(body, tcx, &args[0]) {
+    let stride = if vec_operand_has_word_elem(body, tcx, &args[0]) {
+        8
+    } else if vec_operand_has_byte_elem(body, tcx, &args[0]) {
+        1
+    } else {
+        return Ok(false);
+    };
+    if args.len() != want_args {
         return Ok(false);
     }
     // A store that replaces a handle the vector owns has to give the outgoing
@@ -1412,7 +1436,7 @@ fn try_lower_vec_index_inline(
                 .ins()
                 .brif(bad, dflt_b, &[ir::BlockArg::Value(len)], load_b, &[]);
             builder.switch_to_block(load_b);
-            let v = load_vec_word(builder, ptr_ty, vec_ptr, idx_ptr);
+            let v = load_vec_elem(builder, ptr_ty, vec_ptr, idx_ptr, stride);
             builder.ins().jump(cont_b, &[ir::BlockArg::Value(v)]);
             builder.switch_to_block(dflt_b);
             let oob_len = builder.block_params(dflt_b)[0];
@@ -1430,7 +1454,7 @@ fn try_lower_vec_index_inline(
                 intrinsics,
             )?;
         } else {
-            let v = load_vec_word(builder, ptr_ty, vec_ptr, idx_ptr);
+            let v = load_vec_elem(builder, ptr_ty, vec_ptr, idx_ptr, stride);
             store_call_result(
                 module,
                 builder,
@@ -1479,11 +1503,11 @@ fn try_lower_vec_index_inline(
             let set_oob_len = builder.block_params(oob_b)[0];
             emit_vec_index_panic(module, builder, intrinsics, idx, set_oob_len)?;
             builder.switch_to_block(store_b);
-            store_vec_word(builder, ptr_ty, vec_ptr, idx_ptr, val);
+            store_vec_elem(builder, ptr_ty, vec_ptr, idx_ptr, val, stride);
             builder.ins().jump(cont_b, &[]);
             builder.switch_to_block(cont_b);
         } else {
-            store_vec_word(builder, ptr_ty, vec_ptr, idx_ptr, val);
+            store_vec_elem(builder, ptr_ty, vec_ptr, idx_ptr, val, stride);
         }
     }
     match target {
@@ -1519,42 +1543,113 @@ fn emit_vec_index_panic(
     Ok(())
 }
 
-/// Element address for a word-stride `GosVec`: load the data pointer from
-/// header offset 24, then `data_ptr + idx*8`, and load the 8-byte word.
-fn load_vec_word(
+/// The address of element `idx` of a `GosVec` whose elements are `stride`
+/// bytes apart: the data pointer at header offset 24, plus `idx * stride`.
+fn vec_elem_addr(
     builder: &mut FunctionBuilder<'_>,
     ptr_ty: ir::Type,
     vec_ptr: ir::Value,
     idx_ptr: ir::Value,
+    stride: i64,
 ) -> ir::Value {
     let dptr = builder
         .ins()
         .load(ptr_ty, MemFlagsData::trusted(), vec_ptr, 24);
-    let eight = builder.ins().iconst(ptr_ty, 8);
-    let off = builder.ins().imul(idx_ptr, eight);
-    let ea = builder.ins().iadd(dptr, off);
-    builder
-        .ins()
-        .load(types::I64, MemFlagsData::trusted(), ea, 0)
+    let off = if stride == 1 {
+        idx_ptr
+    } else {
+        let scale = builder.ins().iconst(ptr_ty, stride);
+        builder.ins().imul(idx_ptr, scale)
+    };
+    builder.ins().iadd(dptr, off)
 }
 
-/// Store the 8-byte word `val` into a word-stride `GosVec` element address
-/// (`data_ptr + idx*8`). `val` keeps its native type (`i64` or `f64`); both
-/// write the same 8 bytes the runtime helper would.
-fn store_vec_word(
+/// Branches on whether a byte-element vector packs its elements (`elem_bytes`
+/// at header offset 16 is 1) or keeps each in a word slot, as a view of a
+/// fixed array's slot block does: answers the packed and the slot blocks.
+fn branch_on_byte_packing(
+    builder: &mut FunctionBuilder<'_>,
+    vec_ptr: ir::Value,
+) -> (ir::Block, ir::Block) {
+    let elem_bytes = builder.ins().uload32(MemFlagsData::trusted(), vec_ptr, 16);
+    let packed = builder.ins().icmp_imm_u(IntCC::Equal, elem_bytes, 1);
+    let packed_b = builder.create_block();
+    let slot_b = builder.create_block();
+    builder.ins().brif(packed, packed_b, &[], slot_b, &[]);
+    (packed_b, slot_b)
+}
+
+/// Loads element `idx` as the `i64` the runtime getter answers: the 8-byte
+/// word, or a byte element zero-extended from wherever its vector keeps it.
+fn load_vec_elem(
+    builder: &mut FunctionBuilder<'_>,
+    ptr_ty: ir::Type,
+    vec_ptr: ir::Value,
+    idx_ptr: ir::Value,
+    stride: i64,
+) -> ir::Value {
+    if stride != 1 {
+        let ea = vec_elem_addr(builder, ptr_ty, vec_ptr, idx_ptr, stride);
+        return builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), ea, 0);
+    }
+    let (packed_b, slot_b) = branch_on_byte_packing(builder, vec_ptr);
+    let cont_b = builder.create_block();
+    builder.append_block_param(cont_b, types::I64);
+    builder.switch_to_block(packed_b);
+    let ea = vec_elem_addr(builder, ptr_ty, vec_ptr, idx_ptr, 1);
+    let byte = builder
+        .ins()
+        .uload8(types::I64, MemFlagsData::trusted(), ea, 0);
+    builder.ins().jump(cont_b, &[ir::BlockArg::Value(byte)]);
+    builder.switch_to_block(slot_b);
+    let ea = vec_elem_addr(builder, ptr_ty, vec_ptr, idx_ptr, 8);
+    let word = builder
+        .ins()
+        .load(types::I64, MemFlagsData::trusted(), ea, 0);
+    builder.ins().jump(cont_b, &[ir::BlockArg::Value(word)]);
+    builder.switch_to_block(cont_b);
+    builder.block_params(cont_b)[0]
+}
+
+/// Stores `val` into element `idx`, writing the bytes the runtime setter
+/// would: the whole word (`i64` or `f64`, as `val` holds it), or a byte
+/// element as its vector keeps it, one byte or a zero-extended word slot.
+fn store_vec_elem(
     builder: &mut FunctionBuilder<'_>,
     ptr_ty: ir::Type,
     vec_ptr: ir::Value,
     idx_ptr: ir::Value,
     val: ir::Value,
+    stride: i64,
 ) {
-    let dptr = builder
-        .ins()
-        .load(ptr_ty, MemFlagsData::trusted(), vec_ptr, 24);
-    let eight = builder.ins().iconst(ptr_ty, 8);
-    let off = builder.ins().imul(idx_ptr, eight);
-    let ea = builder.ins().iadd(dptr, off);
-    builder.ins().store(MemFlagsData::trusted(), val, ea, 0);
+    if stride != 1 {
+        let ea = vec_elem_addr(builder, ptr_ty, vec_ptr, idx_ptr, stride);
+        builder.ins().store(MemFlagsData::trusted(), val, ea, 0);
+        return;
+    }
+    let (packed_b, slot_b) = branch_on_byte_packing(builder, vec_ptr);
+    let cont_b = builder.create_block();
+    builder.switch_to_block(packed_b);
+    let ea = vec_elem_addr(builder, ptr_ty, vec_ptr, idx_ptr, 1);
+    if value_type(val, builder) == types::I8 {
+        builder.ins().store(MemFlagsData::trusted(), val, ea, 0);
+    } else {
+        builder.ins().istore8(MemFlagsData::trusted(), val, ea, 0);
+    }
+    builder.ins().jump(cont_b, &[]);
+    builder.switch_to_block(slot_b);
+    let ea = vec_elem_addr(builder, ptr_ty, vec_ptr, idx_ptr, 8);
+    let byte = if value_type(val, builder) == types::I8 {
+        val
+    } else {
+        builder.ins().ireduce(types::I8, val)
+    };
+    let word = builder.ins().uextend(types::I64, byte);
+    builder.ins().store(MemFlagsData::trusted(), word, ea, 0);
+    builder.ins().jump(cont_b, &[]);
+    builder.switch_to_block(cont_b);
 }
 
 pub(super) fn lower_terminator(

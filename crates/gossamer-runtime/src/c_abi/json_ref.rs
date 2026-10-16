@@ -62,23 +62,14 @@ impl ParsedTape {
 
     /// Indices of the elements of the array at `index`, or of the members'
     /// keys of the object at `index` (each value follows its key).
-    fn children(&self, index: u32) -> impl Iterator<Item = u32> + '_ {
-        let step = if self.node(index).kind() == TapeKind::Object {
-            2
-        } else {
-            1
-        };
-        // The first child follows the container's word slot.
-        let mut next = index + 2;
-        (0..self.tape.count(index)).map(move |_| {
-            let at = next;
-            next = self.tape.extent(at);
-            if step == 2 {
-                let value = next;
-                next = self.tape.extent(value);
-            }
-            at
-        })
+    fn children(&self, index: u32) -> Children<'_> {
+        Children {
+            tape: &self.tape,
+            // The first child follows the container's word slot.
+            next: index + 2,
+            left: self.tape.count(index),
+            object: self.node(index).kind() == TapeKind::Object,
+        }
     }
 
     /// The key nodes of the object at `index`, in key order, the last of
@@ -111,17 +102,54 @@ impl ParsedTape {
     /// The value of the member `key` of the object at `index`.
     fn member(&self, index: u32, key: &str) -> Option<u32> {
         if self.tape.count(index) <= SCAN_MEMBERS {
-            return self
-                .children(index)
-                .filter(|&k| self.string(k) == key)
-                .last()
-                .map(|k| k + 1);
+            // The last of equal keys is the member, so every key is read.
+            let mut found = None;
+            for k in self.children(index) {
+                if self.string(k) == key {
+                    found = Some(k + 1);
+                }
+            }
+            return found;
         }
         let members = self.members(index);
         members
             .binary_search_by(|&k| self.string(k).as_ref().cmp(key))
             .ok()
             .map(|at| members[at] + 1)
+    }
+}
+
+/// The children [`ParsedTape::children`] walks: each element of an array, or
+/// each key of an object, skipping the value after it.
+struct Children<'t> {
+    tape: &'t Tape,
+    next: u32,
+    left: u32,
+    object: bool,
+}
+
+impl Iterator for Children<'_> {
+    type Item = u32;
+
+    // A step is two tape reads; a call per member would cost more than the
+    // step, and every object read walks its members.
+    #[inline]
+    fn next(&mut self) -> Option<u32> {
+        if self.left == 0 {
+            return None;
+        }
+        self.left -= 1;
+        let at = self.next;
+        self.next = self.tape.extent(at);
+        if self.object {
+            self.next = self.tape.extent(self.next);
+        }
+        Some(at)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.left as usize, Some(self.left as usize))
     }
 }
 

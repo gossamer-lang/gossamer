@@ -135,6 +135,11 @@ extend(&mut items)     // items is now #[1, 2, 1]
   `for (k, v) in m`, `let a, (b, c) = 1, (2, 3)`.
 - `if let` / `while let`; let-chains `if let Some(x) = a && x > 0 { .. }`;
   `let Some(x) = opt else { return }` (the else must diverge).
+- A single name in a pattern means what it resolves to, as in Rust: a
+  variant, struct, or const is matched (`None =>`, `LIMIT =>`), any other
+  name binds. `let`, `for`, and parameters take irrefutable patterns only
+  (GT0047): `let Some(x) = opt` needs `else`. `use Kind::*` /
+  `use Kind::{A, B}` import variants. Follow Rust's naming (`gos lint`).
 - Exhaustive `match`, no `_ =>` unless every other case means the same.
   Labeled loops: `'outer: for .. { break 'outer }`.
 - `defer expr` runs at every exit of its block (end, `return`, `break`, `?`),
@@ -142,6 +147,10 @@ extend(&mut items)     // items is now #[1, 2, 1]
   or `close` runs in a panicking goroutine too.
 - Named and default arguments: `fn volume(width: i64, height: i64 = 2)`
   then `volume(2)`, `volume(width: 2, height: 3)`, or `volume(2, height: 3)`.
+  A default is any value known while compiling, data included
+  (`mode: Mode = Mode::Fast`, `parent: Option<Window> = None`,
+  `size: Size = Size { w: 800, h: 600 }`, `tags: Vec<String> = #[]`); a
+  call or another parameter is GR0014.
 - Semicolons only separate statements on one line. To continue an
   expression on the next line, end the line with its operator (`a &&` then
   `b`); `|>` is the one operator that may begin a line. A line starting
@@ -448,8 +457,10 @@ tests/          # integration tests
   `#[gos_module("name")]`).
 - `gos run FILE [ARGS]`, `gos build [--release] [-g]`, `gos test`,
   `gos fmt`, `gos lint`, `gos doc`, `gos new/init/add/fetch/publish`,
-  `gos keygen`, `gos registry serve`, `gos env`, `gos repl`
-  (`%i name` documents a symbol). Native builds need LLVM 18-22.
+  `gos keygen`, `gos registry serve`, `gos env`,
+  `gos serve [DIR] [--port 8000] [--bind 127.0.0.1]` (static files over
+  HTTP), `gos repl` (`%i name` documents a symbol). Native builds need
+  LLVM 18-22.
 
 ## 14. When in doubt
 

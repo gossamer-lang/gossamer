@@ -489,6 +489,13 @@ fn outstanding_goroutines() -> u64 {
         .map_or(0, |p| p.outstanding.load(Ordering::Acquire))
 }
 
+/// The participants other than `main` that can still deliver a value: every
+/// outstanding goroutine, plus each actor outside the goroutine set (a live
+/// `ffi::Handle` whose holder may run a callback on a thread of its own).
+fn participants_besides_main() -> u64 {
+    outstanding_goroutines() + gossamer_runtime::sched_global::external_actors() as u64
+}
+
 thread_local! {
     /// Set on every goroutine worker thread, so the deadlock report can tell
     /// a goroutine's own wait from the program's main thread.
@@ -643,7 +650,7 @@ impl ChannelWait {
             || {
                 let waiting =
                     CHANNEL_WAITERS.load(Ordering::Acquire) + JOIN_WAITERS.load(Ordering::Acquire);
-                let participants = outstanding_goroutines() + u64::from(!main_returned);
+                let participants = participants_besides_main() + u64::from(!main_returned);
                 (waiting as u64, participants)
             },
             || a_waiter_is_cancelled() || can_progress(),
@@ -700,7 +707,7 @@ fn report_if_left_waiting() {
         || {
             let waiting =
                 CHANNEL_WAITERS.load(Ordering::Acquire) + JOIN_WAITERS.load(Ordering::Acquire);
-            (waiting as u64, outstanding_goroutines() + 1)
+            (waiting as u64, participants_besides_main() + 1)
         },
         || {
             a_waiter_is_cancelled()
@@ -758,7 +765,7 @@ impl JoinWait {
                 || {
                     let waiting = JOIN_WAITERS.load(Ordering::Acquire)
                         + CHANNEL_WAITERS.load(Ordering::Acquire);
-                    (waiting as u64, outstanding_goroutines() + 1)
+                    (waiting as u64, participants_besides_main() + 1)
                 },
                 || a_waiter_is_cancelled() || settled(),
             )

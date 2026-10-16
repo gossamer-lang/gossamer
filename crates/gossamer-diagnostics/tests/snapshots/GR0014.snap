@@ -4,9 +4,9 @@ assertion_line: 86
 expression: rendered
 ---
 --- plain ---
-error[GR0014]: A parameter default was not a constant. The default is spliced - here
+error[GR0014]: A parameter default was not a value known while compiling. The - here
 --- framed ---
-error[GR0014]: A parameter default was not a constant. The default is spliced
+error[GR0014]: A parameter default was not a value known while compiling. The
   --> snap.gos:2:5
      2 |     let x = 1
        |     ^^^^^

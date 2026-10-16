@@ -275,6 +275,10 @@ pub enum TypeError {
     /// A `for` loop's pattern might not match some element it walks.
     #[error("this `for` pattern might not match every element")]
     ForPatternMayNotMatch,
+    /// A function or closure parameter's pattern might not match some
+    /// argument of its type.
+    #[error("this parameter pattern might not match every argument")]
+    ParamPatternMayNotMatch,
     /// A `let &...` pattern tried to destructure a non-reference value.
     #[error(
         "`let {pattern} name = value` requires an `{pattern}` initializer; write `let name = {pattern} value` to borrow, or remove `{pattern}` to bind the value directly"
@@ -1127,6 +1131,15 @@ pub enum TypeError {
         /// Source-like spelling of the argument place.
         argument: String,
     },
+    /// `&mut x` was passed where the parameter takes a value of its own, so
+    /// the callee's writes would land on its copy.
+    #[error(
+        "`&mut {argument}` is a mutable reference, but the parameter takes a value of its own; what the callee writes would not reach `{argument}`"
+    )]
+    MutReferenceToValueParameter {
+        /// Source-like spelling of the referenced place.
+        argument: String,
+    },
 }
 
 /// The cast that brings two integer operands to one type, for
@@ -1171,6 +1184,7 @@ impl TypeError {
             Self::CannotAssignToLiteral => "cannot-assign-to-literal",
             Self::LetPatternMayNotMatch => "let-pattern-may-not-match",
             Self::ForPatternMayNotMatch => "for-pattern-may-not-match",
+            Self::ParamPatternMayNotMatch => "param-pattern-may-not-match",
             Self::ReferencePatternRequiresReference { .. } => {
                 "reference-pattern-requires-reference"
             }
@@ -1266,6 +1280,7 @@ impl TypeError {
             Self::ConcurrentCaptureUnsupported { .. } => "concurrent-capture-unsupported",
             Self::SharedPayloadUnsupported { .. } => "shared-payload-unsupported",
             Self::MutableArgumentRequiresReference { .. } => "mutable-argument-requires-reference",
+            Self::MutReferenceToValueParameter { .. } => "mut-reference-to-value-parameter",
         }
     }
 
@@ -1315,7 +1330,8 @@ impl TypeError {
             Self::NonExhaustiveMatch { .. } => "GT0004",
             Self::CannotAssignToLiteral
             | Self::LetPatternMayNotMatch
-            | Self::ForPatternMayNotMatch => "GT0047",
+            | Self::ForPatternMayNotMatch
+            | Self::ParamPatternMayNotMatch => "GT0047",
             Self::ReferencePatternRequiresReference { .. } => "GT0048",
             Self::ReferenceParameterPatternPosition { .. } => "GT0069",
             Self::UnsizedSliceValue { .. } => "GT0049",
@@ -1391,6 +1407,7 @@ impl TypeError {
             Self::ConcurrentCaptureUnsupported { .. } => "GT0076",
             Self::SharedPayloadUnsupported { .. } => "GT0077",
             Self::MutableArgumentRequiresReference { .. } => "GT0046",
+            Self::MutReferenceToValueParameter { .. } => "GT0121",
         }
     }
 }
@@ -1667,6 +1684,13 @@ impl TypeDiagnostic {
                         "bind the element with a name and test it in the body with `if let` or `match`",
                     )
                     .with_note("a `for` pattern must accept every element the loop walks");
+            }
+            TypeError::ParamPatternMayNotMatch => {
+                out = out
+                    .with_help(
+                        "take the argument with a name and test it in the body with `if let`, `match`, or `let ... else`",
+                    )
+                    .with_note("a parameter pattern must accept every argument the caller can pass");
             }
             TypeError::ReferencePatternRequiresReference { pattern } => {
                 out = out
@@ -2493,6 +2517,15 @@ impl TypeDiagnostic {
                     ))
                     .with_note(
                         "calls never create mutable references implicitly; `&mut` makes possible mutation visible",
+                    );
+            }
+            TypeError::MutReferenceToValueParameter { argument } => {
+                out = out
+                    .with_help(format!(
+                        "declare the parameter `&mut T` so its writes reach `{argument}`, or pass `{argument}` to hand the callee a value of its own"
+                    ))
+                    .with_note(
+                        "a parameter that is not `&mut`, `mut` included, holds a value of its own: a `mut` parameter writes only its copy",
                     );
             }
         }

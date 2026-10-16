@@ -27,8 +27,8 @@ fuzz_target!(|data: &[u8]| {
     let mut map = SourceMap::new();
     let file = map.add_file("fuzz.gos", source.to_string());
     let (mut sf, _diags) = parse_source_file(source, file);
-    let (resolutions, _r_diags) = resolve_source_file(&sf);
-    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &resolutions);
+    let (mut resolutions, _r_diags) = resolve_source_file(&sf);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
     let mut tcx = TyCtxt::new();
     let (_table, _t_diags) = typecheck_source_file(&sf, &resolutions, &mut tcx);
 });

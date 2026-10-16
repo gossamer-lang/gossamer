@@ -34,7 +34,7 @@ pub(crate) use thunks::{
 };
 use thunks::{
     body_has_wide_spawn, cabi_thunk_param_tys, collect_cabi_handlers, collect_cabi_thunk_sites,
-    collect_sret_bodies, collect_thunk_names_in_body, extern_declare_with,
+    collect_direct_bodies, collect_sret_bodies, collect_thunk_names_in_body, extern_declare_with,
     render_cabi_handler_thunk, render_cabi_thunk_with_linkage, render_shape_thunk,
     render_shape_thunk_with_linkage, render_spawn_wide_cabi_thunk, shape_thunk_param_tys,
     validate_global_decl_shape,
@@ -1078,6 +1078,7 @@ fn render_chunk_module(
     let mut cabi_shape_thunks: std::collections::BTreeSet<String> =
         std::collections::BTreeSet::new();
     let sret_bodies = collect_sret_bodies(ctx.all_bodies, ctx.tcx);
+    let direct_bodies = collect_direct_bodies(ctx.all_bodies);
 
     let defined = chunk_indices.iter().map(|&idx| (idx, false));
     let copied = imports.iter().map(|&idx| (idx, true));
@@ -1098,6 +1099,7 @@ fn render_chunk_module(
             cabi_shape_thunks.extend(sites.values().cloned());
         }
         lowerer.sret_bodies.clone_from(&sret_bodies);
+        lowerer.direct_bodies.clone_from(&direct_bodies);
 
         let text = lowerer.lower()?;
         globals_raw.extend(lowerer.take_module_globals());
@@ -1378,9 +1380,8 @@ fn compile_bodies_parallel_incremental(
     // (chunk_idx, cache_key, ll_path, obj_path)
     let mut chunks_to_compile: Vec<(usize, String, PathBuf, PathBuf)> = Vec::new();
     let mut result_objects: Vec<(usize, PathBuf)> = Vec::new();
+    let mut irs: Vec<String> = Vec::with_capacity(body_chunks.len());
     for (chunk_idx, body_indices) in body_chunks.iter().enumerate() {
-        let obj_path = obj_dir.join(format!("chunk{chunk_idx}.o"));
-        let ll_path = obj_dir.join(format!("chunk{chunk_idx}.ll"));
         let started = std::time::Instant::now();
         let ir =
             render_chunk_module(body_indices, &imports[chunk_idx], &ctx).map_err(|e| match e {
@@ -1391,6 +1392,21 @@ fn compile_bodies_parallel_incremental(
                 BuildError::Io(err) => err,
             })?;
         record_phase(&RENDER_US, started);
+        irs.push(ir);
+    }
+    let exports: std::collections::HashSet<String> =
+        gossamer_mir::export_symbols(bodies).into_iter().collect();
+    let body_symbols: std::collections::HashSet<String> = {
+        let _scope = crate::lower::ExportScope::enter(bodies);
+        bodies
+            .iter()
+            .map(|body| crate::lower::mangle_fn_name(&body.name).into_owned())
+            .collect()
+    };
+    internalize_chunk_locals(&mut irs, &body_symbols, &exports);
+    for (chunk_idx, (body_indices, ir)) in body_chunks.iter().zip(irs).enumerate() {
+        let obj_path = obj_dir.join(format!("chunk{chunk_idx}.o"));
+        let ll_path = obj_dir.join(format!("chunk{chunk_idx}.ll"));
         keep_ir(&format!("chunk{chunk_idx}.ll"), &ir);
         let key = chunk_cache_key(&ir, &llvm_triple, profile);
         let hit = cache_dir
@@ -1482,6 +1498,76 @@ fn compile_bodies_parallel_incremental(
         triple,
         Vec::new(),
     ))
+}
+
+/// Gives `internal` linkage to every program body a chunk defines that no
+/// other chunk names, so `opt` treats it as the module's own: a body with one
+/// caller is folded into it, and one that every caller inlined is dropped. The
+/// entry point the runtime calls, the program's `#[export]` symbols, and the
+/// glue a build emits beside the bodies stay public.
+fn internalize_chunk_locals(
+    irs: &mut [String],
+    body_symbols: &std::collections::HashSet<String>,
+    exports: &std::collections::HashSet<String>,
+) {
+    let named: Vec<std::collections::HashSet<String>> = irs
+        .iter()
+        .map(|ir| {
+            let mut symbols = std::collections::HashSet::new();
+            collect_quoted_symbols(ir, &mut symbols);
+            symbols.into_iter().map(str::to_owned).collect()
+        })
+        .collect();
+    for (chunk, ir) in irs.iter_mut().enumerate() {
+        let mut out = String::with_capacity(ir.len() + 1024);
+        for line in ir.split_inclusive('\n') {
+            if let Some(symbol) = plain_definition_symbol(line)
+                && body_symbols.contains(symbol)
+                && symbol != "gos_main"
+                && !exports.contains(symbol)
+                && !named
+                    .iter()
+                    .enumerate()
+                    .any(|(other, set)| other != chunk && set.contains(symbol))
+            {
+                out.push_str("define internal ");
+                out.push_str(&line["define ".len()..]);
+            } else {
+                out.push_str(line);
+            }
+        }
+        *ir = out;
+    }
+}
+
+/// The quoted symbol a `define` line names when the line gives no linkage of
+/// its own, as every lowered body's does.
+fn plain_definition_symbol(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("define ")?;
+    let at = rest.find(" @\"")?;
+    let head = &rest[..at];
+    let linkage = [
+        "internal",
+        "private",
+        "available_externally",
+        "linkonce",
+        "linkonce_odr",
+        "weak",
+        "weak_odr",
+        "external",
+        "dllexport",
+        "hidden",
+        "protected",
+    ];
+    if head
+        .split_whitespace()
+        .next()
+        .is_some_and(|first| linkage.contains(&first))
+    {
+        return None;
+    }
+    let name = &rest[at + 3..];
+    name.find("\"(").map(|end| &name[..end])
 }
 
 /// Copies a freshly compiled object into the cache under `key`. The copy is
@@ -1644,6 +1730,7 @@ fn render_module_to_path(
     let mut body_w = BufWriter::with_capacity(64 * 1024, body_file);
 
     let sret_bodies = collect_sret_bodies(bodies, tcx);
+    let direct_bodies = collect_direct_bodies(bodies);
     let cabi_handlers = collect_cabi_handlers(bodies);
     let cabi_thunk_sites = collect_cabi_thunk_sites(bodies);
     let mut cabi_shape_thunks: std::collections::BTreeSet<String> =
@@ -1660,6 +1747,7 @@ fn render_module_to_path(
             cabi_shape_thunks.extend(sites.values().cloned());
         }
         lowerer.sret_bodies.clone_from(&sret_bodies);
+        lowerer.direct_bodies.clone_from(&direct_bodies);
         match lowerer.lower() {
             Ok(text) => {
                 body_w

@@ -20,7 +20,7 @@ the implementation by a rev.
 |---------|---------|
 | `gos fmt [--check] FILE` | Rewrite canonically. |
 | `gos doc [--html OUT] FILE` | List items (plain-text) or write an HTML page. |
-| `gos lint [--deny-warnings] [--explain ID] [--fix] PATH` | Run the lint suite (50 lints). `--fix` writes auto-applicable suggestions back to disk; `--explain ID` prints long-form rationale. |
+| `gos lint [--deny-warnings] [--explain ID] [--fix] PATH` | Run the lint suite (56 lints), Rust's naming conventions among them. `--fix` writes auto-applicable suggestions back to disk; `--explain ID` prints long-form rationale. |
 | `gos explain CODE` | Long-form rationale for a diagnostic code. |
 
 ## Testing + benchmarking
@@ -35,6 +35,22 @@ the implementation by a rev.
 | Command | Purpose |
 |---------|---------|
 | `gos watch [PATH] [--] [ARGS...]` | Validate and restart a development service when project inputs change. `gos dev` is accepted as a compatibility alias. |
+
+## Serving files
+
+| Command | Purpose |
+|---------|---------|
+| `gos serve [DIR] [--port PORT] [--bind ADDR]` | Serve the files under `DIR` (default the current directory) over HTTP, as `python -m http.server` does. Listens on `127.0.0.1` port `8000` unless `--bind` and `--port` say otherwise; `--bind 0.0.0.0` answers every network the machine is on, and `--port 0` picks a free port. The first line on stdout names the URL; each request is logged to stderr. A directory's `index.html` is its page, and a directory without one is listed. `GET` and `HEAD` are answered, with `ETag` / `Last-Modified` revalidation and byte ranges; a path that leaves `DIR` is `404`, and any other method is `405`. |
+
+```sh
+gos serve                         # ./ at http://127.0.0.1:8000/
+gos serve site --port 3000        # ./site at http://127.0.0.1:3000/
+gos serve --bind 0.0.0.0          # reachable from other machines
+```
+
+`gos serve` is for development and sharing files on a trusted network: it
+has no TLS and no access control. A program that serves files in
+production uses `http::static_files::FileServer` behind its own router.
 
 ## Housekeeping
 

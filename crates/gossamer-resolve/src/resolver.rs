@@ -193,6 +193,17 @@ struct Resolver {
     /// The names each enclosing `let` declares while its initializer
     /// resolves, innermost last.
     initializing: Vec<Vec<String>>,
+    /// Whether the pattern being bound is a `match` arm's, where a name that
+    /// misspells a variant would otherwise bind every value.
+    in_match_arm: bool,
+    /// Each enum's variant names, keyed by the enum's `::`-joined path from
+    /// the unit root, gathered before any `use` is registered.
+    enum_variant_names: std::collections::HashMap<String, Vec<String>>,
+    /// Each variant's definition, keyed by its `::`-joined path.
+    variant_defs: std::collections::HashMap<String, DefId>,
+    /// The variants a `use` brings into a module: by the module's path and
+    /// the name bound there, the variant's `::`-joined path.
+    variant_imports: std::collections::HashMap<(Vec<String>, String), String>,
 }
 
 impl Resolver {
@@ -222,12 +233,17 @@ impl Resolver {
             synthesized_scope: std::collections::HashMap::new(),
             ambiguous_variants: std::collections::HashMap::new(),
             initializing: Vec::new(),
+            in_match_arm: false,
+            enum_variant_names: std::collections::HashMap::new(),
+            variant_defs: std::collections::HashMap::new(),
+            variant_imports: std::collections::HashMap::new(),
         }
     }
 
     fn run(&mut self, source: &SourceFile) {
         self.local_module_paths = collect_module_paths(&source.items);
         self.local_item_paths = collect_item_paths(&source.items);
+        self.enum_variant_names = collect_enum_variant_names(&source.items);
         self.unit_import_names = collect_import_names(&source.uses);
         self.precollect_project_aliases(source);
         self.collect_imports(&source.uses, &source.items);
@@ -405,6 +421,7 @@ impl Resolver {
         // imports, so one written in a module the cfg drops has to be dropped
         // with it.
         let inactive = collect_inactive_module_paths(items);
+        let mut registered = Vec::new();
         for use_decl in uses {
             if (1..=use_decl.module.len())
                 .any(|depth| inactive.contains(&use_decl.module[..depth].join("::")))
@@ -412,11 +429,207 @@ impl Resolver {
                 continue;
             }
             self.record_imported_module_head(use_decl);
+            if self.register_variant_import(use_decl) {
+                continue;
+            }
             match &use_decl.list {
                 Some(list) => self.register_use_list(use_decl, list),
                 None => self.register_use_simple(use_decl),
             }
+            registered.push(use_decl);
         }
+        // After every module's imports are in, so a re-export is known
+        // whichever file declares it.
+        for use_decl in registered {
+            self.reject_unknown_unit_imports(use_decl);
+        }
+    }
+
+    /// Reports a `use` naming a path into a module this unit declares - a
+    /// bundled package's included - that names nothing there. Every item of
+    /// such a module is in this unit, so a missing one is a misspelling or a
+    /// removed item, which no later pass would report: the import would bind
+    /// a name with no definition behind it.
+    fn reject_unknown_unit_imports(&mut self, use_decl: &UseDecl) {
+        let gossamer_ast::UseTarget::Module(path) = &use_decl.target else {
+            return;
+        };
+        let Some(head) = path.segments.first() else {
+            return;
+        };
+        if head.name == "std" || crate::diagnostic::is_relative_path(&head.name) {
+            return;
+        }
+        let base = self.respell_alias_head(&target_path_text(&use_decl.target));
+        let targets: Vec<String> = match &use_decl.list {
+            Some(list) => list
+                .iter()
+                .filter(|entry| entry.name.name != "self")
+                .map(|entry| {
+                    let mut target = base.clone();
+                    for segment in &entry.prefix {
+                        target.push_str("::");
+                        target.push_str(&segment.name);
+                    }
+                    target.push_str("::");
+                    target.push_str(&entry.name.name);
+                    target
+                })
+                .collect(),
+            None => vec![base],
+        };
+        for target in targets {
+            if self.names_nothing_in_unit(&use_decl.module, &target) {
+                self.emit(ResolveError::UnresolvedName { name: target }, use_decl.span);
+            }
+        }
+    }
+
+    /// Whether `target`, read from the unit root or from a module enclosing
+    /// `module`, starts at a module this unit declares and names no module,
+    /// item, re-export, or member of a type there.
+    fn names_nothing_in_unit(&self, module: &[String], target: &str) -> bool {
+        let head = target.split("::").next().unwrap_or(target);
+        let mut rooted_in_unit = false;
+        for depth in 0..=module.len() {
+            let prefix = module[..depth].join("::");
+            let under = |path: &str| {
+                if prefix.is_empty() {
+                    path.to_string()
+                } else {
+                    format!("{prefix}::{path}")
+                }
+            };
+            if !self.local_module_paths.contains(&under(head)) {
+                continue;
+            }
+            rooted_in_unit = true;
+            let full = under(target);
+            if self.local_module_paths.contains(&full) || self.local_item_paths.contains(&full) {
+                return false;
+            }
+            if let Some((parent, name)) = full.rsplit_once("::")
+                && (self.local_item_paths.contains(parent)
+                    || self
+                        .module_imports
+                        .contains_key(&(parent.to_string(), name.to_string())))
+            {
+                return false;
+            }
+        }
+        rooted_in_unit
+    }
+
+    /// Registers a `use` that names an enum's variants - `use m::Dir::Up`,
+    /// `use m::Dir::{Up, Down}`, or `use m::Dir::*` - and answers whether it
+    /// did. A glob of anything but an enum is reported here.
+    fn register_variant_import(&mut self, use_decl: &UseDecl) -> bool {
+        let gossamer_ast::UseTarget::Module(target) = &use_decl.target else {
+            return false;
+        };
+        let written: Vec<String> = target.segments.iter().map(|s| s.name.clone()).collect();
+        let module = use_decl.module.clone();
+        if use_decl.glob {
+            let Some(enum_path) = self.enum_path_named(&module, &written) else {
+                self.emit(
+                    ResolveError::GlobOfNonEnum {
+                        path: written.join("::"),
+                    },
+                    use_decl.span,
+                );
+                return true;
+            };
+            for variant in self.enum_variant_names[&enum_path].clone() {
+                self.variant_imports.insert(
+                    (module.clone(), variant.clone()),
+                    format!("{enum_path}::{variant}"),
+                );
+            }
+            return true;
+        }
+        if let Some(list) = &use_decl.list {
+            let Some(enum_path) = self.enum_path_named(&module, &written) else {
+                return false;
+            };
+            let variants = &self.enum_variant_names[&enum_path];
+            if !list
+                .iter()
+                .all(|entry| entry.prefix.is_empty() && variants.contains(&entry.name.name))
+            {
+                return false;
+            }
+            for entry in list {
+                let bound = entry.alias.as_ref().unwrap_or(&entry.name).name.clone();
+                self.variant_imports.insert(
+                    (module.clone(), bound),
+                    format!("{enum_path}::{}", entry.name.name),
+                );
+            }
+            return true;
+        }
+        let Some((variant, enum_written)) = written.split_last() else {
+            return false;
+        };
+        let Some(enum_path) = self.enum_path_named(&module, enum_written) else {
+            return false;
+        };
+        if !self.enum_variant_names[&enum_path].contains(variant) {
+            return false;
+        }
+        let bound = use_decl
+            .alias
+            .as_ref()
+            .map_or_else(|| variant.clone(), |alias| alias.name.clone());
+        self.variant_imports
+            .insert((module, bound), format!("{enum_path}::{variant}"));
+        true
+    }
+
+    /// The `::`-joined path of the enum `written` names from `module`: a
+    /// `crate::`, `self::`, or `super::` path names one, any other a child
+    /// of `module` or an item from the unit root.
+    fn enum_path_named(&self, module: &[String], written: &[String]) -> Option<String> {
+        let candidates: Vec<Vec<String>> = match written.first().map(String::as_str) {
+            Some("crate" | "root") => vec![written[1..].to_vec()],
+            Some("self") => vec![[module, &written[1..]].concat()],
+            Some("super") => {
+                let ups = written.iter().take_while(|s| *s == "super").count();
+                let kept = module.len().checked_sub(ups)?;
+                vec![[&module[..kept], &written[ups..]].concat()]
+            }
+            _ => vec![[module, written].concat(), written.to_vec()],
+        };
+        candidates
+            .into_iter()
+            .map(|path| path.join("::"))
+            .find(|path| self.enum_variant_names.contains_key(path))
+    }
+
+    /// The variant a `use` brought into the module being resolved under
+    /// `name`.
+    fn imported_variant(&self, name: &str) -> Option<DefId> {
+        let path = self
+            .variant_imports
+            .get(&(self.current_module.clone(), name.to_string()))?;
+        self.variant_defs.get(path).copied()
+    }
+
+    /// Resolves the single name `name` at `anchor` to the variant a `use`
+    /// imported under it, and answers whether one did. Every tier reads a
+    /// bare variant by its name, which another enum may also declare, so the
+    /// reference is respelled from the unit root after resolution.
+    fn resolve_imported_variant(&mut self, name: &str, anchor: NodeId, span: Span) -> bool {
+        let Some(def) = self.imported_variant(name) else {
+            return false;
+        };
+        let resolution = Resolution::Def {
+            def,
+            kind: DefKind::Variant,
+        };
+        self.check_visibility(resolution, Some(name), span);
+        self.resolutions.insert(anchor, resolution);
+        self.resolutions.spell_from_root(anchor);
+        true
     }
 
     /// Records the head segment of a module-form `use` target, which is the
@@ -1258,6 +1471,10 @@ impl Resolver {
         for variant in &decl.variants {
             let def = self.defs.next();
             let binding = Binding::def(def, DefKind::Variant);
+            let mut path = module_path.to_vec();
+            path.extend([decl.name.name.clone(), variant.name.name.clone()]);
+            self.variant_defs.insert(path.join("::"), def);
+            self.resolutions.insert_path(def, path);
             self.item_homes.insert(
                 def,
                 ItemHome {
@@ -1446,6 +1663,9 @@ impl Resolver {
                 kind,
             },
         );
+        let mut path = module_path.to_vec();
+        path.push(name.name.clone());
+        self.resolutions.insert_path(def, path);
     }
 
     /// Definition an imported `name` ultimately refers to, when the `use`
@@ -1651,8 +1871,19 @@ impl Resolver {
         self.bind_generics(&decl.generics);
         for param in &decl.params {
             match param {
-                FnParam::Typed { pattern, ty, .. } => {
+                FnParam::Typed {
+                    pattern,
+                    ty,
+                    default,
+                    ..
+                } => {
                     self.resolve_type(ty);
+                    // A default resolves where the function is declared, before
+                    // its own parameter is bound; naming an earlier parameter
+                    // resolves to that local, which GR0014 then reports.
+                    if let Some(default) = default {
+                        self.resolve_expr(default);
+                    }
                     self.bind_pattern(pattern);
                 }
                 FnParam::Receiver(_) => {
@@ -1887,34 +2118,25 @@ impl Resolver {
         }
     }
 
-    /// Resolves the path a pattern names. `bare_uppercase_name` marks a
-    /// pattern that is the path alone, one uppercase name, which the parser
-    /// read as a path where a binding may have been meant.
-    fn resolve_pattern_path(
-        &mut self,
-        path: &TypePath,
-        anchor: NodeId,
-        span: Span,
-        bare_uppercase_name: bool,
-    ) {
+    /// Resolves the path a pattern names.
+    fn resolve_pattern_path(&mut self, path: &TypePath, anchor: NodeId, span: Span) {
         let Some(head) = path.segments.first() else {
             return;
         };
         let name = &head.name.name;
+        if path.segments.len() == 1 && self.resolve_imported_variant(name, anchor, span) {
+            for segment in &path.segments {
+                self.resolve_generic_args(&segment.generics);
+            }
+            return;
+        }
         let resolution = self
             .scopes
             .lookup_value(name)
             .or_else(|| self.scopes.lookup_type(name))
             .map_or(Resolution::Err, |b| b.resolution);
         if matches!(resolution, Resolution::Err) {
-            if bare_uppercase_name {
-                self.emit(
-                    ResolveError::UppercaseBindingPattern { name: name.clone() },
-                    span,
-                );
-            } else {
-                self.emit_unresolved_or_rename(name, span);
-            }
+            self.emit_unresolved_or_rename(name, span);
         }
         self.check_visibility(resolution, Some(name), span);
         if path.segments.len() == 1 {
@@ -2568,10 +2790,30 @@ impl Resolver {
         true
     }
 
+    /// The type alias every segment of `written` but the last names:
+    /// `module::Alias::Variant` reaches an item of the aliased type, and the
+    /// alias carries it.
+    fn alias_prefix(&self, written: &[&str]) -> Option<Resolution> {
+        let resolution = self.lookup_qualified_type(&written[..written.len() - 1])?;
+        matches!(
+            resolution,
+            Resolution::Def {
+                kind: DefKind::TypeAlias,
+                ..
+            }
+        )
+        .then_some(resolution)
+    }
+
     fn resolve_value_path(&mut self, path: &PathExpr, anchor: NodeId, span: Span) {
         let Some(head) = path.segments.first() else {
             return;
         };
+        if path.segments.len() == 1 && self.resolve_imported_variant(&head.name.name, anchor, span)
+        {
+            self.resolve_path_generic_args(path);
+            return;
+        }
         // `super::name` / `crate::name` / `self::name` inside an inline
         // child module (`mod tests {}`, an auto-bundled sibling, etc.)
         // navigate from the module being resolved. Items register under
@@ -2618,7 +2860,10 @@ impl Resolver {
                 self.resolve_path_generic_args(path);
                 return;
             }
-            if let Some(resolution) = self.resolve_through_import_head(&effective) {
+            if let Some(resolution) = self
+                .alias_prefix(&written)
+                .or_else(|| self.resolve_through_import_head(&effective))
+            {
                 self.check_visibility(resolution, None, span);
                 self.resolutions.insert(anchor, resolution);
                 self.resolve_path_generic_args(path);
@@ -2770,6 +3015,10 @@ impl Resolver {
         let Some(head) = path.segments.first() else {
             return;
         };
+        if path.segments.len() == 1 && self.resolve_imported_variant(&head.name.name, anchor, span)
+        {
+            return;
+        }
         // A struct literal written inside an inline child module
         // (`super::P { .. }` in a `#[cfg(test)] mod tests {}`) names a
         // type through the module tree, the same way
@@ -2790,8 +3039,13 @@ impl Resolver {
         // under its joined name; prefer that, then fall back to the bare
         // head (covers enum struct-variant literals like
         // `Shape::Rect { .. }`, whose head is the enum type).
+        // A head bound by `use` (`use crate::backend::shapes`, then
+        // `shapes::Rect { .. }`) names the module it imports.
         let joined = (effective.len() > 1)
-            .then(|| self.lookup_qualified_type(&written))
+            .then(|| {
+                self.lookup_qualified_type(&written)
+                    .or_else(|| self.resolve_through_import_head(&effective))
+            })
             .flatten();
         let resolution = joined
             .or_else(|| self.scopes.lookup_type(lookup_name).map(|b| b.resolution))
@@ -2833,7 +3087,15 @@ impl Resolver {
         }
         let absolute = rest.join("::");
         if rooted {
-            return vec![absolute];
+            // `crate` is the root of the package the path is written in: the
+            // unit root, or the top-level module a bundled dependency is
+            // inlined as.
+            return match self.current_module.first() {
+                Some(head) if self.dependency_modules.contains_key(head) => {
+                    vec![format!("{head}::{absolute}")]
+                }
+                _ => vec![absolute],
+            };
         }
         let depth = self.current_module.len().saturating_sub(supers);
         let mut out = Vec::new();
@@ -2993,7 +3255,9 @@ impl Resolver {
 
     fn resolve_match_arm(&mut self, arm: &MatchArm) {
         self.scopes.push();
+        let outer = std::mem::replace(&mut self.in_match_arm, true);
         self.bind_pattern(&arm.pattern);
+        self.in_match_arm = outer;
         if let Some(guard) = &arm.guard {
             self.resolve_expr(guard);
         }
@@ -3041,24 +3305,51 @@ impl Resolver {
             | PatternKind::Range { .. }
             | PatternKind::Error => {}
             PatternKind::Ident {
-                name, subpattern, ..
+                name,
+                subpattern,
+                mutability,
             } => {
-                self.reject_reserved_call_name(&name.name, "binding", pattern.span);
-                self.scopes
-                    .top_mut()
-                    .shadow_value(&name.name, Binding::local(pattern.id));
+                // A plain name that resolves to a unit variant, a struct, or a
+                // const is matched against that value whatever its case, as in
+                // Rust; the normalize pass rewrites it into a path pattern.
+                if subpattern.is_none()
+                    && matches!(mutability, gossamer_ast::Mutability::Immutable)
+                    && self.names_pattern_value(&name.name)
+                {
+                    let path = TypePath::single(name.name.clone());
+                    self.resolve_pattern_path(&path, pattern.id, pattern.span);
+                    return;
+                }
+                self.bind_name(&name.name, pattern);
                 if let Some(subpattern) = subpattern {
                     self.bind_pattern(subpattern);
                 }
             }
             PatternKind::Path(path) => {
-                let bare_uppercase_name = path.segments.len() == 1
-                    && path.segments[0].generics.is_empty()
-                    && path.segments[0]
-                        .name
-                        .name
-                        .starts_with(|c: char| c.is_uppercase());
-                self.resolve_pattern_path(path, pattern.id, pattern.span, bare_uppercase_name);
+                let bare_name = (path.segments.len() == 1 && path.segments[0].generics.is_empty())
+                    .then(|| path.segments[0].name.name.as_str());
+                match bare_name {
+                    // A single name that names no unit variant, struct, or
+                    // const binds, as in Rust; the normalize pass rewrites the
+                    // path the parser read into a binding pattern.
+                    Some(name) if !self.names_pattern_value(name) => {
+                        if let Some(variant) = self.misspelled_variant(name) {
+                            self.emit(
+                                ResolveError::UppercaseBindingPattern {
+                                    name: name.to_string(),
+                                    variant,
+                                },
+                                pattern.span,
+                            );
+                            self.resolutions.insert(pattern.id, Resolution::Err);
+                            return;
+                        }
+                        self.bind_name(name, pattern);
+                        self.resolutions
+                            .insert(pattern.id, Resolution::Local(pattern.id));
+                    }
+                    _ => self.resolve_pattern_path(path, pattern.id, pattern.span),
+                }
             }
             PatternKind::Tuple(parts) => {
                 for part in parts {
@@ -3081,24 +3372,163 @@ impl Resolver {
                 }
             }
             PatternKind::Struct { path, fields, .. } => {
-                self.resolve_pattern_path(path, pattern.id, pattern.span, false);
+                self.resolve_pattern_path(path, pattern.id, pattern.span);
                 for field in fields {
                     self.bind_field_pattern(field);
                 }
             }
             PatternKind::TupleStruct { path, elems } => {
-                self.resolve_pattern_path(path, pattern.id, pattern.span, false);
+                self.resolve_pattern_path(path, pattern.id, pattern.span);
                 for elem in elems {
                     self.bind_pattern(elem);
                 }
             }
             PatternKind::Or(alts) => {
+                // Whichever alternative matches, the arm reads the same names,
+                // so each alternative binds all of them.
+                let sets: Vec<std::collections::BTreeSet<String>> =
+                    alts.iter().map(|alt| self.names_bound_by(alt)).collect();
+                if let Some(name) = sets
+                    .iter()
+                    .flatten()
+                    .find(|name| sets.iter().any(|set| !set.contains(*name)))
+                {
+                    self.emit(
+                        ResolveError::OrPatternBindings { name: name.clone() },
+                        pattern.span,
+                    );
+                }
                 for alt in alts {
                     self.bind_pattern(alt);
                 }
             }
             PatternKind::Ref { inner, .. } => self.bind_pattern(inner),
         }
+    }
+
+    /// The names `pattern` binds, deciding each single name as
+    /// [`Self::bind_pattern`] does.
+    fn names_bound_by(&self, pattern: &Pattern) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        self.collect_bound_names(pattern, &mut out);
+        out
+    }
+
+    fn collect_bound_names(&self, pattern: &Pattern, out: &mut std::collections::BTreeSet<String>) {
+        match &pattern.kind {
+            PatternKind::Ident {
+                name,
+                subpattern,
+                mutability,
+            } => {
+                let matches_value = subpattern.is_none()
+                    && matches!(mutability, gossamer_ast::Mutability::Immutable)
+                    && self.names_pattern_value(&name.name);
+                if !matches_value {
+                    out.insert(name.name.clone());
+                }
+                if let Some(sub) = subpattern {
+                    self.collect_bound_names(sub, out);
+                }
+            }
+            PatternKind::Path(path) => {
+                if let [segment] = path.segments.as_slice()
+                    && segment.generics.is_empty()
+                    && !self.names_pattern_value(&segment.name.name)
+                {
+                    out.insert(segment.name.name.clone());
+                }
+            }
+            PatternKind::Tuple(parts) => {
+                for part in parts {
+                    self.collect_bound_names(part, out);
+                }
+            }
+            PatternKind::Slice {
+                prefix,
+                rest,
+                suffix,
+            } => {
+                for part in prefix.iter().chain(rest.as_deref()).chain(suffix) {
+                    self.collect_bound_names(part, out);
+                }
+            }
+            PatternKind::TupleStruct { elems, .. } => {
+                for elem in elems {
+                    self.collect_bound_names(elem, out);
+                }
+            }
+            PatternKind::Struct { fields, .. } => {
+                for field in fields {
+                    match &field.pattern {
+                        Some(part) => self.collect_bound_names(part, out),
+                        None => {
+                            out.insert(field.name.name.clone());
+                        }
+                    }
+                }
+            }
+            PatternKind::Or(alts) => {
+                if let Some(first) = alts.first() {
+                    self.collect_bound_names(first, out);
+                }
+            }
+            PatternKind::Ref { inner, .. } => self.collect_bound_names(inner, out),
+            PatternKind::Wildcard
+            | PatternKind::Literal(_)
+            | PatternKind::Rest
+            | PatternKind::Range { .. }
+            | PatternKind::Error => {}
+        }
+    }
+
+    /// Binds `name` as a fresh local introduced by `pattern`.
+    fn bind_name(&mut self, name: &str, pattern: &Pattern) {
+        self.reject_reserved_call_name(name, "binding", pattern.span);
+        self.scopes
+            .top_mut()
+            .shadow_value(name, Binding::local(pattern.id));
+    }
+
+    /// Whether a single-name pattern `name` matches a value rather than
+    /// binding one: it resolves to an enum variant, a struct, or a const,
+    /// directly or through an import.
+    fn names_pattern_value(&self, name: &str) -> bool {
+        if self.imported_variant(name).is_some() {
+            return true;
+        }
+        let Some(binding) = self.scopes.lookup_value(name) else {
+            return false;
+        };
+        match binding.resolution {
+            Resolution::Def { kind, .. } => {
+                matches!(kind, DefKind::Variant | DefKind::Struct | DefKind::Const)
+            }
+            Resolution::Import { use_id } if use_id == crate::scope::PRELUDE_SENTINEL => {
+                matches!(name, "None" | "Some" | "Ok" | "Err")
+            }
+            Resolution::Import { .. } => self.imported_definition(name).is_some_and(|def| {
+                matches!(
+                    self.resolutions.kind_of(def),
+                    Some(DefKind::Variant | DefKind::Struct | DefKind::Const)
+                )
+            }),
+            _ => false,
+        }
+    }
+
+    /// The variant a `match` arm's unresolved name `name` most likely
+    /// misspells. Binding it would catch every value, so the arm reports the
+    /// variant it meant instead. A binding elsewhere has no variant to mean.
+    fn misspelled_variant(&self, name: &str) -> Option<String> {
+        if !self.in_match_arm || !name.starts_with(|c: char| c.is_uppercase()) {
+            return None;
+        }
+        let variants = self.ambiguous_variants.keys().map(String::as_str);
+        let budget = if name.chars().count() <= 3 { 1 } else { 2 };
+        gossamer_diagnostics::suggest(name, variants, budget)
+            .filter(|variant| *variant != name)
+            .map(str::to_string)
     }
 
     fn bind_field_pattern(&mut self, field: &FieldPattern) {
@@ -3172,6 +3602,41 @@ fn collect_module_paths(items: &[gossamer_ast::Item]) -> std::collections::HashS
 
     let mut out = std::collections::HashSet::new();
     walk(items, "", &mut out);
+    out
+}
+
+/// Each enum this unit declares, by its `::`-joined path from the unit root,
+/// with its variant names.
+fn collect_enum_variant_names(
+    items: &[gossamer_ast::Item],
+) -> std::collections::HashMap<String, Vec<String>> {
+    fn walk(
+        items: &[gossamer_ast::Item],
+        prefix: &[String],
+        out: &mut std::collections::HashMap<String, Vec<String>>,
+    ) {
+        for item in items {
+            match &item.kind {
+                ItemKind::Enum(decl) => {
+                    let mut path = prefix.to_vec();
+                    path.push(decl.name.name.clone());
+                    let names = decl.variants.iter().map(|v| v.name.name.clone());
+                    out.insert(path.join("::"), names.collect());
+                }
+                ItemKind::Mod(decl) => {
+                    if let gossamer_ast::ModBody::Inline(inner) = &decl.body {
+                        let mut path = prefix.to_vec();
+                        path.push(decl.name.name.clone());
+                        walk(inner, &path, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = std::collections::HashMap::new();
+    walk(items, &[], &mut out);
     out
 }
 

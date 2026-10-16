@@ -2631,6 +2631,35 @@ fn two_packages_normalizing_to_one_module_name_collide() {
     }
 }
 
+/// A `use` list into a dependency names only what the dependency declares:
+/// its items are bundled into the program, so a name it lacks is reported
+/// where it is imported instead of reaching the back end as a call to
+/// nothing.
+#[test]
+fn an_import_of_an_item_a_dependency_lacks_is_unresolved() {
+    let root = fresh_dir("dep-missing-import");
+    write_dep_project(
+        &root,
+        "pgsql-gos",
+        "example.com/pgsql-gos",
+        "pub fn who() -> String { \"a\" }\n",
+    );
+    let app = write_app_project(
+        &root,
+        "\"example.com/pgsql-gos\" = { path = \"../pgsql-gos\" }\n",
+        "use pgsql_gos::{who, missing}\n\n\
+         fn main() {\n    let f = || missing()\n    println(\"{} {}\", who(), f())\n}\n",
+    );
+    let out = project_run_vm(&app);
+    let combined = format!("{}{}", out.0, out.1);
+    let _ = fs::remove_dir_all(&root);
+    assert_ne!(out.2, Some(0), "a missing import must not run: {combined}");
+    assert!(
+        combined.contains("GR0001") && combined.contains("pgsql_gos::missing"),
+        "expected GR0001 naming the missing item, got: {combined}"
+    );
+}
+
 /// Two packages whose ids share a final segment coexist once one names its
 /// own module in the manifest. Both the manifest name and the package id
 /// reach their own package.
@@ -4249,4 +4278,322 @@ fn a_module_type_sharing_a_root_types_name_keeps_its_own_order() {
     let (out, err, code) = project_build_run(&dir, "samename");
     assert_eq!(code, Some(0), "native failed: {err}");
     assert_eq!(out, expected);
+}
+
+#[test]
+fn a_struct_literal_through_a_type_alias_builds_its_target_on_every_tier() {
+    let dir = write_project(
+        "struct-through-alias",
+        "example.com/salias",
+        &[
+            (
+                "src/main.gos",
+                "use shapes\n\n\
+                 type Opts = shapes::Opts\n\
+                 type Other = shapes::Opts\n\
+                 type Same<T> = shapes::Pair<T, T>\n\n\
+                 fn main() {\n\
+                 \x20   let o = Opts { width: 3, ..Opts::default() }\n\
+                 \x20   let p = Other { width: 1, height: 2 }\n\
+                 \x20   let q = Other { height: 9, ..p }\n\
+                 \x20   let s = Same { first: \"a\", second: \"b\" }\n\
+                 \x20   let t = Same::<i64> { first: 4, second: 5 }\n\
+                 \x20   println(f\"{o.width} {o.height} {p.height} {q.width} {q.height}\")\n\
+                 \x20   println(f\"{s.second} {t.first + t.second}\")\n\
+                 }\n",
+            ),
+            (
+                "src/shapes.gos",
+                "#[derive(Default)]\n\
+                 pub struct Opts {\n\
+                 \x20   pub width: i64\n\
+                 \x20   pub height: i64\n\
+                 }\n\n\
+                 pub struct Pair<A, B> {\n\
+                 \x20   pub first: A\n\
+                 \x20   pub second: B\n\
+                 }\n",
+            ),
+        ],
+    );
+    let expected = "3 0 2 1 9\nb 9\n";
+    let (stdout, stderr, code) = project_run_vm(&dir);
+    assert_eq!(code, Some(0), "VM failed: {stderr}");
+    assert_eq!(stdout, expected, "VM: {stderr}");
+    let (stdout, stderr, code) = project_build_run(&dir, "salias");
+    assert_eq!(code, Some(0), "native failed: {stderr}");
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn a_struct_literal_through_a_generic_alias_checks_its_fields() {
+    let dir = write_project(
+        "struct-through-generic-alias",
+        "example.com/galias",
+        &[
+            (
+                "src/main.gos",
+                "use shapes\n\n\
+                 type Same<T> = shapes::Pair<T, T>\n\n\
+                 fn main() {\n\
+                 \x20   let s = Same { first: 1, second: \"b\" }\n\
+                 \x20   println(s.first)\n\
+                 }\n",
+            ),
+            (
+                "src/shapes.gos",
+                "pub struct Pair<A, B> {\n\
+                 \x20   pub first: A\n\
+                 \x20   pub second: B\n\
+                 }\n",
+            ),
+        ],
+    );
+    let (stdout, stderr, code) = project_check(&dir);
+    assert_ne!(
+        code,
+        Some(0),
+        "check accepted the mismatch:\n{stdout}{stderr}"
+    );
+    assert!(
+        format!("{stdout}{stderr}").contains("GT0001"),
+        "{stdout}{stderr}"
+    );
+}
+
+#[test]
+fn an_enum_reached_through_a_type_alias_constructs_and_matches_on_every_tier() {
+    let dir = write_project(
+        "enum-through-alias",
+        "example.com/alias",
+        &[
+            (
+                "src/main.gos",
+                "use crate::shades\n\n\
+                 enum Plain { One, Two(i64) }\n\n\
+                 type Root = Plain\n\
+                 type Tone = shades::Shade\n\
+                 type Again = Tone\n\n\
+                 fn pick(n: i64) -> Tone {\n\
+                 \x20   match n {\n\
+                 \x20       0 => Tone::Light,\n\
+                 \x20       1 => Again::Dark(5),\n\
+                 \x20       _ => Tone::Custom { r: 9 },\n\
+                 \x20   }\n\
+                 }\n\n\
+                 fn main() {\n\
+                 \x20   for n in 0..3 {\n\
+                 \x20       match pick(n) {\n\
+                 \x20           Tone::Light => println(\"light\"),\n\
+                 \x20           Tone::Dark(v) => println(f\"dark {v}\"),\n\
+                 \x20           Tone::Custom { r } => println(f\"custom {r}\"),\n\
+                 \x20       }\n\
+                 \x20   }\n\
+                 \x20   println(f\"{Root::One} {Root::Two(2)} {Tone::named()} {shades::fallback()}\")\n\
+                 }\n",
+            ),
+            (
+                "src/shades.gos",
+                "pub enum Shade { Light, Dark(i64), Custom { r: i64 } }\n\n\
+                 type Local = Shade\n\n\
+                 impl Shade {\n\
+                 \x20   pub fn named() -> String { \"shade\" }\n\
+                 }\n\n\
+                 pub fn fallback() -> Shade { Local::Dark(1) }\n",
+            ),
+        ],
+    );
+    let expected = "light\ndark 5\ncustom 9\nOne Two(2) shade Dark(1)\n";
+    let (stdout, stderr, code) = project_run_vm(&dir);
+    assert_eq!(code, Some(0), "VM failed: {stderr}");
+    assert_eq!(stdout, expected, "VM: {stderr}");
+    let (stdout, stderr, code) = project_build_run(&dir, "alias");
+    assert_eq!(code, Some(0), "native failed: {stderr}");
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn a_dependency_reexports_its_enum_through_a_type_alias() {
+    let dir = write_project(
+        "enum-alias-dependency",
+        "example.com/app",
+        &[(
+            "src/main.gos",
+            "use windowing\n\
+             use windowing::{Event, Key}\n\n\
+             fn main() {\n\
+             \x20   match windowing::first() {\n\
+             \x20       Event::KeyDown { key: Key::F, .. } => println(\"F\"),\n\
+             \x20       _ => println(\"other\"),\n\
+             \x20   }\n\
+             \x20   let quit = Event::Quit\n\
+             \x20   let full = windowing::Key::G\n\
+             \x20   println(f\"{quit} {full}\")\n\
+             }\n",
+        )],
+    );
+    let manifest = dir.join("project.toml");
+    let mut text = fs::read_to_string(&manifest).unwrap();
+    text.push_str("\n[dependencies]\nwindowing = { path = \"lib\" }\n");
+    fs::write(&manifest, text).unwrap();
+    fs::create_dir_all(dir.join("lib/src")).unwrap();
+    fs::write(
+        dir.join("lib/project.toml"),
+        "[project]\nid = \"example.com/windowing\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("lib/src/lib.gos"),
+        "use crate::event\n\n\
+         pub type Event = event::Event\n\
+         pub type Key = event::Key\n\n\
+         pub fn first() -> Event { Event::KeyDown { key: Key::F, repeat: false } }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("lib/src/event.gos"),
+        "pub enum Key { F, G }\n\
+         pub enum Event { KeyDown { key: Key, repeat: bool }, Quit }\n",
+    )
+    .unwrap();
+    let (stdout, stderr, code) = project_run_vm(&dir);
+    assert_eq!(code, Some(0), "VM failed: {stderr}");
+    assert_eq!(stdout, "F\nQuit G\n", "VM: {stderr}");
+    let (stdout, stderr, code) = project_build_run(&dir, "app");
+    assert_eq!(code, Some(0), "native failed: {stderr}");
+    assert_eq!(stdout, "F\nQuit G\n");
+}
+
+#[test]
+fn a_crate_path_in_a_dependency_reaches_the_dependency_root() {
+    let dir = write_project(
+        "crate-path-dependency",
+        "example.com/app",
+        &[(
+            "src/main.gos",
+            "use parts\n\n\
+             fn main() {\n\
+             \x20   println(parts::answer())\n\
+             }\n",
+        )],
+    );
+    let manifest = dir.join("project.toml");
+    let mut text = fs::read_to_string(&manifest).unwrap();
+    text.push_str("\n[dependencies]\nparts = { path = \"lib\" }\n");
+    fs::write(&manifest, text).unwrap();
+    fs::create_dir_all(dir.join("lib/src")).unwrap();
+    fs::write(
+        dir.join("lib/project.toml"),
+        "[project]\nid = \"example.com/parts\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("lib/src/lib.gos"),
+        "pub fn answer() -> i64 {\n\
+         \x20   let piece: crate::hidden::Piece = crate::hidden::Piece { n: crate::hidden::base() }\n\
+         \x20   crate::shown::twice(piece.n)\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("lib/src/hidden.gos"),
+        "pub (package) struct Piece {\n\
+         \x20   pub (package) n: i64\n\
+         }\n\n\
+         pub (package) fn base() -> i64 {\n\
+         \x20   21\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("lib/src/shown.gos"),
+        "pub (package) fn twice(n: i64) -> i64 {\n\
+         \x20   crate::hidden::base() - 21 + n * 2\n\
+         }\n",
+    )
+    .unwrap();
+    let (stdout, stderr, code) = project_run_vm(&dir);
+    assert_eq!(code, Some(0), "VM failed: {stderr}");
+    assert_eq!(stdout, "42\n", "VM: {stderr}");
+    let (stdout, stderr, code) = project_build_run(&dir, "app");
+    assert_eq!(code, Some(0), "native failed: {stderr}");
+    assert_eq!(stdout, "42\n");
+}
+
+#[test]
+fn an_inherent_impl_in_another_module_reaches_its_type_however_it_is_spelled() {
+    let dir = write_project(
+        "impl-in-sibling",
+        "example.com/sibling",
+        &[
+            (
+                "src/main.gos",
+                "use crate::app::App\n\
+                 use crate::{by_import, by_root, by_module}\n\n\
+                 fn main() {\n\
+                 \x20   let a = App { n: 3 }\n\
+                 \x20   println(f\"{a.base()} {a.doubled()} {a.tripled()} {a.quadrupled()}\")\n\
+                 }\n",
+            ),
+            (
+                "src/app.gos",
+                "pub struct App {\n    pub n: i64\n}\n\n\
+                 impl App {\n    pub fn base(&self) -> i64 { self.n }\n}\n",
+            ),
+            (
+                "src/by_import.gos",
+                "use crate::app::App\n\n\
+                 impl App {\n    pub fn doubled(&self) -> i64 { self.n * 2 }\n}\n",
+            ),
+            (
+                "src/by_root.gos",
+                "impl crate::app::App {\n    pub fn tripled(&self) -> i64 { self.n * 3 }\n}\n",
+            ),
+            (
+                "src/by_module.gos",
+                "use crate::app\n\n\
+                 impl app::App {\n    pub fn quadrupled(&self) -> i64 { self.n * 4 }\n}\n",
+            ),
+        ],
+    );
+    let (stdout, stderr, code) = project_run_vm(&dir);
+    assert_eq!(code, Some(0), "VM failed: {stderr}");
+    assert_eq!(stdout, "3 6 9 12\n");
+    let (stdout, stderr, code) = project_build_run(&dir, "sibling");
+    assert_eq!(code, Some(0), "native failed: {stderr}");
+    assert_eq!(stdout, "3 6 9 12\n");
+}
+
+#[test]
+fn a_struct_literal_through_an_imported_nested_module_is_typed() {
+    let dir = write_project(
+        "nested-module-literal",
+        "example.com/nested",
+        &[
+            (
+                "src/main.gos",
+                "use crate::backend::shapes\n\n\
+                 fn area() -> i64 {\n\
+                 \x20   let r = shapes::Rect { w: 3, h: 4 }\n\
+                 \x20   r.w * r.h\n\
+                 }\n\n\
+                 fn main() {\n\
+                 \x20   let r = shapes::Rect { w: 2, h: 5 }\n\
+                 \x20   println(f\"{area()} {r.w + r.h} {r}\")\n\
+                 }\n",
+            ),
+            ("src/backend/mod.gos", "// shapes\n"),
+            (
+                "src/backend/shapes.gos",
+                "pub struct Rect {\n    pub w: i64\n    pub h: i64\n}\n",
+            ),
+        ],
+    );
+    let expected = "12 7 Rect { w: 2, h: 5 }\n";
+    let (stdout, stderr, code) = project_run_vm(&dir);
+    assert_eq!(code, Some(0), "VM failed: {stderr}");
+    assert_eq!(stdout, expected);
+    let (stdout, stderr, code) = project_build_run(&dir, "nested");
+    assert_eq!(code, Some(0), "native failed: {stderr}");
+    assert_eq!(stdout, expected);
 }

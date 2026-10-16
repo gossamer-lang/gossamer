@@ -418,8 +418,8 @@ fn check(source: &str) -> Vec<TypeDiagnostic> {
         parse_diagnostics.is_empty(),
         "test case must parse before mutability is checked: {parse_diagnostics:#?}\nsource:\n{source}"
     );
-    let (resolutions, resolve_diagnostics) = resolve_source_file(&parsed);
-    let _ = gossamer_types::normalize_caller_side_spellings(&mut parsed, &resolutions);
+    let (mut resolutions, resolve_diagnostics) = resolve_source_file(&parsed);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut parsed, &mut resolutions);
     assert!(
         resolve_diagnostics.is_empty(),
         "test case must resolve before mutability is checked: {resolve_diagnostics:#?}\nsource:\n{source}"

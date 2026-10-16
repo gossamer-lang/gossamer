@@ -424,7 +424,7 @@ impl<'a> Lowerer<'a> {
             let bytes = u64::from(op_slots) * 8;
             let vec_child_words = repeated_vec_child_words(self.tcx, op_ty);
             if !vec_child_words.is_empty() {
-                declare_rt(&mut self.runtime_refs, "gos_rt_vec_clone");
+                declare_rt(&mut self.runtime_refs, "gos_rt_vec_clone_field");
             }
             if count <= 16 {
                 for i in 0..count {
@@ -453,7 +453,7 @@ impl<'a> Lowerer<'a> {
                         writeln!(self.out, "  {child} = load ptr, ptr {child_src}").unwrap();
                         writeln!(
                             self.out,
-                            "  {cloned} = call ptr @gos_rt_vec_clone(ptr {child})"
+                            "  {cloned} = call ptr @gos_rt_vec_clone_field(ptr {child})"
                         )
                         .unwrap();
                         writeln!(
@@ -509,7 +509,7 @@ impl<'a> Lowerer<'a> {
                     writeln!(self.out, "  {child} = load ptr, ptr {child_src}").unwrap();
                     writeln!(
                         self.out,
-                        "  {cloned} = call ptr @gos_rt_vec_clone(ptr {child})"
+                        "  {cloned} = call ptr @gos_rt_vec_clone_field(ptr {child})"
                     )
                     .unwrap();
                     writeln!(

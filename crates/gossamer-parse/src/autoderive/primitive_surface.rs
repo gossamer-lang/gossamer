@@ -964,31 +964,29 @@ fn scan(source: &str, lexed: &SourceTokens<'_>) -> Mentions {
             called.insert((*name).to_string());
         }
         // `impl char { .. fn name .. }` and `impl Trait for char { .. }`: the
-        // program's own definitions.
+        // program's own definitions. The block's bodies are code like any
+        // other, so the scan goes on through them for the names they call.
         if *kind == TokenKind::Keyword(Keyword::Impl)
             && let Some((ty, open)) = impl_header_type(&tokens, i + 1)
         {
             let mut depth = 0usize;
-            let mut j = open;
-            while j < tokens.len() {
-                match &tokens[j] {
-                    (TokenKind::Punct(Punct::LBrace), _) => depth += 1,
-                    (TokenKind::Punct(Punct::RBrace), _) => {
+            for (j, (kind, _)) in tokens.iter().enumerate().skip(open) {
+                match kind {
+                    TokenKind::Punct(Punct::LBrace) => depth += 1,
+                    TokenKind::Punct(Punct::RBrace) => {
                         depth -= 1;
                         if depth == 0 {
                             break;
                         }
                     }
-                    (TokenKind::Keyword(Keyword::Fn), _) if depth == 1 => {
+                    TokenKind::Keyword(Keyword::Fn) if depth == 1 => {
                         if let Some((TokenKind::Ident, name)) = tokens.get(j + 1) {
                             defined.insert((ty.to_string(), (*name).to_string()));
                         }
                     }
                     _ => {}
                 }
-                j += 1;
             }
-            i = j;
         }
         i += 1;
     }
@@ -1134,6 +1132,14 @@ mod tests {
                       impl P for i64 { fn pow(&self, e: i64) -> i64 { e } }\n\
                       fn main() { let x = 2.pow(3) }";
         assert!(!synthesize_primitive_surface(source).contains("impl i64"));
+    }
+
+    #[test]
+    fn a_method_named_only_inside_an_impl_is_declared() {
+        let src = "struct K {}\n\
+                   impl K { fn make(c: u32) -> Option<char> { char::from_u32(c) } }\n\
+                   fn main() {}";
+        assert!(synthesize_primitive_surface(src).contains("fn from_u32("));
     }
 
     #[test]

@@ -10,7 +10,6 @@
 #![allow(unsafe_code)]
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 
 use anyhow::{Result, anyhow};
 use cranelift_codegen::ir::{self, AbiParam, InstBuilder, Signature, Type, types};
@@ -71,11 +70,12 @@ impl FfiKind {
 /// its bits in the low half, `0` for void).
 pub type Trampoline = unsafe extern "C" fn(target: *const u8, args: *const u64) -> u64;
 
-type Key = (Vec<FfiKind>, FfiKind);
+/// Generated trampolines by result, then parameters, so a lookup borrows the
+/// caller's slice. Each lives in a module kept for the life of the process.
+static TRAMPOLINES: Mutex<Option<TrampolineCache<FfiKind, FfiKind>>> = Mutex::new(None);
 
-/// Generated trampolines by signature. Each lives in a module kept for the
-/// life of the process.
-static TRAMPOLINES: Mutex<Option<HashMap<Key, usize>>> = Mutex::new(None);
+/// Trampoline addresses by result, then parameters.
+type TrampolineCache<R, P> = HashMap<R, HashMap<Vec<P>, usize>>;
 
 /// The trampoline for a C function taking `params` and answering `ret`.
 ///
@@ -83,12 +83,16 @@ static TRAMPOLINES: Mutex<Option<HashMap<Key, usize>>> = Mutex::new(None);
 ///
 /// Fails when the host ISA cannot be built or the routine does not compile.
 pub fn trampoline(params: &[FfiKind], ret: FfiKind) -> Result<Trampoline> {
-    let key = (params.to_vec(), ret);
     let mut cache = TRAMPOLINES.lock();
-    let cache = cache.get_or_insert_with(HashMap::new);
-    let addr = match cache.entry(key) {
-        Entry::Occupied(found) => *found.get(),
-        Entry::Vacant(slot) => *slot.insert(build(params, ret)?),
+    let by_params = cache
+        .get_or_insert_with(HashMap::new)
+        .entry(ret)
+        .or_default();
+    let addr = match by_params.get(params) {
+        Some(&addr) => addr,
+        None => *by_params
+            .entry(params.to_vec())
+            .or_insert(build(params, ret)?),
     };
     // SAFETY: `addr` is a finalised routine with the `Trampoline` signature,
     // in a module that is never freed.
@@ -253,9 +257,8 @@ pub enum StubRet {
     Struct(RetPlan),
 }
 
-type StructKey = (Vec<StubParam>, StubRet);
-
-static STRUCT_TRAMPOLINES: Mutex<Option<HashMap<StructKey, usize>>> = Mutex::new(None);
+/// Generated struct trampolines by result, then parameters.
+static STRUCT_TRAMPOLINES: Mutex<Option<TrampolineCache<StubRet, StubParam>>> = Mutex::new(None);
 
 /// The trampoline for a C function taking `params` and answering `ret`,
 /// where structs cross by value per their plans. Its words are the
@@ -266,12 +269,21 @@ static STRUCT_TRAMPOLINES: Mutex<Option<HashMap<StructKey, usize>>> = Mutex::new
 ///
 /// Fails when the host ISA cannot be built or the routine does not compile.
 pub fn struct_trampoline(params: &[StubParam], ret: &StubRet) -> Result<Trampoline> {
-    let key = (params.to_vec(), ret.clone());
     let mut cache = STRUCT_TRAMPOLINES.lock();
     let cache = cache.get_or_insert_with(HashMap::new);
-    let addr = match cache.entry(key) {
-        Entry::Occupied(found) => *found.get(),
-        Entry::Vacant(slot) => *slot.insert(build_struct(params, ret)?),
+    let found = cache
+        .get(ret)
+        .and_then(|by_params| by_params.get(params))
+        .copied();
+    let addr = if let Some(addr) = found {
+        addr
+    } else {
+        let addr = build_struct(params, ret)?;
+        cache
+            .entry(ret.clone())
+            .or_default()
+            .insert(params.to_vec(), addr);
+        addr
     };
     // SAFETY: `addr` is a finalised routine with the `Trampoline` signature,
     // in a module that is never freed.

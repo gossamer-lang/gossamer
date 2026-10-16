@@ -10,6 +10,7 @@ Goroutine / scheduler introspection and tuning.
 |---|---|---|
 | `collect_cycles` | `fn collect_cycles() -> ()` | Requests collection of unreachable reference cycles; returns `()`. |
 | `cycle_collection_supported` | `fn cycle_collection_supported() -> bool` | Reports whether this execution tier reclaims unreachable reference cycles. |
+| `is_main_thread` | `fn is_main_thread() -> bool` | Whether the caller runs on the process main thread, the one `main` starts on. Libraries whose platform APIs belong to that thread, such as windowing on macOS, check it before calling them. |
 | `scheduler_stats_json` | `fn scheduler_stats_json() -> String` | Returns a compact JSON snapshot of goroutine scheduler counters. |
 | `arena_push` | `fn arena_push() -> ()` | Opens an arena region for bump allocation. |
 | `arena_pop` | `fn arena_pop() -> ()` | Closes the innermost arena region, freeing its slabs. |

@@ -1883,6 +1883,21 @@ pub unsafe extern "C" fn gos_rt_len_is_zero(p: *const i64) -> bool {
     ffi_entry!({ unsafe { gos_rt_len(p) == 0 } })
 }
 
+/// [`gos_rt_vec_clone`] for a vector field copied with the aggregate holding
+/// it. A field that holds no vector - the zeroed field of an enum variant the
+/// value is not - stays empty, so the copy's words match the source's.
+///
+/// # Safety
+/// `src` is null or a live vec.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_clone_field(src: *const GosVec) -> *mut GosVec {
+    if src.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: `src` is this shim's argument, a live vec (C-ABI contract), non-null above.
+    unsafe { gos_rt_vec_clone(src) }
+}
+
 /// Clones a `*mut GosVec` element-by-element. Used by
 /// `xs.to_vec()` so the result is independent of the source -
 /// without this, the previous identity lowering aliased the

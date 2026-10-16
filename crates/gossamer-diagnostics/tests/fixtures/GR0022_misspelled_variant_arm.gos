@@ -1,0 +1,11 @@
+// ERROR: GR0022
+
+enum Shape { Circle, Square }
+
+fn main() {
+    let s = Shape::Square
+    match s {
+        Circel => println("circle")
+        Square => println("square")
+    }
+}

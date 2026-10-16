@@ -1699,9 +1699,9 @@ pub(crate) type BuiltinFnPtr =
 /// Pre-D8 the `resolved`
 /// field stored a full `Option<Global>` (~24 B by itself) for
 /// 40 B total per slot; we now cache only the resolved
-/// `Arc<FnChunk>` (the dominant hit shape) and let closures /
-/// `Value::Native` / `Value::Variant` callees take the slow
-/// path on every call.
+/// `Arc<FnChunk>` (the dominant hit shape) or a builtin's call
+/// pointer, and let closures / `Value::Variant` callees take the
+/// slow path on every call.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CacheSlot {
     /// Stable identity for the receiver / callee the slot last
@@ -1730,6 +1730,9 @@ pub(crate) struct CacheSlot {
     /// Mirrors `CPython` 3.11's `LOAD_METHOD_NO_DICT` specialised
     /// opcode storing the resolved `__call__` directly.
     pub builtin_fn: Option<BuiltinFnPtr>,
+    /// The call pointer and name of a resolved `Value::Native` builtin, which
+    /// takes the VM as its dispatcher.
+    pub native_fn: Option<(crate::value::NativeCall, &'static str)>,
     /// General path: when the resolved target is a Gossamer
     /// function (`Global::Fn(Arc<FnChunk>)`) - i.e. user code
     /// or stdlib body, not a builtin - its chunk is cached

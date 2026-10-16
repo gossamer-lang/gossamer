@@ -18,8 +18,8 @@ fn run(source: &str) -> Checked {
     let file = map.add_file("test.gos", source.to_string());
     let (mut sf, parse_diags) = parse_source_file(source, file);
     assert!(parse_diags.is_empty(), "parse errors: {parse_diags:?}");
-    let (resolutions, resolve_diags) = resolve_source_file(&sf);
-    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &resolutions);
+    let (mut resolutions, resolve_diags) = resolve_source_file(&sf);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
     let unresolved: Vec<_> = resolve_diags
         .iter()
         .filter(|d| {
@@ -1126,8 +1126,8 @@ fn example_programs_typecheck_without_false_positives() {
         let file = map.add_file(&path, source.clone());
         let (mut sf, parse_diags) = parse_source_file(&source, file);
         assert!(parse_diags.is_empty(), "{path}: {parse_diags:?}");
-        let (resolutions, _resolve_diags) = resolve_source_file(&sf);
-        let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &resolutions);
+        let (mut resolutions, _resolve_diags) = resolve_source_file(&sf);
+        let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
         let mut tcx = TyCtxt::new();
         let (_table, diagnostics) = typecheck_source_file(&sf, &resolutions, &mut tcx);
         assert!(
@@ -1741,8 +1741,8 @@ fn unknown_std_combinator_with_closure_errors_loudly() {
     let file = map.add_file("test.gos", source.to_string());
     let (mut sf, parse_diags) = parse_source_file(source, file);
     assert!(parse_diags.is_empty(), "parse errors: {parse_diags:?}");
-    let (resolutions, _) = resolve_source_file(&sf);
-    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &resolutions);
+    let (mut resolutions, _) = resolve_source_file(&sf);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
     let mut tcx = TyCtxt::new();
     let (_, diagnostics) = typecheck_source_file(&sf, &resolutions, &mut tcx);
     assert!(
@@ -1830,8 +1830,8 @@ fn diagnostics_for(source: &str) -> Vec<gossamer_types::TypeDiagnostic> {
     let file = map.add_file("test.gos", source.to_string());
     let (mut sf, parse_diags) = parse_source_file(source, file);
     assert!(parse_diags.is_empty(), "parse errors: {parse_diags:?}");
-    let (resolutions, _) = resolve_source_file(&sf);
-    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &resolutions);
+    let (mut resolutions, _) = resolve_source_file(&sf);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
     let mut tcx = TyCtxt::new();
     let (_, diagnostics) = typecheck_source_file(&sf, &resolutions, &mut tcx);
     diagnostics
@@ -5066,4 +5066,100 @@ fn a_method_turbofish_instantiates_the_methods_own_type_parameters() {
         "{:?}",
         agreeing.diagnostics
     );
+}
+
+#[test]
+fn formatting_a_value_that_holds_a_closure_is_refused_through_its_fields() {
+    let checked = run("struct Hook { f: Fn(i64) -> i64 }\n\
+         struct Holder { hook: Option<Hook>, n: i64 }\n\
+         enum Slot { Empty, Full(Hook) }\n\
+         fn main() {\n\
+         let h = Holder { hook: Some(Hook { f: |x| x + 1 }), n: 2 }\n\
+         println(f\"{h:?}\")\n\
+         println(f\"{Slot::Empty}\")\n\
+         }\n");
+    let refused = checked
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| matches!(diagnostic.error, TypeError::ValueNotDisplayable { .. }))
+        .count();
+    assert_eq!(refused, 2, "{:?}", checked.diagnostics);
+}
+
+#[test]
+fn a_type_with_its_own_fmt_renders_whatever_it_holds() {
+    let checked = run("struct Hook { f: Fn(i64) -> i64 }\n\
+         impl Display for Hook { fn fmt(&self) -> String { \"hook\" } }\n\
+         fn main() {\n\
+         let h = Hook { f: |x| x + 1 }\n\
+         println(f\"{h}\")\n\
+         }\n");
+    assert!(
+        !checked
+            .diagnostics
+            .iter()
+            .any(|diagnostic| matches!(diagnostic.error, TypeError::ValueNotDisplayable { .. })),
+        "{:?}",
+        checked.diagnostics
+    );
+}
+
+#[test]
+fn arithmetic_on_a_type_without_the_operator_is_rejected() {
+    for expr in [
+        "\"a\" * \"b\"",
+        "true * false",
+        "'a' + 'b'",
+        "#[1] + #[2]",
+        "(1, 2) - (3, 4)",
+    ] {
+        let d = diagnostics_for(&format!(
+            "fn main() {{ let r = {expr}\nprintln(\"{{}}\", r) }}\n"
+        ));
+        assert!(has_code(&d, "GT0003"), "{expr}: {d:?}");
+    }
+    let d = diagnostics_for("fn main() { let mut s = \"a\"\ns -= \"b\"\nprintln(\"{}\", s) }\n");
+    assert!(has_code(&d, "GT0003"), "{d:?}");
+}
+
+#[test]
+fn arithmetic_on_numbers_and_string_concatenation_is_accepted() {
+    for expr in ["1 + 2", "\"a\" + \"b\"", "1.5 % 2.0", "7 / 2 - 1"] {
+        let d = diagnostics_for(&format!(
+            "fn main() {{ let r = {expr}\nprintln(\"{{}}\", r) }}\n"
+        ));
+        assert!(!has_code(&d, "GT0003"), "{expr}: {d:?}");
+    }
+    let d = diagnostics_for("fn main() { let mut s = \"a\"\ns += \"b\"\nprintln(\"{}\", s) }\n");
+    assert!(!has_code(&d, "GT0003"), "{d:?}");
+}
+
+#[test]
+fn clock_arithmetic_answers_a_duration_between_instants() {
+    let prelude = "use std::time\n\
+                   fn main() {\n\
+                   let a = time::Instant::now()\n\
+                   let b = time::Instant::now()\n\
+                   let d = time::Duration::from_millis(3)\n";
+    for body in [
+        "let r: time::Duration = b - a\nprintln(\"{}\", r.as_millis())",
+        "let r: time::Instant = a + d\nprintln(\"{}\", r > a)",
+        "let r: time::Instant = a - d\nprintln(\"{}\", r < a)",
+        "let r: time::Duration = d + d - d\nprintln(\"{}\", r.as_millis())",
+        "let mut r = a\nr += d\nprintln(\"{}\", r > a)",
+    ] {
+        let d = diagnostics_for(&format!("{prelude}{body}\nlet _ = (a, b, d) }}\n"));
+        assert!(d.is_empty(), "{body}: {d:?}");
+    }
+    for body in [
+        "let r = a + b",
+        "let r = a * b",
+        "let r = d * d",
+        "let r = d % d",
+    ] {
+        let d = diagnostics_for(&format!(
+            "{prelude}{body}\nprintln(\"{{}}\", r)\nlet _ = (a, b, d) }}\n"
+        ));
+        assert!(has_code(&d, "GT0003"), "{body}: {d:?}");
+    }
 }

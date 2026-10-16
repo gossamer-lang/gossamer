@@ -28,6 +28,12 @@ impl Parser<'_> {
         {
             self.bump();
         }
+        let glob = self.at_punct(Punct::ColonColon)
+            && matches!(self.peek_nth(1).kind, TokenKind::Punct(Punct::Star));
+        if glob {
+            self.bump();
+            self.bump();
+        }
         let list = if self.at_punct(Punct::LBrace) {
             Some(self.parse_use_list())
         } else {
@@ -45,6 +51,7 @@ impl Parser<'_> {
             list,
             module: self.mod_stack.clone(),
             cfg: None,
+            glob,
         }
     }
 
@@ -162,7 +169,7 @@ impl Parser<'_> {
         while self.at_punct(Punct::ColonColon) {
             let checkpoint = self.tokens.checkpoint();
             self.bump();
-            if self.at_punct(Punct::LBrace) {
+            if self.at_punct(Punct::LBrace) || self.at_punct(Punct::Star) {
                 self.tokens.rewind(checkpoint);
                 break;
             }

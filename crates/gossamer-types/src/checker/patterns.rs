@@ -1,5 +1,7 @@
 //! Patterns, iteration, and parameter shapes.
 
+use gossamer_resolve::DefKind;
+
 use super::{
     ArrayExpr, AstType, BINARY_HEAP_DEF_LOCAL, BTREE_SET_DEF_LOCAL, Block, ClosureParam, DefId,
     Expectation, Expr, ExprKind, FLOAT_SUFFIXES, FloatTy, FloatWidth, FnSig, HASH_SET_DEF_LOCAL,
@@ -495,6 +497,18 @@ impl TypeChecker<'_> {
         }
     }
 
+    /// Reports a parameter pattern that some argument of type `ty` fails to
+    /// match: the call has no other body to run for that argument.
+    pub(super) fn reject_refutable_param_pattern(&mut self, pattern: &Pattern, ty: Ty) {
+        if let Some(problem) = self.let_pattern_problem(pattern, Some(ty)) {
+            let error = match problem {
+                PlainLetPatternProblem::Literal => TypeError::CannotAssignToLiteral,
+                PlainLetPatternProblem::MayNotMatch => TypeError::ParamPatternMayNotMatch,
+            };
+            self.emit(error, pattern.span);
+        }
+    }
+
     /// Reports a `for` pattern that some element of type `elem` fails to
     /// match: the loop has nowhere to send that element.
     pub(super) fn reject_refutable_for_pattern(&mut self, pattern: &Pattern, elem: Ty) {
@@ -542,7 +556,7 @@ impl TypeChecker<'_> {
                     .iter()
                     .map(|part| self.let_pattern_problem(part, ty))
                     .collect();
-                if problems.iter().all(Option::is_some) {
+                if problems.iter().all(Option::is_some) && !self.variants_cover_their_enum(parts) {
                     problems
                         .into_iter()
                         .flatten()
@@ -552,13 +566,26 @@ impl TypeChecker<'_> {
                     None
                 }
             }
-            PatternKind::Struct { fields, .. } => fields
-                .iter()
-                .filter_map(|field| field.pattern.as_ref())
-                .find_map(|part| self.let_pattern_problem(part, None)),
-            PatternKind::TupleStruct { elems, .. } => elems
-                .iter()
-                .find_map(|part| self.let_pattern_problem(part, None)),
+            PatternKind::Struct { path, fields, .. } => {
+                if self.path_pattern_may_not_match(pattern.id, path) {
+                    return Some(PlainLetPatternProblem::MayNotMatch);
+                }
+                fields
+                    .iter()
+                    .filter_map(|field| field.pattern.as_ref())
+                    .find_map(|part| self.let_pattern_problem(part, None))
+            }
+            PatternKind::TupleStruct { path, elems } => {
+                if self.path_pattern_may_not_match(pattern.id, path) {
+                    return Some(PlainLetPatternProblem::MayNotMatch);
+                }
+                elems
+                    .iter()
+                    .find_map(|part| self.let_pattern_problem(part, None))
+            }
+            PatternKind::Path(path) => self
+                .path_pattern_may_not_match(pattern.id, path)
+                .then_some(PlainLetPatternProblem::MayNotMatch),
             PatternKind::Slice {
                 prefix,
                 rest,
@@ -590,10 +617,126 @@ impl TypeChecker<'_> {
                 (!always_matches).then_some(PlainLetPatternProblem::MayNotMatch)
             }
             PatternKind::Ref { inner, .. } => self.let_pattern_problem(inner, None),
-            PatternKind::Wildcard
-            | PatternKind::Path(_)
-            | PatternKind::Rest
-            | PatternKind::Error => None,
+            PatternKind::Wildcard | PatternKind::Rest | PatternKind::Error => None,
+        }
+    }
+
+    /// Whether the alternatives `parts` are variant patterns of one enum that
+    /// name every variant it declares, each matching all of its variant's
+    /// payloads, so that together they match every value.
+    fn variants_cover_their_enum(&mut self, parts: &[Pattern]) -> bool {
+        let mut owner: Option<String> = None;
+        let mut named: HashSet<String> = HashSet::new();
+        for part in parts {
+            let (path, payloads): (&gossamer_ast::TypePath, Vec<&Pattern>) = match &part.kind {
+                PatternKind::Path(path) => (path, Vec::new()),
+                PatternKind::TupleStruct { path, elems } => (path, elems.iter().collect()),
+                PatternKind::Struct { path, fields, .. } => (
+                    path,
+                    fields.iter().filter_map(|f| f.pattern.as_ref()).collect(),
+                ),
+                _ => return false,
+            };
+            if payloads
+                .into_iter()
+                .any(|payload| self.let_pattern_problem(payload, None).is_some())
+            {
+                return false;
+            }
+            let Some((enum_name, variant)) = self.variant_named_by(path) else {
+                return false;
+            };
+            if owner.get_or_insert_with(|| enum_name.clone()) != &enum_name {
+                return false;
+            }
+            named.insert(variant);
+        }
+        owner.is_some_and(|owner| {
+            self.enum_variant_set(&owner)
+                .is_some_and(|all| all.iter().all(|variant| named.contains(variant)))
+        })
+    }
+
+    /// The enum and variant a variant pattern's `path` names: by its
+    /// qualifier, or, for a bare name, the one enum that declares it.
+    fn variant_named_by(&self, path: &gossamer_ast::TypePath) -> Option<(String, String)> {
+        let variant = path.segments.last()?.name.name.clone();
+        let owner = path
+            .segments
+            .len()
+            .checked_sub(2)
+            .map(|i| path.segments[i].name.name.clone());
+        let carrier = match variant.as_str() {
+            "Some" | "None" => Some("Option"),
+            "Ok" | "Err" => Some("Result"),
+            _ => None,
+        };
+        if let Some(carrier) = carrier
+            && owner.as_deref().is_none_or(|owner| owner == carrier)
+        {
+            return Some((carrier.to_string(), variant));
+        }
+        if let Some(owner) = owner {
+            return self
+                .enum_variants
+                .get(&owner)
+                .is_some_and(|variants| variants.contains(&variant))
+                .then_some((owner, variant));
+        }
+        let mut owners = self
+            .enum_variants
+            .iter()
+            .filter(|(_, variants)| variants.contains(&variant));
+        let (owner, _) = owners.next()?;
+        owners.next().is_none().then(|| (owner.clone(), variant))
+    }
+
+    /// Every variant name the enum `name` declares, the carriers included.
+    fn enum_variant_set(&self, name: &str) -> Option<Vec<String>> {
+        match name {
+            "Option" => Some(vec!["Some".to_string(), "None".to_string()]),
+            "Result" => Some(vec!["Ok".to_string(), "Err".to_string()]),
+            _ => self
+                .enum_variants
+                .get(name)
+                .map(|variants| variants.iter().cloned().collect()),
+        }
+    }
+
+    /// Whether the pattern `path`, written at `node`, fails to match some
+    /// value of its type: a const matches one value, and a variant fails on
+    /// every other variant its enum declares. A struct always matches.
+    fn path_pattern_may_not_match(&self, node: NodeId, path: &gossamer_ast::TypePath) -> bool {
+        let Some(last) = path.segments.last().map(|s| s.name.name.as_str()) else {
+            return false;
+        };
+        let owner = path
+            .segments
+            .len()
+            .checked_sub(2)
+            .map(|i| path.segments[i].name.name.as_str());
+        let kind = match self.resolutions.get(node) {
+            Some(Resolution::Def { kind, .. }) => Some(kind),
+            Some(Resolution::Import { .. }) => self
+                .resolutions
+                .import_def(node)
+                .and_then(|def| self.resolutions.kind_of(def)),
+            _ => None,
+        };
+        let carrier = matches!(last, "Some" | "None" | "Ok" | "Err")
+            && owner.is_none_or(|owner| matches!(owner, "Option" | "Result"));
+        match kind {
+            Some(DefKind::Const) => true,
+            Some(DefKind::Struct) if owner.is_none() => false,
+            Some(DefKind::Enum) => owner
+                .and_then(|owner| self.enum_variants.get(owner))
+                .is_some_and(|variants| variants.len() > 1),
+            _ if carrier => true,
+            _ => self
+                .enum_variants
+                .values()
+                .filter(|variants| variants.contains(last))
+                .any(|variants| variants.len() > 1),
         }
     }
 
@@ -1014,6 +1157,7 @@ impl TypeChecker<'_> {
                     self.unify(ty, want, body.span);
                 }
                 self.check_param_reference_pattern(&param.pattern, ty);
+                self.reject_refutable_param_pattern(&param.pattern, ty);
                 self.bind_pattern(&param.pattern, ty);
                 self.register_reference_parameter_origins(&param.pattern);
                 ty

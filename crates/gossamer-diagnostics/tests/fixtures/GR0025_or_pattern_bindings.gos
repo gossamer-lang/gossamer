@@ -1,0 +1,8 @@
+// ERROR: GR0025
+
+fn main() {
+    let o: Option<i64> = None
+    match o {
+        Some(y) | None => println(y)
+    }
+}

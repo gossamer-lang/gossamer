@@ -1651,6 +1651,20 @@ fn vec_call_keeps_no_handle(name: &str) -> bool {
     )
 }
 
+/// Whether `stmts` open by re-publishing the copy `cloned` of `field`:
+/// release the old field, store the copy, take a share of it.
+fn republishes_copy(stmts: &[Statement], field: &Place, cloned: Local) -> bool {
+    stmts.len() >= 3
+        && matches!(&stmts[0].kind, StatementKind::Assign { rvalue: Rvalue::CallIntrinsic { name, args }, .. }
+            if *name == "gos_rt_vec_free"
+                && matches!(args.as_slice(), [Operand::Copy(p)] if *p == *field))
+        && matches!(&stmts[1].kind, StatementKind::Assign { place, rvalue: Rvalue::Use(Operand::Copy(src)) }
+            if *place == *field && src.projection.is_empty() && src.local == cloned)
+        && matches!(&stmts[2].kind, StatementKind::Assign { rvalue: Rvalue::CallIntrinsic { name, args }, .. }
+            if *name == "gos_rt_vec_retain"
+                && matches!(args.as_slice(), [Operand::Copy(p)] if *p == *field))
+}
+
 /// Drops the deep copy a struct binding takes of a vector field when the
 /// vector the field was built from is never named again.
 ///
@@ -1676,7 +1690,11 @@ pub(crate) fn elide_vec_clone_of_dead_aggregate_source(body: &mut Body, user_fns
         else {
             continue;
         };
-        if name != "gos_rt_vec_clone" || !destination.projection.is_empty() {
+        // `vec_clone_field` is the same copy for a field that may hold no
+        // vector yet.
+        if !matches!(name.as_str(), "gos_rt_vec_clone" | "gos_rt_vec_clone_field")
+            || !destination.projection.is_empty()
+        {
             continue;
         }
         let [Operand::Copy(field)] = args.as_slice() else {
@@ -1700,19 +1718,7 @@ pub(crate) fn elide_vec_clone_of_dead_aggregate_source(body: &mut Body, user_fns
         if ti >= n_blocks {
             continue;
         }
-        // The target block re-publishes the copy: release the old field, store
-        // the copy, take a share of it.
-        let stmts = &body.blocks[ti].stmts;
-        if stmts.len() < 3
-            || !matches!(&stmts[0].kind, StatementKind::Assign { rvalue: Rvalue::CallIntrinsic { name, args }, .. }
-                if *name == "gos_rt_vec_free"
-                    && matches!(args.as_slice(), [Operand::Copy(p)] if *p == *field))
-            || !matches!(&stmts[1].kind, StatementKind::Assign { place, rvalue: Rvalue::Use(Operand::Copy(src)) }
-                if *place == *field && src.projection.is_empty() && src.local == cloned)
-            || !matches!(&stmts[2].kind, StatementKind::Assign { rvalue: Rvalue::CallIntrinsic { name, args }, .. }
-                if *name == "gos_rt_vec_retain"
-                    && matches!(args.as_slice(), [Operand::Copy(p)] if *p == *field))
-        {
+        if !republishes_copy(&body.blocks[ti].stmts, field, cloned) {
             continue;
         }
 
@@ -1819,6 +1825,60 @@ fn local_dead_after_except(
     })
 }
 
+/// Whether everything that names `local` after the statement at `site` only
+/// counts it: a retain, a release, or the null a move leaves. Such a local
+/// gives its values no reader after the copy at `site`.
+fn only_counted_after(body: &Body, local: Local, site: (usize, usize)) -> bool {
+    only_counted_after_except(body, local, site, &[])
+}
+
+/// [`only_counted_after`], ignoring the statements at `skip` - the copies
+/// that hand one value along a chain of bindings.
+fn only_counted_after_except(
+    body: &Body,
+    local: Local,
+    site: (usize, usize),
+    skip: &[(usize, usize)],
+) -> bool {
+    let counts_only = |stmt: &Statement| -> bool {
+        let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+            return !statement_mentions(stmt, local);
+        };
+        match rvalue {
+            Rvalue::CallIntrinsic { name, args }
+                if crate::opt::is_rc_retain_name(name) || crate::opt::is_rc_release_name(name) =>
+            {
+                place.local != local
+            }
+            Rvalue::Use(Operand::Const(ConstValue::Int(0))) if place.local == local => true,
+            _ => !statement_mentions(stmt, local),
+        }
+    };
+    let (block, stmt) = site;
+    let fine = |bi: usize, si: usize, s: &Statement| skip.contains(&(bi, si)) || counts_only(s);
+    if !body.blocks[block]
+        .stmts
+        .iter()
+        .enumerate()
+        .skip(stmt + 1)
+        .all(|(si, s)| fine(block, si, s))
+        || crate::opt::term_mentions_local(&body.blocks[block].terminator, local)
+    {
+        return false;
+    }
+    let reachable = blocks_reachable_from(body, block);
+    body.blocks.iter().enumerate().all(|(idx, b)| {
+        idx == block
+            || !reachable[idx]
+            || (b.stmts.iter().enumerate().all(|(si, s)| fine(idx, si, s))
+                && !crate::opt::term_mentions_local(&b.terminator, local))
+    })
+}
+
+fn statement_mentions(stmt: &Statement, local: Local) -> bool {
+    crate::opt::stmt_mentions_local(stmt, local)
+}
+
 /// The one value a local is ever given.
 enum SingleWrite<'a> {
     /// Copied whole out of another local, at this statement.
@@ -1828,6 +1888,12 @@ enum SingleWrite<'a> {
         site: (usize, usize),
         /// The local the value was copied from.
         source: Local,
+    },
+    /// Copied out of a field of another local, at this statement.
+    CopyField {
+        site: (usize, usize),
+        /// The field the value was copied from.
+        source: &'a Place,
     },
     /// Built here: the statement's position and the operands it was built from.
     Built {
@@ -1870,6 +1936,17 @@ fn single_write_of<'a>(body: &'a Body, local: Local, user_fns: &HashSet<String>)
                     Some(SingleWrite::Copy {
                         site: (bi, si),
                         source: src.local,
+                    })
+                }
+                Rvalue::Use(Operand::Copy(src))
+                    if src
+                        .projection
+                        .iter()
+                        .all(|step| matches!(step, Projection::Field(_))) =>
+                {
+                    Some(SingleWrite::CopyField {
+                        site: (bi, si),
+                        source: src,
                     })
                 }
                 Rvalue::Aggregate { operands, .. } => Some(SingleWrite::Built {
@@ -1973,6 +2050,39 @@ fn aggregate_field_origin(
                     return None;
                 }
                 return Some(AggregateOrigin::CallResult);
+            }
+            // Copied out of a field that is set to null right after: the
+            // copy moved the vector, so only this binding names it, and a
+            // field of a value a function answered named nothing else before.
+            SingleWrite::CopyField { site, source } => {
+                let mut moved_out = source.projection.clone();
+                moved_out.extend(path.iter().map(|i| Projection::Field(*i)));
+                let nulled = body.blocks[site.0].stmts[site.1 + 1..].iter().any(|stmt| {
+                    matches!(&stmt.kind, StatementKind::Assign {
+                        place,
+                        rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                    } if place.local == source.local && place.projection == moved_out)
+                });
+                if !(nulled || only_counted_after(body, source.local, site))
+                    || chain
+                        .iter()
+                        .any(|l| !only_counted_after_except(body, *l, site, &hand_offs))
+                {
+                    return None;
+                }
+                // The field's own local may hold the answer through copies,
+                // each of whose sources is done with the value.
+                let mut root = source.local;
+                for _ in 0..=body.locals.len() {
+                    match single_write_of(body, root, user_fns)? {
+                        SingleWrite::Answered { .. } => return Some(AggregateOrigin::CallResult),
+                        SingleWrite::Copy { site, source } if only_counted_after(body, source, site) => {
+                            root = source;
+                        }
+                        _ => return None,
+                    }
+                }
+                return None;
             }
             SingleWrite::Built {
                 block,

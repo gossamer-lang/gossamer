@@ -414,9 +414,12 @@ pub(super) fn lower_foreign_call(
     } else {
         c_type(call.ret)?
     };
-    let enter = intrinsics.extern_fn_by_name(module, "gos_rt_ffi_enter")?;
-    let enter = module.declare_func_in_func(enter, builder.func);
-    builder.ins().call(enter, &[]);
+    let bracket = !call.is_runtime_helper();
+    if bracket {
+        let enter = intrinsics.extern_fn_by_name(module, "gos_rt_ffi_enter")?;
+        let enter = module.declare_func_in_func(enter, builder.func);
+        builder.ins().call(enter, &[]);
+    }
     let inst = match target {
         Some(target) => {
             let sig = signature(module, call)?;
@@ -436,9 +439,11 @@ pub(super) fn lower_foreign_call(
     };
     let result = ret.map(|_| builder.inst_results(inst)[0]);
     let returned: Vec<ir::Value> = builder.inst_results(inst).to_vec();
-    let leave = intrinsics.extern_fn_by_name(module, "gos_rt_ffi_leave")?;
-    let leave = module.declare_func_in_func(leave, builder.func);
-    builder.ins().call(leave, &[]);
+    if bracket {
+        let leave = intrinsics.extern_fn_by_name(module, "gos_rt_ffi_leave")?;
+        let leave = module.declare_func_in_func(leave, builder.func);
+        builder.ins().call(leave, &[]);
+    }
     if let (Some(RetPlan::Pieces(pieces)), Some(holder)) =
         (plan.as_ref().map(|plan| &plan.ret), holder)
     {

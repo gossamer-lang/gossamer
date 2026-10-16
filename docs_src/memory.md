@@ -61,7 +61,15 @@ automatic cycle reclamation that ARC leaves to the programmer.
   `isize`/`usize`, `f32`/`f64`.
 - **Reference-semantic types** share their backing storage when
   copied; the runtime reclaims the backing when the last reference
-  dies. This includes `String`, `Vec<T>`, structs, enums, and closures.
+  dies. This includes `String`, `Vec<T>`, structs, recursive enums, and
+  closures.
+- **Enums are values unless they are recursive.** As in Swift, a
+  non-recursive enum is stored inline: its discriminant beside its
+  variants' fields, which share storage across variants, with no heap
+  node and no reference count of its own. An `Option` or `Result` over
+  such an enum is inline too. An enum that contains itself, directly or
+  through other types, keeps one heap node per value, as Swift's
+  `indirect` enums do; the pointer is what makes its size finite.
   `[T; N]` is an owned fixed array. `[T]` is unsized and appears through a
   borrowed `&[T]` or `&mut [T]` view, so a bare slice is not an owned heap
   collection.
@@ -141,7 +149,7 @@ described in the [concurrency memory model](design/memory_model.md).
   `gos`, the JIT, and `gos build`, before or after
   `runtime::collect_cycles()`. `feature-testing-examples/weak_into_strong_cycle.gos`
   pins the guarantee across all three tiers.
-- **Compact representation.** A heap enum node carries an 8-byte
+- **Compact representation.** A recursive enum's heap node carries an 8-byte
   runtime header. Enums with at most 4 variants store their
   discriminant in pointer tag bits, so a two-pointer tree node costs
   24 bytes - and only 16 inside an arena.
@@ -294,7 +302,8 @@ mutate through a shared handle across goroutines, hold the value in a
 
 - Small value types live on the stack or inline inside their
   aggregate.
-- Aggregates (`String`, `Vec<T>`, structs, enums, closures) live on
-  the heap, reference-counted; `T` / `T` / `T` spellings
+- Non-recursive enums live inline, like the scalars they hold.
+- Other aggregates (`String`, `Vec<T>`, structs, recursive enums,
+  closures) live on the heap, reference-counted; `T` / `T` / `T` spellings
   are accepted and transparent.
 - Short-lived object graphs belong in an `arena { }`.

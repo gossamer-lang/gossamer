@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use thiserror::Error;
 
+mod scan;
 pub mod typed;
 
 /// Default cap on parser nesting depth - guards the recursive descent
@@ -254,6 +255,7 @@ pub struct Tape {
 impl Tape {
     /// The value at `index`, which a walk of the tape answered.
     #[must_use]
+    #[inline]
     pub fn node(&self, index: u32) -> TapeNode {
         self.nodes[index as usize]
     }
@@ -261,6 +263,7 @@ impl Tape {
     /// A number's bits, or a container's extent (low half) and member or
     /// element count (high half).
     #[must_use]
+    #[inline]
     pub fn word(&self, index: u32) -> u64 {
         self.nodes[index as usize + 1].word()
     }
@@ -268,6 +271,7 @@ impl Tape {
     /// Index of the first node past the value at `index` and everything it
     /// holds.
     #[must_use]
+    #[inline]
     pub fn extent(&self, index: u32) -> u32 {
         match self.node(index).kind() {
             TapeKind::Array | TapeKind::Object => self.word(index) as u32,
@@ -279,6 +283,7 @@ impl Tape {
     /// Elements of the array, or members of the object (duplicates
     /// included), at `index`.
     #[must_use]
+    #[inline]
     pub fn count(&self, index: u32) -> u32 {
         (self.word(index) >> 32) as u32
     }
@@ -424,6 +429,7 @@ fn validate_source(
 }
 
 struct Parser<'a> {
+    text: &'a str,
     bytes: &'a [u8],
     cursor: usize,
     depth: usize,
@@ -443,6 +449,7 @@ struct Parser<'a> {
 impl<'a> Parser<'a> {
     fn new(source: &'a str) -> Self {
         Self {
+            text: source,
             bytes: source.as_bytes(),
             cursor: 0,
             depth: 0,
@@ -553,6 +560,7 @@ impl<'a> Parser<'a> {
 
     /// Records a value that ends at the cursor, when the walk keeps a tape,
     /// answering its index.
+    #[inline]
     fn record(&mut self, kind: TapeKind, start: usize, word: u64) -> Option<usize> {
         let end = self.cursor;
         let tape = self.tape.as_mut()?;
@@ -736,15 +744,14 @@ impl<'a> Parser<'a> {
                     // control byte. The source is a `str` and those three are
                     // ASCII, so the run ends on a character boundary.
                     let start = self.cursor;
-                    let run = self.bytes[start..]
-                        .iter()
-                        .position(|b| matches!(b, b'"' | b'\\') || *b < 0x20)
-                        .unwrap_or(self.bytes.len() - start);
-                    self.cursor += run;
+                    self.cursor = scan::find(
+                        self.bytes,
+                        start,
+                        |w| scan::equal(w, b'"') | scan::equal(w, b'\\') | scan::below(w, 0x20),
+                        |b| matches!(b, b'"' | b'\\') || b < 0x20,
+                    );
                     if self.build {
-                        let text = std::str::from_utf8(&self.bytes[start..self.cursor])
-                            .map_err(|_| self.error("invalid UTF-8 in string"))?;
-                        out.push_str(text);
+                        out.push_str(&self.text[start..self.cursor]);
                     }
                 }
             }
@@ -903,7 +910,31 @@ impl Parser<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TapeKind, tape_bound, validate_to_tape};
+    use super::{TapeKind, Value, parse, tape_bound, validate_to_tape};
+
+    #[test]
+    fn strings_read_across_whole_words_of_plain_text() {
+        let text = r#"["plain text longer than a word", "caf\u00e9 \u00e9t\u00e9 \ud83d\ude00 and \"quotes\"", "multibyte été 😀 run"]"#;
+        let Ok(Value::Array(items)) = parse(text) else {
+            panic!("a document of strings parses");
+        };
+        let strings: Vec<_> = items
+            .iter()
+            .map(|v| match v {
+                Value::String(s) => s.as_str(),
+                other => panic!("a string, not {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            strings,
+            [
+                "plain text longer than a word",
+                "caf\u{e9} \u{e9}t\u{e9} \u{1f600} and \"quotes\"",
+                "multibyte \u{e9}t\u{e9} \u{1f600} run"
+            ]
+        );
+        assert!(parse("[\"a long run of text then a\ttab\"]").is_err());
+    }
 
     #[test]
     fn a_tape_fits_the_capacity_it_starts_with() {

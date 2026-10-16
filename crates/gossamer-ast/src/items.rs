@@ -151,6 +151,13 @@ impl Attrs {
         self.link_argument("search")
     }
 
+    /// The kind a `#[link(name = "...", kind = "framework")]` attribute
+    /// gives its library: `framework` names a macOS framework.
+    #[must_use]
+    pub fn link_kind(&self) -> Option<String> {
+        self.link_argument("kind")
+    }
+
     /// The value of `key` in the `#[link(key = "value", ..)]` attribute.
     fn link_argument(&self, key: &str) -> Option<String> {
         let tokens = self

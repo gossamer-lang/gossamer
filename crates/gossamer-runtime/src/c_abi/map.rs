@@ -5866,6 +5866,23 @@ unsafe fn enum_canonical_bytes(node: *mut u8, desc: *const i64) -> Option<Vec<u8
     unsafe { append_enum_canonical(node, desc, &mut out) }.then_some(out)
 }
 
+/// Appends a string word's content: its length, then its bytes; a null word
+/// is the empty string.
+///
+/// # Safety
+/// `word` is null or a live string body.
+unsafe fn append_string_canonical(word: i64, out: &mut Vec<u8>) {
+    let sptr: *const c_char = std::ptr::with_exposed_provenance(word as usize);
+    if sptr.is_null() {
+        out.extend_from_slice(&0u64.to_le_bytes());
+    } else {
+        // SAFETY: `sptr` is non-null and a live string body (this `unsafe fn`'s caller).
+        let bytes = unsafe { crate::c_abi::gos_str_arg_bytes(sptr) };
+        out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        out.extend_from_slice(bytes);
+    }
+}
+
 unsafe fn append_enum_canonical(node: *mut u8, desc: *const i64, out: &mut Vec<u8>) -> bool {
     let raw = node as usize;
     let base = crate::c_abi::rc::untag_rc(node);
@@ -5936,9 +5953,61 @@ unsafe fn append_enum_canonical(node: *mut u8, desc: *const i64, out: &mut Vec<u
                     return false;
                 }
             }
-            // `Vec`-shaped payloads carry no fixed slot count; they stay on
-            // pointer identity rather than encoding a partial key.
-            4 | 5 => return false,
+            // A `Vec` field folds its length, then each element by content.
+            4 | 5 => {
+                let vec = word as *const crate::c_abi::GosVec;
+                let len = if vec.is_null() {
+                    0
+                } else {
+                    // SAFETY: a field of kind 4 or 5 is null or a live `Vec`.
+                    unsafe { (*vec).len }
+                };
+                out.extend_from_slice(&(len as u64).to_le_bytes());
+                for i in 0..len {
+                    if kind == 4 {
+                        // SAFETY: `i` is below the vec's length; the element is a node of `desc`.
+                        let node = unsafe { crate::c_abi::vec::vec_elem_load_i64(&*vec, i) };
+                        // SAFETY: the element is a node of the same descriptor.
+                        if !unsafe { append_enum_canonical(node as *mut u8, desc, out) } {
+                            return false;
+                        }
+                        continue;
+                    }
+                    // SAFETY: `i` is below the vec's length; the element is a
+                    // 16-byte `(String, node)` pair.
+                    let pair = unsafe { gos_rt_vec_get_ptr(vec, i) };
+                    if pair.is_null() {
+                        return false;
+                    }
+                    // SAFETY: `pair` addresses a 16-byte pair element.
+                    let (text, node) = unsafe {
+                        (
+                            pair.cast::<i64>().read_unaligned(),
+                            pair.add(8).cast::<i64>().read_unaligned(),
+                        )
+                    };
+                    // SAFETY: the first word is null or a live string body.
+                    unsafe { append_string_canonical(text, out) };
+                    // SAFETY: the second word is a node of the same descriptor.
+                    if !unsafe { append_enum_canonical(node as *mut u8, desc, out) } {
+                        return false;
+                    }
+                }
+            }
+            6..=8 => {
+                // SAFETY: a field of kind 6, 7, or 8 is null or a live `Vec` of that kind's
+                // scalars.
+                let words = unsafe { crate::c_abi::desc_format::vec_field_words(word) };
+                out.extend_from_slice(&(words.len() as u64).to_le_bytes());
+                for w in words {
+                    if kind == 7 {
+                        // SAFETY: each element is null or a live string body.
+                        unsafe { append_string_canonical(w, out) };
+                    } else {
+                        out.extend_from_slice(&w.to_le_bytes());
+                    }
+                }
+            }
             _ => out.extend_from_slice(&word.to_le_bytes()),
         }
     }

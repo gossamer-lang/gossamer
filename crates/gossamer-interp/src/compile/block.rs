@@ -109,14 +109,24 @@ mod elide_unit_load_tests {
     /// chunk, driving the full front-end with an empty compile context
     /// (no struct layouts / inlinable wrappers / consts).
     fn compile_named(source: &str, fn_name: &str) -> (FnChunk, HirFn) {
+        compile_named_with(source, fn_name, false)
+    }
+
+    /// [`compile_named`] with the program's `&mut self` methods known, as a
+    /// load gives them to every body.
+    fn compile_named_with_mut_self(source: &str, fn_name: &str) -> (FnChunk, HirFn) {
+        compile_named_with(source, fn_name, true)
+    }
+
+    fn compile_named_with(source: &str, fn_name: &str, mut_self: bool) -> (FnChunk, HirFn) {
         let mut map = SourceMap::new();
         let file = map.add_file("test.gos", source.to_string());
         let (mut sf, parse_diags) = parse_source_file(source, file);
         assert!(parse_diags.is_empty(), "parse: {parse_diags:?}");
         let entry_diags = synthesize_entry_main(&mut sf);
         assert!(entry_diags.is_empty(), "entry main: {entry_diags:?}");
-        let (resolutions, _) = resolve_source_file(&sf);
-        let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &resolutions);
+        let (mut resolutions, _) = resolve_source_file(&sf);
+        let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
         let mut tcx = TyCtxt::new();
         let (table, _) = typecheck_source_file(&sf, &resolutions, &mut tcx);
         let program = lower_source_file(&sf, &resolutions, &table, &mut tcx);
@@ -128,6 +138,11 @@ mod elide_unit_load_tests {
                 _ => None,
             })
             .expect("named function not found");
+        let method_muts = if mut_self {
+            super::collect_mut_self_methods(&program)
+        } else {
+            HashSet::new()
+        };
         let chunk = super::compile_fn(
             &decl,
             &tcx,
@@ -137,7 +152,7 @@ mod elide_unit_load_tests {
             &HashMap::new(),
             &HashMap::new(),
             &super::ConstValues::new(),
-            &HashSet::new(),
+            &method_muts,
             &HashSet::new(),
             &HashSet::new(),
             None,
@@ -352,6 +367,167 @@ println("{}", n)
                 .iter()
                 .any(|op| matches!(op, Op::ClearRegs { count: 1, .. })),
             "expected top-level statement last-use clear; chunk: {:?}",
+            chunk.instrs
+        );
+    }
+
+    const CANVAS: &str = r"
+struct Canvas { pixels: Vec<u8>, width: i64 }
+impl Canvas {
+    fn put(&mut self, i: i64) {
+        self.pixels[i] = 1
+    }
+}
+struct Cx { canvas: Canvas, n: i64 }
+";
+
+    #[test]
+    fn a_mut_self_call_on_a_local_moves_the_local_and_writes_it_back() {
+        let source = format!(
+            "{CANVAS}fn f(n: i64) -> u8 {{\n    let mut canvas = Canvas {{ pixels: #[0u8; 8], width: 1 }}\n    canvas.put(n)\n    canvas.pixels[0]\n}}\n"
+        );
+        let (chunk, _) = compile_named_with_mut_self(&source, "f");
+        let moved = chunk.instrs.iter().find_map(|op| match op {
+            Op::CellNewMove { src, .. } => Some(*src),
+            _ => None,
+        });
+        let written = chunk.instrs.iter().find_map(|op| match op {
+            Op::CellTake { dst, .. } => Some(*dst),
+            _ => None,
+        });
+        assert!(
+            moved.is_some() && moved == written,
+            "the receiver should move from and return to its home; chunk: {:?}",
+            chunk.instrs
+        );
+    }
+
+    fn takes_receiver_field(source: &str) -> bool {
+        let (chunk, _) = compile_named_with_mut_self(source, "f");
+        chunk
+            .instrs
+            .windows(2)
+            .any(|pair| matches!(pair, [Op::FieldSet { .. }, Op::CellNewMove { .. }]))
+    }
+
+    #[test]
+    fn a_mut_self_field_receiver_moves_out_after_arguments_read_its_base() {
+        let source = format!(
+            "{CANVAS}impl Cx {{\n    fn next(&self) -> i64 {{ self.n + self.canvas.width }}\n}}\nfn f(cx: &mut Cx) {{\n    cx.canvas.put(cx.next())\n}}\n"
+        );
+        assert!(takes_receiver_field(&source));
+    }
+
+    #[test]
+    fn a_mut_self_field_receiver_stays_put_when_an_argument_lends_its_base() {
+        let source = format!(
+            "{CANVAS}fn bump(cx: &mut Cx) -> i64 {{\n    cx.n += 1\n    cx.n\n}}\nfn f() -> i64 {{\n    let mut cx = Cx {{ canvas: Canvas {{ pixels: #[0u8; 8], width: 1 }}, n: 0 }}\n    cx.canvas.put(bump(&mut cx))\n    cx.n\n}}\n"
+        );
+        assert!(!takes_receiver_field(&source));
+    }
+
+    #[test]
+    fn a_mut_self_call_on_a_field_clears_its_write_back_temporary() {
+        let source = format!("{CANVAS}fn f(cx: &mut Cx, n: i64) {{\n    cx.canvas.put(n)\n}}\n");
+        let (chunk, _) = compile_named_with_mut_self(&source, "f");
+        let cleared = chunk.instrs.iter().enumerate().any(|(i, op)| {
+            matches!(op, Op::FieldSet { value, .. }
+            if chunk.instrs[i + 1..].iter().any(|later| {
+                matches!(later, Op::ClearRegs { start, count: 1 } if start == value)
+            }))
+        });
+        assert!(
+            cleared,
+            "the value stored back into the field should leave its temporary; chunk: {:?}",
+            chunk.instrs
+        );
+    }
+
+    fn moves_field_into_cell(source: &str) -> bool {
+        let (chunk, _) = compile_named(source, "f");
+        chunk
+            .instrs
+            .windows(2)
+            .any(|pair| matches!(pair, [Op::FieldSet { .. }, Op::CellNewMove { .. }]))
+    }
+
+    #[test]
+    fn a_mut_field_argument_moves_out_beside_reads_of_sibling_fields() {
+        let source = r"
+struct Rect { x: i64, y: i64 }
+struct Canvas { pixels: Vec<u8>, width: i64, clip: Rect }
+fn blend(fb: &mut [u8], stride: i64, x: i64) {
+    fb[0] = (stride + x) as u8
+}
+fn f(canvas: &mut Canvas) {
+    blend(&mut canvas.pixels, canvas.width * 4, canvas.clip.x)
+}
+";
+        assert!(moves_field_into_cell(source));
+    }
+
+    #[test]
+    fn a_mut_field_argument_stays_put_when_another_argument_reads_it() {
+        let source = r"
+struct Canvas { pixels: Vec<u8>, width: i64 }
+fn blend(fb: &mut [u8], len: i64) {
+    fb[0] = len as u8
+}
+fn f(canvas: &mut Canvas) {
+    blend(&mut canvas.pixels, canvas.pixels.len())
+}
+";
+        assert!(!moves_field_into_cell(source));
+    }
+
+    #[test]
+    fn a_mut_field_argument_moves_out_of_its_local_for_the_call() {
+        let source = r"
+struct Canvas { pixels: Vec<u8>, width: i64 }
+fn clear(fb: &mut [u8], v: u8) {
+    fb[0] = v
+}
+fn f() -> u8 {
+    let mut canvas = Canvas { pixels: #[1u8; 8], width: 1 }
+    clear(&mut canvas.pixels, 3)
+    canvas.pixels[0]
+}
+";
+        let (chunk, _) = compile_named(source, "f");
+        let moved = chunk
+            .instrs
+            .windows(2)
+            .any(|pair| matches!(pair, [Op::FieldSet { .. }, Op::CellNewMove { .. }]));
+        assert!(
+            moved,
+            "the field should leave its struct and move into the cell; chunk: {:?}",
+            chunk.instrs
+        );
+    }
+
+    #[test]
+    fn a_byte_repeat_in_a_struct_field_builds_packed_bytes() {
+        let source = r"
+struct Canvas { pixels: Vec<u8>, width: i64 }
+fn f(n: i64) -> Canvas {
+    Canvas { pixels: #[0u8; n * 4], width: n }
+}
+";
+        let (chunk, _) = compile_named(source, "f");
+        assert!(
+            chunk
+                .instrs
+                .iter()
+                .any(|op| matches!(op, Op::BuildByteArrayRepeat { .. })),
+            "a `u8` repeat in a field should build packed bytes; chunk: {:?}",
+            chunk.instrs
+        );
+        assert!(
+            !chunk
+                .instrs
+                .iter()
+                .any(|op| matches!(op, Op::BuildArrayRepeat { .. })),
+            "a `u8` repeat in a field should not build boxed values; chunk: {:?}",
             chunk.instrs
         );
     }

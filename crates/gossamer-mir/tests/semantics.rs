@@ -21,8 +21,8 @@ fn build(source: &str) -> Vec<gossamer_mir::Body> {
     let file = map.add_file("test.gos", source.to_string());
     let (mut sf, parse_diags) = parse_source_file(source, file);
     assert!(parse_diags.is_empty(), "parse: {parse_diags:?}");
-    let (resolutions, resolve_diags) = resolve_source_file(&sf);
-    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &resolutions);
+    let (mut resolutions, resolve_diags) = resolve_source_file(&sf);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
     assert!(resolve_diags.is_empty(), "resolve: {resolve_diags:?}");
     let mut tcx = TyCtxt::new();
     let (table, type_diags) = typecheck_source_file(&sf, &resolutions, &mut tcx);

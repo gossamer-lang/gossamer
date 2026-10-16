@@ -473,7 +473,10 @@ impl ProgramTables {
         let (structs, struct_defs) = collect_struct_fields(program);
         keep_word_fields_where_required(program, &struct_defs, tcx);
         let enums = collect_enum_variants(program, tcx);
-        register_inline_enums(program, tcx);
+        if tcx.enums_by_value() {
+            register_inline_enums(program, tcx);
+            flat_enums::register_flat_enums(program, tcx);
+        }
         let mut consts = collect_const_values(program);
         // Scalar `static mut` items become real mutable module globals;
         // remove them from the const-inline map so their reads load the
@@ -576,6 +579,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
     // Which callees borrow a `json::Value` they are handed, so the carrier a
     // combinator reads the handle out of can be reclaimed after the call.
     let json_borrowing_fns = collect_json_borrowing_fns(bodies, tcx);
+    let carrier_abi = flat_carriers::CarrierAbi::collect(bodies);
     for body in &mut bodies[start..] {
         // Rewrite `s = s + frag` to the in-place `gos_rt_str_concat_drop_a`
         // BEFORE inserting RC retain/release statements. The rewrite matches a
@@ -590,6 +594,9 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         // unrelated). Without the binding's concrete (RC-managed) type the drop
         // pass cannot tell it owns a `String` and never releases it (a leak).
         propagate_copy_types(body, tcx);
+        // Before any ownership pass: those account for a flattened carrier
+        // as the tuple it now is.
+        flat_carriers::flatten_carriers(body, &carrier_abi, tcx);
         copy_stored_containers(body, tcx);
         copy_values_into_holders(body, tcx);
         borrow_lent_payload_reads(body, tcx);
@@ -680,6 +687,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
             for body in &mut bodies[start..] {
                 let report = crate::opt::UniquenessReport {
                     shares_transferred: crate::opt::transfer_last_use_shares(body, tcx, &summaries)
+                        + crate::opt::transfer_carrier_payload_shares(body, tcx, &summaries)
                         + crate::opt::move_boxed_payload_sources(body, tcx, &summaries),
                     clones_moved: crate::opt::move_unique_clones(body, tcx, &summaries),
                 };
@@ -688,6 +696,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         }
         let callees = crate::opt::CalleeParams::compute(bodies, tcx);
         for body in &mut bodies[start..] {
+            crate::opt::elide_unit_variant_rc(body);
             crate::opt::elide_null_rc_accounting(body);
             crate::opt::elide_redundant_rc_pairs(body, tcx);
             crate::opt::elide_borrowed_holder_rc(body, tcx, &callees);
@@ -697,6 +706,9 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
             crate::opt::reduce_materialised_counts(body);
             crate::opt::sink_exit_releases(body, tcx);
         }
+    }
+    for body in &mut bodies[start..] {
+        crate::opt::forward_moved_temporaries(body, tcx);
     }
     // Perceus reuse: recycle a uniquely-owned block being released into a
     // same-type constructor in place. Runs last so it sees the final release
@@ -716,6 +728,8 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
 
 pub mod builder;
 pub(crate) mod carrier_ref;
+pub(crate) mod flat_carriers;
+pub(crate) mod flat_enums;
 pub mod helpers;
 pub(crate) mod instantiate;
 

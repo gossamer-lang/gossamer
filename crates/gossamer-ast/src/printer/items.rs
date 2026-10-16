@@ -21,6 +21,9 @@ impl Printer {
         }
         self.write("use ");
         self.write_use_target(&decl.target);
+        if decl.glob {
+            self.write("::*");
+        }
         if let Some(entries) = &decl.list {
             self.write("::{");
             for (index, entry) in entries.iter().enumerate() {

@@ -245,13 +245,28 @@ pub enum ResolveError {
         /// What was being declared, for the message.
         kind: &'static str,
     },
-    /// A single-name pattern starting with an uppercase letter that names no
-    /// unit variant or constant in scope. Such a name is read as a path, not
-    /// a binding, so it cannot introduce one.
-    #[error("`{name}` is not a unit variant or constant in scope")]
+    /// An or-pattern whose alternatives bind different names: the arm reads
+    /// a name one alternative leaves unbound.
+    #[error("`{name}` is bound in one alternative of this pattern but not in another")]
+    OrPatternBindings {
+        /// A name some alternative does not bind.
+        name: String,
+    },
+    /// A `use path::*` whose path names no enum. A glob imports an enum's
+    /// variants; a module's items are imported by name.
+    #[error("`use {path}::*` names no enum")]
+    GlobOfNonEnum {
+        /// The path before `::*`, as written.
+        path: String,
+    },
+    /// A `match` arm whose single name resolves to nothing but misspells a
+    /// variant. As a binding it would match every value.
+    #[error("`{name}` is not a variant in scope; did you mean `{variant}`?")]
     UppercaseBindingPattern {
         /// The name as written.
         name: String,
+        /// The variant the name most likely misspells.
+        variant: String,
     },
     /// A call to a function that reflects its type parameter
     /// (`for f in typeInfo::<T>()`) written without the turbofish that names
@@ -334,8 +349,8 @@ pub enum ResolveError {
         /// Backticked, comma-joined parameters that do have defaults.
         optional: String,
     },
-    /// A parameter default that is not a constant.
-    #[error("a parameter default must be a literal or a constant")]
+    /// A parameter default that is not a value known while compiling.
+    #[error("a parameter default must be a value known while compiling")]
     NonConstantDefault {
         /// Parameter the default was written on.
         name: String,
@@ -405,6 +420,8 @@ impl ResolveError {
             Self::PrivateItem { .. } => "private-item",
             Self::UnreflectableType { .. } => "unreflectable-type",
             Self::UppercaseBindingPattern { .. } => "uppercase-binding-pattern",
+            Self::GlobOfNonEnum { .. } => "glob-of-non-enum",
+            Self::OrPatternBindings { .. } => "or-pattern-bindings",
             Self::ReflectingCallWithoutType { .. } => "reflecting-call-without-type",
             Self::ReservedCallName { .. } => "reserved-call-name",
             Self::UnknownNamedArgument { .. } => "unknown-named-argument",
@@ -446,7 +463,7 @@ impl ResolveError {
             | Self::AmbiguousVariant { name, .. }
             | Self::MissingModuleSource { name }
             | Self::UnreflectableType { name }
-            | Self::UppercaseBindingPattern { name }
+            | Self::UppercaseBindingPattern { name, .. }
             | Self::ReflectingCallWithoutType { name }
             | Self::ReservedCallName { name, .. }
             | Self::UnknownNamedArgument { name, .. }
@@ -458,6 +475,8 @@ impl ResolveError {
             | Self::MissingRequiredArgument { .. }
             | Self::LoopControlOutsideLoop { .. }
             | Self::DataLastCallOrder { .. }
+            | Self::GlobOfNonEnum { .. }
+            | Self::OrPatternBindings { .. }
             | Self::UnknownLoopLabel { .. } => return false,
             Self::DependencyNotImported { module, .. } => module,
             Self::DependencyModuleCollision { module, .. } => module,
@@ -513,6 +532,8 @@ impl ResolveError {
             Self::ReservedCallName { .. } => "GR0020",
             Self::DataLastCallOrder { .. } => "GR0021",
             Self::UppercaseBindingPattern { .. } => "GR0022",
+            Self::GlobOfNonEnum { .. } => "GR0024",
+            Self::OrPatternBindings { .. } => "GR0025",
             Self::ReflectingCallWithoutType { .. } => "GR0023",
         }
     }
@@ -636,8 +657,10 @@ impl ResolveDiagnostic {
             ResolveError::NonConstantDefault { .. } => out.with_help(
                 "a default is spliced into every call that omits it, so it must be a \
                  value known while compiling: a literal (`10`, `-1`, `true`, `\"\"`), a \
-                 `const` or associated const, integer arithmetic over those, or a \
-                 `comptime` expression"
+                 `const` or associated const, integer arithmetic over those, a \
+                 `comptime` expression, a variant (`Mode::Fast`, `None`), a function, or \
+                 a construction, tuple, array, or collection literal built from those; \
+                 a call to a function or a parameter's value is computed at run time"
                     .to_string(),
             ),
             _ => out,
@@ -761,16 +784,24 @@ impl ResolveDiagnostic {
                  from anywhere in this package, or `pub` to make it part of the \
                  package's public API"
             )),
-            ResolveError::UppercaseBindingPattern { name } => {
+            ResolveError::OrPatternBindings { name } => out.with_help(format!(
+                "bind `{name}` in every alternative, or match the alternatives in \
+                 separate arms"
+            )),
+            ResolveError::GlobOfNonEnum { path } => out.with_help(format!(
+                "`::*` imports every variant of an enum; import the items of `{path}` by \
+                 name, as in `use {path}::{{a, b}}`"
+            )),
+            ResolveError::UppercaseBindingPattern { name, variant } => {
                 let mut chars = name.chars();
                 let lower: String = chars
                     .next()
                     .map(|first| first.to_lowercase().chain(chars).collect())
                     .unwrap_or_default();
                 out.with_help(format!(
-                    "a pattern name that starts with an uppercase letter names a unit \
-                     variant or a constant; a binding starts with a lowercase letter, \
-                     as in `{lower}`"
+                    "a name no variant, struct, or const answers binds every value, so \
+                     this arm would match whatever the others do not; write `{variant}` \
+                     to match the variant, or `{lower}` to bind the value"
                 ))
             }
             ResolveError::ReflectingCallWithoutType { name } => out.with_help(format!(

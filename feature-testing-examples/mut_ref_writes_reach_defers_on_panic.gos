@@ -1,0 +1,36 @@
+// What a callee writes through a `&mut` argument before it panics is what
+// the frames it unwinds through see: their deferred expressions read it, and
+// their own `&mut` parameters carry it on to their callers.
+
+struct Inner { items: Vec<i64> }
+
+struct Outer { inner: Inner, tags: Vec<String> }
+
+fn boom(items: &mut Vec<i64>) {
+    items.push(9)
+    panic("stop")
+}
+
+fn forward(items: &mut Vec<i64>) {
+    items.push(3)
+    boom(items)
+}
+
+fn through_field(tags: &mut Vec<String>, inner: &mut Inner) {
+    tags.push("field")
+    defer println(f"through_field sees {inner.items}")
+    forward(&mut inner.items)
+}
+
+fn through_two_fields(outer: &mut Outer) {
+    outer.tags.push("two")
+    through_field(&mut outer.tags, &mut outer.inner)
+}
+
+fn main() {
+    let mut outer = Outer { inner: Inner { items: #[1] }, tags: #["start"] }
+    let mut nested = Outer { inner: Inner { items: #[] }, tags: #[] }
+    defer println(f"main sees {outer.tags} {outer.inner.items} {nested.inner.items}")
+    nested.inner.items.push(5)
+    through_two_fields(&mut outer)
+}

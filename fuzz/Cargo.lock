@@ -194,6 +194,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64-simd"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "339abbe78e73178762e23bea9dfd08e697eb3f3301cd4be981c0f78ba5859195"
+dependencies = [
+ "outref",
+ "vsimd",
+]
+
+[[package]]
 name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -973,7 +983,6 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
- "zlib-rs",
 ]
 
 [[package]]
@@ -1174,11 +1183,11 @@ dependencies = [
 
 [[package]]
 name = "gossamer-abi"
-version = "0.70.0"
+version = "0.73.0"
 
 [[package]]
 name = "gossamer-ast"
-version = "0.70.0"
+version = "0.73.0"
 dependencies = [
  "gossamer-abi",
  "gossamer-lex",
@@ -1187,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-codegen-cranelift"
-version = "0.70.0"
+version = "0.73.0"
 dependencies = [
  "anyhow",
  "backtrace",
@@ -1210,21 +1219,21 @@ dependencies = [
 
 [[package]]
 name = "gossamer-core"
-version = "0.70.0"
+version = "0.73.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "gossamer-coro"
-version = "0.70.0"
+version = "0.73.0"
 dependencies = [
  "corosensei",
 ]
 
 [[package]]
 name = "gossamer-diagnostics"
-version = "0.70.0"
+version = "0.73.0"
 dependencies = [
  "gossamer-lex",
  "serde",
@@ -1250,7 +1259,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-hir"
-version = "0.70.0"
+version = "0.73.0"
 dependencies = [
  "gossamer-abi",
  "gossamer-ast",
@@ -1262,7 +1271,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-http3"
-version = "0.70.0"
+version = "0.73.0"
 dependencies = [
  "bytes",
  "h3",
@@ -1277,7 +1286,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-interp"
-version = "0.70.0"
+version = "0.73.0"
 dependencies = [
  "gossamer-abi",
  "gossamer-ast",
@@ -1304,7 +1313,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-lex"
-version = "0.70.0"
+version = "0.73.0"
 dependencies = [
  "serde",
  "thiserror",
@@ -1313,7 +1322,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-mir"
-version = "0.70.0"
+version = "0.73.0"
 dependencies = [
  "gossamer-abi",
  "gossamer-ast",
@@ -1325,7 +1334,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-parse"
-version = "0.70.0"
+version = "0.73.0"
 dependencies = [
  "gossamer-ast",
  "gossamer-diagnostics",
@@ -1336,7 +1345,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-pkg"
-version = "0.70.0"
+version = "0.73.0"
 dependencies = [
  "ed25519-dalek",
  "gossamer-resolve",
@@ -1355,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-resolve"
-version = "0.70.0"
+version = "0.73.0"
 dependencies = [
  "gossamer-ast",
  "gossamer-diagnostics",
@@ -1368,11 +1377,12 @@ dependencies = [
 
 [[package]]
 name = "gossamer-runtime"
-version = "0.70.0"
+version = "0.73.0"
 dependencies = [
  "aes-gcm",
  "argon2",
  "backtrace",
+ "base64-simd",
  "blake3",
  "bytes",
  "bzip2",
@@ -1428,6 +1438,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "unicode-ident",
  "unicode-normalization",
  "unicode-properties",
  "unicode-segmentation",
@@ -1445,14 +1456,14 @@ dependencies = [
 
 [[package]]
 name = "gossamer-sched"
-version = "0.70.0"
+version = "0.73.0"
 dependencies = [
  "gossamer-runtime",
 ]
 
 [[package]]
 name = "gossamer-std"
-version = "0.70.0"
+version = "0.73.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -1516,6 +1527,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "toml",
+ "unicode-ident",
  "unicode-normalization",
  "unicode-properties",
  "unicode-segmentation",
@@ -1531,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-template"
-version = "0.70.0"
+version = "0.73.0"
 dependencies = [
  "serde_json",
  "thiserror",
@@ -1539,7 +1551,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-types"
-version = "0.70.0"
+version = "0.73.0"
 dependencies = [
  "gossamer-ast",
  "gossamer-diagnostics",
@@ -1552,7 +1564,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-ws"
-version = "0.70.0"
+version = "0.73.0"
 dependencies = [
  "thiserror",
 ]
@@ -2198,6 +2210,12 @@ name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
+
+[[package]]
+name = "outref"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
 
 [[package]]
 name = "p256"
@@ -3305,6 +3323,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "vsimd"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
+
+[[package]]
 name = "walkdir"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3793,32 +3817,13 @@ dependencies = [
  "indexmap",
  "memchr",
  "typed-path",
- "zopfli",
 ]
-
-[[package]]
-name = "zlib-rs"
-version = "0.6.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b142a20ec14a91d5bc708c1dc21b080c550113d8aa77afa29635673a65dd02c5"
 
 [[package]]
 name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
-
-[[package]]
-name = "zopfli"
-version = "0.8.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f05cd8797d63865425ff89b5c4a48804f35ba0ce8d125800027ad6017d2b5249"
-dependencies = [
- "bumpalo",
- "crc32fast",
- "log",
- "simd-adler32",
-]
 
 [[package]]
 name = "zstd"

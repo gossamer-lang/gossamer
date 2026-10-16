@@ -1,0 +1,79 @@
+// Enums as map and set keys: an enum stored by value, one with a sequence
+// payload, and a recursive one key by content, so equal values share an
+// entry, and an ordered map or set keeps the order the enum derives.
+
+use std::collections::{BTreeMap, BTreeSet}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Level {
+    Low
+    Mid(i64)
+    High
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Named {
+    Anon
+    Called { rank: i64, label: String }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Shape {
+    Dot
+    Circle { r: i64, label: String }
+    Rect { w: i64, tags: Vec<String> }
+    Poly(Vec<i64>)
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Tree {
+    Leaf(i64)
+    Node(Vec<Tree>)
+}
+
+fn main() {
+    let mut named = { Named::Anon: 1 }
+    named[Named::Called { rank: 2, label: f"c{2}" }] = 2
+    named[Named::Called { rank: 2, label: "c2" }] = 3
+    println(f"named {named.len()} {named[Named::Called { rank: 2, label: "c2" }]}")
+
+    let mut levels: BTreeMap<Level, String> = BTreeMap::new()
+    levels.insert(Level::High, "h")
+    levels.insert(Level::Mid(300), "m300")
+    levels.insert(Level::Mid(-4), "m-4")
+    levels.insert(Level::Low, "l")
+    levels.insert(Level::Mid(300), "again")
+    println(f"levels {levels.len()} {levels.first_key_value()} {levels.last_key_value()}")
+    let middle: Vec<(Level, String)> = levels.range(Level::Mid(0)..Level::High).collect()
+    println(f"middle {middle}")
+
+    let mut shapes: BTreeMap<Shape, i64> = BTreeMap::new()
+    shapes.insert(Shape::Rect { w: 3, tags: #["a", "b"] }, 1)
+    shapes.insert(Shape::Poly(#[3, 1]), 2)
+    shapes.insert(Shape::Dot, 3)
+    shapes.insert(Shape::Circle { r: 1, label: "zz" }, 4)
+    shapes.insert(Shape::Circle { r: 1, label: "b" }, 5)
+    shapes.insert(Shape::Rect { w: 3, tags: #["a", "b"] }, 6)
+    shapes.insert(Shape::Poly(#[3, 1]), 7)
+    println(f"shapes {shapes.len()}")
+    for (s, n) in shapes {
+        println(f"  {s} {n}")
+    }
+
+    let mut seen: BTreeSet<Shape> = BTreeSet::new()
+    seen.insert(Shape::Poly(#[2]))
+    seen.insert(Shape::Rect { w: 1, tags: #[] })
+    seen.insert(Shape::Poly(#[2]))
+    println(f"seen {seen.len()} {seen.first()} {seen.last()}")
+
+    let mut trees: BTreeMap<Tree, String> = BTreeMap::new()
+    trees.insert(Tree::Leaf(0), "zero")
+    trees.insert(Tree::Node(#[Tree::Leaf(1), Tree::Node(#[Tree::Leaf(2)])]), "deep")
+    trees.insert(Tree::Node(#[Tree::Leaf(1), Tree::Node(#[Tree::Leaf(2)])]), "deep again")
+    println(f"trees {trees.len()} {trees.last_key_value()}")
+    let mut forest: BTreeSet<Tree> = BTreeSet::new()
+    for t in #[Tree::Leaf(1), Tree::Node(#[]), Tree::Node(#[]), Tree::Leaf(1)] {
+        forest.insert(t)
+    }
+    println(f"forest {forest.len()} {forest.contains(Tree::Node(#[]))}")
+}

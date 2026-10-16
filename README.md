@@ -122,6 +122,9 @@ optimized release binary behaves the same as an explicit language goal.
 **Memory: Automatic, Deterministic, with Checked Regions**
 Gossamer's automatic memory management uses deterministic reference counting,
 and features checked regions. No lifetime ceremony.
+Enums are laid out the Swift way: a non-recursive enum, and an `Option` or
+`Result` over one, is stored by value with no allocation; a recursive enum
+keeps a heap node per value, which is what gives it a finite size.
 
 **Commas or Newlines**
 

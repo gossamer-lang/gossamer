@@ -287,7 +287,9 @@ pub(crate) fn scalar_replace_short_lived_aggregates(body: &mut Body) {
                 else {
                     continue;
                 };
+                // `Return` reads the return slot without naming it.
                 if !place.is_simple()
+                    || place.local == Local::RETURN
                     || !aggregate_is_confined_to_block(body, block_index, place.local)
                     || !aggregate_operands_stable_after(&block.stmts, idx, operands)
                     || !aggregate_uses_are_direct_fields(

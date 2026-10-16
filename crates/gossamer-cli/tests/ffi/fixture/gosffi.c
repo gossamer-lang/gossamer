@@ -15,6 +15,7 @@
 #define EXPORT __declspec(dllexport)
 #else
 #include <pthread.h>
+#include <time.h>
 #define EXPORT __attribute__((visibility("default")))
 #endif
 
@@ -180,6 +181,25 @@ EXPORT void fire_on_thread(int value) {
     WaitForSingleObject(thread, INFINITE);
     CloseHandle(thread);
 }
+
+/* Runs the stored handler on a detached thread once `delay_ms` has passed,
+   the way a library delivers an event that arrives after its caller moved on. */
+struct fire_later_args { int value; int delay_ms; };
+
+static DWORD WINAPI fire_later_thread(LPVOID arg) {
+    struct fire_later_args *args = (struct fire_later_args *)arg;
+    Sleep((DWORD)args->delay_ms);
+    fire(args->value);
+    free(args);
+    return 0;
+}
+
+EXPORT void fire_later_on_thread(int value, int delay_ms) {
+    struct fire_later_args *args = malloc(sizeof *args);
+    args->value = value;
+    args->delay_ms = delay_ms;
+    CloseHandle(CreateThread(NULL, 0, fire_later_thread, args, 0, NULL));
+}
 #else
 static void *fire_thread(void *arg) {
     fire((int)(intptr_t)arg);
@@ -190,6 +210,26 @@ EXPORT void fire_on_thread(int value) {
     pthread_t thread;
     pthread_create(&thread, NULL, fire_thread, (void *)(intptr_t)value);
     pthread_join(thread, NULL);
+}
+
+struct fire_later_args { int value; int delay_ms; };
+
+static void *fire_later_thread(void *arg) {
+    struct fire_later_args *args = (struct fire_later_args *)arg;
+    struct timespec delay = { args->delay_ms / 1000, (long)(args->delay_ms % 1000) * 1000000L };
+    nanosleep(&delay, NULL);
+    fire(args->value);
+    free(args);
+    return NULL;
+}
+
+EXPORT void fire_later_on_thread(int value, int delay_ms) {
+    struct fire_later_args *args = malloc(sizeof *args);
+    args->value = value;
+    args->delay_ms = delay_ms;
+    pthread_t thread;
+    pthread_create(&thread, NULL, fire_later_thread, args);
+    pthread_detach(thread);
 }
 #endif
 

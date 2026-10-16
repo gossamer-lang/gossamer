@@ -1,0 +1,22 @@
+// `runtime::is_main_thread` answers true on the thread `main` starts on and
+// false inside a goroutine.
+
+use std::runtime
+use std::sync::channel
+
+fn report(label: String) {
+    println(f"{label} {runtime::is_main_thread()}")
+}
+
+fn main() {
+    report("main")
+    let tx, rx = channel()
+    spawn(|| {
+        tx.send(runtime::is_main_thread())
+        tx.close()
+    })
+    while let Some(on_main) = rx.recv() {
+        println(f"goroutine {on_main}")
+    }
+    report("main again")
+}

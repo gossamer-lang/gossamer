@@ -1015,6 +1015,8 @@ impl Vm {
             // The VM's own bytecode comes from the unlifted `program`, so the
             // rewrite happens on a private copy.
             let lifted = gossamer_hir::lift_closures(program.clone(), &mut jit_tcx);
+            // The VM's enum values are heap nodes the JIT reads in place.
+            jit_tcx.keep_enums_on_heap();
             let mut bodies = gossamer_mir::lower_program(&lifted, &mut jit_tcx);
             bodies.retain(|body| !slice_pattern_bodies.contains(body.name.as_str()));
             // Drop what no entry reaches before the passes that are paid per

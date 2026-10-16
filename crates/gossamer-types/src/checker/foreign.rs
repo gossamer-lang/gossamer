@@ -207,10 +207,10 @@ impl TypeChecker<'_> {
     }
 
     /// Why `elem` cannot be what an `ffi::Ptr` points at, or `None` when it
-    /// can: a scalar, a `Ptr`, a foreign type, or a `#[repr(C)]` plain-data
-    /// struct.
+    /// can: a scalar, a `Ptr`, a foreign type, a `#[repr(C)]` plain-data
+    /// struct, or an `ffi::Union` of members with a C layout.
     pub(super) fn pointee_problem(&mut self, elem: Ty) -> Option<String> {
-        let elem = self.infer.resolve(self.tcx, elem);
+        let elem = self.deep_resolve(elem);
         if self.foreign_scalar(elem)
             || self.ffi_ptr_elem(elem).is_some()
             || self.opaque_name(elem).is_some()
@@ -221,8 +221,9 @@ impl TypeChecker<'_> {
         {
             return None;
         }
-        if let Some(TyKind::Adt { def, .. }) = self.tcx.kind(elem).cloned()
-            && self.repr_c_structs.contains(&def)
+        if let Some(TyKind::Adt { def, substs }) = self.tcx.kind(elem).cloned()
+            && (self.repr_c_structs.contains(&def)
+                || self.tcx.union_members(def, &substs).is_some())
             && self.tcx.c_leaves(elem).is_some()
         {
             return None;
@@ -593,9 +594,26 @@ impl TypeChecker<'_> {
         }
     }
 
+    /// GT0105 for an `ffi` memory operation or layout query over a type
+    /// parameter: the C layout these lower to is settled where the call is
+    /// written, and a parameter's is known only at each instantiation.
+    fn type_parameter_layout(&mut self, ty: Ty, context: &str) -> Option<TypeError> {
+        let ty = self.deep_resolve(ty);
+        if !matches!(self.tcx.kind(ty), Some(TyKind::Param { .. })) {
+            return None;
+        }
+        Some(TypeError::Foreign(ForeignError::PointerTarget {
+            ty: self.render_public_ty(ty),
+            context: format!(
+                "{context}: a type parameter's layout is known only where the function is \
+                 instantiated; make the operation's type concrete there"
+            ),
+        }))
+    }
+
     /// Why `ty` has no C size, or `None` when it has one.
     fn c_layout_problem(&mut self, ty: Ty) -> Option<TypeError> {
-        let ty = self.infer.resolve(self.tcx, ty);
+        let ty = self.deep_resolve(ty);
         if matches!(
             self.tcx.kind(ty),
             Some(TyKind::Param { .. } | TyKind::Var(_))
@@ -607,6 +625,16 @@ impl TypeChecker<'_> {
                 name,
                 context: "its size and layout stay in the native library".to_string(),
             }));
+        }
+        // A fixed array is laid out as C lays out `T name[N]`: as a field, a
+        // union member, or a size query, though no `Ptr` points at one.
+        if let Some(TyKind::Array { elem, .. }) = self.tcx.kind(ty).cloned() {
+            return self.c_layout_problem(elem).map(|_| {
+                TypeError::Foreign(ForeignError::PointerTarget {
+                    ty: self.render_public_ty(ty),
+                    context: "it has no size or offsets to ask for".to_string(),
+                })
+            });
         }
         if self.pointee_problem(ty).is_some() || self.tcx.plain_layout(ty).is_none() {
             return Some(TypeError::Foreign(ForeignError::PointerTarget {
@@ -624,6 +652,12 @@ impl TypeChecker<'_> {
                 else {
                     return;
                 };
+                if let Some(error) =
+                    self.type_parameter_layout(target, "it has no size or offsets to ask for")
+                {
+                    self.emit(error, pending.span);
+                    return;
+                }
                 if let Some(error) = self.c_layout_problem(target) {
                     self.emit(error, pending.span);
                     return;
@@ -801,6 +835,10 @@ impl TypeChecker<'_> {
         let Some(target) = target else {
             return;
         };
+        if let Some(error) = self.type_parameter_layout(target, &format!("{what} cannot copy it")) {
+            self.emit(error, span);
+            return;
+        }
         if let Some(name) = self.opaque_name(target) {
             self.emit(
                 TypeError::Foreign(ForeignError::OpaqueByValue {

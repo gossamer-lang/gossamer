@@ -1,11 +1,11 @@
 # `lang::keyword_arguments`
 
-Keyword arguments and constant parameter defaults: a call may name any parameter (`volume(depth: 4, width: 2)`), and a parameter may declare a constant default (`fn volume(width: i64, height: i64 = 2)`) that is spliced into every call omitting it. Positional arguments come first, then names. Both are caller-side spellings rewritten into the callee's declared order before type checking, so the calling convention is unchanged. A name on a method call is matched when every type declaring that method name would rewrite the call identically; when they disagree the call is reported (GR0013) rather than guessed.
+Keyword arguments and parameter defaults: a call may name any parameter (`volume(depth: 4, width: 2)`), and a parameter may declare a default known while compiling (`fn volume(width: i64, height: i64 = 2)`, `mode: Mode = Mode::Fast`, `parent: Option<Window> = None`) that is spliced into every call omitting it, meaning what it means where the function is declared. Positional arguments come first, then names. Both are caller-side spellings rewritten into the callee's declared order before type checking, so the calling convention is unchanged. A name on a method call is matched when every type declaring that method name would rewrite the call identically; when they disagree the call is reported (GR0013) rather than guessed.
 
 <!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
 
 A call may name the parameter each argument fills, and a parameter may
-declare a constant default that callers can leave out.
+declare a default that callers can leave out.
 
 ```gossamer
 fn volume(width: i64, height: i64 = 2, depth: i64 = 3) -> i64 {
@@ -63,9 +63,9 @@ fn label(text: String, prefix: String = "item", times: i64 = 1) -> String
 A default must be a value known while compiling: an integer, float,
 string, char, byte, or bool literal, optionally negated (`-1`), a `const`
 or an associated const, integer arithmetic over those, or a `comptime`
-expression. It folds to a literal that is spliced into every call that
-omits it. A const is resolved where the function is declared, so every
-call receives the declaration's value:
+expression. A scalar const or arithmetic over consts folds to a literal
+that is spliced into every call that omits it. A const is resolved where
+the function is declared, so every call receives the declaration's value:
 
 ```gossamer
 const DEFAULT_TIMEOUT: i64 = 30
@@ -79,12 +79,40 @@ fn main() {
 }
 ```
 
-An expression that would have to be resolved separately at each call site
-is rejected:
+A default may also hold data: an enum variant (`Mode::Fast`, `None`,
+`Some(4)`, `Ok(0)`), a struct construction, a tuple, an array, a `Vec`,
+`Map`, or `Set` literal, a function, or a const of any type, built from
+values that are themselves known while compiling. Every name in it means
+what it means where the function is declared, so a call site that has
+another `Mode` or `ORIGIN` in scope still receives the declaration's:
+
+```gossamer
+enum Profile { Core, Compat }
+
+struct Size { w: i64, h: i64 }
+
+fn open(
+    title: String
+    profile: Profile = Profile::Core
+    size: Size = Size { w: 800, h: 600 }
+    parent: Option<String> = None
+    tags: Vec<String> = #[]
+) -> String {
+    f"{title} {size.w}x{size.h} {parent} {tags.len()}"
+}
+
+fn main() {
+    println(open("main"))
+    println(open("tools", size: Size { w: 320, h: 200 }, parent: Some("main")))
+}
+```
+
+A default whose value is computed at run time - a call to a function, a
+closure, a `static`, or another parameter - is rejected:
 
 <!-- compile_fail GR0014 -->
 ```gossamer
-fn f(a: i64, b: i64 = a + 1)   // error[GR0014]: a parameter default must be a literal or a constant
+fn f(a: i64, b: i64 = a + 1)   // error[GR0014]: a parameter default must be a value known while compiling
 ```
 
 Defaults are per call site. Two calls to the same function never share a
@@ -135,6 +163,6 @@ passing every argument by position always works.
 | Code | Meaning |
 |---|---|
 | `GR0013` | A name that matches no parameter, is given twice, follows a positional argument, or is on a method whose receiver's type is not settled where several types declare it differently. |
-| `GR0014` | A parameter default that is not a literal or a constant. |
+| `GR0014` | A parameter default that is not a value known while compiling. |
 
 `gos explain GR0013` and `gos explain GR0014` expand both.

@@ -98,3 +98,39 @@ fn main() {
     );
     project.expect_everywhere("41\n42\n101");
 }
+
+#[test]
+fn a_union_is_a_pointee_with_fixed_array_members() {
+    let project = Project::new(
+        "layout-union-pointee",
+        r#"use std::ffi
+use std::ffi::Ptr
+
+#[repr(C)]
+struct Pair {
+    a: u32
+    b: u32
+}
+
+type Word = ffi::Union<(u32, Pair, [u8; 12])>
+
+unsafe extern "C" {
+    fn memset(dst: Ptr<Word>, value: ffi::c_int, n: ffi::size_t) -> Ptr<Word>
+}
+
+fn main() {
+    println(f"size {ffi::size_of::<Word>()} align {ffi::align_of::<Word>()}")
+    let p: Ptr<Word> = unsafe { ffi::alloc(2) }
+    unsafe { ffi::write(p, ffi::Union::new(Pair { a: 7, b: 9 })) }
+    let w: Word = unsafe { ffi::read(p) }
+    let pair: Pair = w.get()
+    println(f"pair {pair.a} {pair.b} first {w.get::<u32>()}")
+    unsafe { memset(p, 1, 12) }
+    let again: Word = unsafe { ffi::read(p) }
+    println(f"after memset {again.get::<u32>()}")
+    unsafe { ffi::free(p) }
+}
+"#,
+    );
+    project.expect_everywhere("size 12 align 4\npair 7 9 first 7\nafter memset 16843009");
+}

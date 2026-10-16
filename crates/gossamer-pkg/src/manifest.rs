@@ -101,6 +101,27 @@ pub struct NativeSpec {
     /// `native.feature` - the package feature the sources belong to; the
     /// sources compile only when it is enabled.
     pub feature: Option<String>,
+    /// `[native.cmake]` - a project built with `cmake` for the
+    /// libraries its `#[link]` declarations name.
+    pub cmake: Option<CmakeSpec>,
+}
+
+/// `[native.cmake]` table: a project built with `cmake` for the libraries it
+/// provides, statically for native builds and as shared libraries for the
+/// bytecode VM and the JIT.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CmakeSpec {
+    /// `native.cmake.source` - the directory holding `CMakeLists.txt`,
+    /// relative to the manifest directory.
+    pub source: String,
+    /// `native.cmake.provides` - the library names the build satisfies: a
+    /// `#[link(name = ..)]` naming one links the package's own build.
+    pub provides: Vec<String>,
+    /// `native.cmake.options` - cache entries passed as `-DNAME=VALUE`.
+    pub options: BTreeMap<String, String>,
+    /// `native.cmake.feature` - the package feature the build belongs to;
+    /// it runs only when that feature is enabled.
+    pub feature: Option<String>,
 }
 
 /// One `[[bin]]` entry.
@@ -823,17 +844,17 @@ impl Manifest {
         }
         if let Some(native) = &self.native {
             out.push_str("\n[native]\n");
-            out.push_str(&format!("sources = {}\n", quoted_list(&native.sources)));
+            if !native.sources.is_empty() {
+                out.push_str(&format!("sources = {}\n", quoted_list(&native.sources)));
+            }
             if !native.include.is_empty() {
                 out.push_str(&format!("include = {}\n", quoted_list(&native.include)));
             }
             if !native.defines.is_empty() {
-                let pairs: Vec<String> = native
-                    .defines
-                    .iter()
-                    .map(|(name, value)| format!("{} = {}", quoted(name), quoted(value)))
-                    .collect();
-                out.push_str(&format!("defines = {{ {} }}\n", pairs.join(", ")));
+                out.push_str(&format!(
+                    "defines = {}\n",
+                    inline_string_table(&native.defines)
+                ));
             }
             if !native.flags.is_empty() {
                 out.push_str(&format!("flags = {}\n", quoted_list(&native.flags)));
@@ -841,8 +862,31 @@ impl Manifest {
             if let Some(feature) = &native.feature {
                 out.push_str(&format!("feature = {}\n", quoted(feature)));
             }
+            if let Some(cmake) = &native.cmake {
+                out.push_str("\n[native.cmake]\n");
+                out.push_str(&format!("source = {}\n", quoted(&cmake.source)));
+                out.push_str(&format!("provides = {}\n", quoted_list(&cmake.provides)));
+                if !cmake.options.is_empty() {
+                    out.push_str(&format!(
+                        "options = {}\n",
+                        inline_string_table(&cmake.options)
+                    ));
+                }
+                if let Some(feature) = &cmake.feature {
+                    out.push_str(&format!("feature = {}\n", quoted(feature)));
+                }
+            }
         }
     }
+}
+
+/// `{ "K" = "V", .. }` for a table of strings.
+fn inline_string_table(entries: &BTreeMap<String, String>) -> String {
+    let pairs: Vec<String> = entries
+        .iter()
+        .map(|(name, value)| format!("{} = {}", quoted(name), quoted(value)))
+        .collect();
+    format!("{{ {} }}", pairs.join(", "))
 }
 
 /// `text` as a TOML basic string, with its quotes and backslashes escaped.
@@ -1085,49 +1129,103 @@ fn parse_native(root: &toml::Table) -> Result<Option<NativeSpec>, ManifestError>
     let Some(table) = optional_toml_table(root, "native")? else {
         return Ok(None);
     };
-    for key in table.keys() {
-        if !matches!(
-            key.as_str(),
-            "sources" | "include" | "defines" | "flags" | "feature"
-        ) {
-            return Err(ManifestError::Malformed {
-                line_no: 0,
-                line: format!("unknown key `{key}` in [native]"),
-            });
-        }
-    }
+    reject_unknown_keys(
+        table,
+        &["sources", "include", "defines", "flags", "feature", "cmake"],
+        "[native]",
+    )?;
+    let cmake = parse_native_cmake(table)?;
     let sources =
         optional_toml_string_array(table, "sources", "native.sources")?.unwrap_or_default();
-    if sources.is_empty() {
+    if sources.is_empty() && (cmake.is_none() || table.contains_key("sources")) {
         return Err(ManifestError::WrongType {
             field: "native.sources".to_string(),
             expected: "non-empty array of source paths",
         });
     }
-    let mut defines = BTreeMap::new();
-    if let Some(value) = table.get("defines") {
-        let Some(entries) = value.as_table() else {
-            return Err(ManifestError::WrongType {
-                field: "native.defines".to_string(),
-                expected: "table of strings",
-            });
-        };
-        for (name, value) in entries {
-            let value = value.as_str().ok_or_else(|| ManifestError::WrongType {
-                field: format!("native.defines.{name}"),
-                expected: "string",
-            })?;
-            defines.insert(name.clone(), value.to_string());
-        }
-    }
     Ok(Some(NativeSpec {
         sources,
         include: optional_toml_string_array(table, "include", "native.include")?
             .unwrap_or_default(),
-        defines,
+        defines: optional_string_table(table, "defines", "native.defines")?,
         flags: optional_toml_string_array(table, "flags", "native.flags")?.unwrap_or_default(),
         feature: optional_toml_str(table, "feature", "native.feature")?,
+        cmake,
     }))
+}
+
+/// The `[native.cmake]` table, when the `[native]` table has one.
+fn parse_native_cmake(native: &toml::Table) -> Result<Option<CmakeSpec>, ManifestError> {
+    let Some(table) = optional_toml_table(native, "cmake")? else {
+        return Ok(None);
+    };
+    reject_unknown_keys(
+        table,
+        &["source", "provides", "options", "feature"],
+        "[native.cmake]",
+    )?;
+    let source = required_toml_str(
+        table,
+        "source",
+        "native.cmake.source",
+        "native.cmake.source",
+    )?
+    .to_string();
+    let provides =
+        optional_toml_string_array(table, "provides", "native.cmake.provides")?.unwrap_or_default();
+    if provides.is_empty() {
+        return Err(ManifestError::WrongType {
+            field: "native.cmake.provides".to_string(),
+            expected: "non-empty array of library names",
+        });
+    }
+    Ok(Some(CmakeSpec {
+        source,
+        provides,
+        options: optional_string_table(table, "options", "native.cmake.options")?,
+        feature: optional_toml_str(table, "feature", "native.cmake.feature")?,
+    }))
+}
+
+/// `Malformed` for the first key of `table` outside `known`.
+fn reject_unknown_keys(
+    table: &toml::Table,
+    known: &[&str],
+    name: &str,
+) -> Result<(), ManifestError> {
+    match table.keys().find(|key| !known.contains(&key.as_str())) {
+        Some(key) => Err(ManifestError::Malformed {
+            line_no: 0,
+            line: format!("unknown key `{key}` in {name}"),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// The table of strings at `key`, empty when absent.
+fn optional_string_table(
+    table: &toml::Table,
+    key: &str,
+    field: &str,
+) -> Result<BTreeMap<String, String>, ManifestError> {
+    let mut out = BTreeMap::new();
+    let Some(value) = table.get(key) else {
+        return Ok(out);
+    };
+    let Some(entries) = value.as_table() else {
+        return Err(ManifestError::WrongType {
+            field: field.to_string(),
+            expected: "table of strings",
+        });
+    };
+    for (name, value) in entries {
+        let value = value.as_str().ok_or_else(|| ManifestError::WrongType {
+            field: format!("{field}.{name}"),
+            expected: "string",
+        })?;
+        out.insert(name.clone(), value.to_string());
+    }
+    Ok(out)
 }
 
 /// `[lib] kind`: one kind as a string or several as an array, each listed

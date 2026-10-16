@@ -48,6 +48,7 @@ pub(crate) fn run(options: &Options) -> Result<()> {
     for target in &targets {
         let ast = clang_ast(&clang, options, target.as_deref())?;
         let macros = clang_macros(&clang, options, target.as_deref())?;
+        let macros = evaluate_macros(&clang, options, target.as_deref(), macros)?;
         let mut model = Model::new(options);
         model.read(&ast)?;
         model.select();
@@ -163,6 +164,128 @@ fn clang_macros(
         }
     }
     Ok(macros)
+}
+
+/// `macros` with each replacement that is an integer constant expression
+/// but no literal (`SDL_UINT64_C(0x20)`, `(A | B)`) replaced by the value
+/// clang computes for it, spelled as a literal of its signedness. clang
+/// evaluates every candidate in one translation unit: as an enumerator's
+/// value, beside a `__typeof__` that says whether the expression is an
+/// unsigned integer. A replacement that is not an integer constant fails
+/// there and keeps its text, which [`constant`] then leaves out.
+fn evaluate_macros(
+    clang: &Path,
+    options: &Options,
+    target: Option<&str>,
+    macros: Vec<(String, String)>,
+) -> Result<Vec<(String, String)>> {
+    let candidates: Vec<&str> = macros
+        .iter()
+        .filter(|(name, value)| {
+            !value.is_empty() && constant(name, value).is_none() && balanced(value)
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if candidates.is_empty() {
+        return Ok(macros);
+    }
+    let header = std::path::absolute(&options.header).unwrap_or_else(|_| options.header.clone());
+    let mut unit = format!("#include \"{}\"\n", header.display());
+    for name in &candidates {
+        let _ = writeln!(
+            unit,
+            "typedef __typeof__(({name})) __gos_type_{name};\n\
+             enum {{ __gos_value_{name} = (long long)({name}) }};"
+        );
+    }
+    let path = std::env::temp_dir().join(format!("gos-bindgen-macros-{}.c", std::process::id()));
+    std::fs::write(&path, unit).with_context(|| format!("writing {}", path.display()))?;
+    let out = clang_command(clang, options, target)
+        .args(["-w", "-ferror-limit=0", "-Xclang", "-ast-dump=json"])
+        .arg(&path)
+        .output()
+        .with_context(|| format!("running {}", clang.display()));
+    let _ = std::fs::remove_file(&path);
+    // Candidates that are not integer constants are errors in the unit; the
+    // AST still holds every one that evaluated.
+    let Ok(ast) = serde_json::from_slice::<Value>(&out?.stdout) else {
+        return Ok(macros);
+    };
+    let mut unsigned = std::collections::BTreeMap::new();
+    let mut values = std::collections::BTreeMap::new();
+    for node in children(&ast) {
+        let name = node.get("name").and_then(Value::as_str).unwrap_or_default();
+        if let Some(macro_name) = name.strip_prefix("__gos_type_") {
+            let ty = node
+                .get("type")
+                .and_then(|ty| ty.get("desugaredQualType").or_else(|| ty.get("qualType")))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if let Some(is_unsigned) = integer_signedness(ty) {
+                unsigned.insert(macro_name.to_string(), is_unsigned);
+            }
+        }
+        if node.get("kind").and_then(Value::as_str) == Some("EnumDecl") {
+            for constant in children(node) {
+                let name = constant
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if let Some(macro_name) = name.strip_prefix("__gos_value_")
+                    && let Some(value) = constant_value(constant)
+                {
+                    values.insert(macro_name.to_string(), value);
+                }
+            }
+        }
+    }
+    Ok(macros
+        .into_iter()
+        .map(|(name, value)| {
+            match (values.get(&name), unsigned.get(&name)) {
+                // The enumerator holds the value cast to `long long`, which
+                // an unsigned value above its range wraps into.
+                (Some(&number), Some(true)) => (name, format!("{}u", number.cast_unsigned())),
+                (Some(&number), Some(false)) => (name, number.to_string()),
+                _ => (name, value),
+            }
+        })
+        .collect())
+}
+
+/// Whether `text` closes every bracket it opens and holds no statement or
+/// directive, so it parses on its own inside parentheses.
+fn balanced(text: &str) -> bool {
+    let mut depth = 0i64;
+    for c in text.chars() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            ';' | '#' => return false,
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+/// `Some(true)` for an unsigned C integer type, `Some(false)` for a signed
+/// one, `None` for any other type.
+fn integer_signedness(ty: &str) -> Option<bool> {
+    let ty = ty.trim();
+    if ty.starts_with("enum ") {
+        return Some(false);
+    }
+    match ty {
+        "_Bool" | "unsigned char" | "unsigned short" | "unsigned int" | "unsigned long"
+        | "unsigned long long" => Some(true),
+        "char" | "signed char" | "short" | "int" | "long" | "long long" => Some(false),
+        _ => None,
+    }
 }
 
 /// A C type, as the declarations need it.
@@ -348,6 +471,13 @@ impl Model {
             }
             return;
         }
+        // `typedef enum name name;` names the enum read just before it,
+        // whose constants are already recorded under that name.
+        if qual.strip_prefix("enum ") == Some(name.as_str())
+            && matches!(self.decls.get(&name), Some(Decl::Enum(_)))
+        {
+            return;
+        }
         let ty = self.ctype(&qual);
         self.insert(&name, Decl::Alias(ty), local);
     }
@@ -479,6 +609,9 @@ impl Model {
 
     /// The C type `qual` spells.
     fn ctype(&self, qual: &str) -> CType {
+        if is_va_list(qual) {
+            return CType::Unsupported("va_list".to_string());
+        }
         let raw = qual.trim();
         // `T *`, `const T *`, `T *const`: a pointer whose pointee is `const`
         // when that word qualifies the text before the last `*`.
@@ -677,8 +810,9 @@ impl Model {
                 "    // `{name}` takes a variable argument list; call it through a fixed-arity C shim\n    // in `[native]` sources.\n"
             ),
             Decl::Function { params, ret, .. } => {
+                let names: Vec<&str> = params.iter().map(|param| param.name.as_str()).collect();
                 let mut list = Vec::new();
-                for param in params {
+                for (param, ident) in params.iter().zip(parameter_identifiers(&names)) {
                     let ty = Self::spell(&param.ty, Place::Param);
                     let Some(ty) = ty else {
                         return Some(format!(
@@ -686,7 +820,7 @@ impl Model {
                             describe(&param.ty)
                         ));
                     };
-                    list.push(format!("{}: {ty}", identifier(&param.name)));
+                    list.push(format!("{ident}: {ty}"));
                 }
                 let ret = match ret {
                     CType::Void => String::new(),
@@ -955,6 +1089,36 @@ fn identifier(name: &str) -> String {
     }
 }
 
+/// A function's parameter names as Gossamer identifiers, unique within the
+/// list. A keyword or a compiler-known call gains a trailing `_`; any other
+/// name keeps its C spelling.
+fn parameter_identifiers(names: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(names.len());
+    for name in names {
+        let mut ident = identifier(name);
+        if gossamer_parse::builtin_macros::is_reserved_call_name(&ident) {
+            ident.push('_');
+        }
+        while out.contains(&ident) {
+            ident.push('_');
+        }
+        out.push(ident);
+    }
+    out
+}
+
+/// Whether the C type `text` is a `va_list` under any of the spellings the
+/// platform headers give it. A function taking one is reached only from C.
+fn is_va_list(text: &str) -> bool {
+    let base = strip_qualifiers(text);
+    let base = base.trim_end_matches('*');
+    let base = base.strip_prefix("struct").unwrap_or(base);
+    matches!(
+        base.trim(),
+        "va_list" | "__builtin_va_list" | "__gnuc_va_list" | "__va_list_tag" | "__va_list"
+    )
+}
+
 /// `const NAME: T = value` for a macro whose replacement is one literal.
 fn constant(name: &str, value: &str) -> Option<String> {
     let mut text = value.trim();
@@ -1121,7 +1285,7 @@ fn merge(per_target: &[TargetItems], options: &Options) -> String {
         }
     }
     let mut out = format!(
-        "// Gossamer declarations for `{header}`, written by `gos bindgen --c`.\n// Regenerate them rather than editing by hand. A parameter pointing at\n// scalars crosses as a slice (`[T]` for `const T *`, `&mut [T]` otherwise,\n// `u8` for `char`); other pointers are `Option<ffi::Ptr<T>>`.\n\nuse std::ffi\n\n"
+        "// Gossamer declarations for `{header}`, written by `gos bindgen --c`.\n// Regenerate them rather than editing by hand. A parameter pointing at\n// scalars crosses as a slice (`[T]` for `const T *`, `&mut [T]` otherwise,\n// `u8` for `char`); other pointers are `Option<ffi::Ptr<T>>`. Names keep\n// their C spelling.\n\n#![lint(allow(non_camel_case_types), allow(non_snake_case), allow(non_upper_case_globals))]\n\nuse std::ffi\n\n"
     );
     out.push_str(&consts);
     if !consts.is_empty() && !consts.ends_with("\n\n") {
@@ -1173,6 +1337,30 @@ mod tests {
         assert!(glob("git_*_open", "git_repository_open"));
         assert!(!glob("git_*", "svn_open"));
         assert!(glob("exact", "exact"));
+    }
+
+    #[test]
+    fn parameter_names_avoid_compiler_calls_and_keep_c_spellings() {
+        assert_eq!(parameter_identifiers(&["format", "w"]), ["format_", "w"]);
+        assert_eq!(
+            parameter_identifiers(&["Yplane", "UVpitch"]),
+            ["Yplane", "UVpitch"]
+        );
+        assert_eq!(parameter_identifiers(&["A", "a"]), ["A", "a"]);
+        assert_eq!(
+            parameter_identifiers(&["type", "panic"]),
+            ["type_", "panic_"]
+        );
+    }
+
+    #[test]
+    fn a_va_list_is_recognised_in_every_spelling() {
+        assert!(is_va_list("va_list"));
+        assert!(is_va_list("__builtin_va_list"));
+        assert!(is_va_list("struct __va_list_tag *"));
+        assert!(is_va_list("__gnuc_va_list"));
+        assert!(!is_va_list("struct va_listing *"));
+        assert!(!is_va_list("int"));
     }
 
     #[test]

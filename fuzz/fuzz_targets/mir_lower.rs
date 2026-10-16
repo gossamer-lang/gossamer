@@ -36,8 +36,8 @@ fuzz_target!(|data: &[u8]| {
         // cleanly. The parse fuzz target covers that path.
         return;
     }
-    let (resolutions, r_diags) = resolve_source_file(&sf);
-    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &resolutions);
+    let (mut resolutions, r_diags) = resolve_source_file(&sf);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
     if !r_diags.is_empty() {
         return;
     }

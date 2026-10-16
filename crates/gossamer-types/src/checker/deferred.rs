@@ -382,6 +382,7 @@ impl TypeChecker<'_> {
                 }
                 let param_ty = self.type_from_ast(ty);
                 self.check_param_reference_pattern(pattern, param_ty);
+                self.reject_refutable_param_pattern(pattern, param_ty);
                 self.bind_pattern(pattern, param_ty);
             }
             FnParam::Receiver(recv) => {
@@ -790,7 +791,30 @@ impl TypeChecker<'_> {
                         .unwrap_or(res),
                     other => other,
                 });
-                let (struct_ty, substs_table) = if let Some(res) = head_res {
+                // A literal named through a `type` alias builds the type the
+                // alias stands for.
+                let alias_struct = match head_res {
+                    Some(Resolution::Def {
+                        def,
+                        kind: gossamer_resolve::DefKind::TypeAlias,
+                    }) => self
+                        .struct_literal_alias_type(def, path, expr.span)
+                        .map(|ty| self.infer.resolve(self.tcx, ty))
+                        .and_then(|ty| match self.tcx.kind_of(ty).clone() {
+                            TyKind::Adt { def, substs }
+                                if self.resolutions.kind_of(def)
+                                    == Some(gossamer_resolve::DefKind::Struct) =>
+                            {
+                                Some((def, ty, substs.types()))
+                            }
+                            _ => None,
+                        }),
+                    _ => None,
+                };
+                let (struct_ty, substs_table) = if let Some((def, ty, substs)) = alias_struct {
+                    self.defer_adt_bounds(def, &substs, expr.span);
+                    (ty, substs)
+                } else if let Some(res) = head_res {
                     match res {
                         Resolution::Def {
                             def,
@@ -935,6 +959,26 @@ impl TypeChecker<'_> {
                         self.reject_private_field_of(def, &field_name, expr.span);
                     }
                 }
+                // A struct-variant literal (`Shape::Rect { w: 1 }`) of a
+                // non-generic enum expects each field value at the type the
+                // variant declares, as a struct literal's field does.
+                let variant_fields: Option<Vec<(String, Ty)>> = match head_res {
+                    Some(Resolution::Def {
+                        kind: gossamer_resolve::DefKind::Variant | gossamer_resolve::DefKind::Enum,
+                        ..
+                    }) if declared.is_none() => {
+                        let segments = &path.segments;
+                        segments.len().checked_sub(2).and_then(|at| {
+                            let enum_name = segments[at].name.name.clone();
+                            let variant = segments[at + 1].name.name.clone();
+                            self.enum_tys.contains_key(&enum_name).then_some(())?;
+                            self.enum_variant_named_payloads
+                                .get(&(enum_name, variant))
+                                .cloned()
+                        })
+                    }
+                    _ => None,
+                };
                 let mut literal_consts =
                     LiteralConsts::new(self.fn_generic_const_mask_of_ty(struct_ty));
                 for (field_idx, field) in fields.iter().enumerate() {
@@ -955,6 +999,14 @@ impl TypeChecker<'_> {
                                     declared_fields.iter().find(|(n, _)| n == &field.name.name)
                                 })
                                 .map(|(_, dty)| *dty)
+                        });
+                        let dty_sub = dty_sub.or_else(|| {
+                            variant_fields.as_ref().and_then(|fields| {
+                                fields
+                                    .iter()
+                                    .find(|(n, _)| n == &field.name.name)
+                                    .map(|(_, ty)| *ty)
+                            })
                         });
                         let dty_sub =
                             dty_sub.map(|dty| self.subst_params_in_ty(dty, &substs_table));

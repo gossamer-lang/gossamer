@@ -749,6 +749,7 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
                                     && (p.local.0 as usize) < n_locals
                                     && (aliases.sourced[p.local.0 as usize]
                                         || aliases.target[p.local.0 as usize]
+                                        || aliases.extracted_twice[p.local.0 as usize]
                                         || is_param(p.local.0 as usize)))
                         {
                             continue;

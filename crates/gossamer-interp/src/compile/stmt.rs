@@ -285,6 +285,13 @@ impl<'tcx> FnBuilder<'tcx> {
     /// one register nothing reads in a tight loop body. Every other shape
     /// compiles normally and leaves its result register unread.
     pub(crate) fn compile_expr_discarded(&mut self, expr: &HirExpr) -> RuntimeResult<()> {
+        let start = self.instrs.len();
+        self.compile_expr_discarded_inner(expr)?;
+        self.annotate_instructions(start, expr.span);
+        Ok(())
+    }
+
+    fn compile_expr_discarded_inner(&mut self, expr: &HirExpr) -> RuntimeResult<()> {
         match &expr.kind {
             HirExprKind::Assign { place, value } => {
                 self.compile_assign_store(place, value)?;

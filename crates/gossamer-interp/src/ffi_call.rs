@@ -7,15 +7,21 @@
 //! mark the worker as possibly blocked and capture `errno`, exactly as the
 //! compiled tiers bracket it.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 use gossamer_mir::ForeignParam;
 use gossamer_types::{c_class_signed, c_class_width};
 
-use crate::value::{NativeDispatch, RuntimeError, RuntimeResult, ThreadConfinedCell, Value};
+use crate::value::{
+    NativeDispatch, RuntimeError, RuntimeResult, SmolStr, ThreadConfinedCell, Value,
+};
 
 /// Resolved addresses by `(symbol, library)`, stored as integers so the
 /// table is `Send`.
@@ -43,27 +49,27 @@ pub(crate) fn native_ffi_call(
             "__gos_ffi_call: symbol, signature, library, and layouts are strings".to_string(),
         ));
     };
-    let malformed =
-        || RuntimeError::Type(format!("__gos_ffi_call: malformed signature `{signature}`"));
-    let (params, ret_spelling) = signature.as_str().split_once('>').ok_or_else(malformed)?;
-    let params = gossamer_mir::foreign_params(params).ok_or_else(malformed)?;
-    let ret_struct = match ret_spelling.strip_prefix("s(") {
-        Some(inner) => Some(
-            inner
-                .strip_suffix(')')
-                .and_then(gossamer_abi::c_aggregate::CLayout::parse)
-                .ok_or_else(malformed)?,
-        ),
-        None => None,
+    let key = [
+        symbol.clone(),
+        signature.clone(),
+        library.clone(),
+        layouts.clone(),
+    ];
+    let cached = PREPARED.with_borrow(|cache| cache.get(&key).cloned());
+    let prepared = if let Some(prepared) = cached {
+        prepared
+    } else {
+        let prepared = Rc::new(Prepared::new(&key)?);
+        PREPARED.with_borrow_mut(|cache| cache.insert(key, Rc::clone(&prepared)));
+        prepared
     };
-    let ret = ret_spelling.chars().next().ok_or_else(malformed)?;
-    let mut layouts: Vec<&str> = layouts.as_str().split('|').collect();
-    let (target, call_args) = if symbol.as_str() == gossamer_hir::FFI_INDIRECT_SYMBOL {
+    let (target, call_args) = if let Some(target) = prepared.target {
+        (target, call_args)
+    } else {
         // A call through an address carries the address first.
-        let (address, forwarded) = call_args.split_first().ok_or_else(malformed)?;
-        if !layouts.is_empty() {
-            layouts.remove(0);
-        }
+        let (address, forwarded) = call_args
+            .split_first()
+            .ok_or_else(|| prepared.malformed())?;
         let address = match address {
             Value::Int(n) => *n as usize,
             Value::Uint(n) => *n as usize,
@@ -74,26 +80,117 @@ pub(crate) fn native_ffi_call(
             }
         };
         (address, forwarded)
-    } else {
-        (resolve(symbol.as_str(), library.as_str())?, call_args)
     };
     // A struct result comes back through one more, final argument.
-    let expected = params.len() + usize::from(ret_struct.is_some());
+    let expected = prepared.params.len() + usize::from(prepared.ret_struct.is_some());
     if expected != call_args.len() {
         return Err(RuntimeError::Arity {
             expected,
             found: call_args.len(),
         });
     }
-    let signature = Signature {
-        params: &params,
-        layouts: &layouts,
-        ret,
-        ret_struct,
-    };
     callbacks::with_active(dispatch, || {
-        call(symbol.as_str(), target, &signature, call_args)
+        call(symbol.as_str(), target, &prepared, call_args)
     })
+}
+
+thread_local! {
+    /// Each call shape's parsed signature and resolved address, keyed by the
+    /// `(symbol, signature, library, layouts)` strings the call site passes.
+    static PREPARED: RefCell<FxHashMap<[SmolStr; 4], Rc<Prepared>>> =
+        RefCell::new(FxHashMap::default());
+}
+
+/// A foreign call's signature, parsed once per call shape.
+struct Prepared {
+    signature: SmolStr,
+    params: Vec<ForeignParam>,
+    /// Each argument's `foreign_layouts` entry, by parameter index.
+    layouts: Vec<String>,
+    ret: char,
+    /// The layout of a struct result, which the final argument receives.
+    ret_struct: Option<gossamer_abi::c_aggregate::CLayout>,
+    invocation: Invocation,
+    /// The resolved address, or `None` for a call through an address the
+    /// arguments carry.
+    target: Option<usize>,
+}
+
+/// How a prepared call reaches the C function.
+enum Invocation {
+    /// A struct moves by value, through a stub planned for the host's
+    /// calling convention.
+    Planned(gossamer_abi::c_aggregate::CallPlan),
+    /// Every argument and the result is one word.
+    Words(platform::Routine),
+}
+
+impl Prepared {
+    fn new([symbol, signature, library, layouts]: &[SmolStr; 4]) -> RuntimeResult<Self> {
+        let malformed =
+            || RuntimeError::Type(format!("__gos_ffi_call: malformed signature `{signature}`"));
+        let (params, ret_spelling) = signature.as_str().split_once('>').ok_or_else(malformed)?;
+        let params = gossamer_mir::foreign_params(params).ok_or_else(malformed)?;
+        let ret_struct = match ret_spelling.strip_prefix("s(") {
+            Some(inner) => Some(
+                inner
+                    .strip_suffix(')')
+                    .and_then(gossamer_abi::c_aggregate::CLayout::parse)
+                    .ok_or_else(malformed)?,
+            ),
+            None => None,
+        };
+        let ret = ret_spelling.chars().next().ok_or_else(malformed)?;
+        let mut layouts: Vec<String> = layouts.as_str().split('|').map(String::from).collect();
+        let target = if symbol.as_str() == gossamer_hir::FFI_INDIRECT_SYMBOL {
+            // The address's own layout entry leads the list.
+            if !layouts.is_empty() {
+                layouts.remove(0);
+            }
+            None
+        } else {
+            Some(resolve(symbol.as_str(), library.as_str())?)
+        };
+        let by_value = ret_struct.is_some()
+            || params
+                .iter()
+                .any(|param| matches!(param, ForeignParam::ByValue(_)));
+        let invocation = if by_value {
+            Invocation::Planned(platform::plan(&params, ret_struct.as_ref(), ret)?)
+        } else {
+            let kinds = params
+                .iter()
+                .map(|param| match param {
+                    &ForeignParam::Scalar(class) => {
+                        platform::kind(class).ok_or_else(|| unknown_class(symbol, class))
+                    }
+                    _ => Ok(platform::pointer_kind()),
+                })
+                .collect::<RuntimeResult<Vec<_>>>()?;
+            let ret_kind = platform::kind(ret).ok_or_else(|| unknown_class(symbol, ret))?;
+            Invocation::Words(platform::routine(&kinds, ret_kind)?)
+        };
+        Ok(Self {
+            signature: signature.clone(),
+            params,
+            layouts,
+            ret,
+            ret_struct,
+            invocation,
+            target,
+        })
+    }
+
+    fn malformed(&self) -> RuntimeError {
+        RuntimeError::Type(format!(
+            "__gos_ffi_call: malformed signature `{}`",
+            self.signature
+        ))
+    }
+
+    fn layout(&self, index: usize) -> &str {
+        self.layouts.get(index).map_or("", String::as_str)
+    }
 }
 
 fn resolve(symbol: &str, library: &str) -> RuntimeResult<usize> {
@@ -176,15 +273,6 @@ fn parse_layout(text: &str) -> Option<(usize, Vec<Leaf>)> {
     Some((size, parsed))
 }
 
-/// A routed call's signature, as the call site spelled it.
-struct Signature<'a> {
-    params: &'a [ForeignParam],
-    layouts: &'a [&'a str],
-    ret: char,
-    /// The layout of a struct result, which the final argument receives.
-    ret_struct: Option<gossamer_abi::c_aggregate::CLayout>,
-}
-
 /// The C buffer for the struct argument `value` laid out by `layout` (a
 /// `foreign_layouts` entry), written back to `cell` when it is given.
 fn struct_buffer(
@@ -212,30 +300,22 @@ fn struct_buffer(
     })
 }
 
-fn call(
-    symbol: &str,
-    target: usize,
-    signature: &Signature<'_>,
-    args: &[Value],
-) -> RuntimeResult<Value> {
-    let Signature {
+fn call(symbol: &str, target: usize, signature: &Prepared, args: &[Value]) -> RuntimeResult<Value> {
+    let Prepared {
         params,
-        layouts,
         ret,
+        invocation,
         ..
-    } = *signature;
-    // A signature moving a struct by value takes a stub planned for the
-    // host's calling convention.
-    let plan = (signature.ret_struct.is_some()
-        || params
-            .iter()
-            .any(|param| matches!(param, ForeignParam::ByValue(_))))
-    .then(|| platform::plan(params, signature.ret_struct.as_ref(), ret))
-    .transpose()?;
+    } = signature;
+    let ret = *ret;
+    let plan = match invocation {
+        Invocation::Planned(plan) => Some(plan),
+        Invocation::Words(_) => None,
+    };
     let mut buffers: Vec<Buffer> = Vec::new();
-    let mut kinds = Vec::with_capacity(args.len());
-    let mut stub_params = Vec::with_capacity(args.len());
-    let mut words = Vec::with_capacity(args.len());
+    let mut kinds: SmallVec<[_; 8]> = SmallVec::new();
+    let mut stub_params: SmallVec<[_; 8]> = SmallVec::new();
+    let mut words: SmallVec<[u64; 8]> = SmallVec::new();
     // Which word holds which buffer's address, filled once `buffers` stops
     // growing so no address moves after it is taken.
     let mut buffer_slots = Vec::new();
@@ -246,12 +326,12 @@ fn call(
         };
         match param {
             ForeignParam::ByValue(_) => {
-                let layout = layouts.get(index).copied().unwrap_or_default();
+                let layout = signature.layout(index);
                 buffer_slots.push((words.len(), buffers.len()));
                 buffers.push(struct_buffer(symbol, index, layout, &value, None)?);
                 words.push(0);
                 kinds.push(platform::pointer_kind());
-                stub_params.push(platform::struct_param(plan.as_ref(), index)?);
+                stub_params.push(platform::struct_param(plan, index)?);
                 continue;
             }
             &ForeignParam::Scalar(class) => {
@@ -272,7 +352,7 @@ fn call(
             }
             &ForeignParam::Struct { writable } => {
                 kinds.push(platform::pointer_kind());
-                let layout = layouts.get(index).copied().unwrap_or_default();
+                let layout = signature.layout(index);
                 buffer_slots.push((words.len(), buffers.len()));
                 buffers.push(struct_buffer(
                     symbol,
@@ -298,7 +378,7 @@ fn call(
             Value::MutCell(cell) => (cell.lock().clone(), Some(Arc::clone(cell))),
             other => (other.clone(), None),
         };
-        let layout = layouts.get(params.len()).copied().unwrap_or_default();
+        let layout = signature.layout(params.len());
         buffer_slots.push((words.len(), buffers.len()));
         buffers.push(struct_buffer(symbol, params.len(), layout, &value, cell)?);
         words.push(0);
@@ -306,11 +386,14 @@ fn call(
     for (word, buffer) in buffer_slots {
         words[word] = platform::buffer_address(&mut buffers[buffer].bytes);
     }
-    let result = if let Some(plan) = &plan {
-        platform::invoke_struct(target, &stub_params, plan, ret, &words)?
-    } else {
-        let ret_kind = platform::kind(ret).ok_or_else(|| unknown_class(symbol, ret))?;
-        platform::invoke(target, &kinds, ret_kind, &words)?
+    // The runtime's own helpers take no foreign-call bracket on any tier; see
+    // `gossamer_mir::ForeignCall::is_runtime_helper`.
+    let bracket = !symbol.starts_with("gos_rt_");
+    let result = match invocation {
+        Invocation::Planned(plan) => {
+            platform::invoke_struct(target, &stub_params, plan, ret, &words, bracket)?
+        }
+        Invocation::Words(routine) => platform::invoke(target, *routine, &words, bracket),
     };
     write_back(buffers)?;
     Ok(match ret {
@@ -518,6 +601,7 @@ mod platform {
         plan: &CallPlan,
         ret: char,
         words: &[u64],
+        bracket: bool,
     ) -> RuntimeResult<u64> {
         let stub_ret = if ret == 's' {
             StubRet::Struct(plan.ret.clone())
@@ -528,14 +612,18 @@ mod platform {
         };
         let routine = struct_trampoline(params, &stub_ret)
             .map_err(|e| RuntimeError::Panic(format!("foreign call trampoline: {e}")))?;
-        gos_rt_ffi_enter();
+        if bracket {
+            gos_rt_ffi_enter();
+        }
         // SAFETY: the routine was generated for exactly these parameters and
         // this result; `words` holds one word per parameter (a struct's being
         // the address of its bytes) and, for a struct result, the address of
         // its buffer, each outliving the call.
         #[allow(unsafe_code)]
         let result = unsafe { routine(target as *const u8, words.as_ptr()) };
-        ffi_leave_capture();
+        if bracket {
+            ffi_leave_capture();
+        }
         Ok(result)
     }
 
@@ -572,23 +660,28 @@ mod platform {
         }
     }
 
-    pub(super) fn invoke(
-        target: usize,
-        params: &[FfiKind],
-        ret: FfiKind,
-        words: &[u64],
-    ) -> RuntimeResult<u64> {
-        let routine = trampoline(params, ret)
-            .map_err(|e| RuntimeError::Panic(format!("foreign call trampoline: {e}")))?;
-        gos_rt_ffi_enter();
+    /// The generated routine that calls a C function of these kinds.
+    pub(super) type Routine = gossamer_codegen_cranelift::ffi_trampoline::Trampoline;
+
+    pub(super) fn routine(params: &[FfiKind], ret: FfiKind) -> RuntimeResult<Routine> {
+        trampoline(params, ret)
+            .map_err(|e| RuntimeError::Panic(format!("foreign call trampoline: {e}")))
+    }
+
+    pub(super) fn invoke(target: usize, routine: Routine, words: &[u64], bracket: bool) -> u64 {
+        if bracket {
+            gos_rt_ffi_enter();
+        }
         // SAFETY: the routine was generated for exactly these parameter
         // kinds; `words` holds one word per parameter, and every pointer word
         // addresses a buffer that outlives the call. What the C function
         // itself does is the program's `unsafe` block's contract.
         #[allow(unsafe_code)]
         let result = unsafe { routine(target as *const u8, words.as_ptr()) };
-        ffi_leave_capture();
-        Ok(result)
+        if bracket {
+            ffi_leave_capture();
+        }
+        result
     }
 }
 
@@ -613,8 +706,16 @@ mod platform {
         0
     }
 
-    pub(super) fn invoke(_: usize, _: &[char], _: char, _: &[u64]) -> RuntimeResult<u64> {
+    /// No routine exists here: `routine` always fails.
+    #[derive(Clone, Copy, Debug)]
+    pub(super) enum Routine {}
+
+    pub(super) fn routine(_: &[char], _: char) -> RuntimeResult<Routine> {
         Err(unavailable())
+    }
+
+    pub(super) fn invoke(_: usize, routine: Routine, _: &[u64], _: bool) -> u64 {
+        match routine {}
     }
 
     fn unavailable() -> RuntimeError {
@@ -646,6 +747,7 @@ mod platform {
         _: &gossamer_abi::c_aggregate::CallPlan,
         _: char,
         _: &[u64],
+        _: bool,
     ) -> RuntimeResult<u64> {
         Err(unavailable())
     }
@@ -998,6 +1100,7 @@ pub(crate) mod handles {
     #[allow(clippy::unnecessary_wraps)]
     pub(crate) fn builtin_pin(args: &[Value]) -> RuntimeResult<Value> {
         let cell = args.first().cloned().unwrap_or(Value::Unit);
+        gossamer_runtime::sched_global::adjust_external_actors(true);
         Ok(Value::Uint(with(|(next, cells)| {
             let id = *next;
             *next += 1;
@@ -1029,7 +1132,10 @@ pub(crate) mod handles {
     pub(crate) fn builtin_release(args: &[Value]) -> RuntimeResult<Value> {
         let id = id_of(args.first().unwrap_or(&Value::Unit))?;
         with(|(_, cells)| cells.remove(&id))
-            .map(|_| Value::Unit)
+            .map(|_| {
+                gossamer_runtime::sched_global::adjust_external_actors(false);
+                Value::Unit
+            })
             .ok_or_else(|| missing(id))
     }
 }

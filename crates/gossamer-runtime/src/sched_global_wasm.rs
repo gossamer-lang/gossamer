@@ -143,10 +143,30 @@ pub fn adjust_pending_handoffs(_ready: bool) {}
 /// same reason as [`adjust_pending_handoffs`].
 pub fn adjust_channel_waiters(_entering: bool) {}
 
+/// Counts a non-goroutine actor in or out. Inert on wasm, where no deadlock
+/// report runs.
+pub fn adjust_external_actors(_entering: bool) {}
+
+/// The live non-goroutine actors; none are counted on wasm.
+pub fn external_actors() -> usize {
+    0
+}
+
 /// Marks the process as a running Gossamer program. Native uses this to keep
 /// deadlock reporting off inside an embedder; the playground is only ever a
 /// program, and reports nothing, so it records nothing.
 pub fn mark_program_entered() {}
+
+/// Records the calling thread as the one `main` runs on; the playground has
+/// that thread alone.
+pub fn mark_main_thread() {}
+
+/// Whether the caller runs on the thread `main` runs on, which on wasm is
+/// every caller.
+#[must_use]
+pub fn on_main_thread() -> bool {
+    true
+}
 
 /// Whether a program's `main` has started. The playground is only ever a
 /// program, never a library a host calls into.
@@ -272,4 +292,16 @@ pub struct SyscallGuard;
 #[must_use]
 pub fn syscall_enter() -> SyscallGuard {
     SyscallGuard
+}
+
+/// [`syscall_enter`] without a guard; nothing to mark on wasm.
+pub fn syscall_mark() {}
+
+/// Leaves a [`syscall_mark`]; nothing to leave on wasm.
+pub fn syscall_unmark() {}
+
+/// Whether the caller is a scheduler worker; wasm runs no workers.
+#[must_use]
+pub fn on_worker() -> bool {
+    false
 }

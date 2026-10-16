@@ -273,7 +273,8 @@ impl<'a> Builder<'a> {
             TyKind::Tuple(_) | TyKind::Array { .. } => true,
             TyKind::Adt { def, .. } => {
                 let def = *def;
-                self.tcx.enum_variant_tys(def).is_none() && self.tcx.struct_field_tys(def).is_some()
+                (self.tcx.enum_variant_tys(def).is_none() || self.tcx.is_flat_enum_def(def.local))
+                    && self.tcx.struct_field_tys(def).is_some()
             }
             _ => false,
         }
@@ -779,7 +780,8 @@ impl<'a> Builder<'a> {
             || matches!(
                 self.tcx.kind_of(elem),
                 TyKind::Adt { def, .. }
-                    if self.tcx.enum_variant_tys(*def).is_none()
+                    if (self.tcx.enum_variant_tys(*def).is_none()
+                        || self.tcx.is_flat_enum_def(def.local))
                         && self.tcx.struct_field_tys(*def).is_some()
             )
     }

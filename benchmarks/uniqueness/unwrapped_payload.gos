@@ -1,0 +1,42 @@
+// `?` reads a carrier's payload into a binding; when the carrier is read by
+// nothing afterwards, the binding takes the carrier's share instead of a
+// retain the carrier's release then gives back.
+use std::errors
+
+enum Shape {
+    Square(i64)
+    Empty
+}
+
+fn make(n: i64) -> Option<Shape> {
+    if n % 3 != 0 { Some(Shape::Square(n)) } else { None }
+}
+
+fn check(n: i64) -> Result<Shape, errors::Error> {
+    if n % 5 != 0 { Ok(Shape::Square(n)) } else { Err(errors::new("multiple of five")) }
+}
+
+fn unwrap_option(n: i64) -> Option<Shape> {
+    let made = make(n)
+    let shape = made?
+    Some(shape)
+}
+
+fn unwrap_result(n: i64) -> Result<Shape, errors::Error> {
+    let checked = check(n)
+    let shape = checked?
+    Ok(shape)
+}
+
+fn main() {
+    let mut total = 0
+    for n in 0..100000 {
+        if let Some(Shape::Square(v)) = unwrap_option(n) {
+            total += v
+        }
+        if let Ok(Shape::Square(v)) = unwrap_result(n) {
+            total += v
+        }
+    }
+    println(f"{total}")
+}

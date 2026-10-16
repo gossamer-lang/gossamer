@@ -898,8 +898,65 @@ impl TypeChecker<'_> {
         &mut self,
         ty: Ty,
     ) -> Option<(String, crate::NotDisplayableClass)> {
+        self.not_displayable_as(ty, true)
+    }
+
+    /// [`Self::not_displayable`] for the `{}` channel when `display`, else
+    /// `{:?}`. A type's own `to_string` renders it through `{}` only; what it
+    /// holds renders through `{:?}` either way, as a structural rendering
+    /// formats its fields.
+    pub(super) fn not_displayable_as(
+        &mut self,
+        ty: Ty,
+        display: bool,
+    ) -> Option<(String, crate::NotDisplayableClass)> {
+        if display {
+            let peeled = self.peel_refs(ty);
+            let peeled = self.infer.resolve(self.tcx, peeled);
+            if let Some(TyKind::Adt { def, .. }) = self.tcx.kind(peeled)
+                && let Some(name) = self.tcx.def_name(*def)
+                && self
+                    .method_homes
+                    .contains_key(&(name.to_string(), "to_string".to_string()))
+            {
+                return None;
+            }
+        }
+        self.not_displayable_within(ty, &mut Vec::new())
+    }
+
+    /// [`Self::not_displayable`] through what a value holds: a struct or an
+    /// enum without a `fmt` of its own renders field by field and payload by
+    /// payload, and a container element by element, so a callable, channel,
+    /// or handle anywhere inside leaves the whole value with no rendering.
+    /// `visiting` stops a type that holds itself.
+    fn not_displayable_within(
+        &mut self,
+        ty: Ty,
+        visiting: &mut Vec<gossamer_resolve::DefId>,
+    ) -> Option<(String, crate::NotDisplayableClass)> {
         use crate::NotDisplayableClass as Class;
         let peeled = self.peel_refs(ty);
+        let peeled = self.infer.resolve(self.tcx, peeled);
+        match self.tcx.kind(peeled)?.clone() {
+            TyKind::Tuple(items) => {
+                return items
+                    .into_iter()
+                    .find_map(|item| self.not_displayable_within(item, visiting));
+            }
+            TyKind::Array { elem, .. } | TyKind::Slice(elem) | TyKind::Vec(elem) => {
+                return self.not_displayable_within(elem, visiting);
+            }
+            TyKind::HashMap { key, value, .. } => {
+                return self
+                    .not_displayable_within(key, visiting)
+                    .or_else(|| self.not_displayable_within(value, visiting));
+            }
+            TyKind::Adt { def, substs } if !is_opaque_handle_def(def.local) => {
+                return self.adt_not_displayable(def, &substs, visiting);
+            }
+            _ => {}
+        }
         match self.tcx.kind(peeled)? {
             TyKind::Adt { def, .. } if is_opaque_handle_def(def.local) => Some((
                 self.tcx
@@ -918,6 +975,47 @@ impl TypeChecker<'_> {
             }
             _ => None,
         }
+    }
+
+    /// Why the struct or enum `def` has no rendering, when a field or payload
+    /// has none and the type supplies no `fmt` of its own.
+    fn adt_not_displayable(
+        &mut self,
+        def: gossamer_resolve::DefId,
+        substs: &crate::Substs,
+        visiting: &mut Vec<gossamer_resolve::DefId>,
+    ) -> Option<(String, crate::NotDisplayableClass)> {
+        if visiting.contains(&def) {
+            return None;
+        }
+        let name = self.tcx.def_name(def)?.to_string();
+        if self
+            .method_homes
+            .contains_key(&(name.clone(), "fmt".to_string()))
+        {
+            return None;
+        }
+        let mut held: Vec<Ty> = substs.types().clone();
+        if let Some(fields) = self.tcx.adt_field_tys(def, substs) {
+            held.extend_from_slice(fields);
+        }
+        if let Some(variants) = self.enum_variants.get(&name) {
+            for variant in variants.clone() {
+                let key = (name.clone(), variant);
+                if let Some(payload) = self.enum_variant_payloads.get(&key) {
+                    held.extend(payload.iter().copied());
+                }
+                if let Some(payload) = self.enum_variant_named_payloads.get(&key) {
+                    held.extend(payload.iter().map(|(_, ty)| *ty));
+                }
+            }
+        }
+        visiting.push(def);
+        let found = held
+            .into_iter()
+            .find_map(|inner| self.not_displayable_within(inner, visiting));
+        visiting.pop();
+        found
     }
 
     /// Handle type a stdlib constructor or middleware wrapper yields.
@@ -2528,7 +2626,11 @@ impl TypeChecker<'_> {
                         self.emit(TypeError::IteratorStateFormatted, span);
                         return Some(self.tcx.error_ty());
                     }
-                    if let Some((ty, class)) = self.not_displayable(resolved) {
+                    let display = !matches!(
+                        name,
+                        "__debug" | "__gos_debug_quote" | "__gos_dyn_debug" | "__gos_f32_debug"
+                    );
+                    if let Some((ty, class)) = self.not_displayable_as(resolved, display) {
                         self.emit(TypeError::ValueNotDisplayable { ty, class }, span);
                         return Some(self.tcx.error_ty());
                     }

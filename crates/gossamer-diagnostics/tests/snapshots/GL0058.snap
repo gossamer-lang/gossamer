@@ -1,0 +1,13 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+assertion_line: 86
+expression: rendered
+---
+--- plain ---
+error[GL0058]: A function, method, parameter, local, field, or module whose name is - here
+--- framed ---
+error[GL0058]: A function, method, parameter, local, field, or module whose name is
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

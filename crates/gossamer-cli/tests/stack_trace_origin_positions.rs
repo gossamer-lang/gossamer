@@ -69,3 +69,32 @@ fn a_panic_in_a_sibling_module_names_that_file_and_line() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_panic_in_a_loop_body_statement_names_that_statement() {
+    let dir = std::env::temp_dir().join(format!("gos-loop-frames-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create dir");
+    let src = dir.join("poke.gos");
+    std::fs::write(
+        &src,
+        "fn poke(fb: &mut [u8], at: i64) {\n    let mut k = 0\n    while k < 1 {\n        fb[at] = 7\n        k += 1\n    }\n}\n\nfn main() {\n    let mut fb = #[0u8; 4]\n    poke(&mut fb, 1)\n    poke(&mut fb, 4)\n}\n",
+    )
+    .expect("write source");
+    for (tier, jit) in [("vm", "0"), ("jit", "1")] {
+        let run = Command::new(gos_bin())
+            .current_dir(&dir)
+            .env("GOSSAMER_CACHE_DIR", dir.join("cache"))
+            .env("GOS_JIT", jit)
+            .env("GOSSAMER_JIT_THRESHOLD", "1")
+            .args(["run", "poke.gos"])
+            .output()
+            .expect("gos run");
+        let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
+        assert!(
+            stderr.contains("    at poke (poke.gos:4:9)\n"),
+            "{tier}: {stderr}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

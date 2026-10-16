@@ -772,8 +772,8 @@ fn build_from_source(source: &str) -> (Vec<gossamer_mir::Body>, TyCtxt) {
     let file = map.add_file("convention.gos", source.to_string());
     let (mut sf, parse_diags) = gossamer_parse::autoderive::parse_with_autoderive(source, file);
     assert!(parse_diags.is_empty(), "parse: {parse_diags:?}");
-    let (resolutions, _) = gossamer_resolve::resolve_source_file(&sf);
-    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &resolutions);
+    let (mut resolutions, _) = gossamer_resolve::resolve_source_file(&sf);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
     let mut tcx = TyCtxt::new();
     let (table, diagnostics) = gossamer_types::typecheck_source_file(&sf, &resolutions, &mut tcx);
     assert!(diagnostics.is_empty(), "typecheck: {diagnostics:?}");
@@ -858,11 +858,493 @@ fn main() { println("{}", total(Point { x: 1, y: 2 })) }
 
     let signature = body.lines().next().unwrap();
     assert_eq!(
-        signature, "define i64 @\"total\"(ptr readonly nocapture %p0) #0 {",
+        signature, "define i64 @\"total\"(ptr noalias readonly nocapture %p0) #0 {",
         "a flat-slot aggregate keeps the by-pointer convention:\n{ir}"
     );
     assert!(
+        body.contains("%l1 = getelementptr inbounds i8, ptr %p0, i64 0")
+            && !body.contains("llvm.memcpy"),
+        "a parameter the body only reads is read in the caller's storage:\n{body}"
+    );
+}
+
+#[test]
+fn a_parameter_the_body_writes_is_copied_into_the_frame() {
+    let (bodies, tcx) = build_from_source(
+        r#"
+struct Point { x: i64, y: i64 }
+
+fn shifted(mut p: Point) -> i64 {
+    p.x = p.x + 5
+    p.x + p.y
+}
+
+fn main() { println("{}", shifted(Point { x: 1, y: 2 })) }
+"#,
+    );
+    let ir = render_ir_to_string(&bodies, &tcx, false).unwrap();
+    let body = body_text(&ir, "define i64 @\"shifted\"(");
+    assert!(
         body.contains("llvm.memcpy.p0.p0.i64(ptr %l1, ptr %p0, i64 16"),
         "the entry copies the caller's two slots into this frame:\n{body}"
+    );
+}
+
+fn build_ffi_put_main(
+    helper: &'static str,
+    value: ConstValue,
+    width: Option<i64>,
+) -> (Body, TyCtxt) {
+    let mut tcx = TyCtxt::new();
+    let i64_ty = tcx.intern(TyKind::Int(IntTy::I64));
+    let unit = tcx.unit();
+    let local = |ty| LocalDecl {
+        ty,
+        debug_name: None,
+        mutable: false,
+        region: false,
+    };
+    let mut args = vec![Operand::Copy(place(1)), Operand::Const(ConstValue::Int(8))];
+    if let Some(width) = width {
+        args.push(Operand::Const(ConstValue::Int(i128::from(width))));
+    }
+    args.push(Operand::Const(value));
+    let put = Statement {
+        span: dummy_span(),
+        inlined: None,
+        kind: StatementKind::Assign {
+            place: place(2),
+            rvalue: Rvalue::CallIntrinsic { name: helper, args },
+        },
+    };
+    let body = Body {
+        name: "main".to_string(),
+        def: None,
+        arity: 0,
+        locals: vec![local(i64_ty), local(i64_ty), local(unit)],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            stmts: vec![const_int_assign(1, 4096), put, const_int_assign(0, 0)],
+            terminator: Terminator::Return,
+            span: dummy_span(),
+            terminator_span: None,
+            terminator_inlined: None,
+        }],
+        span: dummy_span(),
+    };
+    (body, tcx)
+}
+
+#[test]
+fn a_foreign_field_write_at_a_constant_offset_is_an_inline_store() {
+    let cases = [
+        ("gos_rt_ffi_put", ConstValue::Int(7), Some(4), "store i32"),
+        (
+            "gos_rt_ffi_put_f64",
+            ConstValue::Float(1.5f64.to_bits()),
+            None,
+            "store double",
+        ),
+        (
+            "gos_rt_ffi_put_f32",
+            ConstValue::Float(1.5f64.to_bits()),
+            None,
+            "store float",
+        ),
+    ];
+    for (helper, value, width, store) in cases {
+        let (body, tcx) = build_ffi_put_main(helper, value, width);
+        let ir = render_ir_to_string(&[body], &tcx, false).unwrap();
+        let main = ir
+            .split("define ")
+            .find(|f| f.contains("@\"gos_main\"("))
+            .unwrap_or_else(|| panic!("main is defined:\n{ir}"));
+        assert!(main.contains(store), "{helper} stores inline:\n{main}");
+        assert!(
+            !main.contains(&format!("@{helper}(")),
+            "{helper} makes no runtime call:\n{main}"
+        );
+    }
+}
+
+fn build_ffi_scalar_main(
+    helper: &'static str,
+    class: char,
+    value: Option<ConstValue>,
+) -> (Body, TyCtxt) {
+    let mut tcx = TyCtxt::new();
+    let i64_ty = tcx.intern(TyKind::Int(IntTy::I64));
+    let dest_ty = match (helper, value.is_some()) {
+        (_, true) => tcx.unit(),
+        ("gos_rt_ffi_load_float", false) => tcx.intern(TyKind::Float(gossamer_types::FloatTy::F64)),
+        _ => i64_ty,
+    };
+    let local = |ty| LocalDecl {
+        ty,
+        debug_name: None,
+        mutable: false,
+        region: false,
+    };
+    let mut args = vec![
+        Operand::Copy(place(1)),
+        Operand::Const(ConstValue::Int(i128::from(u32::from(class)))),
+    ];
+    args.extend(value.map(Operand::Const));
+    let call = Statement {
+        span: dummy_span(),
+        inlined: None,
+        kind: StatementKind::Assign {
+            place: place(2),
+            rvalue: Rvalue::CallIntrinsic { name: helper, args },
+        },
+    };
+    let body = Body {
+        name: "main".to_string(),
+        def: None,
+        arity: 0,
+        locals: vec![local(i64_ty), local(i64_ty), local(dest_ty)],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            stmts: vec![const_int_assign(1, 4096), call, const_int_assign(0, 0)],
+            terminator: Terminator::Return,
+            span: dummy_span(),
+            terminator_span: None,
+            terminator_inlined: None,
+        }],
+        span: dummy_span(),
+    };
+    (body, tcx)
+}
+
+#[test]
+fn a_foreign_scalar_of_a_constant_class_is_an_inline_load_or_store() {
+    let cases = [
+        (
+            "gos_rt_ffi_load_int",
+            'i',
+            None,
+            &["load i32", "sext i32"][..],
+        ),
+        (
+            "gos_rt_ffi_load_int",
+            'H',
+            None,
+            &["load i16", "zext i16"][..],
+        ),
+        (
+            "gos_rt_ffi_load_int",
+            'B',
+            None,
+            &["load i8", "icmp ne i8"][..],
+        ),
+        (
+            "gos_rt_ffi_load_float",
+            'f',
+            None,
+            &["load float", "fpext float"][..],
+        ),
+        (
+            "gos_rt_ffi_store_int",
+            'h',
+            Some(ConstValue::Int(7)),
+            &["store i16"][..],
+        ),
+        (
+            "gos_rt_ffi_store_float",
+            'd',
+            Some(ConstValue::Float(1.5f64.to_bits())),
+            &["store double"][..],
+        ),
+    ];
+    for (helper, class, value, shapes) in cases {
+        let (body, tcx) = build_ffi_scalar_main(helper, class, value);
+        let ir = render_ir_to_string(&[body], &tcx, false).unwrap();
+        let main = ir
+            .split("define ")
+            .find(|f| f.contains("@\"gos_main\"("))
+            .unwrap_or_else(|| panic!("main is defined:\n{ir}"));
+        for shape in shapes {
+            assert!(
+                main.contains(shape),
+                "{helper} {class} has `{shape}`:\n{main}"
+            );
+        }
+        assert!(
+            !main.contains(&format!("@{helper}(")),
+            "{helper} makes no runtime call:\n{main}"
+        );
+    }
+}
+
+fn build_unit_intrinsic_main(helper: &'static str, args: Vec<Operand>) -> (Body, TyCtxt) {
+    let mut tcx = TyCtxt::new();
+    let i64_ty = tcx.intern(TyKind::Int(IntTy::I64));
+    let unit = tcx.unit();
+    let local = |ty| LocalDecl {
+        ty,
+        debug_name: None,
+        mutable: false,
+        region: false,
+    };
+    let call = Statement {
+        span: dummy_span(),
+        inlined: None,
+        kind: StatementKind::Assign {
+            place: place(2),
+            rvalue: Rvalue::CallIntrinsic { name: helper, args },
+        },
+    };
+    let body = Body {
+        name: "main".to_string(),
+        def: None,
+        arity: 0,
+        locals: vec![local(i64_ty), local(i64_ty), local(unit)],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            stmts: vec![const_int_assign(1, 4096), call, const_int_assign(0, 0)],
+            terminator: Terminator::Return,
+            span: dummy_span(),
+            terminator_span: None,
+            terminator_inlined: None,
+        }],
+        span: dummy_span(),
+    };
+    (body, tcx)
+}
+
+fn gos_main_ir(body: Body, tcx: &TyCtxt) -> String {
+    let ir = render_ir_to_string(&[body], tcx, false).unwrap();
+    ir.split("define ")
+        .find(|f| f.contains("@\"gos_main\"("))
+        .unwrap_or_else(|| panic!("main is defined:\n{ir}"))
+        .to_string()
+}
+
+#[test]
+fn a_carrier_release_calls_the_runtime_only_for_an_arm_that_owns_storage() {
+    let kinds = |ok: i128, err: i128| {
+        vec![
+            Operand::Copy(place(1)),
+            Operand::Const(ConstValue::Int(ok)),
+            Operand::Const(ConstValue::Int(err)),
+        ]
+    };
+    let (body, tcx) = build_unit_intrinsic_main("gos_rt_result_payload_release", kinds(0, 0));
+    let main = gos_main_ir(body, &tcx);
+    assert!(
+        !main.contains("@gos_rt_result_payload_release("),
+        "no arm owns storage, so nothing is called:\n{main}"
+    );
+    let (body, tcx) = build_unit_intrinsic_main("gos_rt_result_payload_release", kinds(0, 4));
+    let main = gos_main_ir(body, &tcx);
+    assert!(
+        main.contains(", 1\n"),
+        "only the `Err` arm is tested:\n{main}"
+    );
+    assert!(main.contains("br i1"), "the call is guarded:\n{main}");
+    assert!(main.contains("@gos_rt_result_payload_release("), "{main}");
+}
+
+fn local(ty: gossamer_types::Ty) -> LocalDecl {
+    LocalDecl {
+        ty,
+        debug_name: None,
+        mutable: false,
+        region: false,
+    }
+}
+
+fn block(id: u32, stmts: Vec<Statement>, terminator: Terminator) -> BasicBlock {
+    BasicBlock {
+        id: BlockId(id),
+        stmts,
+        terminator,
+        span: dummy_span(),
+        terminator_span: None,
+        terminator_inlined: None,
+    }
+}
+
+/// `fill() -> [u8; 32]`, which writes its first byte, and a `main` that
+/// binds its answer.
+fn build_byte_array_answer() -> (Vec<Body>, TyCtxt) {
+    let mut tcx = TyCtxt::new();
+    let u8_ty = tcx.intern(TyKind::Int(IntTy::U8));
+    let unit = tcx.intern(TyKind::Unit);
+    let bytes = tcx.intern(TyKind::Array {
+        elem: u8_ty,
+        len: ArrayLen::Concrete(32),
+    });
+    let def = DefId::local(7);
+    let first = Place {
+        local: Local(0),
+        projection: vec![gossamer_mir::Projection::Index(Local(1))],
+    };
+    let i64_ty = tcx.intern(TyKind::Int(IntTy::I64));
+    let fill = Body {
+        name: "fill".to_string(),
+        def: Some(def),
+        arity: 0,
+        locals: vec![local(bytes), local(i64_ty)],
+        blocks: vec![block(
+            0,
+            vec![
+                const_int_assign(1, 0),
+                Statement {
+                    span: dummy_span(),
+                    inlined: None,
+                    kind: StatementKind::Assign {
+                        place: first,
+                        rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(7))),
+                    },
+                },
+            ],
+            Terminator::Return,
+        )],
+        span: dummy_span(),
+    };
+    let main = Body {
+        name: "main".to_string(),
+        def: None,
+        arity: 0,
+        locals: vec![local(unit), local(bytes)],
+        blocks: vec![
+            block(
+                0,
+                Vec::new(),
+                Terminator::Call {
+                    callee: Operand::FnRef {
+                        def,
+                        substs: gossamer_types::Substs::new(),
+                    },
+                    args: Vec::new(),
+                    destination: place(1),
+                    target: Some(BlockId(1)),
+                },
+            ),
+            block(1, Vec::new(), Terminator::Return),
+        ],
+        span: dummy_span(),
+    };
+    (vec![fill, main], tcx)
+}
+
+#[test]
+fn a_body_answering_through_caller_storage_builds_its_answer_there() {
+    let (bodies, tcx) = build_byte_array_answer();
+    let ir = render_ir_to_string(&bodies, &tcx, false).expect("render");
+    let fill = ir
+        .split("define ")
+        .find(|f| f.contains("@\"fill\"("))
+        .unwrap_or_else(|| panic!("fill is defined:\n{ir}"));
+    assert!(fill.contains("ptr noalias nocapture %sret"), "{fill}");
+    assert!(
+        !fill.contains("%l0 = alloca"),
+        "the answer has no slot of its own:\n{fill}"
+    );
+    assert!(
+        !fill.contains("@llvm.memcpy"),
+        "nothing is copied into the caller's storage:\n{fill}"
+    );
+    let main = gos_main_ir_of(&ir);
+    assert!(
+        !main.contains("i64 256"),
+        "a [u8; 32] answer occupies 32 bytes:\n{main}"
+    );
+}
+
+fn gos_main_ir_of(ir: &str) -> String {
+    ir.split("define ")
+        .find(|f| f.contains("@\"gos_main\"("))
+        .unwrap_or_else(|| panic!("main is defined:\n{ir}"))
+        .to_string()
+}
+
+/// `first(t: (i64, i64, i64), u: (i64, i64, i64)) -> i64` and a `main` that
+/// calls it with `args`.
+fn build_triple_param_call(args: Vec<Operand>) -> (Vec<Body>, TyCtxt) {
+    let mut tcx = TyCtxt::new();
+    let i64_ty = tcx.intern(TyKind::Int(IntTy::I64));
+    let unit = tcx.intern(TyKind::Unit);
+    let triple = tcx.intern(TyKind::Tuple(vec![i64_ty, i64_ty, i64_ty]));
+    let def = DefId::local(9);
+    let first = Body {
+        name: "first".to_string(),
+        def: Some(def),
+        arity: 2,
+        locals: vec![local(i64_ty), local(triple), local(triple)],
+        blocks: vec![block(
+            0,
+            vec![Statement {
+                span: dummy_span(),
+                inlined: None,
+                kind: StatementKind::Assign {
+                    place: place(0),
+                    rvalue: Rvalue::Use(Operand::Copy(Place {
+                        local: Local(1),
+                        projection: vec![gossamer_mir::Projection::Field(0)],
+                    })),
+                },
+            }],
+            Terminator::Return,
+        )],
+        span: dummy_span(),
+    };
+    let main = Body {
+        name: "main".to_string(),
+        def: None,
+        arity: 0,
+        locals: vec![local(unit), local(triple), local(i64_ty), local(triple)],
+        blocks: vec![
+            block(
+                0,
+                Vec::new(),
+                Terminator::Call {
+                    callee: Operand::FnRef {
+                        def,
+                        substs: gossamer_types::Substs::new(),
+                    },
+                    args,
+                    destination: place(2),
+                    target: Some(BlockId(1)),
+                },
+            ),
+            block(1, Vec::new(), Terminator::Return),
+        ],
+        span: dummy_span(),
+    };
+    (vec![first, main], tcx)
+}
+
+#[test]
+fn a_direct_callee_reads_its_aggregate_parameters_in_the_callers_storage() {
+    let (bodies, tcx) =
+        build_triple_param_call(vec![Operand::Copy(place(1)), Operand::Copy(place(3))]);
+    let ir = render_ir_to_string(&bodies, &tcx, false).expect("render");
+    let first = ir
+        .split("define ")
+        .find(|f| f.contains("@\"first\"("))
+        .unwrap_or_else(|| panic!("first is defined:\n{ir}"));
+    assert!(
+        first.contains("ptr noalias readonly nocapture %p0"),
+        "{first}"
+    );
+    let main = gos_main_ir_of(&ir);
+    assert!(
+        !main.contains("@llvm.memcpy"),
+        "distinct bare locals are passed in place:\n{main}"
+    );
+}
+
+#[test]
+fn an_aggregate_passed_twice_reaches_the_callee_as_two_copies() {
+    let (bodies, tcx) =
+        build_triple_param_call(vec![Operand::Copy(place(1)), Operand::Copy(place(1))]);
+    let ir = render_ir_to_string(&bodies, &tcx, false).expect("render");
+    let main = gos_main_ir_of(&ir);
+    assert_eq!(
+        main.matches("@llvm.memcpy").count(),
+        2,
+        "each `noalias` parameter gets storage of its own:\n{main}"
     );
 }

@@ -984,14 +984,17 @@ pub(crate) fn own_rebound_enum_parameters(body: &mut Body, tcx: &gossamer_types:
     }
 }
 
-/// Releases the node a `&mut <payload enum>` reference displaced.
+/// Releases what a store through a `&mut` reference displaced.
 ///
-/// That receiver names the caller's slot, so `*self = Variant(..)` rebinds the
-/// caller's binding: the node the slot held loses the share the binding gave
-/// it, and the callee is the only side that can see both values. The release
-/// follows the store, so a replacement built from the old node keeps it alive
-/// until the slot no longer names it.
+/// A `&mut <payload enum>` receiver names the caller's slot, so
+/// `*self = Variant(..)` rebinds the caller's binding: the node the slot held
+/// loses the share the binding gave it, and the callee is the only side that
+/// can see both values. A `&mut` struct, tuple, or by-value enum names the
+/// caller's words, whose counted fields lose their shares the same way. The
+/// release follows the store, so a replacement built from the old value keeps
+/// it alive until the slot no longer names it.
 pub(crate) fn release_displaced_enum_targets(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+    release_displaced_aggregates(body, tcx);
     let n_locals = body.locals.len();
     let pointee_of = |local: Local| -> Option<gossamer_types::Ty> {
         let i = local.0 as usize;
@@ -1056,6 +1059,128 @@ pub(crate) fn release_displaced_enum_targets(body: &mut Body, tcx: &gossamer_typ
                             Operand::Const(ConstValue::Int(0)),
                         ],
                     },
+                },
+                span,
+                inlined: None,
+            },
+        );
+    }
+}
+
+/// The aggregate half of [`release_displaced_enum_targets`]: before a store
+/// `*r = value` through a `&mut` to a struct, tuple, or by-value enum, the
+/// old words are read into a local of their own, whose counted fields are
+/// released after the store. A local stored whole is copied, as a whole-local
+/// assignment is: the frame still releases it, so the referent takes a share
+/// of each counted field of its own, before the old value gives its shares
+/// back so that storing a copy of the old value keeps it alive.
+fn release_displaced_aggregates(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+    use gossamer_types::TyKind;
+    let n_locals = body.locals.len();
+    let pointee_of = |local: Local| -> Option<gossamer_types::Ty> {
+        let decl = body.locals.get(local.0 as usize)?;
+        let TyKind::Ref {
+            mutability: gossamer_types::Mutbl::Mut,
+            inner,
+        } = tcx.kind_of(decl.ty)
+        else {
+            return None;
+        };
+        let aggregate = match tcx.kind_of(*inner) {
+            TyKind::Tuple(_) | TyKind::Array { .. } => true,
+            TyKind::Adt { def, .. } => {
+                def.local < u32::MAX - 16
+                    && !tcx.is_rc_managed(*inner)
+                    && !tcx.is_inline_enum_ty(*inner)
+                    && tcx.struct_field_tys(*def).is_some()
+            }
+            _ => false,
+        };
+        (aggregate && !aggregate_rc_field_paths(tcx, *inner).is_empty()).then_some(*inner)
+    };
+    let mut sites: Vec<(usize, usize, Local, gossamer_types::Ty, Option<Local>)> = Vec::new();
+    for (bi, block) in body.blocks.iter().enumerate() {
+        for (si, stmt) in block.stmts.iter().enumerate() {
+            let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                continue;
+            };
+            if place.projection.as_slice() != [crate::ir::Projection::Deref]
+                || (place.local.0 as usize) >= n_locals
+                || matches!(rvalue, Rvalue::Use(Operand::Const(_)))
+            {
+                continue;
+            }
+            let Some(pointee) = pointee_of(place.local) else {
+                continue;
+            };
+            let copied = match rvalue {
+                Rvalue::Use(Operand::Copy(src))
+                    if src.projection.is_empty()
+                        && (src.local.0 as usize) < n_locals
+                        && body.locals[src.local.0 as usize].ty == pointee =>
+                {
+                    Some(src.local)
+                }
+                _ => None,
+            };
+            sites.push((bi, si, place.local, pointee, copied));
+        }
+    }
+    let unit_ty = tcx.unit_interned().unwrap_or(body.locals[0].ty);
+    for (bi, si, reference, pointee, copied) in sites.into_iter().rev() {
+        let span = body.blocks[bi].stmts[si].span;
+        let mut push_local = |ty: gossamer_types::Ty| -> Local {
+            let local = Local(u32::try_from(body.locals.len()).expect("local index fits in u32"));
+            body.locals.push(LocalDecl {
+                ty,
+                debug_name: None,
+                mutable: false,
+                region: false,
+            });
+            local
+        };
+        let old = push_local(pointee);
+        let mut releases = Vec::new();
+        let mut shares = Vec::new();
+        for (path, kind) in aggregate_rc_field_paths(tcx, pointee) {
+            let field_ty = holder_copies::field_ty_at(tcx, pointee, &path);
+            let string = matches!(kind, FieldRcKind::Rc)
+                && field_ty.is_some_and(|t| matches!(tcx.kind_of(t), TyKind::String));
+            let name = match kind {
+                FieldRcKind::Rc if string => "gos_rt_str_free_typed",
+                FieldRcKind::Carrier { .. } => "gos_rt_result_payload_release",
+                other => other.helpers().1,
+            };
+            let mut stmt = field_rc_call_stmt(name, push_local(unit_ty), old, &path, span);
+            push_carrier_kinds(&mut stmt, kind);
+            releases.push(stmt);
+            if let Some(src) = copied {
+                let share = match kind {
+                    FieldRcKind::Rc if string => "gos_rt_str_retain_typed",
+                    FieldRcKind::Carrier { .. } => "gos_rt_result_payload_retain",
+                    other => match other.value_container_helpers() {
+                        Some((clone, _)) => clone,
+                        None => other.helpers().0,
+                    },
+                };
+                let mut stmt = field_rc_call_stmt(share, push_local(unit_ty), src, &path, span);
+                push_carrier_kinds(&mut stmt, kind);
+                shares.push(stmt);
+            }
+        }
+        shares.extend(releases);
+        let releases = shares;
+        let stmts = &mut body.blocks[bi].stmts;
+        stmts.splice(si + 1..si + 1, releases);
+        stmts.insert(
+            si,
+            Statement {
+                kind: StatementKind::Assign {
+                    place: Place::local(old),
+                    rvalue: Rvalue::Use(Operand::Copy(Place {
+                        local: reference,
+                        projection: vec![crate::ir::Projection::Deref],
+                    })),
                 },
                 span,
                 inlined: None,

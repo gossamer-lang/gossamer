@@ -884,3 +884,33 @@ fn build_rejects_unknown_target() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("unknown target"));
     let _ = std::fs::remove_file(&fixture);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_test_body_runs_on_the_process_main_thread() {
+    let source = "\
+use std::ffi
+
+unsafe extern \"C\" {
+    fn gettid() -> ffi::c_int
+    fn getpid() -> ffi::c_int
+}
+
+#[test]
+fn runs_on_main() {
+    assert_eq(unsafe { gettid() }, unsafe { getpid() })
+}
+";
+    let fixture = write_fixture("main_thread_test", source);
+    let out = Command::new(gos_bin())
+        .arg("test")
+        .arg(&fixture)
+        .output()
+        .expect("spawn test");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("PASS"),
+        "a test body must run where `gos run` runs `main`:\n{stdout}\n{stderr}"
+    );
+}

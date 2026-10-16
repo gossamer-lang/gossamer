@@ -51,6 +51,9 @@ pub struct ForeignLinks {
     /// What `#[link(name = "..")]` names, in the order first seen, for the
     /// native link line.
     pub libraries: Vec<String>,
+    /// What `#[link(name = "..", kind = "framework")]` names: macOS
+    /// frameworks, linked with `-framework`.
+    pub frameworks: Vec<String>,
     /// Each `#[link(search = "..")]` directory as written, with the
     /// dependency that declares it (`None` for the program's own project),
     /// whose root it is relative to.
@@ -81,10 +84,15 @@ pub fn foreign_link_libraries(sf: &SourceFile, program_end: usize) -> ForeignLin
                     if (item.span.start as usize) < program_end {
                         out.declares_foreign = true;
                     }
-                    if let Some(library) = item.attrs.link_library()
-                        && !out.libraries.contains(&library)
-                    {
-                        out.libraries.push(library);
+                    if let Some(library) = item.attrs.link_library() {
+                        let list = if item.attrs.link_kind().as_deref() == Some("framework") {
+                            &mut out.frameworks
+                        } else {
+                            &mut out.libraries
+                        };
+                        if !list.contains(&library) {
+                            list.push(library);
+                        }
                     }
                     if let Some(dir) = item.attrs.link_search() {
                         let entry = (dependency.map(str::to_string), dir);
@@ -371,6 +379,14 @@ fn lower_to_mir_reporting_prune(
     );
     gossamer_mir::monomorphise(&hir, &mut bodies, &mut tcx);
     let late = gossamer_mir::prune_unreachable(&mut bodies, &roots);
+    // A library unit names no entry, so pruning kept every body; the generic
+    // templates among them are compiled only as the instantiations callers use.
+    if !roots
+        .iter()
+        .any(|root| bodies.iter().any(|body| body.name == *root))
+    {
+        gossamer_mir::drop_library_templates(&mut bodies, &tcx);
+    }
     let prune = gossamer_mir::PruneReport {
         kept: late.kept,
         pruned: early.pruned + late.pruned,

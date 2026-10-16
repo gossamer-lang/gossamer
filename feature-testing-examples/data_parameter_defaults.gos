@@ -1,0 +1,53 @@
+// A parameter default may hold data: a variant, `None`, a construction, a
+// collection literal, a function, or a const of any type. Each copy keeps the
+// meaning it has where the function is declared, whatever the call site names.
+
+use gfx::open
+
+mod gfx {
+    pub enum Profile { Core, Compat, Es }
+
+    #[derive(Debug)]
+    pub struct Size { pub w: i64, pub h: i64 }
+
+    pub const ORIGIN: Size = Size { w: 0, h: 0 }
+
+    fn twice(x: i64) -> i64 { x * 2 }
+
+    pub fn open(
+        title: String
+        profile: Profile = Profile::Core
+        size: Size = Size { w: 800, h: 600 }
+        at: Size = ORIGIN
+        parent: Option<String> = None
+        samples: Option<i64> = Some(4)
+        tags: Vec<String> = #[]
+        pair: (i64, bool) = (1, true)
+        f: Fn(i64) -> i64 = twice
+        limit: i64 = i64::MAX
+    ) -> String {
+        let p = match profile {
+            Profile::Core => "core"
+            Profile::Compat => "compat"
+            Profile::Es => "es"
+        }
+        f"{title} {p} {size.w}x{size.h} at {at.w},{at.h} {parent} {samples} {tags.len()} {pair} {f(21)} {limit}"
+    }
+}
+
+enum Profile { Other }
+struct Size { w: i64 }
+const ORIGIN: i64 = 5
+
+
+fn main() {
+    // Each call site runs twice, so the JIT compiles `main` with its
+    // spliced defaults.
+    for round in 1..3 {
+        println(f"round {round}")
+        println(open("a"))
+        println(open("b", profile: gfx::Profile::Es, samples: None))
+        let tags = #["x"]
+        println(open("c", tags: tags, parent: Some("root")))
+    }
+}

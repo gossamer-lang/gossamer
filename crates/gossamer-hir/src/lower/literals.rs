@@ -55,44 +55,7 @@ impl Lowerer<'_> {
         base: Option<&gossamer_ast::Expr>,
         span: Span,
     ) -> HirExprKind {
-        let mut name = path
-            .segments
-            .last()
-            .map(|seg| seg.name.name.clone())
-            .unwrap_or_default();
-        if let Some(Resolution::Def { def, .. }) = self.resolutions.get(node)
-            && let Some(promoted) = self.module_fn_paths.get(&def)
-            && let Some(promoted_name) = promoted.last()
-        {
-            name.clone_from(&promoted_name.name);
-        }
-        // A type declared in a module is identified by its qualified name,
-        // matching what the type checker registers, so two modules may
-        // declare the same name without their constructors, `{:?}` dispatch,
-        // or native registry entries colliding.
-        if let Some(Resolution::Def { def, .. }) = self.resolutions.get(node)
-            && let Some(identity) = self.module_type_names.get(&def)
-            // The identity names the TYPE. A literal that names a variant of
-            // it - `Value::Attr { .. }` - resolves to the same def, and the
-            // constructor is keyed by the variant, so only a literal whose
-            // own last segment is the type takes the qualified spelling.
-            && identity.rsplit("::").next() == Some(name.as_str())
-        {
-            name.clone_from(identity);
-        }
-        // A literal may name its type through an import (`use a::Point`,
-        // `use a::Point as P`); the import's target path is that identity.
-        if let Some(Resolution::Import { use_id }) = self.resolutions.get(node)
-            && let Some(entries) = self.import_targets.get(&use_id)
-            && let Some((_, full)) = entries.iter().find(|(bound, _)| *bound == name)
-        {
-            name = full
-                .iter()
-                .map(|segment| segment.name.as_str())
-                .filter(|segment| !matches!(*segment, "crate" | "self" | "super" | "root"))
-                .collect::<Vec<_>>()
-                .join("::");
-        }
+        let (name, declared_name) = self.struct_literal_names(node, path);
         let error_ty = self.error_ty();
         let string_ty = self.error_ty();
         let mut args = Vec::with_capacity(1 + fields.len() * 2 + 2);
@@ -102,21 +65,8 @@ impl Lowerer<'_> {
             ty: string_ty,
             kind: HirExprKind::Literal(HirLiteral::String(name)),
         });
-        let field_names = self.resolve_struct_literal_field_names(
-            path.segments
-                .last()
-                .map(|seg| seg.name.name.as_str())
-                .unwrap_or_default(),
-            fields,
-        );
-        let field_order = self.struct_literal_field_order(
-            path.segments
-                .last()
-                .map(|seg| seg.name.name.as_str())
-                .unwrap_or_default(),
-            fields,
-            &field_names,
-        );
+        let field_names = self.resolve_struct_literal_field_names(&declared_name, fields);
+        let field_order = self.struct_literal_field_order(&declared_name, fields, &field_names);
         for idx in field_order {
             let field = &fields[idx];
             args.push(HirExpr {
@@ -165,6 +115,70 @@ impl Lowerer<'_> {
             }),
             args,
         }
+    }
+
+    /// The identity a struct literal at `node` builds, and the name its
+    /// type declares its fields under.
+    fn struct_literal_names(
+        &self,
+        node: NodeId,
+        path: &gossamer_ast::PathExpr,
+    ) -> (String, String) {
+        let mut name = path
+            .segments
+            .last()
+            .map(|seg| seg.name.name.clone())
+            .unwrap_or_default();
+        if let Some(Resolution::Def { def, .. }) = self.resolutions.get(node)
+            && let Some(promoted) = self.module_fn_paths.get(&def)
+            && let Some(promoted_name) = promoted.last()
+        {
+            name.clone_from(&promoted_name.name);
+        }
+        // A type declared in a module is identified by its qualified name,
+        // matching what the type checker registers, so two modules may
+        // declare the same name without their constructors, `{:?}` dispatch,
+        // or native registry entries colliding.
+        if let Some(Resolution::Def { def, .. }) = self.resolutions.get(node)
+            && let Some(identity) = self.module_type_names.get(&def)
+            // The identity names the TYPE. A literal that names a variant of
+            // it - `Value::Attr { .. }` - resolves to the same def, and the
+            // constructor is keyed by the variant, so only a literal whose
+            // own last segment is the type takes the qualified spelling.
+            && identity.rsplit("::").next() == Some(name.as_str())
+        {
+            name.clone_from(identity);
+        }
+        // A literal may name its type through an import (`use a::Point`,
+        // `use a::Point as P`); the import's target path is that identity.
+        if let Some(Resolution::Import { use_id }) = self.resolutions.get(node)
+            && let Some(entries) = self.import_targets.get(&use_id)
+            && let Some((_, full)) = entries.iter().find(|(bound, _)| *bound == name)
+        {
+            name = full
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .filter(|segment| !matches!(*segment, "crate" | "self" | "super" | "root"))
+                .collect::<Vec<_>>()
+                .join("::");
+        }
+        // A literal may name its type through a `type` alias; the alias's
+        // target is the type it builds.
+        let alias_target = self.struct_alias_target(node);
+        if let Some(target) = &alias_target {
+            name = target
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .collect::<Vec<_>>()
+                .join("::");
+        }
+        let declared_name = alias_target
+            .as_ref()
+            .and_then(|target| target.last())
+            .or_else(|| path.segments.last().map(|seg| &seg.name))
+            .map(|ident| ident.name.clone())
+            .unwrap_or_default();
+        (name, declared_name)
     }
 
     fn struct_literal_field_order(

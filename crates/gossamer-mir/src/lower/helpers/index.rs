@@ -90,13 +90,15 @@ pub(crate) fn map_key_kind_from(tcx: &gossamer_types::TyCtxt, ty: Ty) -> MapKeyK
     }
 }
 
-/// Whether `ty` is a user enum represented as a bare discriminant word.
+/// Whether `ty` is a user enum none of whose variants carries a field, so
+/// its value is a bare discriminant word.
 fn is_unit_only_enum(tcx: &gossamer_types::TyCtxt, ty: Ty) -> bool {
     use gossamer_types::TyKind;
     let TyKind::Adt { def, .. } = tcx.kind_of(ty) else {
         return false;
     };
-    tcx.enum_variant_names(*def).is_some() && !tcx.is_rc_managed(ty) && !tcx.is_inline_enum_ty(ty)
+    tcx.enum_variant_tys(*def)
+        .is_some_and(|variants| variants.iter().all(Vec::is_empty))
 }
 
 pub(crate) struct EnumIndex {

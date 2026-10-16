@@ -1562,7 +1562,7 @@ fn leaked_entries(rendered: &[RenderedBinding]) -> &'static [BindingEntry] {
 pub(crate) struct AdvisoryLock {
     path: PathBuf,
     /// The locked file; closing it releases the lock.
-    _file: fs::File,
+    file: fs::File,
 }
 
 impl AdvisoryLock {
@@ -1627,7 +1627,7 @@ impl AdvisoryLock {
         match names_same_file(&file, path) {
             Ok(true) => Ok(Some(Self {
                 path: path.to_path_buf(),
-                _file: file,
+                file,
             })),
             Ok(false) => Ok(None),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -1712,7 +1712,11 @@ fn open_lock_file(path: &Path) -> io::Result<fs::File> {
 
 impl Drop for AdvisoryLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        // The path may name a newer holder's file once this one was removed
+        // from under it; that file is the newer holder's to remove.
+        if names_same_file(&self.file, &self.path).unwrap_or(false) {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -2020,7 +2024,11 @@ mod tests {
             std::thread::spawn(move || AdvisoryLock::acquire(&path).expect("acquire"))
         };
         std::thread::yield_now();
-        let _ = fs::remove_dir_all(&dir);
+        // The file goes, then the directory if nothing has been created in
+        // it since, as reclamation removes a workdir: a lock file the waiter
+        // creates afresh is never deleted from under it.
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
         drop(first);
         let second = waiter.join().expect("waiter");
         assert!(

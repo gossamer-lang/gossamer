@@ -191,6 +191,87 @@ fn main() {
 }
 
 #[test]
+fn main_waits_for_a_value_a_library_thread_sends_through_a_handle() {
+    let project = Project::new(
+        "callback-thread-channel",
+        &fixture_program(
+            r"
+use std::ffi::Handle
+use std::sync::{Sender, channel}
+
+fn on_event(value: ffi::c_int, ctx: Ptr<ffi::c_void>) {
+    let h: Handle<Sender<i64>> = unsafe { Handle::from_ptr(ctx) }
+    let tx = h.get()
+    tx.send(value as i64)
+    tx.close()
+}
+
+fn main() {
+    let tx, rx = channel()
+    let h = Handle::new(tx)
+    unsafe { set_handler(on_event, h.as_ptr()) }
+    unsafe { fire_later_on_thread(9, 100) }
+    while let Some(v) = rx.recv() {
+        println(v)
+    }
+    h.release()
+}
+",
+        ),
+    );
+    project.expect_everywhere("9");
+}
+
+#[test]
+fn a_handle_made_in_compiled_code_reaches_a_later_callback() {
+    let project = Project::new(
+        "callback-handle-compiled",
+        &fixture_program(
+            r#"
+use std::ffi::Handle
+
+struct Offer {
+    items: Vec<(String, i64)>
+    served: Vec<i64>
+}
+
+// The loops make the callback and `register` worth compiling, so the C-ABI
+// adapter is promoted with the callback inlined while `main`, which makes the
+// handle, runs its one call on the VM.
+fn on_event(value: ffi::c_int, ctx: Ptr<ffi::c_void>) {
+    let offer: Handle<Offer> = unsafe { Handle::from_ptr(ctx) }
+    let current = offer.get()
+    for (name, amount) in current.items {
+        if amount == value as i64 {
+            offer.update(|o: &mut Offer| o.served.push(amount))
+            println(f"served {name}")
+        }
+    }
+}
+
+fn register(items: Vec<(String, i64)>) -> Handle<Offer> {
+    let mut names: Vec<String> = #[]
+    for (name, _) in items {
+        names.push(name)
+    }
+    let h = Handle::new(Offer { items: items, served: #[] })
+    unsafe { set_handler(on_event, h.as_ptr()) }
+    h
+}
+
+fn main() {
+    let h = register(#[("a", 5), ("b", 7)])
+    unsafe { fire(5) }
+    unsafe { fire(7) }
+    println(f"{h.take().served}")
+}
+"#,
+        ),
+    );
+    project.expect_everywhere("served a\nserved b\n#[5, 7]");
+}
+
+#[test]
 fn callbacks_run_on_several_library_threads_at_once() {
     let project = Project::new(
         "callback-threads",

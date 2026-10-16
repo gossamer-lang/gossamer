@@ -345,7 +345,7 @@ impl<'a> Builder<'a> {
             // A struct registers its field layout; an enum does not, and its
             // value is one word rather than a slot buffer.
             TyKind::Adt { def, .. } => {
-                self.tcx.enum_variant_tys(*def).is_some()
+                (self.tcx.enum_variant_tys(*def).is_some() && !self.tcx.is_flat_enum_def(def.local))
                     || self.tcx.struct_field_tys(*def).is_none()
             }
             _ => false,

@@ -20,7 +20,7 @@ use super::c_header::{self, Export};
 use super::{
     BuildRequest, BuildTimings, LinkTarget, NativeBuildError, NativeLinks, TargetEnv, TargetOs,
     ValidatedSource, build_static_bindings_lib, emit_native_objects, ensure_output_dir,
-    find_runtime_lib, find_runtime_lib_for_target, host_os, resolve_link_target,
+    find_runtime_lib, find_runtime_lib_for_target, framework_args, host_os, resolve_link_target,
     trace_link_command, validate_source,
 };
 use crate::paths::read_entry_unit;
@@ -170,6 +170,39 @@ pub(super) fn build(file: &Path, request: &BuildRequest<'_>, target: &LibraryTar
     Ok(())
 }
 
+/// Compiles a library root that names no `[lib] kind` through native code
+/// generation and keeps nothing: its dependents bundle its source, so the
+/// build proves it compiles on the native tier without an artifact to link.
+pub(super) fn compile(
+    unit_name: &str,
+    file: &Path,
+    request: &BuildRequest<'_>,
+    checked: gossamer_driver::CheckedFrontend,
+    timings: &mut BuildTimings,
+) -> Result<()> {
+    let lt = resolve_link_target(request.target);
+    let static_musl = lt.env == TargetEnv::Musl || request.link.want_static_musl();
+    let tmp_dir =
+        std::env::temp_dir().join(format!("gos-build-{}-check{unit_name}", std::process::id()));
+    fs::create_dir_all(&tmp_dir).map_err(|err| anyhow!("creating {}: {err}", tmp_dir.display()))?;
+    let result = emit_native_objects(
+        unit_name,
+        &tmp_dir,
+        request.link.release,
+        static_musl,
+        checked,
+        timings,
+    );
+    let _ = fs::remove_dir_all(&tmp_dir);
+    result.map_err(|err| anyhow!("build: {}", err.user_message()))?;
+    outln!(
+        "build: library {} compiled; it declares no `fn main` and no `[lib] kind`, so there \
+         is nothing to link",
+        file.display()
+    );
+    Ok(())
+}
+
 /// What a library's artifacts link besides its own objects: the runtime
 /// archive (none for a host-runtime library, which resolves against its
 /// host's), the archives of its native sources, and its `[rust-bindings]`
@@ -190,6 +223,8 @@ fn link_inputs(
     };
     let native = crate::native_sources::archives(file, lt.is_cross.then_some(lt.triple.as_str()))
         .map_err(|err| NativeBuildError::BackendFailed(format!("{err:#}")))?;
+    let position = libraries.libraries.len();
+    libraries.add_after(position, native.dependencies);
     let native: Vec<PathBuf> = native
         .archives
         .into_iter()
@@ -343,6 +378,12 @@ fn static_link_libraries(lt: &LinkTarget, libraries: &NativeLinks) -> Vec<String
         } else {
             format!("-l{library}")
         });
+    }
+    if lt.os == TargetOs::MacOs {
+        for framework in &libraries.frameworks {
+            flags.push("-framework".to_string());
+            flags.push(framework.clone());
+        }
     }
     flags.extend(libraries.staticlib_args.iter().cloned());
     let system: &[&str] = match lt.os {
@@ -650,6 +691,7 @@ fn shared(parts: &Parts<'_>, name: &str, out: &Path) -> std::result::Result<(), 
     for library in &parts.libraries.libraries {
         cmd.arg(format!("-l{library}"));
     }
+    cmd.args(framework_args(parts.lt, parts.libraries)?);
     cmd.args(&parts.libraries.staticlib_args);
     cmd.arg("-o").arg(out);
     cmd.arg("-lpthread");

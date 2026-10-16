@@ -322,9 +322,10 @@ with its comma, `(a,)`.
 A line break before a binary operator never continues an expression, with
 one exception: `|>`, which may begin a line to continue a pipeline.
 
-- An operator that also begins an expression (`&`, `*`, `-`, `<`, `^`, a
-  closure's `|`, and `||`) begins a new statement, or a new element of a
-  delimited list, when it is the first token on a line. This holds inside
+- An operator that also begins an expression (`&`, `*`, `-`, `<`, `^`, `..`,
+  `..=`, a closure's `|`, and `||`) begins a new statement, or a new element
+  of a delimited list, when it is the first token on a line. A struct
+  literal's `..base` on a line of its own is therefore its base. This holds inside
   parentheses too. A function can therefore end in a closure on its own
   line after a statement, with parameters or without (`let k = 2` then
   `|x| x * k`, or `|| k * 3`).
@@ -798,13 +799,19 @@ argument needs a name too. Violations are `GR0013`.
 
 A default must be a value known while compiling: a literal - integer,
 float, string, char, byte, or bool - optionally negated, a path to a
-`const` item or an associated const, integer arithmetic over those, or a
-`comptime` expression. Each folds to a literal before it is spliced into
-the calls that omit the parameter. A const is resolved where the function
-is declared, so a call site with another `DEFAULT_TIMEOUT` in scope still
-receives the declaration's. Anything else, which would need resolving at
-each call site, is rejected with `GR0014`. Each call site receives its
-own copy, so no two calls share a default value.
+`const` item or an associated const, integer arithmetic over those, a
+`comptime` expression, an enum variant (`Mode::Fast`, `None`), a
+function, or a variant or struct construction, tuple, array, `Vec`,
+`Map`, or `Set` literal built from those (`Some(4)`,
+`Size { w: 800, h: 600 }`, `#[]`). A scalar const and integer arithmetic
+fold to a literal before the default is spliced into the calls that omit
+the parameter. Every name a default uses is resolved where the function
+is declared, and each spliced copy keeps that meaning: a call site with
+another `DEFAULT_TIMEOUT` or `Mode` in scope still receives the
+declaration's. A default computed at run time - a call to a function, a
+closure, a `static`, or another parameter's value - is rejected with
+`GR0014`. Each call site receives its own copy, so no two calls share a
+default value.
 
 Methods and associated functions accept both forms. A method call is
 rewritten against the declaration its receiver's type reaches, so an
@@ -1990,10 +1997,26 @@ inclusive marker requires an upper bound, so bare `..=` and `lo..=` are
 parse errors. Range patterns count toward exhaustiveness by the values
 they cover (see `match` in §4.4).
 
-A `let` binding (§4.1) and a `let` clause in an `if` / `while` condition
-(§4.4) require an irrefutable pattern (or an `else` branch that diverges,
-for `let ... else`). Struct, nested-struct, variant, and or-pattern
-destructuring in irrefutable position bind identically across all tiers.
+A pattern that is a single name means what the name resolves to, as in
+Rust, whatever its case. A name that resolves to a unit variant, a unit or
+tuple struct, or a `const` matches that value: `Red =>`, `None =>`, and
+`LIMIT =>` compare, and so do `red =>` and `limit =>` when a variant `red`
+or a const `limit` is in scope. Any other name binds a fresh local, so
+`let Width = 3` and `fn area(W: i64)` bind. `mut name` and `name @ p`
+always bind. A `match` arm whose name resolves to nothing but is one or two
+edits from a variant's name is `GR0022`, since as a binding it would match
+every value; the naming lints (`gos lint`, `GL0057`-`GL0059`) report a
+binding, const, or variant whose case departs from Rust's conventions.
+
+A `let` binding (§4.1), a `for` binding, a function or closure parameter,
+and a `let` clause in an `if` / `while` condition (§4.4) require an
+irrefutable pattern (or an `else` branch that diverges, for
+`let ... else`). A const, and a variant of an enum that declares another,
+may fail to match, so `let Some(x) = opt`, `fn f(Shape::Circle(r): Shape)`,
+and `let LIMIT = 5` are `GT0047`; a variant of a single-variant enum, a
+struct, and a tuple are irrefutable. Struct, nested-struct, variant, and
+or-pattern destructuring in irrefutable position bind identically across
+all tiers.
 
 `&p` and `&mut p` are reference patterns. They require a shared or mutable
 reference respectively, remove that reference layer, and then match `p`
@@ -2228,7 +2251,7 @@ Properties:
 ### 6.6 `use` declarations
 
 ```
-UseDecl    = "use" UseTarget [ "as" Ident ] [ "{" UseList "}" ]
+UseDecl    = "use" UseTarget [ "as" Ident ] [ "{" UseList "}" | "::" "*" ]
 UseTarget  = ProjectUse | ModulePath
 ProjectUse = StringLit [ "::" ModulePath ]
 ModulePath = Ident { "::" Ident }
@@ -2276,6 +2299,14 @@ resolved the package: the import is what records which package a
 `math::` path comes from. Modules of the current project keep the weaker
 rule - a full path such as `util::add(..)` names a sibling module
 without an import, because the file layout already shows where it lives.
+
+A `use` may name an enum's variants: `use shapes::Kind::Round`,
+`use shapes::Kind::{Round, Square}`, or every variant with
+`use shapes::Kind::*`. Each binds the variant's name (or its `as` alias)
+in the module the `use` is written in, where it names that variant even
+when another enum declares a variant of the same name. `::*` imports an
+enum's variants only; a glob of a module is `GR0024`, and its items are
+imported by name.
 
 There is no side-effect-only `use`. A project's initialisation is
 explicit through an optional `fn init()` per module, run in
@@ -2397,7 +2428,7 @@ stack-allocated (escape analysis). The escape rules are:
 
 ### 7.2 Automatic memory management
 
-Memory management is deterministic reference counting for heap enums
+Memory management is deterministic reference counting for recursive enums
 and runtime containers, drop-pass reclamation for value aggregates,
 weak references, an on-demand cycle collector
 (`runtime::collect_cycles()`), and `arena { }` regions. Cycle collection is
@@ -2410,6 +2441,11 @@ pause.
 
 Memory is reclaimed deterministically, without a tracing collector:
 
+- **Enum layout.** A non-recursive enum is a value aggregate: its
+  discriminant and its variants' fields, which share storage across
+  variants, are stored inline, and so is an `Option` or `Result` over
+  it. An enum that contains itself, directly or through other types,
+  keeps one heap node per value.
 - **Reference counting.** Recursive heap enums and runtime
   containers carry an intrusive header (`[RcHeader | payload]`).
   Codegen emits balanced retain/release pairs; when the strong
@@ -3447,7 +3483,9 @@ Rules:
   `#[link(name = "lib")]` names a library beyond the platform C library
   (and, on Windows, `kernel32`), and `#[link(name = "lib", search =
   "dir")]` adds a directory to search for it, relative to the root of the
-  package that declares it; `#[link_name = "symbol"]` names a C symbol
+  package that declares it; `#[link(name = "Cocoa", kind = "framework")]`
+  names a macOS framework, linked with `-framework` and a link error for any
+  other target, so its declarations carry `#[cfg(target_os = "macos")]`; `#[link_name = "symbol"]` names a C symbol
   that differs from the Gossamer name; `#[cfg(...)]` selects declarations
   per target; besides `target_os`, `target_arch`, `target_family`, `unix`,
   and `windows`, `#[cfg]` knows `target_env` (`gnu`, `musl`, `msvc`),
@@ -3666,6 +3704,38 @@ Objects are cached under `.gos-cache/native/` and recompiled when a
 source, any header it includes, the compiler, its arguments, or the target
 changes; `gos clean --native` removes them. A source that does not compile
 stops the build with the compiler's output.
+
+A package builds a C library that comes with a CMake project of its own
+through `[native.cmake]`:
+
+```toml
+[features]
+default = ["vendored-sdl"]
+vendored-sdl = []
+
+[native.cmake]
+source = "vendor/SDL"
+provides = ["SDL3"]
+options = { SDL_AUDIO = "OFF" }
+feature = "vendored-sdl"
+```
+
+`provides` lists the library names the project builds, and a
+`#[link(name = ..)]` naming one of them resolves to the package's own build:
+a native build links its static archive (the project configured with
+`BUILD_SHARED_LIBS=OFF`), and `gos run` loads its shared library
+(`BUILD_SHARED_LIBS=ON`). `options` become `-DNAME=VALUE` cache entries, and
+`feature` builds the project only when that package feature is enabled, so
+`default-features = false` falls back to the library the system provides
+under the same name. A static archive links what the project's installed
+pkg-config file for it (`lib/pkgconfig/<name>.pc`) lists in `Libs` and
+`Libs.private`, after the archive: `-l` libraries, `-L` directories,
+`-pthread`, and macOS frameworks; its `Requires.private` packages resolve
+through the system's `pkg-config`, and any other option stops the build.
+Each linkage is configured once under
+`.gos-cache/native/` and rebuilt by CMake on every use; `cmake` must be on
+`PATH`, Ninja is used when present, and a cross build reads its target from
+`CMAKE_TOOLCHAIN_FILE`.
 
 ### 12.3 Generating declarations
 

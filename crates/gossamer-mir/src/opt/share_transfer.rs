@@ -112,13 +112,12 @@ fn retained_source(block: &BasicBlock, i: usize, retained: &Place) -> Option<(Pl
     }) = maker
         && place.local != retained.local
     {
+        // The holder took the retained place itself, or the aggregate it
+        // lies inside, whose leaves each take their own retain.
+        let holds = |op: &Operand| matches!(op, Operand::Copy(p) if contains_place(p, retained));
         let reads_retained = match rvalue {
-            Rvalue::Use(op) | Rvalue::Cast { operand: op, .. } => {
-                matches!(op, Operand::Copy(p) if p == retained)
-            }
-            Rvalue::Aggregate { operands, .. } => operands
-                .iter()
-                .any(|op| matches!(op, Operand::Copy(p) if p == retained)),
+            Rvalue::Use(op) | Rvalue::Cast { operand: op, .. } => holds(op),
+            Rvalue::Aggregate { operands, .. } => operands.iter().any(holds),
             _ => false,
         };
         if reads_retained && !place_mentions_local(place, retained.local) {
@@ -134,12 +133,13 @@ fn retained_source(block: &BasicBlock, i: usize, retained: &Place) -> Option<(Pl
         ..
     }) = maker
         && place.projection.is_empty()
-        && copied.projection.is_empty()
+        && fields_only(copied)
         && place.local == retained.local
         && copied.local != retained.local
     {
+        // `d = a.f` hands `d.p` the share `a.f.p` holds.
         let mut source = copied.clone();
-        source.projection.clone_from(&retained.projection);
+        source.projection.extend(retained.projection.iter().cloned());
         return Some((source, true));
     }
     let rest_leaves_it_alone = block.stmts[i + 1..].iter().all(|stmt| {
@@ -225,6 +225,212 @@ pub(crate) fn transfer_last_use_shares(
     count
 }
 
+/// Moves a carrier's payload share to the binding that extracts it when the
+/// extraction is the carrier's last read.
+///
+/// `let e = c?` reads the payload out of `c` and retains it for `e`, while
+/// `c` keeps its own share until its release. When nothing reads `c` again,
+/// those are one share changing holders:
+///
+/// ```text
+/// v = gos_rt_result_payload(c)           v = gos_rt_result_payload(c)
+/// e = v                                  e = v
+/// retain(v)                          ->  c = None
+/// ...                                    ...
+/// gos_rt_result_payload_release(c)       gos_rt_result_payload_release(c)
+/// ```
+///
+/// A release that leaves a count above zero is what buffers an object for
+/// the cycle collector, so the pair otherwise feeds it every value a `?`
+/// unwraps. `c` must be a frame-owned carrier released on every path after
+/// the retain by a release whose kind for each payload-carrying arm is the
+/// storage the retain counts.
+pub(crate) fn transfer_carrier_payload_shares(
+    body: &mut Body,
+    tcx: &TyCtxt,
+    summaries: &crate::uniqueness::CallSummaries,
+) -> usize {
+    let transfers = find_carrier_payload_transfers(body, tcx, summaries);
+    for &(bi, retain, carrier) in &transfers {
+        let stmt = &mut body.blocks[bi].stmts[retain];
+        stmt.kind = StatementKind::Assign {
+            place: Place::local(carrier),
+            rvalue: Rvalue::CallIntrinsic {
+                name: "gos_rt_result_new",
+                args: vec![
+                    Operand::Const(ConstValue::Int(1)),
+                    Operand::Const(ConstValue::Int(0)),
+                ],
+            },
+        };
+    }
+    transfers.len()
+}
+
+/// The carrier release kind that gives back the share the retain `name`
+/// takes.
+fn carrier_kind_of_retain(name: &str) -> Option<i128> {
+    match name {
+        "gos_rt_str_retain_typed" | "gos_rt_str_retain" => Some(1),
+        "gos_rt_vec_retain" => Some(2),
+        "gos_rt_rc_retain" => Some(4),
+        _ => None,
+    }
+}
+
+/// The local `gos_rt_result_payload` reads `value` out of, found walking back
+/// from statement `before` of block `bi` and, when the block starts the path,
+/// through the one block that jumps to it. Neither the value nor the carrier
+/// may be written between the extraction and the retain.
+fn payload_carrier(
+    body: &Body,
+    preds: &[Vec<usize>],
+    bi: usize,
+    before: usize,
+    value: Local,
+) -> Option<Local> {
+    let writes = |stmt: &Statement, local: Local| {
+        matches!(&stmt.kind, StatementKind::Assign { place, .. } if place.local == local)
+    };
+    let mut block = bi;
+    let mut end = before;
+    let mut written_after: Vec<&Statement> = Vec::new();
+    let mut visited = vec![false; body.blocks.len()];
+    loop {
+        if std::mem::replace(&mut visited[block], true) && block != bi {
+            return None;
+        }
+        let stmts = &body.blocks[block].stmts[..end];
+        if let Some(at) = stmts.iter().rposition(|stmt| writes(stmt, value)) {
+            let StatementKind::Assign {
+                rvalue: Rvalue::CallIntrinsic { name: "gos_rt_result_payload", args },
+                ..
+            } = &stmts[at].kind
+            else {
+                return None;
+            };
+            let [Operand::Copy(carrier)] = args.as_slice() else {
+                return None;
+            };
+            if !carrier.projection.is_empty() {
+                return None;
+            }
+            let carrier = carrier.local;
+            let rewritten = stmts[at + 1..]
+                .iter()
+                .chain(written_after.iter().copied())
+                .any(|stmt| writes(stmt, carrier));
+            return (!rewritten).then_some(carrier);
+        }
+        written_after.extend(stmts.iter());
+        let [pred] = preds[block].as_slice() else {
+            return None;
+        };
+        if !matches!(body.blocks[*pred].terminator, Terminator::Goto { .. }) || visited[*pred] {
+            return None;
+        }
+        block = *pred;
+        end = body.blocks[block].stmts.len();
+    }
+}
+
+fn find_carrier_payload_transfers(
+    body: &Body,
+    tcx: &TyCtxt,
+    summaries: &crate::uniqueness::CallSummaries,
+) -> Vec<(usize, usize, Local)> {
+    use crate::uniqueness::{Point, Uniqueness};
+
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); body.blocks.len()];
+    for (bi, block) in body.blocks.iter().enumerate() {
+        for succ in successor_indices(&block.terminator) {
+            if let Some(list) = preds.get_mut(succ) {
+                list.push(bi);
+            }
+        }
+    }
+    let mut candidates = Vec::new();
+    for (bi, block) in body.blocks.iter().enumerate() {
+        for (i, stmt) in block.stmts.iter().enumerate() {
+            let StatementKind::Assign {
+                place: sink,
+                rvalue: Rvalue::CallIntrinsic { name, args },
+            } = &stmt.kind
+            else {
+                continue;
+            };
+            let Some(kind) = carrier_kind_of_retain(name) else {
+                continue;
+            };
+            let [Operand::Copy(retained)] = args.as_slice() else {
+                continue;
+            };
+            if !sink.projection.is_empty() || !retained.projection.is_empty() {
+                continue;
+            }
+            let Some(carrier) = payload_carrier(body, &preds, bi, i, retained.local) else {
+                continue;
+            };
+            candidates.push((bi, i, carrier, kind));
+        }
+    }
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let facts = crate::uniqueness::analyze(body, tcx, summaries);
+    let share = crate::ownership::ShareFacts::compute(body);
+    let mut out = Vec::new();
+    for (bi, i, carrier, kind) in candidates {
+        let ci = carrier.0 as usize;
+        if ci <= body.arity as usize
+            || ci >= body.locals.len()
+            || body.locals[ci].region
+            || share.is_goroutine_shared(carrier)
+        {
+            continue;
+        }
+        let point = Point {
+            block: body.blocks[bi].id,
+            stmt: i,
+        };
+        if facts.at(point, carrier) == Uniqueness::Borrowed || facts.live_after(point, carrier) {
+            continue;
+        }
+        let place = Place::local(carrier);
+        let gives_back = |stmt: &Statement| -> ShareStep {
+            let StatementKind::Assign { place: dest, rvalue } = &stmt.kind else {
+                return ShareStep::Untouched;
+            };
+            if let Rvalue::CallIntrinsic { name, args } = rvalue
+                && let Some(Operand::Copy(released)) = args.first()
+                && released.local == carrier
+            {
+                let constant = |op: Option<&Operand>| match op {
+                    Some(Operand::Const(ConstValue::Int(n))) => Some(*n),
+                    _ => None,
+                };
+                if *name == "gos_rt_result_payload_release"
+                    && released.projection.is_empty()
+                    && let (Some(ok), Some(err)) = (constant(args.get(1)), constant(args.get(2)))
+                    && [ok, err].iter().all(|&k| k == 0 || k == kind)
+                    && (ok == kind || err == kind)
+                {
+                    return ShareStep::Released;
+                }
+                return ShareStep::Ended;
+            }
+            if dest.local == carrier {
+                return ShareStep::Ended;
+            }
+            ShareStep::Untouched
+        };
+        if released_on_every_path_by(body, bi, i + 1, &place, gives_back) {
+            out.push((bi, i, carrier));
+        }
+    }
+    out
+}
+
 /// The releases that give back a share the retain `name` takes.
 fn paired_releases(name: &str) -> &'static [&'static str] {
     match name {
@@ -235,6 +441,13 @@ fn paired_releases(name: &str) -> &'static [&'static str] {
         "gos_rt_rc_retain" => &["gos_rt_rc_release"],
         _ => &[],
     }
+}
+
+/// `true` when `inner` is `outer` or lies inside it.
+fn contains_place(outer: &Place, inner: &Place) -> bool {
+    outer.local == inner.local
+        && outer.projection.len() <= inner.projection.len()
+        && outer.projection.iter().zip(&inner.projection).all(|(x, y)| x == y)
 }
 
 /// `true` when `a` and `b` name overlapping storage: one is the other or
@@ -293,12 +506,26 @@ fn released_on_every_path(
     place: &Place,
     releases: &[&str],
 ) -> bool {
+    released_on_every_path_by(body, block, from, place, |stmt| {
+        statement_share_step(stmt, place, releases)
+    })
+}
+
+/// [`released_on_every_path`] with `step` saying what each statement does to
+/// the share held at `place`.
+fn released_on_every_path_by(
+    body: &Body,
+    block: usize,
+    from: usize,
+    place: &Place,
+    step: impl Fn(&Statement) -> ShareStep,
+) -> bool {
     // `Some(answer)` when the block settles the question itself, `None` when
     // it falls through to its successors.
     let scan = |bi: usize, start: usize| -> Option<bool> {
         let b = &body.blocks[bi];
         for stmt in b.stmts.iter().skip(start) {
-            match statement_share_step(stmt, place, releases) {
+            match step(stmt) {
                 ShareStep::Released => return Some(true),
                 ShareStep::Ended => return Some(false),
                 ShareStep::Untouched => {}
@@ -352,8 +579,11 @@ fn find_share_transfers(
 ) -> Vec<ShareTransfer> {
     use crate::uniqueness::{Point, Uniqueness};
 
-    let facts = crate::uniqueness::analyze(body, tcx, summaries);
-    let share = crate::ownership::ShareFacts::compute(body);
+    // Most bodies hold no candidate; the analysis runs for the first one.
+    let facts_cell = std::cell::OnceCell::new();
+    let facts = || facts_cell.get_or_init(|| crate::uniqueness::analyze(body, tcx, summaries));
+    let share_cell = std::cell::OnceCell::new();
+    let share = || share_cell.get_or_init(|| crate::ownership::ShareFacts::compute(body));
     let preds = block_predecessor_counts(body);
     let mut out = Vec::new();
     for (bi, block) in body.blocks.iter().enumerate() {
@@ -380,7 +610,7 @@ fn find_share_transfers(
                 || ri >= body.locals.len()
                 || body.locals[ri].region
                 || !fields_only(&source)
-                || share.is_goroutine_shared(root)
+                || share().is_goroutine_shared(root)
             {
                 continue;
             }
@@ -394,12 +624,12 @@ fn find_share_transfers(
                 block: block.id,
                 stmt: i,
             };
-            if facts.at(point, root) == Uniqueness::Borrowed {
+            if facts().at(point, root) == Uniqueness::Borrowed {
                 continue;
             }
             let releases = paired_releases(name);
             let null_at = if before {
-                if facts.live_after(point, root)
+                if facts().live_after(point, root)
                     || !released_on_every_path(body, bi, i + 1, &source, releases)
                 {
                     continue;
@@ -417,7 +647,7 @@ fn find_share_transfers(
                 if ti == bi || preds.get(ti).copied() != Some(1) {
                     continue;
                 }
-                if facts.live_on_entry(*target, root)
+                if facts().live_on_entry(*target, root)
                     || !released_on_every_path(body, ti, 0, &source, releases)
                 {
                     continue;
@@ -484,7 +714,9 @@ pub(crate) fn move_unique_clones(
     use crate::uniqueness::{Point, Uniqueness};
 
     let moves: Vec<(usize, Local, Local, BlockId)> = {
-        let facts = crate::uniqueness::analyze(body, tcx, summaries);
+        // Most bodies hold no candidate; the analysis runs for the first one.
+    let facts_cell = std::cell::OnceCell::new();
+    let facts = || facts_cell.get_or_init(|| crate::uniqueness::analyze(body, tcx, summaries));
         let mut out = Vec::new();
         for (bi, block) in body.blocks.iter().enumerate() {
             let Terminator::Call {
@@ -524,8 +756,8 @@ pub(crate) fn move_unique_clones(
                 block: block.id,
                 stmt: block.stmts.len(),
             };
-            if facts.at(point, src) != Uniqueness::Unique
-                || facts.live_on_entry(*target, src)
+            if facts().at(point, src) != Uniqueness::Unique
+                || facts().live_on_entry(*target, src)
                 || !released_on_every_path(
                     body,
                     target.0 as usize,
@@ -635,8 +867,11 @@ pub(crate) fn move_boxed_payload_sources(
     use crate::uniqueness::{Point, Uniqueness};
 
     let moves: Vec<(usize, usize, Local, Vec<Vec<u32>>)> = {
-        let facts = crate::uniqueness::analyze(body, tcx, summaries);
-        let share = crate::ownership::ShareFacts::compute(body);
+        // Most bodies hold no candidate; the analysis runs for the first one.
+    let facts_cell = std::cell::OnceCell::new();
+    let facts = || facts_cell.get_or_init(|| crate::uniqueness::analyze(body, tcx, summaries));
+        let share_cell = std::cell::OnceCell::new();
+    let share = || share_cell.get_or_init(|| crate::ownership::ShareFacts::compute(body));
         let mut out = Vec::new();
         for (bi, block) in body.blocks.iter().enumerate() {
             for (i, stmt) in block.stmts.iter().enumerate() {
@@ -660,7 +895,7 @@ pub(crate) fn move_boxed_payload_sources(
                     || si <= body.arity as usize
                     || si >= body.locals.len()
                     || body.locals[si].region
-                    || share.is_goroutine_shared(src.local)
+                    || share().is_goroutine_shared(src.local)
                 {
                     continue;
                 }
@@ -675,8 +910,8 @@ pub(crate) fn move_boxed_payload_sources(
                     block: block.id,
                     stmt: i,
                 };
-                if facts.at(point, src.local) == Uniqueness::Borrowed
-                    || facts.live_after(point, src.local)
+                if facts().at(point, src.local) == Uniqueness::Borrowed
+                    || facts().live_after(point, src.local)
                 {
                     continue;
                 }

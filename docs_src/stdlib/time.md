@@ -8,7 +8,7 @@ Wall-clock and monotonic time facilities.
 
 | Item | Signature | Description |
 |---|---|---|
-| `Instant` | `type Instant` | A monotonic clock reading in nanoseconds: `now()`, `elapsed()`, `elapsed_ms()`, `duration_since(earlier)`. |
+| `Instant` | `type Instant` | A monotonic clock reading in nanoseconds: `now()`, `elapsed()`, `elapsed_ms()`, `duration_since(earlier)`, `later - earlier` answering the `Duration` between them, `+` / `-` a `Duration`, and ordering. |
 | `Duration` | `type Duration` | A span of nanoseconds: `from_nanos` / `from_micros` / `from_millis` / `from_secs` / `from_secs_f64`, the matching `as_*` accessors, `+`, `-`, and ordering. |
 | `SystemTime` | `type SystemTime` | Wall-clock point-in-time. |
 | `CivilTime` | `type CivilTime` | Calendar fields interpreted only with an explicit location. |

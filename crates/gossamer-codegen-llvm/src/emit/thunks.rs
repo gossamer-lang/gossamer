@@ -271,6 +271,32 @@ pub(super) fn collect_sret_bodies(
     all_bodies: &[Body],
     tcx: &TyCtxt,
 ) -> std::collections::BTreeSet<String> {
+    if std::env::var_os("GOS_NO_SRET").is_some() {
+        return std::collections::BTreeSet::new();
+    }
+    let direct = collect_direct_bodies(all_bodies);
+    all_bodies
+        .iter()
+        .filter(|body| {
+            direct.contains(&body.name)
+                && crate::lower::sret_return_bytes(tcx, body.local_ty(gossamer_mir::Local::RETURN))
+                    .is_some()
+        })
+        // A direct call names the body by the symbol it is emitted as, which
+        // differs from its MIR name where that would shadow a C symbol.
+        .flat_map(|body| {
+            let symbol = crate::lower::mangle_fn_name(&body.name);
+            let renamed = (symbol != body.name.as_str()).then(|| symbol.into_owned());
+            std::iter::once(body.name.clone()).chain(renamed)
+        })
+        .collect()
+}
+
+/// The bodies every call to which is a direct call this module emits, by MIR
+/// name and by emitted symbol: not `main`, and not a body whose address is
+/// taken, which a function pointer or a runtime shim can reach with an
+/// argument list of its own.
+pub(super) fn collect_direct_bodies(all_bodies: &[Body]) -> std::collections::BTreeSet<String> {
     use gossamer_mir::{ConstValue, Operand, Rvalue, StatementKind, Terminator};
 
     let name_of_def = |def: gossamer_resolve::DefId| -> Option<&str> {
@@ -325,17 +351,9 @@ pub(super) fn collect_sret_bodies(
         }
     }
 
-    if std::env::var_os("GOS_NO_SRET").is_some() {
-        return std::collections::BTreeSet::new();
-    }
     all_bodies
         .iter()
-        .filter(|body| {
-            body.name != "main"
-                && !address_taken.contains(&body.name)
-                && crate::lower::sret_return_bytes(tcx, body.local_ty(gossamer_mir::Local::RETURN))
-                    .is_some()
-        })
+        .filter(|body| body.name != "main" && !address_taken.contains(&body.name))
         // A direct call names the body by the symbol it is emitted as, which
         // differs from its MIR name where that would shadow a C symbol.
         .flat_map(|body| {
@@ -718,7 +736,10 @@ pub(super) fn extern_declare_with(
         let close = decl.rfind(')').expect("declare ends with a parameter list");
         let open = decl.find('(').expect("declare has a parameter list");
         let sep = if close == open + 1 { "" } else { ", " };
-        decl.insert_str(close, &format!("{sep}ptr"));
+        decl.insert_str(close, &format!("{sep}ptr noalias nocapture"));
+        // The answer lands in the trailing slot, so nothing is returned.
+        let name_at = decl.find(" @").expect("declare names its symbol");
+        decl.replace_range("declare ".len()..name_at, "void");
     }
     decl
 }

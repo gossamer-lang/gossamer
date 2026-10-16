@@ -49,6 +49,7 @@ pub fn lower_source_file(
         &mut Vec::new(),
         &mut module_type_names,
     );
+    let alias_targets = collect_alias_targets(resolutions, &source.items, &module_type_names);
     let mut lowerer = Lowerer {
         resolutions,
         table,
@@ -68,6 +69,7 @@ pub fn lower_source_file(
         module_fn_paths,
         module_impl_fns,
         module_type_names,
+        alias_targets,
         current_module: Vec::new(),
         user_comparators: collect_user_comparators(&source.items),
         promoted_items: Vec::new(),
@@ -376,6 +378,110 @@ fn collect_module_type_names(
     }
 }
 
+/// The type a `type` alias stands for.
+#[derive(Debug, Clone)]
+struct AliasTarget {
+    /// The type's canonical spelling.
+    spelling: Vec<Ident>,
+    /// Whether the type is a struct, which a braced literal through the
+    /// alias builds; through an enum's alias the literal names a variant.
+    is_struct: bool,
+}
+
+/// The canonical spelling of the struct or enum each `type` alias names,
+/// following aliases of aliases: the qualified identity of a type declared
+/// in a module, the bare name of one declared at the root.
+fn collect_alias_targets(
+    resolutions: &Resolutions,
+    items: &[AstItem],
+    module_type_names: &std::collections::HashMap<gossamer_resolve::DefId, String>,
+) -> std::collections::HashMap<gossamer_resolve::DefId, AliasTarget> {
+    use gossamer_resolve::DefKind;
+
+    fn walk(
+        resolutions: &Resolutions,
+        items: &[AstItem],
+        names: &std::collections::HashMap<gossamer_resolve::DefId, String>,
+        direct: &mut std::collections::HashMap<gossamer_resolve::DefId, AliasTarget>,
+        chained: &mut Vec<(gossamer_resolve::DefId, gossamer_resolve::DefId)>,
+    ) {
+        for item in items {
+            if !gossamer_resolve::item_is_active(&item.attrs) {
+                continue;
+            }
+            match &item.kind {
+                AstItemKind::Mod(decl) => {
+                    if let gossamer_ast::ModBody::Inline(inner) = &decl.body {
+                        walk(resolutions, inner, names, direct, chained);
+                    }
+                }
+                AstItemKind::TypeAlias(decl) => {
+                    let gossamer_ast::TypeKind::Path(path) = &decl.ty.kind else {
+                        continue;
+                    };
+                    let Some(alias) = resolutions.definition_of(item.id) else {
+                        continue;
+                    };
+                    let target = match resolutions.get(decl.ty.id) {
+                        Some(Resolution::Def { def, .. }) => Some(def),
+                        Some(Resolution::Import { .. }) => resolutions.import_def(decl.ty.id),
+                        _ => None,
+                    };
+                    let Some(target) = target else {
+                        continue;
+                    };
+                    match resolutions.kind_of(target) {
+                        Some(kind @ (DefKind::Struct | DefKind::Enum)) => {
+                            let spelling = names
+                                .get(&target)
+                                .cloned()
+                                .or_else(|| path.segments.last().map(|seg| seg.name.name.clone()));
+                            if let Some(spelling) = spelling {
+                                direct.insert(
+                                    alias,
+                                    AliasTarget {
+                                        spelling: spelling.split("::").map(Ident::new).collect(),
+                                        is_struct: kind == DefKind::Struct,
+                                    },
+                                );
+                            }
+                        }
+                        Some(DefKind::TypeAlias) => chained.push((alias, target)),
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut targets = std::collections::HashMap::new();
+    let mut chained = Vec::new();
+    walk(
+        resolutions,
+        items,
+        module_type_names,
+        &mut targets,
+        &mut chained,
+    );
+    // Each pass settles the aliases one step further from a type, so a
+    // chain resolves in as many passes as it is long.
+    loop {
+        let before = targets.len();
+        chained.retain(|(alias, next)| match targets.get(next).cloned() {
+            Some(target) => {
+                targets.insert(*alias, target);
+                false
+            }
+            None => true,
+        });
+        if targets.len() == before {
+            break;
+        }
+    }
+    targets
+}
+
 fn collect_ctor_arities(items: &[AstItem]) -> std::collections::HashMap<String, usize> {
     let mut map = std::collections::HashMap::new();
     collect_ctor_arities_into(items, &mut map);
@@ -650,6 +756,9 @@ struct Lowerer<'a> {
     import_targets: std::collections::HashMap<NodeId, Vec<(String, Vec<Ident>)>>,
     /// Qualified identity of each struct / enum declared inside a module.
     module_type_names: std::collections::HashMap<gossamer_resolve::DefId, String>,
+    /// The canonical spelling of the struct or enum each type alias names,
+    /// so `Alias::Variant` and `Alias::assoc` reach the aliased type's items.
+    alias_targets: std::collections::HashMap<gossamer_resolve::DefId, AliasTarget>,
     /// Field count of every tuple struct and tuple-variant constructor,
     /// keyed by its bare name. Lets a `..` rest in a tuple-variant pattern
     /// (`E::C(..)`) expand to the right number of wildcards, so it matches a
@@ -2347,6 +2456,44 @@ impl Lowerer<'_> {
 
     /// Module-qualified spelling of a `Type::assoc` path whose `Type` came from
     /// a `use`, which is the key the impl's body is registered under.
+    /// Rewrites `Alias::Variant` and `Alias::assoc` to the aliased type's
+    /// canonical spelling, which its items are keyed by; answers whether the
+    /// path went through an alias.
+    fn respell_through_alias(&self, node: NodeId, segments: &mut Vec<Ident>) -> bool {
+        if segments.len() < 2 {
+            return false;
+        }
+        let Some(target) = self.alias_target(node) else {
+            return false;
+        };
+        let last = segments.len() - 1;
+        segments.splice(..last, target);
+        true
+    }
+
+    /// The canonical spelling of the type the path at `node` reaches through
+    /// a `type` alias, when its resolution is one (directly or by import).
+    fn alias_target(&self, node: NodeId) -> Option<Vec<Ident>> {
+        self.alias_entry(node).map(|target| target.spelling.clone())
+    }
+
+    /// The canonical spelling of the struct a braced literal at `node`
+    /// builds through a `type` alias.
+    fn struct_alias_target(&self, node: NodeId) -> Option<Vec<Ident>> {
+        self.alias_entry(node)
+            .filter(|target| target.is_struct)
+            .map(|target| target.spelling.clone())
+    }
+
+    fn alias_entry(&self, node: NodeId) -> Option<&AliasTarget> {
+        let alias = match self.resolutions.get(node)? {
+            Resolution::Def { def, .. } => def,
+            Resolution::Import { .. } => self.resolutions.import_def(node)?,
+            _ => return None,
+        };
+        self.alias_targets.get(&alias)
+    }
+
     fn imported_assoc_path(&self, node: NodeId, segments: &[Ident]) -> Option<Vec<Ident>> {
         let Some(Resolution::Import { use_id }) = self.resolutions.get(node) else {
             return None;
@@ -2440,6 +2587,10 @@ impl Lowerer<'_> {
                 segments.remove(0);
             }
         }
+        let through_alias = self.respell_through_alias(node, &mut segments);
+        if through_alias {
+            anchor_depth = None;
+        }
         // A `Type::assoc` or `Enum::Variant` written inside a module names
         // that module's own item, whose body is keyed by the qualified
         // spelling. Walk outward from the anchor so an inner module's item
@@ -2458,6 +2609,7 @@ impl Lowerer<'_> {
         // target is what the name-keyed dispatch has to see. Without this
         // the call type-checks and is unbound at run time.
         if !qualified_spelling
+            && !through_alias
             && segments.len() == 2
             && let Some(target) = self.imported_assoc_path(node, &segments)
         {
