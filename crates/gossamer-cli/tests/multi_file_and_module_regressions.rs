@@ -2631,6 +2631,35 @@ fn two_packages_normalizing_to_one_module_name_collide() {
     }
 }
 
+/// A `use` list into a dependency names only what the dependency declares:
+/// its items are bundled into the program, so a name it lacks is reported
+/// where it is imported instead of reaching the back end as a call to
+/// nothing.
+#[test]
+fn an_import_of_an_item_a_dependency_lacks_is_unresolved() {
+    let root = fresh_dir("dep-missing-import");
+    write_dep_project(
+        &root,
+        "pgsql-gos",
+        "example.com/pgsql-gos",
+        "pub fn who() -> String { \"a\" }\n",
+    );
+    let app = write_app_project(
+        &root,
+        "\"example.com/pgsql-gos\" = { path = \"../pgsql-gos\" }\n",
+        "use pgsql_gos::{who, missing}\n\n\
+         fn main() {\n    let f = || missing()\n    println(\"{} {}\", who(), f())\n}\n",
+    );
+    let out = project_run_vm(&app);
+    let combined = format!("{}{}", out.0, out.1);
+    let _ = fs::remove_dir_all(&root);
+    assert_ne!(out.2, Some(0), "a missing import must not run: {combined}");
+    assert!(
+        combined.contains("GR0001") && combined.contains("pgsql_gos::missing"),
+        "expected GR0001 naming the missing item, got: {combined}"
+    );
+}
+
 /// Two packages whose ids share a final segment coexist once one names its
 /// own module in the manifest. Both the manifest name and the package id
 /// reach their own package.

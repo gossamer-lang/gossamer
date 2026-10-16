@@ -2,10 +2,11 @@
 //!
 //! A native build links the project's static libraries; the bytecode VM and
 //! the JIT load its shared ones. Each linkage is configured once into its own
-//! build directory under the package's `.gos-cache/native/` entry, keyed on
-//! the source directory, the options, the target, and the C compiler, and is
-//! then rebuilt and installed on every use: `CMake` decides what is stale, and
-//! a current build costs one no-op pass.
+//! build directory under the per-user cache's `native/` root, keyed on the
+//! source directory, the options, the target, and the C compiler, so every
+//! project that depends on one checkout of the package shares its build. It
+//! is then rebuilt and installed on every use: `CMake` decides what is stale,
+//! and a current build costs one no-op pass.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,8 +39,13 @@ pub(crate) struct CmakeTarget<'a> {
     pub target: &'a str,
     /// Whether that target is the host.
     pub host: bool,
-    /// The C compiler to configure with, `None` to let `CMake` find MSVC.
-    pub compiler: Option<&'a Path>,
+    /// The C compiler to configure with: the one the program's own native
+    /// sources build with, so every object a link takes comes from one
+    /// toolchain.
+    pub compiler: &'a Path,
+    /// The environment that compiler runs in (MSVC's `INCLUDE`, `LIB`, and
+    /// `PATH`), which every `CMake` step that compiles needs too.
+    pub env: &'a [(std::ffi::OsString, std::ffi::OsString)],
     /// The compiler's own report of what it is, part of the build's key.
     pub identity: &'a str,
     /// Whether the compiler is MSVC, which names its archives `<name>.lib`.
@@ -92,11 +98,10 @@ impl LinkDependencies {
 }
 
 /// Configures (once), builds, and installs `spec` of the package rooted at
-/// `root` with `linkage`, under `cache`.
+/// `root` with `linkage`, in the per-user cache.
 pub(crate) fn install(
     root: &Path,
     spec: &CmakeSpec,
-    cache: &Path,
     linkage: Linkage,
     target: &CmakeTarget<'_>,
 ) -> Result<CmakeInstall> {
@@ -121,11 +126,13 @@ pub(crate) fn install(
             target.target
         ));
     }
-    let dir = cache.join(format!(
-        "cmake-{}-{}",
-        linkage.name(),
-        build_key(&source, spec, linkage, target)
-    ));
+    let dir = gossamer_driver::frontend_cache::user_cache_root()
+        .join("native")
+        .join(format!(
+            "cmake-{}-{}",
+            linkage.name(),
+            build_key(&source, spec, linkage, target)
+        ));
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     // Builds sharing this directory, from parallel `gos` processes, take
     // turns: CMake and its generators do not share a build tree.
@@ -142,6 +149,7 @@ pub(crate) fn install(
             linkage.name()
         );
         let mut cmd = Command::new(&cmake);
+        cmd.envs(target.env.iter().cloned());
         cmd.arg("-S").arg(&source).arg("-B").arg(&build);
         cmd.args(configure_args(spec, linkage, target, &prefix));
         if which::which("ninja").is_ok() {
@@ -153,11 +161,13 @@ pub(crate) fn install(
         }
     }
     let mut cmd = Command::new(&cmake);
+    cmd.envs(target.env.iter().cloned());
     cmd.arg("--build")
         .arg(&build)
         .args(["--config", "Release", "--parallel"]);
     run(cmd, "building the CMake project")?;
     let mut cmd = Command::new(&cmake);
+    cmd.envs(target.env.iter().cloned());
     cmd.arg("--install")
         .arg(&build)
         .args(["--config", "Release"]);
@@ -220,9 +230,7 @@ fn configure_args(
         "-DCMAKE_INSTALL_LIBDIR=lib".to_string(),
         "-DCMAKE_INSTALL_BINDIR=bin".to_string(),
     ];
-    if let Some(compiler) = target.compiler {
-        args.push(format!("-DCMAKE_C_COMPILER={}", compiler.display()));
-    }
+    args.push(format!("-DCMAKE_C_COMPILER={}", target.compiler.display()));
     args.extend(
         spec.options
             .iter()
@@ -598,7 +606,8 @@ mod tests {
         let target = CmakeTarget {
             target: "x86_64-unknown-linux-gnu",
             host: true,
-            compiler: Some(Path::new("/usr/bin/cc")),
+            compiler: Path::new("/usr/bin/cc"),
+            env: &[],
             identity: "cc",
             msvc: false,
         };

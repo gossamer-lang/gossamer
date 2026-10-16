@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0121]: `&mut x` was passed where the parameter takes a value of its own. - here
+--- framed ---
+error[GT0121]: `&mut x` was passed where the parameter takes a value of its own.
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

@@ -134,7 +134,6 @@ pub fn archives(entry: &Path, target: Option<&str>) -> Result<NativeBuild> {
             let install = native_cmake::install(
                 &package.root,
                 cmake,
-                &dir,
                 Linkage::Static,
                 &toolchain.cmake_target(),
             )?;
@@ -193,12 +192,10 @@ pub fn shared_libraries(
     let toolchain = Toolchain::for_target(None)?;
     let cache = cache_root(entry).join(&toolchain.target);
     for package in &packages {
-        let dir = cache.join(&package.name);
         if let Some(cmake) = &package.spec.cmake {
             let install = native_cmake::install(
                 &package.root,
                 cmake,
-                &dir,
                 Linkage::Shared,
                 &toolchain.cmake_target(),
             )?;
@@ -298,7 +295,8 @@ impl Toolchain {
         native_cmake::CmakeTarget {
             target: &self.target,
             host: self.target == gossamer_driver::TargetTriple::host().as_str(),
-            compiler: (!self.msvc).then(|| self.tool.path()),
+            compiler: self.tool.path(),
+            env: self.tool.env(),
             identity: &self.identity,
             msvc: self.msvc,
         }

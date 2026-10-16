@@ -110,6 +110,7 @@ version. This page is auto-generated from the catalogue in
 | [`GT0005`](#gt0005) | Types | non-primitive cast |
 | [`GT0044`](#gt0044) | Types | generic return type not inferred |
 | [`GT0045`](#gt0045) | Types | question mark not supported here |
+| [`GT0121`](#gt0121) | Types | `&mut` passed where a value is taken |
 
 ## `GP0001` <a id="gp0001"></a>
 
@@ -698,4 +699,10 @@ A generic return payload cannot be inferred from call arguments alone. Add an ex
 **Types** - question mark not supported here
 
 The `?` operator can only unwrap `Result` inside a `Result`-returning function or `Option` inside an `Option`-returning function.
+
+## `GT0121` <a id="gt0121"></a>
+
+**Types** - `&mut` passed where a value is taken
+
+A parameter that is not `&mut` holds a value of its own, and a `mut` parameter writes only that copy, so nothing the callee writes would reach the place the argument names. Declare the parameter `&mut T`, or pass the value.
 

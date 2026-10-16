@@ -107,3 +107,78 @@ fn a_static_cmake_library_links_what_its_pkg_config_file_names() {
     }
     project.expect_everywhere("7");
 }
+
+/// Two projects that depend on one checkout of a `[native.cmake]` package
+/// build it once: the second finds the first's build in the per-user cache.
+#[test]
+fn projects_sharing_a_cmake_package_share_its_build() {
+    let root = std::env::temp_dir().join(format!("gos-ffi-cmake-shared-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let lib = root.join("tally-lib");
+    let vendor = lib.join("vendor/tally");
+    std::fs::create_dir_all(lib.join("src")).expect("create the library");
+    std::fs::create_dir_all(&vendor).expect("create the CMake project");
+    std::fs::write(
+        lib.join("project.toml"),
+        "[project]\nid = \"example.com/tally-lib\"\nversion = \"0.1.0\"\n\n\
+         [native.cmake]\nsource = \"vendor/tally\"\nprovides = [\"tally\"]\n\
+         options = { TALLY_STEP = \"3\" }\n",
+    )
+    .expect("write the library manifest");
+    std::fs::write(
+        lib.join("src/lib.gos"),
+        "use std::ffi\n\n#[link(name = \"tally\")]\nunsafe extern \"C\" {\n    \
+         fn tally_step(x: ffi::c_int) -> ffi::c_int\n}\n\n\
+         pub fn step(x: i64) -> i64 {\n    unsafe { tally_step(x as ffi::c_int) } as i64\n}\n",
+    )
+    .expect("write the library");
+    std::fs::write(vendor.join("CMakeLists.txt"), CMAKE_LISTS).expect("write CMakeLists.txt");
+    std::fs::write(vendor.join("tally.c"), TALLY).expect("write the source");
+    let cache = root.join("cache");
+    let run_app = |name: &str| {
+        let app = root.join(name);
+        std::fs::create_dir_all(app.join("src")).expect("create the app");
+        std::fs::write(
+            app.join("project.toml"),
+            format!(
+                "[project]\nid = \"example.com/{name}\"\nversion = \"0.1.0\"\n\n\
+                 [dependencies]\n\"example.com/tally-lib\" = {{ path = \"../tally-lib\" }}\n"
+            ),
+        )
+        .expect("write the app manifest");
+        std::fs::write(
+            app.join("src/main.gos"),
+            "use tally_lib\n\nfn main() {\n    println(tally_lib::step(4))\n}\n",
+        )
+        .expect("write the app");
+        std::process::Command::new(crate::support::gos_binary())
+            .current_dir(&app)
+            .args(["run", "."])
+            .env("XDG_CACHE_HOME", &cache)
+            .output()
+            .expect("run gos")
+    };
+    let first = run_app("first-app");
+    let second = run_app("second-app");
+    let _ = std::fs::remove_dir_all(&root);
+    let first_err = String::from_utf8_lossy(&first.stderr);
+    let second_err = String::from_utf8_lossy(&second.stderr);
+    assert_eq!(
+        String::from_utf8_lossy(&first.stdout).trim(),
+        "7",
+        "{first_err}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&second.stdout).trim(),
+        "7",
+        "{second_err}"
+    );
+    assert!(
+        first_err.contains("configuring the CMake project"),
+        "the first project builds the package: {first_err}"
+    );
+    assert!(
+        !second_err.contains("configuring the CMake project"),
+        "the second project reuses the first's build: {second_err}"
+    );
+}

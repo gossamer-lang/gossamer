@@ -864,6 +864,13 @@ impl<'a> Builder<'a> {
         span: Span,
     ) -> MethodLowering {
         let receiver_kind_flat = receiver_kind_flat.clone();
+        // A struct or enum of the program's own answers these names through
+        // its own methods.
+        if matches!(&receiver_kind_flat, TyKind::Adt { .. })
+            && !self.is_result_or_option_adt(receiver_ty)
+        {
+            return MethodLowering::Pass;
+        }
         if let name @ ("is_some" | "is_ok" | "is_none" | "is_err") = method.name.as_str() {
             let Some(receiver_local) = self.lower_expr(receiver) else {
                 return MethodLowering::Handled(None);

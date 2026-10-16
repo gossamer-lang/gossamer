@@ -1,0 +1,12 @@
+// ERROR: GT0121
+fn push_two(mut out: Vec<u8>) {
+    out.push(1)
+    out.push(2)
+}
+
+fn main() {
+    let mut xs = #[]
+    xs.push(9)
+    push_two(&mut xs)
+    println(f"{xs.len()}")
+}

@@ -421,6 +421,7 @@ impl Resolver {
         // imports, so one written in a module the cfg drops has to be dropped
         // with it.
         let inactive = collect_inactive_module_paths(items);
+        let mut registered = Vec::new();
         for use_decl in uses {
             if (1..=use_decl.module.len())
                 .any(|depth| inactive.contains(&use_decl.module[..depth].join("::")))
@@ -435,7 +436,88 @@ impl Resolver {
                 Some(list) => self.register_use_list(use_decl, list),
                 None => self.register_use_simple(use_decl),
             }
+            registered.push(use_decl);
         }
+        // After every module's imports are in, so a re-export is known
+        // whichever file declares it.
+        for use_decl in registered {
+            self.reject_unknown_unit_imports(use_decl);
+        }
+    }
+
+    /// Reports a `use` naming a path into a module this unit declares - a
+    /// bundled package's included - that names nothing there. Every item of
+    /// such a module is in this unit, so a missing one is a misspelling or a
+    /// removed item, which no later pass would report: the import would bind
+    /// a name with no definition behind it.
+    fn reject_unknown_unit_imports(&mut self, use_decl: &UseDecl) {
+        let gossamer_ast::UseTarget::Module(path) = &use_decl.target else {
+            return;
+        };
+        let Some(head) = path.segments.first() else {
+            return;
+        };
+        if head.name == "std" || crate::diagnostic::is_relative_path(&head.name) {
+            return;
+        }
+        let base = self.respell_alias_head(&target_path_text(&use_decl.target));
+        let targets: Vec<String> = match &use_decl.list {
+            Some(list) => list
+                .iter()
+                .filter(|entry| entry.name.name != "self")
+                .map(|entry| {
+                    let mut target = base.clone();
+                    for segment in &entry.prefix {
+                        target.push_str("::");
+                        target.push_str(&segment.name);
+                    }
+                    target.push_str("::");
+                    target.push_str(&entry.name.name);
+                    target
+                })
+                .collect(),
+            None => vec![base],
+        };
+        for target in targets {
+            if self.names_nothing_in_unit(&use_decl.module, &target) {
+                self.emit(ResolveError::UnresolvedName { name: target }, use_decl.span);
+            }
+        }
+    }
+
+    /// Whether `target`, read from the unit root or from a module enclosing
+    /// `module`, starts at a module this unit declares and names no module,
+    /// item, re-export, or member of a type there.
+    fn names_nothing_in_unit(&self, module: &[String], target: &str) -> bool {
+        let head = target.split("::").next().unwrap_or(target);
+        let mut rooted_in_unit = false;
+        for depth in 0..=module.len() {
+            let prefix = module[..depth].join("::");
+            let under = |path: &str| {
+                if prefix.is_empty() {
+                    path.to_string()
+                } else {
+                    format!("{prefix}::{path}")
+                }
+            };
+            if !self.local_module_paths.contains(&under(head)) {
+                continue;
+            }
+            rooted_in_unit = true;
+            let full = under(target);
+            if self.local_module_paths.contains(&full) || self.local_item_paths.contains(&full) {
+                return false;
+            }
+            if let Some((parent, name)) = full.rsplit_once("::")
+                && (self.local_item_paths.contains(parent)
+                    || self
+                        .module_imports
+                        .contains_key(&(parent.to_string(), name.to_string())))
+            {
+                return false;
+            }
+        }
+        rooted_in_unit
     }
 
     /// Registers a `use` that names an enum's variants - `use m::Dir::Up`,

@@ -1131,6 +1131,15 @@ pub enum TypeError {
         /// Source-like spelling of the argument place.
         argument: String,
     },
+    /// `&mut x` was passed where the parameter takes a value of its own, so
+    /// the callee's writes would land on its copy.
+    #[error(
+        "`&mut {argument}` is a mutable reference, but the parameter takes a value of its own; what the callee writes would not reach `{argument}`"
+    )]
+    MutReferenceToValueParameter {
+        /// Source-like spelling of the referenced place.
+        argument: String,
+    },
 }
 
 /// The cast that brings two integer operands to one type, for
@@ -1271,6 +1280,7 @@ impl TypeError {
             Self::ConcurrentCaptureUnsupported { .. } => "concurrent-capture-unsupported",
             Self::SharedPayloadUnsupported { .. } => "shared-payload-unsupported",
             Self::MutableArgumentRequiresReference { .. } => "mutable-argument-requires-reference",
+            Self::MutReferenceToValueParameter { .. } => "mut-reference-to-value-parameter",
         }
     }
 
@@ -1397,6 +1407,7 @@ impl TypeError {
             Self::ConcurrentCaptureUnsupported { .. } => "GT0076",
             Self::SharedPayloadUnsupported { .. } => "GT0077",
             Self::MutableArgumentRequiresReference { .. } => "GT0046",
+            Self::MutReferenceToValueParameter { .. } => "GT0121",
         }
     }
 }
@@ -2506,6 +2517,15 @@ impl TypeDiagnostic {
                     ))
                     .with_note(
                         "calls never create mutable references implicitly; `&mut` makes possible mutation visible",
+                    );
+            }
+            TypeError::MutReferenceToValueParameter { argument } => {
+                out = out
+                    .with_help(format!(
+                        "declare the parameter `&mut T` so its writes reach `{argument}`, or pass `{argument}` to hand the callee a value of its own"
+                    ))
+                    .with_note(
+                        "a parameter that is not `&mut`, `mut` included, holds a value of its own: a `mut` parameter writes only its copy",
                     );
             }
         }

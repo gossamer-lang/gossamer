@@ -1958,20 +1958,21 @@ impl TypeChecker<'_> {
                     self.tcx.kind(param),
                     Some(TyKind::Error | TyKind::Var(_) | TyKind::Param { .. })
                 ) && !matches!(self.tcx.kind(arg_ty), Some(TyKind::Error))
-                    && !matches!(
-                        arg.kind,
+                {
+                    let error = match &arg.kind {
+                        // `&mut x` asks for the callee's writes to reach `x`,
+                        // which a value parameter cannot give.
                         ExprKind::Unary {
                             op: UnaryOp::RefMut,
-                            ..
-                        }
-                    )
-                {
-                    self.emit(
-                        TypeError::ReferenceArgumentNeedsDeref {
+                            operand,
+                        } => TypeError::MutReferenceToValueParameter {
+                            argument: Self::place_display(operand),
+                        },
+                        _ => TypeError::ReferenceArgumentNeedsDeref {
                             argument: Self::place_display(arg),
                         },
-                        arg.span,
-                    );
+                    };
+                    self.emit(error, arg.span);
                 }
                 (param, a)
             }

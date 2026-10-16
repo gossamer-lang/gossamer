@@ -579,8 +579,11 @@ fn find_share_transfers(
 ) -> Vec<ShareTransfer> {
     use crate::uniqueness::{Point, Uniqueness};
 
-    let facts = crate::uniqueness::analyze(body, tcx, summaries);
-    let share = crate::ownership::ShareFacts::compute(body);
+    // Most bodies hold no candidate; the analysis runs for the first one.
+    let facts_cell = std::cell::OnceCell::new();
+    let facts = || facts_cell.get_or_init(|| crate::uniqueness::analyze(body, tcx, summaries));
+    let share_cell = std::cell::OnceCell::new();
+    let share = || share_cell.get_or_init(|| crate::ownership::ShareFacts::compute(body));
     let preds = block_predecessor_counts(body);
     let mut out = Vec::new();
     for (bi, block) in body.blocks.iter().enumerate() {
@@ -607,7 +610,7 @@ fn find_share_transfers(
                 || ri >= body.locals.len()
                 || body.locals[ri].region
                 || !fields_only(&source)
-                || share.is_goroutine_shared(root)
+                || share().is_goroutine_shared(root)
             {
                 continue;
             }
@@ -621,12 +624,12 @@ fn find_share_transfers(
                 block: block.id,
                 stmt: i,
             };
-            if facts.at(point, root) == Uniqueness::Borrowed {
+            if facts().at(point, root) == Uniqueness::Borrowed {
                 continue;
             }
             let releases = paired_releases(name);
             let null_at = if before {
-                if facts.live_after(point, root)
+                if facts().live_after(point, root)
                     || !released_on_every_path(body, bi, i + 1, &source, releases)
                 {
                     continue;
@@ -644,7 +647,7 @@ fn find_share_transfers(
                 if ti == bi || preds.get(ti).copied() != Some(1) {
                     continue;
                 }
-                if facts.live_on_entry(*target, root)
+                if facts().live_on_entry(*target, root)
                     || !released_on_every_path(body, ti, 0, &source, releases)
                 {
                     continue;
@@ -711,7 +714,9 @@ pub(crate) fn move_unique_clones(
     use crate::uniqueness::{Point, Uniqueness};
 
     let moves: Vec<(usize, Local, Local, BlockId)> = {
-        let facts = crate::uniqueness::analyze(body, tcx, summaries);
+        // Most bodies hold no candidate; the analysis runs for the first one.
+    let facts_cell = std::cell::OnceCell::new();
+    let facts = || facts_cell.get_or_init(|| crate::uniqueness::analyze(body, tcx, summaries));
         let mut out = Vec::new();
         for (bi, block) in body.blocks.iter().enumerate() {
             let Terminator::Call {
@@ -751,8 +756,8 @@ pub(crate) fn move_unique_clones(
                 block: block.id,
                 stmt: block.stmts.len(),
             };
-            if facts.at(point, src) != Uniqueness::Unique
-                || facts.live_on_entry(*target, src)
+            if facts().at(point, src) != Uniqueness::Unique
+                || facts().live_on_entry(*target, src)
                 || !released_on_every_path(
                     body,
                     target.0 as usize,
@@ -862,8 +867,11 @@ pub(crate) fn move_boxed_payload_sources(
     use crate::uniqueness::{Point, Uniqueness};
 
     let moves: Vec<(usize, usize, Local, Vec<Vec<u32>>)> = {
-        let facts = crate::uniqueness::analyze(body, tcx, summaries);
-        let share = crate::ownership::ShareFacts::compute(body);
+        // Most bodies hold no candidate; the analysis runs for the first one.
+    let facts_cell = std::cell::OnceCell::new();
+    let facts = || facts_cell.get_or_init(|| crate::uniqueness::analyze(body, tcx, summaries));
+        let share_cell = std::cell::OnceCell::new();
+    let share = || share_cell.get_or_init(|| crate::ownership::ShareFacts::compute(body));
         let mut out = Vec::new();
         for (bi, block) in body.blocks.iter().enumerate() {
             for (i, stmt) in block.stmts.iter().enumerate() {
@@ -887,7 +895,7 @@ pub(crate) fn move_boxed_payload_sources(
                     || si <= body.arity as usize
                     || si >= body.locals.len()
                     || body.locals[si].region
-                    || share.is_goroutine_shared(src.local)
+                    || share().is_goroutine_shared(src.local)
                 {
                     continue;
                 }
@@ -902,8 +910,8 @@ pub(crate) fn move_boxed_payload_sources(
                     block: block.id,
                     stmt: i,
                 };
-                if facts.at(point, src.local) == Uniqueness::Borrowed
-                    || facts.live_after(point, src.local)
+                if facts().at(point, src.local) == Uniqueness::Borrowed
+                    || facts().live_after(point, src.local)
                 {
                     continue;
                 }

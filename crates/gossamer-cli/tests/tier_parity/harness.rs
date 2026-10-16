@@ -1659,6 +1659,7 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/enum_keys.gos"),
     spec("feature-testing-examples/main_thread.gos"),
     spec("feature-testing-examples/store_through_mut_ref.gos"),
+    spec("feature-testing-examples/user_methods_named_like_carrier_predicates.gos"),
     Spec {
         allow_nonzero: true,
         ..spec("feature-testing-examples/mut_ref_writes_reach_defers_on_panic.gos")

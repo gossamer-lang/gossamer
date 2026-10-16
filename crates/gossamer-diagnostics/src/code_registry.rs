@@ -1836,6 +1836,14 @@ pub const REGISTRY: &[(&str, &str)] = &[
             rewrites the declaration.",
     ),
     (
+        "GT0121",
+        "`&mut x` was passed where the parameter takes a value of its own.\n\
+            A parameter that is not `&mut` holds a value of its own, and a `mut`\n\
+            parameter writes only that copy, so nothing the callee writes would\n\
+            reach `x`. Declare the parameter `&mut T` to have its writes reach\n\
+            `x`, or pass `x` to hand the callee a value of its own.",
+    ),
+    (
         "GX0001",
         "An operation received a value of an incompatible type. The\n\
                      diagnostic names the type that was required and the type\n\

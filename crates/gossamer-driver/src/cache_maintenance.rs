@@ -214,6 +214,7 @@ pub fn paths(cwd: &Path) -> Vec<(CacheClass, PathBuf)> {
     out.extend([
         (CacheClass::Ir, shared.join("ir-cache")),
         (CacheClass::Runners, binding_root.join("runners")),
+        (CacheClass::Native, shared.join("native")),
     ]);
     // Each project anchors its `.gos-cache/` at its own `project.toml`, so a
     // workspace, an examples directory, and an integration-test tree each

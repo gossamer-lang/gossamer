@@ -253,6 +253,15 @@ fn needs_boxed_storage(body: &Body, local: Local) -> bool {
                 {
                     return true;
                 }
+                // A weak upgrade's `Some` carries the RC cell the referent
+                // lives in, not the value, and the frame pins that cell
+                // through this carrier.
+                if destination.local == local
+                    && matches!(callee, Operand::Const(ConstValue::Str(name))
+                        if name == "gos_rt_rc_weak_upgrade_opt")
+                {
+                    return true;
+                }
             }
             Terminator::Return | Terminator::Goto { .. } | Terminator::Unreachable => {}
             other => {

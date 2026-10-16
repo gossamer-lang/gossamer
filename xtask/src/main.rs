@@ -1377,6 +1377,12 @@ const DIAGNOSTIC_CATALOGUE: &[(&str, &str, &str, &str)] = &[
         "question mark not supported here",
         "The `?` operator can only unwrap `Result` inside a `Result`-returning function or `Option` inside an `Option`-returning function.",
     ),
+    (
+        "GT0121",
+        "Types",
+        "`&mut` passed where a value is taken",
+        "A parameter that is not `&mut` holds a value of its own, and a `mut` parameter writes only that copy, so nothing the callee writes would reach the place the argument names. Declare the parameter `&mut T`, or pass the value.",
+    ),
 ];
 
 fn render_diagnostics_page(entries: &[(&str, &str, &str, &str)]) -> String {
