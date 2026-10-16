@@ -97,8 +97,8 @@ pub use id::{ProjectId, ProjectIdError};
 pub use lockfile::{LOCKFILE_FILENAME, LOCKFILE_HEADER, LockedEntry, Lockfile, LockfileError};
 #[cfg(not(target_arch = "wasm32"))]
 pub use manifest::{
-    DependencyFeatures, DependencySpec, GitRef, InlineDependency, LibKind, LibRuntime, LibTarget,
-    Manifest, ManifestError, NativeSpec, ProjectTable, RustBindingSpec, find_manifest,
+    CmakeSpec, DependencyFeatures, DependencySpec, GitRef, InlineDependency, LibKind, LibRuntime,
+    LibTarget, Manifest, ManifestError, NativeSpec, ProjectTable, RustBindingSpec, find_manifest,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use publish::{

@@ -592,6 +592,9 @@ impl<'a> Builder<'a> {
                 TyKind::Adt { def, .. } if def.local == u32::MAX - 1 => {
                     return self.key_descriptor(cur).is_some();
                 }
+                TyKind::Adt { .. } if self.tcx.is_flat_enum_ty(cur) => {
+                    return self.key_descriptor(cur).is_some();
+                }
                 TyKind::Adt { .. } => return self.struct_name_of(cur).is_some(),
                 _ => return false,
             }
@@ -664,6 +667,34 @@ impl<'a> Builder<'a> {
                     .types()
                     .first()
                     .is_some_and(|payload| self.append_key_descriptor(*payload, out))
+            }
+            // An enum stored by value is its tag, then its regions. A
+            // variant leaves the regions it does not use zeroed, so equal
+            // values have equal words.
+            TyKind::Adt { .. } if self.tcx.is_flat_enum_ty(ty) => {
+                let regions = self
+                    .tcx
+                    .flat_enum_layout(ty)
+                    .map(|layout| layout.regions.clone())
+                    .unwrap_or_default();
+                out.push('s');
+                regions
+                    .iter()
+                    .all(|region| self.append_key_descriptor(*region, out))
+            }
+            // A two-word enum whose payloads are scalars is its discriminant
+            // and its payload word.
+            TyKind::Adt { def, .. } if self.tcx.is_inline_enum_ty(ty) => {
+                let scalar_payloads = self.tcx.enum_variant_tys(*def).is_some_and(|variants| {
+                    variants.iter().flatten().all(|field| {
+                        matches!(
+                            self.tcx.kind_of(self.tcx.peel_nominal(*field)),
+                            TyKind::Int(_) | TyKind::Bool | TyKind::Char | TyKind::Float(_)
+                        )
+                    })
+                });
+                out.push_str("ss");
+                scalar_payloads
             }
             TyKind::Adt { def, substs } => {
                 if self.struct_name_of(ty).is_none() {
@@ -783,9 +814,10 @@ impl<'a> Builder<'a> {
         match self.tcx.kind_of(ty) {
             TyKind::Tuple(_) | TyKind::Array { .. } => true,
             TyKind::Adt { .. } => {
-                !self.tcx.is_rc_managed(ty)
-                    && !self.tcx.is_inline_enum_ty(ty)
-                    && self.struct_name_of(ty).is_some()
+                self.tcx.is_flat_enum_ty(ty)
+                    || (!self.tcx.is_rc_managed(ty)
+                        && !self.tcx.is_inline_enum_ty(ty)
+                        && self.struct_name_of(ty).is_some())
             }
             _ => false,
         }
@@ -2202,9 +2234,10 @@ impl<'a> Builder<'a> {
 
     /// Classifies one enum-variant field for the structural-eq descriptor:
     /// `0` word (int/bool/char), `1` `f64`, `2` `String`, `3` a nested field of
-    /// the same enum (recurse), `4` `Vec<Self>`, `5` `Vec<(String, Self)>`.
-    /// `None` for anything else (a *different* nested enum, other aggregate),
-    /// which makes the whole enum fall back to pointer identity.
+    /// the same enum (recurse), `4` `Vec<Self>`, `5` `Vec<(String, Self)>`,
+    /// `6` a `Vec` of integers, `bool`s, or `char`s, `7` `Vec<String>`, `8`
+    /// `Vec<f64>`. `None` for anything else (a *different* nested enum, other
+    /// aggregate), which makes the whole enum fall back to pointer identity.
     fn enum_eq_field_kind(
         &self,
         fty: gossamer_types::Ty,
@@ -2228,7 +2261,12 @@ impl<'a> Builder<'a> {
                 {
                     Some(5)
                 } else {
-                    None
+                    match self.tcx.kind_of(elem) {
+                        TyKind::Bool | TyKind::Char | TyKind::Int(_) => Some(6),
+                        TyKind::String => Some(7),
+                        TyKind::Float(gossamer_types::FloatTy::F64) => Some(8),
+                        _ => None,
+                    }
                 }
             }
             _ => None,

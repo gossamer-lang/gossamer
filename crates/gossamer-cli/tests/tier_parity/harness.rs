@@ -1374,6 +1374,8 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/weak_references_in_containers.gos"),
     spec("feature-testing-examples/compress_archive_limits.gos"),
     spec("feature-testing-examples/lent_carrier_payloads.gos"),
+    spec("feature-testing-examples/carrier_wrapped_parameters.gos"),
+    spec("feature-testing-examples/match_tested_payloads.gos"),
     spec("feature-testing-examples/returned_tables.gos"),
     spec("feature-testing-examples/table_value_semantics.gos"),
     spec("feature-testing-examples/string_position_units.gos"),
@@ -1651,6 +1653,16 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/stdlib_process.gos"),
     spec("feature-testing-examples/stdlib_time_methods.gos"),
     spec("feature-testing-examples/duration_methods.gos"),
+    spec("feature-testing-examples/clock_arithmetic.gos"),
+    spec("feature-testing-examples/value_enums.gos"),
+    spec("feature-testing-examples/bindings_moved_into_holders.gos"),
+    spec("feature-testing-examples/enum_keys.gos"),
+    spec("feature-testing-examples/main_thread.gos"),
+    spec("feature-testing-examples/store_through_mut_ref.gos"),
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/mut_ref_writes_reach_defers_on_panic.gos")
+    },
     spec("feature-testing-examples/flag_cell_duration.gos"),
     spec("feature-testing-examples/instant_methods.gos"),
     spec("feature-testing-examples/time_param_dispatch.gos"),
@@ -2102,6 +2114,15 @@ const SPECS: &[Spec] = &[
     // Parameter defaults folded from consts, associated consts, arithmetic,
     // and `comptime`, resolved where the function is declared.
     spec("feature-testing-examples/const_parameter_defaults.gos"),
+    // Defaults holding variants, `None`, constructions, collections, and
+    // functions, resolved where the function is declared.
+    spec("feature-testing-examples/data_parameter_defaults.gos"),
+    spec("feature-testing-examples/data_parameter_defaults_on_methods.gos"),
+    // Associated consts in modules read from their own module.
+    spec("feature-testing-examples/associated_consts_in_modules.gos"),
+    // Single-name patterns decided by what the name resolves to, and
+    // imported variants that share a name with another enum's.
+    spec("feature-testing-examples/pattern_names_by_resolution.gos"),
     // Ranges that tile `u8`, `i8`, and `char` cover the match with no `_`.
     spec("feature-testing-examples/range_patterns_cover_types.gos"),
     // Supertrait methods, defaults, and `&mut self` methods through a bound.

@@ -1437,6 +1437,7 @@ unsafe extern "C" fn drop_managed<T: 'static>(payload: *mut u8) {
         drop(value);
     } else {
         PENDING_FINALIZERS.with(|q| q.borrow_mut().push(Box::new(move || drop(value))));
+        mark_pending();
     }
 }
 
@@ -1563,6 +1564,17 @@ pub unsafe extern "C" fn gos_rt_rc_alloc(size: u64, meta: *const i64) -> *mut u8
     unsafe { base.add(RC_HEADER_SIZE) }
 }
 
+/// The discriminants [`gos_rt_enum_unit`] caches a singleton for: every one an
+/// enum can have.
+const ENUM_UNIT_TAGS: usize = 256;
+
+/// The installed unit-variant singletons by discriminant, null until first
+/// asked for. Compiled code reads an entry directly and calls
+/// [`gos_rt_enum_unit`] only for a null one; an installed entry never changes.
+#[unsafe(export_name = "gos_rt_enum_units")]
+pub static ENUM_UNIT_SINGLETONS: [std::sync::atomic::AtomicPtr<u8>; ENUM_UNIT_TAGS] =
+    [const { std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()) }; ENUM_UNIT_TAGS];
+
 /// Shared, pinned singleton for a payload-less enum variant with discriminant
 /// `tag`. Unit variants carry no fields and are only read (the match reads the
 /// tag at offset 0), so every `Tree::Leaf`-style construction shares one heap
@@ -1574,11 +1586,11 @@ pub unsafe extern "C" fn gos_rt_rc_alloc(size: u64, meta: *const i64) -> *mut u8
 /// aggregate's store retains it and teardown releases it (balanced).
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_enum_unit(tag: i64) -> *mut u8 {
-    use std::sync::atomic::{AtomicPtr, Ordering};
-    const N: usize = 256;
-    static SINGLETONS: [AtomicPtr<u8>; N] = [const { AtomicPtr::new(std::ptr::null_mut()) }; N];
+    use std::sync::atomic::Ordering;
+    const N: usize = ENUM_UNIT_TAGS;
 
-    // Global (non-region) allocation of a tag-only RC node, pinned at strong=1.
+    // Global (non-region) allocation of a tag-only RC node, owned by the
+    // caller at strong=1.
     let alloc_global = |tag: i64| -> *mut u8 {
         let total = 8usize.saturating_add(RC_HEADER_SIZE);
         let base = rc_block_alloc_zeroed(total);
@@ -1589,9 +1601,9 @@ pub extern "C" fn gos_rt_enum_unit(tag: i64) -> *mut u8 {
         // payload bytes.
         unsafe {
             let h = base as *mut RcHeader;
-            (*h).strong = STRONG_IMMORTAL;
+            (*h).strong = 1;
             (*h).weak = AtomicU8::new(0);
-            // Unit-variant singleton: the discriminant lives in the
+            // Unit-variant node: the discriminant lives in the
             // header byte the compiled match reads. The 8-byte payload
             // stays zeroed spare space.
             (*h).disc = u8::try_from(tag).unwrap_or(0);
@@ -1613,23 +1625,24 @@ pub extern "C" fn gos_rt_enum_unit(tag: i64) -> *mut u8 {
         // Uncached, so the caller's single ownership reclaims it.
         return alloc_global(tag);
     }
-    // Every return hands the caller an OWNED share (+1): the drop pass
-    // treats the destination local as owned (release at death) exactly
-    // like any other constructor result, and a bare `let x = Enum::Unit`
-    // binding must not strip the cache's pin when it dies. The cache
-    // insert itself holds the initial strong=1 pin, so the singleton's
-    // count never reaches zero.
-    let slot = &SINGLETONS[tag as usize];
+    // The drop pass treats the result as an owned share, released when its
+    // local dies, as for any other constructor. A cached node is immortal:
+    // retaining or releasing it changes nothing, so it is handed out as is.
+    let slot = &ENUM_UNIT_SINGLETONS[tag as usize];
     let existing = slot.load(Ordering::Acquire);
     if !existing.is_null() {
-        // SAFETY: `existing` is the cached singleton, pinned for the process.
-        unsafe { gos_rt_rc_retain(existing) };
         return existing;
     }
     let fresh = alloc_global(tag);
     if fresh.is_null() {
         return fresh;
     }
+    // The cached node is pinned for the process before it is published, so
+    // no reader can release it; a pinned node is never given back, so it is
+    // not counted among the live objects a leak report names.
+    let header = fresh.wrapping_sub(RC_HEADER_SIZE).cast::<RcHeader>();
+    // SAFETY: `fresh` is this call's own node, not yet published.
+    unsafe { (*header).strong = STRONG_IMMORTAL };
     match slot.compare_exchange(
         std::ptr::null_mut(),
         fresh,
@@ -1637,16 +1650,17 @@ pub extern "C" fn gos_rt_enum_unit(tag: i64) -> *mut u8 {
         Ordering::Acquire,
     ) {
         Ok(_) => {
-            // SAFETY: `fresh` is the singleton just installed.
-            unsafe { gos_rt_rc_retain(fresh) };
+            rc_live_dec();
             fresh
         }
         Err(winner) => {
-            // Lost the race - drop the redundant node, share the winner's.
-            // SAFETY: `fresh` lost the race, so this call holds its only share.
-            unsafe { gos_rt_rc_release(fresh) };
-            // SAFETY: `winner` is the installed singleton, pinned for the process.
-            unsafe { gos_rt_rc_retain(winner) };
+            // Lost the race: the node goes back to an ordinary one this call
+            // owns and is freed, and the winner's is shared.
+            // SAFETY: `fresh` was never published, so this call holds its only share.
+            unsafe {
+                (*header).strong = 1;
+                gos_rt_rc_release(fresh);
+            }
             winner
         }
     }
@@ -2592,36 +2606,50 @@ thread_local! {
     /// Nesting depth of teardown frames (release walks / collection
     /// slices) on this thread; pending Vec frees drain when it reaches 0.
     static TEARDOWN_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Whether any pending queue above may hold an entry, so the outermost
+    /// teardown exit of a walk that queued nothing touches none of them.
+    static PENDING_ANY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Notes that a pending queue gained an entry for the outermost teardown
+/// exit to drain.
+fn mark_pending() {
+    PENDING_ANY.with(|p| p.set(true));
 }
 
 /// Queue a dead node's owned Vec child for release at the outermost
 /// teardown exit.
 fn queue_vec_child(v: *mut u8) {
     PENDING_VEC_FREES.with(|q| q.borrow_mut().push(v));
+    mark_pending();
 }
 
 /// Queue a dead node's owned `Map` child for release at the outermost
 /// teardown exit.
 fn queue_map_child(m: *mut u8) {
     PENDING_MAP_FREES.with(|q| q.borrow_mut().push(m));
+    mark_pending();
 }
 
 /// Queue a dead node's owned `Set` child for release at the outermost
 /// teardown exit.
 fn queue_set_child(s: *mut u8) {
     PENDING_SET_FREES.with(|q| q.borrow_mut().push(s));
+    mark_pending();
 }
 
 /// Queue a dead node's owned deque child for release at the outermost
 /// teardown exit.
 fn queue_deque_child(d: *mut u8) {
     PENDING_DEQUE_FREES.with(|q| q.borrow_mut().push(d));
+    mark_pending();
 }
 
 /// Queue a dead node's lazy iterator share for release at the outermost
 /// teardown exit.
 fn queue_iter_child(iter: *mut u8, pair: bool) {
     PENDING_ITER_FREES.with(|q| q.borrow_mut().push((iter, pair)));
+    mark_pending();
 }
 
 /// Gives up one share of a lazy iterator child.
@@ -2682,7 +2710,9 @@ unsafe fn teardown_exit() {
         d.set(next);
         next
     });
-    if depth != 0 {
+    // An entry queued after the flag clears sets it again, so the next
+    // outermost exit drains it.
+    if depth != 0 || !PENDING_ANY.with(|p| p.replace(false)) {
         return;
     }
     loop {
@@ -3368,6 +3398,31 @@ mod tests {
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         unsafe { gos_rt_collect_cycles() };
+    }
+
+    #[test]
+    fn a_unit_variant_singleton_is_shared_and_not_counted_live() {
+        let _g = count_guard();
+        let base = rc_live_count();
+        // A discriminant no other test builds, so this call installs it.
+        let first = gos_rt_enum_unit(251);
+        let second = gos_rt_enum_unit(251);
+        assert_eq!(first, second, "every construction shares one node");
+        // SAFETY: both are the pinned singleton, which a release leaves alone.
+        unsafe {
+            gos_rt_rc_release(first);
+            gos_rt_rc_release(second);
+        }
+        assert_eq!(
+            rc_live_count(),
+            base,
+            "the pinned node is not a live object"
+        );
+        assert_eq!(
+            gos_rt_enum_unit(251),
+            first,
+            "the node survives its shares' release"
+        );
     }
 
     #[test]

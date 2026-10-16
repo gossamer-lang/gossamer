@@ -727,6 +727,16 @@ static FOREIGN_NAMES: std::sync::Mutex<Option<std::collections::HashSet<&'static
     std::sync::Mutex::new(None);
 
 impl<'a> ForeignCall<'a> {
+    /// Whether the call reaches one of the runtime's own helpers (`gos_rt_*`),
+    /// which `ffi::read`, `ffi::write`, and the other memory operations route
+    /// through. A helper never blocks and leaves no `errno` of a C library's,
+    /// so it takes no foreign-call bracket: the error codes the program's last
+    /// foreign call left stay what `ffi::last_errno()` reports.
+    #[must_use]
+    pub fn is_runtime_helper(&self) -> bool {
+        self.symbol.starts_with("gos_rt_")
+    }
+
     /// The intrinsic name for a call to `symbol` with compact `signature`
     /// (`params>ret`) from `library`.
     #[must_use]

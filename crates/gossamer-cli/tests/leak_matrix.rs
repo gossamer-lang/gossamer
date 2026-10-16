@@ -172,6 +172,33 @@ fn main() {
 "#,
     ),
     (
+        "carrier_field_unwrap_or",
+        r#"
+struct S { n: i64, t: Option<String> }
+enum K { Text(Option<String>), Count(i64) }
+fn weigh(s: S) -> i64 {
+    let t = s.t
+    t.unwrap_or("").len()
+}
+fn weigh_kind(k: K) -> i64 {
+    match k {
+        K::Text(t) => t.unwrap_or("").len(),
+        K::Count(n) => n,
+    }
+}
+fn main() {
+    let mut total = 0
+    let mut i = 0
+    while i < 200000 {
+        for s in #[S { n: i, t: Some(f"t{i}") }] { total += weigh(s) }
+        for k in #[K::Text(Some(f"k{i}")), K::Count(i)] { total += weigh_kind(k) }
+        i += 1
+    }
+    println(total)
+}
+"#,
+    ),
+    (
         "enum_tree_control",
         r#"
 enum Tree { Node(i64, Tree, Tree), Leaf }

@@ -101,6 +101,9 @@ impl<'a> Lowerer<'a> {
             cabi_thunk_sites: std::collections::BTreeSet::new(),
             entry_allocas: Vec::new(),
             sret_bodies: std::collections::BTreeSet::new(),
+            direct_bodies: std::collections::BTreeSet::new(),
+            address_taken: std::cell::OnceCell::new(),
+            params_in_place: std::cell::OnceCell::new(),
         }
     }
 
@@ -114,8 +117,81 @@ impl<'a> Lowerer<'a> {
 
     /// Whether a direct call to `name` writes its answer into storage this
     /// caller supplies.
+    /// Whether `local`'s slot is the caller's storage: the answer a sret body
+    /// builds there, or a parameter it reads in place.
+    pub(crate) fn answers_in_caller_storage(&self, local: Local) -> bool {
+        if local == Local::RETURN {
+            return self.body_uses_sret().is_some();
+        }
+        (1..=self.body.arity).contains(&local.0) && self.param_read_in_place(local.0 - 1)
+    }
+
+    /// Whether by-pointer parameter `i` is read in the caller's storage, with
+    /// no copy of its own: the parameter is `noalias`, so that storage holds
+    /// still for the whole call, and the body only reads it. A write, a
+    /// borrow, or a helper handed the slot's address keeps the copy.
+    pub(crate) fn param_read_in_place(&self, i: u32) -> bool {
+        let flags = self.params_in_place.get_or_init(|| {
+            if !self.direct_bodies.contains(&self.body.name) {
+                return vec![false; self.body.arity as usize];
+            }
+            (0..self.body.arity)
+                .map(|i| self.param_is_by_pointer(i) && param_only_read(self.body, Local(i + 1)))
+                .collect()
+        });
+        flags.get(i as usize).copied().unwrap_or(false)
+    }
+
     pub(crate) fn callee_uses_sret(&self, name: &str) -> bool {
         self.sret_bodies.contains(name)
+    }
+
+    /// Whether `arg` is a bare local whose storage the call it is passed to
+    /// reaches only through this argument: no address of it is taken, it is
+    /// no view into another value, and no other argument nor the call's
+    /// destination names it.
+    pub(crate) fn arg_storage_unshared(
+        &self,
+        arg: &gossamer_mir::Operand,
+        args: &[gossamer_mir::Operand],
+        destination: &gossamer_mir::Place,
+    ) -> bool {
+        let gossamer_mir::Operand::Copy(place) = arg else {
+            return false;
+        };
+        let local = place.local;
+        let names = |op: &gossamer_mir::Operand| {
+            matches!(op, gossamer_mir::Operand::Copy(p)
+                if p.local == local
+                    || p.projection.iter().any(|step|
+                        matches!(step, gossamer_mir::Projection::Index(l) if *l == local)))
+        };
+        place.projection.is_empty()
+            && !self.local_address_taken(local)
+            && !self.payload_views.contains_key(&local)
+            && destination.local != local
+            && args.iter().filter(|op| names(op)).count() == 1
+    }
+
+    /// Whether this body takes the address of `local` anywhere.
+    pub(crate) fn local_address_taken(&self, local: Local) -> bool {
+        self.address_taken
+            .get_or_init(|| {
+                let mut taken = std::collections::HashSet::new();
+                for block in &self.body.blocks {
+                    for stmt in &block.stmts {
+                        if let gossamer_mir::StatementKind::Assign {
+                            rvalue: gossamer_mir::Rvalue::Ref { place, .. },
+                            ..
+                        } = &stmt.kind
+                        {
+                            taken.insert(place.local.0);
+                        }
+                    }
+                }
+                taken
+            })
+            .contains(&local.0)
     }
 
     /// Main entry point - emits the function's IR text in its
@@ -225,7 +301,11 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(crate) fn emit_prelude(&mut self) {
-        let ret_ty = render_ty(self.tcx, self.body.local_ty(Local::RETURN));
+        let ret_ty = if self.body_uses_sret().is_some() {
+            "void".to_string()
+        } else {
+            render_ty(self.tcx, self.body.local_ty(Local::RETURN))
+        };
         let mut params = String::new();
         for i in 0..self.body.arity {
             if i > 0 {
@@ -239,17 +319,19 @@ impl<'a> Lowerer<'a> {
             // stores it anywhere, so callers may keep their copy of the
             // aggregate in registers across the call.
             //
-            // Deliberately NOT `noalias`. The pointer is whatever address the
-            // call site produced, and a projected argument yields an interior
-            // address: `f(v[0], &mut v)` hands the callee a pointer into `v`'s
-            // element buffer alongside `v` itself, and reference counting lets
-            // two arguments reach one object with no borrow checker to forbid
-            // it. `noalias` would then let `-O3` sink the entry memcpy past a
-            // write the other argument performs.
-            let attrs = if self.param_is_by_pointer(i) {
-                " readonly nocapture"
-            } else {
+            // `noalias` only where every call is one this module emits, which
+            // passes storage nothing else reaches for the whole call: a
+            // projected argument is an interior address (`f(v[0], &mut v)`
+            // hands over a pointer into `v`'s buffer alongside `v` itself),
+            // so those call sites copy it into a slot of their own first.
+            // With it, LLVM reads the caller's copy in place and drops the
+            // entry memcpy of a parameter the body only reads.
+            let attrs = if !self.param_is_by_pointer(i) {
                 ""
+            } else if self.direct_bodies.contains(&self.body.name) {
+                " noalias readonly nocapture"
+            } else {
+                " readonly nocapture"
             };
             let _ = write!(params, "{p_ty}{attrs} %p{i}");
         }
@@ -261,11 +343,13 @@ impl<'a> Lowerer<'a> {
             if !params.is_empty() {
                 params.push_str(", ");
             }
-            // Deliberately not `noalias`: the storage is the caller's own
-            // local, and `x = f(&mut x)` hands the same address through a
-            // parameter. The write lands once, at the return, after the body
-            // has finished reading through that parameter.
-            params.push_str("ptr %sret");
+            // The caller answers into storage nothing else reaches during
+            // the call: a local whose address it took, or one it passes as an
+            // argument, answers through a slot of its own instead (see the
+            // call lowering). Nothing keeps the address either. The body
+            // builds its answer there and may read it back, so the slot is
+            // not `writeonly`.
+            params.push_str("ptr noalias nocapture %sret");
         }
         writeln!(
             self.out,
@@ -482,6 +566,25 @@ impl<'a> Lowerer<'a> {
                 continue;
             }
             let slot = local_slot(Local(i as u32));
+            if i == 0 && self.body_uses_sret().is_some() {
+                // The answer is built in the caller's storage, which outlives
+                // this frame, so it needs no slot of its own or copy at return.
+                writeln!(
+                    self.out,
+                    "  {slot} = getelementptr inbounds i8, ptr %sret, i64 0"
+                )
+                .unwrap();
+                continue;
+            }
+            if i >= 1 && self.answers_in_caller_storage(Local(i as u32)) {
+                writeln!(
+                    self.out,
+                    "  {slot} = getelementptr inbounds i8, ptr %p{}, i64 0",
+                    i - 1
+                )
+                .unwrap();
+                continue;
+            }
             if is_aggregate(self.tcx, decl.ty) {
                 if let Some(bytes) = packed_byte_array_len(self.tcx, decl.ty) {
                     writeln!(self.out, "  {slot} = alloca [{bytes} x i8]").unwrap();
@@ -611,11 +714,18 @@ impl<'a> Lowerer<'a> {
 
     pub(crate) fn heap_spilled_local_bytes(&self, local: Local) -> Option<u64> {
         let ty = self.body.local_ty(local);
-        if !is_aggregate(self.tcx, ty) {
+        if !is_aggregate(self.tcx, ty) || self.answers_in_caller_storage(local) {
             return None;
         }
         let bytes = aggregate_storage_bytes(self.tcx, ty)?;
         (bytes > STACK_AGGREGATE_SPILL_BYTES).then_some(bytes)
+    }
+
+    /// Bytes of the storage `local`'s slot occupies.
+    pub(crate) fn local_storage_bytes(&self, local: Local) -> u64 {
+        let ty = self.body.local_ty(local);
+        aggregate_storage_bytes(self.tcx, ty)
+            .unwrap_or_else(|| u64::from(slot_count(self.tcx, ty).unwrap_or(1)) * 8)
     }
 
     pub(crate) fn emit_heap_spill_frees(&mut self) {
@@ -650,6 +760,9 @@ impl<'a> Lowerer<'a> {
                 continue;
             }
             let slot = local_slot(local);
+            if self.param_read_in_place(i) {
+                continue;
+            }
             if self.param_is_by_pointer(i) {
                 let slots = slot_count(self.tcx, local_ty);
                 let bytes = aggregate_storage_bytes(self.tcx, local_ty)
@@ -708,4 +821,44 @@ fn hot_text_reads_frame_line(out: &str, mark: usize, cold: &[(usize, usize)]) ->
         cursor = cursor.max(end);
     }
     cursor < out.len() && text_reads_frame_line(&out[cursor..])
+}
+
+/// Whether every mention of `param` in `body` reads its value: no store to it
+/// or into it, no borrow, no call answering into it, and no helper handed the
+/// address of its slot, which may write through it.
+fn param_only_read(body: &gossamer_mir::Body, param: Local) -> bool {
+    use gossamer_mir::{Operand, Rvalue, StatementKind, Terminator};
+    let mentions = |op: &Operand| matches!(op, Operand::Copy(p) if p.local == param);
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            match &stmt.kind {
+                StatementKind::Assign { place, rvalue } => {
+                    if place.local == param {
+                        return false;
+                    }
+                    match rvalue {
+                        Rvalue::Ref { place, .. } if place.local == param => return false,
+                        Rvalue::CallIntrinsic { name, args }
+                            if args.iter().any(mentions)
+                                && (!name.starts_with("gos_rt_")
+                                    || super::stmt::takes_slot_address(name)) =>
+                        {
+                            return false;
+                        }
+                        _ => {}
+                    }
+                }
+                StatementKind::Nop
+                | StatementKind::StorageLive(_)
+                | StatementKind::StorageDead(_) => {}
+                _ => return false,
+            }
+        }
+        match &block.terminator {
+            Terminator::Call { destination, .. } if destination.local == param => return false,
+            Terminator::Drop { place, .. } if place.local == param => return false,
+            _ => {}
+        }
+    }
+    true
 }

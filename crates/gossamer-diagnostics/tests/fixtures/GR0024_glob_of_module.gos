@@ -1,0 +1,11 @@
+// ERROR: GR0024
+
+use shapes::*
+
+mod shapes {
+    pub fn area() -> i64 { 1 }
+}
+
+fn main() {
+    println(shapes::area())
+}

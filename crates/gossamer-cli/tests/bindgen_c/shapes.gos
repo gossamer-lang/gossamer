@@ -1,7 +1,10 @@
 // Gossamer declarations for `shapes.h`, written by `gos bindgen --c`.
 // Regenerate them rather than editing by hand. A parameter pointing at
 // scalars crosses as a slice (`[T]` for `const T *`, `&mut [T]` otherwise,
-// `u8` for `char`); other pointers are `Option<ffi::Ptr<T>>`.
+// `u8` for `char`); other pointers are `Option<ffi::Ptr<T>>`. Names keep
+// their C spelling.
+
+#![lint(allow(non_camel_case_types), allow(non_snake_case), allow(non_upper_case_globals))]
 
 use std::ffi
 
@@ -9,6 +12,9 @@ pub const SHAPES_VERSION: i64 = 3
 pub const SHAPES_NAME: String = "shapes"
 pub const SHAPES_FLAG: u64 = 0x10
 pub const SHAPES_SCALE: f64 = 1.5
+pub const SHAPES_BIG: u64 = 4294967296
+pub const SHAPES_MASK: u64 = 19
+pub const SHAPES_NEG: i64 = -8
 
 #[repr(C)]
 pub struct shapes_point {
@@ -36,6 +42,11 @@ pub type shapes_kind = ffi::c_int
 pub const SHAPES_CIRCLE: ffi::c_int = 0
 pub const SHAPES_SQUARE: ffi::c_int = 4
 pub const SHAPES_TRIANGLE: ffi::c_int = 5
+
+pub type shapes_mode = ffi::c_int
+pub const SHAPES_FILL: ffi::c_int = 0
+pub const SHAPES_STROKE: ffi::c_int = 3
+pub const SHAPES_BOTH: ffi::c_int = 4
 
 #[link(name = "shapes")]
 unsafe extern "C" {

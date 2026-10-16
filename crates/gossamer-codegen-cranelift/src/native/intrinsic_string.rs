@@ -1161,7 +1161,8 @@ pub(super) fn lower_intrinsic_call_string(
         | "gos_rt_str_to_lower"
         | "gos_rt_str_to_upper"
         | "gos_rt_str_as_bytes"
-        | "gos_rt_vec_clone" => {
+        | "gos_rt_vec_clone"
+        | "gos_rt_vec_clone_field" => {
             let rt_fn = intrinsics.extern_fn(
                 module,
                 match name {
@@ -1170,6 +1171,7 @@ pub(super) fn lower_intrinsic_call_string(
                     "gos_rt_str_to_upper" => "gos_rt_str_to_upper",
                     "gos_rt_str_as_bytes" => "gos_rt_str_as_bytes",
                     "gos_rt_vec_clone" => "gos_rt_vec_clone",
+                    "gos_rt_vec_clone_field" => "gos_rt_vec_clone_field",
                     _ => unreachable!(),
                 },
                 &[ptr_ty],

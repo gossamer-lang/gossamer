@@ -26,8 +26,8 @@ fn run_server(source: &str) -> Result<(), String> {
     let mut map = SourceMap::new();
     let file = map.add_file("server.gos", source.to_string());
     let (mut sf, _) = parse_source_file(source, file);
-    let (resolutions, _) = resolve_source_file(&sf);
-    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &resolutions);
+    let (mut resolutions, _) = resolve_source_file(&sf);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
     let mut tcx = TyCtxt::new();
     let (table, _) = typecheck_source_file(&sf, &resolutions, &mut tcx);
     let program = lower_source_file(&sf, &resolutions, &table, &mut tcx);

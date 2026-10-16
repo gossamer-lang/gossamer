@@ -65,6 +65,8 @@ path = "src/main.gos"
 # Optional: a library target alongside / in place of a binary.
 # Without this section, presence of `src/lib.gos` is enough to
 # build the library by convention.
+# Without a `kind`, `gos build` compiles the library natively and
+# links nothing: dependents build it from source.
 [lib]
 name = "widget"
 path = "src/lib.gos"

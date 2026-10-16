@@ -860,6 +860,14 @@ impl<'tcx> FnBuilder<'tcx> {
                 self.compile_array_list(elems)
             }
             HirExprKind::Array(gossamer_hir::HirArrayExpr::Repeat { value, count }) => {
+                // A byte buffer is packed wherever it lands, a struct field
+                // or a call argument as much as a binding.
+                let elem = self
+                    .array_elem_ty(expr.ty)
+                    .and_then(|elem| self.tcx.kind(elem));
+                if matches!(elem, Some(TyKind::Int(gossamer_types::IntTy::U8))) {
+                    return self.compile_byte_array_repeat(value, count);
+                }
                 self.compile_array_repeat(value, count)
             }
             // Native standalone range value (`a..b` / `a..=b`): an eager

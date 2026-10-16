@@ -469,6 +469,39 @@ fn retain_active(items: &mut Vec<crate::Item>) {
     }
 }
 
+/// Removes the `impl` and `trait` members inactive under the current cfg,
+/// at any depth, so the semantic passes see one declaration per name where
+/// `#[cfg]` picks between several. Items stay: the resolver skips an
+/// inactive item itself, and tools that reprint source read every one.
+pub fn strip_inactive_members(source: &mut crate::SourceFile) {
+    strip_members(&mut source.items);
+}
+
+fn strip_members(items: &mut [crate::Item]) {
+    for item in items {
+        match &mut item.kind {
+            crate::ItemKind::Impl(decl) => decl.items.retain(|member| match member {
+                crate::ImplItem::Fn(f) => item_is_active(&f.attrs),
+                crate::ImplItem::Type { attrs, .. } | crate::ImplItem::Const { attrs, .. } => {
+                    item_is_active(attrs)
+                }
+            }),
+            crate::ItemKind::Trait(decl) => decl.items.retain(|member| match member {
+                crate::TraitItem::Fn(f) => item_is_active(&f.attrs),
+                crate::TraitItem::Type { attrs, .. } | crate::TraitItem::Const { attrs, .. } => {
+                    item_is_active(attrs)
+                }
+            }),
+            crate::ItemKind::Mod(decl) => {
+                if let crate::ModBody::Inline(inner) = &mut decl.body {
+                    strip_members(inner);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static TEST_CFG_ENABLED: AtomicBool = AtomicBool::new(false);

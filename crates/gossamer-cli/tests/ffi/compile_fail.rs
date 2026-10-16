@@ -490,3 +490,30 @@ fn an_export_c_cannot_call_is_gt0113() {
         &["the symbol `main` is the C program's entry"],
     );
 }
+
+#[test]
+fn a_memory_operation_over_a_type_parameter_is_gt0105() {
+    rejects(
+        "cf-generic-write",
+        r"use std::ffi
+use std::ffi::Ptr
+
+fn store<T>(p: Ptr<T>, value: T) {
+    unsafe { ffi::write(p, value) }
+}
+
+fn width<T>() -> i64 {
+    ffi::size_of::<T>()
+}
+
+fn main() {
+    let p: Ptr<i64> = unsafe { ffi::alloc(1) }
+    store(p, 3)
+    println(width::<i64>())
+    unsafe { ffi::free(p) }
+}
+",
+        "GT0105",
+        &["type parameter", "ffi::write", "size"],
+    );
+}

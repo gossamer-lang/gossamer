@@ -1338,12 +1338,22 @@ pub unsafe extern "C" fn gos_rt_set_is_disjoint(a: *const GosSet, b: *const GosS
 // the interpreter.
 // ---------------------------------------------------------------
 
-/// The canonical key bytes of an enum node, or `None` when the descriptor
-/// does not describe it.
+/// The key an enum node is stored under in `s`: the node word for a set its
+/// element type orders, its canonical bytes otherwise, or `None` when the
+/// descriptor does not describe it.
 ///
 /// # Safety
-/// `node` is an enum node word and `desc` its variant-layout descriptor.
-unsafe fn enum_element_key(node: *mut u8, desc: *const i64) -> Option<Vec<u8>> {
+/// `s` is null or a live set, `node` an enum node word, and `desc` its
+/// variant-layout descriptor.
+unsafe fn enum_element_key(s: *const GosSet, node: *mut u8, desc: *const i64) -> Option<Vec<u8>> {
+    // The element type's own order reads the node itself, so a set ordered by
+    // one keys its elements by node word, as a map ordered by one does.
+    // SAFETY: `s` is null or a live set (this `unsafe fn`'s caller).
+    if let Some(set) = unsafe { s.as_ref() }
+        && set.user_cmp.is_some()
+    {
+        return Some((node as usize as i64).to_le_bytes().to_vec());
+    }
     // SAFETY: this `unsafe fn`'s caller passes `node` as an enum node word and `desc` as its
     // descriptor.
     unsafe { crate::c_abi::map::enum_canonical_key(node, desc) }
@@ -1361,7 +1371,7 @@ pub unsafe extern "C" fn gos_rt_set_insert_ekey(
 ) -> i64 {
     ffi_entry!({
         // SAFETY: `node` is an enum node word and `desc` its descriptor (this shim's contract).
-        let Some(key) = (unsafe { enum_element_key(node, desc) }) else {
+        let Some(key) = (unsafe { enum_element_key(s, node, desc) }) else {
             return 0;
         };
         if s.is_null() {
@@ -1399,7 +1409,7 @@ pub unsafe extern "C" fn gos_rt_set_contains_ekey(
 ) -> i64 {
     ffi_entry!({
         // SAFETY: `node` is an enum node word and `desc` its descriptor (this shim's contract).
-        let Some(key) = (unsafe { enum_element_key(node, desc) }) else {
+        let Some(key) = (unsafe { enum_element_key(s, node, desc) }) else {
             return 0;
         };
         if s.is_null() {
@@ -1422,7 +1432,7 @@ pub unsafe extern "C" fn gos_rt_set_remove_ekey(
 ) -> i64 {
     ffi_entry!({
         // SAFETY: `node` is an enum node word and `desc` its descriptor (this shim's contract).
-        let Some(key) = (unsafe { enum_element_key(node, desc) }) else {
+        let Some(key) = (unsafe { enum_element_key(s, node, desc) }) else {
             return 0;
         };
         if s.is_null() {
@@ -1684,9 +1694,9 @@ pub unsafe extern "C" fn gos_rt_set_range_ekey(
 ) -> *mut GosSet {
     ffi_entry!({
         // SAFETY: `lo` is an enum node word and `desc` its descriptor (this shim's contract).
-        let lo = unsafe { enum_element_key(lo, desc) }.unwrap_or_default();
+        let lo = unsafe { enum_element_key(s, lo, desc) }.unwrap_or_default();
         // SAFETY: `hi` is an enum node word and `desc` its descriptor (this shim's contract).
-        let hi = unsafe { enum_element_key(hi, desc) }.unwrap_or_default();
+        let hi = unsafe { enum_element_key(s, hi, desc) }.unwrap_or_default();
         // SAFETY: `s` is this shim's argument, null or live for the call and written by nothing
         // else (C-ABI contract), which `set_range` accepts.
         unsafe {

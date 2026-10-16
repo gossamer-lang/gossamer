@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.73.0 - Data-valued parameter defaults, foreign-library fixes, optimizations
+
+- A parameter default may hold data: an enum variant (`mode: Mode = Mode::Fast`, `parent: Option<Window> = None`, `samples: Option<i64> = Some(4)`), a struct construction, a tuple, an array, a `Vec`, `Map`, or `Set` literal, a function, `i64::MAX`, or a const of any type, built from values known while compiling. Every name in a default means what it means where the function is declared, on every tier, whatever the call site has in scope. A default computed at run time (a function call, a closure, a `static`, another parameter) is still `GR0014`, which now says the default must be a value known while compiling.
+- `gos serve [DIR] [--port 8000] [--bind 127.0.0.1]` serves a directory's files over HTTP, as `python -m http.server` does: a directory's `index.html` is its page and a directory without one is listed, `GET` and `HEAD` answer with `ETag` / `Last-Modified` revalidation and byte ranges, and a path that leaves the directory is `404`. It answers only this machine unless `--bind` says otherwise.
+- A single name in a pattern means what it resolves to, as in Rust, whatever its case: a name that resolves to a variant, a struct, or a const is matched against it, and any other name binds. A lowercase variant or const (`red =>`, `limit =>`) used to bind every value and match the first arm whatever the value was; an uppercase binding (`let Width = 3`, `fn area(W: i64)`) used to be `GR0022`. `GR0022` now reports a `match` arm whose name resolves to nothing but misspells a variant, with the variant it meant.
+- A `let`, a `for` binding, and a function or closure parameter reject a pattern that may fail to match (`GT0047`): `let Some(x) = opt`, `let Shape::Circle(r) = shape`, `let LIMIT = 5`, and `fn f(Shape::Circle(r): Shape)` used to compile and bind the payload of whatever variant arrived. An or-pattern naming every variant of its enum (`let Shape::Pair(g, _) | Shape::Single(g) = s`) still always matches.
+- An or-pattern whose alternatives bind different names (`Some(y) | None => println(y)`) is `GR0025`; the bytecode VM stopped on it with an internal error, and a compiled program read a value that was never set.
+- `use Kind::Round`, `use Kind::{Round, Square}`, and `use Kind::*` import an enum's variants into a module, where they name those variants even when another enum declares the same names. A `::*` of anything but an enum is `GR0024`.
+- `gos lint` and `gos check` report names that depart from Rust's conventions: `UpperCamelCase` types, traits, and variants (`GL0057`), `snake_case` functions, parameters, locals, fields, and modules (`GL0058`), and `SCREAMING_SNAKE_CASE` consts and statics (`GL0059`). Foreign declarations, `#[export]` functions, and `#[repr(C)]` fields keep their C spelling; `gos bindgen --c` output allows the three lints and keeps C parameter names as written.
+- An associated const declared in an `impl` inside a module can name the module's own types and items; it was rejected as out of scope. Two modules may each declare a type of the same name with an associated const of the same name, and each read reaches the one its path, its module, or its `use` names; this was rejected as a duplicate definition. A parameter default may read an associated const.
+- `#[link(name = "...", kind = "framework")]` links an Apple framework on macOS and is an error elsewhere.
+- `[native.cmake]` builds a vendored CMake project with the package and links its libraries on every tier; `provides`, `options`, and `feature` select what it builds.
+- A native build that names libraries links with the platform linker's library search, so `#[link(search = ...)]` libraries resolve as they do on the VM.
+- `ffi::Union` works as a pointer target and in `ffi::size_of`, and a union member may be a fixed array.
+- An `ffi` memory operation or layout query over a type parameter is GT0105 at check time.
+- A live `ffi::Handle` counts as a pending sender, so waiting for a value a C library thread delivers through a handle is no longer reported as a deadlock.
+- A callback that reaches an `ffi::Handle` keeps working when the JIT promotes the code around it.
+- `gos bindgen --c` renames parameters that collide with keywords or builtin calls, skips `va_list` functions, keeps the constants of typedef'd enums, and evaluates computed macro constants.
+- `gos test` runs test bodies on the process main thread, which windowing and GUI libraries require.
+- A `type` alias reaches its enum's variants and associated items, including when a dependency re-exports the type through it.
+- A struct literal through a `type` alias builds the aliased struct on every tier, and a generic alias's fields are type-checked.
+- A struct literal through an imported nested module (`sdl::Point { .. }`) is typed.
+- An inherent `impl` in another module reaches its type however the type is spelled: imported, `crate::`-rooted, or through an alias.
+- `#[cfg]` on `impl` and trait members picks the member for the target.
+- Associated functions of primitive types named only inside `impl` bodies, such as `char::from_u32`, resolve.
+- An attribute followed by `pub(package)` parses as an item.
+- `#[derive(Default)]` fills `Option`, `Vec`, slice, and `Map` fields whatever they hold.
+- A struct holding an `ffi::Ptr` renders as `Ptr(0x..)` with `{}` and `{:?}`.
+- Formatting a value whose fields hold a closure is refused at check time unless the type has its own `fmt`.
+- Concurrent builds sharing a cache no longer remove each other's lock file.
+- A line that starts with `..` in a multiline struct literal is the literal's base, not a range continuing the line above.
+- A static `[native.cmake]` library also links what its installed pkg-config file lists: libraries, search directories, and macOS frameworks.
+- A `crate::` path written inside a dependency reaches that dependency's own modules.
+- A native `match` on an `Option` or `Result` of an enum no longer frees the matched value twice when a later arm matches after an earlier pattern's test failed (`Some(Event::KeyDown { .. })` beside `Some(_)`).
+- `ffi::last_errno()` and `ffi::last_os_error()` keep reporting the last foreign call's codes across `ffi::read`, `ffi::write`, `ffi::alloc`, and `ffi::free`, which reset them before.
+- `GOS_RC_DEBUG` no longer counts the shared node of a payload-free enum variant as an object left alive at exit, and two goroutines building that node at once no longer leak the one that loses.
+- A static musl release build links the runtime built with the `gos` running it, not one found in a `target/` directory under the working directory.
+- A native build no longer frees a `Vec` twice when a function answers `Ok(v)` or `Some(v)` for a `Vec` parameter `v`.
+- A native build no longer frees a `Vec` twice when a field is rebound from a binding taken through `?` (`let next = f(self.items)?` then `self.items = next`).
+- Native `ffi::read` and `ffi::write` of a struct read and write its fields at the foreign address directly, with no staging buffer or runtime call per field.
+- An arithmetic operator on a type it is not defined for is `GT0003` at check time: `"a" * "b"`, `true + false`, `'a' + 'b'`, a `Vec` or tuple operand, `Duration * Duration`, and `Instant + Instant` compiled and failed at run time.
+- `later - earlier` of two `Instant`s is the `Duration` between them, and `instant + duration`, `instant - duration`, `+=`, and `-=` move an `Instant`; the difference of two instants was typed as an `Instant`.
+- Native code makes fewer runtime calls: `ffi::read` and `ffi::write` of a scalar and of a struct field are plain loads and stores, an `Ok(())` or `None` going out of scope costs a compare, a payload-free variant of an enum with more than four variants is read from a table and never counted, and a value `?` takes out of an `Option` or `Result` that is not read again moves instead of being retained and released.
+- A foreign call off the scheduler's workers no longer touches the scheduler, and one on a worker marks itself with two stores instead of a clock read and three atomic operations. A worker blocked in a foreign call hands its queued goroutines to a new worker once the watchdog has seen the call on two consecutive passes.
+- Enums are stored the Swift way. A non-recursive enum holds its discriminant and its variants' fields inline, with fields of different variants sharing storage, and an `Option` or `Result` over one is inline too, so building, matching, and passing such values allocates nothing. An enum that contains itself keeps a heap node per value.
+- The bytecode VM calls a foreign function at about the cost of a plain call: a foreign function's signature is parsed, its symbol resolved, and its trampoline picked once, and a call to a builtin reuses the call site's cache instead of resolving the name each time.
+- Native code builds a struct, tuple, or enum value directly in the variable or result that receives it, instead of in a temporary it then copies.
+- `csv` parsing reads a field without validating its bytes a second time and scans for separators and quotes a word at a time; `json` scans strings and skipped values a word at a time.
+- A native build renders a `&mut String` parameter in `f"{s}"` and `format` as its text; it rendered unrelated memory.
+- The bytecode VM orders a derived-`Ord` enum by variant when its variants differ in shape (a struct variant beside a tuple or unit variant); `sort` treated such values as equal.
+- `*self = value` in a method of a struct or enum releases the fields of the value it replaces; a native build leaked them.
+- A native `match` arm `Some(S { .. })` over `None` falls through to the next arm; it read the absent payload and crashed.
+- A native build no longer leaks the payload of an `Option` taken from a struct field or a variant's payload and then read with `unwrap_or`.
+- An integer literal in an enum's struct-variant field is checked against the field's type, so `Wide { big: 18446744073709551615 }` for a `u64` field compiles; it was checked as an `i64`.
+- A native build no longer frees a `Vec` twice when a binding taken through `?` is moved into a struct or enum that a vector then keeps (`let inner = f()?` then `items.push(Row { cells: inner })`); the corrupted vector could crash or loop.
+- An enum key in a `Map`, `BTreeMap`, `Set`, or `BTreeSet` keys by its value on native builds, and so does a `BTreeMap` or `BTreeSet` key whose variants hold a `Vec` of numbers, of strings, or of the enum itself, so equal keys share one entry; such keys were compared by address and never freed.
+- A `BTreeMap` or `BTreeSet` keyed by an enum orders its entries by the enum's derived or written order on every tier; the bytecode VM ordered a variant with named fields by name, and native builds ordered some keys by their encoded bytes.
+- `BTreeSet::range`, `first`, `last`, `pop_first`, and `pop_last`, and `BTreeMap::first_key_value` and `last_key_value`, no longer leak the temporary collection they read from on native builds.
+- `gos build` on a library root that declares no `fn main` and no `[lib] kind` compiles it through native code generation and links nothing, as `go build` does for a package; it stopped with internal errors about uninstantiated generic `ffi` bodies, then failed to link a `main`.
+- A native build gives the program's own functions internal linkage, so LLVM inlines them across the program and drops the copies nothing calls.
+- `runtime::is_main_thread()` answers whether the caller runs on the process main thread, the one `main` starts on, on every tier; it reads a thread-local flag, so a library that must stay on that thread can check it on every call.
+- A native function that answers a `[u8; N]` array writes `N` bytes into its caller's storage; it copied eight times that, past the end of both frames.
+- `GOS_LLVM_DUMP`, `GOS_LLVM_DUMP_MIR`, and `GOS_DUMP_MIR_RC` compile the program again instead of reporting a current build unchanged, so the dump they ask for is written.
+- `*r = value` through a `&mut` gives the referent its own share of the value's strings, vectors, and other counted fields; a native build or the JIT freed them with the local they were copied from, so a struct or by-value enum stored through `*self` held freed memory.
+- Native code reads a struct, tuple, or enum parameter that a function only reads in its caller's storage instead of copying it in, and a value a loop redefines on each turn and answers on one exit is built in the function's result.
+- What a callee writes through a `&mut` argument before it panics reaches the frames the panic unwinds through on the bytecode VM, as it does in compiled code: their deferred expressions read it, and their own `&mut` parameters pass it on. A `&mut` argument forwarded from a parameter read back empty there, and a `&mut` struct field read back its value from before the call.
+- `gos run` hands the compiler's memory back to the system before the program starts, and the bytecode VM stores a `u8` repeat (`#[0u8; n]`) as packed bytes wherever it is written, a struct field and a call argument included, where it took eight bytes or more per element. A `&mut` struct field argument (`clear(&mut self.pixels)`) no longer copies the field before the callee's first write, and a value built for a call argument moves into the call instead of keeping a second share; each of those copies cost the whole buffer.
+
 ## 0.72.0 - Typed serde, packed vectors, cheaper reference counting, and faster checks
 
 - `to_json::<T>`, `from_json::<T>`, `json::decode::<T>`, `json::encode::<T>`, and the toml and yaml forms read and write through a typed reader and writer the compiler generates for each type after checking. Decoding walks the text once it is validated and builds no document tree, so it runs faster and holds far less memory. The text written and every error message are unchanged.

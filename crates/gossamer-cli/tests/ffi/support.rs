@@ -310,6 +310,7 @@ unsafe extern "C" {
     fn set_handler(f: Fn(ffi::c_int, Ptr<ffi::c_void>), ctx: Ptr<ffi::c_void>)
     fn fire(value: ffi::c_int)
     fn fire_on_thread(value: ffi::c_int)
+    fn fire_later_on_thread(value: ffi::c_int, delay_ms: ffi::c_int)
     fn get_doubler() -> Ptr<ffi::c_void>
     fn get_halver() -> Ptr<ffi::c_void>
 }

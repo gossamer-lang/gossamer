@@ -360,7 +360,7 @@ fn analyse_unit(name: &str, bundled: &str, origins: Vec<BundledSpan>) -> UnitAna
     let mut map = SourceMap::new();
     let file = map.add_file(name.to_string(), augmented.clone());
     let (mut sf, parse_diags) = gossamer_parse::autoderive::parse_with_autoderive(&augmented, file);
-    let (resolutions, resolve_diags) = resolve_source_file(&sf);
+    let (mut resolutions, resolve_diags) = resolve_source_file(&sf);
     // A program that does not parse is not the program the later passes
     // see: `autoderive::augment_source` declines to synthesize from a
     // recovered tree, so the derived `fmt` / `to_string` / serde surface a
@@ -385,7 +385,7 @@ fn analyse_unit(name: &str, bundled: &str, origins: Vec<BundledSpan>) -> UnitAna
     let earlier_fatal = !fatal.is_empty();
     let checks = gossamer_types::check_resolved_unit(
         &mut sf,
-        &resolutions,
+        &mut resolutions,
         &resolve_diags,
         parse_failed,
         earlier_fatal,

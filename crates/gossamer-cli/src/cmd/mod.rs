@@ -27,6 +27,7 @@ pub(crate) mod parse;
 pub(crate) mod pkg;
 pub(crate) mod run;
 pub(crate) mod scaffold;
+pub(crate) mod serve;
 pub(crate) mod skill_prompt;
 pub(crate) mod test;
 pub(crate) mod traceback;
@@ -87,6 +88,7 @@ pub(crate) fn with_vm_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 's
 /// the same main-thread stack a compiled program gets.
 pub(crate) fn on_main_thread<T>(f: impl FnOnce() -> T) -> T {
     gossamer_runtime::stack_guard::install_stack_guard();
+    gossamer_runtime::sched_global::mark_main_thread();
     crate::arm_main_thread_guard();
     f()
 }

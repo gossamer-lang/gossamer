@@ -276,9 +276,7 @@ fn run(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
     let cross_target = cross_target(target)?;
 
     if explain_profile {
-        let planned_target = resolve_link_target(cross_target);
-        let static_musl = planned_target.env == TargetEnv::Musl || opts.want_static_musl();
-        print_profile_plan(&planned_target, opts, static_musl);
+        print_profile_plan(cross_target, opts);
     }
 
     if let Some(library) = library::target_for(file)? {
@@ -297,9 +295,8 @@ fn run(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
     let phase_started = Instant::now();
     let build_key = build_artifact_key(file, &source, cross_target, opts, &out_path);
     let stamp_path = build_stamp_path(file, &out_path);
-    // A report is about this compile, so a current build does not stand in.
-    let reporting = request.uniqueness_report || gossamer_mir::remarks::any_enabled();
-    let unchanged = (!reporting).then(|| load_unchanged_build(&stamp_path, &out_path, &build_key));
+    let unchanged = (!reports_on_compile(request))
+        .then(|| load_unchanged_build(&stamp_path, &out_path, &build_key));
     if let Some(outcome) = unchanged.flatten() {
         build_timings.stamp = phase_started.elapsed();
         build_timings.total = started.elapsed();
@@ -328,12 +325,21 @@ fn run(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
     )?;
     build_timings.frontend = phase_started.elapsed();
     profile_rss_stage("build_frontend_released");
+    let library = !c_header::declares_main(&sf);
     let checked = gossamer_driver::CheckedFrontend {
         sf,
         resolutions,
         table,
         tcx,
     };
+    if library {
+        library::compile(&unit_name, file, request, checked, &mut build_timings)?;
+        if timings {
+            build_timings.total = started.elapsed();
+            build_timings.print(false);
+        }
+        return Ok(());
+    }
     let paths = BuildPaths {
         unit_name: &unit_name,
         input: file,
@@ -365,6 +371,16 @@ fn run(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Whether this build reports on or dumps its compile, which a current build
+/// cannot stand in for.
+fn reports_on_compile(request: &BuildRequest<'_>) -> bool {
+    request.uniqueness_report
+        || gossamer_mir::remarks::any_enabled()
+        || COMPILE_DUMP_VARS
+            .iter()
+            .any(|name| std::env::var_os(name).is_some())
+}
+
 /// The one line a finished build prints, whether it linked or found
 /// the artifact still current.
 fn report_artifact(outcome: &NativeBuildOutcome, out_path: &Path) {
@@ -379,7 +395,10 @@ fn report_artifact(outcome: &NativeBuildOutcome, out_path: &Path) {
 /// Emits a stable, machine-readable summary of the selected optimization
 /// policy. This is deliberately available before the artifact-cache return so
 /// a reporter can prove profile selection even when no codegen reruns.
-fn print_profile_plan(target: &LinkTarget, opts: LinkOptions, static_musl: bool) {
+fn print_profile_plan(cross_target: Option<&str>, opts: LinkOptions) {
+    let planned_target = resolve_link_target(cross_target);
+    let target = &planned_target;
+    let static_musl = target.env == TargetEnv::Musl || opts.want_static_musl();
     let profile = if opts.release { "release" } else { "debug" };
     let (mir, llvm) = if opts.release {
         ("release-inline+optimise", "O3")
@@ -492,6 +511,9 @@ impl BuildTimings {
 /// read as a miss, so a format that gained a field never reads one
 /// that could not carry it as though it did.
 const BUILD_STAMP_VERSION: &str = "gossamer-linked-artifact-v2";
+
+/// Variables that ask a compile to write its intermediate forms out.
+const COMPILE_DUMP_VARS: [&str; 3] = ["GOS_LLVM_DUMP", "GOS_LLVM_DUMP_MIR", "GOS_DUMP_MIR_RC"];
 
 /// Fingerprints everything available before the frontend that can affect the
 /// linked artifact. The bundled source covers sibling modules, while project
@@ -985,13 +1007,29 @@ fn resolve_link_target(target: Option<&str>) -> LinkTarget {
 ///    host-architecture musl runtime.
 /// 3. `<gos-bin>/../lib/<triple>/libgossamer_runtime.a` (installed
 ///    cross-toolchain layout).
-/// 4. `target/<triple>/{release,debug}/libgossamer_runtime.a` (dev
-///    tree).
-/// 5. The musl archive baked in at cli build time, only when `triple`
+/// 4. The musl archive baked in at cli build time, only when `triple`
 ///    is the host arch's musl triple (the host == target musl case).
 ///    It names the tree the cli was compiled in, so it ranks below
-///    every path an installed toolchain owns.
+///    every path an installed toolchain owns and above any other tree.
+/// 5. `target/<triple>/{release,debug}/libgossamer_runtime.a` under the
+///    working directory, for a cross target no other step names.
 fn find_runtime_lib_for_target(triple: &str) -> std::result::Result<PathBuf, NativeBuildError> {
+    runtime_lib_for_target(
+        triple,
+        std::env::current_exe().ok().as_deref(),
+        MUSL_RUNTIME_LIB,
+        Path::new("."),
+    )
+}
+
+/// [`find_runtime_lib_for_target`] for the cli at `exe`, built with the musl
+/// archive `baked`, looking under `cwd` last.
+fn runtime_lib_for_target(
+    triple: &str,
+    exe: Option<&Path>,
+    baked: Option<&str>,
+    cwd: &Path,
+) -> std::result::Result<PathBuf, NativeBuildError> {
     let env_key = format!(
         "GOS_RUNTIME_LIB_{}",
         triple.replace(['-', '.'], "_").to_uppercase()
@@ -1003,7 +1041,7 @@ fn find_runtime_lib_for_target(triple: &str) -> std::result::Result<PathBuf, Nat
         }
     }
     if triple == musl_triple_for_arch(std::env::consts::ARCH)
-        && let Ok(exe) = std::env::current_exe()
+        && let Some(exe) = exe
         && let Some(libdir) = exe.parent().and_then(Path::parent).map(|gp| gp.join("lib"))
     {
         let cand = libdir.join("libgossamer_runtime-musl.a");
@@ -1011,7 +1049,7 @@ fn find_runtime_lib_for_target(triple: &str) -> std::result::Result<PathBuf, Nat
             return Ok(cand);
         }
     }
-    if let Ok(exe) = std::env::current_exe()
+    if let Some(exe) = exe
         && let Some(libdir) = exe
             .parent()
             .and_then(Path::parent)
@@ -1022,21 +1060,22 @@ fn find_runtime_lib_for_target(triple: &str) -> std::result::Result<PathBuf, Nat
             return Ok(cand);
         }
     }
-    for profile in ["release", "debug"] {
-        let cand = Path::new("target")
-            .join(triple)
-            .join(profile)
-            .join("libgossamer_runtime.a");
-        if cand.exists() {
-            return Ok(cand);
-        }
-    }
-    if let Some(baked) = MUSL_RUNTIME_LIB
+    if let Some(baked) = baked
         && triple == musl_triple_for_arch(std::env::consts::ARCH)
     {
         let p = PathBuf::from(baked);
         if p.exists() {
             return Ok(p);
+        }
+    }
+    for profile in ["release", "debug"] {
+        let cand = cwd
+            .join("target")
+            .join(triple)
+            .join(profile)
+            .join("libgossamer_runtime.a");
+        if cand.exists() {
+            return Ok(cand);
         }
     }
     Err(NativeBuildError::LinkerMissing(format!(
@@ -1128,6 +1167,8 @@ fn ensure_output_dir(out_path: &Path) -> std::result::Result<(), NativeBuildErro
 /// directories it searches for them.
 struct NativeLinks {
     libraries: Vec<String>,
+    /// macOS frameworks the declarations name with `kind = "framework"`.
+    frameworks: Vec<String>,
     search: Vec<PathBuf>,
     /// Linker driver arguments rustc reported for the `[rust-bindings]`
     /// staticlib, passed through as written after the libraries.
@@ -1135,15 +1176,80 @@ struct NativeLinks {
 }
 
 impl NativeLinks {
+    /// Links `dependencies` after the first `position` libraries, the
+    /// archives that need them.
+    fn add_after(&mut self, position: usize, dependencies: crate::native_cmake::LinkDependencies) {
+        let mut at = position.min(self.libraries.len());
+        for library in dependencies.libraries {
+            if !self.libraries[at..].contains(&library) {
+                self.libraries.insert(at, library);
+                at += 1;
+            }
+        }
+        for framework in dependencies.frameworks {
+            if !self.frameworks.contains(&framework) {
+                self.frameworks.push(framework);
+            }
+        }
+        for dir in dependencies.search {
+            if !self.search.contains(&dir) {
+                self.search.push(dir);
+            }
+        }
+    }
+
     /// The libraries and search directories the foreign declarations of the
     /// program at `entry` name.
     fn foreign(entry: &Path, links: gossamer_driver::ForeignLinks) -> Self {
         Self {
             search: crate::paths::foreign_search_dirs(entry, &links),
             libraries: links.libraries,
+            frameworks: links.frameworks,
             staticlib_args: Vec::new(),
         }
     }
+}
+
+/// The driver arguments linking `libraries`' frameworks for `lt`: a
+/// `-framework` pair each on macOS. A framework exists only there, so naming
+/// one for another target is an error the declaration's `#[cfg]` should gate.
+fn framework_args(
+    lt: &LinkTarget,
+    libraries: &NativeLinks,
+) -> std::result::Result<Vec<String>, NativeBuildError> {
+    if libraries.frameworks.is_empty() {
+        return Ok(Vec::new());
+    }
+    if lt.os != TargetOs::MacOs {
+        return Err(NativeBuildError::BackendFailed(format!(
+            "framework `{}` links only on macOS; gate its declarations with \
+             #[cfg(target_os = \"macos\")]",
+            libraries.frameworks.join("`, `")
+        )));
+    }
+    Ok(libraries
+        .frameworks
+        .iter()
+        .flat_map(|name| ["-framework".to_string(), name.clone()])
+        .collect())
+}
+
+/// Whether a native Linux host link uses mold, when it is installed and
+/// resolves the link's libraries where the platform linker would.
+fn links_with_mold(lt: &LinkTarget, libraries: &NativeLinks) -> bool {
+    !lt.is_cross
+        && lt.os == TargetOs::Linux
+        && mold_resolves_like_the_platform_linker(libraries)
+        && which::which("mold").is_ok()
+}
+
+/// Whether mold finds every library this link names where the platform
+/// linker would. mold searches only the directories the driver passes, while
+/// GNU ld adds built-in ones (`/usr/local/lib` among them) that the dynamic
+/// loader also reads, so a link naming a library of the program's own takes
+/// the platform linker and resolves it where `gos run` loads it from.
+fn mold_resolves_like_the_platform_linker(libraries: &NativeLinks) -> bool {
+    libraries.libraries.is_empty()
 }
 
 /// The archives a native link takes beyond the runtime: the
@@ -1203,10 +1309,12 @@ fn link_native_sources(
 ) -> std::result::Result<Vec<PathBuf>, NativeBuildError> {
     let native = crate::native_sources::archives(input_path, target)
         .map_err(|err| NativeBuildError::BackendFailed(format!("{err:#}")))?;
+    let count = native.archives.len();
     for (index, archive) in native.archives.into_iter().enumerate() {
         libraries.search.insert(index, archive.dir);
         libraries.libraries.insert(index, archive.name);
     }
+    libraries.add_after(count, native.dependencies);
     Ok(native.inputs)
 }
 
@@ -1643,7 +1751,7 @@ fn link_posix(
     // macOS keeps Apple's `ld`: it ships with the SDK and reads that SDK's
     // `.tbd` library stubs, whose target list moves with each release
     // faster than another linker's stub reader follows.
-    if !lt.is_cross && lt.os == TargetOs::Linux && which::which("mold").is_ok() {
+    if links_with_mold(lt, libraries) {
         cmd.arg("-fuse-ld=mold");
     }
     for p in object_paths {
@@ -1659,6 +1767,7 @@ fn link_posix(
     for library in &libraries.libraries {
         cmd.arg(format!("-l{library}"));
     }
+    cmd.args(framework_args(lt, libraries)?);
     cmd.args(&libraries.staticlib_args);
     cmd.arg("-o").arg(out_path);
     // `-ldl` only exists on Linux (libdl). macOS folds `dl*` into
@@ -2217,6 +2326,51 @@ fn set_executable(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_framework_links_with_its_flag_on_macos_only() {
+        let target = |os| super::LinkTarget {
+            triple: String::new(),
+            os,
+            arch: "aarch64",
+            env: super::TargetEnv::Other,
+            is_cross: false,
+        };
+        let links = super::NativeLinks {
+            libraries: Vec::new(),
+            frameworks: vec!["Cocoa".to_string(), "Metal".to_string()],
+            search: Vec::new(),
+            staticlib_args: Vec::new(),
+        };
+        assert_eq!(
+            super::framework_args(&target(super::TargetOs::MacOs), &links).ok(),
+            Some(vec![
+                "-framework".to_string(),
+                "Cocoa".to_string(),
+                "-framework".to_string(),
+                "Metal".to_string(),
+            ])
+        );
+        assert!(super::framework_args(&target(super::TargetOs::Linux), &links).is_err());
+    }
+
+    #[test]
+    fn a_link_naming_libraries_keeps_the_platform_linker_search() {
+        let runtime_only = super::NativeLinks {
+            libraries: Vec::new(),
+            frameworks: Vec::new(),
+            search: Vec::new(),
+            staticlib_args: Vec::new(),
+        };
+        assert!(super::mold_resolves_like_the_platform_linker(&runtime_only));
+        let named = super::NativeLinks {
+            libraries: vec!["SDL3".to_string()],
+            frameworks: Vec::new(),
+            search: Vec::new(),
+            staticlib_args: Vec::new(),
+        };
+        assert!(!super::mold_resolves_like_the_platform_linker(&named));
+    }
+
+    #[test]
     fn packed_relative_relocations_need_glibc_2_36() {
         assert!(super::glibc_version_reads_relr("2.36"));
         assert!(super::glibc_version_reads_relr("2.39"));
@@ -2329,6 +2483,25 @@ mod tests {
             "aarch64" => assert_eq!(lt.arch, "aarch64"),
             _ => {}
         }
+    }
+
+    #[test]
+    fn the_runtime_built_with_the_cli_outranks_another_tree_under_the_working_directory() {
+        let root = scratch("runtime-lookup");
+        let triple = super::musl_triple_for_arch(std::env::consts::ARCH);
+        let decoy = root.join("project/target").join(triple).join("release");
+        let own = root.join("cli-tree/libgossamer_runtime.a");
+        std::fs::create_dir_all(&decoy).expect("create the decoy tree");
+        std::fs::create_dir_all(own.parent().expect("a parent")).expect("create the cli tree");
+        std::fs::write(decoy.join("libgossamer_runtime.a"), b"decoy").expect("write the decoy");
+        std::fs::write(&own, b"own").expect("write the cli's runtime");
+        let Ok(found) =
+            super::runtime_lib_for_target(triple, None, own.to_str(), &root.join("project"))
+        else {
+            panic!("no runtime archive found");
+        };
+        assert_eq!(found, own);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

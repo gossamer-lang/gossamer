@@ -1531,6 +1531,138 @@ impl<'a> Lowerer<'a> {
         writeln!(self.out, "  store i8 {valb}, ptr {target}{TBAA_DATA}").unwrap();
     }
 
+    /// A carrier payload release whose kinds are constants, guarded so the
+    /// runtime is called only when the arm the carrier holds owns heap
+    /// storage: an `Ok(())` or a `None` costs a compare, not a call. Answers
+    /// `false`, emitting nothing, when a kind is not a constant.
+    pub(crate) fn lower_result_release_guarded(
+        &mut self,
+        name: &str,
+        args: &[Operand],
+        dest: Local,
+    ) -> Result<bool, BuildError> {
+        let constant = |op: Option<&Operand>| match op {
+            Some(Operand::Const(gossamer_mir::ConstValue::Int(n))) => i64::try_from(*n).ok(),
+            _ => None,
+        };
+        // The kinds the runtime releases; any other names no heap storage.
+        let owns = |kind: i64| (1..=8).contains(&kind);
+        let (Some(ok_kind), Some(err_kind)) = (
+            constant(args.get(1)),
+            if name == "gos_rt_result_payload_release" {
+                constant(args.get(2))
+            } else {
+                Some(0)
+            },
+        ) else {
+            return Ok(false);
+        };
+        let arms: Vec<i64> = [(0, ok_kind), (1, err_kind)]
+            .into_iter()
+            .filter(|&(_, kind)| owns(kind))
+            .map(|(disc, _)| disc)
+            .collect();
+        if arms.is_empty() {
+            return Ok(true);
+        }
+        let Some(carrier) = args.first() else {
+            return Ok(false);
+        };
+        let ty = self.operand_llvm_ty(carrier);
+        let raw = self.lower_operand(carrier)?;
+        let r = if ty == "i128" {
+            raw
+        } else {
+            self.coerce_llvm_value(&raw, &ty, "i128")
+        };
+        let disc = self.fresh();
+        writeln!(self.out, "  {disc} = trunc i128 {r} to i64").unwrap();
+        let high = self.fresh();
+        writeln!(self.out, "  {high} = lshr i128 {r}, 64").unwrap();
+        let payload = self.fresh();
+        writeln!(self.out, "  {payload} = trunc i128 {high} to i64").unwrap();
+        let owned = self.fresh();
+        writeln!(self.out, "  {owned} = icmp ne i64 {payload}, 0").unwrap();
+        let arm = if let [only] = arms.as_slice() {
+            let arm = self.fresh();
+            writeln!(self.out, "  {arm} = icmp eq i64 {disc}, {only}").unwrap();
+            arm
+        } else {
+            let arm = self.fresh();
+            writeln!(self.out, "  {arm} = icmp ult i64 {disc}, 2").unwrap();
+            arm
+        };
+        let live = self.fresh();
+        writeln!(self.out, "  {live} = and i1 {owned}, {arm}").unwrap();
+        let call = self.fresh_label("rrel_call");
+        let cont = self.fresh_label("rrel_cont");
+        writeln!(self.out, "  br i1 {live}, label %{call}, label %{cont}").unwrap();
+        writeln!(self.out, "{call}:").unwrap();
+        self.lower_runtime_call_intrinsic(name, args, dest)?;
+        writeln!(self.out, "  br label %{cont}").unwrap();
+        writeln!(self.out, "{cont}:").unwrap();
+        Ok(true)
+    }
+
+    /// A unit variant's singleton read straight from the runtime's table, the
+    /// call taken only the first time a tag is asked for, which installs it.
+    pub(crate) fn lower_enum_unit_inline(
+        &mut self,
+        args: &[Operand],
+        destination: &Place,
+        target: Option<&gossamer_mir::BlockId>,
+    ) -> Result<(), BuildError> {
+        self.runtime_refs
+            .insert("@gos_rt_enum_units = external global [256 x ptr]".to_string());
+        self.runtime_refs
+            .insert("declare ptr @gos_rt_enum_unit(i64)".to_string());
+        let tag = self.lower_operand(&args[0])?;
+        let tag = self.widen_to_i64(&args[0], &tag);
+        let entry = self.fresh_label("unit_entry");
+        let slow = self.fresh_label("unit_slow");
+        let done = self.fresh_label("unit_done");
+        let in_table = self.fresh();
+        writeln!(self.out, "  {in_table} = icmp ult i64 {tag}, 256").unwrap();
+        writeln!(
+            self.out,
+            "  br i1 {in_table}, label %{entry}, label %{slow}"
+        )
+        .unwrap();
+        writeln!(self.out, "{entry}:").unwrap();
+        let slot = self.fresh();
+        writeln!(
+            self.out,
+            "  {slot} = getelementptr [256 x ptr], ptr @gos_rt_enum_units, i64 0, i64 {tag}"
+        )
+        .unwrap();
+        let cached = self.fresh();
+        writeln!(
+            self.out,
+            "  {cached} = load atomic ptr, ptr {slot} acquire, align 8"
+        )
+        .unwrap();
+        let missing = self.fresh();
+        writeln!(self.out, "  {missing} = icmp eq ptr {cached}, null").unwrap();
+        writeln!(self.out, "  br i1 {missing}, label %{slow}, label %{done}").unwrap();
+        writeln!(self.out, "{slow}:").unwrap();
+        let made = self.fresh();
+        writeln!(self.out, "  {made} = call ptr @gos_rt_enum_unit(i64 {tag})").unwrap();
+        writeln!(self.out, "  br label %{done}").unwrap();
+        writeln!(self.out, "{done}:").unwrap();
+        let unit = self.fresh();
+        writeln!(
+            self.out,
+            "  {unit} = phi ptr [ {cached}, %{entry} ], [ {made}, %{slow} ]"
+        )
+        .unwrap();
+        let dest_ty = render_ty(self.tcx, self.body.local_ty(destination.local));
+        let value = self.coerce_llvm_value(&unit, "ptr", &dest_ty);
+        let dest_slot = local_slot(destination.local);
+        writeln!(self.out, "  store {dest_ty} {value}, ptr {dest_slot}").unwrap();
+        emit_terminator_branch(&mut self.out, target);
+        Ok(())
+    }
+
     /// Inline fast path for `gos_rt_heap_u8_set(v, idx, val)` on the
     /// `Terminator::Call` route (`buf.set_byte(i, x)`). Mirrors the
     /// `Rvalue::CallIntrinsic` inline; the destination is unit, so nothing is

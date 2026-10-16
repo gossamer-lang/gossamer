@@ -541,7 +541,14 @@ impl TypeLowerer<'_> {
                     let substs = self.lower_substs(path);
                     return self.tcx.intern(TyKind::Adt { def, substs });
                 }
-                Resolution::Import { .. } | Resolution::Err | Resolution::Local(_) => {}
+                // `use a::Point` then `impl Point`: the import names the type.
+                Resolution::Import { .. } => {
+                    if let Some(def) = self.resolutions.import_def(node) {
+                        let substs = self.lower_substs(path);
+                        return self.tcx.intern(TyKind::Adt { def, substs });
+                    }
+                }
+                Resolution::Err | Resolution::Local(_) => {}
             }
         }
         self.tcx.error_ty()

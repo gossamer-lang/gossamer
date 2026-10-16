@@ -275,6 +275,10 @@ pub enum TypeError {
     /// A `for` loop's pattern might not match some element it walks.
     #[error("this `for` pattern might not match every element")]
     ForPatternMayNotMatch,
+    /// A function or closure parameter's pattern might not match some
+    /// argument of its type.
+    #[error("this parameter pattern might not match every argument")]
+    ParamPatternMayNotMatch,
     /// A `let &...` pattern tried to destructure a non-reference value.
     #[error(
         "`let {pattern} name = value` requires an `{pattern}` initializer; write `let name = {pattern} value` to borrow, or remove `{pattern}` to bind the value directly"
@@ -1171,6 +1175,7 @@ impl TypeError {
             Self::CannotAssignToLiteral => "cannot-assign-to-literal",
             Self::LetPatternMayNotMatch => "let-pattern-may-not-match",
             Self::ForPatternMayNotMatch => "for-pattern-may-not-match",
+            Self::ParamPatternMayNotMatch => "param-pattern-may-not-match",
             Self::ReferencePatternRequiresReference { .. } => {
                 "reference-pattern-requires-reference"
             }
@@ -1315,7 +1320,8 @@ impl TypeError {
             Self::NonExhaustiveMatch { .. } => "GT0004",
             Self::CannotAssignToLiteral
             | Self::LetPatternMayNotMatch
-            | Self::ForPatternMayNotMatch => "GT0047",
+            | Self::ForPatternMayNotMatch
+            | Self::ParamPatternMayNotMatch => "GT0047",
             Self::ReferencePatternRequiresReference { .. } => "GT0048",
             Self::ReferenceParameterPatternPosition { .. } => "GT0069",
             Self::UnsizedSliceValue { .. } => "GT0049",
@@ -1667,6 +1673,13 @@ impl TypeDiagnostic {
                         "bind the element with a name and test it in the body with `if let` or `match`",
                     )
                     .with_note("a `for` pattern must accept every element the loop walks");
+            }
+            TypeError::ParamPatternMayNotMatch => {
+                out = out
+                    .with_help(
+                        "take the argument with a name and test it in the body with `if let`, `match`, or `let ... else`",
+                    )
+                    .with_note("a parameter pattern must accept every argument the caller can pass");
             }
             TypeError::ReferencePatternRequiresReference { pattern } => {
                 out = out

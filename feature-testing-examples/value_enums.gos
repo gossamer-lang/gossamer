@@ -1,0 +1,225 @@
+// Enums stored by value: every variant shape, the scalar widths that share a
+// word, copies and writes through `&mut`, containers, channels, closures,
+// carriers over an enum, and the derived traits.
+
+use std::sync::channel
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Pt { x: i64, y: i64 }
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Shape {
+    Dot
+    Circle { r: i64, label: String }
+    Rect { w: i64, h: i64, tags: Vec<String> }
+    Pair(String, String)
+    Point(Pt)
+}
+
+#[derive(Debug, PartialEq)]
+enum Scalars {
+    Narrow { a: i8, b: u16, c: i32 }
+    Wide { big: u64, neg: i64 }
+    Other { flag: bool, ch: char, f: f32, g: f64 }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Key {
+    Unknown
+    A
+    B
+    Char(char)
+    Other(u32)
+}
+
+#[derive(Debug, PartialEq)]
+enum Ev {
+    Quit
+    KeyDown { window: u32, key: Key, repeat: bool }
+    Text { window: u32, text: String }
+    Moved { window: u32, x: f64, y: f64 }
+}
+
+struct Holder { shape: Shape, n: i64 }
+
+struct Named { n: i64, label: String }
+
+impl Named {
+    fn grow(&mut self) {
+        let next = Named { n: self.n + 1, label: f"{self.label}+" }
+        *self = next
+    }
+}
+
+impl Key {
+    fn code(&self) -> u32 {
+        match self {
+            Key::Unknown => 0
+            Key::A => 4
+            Key::B => 5
+            Key::Char(c) => c as u32
+            Key::Other(code) => code
+        }
+    }
+}
+
+impl Shape {
+    fn area(&self) -> i64 {
+        match self {
+            Shape::Dot => 0
+            Shape::Circle { r, .. } => 3 * r * r
+            Shape::Rect { w, h, .. } => w * h
+            Shape::Pair(a, b) => a.len() as i64 + b.len() as i64
+            Shape::Point(p) => p.x + p.y
+        }
+    }
+
+    fn describe(&mut self) -> String {
+        match self {
+            Shape::Circle { r, label } => f"circle {r} {label}"
+            _ => "other"
+        }
+    }
+
+    fn grow(&mut self) {
+        match self {
+            Shape::Circle { r, label } => {
+                let next = Shape::Circle { r: r + 1, label: f"{label}+" }
+                *self = next
+            }
+            Shape::Rect { tags, .. } => tags.push("grown")
+            _ => ()
+        }
+    }
+}
+
+fn make(i: i64) -> Shape {
+    match i % 5 {
+        0 => Shape::Dot
+        1 => Shape::Circle { r: i, label: f"c{i}" }
+        2 => Shape::Rect { w: i, h: 2, tags: #["a", f"t{i}"] }
+        3 => Shape::Pair(f"p{i}", "q")
+        _ => Shape::Point(Pt { x: i, y: -i })
+    }
+}
+
+fn poll(i: i64) -> Option<Ev> {
+    if i > 6 {
+        return None
+    }
+    match i % 3 {
+        0 => Some(Ev::KeyDown { window: 1, key: if i % 2 == 0 { Key::A } else { Key::Char('é') }, repeat: i % 4 == 0 })
+        1 => Some(Ev::Text { window: 2, text: f"t{i}" })
+        _ => Some(Ev::Moved { window: 3, x: 1.5, y: -2.25 })
+    }
+}
+
+fn first_circle(shapes: Vec<Shape>) -> Option<Shape> {
+    for s in shapes {
+        if let Shape::Circle { .. } = s {
+            return Some(s)
+        }
+    }
+    None
+}
+
+fn tag(s: &mut String) -> String {
+    f"<{s}>"
+}
+
+fn main() {
+    let mut shapes = #[]
+    for i in 0..10 {
+        shapes.push(make(i))
+    }
+    let mut total = 0
+    for s in shapes {
+        total += s.area()
+    }
+    println(f"total {total}")
+
+    let a = make(1)
+    let mut b = a
+    b.grow()
+    println(f"a {a} b {b}")
+    println(f"eq {a == b} {a == make(1)} lt {a < b}")
+    let mut c = make(6)
+    println(c.describe())
+
+    let mut h = Holder { shape: make(2), n: 1 }
+    h.shape.grow()
+    println(f"holder {h.shape:?} {h.n}")
+
+    let mut sorted = #[make(4), make(2), make(0), make(1), make(3)]
+    sorted.sort()
+    println(f"sorted {sorted}")
+
+    if let Some(found) = first_circle(shapes) {
+        println(f"first circle {found}")
+    }
+    let m = { "x": make(3), "y": make(8) }
+    println(f"map {m["x"]} {m.len()}")
+
+    let tx, rx = channel()
+    spawn(|| {
+        tx.send(make(1))
+        tx.send(make(2))
+        tx.close()
+    })
+    while let Some(s) = rx.recv() {
+        println(f"recv {s}")
+    }
+
+    let captured = make(3)
+    let describe = || f"closure sees {captured}"
+    println(describe())
+
+    let Shape::Pair(left, right) = make(8) else {
+        return
+    }
+    println(f"let-else {left} {right}")
+
+    let picked = match make(6) {
+        Shape::Circle { r: 6, label } => f"six {label}"
+        Shape::Circle { r, .. } if r > 3 => "big"
+        other => f"other {other}"
+    }
+    println(picked)
+    println(f"matches {matches(make(2), Shape::Rect { .. })}")
+
+    let scalars = #[
+        Scalars::Narrow { a: -5, b: 65535, c: -2147483648 }
+        Scalars::Wide { big: 18446744073709551615, neg: -9223372036854775807 }
+        Scalars::Other { flag: true, ch: 'ß', f: 1.5, g: -0.125 }
+    ]
+    for s in scalars {
+        println(f"{s:?}")
+    }
+
+    let mut reps = 0
+    let mut codes = 0
+    let mut texts = 0
+    let mut i = 0
+    loop {
+        match poll(i) {
+            Some(Ev::KeyDown { key, repeat, .. }) => {
+                codes += key.code() as i64
+                if repeat {
+                    reps += 1
+                }
+            }
+            Some(Ev::Text { text, .. }) => texts += text.len()
+            Some(_) => ()
+            None => break
+        }
+        i += 1
+    }
+    println(f"events reps {reps} codes {codes} texts {texts}")
+
+    let mut named = Named { n: 1, label: f"n{1}" }
+    named.grow()
+    println(f"named {named.n} {named.label}")
+
+    let mut word = "hi"
+    println(tag(&mut word))
+}

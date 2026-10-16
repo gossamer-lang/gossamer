@@ -24,6 +24,7 @@ pub mod fix;
 mod lints;
 
 pub mod migrate;
+mod naming;
 
 pub use explain::lint_explanation;
 pub use fix::{Fix, apply as apply_fixes, fixes};
@@ -173,6 +174,10 @@ pub const DAY_ONE_LINTS: &[&str] = &[
     // Batch 5 (conciseness nudges).
     "fill_loop",
     "substring_byte_scan",
+    // Rust's naming conventions.
+    "non_camel_case_types",
+    "non_snake_case",
+    "non_upper_case_globals",
 ];
 
 /// Runs every enabled lint over `source_file` (parsed from `src`) and
@@ -357,6 +362,9 @@ pub fn lint_code(id: &str) -> Code {
         "substring_byte_scan" => Code("GL0052"),
         "i64_only_container_family" => Code("GL0054"),
         "no_effect_statement" => Code("GL0056"),
+        "non_camel_case_types" => Code("GL0057"),
+        "non_snake_case" => Code("GL0058"),
+        "non_upper_case_globals" => Code("GL0059"),
         _ => Code("GL9999"),
     }
 }

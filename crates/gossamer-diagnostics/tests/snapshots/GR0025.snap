@@ -1,0 +1,13 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+assertion_line: 86
+expression: rendered
+---
+--- plain ---
+error[GR0025]: An or-pattern's alternatives bind different names. Whichever - here
+--- framed ---
+error[GR0025]: An or-pattern's alternatives bind different names. Whichever
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

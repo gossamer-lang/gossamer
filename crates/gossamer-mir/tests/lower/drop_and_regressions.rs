@@ -364,6 +364,14 @@ fn copy_source_field_nulled(body: &gossamer_mir::Body, slot: Local, field: u32) 
     })
 }
 
+/// Whether `local` is written whole by a call, owning the result it receives.
+fn is_call_destination(body: &gossamer_mir::Body, local: Local) -> bool {
+    body.blocks.iter().any(|block| {
+        matches!(&block.terminator, gossamer_mir::Terminator::Call { destination, .. }
+            if destination.local == local && destination.projection.is_empty())
+    })
+}
+
 /// The tuple slot a field-0 extract copies from.
 fn field0_extract_source(body: &gossamer_mir::Body) -> Option<Local> {
     body.blocks
@@ -413,10 +421,11 @@ fn use_it() -> i64 {
 
     assert!(
         field_rc_calls_on(body, "gos_rt_rc_retain", slot, 0) > 0
-            || copy_source_field_nulled(body, slot, 0),
-        "the tuple slot's String field must hold a share of its own when the slot \
-         is copied: a retain, or the share of the dead value it copies, which is \
-         then set to null"
+            || copy_source_field_nulled(body, slot, 0)
+            || is_call_destination(body, slot),
+        "the tuple slot's String field must hold a share of its own: the result \
+         the call wrote into it, a retain when the slot is copied, or the share of \
+         the dead value it copies, which is then set to null"
     );
     assert!(
         field_rc_calls_on(body, "gos_rt_rc_release", slot, 0) > 0
@@ -806,8 +815,8 @@ fn build_with_lift(source: &str) -> (Vec<gossamer_mir::Body>, TyCtxt) {
     let file = map.add_file("test.gos", source.to_string());
     let (mut sf, parse_diags) = parse_source_file(source, file);
     assert!(parse_diags.is_empty(), "parse: {parse_diags:?}");
-    let (resolutions, _) = resolve_source_file(&sf);
-    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &resolutions);
+    let (mut resolutions, _) = resolve_source_file(&sf);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
     let mut tcx = TyCtxt::new();
     let (table, type_diags) = typecheck_source_file(&sf, &resolutions, &mut tcx);
     assert!(type_diags.is_empty(), "typecheck: {type_diags:?}");

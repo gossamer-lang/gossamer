@@ -291,7 +291,10 @@ impl Lowerer<'_> {
                 format!("@{symbol}")
             }
         };
-        writeln!(self.out, "  call void @gos_rt_ffi_enter()").unwrap();
+        let bracket = !call.is_runtime_helper();
+        if bracket {
+            writeln!(self.out, "  call void @gos_rt_ffi_enter()").unwrap();
+        }
         let args_text = call_args.join(", ");
         // `nobuiltin`: the call reaches the native function, never LLVM's
         // model of a C library function of the same name.
@@ -307,7 +310,9 @@ impl Lowerer<'_> {
             .unwrap();
             Some(tmp)
         };
-        writeln!(self.out, "  call void @gos_rt_ffi_leave()").unwrap();
+        if bracket {
+            writeln!(self.out, "  call void @gos_rt_ffi_leave()").unwrap();
+        }
         if let (Some(pieces), Some(result), Some(holder)) = (&piece_ret, &result, &holder) {
             self.store_ret_pieces(pieces, result, &ret_ty, holder);
         }

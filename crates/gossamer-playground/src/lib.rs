@@ -268,12 +268,12 @@ fn front_end(
     // diagnostics are the actionable report.
     let parse_failed = !parse_diags.is_empty();
 
-    let (resolutions, resolve_diags) = resolve_source_file(&sf);
+    let (mut resolutions, resolve_diags) = resolve_source_file(&sf);
     let mut tcx = TyCtxt::new();
     let earlier_fatal = !diagnostics.is_empty();
     let checks = gossamer_types::check_resolved_unit(
         &mut sf,
-        &resolutions,
+        &mut resolutions,
         &resolve_diags,
         parse_failed,
         earlier_fatal,

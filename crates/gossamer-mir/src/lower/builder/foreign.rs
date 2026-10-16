@@ -47,6 +47,9 @@ impl Builder<'_> {
         };
         let (symbol, signature, library) =
             (literal(symbol)?, literal(signature)?, literal(library)?);
+        if let Some(copied) = self.lower_ffi_copy(symbol, rest, ty, span) {
+            return Some(copied);
+        }
         let declared = ForeignCall::intrinsic_name(symbol, signature, library);
         let declared_call = ForeignCall::parse(declared)?;
         let params = declared_call.param_list();
@@ -144,6 +147,45 @@ impl Builder<'_> {
                 span,
             );
         }
+        Some(dest)
+    }
+
+    /// `ffi::read` and `ffi::write` of an aggregate, which the foreign-boundary
+    /// pass routes through `gos_rt_ffi_read` / `gos_rt_ffi_write`: each leaf is
+    /// read from, or written at, its offset from the foreign address itself,
+    /// with no staging buffer. A write zeroes the destination first, so its
+    /// padding reads as the copy of a zeroed buffer left it.
+    fn lower_ffi_copy(
+        &mut self,
+        symbol: &str,
+        args: &[HirExpr],
+        ty: Ty,
+        span: Span,
+    ) -> Option<Local> {
+        let (aggregate, address) = match (symbol, args) {
+            ("gos_rt_ffi_read", [staged, address, _len]) => (staged, address),
+            ("gos_rt_ffi_write", [address, staged, _len]) => (staged, address),
+            _ => return None,
+        };
+        let address = self.lower_expr(address)?;
+        let (inner_ty, place) = self.foreign_aggregate_place(aggregate)?;
+        let (size, leaves) = self.tcx.c_leaves(inner_ty)?;
+        if symbol == "gos_rt_ffi_read" {
+            self.get_leaves(address, &place, &leaves, span);
+        } else {
+            self.foreign_runtime(
+                "gos_rt_ffi_zero",
+                vec![Operand::Copy(Place::local(address)), Self::int_const(size)],
+                span,
+            );
+            self.put_leaves(address, &place, &leaves, span);
+        }
+        let dest = self.fresh(ty);
+        self.emit_assign(
+            Place::local(dest),
+            Rvalue::Use(Operand::Const(ConstValue::Unit)),
+            span,
+        );
         Some(dest)
     }
 
@@ -313,6 +355,13 @@ impl Builder<'_> {
     ) -> Local {
         let buffer =
             self.foreign_runtime("gos_rt_ffi_struct_alloc", vec![Self::int_const(size)], span);
+        self.put_leaves(buffer, place, leaves, span);
+        buffer
+    }
+
+    /// Writes each leaf of the aggregate at `place` at its offset from the
+    /// address `buffer` holds.
+    fn put_leaves(&mut self, buffer: Local, place: &Place, leaves: &[CLeaf], span: Span) {
         let f64_ty = self.tcx.float_ty(FloatTy::F64);
         let i64_ty = self.tcx.int_ty(IntTy::I64);
         for leaf in leaves {
@@ -371,13 +420,18 @@ impl Builder<'_> {
                 }
             }
         }
-        buffer
     }
 
     /// Reads each leaf back from the C buffer into the aggregate's place.
     fn unpack_foreign_aggregate(&mut self, packed: &Packed, span: Span) {
-        for leaf in &packed.leaves {
-            let buffer_op = Operand::Copy(Place::local(packed.buffer));
+        self.get_leaves(packed.buffer, &packed.place, &packed.leaves, span);
+    }
+
+    /// Reads each leaf at its offset from the address `buffer` holds into
+    /// the aggregate at `place`.
+    fn get_leaves(&mut self, buffer: Local, place: &Place, leaves: &[CLeaf], span: Span) {
+        for leaf in leaves {
+            let buffer_op = Operand::Copy(Place::local(buffer));
             let offset = Self::int_const(leaf.offset);
             let raw = match leaf.class {
                 'f' => self.foreign_runtime("gos_rt_ffi_get_f32", vec![buffer_op, offset], span),
@@ -408,7 +462,7 @@ impl Builder<'_> {
                 }
             };
             self.emit_assign(Place::local(value), read_back, span);
-            let leaf_place = self.foreign_leaf_place(&packed.place, leaf, span);
+            let leaf_place = self.foreign_leaf_place(place, leaf, span);
             self.emit_assign(
                 leaf_place,
                 Rvalue::Use(Operand::Copy(Place::local(value))),

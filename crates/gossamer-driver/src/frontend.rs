@@ -176,10 +176,11 @@ pub fn check_frontend_with_program(
 
     let phase_started = Instant::now();
     let (mut sf, mut diagnostics, parse_failed) = parse_phase(source, file_id, program);
+    gossamer_ast::cfg::strip_inactive_members(&mut sf);
     let parse = phase_started.elapsed();
 
     let phase_started = Instant::now();
-    let (resolutions, resolve_diags) = resolve_source_file(&sf);
+    let (mut resolutions, resolve_diags) = resolve_source_file(&sf);
     let resolve = phase_started.elapsed();
 
     let mut tcx = TyCtxt::new();
@@ -187,7 +188,7 @@ pub fn check_frontend_with_program(
     let earlier_fatal = !diagnostics.is_empty();
     let checks = check_resolved_unit(
         &mut sf,
-        &resolutions,
+        &mut resolutions,
         &resolve_diags,
         parse_failed,
         earlier_fatal,

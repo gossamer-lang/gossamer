@@ -941,6 +941,265 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// The inline form of a `gos_rt_ffi_get` / `put` family call whose
+    /// offset, width, and signedness are constants: the field's address is
+    /// the buffer plus the offset, read or written at the field's own width
+    /// with no alignment assumed. `None` leaves the call to the runtime.
+    pub(crate) fn try_inline_ffi_field(
+        &mut self,
+        name: &str,
+        args: &[Operand],
+    ) -> Result<Option<String>, BuildError> {
+        let constant = |op: Option<&Operand>| match op {
+            Some(Operand::Const(gossamer_mir::ConstValue::Int(n))) => i64::try_from(*n).ok(),
+            _ => None,
+        };
+        let Some(offset) = constant(args.get(1)) else {
+            return Ok(None);
+        };
+        let Some(buffer) = args.first() else {
+            return Ok(None);
+        };
+        let buffer_ty = self.operand_llvm_ty(buffer);
+        let buffer = self.lower_operand(buffer)?;
+        let base = if buffer_ty == "ptr" {
+            buffer
+        } else {
+            let as_ptr = self.fresh();
+            writeln!(self.out, "  {as_ptr} = inttoptr i64 {buffer} to ptr").unwrap();
+            as_ptr
+        };
+        let field = self.fresh();
+        writeln!(
+            self.out,
+            "  {field} = getelementptr i8, ptr {base}, i64 {offset}"
+        )
+        .unwrap();
+        let int_ty = |width: i64| match width {
+            1 => Some("i8"),
+            2 => Some("i16"),
+            4 => Some("i32"),
+            8 => Some("i64"),
+            _ => None,
+        };
+        Ok(Some(match name {
+            "gos_rt_ffi_get" => {
+                let (Some(width), Some(signed)) = (constant(args.get(2)), constant(args.get(3)))
+                else {
+                    return Ok(None);
+                };
+                let Some(ty) = int_ty(width) else {
+                    return Ok(None);
+                };
+                let raw = self.fresh();
+                writeln!(self.out, "  {raw} = load {ty}, ptr {field}, align 1").unwrap();
+                if ty == "i64" {
+                    raw
+                } else {
+                    let wide = self.fresh();
+                    let extend = if signed != 0 { "sext" } else { "zext" };
+                    writeln!(self.out, "  {wide} = {extend} {ty} {raw} to i64").unwrap();
+                    wide
+                }
+            }
+            "gos_rt_ffi_put" => {
+                let Some(width) = constant(args.get(2)) else {
+                    return Ok(None);
+                };
+                let Some(ty) = int_ty(width) else {
+                    return Ok(None);
+                };
+                let Some(bits) = args.get(3) else {
+                    return Ok(None);
+                };
+                let bits = self.lower_operand(bits)?;
+                let narrow = if ty == "i64" {
+                    bits
+                } else {
+                    let narrow = self.fresh();
+                    writeln!(self.out, "  {narrow} = trunc i64 {bits} to {ty}").unwrap();
+                    narrow
+                };
+                writeln!(self.out, "  store {ty} {narrow}, ptr {field}, align 1").unwrap();
+                "0".to_string()
+            }
+            "gos_rt_ffi_get_f64" => {
+                let value = self.fresh();
+                writeln!(self.out, "  {value} = load double, ptr {field}, align 1").unwrap();
+                value
+            }
+            "gos_rt_ffi_get_f32" => {
+                let narrow = self.fresh();
+                let value = self.fresh();
+                writeln!(self.out, "  {narrow} = load float, ptr {field}, align 1").unwrap();
+                writeln!(self.out, "  {value} = fpext float {narrow} to double").unwrap();
+                value
+            }
+            "gos_rt_ffi_put_f64" | "gos_rt_ffi_put_f32" => {
+                let Some(value) = args.get(2) else {
+                    return Ok(None);
+                };
+                let value = self.lower_operand(value)?;
+                if name == "gos_rt_ffi_put_f64" {
+                    writeln!(self.out, "  store double {value}, ptr {field}, align 1").unwrap();
+                } else {
+                    let narrow = self.fresh();
+                    writeln!(self.out, "  {narrow} = fptrunc double {value} to float").unwrap();
+                    writeln!(self.out, "  store float {narrow}, ptr {field}, align 1").unwrap();
+                }
+                "0".to_string()
+            }
+            _ => return Ok(None),
+        }))
+    }
+
+    /// The inline form of a `gos_rt_ffi_load_*` / `store_*` call whose C
+    /// class is a constant, as `ffi::read` and `ffi::write` of a scalar
+    /// lower: a load or store at the address at the class's width, matching
+    /// the runtime's `class_shape`. `None` leaves the call to the runtime.
+    /// `gos_rt_ffi_zero` over a constant length, as an aggregate `ffi::write`
+    /// lowers it: a `memset` that LLVM narrows to the bytes the field stores
+    /// after it leave unwritten. `false` leaves the call to the runtime.
+    pub(crate) fn try_inline_ffi_zero(&mut self, args: &[Operand]) -> Result<bool, BuildError> {
+        let [address, Operand::Const(ConstValue::Int(len))] = args else {
+            return Ok(false);
+        };
+        let Ok(len) = u64::try_from(*len) else {
+            return Ok(false);
+        };
+        if len == 0 {
+            return Ok(true);
+        }
+        let address_ty = self.operand_llvm_ty(address);
+        let address = self.lower_operand(address)?;
+        let base = if address_ty == "ptr" {
+            address
+        } else {
+            let as_ptr = self.fresh();
+            writeln!(self.out, "  {as_ptr} = inttoptr i64 {address} to ptr").unwrap();
+            as_ptr
+        };
+        writeln!(
+            self.out,
+            "  call void @llvm.memset.p0.i64(ptr {base}, i8 0, i64 {len}, i1 false)"
+        )
+        .unwrap();
+        Ok(true)
+    }
+
+    pub(crate) fn try_inline_ffi_scalar(
+        &mut self,
+        name: &str,
+        args: &[Operand],
+    ) -> Result<Option<String>, BuildError> {
+        let Some(Operand::Const(gossamer_mir::ConstValue::Int(class))) = args.get(1) else {
+            return Ok(None);
+        };
+        let class = u8::try_from(*class).map(char::from).unwrap_or('\0');
+        // (LLVM type, sign-extends, a bool normalised to 0 or 1)
+        let (ty, signed, boolean) = match (name, class) {
+            ("gos_rt_ffi_load_float" | "gos_rt_ffi_store_float", 'f') => ("float", false, false),
+            ("gos_rt_ffi_load_float" | "gos_rt_ffi_store_float", 'd') => ("double", false, false),
+            ("gos_rt_ffi_load_float" | "gos_rt_ffi_store_float", _) => return Ok(None),
+            (_, 'c') => ("i8", true, false),
+            (_, 'h') => ("i16", true, false),
+            (_, 'H') => ("i16", false, false),
+            (_, 'i') => ("i32", true, false),
+            (_, 'I') => ("i32", false, false),
+            (_, 'l' | 'L') => ("i64", false, false),
+            (_, 'B') => ("i8", false, true),
+            _ => ("i8", false, false),
+        };
+        let value_ty = match name {
+            "gos_rt_ffi_store_int" => Some("i64"),
+            "gos_rt_ffi_store_float" => Some("double"),
+            _ => None,
+        };
+        if let Some(expected) = value_ty
+            && args
+                .get(2)
+                .map(|value| self.operand_llvm_ty(value))
+                .as_deref()
+                != Some(expected)
+        {
+            return Ok(None);
+        }
+        let Some(addr) = args.first() else {
+            return Ok(None);
+        };
+        let addr_ty = self.operand_llvm_ty(addr);
+        let addr = self.lower_operand(addr)?;
+        let ptr = if addr_ty == "ptr" {
+            addr
+        } else {
+            let as_ptr = self.fresh();
+            writeln!(self.out, "  {as_ptr} = inttoptr i64 {addr} to ptr").unwrap();
+            as_ptr
+        };
+        Ok(Some(match name {
+            "gos_rt_ffi_load_int" => {
+                let raw = self.fresh();
+                writeln!(self.out, "  {raw} = load {ty}, ptr {ptr}, align 1").unwrap();
+                if boolean {
+                    let set = self.fresh();
+                    let wide = self.fresh();
+                    writeln!(self.out, "  {set} = icmp ne i8 {raw}, 0").unwrap();
+                    writeln!(self.out, "  {wide} = zext i1 {set} to i64").unwrap();
+                    wide
+                } else if ty == "i64" {
+                    raw
+                } else {
+                    let wide = self.fresh();
+                    let extend = if signed { "sext" } else { "zext" };
+                    writeln!(self.out, "  {wide} = {extend} {ty} {raw} to i64").unwrap();
+                    wide
+                }
+            }
+            "gos_rt_ffi_load_float" => {
+                let raw = self.fresh();
+                writeln!(self.out, "  {raw} = load {ty}, ptr {ptr}, align 1").unwrap();
+                if ty == "double" {
+                    raw
+                } else {
+                    let wide = self.fresh();
+                    writeln!(self.out, "  {wide} = fpext float {raw} to double").unwrap();
+                    wide
+                }
+            }
+            "gos_rt_ffi_store_int" => {
+                let Some(value) = args.get(2) else {
+                    return Ok(None);
+                };
+                let value = self.lower_operand(value)?;
+                let narrow = if ty == "i64" {
+                    value
+                } else {
+                    let narrow = self.fresh();
+                    writeln!(self.out, "  {narrow} = trunc i64 {value} to {ty}").unwrap();
+                    narrow
+                };
+                writeln!(self.out, "  store {ty} {narrow}, ptr {ptr}, align 1").unwrap();
+                "0".to_string()
+            }
+            "gos_rt_ffi_store_float" => {
+                let Some(value) = args.get(2) else {
+                    return Ok(None);
+                };
+                let value = self.lower_operand(value)?;
+                let narrow = if ty == "double" {
+                    value
+                } else {
+                    let narrow = self.fresh();
+                    writeln!(self.out, "  {narrow} = fptrunc double {value} to float").unwrap();
+                    narrow
+                };
+                writeln!(self.out, "  store {ty} {narrow}, ptr {ptr}, align 1").unwrap();
+                "0".to_string()
+            }
+            _ => return Ok(None),
+        }))
+    }
+
     pub(crate) fn lower_call_intrinsic(
         &mut self,
         name: &str,
@@ -996,6 +1255,39 @@ impl<'a> Lowerer<'a> {
                     _ => "0",
                 }
                 .to_string());
+            }
+            // A C field read or written at a constant offset, as `ffi::read`,
+            // `ffi::write`, and struct arguments lower: an inline load or
+            // store instead of a runtime call per field.
+            RawIntrinsic::Runtime
+                if matches!(
+                    name,
+                    "gos_rt_ffi_get"
+                        | "gos_rt_ffi_put"
+                        | "gos_rt_ffi_get_f32"
+                        | "gos_rt_ffi_get_f64"
+                        | "gos_rt_ffi_put_f32"
+                        | "gos_rt_ffi_put_f64"
+                ) =>
+            {
+                if let Some(inlined) = self.try_inline_ffi_field(name, args)? {
+                    return Ok(inlined);
+                }
+                return self.lower_runtime_call_intrinsic(name, args, dest_local);
+            }
+            RawIntrinsic::Runtime
+                if matches!(
+                    name,
+                    "gos_rt_ffi_load_int"
+                        | "gos_rt_ffi_load_float"
+                        | "gos_rt_ffi_store_int"
+                        | "gos_rt_ffi_store_float"
+                ) =>
+            {
+                if let Some(inlined) = self.try_inline_ffi_scalar(name, args)? {
+                    return Ok(inlined);
+                }
+                return self.lower_runtime_call_intrinsic(name, args, dest_local);
             }
             RawIntrinsic::Foreign => return self.lower_foreign_call(name, args, dest_local),
             RawIntrinsic::ForeignCallback => return self.lower_foreign_callback(name, dest_local),

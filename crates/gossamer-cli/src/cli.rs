@@ -362,6 +362,20 @@ enum Command {
         /// Project id the key signs for (e.g. `example.com/widget`).
         id: String,
     },
+    /// Serve a directory's files over HTTP, as `python -m http.server`
+    /// does. A directory without an `index.html` is listed.
+    Serve {
+        /// Directory to serve.
+        #[arg(default_value = ".", value_hint = ValueHint::DirPath)]
+        dir: PathBuf,
+        /// Port to listen on; 0 picks a free one.
+        #[arg(long, default_value_t = 8000)]
+        port: u16,
+        /// Address to listen on. The default answers this machine only;
+        /// `0.0.0.0` answers every network it is on.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+    },
     /// Run a package registry.
     Registry {
         /// What to do with the registry.
@@ -1302,6 +1316,7 @@ fn dispatch(
         Some(Command::Registry {
             action: RegistryAction::Serve { root, addr },
         }) => cmd::pkg::registry_serve(&root, &addr),
+        Some(Command::Serve { dir, port, bind }) => cmd::serve::serve(&dir, port, &bind),
         Some(Command::Fmt { file, check }) => cmd::fmt_cmd::dispatch(file, check),
         Some(Command::Bindgen {
             input,

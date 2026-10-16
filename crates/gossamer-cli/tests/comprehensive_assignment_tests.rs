@@ -31,8 +31,8 @@ fn diagnostics(source: &str) -> Vec<String> {
             })
             .collect();
     }
-    let (resolutions, resolve_diagnostics) = resolve_source_file(&parsed);
-    let _ = gossamer_types::normalize_caller_side_spellings(&mut parsed, &resolutions);
+    let (mut resolutions, resolve_diagnostics) = resolve_source_file(&parsed);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut parsed, &mut resolutions);
     if !resolve_diagnostics.is_empty() {
         return resolve_diagnostics
             .into_iter()

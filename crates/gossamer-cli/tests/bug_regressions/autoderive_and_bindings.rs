@@ -1038,3 +1038,150 @@ fn main() {
     assert_eq!(native.2, Some(0), "native stderr: {}", native.1);
     assert_eq!(native.0, expected, "native output drift");
 }
+
+#[test]
+fn derive_default_fills_containers_whatever_they_hold() {
+    let src = r#"
+use std::ffi
+use std::ffi::Ptr
+
+struct Native {
+    handle: Ptr<u8>
+}
+
+#[derive(Debug, Default)]
+struct Options {
+    title: String
+    parent: Option<Native>
+    children: Vec<Native>
+    named: Map<String, Native>
+}
+
+fn main() {
+    let o = Options::default()
+    println(f"{o.title.len()} {o.parent.is_none()} {o.children.len()} {o.named.len()}")
+}
+"#;
+    let dir = fresh_dir("derive_default_containers");
+    let path = write_source(&dir, "containers", src);
+    let run = run_vm(&path);
+    assert_eq!(run.2, Some(0), "vm stderr: {}", run.1);
+    assert_eq!(run.0.trim_end(), "0 true 0 0");
+    let scratch = dir.join("bin");
+    fs::create_dir_all(&scratch).unwrap();
+    let bin = build_native_release(&path, &scratch).expect("build release");
+    let out = run_native(&bin);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(out.2, Some(0), "release stderr: {}", out.1);
+    assert_eq!(out.0.trim_end(), "0 true 0 0");
+}
+
+#[test]
+fn a_struct_holding_a_foreign_pointer_renders_on_every_tier() {
+    let src = r#"
+use std::ffi
+use std::ffi::Ptr
+
+struct Native {
+    handle: Ptr<u8>
+    raw: ffi::Ptr<u8>
+}
+
+#[derive(Debug)]
+struct Holder {
+    parent: Option<Native>
+}
+
+fn main() {
+    let p: Ptr<u8> = unsafe { Ptr::from_address(4096) }.unwrap()
+    let n = Native { handle: p, raw: p }
+    println(f"{n}")
+    println(f"{Holder { parent: Some(n) }:?}")
+}
+"#;
+    let expected = "Native { handle: Ptr(0x1000), raw: Ptr(0x1000) }\n\
+                    Holder { parent: Some(Native { handle: Ptr(0x1000), raw: Ptr(0x1000) }) }";
+    let dir = fresh_dir("foreign_pointer_render");
+    let path = write_source(&dir, "render", src);
+    let run = run_vm(&path);
+    assert_eq!(run.2, Some(0), "vm stderr: {}", run.1);
+    assert_eq!(run.0.trim_end(), expected);
+    let scratch = dir.join("bin");
+    fs::create_dir_all(&scratch).unwrap();
+    let bin = build_native_release(&path, &scratch).expect("build release");
+    let out = run_native(&bin);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(out.2, Some(0), "release stderr: {}", out.1);
+    assert_eq!(out.0.trim_end(), expected);
+}
+
+#[test]
+fn a_display_of_its_own_renders_a_type_that_holds_a_closure() {
+    let src = r#"
+struct Hook {
+    f: Fn(i64) -> i64
+}
+
+impl Display for Hook {
+    fn fmt(&self) -> String { "hook" }
+}
+
+fn main() {
+    let h = Hook { f: |x| x + 1 }
+    println(f"{h} {(h.f)(1)}")
+}
+"#;
+    let dir = fresh_dir("display_over_closure");
+    let path = write_source(&dir, "hook", src);
+    let run = run_vm(&path);
+    assert_eq!(run.2, Some(0), "vm stderr: {}", run.1);
+    assert_eq!(run.0.trim_end(), "hook 2");
+    let scratch = dir.join("bin");
+    fs::create_dir_all(&scratch).unwrap();
+    let bin = build_native_release(&path, &scratch).expect("build release");
+    let out = run_native(&bin);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(out.2, Some(0), "release stderr: {}", out.1);
+    assert_eq!(out.0.trim_end(), "hook 2");
+}
+
+#[test]
+fn a_cfg_on_a_method_picks_the_one_for_the_target() {
+    let src = r#"
+struct Mods {
+    ctrl: bool
+    gui: bool
+}
+
+impl Mods {
+    #[cfg(target_os = "macos")]
+    fn shortcut(&self) -> bool { self.gui }
+
+    #[cfg(not(target_os = "macos"))]
+    fn shortcut(&self) -> bool { self.ctrl }
+
+    #[cfg(windows)]
+    const NAME: String = "windows"
+    #[cfg(not(windows))]
+    const NAME: String = "other"
+}
+
+fn main() {
+    let m = Mods { ctrl: true, gui: false }
+    println(f"{m.shortcut()}")
+}
+"#;
+    let expected = if cfg!(target_os = "macos") { "false" } else { "true" };
+    let dir = fresh_dir("cfg_on_methods");
+    let path = write_source(&dir, "mods", src);
+    let run = run_vm(&path);
+    assert_eq!(run.2, Some(0), "vm stderr: {}", run.1);
+    assert_eq!(run.0.trim_end(), expected);
+    let scratch = dir.join("bin");
+    fs::create_dir_all(&scratch).unwrap();
+    let bin = build_native_release(&path, &scratch).expect("build release");
+    let out = run_native(&bin);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(out.2, Some(0), "release stderr: {}", out.1);
+    assert_eq!(out.0.trim_end(), expected);
+}

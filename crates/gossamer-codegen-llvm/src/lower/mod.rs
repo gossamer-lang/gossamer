@@ -213,6 +213,14 @@ pub(crate) struct Lowerer<'a> {
     /// caller names, keyed by body name. Both sides of every call read this,
     /// so the parameter list and the argument list cannot disagree.
     pub(crate) sret_bodies: std::collections::BTreeSet<String>,
+    /// Bodies reached only by direct calls this module emits; see
+    /// `collect_direct_bodies`. Their by-pointer parameters are `noalias`.
+    pub(crate) direct_bodies: std::collections::BTreeSet<String>,
+    /// Locals whose address the body takes, found on first use. Such a local
+    /// cannot be a callee's answer slot: the callee may reach it another way.
+    pub(crate) address_taken: std::cell::OnceCell<std::collections::HashSet<u32>>,
+    /// Parameters read in the caller's storage; see `Lowerer::param_read_in_place`.
+    pub(crate) params_in_place: std::cell::OnceCell<Vec<bool>>,
 }
 
 /// Byte width of a return value an aggregate-returning body writes into
@@ -228,7 +236,7 @@ pub(crate) fn sret_return_bytes(tcx: &TyCtxt, ty: Ty) -> Option<u64> {
     if crate::ty::is_unit(tcx, ty) || !crate::ty::is_aggregate(tcx, ty) {
         return None;
     }
-    crate::ty::slot_count(tcx, ty).map(|slots| u64::from(slots.max(1)) * 8)
+    crate::ty::aggregate_storage_bytes(tcx, ty)
 }
 
 /// Module-scoped string intern pool.

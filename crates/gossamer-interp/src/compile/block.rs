@@ -115,8 +115,8 @@ mod elide_unit_load_tests {
         assert!(parse_diags.is_empty(), "parse: {parse_diags:?}");
         let entry_diags = synthesize_entry_main(&mut sf);
         assert!(entry_diags.is_empty(), "entry main: {entry_diags:?}");
-        let (resolutions, _) = resolve_source_file(&sf);
-        let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &resolutions);
+        let (mut resolutions, _) = resolve_source_file(&sf);
+        let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
         let mut tcx = TyCtxt::new();
         let (table, _) = typecheck_source_file(&sf, &resolutions, &mut tcx);
         let program = lower_source_file(&sf, &resolutions, &table, &mut tcx);
@@ -352,6 +352,58 @@ println("{}", n)
                 .iter()
                 .any(|op| matches!(op, Op::ClearRegs { count: 1, .. })),
             "expected top-level statement last-use clear; chunk: {:?}",
+            chunk.instrs
+        );
+    }
+
+    #[test]
+    fn a_mut_field_argument_moves_out_of_its_local_for_the_call() {
+        let source = r"
+struct Canvas { pixels: Vec<u8>, width: i64 }
+fn clear(fb: &mut [u8], v: u8) {
+    fb[0] = v
+}
+fn f() -> u8 {
+    let mut canvas = Canvas { pixels: #[1u8; 8], width: 1 }
+    clear(&mut canvas.pixels, 3)
+    canvas.pixels[0]
+}
+";
+        let (chunk, _) = compile_named(source, "f");
+        let moved = chunk
+            .instrs
+            .windows(2)
+            .any(|pair| matches!(pair, [Op::FieldSet { .. }, Op::CellNewMove { .. }]));
+        assert!(
+            moved,
+            "the field should leave its struct and move into the cell; chunk: {:?}",
+            chunk.instrs
+        );
+    }
+
+    #[test]
+    fn a_byte_repeat_in_a_struct_field_builds_packed_bytes() {
+        let source = r"
+struct Canvas { pixels: Vec<u8>, width: i64 }
+fn f(n: i64) -> Canvas {
+    Canvas { pixels: #[0u8; n * 4], width: n }
+}
+";
+        let (chunk, _) = compile_named(source, "f");
+        assert!(
+            chunk
+                .instrs
+                .iter()
+                .any(|op| matches!(op, Op::BuildByteArrayRepeat { .. })),
+            "a `u8` repeat in a field should build packed bytes; chunk: {:?}",
+            chunk.instrs
+        );
+        assert!(
+            !chunk
+                .instrs
+                .iter()
+                .any(|op| matches!(op, Op::BuildArrayRepeat { .. })),
+            "a `u8` repeat in a field should not build boxed values; chunk: {:?}",
             chunk.instrs
         );
     }

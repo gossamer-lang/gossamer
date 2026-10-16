@@ -983,6 +983,8 @@ impl Vm {
                                 // frame must suspend that frame rather than grow the Rust
                                 // stack through `invoke_closure -> apply`.
                                 let bytecode_target = if let Some(name) = callee_name {
+                                    // A hit answers whether the callee is bytecode, so a
+                                    // builtin callee is resolved once per site, not per call.
                                     let cached = {
                                         let cache = state.call_caches.borrow();
                                         let slot = &cache[cache_idx as usize];
@@ -990,9 +992,8 @@ impl Vm {
                                             && slot.callee_name.as_deref() == Some(name)
                                             && slot.generation == live_generation)
                                             .then(|| slot.fn_chunk.as_ref().map(Arc::clone))
-                                            .flatten()
                                     };
-                                    let resolved = cached.or_else(|| {
+                                    let resolved = cached.unwrap_or_else(|| {
                                         let global = self.lookup_global(name);
                                         if let Some(ref global) = global {
                                             let mut cache = state.call_caches.borrow_mut();
@@ -1094,35 +1095,42 @@ impl Vm {
                                 // `Arc<BuiltinInner>` allocation just to thread it
                                 // through `apply`.
                                 type BuiltinFn = fn(&[Value]) -> RuntimeResult<Value>;
-                                let (cached_builtin, cached): (Option<BuiltinFn>, Option<Global>) =
-                                    if token != 0 {
-                                        // Read-only borrow on the IC hit path; the
-                                        // fill (miss) path below takes borrow_mut.
-                                        // Splitting avoids serialising every cached
-                                        // hit against any concurrent borrow on the
-                                        // same RefCell.
-                                        let cache = state.call_caches.borrow();
-                                        let slot = &cache[cache_idx as usize];
-                                        if slot.type_token == token
-                                            && slot.callee_name.as_deref() == callee_name
-                                            && slot.generation == live_generation
-                                        {
-                                            if let Some(call_fn) = slot.builtin_fn {
-                                                (Some(call_fn), None)
-                                            } else {
-                                                (
-                                                    None,
-                                                    slot.fn_chunk
-                                                        .as_ref()
-                                                        .map(|c| Global::Fn(Arc::clone(c))),
-                                                )
-                                            }
+                                type NativeFn = (crate::value::NativeCall, &'static str);
+                                let (cached_builtin, cached_native, cached): (
+                                    Option<BuiltinFn>,
+                                    Option<NativeFn>,
+                                    Option<Global>,
+                                ) = if token != 0 {
+                                    // Read-only borrow on the IC hit path; the
+                                    // fill (miss) path below takes borrow_mut.
+                                    // Splitting avoids serialising every cached
+                                    // hit against any concurrent borrow on the
+                                    // same RefCell.
+                                    let cache = state.call_caches.borrow();
+                                    let slot = &cache[cache_idx as usize];
+                                    if slot.type_token == token
+                                        && slot.callee_name.as_deref() == callee_name
+                                        && slot.generation == live_generation
+                                    {
+                                        if let Some(call_fn) = slot.builtin_fn {
+                                            (Some(call_fn), None, None)
+                                        } else if let Some(native) = slot.native_fn {
+                                            (None, Some(native), None)
                                         } else {
-                                            (None, None)
+                                            (
+                                                None,
+                                                None,
+                                                slot.fn_chunk
+                                                    .as_ref()
+                                                    .map(|c| Global::Fn(Arc::clone(c))),
+                                            )
                                         }
                                     } else {
-                                        (None, None)
-                                    };
+                                        (None, None, None)
+                                    }
+                                } else {
+                                    (None, None, None)
+                                };
                                 let result = if let Some(call_fn) = cached_builtin {
                                     // Hottest hit: direct fn-ptr call. Unwrap any `&mut`
                                     // write-back cells (free builtins take aggregates by
@@ -1133,6 +1141,15 @@ impl Vm {
                                         arg_values,
                                     );
                                     let r = call_fn(&call_args)?;
+                                    self.pool.borrow_mut().give_args(call_args);
+                                    r
+                                } else if let Some((call_fn, name)) = cached_native {
+                                    let call_args = crate::value::unwrap_mut_cells_unless_writer(
+                                        name, arg_values,
+                                    );
+                                    let mut dispatch =
+                                        super::native_dispatch::VmDispatch::new(self);
+                                    let r = call_fn(&mut dispatch, &call_args)?;
                                     self.pool.borrow_mut().give_args(call_args);
                                     r
                                 } else if let Some(g) = cached {
@@ -5016,10 +5033,12 @@ impl Vm {
                         crate::bytecode::UnwindKind::Note => true,
                     }
             });
-            if handled.is_some() {
-                // A `&mut` argument's write-back cell holds what the faulting
-                // callee wrote through it; the deferred expressions read it back
-                // in its home register, as a normal return would have.
+            if handled.is_some_and(|entry| entry.kind == crate::bytecode::UnwindKind::Note) {
+                // A call inside a landing pad has no pad of its own: its
+                // `&mut` arguments' cells hold what the faulting callee wrote,
+                // and the deferred expressions after it read them back in
+                // their home registers, as a normal return would have. A call
+                // anywhere else publishes them from its own landing pad.
                 let mut next = pc as usize;
                 while let Some(Op::CellTake { dst, cell }) = instrs.get(next).copied() {
                     let taken = match &registers[cell as usize] {

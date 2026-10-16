@@ -605,10 +605,23 @@ pub(crate) fn insert_vec_elem_metas(
             gossamer_ast::USER_COMPARATOR_PREFIX,
             name.replace("::", "__")
         );
-        if !comparators.contains(&symbol) {
+        // A user enum's derived order is its `cmp`: the bytes a key encodes
+        // to do not order its fields as the variant declares them.
+        let structural = format!(
+            "{}{}",
+            gossamer_ast::STRUCTURAL_COMPARATOR_PREFIX,
+            name.replace("::", "__")
+        );
+        let is_enum = matches!(tcx.kind_of(key), TyKind::Adt { def, .. }
+            if tcx.enum_variant_tys(*def).is_some_and(|vs| vs.iter().any(|v| !v.is_empty())));
+        let symbol = if comparators.contains(&symbol) {
+            symbol
+        } else if is_enum && comparators.contains(&structural) {
+            structural
+        } else {
             return None;
-        }
-        let by_address = tcx.is_flat_inline_aggregate(key);
+        };
+        let by_address = tcx.is_flat_inline_aggregate(key) || tcx.is_flat_enum_ty(key);
         Some((symbol, by_address))
     };
 

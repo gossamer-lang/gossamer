@@ -159,15 +159,17 @@ fn aggregate_walk_rc_calls_are_pinned() {
                 "point",
                 RcCounts {
                     retain: 0,
-                    release: 1,
+                    release: 0,
                     clone: 0,
                 },
             ),
+            // A temporary moved whole into a local is built in that local,
+            // so only the local's releases remain.
             (
                 "shape",
                 RcCounts {
                     retain: 0,
-                    release: 8,
+                    release: 2,
                     clone: 0,
                 },
             ),
@@ -200,7 +202,7 @@ fn string_builder_rc_calls_are_pinned() {
                 "render",
                 RcCounts {
                     retain: 0,
-                    release: 2,
+                    release: 1,
                     clone: 0,
                 },
             ),
@@ -208,7 +210,7 @@ fn string_builder_rc_calls_are_pinned() {
                 "page",
                 RcCounts {
                     retain: 0,
-                    release: 4,
+                    release: 3,
                     clone: 0,
                 },
             ),
@@ -216,7 +218,7 @@ fn string_builder_rc_calls_are_pinned() {
                 "main",
                 RcCounts {
                     retain: 0,
-                    release: 7,
+                    release: 6,
                     clone: 0,
                 },
             ),
@@ -351,5 +353,60 @@ fn a_let_neither_side_can_write_shares_its_value() {
     assert_eq!(
         counts["alias"].clone, 2,
         "alias copies only for its `mut` binding and its `mut` parameter"
+    );
+}
+
+#[test]
+fn unwrapped_payload_rc_calls_are_pinned() {
+    expect(
+        "benchmarks/uniqueness/unwrapped_payload.gos",
+        &[
+            (
+                "unwrap_option",
+                RcCounts {
+                    retain: 0,
+                    release: 0,
+                    clone: 0,
+                },
+            ),
+            // `Result<Shape, errors::Error>` is held as a tuple whose error
+            // field is its one counted value: the `Ok` exit releases that
+            // empty field and the `Err` exit moves the error into the result.
+            // The temporaries moved into `checked` and the result are built
+            // in place and release nothing of their own.
+            (
+                "unwrap_result",
+                RcCounts {
+                    retain: 0,
+                    release: 1,
+                    clone: 0,
+                },
+            ),
+        ],
+    );
+}
+
+#[test]
+fn unit_variants_rc_calls_are_pinned() {
+    expect(
+        "benchmarks/uniqueness/unit_variants.gos",
+        &[
+            (
+                "from_code",
+                RcCounts {
+                    retain: 0,
+                    release: 0,
+                    clone: 0,
+                },
+            ),
+            (
+                "primaries",
+                RcCounts {
+                    retain: 0,
+                    release: 0,
+                    clone: 0,
+                },
+            ),
+        ],
     );
 }

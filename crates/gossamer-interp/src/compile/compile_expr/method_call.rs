@@ -572,28 +572,10 @@ impl<'tcx> FnBuilder<'tcx> {
                 cell_takes.push((home, cell));
                 arg_regs.push(cell);
             } else if let Some(place) = Self::mut_ref_writeback_place(self.tcx, arg, None) {
-                let place_reg = self.compile_expr(place)?;
-                let cell = self.alloc_reg();
-                let local_home = Self::path_single_seg_name(place).and_then(|name| {
-                    self.lookup_local(name)
-                        .filter(|tr| tr.kind == RegKind::Value)
-                        .map(|_| name)
-                });
-                if local_home.is_some_and(|name| Self::mut_arg_move_safe(args, i, name)) {
-                    self.emit(Op::CellNewMove {
-                        dst: cell,
-                        src: place_reg,
-                    });
-                } else {
-                    self.emit(Op::CellNew {
-                        dst: cell,
-                        src: place_reg,
-                    });
-                }
-                if local_home.is_some() {
-                    cell_takes.push((place_reg, cell));
-                } else {
-                    place_takes.push((place, cell));
+                let (cell, local_home) = self.place_write_back_cell(place, args, i)?;
+                match local_home {
+                    Some(home) => cell_takes.push((home, cell)),
+                    None => place_takes.push((place, cell)),
                 }
                 arg_regs.push(cell);
             } else {
@@ -619,10 +601,7 @@ impl<'tcx> FnBuilder<'tcx> {
             // Move-on-last-use, as for a free call's argument: a consumable
             // local read straight from its home register is handed over, so
             // what the method keeps is not also held by a dead register.
-            let consume = self
-                .consumable_path(&args[i])
-                .and_then(|name| self.lookup_local(name))
-                .is_some_and(|tr| tr.kind == RegKind::Value && tr.reg == *r);
+            let consume = self.arg_reg_consumable(&args[i], *r);
             if consume {
                 self.emit(Op::MoveConsume { dst: slot, src: *r });
             } else {
@@ -800,7 +779,7 @@ impl<'tcx> FnBuilder<'tcx> {
         let name_idx = self.global_idx(dispatch_name);
         let dst = self.alloc_reg();
         let cache_idx = self.alloc_cache_idx();
-        self.emit(Op::MethodCall {
+        let call = self.emit(Op::MethodCall {
             dst,
             receiver: receiver_reg,
             name_idx,
@@ -808,14 +787,7 @@ impl<'tcx> FnBuilder<'tcx> {
             argc,
             cache_idx,
         });
-        for (home, cell) in cell_takes {
-            self.emit(Op::CellTake { dst: home, cell });
-        }
-        for (place, cell) in place_takes {
-            let tmp = self.alloc_reg();
-            self.emit(Op::CellTake { dst: tmp, cell });
-            self.compile_place_store(place, tmp)?;
-        }
+        self.emit_write_backs(call, &cell_takes, &place_takes, &[])?;
         // Mutating-method writeback. The builtins for `push` /
         // `insert` / etc. return the *new* aggregate rather than
         // mutating in place, so the VM has to thread the result back

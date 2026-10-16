@@ -438,40 +438,15 @@ impl<'tcx> FnBuilder<'tcx> {
             } else if !reads_only
                 && let Some(place) = Self::mut_ref_writeback_place(self.tcx, arg, expected_ty)
             {
-                let place_reg = self.compile_expr(place)?;
-                let cell = self.alloc_reg();
-                // A bare-local place (`&mut s` for a `String` / scalar /
-                // struct local) is the local's own home register: it can be
-                // moved into the cell (no-sibling-reads) and written back
-                // with a direct `CellTake` into that register. A field /
-                // index place keeps the clone (its value was copied out of
-                // an aggregate that still holds a share) and re-stores
-                // through the place expression.
-                let local_home = Self::path_single_seg_name(place).and_then(|name| {
-                    self.lookup_local(name)
-                        .filter(|tr| tr.kind == RegKind::Value)
-                        .map(|_| name)
-                });
-                if local_home.is_some_and(|name| Self::mut_arg_move_safe(args, i, name)) {
-                    self.emit(Op::CellNewMove {
-                        dst: cell,
-                        src: place_reg,
-                    });
-                } else {
-                    self.emit(Op::CellNew {
-                        dst: cell,
-                        src: place_reg,
-                    });
-                }
-                if local_home.is_some() {
-                    // `place_reg` is the local's home register; publish the
-                    // post-call value straight back into it. The temp +
-                    // place-store form would leave a lingering clone in the
-                    // temp register, forcing copy-on-write on every later
-                    // mutation through a repeatedly-called `&mut <local>`.
-                    cell_takes.push((place_reg, cell));
-                } else {
-                    place_takes.push((place, cell));
+                let (cell, local_home) = self.place_write_back_cell(place, args, i)?;
+                match local_home {
+                    // The local's home register takes the post-call value
+                    // directly. The temp + place-store form would leave a
+                    // lingering clone in the temp register, forcing
+                    // copy-on-write on every later mutation through a
+                    // repeatedly-called `&mut <local>`.
+                    Some(home) => cell_takes.push((home, cell)),
+                    None => place_takes.push((place, cell)),
                 }
                 arg_regs.push(cell);
             } else if render_call
@@ -511,13 +486,11 @@ impl<'tcx> FnBuilder<'tcx> {
                 .checked_add(u16::try_from(i).unwrap())
                 .expect("register overflow");
             // Move-on-last-use: when the argument is a consumable local
-            // whose home register we are reading directly, hand the value
-            // over instead of cloning so the callee receives unique
-            // ownership and the caller's input frees as it is consumed.
-            let consume = self
-                .consumable_path(&args[i])
-                .and_then(|name| self.lookup_local(name))
-                .is_some_and(|tr| tr.kind == RegKind::Value && tr.reg == *arg_reg);
+            // whose home register we are reading directly, or a fresh
+            // result nothing else reads, hand the value over instead of
+            // cloning so the callee receives unique ownership and the
+            // caller's input frees as it is consumed.
+            let consume = self.arg_reg_consumable(&args[i], *arg_reg);
             if consume {
                 self.emit(Op::MoveConsume {
                     dst: slot,
@@ -572,7 +545,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 Some(TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char)
             )
         });
-        if let Some(global_idx) = direct_global_idx {
+        let call = if let Some(global_idx) = direct_global_idx {
             self.emit(Op::CallGlobal {
                 dst,
                 global_idx,
@@ -580,7 +553,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 argc,
                 cache_idx,
                 may_have_cells,
-            });
+            })
         } else {
             self.emit(Op::Call {
                 dst,
@@ -589,20 +562,162 @@ impl<'tcx> FnBuilder<'tcx> {
                 argc,
                 cache_idx,
                 may_have_cells,
+            })
+        };
+        self.emit_write_backs(call, &cell_takes, &place_takes, &window_takes)?;
+        Ok(dst)
+    }
+
+    /// Whether the call may move `arg`'s compiled register `reg` into its
+    /// argument slot: the home of a local read for the last time here, or the
+    /// fresh result of an expression no binding owns.
+    pub(super) fn arg_reg_consumable(&self, arg: &HirExpr, reg: Reg) -> bool {
+        match self.consumable_path(arg) {
+            Some(name) => self
+                .lookup_local(name)
+                .is_some_and(|tr| tr.kind == RegKind::Value && tr.reg == reg),
+            None => {
+                !matches!(arg.kind, HirExprKind::Path { .. })
+                    && self.value_consumable_here(arg)
+                    && !self.reg_is_bound_local(reg)
+                    && !self.capture_cells.iter().any(|&(home, _)| home == reg)
+            }
+        }
+    }
+
+    /// Wraps the place a `&mut` argument names in a write-back cell, and
+    /// answers the cell with, for a bare local, the home register its
+    /// write-back stores into. A bare local, or a field of one, that no
+    /// other argument reads moves into the cell, so the callee's first write
+    /// mutates in place; any other place passes a copy of what it holds.
+    pub(super) fn place_write_back_cell(
+        &mut self,
+        place: &HirExpr,
+        args: &[HirExpr],
+        i: usize,
+    ) -> RuntimeResult<(Reg, Option<Reg>)> {
+        let place_reg = self.compile_expr(place)?;
+        let cell = self.alloc_reg();
+        let local_home = Self::path_single_seg_name(place).and_then(|name| {
+            self.lookup_local(name)
+                .filter(|tr| tr.kind == RegKind::Value)
+                .map(|_| name)
+        });
+        if local_home.is_some_and(|name| Self::mut_arg_move_safe(args, i, name)) {
+            self.emit(Op::CellNewMove {
+                dst: cell,
+                src: place_reg,
+            });
+        } else if let Some((home, name_idx)) = self.movable_local_field(place, args, i) {
+            // The aggregate gives up its share of the field for the call;
+            // the write-back stores the callee's value over the placeholder.
+            let unit = self.load_unit();
+            self.emit(Op::FieldSet {
+                receiver: home,
+                name_idx,
+                value: unit,
+            });
+            self.emit(Op::CellNewMove {
+                dst: cell,
+                src: place_reg,
+            });
+        } else {
+            self.emit(Op::CellNew {
+                dst: cell,
+                src: place_reg,
             });
         }
-        for (home, cell) in cell_takes {
+        Ok((cell, local_home.map(|_| place_reg)))
+    }
+
+    /// The home register and field-name constant of a `local.field` place
+    /// whose local lives in a register of its own, no closure captures, and
+    /// no other argument reads.
+    fn movable_local_field(
+        &mut self,
+        place: &HirExpr,
+        args: &[HirExpr],
+        i: usize,
+    ) -> Option<(Reg, ConstIdx)> {
+        let HirExprKind::Field { receiver, name } = &place.kind else {
+            return None;
+        };
+        let base = Self::path_single_seg_name(receiver)?;
+        let home = self
+            .lookup_local(base)
+            .filter(|tr| tr.kind == RegKind::Value)?
+            .reg;
+        if self
+            .capture_cells
+            .iter()
+            .any(|&(captured, _)| captured == home)
+            || !Self::mut_arg_move_safe(args, i, base)
+        {
+            return None;
+        }
+        let name_idx = self.const_idx(
+            ConstKey::String(name.name.clone()),
+            Value::String(SmolStr::from(name.name.clone())),
+        );
+        Some((home, name_idx))
+    }
+
+    /// Publishes what the call at `call` wrote through its `&mut` arguments:
+    /// after it returns, and from a landing pad covering the call when the
+    /// callee faults, so the frame's deferred expressions and its own `&mut`
+    /// parameters see those writes as they see a native reference's.
+    pub(super) fn emit_write_backs(
+        &mut self,
+        call: InstrIdx,
+        cell_takes: &[(Reg, Reg)],
+        place_takes: &[(&HirExpr, Reg)],
+        window_takes: &[WindowTake],
+    ) -> RuntimeResult<()> {
+        self.emit_write_back_stores(cell_takes, place_takes, window_takes)?;
+        let none = cell_takes.is_empty() && place_takes.is_empty() && window_takes.is_empty();
+        // A fault inside a landing pad is a note on the held one, and the pad
+        // goes on with its next deferred expression.
+        if none || self.in_unwind_pad > 0 {
+            return Ok(());
+        }
+        let skip = self.emit(Op::Jump { target: 0 });
+        let landing = self.cur_idx();
+        let mark = self.register_mark();
+        self.in_unwind_pad += 1;
+        let compiled = self.emit_write_back_stores(cell_takes, place_takes, window_takes);
+        self.emit(Op::ResumeUnwind);
+        self.in_unwind_pad -= 1;
+        self.restore_register_mark(mark);
+        compiled?;
+        let after = self.cur_idx();
+        self.patch_jump(skip, after);
+        self.unwind_table.push(crate::bytecode::UnwindEntry {
+            start: call,
+            end: call + 1,
+            landing,
+            kind: crate::bytecode::UnwindKind::Cleanup,
+        });
+        Ok(())
+    }
+
+    fn emit_write_back_stores(
+        &mut self,
+        cell_takes: &[(Reg, Reg)],
+        place_takes: &[(&HirExpr, Reg)],
+        window_takes: &[WindowTake],
+    ) -> RuntimeResult<()> {
+        for &(home, cell) in cell_takes {
             self.emit(Op::CellTake { dst: home, cell });
         }
-        for (place, cell) in place_takes {
+        for &(place, cell) in place_takes {
             let tmp = self.alloc_reg();
             self.emit(Op::CellTake { dst: tmp, cell });
             self.compile_place_store(place, tmp)?;
         }
         for take in window_takes {
-            self.finish_window_take(take)?;
+            self.finish_window_take(take.clone())?;
         }
-        Ok(dst)
+        Ok(())
     }
 
     /// Passes a mutable window `&mut base[lo..hi]` as a write-back cell
@@ -1357,6 +1472,7 @@ impl<'tcx> FnBuilder<'tcx> {
 
 /// A mutable window argument in flight: the cell the callee writes, and the
 /// hoisted base and range its write-back splices into.
+#[derive(Clone)]
 pub(crate) struct WindowTake {
     base: HirExpr,
     range: HirExpr,

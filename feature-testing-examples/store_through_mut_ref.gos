@@ -1,0 +1,42 @@
+// `*r = value` through a `&mut` copies a struct whose fields own strings and
+// vectors: built in a match arm, bound first, passed in, or copied from the
+// old value itself. The referent and the source each keep what they hold.
+
+struct Rec { name: String, items: Vec<i64> }
+
+impl Rec {
+    fn step(&mut self, k: i64) {
+        match k % 3 {
+            0 => { *self = Rec { name: "zero", items: #[0] } }
+            1 => { *self = Rec { name: f"one{k}", items: #[1, k] } }
+            _ => {
+                let next = Rec { name: f"{self.name}+", items: #[k, k, k] }
+                *self = next
+            }
+        }
+    }
+
+    fn set(&mut self, other: Rec) {
+        *self = other
+    }
+
+    fn keep(&mut self) {
+        let same = *self
+        *self = same
+    }
+}
+
+fn main() {
+    let mut r = Rec { name: "start", items: #[] }
+    let mut total = 0
+    for k in 0..2000 {
+        r.step(k)
+        total += r.items.len() + r.name.len()
+    }
+    println(f"{r.name} {r.items} {total}")
+    let given = Rec { name: f"given{7}", items: #[7, 8] }
+    r.set(given)
+    println(f"{r.name} {r.items} {given.name} {given.items}")
+    r.keep()
+    println(f"{r.name} {r.items}")
+}

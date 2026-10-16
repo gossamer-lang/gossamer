@@ -11,7 +11,8 @@ mod elision_tests {
         elide_vec_clone_of_fresh_temporary,
         fuse_slice_parse_ranges, local_branch_bounds_check_elim, loop_body_has_exactly_one_vec_push,
         reserve_bound_available_at_entry, reserve_vecs_for_counted_push_loops,
-        scalar_replace_short_lived_aggregates, structural_children_are_guarded_blobs,
+        forward_moved_temporaries, scalar_replace_short_lived_aggregates,
+        structural_children_are_guarded_blobs,
     };
     use crate::ir::{
         BasicBlock, BinOp, BlockId, Body, ConstValue, Local, LocalDecl, Operand, Place, Projection,
@@ -226,6 +227,257 @@ mod elision_tests {
                 ..
             } if *place == Place::local(Local(2))
         ));
+    }
+
+    /// `fn pick(flag: bool) -> (i64, i64, i64)` whose arms each build a value
+    /// in a temporary `_2` and join at `_0 = _2`. With `chained`, the first
+    /// arm runs on into the second arm's block instead of the join, and the
+    /// join moves `_2` into the local `_3` the answer is then read from.
+    fn arms_joining_at_a_move(chained: bool) -> (Body, TyCtxt) {
+        use gossamer_types::IntTy;
+        let mut tcx = TyCtxt::new();
+        let i64t = tcx.int_ty(IntTy::I64);
+        let boolt = tcx.bool_ty();
+        let triple = tcx.intern(gossamer_types::TyKind::Tuple(vec![i64t, i64t, i64t]));
+        let build = |base: i128| {
+            assign(
+                Place::local(Local(2)),
+                Rvalue::Aggregate {
+                    kind: crate::AggregateKind::Tuple,
+                    operands: (base..base + 3)
+                        .map(|n| Operand::Const(ConstValue::Int(n)))
+                        .collect(),
+                },
+            )
+        };
+        let arm = |id: u32, base: i128, next: u32| BasicBlock {
+            id: BlockId(id),
+            stmts: vec![build(base)],
+            terminator: Terminator::Goto {
+                target: BlockId(next),
+            },
+            ..block_at(span())
+        };
+        let body = Body {
+            name: "pick".into(),
+            def: None,
+            arity: 1,
+            locals: vec![decl(triple), decl(boolt), decl(triple), decl(triple)],
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    stmts: Vec::new(),
+                    terminator: Terminator::SwitchInt {
+                        discriminant: Operand::Copy(Place::local(Local(1))),
+                        arms: vec![(0, BlockId(2))],
+                        default: BlockId(1),
+                    },
+                    ..block_at(span())
+                },
+                arm(1, 1, if chained { 2 } else { 3 }),
+                arm(2, 4, 3),
+                BasicBlock {
+                    id: BlockId(3),
+                    stmts: if chained {
+                        let first = Place {
+                            local: Local(3),
+                            projection: vec![Projection::Field(0)],
+                        };
+                        vec![
+                            copy(3, 2),
+                            assign(
+                                Place::local(Local(0)),
+                                Rvalue::Aggregate {
+                                    kind: crate::AggregateKind::Tuple,
+                                    operands: vec![
+                                        Operand::Copy(first),
+                                        Operand::Const(ConstValue::Int(0)),
+                                        Operand::Const(ConstValue::Int(0)),
+                                    ],
+                                },
+                            ),
+                        ]
+                    } else {
+                        vec![copy(0, 2)]
+                    },
+                    terminator: Terminator::Return,
+                    ..block_at(span())
+                },
+            ],
+            span: span(),
+        };
+        (body, tcx)
+    }
+
+    fn assigns_whole(stmt: &Statement, local: u32) -> bool {
+        matches!(&stmt.kind, StatementKind::Assign { place, .. }
+            if *place == Place::local(Local(local)))
+    }
+
+    #[test]
+    fn arms_that_each_build_the_answer_build_it_in_place() {
+        let (mut body, tcx) = arms_joining_at_a_move(false);
+
+        forward_moved_temporaries(&mut body, &tcx);
+
+        assert!(assigns_whole(&body.blocks[1].stmts[0], 0), "{:?}", body.blocks[1]);
+        assert!(assigns_whole(&body.blocks[2].stmts[0], 0), "{:?}", body.blocks[2]);
+        assert!(is_nop(&body.blocks[3].stmts[0]), "{:?}", body.blocks[3]);
+    }
+
+    #[test]
+    fn an_arm_that_runs_into_another_definition_keeps_its_temporary() {
+        let (mut body, tcx) = arms_joining_at_a_move(true);
+
+        forward_moved_temporaries(&mut body, &tcx);
+
+        assert!(assigns_whole(&body.blocks[1].stmts[0], 2), "{:?}", body.blocks[1]);
+        assert!(assigns_whole(&body.blocks[2].stmts[0], 2), "{:?}", body.blocks[2]);
+        assert!(!is_nop(&body.blocks[3].stmts[0]), "{:?}", body.blocks[3]);
+    }
+
+    /// `fn poll(more: bool) -> (i64, i64, i64)`: a loop that calls `take`
+    /// into `_2` each turn, answers `_2` when its tag is set, and answers a
+    /// value of its own once the loop ends.
+    fn loop_answering_its_last_take() -> (Body, TyCtxt) {
+        use gossamer_types::IntTy;
+        let mut tcx = TyCtxt::new();
+        let i64t = tcx.int_ty(IntTy::I64);
+        let boolt = tcx.bool_ty();
+        let triple = tcx.intern(gossamer_types::TyKind::Tuple(vec![i64t, i64t, i64t]));
+        let field0 = Place {
+            local: Local(2),
+            projection: vec![Projection::Field(0)],
+        };
+        let goto = |id: u32, stmts: Vec<Statement>, target: u32| BasicBlock {
+            id: BlockId(id),
+            stmts,
+            terminator: Terminator::Goto {
+                target: BlockId(target),
+            },
+            ..block_at(span())
+        };
+        let body = Body {
+            name: "poll".into(),
+            def: None,
+            arity: 1,
+            locals: vec![decl(triple), decl(boolt), decl(triple), decl(boolt)],
+            blocks: vec![
+                goto(0, Vec::new(), 1),
+                BasicBlock {
+                    id: BlockId(1),
+                    stmts: Vec::new(),
+                    terminator: Terminator::SwitchInt {
+                        discriminant: Operand::Copy(Place::local(Local(1))),
+                        arms: vec![(0, BlockId(3))],
+                        default: BlockId(2),
+                    },
+                    ..block_at(span())
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    stmts: Vec::new(),
+                    terminator: Terminator::Call {
+                        callee: Operand::Const(ConstValue::Str("take".into())),
+                        args: Vec::new(),
+                        destination: Place::local(Local(2)),
+                        target: Some(BlockId(4)),
+                    },
+                    ..block_at(span())
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    stmts: vec![assign(
+                        Place::local(Local(0)),
+                        Rvalue::Aggregate {
+                            kind: crate::AggregateKind::Tuple,
+                            operands: vec![Operand::Const(ConstValue::Int(1)); 3],
+                        },
+                    )],
+                    terminator: Terminator::Return,
+                    ..block_at(span())
+                },
+                BasicBlock {
+                    id: BlockId(4),
+                    stmts: vec![assign(
+                        Place::local(Local(3)),
+                        Rvalue::BinaryOp {
+                            op: BinOp::Eq,
+                            lhs: Operand::Copy(field0),
+                            rhs: Operand::Const(ConstValue::Int(0)),
+                        },
+                    )],
+                    terminator: Terminator::SwitchInt {
+                        discriminant: Operand::Copy(Place::local(Local(3))),
+                        arms: vec![(0, BlockId(5))],
+                        default: BlockId(1),
+                    },
+                    ..block_at(span())
+                },
+                BasicBlock {
+                    id: BlockId(5),
+                    stmts: vec![copy(0, 2)],
+                    terminator: Terminator::Return,
+                    ..block_at(span())
+                },
+            ],
+            span: span(),
+        };
+        (body, tcx)
+    }
+
+    #[test]
+    fn a_value_redefined_each_turn_and_answered_on_one_exit_lives_in_the_return_slot() {
+        let (mut body, tcx) = loop_answering_its_last_take();
+
+        forward_moved_temporaries(&mut body, &tcx);
+
+        assert!(
+            matches!(&body.blocks[2].terminator, Terminator::Call { destination, .. }
+                if *destination == Place::local(Local(0))),
+            "{:?}",
+            body.blocks[2].terminator
+        );
+        assert!(is_nop(&body.blocks[5].stmts[0]), "{:?}", body.blocks[5]);
+        assert!(
+            assigns_whole(&body.blocks[3].stmts[0], 0),
+            "the other exit still answers its own value: {:?}",
+            body.blocks[3]
+        );
+    }
+
+    #[test]
+    fn scalar_replacement_keeps_an_aggregate_built_in_the_return_slot() {
+        use gossamer_types::IntTy;
+        let mut tcx = TyCtxt::new();
+        let i64t = tcx.int_ty(IntTy::I64);
+        let pair = tcx.intern(gossamer_types::TyKind::Tuple(vec![i64t, i64t]));
+        let mut body = Body {
+            name: "scalar_replace_return".into(),
+            def: None,
+            arity: 1,
+            locals: vec![decl(pair), decl(i64t)],
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                stmts: vec![assign(
+                    Place::local(Local(0)),
+                    Rvalue::Aggregate {
+                        kind: crate::AggregateKind::Tuple,
+                        operands: vec![
+                            Operand::Copy(Place::local(Local(1))),
+                            Operand::Const(ConstValue::Int(7)),
+                        ],
+                    },
+                )],
+                terminator: Terminator::Return,
+                ..block_at(span())
+            }],
+            span: span(),
+        };
+
+        scalar_replace_short_lived_aggregates(&mut body);
+
+        assert!(!is_nop(&body.blocks[0].stmts[0]));
     }
 
     #[test]

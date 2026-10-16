@@ -137,6 +137,61 @@ impl TypeChecker<'_> {
         expanded
     }
 
+    /// The type a struct literal headed by the alias `def` builds. A generic
+    /// alias the literal names without arguments takes one inference
+    /// variable per parameter, which the field values pin.
+    pub(super) fn struct_literal_alias_type(
+        &mut self,
+        def: gossamer_resolve::DefId,
+        path: &gossamer_ast::PathExpr,
+        span: Span,
+    ) -> Option<Ty> {
+        let name = path
+            .segments
+            .last()
+            .map_or_else(String::new, |segment| segment.name.name.clone());
+        let (params, rhs) = self.alias_targets.get(&def).cloned()?;
+        let named_args = path
+            .segments
+            .last()
+            .is_some_and(|seg| !seg.generics.is_empty());
+        if params.is_empty() || named_args {
+            let segments = path
+                .segments
+                .iter()
+                .map(|segment| gossamer_ast::TypePathSegment {
+                    name: segment.name.clone(),
+                    generics: segment.generics.clone(),
+                    assoc_bindings: Vec::new(),
+                })
+                .collect();
+            return self.expand_type_alias(def, &name, span, &TypePath { segments });
+        }
+        if !self.alias_expanding.insert(def) {
+            self.emit(TypeError::CyclicTypeAlias { name }, span);
+            return Some(self.tcx.error_ty());
+        }
+        // Each parameter lowers to one `Param` slot, so every place the
+        // body repeats a parameter shares the variable substituted for it.
+        let scope = params
+            .iter()
+            .enumerate()
+            .map(|(i, param)| {
+                let idx = crate::ParamIdx(u32::try_from(i).unwrap_or(u32::MAX));
+                (param.clone(), (idx, Box::from(param.as_str())))
+            })
+            .collect();
+        let outer = std::mem::replace(&mut self.current_generic_scope, scope);
+        let body = self.type_from_ast(&rhs);
+        self.current_generic_scope = outer;
+        self.alias_expanding.remove(&def);
+        if self.nominal_aliases.contains(&def) {
+            return None;
+        }
+        let vars: Vec<Ty> = params.iter().map(|_| self.fresh()).collect();
+        Some(self.subst_params_in_ty(body, &vars))
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "one arm per built-in type constructor; splitting hides the dispatch table"

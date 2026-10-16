@@ -907,7 +907,7 @@ pub(super) fn lower_rvalue_into(
                                 );
                                 let clone_fn = intrinsics.extern_fn(
                                     module,
-                                    "gos_rt_vec_clone",
+                                    "gos_rt_vec_clone_field",
                                     &[ptr_ty],
                                     &[ptr_ty],
                                 )?;
@@ -967,7 +967,7 @@ pub(super) fn lower_rvalue_into(
                             );
                             let clone_fn = intrinsics.extern_fn(
                                 module,
-                                "gos_rt_vec_clone",
+                                "gos_rt_vec_clone_field",
                                 &[ptr_ty],
                                 &[ptr_ty],
                             )?;

@@ -15,6 +15,10 @@ pub(super) struct BareCopies {
     /// pointer is shared, so no extraction owns or releases it, since matching
     /// both aliases would free the one payload twice.
     pub(super) target: Vec<bool>,
+    /// A carrier whose payload is read out twice along one path, as a match
+    /// does once per pattern it tests. No one extraction can own the payload,
+    /// so like an aliased carrier it keeps its share and each read is a view.
+    pub(super) extracted_twice: Vec<bool>,
 }
 
 pub(super) fn bare_copies(body: &Body) -> BareCopies {
@@ -23,6 +27,7 @@ pub(super) fn bare_copies(body: &Body) -> BareCopies {
         sourced: vec![false; n_locals],
         sourced_to_binding: vec![false; n_locals],
         target: vec![false; n_locals],
+        extracted_twice: vec![false; n_locals],
     };
     for block in &body.blocks {
         for stmt in &block.stmts {
@@ -43,7 +48,85 @@ pub(super) fn bare_copies(body: &Body) -> BareCopies {
             }
         }
     }
+    let mut extractions: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n_locals];
+    for (bi, block) in body.blocks.iter().enumerate() {
+        for (si, stmt) in block.stmts.iter().enumerate() {
+            if let StatementKind::Assign {
+                rvalue: Rvalue::CallIntrinsic { name, args },
+                ..
+            } = &stmt.kind
+                && *name == "gos_rt_result_payload"
+                && let Some(Operand::Copy(p)) = args.first()
+                && p.projection.is_empty()
+                && (p.local.0 as usize) < n_locals
+            {
+                extractions[p.local.0 as usize].push((bi, si));
+            }
+        }
+    }
+    for (carrier, sites) in extractions.iter().enumerate() {
+        if sites.len() > 1 {
+            facts.extracted_twice[carrier] = sites
+                .iter()
+                .any(|&from| reaches_another_extraction(body, Local(carrier as u32), from, sites));
+        }
+    }
     facts
+}
+
+/// Whether the extraction at `from` can be followed by another of `sites`
+/// before `carrier` is defined again.
+fn reaches_another_extraction(
+    body: &Body,
+    carrier: Local,
+    from: (usize, usize),
+    sites: &[(usize, usize)],
+) -> bool {
+    let defines = |stmt: &Statement| {
+        matches!(&stmt.kind, StatementKind::Assign { place, .. }
+            if place.local == carrier && place.projection.is_empty())
+    };
+    let call_defines = |term: &Terminator| {
+        matches!(term, Terminator::Call { destination, .. }
+            if destination.local == carrier && destination.projection.is_empty())
+    };
+    // Walks block `bi` from statement `start`: `Some(true)` at another
+    // extraction, `Some(false)` where the carrier is redefined, and `None`
+    // when the walk runs on into the block's successors.
+    let scan = |bi: usize, start: usize| -> Option<bool> {
+        let block = &body.blocks[bi];
+        for si in start..block.stmts.len() {
+            if sites.contains(&(bi, si)) && (bi, si) != from {
+                return Some(true);
+            }
+            if defines(&block.stmts[si]) {
+                return Some(false);
+            }
+        }
+        if call_defines(&block.terminator) {
+            return Some(false);
+        }
+        None
+    };
+    let (fb, fs) = from;
+    match scan(fb, fs + 1) {
+        Some(found) => return found,
+        None => {}
+    }
+    let mut seen = vec![false; body.blocks.len()];
+    let mut pending: Vec<usize> = successors_of(&body.blocks[fb].terminator);
+    while let Some(bi) = pending.pop() {
+        if bi >= body.blocks.len() || seen[bi] {
+            continue;
+        }
+        seen[bi] = true;
+        match scan(bi, 0) {
+            Some(true) => return true,
+            Some(false) => {}
+            None => pending.extend(successors_of(&body.blocks[bi].terminator)),
+        }
+    }
+    false
 }
 
 /// Readers that answer the carrier a two-word payload was boxed as: the words

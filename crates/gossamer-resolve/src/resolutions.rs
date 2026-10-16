@@ -105,6 +105,13 @@ pub struct Resolutions {
     scoped_module_aliases: HashMap<String, HashMap<String, String>>,
     #[serde(serialize_with = "gossamer_ast::ordered::map")]
     import_defs: HashMap<NodeId, DefId>,
+    /// The path from the unit root that names each item and enum variant.
+    #[serde(default, serialize_with = "gossamer_ast::ordered::map")]
+    paths: HashMap<DefId, Vec<String>>,
+    /// References to an imported variant, which are spelled from the unit
+    /// root once resolution is done.
+    #[serde(default)]
+    from_root: std::collections::BTreeSet<NodeId>,
 }
 
 impl Resolutions {
@@ -112,6 +119,30 @@ impl Resolutions {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Marks the reference at `node` for respelling from the unit root.
+    pub fn spell_from_root(&mut self, node: NodeId) {
+        self.from_root.insert(node);
+    }
+
+    /// Whether the reference at `node` is respelled from the unit root.
+    #[must_use]
+    pub fn is_spelled_from_root(&self, node: NodeId) -> bool {
+        self.from_root.contains(&node)
+    }
+
+    /// Records `path`, from the unit root, as what names `def` anywhere in
+    /// the unit.
+    pub fn insert_path(&mut self, def: DefId, path: Vec<String>) {
+        self.paths.insert(def, path);
+    }
+
+    /// The path from the unit root that names `def`: its modules, then its
+    /// enum for a variant, then its own name.
+    #[must_use]
+    pub fn path_of(&self, def: DefId) -> Option<&[String]> {
+        self.paths.get(&def).map(Vec::as_slice)
     }
 
     /// Records that `path_node` resolves to `resolution`.

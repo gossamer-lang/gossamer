@@ -123,3 +123,74 @@ fn main() {
     );
     project.expect_everywhere("true true true");
 }
+
+#[test]
+fn a_struct_write_fills_its_fields_and_zeroes_its_padding() {
+    let project = Project::new(
+        "memory-struct-padding",
+        &fixture_program(
+            r#"
+#[repr(C)]
+struct Padded {
+    tag: u8
+    count: i32
+    flag: bool
+    weight: f64
+    small: i16
+}
+
+fn main() {
+    let size = ffi::size_of::<Padded>()
+    let p: Ptr<Padded> = unsafe { ffi::alloc(1) }
+    let bytes: Ptr<u8> = p.cast()
+    for i in 0..size {
+        unsafe { ffi::write_at(bytes, i, 255u8) }
+    }
+    unsafe { ffi::write(p, Padded { tag: 7, count: -3, flag: true, weight: 1.5, small: -2 }) }
+    let mut raw = #[]
+    for i in 0..size {
+        raw.push(unsafe { ffi::read_at::<u8>(bytes, i) })
+    }
+    let back: Padded = unsafe { ffi::read(p) }
+    unsafe { ffi::free(p) }
+    println(f"{size} {raw}")
+    println(f"{back.tag} {back.count} {back.flag} {back.weight} {back.small}")
+}
+"#,
+        ),
+    );
+    project.expect_everywhere(
+        "32 #[7, 0, 0, 0, 253, 255, 255, 255, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 248, 63, 254, 255, 0, 0, 0, 0, 0, 0]\n\
+         7 -3 true 1.5 -2",
+    );
+}
+
+#[test]
+fn a_library_root_using_generic_memory_calls_builds_natively() {
+    let project = Project::new("memory-library", "");
+    std::fs::remove_file(project.dir.join("src/main.gos")).expect("drop the entry");
+    std::fs::write(
+        project.dir.join("src/lib.gos"),
+        r"
+use std::ffi::Ptr
+
+pub fn round_trip(n: i64) -> i64 {
+    let p: Ptr<i64> = unsafe { ffi::alloc(2) }
+    unsafe { ffi::write_at(p, 1, n) }
+    let back: i64 = unsafe { ffi::read_at(p, 1) }
+    unsafe { ffi::free(p) }
+    back
+}
+",
+    )
+    .expect("write the library root");
+    for profile in [&["build", "."][..], &["build", "--release", "."][..]] {
+        let out = project.gos(profile);
+        assert!(out.ok, "{profile:?} failed:\n{}", out.all());
+        assert!(
+            out.stdout.contains("compiled"),
+            "{profile:?}:\n{}",
+            out.all()
+        );
+    }
+}

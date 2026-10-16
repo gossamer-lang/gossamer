@@ -28,6 +28,7 @@ literal `--`. Put `gos run` options before `FILE`.
 | `gos lint --explain unused_variable` | Long-form rationale for a lint |
 | `gos explain GT0001` | Long-form rationale for a diagnostic code |
 | `gos watch [PATH] [--] [ARGS...]` | Restart a development service after validating local source changes |
+| `gos serve [DIR] [--port 8000] [--bind 127.0.0.1]` | Serve a directory's files over HTTP, as `python -m http.server` does |
 | `gos add example.org/lib@1.2.3` | Add a dependency to `project.toml` |
 | `gos remove example.org/lib` | Drop a dependency |
 | `gos update` | Update locked dependencies within declared ranges |

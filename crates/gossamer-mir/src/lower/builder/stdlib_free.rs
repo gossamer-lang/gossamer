@@ -458,9 +458,10 @@ impl<'a> Builder<'a> {
     }
 
     /// Seats a `BTreeSet`'s elements by the type's own `cmp` when it writes
-    /// one, through the comparator the program compiled for that type. An
-    /// element type the language orders needs no call: the constructor
-    /// already answers a set in that order.
+    /// one, or by a user enum's derived `cmp`, through the comparator the
+    /// program compiled for that type. Any other element type the language
+    /// orders needs no call: the constructor already answers a set in that
+    /// order.
     fn order_set_by_element(&mut self, set: Local, elem: gossamer_types::Ty, span: Span) {
         let Some(name) = self.user_comparator_name(elem) else {
             return;
@@ -477,7 +478,7 @@ impl<'a> Builder<'a> {
         );
         // An aggregate crosses the comparator's boundary by the address of
         // its slots, a node or a scalar by the word that names it.
-        let by_address = self.tcx.is_flat_inline_aggregate(elem);
+        let by_address = self.tcx.is_flat_inline_aggregate(elem) || self.tcx.is_flat_enum_ty(elem);
         let unit_ty = self.tcx.unit();
         let dest = self.fresh(unit_ty);
         self.emit_assign(
@@ -494,8 +495,8 @@ impl<'a> Builder<'a> {
         );
     }
 
-    /// The comparator the program declares for `ty`, `None` for a type the
-    /// language orders on its own.
+    /// The comparator the program declares or derives for `ty`, `None` for a
+    /// type the language orders on its own.
     fn user_comparator_name(&self, ty: gossamer_types::Ty) -> Option<String> {
         let gossamer_types::TyKind::Adt { def, .. } = self.tcx.kind(ty)? else {
             return None;
@@ -506,7 +507,21 @@ impl<'a> Builder<'a> {
             gossamer_ast::USER_COMPARATOR_PREFIX,
             registered.replace("::", "__")
         );
-        self.fn_ret_names.contains_key(&name).then_some(name)
+        if self.fn_ret_names.contains_key(&name) {
+            return Some(name);
+        }
+        // A user enum's derived order is its `cmp`: the bytes an element
+        // encodes to do not order its fields as the variant declares them.
+        let has_payload = self
+            .tcx
+            .enum_variant_tys(*def)
+            .is_some_and(|variants| variants.iter().any(|v| !v.is_empty()));
+        let structural = format!(
+            "{}{}",
+            gossamer_ast::STRUCTURAL_COMPARATOR_PREFIX,
+            registered.replace("::", "__")
+        );
+        (has_payload && self.fn_ret_names.contains_key(&structural)).then_some(structural)
     }
 
     fn lower_set_from_array(
@@ -2090,6 +2105,7 @@ impl<'a> Builder<'a> {
             "runtime::scheduler_stats_json" => {
                 ("gos_rt_runtime_scheduler_stats_json", self.tcx.string_ty())
             }
+            "runtime::is_main_thread" => ("gos_rt_runtime_is_main_thread", self.tcx.bool_ty()),
             "pprof::goroutine_profile" => ("gos_rt_pprof_goroutine_profile", self.tcx.string_ty()),
             "pprof::mutex_profile" => ("gos_rt_pprof_mutex_profile", self.tcx.string_ty()),
             "pprof::block_profile" => ("gos_rt_pprof_block_profile", self.tcx.string_ty()),

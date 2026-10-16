@@ -1,0 +1,34 @@
+// Locks arithmetic on the clock types across every tier: the span between
+// two `Instant`s is a `Duration`, an `Instant` moved by a `Duration` is an
+// `Instant`, and two `Duration`s add and subtract. Both types are an `i64`
+// of nanoseconds, so every result below is exact.
+use std::time
+
+fn shifted(start: time::Instant, steps: i64) -> time::Instant {
+    let mut at = start
+    for _ in 0..steps {
+        at += time::Duration::from_millis(5)
+    }
+    at
+}
+
+fn main() {
+    let start = time::Instant::now()
+    let later = start + time::Duration::from_millis(250)
+    let span = later - start
+    println("span: {} ms, later after start: {}", span.as_millis(), later > start)
+
+    let earlier = later - time::Duration::from_secs(1)
+    println("back a second: {} ms before start", (start - earlier).as_millis())
+
+    let total = time::Duration::from_millis(1500) + time::Duration::from_micros(500)
+    let rest = total - time::Duration::from_secs(1)
+    println("total: {} us, rest: {} us", total.as_micros(), rest.as_micros())
+
+    let moved = shifted(start, 40)
+    println("moved: {} ms", (moved - start).as_millis())
+
+    let mut back = moved
+    back -= time::Duration::from_millis(200)
+    println("back at start: {}", back == start)
+}

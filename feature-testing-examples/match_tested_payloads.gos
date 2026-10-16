@@ -1,0 +1,55 @@
+// A match reads the payload out of its scrutinee once per pattern it tests,
+// so each read is a view and the scrutinee gives the payload back once,
+// whichever arm runs: one that names nothing, one that keeps the value, or
+// a catch-all reached after a pattern test that failed.
+
+newtype WindowId = u32
+
+#[derive(Debug, Default)]
+struct Mods {
+    shift: bool
+    ctrl: bool
+}
+
+enum Key {
+    Escape
+    Enter
+    Tab
+    Char(char)
+    Other(u32)
+}
+
+enum Event {
+    KeyDown { window: WindowId, key: Key, mods: Mods, repeat: bool }
+    Text { window: WindowId, text: String }
+    Shown { window: WindowId }
+}
+
+fn event(i: i64) -> Option<Event> {
+    let window: WindowId = (2 as u32).into()
+    match i % 4 {
+        0 => Some(Event::KeyDown { window: window, key: Key::Char('a'), mods: Mods::default(), repeat: i % 8 == 0 })
+        1 => Some(Event::Text { window: window, text: f"typed {i}" })
+        2 => Some(Event::Shown { window: window })
+        _ => Some(Event::KeyDown { window: window, key: Key::Escape, mods: Mods { shift: true, ctrl: false }, repeat: false })
+    }
+}
+
+fn main() {
+    let mut repeats = 0
+    let mut others = 0
+    let mut kept: Vec<String> = #[]
+    for i in 0..400 {
+        match event(i) {
+            Some(Event::KeyDown { repeat, .. }) => {
+                if repeat {
+                    repeats += 1
+                }
+            }
+            Some(Event::Text { text, .. }) => kept.push(text)
+            Some(_) => others += 1
+            None => ()
+        }
+    }
+    println(f"{repeats} {others} {kept.len()} {kept[0]} {kept[kept.len() - 1]}")
+}

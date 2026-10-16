@@ -16,6 +16,8 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result, anyhow};
 use gossamer_pkg::NativeSpec;
+
+use crate::native_cmake::{self, Linkage};
 use gossamer_pkg::sha256::Hasher;
 use parking_lot::Mutex;
 
@@ -57,6 +59,12 @@ pub fn packages(entry: &Path) -> Result<Vec<NativePackage>> {
         {
             continue;
         }
+        let mut spec = spec;
+        if let Some(feature) = spec.cmake.as_ref().and_then(|cmake| cmake.feature.as_ref())
+            && !gossamer_ast::cfg::feature_enabled(&package, feature)
+        {
+            spec.cmake = None;
+        }
         let id = manifest.project.id.to_string();
         let leaf = id.rsplit('/').next().unwrap_or(&id);
         let name: String = leaf
@@ -85,6 +93,9 @@ pub struct NativeArchive {
 pub struct NativeBuild {
     /// One archive per package.
     pub archives: Vec<NativeArchive>,
+    /// What the `[native.cmake]` archives link against in turn, linked
+    /// after every archive.
+    pub dependencies: crate::native_cmake::LinkDependencies,
     /// Every manifest, source, and included header the archives were made
     /// from: a later build is current only while these are unchanged.
     pub inputs: Vec<PathBuf>,
@@ -102,19 +113,43 @@ pub fn archives(entry: &Path, target: Option<&str>) -> Result<NativeBuild> {
     let cache = cache_root(entry).join(&toolchain.target);
     for package in &packages {
         let dir = cache.join(&package.name);
-        let objects = compile(package, &toolchain, &dir)?;
-        let archive = toolchain.archive(&package.name, &objects, &dir.join("static"))?;
         build.inputs.push(package.root.join("project.toml"));
-        for object in &objects {
+        // The package's own C comes first: a single-pass linker resolves
+        // what it calls from the libraries after it.
+        if !package.spec.sources.is_empty() {
+            let objects = compile(package, &toolchain, &dir)?;
+            let archive = toolchain.archive(&package.name, &objects, &dir.join("static"))?;
+            for object in &objects {
+                build
+                    .inputs
+                    .extend(recorded_inputs(&object.with_extension("deps")));
+            }
+            build.archives.push(NativeArchive {
+                dir: archive.parent().map(Path::to_path_buf).unwrap_or_default(),
+                name: format!("gosnative_{}", package.name),
+                path: archive,
+            });
+        }
+        if let Some(cmake) = &package.spec.cmake {
+            let install = native_cmake::install(
+                &package.root,
+                cmake,
+                &dir,
+                Linkage::Static,
+                &toolchain.cmake_target(),
+            )?;
             build
                 .inputs
-                .extend(recorded_inputs(&object.with_extension("deps")));
+                .extend(native_cmake::source_files(&package.root, cmake));
+            for (name, path) in install.archives {
+                build.archives.push(NativeArchive {
+                    dir: path.parent().map(Path::to_path_buf).unwrap_or_default(),
+                    name,
+                    path,
+                });
+            }
+            build.dependencies.merge(install.dependencies);
         }
-        build.archives.push(NativeArchive {
-            dir: archive.parent().map(Path::to_path_buf).unwrap_or_default(),
-            name: format!("gosnative_{}", package.name),
-            path: archive,
-        });
     }
     build.inputs.sort();
     build.inputs.dedup();
@@ -130,35 +165,63 @@ fn recorded_inputs(record: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// What the bytecode VM and the JIT load from the `[native]` packages.
+#[derive(Debug, Clone, Default)]
+pub struct NativeShared {
+    /// One shared library per package with C sources of its own.
+    pub libraries: Vec<PathBuf>,
+    /// The directories holding the shared libraries `[native.cmake]` builds
+    /// installed, searched ahead of the system's so a `#[link]` naming a
+    /// provided library loads the package's own build.
+    pub search: Vec<PathBuf>,
+}
+
 /// The shared libraries the bytecode VM and the JIT load for the program
-/// rooted at `entry`: one per `[native]` package, built for the host.
-/// `libraries` and `search` are the program's own `#[link]` libraries,
-/// which a shim may call into and which a Windows DLL resolves at link.
+/// rooted at `entry`, built for the host. `libraries` and `search` are the
+/// program's own `#[link]` libraries, which a shim may call into and which a
+/// Windows DLL resolves at link.
 pub fn shared_libraries(
     entry: &Path,
     libraries: &[String],
     search: &[PathBuf],
-) -> Result<Vec<PathBuf>> {
+) -> Result<NativeShared> {
     let packages = packages(entry)?;
+    let mut shared = NativeShared::default();
     if packages.is_empty() {
-        return Ok(Vec::new());
+        return Ok(shared);
     }
     let toolchain = Toolchain::for_target(None)?;
     let cache = cache_root(entry).join(&toolchain.target);
-    packages
+    for package in &packages {
+        let dir = cache.join(&package.name);
+        if let Some(cmake) = &package.spec.cmake {
+            let install = native_cmake::install(
+                &package.root,
+                cmake,
+                &dir,
+                Linkage::Shared,
+                &toolchain.cmake_target(),
+            )?;
+            shared.search.extend(install.dirs);
+        }
+    }
+    let mut link_search = shared.search.clone();
+    link_search.extend(search.iter().cloned());
+    for package in packages
         .iter()
-        .map(|package| {
-            let dir = cache.join(&package.name);
-            let objects = compile(package, &toolchain, &dir)?;
-            toolchain.shared(
-                &package.name,
-                &objects,
-                &dir.join("shared"),
-                libraries,
-                search,
-            )
-        })
-        .collect()
+        .filter(|package| !package.spec.sources.is_empty())
+    {
+        let dir = cache.join(&package.name);
+        let objects = compile(package, &toolchain, &dir)?;
+        shared.libraries.push(toolchain.shared(
+            &package.name,
+            &objects,
+            &dir.join("shared"),
+            libraries,
+            &link_search,
+        )?);
+    }
+    Ok(shared)
 }
 
 /// The host compiler `[native]` sources compile with, and what it reports
@@ -228,6 +291,17 @@ impl Toolchain {
             identity,
             msvc,
         })
+    }
+
+    /// The compiler and target a `[native.cmake]` build configures with.
+    fn cmake_target(&self) -> native_cmake::CmakeTarget<'_> {
+        native_cmake::CmakeTarget {
+            target: &self.target,
+            host: self.target == gossamer_driver::TargetTriple::host().as_str(),
+            compiler: (!self.msvc).then(|| self.tool.path()),
+            identity: &self.identity,
+            msvc: self.msvc,
+        }
     }
 
     fn object_extension(&self) -> &'static str {

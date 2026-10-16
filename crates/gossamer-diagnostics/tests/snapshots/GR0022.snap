@@ -1,11 +1,12 @@
 ---
 source: crates/gossamer-diagnostics/tests/snapshots.rs
+assertion_line: 86
 expression: rendered
 ---
 --- plain ---
-error[GR0022]: A pattern that is a single name starting with an uppercase letter - here
+error[GR0022]: A `match` arm's pattern is a single name that no variant, struct, - here
 --- framed ---
-error[GR0022]: A pattern that is a single name starting with an uppercase letter
+error[GR0022]: A `match` arm's pattern is a single name that no variant, struct,
   --> snap.gos:2:5
      2 |     let x = 1
        |     ^^^^^

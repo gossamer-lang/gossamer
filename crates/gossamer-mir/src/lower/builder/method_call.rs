@@ -1047,7 +1047,7 @@ impl<'a> Builder<'a> {
             // An `Option` / `Result` is a discriminant and a payload word.
             TyKind::Adt { def, .. } if def.local == u32::MAX || def.local == u32::MAX - 1 => true,
             TyKind::Adt { def, .. } => {
-                self.tcx.enum_variant_tys(*def).is_none()
+                (self.tcx.enum_variant_tys(*def).is_none() || self.tcx.is_flat_enum_def(def.local))
                     && self.tcx.struct_field_tys(*def).is_some()
             }
             _ => false,

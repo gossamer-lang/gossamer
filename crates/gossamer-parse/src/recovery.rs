@@ -150,11 +150,36 @@ fn hash_prefixed_item_start(parser: &Parser<'_>) -> bool {
     let Some(offset) = skip_outer_attrs(parser, 0) else {
         return true;
     };
-    matches!(
+    item_start_after_attrs(parser, skip_visibility(parser, offset))
+}
+
+/// The offset past a visibility at `offset`: `pub`, or `pub` with a
+/// parenthesized restriction (`pub(package)`); `offset` itself when none.
+fn skip_visibility(parser: &Parser<'_>, offset: usize) -> usize {
+    if !matches!(
         parser.peek_nth(offset).kind,
         TokenKind::Keyword(Keyword::Pub)
-    ) && item_start_after_attrs(parser, offset + 1)
-        || item_start_after_attrs(parser, offset)
+    ) {
+        return offset;
+    }
+    if !matches!(
+        parser.peek_nth(offset + 1).kind,
+        TokenKind::Punct(Punct::LParen)
+    ) {
+        return offset + 1;
+    }
+    let mut at = offset + 2;
+    let mut depth = 1usize;
+    while depth > 0 {
+        match parser.peek_nth(at).kind {
+            TokenKind::Eof => return at,
+            TokenKind::Punct(Punct::LParen) => depth += 1,
+            TokenKind::Punct(Punct::RParen) => depth -= 1,
+            _ => {}
+        }
+        at += 1;
+    }
+    at
 }
 
 fn skip_outer_attrs(parser: &Parser<'_>, mut offset: usize) -> Option<usize> {

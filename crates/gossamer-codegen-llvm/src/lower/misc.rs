@@ -586,6 +586,28 @@ impl<'a> Lowerer<'a> {
             } else {
                 base
             };
+            if name == "gos_rt_option_slot_release" {
+                // A carrier whose payload word is null - a `None`, an arm the
+                // frame did not take - has nothing to give back.
+                let at = self.fresh();
+                writeln!(self.out, "  {at} = getelementptr i8, ptr {slot}, i64 8").unwrap();
+                let payload = self.fresh();
+                writeln!(self.out, "  {payload} = load i64, ptr {at}").unwrap();
+                let is_null = self.fresh();
+                writeln!(self.out, "  {is_null} = icmp eq i64 {payload}, 0").unwrap();
+                let live_l = self.fresh_label("payload_live");
+                let done_l = self.fresh_label("payload_done");
+                writeln!(
+                    self.out,
+                    "  br i1 {is_null}, label %{done_l}, label %{live_l}"
+                )
+                .unwrap();
+                writeln!(self.out, "{live_l}:").unwrap();
+                writeln!(self.out, "  call void @{name}(ptr {slot})").unwrap();
+                writeln!(self.out, "  br label %{done_l}").unwrap();
+                writeln!(self.out, "{done_l}:").unwrap();
+                return Ok(());
+            }
             writeln!(self.out, "  call void @{name}(ptr {slot})").unwrap();
             return Ok(());
         }
@@ -1397,7 +1419,9 @@ impl<'a> Lowerer<'a> {
     /// node pointer - whose `fmt` decodes that word directly.
     pub(crate) fn adt_fmt_takes_slot_address(&self, ty: Ty) -> bool {
         match self.tcx.kind(self.unwrap_ref(ty)) {
-            Some(TyKind::Adt { def, .. }) => self.tcx.enum_variant_tys(*def).is_none(),
+            Some(TyKind::Adt { def, .. }) => {
+                self.tcx.enum_variant_tys(*def).is_none() || self.tcx.is_flat_enum_def(def.local)
+            }
             _ => false,
         }
     }

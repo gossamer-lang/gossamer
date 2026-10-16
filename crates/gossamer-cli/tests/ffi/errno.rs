@@ -1,7 +1,9 @@
 //! Error codes across a foreign call: each call starts with `errno` (and on
 //! Windows the thread's last error) cleared, so a call that succeeds without
 //! touching them reads back zero, and `last_errno` and `last_os_error` report
-//! the C and operating-system codes a failing call set.
+//! the C and operating-system codes a failing call set. The runtime's own
+//! helpers behind `ffi::read`, `ffi::write`, and the other memory operations
+//! are not foreign calls and leave those codes alone.
 
 use crate::support::Project;
 
@@ -39,6 +41,33 @@ fn main() {
         ),
     );
     project.expect_everywhere("failed: 34\nafter a success: 0\non entry: 0 then 0");
+}
+
+#[test]
+fn memory_operations_leave_the_last_foreign_calls_errno() {
+    let project = Project::new(
+        "errno-memory-ops",
+        &format!(
+            "{DECLS}{}",
+            r#"
+#[repr(C)]
+struct Pair {
+    a: i32
+    b: i32
+}
+
+fn main() {
+    unsafe { fail_with_errno(34) }
+    let p: ffi::Ptr<Pair> = unsafe { ffi::alloc(1) }
+    unsafe { ffi::write(p, Pair { a: 4, b: 5 }) }
+    let back: Pair = unsafe { ffi::read(p) }
+    unsafe { ffi::free(p) }
+    println(f"{back.a + back.b} {ffi::last_errno()}")
+}
+"#
+        ),
+    );
+    project.expect_everywhere("9 34");
 }
 
 #[cfg(unix)]

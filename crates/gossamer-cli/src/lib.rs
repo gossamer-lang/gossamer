@@ -34,6 +34,7 @@ pub mod comptime_fold;
 pub mod doc;
 pub mod loaders;
 mod main_stack;
+mod native_cmake;
 pub mod native_sources;
 pub mod paths;
 pub mod repl;

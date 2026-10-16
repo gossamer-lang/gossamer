@@ -12,8 +12,8 @@ fn purity_for(source: &str) -> PurityFacts {
     let file = map.add_file("purity.gos".to_string(), source.to_string());
     let (mut parsed, parse_errors) = parse_source_file(source, file);
     assert!(parse_errors.is_empty(), "parse errors: {parse_errors:?}");
-    let (resolutions, _) = resolve_source_file(&parsed);
-    let _ = gossamer_types::normalize_caller_side_spellings(&mut parsed, &resolutions);
+    let (mut resolutions, _) = resolve_source_file(&parsed);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut parsed, &mut resolutions);
     let mut tcx = TyCtxt::new();
     let (table, _) = typecheck_source_file(&parsed, &resolutions, &mut tcx);
     analyze(&parsed, &resolutions, &table, &tcx)
@@ -24,8 +24,8 @@ fn adapter_codes(source: &str) -> Vec<String> {
     let file = map.add_file("adapters.gos".to_string(), source.to_string());
     let (mut parsed, parse_errors) = parse_source_file(source, file);
     assert!(parse_errors.is_empty(), "parse errors: {parse_errors:?}");
-    let (resolutions, _) = resolve_source_file(&parsed);
-    let _ = gossamer_types::normalize_caller_side_spellings(&mut parsed, &resolutions);
+    let (mut resolutions, _) = resolve_source_file(&parsed);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut parsed, &mut resolutions);
     let mut tcx = TyCtxt::new();
     let (table, _) = typecheck_source_file(&parsed, &resolutions, &mut tcx);
     check_parallel_adapters(&parsed, &resolutions, &table, &tcx)

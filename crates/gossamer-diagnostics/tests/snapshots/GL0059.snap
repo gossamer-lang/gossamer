@@ -1,0 +1,13 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+assertion_line: 86
+expression: rendered
+---
+--- plain ---
+error[GL0059]: A const or static whose name is not `SCREAMING_SNAKE_CASE`, as Rust - here
+--- framed ---
+error[GL0059]: A const or static whose name is not `SCREAMING_SNAKE_CASE`, as Rust
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

@@ -18,8 +18,8 @@ fn simd_affine_kernel(a: Simd<f64, 4>, b: Simd<f64, 4>, c: Simd<f64, 4>) -> Simd
 
 fn main() {
     let seed = env::args().len() as f64
-    let a = Simd::from_array([seed, 2.0, 3.0, 4.0])
-    let b: Simd<f64, 4> = Simd::splat(0.1)
+    let a = Simd::from_array([seed, seed + 2.0, seed + 3.0, seed + 4.0])
+    let b: Simd<f64, 4> = Simd::splat(seed + 0.1)
     let c: Simd<f64, 4> = Simd::splat(seed * 0.3)
     println("{:?}", simd_affine_kernel(a, b, c))
 }
@@ -85,11 +85,13 @@ fn simd_kernel_compiles_to_vector_instructions_without_fused_multiply_add() {
         "release and bytecode lanes differ"
     );
 
-    let body = disassembly_of(&binary, "simd_affine_kernel");
-    assert!(
-        !body.is_empty(),
-        "no `simd_affine_kernel` in the release binary"
-    );
+    // The program's own functions are internal, so the kernel may be inlined
+    // into `main`; its inputs come from the arguments so its arithmetic stays.
+    let mut body = disassembly_of(&binary, "simd_affine_kernel");
+    if body.is_empty() {
+        body = disassembly_of(&binary, "gos_main");
+    }
+    assert!(!body.is_empty(), "no kernel code in the release binary");
     let fused: Vec<&String> = body
         .iter()
         .filter(|line| {

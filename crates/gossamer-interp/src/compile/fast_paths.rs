@@ -1329,30 +1329,47 @@ impl<'tcx> FnBuilder<'tcx> {
         ) {
             return Ok(None);
         }
+        if matches!(elem_kind, Some(TyKind::Int(IntTy::U8))) {
+            let dst = self.compile_byte_array_repeat(value, count)?;
+            self.flat_int_locals.insert(dst);
+            return Ok(Some(TypedReg {
+                reg: dst,
+                kind: RegKind::Value,
+            }));
+        }
         let src_tr = self.compile_expr_ex(value)?;
         let dst = self.alloc_reg();
-        if matches!(elem_kind, Some(TyKind::Int(IntTy::U8))) {
-            let value_i = self.as_i64(src_tr);
-            let count_v = self.compile_expr(count)?;
-            self.emit(Op::BuildByteArrayRepeat {
-                dst_v: dst,
-                value_i,
-                count_v,
-            });
-        } else {
-            let value_reg = self.as_value(src_tr);
-            let count_reg = self.compile_expr(count)?;
-            self.emit(Op::BuildArrayRepeat {
-                dst,
-                value: value_reg,
-                count: count_reg,
-            });
-        }
+        let value_reg = self.as_value(src_tr);
+        let count_reg = self.compile_expr(count)?;
+        self.emit(Op::BuildArrayRepeat {
+            dst,
+            value: value_reg,
+            count: count_reg,
+        });
         self.flat_int_locals.insert(dst);
         Ok(Some(TypedReg {
             reg: dst,
             kind: RegKind::Value,
         }))
+    }
+
+    /// Lowers a `[value; count]` repeat of `u8` to a packed
+    /// `Value::ByteArray`, the storage every `Vec<u8>` consumer reads.
+    pub(crate) fn compile_byte_array_repeat(
+        &mut self,
+        value: &HirExpr,
+        count: &HirExpr,
+    ) -> RuntimeResult<Reg> {
+        let src_tr = self.compile_expr_ex(value)?;
+        let value_i = self.as_i64(src_tr);
+        let count_v = self.compile_expr(count)?;
+        let dst = self.alloc_reg();
+        self.emit(Op::BuildByteArrayRepeat {
+            dst_v: dst,
+            value_i,
+            count_v,
+        });
+        Ok(dst)
     }
 
     /// Mirror of [`Self::try_build_int_array`] for `[f64; N]`

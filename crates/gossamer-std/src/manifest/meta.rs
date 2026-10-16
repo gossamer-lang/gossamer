@@ -84,6 +84,11 @@ pub const RUNTIME: StdModule = StdModule {
             doc: "Reports whether this execution tier reclaims unreachable reference cycles.",
         },
         StdItem {
+            name: "is_main_thread",
+            kind: StdItemKind::Function,
+            doc: "Whether the caller runs on the process main thread, the one `main` starts on. Libraries whose platform APIs belong to that thread, such as windowing on macOS, check it before calling them.",
+        },
+        StdItem {
             name: "scheduler_stats_json",
             kind: StdItemKind::Function,
             doc: "Returns a compact JSON snapshot of goroutine scheduler counters.",
@@ -395,7 +400,7 @@ pub const TIME: StdModule = StdModule {
         StdItem {
             name: "Instant",
             kind: StdItemKind::Type,
-            doc: "A monotonic clock reading in nanoseconds: `now()`, `elapsed()`, `elapsed_ms()`, `duration_since(earlier)`.",
+            doc: "A monotonic clock reading in nanoseconds: `now()`, `elapsed()`, `elapsed_ms()`, `duration_since(earlier)`, `later - earlier` answering the `Duration` between them, `+` / `-` a `Duration`, and ordering.",
         },
         StdItem {
             name: "Duration",

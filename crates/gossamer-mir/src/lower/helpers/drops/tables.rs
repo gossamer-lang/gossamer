@@ -537,7 +537,7 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
             // whatever the destination's inferred type (a cloned borrowed
             // row lands in a Slice-typed local the type-based inference
             // below does not cover).
-            "gos_rt_vec_clone" => Some("gos_rt_vec_free"),
+            "gos_rt_vec_clone" | "gos_rt_vec_clone_field" => Some("gos_rt_vec_free"),
             // A mutable window is a header of its own over another vec's
             // elements; the frame reclaims that header, and the runtime frees
             // nothing it aliases.
@@ -547,6 +547,13 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
             // A queue and a stack share the deque header, so they share its
             // reclamation too.
             "gos_rt_set_clone" => Some("gos_rt_set_free"),
+            // A window or a range is a set of its own holding the elements
+            // between two ranks or bounds, built for the read that takes it.
+            "gos_rt_set_window"
+            | "gos_rt_set_range_i64"
+            | "gos_rt_set_range_str"
+            | "gos_rt_set_range_skey"
+            | "gos_rt_set_range_ekey" => Some("gos_rt_set_free"),
             "gos_rt_map_clone" => Some("gos_rt_map_free"),
             "gos_rt_deque_clone" | "gos_rt_queue_clone" | "gos_rt_stack_clone" => {
                 Some("gos_rt_deque_free")

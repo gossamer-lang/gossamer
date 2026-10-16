@@ -38,6 +38,46 @@ pub struct PackedLayout {
     pub field_bytes: Vec<u32>,
 }
 
+/// Where the fields of a by-value enum live.
+///
+/// The value is a struct whose first field is the discriminant (an `i64`)
+/// and whose remaining fields are `regions`. Each variant's fields take
+/// regions of their storage type, two fields of one variant never sharing
+/// one, so every region holds one type in every variant that uses it. A
+/// region the current variant does not use holds zeroes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FlatEnumLayout {
+    /// The type of each region, after the discriminant.
+    pub regions: Vec<Ty>,
+    /// For each variant, the region each of its fields occupies.
+    pub variant_regions: Vec<Vec<u32>>,
+    /// For each variant, the type of each of its fields. A field whose type
+    /// differs from its region's is a one-word scalar held in a shared word:
+    /// an integer, `bool`, `char`, or unit-only enum in an `i64`, a float in
+    /// an `f64`.
+    pub variant_field_tys: Vec<Vec<Ty>>,
+}
+
+impl FlatEnumLayout {
+    /// The struct field holding field `field` of variant `variant`: the
+    /// discriminant is field 0.
+    #[must_use]
+    pub fn field_of(&self, variant: u32, field: u32) -> Option<u32> {
+        self.variant_regions
+            .get(variant as usize)?
+            .get(field as usize)
+            .map(|region| region + 1)
+    }
+
+    /// The struct-shaped field list: the discriminant, then every region.
+    #[must_use]
+    pub fn struct_fields(&self, tag: Ty) -> Vec<Ty> {
+        std::iter::once(tag)
+            .chain(self.regions.iter().copied())
+            .collect()
+    }
+}
+
 /// Interner that maps [`TyKind`]s to stable [`Ty`] handles.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TyCtxt {
@@ -139,6 +179,18 @@ pub struct TyCtxt {
     /// released per-discriminant on drop).
     #[serde(serialize_with = "gossamer_ast::ordered::set")]
     inline_enum_defs: std::collections::HashSet<u32>,
+    /// `DefId.local` of user enums stored by value as a tag word followed by
+    /// the regions their variants' fields share, with the layout of each.
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
+    flat_enums: HashMap<u32, FlatEnumLayout>,
+    /// Whether every user enum keeps its heap node, as the bytecode VM's
+    /// enum values are, so code compiled to run beside it passes them as is.
+    #[serde(default)]
+    enums_on_heap: bool,
+    /// The tuple each `Option` / `Result` over a by-value enum is held as
+    /// in a body, mapped to the carrier type it stands for.
+    #[serde(serialize_with = "gossamer_ast::ordered::map")]
+    flat_carriers: HashMap<Ty, Ty>,
     /// Structs a program takes a `&mut` to a narrow field of. The borrow hands
     /// its callee an address a whole word is written through, so such a
     /// struct keeps one word per field. MIR lowering records these before it
@@ -194,7 +246,7 @@ impl TyCtxt {
 
         write!(
             output,
-            "kinds={:?};primitives={:?};struct_fields={:?};enum_variant_tys={:?};enum_variant_names={:?};enum_repr_bits={:?};enum_ty_by_name={:?};struct_fields_inst={:?};def_names={:?};type_param_defs={:?};rc_metas={:?};aggr_copy_metas={:?};rc_managed_tys={:?};rc_managed_enum_defs={:?};tuple_struct_defs={:?};inline_enum_defs={:?};boxed_enum_payload_tys={:?}",
+            "kinds={:?};primitives={:?};struct_fields={:?};enum_variant_tys={:?};enum_variant_names={:?};enum_repr_bits={:?};enum_ty_by_name={:?};struct_fields_inst={:?};def_names={:?};type_param_defs={:?};rc_metas={:?};aggr_copy_metas={:?};rc_managed_tys={:?};rc_managed_enum_defs={:?};tuple_struct_defs={:?};inline_enum_defs={:?};flat_enums={:?};flat_carriers={:?};boxed_enum_payload_tys={:?}",
             self.kinds,
             self.primitives,
             sorted(
@@ -243,6 +295,12 @@ impl TyCtxt {
             sorted(self.rc_managed_enum_defs.iter().map(|v| format!("{v:?}"))),
             sorted(self.tuple_struct_defs.iter().map(|v| format!("{v:?}"))),
             sorted(self.inline_enum_defs.iter().map(|v| format!("{v:?}"))),
+            sorted(self.flat_enums.iter().map(|(k, v)| format!("{k:?}:{v:?}"))),
+            sorted(
+                self.flat_carriers
+                    .iter()
+                    .map(|(k, v)| format!("{k:?}:{v:?}"))
+            ),
             sorted(self.boxed_enum_payload_tys.iter().map(|v| format!("{v:?}"))),
         )
     }
@@ -946,7 +1004,10 @@ impl TyCtxt {
         let TyKind::Adt { def, substs } = self.kind_of(ty) else {
             return false;
         };
-        if def.local >= u32::MAX - 16 || !substs.as_slice().is_empty() || self.is_inline_enum_ty(ty)
+        if def.local >= u32::MAX - 16
+            || !substs.as_slice().is_empty()
+            || self.is_inline_enum_ty(ty)
+            || self.flat_enums.contains_key(&def.local)
         {
             return false;
         }
@@ -1328,10 +1389,112 @@ impl TyCtxt {
         self.tuple_struct_defs.contains(&def_local)
     }
 
+    /// Keeps every user enum lowered after this call in its heap node, the
+    /// representation the bytecode VM's enum values share with the JIT.
+    pub fn keep_enums_on_heap(&mut self) {
+        self.enums_on_heap = true;
+    }
+
+    /// Whether user enums may be stored by value; see [`Self::keep_enums_on_heap`].
+    #[must_use]
+    pub fn enums_by_value(&self) -> bool {
+        !self.enums_on_heap
+    }
+
     /// Registers a user enum (by `DefId.local`) as inline-able - its values
     /// are the 2-word by-value `i128` representation.
     pub fn register_inline_enum_def(&mut self, def_local: u32) {
         self.inline_enum_defs.insert(def_local);
+    }
+
+    /// Registers `def` as an enum stored by value with `layout`: its values
+    /// are a struct of the discriminant and the layout's regions, so every
+    /// layout and ownership walk reads them as that struct.
+    pub fn register_flat_enum(&mut self, def: gossamer_resolve::DefId, layout: FlatEnumLayout) {
+        let tag = self.int_ty(IntTy::I64);
+        self.struct_fields.insert(def, layout.struct_fields(tag));
+        self.word_field_structs.insert(def);
+        self.rc_managed_enum_defs.remove(&def.local);
+        self.flat_enums.insert(def.local, layout);
+    }
+
+    /// Every type a map or set in the program is keyed by.
+    #[must_use]
+    pub fn keyed_tys(&self) -> Vec<Ty> {
+        let mut keys = Vec::new();
+        for kind in &self.kinds {
+            match kind {
+                TyKind::HashMap { key, .. } => keys.push(*key),
+                TyKind::Adt { def, substs }
+                    if def.local >= u32::MAX - 64
+                        && matches!(self.def_name(*def), Some("Set" | "BTreeSet" | "BTreeMap")) =>
+                {
+                    keys.extend(substs.types().first().copied());
+                }
+                _ => {}
+            }
+        }
+        keys
+    }
+
+    /// The by-value layout of `ty`, when it is an enum stored by value.
+    #[must_use]
+    pub fn flat_enum_layout(&self, ty: Ty) -> Option<&FlatEnumLayout> {
+        match self.kind(ty) {
+            Some(TyKind::Adt { def, .. }) => self.flat_enums.get(&def.local),
+            _ => None,
+        }
+    }
+
+    /// The tuple a body holds the carrier `carrier` as, when its payload is
+    /// a by-value enum: the discriminant, then the `Ok` / `Some` payload,
+    /// then (for a `Result`) the `Err` payload.
+    pub fn flat_carrier_ty(&mut self, carrier: Ty) -> Option<Ty> {
+        let TyKind::Adt { def, substs } = self.kind(carrier)?.clone() else {
+            return None;
+        };
+        if def.local != u32::MAX && def.local != u32::MAX - 1 {
+            return None;
+        }
+        let payloads = substs.types();
+        let arms = if def.local == u32::MAX { 2 } else { 1 };
+        if payloads.len() < arms
+            || !payloads[..arms]
+                .iter()
+                .any(|p| self.is_flat_enum_ty(self.peel_nominal(*p)))
+        {
+            return None;
+        }
+        let tag = self.int_ty(IntTy::I64);
+        let mut fields = vec![tag];
+        fields.extend(payloads[..arms].iter().map(|p| self.peel_nominal(*p)));
+        let tuple = self.intern(TyKind::Tuple(fields));
+        self.flat_carriers.insert(tuple, carrier);
+        Some(tuple)
+    }
+
+    /// The carrier type a flattened carrier tuple stands for.
+    #[must_use]
+    pub fn carrier_of_flat(&self, tuple: Ty) -> Option<Ty> {
+        self.flat_carriers.get(&tuple).copied()
+    }
+
+    /// Whether the user enum `def_local` names is stored by value.
+    #[must_use]
+    pub fn is_flat_enum_def(&self, def_local: u32) -> bool {
+        self.flat_enums.contains_key(&def_local)
+    }
+
+    /// Whether `ty` is an enum stored by value as a tag and shared regions.
+    #[must_use]
+    pub fn is_flat_enum_ty(&self, ty: Ty) -> bool {
+        self.flat_enum_layout(ty).is_some()
+    }
+
+    /// Whether the user enum `def_local` names is an inline-able one.
+    #[must_use]
+    pub fn is_inline_enum_def(&self, def_local: u32) -> bool {
+        self.inline_enum_defs.contains(&def_local)
     }
 
     /// True when `ty` is an inline-able user enum (2-word by-value).
@@ -1403,7 +1566,7 @@ impl TyCtxt {
         }
         // Inline-able user enums are by-value (their payload's RC, if any, is
         // released per-discriminant on drop), never RC-managed as a whole.
-        if self.is_inline_enum_ty(ty) {
+        if self.is_inline_enum_ty(ty) || self.is_flat_enum_ty(ty) {
             return false;
         }
         if matches!(self.kind(ty), Some(TyKind::String)) {

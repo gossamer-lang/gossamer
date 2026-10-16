@@ -800,7 +800,15 @@ static CHANNEL_WAITERS: std::sync::atomic::AtomicUsize = std::sync::atomic::Atom
 /// than on a goroutine, and its accept loop waits for the next connection on
 /// another. Both run user code and reach channels, so a channel wait is not
 /// terminal while either is live, however few goroutines the scheduler holds.
+/// A live `ffi::Handle` counts too: native code holding it can run a callback
+/// on a thread of its own that reaches the handle's value at any time.
 static EXTERNAL_ACTORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The live non-goroutine actors: threads outside the goroutine set and
+/// handles native code holds, each able to reach a channel.
+pub fn external_actors() -> usize {
+    EXTERNAL_ACTORS.load(Ordering::Acquire)
+}
 
 /// Adds or removes the caller from the count of non-goroutine actors.
 ///
@@ -846,9 +854,25 @@ pub fn program_entered() -> bool {
     PROGRAM_ENTERED.load(Ordering::Acquire)
 }
 
+thread_local! {
+    static ON_MAIN_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Records the calling thread as the one a program's `main` runs on: the
+/// process main thread, on every tier.
+pub fn mark_main_thread() {
+    ON_MAIN_THREAD.with(|on| on.set(true));
+}
+
+/// Whether the caller runs on the thread a program's `main` runs on.
+pub fn on_main_thread() -> bool {
+    ON_MAIN_THREAD.with(std::cell::Cell::get)
+}
+
 /// Marks the process as a running Gossamer program. Called from the entry
 /// shim a compiled binary emits, and from nowhere else.
 pub fn mark_program_entered() {
+    mark_main_thread();
     let _ = MAIN_THREAD.set(std::thread::current().id());
     PROGRAM_ENTERED.store(true, Ordering::Release);
 }
@@ -874,7 +898,9 @@ fn report_fatal_deadlock(op: &str) -> ! {
     )
 }
 
-pub use crate::sched::multi::{SYSCALL_HANDOFF_THRESHOLD, SyscallGuard, syscall_enter};
+pub use crate::sched::multi::{
+    SYSCALL_HANDOFF_THRESHOLD, SyscallGuard, on_worker, syscall_enter, syscall_mark, syscall_unmark,
+};
 
 /// Runs a potentially blocking OS operation without pinning a scheduler
 /// worker. When called from a goroutine, the operation runs on the blocking

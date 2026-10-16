@@ -451,7 +451,13 @@ impl<'a> Builder<'a> {
         // name, since the MIR contract for a `SwitchInt` discriminant is an
         // integer one.
         let disc = self.fresh(i64_ty);
-        if self.enums.enum_has_any_payload(enum_name) {
+        if let Some(read) = self.flat_enum_disc(scrutinee_local, span) {
+            self.emit_assign(
+                Place::local(disc),
+                Rvalue::Use(Operand::Copy(Place::local(read))),
+                span,
+            );
+        } else if self.enums.enum_has_any_payload(enum_name) {
             let intrinsic = if self.enum_repr_tagged(enum_name) {
                 "gos_enum_disc_tag"
             } else {
@@ -528,7 +534,10 @@ impl<'a> Builder<'a> {
         // `match &mut x` over a local the reference copies into a slot of its
         // own: the binding may give the slot a node of its own, which the
         // local then takes back.
-        let reload = self.mut_ref_reload_target(scrutinee);
+        // A by-value enum is written where it lies, so no slot is reloaded.
+        let reload = self
+            .mut_ref_reload_target(scrutinee)
+            .filter(|_| self.flat_enum_place(scrutinee_local).is_none());
         for (arm_block, arm) in bodies {
             self.set_current(arm_block);
             match &arm.pattern.kind {
@@ -841,6 +850,9 @@ impl<'a> Builder<'a> {
     ) -> Option<Local> {
         use gossamer_types::TyKind;
         let bool_ty = self.tcx.bool_ty();
+        if let Some((variant, fields)) = self.flat_pattern_fields(scrutinee, pattern) {
+            return self.lower_flat_variant_predicate(scrutinee, variant, &fields, span);
+        }
         match &pattern.kind {
             HirPatKind::Wildcard => {
                 let l = self.fresh(bool_ty);
@@ -1573,7 +1585,15 @@ impl<'a> Builder<'a> {
                     } else {
                         scrutinee
                     };
-                    let lit_local = self.fresh(scrut_ty);
+                    // The constant takes the type of what it is compared
+                    // with: the discriminant read out of the value, or the
+                    // value itself when the value is its discriminant.
+                    let lit_ty = if scrut_for_cmp == scrutinee {
+                        scrut_ty
+                    } else {
+                        i64_ty
+                    };
+                    let lit_local = self.fresh(lit_ty);
                     self.emit_assign(
                         Place::local(lit_local),
                         Rvalue::Use(Operand::Const(ConstValue::Int(idx as i128))),
@@ -2179,11 +2199,26 @@ impl<'a> Builder<'a> {
                     } else if !matches!(first.kind, HirPatKind::Wildcard) {
                         // Concrete payload pattern: literal, range, nested
                         // variant, or-pattern, etc. (e.g. `Ok(1)`, `Ok(1..=5)`).
-                        // `gos_rt_result_payload` null-checks internally, so
-                        // calling it unconditionally in the pre-branch header
-                        // is safe regardless of discriminant. The disc predicate
-                        // (`const_pred`) will be false when the variant doesn't
-                        // match, making the combined AND false too.
+                        // The payload is read only once the discriminant says
+                        // the arm holds one: an aggregate payload is copied out
+                        // of the words the other arm leaves empty.
+                        let guard = real_disc.then(|| {
+                            let guarded = self.new_block(span);
+                            let merge = self.new_block(span);
+                            let answer = self.fresh(bool_ty);
+                            self.emit_assign(
+                                Place::local(answer),
+                                Rvalue::Use(Operand::Const(ConstValue::Bool(false))),
+                                span,
+                            );
+                            self.terminate(Terminator::SwitchInt {
+                                discriminant: Operand::Copy(Place::local(const_pred)),
+                                arms: vec![(0, merge)],
+                                default: guarded,
+                            });
+                            self.set_current(guarded);
+                            (answer, merge)
+                        });
                         let payload_slot = match name.name.as_str() {
                             "Ok" | "Some" => Some(0usize),
                             "Err" => Some(1usize),
@@ -2223,9 +2258,20 @@ impl<'a> Builder<'a> {
                         } else {
                             scrutinee
                         };
-                        if let Some(sub_pred) =
-                            self.lower_pattern_predicate(payload_local, first, span)
-                        {
+                        let sub_pred = self.lower_pattern_predicate(payload_local, first, span);
+                        if let Some((answer, merge)) = guard {
+                            // Inside the guarded block the discriminant matched,
+                            // so the payload's own predicate is the answer.
+                            let value = match sub_pred {
+                                Some(sub) => Operand::Copy(Place::local(sub)),
+                                None => Operand::Const(ConstValue::Bool(true)),
+                            };
+                            self.emit_assign(Place::local(answer), Rvalue::Use(value), span);
+                            self.terminate(Terminator::Goto { target: merge });
+                            self.set_current(merge);
+                            return Some(answer);
+                        }
+                        if let Some(sub_pred) = sub_pred {
                             let combined = self.fresh(bool_ty);
                             self.emit_assign(
                                 Place::local(combined),
@@ -2697,6 +2743,10 @@ impl<'a> Builder<'a> {
         pattern: &HirPat,
         span: Span,
     ) {
+        if let Some((variant, fields)) = self.flat_pattern_fields(aggregate, pattern) {
+            self.bind_flat_variant_fields(aggregate, variant, &fields, span);
+            return;
+        }
         match &pattern.kind {
             HirPatKind::Binding { name, .. } => {
                 self.bind_local(name.name.as_str(), aggregate);
@@ -2905,6 +2955,17 @@ impl<'a> Builder<'a> {
         span: Span,
     ) {
         use gossamer_types::TyKind;
+        if let Some((_, enum_ty, _)) = self.flat_enum_place(aggregate) {
+            let positions = self.enum_index_name_of(enum_ty).and_then(|en| {
+                let variant = self.enums.variant_of_enum(&en, &name.name)?;
+                let fields = self.flat_variant_positions(&en, &name.name, Some(fields), None)?;
+                Some((u32::try_from(variant).ok()?, fields))
+            });
+            if let Some((variant, fields)) = positions {
+                self.bind_flat_variant_fields(aggregate, variant, &fields, span);
+            }
+            return;
+        }
         let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
         let scrut_ty = self.locals[aggregate.0 as usize].ty;
         let mut peeled = scrut_ty;

@@ -1034,8 +1034,10 @@ impl MapKey {
                 fields: bytes.iter().map(|n| Self::Int(i64::from(*n))).collect(),
                 shape: AggShape::Array,
             })),
+            // A variant with named fields is held as a struct of the
+            // variant's name, and orders by its rank as any variant does.
             Value::Struct(inner) => Self::Agg(Box::new(AggKey {
-                rank: 0,
+                rank: crate::builtins::variant_rank_of(inner.name.as_str()).unwrap_or(0),
                 name: inner.name.clone(),
                 fields: inner
                     .fields
@@ -1079,7 +1081,7 @@ impl MapKey {
                 shape: AggShape::Array,
             })),
             Value::Struct(inner) => Self::Agg(Box::new(AggKey {
-                rank: 0,
+                rank: crate::builtins::variant_rank_of(inner.name.as_str()).unwrap_or(0),
                 name: inner.name.clone(),
                 fields: inner
                     .fields

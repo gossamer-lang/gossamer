@@ -839,6 +839,10 @@ impl<'a> Lowerer<'a> {
         // loop). The branchless inline also fires on the Rvalue::CallIntrinsic
         // route (`lower_call_intrinsic`); route both to the same body so the
         // per-byte FFI call disappears regardless of how the call was lowered.
+        if name == "gos_rt_enum_unit" && args.len() == 1 && destination.projection.is_empty() {
+            self.lower_enum_unit_inline(args, destination, target)?;
+            return Ok(());
+        }
         if name == "gos_rt_heap_u8_set" && args.len() == 3 {
             self.lower_heap_u8_set_inline(args, destination, target)?;
             return Ok(());

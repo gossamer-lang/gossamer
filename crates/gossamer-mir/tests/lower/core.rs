@@ -24,8 +24,8 @@ fn build_with_hir(source: &str) -> (gossamer_hir::HirProgram, Vec<gossamer_mir::
     let file = map.add_file("test.gos", source.to_string());
     let (mut sf, parse_diags) = parse_with_autoderive(source, file);
     assert!(parse_diags.is_empty(), "parse: {parse_diags:?}");
-    let (resolutions, _) = resolve_source_file(&sf);
-    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &resolutions);
+    let (mut resolutions, _) = resolve_source_file(&sf);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
     let mut tcx = TyCtxt::new();
     let (table, diagnostics) =
         typecheck_source_file(&sf, &resolutions, &mut tcx);
@@ -1318,7 +1318,7 @@ fn main() {
         .position(|decl| decl.debug_name.as_ref().is_some_and(|name| name.name == "rec"))
         .map(|index| Local(index as u32))
         .expect("rec binding");
-    assert!(main.blocks.iter().any(|block| {
+    let shallow_copy = main.blocks.iter().any(|block| {
         block.stmts.iter().any(|stmt| {
             matches!(
                 &stmt.kind,
@@ -1331,7 +1331,16 @@ fn main() {
                     && source.projection.is_empty()
             )
         })
-    }), "the owned binding must shallow-copy the fresh result temporary so RC insertion can balance its managed fields");
+    });
+    let built_in_place = main.blocks.iter().any(|block| {
+        matches!(&block.terminator, Terminator::Call { destination, .. }
+            if destination.local == rec && destination.projection.is_empty())
+    });
+    assert!(
+        shallow_copy || built_in_place,
+        "the owned binding must take the fresh result whole, written by the call or \
+         shallow-copied from its temporary, so RC insertion can balance its managed fields"
+    );
 }
 
 #[test]
@@ -1701,13 +1710,21 @@ fn dispatch_shape(body: &gossamer_mir::Body) -> (usize, Vec<usize>) {
     let mut switches = Vec::new();
     for block in &body.blocks {
         for stmt in &block.stmts {
-            if let StatementKind::Assign {
-                rvalue: Rvalue::CallIntrinsic { name, .. },
-                ..
-            } = &stmt.kind
-                && matches!(*name, "gos_enum_disc" | "gos_enum_disc_tag")
-            {
-                disc_reads += 1;
+            match &stmt.kind {
+                StatementKind::Assign {
+                    rvalue: Rvalue::CallIntrinsic { name, .. },
+                    ..
+                } if matches!(*name, "gos_enum_disc" | "gos_enum_disc_tag") => disc_reads += 1,
+                // An enum stored by value keeps its tag in its first word.
+                StatementKind::Assign {
+                    rvalue: Rvalue::Use(Operand::Copy(place)),
+                    ..
+                } if place.local == Local(1)
+                    && place.projection.as_slice() == [gossamer_mir::Projection::Field(0)] =>
+                {
+                    disc_reads += 1;
+                }
+                _ => {}
             }
         }
         if let Terminator::SwitchInt { arms, .. } = &block.terminator {

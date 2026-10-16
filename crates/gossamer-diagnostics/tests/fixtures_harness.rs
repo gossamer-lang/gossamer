@@ -31,8 +31,8 @@ fn collect_diagnostics(source: &str, file_name: &str) -> Vec<Diagnostic> {
         .map(gossamer_parse::ParseDiagnostic::to_diagnostic)
         .collect();
 
-    let (resolutions, resolve_diags) = resolve_source_file(&sf);
-    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &resolutions);
+    let (mut resolutions, resolve_diags) = resolve_source_file(&sf);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
     let in_scope = collect_names(&sf);
     // Every resolver diagnostic, matching what `gos check` reports: a
     // whitelist here would silently exclude any new one from fixturing.

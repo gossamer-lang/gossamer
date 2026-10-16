@@ -15,6 +15,7 @@ use gossamer_ast::{
 use gossamer_lex::Span;
 
 use crate::Finding;
+use crate::naming;
 
 /// Dispatches on the lint id and returns the findings from that
 /// specific pass. Used by [`crate::run`].
@@ -73,6 +74,9 @@ pub(crate) fn run_lint(id: &str, sf: &SourceFile, src: &str) -> Vec<Finding> {
         "empty_loop" => lint_empty_loop(sf),
         "fill_loop" => lint_fill_loop(sf),
         "substring_byte_scan" => lint_substring_byte_scan(sf),
+        "non_camel_case_types" => naming::lint_naming(sf, naming::Convention::Camel),
+        "non_snake_case" => naming::lint_naming(sf, naming::Convention::Snake),
+        "non_upper_case_globals" => naming::lint_naming(sf, naming::Convention::Upper),
         _ => Vec::new(),
     }
 }
@@ -453,17 +457,52 @@ pub(crate) fn place_root_is(expr: &Expr, target: &str) -> bool {
     }
 }
 
+/// The variant names of the enum `name` this file declares, at any module
+/// depth.
+fn enum_variants_named(items: &[Item], name: &str) -> Option<Vec<String>> {
+    items.iter().find_map(|item| match &item.kind {
+        ItemKind::Enum(decl) if decl.name.name == name => {
+            Some(decl.variants.iter().map(|v| v.name.name.clone()).collect())
+        }
+        ItemKind::Mod(decl) => match &decl.body {
+            gossamer_ast::ModBody::Inline(inner) => enum_variants_named(inner, name),
+            gossamer_ast::ModBody::External => None,
+        },
+        _ => None,
+    })
+}
+
 fn lint_unused_import(sf: &SourceFile) -> Vec<Finding> {
     let mut uses = Uses::default();
     uses.collect(sf);
     let mut out = Vec::new();
     for decl in &sf.uses {
-        check_use(decl, &uses, &mut out);
+        check_use(decl, sf, &uses, &mut out);
     }
     out
 }
 
-fn check_use(decl: &UseDecl, uses: &Uses, out: &mut Vec<Finding>) {
+fn check_use(decl: &UseDecl, sf: &SourceFile, uses: &Uses, out: &mut Vec<Finding>) {
+    // A glob binds the variants of the enum it names: it is unused when none
+    // of them is named. An enum another file declares cannot be judged here.
+    if decl.glob {
+        let UseTarget::Module(path) = &decl.target else {
+            return;
+        };
+        let Some(enum_name) = path.segments.last().map(|s| s.name.as_str()) else {
+            return;
+        };
+        if let Some(variants) = enum_variants_named(&sf.items, enum_name)
+            && !variants.iter().any(|variant| uses.contains(variant))
+        {
+            out.push((
+                decl.span,
+                format!("unused import `{enum_name}::*`"),
+                Some("remove the `use` declaration".to_string()),
+            ));
+        }
+        return;
+    }
     if let Some(list) = &decl.list {
         for entry in list {
             check_entry(entry, decl.span, uses, out);

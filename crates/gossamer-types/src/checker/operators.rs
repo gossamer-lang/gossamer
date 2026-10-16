@@ -1471,6 +1471,9 @@ impl TypeChecker<'_> {
                 if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
                     return self.check_shift(op, (lhs, lhs_ty), (rhs, rhs_ty));
                 }
+                if let Some(ty) = self.check_clock_arithmetic(op, lhs_ty, rhs_ty, span) {
+                    return ty;
+                }
                 // A byte literal joins integer arithmetic without an explicit
                 // `as i64` - `s[i] - b'0'` - through the same node re-typing
                 // the comparison arms apply; the result takes the integer
@@ -1491,7 +1494,91 @@ impl TypeChecker<'_> {
                         span,
                     ));
                 }
+                if is_arithmetic(op) {
+                    self.deferred_arith_operands
+                        .push((result, op.as_str(), span));
+                }
                 result
+            }
+        }
+    }
+
+    /// Types arithmetic on the clock types: the span between two `Instant`s
+    /// is a `Duration`, an `Instant` moved by a `Duration` is an `Instant`,
+    /// and no other arithmetic is defined on an `Instant`. `None` leaves the
+    /// operands to the general rule.
+    fn check_clock_arithmetic(
+        &mut self,
+        op: BinaryOp,
+        lhs_ty: Ty,
+        rhs_ty: Ty,
+        span: Span,
+    ) -> Option<Ty> {
+        if !is_arithmetic(op) {
+            return None;
+        }
+        let lhs_res = self.infer.resolve(self.tcx, lhs_ty);
+        if !matches!(self.tcx.kind(lhs_res), Some(TyKind::Instant)) {
+            return None;
+        }
+        let rhs_res = self.infer.resolve(self.tcx, rhs_ty);
+        match (op, self.tcx.kind(rhs_res)) {
+            (BinaryOp::Sub, Some(TyKind::Instant)) => Some(self.tcx.duration_ty()),
+            (BinaryOp::Add | BinaryOp::Sub, Some(TyKind::Duration)) => Some(lhs_res),
+            (BinaryOp::Sub, Some(TyKind::Var(_))) => {
+                // An operand still being inferred is taken to be an `Instant`.
+                self.unify(lhs_res, rhs_ty, span);
+                Some(self.tcx.duration_ty())
+            }
+            _ => {
+                let lhs = self.render_public_ty(lhs_res);
+                let rhs = self.render_public_ty(rhs_res);
+                self.emit(
+                    TypeError::UnresolvedOp {
+                        op: op.as_str().to_string(),
+                        lhs,
+                        rhs,
+                    },
+                    span,
+                );
+                Some(self.tcx.error_ty())
+            }
+        }
+    }
+
+    /// Reports GT0003 for each arithmetic operator whose operands settled on
+    /// a type it is not defined for: numbers and SIMD vectors take every
+    /// one, a `String` takes `+`, and a `Duration` takes `+` and `-`.
+    pub(super) fn check_deferred_arith_operands(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred_arith_operands);
+        for (ty, op, span) in deferred {
+            let resolved = self.deep_resolve(ty);
+            let resolved = self.peel_refs(resolved);
+            let defined = match self.tcx.kind(resolved) {
+                None
+                | Some(
+                    TyKind::Int(_)
+                    | TyKind::Float(_)
+                    | TyKind::Simd { .. }
+                    | TyKind::Var(_)
+                    | TyKind::Error
+                    | TyKind::Never
+                    | TyKind::Param { .. },
+                ) => true,
+                Some(TyKind::String) => op == "+",
+                Some(TyKind::Duration) => matches!(op, "+" | "-"),
+                Some(_) => false,
+            };
+            if !defined {
+                let ty = self.render_public_ty(resolved);
+                self.emit(
+                    TypeError::UnresolvedOp {
+                        op: op.to_string(),
+                        lhs: ty.clone(),
+                        rhs: ty,
+                    },
+                    span,
+                );
             }
         }
     }
@@ -2614,6 +2701,29 @@ impl TypeChecker<'_> {
                 return self.tcx.unit();
             }
         }
+        let arith = match op {
+            gossamer_ast::AssignOp::AddAssign => Some("+"),
+            gossamer_ast::AssignOp::SubAssign => Some("-"),
+            gossamer_ast::AssignOp::MulAssign => Some("*"),
+            gossamer_ast::AssignOp::DivAssign => Some("/"),
+            gossamer_ast::AssignOp::RemAssign => Some("%"),
+            _ => None,
+        };
+        if let Some(arith) = arith {
+            // An `Instant` moves by a `Duration`, as `instant + duration` does.
+            let pr = self.infer.resolve(self.tcx, place_ty);
+            let vr = self.infer.resolve(self.tcx, value_ty);
+            if matches!(arith, "+" | "-")
+                && matches!(self.tcx.kind(pr), Some(TyKind::Instant))
+                && matches!(self.tcx.kind(vr), Some(TyKind::Duration))
+            {
+                return self.tcx.unit();
+            }
+            self.unify(place_ty, value_ty, value.span);
+            self.deferred_arith_operands
+                .push((place_ty, arith, place.span));
+            return self.tcx.unit();
+        }
         self.unify(place_ty, value_ty, value.span);
         self.tcx.unit()
     }
@@ -3245,4 +3355,12 @@ fn literal_int_spelling(expr: &Expr) -> Option<String> {
         } => literal_int_spelling(operand).map(|text| format!("-{text}")),
         _ => None,
     }
+}
+
+/// Whether `op` is one of the arithmetic operators `+ - * / %`.
+fn is_arithmetic(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem
+    )
 }

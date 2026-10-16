@@ -241,6 +241,7 @@ pub(crate) const fn int_to_str_symbol(int: gossamer_types::IntTy) -> &'static st
 
 mod ctrl;
 mod expr;
+mod flat_enum;
 mod intrinsic;
 mod method_call;
 pub(crate) use method_call::{ElemAbi, LazyElemFamily};

@@ -20,8 +20,8 @@ fn diagnostics(source: &str) -> Vec<TypeDiagnostic> {
         parse_errors.is_empty(),
         "unexpected parse errors: {parse_errors:?}"
     );
-    let (resolutions, _resolve_errors) = resolve_source_file(&parsed);
-    let _ = gossamer_types::normalize_caller_side_spellings(&mut parsed, &resolutions);
+    let (mut resolutions, _resolve_errors) = resolve_source_file(&parsed);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut parsed, &mut resolutions);
     let mut tcx = TyCtxt::new();
     let (_table, diagnostics) = typecheck_source_file(&parsed, &resolutions, &mut tcx);
     diagnostics

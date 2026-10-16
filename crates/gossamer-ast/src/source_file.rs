@@ -112,6 +112,10 @@ pub struct UseDecl {
     /// platform's).
     #[serde(default)]
     pub cfg: Option<String>,
+    /// `true` for `use path::*`, which imports every variant of the enum
+    /// `path` names.
+    #[serde(default)]
+    pub glob: bool,
 }
 
 impl UseDecl {
@@ -126,13 +130,17 @@ impl UseDecl {
             list: None,
             module: Vec::new(),
             cfg: None,
+            glob: false,
         }
     }
 }
 
 impl PartialEq for UseDecl {
     fn eq(&self, other: &Self) -> bool {
-        self.target == other.target && self.alias == other.alias && self.list == other.list
+        self.target == other.target
+            && self.alias == other.alias
+            && self.list == other.list
+            && self.glob == other.glob
     }
 }
 

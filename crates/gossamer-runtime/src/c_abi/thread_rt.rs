@@ -47,6 +47,13 @@ pub extern "C" fn gos_rt_runtime_scheduler_stats_json() -> *mut std::os::raw::c_
     ffi_entry!({ crate::c_abi::alloc_cstring(scheduler_stats_json().as_bytes()) })
 }
 
+/// `runtime::is_main_thread() -> bool` - whether the caller runs on the
+/// thread the program's `main` runs on.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_runtime_is_main_thread() -> i64 {
+    i64::from(crate::sched_global::on_main_thread())
+}
+
 /// `runtime::cycle_collection_supported() -> bool` - compiled tiers run the
 /// native trial-deletion collector, unlike the Arc-backed bytecode VM.
 #[unsafe(no_mangle)]

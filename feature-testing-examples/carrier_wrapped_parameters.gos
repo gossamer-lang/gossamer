@@ -1,0 +1,62 @@
+// A `Vec` parameter a function wraps in the `Result` or `Option` it answers
+// takes a share of its own, and a field rebound from a binding that only
+// copies a carrier's payload keeps one; each buffer is freed exactly once.
+
+use std::errors
+
+struct Holder {
+    items: Vec<i64>
+}
+
+fn wrap_ok(v: Vec<i64>) -> Result<Vec<i64>, errors::Error> {
+    Ok(v)
+}
+
+fn wrap_some(v: Vec<i64>) -> Option<Vec<i64>> {
+    Some(v)
+}
+
+fn grown(v: Vec<i64>, fail: bool) -> Result<Vec<i64>, errors::Error> {
+    if fail {
+        return Err(errors::new("refused"))
+    }
+    let mut out = v
+    out.push(out.len())
+    Ok(out)
+}
+
+impl Holder {
+    fn grow(&mut self, fail: bool) -> Result<(), errors::Error> {
+        let next = grown(self.items, fail)?
+        self.items = next
+        Ok(())
+    }
+}
+
+fn rebuilt(mut holder: Holder) -> Result<Holder, errors::Error> {
+    let kept = wrap_ok(holder.items)?
+    holder.items = kept
+    Ok(holder)
+}
+
+// Wrapping in a loop takes and gives back a share per pass.
+fn wrapped_lengths(n: i64) -> i64 {
+    let mut total = 0
+    for i in 0..n {
+        let v = #[i, i + 1, i + 2]
+        total += wrap_ok(v).unwrap_or(#[]).len()
+        total += wrap_some(v).unwrap_or(#[]).len()
+    }
+    total
+}
+
+fn main() {
+    let a = #[1, 2]
+    let b = wrap_ok(a).unwrap_or(#[])
+    let c = wrap_some(a).unwrap_or(#[])
+    println(f"{a} {b} {c}")
+    let mut h = Holder { items: #[7] }
+    println(f"{h.grow(false)} {h.grow(true)} {h.items}")
+    println(f"{rebuilt(Holder { items: #[5, 6] })}")
+    println(wrapped_lengths(200))
+}

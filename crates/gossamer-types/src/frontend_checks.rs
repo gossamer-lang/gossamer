@@ -60,7 +60,7 @@ impl PhaseObserver for () {
 /// needs a well-typed program to say anything.
 pub fn check_resolved_unit(
     sf: &mut SourceFile,
-    resolutions: &Resolutions,
+    resolutions: &mut Resolutions,
     resolve_diags: &[ResolveDiagnostic],
     parse_failed: bool,
     earlier_fatal: bool,

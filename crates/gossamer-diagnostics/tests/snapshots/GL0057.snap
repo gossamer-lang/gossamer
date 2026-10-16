@@ -1,0 +1,13 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+assertion_line: 86
+expression: rendered
+---
+--- plain ---
+error[GL0057]: A type, trait, enum variant, associated type, or type parameter - here
+--- framed ---
+error[GL0057]: A type, trait, enum variant, associated type, or type parameter
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

@@ -553,7 +553,11 @@ pub(crate) fn run_with_opts(opts: TestOpts) -> Result<()> {
     } else {
         let mut output = Vec::new();
         for (file, names) in &by_file_vec {
-            let recs = run_tests_filtered(file, names, &style, want_junit);
+            let recs = if opts.worker {
+                run_tests_on_main_thread(file, names, &style, want_junit)
+            } else {
+                run_tests_filtered(file, names, &style, want_junit)
+            };
             let failed = recs.iter().any(|record| !record.passed);
             output.push((file.clone(), recs));
             if opts.fail_fast && failed {
@@ -1070,6 +1074,18 @@ fn run_tests_filtered(
     let tests = tests.to_vec();
     let style = style.clone();
     crate::cmd::with_vm_stack(move || run_tests_filtered_inner(&file, &tests, &style, quiet))
+}
+
+/// Runs an isolated worker's test on the process main thread, where `gos run`
+/// runs `main`: the worker process holds this one test, and a library bound to
+/// the main thread (Cocoa, GLFW) behaves under `gos test` as in the program.
+fn run_tests_on_main_thread(
+    file: &Path,
+    tests: &[TestSpec],
+    style: &TestStyle,
+    quiet: bool,
+) -> Vec<TestRecord> {
+    crate::cmd::on_main_thread(|| run_tests_filtered_inner(file, tests, style, quiet))
 }
 
 #[allow(

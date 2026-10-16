@@ -3210,6 +3210,11 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::runtime",
+        name: "is_main_thread",
+        signature: "fn is_main_thread() -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::runtime",
         name: "at_exit",
         signature: "fn at_exit(hook: Fn() -> ()) -> ()",
     },

@@ -696,11 +696,12 @@ fn jit_compile_set<'a>(
             };
             let (calls, unresolved) = body_user_calls(body, &all_names, &def_to_name);
             let calls_excluded = calls.iter().any(|c| !included.contains(c));
-            if unresolved || calls_excluded {
+            let handles = body_crosses_handle_registries(body);
+            if unresolved || calls_excluded || handles {
                 if trace {
                     eprintln!(
                         "jit: propagate-reject {name} (unresolved={unresolved} \
-                         excluded_callee={calls_excluded})"
+                         excluded_callee={calls_excluded} handles={handles})"
                     );
                 }
                 included.remove(name);
@@ -996,6 +997,28 @@ pub fn jit_eager_loop_bodies(
         .collect()
 }
 
+/// Whether `body` makes or reads an `ffi::Handle` on a tier it could share
+/// with bytecode. The VM keeps handles in a registry of its own values and
+/// native code in the runtime's, so a handle is made and read on one tier:
+/// every such body stays on bytecode. A loop-free `main` is the exception, as
+/// its one call starts on bytecode before any entry is installed and stays
+/// there; a `main` with a loop is compiled before that call.
+fn body_crosses_handle_registries(body: &Body) -> bool {
+    use gossamer_mir::{Rvalue, StatementKind};
+    let uses_handles = body.blocks.iter().any(|block| {
+        block.stmts.iter().any(|stmt| {
+            matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    rvalue: Rvalue::CallIntrinsic { name, .. },
+                    ..
+                } if name.starts_with("gos_rt_ffi_handle_")
+            )
+        })
+    });
+    uses_handles && (body.name != "main" || body_has_loop(body))
+}
+
 fn body_has_loop(body: &Body) -> bool {
     use gossamer_mir::Terminator;
     fn successors(term: &Terminator, out: &mut Vec<usize>) {
@@ -1281,24 +1304,8 @@ fn compile_bodies(
     enum_shapes: &HashMap<u32, u32>,
     struct_shapes: &HashMap<u32, u32>,
 ) -> Result<JitArtifact> {
-    let isa = build_native_isa(false, true)?;
-    let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     let heap = NativeCodeHeap::new();
-    builder.memory_provider(Box::new(NativeCodeHeap::provider(&heap)));
-    let mut runtime_symbol_set = register_runtime_symbols(&mut builder);
-    // Register every `gos_binding_<...>` C-ABI thunk advertised by
-    // the binding crates. Without these, `JITModule::finalize_definitions`
-    // panics with `can't resolve symbol gos_binding_<...>` because
-    // the default libloading-based resolver only sees the dynamic
-    // symbol table, and Cargo binaries don't expose statically-linked
-    // `pub extern "C"` symbols there.
-    let leaked_binding_names = register_binding_symbols(&mut builder);
-    runtime_symbol_set.extend(leaked_binding_names);
-    let libraries = foreign_libraries(filtered);
-    builder.symbol_lookup_fn(Box::new(move |name| {
-        gossamer_runtime::c_abi::ffi::resolve_symbol(name, &libraries)
-    }));
-    let mut module = JITModule::new(builder);
+    let (mut module, runtime_symbol_set) = jit_module(filtered, &heap)?;
 
     // Rename the user's `main` to `gos_main` in the JIT's symbol
     // table. The host binary already exports `main` (the Rust
@@ -1325,6 +1332,9 @@ fn compile_bodies(
             .map(|frames| (module.get_finalized_function(frames.id) as usize, frames))
             .collect();
     let frames = crate::jit_frames::register(cranelift_module::Module::isa(&module), placed);
+    if std::env::var_os("GOS_JIT_TRACE").is_some() {
+        trace_placements(&module, &lowered.function_ids_by_name);
+    }
 
     let body_name_set: std::collections::HashSet<&str> =
         filtered.iter().map(|b| b.name.as_str()).collect();
@@ -1421,6 +1431,47 @@ fn compile_bodies(
             .iter()
             .any(|body| !body_static_symbols(body).is_empty()),
     })
+}
+
+/// A JIT module whose code lives in `heap` and whose symbols resolve to the
+/// runtime, the binding crates, and the foreign libraries `filtered` links,
+/// with the names of the runtime and binding symbols it registered.
+fn jit_module(
+    filtered: &[Body],
+    heap: &std::sync::Arc<NativeCodeHeap>,
+) -> Result<(JITModule, std::collections::HashSet<&'static str>)> {
+    let isa = build_native_isa(false, true)?;
+    let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+    builder.memory_provider(Box::new(NativeCodeHeap::provider(heap)));
+    let mut runtime_symbol_set = register_runtime_symbols(&mut builder);
+    // Register every `gos_binding_<...>` C-ABI thunk advertised by
+    // the binding crates. Without these, `JITModule::finalize_definitions`
+    // panics with `can't resolve symbol gos_binding_<...>` because
+    // the default libloading-based resolver only sees the dynamic
+    // symbol table, and Cargo binaries don't expose statically-linked
+    // `pub extern "C"` symbols there.
+    let leaked_binding_names = register_binding_symbols(&mut builder);
+    runtime_symbol_set.extend(leaked_binding_names);
+    let libraries = foreign_libraries(filtered);
+    builder.symbol_lookup_fn(Box::new(move |name| {
+        gossamer_runtime::c_abi::ffi::resolve_symbol(name, &libraries)
+    }));
+    Ok((JITModule::new(builder), runtime_symbol_set))
+}
+
+/// Prints where each body landed, so a native fault address names its body.
+fn trace_placements(
+    module: &JITModule,
+    function_ids_by_name: &HashMap<String, cranelift_module::FuncId>,
+) {
+    let mut addresses: Vec<(usize, &String)> = function_ids_by_name
+        .iter()
+        .map(|(name, id)| (module.get_finalized_function(*id) as usize, name))
+        .collect();
+    addresses.sort_unstable();
+    for (address, name) in addresses {
+        eprintln!("jit: placed {name} at {address:#x}");
+    }
 }
 
 /// Wraps each body that takes or answers a two-word carrier in an entry thunk,
@@ -1896,7 +1947,7 @@ fn jit_map_key_descriptor_ok(tcx: &TyCtxt, ty: Ty, depth: u32) -> bool {
         // enum varies its layout per variant and keys through the separate
         // `ekey` descriptor instead, handled by [`jit_map_enum_key_ok`].
         TyKind::Adt { def, substs } if def.local < u32::MAX - 64 => {
-            tcx.enum_variant_tys(*def).is_none()
+            (tcx.enum_variant_tys(*def).is_none() || tcx.is_flat_enum_def(def.local))
                 && tcx.adt_field_tys(*def, substs).is_some_and(|fields| {
                     !fields.is_empty()
                         && fields

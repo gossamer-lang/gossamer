@@ -358,7 +358,7 @@ pub(super) fn rebuild_session(declarations: &[String]) -> std::result::Result<()
     if !parse_diags.is_empty() {
         return Err(format_parse_diags(&parse_diags, &map));
     }
-    let (res, resolve_diags) = gossamer_resolve::resolve_source_file(&sf);
+    let (mut res, resolve_diags) = gossamer_resolve::resolve_source_file(&sf);
     if !resolve_diags.is_empty() {
         return Err(format_resolve_diags(&sf, &resolve_diags, &map));
     }
@@ -367,7 +367,7 @@ pub(super) fn rebuild_session(declarations: &[String]) -> std::result::Result<()
     // checker and every tier lower. The REPL drives the front-end phase by
     // phase rather than through `check_frontend`, so it runs the shared
     // normalisation itself to see the same calls a file does.
-    let named_arg_diags = gossamer_types::normalize_caller_side_spellings(&mut sf, &res);
+    let named_arg_diags = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut res);
     if !named_arg_diags.is_empty() {
         return Err(format_resolve_diags(&sf, &named_arg_diags, &map));
     }
