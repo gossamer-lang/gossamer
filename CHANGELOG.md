@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.73.1 - Platform-gated statics
+
+- A `static mut` that `#[cfg]` leaves out of the build, with a collection or `None` as its value (`#[cfg(target_os = "macos")] static mut NAMES: Vec<String> = #[]`), no longer stops the program with `GR0001 cannot find NAMES` on the platforms it is gated off.
+
 ## 0.73.0 - Data-valued parameter defaults, foreign-library fixes, optimizations, gos serve
 
 - A parameter default may hold data: an enum variant (`mode: Mode = Mode::Fast`, `parent: Option<Window> = None`, `samples: Option<i64> = Some(4)`), a struct construction, a tuple, an array, a `Vec`, `Map`, or `Set` literal, a function, `i64::MAX`, or a const of any type, built from values known while compiling. Every name in a default means what it means where the function is declared, on every tier, whatever the call site has in scope. A default computed at run time (a function call, a closure, a `static`, another parameter) is still `GR0014`, which now says the default must be a value known while compiling.

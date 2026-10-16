@@ -1,0 +1,21 @@
+// A heap-valued `static mut` that `#[cfg]` leaves out of this build is not
+// there at all: nothing initializes it, and the one the build keeps works.
+
+#[cfg(target_os = "a-target-no-build-has")]
+static mut NAMES: Vec<String> = #[]
+
+#[cfg(not(target_os = "a-target-no-build-has"))]
+static mut NAMES: Vec<String> = #["first"]
+
+#[cfg(target_os = "a-target-no-build-has")]
+static mut LOOKUP: Map<String, i64> = {}
+
+fn note(name: String) {
+    NAMES.push(name)
+}
+
+fn main() {
+    note("second")
+    note("third")
+    println(f"{NAMES.len()} names: {NAMES}")
+}

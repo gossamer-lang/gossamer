@@ -147,6 +147,10 @@ fn collect_heap_mut_statics(
     out: &mut Vec<(Vec<String>, Expr)>,
 ) {
     for item in items {
+        // An item `#[cfg]` leaves out of this build is not there to assign.
+        if !gossamer_ast::cfg::item_is_active(&item.attrs) {
+            continue;
+        }
         match &item.kind {
             // A foreign static is a C global; its placeholder initializer
             // never runs.

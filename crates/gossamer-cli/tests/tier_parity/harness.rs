@@ -1662,6 +1662,7 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/static_map_of_structs.gos"),
     spec("feature-testing-examples/mut_field_beside_sibling_reads.gos"),
     spec("feature-testing-examples/param_stored_into_field.gos"),
+    spec("feature-testing-examples/cfg_inactive_static_mut.gos"),
     spec("feature-testing-examples/user_methods_named_like_carrier_predicates.gos"),
     Spec {
         allow_nonzero: true,
