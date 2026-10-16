@@ -276,6 +276,7 @@ feature-testing-examples/metrics_observability.gos	no hot body
 feature-testing-examples/module_aggregate_slots.gos	aggregate print
 feature-testing-examples/module_impl_ordering.gos	no hot body
 feature-testing-examples/module_same_fn_names.gos	no hot body
+feature-testing-examples/mut_field_beside_sibling_reads.gos	&mut aggregate param
 feature-testing-examples/mut_param_is_a_copy.gos	no hot body
 feature-testing-examples/mut_ref_container_params.gos	&mut aggregate param
 feature-testing-examples/mut_ref_params.gos	callable local
@@ -358,6 +359,7 @@ feature-testing-examples/sort_with_closure.gos	no hot body
 feature-testing-examples/spawn_join.gos	no hot body
 feature-testing-examples/spawn_operand_order.gos	cross-goroutine
 feature-testing-examples/spawn_shared_captures.gos	cross-goroutine
+feature-testing-examples/static_map_of_structs.gos	bytecode-only local
 feature-testing-examples/static_mut_basic.gos	no hot body
 feature-testing-examples/static_mut_goroutines.gos	bytecode-only local
 feature-testing-examples/static_values_across_threads.gos	cross-goroutine

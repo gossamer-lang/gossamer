@@ -3,7 +3,6 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use gossamer_std::http::server;
@@ -30,24 +29,24 @@ pub(crate) fn serve(dir: &Path, port: u16, bind: &str) -> Result<()> {
     std::io::stdout()
         .flush()
         .context("serve: flushing stdout")?;
-    let site = Arc::new(Site {
-        files: FileServer::new(root.clone()),
-        root,
-    });
+    let mut files = FileServer::new(root.clone());
+    // A file is sent from disk as the client reads it, so its size costs no
+    // memory and needs no cap.
+    files.max_file_bytes = 0;
+    let site = Site { files, root };
     let config = server::Config::default();
-    server::run_dispatch(listener, &config, move |request, sink| {
-        let site = Arc::clone(&site);
-        std::thread::spawn(move || {
-            let response = site.answer(&request);
-            eprintln!(
-                "{} \"{} {}\" {}",
-                request.peer_addr,
-                request.method.as_str(),
-                request.path,
-                response.status.0
-            );
-            sink.send(response);
-        });
+    server::run_inline(listener, &config, move |request| {
+        let response = site.answer(&request);
+        let line = format!(
+            "{} \"{} {}\" {}\n",
+            request.peer_addr,
+            request.method.as_str(),
+            request.path,
+            response.status.0
+        );
+        // One write per line keeps lines from concurrent connections whole.
+        let _ = std::io::stderr().write_all(line.as_bytes());
+        response
     })
     .with_context(|| format!("serve: serving {bound}"))
 }
@@ -96,6 +95,11 @@ impl Site {
     /// it. Each segment of the location is escaped as a URL spells it.
     fn directory_redirect(&self, rel: &str) -> Option<Response> {
         if rel.is_empty() || rel.ends_with('/') {
+            return None;
+        }
+        // Most requests name a file: one stat settles that before the
+        // directory's path is resolved.
+        if !std::fs::metadata(self.root.join(rel)).is_ok_and(|meta| meta.is_dir()) {
             return None;
         }
         let dir = self.root.join(rel).canonicalize().ok()?;

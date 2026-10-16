@@ -746,6 +746,378 @@ pub mod server {
         Ok(())
     }
 
+    /// How long a connection thread waits for work before it exits, so a
+    /// burst leaves no threads behind once it passes.
+    const INLINE_WORKER_LINGER: Duration = Duration::from_secs(10);
+
+    /// Stack reserved for a connection thread: request parsing and a handler
+    /// that answers in place, with no deep recursion.
+    const INLINE_WORKER_STACK_BYTES: usize = 256 * 1024;
+
+    /// Accept loop that answers each request on a thread of a small pool, by
+    /// calling `handle` there.
+    ///
+    /// For a handler that needs nothing from the thread that started the
+    /// server - a static file server, a proxy - this is the cheapest shape: no
+    /// request crosses a thread. The pool holds at most one thread per core,
+    /// started as connections arrive and gone once they stop. A connection
+    /// waiting for its next keep-alive request holds no thread: it waits in
+    /// the poller until it is readable, and is closed once it has been idle
+    /// for `config.idle_timeout`.
+    ///
+    /// Returns once `config.shutdown` is set and the next connection arrives.
+    pub fn run_inline<H>(listener: TcpListener, config: &Config, handle: H) -> io::Result<()>
+    where
+        H: Fn(Request) -> Response + Send + Sync + 'static,
+    {
+        let _ = listener.set_nonblocking(false);
+        let pool = Arc::new(InlinePool {
+            work: parking_lot::Mutex::new(InlineWork::default()),
+            ready: parking_lot::Condvar::new(),
+            max_workers: std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+            parked: Parker::start(config.effective_idle_timeout())?,
+            config: config.clone(),
+            handle,
+        });
+        Parker::spawn_waiter(&pool)?;
+        loop {
+            let (stream, _) = match listener.accept() {
+                Ok(accepted) => accepted,
+                Err(err) if is_ignorable(&err) || err.kind() == io::ErrorKind::Interrupted => {
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            if config.shutdown.load(Ordering::Acquire) {
+                let _ = stream.shutdown(Shutdown::Both);
+                return Ok(());
+            }
+            if !try_acquire_connection(config.max_connections) {
+                let mut stream = stream;
+                let _ = stream.write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+                let _ = stream.shutdown(Shutdown::Both);
+                continue;
+            }
+            let permit = ConnectionPermit;
+            if let Some(timeout) = config.read_timeout {
+                let _ = stream.set_read_timeout(Some(timeout));
+                let _ = stream.set_write_timeout(Some(timeout));
+            }
+            let _ = stream.set_nodelay(true);
+            let peer = stream
+                .peer_addr()
+                .map_or_else(|_| String::new(), |a| a.to_string());
+            InlinePool::submit(
+                &pool,
+                InlineConn {
+                    reader: BufReader::new(stream),
+                    peer,
+                    _permit: permit,
+                },
+            );
+        }
+    }
+
+    /// One connection [`run_inline`] serves, with the read buffer that
+    /// outlives each request on it.
+    struct InlineConn {
+        reader: BufReader<TcpStream>,
+        peer: String,
+        _permit: ConnectionPermit,
+    }
+
+    /// The threads [`run_inline`] answers on, the connections waiting for
+    /// one, and the poller idle connections wait in.
+    struct InlinePool<H> {
+        work: parking_lot::Mutex<InlineWork>,
+        ready: parking_lot::Condvar,
+        max_workers: usize,
+        parked: Parker,
+        config: Config,
+        handle: H,
+    }
+
+    #[derive(Default)]
+    struct InlineWork {
+        /// Connections with a request to read.
+        queue: std::collections::VecDeque<InlineConn>,
+        /// Threads waiting for a connection.
+        idle: usize,
+        /// Threads started and not yet exited.
+        workers: usize,
+    }
+
+    impl<H> InlinePool<H>
+    where
+        H: Fn(Request) -> Response + Send + Sync + 'static,
+    {
+        /// Queues `conn` for a thread: a waiting one when there is one, a new
+        /// one while the pool is below its size, and otherwise the next to
+        /// finish.
+        fn submit(pool: &Arc<Self>, conn: InlineConn) {
+            let mut work = pool.work.lock();
+            work.queue.push_back(conn);
+            if work.queue.len() <= work.idle {
+                drop(work);
+                pool.ready.notify_one();
+                return;
+            }
+            if work.workers >= pool.max_workers {
+                return;
+            }
+            work.workers += 1;
+            drop(work);
+            let worker = Arc::clone(pool);
+            let spawned = std::thread::Builder::new()
+                .name("gossamer-http-conn".into())
+                .stack_size(INLINE_WORKER_STACK_BYTES)
+                .spawn(move || worker.work());
+            if spawned.is_err() {
+                // The connections queued for it go to the threads already
+                // running.
+                pool.work.lock().workers -= 1;
+            }
+        }
+
+        fn work(&self) {
+            while let Some(conn) = self.next_conn() {
+                if let Some(conn) = serve_inline_connection(conn, &self.config, &self.handle) {
+                    self.parked.park(conn);
+                }
+            }
+        }
+
+        /// The next queued connection, or `None` once the thread has waited
+        /// [`INLINE_WORKER_LINGER`] with none arriving, the thread then no
+        /// longer counted.
+        fn next_conn(&self) -> Option<InlineConn> {
+            let mut work = self.work.lock();
+            loop {
+                if let Some(conn) = work.queue.pop_front() {
+                    return Some(conn);
+                }
+                work.idle += 1;
+                let timed_out = self
+                    .ready
+                    .wait_for(&mut work, INLINE_WORKER_LINGER)
+                    .timed_out();
+                work.idle -= 1;
+                if timed_out && work.queue.is_empty() {
+                    work.workers -= 1;
+                    return None;
+                }
+            }
+        }
+    }
+
+    /// The poller connections idle in between keep-alive requests, and the
+    /// thread that waits on it.
+    struct Parker {
+        poll: parking_lot::Mutex<Option<mio::Poll>>,
+        registry: mio::Registry,
+        waker: mio::Waker,
+        parked: parking_lot::Mutex<ParkedConns>,
+        idle_timeout: Option<Duration>,
+    }
+
+    #[derive(Default)]
+    struct ParkedConns {
+        next_token: usize,
+        /// Each idle connection by its poller token, with the clone of its
+        /// socket registered for readiness and when it stops being kept.
+        conns: std::collections::HashMap<usize, (InlineConn, mio::net::TcpStream, Option<Instant>)>,
+    }
+
+    /// The poller token the waker answers to.
+    const PARKER_WAKE: mio::Token = mio::Token(usize::MAX);
+
+    impl Parker {
+        fn start(idle_timeout: Option<Duration>) -> io::Result<Self> {
+            let poll = mio::Poll::new()?;
+            let registry = poll.registry().try_clone()?;
+            let waker = mio::Waker::new(&registry, PARKER_WAKE)?;
+            Ok(Self {
+                poll: parking_lot::Mutex::new(Some(poll)),
+                registry,
+                waker,
+                parked: parking_lot::Mutex::new(ParkedConns::default()),
+                idle_timeout,
+            })
+        }
+
+        /// Starts the thread that hands readable connections back to `pool`
+        /// and closes those idle past the timeout.
+        fn spawn_waiter<H>(pool: &Arc<InlinePool<H>>) -> io::Result<()>
+        where
+            H: Fn(Request) -> Response + Send + Sync + 'static,
+        {
+            let Some(mut poller) = pool.parked.poll.lock().take() else {
+                return Ok(());
+            };
+            let pool = Arc::clone(pool);
+            std::thread::Builder::new()
+                .name("gossamer-http-park".into())
+                .stack_size(INLINE_WORKER_STACK_BYTES)
+                .spawn(move || {
+                    let mut events = mio::Events::with_capacity(256);
+                    loop {
+                        let wait = pool
+                            .parked
+                            .next_deadline()
+                            .map(|deadline| deadline.saturating_duration_since(Instant::now()));
+                        if let Err(err) = poller.poll(&mut events, wait) {
+                            if err.kind() == io::ErrorKind::Interrupted {
+                                continue;
+                            }
+                            eprintln!("http: poll error: {err}");
+                            return;
+                        }
+                        for event in &events {
+                            if event.token() == PARKER_WAKE {
+                                continue;
+                            }
+                            if let Some(conn) = pool.parked.unpark(event.token().0) {
+                                InlinePool::submit(&pool, conn);
+                            }
+                        }
+                        pool.parked.close_expired();
+                    }
+                })
+                .map(|_| ())
+        }
+
+        /// Keeps `conn` until it is readable, without a thread.
+        fn park(&self, conn: InlineConn) {
+            let Ok(watched) = conn.reader.get_ref().try_clone() else {
+                return;
+            };
+            // The clone shares the socket's blocking mode; readiness needs it
+            // nonblocking, and `unpark` restores it.
+            if watched.set_nonblocking(true).is_err() {
+                return;
+            }
+            let mut watched = mio::net::TcpStream::from_std(watched);
+            let deadline = self.idle_timeout.map(|idle| Instant::now() + idle);
+            let mut parked = self.parked.lock();
+            let token = parked.next_token;
+            parked.next_token = parked.next_token.wrapping_add(1) % PARKER_WAKE.0;
+            if self
+                .registry
+                .register(&mut watched, mio::Token(token), mio::Interest::READABLE)
+                .is_err()
+            {
+                return;
+            }
+            let was_empty = parked.conns.is_empty();
+            parked.conns.insert(token, (conn, watched, deadline));
+            drop(parked);
+            // A waiter with nothing parked sleeps with no deadline to keep.
+            if was_empty {
+                let _ = self.waker.wake();
+            }
+        }
+
+        fn unpark(&self, token: usize) -> Option<InlineConn> {
+            let (conn, mut watched, _) = self.parked.lock().conns.remove(&token)?;
+            let _ = self.registry.deregister(&mut watched);
+            drop(watched);
+            if conn.reader.get_ref().set_nonblocking(false).is_err() {
+                return None;
+            }
+            Some(conn)
+        }
+
+        fn next_deadline(&self) -> Option<Instant> {
+            self.parked
+                .lock()
+                .conns
+                .values()
+                .filter_map(|(_, _, deadline)| *deadline)
+                .min()
+        }
+
+        fn close_expired(&self) {
+            let now = Instant::now();
+            let mut parked = self.parked.lock();
+            let expired: Vec<usize> = parked
+                .conns
+                .iter()
+                .filter(|(_, (_, _, deadline))| deadline.is_some_and(|d| d <= now))
+                .map(|(token, _)| *token)
+                .collect();
+            for token in expired {
+                if let Some((conn, mut watched, _)) = parked.conns.remove(&token) {
+                    let _ = self.registry.deregister(&mut watched);
+                    let _ = conn.reader.get_ref().shutdown(Shutdown::Both);
+                }
+            }
+        }
+    }
+
+    /// Answers the requests `conn` holds, each with `handle` on this thread,
+    /// for as long as the next one is already here. Answers the connection
+    /// back when it is kept alive with nothing more to read yet, and `None`
+    /// once it is closed.
+    fn serve_inline_connection<H>(
+        mut conn: InlineConn,
+        config: &Config,
+        handle: &H,
+    ) -> Option<InlineConn>
+    where
+        H: Fn(Request) -> Response,
+    {
+        loop {
+            if config.shutdown.load(Ordering::Acquire) {
+                break;
+            }
+            match read_request(&mut conn.reader, config) {
+                Ok(Some((mut request, http10, client_close, _cancel))) => {
+                    request.peer_addr.clone_from(&conn.peer);
+                    let mut response = handle(request);
+                    let keep_alive = !client_close && !wants_close(&response.headers);
+                    announce_connection(&mut response, http10, keep_alive);
+                    if let Some(t) = config.effective_write_timeout() {
+                        let _ = conn.reader.get_mut().set_write_timeout(Some(t));
+                    }
+                    if let Err(err) = write_response(
+                        conn.reader.get_mut(),
+                        &mut response,
+                        config.server_name.as_deref(),
+                    ) {
+                        if !is_ignorable(&err) {
+                            eprintln!("http: write error: {err}");
+                        }
+                        break;
+                    }
+                    if !keep_alive {
+                        break;
+                    }
+                    if conn.reader.buffer().is_empty() {
+                        return Some(conn);
+                    }
+                }
+                Ok(None) => break,
+                Err(err) => {
+                    if let Some(rejected) = rejection_of(&err) {
+                        let mut response = rejection_response(rejected);
+                        let _ = write_response_generic(
+                            conn.reader.get_mut(),
+                            &mut response,
+                            config.server_name.as_deref(),
+                        );
+                    } else if !is_ignorable(&err) {
+                        eprintln!("http: parse error: {err}");
+                    }
+                    break;
+                }
+            }
+        }
+        let _ = conn.reader.get_mut().shutdown(Shutdown::Both);
+        None
+    }
+
     fn accept_loop(
         listener: TcpListener,
         shutdown: Arc<AtomicBool>,
@@ -986,20 +1358,31 @@ pub mod server {
         active_cancel: &ActiveCancel,
         watch_socket: RawPeerSocket,
     ) -> (
-        std::sync::mpsc::Sender<()>,
+        std::sync::mpsc::Sender<RequestPhase>,
         io::Result<std::thread::JoinHandle<()>>,
     ) {
         use std::sync::mpsc::RecvTimeoutError;
 
         let active_cancel = Arc::clone(active_cancel);
         let shutdown = Arc::clone(&config.shutdown);
-        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let (phase_tx, phase_rx) = std::sync::mpsc::channel::<RequestPhase>();
         let watcher = std::thread::Builder::new()
             .name("gossamer-http-watcher".into())
             .spawn(move || {
+                // Between requests there is nothing to cancel, so the watcher
+                // sleeps until the next one starts rather than probing a
+                // connection that is only waiting.
+                let mut running = false;
                 loop {
-                    match done_rx.recv_timeout(Duration::from_millis(10)) {
-                        Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+                    let next = if running {
+                        phase_rx.recv_timeout(Duration::from_millis(10))
+                    } else {
+                        phase_rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
+                    };
+                    match next {
+                        Ok(RequestPhase::Running) => running = true,
+                        Ok(RequestPhase::Answered) => running = false,
+                        Err(RecvTimeoutError::Disconnected) => return,
                         Err(RecvTimeoutError::Timeout) => {
                             if shutdown.load(Ordering::Acquire) {
                                 if let Some(c) = active_cancel.lock().take() {
@@ -1020,7 +1403,15 @@ pub mod server {
                     }
                 }
             });
-        (done_tx, watcher)
+        (phase_tx, watcher)
+    }
+
+    /// Where a connection's request is, as its watcher is told.
+    enum RequestPhase {
+        /// A request is in its handler: watch for the peer leaving.
+        Running,
+        /// The handler answered: nothing to watch until the next request.
+        Answered,
     }
 
     /// Per-connection worker. Runs as a goroutine on the M:N
@@ -1056,7 +1447,7 @@ pub mod server {
         let mut reader = BufReader::new(stream);
 
         let active_cancel: ActiveCancel = Arc::new(parking_lot::Mutex::new(None));
-        let (watcher_done_tx, watcher) =
+        let (watcher_phase_tx, watcher) =
             spawn_connection_watcher(&config, &active_cancel, watch_socket);
 
         loop {
@@ -1079,6 +1470,7 @@ pub mod server {
                 Ok(Some((mut request, http10, client_close, cancel))) => {
                     request.peer_addr.clone_from(&peer_addr);
                     *active_cancel.lock() = Some(cancel);
+                    let _ = watcher_phase_tx.send(RequestPhase::Running);
                     let (resp_tx, resp_rx) = std::sync::mpsc::channel::<Response>();
                     if dispatch_tx.send((request, resp_tx)).is_err() {
                         active_cancel.lock().take();
@@ -1088,6 +1480,7 @@ pub mod server {
                     // Handler returned - clear the active cancel so the
                     // watcher doesn't fire on a stale token.
                     active_cancel.lock().take();
+                    let _ = watcher_phase_tx.send(RequestPhase::Answered);
 
                     match result {
                         Ok(mut response) => {
@@ -1133,7 +1526,7 @@ pub mod server {
             }
         }
         // Signal the per-connection watcher to exit and wait for it.
-        drop(watcher_done_tx);
+        drop(watcher_phase_tx);
         if let Ok(w) = watcher {
             let _ = w.join();
         }
@@ -1938,13 +2331,22 @@ pub mod server {
         let reason = response.status.reason().unwrap_or("");
         let mut headers = response.headers.clone();
         let streamed = response.body_stream.is_some();
-        let chunked = streamed
-            || headers
-                .get("transfer-encoding")
-                .is_some_and(|v| v.eq_ignore_ascii_case("chunked"));
-        if streamed {
+        let declared_chunked = headers
+            .get("transfer-encoding")
+            .is_some_and(|v| v.eq_ignore_ascii_case("chunked"));
+        // A stream whose length the handler declared - a file - goes out as
+        // exactly that many bytes, so the client learns the size up front.
+        let sized_stream = if streamed && !declared_chunked {
+            headers
+                .get("content-length")
+                .and_then(|v| v.trim().parse::<u64>().ok())
+        } else {
+            None
+        };
+        let chunked = (streamed && sized_stream.is_none()) || declared_chunked;
+        if streamed && sized_stream.is_none() {
             // The streamed body's length is unknown up front, so
-            // the wire framing is always chunked.
+            // the wire framing is chunked.
             headers.insert("transfer-encoding", "chunked");
         }
         if !chunked && !headers.contains("content-length") {
@@ -2000,7 +2402,19 @@ pub mod server {
         out.push_str("\r\n");
         if let Some(BodyStream(mut reader)) = response.body_stream.take() {
             stream.write_all(out.as_bytes())?;
-            return drain_chunked(stream, reader.as_mut());
+            let Some(len) = sized_stream else {
+                return drain_chunked(stream, reader.as_mut());
+            };
+            let sent = io::copy(&mut reader.as_mut().take(len), stream)?;
+            // A stream that ended short of its declared length leaves the
+            // response unframeable; the connection has to close on it.
+            if sent != len {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "response body ended before its content-length",
+                ));
+            }
+            return Ok(());
         }
         let body = &response.body;
         if chunked {

@@ -2747,3 +2747,72 @@ fn build(config: Config) -> App {
         "build hands exactly one Map table to its caller"
     );
 }
+
+#[test]
+fn a_parameter_stored_into_a_field_keeps_the_callers_share() {
+    // The caller holds a by-value argument for the whole call, so the field
+    // takes a share of its own and the callee gives back only the field's
+    // previous value.
+    let source = r#"
+struct Hit { id: String, options: Vec<String> }
+
+fn set(h: &mut Hit, options: Vec<String>) {
+    h.options = options
+}
+
+fn main() {
+    let mut h = Hit { id: "a", options: #[] }
+    set(&mut h, #["p"])
+    println(f"{h.options}")
+}
+"#;
+    let (bodies, _) = build(source);
+    let set = bodies.iter().find(|b| b.name == "set").expect("set body");
+    let calls = intrinsic_calls(set);
+    let minted = calls.iter().filter(|name| *name == "gos_rt_vec_retain").count();
+    let released = calls.iter().filter(|name| *name == "gos_rt_vec_free").count();
+    assert_eq!(minted, 1, "the field takes its share: {calls:?}");
+    assert_eq!(released, 1, "only the field's old value goes back: {calls:?}");
+}
+
+#[test]
+fn a_nested_field_handed_to_a_rebound_local_leaves_or_shares_the_field() {
+    // `last = cx.canvas.pixels` in a loop: the aggregate still releases its
+    // field, so the binding has to take the vector out of it or a share of it.
+    let source = r#"
+struct Canvas { pixels: Vec<u8>, width: i64 }
+struct Cx { canvas: Canvas, tags: Vec<String> }
+
+fn main() {
+    let mut last = #[]
+    for f in 0..3 {
+        let cx = Cx { canvas: Canvas { pixels: #[f as u8; 4], width: 1 }, tags: #["t"] }
+        last = cx.canvas.pixels
+    }
+    println(f"{last}")
+}
+"#;
+    let (bodies, _) = build(source);
+    let main = bodies.iter().find(|b| b.name == "main").expect("main body");
+    let stmts: Vec<String> = main
+        .blocks
+        .iter()
+        .flat_map(|b| b.stmts.iter())
+        .map(|stmt| format!("{:?}", stmt.kind))
+        .collect();
+    let nested = "projection: [Field(0), Field(0)] }";
+    let read = stmts
+        .iter()
+        .position(|s| s.contains("rvalue: Use(Copy(Place {") && s.contains(nested))
+        .expect("the nested field read");
+    let after = &stmts[read + 1..];
+    let emptied = after
+        .iter()
+        .take(4)
+        .any(|s| s.contains(nested) && s.contains("rvalue: Use(Const(Int(0)))"));
+    let shared = after
+        .iter()
+        .take(4)
+        .any(|s| s.contains("gos_rt_vec_retain"));
+    assert!(emptied || shared, "{stmts:#?}");
+}

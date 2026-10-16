@@ -67,6 +67,8 @@ struct Counters {
     /// compute "instructions per call" - a useful denominator
     /// for "is dispatch the bottleneck or is per-op work?".
     frame_enters: u64,
+    /// Instructions executed in each function's chunk, by name.
+    fn_ops: std::collections::HashMap<&'static str, u64>,
 }
 
 impl Default for Counters {
@@ -93,6 +95,7 @@ impl Default for Counters {
             pool_arg_miss: 0,
             slow_call_dispatch: 0,
             frame_enters: 0,
+            fn_ops: std::collections::HashMap::new(),
         }
     }
 }
@@ -131,11 +134,12 @@ fn op_tag(_op: Op) -> usize {
 /// this once per executed instruction.
 #[inline]
 #[cfg(feature = "profile")]
-pub(crate) fn record_op(op: Op) {
+pub(crate) fn record_op(function: &'static str, op: Op) {
     let tag = op_tag(op);
     CTRS.with(|c| {
         let mut c = c.borrow_mut();
         c.instr_count += 1;
+        *c.fn_ops.entry(function).or_insert(0) += 1;
         if tag < MAX_OPS {
             c.ops[tag] += 1;
         }
@@ -153,7 +157,7 @@ pub(crate) fn record_op(op: Op) {
 
 #[inline]
 #[cfg(not(feature = "profile"))]
-pub(crate) fn record_op(_op: Op) {}
+pub(crate) fn record_op(_function: &'static str, _op: Op) {}
 
 /// Reset the dispatch loop's prev-op tracker - called on entry
 /// to each frame so cross-call pairs are dropped.
@@ -232,6 +236,22 @@ pub fn dump_report() -> String {
                 out,
                 "instructions/frame: {:.1}",
                 c.instr_count as f64 / c.frame_enters as f64
+            );
+        }
+        let _ = writeln!(out);
+
+        let _ = writeln!(out, "### Top 25 functions by instructions");
+        let mut fns: Vec<(&str, u64)> = c.fn_ops.iter().map(|(n, k)| (*n, *k)).collect();
+        fns.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+        for (i, (name, count)) in fns.iter().take(25).enumerate() {
+            let pct = 100.0 * (*count as f64) / (c.instr_count.max(1) as f64);
+            let _ = writeln!(
+                out,
+                "  {:>2}. {:<44} {:>14}  {:>5.1}%",
+                i + 1,
+                name,
+                count,
+                pct
             );
         }
         let _ = writeln!(out);

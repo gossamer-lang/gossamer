@@ -377,10 +377,6 @@ impl<'tcx> FnBuilder<'tcx> {
         // (`cell_takes`); a non-local place (`&mut arr[i]`, `&mut
         // obj.field`, `&mut <scalar local>`) takes the cell's inner into a
         // temp and re-stores it through the place (`place_takes`).
-        let mut cell_takes: Vec<(Reg, Reg)> = Vec::new();
-        let mut place_takes: Vec<(&HirExpr, Reg)> = Vec::new();
-        let mut window_takes: Vec<WindowTake> = Vec::new();
-        let mut arg_regs: Vec<Reg> = Vec::with_capacity(args.len());
         // Renderer calls need unsigned-64 arguments boxed as `Value::Uint` so
         // values above `i64::MAX` render as large positive decimals. This
         // mirrors the compiled tiers' printer choice from declared type and
@@ -397,90 +393,46 @@ impl<'tcx> FnBuilder<'tcx> {
             "to_string"
         };
         let callee_param_tys = self.callee_param_tys(callee);
-        for (i, arg) in args.iter().enumerate() {
-            let expected_ty = callee_param_tys
-                .as_ref()
-                .and_then(|params| params.get(i))
-                .copied();
-            // A renderer or encoder reads its arguments and never writes one
-            // back, so a reference argument reaches it as the value it names,
-            // described like any other rendered value.
-            let reads_only = unsigned_leaves_call;
-            if !reads_only && let Some(home) = self.mut_ref_arg_home(arg, expected_ty) {
-                // `&mut <local Vec>`: move the local into the cell when no
-                // sibling argument reads it, giving the callee unique
-                // ownership so its first mutation grows in place instead of
-                // copy-on-writing the whole buffer. A read elsewhere keeps
-                // the clone, matching the compiled tiers' by-pointer
-                // snapshot semantics (see the `&mut self` precedent).
-                let cell = self.alloc_reg();
-                if Self::mut_ref_place_name(arg)
-                    .is_some_and(|name| Self::mut_arg_move_safe(args, i, name))
+        let mut takes = CallTakes::default();
+        let pending = self.lower_args(
+            args,
+            !unsigned_leaves_call,
+            callee_param_tys.as_deref(),
+            &mut takes,
+            |this, _, arg| {
+                if render_call && let Some(reg) = this.compile_user_rendering(arg, render_method)? {
+                    return Ok(reg);
+                }
+                if unsigned_leaves_call && this.expr_has_uint_display_provenance(arg) {
+                    let tr = this.compile_expr_ex(arg)?;
+                    let src_i = this.as_i64(tr);
+                    let dst_v = this.alloc_reg();
+                    this.emit(Op::I64ToUint { dst_v, src_i });
+                    return Ok(dst_v);
+                }
+                if unsigned_leaves_call
+                    && let Some(desc) = if encodes_json {
+                        crate::value::json_descriptor(this.tcx, this.static_ty(arg))
+                    } else {
+                        this.uint_leaves_desc(this.static_ty(arg))
+                    }
                 {
-                    self.emit(Op::CellNewMove {
-                        dst: cell,
-                        src: home,
-                    });
-                } else {
-                    self.emit(Op::CellNew {
-                        dst: cell,
-                        src: home,
-                    });
+                    // An integer the type declared `u64` / `usize` reads as
+                    // unsigned wherever it sits, exactly as the compiled tiers'
+                    // element, payload, and slot tags render it.
+                    let src = this.compile_expr(arg)?;
+                    let dst = this.alloc_reg();
+                    let desc_idx = this.const_idx(
+                        ConstKey::String(desc.clone()),
+                        Value::String(desc.as_str().into()),
+                    );
+                    this.emit(Op::UintLeaves { dst, src, desc_idx });
+                    return Ok(dst);
                 }
-                cell_takes.push((home, cell));
-                arg_regs.push(cell);
-            } else if !reads_only
-                && let Some(place) = Self::mut_ref_writeback_place(self.tcx, arg, expected_ty)
-                && let Some(take) = self.compile_window_take(place)?
-            {
-                arg_regs.push(take.cell);
-                window_takes.push(take);
-            } else if !reads_only
-                && let Some(place) = Self::mut_ref_writeback_place(self.tcx, arg, expected_ty)
-            {
-                let (cell, local_home) = self.place_write_back_cell(place, args, i)?;
-                match local_home {
-                    // The local's home register takes the post-call value
-                    // directly. The temp + place-store form would leave a
-                    // lingering clone in the temp register, forcing
-                    // copy-on-write on every later mutation through a
-                    // repeatedly-called `&mut <local>`.
-                    Some(home) => cell_takes.push((home, cell)),
-                    None => place_takes.push((place, cell)),
-                }
-                arg_regs.push(cell);
-            } else if render_call
-                && let Some(reg) = self.compile_user_rendering(arg, render_method)?
-            {
-                arg_regs.push(reg);
-            } else if unsigned_leaves_call && self.expr_has_uint_display_provenance(arg) {
-                let tr = self.compile_expr_ex(arg)?;
-                let src_i = self.as_i64(tr);
-                let dst_v = self.alloc_reg();
-                self.emit(Op::I64ToUint { dst_v, src_i });
-                arg_regs.push(dst_v);
-            } else if unsigned_leaves_call
-                && let Some(desc) = if encodes_json {
-                    crate::value::json_descriptor(self.tcx, self.static_ty(arg))
-                } else {
-                    self.uint_leaves_desc(self.static_ty(arg))
-                }
-            {
-                // An integer the type declared `u64` / `usize` reads as
-                // unsigned wherever it sits, exactly as the compiled tiers'
-                // element, payload, and slot tags render it.
-                let src = self.compile_expr(arg)?;
-                let dst = self.alloc_reg();
-                let desc_idx = self.const_idx(
-                    ConstKey::String(desc.clone()),
-                    Value::String(desc.as_str().into()),
-                );
-                self.emit(Op::UintLeaves { dst, src, desc_idx });
-                arg_regs.push(dst);
-            } else {
-                arg_regs.push(self.compile_expr(arg)?);
-            }
-        }
+                this.compile_expr(arg)
+            },
+        )?;
+        let arg_regs = self.finish_args(args, pending, &mut takes)?;
         for (i, arg_reg) in arg_regs.iter().enumerate() {
             let slot = args_start
                 .checked_add(u16::try_from(i).unwrap())
@@ -564,8 +516,129 @@ impl<'tcx> FnBuilder<'tcx> {
                 may_have_cells,
             })
         };
-        self.emit_write_backs(call, &cell_takes, &place_takes, &window_takes)?;
+        self.emit_write_backs(call, &takes.cells, &takes.places, &takes.windows)?;
         Ok(dst)
+    }
+
+    /// Lowers a call's arguments in order, but for each `&mut` argument that
+    /// names a local or a field of one: that place is read by
+    /// [`Self::finish_args`], once every other argument has run, so the callee
+    /// reaches it as it stands at the call, as the compiled tiers' pointer to
+    /// it does. `lends` is false for a callee that only reads its arguments;
+    /// `value_arg` lowers every argument that lends no place.
+    pub(super) fn lower_args<'a>(
+        &mut self,
+        args: &'a [HirExpr],
+        lends: bool,
+        param_tys: Option<&[Ty]>,
+        takes: &mut CallTakes<'a>,
+        mut value_arg: impl FnMut(&mut Self, usize, &'a HirExpr) -> RuntimeResult<Reg>,
+    ) -> RuntimeResult<PendingArgs> {
+        let mut pending = PendingArgs {
+            slots: Vec::with_capacity(args.len()),
+            deferred: Vec::new(),
+        };
+        for (i, arg) in args.iter().enumerate() {
+            let expected_ty = param_tys.and_then(|params| params.get(i)).copied();
+            if lends && self.mut_arg_names_local_place(arg, expected_ty) {
+                pending.deferred.push((i, expected_ty));
+                pending.slots.push(None);
+            } else if lends
+                && let Some(cell) = self.compile_mut_place_arg(args, i, expected_ty, takes)?
+            {
+                pending.slots.push(Some(cell));
+            } else {
+                pending.slots.push(Some(value_arg(self, i, arg)?));
+            }
+        }
+        Ok(pending)
+    }
+
+    /// Reads the places [`Self::lower_args`] left for last and answers every
+    /// argument's register in order.
+    pub(super) fn finish_args<'a>(
+        &mut self,
+        args: &'a [HirExpr],
+        pending: PendingArgs,
+        takes: &mut CallTakes<'a>,
+    ) -> RuntimeResult<Vec<Reg>> {
+        let PendingArgs {
+            mut slots,
+            deferred,
+        } = pending;
+        for (i, expected_ty) in deferred {
+            slots[i] = self.compile_mut_place_arg(args, i, expected_ty, takes)?;
+        }
+        slots
+            .into_iter()
+            .collect::<Option<_>>()
+            .ok_or(RuntimeError::Unsupported("`&mut` argument naming no place"))
+    }
+
+    /// Whether `arg` passes `&mut` of a local, or of a field chain below one.
+    fn mut_arg_names_local_place(&self, arg: &HirExpr, expected_ty: Option<Ty>) -> bool {
+        if self.mut_ref_arg_home(arg, expected_ty).is_some() {
+            return true;
+        }
+        Self::mut_ref_writeback_place(self.tcx, arg, expected_ty).is_some_and(|place| {
+            Self::path_single_seg_name(place).is_some_and(|name| self.lookup_local(name).is_some())
+                || self.local_field_chain(place)
+        })
+    }
+
+    /// Lowers the `i`-th argument when it lends a place by `&mut`: the
+    /// write-back cell the callee receives, with the store that publishes the
+    /// callee's value recorded in the matching list. `None` for any other
+    /// argument.
+    fn compile_mut_place_arg<'a>(
+        &mut self,
+        args: &'a [HirExpr],
+        i: usize,
+        expected_ty: Option<Ty>,
+        takes: &mut CallTakes<'a>,
+    ) -> RuntimeResult<Option<Reg>> {
+        let arg = &args[i];
+        if let Some(home) = self.mut_ref_arg_home(arg, expected_ty) {
+            // `&mut <local Vec>`: move the local into the cell when no
+            // sibling argument reads it, giving the callee unique
+            // ownership so its first mutation grows in place instead of
+            // copy-on-writing the whole buffer.
+            let cell = self.alloc_reg();
+            if Self::mut_ref_place_name(arg)
+                .is_some_and(|name| Self::mut_arg_move_safe(args, i, name))
+            {
+                self.emit(Op::CellNewMove {
+                    dst: cell,
+                    src: home,
+                });
+            } else {
+                self.emit(Op::CellNew {
+                    dst: cell,
+                    src: home,
+                });
+            }
+            takes.cells.push((home, cell));
+            return Ok(Some(cell));
+        }
+        let Some(place) = Self::mut_ref_writeback_place(self.tcx, arg, expected_ty) else {
+            return Ok(None);
+        };
+        if let Some(take) = self.compile_window_take(place)? {
+            let cell = take.cell;
+            takes.windows.push(take);
+            return Ok(Some(cell));
+        }
+        let (cell, local_home) = self.place_write_back_cell(place, args, i)?;
+        match local_home {
+            // The local's home register takes the post-call value
+            // directly. The temp + place-store form would leave a
+            // lingering clone in the temp register, forcing
+            // copy-on-write on every later mutation through a
+            // repeatedly-called `&mut <local>`.
+            Some(home) => takes.cells.push((home, cell)),
+            None => takes.places.push((place, cell)),
+        }
+        Ok(Some(cell))
     }
 
     /// Whether the call may move `arg`'s compiled register `reg` into its
@@ -631,13 +704,37 @@ impl<'tcx> FnBuilder<'tcx> {
     }
 
     /// The home register and field-name constant of a `local.field` place
-    /// whose local lives in a register of its own, no closure captures, and
-    /// no other argument reads.
-    fn movable_local_field(
+    /// passed as the `i`-th argument, whose local lives in a register of its
+    /// own, no closure captures, and no other argument reads beyond its
+    /// sibling fields.
+    pub(super) fn movable_local_field(
         &mut self,
         place: &HirExpr,
         args: &[HirExpr],
         i: usize,
+    ) -> Option<(Reg, ConstIdx)> {
+        self.local_field_home(place, |base, field| {
+            Self::field_move_safe(args, i, base, field)
+        })
+    }
+
+    /// [`Self::movable_local_field`] for a `&mut self` receiver, taken once
+    /// every argument has been evaluated: only an argument that lends the
+    /// receiver's base by `&mut` still reaches it during the call.
+    pub(super) fn movable_receiver_field(
+        &mut self,
+        place: &HirExpr,
+        args: &[HirExpr],
+    ) -> Option<(Reg, ConstIdx)> {
+        self.local_field_home(place, |base, _| {
+            !args.iter().any(|arg| Self::lends_mut(arg, base))
+        })
+    }
+
+    fn local_field_home(
+        &mut self,
+        place: &HirExpr,
+        movable: impl FnOnce(&str, &str) -> bool,
     ) -> Option<(Reg, ConstIdx)> {
         let HirExprKind::Field { receiver, name } = &place.kind else {
             return None;
@@ -651,7 +748,7 @@ impl<'tcx> FnBuilder<'tcx> {
             .capture_cells
             .iter()
             .any(|&(captured, _)| captured == home)
-            || !Self::mut_arg_move_safe(args, i, base)
+            || !movable(base, name.name.as_str())
         {
             return None;
         }
@@ -660,6 +757,31 @@ impl<'tcx> FnBuilder<'tcx> {
             Value::String(SmolStr::from(name.name.clone())),
         );
         Some((home, name_idx))
+    }
+
+    /// Whether `expr` takes `&mut` of `base` or of a place below it.
+    fn lends_mut(expr: &HirExpr, base: &str) -> bool {
+        if let HirExprKind::Unary {
+            op: HirUnaryOp::RefMut,
+            operand,
+        } = &expr.kind
+        {
+            let mut root = &**operand;
+            while let HirExprKind::Field { receiver, .. }
+            | HirExprKind::TupleIndex { receiver, .. }
+            | HirExprKind::Index { base: receiver, .. } = &root.kind
+            {
+                root = receiver;
+            }
+            if Self::path_single_seg_name(root) == Some(base) {
+                return true;
+            }
+        }
+        let mut lends = false;
+        gossamer_hir::for_each_child_expr(expr, &mut |child| {
+            lends = lends || Self::lends_mut(child, base);
+        });
+        lends
     }
 
     /// Publishes what the call at `call` wrote through its `&mut` arguments:
@@ -713,6 +835,12 @@ impl<'tcx> FnBuilder<'tcx> {
             let tmp = self.alloc_reg();
             self.emit(Op::CellTake { dst: tmp, cell });
             self.compile_place_store(place, tmp)?;
+            // The place holds the value now; a share left in the temporary
+            // would make the next write through the place copy it.
+            self.emit(Op::ClearRegs {
+                start: tmp,
+                count: 1,
+            });
         }
         for take in window_takes {
             self.finish_window_take(take.clone())?;
@@ -1394,6 +1522,33 @@ impl<'tcx> FnBuilder<'tcx> {
         })
     }
 
+    /// Whether no argument but the `self_idx`-th reads `base` other than
+    /// through one of its other fields: those still read the same value once
+    /// the call's `&mut base.field` argument has taken that field out.
+    fn field_move_safe(args: &[HirExpr], self_idx: usize, base: &str, field: &str) -> bool {
+        fn reads_field_or_whole(expr: &HirExpr, base: &str, field: &str) -> bool {
+            match &expr.kind {
+                HirExprKind::Field { receiver, name }
+                    if name.name != field
+                        && FnBuilder::path_single_seg_name(receiver) == Some(base) =>
+                {
+                    false
+                }
+                HirExprKind::Path { .. } => FnBuilder::path_single_seg_name(expr) == Some(base),
+                _ => {
+                    let mut reads = false;
+                    gossamer_hir::for_each_child_expr(expr, &mut |child| {
+                        reads = reads || reads_field_or_whole(child, base, field);
+                    });
+                    reads
+                }
+            }
+        }
+        args.iter()
+            .enumerate()
+            .all(|(j, other)| j == self_idx || !reads_field_or_whole(other, base, field))
+    }
+
     pub(super) fn mut_ref_arg_home(&self, arg: &HirExpr, expected_ty: Option<Ty>) -> Option<Reg> {
         // The callee's declared parameter decides, exactly as it does in
         // `mut_ref_writeback_place`: a `&Vec<T>` parameter reads the vector
@@ -1468,6 +1623,23 @@ impl<'tcx> FnBuilder<'tcx> {
         )
         .then_some(place)
     }
+}
+
+/// The write-backs a call's `&mut` arguments owe once it returns.
+#[derive(Default)]
+pub(crate) struct CallTakes<'a> {
+    /// `(home, cell)`: a local's register takes the cell's value directly.
+    pub(crate) cells: Vec<(Reg, Reg)>,
+    /// `(place, cell)`: the cell's value is stored back through the place.
+    pub(crate) places: Vec<(&'a HirExpr, Reg)>,
+    /// Windows spliced back into the range they named.
+    pub(crate) windows: Vec<WindowTake>,
+}
+
+/// A call's arguments with the `&mut` places still to read.
+pub(crate) struct PendingArgs {
+    slots: Vec<Option<Reg>>,
+    deferred: Vec<(usize, Option<Ty>)>,
 }
 
 /// A mutable window argument in flight: the cell the callee writes, and the

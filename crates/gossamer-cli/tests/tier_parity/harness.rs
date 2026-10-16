@@ -1659,6 +1659,9 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/enum_keys.gos"),
     spec("feature-testing-examples/main_thread.gos"),
     spec("feature-testing-examples/store_through_mut_ref.gos"),
+    spec("feature-testing-examples/static_map_of_structs.gos"),
+    spec("feature-testing-examples/mut_field_beside_sibling_reads.gos"),
+    spec("feature-testing-examples/param_stored_into_field.gos"),
     spec("feature-testing-examples/user_methods_named_like_carrier_predicates.gos"),
     Spec {
         allow_nonzero: true,

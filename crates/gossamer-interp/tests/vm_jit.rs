@@ -707,3 +707,30 @@ fn jit_divide_by_zero_is_clean_panic_not_trap() {
         output.status
     );
 }
+
+#[test]
+fn a_kernel_reading_a_byte_slice_is_entered_natively_from_the_vm() {
+    // A `[u8]` the body only reads is lent to it in place, so the VM enters
+    // the compiled body directly instead of keeping it on bytecode.
+    let _g = GosJitGuard::new();
+    // `paint` takes a struct holding a vector, which cannot cross into
+    // compiled code, so it stays on bytecode and the kernel it calls is entered
+    // from the VM, as a canvas blit is.
+    let source = "struct Canvas { pixels: Vec<u8>, n: i64 }\nfn blit(dst: &mut [u8], src: [u8], n: i64) {\n  let mut i = 0i64\n  while i < n {\n    dst[i] = src[i] + 1u8\n    i = i + 1i64\n  }\n}\nfn paint(c: Canvas) -> i64 {\n  let mut dst = #[0u8; c.n]\n  blit(&mut dst, c.pixels, c.n)\n  dst[c.n - 1i64] as i64 + dst.len() as i64\n}\nfn run(n: i64) -> i64 { paint(Canvas { pixels: #[4u8; n], n: n }) }\nfn main() -> i64 { 0i64 }\n";
+    // Promoting the kernel alone makes a resident entry mean it was entered.
+    // SAFETY: the guard above holds the lock every env-toggling test takes.
+    unsafe { std::env::set_var("GOS_JIT_ONLY", "blit") };
+    let (vm, _) = build_vm(source);
+    let mut last = Value::Int(0);
+    for _ in 0..8 {
+        last = vm.call("run", vec![Value::Int(4096)]).expect("run");
+    }
+    // SAFETY: as above.
+    unsafe { std::env::remove_var("GOS_JIT_ONLY") };
+    assert!(matches!(last, Value::Int(4101)), "{last:?}");
+    let metrics = vm.jit_metrics();
+    assert!(
+        metrics.resident_functions >= 1,
+        "the byte kernel must be entered natively: {metrics:?}"
+    );
+}

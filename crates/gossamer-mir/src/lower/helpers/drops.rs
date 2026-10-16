@@ -3102,6 +3102,22 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
             }
         }
     }
+    // Locals holding a word read straight out of a field the aggregate keeps
+    // and minted no share for, so there is none to hand on.
+    let mut field_view = vec![false; n_locals];
+    for stmt in body.blocks.iter().flat_map(|b| &b.stmts) {
+        if let StatementKind::Assign {
+            place,
+            rvalue: Rvalue::Use(Operand::Copy(src)),
+        } = &stmt.kind
+            && place.projection.is_empty()
+            && (place.local.0 as usize) < n_locals
+            && !src.projection.is_empty()
+            && !owned[place.local.0 as usize]
+        {
+            field_view[place.local.0 as usize] = true;
+        }
+    }
     for (bi, block) in body.blocks.iter().enumerate() {
         for (si, stmt) in block.stmts.iter().enumerate() {
             if let StatementKind::Assign {
@@ -3118,6 +3134,7 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                     && !body.locals[s].region
                     && stmt_copy_reads[s] == 1
                     && !vec_field_extract[s]
+                    && !field_view[s]
                     && !rebound[s]
                     && !(is_rc(s) && owned[s])
                     && copy_is_last_use(body, (bi, si), src.local);
@@ -4243,7 +4260,13 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                                     || vec_released.contains(&l.0)
                                     || borrows_owned_field[l.0 as usize]
                             });
-                            if copy_minted || !frame_keeps {
+                            // A by-value parameter books no release because
+                            // the caller keeps its share, not because the
+                            // frame hands one over: the field's share is the
+                            // retain alone.
+                            let caller_keeps = copy_chain(&copy_sources, src.local)
+                                .any(|l| (1..=body.arity as usize).contains(&(l.0 as usize)));
+                            if copy_minted || (!frame_keeps && !caller_keeps) {
                                 gaps[bi][si + 1].push((false, src.local));
                             }
                         }

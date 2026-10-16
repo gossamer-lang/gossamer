@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.73.0 - Data-valued parameter defaults, foreign-library fixes, optimizations
+## 0.73.0 - Data-valued parameter defaults, foreign-library fixes, optimizations, gos serve
 
 - A parameter default may hold data: an enum variant (`mode: Mode = Mode::Fast`, `parent: Option<Window> = None`, `samples: Option<i64> = Some(4)`), a struct construction, a tuple, an array, a `Vec`, `Map`, or `Set` literal, a function, `i64::MAX`, or a const of any type, built from values known while compiling. Every name in a default means what it means where the function is declared, on every tier, whatever the call site has in scope. A default computed at run time (a function call, a closure, a `static`, another parameter) is still `GR0014`, which now says the default must be a value known while compiling.
 - `gos serve [DIR] [--port 8000] [--bind 127.0.0.1]` serves a directory's files over HTTP, as `python -m http.server` does: a directory's `index.html` is its page and a directory without one is listed, `GET` and `HEAD` answer with `ETag` / `Last-Modified` revalidation and byte ranges, and a path that leaves the directory is `404`. It answers only this machine unless `--bind` says otherwise.
@@ -71,6 +71,17 @@
 - A struct or enum method named `is_none`, `is_some`, `is_ok`, or `is_err` runs in compiled code; a native build and the JIT answered a constant instead of calling it (`placement.is_none()` was always `false`).
 - A `use` list into a dependency reports a name the dependency does not declare (`GR0001`), as a path written in full does; it was accepted, and a call through it failed in the native back end with an undefined symbol.
 - `gos run` reaches `main` sooner when the JIT prepares the program: the passes that hand a value's share on to its last user analyse only the functions that hold a candidate, which halves the work for a program as large as a GUI application.
+- A `static mut` map whose values are structs with counted fields (`static mut CACHE: Map<K, Glyph> = {}`) keeps the entries a function stores in it in compiled code; an entry stored from one function read back freed memory in another.
+- The bytecode VM no longer copies a whole buffer on each call to a `&mut self` method on a local or a struct field (`canvas.put(i)`, `cx.canvas.coverage(..)`), and a JIT-compiled function reaches a `&mut [u8]` argument, or a `[u8]` it only reads, in place instead of copying it in and back. A painting loop over a 2.5 MB canvas ran a full copy for every pixel helper it called.
+- A `&mut` struct field argument moves out of its struct for the call when the other arguments read only its sibling fields (`blend(&mut self.pixels, self.width * 4)`), where the bytecode VM copied the buffer on the callee's first write.
+- A function that stores a by-value parameter into a field (`self.hits[i].options = options`) keeps the stored value alive in compiled code; the field was left pointing at freed memory, and a later copy of the struct could ask for terabytes or abort.
+- Rebinding a local to a vector read from a nested field (`last = cx.canvas.pixels` in a loop) keeps that vector alive in compiled code; the struct's release freed it under the binding.
+- A `&mut` argument naming a local or one of its fields, and a method called on a field (`cx.items.push(grow(&mut cx))`), see the place as the other arguments leave it on every tier; the bytecode VM read it before evaluating them and lost their writes.
+- A panic inside a loop body names the failing statement's line and column on the bytecode VM, as the compiled tiers do, instead of the loop's.
+- JIT-compiled code indexes `Vec<u8>`, `[u8]`, and `Vec<bool>` elements in place instead of calling the runtime for each byte.
+- `gos serve` answers each request on the thread that read it, from a pool of at most one thread per core, parks idle keep-alive connections in the poller instead of on a thread, and sends files of 64 KiB or more from disk as the client reads them, with no size cap. It spends a fifth to a tenth of the CPU per request that `python -m http.server` does, and less memory at every concurrency.
+- A response with a streamed body and a `Content-Length` goes out with that length instead of chunked.
+- An `http::serve` connection waiting between requests no longer wakes its watcher thread every 10 ms.
 
 ## 0.72.0 - Typed serde, packed vectors, cheaper reference counting, and faster checks
 

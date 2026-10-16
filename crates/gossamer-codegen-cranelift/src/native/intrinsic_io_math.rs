@@ -172,6 +172,18 @@ pub(super) fn lower_intrinsic_call_io_math(
     #![allow(clippy::too_many_lines, clippy::too_many_arguments)]
     let ptr_ty = module.target_config().pointer_type();
     let _ = ptr_ty; // suppress unused if all arms inline
+    // A float's `.abs()` reaches here under its bare method name; an
+    // integer's was narrowed to its own width before lowering.
+    let name = if name == "abs"
+        && destination.projection.is_empty()
+        && matches!(
+            tcx.kind_of(body.local_ty(destination.local)),
+            TyKind::Float(_)
+        ) {
+        "math::abs"
+    } else {
+        name
+    };
     match name {
         // `__debug` is the `{:?}` channel: identical to `__concat` except a
         // float always renders with a fractional part or an exponent.

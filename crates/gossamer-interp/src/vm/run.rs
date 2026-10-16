@@ -629,7 +629,7 @@ impl Vm {
                         debug_assert!((pc as usize) < instr_count, "fell off end of bytecode");
                         let _ = instr_count;
                         let op = unsafe { *instrs.get_unchecked(pc as usize) };
-                        crate::profile::record_op(op);
+                        crate::profile::record_op(chunk.name, op);
                         pc += 1;
                         match op {
                             Op::LoadConst { dst, idx } => {

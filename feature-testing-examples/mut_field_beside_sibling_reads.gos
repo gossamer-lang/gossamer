@@ -1,0 +1,66 @@
+// A `&mut` argument naming a local or one of its fields, or a method called
+// on such a field, sits beside other arguments that read or write the same
+// local: the call reaches the place as it stands once those have run.
+
+struct Rect { x: i64, w: i64 }
+
+struct Canvas { pixels: Vec<u8>, width: i64, clip: Rect }
+
+impl Canvas {
+    fn fill(&mut self, at: i64, v: u8) {
+        let c = self.clip
+        paint(&mut self.pixels, self.width * 2 + c.x, at, v)
+        self.width += 1
+    }
+}
+
+struct Cx { canvas: Canvas, n: i64, items: Vec<i64> }
+
+impl Cx {
+    fn next(&self) -> i64 { self.n + self.canvas.width }
+}
+
+fn paint(fb: &mut [u8], stride: i64, at: i64, v: u8) {
+    fb[at] = v + (stride % 7) as u8
+}
+
+fn bump(cx: &mut Cx) -> i64 {
+    cx.n += 1
+    cx.canvas.width += 10
+    cx.n
+}
+
+fn grow(cx: &mut Cx) -> i64 {
+    cx.items.push(100)
+    cx.n += 1
+    cx.n
+}
+
+fn put(xs: &mut Vec<i64>, v: i64) {
+    xs.push(v)
+}
+
+fn push_into(xs: &mut Vec<i64>) -> i64 {
+    xs.push(50)
+    xs.len() as i64
+}
+
+fn through_param(cx: &mut Cx) {
+    cx.canvas.fill(cx.next() % 8, 1)
+    paint(&mut cx.canvas.pixels, cx.canvas.width, cx.canvas.clip.x, 2)
+}
+
+fn main() {
+    let mut cx = Cx { canvas: Canvas { pixels: #[0u8; 8], width: 3, clip: Rect { x: 1, w: 4 } }, n: 2, items: #[1] }
+    through_param(&mut cx)
+    cx.canvas.fill(bump(&mut cx) % 8, 3)
+    paint(&mut cx.canvas.pixels, cx.canvas.pixels.len(), 7, 4)
+    println(f"{cx.canvas.pixels} width {cx.canvas.width} n {cx.n}")
+    cx.items.push(grow(&mut cx))
+    put(&mut cx.items, grow(&mut cx))
+    let mut v = #[1]
+    put(&mut v, push_into(&mut v))
+    let mut t = (#[1], 0)
+    t.0.push(t.1 + 5)
+    println(f"{cx.items} n {cx.n} {v} {t.0}")
+}

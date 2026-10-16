@@ -1553,7 +1553,26 @@ unsafe fn free_native(kind: JitKind, ptr: i64) {
         },
         JitKind::NativeStr => unsafe { rt::gos_rt_str_free(ptr as *mut c_char) },
         JitKind::U8VecHandle => unsafe { rt::gos_rt_heap_u8_free(ptr as *mut rt::GosU8Vec) },
+        // A view lends the caller's bytes; only its header is the trampoline's.
+        JitKind::BytesView => unsafe { rt::vec::end_bytes_view(ptr as *mut rt::vec::GosVec) },
         _ => {}
+    }
+}
+
+/// The address and length of the bytes `value` holds, made unique to it so
+/// compiled code may write them in place. `None` for a value with no byte
+/// storage of its own to lend.
+fn lend_bytes(value: &mut Value) -> Option<(*mut u8, usize)> {
+    match value {
+        Value::ByteArray(bytes) => {
+            let bytes = Arc::make_mut(bytes);
+            Some((bytes.as_mut_ptr(), bytes.len()))
+        }
+        Value::ByteVec(bytes) => {
+            let bytes = Arc::make_mut(bytes);
+            Some((bytes.as_mut_ptr(), bytes.len()))
+        }
+        _ => None,
     }
 }
 
@@ -1887,6 +1906,16 @@ pub(crate) enum Slot {
     F(f64),
 }
 
+/// Rewrites each float slot as its bits in an integer slot, for an entry
+/// that takes its floats as words.
+fn float_slots_as_words(slots: &mut [Slot]) {
+    for slot in slots {
+        if let Slot::F(x) = *slot {
+            *slot = Slot::I(x.to_bits() as i64);
+        }
+    }
+}
+
 fn slot_i(s: Slot) -> i64 {
     match s {
         Slot::I(n) => n,
@@ -1974,7 +2003,8 @@ macro_rules! call_through {
             | JitKind::NativeVecTupleIF
             | JitKind::NativeVecU8
             | JitKind::NativeVecVecI64
-            | JitKind::U8VecHandle => {
+            | JitKind::U8VecHandle
+            | JitKind::BytesView => {
                 unreachable!("native aggregate returns are canonicalized to I64")
             }
             // Struct returns are canonicalized to I64 in `prepare` and decoded
@@ -3387,9 +3417,11 @@ pub(crate) fn prepare(jit: std::sync::Arc<JitFn>) -> Option<Prepared> {
         trace_prepare_fail(&jit.name, "native arity exceeds MAX_ARGS");
         return None;
     }
+    // A body whose entry takes its floats as words is called through the
+    // all-integer signature of its arity.
     let mut shape: u32 = 0;
     for (i, k) in jit.params.iter().enumerate() {
-        if matches!(k, JitKind::F64) {
+        if matches!(k, JitKind::F64) && !jit.word_params {
             shape |= 1 << i;
         }
     }
@@ -3409,6 +3441,12 @@ pub(crate) fn prepare(jit: std::sync::Arc<JitFn>) -> Option<Prepared> {
         | JitKind::NativeVecStr
         | JitKind::NativeVecTupleIF
         | JitKind::NativeVecU8) => (JitKind::I64, None, Some(k), None),
+        // A byte view lends a caller's storage for one call; it is never
+        // answered.
+        JitKind::BytesView => {
+            trace_prepare_fail(&jit.name, "byte view return");
+            return None;
+        }
         // A `U8Vec` return would need re-registering the native buffer into
         // the VM registry; not supported, so keep such bodies on bytecode.
         JitKind::U8VecHandle => {
@@ -3468,6 +3506,7 @@ pub(crate) fn prepare(jit: std::sync::Arc<JitFn>) -> Option<Prepared> {
                     | JitKind::NativeVecStr
                     | JitKind::NativeVecTupleIF
                     | JitKind::NativeVecU8
+                    | JitKind::BytesView
                     | JitKind::NativeVecVecI64
                     | JitKind::U8VecHandle
                     | JitKind::StructPtr(_)
@@ -3599,6 +3638,7 @@ pub(crate) fn invoke_prepared(p: &Prepared, args: &[Value], graph_cache: &GraphC
                 | JitKind::NativeVecStr
                 | JitKind::NativeVecTupleIF
                 | JitKind::NativeVecU8
+                | JitKind::BytesView
                 | JitKind::NativeVecVecI64
                 | JitKind::U8VecHandle
                 | JitKind::StructPtr(_)
@@ -3649,6 +3689,9 @@ pub(crate) fn invoke_prepared(p: &Prepared, args: &[Value], graph_cache: &GraphC
     // A fault the body raises unwinds to here, so the bytecode frames above
     // it run their deferred expressions before it is reported.
     let deferred = gossamer_runtime::c_abi::panic::DeferredFaults::enter();
+    if jit.word_params {
+        float_slots_as_words(&mut slots[..n]);
+    }
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
         (p.stub)(jit.ptr, &slots[..n], p.ret_kind)
     }));
@@ -3757,6 +3800,42 @@ fn invoke_prepared_native(p: &Prepared, args: &[Value], graph_cache: &GraphCache
                     Slot::I(ptr)
                 }
             },
+            JitKind::BytesView => {
+                // The body reaches the caller's bytes in place through a header
+                // that lends them, so nothing is copied in or back: a `&mut`
+                // write-back cell owns them throughout, and a slice the body
+                // only reads is lent as the value holds it.
+                let lent = match value {
+                    Value::MutCell(c) => lend_bytes(&mut c.lock()),
+                    other => match other.byte_slice() {
+                        Some(std::borrow::Cow::Borrowed(bytes)) => {
+                            Some((bytes.as_ptr().cast_mut(), bytes.len()))
+                        }
+                        _ => None,
+                    },
+                };
+                match lent {
+                    Some((data, len)) => {
+                        let ptr = rt::vec::begin_bytes_view(data, len) as i64;
+                        natives.push((JitKind::BytesView, ptr, None));
+                        Slot::I(ptr)
+                    }
+                    // Bytes the value has to convert first are copied, as any
+                    // `Vec<u8>` argument is.
+                    None if !matches!(value, Value::MutCell(_)) => {
+                        let Some(ptr) = build_native_arg(JitKind::NativeVecU8, value) else {
+                            free_in_flight(&natives, &built_enums, &str_cells);
+                            return Dispatch::Fallback;
+                        };
+                        natives.push((JitKind::NativeVecU8, ptr, None));
+                        Slot::I(ptr)
+                    }
+                    None => {
+                        free_in_flight(&natives, &built_enums, &str_cells);
+                        return Dispatch::Fallback;
+                    }
+                }
+            }
             JitKind::NativeVecI64
             | JitKind::NativeVecF64
             | JitKind::NativeVecStr
@@ -3950,6 +4029,9 @@ fn invoke_prepared_native(p: &Prepared, args: &[Value], graph_cache: &GraphCache
     // A fault the body raises unwinds to here, so the bytecode frames above
     // it run their deferred expressions before it is reported.
     let deferred = gossamer_runtime::c_abi::panic::DeferredFaults::enter();
+    if jit.word_params {
+        float_slots_as_words(&mut slots[..n_call]);
+    }
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
         (p.stub)(jit.ptr, &slots[..n_call], p.ret_kind)
     }));

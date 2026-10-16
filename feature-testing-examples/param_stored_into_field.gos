@@ -1,0 +1,67 @@
+// A by-value parameter stored into a field, directly, through a copy, after
+// a rebinding, or from inside a method that writes an element of a vector of
+// structs, leaves the field holding a value of its own: the caller's
+// argument and the stored field both read back whole afterwards.
+
+struct Hit { id: String, options: Vec<String> }
+
+struct Cx { hits: Vec<Hit> }
+
+impl Cx {
+    fn mark_options(&mut self, options: Vec<String>) {
+        let i = self.hits.len() - 1
+        self.hits[i].options = options
+    }
+}
+
+fn set(h: &mut Hit, options: Vec<String>) {
+    h.options = options
+}
+
+fn set_copy(h: &mut Hit, options: Vec<String>) {
+    let o = options
+    h.options = o
+}
+
+fn set_rebound(h: &mut Hit, mut options: Vec<String>) {
+    options = #[f"r{options.len()}"]
+    h.options = options
+}
+
+fn set_name(h: &mut Hit, id: String) {
+    h.id = id
+}
+
+fn set_fresh(h: &mut Hit, n: i64) {
+    let o = #[f"f{n}"]
+    h.options = o
+}
+
+fn widget(cx: &mut Cx, i: i64) {
+    cx.hits.push(Hit { id: f"h{i}", options: #[] })
+    cx.mark_options(#[f"p{i}", "q"])
+}
+
+fn main() {
+    let mut h = Hit { id: "a", options: #[] }
+    let mut out = #[]
+    for i in 0..4 {
+        let kept = #[f"k{i}"]
+        set(&mut h, kept)
+        out.push(f"{h.options} {kept}")
+        set(&mut h, #[f"t{i}"])
+        out.push(f"{h.options}")
+        set_copy(&mut h, #[f"c{i}"])
+        out.push(f"{h.options}")
+        set_rebound(&mut h, #["x", "y"])
+        out.push(f"{h.options}")
+        set_name(&mut h, f"n{i}")
+        set_fresh(&mut h, i)
+        out.push(f"{h.options} {h.id}")
+    }
+    let mut cx = Cx { hits: #[] }
+    for i in 0..3 { widget(&mut cx, i) }
+    let copy = cx.hits
+    for x in copy { out.push(f"{x.id} {x.options}") }
+    println(out.join("\n"))
+}

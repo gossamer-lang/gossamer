@@ -66,6 +66,8 @@ pub enum JitKind {
     NativeVecTupleIF,
     /// `Vec<u8>` as a native `GosVec` of one-byte primitive slots.
     NativeVecU8,
+    /// `&mut [u8]` as a header lending the caller's bytes in place.
+    BytesView,
     /// `Vec<Vec<i64>>` as a native outer `GosVec` of inner `GosVec` pointers.
     NativeVecVecI64,
     /// `U8Vec` byte-buffer handle, marshalled by copy-in / copy-back.
@@ -125,6 +127,8 @@ pub struct JitFn {
     pub returns_fresh: bool,
     /// Mirrors `gossamer_codegen_cranelift::JitFn::carrier_box_metas`.
     pub carrier_box_metas: Box<[CarrierBoxMetas]>,
+    /// Mirrors `gossamer_codegen_cranelift::JitFn::word_params`.
+    pub word_params: bool,
 }
 
 /// A JIT frame on the machine stack. wasm compiles none.

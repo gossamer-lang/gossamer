@@ -1,5 +1,6 @@
 //! Compiling method calls.
 
+use super::free_call::CallTakes;
 use super::*;
 
 impl<'tcx> FnBuilder<'tcx> {
@@ -31,6 +32,28 @@ impl<'tcx> FnBuilder<'tcx> {
         }
         if let Some(reg) = self.try_compile_window_method(receiver, name, args, owner)? {
             return Ok(reg);
+        }
+        // A field of a local names a place the method reaches as it stands
+        // once its arguments have run, as the compiled tiers' pointer to it
+        // does: an argument that writes below that local runs first.
+        if let Some(root) = self.local_field_chain_root(receiver)
+            && args.iter().any(|arg| {
+                Self::mut_ref_writeback_place(self.tcx, arg, None).is_none()
+                    && Self::writes_below(arg, root)
+            })
+        {
+            let mut hidden = 0;
+            let mut hoisted = Vec::with_capacity(args.len());
+            for arg in args {
+                hoisted.push(
+                    if Self::mut_ref_writeback_place(self.tcx, arg, None).is_some() {
+                        arg.clone()
+                    } else {
+                        self.bind_hidden_value(arg, receiver.id.0, &mut hidden)?
+                    },
+                );
+            }
+            return self.compile_method_call(receiver, name, &hoisted, owner);
         }
         // `xs.join(sep)` renders each element the way `{}` does, so an
         // element type that supplies its own rendering answers through that
@@ -550,49 +573,21 @@ impl<'tcx> FnBuilder<'tcx> {
                 found: args.len(),
             })?)
             .expect("register overflow reserving method args");
-        let mut cell_takes: Vec<(Reg, Reg)> = Vec::new();
-        let mut place_takes: Vec<(&HirExpr, Reg)> = Vec::new();
-        let mut arg_regs: Vec<Reg> = Vec::with_capacity(args.len());
-        for (i, arg) in args.iter().enumerate() {
-            if let Some(home) = self.mut_ref_arg_home(arg, None) {
-                let cell = self.alloc_reg();
-                if Self::mut_ref_place_name(arg)
-                    .is_some_and(|name| Self::mut_arg_move_safe(args, i, name))
-                {
-                    self.emit(Op::CellNewMove {
-                        dst: cell,
-                        src: home,
-                    });
-                } else {
-                    self.emit(Op::CellNew {
-                        dst: cell,
-                        src: home,
-                    });
-                }
-                cell_takes.push((home, cell));
-                arg_regs.push(cell);
-            } else if let Some(place) = Self::mut_ref_writeback_place(self.tcx, arg, None) {
-                let (cell, local_home) = self.place_write_back_cell(place, args, i)?;
-                match local_home {
-                    Some(home) => cell_takes.push((home, cell)),
-                    None => place_takes.push((place, cell)),
-                }
-                arg_regs.push(cell);
+        let mut takes = CallTakes::default();
+        // The value a storing method keeps is a value of its own.
+        let stores = matches!(
+            name.name.as_str(),
+            "push" | "push_back" | "push_front" | "insert" | "or_insert"
+        );
+        let pending = self.lower_args(args, true, None, &mut takes, |this, i, arg| {
+            let reg = this.compile_expr(arg)?;
+            Ok(if stores && i + 1 == args.len() {
+                this.stored_value_reg(arg, reg)
             } else {
-                let reg = self.compile_expr(arg)?;
-                // The value a storing method keeps is a value of its own.
-                let stores = matches!(
-                    name.name.as_str(),
-                    "push" | "push_back" | "push_front" | "insert" | "or_insert"
-                ) && i + 1 == args.len();
-                let reg = if stores {
-                    self.stored_value_reg(arg, reg)
-                } else {
-                    reg
-                };
-                arg_regs.push(reg);
-            }
-        }
+                reg
+            })
+        })?;
+        let arg_regs = self.finish_args(args, pending, &mut takes)?;
         for (i, r) in arg_regs.iter().enumerate() {
             let slot = args_start
                 .checked_add(u16::try_from(i).expect("argc overflow"))
@@ -787,7 +782,7 @@ impl<'tcx> FnBuilder<'tcx> {
             argc,
             cache_idx,
         });
-        self.emit_write_backs(call, &cell_takes, &place_takes, &[])?;
+        self.emit_write_backs(call, &takes.cells, &takes.places, &takes.windows)?;
         // Mutating-method writeback. The builtins for `push` /
         // `insert` / etc. return the *new* aggregate rather than
         // mutating in place, so the VM has to thread the result back
@@ -1009,7 +1004,25 @@ impl<'tcx> FnBuilder<'tcx> {
             .next_reg
             .checked_add(argc)
             .expect("register overflow reserving mut-self method args");
-        let place_reg = self.compile_expr(place)?;
+        // A receiver that is a local of its own is moved from its home
+        // register; reading it into a fresh one first would leave the home a
+        // share, and the callee's first write would copy the whole value.
+        let receiver_home = Self::path_single_seg_name(place)
+            .and_then(|name| self.lookup_local(name))
+            .filter(|tr| {
+                tr.kind == RegKind::Value
+                    && !self.capture_cells.iter().any(|&(home, _)| home == tr.reg)
+            })
+            .map(|tr| tr.reg);
+        // A field of a local names a place, which the call reaches as it
+        // stands once the arguments have run, as the compiled tiers' pointer
+        // to it does; any other receiver is a value computed first.
+        let receiver_is_place = receiver_home.is_none() && self.local_field_chain(place);
+        let early_place = match receiver_home {
+            Some(home) => Some(home),
+            None if receiver_is_place => None,
+            None => Some(self.compile_expr(place)?),
+        };
         // Evaluate every argument BEFORE capturing the receiver, so an argument
         // that reads the receiver (`c.bump(c.value)`) still sees its live value
         // - `CellNewMove` empties the receiver's register immediately after.
@@ -1018,58 +1031,29 @@ impl<'tcx> FnBuilder<'tcx> {
         // path gives it: a `&mut self` method may take an out-parameter
         // (`conn.next_row(&mut stream)`), and passing that by value would
         // leave every mutation on a copy.
-        let mut arg_regs: Vec<Reg> = Vec::with_capacity(args.len());
-        let mut arg_cell_takes: Vec<(Reg, Reg)> = Vec::new();
-        let mut arg_place_takes: Vec<(&HirExpr, Reg)> = Vec::new();
-        for (i, arg) in args.iter().enumerate() {
-            if let Some(home) = self.mut_ref_arg_home(arg, None) {
-                let arg_cell = self.alloc_reg();
-                if Self::mut_ref_place_name(arg)
-                    .is_some_and(|name| Self::mut_arg_move_safe(args, i, name))
-                {
-                    self.emit(Op::CellNewMove {
-                        dst: arg_cell,
-                        src: home,
-                    });
-                } else {
-                    self.emit(Op::CellNew {
-                        dst: arg_cell,
-                        src: home,
-                    });
-                }
-                arg_cell_takes.push((home, arg_cell));
-                arg_regs.push(arg_cell);
-            } else if let Some(place) = Self::mut_ref_writeback_place(self.tcx, arg, None) {
-                let place_reg = self.compile_expr(place)?;
-                let arg_cell = self.alloc_reg();
-                let local_home = Self::path_single_seg_name(place).and_then(|name| {
-                    self.lookup_local(name)
-                        .filter(|tr| tr.kind == RegKind::Value)
-                        .map(|_| name)
-                });
-                if local_home.is_some_and(|name| Self::mut_arg_move_safe(args, i, name)) {
-                    self.emit(Op::CellNewMove {
-                        dst: arg_cell,
-                        src: place_reg,
-                    });
-                } else {
-                    self.emit(Op::CellNew {
-                        dst: arg_cell,
-                        src: place_reg,
-                    });
-                }
-                if local_home.is_some() {
-                    arg_cell_takes.push((place_reg, arg_cell));
-                } else {
-                    arg_place_takes.push((place, arg_cell));
-                }
-                arg_regs.push(arg_cell);
-            } else {
-                arg_regs.push(self.compile_expr(arg)?);
-            }
-        }
+        let mut takes = CallTakes::default();
+        let pending = self.lower_args(args, true, None, &mut takes, |this, _, arg| {
+            this.compile_expr(arg)
+        })?;
+        let place_reg = match early_place {
+            Some(reg) => reg,
+            None => self.compile_expr(place)?,
+        };
+        let arg_regs = self.finish_args(args, pending, &mut takes)?;
         let cell = self.alloc_reg();
-        // Move (not clone) the receiver into the cell. `CellTake` below
+        // A field receiver (`cx.canvas`) leaves its struct for the call, so the
+        // value moved below is the only share of it.
+        if receiver_home.is_none()
+            && let Some((home, name_idx)) = self.movable_receiver_field(place, args)
+        {
+            let unit = self.load_unit();
+            self.emit(Op::FieldSet {
+                receiver: home,
+                name_idx,
+                value: unit,
+            });
+        }
+        // Move (not clone) the receiver into the cell. The write-back below
         // republishes the post-call `self` into the same place, and moving
         // keeps the receiver's refcount at one so the callee's first field
         // write mutates in place instead of forcing a copy-on-write clone.
@@ -1099,7 +1083,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 Some(TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char)
             )
         });
-        match callee_reg {
+        let call = match callee_reg {
             Some(callee) => self.emit(Op::Call {
                 dst,
                 callee,
@@ -1121,28 +1105,68 @@ impl<'tcx> FnBuilder<'tcx> {
                 })
             }
         };
-        let tmp = self.alloc_reg();
-        self.emit(Op::CellTake { dst: tmp, cell });
-        self.compile_place_store(place, tmp)?;
-        for (home, arg_cell) in arg_cell_takes {
-            self.emit(Op::CellTake {
-                dst: home,
-                cell: arg_cell,
-            });
+        let mut cell_takes = Vec::with_capacity(takes.cells.len() + 1);
+        let mut place_takes = Vec::with_capacity(takes.places.len() + 1);
+        match receiver_home {
+            Some(home) => cell_takes.push((home, cell)),
+            None => place_takes.push((place, cell)),
         }
-        for (arg_place, arg_cell) in arg_place_takes {
-            let taken = self.alloc_reg();
-            self.emit(Op::CellTake {
-                dst: taken,
-                cell: arg_cell,
-            });
-            self.compile_place_store(arg_place, taken)?;
-        }
+        cell_takes.extend(takes.cells);
+        place_takes.extend(takes.places);
+        self.emit_write_backs(call, &cell_takes, &place_takes, &takes.windows)?;
         Ok(Some(dst))
     }
 }
 
 impl FnBuilder<'_> {
+    /// Whether `place` is `local.a.b..` - fields and tuple slots of a local.
+    pub(super) fn local_field_chain(&self, place: &HirExpr) -> bool {
+        self.local_field_chain_root(place).is_some()
+    }
+
+    /// The local `place` is a field chain of, as [`Self::local_field_chain`].
+    fn local_field_chain_root<'a>(&self, place: &'a HirExpr) -> Option<&'a str> {
+        let mut root = place;
+        while let HirExprKind::Field { receiver, .. } | HirExprKind::TupleIndex { receiver, .. } =
+            &root.kind
+        {
+            root = receiver;
+        }
+        if std::ptr::eq(root, place) {
+            return None;
+        }
+        Self::path_single_seg_name(root).filter(|name| self.lookup_local(name).is_some())
+    }
+
+    /// Whether evaluating `expr` may write `local` or a place below it: it
+    /// lends one by `&mut`, assigns one, or calls a method on one.
+    fn writes_below(expr: &HirExpr, local: &str) -> bool {
+        let rooted = |place: &HirExpr| {
+            let mut root = place;
+            while let HirExprKind::Field { receiver, .. }
+            | HirExprKind::TupleIndex { receiver, .. }
+            | HirExprKind::Index { base: receiver, .. } = &root.kind
+            {
+                root = receiver;
+            }
+            Self::path_single_seg_name(root) == Some(local)
+        };
+        let writes = match &expr.kind {
+            HirExprKind::Unary {
+                op: HirUnaryOp::RefMut,
+                operand,
+            } => rooted(operand),
+            HirExprKind::Assign { place, .. } => rooted(place),
+            HirExprKind::MethodCall { receiver, .. } => rooted(receiver),
+            _ => false,
+        };
+        let mut found = writes;
+        gossamer_hir::for_each_child_expr(expr, &mut |child| {
+            found = found || Self::writes_below(child, local);
+        });
+        found
+    }
+
     /// A mutating method on a window receiver `(&mut base[lo..hi]).m(..)`.
     /// The window's elements are bound to a hidden local, the method runs
     /// against that local through the ordinary local write-back, and the

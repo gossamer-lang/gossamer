@@ -891,7 +891,7 @@ impl<'a> Builder<'a> {
                 | "collections::BTreeMap::from"
         ) && matches!(args, [arg] if self.hashmap_from_arg_is_empty(arg))
         {
-            let map_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+            let map_ty = self.map_ctor_ty(result_ty);
             return self.emit_stdlib_free_call("Map::new", map_ty, &[], span);
         }
         if matches!(
@@ -972,6 +972,11 @@ impl<'a> Builder<'a> {
         }
         let joined = joined.as_str();
         let (rt_name, ret_ty) = self.resolve_stdlib_free_call(joined, args)?;
+        let ret_ty = if rt_name == "gos_rt_map_new" {
+            self.map_ctor_ty(result_ty)
+        } else {
+            ret_ty
+        };
         self.emit_stdlib_free_call(rt_name, ret_ty, args, span)
     }
 
@@ -980,6 +985,20 @@ impl<'a> Builder<'a> {
     /// `use std::compress::gzip` + `gzip::encode(..)` names the same
     /// function as `compress::gzip::encode`, and the arms below key on
     /// the canonical path, so the leaf spelling folds into it here.
+    /// The type a map constructor's answer is held as: the map type the
+    /// call is checked at, which tells the ownership passes what its entries
+    /// hold, or the bare handle word when the checker left it unknown.
+    fn map_ctor_ty(&mut self, result_ty: gossamer_types::Ty) -> gossamer_types::Ty {
+        if matches!(
+            self.tcx.kind_of(result_ty),
+            gossamer_types::TyKind::HashMap { .. }
+        ) {
+            result_ty
+        } else {
+            self.tcx.int_ty(gossamer_types::IntTy::I64)
+        }
+    }
+
     pub(crate) fn stdlib_free_path(segments: &[gossamer_ast::Ident]) -> String {
         let names: Vec<&str> = segments.iter().map(|s| s.name.as_str()).collect();
         let strip_std = if names.first() == Some(&"std") {
