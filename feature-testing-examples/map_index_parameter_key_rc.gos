@@ -1,0 +1,42 @@
+struct Store {
+    gens: Map<String, i64>
+    seen: Set<String>
+    next: i64
+}
+
+impl Store {
+    fn generation(&mut self, id: String) -> i64 {
+        if let Some(g) = self.gens.get(id) {
+            return g
+        }
+        let g = self.next
+        self.next += 1
+        self.gens[id] = g
+        g
+    }
+
+    fn mark(&mut self, id: String) {
+        if id.is_empty() {
+            return
+        }
+        self.seen.insert(id)
+        let _ = self.generation(id)
+    }
+}
+
+fn mark_ids(ids: Vec<String>, st: &mut Store) {
+    for id in ids {
+        st.mark(id)
+        st.mark(f"{id}#completion")
+    }
+}
+
+fn main() {
+    let mut st = Store { gens: Map::new(), seen: #{}, next: 1 }
+    let mut round = 0
+    while round < 3 {
+        mark_ids(#["alpha-long-identifier", "beta-long-identifier"], &mut st)
+        round += 1
+    }
+    println(f"{st.gens.len()} {st.seen.len()} {st.next}")
+}

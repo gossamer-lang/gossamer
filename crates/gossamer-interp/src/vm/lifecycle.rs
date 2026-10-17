@@ -49,6 +49,7 @@ impl Vm {
             source_map: None,
             collect_comptime: Cell::new(false),
             comptime_folds: RefCell::new(Vec::new()),
+            comptime_origins: RefCell::new(Vec::new()),
             comptime_gate: Cell::new(false),
         };
         // Late-registered binding natives go into the per-Vm overlay
@@ -120,6 +121,7 @@ impl Vm {
             // Comptime folding is a main-VM compile-time concern only.
             collect_comptime: Cell::new(false),
             comptime_folds: RefCell::new(Vec::new()),
+            comptime_origins: RefCell::new(Vec::new()),
             // The spawner stamps this from its own state; a pooled
             // worker `Vm` is reused across programs, so the flag is
             // re-stamped per task rather than assumed.
@@ -403,6 +405,13 @@ impl Vm {
     /// [`Self::load`] (empty unless [`Self::set_collect_comptime`] was
     /// set). Each entry is `(span, raw, Ok(value) | Err(message))`, where
     /// `raw` marks a `codegen!` region spliced as source.
+    /// Records which file each `(start, end)` range of the unit about to be
+    /// loaded was written in, outermost first, so a comptime region reads
+    /// relative to its own file.
+    pub fn set_comptime_origins(&self, origins: Vec<(u32, u32, String)>) {
+        *self.comptime_origins.borrow_mut() = origins;
+    }
+
     pub fn take_comptime_folds(&self) -> Vec<crate::vm::ComptimeFold> {
         std::mem::take(&mut self.comptime_folds.borrow_mut())
     }
@@ -962,7 +971,18 @@ impl Vm {
             let comptime_info = crate::comptime::ComptimeInfo::collect(program);
             let regions = crate::comptime::collect_regions(program, &comptime_info);
             let mut folds = Vec::with_capacity(regions.len());
+            let origins = self.comptime_origins.borrow().clone();
             for region in regions {
+                // A region written in a bundled file - a dependency's - reads
+                // and is confined relative to that file, not the entry.
+                let start = region.span.start;
+                let origin = origins
+                    .iter()
+                    .rev()
+                    .find(|(lo, hi, _)| start >= *lo && start < *hi)
+                    .map(|(_, _, path)| path.as_str());
+                let _anchor = origin.map(gossamer_runtime::comptime_paths::Anchored::at_source);
+                let _confined = origin.map(gossamer_runtime::comptime_policy::Confined::at_source);
                 let outcome = self
                     .eval_initializer(
                         region.expr,

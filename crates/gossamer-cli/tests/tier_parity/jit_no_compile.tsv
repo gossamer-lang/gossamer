@@ -88,6 +88,7 @@ feature-testing-examples/carrier_at_odd_slot_offset.gos	unsupported-boundary: a 
 feature-testing-examples/carrier_payload_debug_shapes.gos	aggregate print
 feature-testing-examples/carrier_payload_views.gos	unsupported-boundary: a struct carrying two-word Option fields crosses the function boundary, which the trampoline cannot marshal - the recursive walk the fixture pins
 feature-testing-examples/carrier_unwrap_or_else.gos	admission gate
+feature-testing-examples/cfg_inactive_static_mut.gos	no hot body
 feature-testing-examples/chan_carrier_elements.gos	cross-goroutine
 feature-testing-examples/chan_select_struct_payload.gos	bytecode-only local
 feature-testing-examples/chan_struct_local_recv.gos	bytecode-only local
@@ -150,6 +151,7 @@ feature-testing-examples/debugfmt_floats.gos	no hot body
 feature-testing-examples/debugfmt_nested_adts.gos	no hot user body
 feature-testing-examples/debugfmt_nested_floats.gos	entry shape
 feature-testing-examples/deref_string_concat.gos	string append
+feature-testing-examples/derive_default_in_module.gos	no hot body
 feature-testing-examples/derive_ord_option_field.gos	no hot body
 feature-testing-examples/derive_struct_variant.gos	no hot body
 feature-testing-examples/derive_traits.gos	entry shape
@@ -158,6 +160,7 @@ feature-testing-examples/doc_test_vs_unit_test_drift.gos	no hot body
 feature-testing-examples/doctest_fences.gos	no hot body
 feature-testing-examples/duration_methods.gos	no hot body
 feature-testing-examples/dyn_value_rendering.gos	no hot body
+feature-testing-examples/element_returned_by_value.gos	bytecode-only local
 feature-testing-examples/elemty_float_eager.gos	no hot body
 feature-testing-examples/elemty_string_closures.gos	no hot body
 feature-testing-examples/encoding_xml.gos	no hot body
@@ -202,6 +205,7 @@ feature-testing-examples/generic_enum_float_payload.gos	entry shape
 feature-testing-examples/generic_fn_value_callback.gos	entry shape
 feature-testing-examples/generic_impl_bound_dispatch.gos	entry shape
 feature-testing-examples/generic_method_fn_only_param.gos	entry shape
+feature-testing-examples/generic_method_takes_named_fn.gos	no hot body
 feature-testing-examples/generic_static_trait_item.gos	entry shape
 feature-testing-examples/generic_struct_rendering.gos	entry shape
 feature-testing-examples/go_stdlib_spawn.gos	no hot body
@@ -276,6 +280,7 @@ feature-testing-examples/metrics_observability.gos	no hot body
 feature-testing-examples/module_aggregate_slots.gos	aggregate print
 feature-testing-examples/module_impl_ordering.gos	no hot body
 feature-testing-examples/module_same_fn_names.gos	no hot body
+feature-testing-examples/module_static_beside_same_named_local.gos	no hot body
 feature-testing-examples/mut_field_beside_sibling_reads.gos	&mut aggregate param
 feature-testing-examples/mut_param_is_a_copy.gos	no hot body
 feature-testing-examples/mut_ref_container_params.gos	&mut aggregate param
@@ -326,6 +331,7 @@ feature-testing-examples/pipe_closure_step.gos	no hot body
 feature-testing-examples/pipe_operator_precedence.gos	no hot body
 feature-testing-examples/process_run_in.gos	no hot body
 feature-testing-examples/process_spawn_pipe.gos	bytecode-only local
+feature-testing-examples/qualified_pattern_paths.gos	no hot body
 feature-testing-examples/question_mark_error_conversion.gos	entry shape
 feature-testing-examples/range_pipeline_iter.gos	no hot body
 feature-testing-examples/rc_tree_teardown.gos	admission gate
@@ -356,6 +362,7 @@ feature-testing-examples/slice_pattern_fixed_array.gos	no hot body
 feature-testing-examples/slot_container_value_semantics.gos	container param kinds
 feature-testing-examples/sort_nested_sequences.gos	aggregate print
 feature-testing-examples/sort_with_closure.gos	no hot body
+feature-testing-examples/spawn_aggregate_arguments.gos	cross-goroutine
 feature-testing-examples/spawn_join.gos	no hot body
 feature-testing-examples/spawn_operand_order.gos	cross-goroutine
 feature-testing-examples/spawn_shared_captures.gos	cross-goroutine
@@ -456,6 +463,7 @@ feature-testing-examples/validate_errors.gos	no hot body
 feature-testing-examples/validate_errors_return.gos	bytecode-only local
 feature-testing-examples/value_enums.gos	entry shape
 feature-testing-examples/value_order_and_equality.gos	no hot body
+feature-testing-examples/variant_named_like_a_const.gos	no hot body
 feature-testing-examples/vec_capacity_overflow.gos	no hot body
 feature-testing-examples/vec_copies_into_holders.gos	&mut aggregate param
 feature-testing-examples/vec_get_method.gos	admission gate

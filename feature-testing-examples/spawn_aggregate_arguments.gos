@@ -1,0 +1,33 @@
+// A struct, fixed array, or tuple of scalars, strings, and runtime handles
+// passed to a spawned call crosses as a snapshot: the child reads the same
+// values, sends through the same channel, and updates the same shared cell.
+
+use std::sync::{channel_unbounded, Sender, Shared}
+
+struct Pair { left: i64, right: f64, name: String }
+struct Post { tx: Sender<String>, n: Shared<i64>, tag: String, pair: Pair }
+
+fn pair_work(p: Pair, xs: [i64; 3], t: (i64, String)) -> String {
+    f"{p.left} {p.right} {p.name} {xs[0] + xs[1] + xs[2]} {t.0} {t.1}"
+}
+
+fn post_work(p: Post) -> i64 {
+    p.tx.send(f"{p.tag}:{p.pair.name}")
+    p.n.update(|v| v + 10)
+}
+
+fn main() {
+    let tx, rx = channel_unbounded()
+    let p = Pair { left: 1, right: 2.5, name: "pair" }
+    let xs = [4, 5, 6]
+    let t = (7, "seven")
+    let post = Post { tx: tx, n: Shared::new(1), tag: "post", pair: p }
+    let mut k = 0
+    while k < 3 {
+        let a = spawn(|| pair_work(p, xs, t))
+        let b = spawn(|| post_work(post))
+        println(f"{a.join().unwrap_or("?")} | {b.join().unwrap_or(-1)} {rx.recv().unwrap_or("")}")
+        k += 1
+    }
+    println(f"{post.n.get()} {p.name} {xs[2]} {t.1}")
+}

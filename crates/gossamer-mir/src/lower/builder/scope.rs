@@ -165,6 +165,16 @@ impl<'a> Builder<'a> {
         None
     }
 
+    /// The local a path names: only a single-segment path can name one. A
+    /// module-anchored path (`text::layout::COUNT`) starts with a module,
+    /// whatever local shares that module's name.
+    pub(crate) fn path_local(&self, segments: &[Ident]) -> Option<Local> {
+        match segments {
+            [only] => self.lookup_local(&only.name),
+            _ => None,
+        }
+    }
+
     pub(crate) fn bind_reference_alias(&mut self, name: &str, local: Local) {
         if let Some(scope) = self.reference_aliases.last_mut() {
             scope.insert(name.to_string(), local);
@@ -596,8 +606,7 @@ impl<'a> Builder<'a> {
 
     pub(crate) fn receiver_local_from_path(&self, expr: &HirExpr) -> Option<Local> {
         if let HirExprKind::Path { segments, .. } = &expr.kind {
-            let first = segments.first()?;
-            return self.lookup_local(&first.name);
+            return self.path_local(segments);
         }
         None
     }

@@ -2304,16 +2304,36 @@ impl<'a> Builder<'a> {
         // The impl whose receiver is the type in front of us. Two impls on one
         // type is a coherence error the checker reports, so more than one
         // match names no single body and falls through with the rest.
-        let unique_impl = match recorded.as_deref() {
-            Some(mangled) => Some(mangled),
-            None => match on_receiver.as_slice() {
-                [only] => Some(*only),
-                _ => match named.as_slice() {
+        // A receiver of a built-in scalar or string type reaches a user impl
+        // only when that impl's declared receiver is the same type: a
+        // program's lone `PaintCx::abs` is not what `x.abs()` on an `f64`
+        // calls.
+        let receiver_is_builtin = matches!(
+            self.tcx.kind_of(receiver_key),
+            gossamer_types::TyKind::Int(_)
+                | gossamer_types::TyKind::Float(_)
+                | gossamer_types::TyKind::Bool
+                | gossamer_types::TyKind::Char
+                | gossamer_types::TyKind::String
+        );
+        let unique_impl =
+            match recorded.as_deref() {
+                Some(mangled) => Some(mangled),
+                None => match on_receiver.as_slice() {
                     [only] => Some(*only),
-                    _ => None,
+                    _ => match named.as_slice() {
+                        [only]
+                            if !receiver_is_builtin
+                                || self.impl_method_receivers.get(*only).is_some_and(
+                                    |declared| self.peel_ref_ty(*declared) == receiver_key,
+                                ) =>
+                        {
+                            Some(*only)
+                        }
+                        _ => None,
+                    },
                 },
-            },
-        };
+            };
         if let Some(mangled) = unique_impl {
             let dest_ty = match self.tcx.kind_of(ty) {
                 gossamer_types::TyKind::Error | gossamer_types::TyKind::Var(_) => self

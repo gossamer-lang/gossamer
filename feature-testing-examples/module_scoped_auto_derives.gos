@@ -1,0 +1,25 @@
+use std::sync::channel_unbounded
+
+struct Model { requests: Sender<i64> }
+
+mod values {
+    pub struct Model { value: i64 }
+
+    pub fn exercise() -> String {
+        let a = Model { value: 7 }
+        let b = Model { value: 9 }
+        assert(a != b)
+        assert(a < b)
+        f"{a}"
+    }
+}
+
+fn main() {
+    let tx, rx = channel_unbounded()
+    let model = Model { requests: tx }
+    for _ in 0..3 {
+        println(values::exercise())
+    }
+    model.requests.close()
+    let _ = rx
+}

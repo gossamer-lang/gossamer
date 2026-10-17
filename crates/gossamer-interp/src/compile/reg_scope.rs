@@ -240,6 +240,16 @@ impl<'tcx> FnBuilder<'tcx> {
         None
     }
 
+    /// The local a path names: only a single-segment path can name one. A
+    /// module-anchored path (`text::layout::COUNT`) starts with a module,
+    /// whatever local shares that module's name.
+    pub(crate) fn path_local(&self, segments: &[gossamer_ast::Ident]) -> Option<TypedReg> {
+        match segments {
+            [only] => self.lookup_local(&only.name),
+            _ => None,
+        }
+    }
+
     /// Whether `reg` is the home of a binding that is still in scope.
     /// An initializer that folds to an existing binding's register - an
     /// inlined identity call, say - aliases it exactly as `let y = x` does,

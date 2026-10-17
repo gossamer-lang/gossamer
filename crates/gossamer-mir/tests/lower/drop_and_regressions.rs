@@ -2816,3 +2816,39 @@ fn main() {
         .any(|s| s.contains("gos_rt_vec_retain"));
     assert!(emptied || shared, "{stmts:#?}");
 }
+
+#[test]
+fn map_index_parameter_copy_keeps_callers_string_share() {
+    let source = r"
+struct Store { gens: Map<String, i64> }
+impl Store {
+    fn insert(&mut self, key: String) {
+        self.gens[key] = 7
+    }
+}
+";
+    let (bodies, _) = build(source);
+    let body = bodies.iter().find(|b| b.name == "Store::insert").expect("insert body");
+    assert_eq!(rc_calls_on(body, "gos_rt_str_retain_typed", Local(2)), 1);
+    assert_eq!(rc_calls_on(body, "gos_rt_str_free_typed", Local(2)), 0);
+}
+
+#[test]
+fn nested_map_aggregate_copy_clones_its_destination_slot() {
+    let source = r"
+struct Inner { values: Map<String, String> }
+struct Outer { inner: Inner }
+fn wrap(inner: Inner) -> Outer { Outer { inner: inner } }
+";
+    let (bodies, _) = build(source);
+    let body = bodies.iter().find(|b| b.name == "wrap").expect("wrap body");
+    let copy = body.blocks.iter().flat_map(|b| &b.stmts).find_map(|stmt| match &stmt.kind {
+        StatementKind::Assign { place, rvalue: Rvalue::Aggregate { operands, .. } }
+            if operands.iter().any(|op| matches!(op, Operand::Copy(p) if p.local == Local(1))) => Some(place.local),
+        _ => None,
+    }).expect("aggregate copy");
+    assert!(body.blocks.iter().flat_map(|b| &b.stmts).any(|stmt| matches!(&stmt.kind,
+        StatementKind::Assign { rvalue: Rvalue::CallIntrinsic { name: "gos_rt_map_field_clone", args }, .. }
+            if matches!(args.first(), Some(Operand::Copy(p)) if p.local == copy && p.projection == vec![gossamer_mir::Projection::Field(0), gossamer_mir::Projection::Field(0)])
+    )), "{body:#?}");
+}

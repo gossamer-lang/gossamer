@@ -2615,10 +2615,12 @@ copy directly. A named Vec argument is cloned before the goroutine is
 published, including nested Vec storage, so later growth occurs on independent
 buffers. Every managed child reachable from that Vec is marked shared before
 publication. Runtime synchronization handles keep their documented
-shared-handle semantics. GT0055 rejects every inline struct, tuple, or
-fixed-array argument at a spawned call because the compiled spawn ABI
-cannot yet copy arbitrary inline layouts. Publish supported fields separately
-and reconstruct the aggregate in the receiving goroutine.
+shared-handle semantics. A struct, tuple, or fixed-array argument crosses as
+the captured snapshot it is when it holds scalars, strings, and runtime
+handles (`Sender`, `Shared`, `Mutex`, ...). GT0055 rejects one that holds
+nested Vec storage, which the spawn boundary cannot yet copy with a single
+ownership descriptor; publish that Vec separately and reconstruct the
+aggregate in the receiving goroutine.
 
 A spawned call may not capture or pass a `&T` or `&mut T`. The tracked
 `&`/`&mut` access markers are lexical write-intent markers (§7.5) and cannot be

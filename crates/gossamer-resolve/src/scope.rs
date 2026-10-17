@@ -220,6 +220,23 @@ impl ScopeStack {
         None
     }
 
+    /// [`Self::lookup_type`] over the scopes inside the module-level one:
+    /// locals, parameters, and an inline module's own items.
+    pub(crate) fn lookup_type_inner(&self, name: &str) -> Option<Binding> {
+        self.layers[1..]
+            .iter()
+            .rev()
+            .find_map(|scope| scope.lookup_type(name))
+    }
+
+    /// [`Self::lookup_value`] over the scopes inside the module-level one.
+    pub(crate) fn lookup_value_inner(&self, name: &str) -> Option<Binding> {
+        self.layers[1..]
+            .iter()
+            .rev()
+            .find_map(|scope| scope.lookup_value(name))
+    }
+
     /// Every name visible at this point, innermost scope first, across both
     /// namespaces. Locals, parameters, and closure bindings live only here,
     /// so this is the candidate set a "did you mean" must draw on to reach

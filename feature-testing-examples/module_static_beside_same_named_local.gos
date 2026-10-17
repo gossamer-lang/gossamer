@@ -1,0 +1,24 @@
+// A `static mut` written inside a module is reached by its module path, so a
+// parameter or local that shares a module's name (`text` in `text::layout`)
+// is never the place a read or a compound assignment of the static lands.
+
+mod text {
+    pub mod layout {
+        static mut MISSES: i64 = 0
+        static mut LOG: Vec<String> = #[]
+
+        pub fn layout(text: String, layout: i64) -> String {
+            MISSES += 1
+            LOG.push(text)
+            f"{text}:{layout}:{MISSES}"
+        }
+
+        pub fn stats() -> (i64, i64) { (MISSES, LOG.len()) }
+    }
+}
+
+fn main() {
+    println(text::layout::layout("ab", 5))
+    println(text::layout::layout("cd", 6))
+    println(f"{text::layout::stats()}")
+}

@@ -1,8 +1,30 @@
 # Changelog
 
-## 0.73.1 - Platform-gated statics
+## 0.73.1 - Platform-gated statics, structural comparison, fixes
 
 - A `static mut` that `#[cfg]` leaves out of the build, with a collection or `None` as its value (`#[cfg(target_os = "macos")] static mut NAMES: Vec<String> = #[]`), no longer stops the program with `GR0001 cannot find NAMES` on the platforms it is gated off.
+- `==` and `<` compare a struct or enum by its fields whatever its fields hold: a newtype or `type` alias (`newtype WindowId = u32`), an `Option`, `Result`, tuple, array, `Vec`, or (for `==`) map or set, a `bool`, the type's own type parameter, a type with its own or a derived `eq` / `cmp`, or an enum that reaches this one back through a sequence. A newtype another module re-exports under the same name (`pub type Id = inner::Id`) counts as the type it wraps. Such a value compared by its address on the native tiers, so two equal values compared unequal, and `==` or `<` on one stopped the bytecode VM with `GX0002 S::eq is not bound` or `S::cmp is not bound`.
+- A struct-variant literal checks each field against the type its variant declares when the path reaches the enum through a module (`ev::Ev::Focus { .. }`), a `type` alias, or a dependency's re-export. Such a literal accepted a value of any type, and `.into()` in one of its fields was `GT0066` for want of a target.
+- A panic's call stack on the bytecode VM no longer names functions that already returned: a function that tail-called another which called a closure stayed in every later report (`at window` beneath the frame that panicked).
+- A negative index into a sequence a function received reports the sequence's length in its panic on the bytecode VM and the JIT (`the len is 2 but the index is -1`), where it said the length was 0.
+- An enum stored by value orders and compares by its fields inside a `Vec`, an `Option`, a tuple, or another type's fields on the native tiers, where `sort`, `contains`, and `==` read its slots in the wrong places.
+- A struct read out of a sequence by index and answered by value (`fn face(&self, i: i64) -> Face { self.faces[i] }`, `let f = FACES[i]; f`) owns its `String` and `Vec` fields on the native tiers and the JIT, so dropping the copy no longer frees the element the sequence still holds; a field of such an element stored into a struct the function answers is that struct's own as well.
+- A method on a number, `bool`, `char`, or `String` (`x.abs()` on an `f64`) no longer reaches a user method of the same name on an unrelated type in compiled code.
+- `#[derive(Default)]` fills a newtype field with its representation's zero value converted in, and a tuple field element by element, where it emitted a bare `0` that failed to type-check; a derived `default()` called as `Type::default()` inside the module that declares the type no longer stops the native build with `UnresolvedFnRef`.
+- `Newtype::name(..)` with no `impl` on the newtype declaring `name` (`Id::from(7)`) is `GT0060` at check time, where it type-checked and failed when the program ran.
+- A struct holding a tuple of newtypes (`pair: (Id, f64)`) builds natively; its rendering no longer stops the LLVM backend with "println/format of aggregate or variant types".
+- A struct literal inside a dependency that names its type through `use crate::m::{T}` builds natively, where it referenced an undefined `__struct` symbol.
+- A project module may share its name with a standard one (`render::path` beside `use std::path`): its own items keep their meaning, and a `use std::...` in one module no longer reaches paths written in another.
+- Each module's paths follow its own `use`: two modules importing different items under one name, a test module importing an enum another module also imports, and a module's own `use dep::Mods` beside a root-level `pub type Mods` each reach the item their module named. These stopped the program with `GX0002 ... is not bound` or checked a literal against the wrong type.
+- A variant reached through a module path (`m::F::A`, `m::F::C { x: 1 }`) or through a dependency's alias of its enum (`win::Event::Wheel { .. }`) has its enum's type, and its fields check against that enum's declaration rather than a same-named enum elsewhere.
+- A pattern may name its enum through `super::`, `crate::`, or `self::` (`super::Parsed::Invalid(_)`), where it failed with `GR0001 cannot find super`.
+- A variant pattern such as `Key::S` matches the variant even when another module declares a constant named `S`; a constant named in a pattern still matches by value.
+- Inside a module, a `static mut` beside a parameter named like an enclosing module (`text` in `text::layout`) is read and written as the static on every tier, where `COUNT += 1` overwrote the parameter.
+- `Duration` and `Instant` reached through `use std::time::{Duration, Instant}` carry their types, so `Duration::from_millis(n).as_millis()` and `start.elapsed()` work on every tier instead of failing with `GX0002 as_millis is not bound` or undefined native symbols.
+- `sort_by`, `sort_by_key`, and `sort` on a tuple sequence work in place on a `static mut` `Vec` and on a struct field (`self.items.sort_by(..)`) natively, where the first did not link and the second sorted the wrong memory.
+- `unicode::word_bounds` is declared to answer `Vec<String>`, the segments every tier returns, where its `Vec<(i64, i64)>` signature made compiled code read the strings as integer pairs.
+- A `comptime` file read inside a dependency resolves against the dependency's own file, so a library embeds its own assets whatever package builds it.
+- A struct, tuple, or fixed array of scalars, strings, and runtime handles may be passed to a spawned call (`spawn(|| work(mailbox))`); `GT0055` now refuses only an aggregate holding nested `Vec` storage.
 
 ## 0.73.0 - Data-valued parameter defaults, foreign-library fixes, optimizations, gos serve
 

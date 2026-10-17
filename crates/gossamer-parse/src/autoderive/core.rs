@@ -333,6 +333,8 @@ pub(crate) struct StructIdentities {
     scoped: HashMap<String, HashMap<String, DeclaredType>>,
     first: HashMap<String, TyId>,
     first_enum: HashMap<String, TyId>,
+    first_newtype: HashMap<String, gossamer_ast::Type>,
+    newtypes_in: HashMap<String, HashMap<String, gossamer_ast::Type>>,
 }
 
 impl StructIdentities {
@@ -353,6 +355,20 @@ impl StructIdentities {
     pub(crate) fn first_enum(&self, name: &str) -> Option<&TyId> {
         self.first_enum.get(name)
     }
+
+    /// The representation of the newtype `name` names in `module`: its own
+    /// declaration, or else the first one anywhere in the tree. `None` when
+    /// the name is not a newtype there.
+    pub(crate) fn newtype(&self, module: &str, name: &str) -> Option<&gossamer_ast::Type> {
+        match self.local(module, name) {
+            Some(DeclaredType::Alias(_)) => self
+                .newtypes_in
+                .get(module)
+                .and_then(|names| names.get(name)),
+            Some(_) => None,
+            None => self.first_newtype.get(name),
+        }
+    }
 }
 
 /// Indexes every type-namespace item in the tree by its declaring module and
@@ -372,6 +388,16 @@ pub(crate) fn struct_identities(items: &[Item]) -> StructIdentities {
             }
             ItemKind::Struct(decl) => (&decl.name.name, DeclaredType::Other),
             ItemKind::TypeAlias(decl) if decl.generics.params.is_empty() => {
+                if decl.nominal {
+                    out.first_newtype
+                        .entry(decl.name.name.clone())
+                        .or_insert_with(|| decl.ty.clone());
+                    out.newtypes_in
+                        .entry(module.clone())
+                        .or_default()
+                        .entry(decl.name.name.clone())
+                        .or_insert_with(|| decl.ty.clone());
+                }
                 (&decl.name.name, DeclaredType::Alias(decl.ty.clone()))
             }
             ItemKind::TypeAlias(decl) => (&decl.name.name, DeclaredType::Other),

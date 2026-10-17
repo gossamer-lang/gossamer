@@ -102,7 +102,7 @@ impl Lowerer<'_> {
                 }
             }
             AstPatKind::Literal(lit) => HirPatKind::Literal(lower_literal(lit)),
-            AstPatKind::Path(path) => self.lower_path_pat(path),
+            AstPatKind::Path(path) => self.lower_path_pat(pattern.id, path),
             AstPatKind::TupleStruct { path, elems } => {
                 let name = path
                     .segments
@@ -143,7 +143,7 @@ impl Lowerer<'_> {
     }
 
     /// Lowers a path pattern, resolving it to a const value, unit struct, or unit variant.
-    fn lower_path_pat(&mut self, path: &gossamer_ast::TypePath) -> HirPatKind {
+    fn lower_path_pat(&mut self, node: NodeId, path: &gossamer_ast::TypePath) -> HirPatKind {
         let name = path
             .segments
             .last()
@@ -160,8 +160,26 @@ impl Lowerer<'_> {
                 rest: false,
             };
         }
+        // A path headed by a type (`Key::S`), or a lone name that resolves to
+        // a variant or a type, is nominal whatever constant elsewhere shares
+        // its last segment.
+        let nominal = match self.resolutions.get(node) {
+            Some(Resolution::Def { kind, .. }) if path.segments.len() > 1 => matches!(
+                kind,
+                gossamer_resolve::DefKind::Enum
+                    | gossamer_resolve::DefKind::Struct
+                    | gossamer_resolve::DefKind::TypeAlias
+            ),
+            Some(Resolution::Def { kind, .. }) => matches!(
+                kind,
+                gossamer_resolve::DefKind::Variant
+                    | gossamer_resolve::DefKind::Enum
+                    | gossamer_resolve::DefKind::Struct
+            ),
+            _ => false,
+        };
         match self.const_literals.get(name.name.as_str()) {
-            Some(lit) if !self.ctor_arity.contains_key(name.name.as_str()) => {
+            Some(lit) if !nominal && !self.ctor_arity.contains_key(name.name.as_str()) => {
                 HirPatKind::Literal(lit.clone())
             }
             _ => HirPatKind::Variant {

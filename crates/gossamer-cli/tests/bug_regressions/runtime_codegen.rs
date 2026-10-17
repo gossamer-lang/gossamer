@@ -1571,3 +1571,110 @@ fn main() {
     }
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn negative_index_into_a_parameter_reports_the_sequence_length_on_every_tier() {
+    let src = r#"
+fn poke(xs: Vec<i64>, i: i64) -> i64 {
+    xs[i]
+}
+
+fn main() {
+    println(f"{poke(#[1, 2], -1)}")
+}
+"#;
+    let needle = "the len is 2 but the index is -1";
+    let dir = fresh_dir("negative_index_param_len");
+    let path = write_source(&dir, "negative_index_param_len", src);
+
+    let vm = run_vm(&path);
+    assert_eq!(vm.2, Some(101), "vm stderr: {}", vm.1);
+    assert!(vm.1.contains(needle), "vm stderr: {}", vm.1);
+
+    let jit = Command::new(gos_bin())
+        .arg("run")
+        .arg(&path)
+        .env("GOSSAMER_JIT_THRESHOLD", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn jit run");
+    let jit = run_with_timeout(jit);
+    assert_eq!(jit.2, Some(101), "jit stderr: {}", jit.1);
+    assert!(jit.1.contains(needle), "jit stderr: {}", jit.1);
+
+    for release in [false, true] {
+        let scratch = dir.join(if release { "release" } else { "debug" });
+        fs::create_dir_all(&scratch).unwrap();
+        let bin = build_native_with_flag(&path, &scratch, release).expect("native build");
+        let native = run_native(&bin);
+        assert_eq!(native.2, Some(101), "native stderr: {}", native.1);
+        assert!(native.1.contains(needle), "native stderr: {}", native.1);
+    }
+}
+
+#[test]
+fn a_tail_call_whose_callee_calls_a_closure_leaves_no_frame_in_a_later_trace() {
+    let src = r#"
+use std::errors
+
+fn create(n: i64) -> Result<i64, errors::Error> {
+    let props = n
+    let set = |k: i64| -> Result<(), errors::Error> {
+        if k + props < 0 {
+            return Err(errors::new("negative"))
+        }
+        Ok(())
+    }
+    set(1)?
+    set(2)?
+    Ok(n + 1)
+}
+
+fn check(n: i64) {
+    if n < 0 {
+        println(f"negative {n}")
+    }
+}
+
+fn outer(n: i64) -> Result<i64, errors::Error> {
+    check(n)
+    create(n)
+}
+
+fn poke(xs: Vec<u8>, i: i64) -> u8 {
+    xs[i]
+}
+
+fn run() -> Result<(), errors::Error> {
+    let a = outer(1)?
+    println(f"{poke(#[1u8], a - 100)}")
+    Ok(())
+}
+
+fn main() {
+    let _ = run()
+}
+"#;
+    let dir = fresh_dir("tail_call_closure_trace");
+    let path = write_source(&dir, "tail_call_closure_trace", src);
+    let vm = Command::new(gos_bin())
+        .arg("run")
+        .arg("--no-jit")
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn gos");
+    let vm = run_with_timeout(vm);
+    assert_eq!(vm.2, Some(101), "vm stderr: {}", vm.1);
+    let frames: Vec<&str> = vm
+        .1
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("at "))
+        .map(|frame| frame.split(' ').next().unwrap_or(frame))
+        .collect();
+    assert_eq!(frames, ["main", "run", "poke"], "vm stderr: {}", vm.1);
+}

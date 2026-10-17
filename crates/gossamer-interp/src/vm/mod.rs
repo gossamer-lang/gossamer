@@ -355,6 +355,10 @@ pub struct Vm {
     /// Populated by `load` when [`Self::collect_comptime`] is set; drained
     /// by the CLI to splice results back into the source.
     pub(crate) comptime_folds: RefCell<Vec<ComptimeFold>>,
+    /// The file each region of an assembled unit was written in, as
+    /// `(start, end, path)` byte ranges of the unit, outermost first. A
+    /// comptime region's relative reads resolve against its own file.
+    pub(crate) comptime_origins: RefCell<Vec<(u32, u32, String)>>,
 }
 
 /// One lazily materialised `Type::method` spelling owned by a [`Vm`]. A compact

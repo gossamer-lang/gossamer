@@ -941,6 +941,18 @@ fn concurrency_rejects_unmarshalable_inline_aggregates() {
             "struct Wrapped { values: Vec<i64> }\nfn work(value: Wrapped) {}\nfn main() { let value = Wrapped { values: Vec::from([1, 2]) }\n spawn(|| work(value)) }",
         ),
         (
+            "tuple containing Vec argument",
+            "fn work(value: (Vec<i64>, i64)) {}\nfn main() { let value = (Vec::from([1, 2]), 2)\n spawn(|| work(value)) }",
+        ),
+    ] {
+        assert_rejected(name, source, ExpectedError::ConcurrentInlineAggregate);
+    }
+}
+
+#[test]
+fn concurrency_takes_aggregates_without_growable_storage() {
+    for (name, source) in [
+        (
             "scalar struct goroutine argument",
             "struct Pair { left: i64, right: i64 }\nfn work(value: Pair) {}\nfn main() { let value = Pair { left: 1, right: 2 }\n spawn(|| work(value)) }",
         ),
@@ -949,11 +961,11 @@ fn concurrency_rejects_unmarshalable_inline_aggregates() {
             "fn work(value: [i64; 2]) {}\nfn main() { let value = [1, 2]\n spawn(|| work(value)) }",
         ),
         (
-            "tuple containing Vec argument",
-            "fn work(value: (Vec<i64>, i64)) {}\nfn main() { let value = (Vec::from([1, 2]), 2)\n spawn(|| work(value)) }",
+            "struct of runtime handles goroutine argument",
+            "use std::sync::{channel_unbounded, Sender, Shared}\nstruct Post { tx: Sender<String>, n: Shared<i64>, tag: String }\nfn work(p: Post) { p.tx.send(p.tag) }\nfn main() { let tx, rx = channel_unbounded()\n let p = Post { tx: tx, n: Shared::new(0), tag: \"t\" }\n spawn(|| work(p))\n let _ = rx }",
         ),
     ] {
-        assert_rejected(name, source, ExpectedError::ConcurrentInlineAggregate);
+        assert_accepted(name, source);
     }
 }
 

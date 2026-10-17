@@ -536,10 +536,8 @@ impl<'a> Builder<'a> {
         ty: Ty,
         span: Span,
     ) -> Option<Local> {
-        if let Some(first) = segments.first() {
-            if let Some(local) = self.lookup_local(&first.name) {
-                return Some(local);
-            }
+        if let Some(local) = self.path_local(segments) {
+            return Some(local);
         }
         // `T::name` used as a value names a trait function through a type
         // parameter. It is spelled the way a call through the parameter is,
@@ -1625,6 +1623,28 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        // A struct or enum with no `eq` / `cmp` of its own still compares by
+        // its fields, through its ordering descriptor, never by the address
+        // its value happens to sit at.
+        if matches!(
+            op,
+            HirBinaryOp::Eq
+                | HirBinaryOp::Ne
+                | HirBinaryOp::Lt
+                | HirBinaryOp::Le
+                | HirBinaryOp::Gt
+                | HirBinaryOp::Ge
+        ) {
+            let tys = [
+                lhs.ty,
+                self.locals[lhs_local.0 as usize].ty,
+                rhs.ty,
+                self.locals[rhs_local.0 as usize].ty,
+            ];
+            if let Some(dest) = self.lower_adt_desc_compare(op, lhs_local, rhs_local, &tys, span) {
+                return Some(dest);
+            }
+        }
         // Arithmetic operator overloading: route `a + b` (and `- * /`) on a
         // user struct/enum to its `add`/`sub`/`mul`/`div` impl method. The
         // checker has already typed the result as that method's return type
@@ -2426,13 +2446,18 @@ impl<'a> Builder<'a> {
     /// when the type has no ordering the language defines - a map, a set, a
     /// handle - so the caller can decline rather than compare raw words.
     pub(crate) fn ordering_stream(&self, ty: Ty) -> Option<Vec<u8>> {
-        self.ordering_stream_inner(ty, None, 0)
+        self.ordering_stream_inner(ty, &[], 0, 0)
     }
 
+    /// The descriptor of `ty` as it begins at byte `at` of the whole stream.
+    /// `enclosing` lists the enums being described around it, innermost
+    /// last, so a field reaching one of them refers back to it instead of
+    /// describing it again.
     fn ordering_stream_inner(
         &self,
         ty: Ty,
-        self_enum: Option<gossamer_resolve::DefId>,
+        enclosing: &[Enclosing],
+        at: usize,
         depth: u32,
     ) -> Option<Vec<u8>> {
         use gossamer_types::{ArrayLen, IntTy, TyKind};
@@ -2440,8 +2465,13 @@ impl<'a> Builder<'a> {
             return None;
         }
         let mut peeled = ty;
-        while let TyKind::Ref { inner, .. } = self.tcx.kind_of(peeled) {
-            peeled = *inner;
+        loop {
+            match self.tcx.kind_of(peeled) {
+                TyKind::Ref { inner, .. } => peeled = *inner,
+                // A newtype orders as the value it wraps.
+                TyKind::Nominal { repr, .. } => peeled = *repr,
+                _ => break,
+            }
         }
         match self.tcx.kind_of(peeled) {
             // An unsigned integer orders as one: a narrow one stored at its
@@ -2463,13 +2493,23 @@ impl<'a> Builder<'a> {
                 let count = u8::try_from(n).ok()?;
                 let span = u8::try_from(self.type_slot_bytes(elem).max(8) / 8).ok()?;
                 let mut out = vec![gossamer_abi::DESC_ARRAY, count, span];
-                out.extend(self.ordering_stream_inner(elem, self_enum, depth + 1)?);
+                out.extend(self.ordering_stream_inner(
+                    elem,
+                    enclosing,
+                    at + out.len(),
+                    depth + 1,
+                )?);
                 Some(out)
             }
             TyKind::Vec(elem) | TyKind::Slice(elem) => {
                 let elem = *elem;
                 let mut out = vec![gossamer_abi::DESC_VEC];
-                out.extend(self.ordering_stream_inner(elem, self_enum, depth + 1)?);
+                out.extend(self.ordering_stream_inner(
+                    elem,
+                    enclosing,
+                    at + out.len(),
+                    depth + 1,
+                )?);
                 Some(out)
             }
             TyKind::Tuple(elems) => {
@@ -2477,7 +2517,12 @@ impl<'a> Builder<'a> {
                 let arity = u8::try_from(elems.len()).ok()?;
                 let mut out = vec![gossamer_abi::TUPLE_TAG_NESTED, arity];
                 for e in &elems {
-                    out.extend(self.ordering_stream_inner(*e, self_enum, depth + 1)?);
+                    out.extend(self.ordering_stream_inner(
+                        *e,
+                        enclosing,
+                        at + out.len(),
+                        depth + 1,
+                    )?);
                 }
                 Some(out)
             }
@@ -2492,28 +2537,57 @@ impl<'a> Builder<'a> {
                     } else {
                         gossamer_abi::DESC_RESULT
                     }];
-                    out.extend(self.ordering_stream_inner(*tys.first()?, self_enum, depth + 1)?);
+                    let first = *tys.first()?;
+                    out.extend(self.ordering_stream_inner(
+                        first,
+                        enclosing,
+                        at + out.len(),
+                        depth + 1,
+                    )?);
                     if !is_option {
+                        let second = *tys.get(1)?;
                         out.extend(self.ordering_stream_inner(
-                            *tys.get(1)?,
-                            self_enum,
+                            second,
+                            enclosing,
+                            at + out.len(),
                             depth + 1,
                         )?);
                     }
                     return Some(out);
                 }
-                if self_enum == Some(def) {
-                    return Some(vec![gossamer_abi::DESC_SELF]);
+                if let Some(index) = enclosing.iter().rposition(|e| e.def == def) {
+                    let target = enclosing[index];
+                    // `DESC_SELF` reads the innermost enum's node through its
+                    // word; a by-value enum's slots are read in place.
+                    if index + 1 == enclosing.len() && !target.by_value {
+                        return Some(vec![gossamer_abi::DESC_SELF]);
+                    }
+                    let back = u16::try_from(at - target.at).ok()?.to_le_bytes();
+                    return Some(vec![gossamer_abi::DESC_ENUM_REF, back[0], back[1]]);
+                }
+                if let Some(layout) = self.tcx.flat_enum_layout(peeled).cloned() {
+                    let mut inner = enclosing.to_vec();
+                    inner.push(Enclosing {
+                        def,
+                        at,
+                        by_value: true,
+                    });
+                    return self.flat_enum_ordering_stream(&layout, &inner, at, depth);
                 }
                 if let Some(stream) = self.packed_ordering_stream(peeled) {
                     return Some(stream);
                 }
-                if let Some(fields) = self.tcx.struct_field_tys(def) {
+                if let Some(fields) = self.tcx.adt_field_tys(def, &substs) {
                     let fields = fields.to_vec();
                     let arity = u8::try_from(fields.len()).ok()?;
                     let mut out = vec![gossamer_abi::TUPLE_TAG_NESTED, arity];
                     for f in &fields {
-                        out.extend(self.ordering_stream_inner(*f, self_enum, depth + 1)?);
+                        out.extend(self.ordering_stream_inner(
+                            *f,
+                            enclosing,
+                            at + out.len(),
+                            depth + 1,
+                        )?);
                     }
                     return Some(out);
                 }
@@ -2521,16 +2595,67 @@ impl<'a> Builder<'a> {
                 let count = u8::try_from(variants.len()).ok()?;
                 let inline = u8::from(self.tcx.is_inline_enum_ty(peeled));
                 let mut out = vec![gossamer_abi::DESC_ENUM, inline, count];
+                let mut inner = enclosing.to_vec();
+                inner.push(Enclosing {
+                    def,
+                    at,
+                    by_value: false,
+                });
                 for fields in &variants {
                     out.push(u8::try_from(fields.len()).ok()?);
                     for f in fields {
-                        out.extend(self.ordering_stream_inner(*f, Some(def), depth + 1)?);
+                        out.extend(self.ordering_stream_inner(
+                            *f,
+                            &inner,
+                            at + out.len(),
+                            depth + 1,
+                        )?);
                     }
                 }
                 Some(out)
             }
             _ => None,
         }
+    }
+
+    /// The `DESC_FLAT_ENUM` descriptor of an enum stored by value. A field
+    /// held in a shared word - an integer, `bool`, `char`, or unit-only enum
+    /// in an `i64`, a float in an `f64` - is described as the one slot it
+    /// occupies there.
+    fn flat_enum_ordering_stream(
+        &self,
+        layout: &gossamer_types::FlatEnumLayout,
+        enclosing: &[Enclosing],
+        at: usize,
+        depth: u32,
+    ) -> Option<Vec<u8>> {
+        let mut out = vec![
+            gossamer_abi::DESC_FLAT_ENUM,
+            u8::try_from(layout.regions.len()).ok()?,
+        ];
+        for region in &layout.regions {
+            out.push(u8::try_from(self.type_slot_bytes(*region).max(8) / 8).ok()?);
+        }
+        out.push(u8::try_from(layout.variant_field_tys.len()).ok()?);
+        for (fields, regions) in layout.variant_field_tys.iter().zip(&layout.variant_regions) {
+            out.push(u8::try_from(fields.len()).ok()?);
+            for (field, region) in fields.iter().zip(regions) {
+                out.push(u8::try_from(*region).ok()?);
+                // A unit-only enum keeps only its discriminant in a shared
+                // word, where its own descriptor would read two slots.
+                if crate::lower::flat_enums::is_unit_only_enum(self.tcx, *field) {
+                    out.push(0);
+                } else {
+                    out.extend(self.ordering_stream_inner(
+                        *field,
+                        enclosing,
+                        at + out.len(),
+                        depth + 1,
+                    )?);
+                }
+            }
+        }
+        Some(out)
     }
 
     /// Whether `ty` is an enum some variant of which carries fields.
@@ -2735,6 +2860,11 @@ impl<'a> Builder<'a> {
         }
         if let Some(local) =
             self.lower_sequence_eq(HirBinaryOp::Eq, lhs_local, rhs_local, &[ty, lhs_ty], span)
+        {
+            return local;
+        }
+        if let Some(local) =
+            self.lower_adt_desc_compare(HirBinaryOp::Eq, lhs_local, rhs_local, &[ty, lhs_ty], span)
         {
             return local;
         }
@@ -3051,6 +3181,43 @@ impl<'a> Builder<'a> {
             Operand::Const(ConstValue::Str(desc_text)),
         ];
         Some(self.lower_equality_call(op, "gos_rt_desc_eq", args, span))
+    }
+
+    /// A comparison of two values of a user struct or enum through its
+    /// ordering descriptor: `gos_rt_desc_eq` for `==` / `!=`, `gos_rt_desc_cmp`
+    /// for an ordering. `None` when no candidate type is a user struct or enum
+    /// with a descriptor.
+    fn lower_adt_desc_compare(
+        &mut self,
+        op: HirBinaryOp,
+        lhs_local: Local,
+        rhs_local: Local,
+        tys: &[Ty],
+        span: Span,
+    ) -> Option<Local> {
+        use gossamer_types::TyKind;
+        let (adt, desc) = tys
+            .iter()
+            .map(|ty| self.tcx.peel_nominal(self.peel_ref_ty(*ty)))
+            .find(|ty| {
+                matches!(self.tcx.kind_of(*ty), TyKind::Adt { def, .. }
+                    if def.local < u32::MAX - 64
+                        && (self.tcx.struct_field_tys(*def).is_some()
+                            || self.tcx.enum_variant_tys(*def).is_some()))
+            })
+            .and_then(|ty| self.ordering_stream(ty).map(|desc| (ty, desc)))?;
+        let lhs_slots = self.ordered_value_slots(lhs_local, adt, span);
+        let rhs_slots = self.ordered_value_slots(rhs_local, adt, span);
+        let desc_text: String = desc.iter().map(|&b| b as char).collect();
+        let args = vec![
+            Operand::Copy(Place::local(lhs_slots)),
+            Operand::Copy(Place::local(rhs_slots)),
+            Operand::Const(ConstValue::Str(desc_text)),
+        ];
+        if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne) {
+            return Some(self.lower_equality_call(op, "gos_rt_desc_eq", args, span));
+        }
+        Some(self.lower_ordering_call(op, "gos_rt_desc_cmp", args, span))
     }
 
     /// `==` / `!=` over two sequences whose elements are compared field by
@@ -3677,11 +3844,7 @@ impl<'a> Builder<'a> {
 
     pub(crate) fn lower_place_expr(&mut self, expr: &HirExpr) -> Option<Place> {
         match &expr.kind {
-            HirExprKind::Path { segments, .. } => {
-                let first = segments.first()?;
-                let local = self.lookup_local(&first.name)?;
-                Some(Place::local(local))
-            }
+            HirExprKind::Path { segments, .. } => Some(Place::local(self.path_local(segments)?)),
             HirExprKind::Field { receiver, name } => {
                 let mut base = self.lower_place_expr(receiver)?;
                 // Resolve which struct's field ordering to use.
@@ -4750,4 +4913,14 @@ pub(crate) const fn narrow_int_width(ty: gossamer_types::IntTy) -> Option<u32> {
         IntTy::I32 | IntTy::U32 => Some(32),
         _ => None,
     }
+}
+
+/// An enum whose ordering descriptor is being written around a field: its
+/// definition, the byte its entry begins at, and whether its values are
+/// stored by value rather than as a node.
+#[derive(Clone, Copy)]
+struct Enclosing {
+    def: gossamer_resolve::DefId,
+    at: usize,
+    by_value: bool,
 }

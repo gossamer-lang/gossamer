@@ -12,10 +12,17 @@ const REWRITTEN_STDLIB_MODULES: &[&str] = &[
 /// answering the module that name reaches. `use` decls inside `mod` bodies are hoisted to
 /// the source file, so a bundle answers for every one of its files.
 fn stdlib_modules_in_scope(sf: &SourceFile) -> std::collections::HashMap<String, String> {
+    std_modules_bound_by(sf.uses.iter())
+}
+
+/// The stdlib modules `uses` bind, keyed by the name each is spelled by.
+fn std_modules_bound_by<'a>(
+    uses: impl Iterator<Item = &'a gossamer_ast::UseDecl>,
+) -> std::collections::HashMap<String, String> {
     use gossamer_ast::UseTarget;
 
     let mut out: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for decl in &sf.uses {
+    for decl in uses {
         let UseTarget::Module(path) = &decl.target else {
             continue;
         };
@@ -45,6 +52,96 @@ fn stdlib_modules_in_scope(sf: &SourceFile) -> std::collections::HashMap<String,
     out
 }
 
+/// What the `use` declarations in scope bind inside each module of a unit:
+/// the stdlib modules by the name each is spelled by, and the bare names that
+/// reach an injected wrapper. A module sees the file's own imports and the
+/// ones written inside it, as name resolution does, so an import in one
+/// module never reaches a path written in another.
+struct ImportScopes {
+    modules: std::collections::HashMap<Vec<String>, std::collections::HashMap<String, String>>,
+    wrappers: std::collections::HashMap<Vec<String>, std::collections::HashMap<String, &'static str>>,
+}
+
+impl ImportScopes {
+    fn of(sf: &SourceFile) -> Self {
+        let mut declared: std::collections::HashMap<Vec<String>, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+        collect_declared_names(&sf.items, &mut Vec::new(), &mut declared);
+        let mut modules = std::collections::HashMap::new();
+        let mut wrappers = std::collections::HashMap::new();
+        for (module, names) in &declared {
+            let mut bound = std_modules_bound_by(uses_in(sf, &[]));
+            let mut bare = wrapper_names_bound_by(uses_in(sf, &[]), names);
+            if !module.is_empty() {
+                bound.extend(std_modules_bound_by(uses_in(sf, module)));
+                bare.extend(wrapper_names_bound_by(uses_in(sf, module), names));
+            }
+            modules.insert(module.clone(), bound);
+            wrappers.insert(module.clone(), bare);
+        }
+        Self { modules, wrappers }
+    }
+
+    fn modules_in(&self, module: &[String]) -> &std::collections::HashMap<String, String> {
+        static EMPTY: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+            std::sync::OnceLock::new();
+        self.modules
+            .get(module)
+            .unwrap_or_else(|| EMPTY.get_or_init(std::collections::HashMap::new))
+    }
+
+    fn wrappers_in(&self, module: &[String]) -> &std::collections::HashMap<String, &'static str> {
+        static EMPTY: std::sync::OnceLock<std::collections::HashMap<String, &'static str>> =
+            std::sync::OnceLock::new();
+        self.wrappers
+            .get(module)
+            .unwrap_or_else(|| EMPTY.get_or_init(std::collections::HashMap::new))
+    }
+}
+
+/// The `use` declarations written in `module` itself.
+fn uses_in<'a>(
+    sf: &'a SourceFile,
+    module: &'a [String],
+) -> impl Iterator<Item = &'a gossamer_ast::UseDecl> {
+    sf.uses.iter().filter(move |decl| decl.module == module)
+}
+
+/// The `fn` / `struct` / `enum` names each inline module declares, keyed by
+/// the module's path; the file's own level is the empty path.
+fn collect_declared_names(
+    items: &[gossamer_ast::Item],
+    module: &mut Vec<String>,
+    out: &mut std::collections::HashMap<Vec<String>, std::collections::HashSet<String>>,
+) {
+    use gossamer_ast::ItemKind;
+
+    let names = out.entry(module.clone()).or_default();
+    for item in items {
+        match &item.kind {
+            ItemKind::Fn(decl) => {
+                names.insert(decl.name.name.clone());
+            }
+            ItemKind::Struct(decl) => {
+                names.insert(decl.name.name.clone());
+            }
+            ItemKind::Enum(decl) => {
+                names.insert(decl.name.name.clone());
+            }
+            _ => {}
+        }
+    }
+    for item in items {
+        if let ItemKind::Mod(decl) = &item.kind
+            && let gossamer_ast::ModBody::Inline(inner) = &decl.body
+        {
+            module.push(decl.name.name.clone());
+            collect_declared_names(inner, module, out);
+            module.pop();
+        }
+    }
+}
+
 /// The rewrite-table module key `head` names, or `None` where `head` spells a
 /// stdlib module this unit never imported. A path rooted at `std` names the
 /// stdlib outright, whatever is in scope.
@@ -62,25 +159,18 @@ fn stdlib_module_key(
     None
 }
 
-/// Bare names a `use std::<module>::<item>` brought into scope that reach an
-/// injected wrapper, mapped to that wrapper's mangled name. An item the file
-/// declares itself keeps its own meaning, so a program with its own `shield`
-/// is untouched.
-fn imported_wrapper_names(sf: &SourceFile) -> std::collections::HashMap<String, &'static str> {
-    use gossamer_ast::{ItemKind, UseTarget};
+/// Bare names `uses` bring into scope that reach an injected wrapper, mapped
+/// to that wrapper's mangled name. An item the module declares itself
+/// (`declared`) keeps its own meaning, so a program with its own `shield` is
+/// untouched.
+fn wrapper_names_bound_by<'a>(
+    uses: impl Iterator<Item = &'a gossamer_ast::UseDecl>,
+    declared: &std::collections::HashSet<String>,
+) -> std::collections::HashMap<String, &'static str> {
+    use gossamer_ast::UseTarget;
 
-    let declared: std::collections::HashSet<&str> = sf
-        .items
-        .iter()
-        .filter_map(|item| match &item.kind {
-            ItemKind::Fn(decl) => Some(decl.name.name.as_str()),
-            ItemKind::Struct(decl) => Some(decl.name.name.as_str()),
-            ItemKind::Enum(decl) => Some(decl.name.name.as_str()),
-            _ => None,
-        })
-        .collect();
     let mut out: std::collections::HashMap<String, &'static str> = std::collections::HashMap::new();
-    for decl in &sf.uses {
+    for decl in uses {
         let UseTarget::Module(path) = &decl.target else {
             continue;
         };
@@ -151,6 +241,11 @@ fn collapse_expr(
                 .segments
                 .get(1)
                 .is_some_and(|module| scope.contains_key(module.name.name.as_str())));
+    // A longer path rooted anywhere else - `crate::render::path::Path` - goes
+    // through the program's own modules, whatever their names.
+    if !rooted && n > 2 {
+        return;
+    }
     let key = |i: usize| stdlib_module_key(scope, path.segments[i].name.name.as_str(), rooted);
     let head3 = if n >= 3 { key(n - 3) } else { None };
     let head2 = key(n - 2);
@@ -269,6 +364,9 @@ fn collapse_type(
                 .segments
                 .get(1)
                 .is_some_and(|module| scope.contains_key(module.name.name.as_str())));
+    if !rooted && n > 2 {
+        return;
+    }
     let parent = stdlib_module_key(scope, path.segments[n - 2].name.name.as_str(), rooted);
     let parent = parent.as_deref();
     // `sql::Error` is the standard error type at the language
@@ -337,36 +435,56 @@ pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
     use gossamer_ast::VisitorMut;
     use gossamer_ast::expr::{Expr, ExprKind};
     use gossamer_ast::ty::{Type, TypeKind};
-    use gossamer_ast::visitor::{walk_expr_mut, walk_type_mut};
+    use gossamer_ast::visitor::{walk_expr_mut, walk_item_mut, walk_type_mut};
 
     /// Rewrites a bare name a `use std::<module>::<item>` bound, which
     /// reaches the same injected wrapper the qualified path does. Without
     /// it the imported spelling type-checks and then finds no such name at
     /// run time.
-    struct BareImportRewriter {
-        imported: std::collections::HashMap<String, &'static str>,
+    struct BareImportRewriter<'s> {
+        scopes: &'s ImportScopes,
+        module: Vec<String>,
     }
 
-    impl VisitorMut for BareImportRewriter {
+    impl VisitorMut for BareImportRewriter<'_> {
+        fn visit_item(&mut self, item: &mut gossamer_ast::Item) {
+            let name = inline_module_name(item);
+            self.module.extend(name.clone());
+            walk_item_mut(self, item);
+            if name.is_some() {
+                self.module.pop();
+            }
+        }
+
         fn visit_expr(&mut self, expr: &mut Expr) {
             walk_expr_mut(self, expr);
             if let ExprKind::Path(path) = &mut expr.kind {
-                bare_import_expr(path, &self.imported);
+                bare_import_expr(path, self.scopes.wrappers_in(&self.module));
             }
         }
 
         fn visit_type(&mut self, ty: &mut Type) {
             walk_type_mut(self, ty);
             if let TypeKind::Path(path) = &mut ty.kind {
-                bare_import_type(path, &self.imported);
+                bare_import_type(path, self.scopes.wrappers_in(&self.module));
             }
         }
     }
 
-    struct Rewriter {
-        scope: std::collections::HashMap<String, String>,
+    struct Rewriter<'s> {
+        scopes: &'s ImportScopes,
+        module: Vec<String>,
     }
-    impl VisitorMut for Rewriter {
+    impl VisitorMut for Rewriter<'_> {
+        fn visit_item(&mut self, item: &mut gossamer_ast::Item) {
+            let name = inline_module_name(item);
+            self.module.extend(name.clone());
+            walk_item_mut(self, item);
+            if name.is_some() {
+                self.module.pop();
+            }
+        }
+
         fn visit_expr(&mut self, expr: &mut Expr) {
             walk_expr_mut(self, expr);
             // `r.form_file(name)` is a request/multipart convenience that
@@ -380,46 +498,66 @@ pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
                 rewrite_form_file_method(expr);
                 return;
             }
+            let scope = self.scopes.modules_in(&self.module);
             match &mut expr.kind {
                 ExprKind::Call { callee, .. } => {
                     if let ExprKind::Path(path) = &mut callee.kind {
-                        collapse_expr(path, &self.scope);
+                        collapse_expr(path, scope);
                     }
                 }
-                ExprKind::Path(path) => collapse_expr(path, &self.scope),
-                ExprKind::Struct { path, .. } => collapse_expr(path, &self.scope),
+                ExprKind::Path(path) => collapse_expr(path, scope),
+                ExprKind::Struct { path, .. } => collapse_expr(path, scope),
                 _ => {}
             }
         }
         fn visit_type(&mut self, ty: &mut Type) {
             walk_type_mut(self, ty);
             if let TypeKind::Path(tp) = &mut ty.kind {
-                collapse_type(tp, &self.scope);
+                collapse_type(tp, self.scopes.modules_in(&self.module));
             }
         }
     }
-    let imported = imported_wrapper_names(sf);
-    let scope = stdlib_modules_in_scope(sf);
-    Rewriter { scope }.visit_source_file(sf);
-    if !imported.is_empty() {
-        BareImportRewriter { imported }.visit_source_file(sf);
+    let scopes = ImportScopes::of(sf);
+    Rewriter {
+        scopes: &scopes,
+        module: Vec::new(),
+    }
+    .visit_source_file(sf);
+    if scopes.wrappers.values().any(|bare| !bare.is_empty()) {
+        BareImportRewriter {
+            scopes: &scopes,
+            module: Vec::new(),
+        }
+        .visit_source_file(sf);
     }
 }
 
-/// The injected wrapper names `sf` spells once
-/// [`rewrite_stdlib_struct_surface`] has rewritten it, found without
-/// rewriting it: each path the rewrite would change is rewritten alone, by
-/// the same functions, and every other path is read as written.
-fn stdlib_wrapper_names(sf: &SourceFile) -> std::collections::HashSet<String> {
+/// The name of the inline module `item` declares, if it declares one.
+fn inline_module_name(item: &gossamer_ast::Item) -> Option<String> {
+    match &item.kind {
+        gossamer_ast::ItemKind::Mod(decl)
+            if matches!(decl.body, gossamer_ast::ModBody::Inline(_)) =>
+        {
+            Some(decl.name.name.clone())
+        }
+        _ => None,
+    }
+}
+
+mod wrapper_names {
     use gossamer_ast::Visitor;
     use gossamer_ast::expr::{Expr, ExprKind};
     use gossamer_ast::ty::{Type, TypeKind, TypePath};
-    use gossamer_ast::visitor::{walk_expr, walk_path_expr, walk_type, walk_type_path};
+    use gossamer_ast::visitor::{walk_expr, walk_item, walk_path_expr, walk_type, walk_type_path};
 
-    struct Names {
-        scope: std::collections::HashMap<String, String>,
-        imported: std::collections::HashMap<String, &'static str>,
-        found: std::collections::HashSet<String>,
+    use super::{ImportScopes, bare_import_expr, bare_import_type, collapse_expr, collapse_type, inline_module_name};
+
+    /// Collects the injected wrapper names a unit's paths become, module by
+    /// module, for [`super::stdlib_wrapper_names`].
+    pub(super) struct Names {
+        pub(super) scopes: ImportScopes,
+        pub(super) module: Vec<String>,
+        pub(super) found: std::collections::HashSet<String>,
     }
 
     impl Names {
@@ -432,11 +570,20 @@ fn stdlib_wrapper_names(sf: &SourceFile) -> std::collections::HashSet<String> {
         /// Whether the rewrite can change a path whose first segment is
         /// `first` and that has `len` segments.
         fn may_rewrite(&self, len: usize, first: &str) -> bool {
-            len >= 2 || self.imported.contains_key(first)
+            len >= 2 || self.scopes.wrappers_in(&self.module).contains_key(first)
         }
     }
 
     impl Visitor for Names {
+        fn visit_item(&mut self, item: &gossamer_ast::Item) {
+            let name = inline_module_name(item);
+            self.module.extend(name.clone());
+            walk_item(self, item);
+            if name.is_some() {
+                self.module.pop();
+            }
+        }
+
         fn visit_expr(&mut self, expr: &Expr) {
             match &expr.kind {
                 // `r.form_file(name)` becomes a call of the multipart wrapper
@@ -457,15 +604,15 @@ fn stdlib_wrapper_names(sf: &SourceFile) -> std::collections::HashSet<String> {
                     if self.may_rewrite(path.segments.len(), &path.segments[0].name.name) =>
                 {
                     let mut path = path.clone();
-                    collapse_expr(&mut path, &self.scope);
-                    bare_import_expr(&mut path, &self.imported);
+                    collapse_expr(&mut path, self.scopes.modules_in(&self.module));
+                    bare_import_expr(&mut path, self.scopes.wrappers_in(&self.module));
                     self.visit_path_expr(&path);
                 }
                 ExprKind::Struct {
                     path, fields, base, ..
                 } if path.segments.len() >= 2 => {
                     let mut path = path.clone();
-                    collapse_expr(&mut path, &self.scope);
+                    collapse_expr(&mut path, self.scopes.modules_in(&self.module));
                     self.visit_path_expr(&path);
                     for field in fields {
                         if let Some(value) = &field.value {
@@ -486,8 +633,8 @@ fn stdlib_wrapper_names(sf: &SourceFile) -> std::collections::HashSet<String> {
                     if self.may_rewrite(path.segments.len(), &path.segments[0].name.name) =>
                 {
                     let mut path = path.clone();
-                    collapse_type(&mut path, &self.scope);
-                    bare_import_type(&mut path, &self.imported);
+                    collapse_type(&mut path, self.scopes.modules_in(&self.module));
+                    bare_import_type(&mut path, self.scopes.wrappers_in(&self.module));
                     self.visit_type_path(&path);
                 }
                 _ => walk_type(self, ty),
@@ -509,9 +656,18 @@ fn stdlib_wrapper_names(sf: &SourceFile) -> std::collections::HashSet<String> {
         }
     }
 
-    let mut names = Names {
-        scope: stdlib_modules_in_scope(sf),
-        imported: imported_wrapper_names(sf),
+}
+
+/// The injected wrapper names `sf` spells once
+/// [`rewrite_stdlib_struct_surface`] has rewritten it, found without
+/// rewriting it: each path the rewrite would change is rewritten alone, by
+/// the same functions, and every other path is read as written.
+fn stdlib_wrapper_names(sf: &SourceFile) -> std::collections::HashSet<String> {
+    use gossamer_ast::Visitor;
+
+    let mut names = wrapper_names::Names {
+        scopes: ImportScopes::of(sf),
+        module: Vec::new(),
         found: std::collections::HashSet::new(),
     };
     names.visit_source_file(sf);

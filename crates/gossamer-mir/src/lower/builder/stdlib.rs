@@ -103,6 +103,23 @@ impl<'a> Builder<'a> {
     /// method among them: the instantiation is read off the argument's own
     /// type, matched position by position against the parameter's.
     pub(crate) fn instantiate_param_ty_from_arg(&mut self, param: Ty, arg: Ty) -> Ty {
+        // A named function binds a callable parameter through its signature:
+        // `commands` handed to `Fn(M) -> Vec<Command>` says what `M` is.
+        let arg = match self.tcx.kind_of(arg).clone() {
+            gossamer_types::TyKind::FnDef { def, .. } => {
+                match (self.fn_inputs.get(&def), self.fn_returns.get(&def)) {
+                    (Some(inputs), Some(output)) => {
+                        let sig = gossamer_types::FnSig {
+                            inputs: inputs.clone(),
+                            output: *output,
+                        };
+                        self.tcx.intern(gossamer_types::TyKind::FnTrait(sig))
+                    }
+                    _ => arg,
+                }
+            }
+            _ => arg,
+        };
         let mut resolved = Vec::new();
         crate::monomorph::bind_template_params(self.tcx, param, arg, &mut resolved);
         if resolved.is_empty() {

@@ -965,6 +965,14 @@ impl TypeChecker<'_> {
         if owner.is_empty() {
             return None;
         }
+        if let Some(Resolution::Def {
+            def,
+            kind: gossamer_resolve::DefKind::TypeAlias,
+        }) = self.resolutions.get(callee.id)
+            && self.nominal_aliases.contains(&def)
+        {
+            return self.reject_unknown_newtype_assoc_fn(owner, fn_name, callee.span);
+        }
         // A type reached through its module (`lib::Point::new`) is keyed
         // by the identity it registers under, so try the written path
         // before the bare name two modules could share.
@@ -1049,6 +1057,52 @@ impl TypeChecker<'_> {
         let base =
             crate::printer::public_type_name(type_name.rsplit("::").next().unwrap_or(type_name))
                 .into_owned();
+        self.emit(
+            TypeError::UnknownAssocItem {
+                base,
+                name: fn_name.to_string(),
+                declared,
+            },
+            span,
+        );
+        Some(self.tcx.error_ty())
+    }
+
+    /// Reports `Newtype::name(..)` when no `impl` on the newtype declares
+    /// `name`. A newtype inherits none of its representation's functions, so
+    /// such a call has nothing to reach on any tier. A declared function is
+    /// typed by the general call path, so this answers `None` for one.
+    fn reject_unknown_newtype_assoc_fn(
+        &mut self,
+        owner: &[&str],
+        fn_name: &str,
+        span: Span,
+    ) -> Option<Ty> {
+        let candidates = self.owner_identity_candidates(owner);
+        let declared_here = |checker: &Self, name: &str| {
+            candidates.iter().any(|candidate| {
+                checker
+                    .method_arities
+                    .contains_key(&(candidate.clone(), name.to_string()))
+                    || checker
+                        .user_method_owners
+                        .get(name)
+                        .is_some_and(|owners| owners.contains(candidate))
+            })
+        };
+        if declared_here(self, fn_name) {
+            return None;
+        }
+        let mut declared: Vec<String> = self
+            .method_arities
+            .keys()
+            .filter(|(type_name, _)| candidates.contains(type_name))
+            .map(|(_, name)| name.clone())
+            .filter(|name| !name.starts_with("__"))
+            .collect();
+        declared.sort();
+        declared.dedup();
+        let base = owner.last().copied().unwrap_or_default().to_string();
         self.emit(
             TypeError::UnknownAssocItem {
                 base,

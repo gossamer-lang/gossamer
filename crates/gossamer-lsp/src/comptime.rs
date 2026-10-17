@@ -53,7 +53,7 @@ const FALLBACK_CODE: Code = Code("GX0007");
 /// that resolved and typechecked.
 pub(crate) fn fold_diagnostic(
     uri: &str,
-    augmented: &str,
+    (augmented, origins): (&str, &[gossamer_pkg::bundle::BundledSpan]),
     sf: &SourceFile,
     resolutions: &Resolutions,
     types: &TypeTable,
@@ -69,7 +69,9 @@ pub(crate) fn fold_diagnostic(
         |path| path.to_string_lossy().into_owned(),
     );
     let program = gossamer_hir::lower_source_file(sf, resolutions, types, tcx);
-    let message = fold_on_vm_stack(program, tcx.clone(), augmented.to_string(), anchor).err()?;
+    let origins = gossamer_pkg::bundle::comptime_origins(origins);
+    let message =
+        fold_on_vm_stack(program, tcx.clone(), augmented.to_string(), anchor, origins).err()?;
     Some(to_diagnostic(&message, augmented, file))
 }
 
@@ -131,13 +133,14 @@ fn fold_on_vm_stack(
     tcx: TyCtxt,
     augmented: String,
     anchor: String,
+    origins: Vec<(u32, u32, String)>,
 ) -> Result<String, String> {
     std::thread::Builder::new()
         .name("gos-lsp-comptime".to_string())
         .stack_size(gossamer_interp::VM_THREAD_STACK_BYTES)
         .spawn(move || {
             gossamer_interp::fold_into_source_anchored(
-                &program, tcx, &augmented, FOLD_LABEL, &anchor,
+                &program, tcx, &augmented, FOLD_LABEL, &anchor, origins,
             )
         })
         .map_err(|err| format!("comptime evaluation could not start: {err}"))?
@@ -152,8 +155,11 @@ fn fold_on_vm_stack(
     tcx: TyCtxt,
     augmented: String,
     anchor: String,
+    origins: Vec<(u32, u32, String)>,
 ) -> Result<String, String> {
-    gossamer_interp::fold_into_source_anchored(&program, tcx, &augmented, FOLD_LABEL, &anchor)
+    gossamer_interp::fold_into_source_anchored(
+        &program, tcx, &augmented, FOLD_LABEL, &anchor, origins,
+    )
 }
 
 /// Turns the fold's `comptime:LINE:COL: message` string into a located

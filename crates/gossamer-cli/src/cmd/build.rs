@@ -736,7 +736,7 @@ fn validate_source(
     // much an input of this build as the source is: the same text over
     // different bytes is a different program, and the stamp has to be able
     // to tell.
-    let prepared = crate::unit_cache::prepare(&source, &file.to_string_lossy());
+    let prepared = crate::unit_cache::prepare(&source, &file.to_string_lossy(), origins.1);
     // The prepared text supersedes the file contents for every subsequent
     // frontend stage. Release the original before parsing so large generated
     // files do not overlap the resolver, type table, and backend artifacts.

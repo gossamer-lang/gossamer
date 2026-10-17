@@ -5163,3 +5163,61 @@ fn clock_arithmetic_answers_a_duration_between_instants() {
         assert!(has_code(&d, "GT0003"), "{body}: {d:?}");
     }
 }
+
+#[test]
+fn a_struct_variant_literal_checks_its_fields_however_its_path_is_spelled() {
+    let checked = run("mod ev {\n\
+             pub enum Ev {\n\
+                 Focus { window: i64 }\n\
+             }\n\
+         }\n\
+         type Event = ev::Ev\n\
+         fn main() {\n\
+             let _ = ev::Ev::Focus { window: \"through the module\" }\n\
+             let _ = Event::Focus { window: \"through the alias\" }\n\
+         }\n");
+    let mismatches = checked
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            matches!(&diagnostic.error, TypeError::TypeMismatch { expected, found }
+                if expected == "i64" && found == "String")
+        })
+        .count();
+    assert_eq!(mismatches, 2, "{:?}", checked.diagnostics);
+}
+
+#[test]
+fn newtype_assoc_call_reaches_only_its_own_impl() {
+    let checked = run("newtype Id = i64\n\
+         impl Id { fn make(n: i64) -> Id { n.into() } }\n\
+         fn main() {\n    let a = Id::make(1)\n    let b = Id::from(2)\n}\n");
+    let unknown: Vec<(&str, &[String])> = checked
+        .diagnostics
+        .iter()
+        .filter_map(|d| match &d.error {
+            TypeError::UnknownAssocItem { name, declared, .. } => {
+                Some((name.as_str(), declared.as_slice()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        unknown,
+        vec![("from", &["make".to_string()][..])],
+        "{:?}",
+        checked.diagnostics
+    );
+}
+
+#[test]
+fn variant_reached_through_its_module_has_the_enum_type() {
+    let checked = run("mod m {\n    pub enum F { A, B(i64), C { x: i64 } }\n}\n\
+         fn main() {\n    let a: bool = m::F::A\n    let c: bool = m::F::C { x: 1 }\n}\n");
+    let mismatches = checked
+        .diagnostics
+        .iter()
+        .filter(|d| matches!(&d.error, TypeError::TypeMismatch { .. }))
+        .count();
+    assert_eq!(mismatches, 2, "{:?}", checked.diagnostics);
+}

@@ -10,6 +10,57 @@ use super::{
 };
 
 impl TypeChecker<'_> {
+    /// The non-generic `type` alias registered under the full path `name`.
+    fn alias_def_named(&self, name: &str) -> Option<gossamer_resolve::DefId> {
+        self.alias_targets.keys().copied().find(|alias| {
+            self.resolutions
+                .path_of(*alias)
+                .is_some_and(|p| p.join("::") == name)
+        })
+    }
+
+    /// The enum a variant path reaches through the module `module` it is
+    /// headed by (`ui::Event::Window`), or through that module's alias of one
+    /// (`win::Event` for `pub type Event = event::Event`).
+    pub(super) fn enum_def_through_module(
+        &mut self,
+        module: gossamer_resolve::DefId,
+        path: &gossamer_ast::PathExpr,
+    ) -> Option<gossamer_resolve::DefId> {
+        let segments = &path.segments;
+        if segments.len() < 3 {
+            return None;
+        }
+        let mut parts: Vec<String> = self.resolutions.path_of(module)?.to_vec();
+        parts.extend(
+            segments[1..segments.len() - 1]
+                .iter()
+                .map(|s| s.name.name.clone()),
+        );
+        let mut name = parts.join("::");
+        if !self.enum_tys.contains_key(&name) {
+            let alias = self.alias_def_named(&name)?;
+            name = self.alias_enum_identity(alias)?;
+        }
+        self.enum_tys.contains_key(&name).then_some(())?;
+        self.user_type_defs.get(&name).copied()
+    }
+
+    /// The registered name of the enum a non-generic `type` alias `def`
+    /// spells, when it spells one.
+    fn alias_enum_identity(&mut self, def: gossamer_resolve::DefId) -> Option<String> {
+        let (params, rhs) = self.alias_targets.get(&def).cloned()?;
+        if !params.is_empty() {
+            return None;
+        }
+        let ty = self.type_from_ast(&rhs);
+        let ty = self.infer.resolve(self.tcx, ty);
+        match self.tcx.kind_of(ty) {
+            TyKind::Adt { def, .. } => self.tcx.def_name(*def).map(ToString::to_string),
+            _ => None,
+        }
+    }
+
     /// Reports a `spawn` that no `cohort { }` in the same body encloses.
     ///
     /// `spawn` attaches its child to the cohort the goroutine is inside at
@@ -815,6 +866,30 @@ impl TypeChecker<'_> {
                     self.defer_adt_bounds(def, &substs, expr.span);
                     (ty, substs)
                 } else if let Some(res) = head_res {
+                    // A struct-variant literal reached through a module path,
+                    // or through an alias of the enum, builds that enum.
+                    let res = match res {
+                        Resolution::Def {
+                            def,
+                            kind: gossamer_resolve::DefKind::Mod,
+                        } => self.enum_def_through_module(def, path).map_or(res, |def| {
+                            Resolution::Def {
+                                def,
+                                kind: gossamer_resolve::DefKind::Enum,
+                            }
+                        }),
+                        Resolution::Def {
+                            def,
+                            kind: gossamer_resolve::DefKind::TypeAlias,
+                        } if path.segments.len() == 2 => self
+                            .alias_enum_identity(def)
+                            .and_then(|name| self.user_type_defs.get(&name).copied())
+                            .map_or(res, |def| Resolution::Def {
+                                def,
+                                kind: gossamer_resolve::DefKind::Enum,
+                            }),
+                        other => other,
+                    };
                     match res {
                         Resolution::Def {
                             def,
@@ -962,19 +1037,72 @@ impl TypeChecker<'_> {
                 // A struct-variant literal (`Shape::Rect { w: 1 }`) of a
                 // non-generic enum expects each field value at the type the
                 // variant declares, as a struct literal's field does.
+                // The enum a struct-variant literal builds, named the way its
+                // declaration registered it: from the definition the path's
+                // head resolves to, so a module path, an alias, or a
+                // dependency's re-export reaches the same variant.
                 let variant_fields: Option<Vec<(String, Ty)>> = match head_res {
-                    Some(Resolution::Def {
-                        kind: gossamer_resolve::DefKind::Variant | gossamer_resolve::DefKind::Enum,
-                        ..
-                    }) if declared.is_none() => {
+                    Some(Resolution::Def { def, kind }) if declared.is_none() => {
                         let segments = &path.segments;
-                        segments.len().checked_sub(2).and_then(|at| {
-                            let enum_name = segments[at].name.name.clone();
-                            let variant = segments[at + 1].name.name.clone();
-                            self.enum_tys.contains_key(&enum_name).then_some(())?;
-                            self.enum_variant_named_payloads
-                                .get(&(enum_name, variant))
-                                .cloned()
+                        let variant = segments.last().map(|s| s.name.name.clone());
+                        let between = segments
+                            .len()
+                            .checked_sub(1)
+                            .map(|end| &segments[1.min(end)..end]);
+                        let identity = match kind {
+                            gossamer_resolve::DefKind::Variant => self
+                                .resolutions
+                                .path_of(def)
+                                .and_then(|p| p.split_last())
+                                .map(|(_, owner)| owner.join("::")),
+                            gossamer_resolve::DefKind::Enum | gossamer_resolve::DefKind::Mod => {
+                                let joined =
+                                    self.resolutions.path_of(def).zip(between).map(|(p, rest)| {
+                                        p.iter()
+                                            .cloned()
+                                            .chain(rest.iter().map(|s| s.name.name.clone()))
+                                            .collect::<Vec<_>>()
+                                            .join("::")
+                                    });
+                                // A module path may reach the enum through an
+                                // alias the module declares (`win::Event` for
+                                // `pub type Event = event::Event`).
+                                match joined {
+                                    Some(name) if !self.enum_tys.contains_key(&name) => {
+                                        let alias = self.alias_def_named(&name);
+                                        Some(
+                                            alias
+                                                .and_then(|alias| self.alias_enum_identity(alias))
+                                                .unwrap_or(name),
+                                        )
+                                    }
+                                    other => other,
+                                }
+                            }
+                            gossamer_resolve::DefKind::TypeAlias if segments.len() == 2 => {
+                                self.alias_enum_identity(def)
+                            }
+                            _ => None,
+                        };
+                        // The written enum segment stands in only when the
+                        // path's head said nothing about which enum it is; a
+                        // bare name two packages share would otherwise reach
+                        // the wrong one.
+                        let spelled = if identity.is_none() {
+                            segments
+                                .len()
+                                .checked_sub(2)
+                                .map(|at| segments[at].name.name.clone())
+                        } else {
+                            None
+                        };
+                        variant.and_then(|variant| {
+                            identity.into_iter().chain(spelled).find_map(|enum_name| {
+                                self.enum_tys.contains_key(&enum_name).then_some(())?;
+                                self.enum_variant_named_payloads
+                                    .get(&(enum_name, variant.clone()))
+                                    .cloned()
+                            })
                         })
                     }
                     _ => None,

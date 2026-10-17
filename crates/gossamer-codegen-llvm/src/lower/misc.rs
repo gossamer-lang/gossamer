@@ -253,6 +253,18 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// `ty` with its references and newtypes peeled: the type whose layout
+    /// the runtime value actually has, since a newtype adds none.
+    pub(crate) fn runtime_ty(&self, mut ty: Ty) -> Ty {
+        loop {
+            match self.tcx.kind(ty) {
+                Some(TyKind::Ref { inner, .. }) => ty = *inner,
+                Some(TyKind::Nominal { repr, .. }) => ty = *repr,
+                _ => return ty,
+            }
+        }
+    }
+
     /// When `arg` is a `Copy` of a stack-aggregate local whose
     /// slot contents will outlive the current frame as data -
     /// but whose stack address won't - emit a heap copy and
@@ -1564,7 +1576,7 @@ impl<'a> Lowerer<'a> {
         fns: &mut Vec<String>,
         method: &str,
     ) -> Option<Vec<u8>> {
-        let ty = self.unwrap_ref(ty);
+        let ty = self.runtime_ty(ty);
         match self.tcx.kind(ty) {
             Some(TyKind::Tuple(elems)) => {
                 let elems: Vec<Ty> = elems.clone();
@@ -1691,7 +1703,7 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(crate) fn tuple_elem_tags(&self, elem: Ty) -> Option<Vec<u8>> {
-        if let Some(TyKind::Tuple(nested)) = self.tcx.kind(self.unwrap_ref(elem)) {
+        if let Some(TyKind::Tuple(nested)) = self.tcx.kind(self.runtime_ty(elem)) {
             let nested: Vec<Ty> = nested.clone();
             if nested.is_empty() || nested.len() > usize::from(u8::MAX) {
                 return None;
@@ -1706,7 +1718,7 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(crate) fn tuple_elem_tag(&self, elem: Ty) -> Option<u8> {
-        match self.tcx.kind(self.unwrap_ref(elem)) {
+        match self.tcx.kind(self.runtime_ty(elem)) {
             // A `u64` / `usize` slot spans the whole unsigned range, so it
             // reads as unsigned wherever a tag stream names it.
             Some(TyKind::Int(IntTy::U64 | IntTy::Usize)) => Some(1),

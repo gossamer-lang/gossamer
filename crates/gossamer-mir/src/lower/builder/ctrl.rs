@@ -3796,8 +3796,7 @@ impl<'a> Builder<'a> {
             return true;
         }
         if let HirExprKind::Path { segments, .. } = &probe_expr.kind
-            && let Some(first) = segments.first()
-            && let Some(local) = self.lookup_local(&first.name)
+            && let Some(local) = self.path_local(segments)
         {
             return is_user_adt(self.locals[local.0 as usize].ty);
         }
@@ -4003,15 +4002,13 @@ impl<'a> Builder<'a> {
         // `let` statement; the local's MIR-side type is the
         // authoritative source.
         if let HirExprKind::Path { segments, .. } = &probe_expr.kind {
-            if let Some(first) = segments.first() {
-                if let Some(local) = self.lookup_local(&first.name) {
-                    let mut local_ty = self.locals[local.0 as usize].ty;
-                    for _ in 0..8 {
-                        match self.tcx.kind_of(local_ty) {
-                            TyKind::Ref { inner, .. } => local_ty = *inner,
-                            TyKind::Adt { .. } => return None,
-                            _ => break,
-                        }
+            if let Some(local) = self.path_local(segments) {
+                let mut local_ty = self.locals[local.0 as usize].ty;
+                for _ in 0..8 {
+                    match self.tcx.kind_of(local_ty) {
+                        TyKind::Ref { inner, .. } => local_ty = *inner,
+                        TyKind::Adt { .. } => return None,
+                        _ => break,
                     }
                 }
             }
@@ -4340,10 +4337,8 @@ impl<'a> Builder<'a> {
                 // concrete `Vec<T>` via a runtime-helper return
                 // type pin.
                 if let HirExprKind::Path { segments, .. } = &probe_expr.kind {
-                    if let Some(first) = segments.first() {
-                        if let Some(local) = self.lookup_local(&first.name) {
-                            cur = self.locals[local.0 as usize].ty;
-                        }
+                    if let Some(local) = self.path_local(segments) {
+                        cur = self.locals[local.0 as usize].ty;
                     }
                 }
                 // Check whether the HIR-expression type or the

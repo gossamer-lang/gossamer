@@ -4582,8 +4582,9 @@ impl Vm {
                             } => unsafe {
                                 let idx = *ints.get_unchecked(index_i as usize);
                                 let b = registers.get_unchecked(base as usize);
-                                let i = usize::try_from(idx)
-                                    .map_err(|_| crate::vm::index_oob_panic(idx, 0))?;
+                                let i = usize::try_from(idx).map_err(|_| {
+                                    crate::vm::index_oob_panic(idx, flat_receiver_len(b))
+                                })?;
                                 let value = match b {
                                     Value::IntArray(data) => {
                                         data.get(i).copied().ok_or_else(|| {
@@ -4646,8 +4647,9 @@ impl Vm {
                                     &Value::Int(new_val),
                                 );
                                 let b = registers.get_unchecked_mut(base as usize);
-                                let i = usize::try_from(idx)
-                                    .map_err(|_| crate::vm::index_oob_panic(idx, 0))?;
+                                let i = usize::try_from(idx).map_err(|_| {
+                                    crate::vm::index_oob_panic(idx, flat_receiver_len(b))
+                                })?;
                                 match b {
                                     Value::IntArray(data) => {
                                         if i >= data.len() {
@@ -4825,8 +4827,9 @@ impl Vm {
                             } => unsafe {
                                 let idx = *ints.get_unchecked(index_i as usize);
                                 let b = registers.get_unchecked(base as usize);
-                                let i = usize::try_from(idx)
-                                    .map_err(|_| crate::vm::index_oob_panic(idx, 0))?;
+                                let i = usize::try_from(idx).map_err(|_| {
+                                    crate::vm::index_oob_panic(idx, flat_receiver_len(b))
+                                })?;
                                 let value = match b {
                                     Value::FloatVec(data) => {
                                         data.get(i).copied().ok_or_else(|| {
@@ -4874,8 +4877,9 @@ impl Vm {
                                     &Value::Float(new_f),
                                 );
                                 let b = registers.get_unchecked_mut(base as usize);
-                                let i = usize::try_from(idx)
-                                    .map_err(|_| crate::vm::index_oob_panic(idx, 0))?;
+                                let i = usize::try_from(idx).map_err(|_| {
+                                    crate::vm::index_oob_panic(idx, flat_receiver_len(b))
+                                })?;
                                 match b {
                                     Value::FloatVec(data_arc) => {
                                         let buf = Arc::make_mut(data_arc);

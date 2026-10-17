@@ -2518,11 +2518,9 @@ impl<'a> Builder<'a> {
                 // inference-variable leakage) before walking the
                 // base's static type.
                 if let HirExprKind::Path { segments, .. } = &base.kind {
-                    if let Some(first) = segments.first() {
-                        if let Some(local) = self.lookup_local(&first.name) {
-                            if let Some(name) = self.local_elem_struct.get(&local).cloned() {
-                                return Some(name);
-                            }
+                    if let Some(local) = self.path_local(segments) {
+                        if let Some(name) = self.local_elem_struct.get(&local).cloned() {
+                            return Some(name);
                         }
                     }
                 }
@@ -2551,8 +2549,7 @@ impl<'a> Builder<'a> {
                 }
             }
             HirExprKind::Path { segments, .. } => {
-                let first = segments.first()?;
-                let local = self.lookup_local(&first.name)?;
+                let local = self.path_local(segments)?;
                 // A variant constructor's type is left a `Var`, so recover the
                 // struct / enum name from the `local_struct` tag first.
                 if let Some(name) = self.local_struct.get(&local).cloned() {

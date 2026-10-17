@@ -1047,7 +1047,10 @@ impl TypeChecker<'_> {
         })
     }
 
-    /// Rejects an aggregate written inline at a spawned call.
+    /// Rejects an aggregate argument at a spawned call that holds nested
+    /// growable storage, the one layout the spawn boundary cannot copy with
+    /// a single ownership descriptor. Scalars, strings, and runtime handles
+    /// inside an aggregate cross as the captured snapshot they already are.
     ///
     /// The argument is a closure, so the call it wraps is one level in: a
     /// `spawn(|| f(Pair { .. }))` puts the aggregate where the boundary is.
@@ -1074,7 +1077,7 @@ impl TypeChecker<'_> {
                 }
                 _ => false,
             };
-            if inline {
+            if inline && self.ty_is_unshareable_across_goroutines(resolved) {
                 let ty = self.render_public_ty(resolved);
                 self.emit(
                     TypeError::ConcurrentAggregateUnsupported {
@@ -1593,11 +1596,7 @@ impl TypeChecker<'_> {
             def,
             substs: crate::Substs::from_types(substs),
         });
-        let enum_name = self
-            .tcx
-            .def_name(def)
-            .and_then(|name| name.rsplit("::").next())
-            .map(str::to_string);
+        let enum_name = self.tcx.def_name(def).map(str::to_string);
         let variant_name = path
             .segments
             .last()
@@ -1616,6 +1615,71 @@ impl TypeChecker<'_> {
             return ty;
         }
         self.finish_struct_literal_consts(ty, &consts, expected, path, span)
+    }
+
+    /// Type of a path expression that resolves to the definition `def`.
+    fn def_path_value_ty(
+        &mut self,
+        node: NodeId,
+        (def, kind): (gossamer_resolve::DefId, gossamer_resolve::DefKind),
+        path: &gossamer_ast::PathExpr,
+        span: Span,
+        expected: Expectation,
+    ) -> Ty {
+        match kind {
+            gossamer_resolve::DefKind::Struct => {
+                if self
+                    .struct_fields
+                    .get(&def)
+                    .is_some_and(|fields| !fields.is_empty() || self.tcx.is_tuple_struct(def.local))
+                    && !self.callee_path_nodes.contains(&node)
+                {
+                    let name = self
+                        .tcx
+                        .def_name(def)
+                        .map_or_else(|| "<struct>".to_string(), ToString::to_string);
+                    let error = if self.tcx.is_tuple_struct(def.local) {
+                        TypeError::TupleStructConstructorParenthesesRequired { name }
+                    } else {
+                        TypeError::StructConstructorBracesRequired { name }
+                    };
+                    self.emit(error, span);
+                }
+                self.tcx.intern(TyKind::Adt {
+                    def,
+                    substs: crate::Substs::new(),
+                })
+            }
+            gossamer_resolve::DefKind::Enum => {
+                self.enum_path_value_ty(node, def, path, span, expected)
+            }
+            gossamer_resolve::DefKind::Fn => {
+                // Pull turbofish args (`ident::<i64, bool>`) off
+                // the last path segment, resolve each to a
+                // concrete [`Ty`], and stamp the callee's type as
+                // `TyKind::FnDef { def, substs }` so that the MIR
+                // lowerer reads the real substitution instead of
+                // deriving one heuristically from argument types.
+                let substs = self.fn_item_path_substs(node, def, path);
+                self.tcx.intern(TyKind::FnDef { def, substs })
+            }
+            gossamer_resolve::DefKind::Const | gossamer_resolve::DefKind::Static => {
+                self.const_path_ty(def, path)
+            }
+            gossamer_resolve::DefKind::TypeParam => {
+                match self.check_param_assoc_fn_path(def, path) {
+                    Some(ty) => ty,
+                    None => self.fresh(),
+                }
+            }
+            // `ui::Event::Window`: a variant reached through the module
+            // that declares its enum.
+            gossamer_resolve::DefKind::Mod => match self.enum_def_through_module(def, path) {
+                Some(enum_def) => self.enum_path_value_ty(node, enum_def, path, span, expected),
+                None => self.fresh(),
+            },
+            _ => self.fresh(),
+        }
     }
 
     pub(super) fn check_path_expr(
@@ -1679,52 +1743,9 @@ impl TypeChecker<'_> {
                 self.fresh()
             }
             Resolution::Primitive(prim) => self.type_from_primitive(prim),
-            Resolution::Def { def, kind } => match kind {
-                gossamer_resolve::DefKind::Struct => {
-                    if self.struct_fields.get(&def).is_some_and(|fields| {
-                        !fields.is_empty() || self.tcx.is_tuple_struct(def.local)
-                    }) && !self.callee_path_nodes.contains(&node)
-                    {
-                        let name = self
-                            .tcx
-                            .def_name(def)
-                            .map_or_else(|| "<struct>".to_string(), ToString::to_string);
-                        let error = if self.tcx.is_tuple_struct(def.local) {
-                            TypeError::TupleStructConstructorParenthesesRequired { name }
-                        } else {
-                            TypeError::StructConstructorBracesRequired { name }
-                        };
-                        self.emit(error, span);
-                    }
-                    self.tcx.intern(TyKind::Adt {
-                        def,
-                        substs: crate::Substs::new(),
-                    })
-                }
-                gossamer_resolve::DefKind::Enum => {
-                    self.enum_path_value_ty(node, def, path, span, expected)
-                }
-                gossamer_resolve::DefKind::Fn => {
-                    // Pull turbofish args (`ident::<i64, bool>`) off
-                    // the last path segment, resolve each to a
-                    // concrete [`Ty`], and stamp the callee's type as
-                    // `TyKind::FnDef { def, substs }` so that the MIR
-                    // lowerer reads the real substitution instead of
-                    // deriving one heuristically from argument types.
-                    let substs = self.fn_item_path_substs(node, def, path);
-                    self.tcx.intern(TyKind::FnDef { def, substs })
-                }
-                gossamer_resolve::DefKind::Const | gossamer_resolve::DefKind::Static => {
-                    self.const_path_ty(def, path)
-                }
-                gossamer_resolve::DefKind::TypeParam => {
-                    match self.check_param_assoc_fn_path(def, path) {
-                        Some(ty) => ty,
-                        None => self.fresh(),
-                    }
-                }
-                _ => self.fresh(),
-            },
+            Resolution::Def { def, kind } => {
+                self.def_path_value_ty(node, (def, kind), path, span, expected)
+            }
             Resolution::Import { .. } | Resolution::Err => {
                 // A `use` of this unit's own item keeps its opaque
                 // `Import` resolution so lowering still qualifies the

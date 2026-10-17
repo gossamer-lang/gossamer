@@ -50,7 +50,14 @@ struct PreparedBlob {
 /// their earlier output for the same text when every file the fold read is
 /// unchanged. `label` names the unit to the fold, as a relative read
 /// resolves against it.
-pub(crate) fn prepare(user_source: &str, label: &str) -> PreparedUnit {
+///
+/// `origins` names the file each region of an assembled unit was read from,
+/// so a comptime region in a bundled dependency reads relative to that file.
+pub(crate) fn prepare(
+    user_source: &str,
+    label: &str,
+    origins: &[gossamer_pkg::bundle::BundledSpan],
+) -> PreparedUnit {
     // A relative label resolves against the working directory, so the key
     // names the unit by its absolute path.
     let key = gossamer_driver::cache_enabled().then(|| {
@@ -81,10 +88,12 @@ pub(crate) fn prepare(user_source: &str, label: &str) -> PreparedUnit {
     let generated_len = augmented.len().saturating_sub(user_source.len());
     let autoderive = started.elapsed();
     let started = Instant::now();
-    let (source, fold_error) = match crate::comptime_fold::fold_comptime(augmented.clone(), label) {
-        Ok(folded) => (folded, None),
-        Err(err) => (augmented.clone(), Some(err)),
-    };
+    let fold_origins = gossamer_pkg::bundle::comptime_origins(origins);
+    let (source, fold_error) =
+        match crate::comptime_fold::fold_comptime(augmented.clone(), label, fold_origins) {
+            Ok(folded) => (folded, None),
+            Err(err) => (augmented.clone(), Some(err)),
+        };
     // A fold that spliced a constant changed the program's own text, which
     // the tree no longer describes.
     let program = program.filter(|_| source == augmented);

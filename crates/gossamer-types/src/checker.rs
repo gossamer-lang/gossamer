@@ -1450,13 +1450,21 @@ impl<'a> TypeChecker<'a> {
             .iter()
             .map(|segment| segment.name.name.clone())
             .collect();
-        if segments.len() != 1 {
-            return segments;
-        }
-        let name = &segments[0];
         let Some(Resolution::Import { use_id }) = self.resolutions.get(node) else {
             return segments;
         };
+        if segments.len() != 1 {
+            // A standard type a `use` names (`use std::time::Duration`) heads
+            // its associated paths the way its full spelling does, so
+            // `Duration::from_millis` is `std::time::Duration::from_millis`.
+            return match self.import_targets.get(&(use_id, segments[0].clone())) {
+                Some(full) if full.first().is_some_and(|head| head == "std") => {
+                    full.iter().chain(&segments[1..]).cloned().collect()
+                }
+                _ => segments,
+            };
+        }
+        let name = &segments[0];
         self.import_targets
             .get(&(use_id, name.clone()))
             .cloned()

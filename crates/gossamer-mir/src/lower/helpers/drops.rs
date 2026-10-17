@@ -1750,6 +1750,19 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                     _ => {}
                 }
             }
+            // Consumed arguments need an owning share even when their source
+            // is a stable parameter or a borrowed enum child.
+            if let Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(name)),
+                args,
+                ..
+            } = &block.terminator
+                && is_consuming_call(name)
+            {
+                for arg in args.iter().skip(1) {
+                    mark_stored(arg, &mut stored_into_aggregate);
+                }
+            }
             if let Terminator::Call {
                 callee: Operand::Const(ConstValue::Str(name)),
                 destination,
@@ -3745,11 +3758,15 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                 disqualified[destination.local.0 as usize] = true;
             }
         }
+        // The return place is never a view: it hands the caller a value whose
+        // frame releases every field, so a copy into it takes shares of its
+        // own like any owned destination.
         let mut borrow = get_ptr_dest.clone();
+        borrow[Local::RETURN.0 as usize] = false;
         let mut changed = true;
         while changed {
             changed = false;
-            for i in 0..n_locals {
+            for i in 1..n_locals {
                 if borrow[i] || disqualified[i] || copy_srcs[i].is_empty() {
                     continue;
                 }
@@ -3913,6 +3930,18 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                         && !agg_rc_fields(body.locals[src.local.0 as usize].ty).is_empty())
             })
     });
+    // A whole aggregate copied into the return place hands the caller a share
+    // of every RC field, whatever the frame classifies its source as.
+    let returns_shared_aggregate = body.blocks.iter().flat_map(|b| &b.stmts).any(|stmt| {
+        matches!(&stmt.kind, StatementKind::Assign {
+            place,
+            rvalue: Rvalue::Use(Operand::Copy(src)),
+        } if place.local == Local::RETURN
+            && place.projection.is_empty()
+            && src.projection.is_empty()
+            && (src.local.0 as usize) < n_locals
+            && !agg_rc_fields(body.locals[src.local.0 as usize].ty).is_empty())
+    });
     if releasable.is_empty()
         && retain_sites.is_empty()
         && terminator_retains.is_empty()
@@ -3921,6 +3950,7 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
         && ref_agg_locals.is_empty()
         && returned_map_field_sites.is_empty()
         && !owes_extracted_payload_retain
+        && !returns_shared_aggregate
     {
         return;
     }
@@ -4085,9 +4115,11 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
     // destination to the handle word.
     let call_dest = call_destinations(body);
 
-    // Locals holding a word read out of an owned aggregate's field. The
-    // aggregate still frees that field at its own death, so a store handing
-    // the word on has to give the destination a value container of its own.
+    // Locals holding a word read out of an owned aggregate's field, or out of
+    // a view of storage someone else owns (a container element, a payload, an
+    // enum child). The owner still frees that field at its own death, so a
+    // store handing the word on has to give the destination a share of its
+    // own and leave the word itself unreleased.
     let borrows_owned_field: Vec<bool> = {
         let owners: std::collections::HashSet<usize> = agg_locals
             .iter()
@@ -4095,6 +4127,10 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
             .chain(ref_agg_locals.iter())
             .chain(borrow_copy_agg_locals.iter())
             .map(|(l, _)| *l)
+            .chain(
+                (0..n_locals)
+                    .filter(|&i| vec_borrow_agg[i] || extraction_seed[i] || enum_child_borrow[i]),
+            )
             .collect();
         let mut out = vec![false; n_locals];
         for block in &body.blocks {
@@ -4367,22 +4403,21 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                         field_gaps[bi][si + 1].push((true, place.local, f, w));
                     }
                 }
-                // Aggregate construction `dest = Aggregate[.., Copy(src), ..]`
-                // whose operand copies a by-value aggregate: the new struct's
-                // slot shares each of `src`'s RC field pointers, so retain them
-                // (mirrors the whole-local struct-copy retain above). The shared
-                // pointers are reached through `src` itself - a one-level
-                // projection equivalent to the new aggregate's nested slot - so
-                // the source's at-death release is balanced by the new owner's.
+                // Each copied aggregate operand takes its share in the new
+                // storage. Value-container clones replace their handle slot,
+                // so they must update the destination rather than a borrowed
+                // source that another owner still holds.
                 if let Rvalue::Aggregate { operands, .. } = rvalue {
-                    for op in operands {
+                    for (index, op) in operands.iter().enumerate() {
                         if let Operand::Copy(src) = op
                             && src.projection.is_empty()
                             && (src.local.0 as usize) < body.locals.len()
                             && !body.locals[place.local.0 as usize].region
                         {
                             for (f, w) in agg_rc_fields(body.locals[src.local.0 as usize].ty) {
-                                field_gaps[bi][si + 1].push((true, src.local, f, w));
+                                let mut path = vec![u32::try_from(index).expect("aggregate index")];
+                                path.extend(f);
+                                field_gaps[bi][si + 1].push((true, place.local, path, w));
                             }
                         }
                     }

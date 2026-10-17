@@ -46,7 +46,11 @@ fn run_source_on_vm(
     // comptime fold evaluates `comptime { ... }` / `comptime fn` calls now
     // and splices their result literals in, so the VM compiles a constant
     // identical to what the compiled tiers see.
-    let prepared = crate::unit_cache::prepare(user_source, file_label);
+    let prepared = crate::unit_cache::prepare(
+        user_source,
+        file_label,
+        origins.map_or(&[][..], |(_, spans)| spans),
+    );
     if let Some(err) = prepared.fold_error {
         return Err(err);
     }

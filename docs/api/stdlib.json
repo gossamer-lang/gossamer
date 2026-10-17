@@ -18435,7 +18435,7 @@
       "id": "std-unicode-word-bounds",
       "name": "std::unicode::word_bounds",
       "kind": "function",
-      "signature": "fn word_bounds(text: String) -> Vec<(i64, i64)>",
+      "signature": "fn word_bounds(text: String) -> Vec<String>",
       "description": "UAX #29 word boundaries (includes punct + whitespace runs).",
       "lifecycle": "experimental",
       "tier_support": [

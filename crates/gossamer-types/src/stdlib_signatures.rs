@@ -3866,7 +3866,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::unicode",
         name: "word_bounds",
-        signature: "fn word_bounds(text: String) -> Vec<(i64, i64)>",
+        signature: "fn word_bounds(text: String) -> Vec<String>",
     },
     StdFunctionSignature {
         module_path: "std::unicode",

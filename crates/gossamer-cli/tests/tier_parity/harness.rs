@@ -728,6 +728,33 @@ const SPECS: &[Spec] = &[
     // ordering (all six operators) are bit-identical across tiers (the VM
     // walks them at runtime; compiled routes to gos_rt_tuple_cmp / vec_eq).
     spec("feature-testing-examples/aggregate_compare.gos"),
+    // Structs and enums compare and order by their fields whatever they
+    // hold - newtypes, carriers, sequences, nested and mutually recursive
+    // enums, type parameters - including a by-value enum bound by a `for`
+    // loop and a newtype another module re-exports.
+    spec("feature-testing-examples/structural_compare_fields.gos"),
+    spec("feature-testing-examples/newtype_field_loop_eq.gos"),
+    spec("feature-testing-examples/reexported_newtype_field_eq.gos"),
+    // A struct read out of a sequence by index and answered by value owns
+    // its fields, whether a method, a `let`, or a `static mut` hands it back.
+    spec("feature-testing-examples/element_returned_by_value.gos"),
+    // A derived `default()` fills newtype and tuple fields and is reached by
+    // `Type::default()` inside the module that declares the type.
+    spec("feature-testing-examples/derive_default_in_module.gos"),
+    // A pattern names its enum through `super::`, `crate::`, or `self::`.
+    spec("feature-testing-examples/qualified_pattern_paths.gos"),
+    // `unicode::word_bounds` answers its segments as strings on every tier.
+    spec("feature-testing-examples/unicode_word_bounds_segments.gos"),
+    // `Key::S` stays a variant pattern beside a module's `const S`; a const
+    // named in a pattern still matches by value.
+    spec("feature-testing-examples/variant_named_like_a_const.gos"),
+    // A module's `static mut` is reached by its path beside a parameter
+    // named like the module.
+    spec("feature-testing-examples/module_static_beside_same_named_local.gos"),
+    // Aggregates of scalars, strings, and handles cross a spawned call.
+    spec("feature-testing-examples/spawn_aggregate_arguments.gos"),
+    // A generic type's method taking `Fn(M) -> ..` accepts a named function.
+    spec("feature-testing-examples/generic_method_takes_named_fn.gos"),
     // `sort_by_key` / `sort_by_key_desc` Vec methods with scalar and tuple
     // (multi-key) keys; the key body is inlined into a `sort_by` comparator
     // that orders with `<`, identical on every tier.
@@ -1545,6 +1572,10 @@ const SPECS: &[Spec] = &[
     },
     spec("feature-testing-examples/rc_release_drops.gos"),
     spec("feature-testing-examples/map_insert_borrowed_key_rc.gos"),
+    spec("feature-testing-examples/map_index_parameter_key_rc.gos"),
+    spec("feature-testing-examples/map_enum_value_replacement.gos"),
+    spec("feature-testing-examples/module_scoped_structural_derives.gos"),
+    spec("feature-testing-examples/module_scoped_auto_derives.gos"),
     spec("feature-testing-examples/map_owned_struct_value_rc.gos"),
     spec("feature-testing-examples/mut_string_return.gos"),
     spec("feature-testing-examples/string_accumulator_return.gos"),

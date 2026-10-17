@@ -750,7 +750,7 @@ pub const UNICODE: StdModule = StdModule {
         StdItem {
             name: "word_bounds",
             kind: StdItemKind::Function,
-            doc: "UAX #29 word boundaries (includes punct + whitespace runs).",
+            doc: "UAX #29 word-boundary segments of a string, punctuation and whitespace runs included.",
         },
         StdItem {
             name: "word_count",

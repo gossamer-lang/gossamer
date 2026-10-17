@@ -195,7 +195,10 @@ impl Vm {
                 // than recursively entering `apply -> run`. The destination
                 // register belongs to the suspended frame; the child result
                 // is written just before that frame resumes.
-                let mut suspended: Vec<(u16, crate::vm::run::SuspendedFrame, usize)> = Vec::new();
+                // Each suspended caller keeps the trace frames its own tail
+                // calls pushed, which leave the trace when it returns.
+                let mut suspended: Vec<(u16, crate::vm::run::SuspendedFrame, usize, usize)> =
+                    Vec::new();
                 let mut resumed: Option<crate::vm::run::SuspendedFrame> = None;
                 // A fault the resumed frame raises at the call it is suspended
                 // at, so its landing pad runs before the fault leaves it.
@@ -334,7 +337,8 @@ impl Vm {
                                 if jit_call::jit_trace() {
                                     eprintln!("jit: native hit {}", prepared.jit.name);
                                 }
-                                if let Some((dst, mut parent, bytes)) = suspended.pop() {
+                                if let Some((dst, mut parent, bytes, parent_tail)) = suspended.pop()
+                                {
                                     self.release_heap_frame(bytes);
                                     // A nested native body completes exactly
                                     // like `RunControl::Return`: publish its
@@ -347,7 +351,7 @@ impl Vm {
                                         stack.pop();
                                     }
                                     drop(stack);
-                                    tail_frames = 0;
+                                    tail_frames = parent_tail;
                                     parent.registers[dst as usize] = value;
                                     chunk = Arc::clone(&parent.chunk);
                                     resumed = Some(parent);
@@ -409,7 +413,7 @@ impl Vm {
                             // A suspended caller with deferred expressions
                             // pending at its call runs them before the fault
                             // reaches the callers above it.
-                            if let Some(at) = suspended.iter().rposition(|(_, parent, _)| {
+                            if let Some(at) = suspended.iter().rposition(|(_, parent, _, _)| {
                                 err.unwinds_defers()
                                     && parent
                                         .chunk
@@ -424,12 +428,12 @@ impl Vm {
                                     .set(self.call_depth.get().saturating_sub(left));
                                 let mut leaving = suspended.split_off(at);
                                 self.release_heap_frame(leaving.iter().map(|s| s.2).sum());
-                                let (_, parent, _) = leaving.remove(0);
+                                let (_, parent, _, parent_tail) = leaving.remove(0);
                                 chunk = Arc::clone(&parent.chunk);
                                 resumed = Some(parent);
                                 resumed_fault = Some(err);
                                 args = Vec::new();
-                                tail_frames = 0;
+                                tail_frames = parent_tail;
                                 continue;
                             }
                             // The explicit parents will not get individual
@@ -447,7 +451,7 @@ impl Vm {
                     };
                     match control {
                         crate::vm::run::RunControl::Return(value) => {
-                            if let Some((dst, mut parent, bytes)) = suspended.pop() {
+                            if let Some((dst, mut parent, bytes, parent_tail)) = suspended.pop() {
                                 self.release_heap_frame(bytes);
                                 // The child completed successfully. Its
                                 // logical frame (and any tail frames it grew)
@@ -458,7 +462,7 @@ impl Vm {
                                     stack.pop();
                                 }
                                 drop(stack);
-                                tail_frames = 0;
+                                tail_frames = parent_tail;
                                 parent.registers[dst as usize] = value;
                                 chunk = Arc::clone(&parent.chunk);
                                 resumed = Some(parent);
@@ -542,7 +546,7 @@ impl Vm {
                             self.call_stack
                                 .borrow_mut()
                                 .push(VmCallStackFrame::new(next_chunk.name));
-                            suspended.push((dst, parent, bytes));
+                            suspended.push((dst, parent, bytes, tail_frames));
                             chunk = next_chunk;
                             args = call_args;
                             tail_frames = 0;

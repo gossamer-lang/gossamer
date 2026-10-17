@@ -150,8 +150,17 @@ impl Lowerer<'_> {
             name.clone_from(identity);
         }
         // A literal may name its type through an import (`use a::Point`,
-        // `use a::Point as P`); the import's target path is that identity.
-        if let Some(Resolution::Import { use_id }) = self.resolutions.get(node)
+        // `use a::Point as P`); the imported type's own identity is what the
+        // literal builds. The resolver followed the `use` from the module it
+        // is written in - `crate::` inside a dependency names that
+        // dependency's root - so its answer is preferred over the spelling.
+        if let Some(Resolution::Import { .. }) = self.resolutions.get(node)
+            && let Some(def) = self.resolutions.import_def(node)
+            && let Some(identity) = self.module_type_names.get(&def)
+            && path.segments.len() == 1
+        {
+            name.clone_from(identity);
+        } else if let Some(Resolution::Import { use_id }) = self.resolutions.get(node)
             && let Some(entries) = self.import_targets.get(&use_id)
             && let Some((_, full)) = entries.iter().find(|(bound, _)| *bound == name)
         {

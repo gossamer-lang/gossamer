@@ -106,6 +106,19 @@ pub const DESC_ARRAY: u8 = 20;
 /// kind.
 pub const DESC_PACKED: u8 = 24;
 
+/// Ordering-descriptor tag for a user enum stored by value: a discriminant
+/// slot, then regions its variants share. One byte follows giving the region
+/// count, then each region's slot span, then the variant count and, per
+/// variant, its field count followed by, per field, the region it occupies
+/// and the field's own descriptor.
+pub const DESC_FLAT_ENUM: u8 = 27;
+
+/// Ordering-descriptor tag for a field whose type is an enum described
+/// further out than the innermost enclosing one, as mutually recursive enums
+/// reach each other. Two bytes follow: how far back, as a little-endian
+/// `u16` byte count from this tag, that enum's [`DESC_ENUM`] entry begins.
+pub const DESC_ENUM_REF: u8 = 28;
+
 /// Rendering tag for an `f32` leaf: the slot holds the value at double width,
 /// and it renders with the shortest digits that read back as the
 /// single-precision value. Only rendering streams carry it; an `f32` orders,

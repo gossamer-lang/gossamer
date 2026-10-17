@@ -1,0 +1,96 @@
+// A struct read out of a sequence by index and handed back by value - from a
+// method on its holder, from a free function through a `let`, or from a
+// `static mut` registry - owns its fields: the caller reads, keeps, and drops
+// it as many times as it likes while the sequence keeps its own. A field of
+// such an element stored into a struct the function answers is that struct's
+// own share as well.
+
+struct Face {
+    name: String
+    data: Vec<u8>
+    n: i64
+}
+
+struct Reg {
+    faces: Vec<Face>
+}
+
+impl Reg {
+    fn face(&self, i: i64) -> Face {
+        self.faces[i]
+    }
+}
+
+impl Face {
+    fn first(&self) -> i64 {
+        let d = self.data
+        d[0] as i64 + d.len()
+    }
+}
+
+static mut FACES: Vec<Face> = #[]
+
+fn ensure() {
+    if FACES.len() > 0 { return }
+    FACES.push(Face { name: "static", data: #[7u8, 8u8, 9u8], n: 4 })
+}
+
+fn static_face(i: i64) -> Face {
+    ensure()
+    let f = FACES[i]
+    f
+}
+
+fn bound_face(faces: Vec<Face>, i: i64) -> Face {
+    let f = faces[i]
+    f
+}
+
+struct Cmds { commands: Vec<String> }
+struct Win { focus: String, commands: Cmds, active: bool, extra: Vec<i64> }
+struct Cx { focus: String, messages: Vec<String>, registry: Vec<String>, active: bool }
+
+struct Session { windows: Vec<Win> }
+
+impl Session {
+    fn new_cx(&self, w: i64) -> Cx {
+        let win = self.windows[w]
+        let mut cx = Cx { focus: win.focus, messages: #[], registry: #[], active: true }
+        cx.active = win.active
+        cx.registry = win.commands.commands
+        cx
+    }
+
+    fn down(&mut self, w: i64) -> String {
+        let mut cx = self.new_cx(w)
+        cx.messages.push("m")
+        cx.registry.push("c")
+        f"{cx.registry} {cx.focus} {cx.messages.len()} {cx.active}"
+    }
+}
+
+fn metric(r: Reg) -> i64 {
+    let f = r.face(0)
+    f.n * 2
+}
+
+fn main() {
+    let r = Reg { faces: #[Face { name: "held", data: #[1u8, 2u8], n: 3 }] }
+    let mut kept = #[]
+    for _ in 0..4 {
+        println(f"metric {metric(r)}")
+        let g = r.face(0)
+        println(f"method {g.name} {g.data.len()}")
+        let s = static_face(0)
+        println(f"static {s.name} {s.first()} {s.n}")
+        let b = bound_face(r.faces, 0)
+        kept.push(b)
+    }
+    println(f"kept {kept.len()} {kept[3].name} {kept[3].data}")
+    println(f"held {r.faces[0].name} {r.faces[0].data}")
+    let mut s = Session { windows: #[Win { focus: "f", commands: Cmds { commands: #["a", "b"] }, active: false, extra: #[1] }] }
+    for _ in 0..3 {
+        println(s.down(0))
+    }
+    println(f"session {s.windows[0].commands.commands}")
+}

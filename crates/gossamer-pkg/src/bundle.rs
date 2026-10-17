@@ -619,6 +619,22 @@ fn is_valid_module_ident(name: &str) -> bool {
     true
 }
 
+/// The `(start, end, file)` ranges of an assembled unit a compile-time fold
+/// anchors each region's relative reads at, outermost first.
+#[must_use]
+pub fn comptime_origins(spans: &[BundledSpan]) -> Vec<(u32, u32, String)> {
+    spans
+        .iter()
+        .map(|span| {
+            (
+                span.start,
+                span.end,
+                span.origin.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
+}
+
 /// Assembles the compilation unit for `entry` from `source`: its
 /// sibling / subdirectory modules first, then every `path = "..."`
 /// dependency. `source` is the entry's text, which lets an editor pass
