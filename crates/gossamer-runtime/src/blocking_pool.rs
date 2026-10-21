@@ -155,18 +155,7 @@ impl Pool {
             .name("gos-blocking".to_string())
             .spawn(move || self.worker());
         match spawned {
-            Ok(thread) => {
-                let mut threads = self.threads.lock();
-                let mut index = 0;
-                while index < threads.len() {
-                    if threads[index].is_finished() {
-                        let _ = threads.swap_remove(index).join();
-                    } else {
-                        index += 1;
-                    }
-                }
-                threads.push(thread);
-            }
+            Ok(thread) => self.threads.lock().push(thread),
             Err(e) => {
                 let mut state = self.state.lock();
                 state.threads -= 1;
@@ -181,6 +170,24 @@ impl Pool {
     }
 
     fn worker(&self) {
+        self.serve();
+        self.retire();
+    }
+
+    /// Lets go of the calling worker's own handle as it leaves, which detaches
+    /// it, so a thread that retired is never left neither joined nor
+    /// detached. A handle `shutdown_idle` already took is joined there.
+    fn retire(&self) {
+        let me = std::thread::current().id();
+        let mut threads = self.threads.lock();
+        if let Some(at) = threads.iter().position(|t| t.thread().id() == me) {
+            drop(threads.swap_remove(at));
+        }
+    }
+
+    /// Runs queued jobs until the pool stops or the thread has waited out its
+    /// keep-alive with nothing to do.
+    fn serve(&self) {
         let mut state = self.state.lock();
         loop {
             if state.stopping && state.queue.is_empty() {
@@ -347,6 +354,25 @@ mod tests {
         pool.thread_cap.store(threads, Ordering::Relaxed);
         pool.queue_cap.store(queue, Ordering::Relaxed);
         pool
+    }
+
+    #[test]
+    fn a_worker_that_outlives_its_keep_alive_leaves_no_handle_behind() {
+        let pool = private_pool(1, 2);
+        pool.keep_alive_ms.store(0, Ordering::Relaxed);
+        let (tx, rx) = std::sync::mpsc::channel();
+        pool.submit(Box::new(move || {
+            tx.send(()).unwrap();
+        }))
+        .unwrap();
+        rx.recv().unwrap();
+        // The worker retires on its own; its handle goes with it, so nothing
+        // is left for the process to end with neither joined nor detached.
+        while !pool.threads.lock().is_empty() {
+            std::thread::yield_now();
+        }
+        assert_eq!(pool.stats().threads, 0);
+        assert!(pool.shutdown_idle());
     }
 
     #[test]
