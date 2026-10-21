@@ -1,0 +1,78 @@
+use units::{Shape, Span}
+
+mod units {
+    pub struct Bytes(pub i64)
+    pub struct Span { pub start: i64, pub end: i64 }
+    pub enum Shape {
+        Circle(i64)
+        Rect { w: i64, h: i64 }
+    }
+
+    pub fn next(at: Bytes) -> i64 {
+        let Bytes(b) = at
+        b + 1
+    }
+
+    pub fn advance(at: Bytes, steps: i64) -> Bytes {
+        let mut here = at
+        for _ in 0..steps {
+            let Bytes(b) = here
+            here = Bytes(b + 2)
+        }
+        here
+    }
+
+    pub fn inner(found: Option<Bytes>) -> i64 {
+        match found {
+            Some(Bytes(b)) => b
+            None => 0
+        }
+    }
+
+    pub fn length(found: Result<Span, String>) -> i64 {
+        match found {
+            Ok(Span { start, end }) => end - start
+            Err(_) => -1
+        }
+    }
+}
+
+fn outer(found: Option<units::Bytes>) -> i64 {
+    match found {
+        Some(units::Bytes(b)) => b * 10
+        None => 0
+    }
+}
+
+fn width(found: Option<Span>) -> i64 {
+    match found {
+        Some(Span { start, end }) => end - start
+        None => 0
+    }
+}
+
+fn area(shape: Shape) -> i64 {
+    match shape {
+        units::Shape::Circle(r) => 3 * r * r
+        Shape::Rect { w, h } => w * h
+    }
+}
+
+fn total(n: i64) -> i64 {
+    let mut sum = 0
+    for i in 0..n {
+        sum += units::next(units::Bytes(i)) + outer(Some(units::Bytes(i))) + width(Some(Span { start: i, end: 2 * i }))
+    }
+    sum
+}
+
+fn main() {
+    println(f"{units::inner(Some(units::Bytes(3)))} {units::next(units::Bytes(3))}")
+    let missing: Result<Span, String> = Err("no")
+    println(f"{units::length(Ok(Span { start: 2, end: 9 }))} {units::length(missing)}")
+    println(f"{outer(Some(units::Bytes(4)))} {outer(None)}")
+    println(f"{width(Some(Span { start: 1, end: 5 }))}")
+    println(f"{area(Shape::Circle(2))} {area(units::Shape::Rect { w: 3, h: 4 })}")
+    let units::Bytes(far) = units::advance(units::Bytes(5), 1000)
+    println(f"{far} {total(1000)}")
+}

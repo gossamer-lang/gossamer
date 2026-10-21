@@ -197,7 +197,9 @@ fn map_expr(expr: &mut HirExpr, map: &mut impl Instantiation) {
         HirExprKind::Select { arms } => {
             for arm in arms {
                 match &mut arm.op {
-                    HirSelectOp::Recv { pattern, channel } => {
+                    HirSelectOp::Recv {
+                        pattern, channel, ..
+                    } => {
                         map_pat(pattern, map);
                         map_expr(channel, map);
                     }

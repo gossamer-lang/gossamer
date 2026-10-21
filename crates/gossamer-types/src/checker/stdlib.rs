@@ -1697,8 +1697,7 @@ impl TypeChecker<'_> {
         let Some(TyKind::Adt { def, .. }) = self.tcx.kind(resolved) else {
             return None;
         };
-        let offset = u32::MAX - def.local;
-        if offset != 35 && !(SYNC_HANDLE_LO_OFFSET..SYNC_HANDLE_HI_OFFSET).contains(&offset) {
+        if !super::handles::is_sync_primitive_def(def.local) {
             return None;
         }
         let owner = self.tcx.def_name(*def)?.to_string();
@@ -1983,13 +1982,24 @@ impl TypeChecker<'_> {
         args: &[Expr],
         span: Span,
     ) -> Option<Ty> {
-        let TyKind::Adt { def, .. } = self.tcx.kind_of(resolved) else {
+        let TyKind::Adt { def, substs } = self.tcx.kind_of(resolved).clone() else {
             return None;
         };
-        if self.tcx.def_name(*def) != Some("sync::Shared") {
+        if self.tcx.def_name(def) != Some("sync::Shared") {
             return None;
         }
-        let elem = self.tcx.int_ty(IntTy::I64);
+        // A guarded type that is settled and not an integer is reported where
+        // the `Shared` is built (GT0077); its methods answer the error type so
+        // nothing downstream reports a second, misleading mismatch.
+        let declared = substs
+            .types()
+            .first()
+            .map(|t| self.infer.resolve(self.tcx, *t))
+            .filter(|t| self.is_concrete(*t));
+        let elem = match declared {
+            Some(t) if !matches!(self.tcx.kind_of(t), TyKind::Int(_)) => self.tcx.error_ty(),
+            _ => self.tcx.int_ty(IntTy::I64),
+        };
         match method {
             "get" => Some(elem),
             "set" => {
@@ -2659,8 +2669,12 @@ impl TypeChecker<'_> {
             | "channel::unbounded"
             | "sync::channel"
             | "sync::channel_unbounded"
+            | "sync::channel::new"
+            | "sync::channel::unbounded"
             | "std::sync::channel"
-            | "std::sync::channel_unbounded" => self.channel_tuple_ty(),
+            | "std::sync::channel_unbounded"
+            | "std::sync::channel::new"
+            | "std::sync::channel::unbounded" => self.channel_tuple_ty(),
             // `spawn(f) -> JoinHandle<T>`, T being the callable's return
             // type. Typing the call itself is what lets `spawn(f).join()`
             // resolve without binding the handle first: the method arm
@@ -2846,6 +2860,7 @@ impl TypeChecker<'_> {
         &mut self,
         module: &[&str],
         name: &str,
+        written: &str,
         supplied: usize,
         pipe_extra: usize,
         span: Span,
@@ -2864,11 +2879,10 @@ impl TypeChecker<'_> {
         if found != expected {
             self.emit(
                 TypeError::CallArityMismatch {
-                    callee: if module.is_empty() {
-                        name.to_string()
-                    } else {
-                        format!("{}::{name}", module.join("::"))
-                    },
+                    // The diagnostic quotes the path the call site wrote
+                    // (`strings::count`), not the resolved module-qualified
+                    // row the signature catalogue is keyed by.
+                    callee: written.to_string(),
                     expected,
                     found,
                 },
@@ -3127,6 +3141,7 @@ impl TypeChecker<'_> {
             // spellings.
             let name = stdlib_net_handle(tail)
                 .or_else(|| stdlib_fs_handle(tail))
+                .or_else(|| super::handles::stdlib_io_handle(tail))
                 .map_or_else(|| tail.to_string(), |(_, n)| n.to_string());
             self.tcx.register_def_name(def, &name);
             return Some(self.tcx.intern(TyKind::Adt {

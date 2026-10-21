@@ -1355,3 +1355,16 @@ fn a_line_leading_range_in_a_multiline_struct_literal_is_its_base() {
         "the `..base` line was not the literal's base"
     );
 }
+
+#[test]
+fn a_cfg_bang_points_at_the_item_attribute_not_a_call() {
+    let source = "fn main() { let mac = cfg!(target_os = \"macos\") }";
+    let mut map = SourceMap::new();
+    let file = map.add_file("cfg_bang.gos", source.to_string());
+    let (_sf, diags) = parse_source_file(source, file);
+    let text = format!("{diags:?}");
+    assert!(
+        text.contains("#[cfg(...)]") && !text.contains("drop the `!`"),
+        "cfg! should steer to the attribute: {text}"
+    );
+}

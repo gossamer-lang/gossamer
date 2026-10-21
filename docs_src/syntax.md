@@ -435,8 +435,8 @@ spawn(|| { tx.send(42) })
 let n = rx.recv()
 
 select {
-    a = rx_a.recv() => handle_a(a),
-    b = rx_b.recv() => handle_b(b),
+    Some(a) = rx_a.recv() => handle_a(a),
+    Some(b) = rx_b.recv() => handle_b(b),
     _ = time::after(Duration::from_millis(5000)).recv() => timeout(),
 }
 ```

@@ -482,13 +482,24 @@ impl<'a> Builder<'a> {
             // all backends can call with just the channel pointer.
             "gos_rt_chan_recv_option" | "gos_rt_chan_try_recv_option" => {
                 use gossamer_types::TyKind;
-                // Derive the element type from the receiver's
-                // `Receiver<T>` so `rx.recv()` yields `Option<T>` with the
-                // right payload. A hardcoded `Option<i64>` made a
-                // `channel<String>` recv print the String payload's
-                // pointer as a number on the compiled tier.
-                let elem = [receiver_ty, lowered_recv_ty]
+                // Derive the element type from the receiver's `Receiver<T>`
+                // so `rx.recv()` yields `Option<T>` with the right payload.
+                // A hardcoded `Option<i64>` made a `channel<String>` recv
+                // print the String payload's pointer as a number on the
+                // compiled tier. A tuple-destructured name (`let tx, rx =
+                // channel()`) types its local as the whole tuple, so the
+                // scan also walks tuple fields: a channel tuple holds one
+                // `Sender` and one `Receiver`, and the endpoint kind picks
+                // the field.
+                let elem = [receiver_ty, lowered_recv_ty, receiver.ty]
                     .into_iter()
+                    .flat_map(|t| {
+                        let mut all = vec![t];
+                        if let TyKind::Tuple(fields) = self.tcx.kind_of(t) {
+                            all.extend(fields.iter().copied());
+                        }
+                        all
+                    })
                     .find_map(|t| match self.tcx.kind_of(t) {
                         TyKind::Receiver(e) | TyKind::Sender(e) => Some(*e),
                         _ => None,

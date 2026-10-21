@@ -1,0 +1,27 @@
+// Map literals whose keys or values are strings built at run time, passed to
+// calls, bound, and read back. Each entry's strings are shared with the map
+// once, so the values print the same on every tier and nothing is released
+// twice.
+
+fn size(args: Map<String, String>) -> i64 { args.len() }
+
+fn lookup(args: Map<String, String>, key: String) -> String { args.get(key).unwrap_or("") }
+
+fn counts(args: Map<String, i64>) -> i64 { args.get("n").unwrap_or(0) }
+
+fn main() {
+    let mut total = 0
+    let mut seen = #[]
+    for i in 0..20 {
+        let v = f"{i}"
+        total += size({ "current": v })
+        let k = f"key{i % 3}"
+        let m = { k: f"value {i}", "fixed": v }
+        seen.push(lookup(m, k))
+        total += counts({ f"n": i })
+        let inline = { f"{i}": f"{i * 2}" }
+        seen.push(lookup(inline, f"{i}"))
+    }
+    println(f"{total} {seen.len()}")
+    println(f"{seen[0]} {seen[1]} {seen[38]} {seen[39]}")
+}

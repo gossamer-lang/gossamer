@@ -595,6 +595,11 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::image",
+        name: "release",
+        signature: "fn release(image: i64) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::image",
         name: "to_rgba_bytes",
         signature: "fn to_rgba_bytes(image: i64) -> Vec<u8>",
     },
@@ -2826,57 +2831,57 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::io",
         name: "string_reader",
-        signature: "fn string_reader(text: String) -> i64",
+        signature: "fn string_reader(text: String) -> io::MemoryStream",
     },
     StdFunctionSignature {
         module_path: "std::io",
         name: "buffer_writer",
-        signature: "fn buffer_writer() -> i64",
+        signature: "fn buffer_writer() -> io::MemoryStream",
     },
     StdFunctionSignature {
         module_path: "std::io",
         name: "limit_reader",
-        signature: "fn limit_reader(src: i64, limit: i64) -> i64",
+        signature: "fn limit_reader(src: io::MemoryStream, limit: i64) -> io::MemoryStream",
     },
     StdFunctionSignature {
         module_path: "std::io",
         name: "tee_reader",
-        signature: "fn tee_reader(src: i64, sink: i64) -> i64",
+        signature: "fn tee_reader(src: io::MemoryStream, sink: io::MemoryStream) -> io::MemoryStream",
     },
     StdFunctionSignature {
         module_path: "std::io",
         name: "multi_reader",
-        signature: "fn multi_reader(sources: Vec<i64>) -> i64",
+        signature: "fn multi_reader(sources: Vec<io::MemoryStream>) -> io::MemoryStream",
     },
     StdFunctionSignature {
         module_path: "std::io",
         name: "pipe",
-        signature: "fn pipe() -> (i64, i64)",
+        signature: "fn pipe() -> (io::MemoryStream, io::MemoryStream)",
     },
     StdFunctionSignature {
         module_path: "std::io",
         name: "copy_n",
-        signature: "fn copy_n(dst: i64, src: i64, n: i64) -> Result<i64, errors::Error>",
+        signature: "fn copy_n(dst: io::MemoryStream, src: io::MemoryStream, n: i64) -> Result<i64, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::io",
         name: "drain",
-        signature: "fn drain(src: i64) -> String",
+        signature: "fn drain(src: io::MemoryStream) -> String",
     },
     StdFunctionSignature {
         module_path: "std::io",
         name: "contents",
-        signature: "fn contents(writer: i64) -> String",
+        signature: "fn contents(writer: io::MemoryStream) -> String",
     },
     StdFunctionSignature {
         module_path: "std::io",
         name: "write",
-        signature: "fn write(writer: i64, text: String) -> i64",
+        signature: "fn write(writer: io::MemoryStream, text: String) -> i64",
     },
     StdFunctionSignature {
         module_path: "std::io",
         name: "close_writer",
-        signature: "fn close_writer(writer: i64)",
+        signature: "fn close_writer(writer: io::MemoryStream)",
     },
     StdFunctionSignature {
         module_path: "std::path",

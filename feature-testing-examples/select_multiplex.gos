@@ -13,8 +13,8 @@ fn main() {
 
     // 1. Nothing buffered yet: the default arm fires.
     let a = select {
-        v = rx1.recv() => v
-        w = rx2.recv() => w
+        Some(v) = rx1.recv() => v
+        Some(w) = rx2.recv() => w
         default => -1
     }
     println("a = {}", a)
@@ -22,8 +22,8 @@ fn main() {
     // 2. Only rx1 has a value: the recv arm beats default.
     tx1.send(10)
     let b = select {
-        v = rx1.recv() => v
-        w = rx2.recv() => w
+        Some(v) = rx1.recv() => v
+        Some(w) = rx2.recv() => w
         default => -1
     }
     println("b = {}", b)
@@ -31,8 +31,8 @@ fn main() {
     // 3. rx1 is drained, rx2 has a value: that recv arm wins.
     tx2.send(20)
     let c = select {
-        v = rx1.recv() => v
-        w = rx2.recv() => w
+        Some(v) = rx1.recv() => v
+        Some(w) = rx2.recv() => w
         default => -1
     }
     println("c = {}", c)
@@ -57,7 +57,7 @@ mod tests {
     fn default_arm_fires_when_nothing_ready() {
         let _tx, rx = channel()
         let chosen = select {
-            v = rx.recv() => v
+            Some(v) = rx.recv() => v
             default => -1
         }
         let _ = testing::check(chosen == -1, "default arm fires when no value is ready")
@@ -68,7 +68,7 @@ mod tests {
         let tx, rx = channel::unbounded()
         tx.send(7)
         let chosen = select {
-            v = rx.recv() => v
+            Some(v) = rx.recv() => v
             default => -1
         }
         let _ = testing::check(chosen == 7, "ready recv arm is chosen over default")

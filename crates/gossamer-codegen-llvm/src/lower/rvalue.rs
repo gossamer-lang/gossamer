@@ -236,6 +236,167 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Applies the field ownership operations to persistent inline storage.
+    pub(crate) fn static_aggregate_children(
+        &mut self,
+        ty: Ty,
+        base: &str,
+        retain: bool,
+        guarded: bool,
+    ) {
+        let fields = gossamer_mir::aggregate_ownership_fields(self.tcx, ty);
+        self.static_children(ty, base, retain, guarded, fields);
+    }
+
+    fn static_children(
+        &mut self,
+        ty: Ty,
+        base: &str,
+        retain: bool,
+        guarded: bool,
+        fields: Vec<gossamer_mir::AggregateOwnershipField>,
+    ) {
+        for field in fields {
+            let mut leaf_ty = ty;
+            let mut word = 0;
+            for index in field.path {
+                word += field_slot_offset(self.tcx, leaf_ty, index);
+                leaf_ty = match self.tcx.kind_of(leaf_ty) {
+                    TyKind::Tuple(fields) => fields[index as usize],
+                    TyKind::Array { elem, .. } => *elem,
+                    TyKind::Adt { def, substs } => self
+                        .tcx
+                        .adt_field_tys(*def, substs)
+                        .expect("aggregate field layout")[index as usize],
+                    _ => unreachable!("ownership field belongs to an aggregate"),
+                };
+            }
+            let addr = self.fresh();
+            writeln!(
+                self.out,
+                "  {addr} = getelementptr i8, ptr {base}, i64 {}",
+                word * 8
+            )
+            .unwrap();
+            let helper = if retain { field.retain } else { field.release };
+            declare_rt(&mut self.runtime_refs, helper);
+            if field.by_address {
+                writeln!(self.out, "  call void @{helper}(ptr {addr})").unwrap();
+            } else if let Some((ok, err)) = field.carrier {
+                let value = self.fresh();
+                writeln!(self.out, "  {value} = load i128, ptr {addr}, align 8").unwrap();
+                writeln!(
+                    self.out,
+                    "  call void @{helper}(i128 {value}, i64 {ok}, i64 {err})"
+                )
+                .unwrap();
+            } else {
+                let value = self.fresh();
+                writeln!(self.out, "  {value} = load ptr, ptr {addr}").unwrap();
+                let abi = gossamer_abi::lookup(helper).expect("ownership helper ABI");
+                if abi.sig.params[0] == gossamer_abi::AbiType::I64 {
+                    let word = self.fresh();
+                    writeln!(self.out, "  {word} = ptrtoint ptr {value} to i64").unwrap();
+                    writeln!(self.out, "  call void @{helper}(i64 {word})").unwrap();
+                } else {
+                    writeln!(self.out, "  call void @{helper}(ptr {value})").unwrap();
+                }
+            }
+        }
+        if guarded
+            && let Some(symbol) = self.tcx.aggr_copy_meta(ty)
+            && self.tcx.rc_meta(symbol).is_some_and(|meta| meta.len() > 2)
+        {
+            let helper = if retain {
+                "gos_rt_aggr_retain_children"
+            } else {
+                "gos_rt_aggr_release_children"
+            };
+            declare_rt(&mut self.runtime_refs, helper);
+            writeln!(
+                self.out,
+                "  call void @{helper}(ptr {base}, ptr @\"{symbol}\")"
+            )
+            .unwrap();
+        }
+    }
+
+    /// A cell owns its last stored value until the program shuts down. Register
+    /// one callback that reads that value instead of leaking persistent owners.
+    pub(crate) fn register_static_drop(&mut self, sref: &gossamer_mir::StaticRef) {
+        let fields = gossamer_mir::value_ownership_fields(self.tcx, sref.ty);
+        let root = fields.iter().any(|field| field.path.is_empty());
+        let guarded = !root
+            && self
+                .tcx
+                .aggr_copy_meta(sref.ty)
+                .and_then(|symbol| self.tcx.rc_meta(symbol))
+                .is_some_and(|meta| meta.len() > 2);
+        let option_slot = gossamer_mir::is_option_slot_holder(self.tcx, sref.ty);
+        if fields.is_empty() && !guarded && !option_slot {
+            return;
+        }
+        let callback = format!("{}__drop", sref.symbol);
+        let base = format!("@{}", sref.symbol);
+        let saved = std::mem::take(&mut self.out);
+        let saved_ssa = std::mem::replace(&mut self.next_ssa, 0);
+        let comdat = if let Some(decl) = crate::emit::coff_comdat_decl("linkonce_odr", &callback) {
+            self.runtime_refs.insert(decl);
+            " comdat"
+        } else {
+            ""
+        };
+        writeln!(
+            self.out,
+            "define linkonce_odr void @{callback}(){comdat} {{\nentry:"
+        )
+        .unwrap();
+        self.static_children(sref.ty, &base, false, guarded, fields);
+        self.release_static_option_slot(sref);
+        let llvm_ty = render_ty(self.tcx, sref.ty);
+        if is_aggregate(self.tcx, sref.ty) {
+            if let Some(bytes) = aggregate_storage_bytes(self.tcx, sref.ty) {
+                writeln!(
+                    self.out,
+                    "  store [{bytes} x i8] zeroinitializer, ptr {base}, align 8"
+                )
+                .unwrap();
+            }
+        } else {
+            let zero = if llvm_ty == "ptr" { "null" } else { "0" };
+            writeln!(self.out, "  store {llvm_ty} {zero}, ptr {base}").unwrap();
+        }
+        writeln!(self.out, "  ret void\n}}").unwrap();
+        let definition = std::mem::replace(&mut self.out, saved);
+        self.next_ssa = saved_ssa;
+        self.runtime_refs.insert(definition);
+        declare_rt(&mut self.runtime_refs, "gos_rt_register_static_drop");
+        writeln!(
+            self.out,
+            "  call void @gos_rt_register_static_drop(ptr {base}, ptr @{callback})"
+        )
+        .unwrap();
+    }
+
+    pub(crate) fn release_static_previous(&mut self, sref: &gossamer_mir::StaticRef) {
+        let fields = gossamer_mir::value_ownership_fields(self.tcx, sref.ty);
+        if fields.iter().any(|field| field.path.is_empty()) {
+            self.static_children(sref.ty, &format!("@{}", sref.symbol), false, false, fields);
+        }
+        self.release_static_option_slot(sref);
+    }
+
+    /// Releases the copy-blob payload share a carrier static holds, for a
+    /// cell whose type `gossamer_mir::is_option_slot_holder` accepts.
+    fn release_static_option_slot(&mut self, sref: &gossamer_mir::StaticRef) {
+        if !gossamer_mir::is_option_slot_holder(self.tcx, sref.ty) {
+            return;
+        }
+        let (_, release) = gossamer_mir::option_slot_helpers(self.tcx, sref.ty);
+        declare_rt(&mut self.runtime_refs, release);
+        writeln!(self.out, "  call void @{release}(ptr @{})", sref.symbol).unwrap();
+    }
+
     /// Registers the backing module global for a `static mut`. The
     /// definition uses `linkonce_odr` linkage so the same global emitted
     /// from every object that references the static coalesces to one
@@ -244,7 +405,14 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn register_static_global(&mut self, sref: &gossamer_mir::StaticRef, llvm_ty: &str) {
         // A pointer-shaped cell starts empty; the entry's prologue writes the
         // storage the declaration names before anything reads it.
-        let init = if llvm_ty == "ptr" {
+        let aggregate_bytes = is_aggregate(self.tcx, sref.ty)
+            .then(|| aggregate_storage_bytes(self.tcx, sref.ty))
+            .flatten();
+        let storage_ty = aggregate_bytes.map(|bytes| format!("[{bytes} x i8]"));
+        let llvm_ty = storage_ty.as_deref().unwrap_or(llvm_ty);
+        let init = if aggregate_bytes.is_some() {
+            "zeroinitializer".to_string()
+        } else if llvm_ty == "ptr" {
             "null".to_string()
         } else {
             render_const(&sref.init)
@@ -256,8 +424,13 @@ impl<'a> Lowerer<'a> {
             }
             None => "",
         };
+        let alignment = if aggregate_bytes.is_some() {
+            ", align 8"
+        } else {
+            ""
+        };
         self.runtime_refs.insert(format!(
-            "@{sym} = linkonce_odr global {llvm_ty} {init}{comdat}",
+            "@{sym} = linkonce_odr global {llvm_ty} {init}{comdat}{alignment}",
             sym = sref.symbol,
         ));
     }
@@ -322,7 +495,10 @@ impl<'a> Lowerer<'a> {
                 // children was removed, so the box takes the share those words
                 // already carried instead of minting one.
                 let owned = name == "gos_rt_result_new_owned";
-                let payload = if let Some(hv) = self
+                // A payload with no fields carries no bits, as `()` does.
+                let payload = if self.is_field_free_operand(&args[1]) {
+                    "0".to_string()
+                } else if let Some(hv) = self
                     .maybe_heap_copy_value_enum(&args[1])
                     .or_else(|| self.maybe_heap_copy_aggregate_moved(&args[1], owned))
                 {
@@ -546,11 +722,6 @@ impl<'a> Lowerer<'a> {
         args: &[Operand],
         dest_local: Local,
     ) -> Result<String, BuildError> {
-        let name = if name == "gos_rt_bytearr_slice_result" {
-            "gos_rt_packed_bytearr_slice_result"
-        } else {
-            name
-        };
         let dest_ty = render_ty(self.tcx, self.body.local_ty(dest_local));
         // Inline the Result/Option i128 carrier bit-ops. The runtime encodes a
         // `Result<T, E>` / `Option<T>` as a 2-word by-value i128 with the
@@ -698,6 +869,10 @@ impl<'a> Lowerer<'a> {
             }
             let a_ty = self.operand_llvm_ty(arg);
             let a_v = self.lower_operand(arg)?;
+            if result_new_heap_copy && i == 1 && self.is_field_free_operand(arg) {
+                arg_text.push_str("i64 0");
+                continue;
+            }
             if result_new_heap_copy
                 && i == 1
                 && let Some(heap_v) = self

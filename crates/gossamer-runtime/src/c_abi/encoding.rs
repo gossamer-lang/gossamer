@@ -66,8 +66,13 @@ pub unsafe extern "C" fn gos_rt_encoding_hex_encode(
     ffi_entry!({
         // SAFETY: `data` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `vec_bytes` accepts.
-        let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
-        alloc_cstring(hex::encode(&bytes).as_bytes())
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes_cow(data) };
+        let len = bytes.len() * 2;
+        let force_heap = crate::c_abi::rc::in_region_arena(bytes.as_ptr());
+        super::string::alloc_ascii_with_fill(len, force_heap, |out| {
+            // SAFETY: the allocation passes `len` writable content bytes at `out`.
+            hex::encode_into(&bytes, unsafe { std::slice::from_raw_parts_mut(out, len) });
+        })
     })
 }
 
@@ -186,13 +191,34 @@ pub unsafe extern "C" fn gos_rt_encoding_base64_decode(s: *const c_char) -> i128
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_encoding_hex_decode(s: *const c_char) -> i128 {
     ffi_entry!({
-        // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
-        match hex::decode(unsafe { cstr_to_str(s) }) {
-            Ok(bytes) => {
-                let v = bytes_to_gosvec(&bytes);
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
+        let text = unsafe { crate::c_abi::gos_str_arg_bytes(s) };
+        let bound = hex::decoded_bound(text.len());
+        // Decoding straight into the answer's own storage keeps the result
+        // one allocation.
+        let v = super::vec::gos_rt_vec_with_capacity(1, bound as i64);
+        // SAFETY: `gos_rt_vec_with_capacity` answers a live header for a non-negative capacity,
+        // owned here alone.
+        let vref = unsafe { &mut *v };
+        if vref.ptr.is_null() {
+            return super::result::gos_rt_result_new(0, v as i64);
+        }
+        // SAFETY: the buffer is live, uniquely held here, and has room for `bound` bytes, which
+        // are zeroed before the slice is formed.
+        let out = unsafe {
+            std::ptr::write_bytes(vref.ptr.as_ptr(), 0, bound);
+            std::slice::from_raw_parts_mut(vref.ptr.as_ptr(), bound)
+        };
+        match hex::decode_into(text, out) {
+            Ok(written) => {
+                vref.len = written as i64;
                 super::result::gos_rt_result_new(0, v as i64)
             }
-            Err(e) => err_result(&e),
+            Err(e) => {
+                // SAFETY: `v` is the fresh vec made above, owned here alone and not read again.
+                unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
+                err_result(&e)
+            }
         }
     })
 }

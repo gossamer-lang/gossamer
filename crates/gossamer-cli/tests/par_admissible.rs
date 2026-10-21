@@ -14,7 +14,7 @@ fn a_pure_closure_literal_is_accepted() {
 #[test]
 fn the_callback_shorthand_is_accepted() {
     let out = common::gos_check_str(
-        "use std::math\nfn main() { let xs = #[-1, 2]\n println(\"{}\", xs.par_map(math::abs)) }",
+        "use std::math\nfn main() { let xs = #[-1.5, 2.0]\n println(\"{}\", xs.par_map(math::abs)) }",
     );
     assert_eq!(out.status.code(), Some(0), "{}", common::stderr(&out));
 }

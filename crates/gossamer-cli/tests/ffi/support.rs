@@ -46,33 +46,48 @@ pub(crate) enum Tier {
 
 pub(crate) const TIERS: [Tier; 3] = [Tier::Bytecode, Tier::Jit, Tier::Native];
 
-/// The file names the fixture library is built as on this platform.
-fn fixture_files() -> &'static [&'static str] {
+/// The fixture libraries, each built from `tests/ffi/fixture/<name>.c`.
+const FIXTURE_LIBRARIES: [&str; 2] = ["gosffi", "gosffi2"];
+
+/// The file names library `name` is built as on this platform.
+fn library_files(name: &str) -> Vec<String> {
     if cfg!(windows) {
-        &["gosffi.dll", "gosffi.lib"]
+        vec![format!("{name}.dll"), format!("{name}.lib")]
     } else if cfg!(target_os = "macos") {
-        &["libgosffi.dylib"]
+        vec![format!("lib{name}.dylib")]
     } else {
-        &["libgosffi.so"]
+        vec![format!("lib{name}.so")]
     }
 }
 
-/// The directory the fixture library is built into, once per test process.
+/// The file names every fixture library is built as.
+fn fixture_files() -> Vec<String> {
+    FIXTURE_LIBRARIES
+        .iter()
+        .flat_map(|name| library_files(name))
+        .collect()
+}
+
+/// The directory the fixture libraries are built into, once per test process.
 fn fixture_dir() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!("gos-ffi-fixture-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create the fixture directory");
-        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ffi/fixture/gosffi.c");
-        build_shared_library(&source, &dir);
+        for name in FIXTURE_LIBRARIES {
+            let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/ffi/fixture")
+                .join(format!("{name}.c"));
+            build_shared_library(name, &source, &dir);
+        }
         dir
     })
 }
 
 #[cfg(not(windows))]
-fn build_shared_library(source: &Path, dir: &Path) {
+fn build_shared_library(name: &str, source: &Path, dir: &Path) {
     let compiler = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
-    let output = dir.join(fixture_files()[0]);
+    let output = dir.join(&library_files(name)[0]);
     let mut cmd = Command::new(compiler);
     cmd.arg("-shared")
         .arg("-fPIC")
@@ -84,7 +99,8 @@ fn build_shared_library(source: &Path, dir: &Path) {
         cmd.arg("-lpthread");
     }
     if cfg!(target_os = "macos") {
-        cmd.arg("-install_name").arg("@rpath/libgosffi.dylib");
+        cmd.arg("-install_name")
+            .arg(format!("@rpath/lib{name}.dylib"));
     }
     let out = cmd.output().expect("run the C compiler");
     assert!(
@@ -95,7 +111,7 @@ fn build_shared_library(source: &Path, dir: &Path) {
 }
 
 #[cfg(windows)]
-fn build_shared_library(source: &Path, dir: &Path) {
+fn build_shared_library(name: &str, source: &Path, dir: &Path) {
     let target = if cfg!(target_arch = "aarch64") {
         "aarch64-pc-windows-msvc"
     } else {
@@ -112,7 +128,7 @@ fn build_shared_library(source: &Path, dir: &Path) {
         .arg("/nologo")
         .arg("/LD")
         .arg(source)
-        .arg(format!("/Fe:{}", dir.join("gosffi.dll").display()));
+        .arg(format!("/Fe:{}", dir.join(format!("{name}.dll")).display()));
     let out = cmd.output().expect("run the C compiler");
     assert!(
         out.status.success(),
@@ -162,7 +178,7 @@ impl Project {
         .expect("write the manifest");
         std::fs::write(dir.join("src/main.gos"), source).expect("write the entry");
         for file in fixture_files() {
-            std::fs::copy(fixture_dir().join(file), dir.join("native").join(file))
+            std::fs::copy(fixture_dir().join(&file), dir.join("native").join(&file))
                 .expect("vendor the fixture library");
         }
         Self {

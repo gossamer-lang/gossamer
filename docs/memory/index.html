@@ -2660,7 +2660,15 @@ automatic cycle reclamation that ARC leaves to the programmer.</p>
   <code>isize</code>/<code>usize</code>, <code>f32</code>/<code>f64</code>.</li>
 <li><strong>Reference-semantic types</strong> share their backing storage when
   copied; the runtime reclaims the backing when the last reference
-  dies. This includes <code>String</code>, <code>Vec&lt;T&gt;</code>, structs, enums, and closures.
+  dies. This includes <code>String</code>, <code>Vec&lt;T&gt;</code>, structs, recursive enums, and
+  closures.</li>
+<li><strong>Enums are values unless they are recursive.</strong> As in Swift, a
+  non-recursive enum is stored inline: its discriminant beside its
+  variants' fields, which share storage across variants, with no heap
+  node and no reference count of its own. An <code>Option</code> or <code>Result</code> over
+  such an enum is inline too. An enum that contains itself, directly or
+  through other types, keeps one heap node per value, as Swift's
+  <code>indirect</code> enums do; the pointer is what makes its size finite.
   <code>[T; N]</code> is an owned fixed array. <code>[T]</code> is unsized and appears through a
   borrowed <code>&amp;[T]</code> or <code>&amp;mut [T]</code> view, so a bare slice is not an owned heap
   collection.</li>
@@ -2731,7 +2739,7 @@ described in the <a href="../design/memory_model/">concurrency memory model</a>.
   <code>gos</code>, the JIT, and <code>gos build</code>, before or after
   <code>runtime::collect_cycles()</code>. <code>feature-testing-examples/weak_into_strong_cycle.gos</code>
   pins the guarantee across all three tiers.</li>
-<li><strong>Compact representation.</strong> A heap enum node carries an 8-byte
+<li><strong>Compact representation.</strong> A recursive enum's heap node carries an 8-byte
   runtime header. Enums with at most 4 variants store their
   discriminant in pointer tag bits, so a two-pointer tree node costs
   24 bytes - and only 16 inside an arena.</li>
@@ -2864,8 +2872,9 @@ mutate through a shared handle across goroutines, hold the value in a
 <ul>
 <li>Small value types live on the stack or inline inside their
   aggregate.</li>
-<li>Aggregates (<code>String</code>, <code>Vec&lt;T&gt;</code>, structs, enums, closures) live on
-  the heap, reference-counted; <code>T</code> / <code>T</code> / <code>T</code> spellings
+<li>Non-recursive enums live inline, like the scalars they hold.</li>
+<li>Other aggregates (<code>String</code>, <code>Vec&lt;T&gt;</code>, structs, recursive enums,
+  closures) live on the heap, reference-counted; <code>T</code> / <code>T</code> / <code>T</code> spellings
   are accepted and transparent.</li>
 <li>Short-lived object graphs belong in an <code>arena { }</code>.</li>
 </ul>

@@ -134,9 +134,18 @@ pub struct ProgramEffects {
     /// The nominal type each `impl` names, by its written name, for a call
     /// compiled code spells as `Type::method`.
     owners_by_name: HashMap<String, Vec<Option<DefId>>>,
+    /// Every static holding heap storage.
+    heap_statics: HashSet<DefId>,
 }
 
 impl ProgramEffects {
+    /// Whether `def` is a static holding heap storage, whose read compiled
+    /// code takes a counted copy of.
+    #[must_use]
+    pub fn is_heap_static(&self, def: DefId) -> bool {
+        self.heap_statics.contains(&def)
+    }
+
     /// The summary of the free function `def`, if the program defines it.
     #[must_use]
     pub fn of_fn(&self, def: DefId) -> Option<&FnEffects> {
@@ -379,6 +388,7 @@ pub fn collect_program_effects(program: &HirProgram, tcx: &TyCtxt) -> ProgramEff
     let mut out = ProgramEffects {
         by_name,
         owners_by_name,
+        heap_statics: statics.clone(),
         ..ProgramEffects::default()
     };
     for (key, effects) in summaries {

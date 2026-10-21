@@ -1,0 +1,82 @@
+// Values that cross between interpreted and compiled code through
+// structs: a `Vec` of structs as an argument, tuples of up to four
+// elements as answers, an `Option` of a wide struct both ways, and a struct
+// holding vectors written through `&mut`.
+struct Affine {
+    a: f64
+    b: f64
+    c: f64
+    d: f64
+    e: f64
+    f: f64
+}
+
+struct Stop {
+    offset: f64
+    r: f64
+}
+
+struct Layer {
+    px: Vec<f64>
+    marks: Vec<i64>
+    width: i64
+}
+
+fn color_at(list: Vec<Stop>, t: f64) -> (f64, f64, f64, f64) {
+    for s in list { if t <= s.offset { return (s.r, s.r * 2.0, s.r * 3.0, 1.0) } }
+    (0.0, 0.0, 0.0, 0.0)
+}
+
+fn stats(list: Vec<Stop>) -> (i64, f64, bool) {
+    let mut total = 0.0
+    for s in list { total += s.r }
+    (list.len(), total, total > 1.0)
+}
+
+fn first_invertible(ms: Vec<Affine>) -> Option<Affine> {
+    for m in ms {
+        let det = m.a * m.d - m.b * m.c
+        if det != 0.0 { return Some(Affine { a: m.d / det, b: -m.b / det, c: -m.c / det, d: m.a / det, e: m.e, f: m.f }) }
+    }
+    None
+}
+
+fn scale_or(m: Option<Affine>, k: f64, n: i64) -> f64 {
+    let mut total = 0.0
+    for i in 0..n {
+        total += match m {
+            Some(a) => a.a * k + i as f64
+            None => -1.0
+        }
+    }
+    total
+}
+
+fn blur(layer: &mut Layer, k: f64) {
+    let mut i = 0
+    while i < layer.px.len() { layer.px[i] *= k; i += 1 }
+    layer.marks.push(layer.width)
+    layer.width += 1
+}
+
+fn main() {
+    let stops = #[Stop { offset: 0.5, r: 0.25 }, Stop { offset: 1.0, r: 0.75 }]
+    let mut acc = 0.0
+    for i in 0..50 {
+        let r, g, b, a = color_at(stops, (i % 10) as f64 / 10.0)
+        acc += r + g + b + a
+    }
+    println(f"colors {acc:.3}")
+    let n, total, big = stats(stops)
+    println(f"stats {n} {total} {big}")
+    let ms = #[Affine { a: 0.0, b: 0.0, c: 0.0, d: 0.0, e: 1.0, f: 2.0 }, Affine { a: 2.0, b: 0.0, c: 0.0, d: 4.0, e: 3.0, f: 5.0 }]
+    match first_invertible(ms) {
+        Some(m) => println(f"inverse {m.a} {m.d} {m.e} {m.f}")
+        None => println("none")
+    }
+    println(f"none {first_invertible(#[Affine { a: 0.0, b: 0.0, c: 0.0, d: 0.0, e: 0.0, f: 0.0 }]).is_none()}")
+    println(f"scaled {scale_or(Some(Affine { a: 3.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 }), 2.0, 4)} {scale_or(None, 2.0, 3)}")
+    let mut layer = Layer { px: #[1.0, 2.0, 3.0], marks: #[], width: 7 }
+    for _ in 0..3 { blur(&mut layer, 2.0) }
+    println(f"layer {layer.px} {layer.marks} {layer.width}")
+}

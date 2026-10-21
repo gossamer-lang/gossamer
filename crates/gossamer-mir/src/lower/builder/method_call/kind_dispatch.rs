@@ -1438,6 +1438,12 @@ impl<'a> Builder<'a> {
         let method_inputs = [
             owner.map(|owner| owner.name.clone()),
             self.struct_name_of(receiver_ty),
+            // An enum is not in the struct index, so its impl is reached
+            // through the enum index: without it a method on an enum
+            // receiver finds no parameter list and a lifted bare-closure
+            // argument skips its Fn wrap, reaching the callee as a raw
+            // name string.
+            self.enum_index_name_of(receiver_ty),
             self.struct_name_from_expr(receiver),
             self.builtin_impl_owner_name(receiver_ty),
         ]
@@ -1454,6 +1460,19 @@ impl<'a> Builder<'a> {
         } else {
             None
         };
+        // An element read out of a sequence for a method that only reads its
+        // receiver - lets nothing escape, keeps nothing of it, and so cannot
+        // reach the sequence either - is lent to the call in place: it owns
+        // none of the element's heap fields, so none are copied for it.
+        if matches!(receiver.kind, HirExprKind::Index { .. })
+            && self.is_inline_aggregate_ty(self.locals[receiver_local.0 as usize].ty)
+            && callee_effects.as_ref().is_some_and(|summary| {
+                let recv = summary.param(0);
+                !summary.escapes && recv.leaves_untouched() && !recv.resizes
+            })
+        {
+            self.lent_slots.push(receiver_local);
+        }
         let (receiver_local, mut arg_operands) = self.build_fallback_arg_operands(
             runtime_symbol,
             receiver_local,

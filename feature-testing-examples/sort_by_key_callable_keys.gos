@@ -1,0 +1,35 @@
+// `sort_by_key` takes any callable key: a named function, a std function, a
+// closure held in a variable, or one a call answers.
+
+use std::math
+
+struct Row { name: String, score: i64 }
+
+fn rank(s: String) -> i64 { s.len() }
+fn neg(x: i64) -> i64 { -x }
+fn by_score(r: Row) -> i64 { r.score }
+fn pair(r: Row) -> (i64, String) { (r.score, r.name) }
+
+fn make_key() -> Fn(i64) -> i64 { |x| x % 3 }
+
+fn main() {
+    let mut xs = #["ccc", "a", "bb"]
+    xs.sort_by_key(rank)
+    println(f"{xs}")
+    let mut ys = #[3, -5, 1, -2]
+    let mut fs = #[3.5, -5.0, 1.0, -2.25]
+    fs.sort_by_key(math::abs)
+    println(f"{fs}")
+    let key = |x: i64| neg(x)
+    ys.sort_by_key(key)
+    println(f"{ys}")
+    ys.sort_by_key(make_key())
+    println(f"{ys}")
+    ys.sort_by_key_desc(neg)
+    println(f"{ys}")
+    let mut rows = #[Row { name: "b", score: 2 }, Row { name: "a", score: 2 }, Row { name: "c", score: 1 }]
+    rows.sort_by_key(by_score)
+    println(f"{rows.map(|r| r.name)}")
+    rows.sort_by_key(pair)
+    println(f"{rows.map(|r| r.name)}")
+}

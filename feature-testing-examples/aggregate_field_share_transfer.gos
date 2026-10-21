@@ -1,0 +1,67 @@
+mod request {
+    #[derive(PartialEq, Eq)]
+    pub enum ButtonRole { Accept, Reject, Destructive, Apply, Help, Other }
+    pub struct Action { pub id: String, pub label: String, pub role: ButtonRole }
+    impl Action { pub fn new(id: String, label: String, role: ButtonRole) -> Action { Action { id: id, label: label, role: role } } }
+    pub enum Request { Message { actions: Vec<Action>, text: String }, Empty }
+    pub fn message(actions: Vec<Action>, text: String) -> Request {
+        Request::Message { actions: actions, text: text }
+    }
+    pub fn unsaved() -> Request {
+        message(#[Action::new("save", "Save", ButtonRole::Accept), Action::new("discard", "Discard", ButtonRole::Destructive), Action::new("cancel", "Cancel", ButtonRole::Reject)], "Save this document?")
+    }
+}
+mod host {
+    use crate::request::{Request, ButtonRole}
+    pub fn initial(req: Request) -> String {
+        match req {
+            Request::Message { actions, .. } => {
+                for a in actions { if a.role == ButtonRole::Accept { return a.id } }
+                "none"
+            }
+            Request::Empty => "empty"
+        }
+    }
+}
+
+struct Layout { children: Vec<Layout>, parts: Vec<i64>, x: i64 }
+impl Layout { fn at(&self, x: i64) -> Layout { let mut n = *self; n.x = x; n } }
+struct Instance { req: request::Request, node: Layout, values: Map<String, String> }
+fn layout() -> Layout { Layout { children: #[], parts: #[1, 2], x: 0 } }
+fn actions(inst: Instance) -> Vec<request::Action> {
+    match inst.req { request::Request::Message { actions, .. } => actions, _ => #[] }
+}
+fn ordered(actions: Vec<request::Action>) -> Vec<request::Action> {
+    let mut first = #[]
+    let mut other = #[]
+    for a in actions {
+        match a.role {
+            request::ButtonRole::Accept => first.push(a)
+            _ => other.push(a)
+        }
+    }
+    let mut out = first
+    for a in other { out.push(a) }
+    out
+}
+fn read(inst: Instance) -> i64 {
+    let acts = ordered(actions(inst))
+    let mut n = 0
+    for a in acts { n += a.label.len() }
+    n + inst.node.children.len()
+}
+fn rerender(items: &mut Vec<Instance>) {
+    let mut inst = items[0]
+    let _ = read(inst)
+    let natural = Layout { children: #[layout(), layout()], parts: #[3, 4], x: 0 }
+    inst.node = natural.at(10)
+    items[0] = inst
+}
+fn main() {
+    let mut items = #[Instance { req: request::unsaved(), node: layout(), values: { "a": "b" } }]
+    for i in 0..10 {
+        rerender(&mut items)
+        assert_eq(host::initial(items[0].req), "save")
+    }
+    println("aggregate field shares ok")
+}

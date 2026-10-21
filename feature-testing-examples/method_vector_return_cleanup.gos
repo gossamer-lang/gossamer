@@ -1,0 +1,15 @@
+struct Outline { path: Vec<f64>, advance: i64 }
+struct Face { count: i64 }
+impl Face {
+    fn append(&self, path: &mut Vec<f64>) { for i in 0..self.count { path.push(i as f64) } }
+    fn outline(&self) -> Outline {
+        let mut path = #[]
+        self.append(&mut path)
+        Outline { path: path, advance: 12 }
+    }
+}
+fn main() {
+    let face = Face { count: 24 }
+    for _ in 0..100 { let made = face.outline(); assert_eq(made.path.len(), 24) }
+    println("method vector return ok")
+}

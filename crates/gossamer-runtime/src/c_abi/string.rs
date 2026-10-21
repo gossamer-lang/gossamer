@@ -164,6 +164,20 @@ fn unregister_heap_string_body(s: *const c_char) {
         .remove(&(s as usize));
 }
 
+/// Releases empty diagnostic string-registry tables at native shutdown while
+/// preserving entries for any genuinely live strings.
+pub(crate) fn trim_heap_string_registry() {
+    #[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
+    if let Some(shards) = HEAP_STRING_BODIES.get() {
+        for shard in shards {
+            shard
+                .lock()
+                .expect("heap string registry poisoned")
+                .shrink_to_fit();
+        }
+    }
+}
+
 #[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
 fn is_registered_heap_string_body(s: *const c_char) -> bool {
     heap_string_shard(s)
@@ -2958,8 +2972,8 @@ pub unsafe extern "C" fn gos_rt_str_replace(
 }
 
 /// `s.split_once(sep) -> Option<(String, String)>`. Returns a
-/// `*mut GosResult` with `disc=0` holding a heap-allocated
-/// `{a: *mut c_char, b: *mut c_char}` pair; `disc=1` for None
+/// `*mut GosResult` with `disc=0` holding a counted `(String, String)`
+/// blob that owns both halves; `disc=1` for None
 /// (separator not found, or null/empty input). Mirrors the
 /// `find_opt` packing convention.
 #[unsafe(no_mangle)]
@@ -2976,19 +2990,16 @@ pub unsafe extern "C" fn gos_rt_str_split_once(s: *const c_char, sep: *const c_c
         match s.split_once(sep) {
             None => gos_rt_result_new(1, 0),
             Some((a, b)) => {
-                #[repr(C)]
-                struct Pair {
-                    a: i64,
-                    b: i64,
-                }
-                let pair = Box::into_raw(Box::new(Pair {
-                    // SAFETY: `source` is this shim's live string argument, and `a` a window of
-                    // it.
-                    a: unsafe { alloc_slice_cstring(source, a.as_bytes()) } as i64,
-                    // SAFETY: `source` is this shim's live string argument, and `b` a window of
-                    // it.
-                    b: unsafe { alloc_slice_cstring(source, b.as_bytes()) } as i64,
-                }));
+                // SAFETY: `source` is this shim's live string argument, and `a` and `b`
+                // windows of it.
+                let words = unsafe {
+                    [
+                        alloc_slice_cstring(source, a.as_bytes()) as i64,
+                        alloc_slice_cstring(source, b.as_bytes()) as i64,
+                    ]
+                };
+                let pair =
+                    crate::c_abi::rc::counted_words(&words, &crate::c_abi::rc::STRING_PAIR_META);
                 gos_rt_result_new(0, pair as i64)
             }
         }
@@ -3011,19 +3022,16 @@ pub unsafe extern "C" fn gos_rt_str_rsplit_once(s: *const c_char, sep: *const c_
         match s.rsplit_once(sep) {
             None => gos_rt_result_new(1, 0),
             Some((a, b)) => {
-                #[repr(C)]
-                struct Pair {
-                    a: i64,
-                    b: i64,
-                }
-                let pair = Box::into_raw(Box::new(Pair {
-                    // SAFETY: `source` is this shim's live string argument, and `a` a window of
-                    // it.
-                    a: unsafe { alloc_slice_cstring(source, a.as_bytes()) } as i64,
-                    // SAFETY: `source` is this shim's live string argument, and `b` a window of
-                    // it.
-                    b: unsafe { alloc_slice_cstring(source, b.as_bytes()) } as i64,
-                }));
+                // SAFETY: `source` is this shim's live string argument, and `a` and `b`
+                // windows of it.
+                let words = unsafe {
+                    [
+                        alloc_slice_cstring(source, a.as_bytes()) as i64,
+                        alloc_slice_cstring(source, b.as_bytes()) as i64,
+                    ]
+                };
+                let pair =
+                    crate::c_abi::rc::counted_words(&words, &crate::c_abi::rc::STRING_PAIR_META);
                 gos_rt_result_new(0, pair as i64)
             }
         }

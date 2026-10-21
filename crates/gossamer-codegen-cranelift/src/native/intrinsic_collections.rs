@@ -1051,6 +1051,9 @@ pub(super) fn lower_intrinsic_call_collections(
             let val_cl = if val_kind == 0 { types::I64 } else { ptr_ty };
             let ins_fn = intrinsics.extern_fn(module, helper, &[ptr_ty, key_cl, val_cl], &[])?;
             let ins_ref = module.declare_func_in_func(ins_fn, builder.func);
+            let retain_fn =
+                intrinsics.extern_fn(module, "gos_rt_str_retain_typed", &[ptr_ty], &[])?;
+            let retain_ref = module.declare_func_in_func(retain_fn, builder.func);
             for index in 0..len.to_usize() {
                 let elem_slot = i64::try_from(index)
                     .unwrap_or(i64::MAX)
@@ -1065,6 +1068,14 @@ pub(super) fn lower_intrinsic_call_collections(
                 let val_val = builder
                     .ins()
                     .load(val_cl, MemFlagsData::trusted(), base, val_off);
+                // Each insert consumes a share of the strings it is handed, and
+                // the array keeps the shares it holds, so the insert is handed
+                // shares of its own.
+                for (kind, value) in [(key_kind, key_val), (val_kind, val_val)] {
+                    if kind == 1 {
+                        let _ = builder.ins().call(retain_ref, &[value]);
+                    }
+                }
                 let _ = builder.ins().call(ins_ref, &[map_ptr, key_val, val_val]);
             }
             define_var_to(
@@ -1343,10 +1354,20 @@ pub(super) fn lower_intrinsic_call_collections(
                 Some(a) => lower_operand(module, builder, locals, body, tcx, a, None, intrinsics)?,
                 None => builder.ins().iconst(types::I64, 0),
             };
+            // A map entry holds a counted copy of a by-value aggregate.
+            let minted = match args.get(2) {
+                Some(a) => super::lowering_calls::map_value_copy(
+                    module, builder, intrinsics, body, tcx, a, v_val,
+                )?,
+                None => None,
+            };
             let k = coerce_arg_to(builder, k_val, types::I64)?;
-            let v = coerce_arg_to(builder, v_val, types::I64)?;
+            let v = coerce_arg_to(builder, minted.unwrap_or(v_val), types::I64)?;
             let fref = module.declare_func_in_func(ins_fn, builder.func);
             let _ = builder.ins().call(fref, &[m, k, v]);
+            if let Some(blob) = minted {
+                super::lowering_calls::release_map_value_copy(module, builder, intrinsics, blob)?;
+            }
             let unit = builder.ins().iconst(types::I64, 0);
             define_var_to(
                 builder,

@@ -86,6 +86,9 @@ fn trivial_main_returning_zero() -> (Body, TyCtxt) {
             terminator_inlined: None,
         }],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (body, tcx)
 }
@@ -157,6 +160,9 @@ fn looping_main() -> (Body, TyCtxt) {
             },
         ],
         span,
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (body, tcx)
 }
@@ -210,6 +216,9 @@ fn acyclic_backward_numbered_main() -> (Body, TyCtxt) {
             },
         ],
         span,
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (body, tcx)
 }
@@ -302,6 +311,9 @@ fn typed_iterator_main() -> (Body, TyCtxt) {
             terminator_inlined: None,
         }],
         span,
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (body, tcx)
 }
@@ -360,6 +372,9 @@ fn string_len_main(text: &str) -> (Body, TyCtxt) {
             },
         ],
         span,
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (body, tcx)
 }
@@ -411,6 +426,9 @@ fn dynamic_string_len_main() -> (Body, TyCtxt) {
             },
         ],
         span,
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (body, tcx)
 }

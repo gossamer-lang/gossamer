@@ -166,3 +166,55 @@ fn a_native_source_that_does_not_compile_reports_the_compiler() {
         out.all()
     );
 }
+
+#[test]
+fn one_extern_block_links_every_library_it_names() {
+    let project = Project::new(
+        "two-libraries",
+        r#"use std::ffi
+
+#[link(name = "gosffi", search = "native")]
+#[link(name = "gosffi2", search = "native")]
+unsafe extern "C" {
+    fn counter_find(key: ffi::c_int) -> Option<ffi::Ptr<ffi::c_void>>
+    fn second_library_answer() -> ffi::c_int
+}
+
+fn main() {
+    println(f"{unsafe { counter_find(1) }.is_some()} {unsafe { second_library_answer() }}")
+}
+"#,
+    );
+    project.expect_everywhere("true 7");
+}
+
+#[test]
+fn the_jit_leaves_a_function_naming_an_undefined_symbol_to_the_interpreter() {
+    let project = Project::new(
+        "undefined-symbol",
+        r#"use std::ffi
+
+#[link(name = "gosffi", search = "native")]
+unsafe extern "C" {
+    fn counter_find(key: ffi::c_int) -> Option<ffi::Ptr<ffi::c_void>>
+    fn no_library_defines_this() -> ffi::c_int
+}
+
+fn hot(n: i64) -> i64 {
+    let mut found = 0
+    for i in 0..n {
+        if unsafe { counter_find(1) }.is_some() { found += 1 }
+        if i < 0 { found += unsafe { no_library_defines_this() } as i64 }
+    }
+    found
+}
+
+fn main() {
+    println(hot(3))
+}
+"#,
+    );
+    let out = project.run_on(crate::support::Tier::Jit);
+    assert!(out.ok, "{}", out.all());
+    assert_eq!(out.stdout.trim_end(), "3");
+}

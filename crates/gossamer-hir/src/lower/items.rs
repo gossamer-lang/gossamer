@@ -43,7 +43,7 @@ impl Lowerer<'_> {
                             item.attrs
                                 .link_name()
                                 .unwrap_or_else(|| decl.name.name.clone()),
-                            item.attrs.link_library().unwrap_or_default(),
+                            item.attrs.link_libraries().unwrap_or_default(),
                         )
                     }),
             }),
@@ -196,7 +196,7 @@ impl Lowerer<'_> {
             is_comptime: decl.is_comptime,
             has_self,
             origin: FnOrigin::of(decl),
-            foreign_link: decl.attrs.link_library(),
+            foreign_link: decl.attrs.link_libraries(),
             foreign_symbol: decl.attrs.link_name(),
             export_symbol: decl.attrs.export_symbol(&decl.name.name),
         }

@@ -301,6 +301,15 @@ fn push_lint_scope(attrs: &Attrs, span: Span, out: &mut Vec<LintScope>) {
     }
 }
 
+/// The lint identifier a diagnostic code names (`GL0034` -> `if_not_else`).
+#[must_use]
+pub fn lint_for_code(code: &str) -> Option<&'static str> {
+    DAY_ONE_LINTS
+        .iter()
+        .copied()
+        .find(|id| lint_code(id).0.eq_ignore_ascii_case(code))
+}
+
 /// Stable diagnostic code for a lint identifier.
 ///
 /// Codes are assigned per identifier rather than by position, so retiring a

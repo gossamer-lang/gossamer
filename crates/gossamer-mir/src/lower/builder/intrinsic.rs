@@ -452,7 +452,8 @@ impl<'a> Builder<'a> {
     ///
     /// A tuple or struct local is already that run of slots. Any other value
     /// is a word or a carrier held by value, so it is placed in a one-field
-    /// tuple, whose storage is exactly the element's slots.
+    /// tuple, whose storage is exactly the element's slots. The tuple is lent:
+    /// the value keeps every share its words name.
     pub(crate) fn ordered_value_slots(&mut self, value: Local, elem: Ty, span: Span) -> Local {
         use gossamer_types::TyKind;
 
@@ -472,6 +473,7 @@ impl<'a> Builder<'a> {
             },
             span,
         );
+        self.lent_slots.push(slots);
         slots
     }
 

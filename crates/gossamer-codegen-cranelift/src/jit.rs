@@ -25,6 +25,7 @@ use gossamer_types::{ArrayLen, Ty, TyCtxt, TyKind};
 
 use crate::jit_memory::NativeCodeHeap;
 use crate::native::{FailedBody, build_native_isa, lower_program_serial};
+pub use gossamer_abi::static_storage::{StaticClass, StaticStorage};
 
 /// Encoding of one slot in a fixed-array parameter's flat block. Every
 /// class occupies a full 8-byte slot; they differ in how the trampoline
@@ -133,6 +134,10 @@ pub enum JitKind {
     /// tuple layout). The trampoline builds the vector from the VM tuples
     /// and frees it after the call. Integer register class.
     NativeVecTupleIF,
+    /// A `Vec` of a struct of scalars crossing as a native `*mut GosVec`
+    /// whose elements are the struct's slots inline; the index is the
+    /// struct's shape. Integer register class.
+    NativeVecStruct(u32),
     /// A `Vec<u8>` crossing as a native `*mut GosVec` with one-byte
     /// primitive slots, the packed layout the compiled tiers index. The
     /// trampoline builds it from the VM's byte storage and reads the bytes
@@ -164,7 +169,7 @@ pub enum JitKind {
     /// `Enum` slot becomes an owning native handle) into a `Value::Tuple`, then
     /// shallow-frees the block. Return-only. Letting a tuple-returning
     /// constructor JIT keeps the values it produces native end to end.
-    TupleReturn([TupleElem; 2]),
+    TupleReturn(TupleElems),
 }
 
 /// One element of a JIT-marshalled tuple return ([`JitKind::TupleReturn`]).
@@ -185,6 +190,40 @@ pub enum TupleElem {
     /// Heap enum slot; the payload is the VM shape-table index used to re-wrap
     /// the returned pointer as a native handle.
     Enum(u32),
+}
+
+/// The elements of a tuple a body answers through its result block, two to
+/// [`TUPLE_RETURN_MAX`], one slot each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TupleElems {
+    len: u8,
+    elems: [TupleElem; TUPLE_RETURN_MAX],
+}
+
+/// The widest tuple a body answers through its result block.
+pub const TUPLE_RETURN_MAX: usize = 4;
+
+impl TupleElems {
+    /// `elems` as a tuple return, or `None` outside two to
+    /// [`TUPLE_RETURN_MAX`] elements.
+    #[must_use]
+    pub fn new(elems: &[TupleElem]) -> Option<Self> {
+        if !(2..=TUPLE_RETURN_MAX).contains(&elems.len()) {
+            return None;
+        }
+        let mut out = [TupleElem::I64; TUPLE_RETURN_MAX];
+        out[..elems.len()].copy_from_slice(elems);
+        Some(Self {
+            len: u8::try_from(elems.len()).ok()?,
+            elems: out,
+        })
+    }
+
+    /// The elements in order.
+    #[must_use]
+    pub fn as_slice(&self) -> &[TupleElem] {
+        &self.elems[..usize::from(self.len)]
+    }
 }
 
 /// Raw handle for a JIT-compiled function: a fn pointer plus the
@@ -236,6 +275,45 @@ fn report_jit_stats(compiled: usize) {
     }
 }
 
+/// The class of a static whose storage the VM reads and writes as its value,
+/// or `None` when the VM holds the static in a representation of its own.
+#[must_use]
+pub fn shared_static_class(tcx: &TyCtxt, ty: Ty) -> Option<StaticClass> {
+    match tcx.kind_of(ty) {
+        TyKind::Int(_) => Some(StaticClass::Int),
+        TyKind::Float(_) => Some(StaticClass::Float),
+        TyKind::Bool => Some(StaticClass::Bool),
+        TyKind::Char => Some(StaticClass::Char),
+        _ => None,
+    }
+}
+
+/// Finds the program's storage for a static by its MIR symbol, adopting the
+/// offered default when the program has none yet. `None` leaves the static
+/// in the artifact's own data, which only a program run by one artifact can
+/// use.
+pub type StaticResolver<'r> =
+    dyn Fn(&str, StaticStorage) -> Option<std::sync::Arc<StaticStorage>> + 'r;
+
+/// The storage a static starts with: its constant initializer, or zeroed
+/// words that the program's static initializer fills.
+fn default_static_storage(tcx: &TyCtxt, sref: &gossamer_mir::StaticRef) -> StaticStorage {
+    use gossamer_mir::ConstValue;
+    match shared_static_class(tcx, sref.ty) {
+        Some(class) => {
+            let bits = match &sref.init {
+                ConstValue::Int(n) => *n as u64,
+                ConstValue::Bool(b) => u64::from(*b),
+                ConstValue::Char(c) => u64::from(u32::from(*c)),
+                ConstValue::Float(bits) => *bits,
+                ConstValue::Unit | ConstValue::Str(_) => 0,
+            };
+            StaticStorage::scalar(class, bits)
+        }
+        None => StaticStorage::new(crate::native::static_slot_count(tcx, sref.ty) as usize, &[]),
+    }
+}
+
 /// Owns finalized native allocations and a name → [`JitFn`] map.
 /// Dropping the artifact frees every page that backs the function
 /// pointers it has handed out, so the VM must hold the artifact
@@ -262,6 +340,8 @@ pub struct JitArtifact {
     /// data belongs to one VM instance, so artifacts containing `static mut`
     /// accessors must never cross that boundary.
     pub cacheable: bool,
+    /// The program's storage for the statics this artifact's code addresses.
+    _statics: Vec<std::sync::Arc<StaticStorage>>,
 }
 
 /// Deterministic static admission result for one MIR body.
@@ -319,46 +399,108 @@ fn referenced_body<'a>(
     }
 }
 
+/// Bodies `body` names as a value (a closure, a function it passes on) rather
+/// than calls, so code anywhere may invoke them.
+fn body_value_refs<'a>(
+    body: &Body,
+    all_names: &std::collections::HashSet<&'a str>,
+) -> Vec<&'a str> {
+    use gossamer_mir::{Rvalue, StatementKind, Terminator};
+    let mut refs = Vec::new();
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            let StatementKind::Assign { rvalue, .. } = &stmt.kind else {
+                continue;
+            };
+            let operands: &[gossamer_mir::Operand] = match rvalue {
+                Rvalue::Use(op) => std::slice::from_ref(op),
+                Rvalue::Aggregate { operands, .. } => operands,
+                Rvalue::CallIntrinsic { args, .. } => args,
+                _ => &[],
+            };
+            refs.extend(
+                operands
+                    .iter()
+                    .filter_map(|op| referenced_body(op, all_names)),
+            );
+        }
+        if let Terminator::Call { args, .. } = &block.terminator {
+            refs.extend(
+                args.iter()
+                    .filter_map(|arg| referenced_body(arg, all_names)),
+            );
+        }
+    }
+    refs
+}
+
+/// Bodies that read or write a static the VM keeps a value of its own for,
+/// or call one that does.
+fn bodies_reaching_unshared_statics<'a>(
+    bodies: &'a [Body],
+    tcx: &TyCtxt,
+) -> std::collections::HashSet<&'a str> {
+    let all_names: std::collections::HashSet<&str> =
+        bodies.iter().map(|b| b.name.as_str()).collect();
+    let by_last = names_by_last_segment(&all_names);
+    let def_to_name: HashMap<u32, &str> = bodies
+        .iter()
+        .filter_map(|b| b.def.map(|d| (d.local, b.name.as_str())))
+        .collect();
+    let calls: Vec<(&str, Vec<&str>)> = bodies
+        .iter()
+        .map(|b| {
+            (
+                b.name.as_str(),
+                body_user_calls(b, &all_names, &by_last, &def_to_name).0,
+            )
+        })
+        .collect();
+    let mut reaching: std::collections::HashSet<&str> = bodies
+        .iter()
+        .filter(|b| !body_unshared_static_symbols(b, tcx).is_empty())
+        .map(|b| b.name.as_str())
+        .collect();
+    loop {
+        let before = reaching.len();
+        for (caller, callees) in &calls {
+            if callees.iter().any(|callee| reaching.contains(callee)) {
+                reaching.insert(caller);
+            }
+        }
+        if reaching.len() == before {
+            return reaching;
+        }
+    }
+}
+
+/// The bodies' names keyed by their last path segment, so a method named by
+/// a shorter path (`Widget::decorate`) finds its candidates directly.
+fn names_by_last_segment<'a>(
+    all_names: &std::collections::HashSet<&'a str>,
+) -> HashMap<&'a str, Vec<&'a str>> {
+    let mut by_last: HashMap<&'a str, Vec<&'a str>> = HashMap::new();
+    for &name in all_names {
+        let last = name.rsplit("::").next().unwrap_or(name);
+        by_last.entry(last).or_default().push(name);
+    }
+    by_last
+}
+
 fn body_user_calls<'a>(
     body: &'a Body,
     all_names: &std::collections::HashSet<&'a str>,
+    by_last: &HashMap<&'a str, Vec<&'a str>>,
     def_to_name: &HashMap<u32, &'a str>,
 ) -> (Vec<&'a str>, bool) {
     use gossamer_mir::{ConstValue, Operand, Terminator};
-    let mut calls = Vec::new();
-    let mut unresolved = false;
     // A closure reaches its body by address rather than through a call
     // terminator: the body is named in an operand and invoked indirectly. It
     // still has to travel into the same compile unit, or the module cannot
     // resolve the address at all.
-
+    let mut calls = body_value_refs(body, all_names);
+    let mut unresolved = false;
     for block in &body.blocks {
-        for stmt in &block.stmts {
-            let gossamer_mir::StatementKind::Assign { rvalue, .. } = &stmt.kind else {
-                continue;
-            };
-            match rvalue {
-                gossamer_mir::Rvalue::Use(op) => {
-                    calls.extend(referenced_body(op, all_names));
-                }
-                gossamer_mir::Rvalue::Aggregate { operands, .. } => {
-                    for op in operands {
-                        calls.extend(referenced_body(op, all_names));
-                    }
-                }
-                gossamer_mir::Rvalue::CallIntrinsic { args, .. } => {
-                    for op in args {
-                        calls.extend(referenced_body(op, all_names));
-                    }
-                }
-                _ => {}
-            }
-        }
-        if let Terminator::Call { args, .. } = &block.terminator {
-            for arg in args {
-                calls.extend(referenced_body(arg, all_names));
-            }
-        }
         let Terminator::Call { callee, .. } = &block.terminator else {
             continue;
         };
@@ -368,8 +510,11 @@ fn body_user_calls<'a>(
             }
             Operand::Const(ConstValue::Str(name)) => {
                 let suffix = format!("::{name}");
-                let mut matching_methods = all_names
-                    .iter()
+                let last = name.rsplit("::").next().unwrap_or(name);
+                let mut matching_methods = by_last
+                    .get(last)
+                    .into_iter()
+                    .flatten()
                     .copied()
                     .filter(|candidate| candidate.ends_with(&suffix));
                 match (matching_methods.next(), matching_methods.next()) {
@@ -471,7 +616,7 @@ fn body_uses_unlowerable_local_repr(
     body: &Body,
     tcx: &TyCtxt,
     enum_shapes: &HashMap<u32, u32>,
-    struct_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
 ) -> bool {
     // A reference to a parameter-typed local is an address into this body's
     // own frame. A generic template hands it to whichever impl the
@@ -569,10 +714,11 @@ fn jit_compile_set<'a>(
     bodies: &'a [Body],
     tcx: &TyCtxt,
     enum_shapes: &HashMap<u32, u32>,
-    struct_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
 ) -> std::collections::HashSet<&'a str> {
     let all_names: std::collections::HashSet<&str> =
         bodies.iter().map(|b| b.name.as_str()).collect();
+    let by_last = names_by_last_segment(&all_names);
     let body_map: HashMap<&str, &Body> = bodies.iter().map(|b| (b.name.as_str(), b)).collect();
     let def_to_name: HashMap<u32, &str> = bodies
         .iter()
@@ -581,7 +727,7 @@ fn jit_compile_set<'a>(
 
     let mut graph: HashMap<&str, Vec<&str>> = HashMap::new();
     for b in bodies {
-        let (calls, _) = body_user_calls(b, &all_names, &def_to_name);
+        let (calls, _) = body_user_calls(b, &all_names, &by_last, &def_to_name);
         graph.insert(b.name.as_str(), calls);
     }
     let reaches_self = |start: &str| -> bool {
@@ -674,7 +820,7 @@ fn jit_compile_set<'a>(
         let Some(body) = body_map.get(name) else {
             continue;
         };
-        let (calls, _) = body_user_calls(body, &all_names, &def_to_name);
+        let (calls, _) = body_user_calls(body, &all_names, &by_last, &def_to_name);
         for callee in calls {
             let ok = body_map.get(callee).is_some_and(|b| {
                 // A dependency pulled into the same native module never
@@ -704,7 +850,7 @@ fn jit_compile_set<'a>(
             let Some(body) = body_map.get(name) else {
                 continue;
             };
-            let (calls, unresolved) = body_user_calls(body, &all_names, &def_to_name);
+            let (calls, unresolved) = body_user_calls(body, &all_names, &by_last, &def_to_name);
             let calls_excluded = calls.iter().any(|c| !included.contains(c));
             let handles = body_crosses_handle_registries(body);
             if unresolved || calls_excluded || handles {
@@ -746,10 +892,17 @@ pub fn has_worthy_jit_body(
     bodies: &[Body],
     tcx: &TyCtxt,
     enum_shapes: &HashMap<u32, u32>,
-    struct_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
 ) -> bool {
     let mut compile_set = jit_compile_set(bodies, tcx, enum_shapes, struct_shapes);
-    restrict_static_leaky_bodies(&mut compile_set, bodies);
+    restrict_static_leaky_bodies(
+        &mut compile_set,
+        bodies,
+        tcx,
+        enum_shapes,
+        struct_shapes,
+        &std::collections::HashSet::new(),
+    );
     !compile_set.is_empty()
 }
 
@@ -766,10 +919,40 @@ pub fn jit_compile_body_names(
     bodies: &[Body],
     tcx: &TyCtxt,
     enum_shapes: &HashMap<u32, u32>,
-    struct_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
+) -> std::collections::HashSet<String> {
+    jit_compile_body_names_with_vm_statics(
+        bodies,
+        tcx,
+        enum_shapes,
+        struct_shapes,
+        &std::collections::HashSet::new(),
+    )
+}
+
+/// [`jit_compile_body_names`] for a program already running: `vm_statics`
+/// names the statics the VM has written, whose accessors stay interpreted.
+#[allow(
+    clippy::implicit_hasher,
+    reason = "single interp caller passes the same HashMap shape compile_to_jit uses"
+)]
+#[must_use]
+pub fn jit_compile_body_names_with_vm_statics(
+    bodies: &[Body],
+    tcx: &TyCtxt,
+    enum_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
+    vm_statics: &std::collections::HashSet<String>,
 ) -> std::collections::HashSet<String> {
     let mut compile_set = jit_compile_set(bodies, tcx, enum_shapes, struct_shapes);
-    restrict_static_leaky_bodies(&mut compile_set, bodies);
+    restrict_static_leaky_bodies(
+        &mut compile_set,
+        bodies,
+        tcx,
+        enum_shapes,
+        struct_shapes,
+        vm_statics,
+    );
     compile_set.into_iter().map(str::to_string).collect()
 }
 
@@ -786,7 +969,7 @@ pub fn jit_entry_body_names(
     bodies: &[Body],
     tcx: &TyCtxt,
     enum_shapes: &HashMap<u32, u32>,
-    struct_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
 ) -> std::collections::HashSet<String> {
     let admitted = jit_compile_body_names(bodies, tcx, enum_shapes, struct_shapes);
     jit_entry_body_names_with_admitted(bodies, tcx, &admitted)
@@ -807,6 +990,7 @@ pub fn jit_entry_body_names_with_admitted(
 ) -> std::collections::HashSet<String> {
     let all_names: std::collections::HashSet<&str> =
         bodies.iter().map(|body| body.name.as_str()).collect();
+    let by_last = names_by_last_segment(&all_names);
     let def_to_name: HashMap<u32, &str> = bodies
         .iter()
         .filter_map(|body| body.def.map(|def| (def.local, body.name.as_str())))
@@ -814,7 +998,7 @@ pub fn jit_entry_body_names_with_admitted(
     let graph: HashMap<&str, Vec<&str>> = bodies
         .iter()
         .map(|body| {
-            let (calls, _) = body_user_calls(body, &all_names, &def_to_name);
+            let (calls, _) = body_user_calls(body, &all_names, &by_last, &def_to_name);
             (body.name.as_str(), calls)
         })
         .collect();
@@ -833,6 +1017,7 @@ pub fn jit_entry_body_names_with_admitted(
         }
         false
     };
+    let reaching_statics = bodies_reaching_unshared_statics(bodies, tcx);
     let reaches_admitted_hot_body = |start: &str| {
         let mut seen = std::collections::HashSet::new();
         let mut pending: Vec<&str> = graph.get(start).into_iter().flatten().copied().collect();
@@ -857,10 +1042,14 @@ pub fn jit_entry_body_names_with_admitted(
         .filter(|body| {
             let entry_compatible =
                 admitted.contains(body.name.as_str()) && !entry_copies_a_sequence(body, tcx);
+            // An admitted body that can reach a static the VM keeps its own
+            // copy of is always an entry: compiled code uses the native cell,
+            // so interpreted callers must run the compiled body too.
             entry_compatible
                 && (body_has_loop(body)
                     || recursive(body.name.as_str())
-                    || reaches_admitted_hot_body(body.name.as_str()))
+                    || reaches_admitted_hot_body(body.name.as_str())
+                    || reaching_statics.contains(body.name.as_str()))
         })
         .map(|body| body.name.clone())
         .collect()
@@ -879,7 +1068,7 @@ pub fn jit_compile_body_names_for_trigger(
     bodies: &[Body],
     tcx: &TyCtxt,
     enum_shapes: &HashMap<u32, u32>,
-    struct_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
     trigger: &str,
 ) -> std::collections::HashSet<String> {
     fn reachable<'a>(
@@ -904,6 +1093,7 @@ pub fn jit_compile_body_names_for_trigger(
     }
     let all_names: std::collections::HashSet<&str> =
         bodies.iter().map(|body| body.name.as_str()).collect();
+    let by_last = names_by_last_segment(&all_names);
     let def_to_name: HashMap<u32, &str> = bodies
         .iter()
         .filter_map(|body| body.def.map(|def| (def.local, body.name.as_str())))
@@ -911,7 +1101,7 @@ pub fn jit_compile_body_names_for_trigger(
     let graph: HashMap<&str, Vec<&str>> = bodies
         .iter()
         .map(|body| {
-            let (calls, _) = body_user_calls(body, &all_names, &def_to_name);
+            let (calls, _) = body_user_calls(body, &all_names, &by_last, &def_to_name);
             (body.name.as_str(), calls)
         })
         .collect();
@@ -947,7 +1137,7 @@ pub fn jit_promotion_report(
     bodies: &[Body],
     tcx: &TyCtxt,
     enum_shapes: &HashMap<u32, u32>,
-    struct_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
 ) -> Vec<JitBodyDecision> {
     let admitted = jit_compile_body_names(bodies, tcx, enum_shapes, struct_shapes);
     let mut report: Vec<_> = bodies
@@ -985,8 +1175,11 @@ pub fn jit_promotion_report(
     report
 }
 
-/// Names of admitted loop-bearing bodies that must compile before entry
-/// because an already-running bytecode frame cannot switch tiers without OSR.
+/// Names of admitted bodies that must compile before their first call: a
+/// loop-bearing body, because an already-running bytecode frame cannot switch
+/// tiers without OSR, and a body that can reach a static the VM keeps a value
+/// of its own for, because a frame of it running as bytecode would reach the
+/// VM's copy, which compiled code never reads.
 #[allow(
     clippy::implicit_hasher,
     reason = "single interp caller passes the same HashMap shape compile_to_jit uses"
@@ -996,13 +1189,24 @@ pub fn jit_eager_loop_bodies(
     bodies: &[Body],
     tcx: &TyCtxt,
     enum_shapes: &HashMap<u32, u32>,
-    struct_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
 ) -> Vec<String> {
     let mut compile_set = jit_compile_set(bodies, tcx, enum_shapes, struct_shapes);
-    restrict_static_leaky_bodies(&mut compile_set, bodies);
+    restrict_static_leaky_bodies(
+        &mut compile_set,
+        bodies,
+        tcx,
+        enum_shapes,
+        struct_shapes,
+        &std::collections::HashSet::new(),
+    );
+    let reaching_statics = bodies_reaching_unshared_statics(bodies, tcx);
     bodies
         .iter()
-        .filter(|body| body_has_loop(body) && compile_set.contains(body.name.as_str()))
+        .filter(|body| {
+            compile_set.contains(body.name.as_str())
+                && (body_has_loop(body) || reaching_statics.contains(body.name.as_str()))
+        })
         .map(|body| body.name.clone())
         .collect()
 }
@@ -1107,31 +1311,141 @@ fn body_static_symbols(body: &Body) -> Vec<&str> {
     out
 }
 
-/// Removes from `compile_set` every body that accesses a `static mut` shared
-/// with a body outside the set. A JIT-compiled body reads and writes the
-/// static's native backing cell; a body left on the VM reads and writes the
-/// VM's separate `Global::MutStatic` cell. Correctness requires every accessor
+/// The statics `body` reads or writes whose VM copy is a value of the VM's
+/// own; a scalar static is one cell for both tiers and is not listed.
+fn body_unshared_static_symbols<'b>(body: &'b Body, tcx: &TyCtxt) -> Vec<&'b str> {
+    use gossamer_mir::{Rvalue, StatementKind};
+    let mut out: Vec<&str> = Vec::new();
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            let sref = match &stmt.kind {
+                StatementKind::Assign {
+                    rvalue: Rvalue::StaticLoad(sref),
+                    ..
+                } => sref,
+                StatementKind::StaticStore { target, .. } => target,
+                _ => continue,
+            };
+            if shared_static_class(tcx, sref.ty).is_none() {
+                out.push(sref.symbol.as_str());
+            }
+        }
+    }
+    out
+}
+
+/// Removes from `compile_set` every body that accesses a non-scalar
+/// `static mut` shared with a body outside the set. A JIT-compiled body reads
+/// and writes the static's native backing cell; a body left on the VM reads
+/// and writes the VM's separate `Global::MutStatic` value (a scalar static is
+/// one [`StaticStorage`] for both). Correctness requires every accessor
 /// of a static to sit on the same side of the tier boundary, so if any accessor
 /// is not compiled, none of them are - they all fall back to the VM's one
-/// shared cell. Iterated to a fixpoint because dropping one accessor can strand
-/// another static's last remaining compiled accessor.
+/// shared cell. A body that calls a removed body goes too, since compiled code
+/// only calls compiled code. Iterated to a fixpoint because dropping one body
+/// can strand another static's last remaining compiled accessor or caller.
 fn restrict_static_leaky_bodies<'a>(
     compile_set: &mut std::collections::HashSet<&'a str>,
     bodies: &'a [Body],
+    tcx: &TyCtxt,
+    enum_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
+    vm_statics: &std::collections::HashSet<String>,
 ) {
     let mut accessors: HashMap<&'a str, Vec<&'a str>> = HashMap::new();
     for b in bodies {
-        for sym in body_static_symbols(b) {
+        for sym in body_unshared_static_symbols(b, tcx) {
             accessors.entry(sym).or_default().push(b.name.as_str());
         }
     }
     if accessors.is_empty() {
         return;
     }
+    // A compiled body links its calls to other compiled bodies, so removing
+    // an accessor removes every admitted body that calls it, in turn.
+    let all_names: std::collections::HashSet<&str> =
+        bodies.iter().map(|b| b.name.as_str()).collect();
+    let by_last = names_by_last_segment(&all_names);
+    let def_to_name: HashMap<u32, &str> = bodies
+        .iter()
+        .filter_map(|b| b.def.map(|d| (d.local, b.name.as_str())))
+        .collect();
+    let calls: HashMap<&str, Vec<&str>> = bodies
+        .iter()
+        .map(|b| {
+            (
+                b.name.as_str(),
+                body_user_calls(b, &all_names, &by_last, &def_to_name).0,
+            )
+        })
+        .collect();
+    let mut callers: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (caller, callees) in &calls {
+        for callee in callees {
+            callers.entry(*callee).or_default().push(*caller);
+        }
+    }
+    // The VM reaches a compiled body only through an entry, and an entry needs
+    // a signature the boundary can marshal. An accessor interpreted code can
+    // call that has no such signature runs as bytecode there, against the
+    // VM's cell.
+    let native_capable: std::collections::HashSet<&str> = bodies
+        .iter()
+        .filter(|b| {
+            body_kinds(b, tcx, enum_shapes, struct_shapes).is_some()
+                && !entry_copies_a_sequence(b, tcx)
+        })
+        .map(|b| b.name.as_str())
+        .collect();
+    // The VM itself invokes `main`, the static initializers, and any body
+    // named as a value.
+    let roots: std::collections::HashSet<&str> = bodies
+        .iter()
+        .flat_map(|b| body_value_refs(b, &all_names))
+        .chain(
+            bodies
+                .iter()
+                .map(|b| b.name.as_str())
+                .filter(|n| *n == "main" || n.starts_with("__gos_static_init")),
+        )
+        .collect();
+    // Only bodies this restriction removes can strand a caller: the set it
+    // receives is already closed under the calls compiled code makes.
+    let mut removed: std::collections::HashSet<&str> = std::collections::HashSet::new();
     loop {
+        // Every compiled body that can reach a static is an entry and compiles
+        // before its first call (`jit_entry_body_names_with_admitted`,
+        // `jit_eager_loop_bodies`), so the bodies that run as bytecode are
+        // those outside the set and the ones without an entry that a VM root
+        // or another bytecode body reaches.
+        let mut bytecode: std::collections::HashSet<&str> = bodies
+            .iter()
+            .map(|b| b.name.as_str())
+            .filter(|n| !compile_set.contains(n))
+            .collect();
+        loop {
+            let before = bytecode.len();
+            for b in bodies {
+                let n = b.name.as_str();
+                if !native_capable.contains(n)
+                    && (roots.contains(n)
+                        || callers
+                            .get(n)
+                            .is_some_and(|cs| cs.iter().any(|c| bytecode.contains(c))))
+                {
+                    bytecode.insert(n);
+                }
+            }
+            if bytecode.len() == before {
+                break;
+            }
+        }
         let mut to_remove: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for bods in accessors.values() {
-            if !bods.iter().all(|n| compile_set.contains(n)) {
+        for (symbol, bods) in &accessors {
+            // A static the VM has already written holds its value in the VM's
+            // representation, which compiled code cannot read.
+            let split = vm_statics.contains(*symbol) || bods.iter().any(|n| bytecode.contains(n));
+            if split {
                 for n in bods {
                     if compile_set.contains(n) {
                         to_remove.insert(*n);
@@ -1139,11 +1453,18 @@ fn restrict_static_leaky_bodies<'a>(
                 }
             }
         }
+        for (caller, callees) in &calls {
+            if compile_set.contains(caller) && callees.iter().any(|callee| removed.contains(callee))
+            {
+                to_remove.insert(caller);
+            }
+        }
         if to_remove.is_empty() {
             break;
         }
         for n in to_remove {
             compile_set.remove(n);
+            removed.insert(n);
         }
     }
 }
@@ -1165,7 +1486,7 @@ pub fn compile_to_jit(
     bodies: &[Body],
     tcx: &TyCtxt,
     enum_shapes: &HashMap<u32, u32>,
-    struct_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
 ) -> Result<JitArtifact> {
     if bodies.is_empty() {
         report_jit_stats(0);
@@ -1175,9 +1496,10 @@ pub fn compile_to_jit(
             functions: HashMap::new(),
             code_bytes: 0,
             cacheable: true,
+            _statics: Vec::new(),
         });
     }
-    compile_bodies(bodies, tcx, enum_shapes, struct_shapes)
+    compile_bodies(bodies, tcx, enum_shapes, struct_shapes, &|_, _| None)
 }
 
 /// Compiles only the bodies the bytecode VM should promote at runtime.
@@ -1194,9 +1516,16 @@ pub fn compile_to_jit_for_promotion(
     bodies: &[Body],
     tcx: &TyCtxt,
     enum_shapes: &HashMap<u32, u32>,
-    struct_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
 ) -> Result<JitArtifact> {
-    compile_to_jit_for_promotion_owned(bodies.to_vec(), tcx, enum_shapes, struct_shapes)
+    compile_to_jit_for_promotion_owned(
+        bodies.to_vec(),
+        tcx,
+        enum_shapes,
+        struct_shapes,
+        &std::collections::HashSet::new(),
+        &|_, _| None,
+    )
 }
 
 /// Ownership-taking promotion path. This avoids cloning the retained MIR
@@ -1209,7 +1538,9 @@ pub fn compile_to_jit_for_promotion_owned(
     mut bodies: Vec<Body>,
     tcx: &TyCtxt,
     enum_shapes: &HashMap<u32, u32>,
-    struct_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
+    vm_statics: &std::collections::HashSet<String>,
+    statics: &StaticResolver<'_>,
 ) -> Result<JitArtifact> {
     // Decide the compile set BEFORE touching Cranelift. When no body is
     // worth promoting, return an empty artifact without instantiating the JIT
@@ -1218,7 +1549,14 @@ pub fn compile_to_jit_for_promotion_owned(
     let mut compile_set = jit_compile_set(&bodies, tcx, enum_shapes, struct_shapes);
     // Keep every accessor of a `static mut` on the same tier: a compiled body
     // uses the static's native cell, a VM body its `Global::MutStatic` cell.
-    restrict_static_leaky_bodies(&mut compile_set, &bodies);
+    restrict_static_leaky_bodies(
+        &mut compile_set,
+        &bodies,
+        tcx,
+        enum_shapes,
+        struct_shapes,
+        vm_statics,
+    );
     if compile_set.is_empty() {
         report_jit_stats(0);
         return Ok(JitArtifact {
@@ -1227,6 +1565,7 @@ pub fn compile_to_jit_for_promotion_owned(
             functions: HashMap::new(),
             code_bytes: 0,
             cacheable: true,
+            _statics: Vec::new(),
         });
     }
 
@@ -1242,7 +1581,7 @@ pub fn compile_to_jit_for_promotion_owned(
     bodies.retain(|body| compile_names.contains(body.name.as_str()));
     let filtered = bodies;
 
-    compile_bodies_dropping_failures(filtered, tcx, enum_shapes, struct_shapes)
+    compile_bodies_dropping_failures(filtered, tcx, enum_shapes, struct_shapes, statics)
 }
 
 /// Compiles `bodies`, dropping any single body whose lowering fails and
@@ -1253,11 +1592,12 @@ fn compile_bodies_dropping_failures(
     mut bodies: Vec<Body>,
     tcx: &TyCtxt,
     enum_shapes: &HashMap<u32, u32>,
-    struct_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
+    statics: &StaticResolver<'_>,
 ) -> Result<JitArtifact> {
     let trace = std::env::var("GOS_JIT_TRACE").is_ok();
     loop {
-        let err = match compile_bodies(&bodies, tcx, enum_shapes, struct_shapes) {
+        let err = match compile_bodies(&bodies, tcx, enum_shapes, struct_shapes, statics) {
             Ok(artifact) => return Ok(artifact),
             Err(err) => err,
         };
@@ -1284,7 +1624,14 @@ fn compile_bodies_dropping_failures(
         if retry_set.len() == bodies.len() {
             return Err(err);
         }
-        restrict_static_leaky_bodies(&mut retry_set, &bodies);
+        restrict_static_leaky_bodies(
+            &mut retry_set,
+            &bodies,
+            tcx,
+            enum_shapes,
+            struct_shapes,
+            &std::collections::HashSet::new(),
+        );
         let retry_names: std::collections::HashSet<String> =
             retry_set.into_iter().map(str::to_string).collect();
         bodies.retain(|body| retry_names.contains(body.name.as_str()));
@@ -1295,6 +1642,7 @@ fn compile_bodies_dropping_failures(
                 functions: HashMap::new(),
                 code_bytes: 0,
                 cacheable: true,
+                _statics: Vec::new(),
             });
         }
     }
@@ -1312,18 +1660,18 @@ fn compile_bodies(
     filtered: &[Body],
     tcx: &TyCtxt,
     enum_shapes: &HashMap<u32, u32>,
-    struct_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
+    statics: &StaticResolver<'_>,
 ) -> Result<JitArtifact> {
+    // The module resolves foreign symbols only as it finalizes, and fails
+    // there by panicking; a body naming one no library defines runs on the
+    // VM, which reports it.
+    if let Some(name) = body_with_unresolved_foreign_symbol(filtered) {
+        return Err(anyhow!("unresolved foreign symbol").context(FailedBody(name)));
+    }
     let heap = NativeCodeHeap::new();
-    let (mut module, runtime_symbol_set) = jit_module(filtered, &heap)?;
-
-    // Rename the user's `main` to `gos_main` in the JIT's symbol
-    // table. The host binary already exports `main` (the Rust
-    // runtime's entry point); declaring a second `Linkage::Local`
-    // `main` produced flaky SIGILLs on bring-up. The lookup map
-    // we hand back to the VM keeps the original Gossamer name as
-    // the key, so dispatch is unaffected.
-    let mut lowered = lower_program_serial(&mut module, filtered, tcx, Some("gos_main"))?;
+    let built = lower_jit_module(filtered, tcx, &heap, statics)?;
+    let (mut module, mut lowered) = (built.module, built.lowered);
 
     let carrier_thunks = emit_carrier_thunks(
         &mut module,
@@ -1373,7 +1721,7 @@ fn compile_bodies(
             }
             continue;
         };
-        if body_calls_jit_unsafe(body, &runtime_symbol_set, &body_name_set) {
+        if body_calls_jit_unsafe(body, &built.runtime_symbol_set, &body_name_set) {
             // Body invokes something cranelift would lower as the
             // "soft-zero stub" at native.rs (~line 2099): unknown
             // by-name calls that aren't in the runtime symbol table
@@ -1443,19 +1791,87 @@ fn compile_bodies(
         cacheable: !filtered
             .iter()
             .any(|body| !body_static_symbols(body).is_empty()),
+        _statics: built.statics,
     })
 }
 
+/// A JIT module with its bodies lowered but not yet finalized.
+struct LoweredJitModule {
+    module: JITModule,
+    runtime_symbol_set: std::collections::HashSet<&'static str>,
+    lowered: crate::native::LoweredProgram,
+    /// The program's storage for the statics the module imports.
+    statics: Vec<std::sync::Arc<StaticStorage>>,
+}
+
+/// Lowers `filtered` into a fresh JIT module whose statics address the
+/// program's storage.
+fn lower_jit_module(
+    filtered: &[Body],
+    tcx: &TyCtxt,
+    heap: &std::sync::Arc<NativeCodeHeap>,
+    statics: &StaticResolver<'_>,
+) -> Result<LoweredJitModule> {
+    let storage = program_static_storage(filtered, tcx, statics);
+    let (mut module, runtime_symbol_set) = jit_module(filtered, heap, &storage)?;
+    let imported_statics: std::sync::Arc<std::collections::HashSet<String>> =
+        std::sync::Arc::new(storage.keys().cloned().collect());
+    // Rename the user's `main` to `gos_main` in the JIT's symbol
+    // table. The host binary already exports `main` (the Rust
+    // runtime's entry point); declaring a second `Linkage::Local`
+    // `main` produced flaky SIGILLs on bring-up. The lookup map
+    // we hand back to the VM keeps the original Gossamer name as
+    // the key, so dispatch is unaffected.
+    let lowered = lower_program_serial(
+        &mut module,
+        filtered,
+        tcx,
+        Some("gos_main"),
+        &imported_statics,
+    )?;
+    Ok(LoweredJitModule {
+        module,
+        runtime_symbol_set,
+        lowered,
+        statics: storage.into_values().collect(),
+    })
+}
+
+/// The program's storage for every static `bodies` address, by MIR symbol.
+fn program_static_storage(
+    bodies: &[Body],
+    tcx: &TyCtxt,
+    statics: &StaticResolver<'_>,
+) -> HashMap<String, std::sync::Arc<StaticStorage>> {
+    let mut storage = HashMap::new();
+    for sref in bodies
+        .iter()
+        .flat_map(crate::native::collect_body_static_refs)
+    {
+        if !storage.contains_key(&sref.symbol)
+            && let Some(cell) = statics(&sref.symbol, default_static_storage(tcx, sref))
+        {
+            storage.insert(sref.symbol.clone(), cell);
+        }
+    }
+    storage
+}
+
 /// A JIT module whose code lives in `heap` and whose symbols resolve to the
-/// runtime, the binding crates, and the foreign libraries `filtered` links,
-/// with the names of the runtime and binding symbols it registered.
+/// runtime, the binding crates, the program's static storage, and the foreign
+/// libraries `filtered` links, with the names of the runtime and binding
+/// symbols it registered.
 fn jit_module(
     filtered: &[Body],
     heap: &std::sync::Arc<NativeCodeHeap>,
+    statics: &HashMap<String, std::sync::Arc<StaticStorage>>,
 ) -> Result<(JITModule, std::collections::HashSet<&'static str>)> {
     let isa = build_native_isa(false, true)?;
     let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     builder.memory_provider(Box::new(NativeCodeHeap::provider(heap)));
+    for (symbol, cell) in statics {
+        builder.symbol(symbol.clone(), cell.addr());
+    }
     let mut runtime_symbol_set = register_runtime_symbols(&mut builder);
     // Register every `gos_binding_<...>` C-ABI thunk advertised by
     // the binding crates. Without these, `JITModule::finalize_definitions`
@@ -1498,7 +1914,7 @@ fn emit_carrier_thunks(
     module: &mut JITModule,
     filtered: &[Body],
     function_ids_by_name: &HashMap<String, cranelift_module::FuncId>,
-    (tcx, enum_shapes, struct_shapes): (&TyCtxt, &HashMap<u32, u32>, &HashMap<u32, u32>),
+    (tcx, enum_shapes, struct_shapes): (&TyCtxt, &HashMap<u32, u32>, &HashMap<Ty, u32>),
     frames: &mut Vec<crate::jit_frames::FunctionFrames>,
 ) -> Result<HashMap<String, EntryThunk>> {
     let mut carrier_thunks = HashMap::new();
@@ -1719,7 +2135,7 @@ fn param_kind(
     tcx: &TyCtxt,
     pidx: u32,
     enum_shapes: &HashMap<u32, u32>,
-    struct_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
 ) -> Option<JitKind> {
     let local = gossamer_mir::Local(pidx);
     let ty = body.local_ty(local);
@@ -1814,7 +2230,7 @@ fn param_only_read(body: &Body, local: gossamer_mir::Local) -> bool {
 /// - A `&mut` parameter over a sequence whose elements the trampoline cannot
 ///   build and read back (`Vec<String>`, `Vec<Vec<i64>>`, a `HashMap`).
 /// - A goroutine-spawn site or a cross-goroutine sync primitive
-///   (channel / `WaitGroup` / Mutex / Atomic / ... - see
+///   (channel / `WaitGroup` / Mutex / ... - see
 ///   [`is_cross_goroutine_rt`]). Under `gos` the spawned side runs
 ///   on the VM scheduler against the interpreter's own handle
 ///   registries; a native body would mint and wait on the *runtime*
@@ -1889,6 +2305,7 @@ fn body_jit_unsupported(body: &Body, tcx: &TyCtxt) -> bool {
                     JitKind::NativeVecI64
                         | JitKind::NativeVecF64
                         | JitKind::NativeVecTupleIF
+                        | JitKind::NativeVecStruct(_)
                         | JitKind::NativeVecU8
                 )
             ),
@@ -2168,6 +2585,9 @@ fn jit_local_ty_needs_bytecode_inner(
             })
         }
         TyKind::Adt { def, .. } if def.local == u32::MAX - 20 => false,
+        // A `sync` atomic is the runtime's cell on both tiers: the VM holds a
+        // share of the same `GosAtomicI64` a native body updates.
+        TyKind::Adt { def, .. } if (u32::MAX - 57..=u32::MAX - 54).contains(&def.local) => false,
         // A runtime container's handle is the same one word on both tiers,
         // and every operation on it lowers to the `gos_rt_*` call the AOT
         // backend emits, so a body that builds and consumes one internally
@@ -2224,7 +2644,8 @@ fn jit_local_ty_needs_bytecode_inner(
             !(jit_map_component_ok(tcx, *key)
                 || jit_map_key_descriptor_ok(tcx, *key, 0)
                 || jit_map_enum_key_ok(tcx, *key))
-                || !jit_map_component_ok(tcx, *value)
+                || (!jit_map_component_ok(tcx, *value)
+                    && jit_local_ty_needs_bytecode_inner(tcx, *value, visiting))
         }
         // An `errors::Error` is a `*mut GosError` handle the runtime owns, the
         // same one word the LLVM tier lowers with no special casing, so a
@@ -2242,11 +2663,13 @@ fn jit_local_ty_needs_bytecode_inner(
         // proves that before this check is consulted.
         TyKind::Iterator(elem) => jit_local_ty_needs_bytecode_inner(tcx, *elem, visiting),
         // A `json::Value` is one word natively, the runtime's document
-        // handle, but the bytecode tier holds the same type as its own
-        // counted value, so a body holding one stays on bytecode, where both
-        // sides of every call agree on what the word is.
-        TyKind::JsonValue
-        | TyKind::Adt { .. }
+        // handle, and the bytecode tier holds the same type as its own
+        // counted value. No boundary kind, struct shape, or enum shape
+        // carries one, so a compiled body only ever holds the handle compiled
+        // code made, and every operation on it lowers to the `gos_rt_json_*`
+        // call the AOT backend emits.
+        TyKind::JsonValue => false,
+        TyKind::Adt { .. }
         | TyKind::Range(_)
         | TyKind::Sender(_)
         | TyKind::Receiver(_)
@@ -2321,7 +2744,6 @@ fn is_cross_goroutine_rt(name: &str) -> bool {
         "gos_rt_chan_",
         "gos_rt_wg_",
         "gos_rt_mutex_",
-        "gos_rt_atomic_",
         "gos_rt_rwlock_",
         "gos_rt_once_",
         "gos_rt_barrier_",
@@ -2465,7 +2887,7 @@ fn body_kinds(
     body: &Body,
     tcx: &TyCtxt,
     enum_shapes: &HashMap<u32, u32>,
-    struct_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
 ) -> Option<(Vec<JitKind>, JitKind)> {
     let mut params = Vec::with_capacity(body.arity as usize);
     for pidx in 1..=body.arity {
@@ -2582,26 +3004,85 @@ fn trace_ty_to_kind(tcx: &TyCtxt, ty: Ty) {
 
 /// The payload tree of the `Option` / `Result` `ty`, or `None` when an arm
 /// holds a payload with no one-word encoding the trampoline reads.
-fn carrier_shape(tcx: &TyCtxt, ty: Ty) -> Option<CarrierShape> {
+fn carrier_shape(
+    tcx: &TyCtxt,
+    ty: Ty,
+    enum_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
+) -> Option<CarrierShape> {
     let mut nodes = Vec::new();
-    push_carrier_nodes(tcx, ty, &mut nodes)?;
-    CarrierShape::from_nodes(&nodes)
+    let mut shapes = CarrierLayouts {
+        enum_shapes,
+        struct_shapes,
+        enum_shape: None,
+        struct_shape: None,
+    };
+    push_carrier_nodes(tcx, ty, &mut shapes, &mut nodes)?;
+    let mut shape = CarrierShape::from_nodes(&nodes)?;
+    if let Some(index) = shapes.enum_shape {
+        shape = shape.with_enum_shape(index);
+    }
+    if let Some(index) = shapes.struct_shape {
+        shape = shape.with_struct_shape(index);
+    }
+    Some(shape)
 }
 
-fn push_carrier_nodes(tcx: &TyCtxt, ty: Ty, nodes: &mut Vec<CarrierNode>) -> Option<()> {
+/// The shape tables a carrier tree's payloads are classified against, and the
+/// one enum shape and one struct shape the tree may name.
+struct CarrierLayouts<'a> {
+    enum_shapes: &'a HashMap<u32, u32>,
+    struct_shapes: &'a HashMap<Ty, u32>,
+    enum_shape: Option<u32>,
+    struct_shape: Option<u32>,
+}
+
+/// Appends the preorder nodes of `ty`. Every heap-enum payload of one shape
+/// must be the same enum, and every struct payload the same struct, as the
+/// shape names a single layout of each.
+fn push_carrier_nodes(
+    tcx: &TyCtxt,
+    ty: Ty,
+    shapes: &mut CarrierLayouts<'_>,
+    nodes: &mut Vec<CarrierNode>,
+) -> Option<()> {
     if nodes.len() >= CarrierShape::MAX_NODES {
         return None;
     }
     let node = match tcx.kind_of(ty) {
         TyKind::Adt { def, substs } if def.local == u32::MAX - 1 => {
             nodes.push(CarrierNode::Option);
-            return push_carrier_nodes(tcx, *substs.types().first()?, nodes);
+            return push_carrier_nodes(tcx, *substs.types().first()?, shapes, nodes);
         }
         TyKind::Adt { def, substs } if def.local == u32::MAX => {
             let arms = substs.types();
             nodes.push(CarrierNode::Result);
-            push_carrier_nodes(tcx, *arms.first()?, nodes)?;
-            return push_carrier_nodes(tcx, *arms.get(1)?, nodes);
+            push_carrier_nodes(tcx, *arms.first()?, shapes, nodes)?;
+            return push_carrier_nodes(tcx, *arms.get(1)?, shapes, nodes);
+        }
+        TyKind::Adt { def, .. } if tcx.is_rc_managed(ty) => {
+            let index = *shapes.enum_shapes.get(&def.local)?;
+            if shapes
+                .enum_shape
+                .replace(index)
+                .is_some_and(|seen| seen != index)
+            {
+                return None;
+            }
+            CarrierNode::Enum
+        }
+        // A struct of scalars wider than a slot rides in a copy blob of its
+        // own slots.
+        TyKind::Adt { .. } if is_scalar_struct(tcx, ty) && tcx.slot_bytes(ty) > 8 => {
+            let index = *shapes.struct_shapes.get(&ty)?;
+            if shapes
+                .struct_shape
+                .replace(index)
+                .is_some_and(|seen| seen != index)
+            {
+                return None;
+            }
+            CarrierNode::Struct
         }
         TyKind::Unit => CarrierNode::Unit,
         TyKind::Int(gossamer_types::IntTy::I128 | gossamer_types::IntTy::U128) => return None,
@@ -2661,7 +3142,7 @@ fn box_meta_owns_payloads(shape: CarrierShape, at: usize, blob: &[i64]) -> bool 
             return true;
         };
         match shape.node(arm) {
-            CarrierNode::Str => {
+            CarrierNode::Str | CarrierNode::Enum => {
                 kind == Some(RC_KIND_STRUCT)
                     && blob.get(4..).is_some_and(|entries| {
                         entries.contains(&((RC_CHILD_RC << RC_CHILD_KIND_SHIFT) | PAYLOAD_WORD))
@@ -2760,11 +3241,61 @@ fn is_mut_byte_slice(tcx: &TyCtxt, ty: Ty) -> bool {
             if matches!(tcx.kind_of(*elem), TyKind::Int(gossamer_types::IntTy::U8))))
 }
 
+/// The kind of a `Vec` or slice of `elem`, or `None` when the trampoline has
+/// no marshalling shape for one.
+fn sequence_kind(tcx: &TyCtxt, elem: Ty, struct_shapes: &HashMap<Ty, u32>) -> Option<JitKind> {
+    // `[i64]` / `[f64]` / `[(i64, f64)]` slices marshal identically to the
+    // `Vec<...>` spelling - the runtime object is the same `*mut GosVec` - so
+    // the idiomatic slice-param helper (`fn f(xs: &[i64])`) promotes just like
+    // its `Vec` twin.
+    match tcx.kind_of(elem) {
+        TyKind::Int(gossamer_types::IntTy::I64) => Some(JitKind::NativeVecI64),
+        TyKind::Float(gossamer_types::FloatTy::F64) => Some(JitKind::NativeVecF64),
+        TyKind::Int(gossamer_types::IntTy::U8) => Some(JitKind::NativeVecU8),
+        // `&Vec<String>` / `&[String]`: a `STRING`-kind `GosVec` whose slots
+        // hold owned cstrings, which is the layout both compiled tiers build.
+        // Borrowed only - the trampoline owns the vec it builds and deep-frees
+        // its strings afterwards, so a body that could consume an element
+        // would leave that free reading storage it no longer owns.
+        TyKind::String => Some(JitKind::NativeVecStr),
+        _ if is_i64_f64_tuple(tcx, elem) => Some(JitKind::NativeVecTupleIF),
+        // A `Vec` of a struct of scalars: its elements are the struct's slots,
+        // which the struct's registered shape describes.
+        _ if is_scalar_struct(tcx, elem) => struct_shapes
+            .get(&elem)
+            .map(|idx| JitKind::NativeVecStruct(*idx)),
+        // `Vec<Vec<i64>>` / `[[i64]]`: an outer vec / slice whose elements are
+        // themselves `Vec<i64>` / `[i64]`. Crosses as the AOT nested layout
+        // (outer `VEC`-kind slots holding inner `GosVec` pointers); the
+        // trampoline builds it once per source Arc. A `&[[i64]]` parameter
+        // peels to `Slice(Slice(i64))`, so both outer shapes are accepted.
+        _ if is_i64_vec(tcx, elem) => Some(JitKind::NativeVecVecI64),
+        _ => None,
+    }
+}
+
+/// Whether `ty` is a struct whose fields are all scalars, which a `Vec` holds
+/// as its slots with nothing to release.
+fn is_scalar_struct(tcx: &TyCtxt, ty: Ty) -> bool {
+    let TyKind::Adt { def, substs } = tcx.kind_of(ty) else {
+        return false;
+    };
+    tcx.adt_field_tys(*def, substs).is_some_and(|fields| {
+        !fields.is_empty()
+            && fields.iter().all(|field| {
+                matches!(
+                    tcx.kind_of(*field),
+                    TyKind::Bool | TyKind::Int(_) | TyKind::Float(_) | TyKind::Char
+                )
+            })
+    })
+}
+
 fn ty_to_kind(
     tcx: &TyCtxt,
     ty: Ty,
     enum_shapes: &HashMap<u32, u32>,
-    struct_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
 ) -> Option<JitKind> {
     if is_mut_byte_slice(tcx, ty) {
         return Some(JitKind::BytesView);
@@ -2831,16 +3362,17 @@ fn ty_to_kind(
         // Every other `Option` / `Result`: the two words, classified arm by
         // arm so each payload word is read as what its own type stores.
         TyKind::Adt { def, .. } if def.local == u32::MAX || def.local == u32::MAX - 1 => {
-            carrier_shape(tcx, ty).map(JitKind::Carrier)
+            carrier_shape(tcx, ty, enum_shapes, struct_shapes).map(JitKind::Carrier)
         }
         // An all-scalar user struct with a registered VM-side shape
         // crosses as a pointer to its flat field-slot block (the
         // compiled tier's struct layout - no RC header). Only structs
         // the interpreter registered (all-scalar fields) appear here, so
-        // the marshal is always O(field count) with no heap children.
-        TyKind::Adt { def, .. } if struct_shapes.contains_key(&def.local) => struct_shapes
-            .get(&def.local)
-            .map(|idx| JitKind::StructPtr(*idx)),
+        // the marshal is always O(field count) with no heap children. A
+        // generic struct has one shape per instantiation.
+        TyKind::Adt { .. } if struct_shapes.contains_key(&ty) => {
+            struct_shapes.get(&ty).map(|idx| JitKind::StructPtr(*idx))
+        }
         // `String` and `Vec<i64>` cross as the runtime's native pointer
         // (the flat-ABI shape `mir_ty_to_cabi` emits: a single pointer
         // slot). The trampoline builds a fresh runtime object from the
@@ -2858,62 +3390,24 @@ fn ty_to_kind(
                 .ok()
                 .map(|n| JitKind::ArrayBlockPtr(n, class))
         }
-        // `[i64]` / `[f64]` / `[(i64, f64)]` slices marshal identically to the
-        // `Vec<...>` spelling - the runtime object is the same `*mut GosVec` - so
-        // the idiomatic slice-param helper (`fn f(xs: &[i64])`) promotes just
-        // like its `Vec` twin instead of falling to `_ => None`.
-        TyKind::Vec(elem) | TyKind::Slice(elem)
-            if matches!(tcx.kind_of(*elem), TyKind::Int(gossamer_types::IntTy::I64)) =>
-        {
-            Some(JitKind::NativeVecI64)
-        }
-        TyKind::Vec(elem) | TyKind::Slice(elem)
-            if matches!(
-                tcx.kind_of(*elem),
-                TyKind::Float(gossamer_types::FloatTy::F64)
-            ) =>
-        {
-            Some(JitKind::NativeVecF64)
-        }
-        TyKind::Vec(elem) | TyKind::Slice(elem) if is_i64_f64_tuple(tcx, *elem) => {
-            Some(JitKind::NativeVecTupleIF)
-        }
-        TyKind::Vec(elem) | TyKind::Slice(elem)
-            if matches!(tcx.kind_of(*elem), TyKind::Int(gossamer_types::IntTy::U8)) =>
-        {
-            Some(JitKind::NativeVecU8)
-        }
-        // `&Vec<String>` / `&[String]`: a `STRING`-kind `GosVec` whose slots
-        // hold owned cstrings, which is the layout both compiled tiers build.
-        // Borrowed only - the trampoline owns the vec it builds and deep-frees
-        // its strings afterwards, so a body that could consume an element
-        // would leave that free reading storage it no longer owns.
-        TyKind::Vec(elem) | TyKind::Slice(elem) if matches!(tcx.kind_of(*elem), TyKind::String) => {
-            let _ = was_borrowed;
-            Some(JitKind::NativeVecStr)
-        }
-        // `Vec<Vec<i64>>` / `[[i64]]`: an outer vec / slice whose elements are
-        // themselves `Vec<i64>` / `[i64]`. Crosses as the AOT nested layout
-        // (outer `VEC`-kind slots holding inner `GosVec` pointers); the
-        // trampoline builds it once per source Arc. A `&[[i64]]` parameter
-        // peels to `Slice(Slice(i64))`, so both outer shapes are accepted.
-        TyKind::Vec(elem) | TyKind::Slice(elem) if is_i64_vec(tcx, *elem) => {
-            Some(JitKind::NativeVecVecI64)
-        }
+        TyKind::Vec(elem) | TyKind::Slice(elem) => sequence_kind(tcx, *elem, struct_shapes),
         // `U8Vec` (prelude sentinel `u32::MAX - 20`): a byte-buffer handle.
         // The trampoline copies its bytes through a fresh native `GosU8Vec`
         // and copies the mutations back. Other prelude handles (Mutex,
-        // WaitGroup, I64Vec, Atomic) are cross-goroutine shared state and
-        // stay on bytecode (no `JitKind`), so they fall through below.
+        // WaitGroup, I64Vec) are cross-goroutine shared state and stay on
+        // bytecode (no `JitKind`), so they fall through below; an atomic
+        // crosses as a field of a struct shape, whose handle both tiers share.
         TyKind::Adt { def, .. } if def.local == u32::MAX - 20 => Some(JitKind::U8VecHandle),
-        // A 2-element tuple of scalars / heap enums is marshalled as a tuple
-        // RETURN (the `(Node, i64)` / `(i64, i64)` constructor shape). Both
-        // elements must classify; otherwise stay on bytecode. `body_kinds`
+        // A tuple of two to four scalars / heap enums is marshalled as a tuple
+        // RETURN (the `(Node, i64)` / `(i64, i64)` constructor shape). Every
+        // element must classify; otherwise stay on bytecode. `body_kinds`
         // rejects this as a parameter - it is a return-only marshalling shape.
-        TyKind::Tuple(elems) if elems.len() == 2 => {
-            let e0 = ty_to_tuple_elem(tcx, elems[0], enum_shapes)?;
-            let e1 = ty_to_tuple_elem(tcx, elems[1], enum_shapes)?;
-            Some(JitKind::TupleReturn([e0, e1]))
+        TyKind::Tuple(elems) if (2..=TUPLE_RETURN_MAX).contains(&elems.len()) => {
+            let kinds = elems
+                .iter()
+                .map(|elem| ty_to_tuple_elem(tcx, *elem, enum_shapes))
+                .collect::<Option<Vec<_>>>()?;
+            TupleElems::new(&kinds).map(JitKind::TupleReturn)
         }
         // Remaining aggregates (larger `Tuple`, struct `Adt`, `Vec` of
         // unsupported element, channels …) stay on bytecode: the
@@ -2959,6 +3453,30 @@ fn ty_to_tuple_elem(
 /// runtime does not define.
 /// The libraries the foreign calls in `bodies` name with `#[link]`, which a
 /// foreign symbol is looked up in before the process's own modules.
+/// The first body calling or naming a foreign symbol that neither the process
+/// nor the libraries `bodies` link define.
+fn body_with_unresolved_foreign_symbol(bodies: &[Body]) -> Option<String> {
+    let libraries = foreign_libraries(bodies);
+    bodies.iter().find_map(|body| {
+        body.blocks
+            .iter()
+            .flat_map(|block| &block.stmts)
+            .filter_map(|stmt| match &stmt.kind {
+                gossamer_mir::StatementKind::Assign {
+                    rvalue: gossamer_mir::Rvalue::CallIntrinsic { name, .. },
+                    ..
+                } => gossamer_mir::ForeignCall::parse(name)
+                    .map(|call| call.symbol)
+                    .or_else(|| gossamer_mir::ForeignStatic::parse(name).map(|g| g.symbol)),
+                _ => None,
+            })
+            .any(|symbol| {
+                gossamer_runtime::c_abi::ffi::resolve_symbol(symbol, &libraries).is_none()
+            })
+            .then(|| body.name.clone())
+    })
+}
+
 fn foreign_libraries(bodies: &[Body]) -> Vec<String> {
     let mut libraries: Vec<String> = Vec::new();
     for body in bodies {
@@ -2968,13 +3486,16 @@ fn foreign_libraries(bodies: &[Body]) -> Vec<String> {
                     rvalue: gossamer_mir::Rvalue::CallIntrinsic { name, .. },
                     ..
                 } = &stmt.kind
-                    && let Some(library) = gossamer_mir::ForeignCall::parse(name)
+                    && let Some(linked) = gossamer_mir::ForeignCall::parse(name)
                         .map(|call| call.library)
                         .or_else(|| gossamer_mir::ForeignStatic::parse(name).map(|g| g.library))
-                    && !library.is_empty()
-                    && !libraries.iter().any(|known| known == library)
                 {
-                    libraries.push(library.to_string());
+                    // A declaration's libraries are joined by `,`.
+                    for library in linked.split(',').filter(|name| !name.is_empty()) {
+                        if !libraries.iter().any(|known| known == library) {
+                            libraries.push(library.to_string());
+                        }
+                    }
                 }
             }
         }
@@ -3084,6 +3605,9 @@ mod promotion_report_tests {
                 terminator_inlined: None,
             }],
             span,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 
@@ -3521,6 +4045,9 @@ mod failure_isolation_tests {
                 terminator_inlined: None,
             }],
             span,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 
@@ -3543,9 +4070,14 @@ mod failure_isolation_tests {
                 Rvalue::Use(Operand::Const(ConstValue::Int(7))),
             ),
         ];
-        let artifact =
-            compile_bodies_dropping_failures(bodies, &tcx, &HashMap::new(), &HashMap::new())
-                .expect("an un-lowerable body must not fail the whole module");
+        let artifact = compile_bodies_dropping_failures(
+            bodies,
+            &tcx,
+            &HashMap::new(),
+            &HashMap::new(),
+            &|_, _| None,
+        )
+        .expect("an un-lowerable body must not fail the whole module");
         assert!(
             artifact.functions.contains_key("healthy"),
             "the lowerable body keeps its native entry"

@@ -1566,20 +1566,21 @@ impl Resolver {
                 .or_default()
                 .push((decl.name.name.clone(), module_path.to_vec()));
             let name = variant.name.name.as_str();
-            // Variants of different enums may share a name: each is reached
-            // through its enum, and a bare reference that more than one of
-            // them answers is reported where it is written. Only a clash
-            // with an item that is not a variant is a redeclaration.
+            // A variant is reached through its enum, so its bare name is a
+            // convenience: variants of different enums may share it (a bare
+            // reference more than one answers is reported where it is
+            // written), and a module item of the same name keeps it. Only a
+            // name that is not a binding at all can fail to register here.
             let own_module_ok = match self.collect_mod_stack.last().copied() {
                 Some(mod_id) => self.module_scopes.get_mut(&mod_id).is_none_or(|scope| {
                     let occupant = scope.lookup_value(name);
-                    scope.insert_value(name, binding) || is_variant_binding(occupant)
+                    scope.insert_value(name, binding) || occupant.is_some()
                 }),
                 None => true,
             };
             let root_occupant = self.scopes.module_mut().lookup_value(name);
-            let root_ok = self.scopes.module_mut().insert_value(name, binding)
-                || is_variant_binding(root_occupant);
+            let root_ok =
+                self.scopes.module_mut().insert_value(name, binding) || root_occupant.is_some();
             // The root module's own enum answers a bare name at the root
             // ahead of a variant a nested module registered there first.
             if module_path.is_empty()
@@ -1622,7 +1623,7 @@ impl Resolver {
             inserted_any |= module.insert_type(&name.name, binding);
         }
         if kind.is_value_ns() {
-            inserted_any |= module.insert_value(&name.name, binding);
+            inserted_any |= insert_value_over_variant(module, &name.name, binding);
         }
         if !inserted_any && (kind.is_type_ns() || kind.is_value_ns()) {
             self.emit(
@@ -1667,7 +1668,7 @@ impl Resolver {
                 inserted_any |= scope.insert_type(&name.name, binding);
             }
             if kind.is_value_ns() {
-                inserted_any |= scope.insert_value(&name.name, binding);
+                inserted_any |= insert_value_over_variant(scope, &name.name, binding);
             }
             if !inserted_any && (kind.is_type_ns() || kind.is_value_ns()) {
                 module_scope_ok = false;
@@ -2205,11 +2206,12 @@ impl Resolver {
             }
             return;
         }
-        // A pattern anchored by `super::` / `crate::` / `self::` names its
-        // type from that module: the longest prefix that is a type is the
-        // enum (or struct) the pattern matches.
+        // A qualified pattern names its type through modules (`units::P`,
+        // `super::Shape::Circle`): the longest prefix that is a type is the
+        // enum (or struct) the pattern matches. The head alone would name
+        // the module.
         let written: Vec<&str> = path.segments.iter().map(|s| s.name.name.as_str()).collect();
-        if written.len() > 1 && matches!(written[0], "super" | "crate" | "self" | "root") {
+        if written.len() > 1 {
             if let Some(resolution) = (2..=written.len())
                 .rev()
                 .find_map(|end| self.lookup_qualified_type(&written[..end]))
@@ -2234,6 +2236,9 @@ impl Resolver {
             self.reject_ambiguous_variant(resolution, name, span);
         }
         self.resolutions.insert(anchor, resolution);
+        // A pattern naming an imported type tests that type's own identity,
+        // which lowering reads from the `use`'s target.
+        self.record_import_def(resolution, name, anchor);
         for segment in &path.segments {
             self.resolve_generic_args(&segment.generics);
         }
@@ -3937,6 +3942,21 @@ fn target_path_text(target: &UseTarget) -> String {
 }
 
 /// Whether `binding` names an enum variant.
+/// Binds `name` to an item in `scope`'s value namespace, taking it from an
+/// enum variant that claimed it first: the variant stays reachable through
+/// its enum.
+fn insert_value_over_variant(
+    scope: &mut crate::scope::Scope,
+    name: &str,
+    binding: Binding,
+) -> bool {
+    if is_variant_binding(scope.lookup_value(name)) {
+        scope.shadow_value(name, binding);
+        return true;
+    }
+    scope.insert_value(name, binding)
+}
+
 fn is_variant_binding(binding: Option<Binding>) -> bool {
     matches!(
         binding,

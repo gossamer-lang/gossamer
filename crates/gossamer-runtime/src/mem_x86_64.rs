@@ -1,14 +1,17 @@
-//! `memcpy`, `memmove`, and `memset` for the static-musl runtime on `x86_64`.
+//! `memcpy`, `memmove`, `memset`, `memcmp`, and `bcmp` for the static-musl
+//! runtime on `x86_64`.
 //!
 //! musl's routines start every copy with `rep movsq` (and every fill with
 //! `rep stosq`), whose microcode startup dominates the short copies a
 //! program makes most: a string append, a struct move, a small key. Here a
 //! length up to 64 bytes is a handful of unaligned loads and stores, and a
 //! longer one is `rep movsb` / `rep stosb`, which the fast-string microcode
-//! of every current `x86_64` core runs at full width.
+//! of every current `x86_64` core runs at full width. musl compares one byte
+//! per step; here sixteen bytes compare per SSE2 instruction.
 //!
-//! The bodies hold no loops, so the optimiser has nothing to turn back into a
-//! call to the routine being defined.
+//! The copy and fill bodies hold no loops, and the compare loop is made of
+//! vector intrinsics, so the optimiser has nothing to turn back into a call
+//! to the routine being defined.
 
 use std::ptr::{read_unaligned, write_unaligned};
 
@@ -178,6 +181,106 @@ pub(crate) unsafe fn fill(dst: *mut u8, byte: u8, n: usize) {
     }
 }
 
+/// The sign of the first differing byte, as C's `memcmp` answers it.
+#[inline]
+fn byte_order(a: u8, b: u8) -> i32 {
+    i32::from(a) - i32::from(b)
+}
+
+/// The order of two equal-width big-endian loads: the first differing byte
+/// decides it, as in `memcmp`.
+#[inline]
+fn word_order(a: u64, b: u64) -> i32 {
+    match a.cmp(&b) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+/// The index of the first differing byte of the sixteen at `a` and `b`, if
+/// any differ.
+///
+/// # Safety
+/// `a` and `b` are readable for 16 bytes.
+#[inline]
+unsafe fn first_difference_16(a: *const u8, b: *const u8) -> Option<usize> {
+    use std::arch::x86_64::{_mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8};
+    // SAFETY: SSE2 is part of the `x86_64` baseline, and both loads lie in the
+    // sixteen bytes the caller vouches for.
+    let equal = unsafe {
+        _mm_movemask_epi8(_mm_cmpeq_epi8(
+            _mm_loadu_si128(a.cast()),
+            _mm_loadu_si128(b.cast()),
+        ))
+    } as u32;
+    let differing = !equal & 0xFFFF;
+    (differing != 0).then(|| differing.trailing_zeros() as usize)
+}
+
+/// `memcmp` of `n` bytes.
+///
+/// # Safety
+/// As C's `memcmp`.
+#[inline]
+pub(crate) unsafe fn compare(lhs: *const u8, rhs: *const u8, len: usize) -> i32 {
+    // SAFETY: every access lies in `[0, len)` of the ranges the caller vouches
+    // for, and the unaligned forms carry no alignment requirement.
+    unsafe {
+        if len >= 16 {
+            let mut at = 0;
+            while at + 16 <= len {
+                if let Some(first) = first_difference_16(lhs.add(at), rhs.add(at)) {
+                    return byte_order(*lhs.add(at + first), *rhs.add(at + first));
+                }
+                at += 16;
+            }
+            if at < len {
+                let tail = len - 16;
+                if let Some(first) = first_difference_16(lhs.add(tail), rhs.add(tail)) {
+                    return byte_order(*lhs.add(tail + first), *rhs.add(tail + first));
+                }
+            }
+            0
+        } else if len >= 8 {
+            let head = word_order(
+                u64::from_be(read_unaligned(lhs.cast::<u64>())),
+                u64::from_be(read_unaligned(rhs.cast::<u64>())),
+            );
+            if head != 0 {
+                return head;
+            }
+            word_order(
+                u64::from_be(read_unaligned(lhs.add(len - 8).cast::<u64>())),
+                u64::from_be(read_unaligned(rhs.add(len - 8).cast::<u64>())),
+            )
+        } else if len >= 4 {
+            let head = word_order(
+                u64::from(u32::from_be(read_unaligned(lhs.cast::<u32>()))),
+                u64::from(u32::from_be(read_unaligned(rhs.cast::<u32>()))),
+            );
+            if head != 0 {
+                return head;
+            }
+            word_order(
+                u64::from(u32::from_be(read_unaligned(lhs.add(len - 4).cast::<u32>()))),
+                u64::from(u32::from_be(read_unaligned(rhs.add(len - 4).cast::<u32>()))),
+            )
+        } else {
+            if len >= 1 && *lhs != *rhs {
+                return byte_order(*lhs, *rhs);
+            }
+            if len >= 2 && *lhs.add(1) != *rhs.add(1) {
+                return byte_order(*lhs.add(1), *rhs.add(1));
+            }
+            if len == 3 {
+                return byte_order(*lhs.add(2), *rhs.add(2));
+            }
+            0
+        }
+    }
+}
+
 // Exported only where they replace musl's own: every other target links a
 // libc whose routines already pick a width-appropriate path at run time.
 #[cfg(target_env = "musl")]
@@ -225,11 +328,51 @@ mod exports {
         unsafe { super::fill(dst.cast(), c as u8, n) };
         dst
     }
+
+    /// C `memcmp`.
+    ///
+    /// # Safety
+    /// As C's `memcmp`.
+    #[unsafe(no_mangle)]
+    pub(crate) unsafe extern "C" fn memcmp(a: *const c_void, b: *const c_void, n: usize) -> c_int {
+        // SAFETY: the C caller holds `memcmp`'s contract.
+        unsafe { super::compare(a.cast(), b.cast(), n) }
+    }
+
+    /// C `bcmp`: zero exactly when the ranges are equal.
+    ///
+    /// # Safety
+    /// As C's `memcmp`.
+    #[unsafe(no_mangle)]
+    pub(crate) unsafe extern "C" fn bcmp(a: *const c_void, b: *const c_void, n: usize) -> c_int {
+        // SAFETY: the C caller holds `memcmp`'s contract.
+        unsafe { super::compare(a.cast(), b.cast(), n) }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     const SPAN: usize = 320;
+
+    #[test]
+    fn compare_orders_like_a_byte_compare_at_every_length_and_position() {
+        let base = pattern();
+        for n in 0..SPAN {
+            // SAFETY: both buffers hold at least `n` bytes.
+            let same = unsafe { super::compare(base.as_ptr(), base.as_ptr(), n) };
+            assert_eq!(same, 0, "n={n}");
+            for at in 0..n {
+                for delta in [1u8, 0x80, 0xFF] {
+                    let mut other = base.clone();
+                    other[at] = other[at].wrapping_add(delta);
+                    let want = i32::from(base[at]) - i32::from(other[at]);
+                    // SAFETY: both buffers hold at least `n` bytes.
+                    let got = unsafe { super::compare(base.as_ptr(), other.as_ptr(), n) };
+                    assert_eq!(got.signum(), want.signum(), "n={n} at={at} delta={delta}");
+                }
+            }
+        }
+    }
 
     fn pattern() -> Vec<u8> {
         (0..SPAN * 2).map(|i| (i * 7 + 3) as u8).collect()

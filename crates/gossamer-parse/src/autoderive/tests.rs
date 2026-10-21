@@ -172,6 +172,22 @@ mod autoderive_tests {
         assert!(serde_field_errors(src).is_empty());
     }
 
+    #[test]
+    fn serde_diagnostics_agree_with_rewrite_for_a_nested_module_import() {
+        let src = "mod library {
+            pub mod services { pub struct StringList { items: Vec<String> } }
+            mod dialogs {
+                use crate::library::services
+                fn decode(text: String) {
+                    let _ = from_json::<services::StringList>(text)
+                }
+            }
+        }";
+        let augmented = super::augment_source(src);
+        assert!(augmented.contains("fn __gos_serde_from_json_library__services__StringList"));
+        assert!(autoderive_diags(src).is_empty());
+    }
+
     /// A callable field names its own type in the report rather than the
     /// renderer's catch-all.
     #[test]

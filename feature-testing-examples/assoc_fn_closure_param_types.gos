@@ -1,0 +1,39 @@
+// A closure passed to an associated function takes its parameter types from
+// the function's declared signature, so `{i:03}` pads the number `i`.
+pub struct Keys {
+    pub keys: Vec<String>
+}
+
+impl Keys {
+    pub fn new(count: i64, sort_key: Fn(i64) -> String) -> Keys {
+        let mut out = #[]
+        let mut i = 0
+        while i < count {
+            out.push(sort_key(i))
+            i += 1
+        }
+        Keys { keys: out }
+    }
+
+    pub fn joined(&self, sep: String, wrap: Fn(String) -> String) -> String {
+        let mut out = ""
+        for k in self.keys {
+            if !out.is_empty() { out += sep }
+            out += wrap(k)
+        }
+        out
+    }
+}
+
+enum Pad { Left, Right }
+
+impl Pad {
+    fn apply(width: i64, f: Fn(i64) -> String) -> String { f(width) }
+}
+
+fn main() {
+    let k = Keys::new(3, |i| f"{i:03}")
+    println(f"{k.keys}")
+    println(Keys::joined(k, ", ", |s| f"[{s:>5}]"))
+    println(Pad::apply(7, |w| f"{w:+}"))
+}

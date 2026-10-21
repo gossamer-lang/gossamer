@@ -1650,36 +1650,6 @@ pub unsafe extern "C" fn gos_rt_bytearr_slice_result(
     })
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_packed_bytearr_slice_result(
-    p: *const u8,
-    len: i64,
-    start: i64,
-    end: i64,
-) -> i128 {
-    ffi_entry!({
-        if p.is_null() || start < 0 || end < 0 || start > end || end > len {
-            let msg = format!("slice: range [{start}, {end}) out of bounds for length {len}");
-            let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-            return gos_rt_result_new(1, err as i64);
-        }
-        let count = end - start;
-        let out = gos_rt_vec_with_capacity(1, count);
-        if !out.is_null() && count > 0 {
-            // SAFETY: `out` is non-null (checked above).
-            let dst = unsafe { (*out).ptr.as_ptr() };
-            // SAFETY: `out` has capacity for `count` bytes, and `p` addresses `len` bytes (C-ABI
-            // contract) with `start + count` at most `len`; the fresh buffer does not overlap
-            // `p`.
-            unsafe {
-                std::ptr::copy_nonoverlapping(p.add(start as usize), dst, count as usize);
-                (*out).len = count;
-            }
-        }
-        gos_rt_result_new(0, out as i64)
-    })
-}
-
 /// `xs.slice(start, end) -> Result<Vec<f64>, errors::Error>` for
 /// fixed-size f64 array receivers. Same layout contract as
 /// [`gos_rt_intarr_slice_result`] - raw inline buffer plus a

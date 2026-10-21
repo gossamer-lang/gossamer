@@ -21,6 +21,9 @@ use crate::c_abi::vec::vec_elem_kind;
 pub struct GosDeque {
     vec: *mut GosVec,
     head: i64,
+    /// Owners beyond the first: a closure environment sharing the deque with
+    /// the frame that built it. The deque is freed when the last one lets go.
+    extra_holders: std::sync::atomic::AtomicU32,
 }
 
 /// Boxes a deque over `vec` as a runtime handle, or places it in the
@@ -28,8 +31,15 @@ pub struct GosDeque {
 /// [`gos_rt_deque_free`] or the region's pop reclaims it.
 fn deque_handle(vec: *mut GosVec) -> *mut GosDeque {
     crate::c_abi::ledger::deque_inc();
-    crate::c_abi::rc::region_alloc_handle(GosDeque { vec, head: 0 }, finalize_region_deque)
-        .unwrap_or_else(|deque| Box::into_raw(Box::new(deque)))
+    crate::c_abi::rc::region_alloc_handle(
+        GosDeque {
+            vec,
+            head: 0,
+            extra_holders: std::sync::atomic::AtomicU32::new(0),
+        },
+        finalize_region_deque,
+    )
+    .unwrap_or_else(|deque| Box::into_raw(Box::new(deque)))
 }
 
 /// Releases the store of a deque its region placed.
@@ -885,11 +895,32 @@ pub unsafe extern "C" fn gos_rt_stack_clone(d: *mut GosDeque) -> *mut GosDeque {
     unsafe { gos_rt_deque_clone(d) }
 }
 
+/// [`crate::c_abi::map::gos_rt_map_retain`] for a deque, given back by
+/// [`gos_rt_deque_free`].
+///
+/// # Safety
+/// `d` is null or a live deque.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_deque_retain(d: *mut GosDeque) {
+    if d.is_null() || crate::c_abi::rc::in_region_arena(d.cast()) {
+        return;
+    }
+    // SAFETY: `d` is non-null (checked above) and live (this shim's contract).
+    unsafe {
+        (*d).extra_holders
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+    };
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_free(d: *mut GosDeque) {
     ffi_entry!({
         // A deque in region storage is finalized by its region's pop.
         if d.is_null() || crate::c_abi::rc::in_region_arena(d.cast()) {
+            return;
+        }
+        // SAFETY: `d` is non-null (checked above) and live (C-ABI contract).
+        if crate::c_abi::map::release_extra_holder(unsafe { &(*d).extra_holders }) {
             return;
         }
         // Compacting first leaves the store holding exactly the live range,

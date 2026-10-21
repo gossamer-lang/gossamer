@@ -508,6 +508,101 @@ mod tests {
 }
 
 #[test]
+fn a_derived_default_reads_qualified_and_aliased_enum_fields() {
+    let dir = write_project(
+        "derive-default-qualified",
+        "example.com/derivequal",
+        &[
+            (
+                "src/zkinds.gos",
+                "#[derive(Default, PartialEq)]
+pub enum State {
+    #[default]
+    Off
+    On
+}
+",
+            ),
+            (
+                "src/abc.gos",
+                "use crate::zkinds
+use crate::zkinds::State
+
+#[derive(Default)]
+pub struct Model { pub state: State, pub n: i64 }
+
+#[derive(Default)]
+pub struct Qualified { pub state: zkinds::State, pub other: crate::zkinds::State }
+",
+            ),
+            (
+                "src/main.gos",
+                "use crate::{abc, zkinds}
+
+pub type State = zkinds::State
+
+fn main() {
+    let m = abc::Model::default()
+    let q = abc::Qualified::default()
+    println(f\"{m.state} {m.n} {q.state} {q.other}\")
+}
+",
+            ),
+        ],
+    );
+    let expected = "Off 0 Off Off\n";
+    let vm = project_run_vm(&dir);
+    assert_eq!(vm.2, Some(0), "vm stderr: {}", vm.1);
+    assert_eq!(vm.0, expected, "vm stdout");
+    let native = project_build_run(&dir, "derivequal");
+    assert_eq!(native.2, Some(0), "native stderr: {}", native.1);
+    assert_eq!(native.0, expected, "native stdout");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_derive_in_a_test_module_is_checked_only_by_gos_test() {
+    let dir = write_project(
+        "test-module-derive",
+        "example.com/testderive",
+        &[(
+            "src/main.gos",
+            "fn double(n: i64) -> i64 { n * 2 }
+
+fn main() { println(\"{}\", double(21)) }
+
+#[cfg(test)]
+mod tests {
+    struct Plain { n: i64 }
+
+    #[derive(Default)]
+    struct Model { p: Plain }
+
+    #[test]
+    fn doubles() { assert_eq(super::double(1), 2) }
+}
+",
+        )],
+    );
+    let vm = project_run_vm(&dir);
+    assert_eq!(vm.2, Some(0), "vm stderr: {}", vm.1);
+    assert_eq!(vm.0, "42\n", "vm stdout");
+    let native = project_build_run(&dir, "testderive");
+    assert_eq!(native.2, Some(0), "native stderr: {}", native.1);
+    assert_eq!(native.0, "42\n", "native stdout");
+
+    let out = std::process::Command::new(gos_bin())
+        .arg("test")
+        .current_dir(&dir)
+        .output()
+        .expect("gos test");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "gos test accepted the derive");
+    assert!(stderr.contains("GP0062"), "gos test stderr: {stderr}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_test_module_import_stays_out_of_a_later_siblings_scope() {
     // `aa` sorts before `b`, so the test module's `use super::{norm, parse}`
     // is registered before `b`'s own `use aa::norm`. Both name one item, and
@@ -2702,6 +2797,195 @@ fn a_module_override_lets_two_same_named_packages_coexist() {
     let _ = fs::remove_dir_all(&root);
     assert_eq!(out.2, Some(0), "stderr: {}", out.1);
     assert_eq!(out.0.trim(), "a b", "stdout: {:?}", out.0);
+}
+
+/// A library's `[lib] name` is the module its consumers import it as, with
+/// no override in their manifests. A consumer's own `module = "..."` still
+/// wins, and the package id reaches the library under either name.
+#[test]
+fn a_dependency_reaches_its_own_types_beside_same_named_app_types() {
+    let root = fresh_dir("dep-same-named-types");
+    let dep = write_dep_project(
+        &root,
+        "leaklib",
+        "example.com/leaklib",
+        "use crate::{cmds, events}\npub fn label() -> String { cmds::Command::new(\"save\").name }\n",
+    );
+    fs::write(
+        dep.join("cmds.gos"),
+        "pub struct Command { pub name: String }\n\
+         impl Command {\n\x20   pub fn new(name: String) -> Command { Command { name: name } }\n}\n\
+         pub fn standard() -> String { Command::new(\"open\").name }\n",
+    )
+    .unwrap();
+    fs::write(
+        dep.join("events.gos"),
+        "pub enum Event {\n\x20   Key(i64)\n\x20   Text { body: String }\n\x20   Quit\n}\n\n\
+         pub fn make(i: i64) -> Event {\n\
+         \x20   if i == 0 { Event::Quit } else if i == 1 { Event::Text { body: \"hi\" } } else { Event::Key(i) }\n}\n\n\
+         pub fn describe(e: Event) -> String {\n\
+         \x20   match e {\n\
+         \x20       Event::Key(k) => f\"key {k}\"\n\
+         \x20       Event::Text { body } => f\"text {body}\"\n\
+         \x20       Event::Quit => \"quit\"\n\x20   }\n}\n",
+    )
+    .unwrap();
+    let app = write_app_project(
+        &root,
+        "\"example.com/leaklib\" = { path = \"../leaklib\" }\n",
+        "use leaklib\nuse leaklib::events\n\n\
+         enum Command { Quit }\nenum Event { Other(String), Key { code: i64 } }\n\n\
+         fn mine(e: Event) -> String {\n\x20   match e { Event::Other(s) => s, Event::Key { code } => f\"{code}\" }\n}\n\n\
+         fn main() {\n\
+         \x20   let c = Command::Quit\n\
+         \x20   match c { Command::Quit => println(f\"{leaklib::label()} {leaklib::cmds::standard()}\") }\n\
+         \x20   for i in 0..3 { println(events::describe(events::make(i))) }\n\
+         \x20   println(events::describe(events::Event::Key(9)))\n\
+         \x20   println(f\"{mine(Event::Other(\"x\"))} {mine(Event::Key { code: 4 })}\")\n}\n",
+    );
+    let expected = "save open\nquit\ntext hi\nkey 2\nkey 9\nx 4";
+    let vm = project_run_vm(&app);
+    assert_eq!(vm.2, Some(0), "stderr: {}", vm.1);
+    assert_eq!(vm.0.trim(), expected);
+    let native = project_build_run(&app, "app");
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(native.2, Some(0), "stderr: {}", native.1);
+    assert_eq!(native.0.trim(), expected);
+}
+
+#[test]
+fn struct_patterns_in_a_dependency_match_imported_types() {
+    let root = fresh_dir("dep-struct-patterns");
+    let dep = write_dep_project(
+        &root,
+        "unitlib",
+        "example.com/unitlib",
+        "use crate::{units, user}\n",
+    );
+    fs::create_dir_all(dep.join("units")).unwrap();
+    fs::create_dir_all(dep.join("user")).unwrap();
+    fs::write(
+        dep.join("units/mod.gos"),
+        "pub struct ByteOffset(pub i64)\n\
+         pub struct Span { pub start: i64, pub end: i64 }\n\n\
+         pub fn find(want: i64) -> Result<ByteOffset, String> {\n\
+         \x20   if want >= 0 { Ok(ByteOffset(want)) } else { Err(\"negative\") }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dep.join("user/mod.gos"),
+        "use crate::units\nuse crate::units::{ByteOffset, Span}\n\n\
+         pub fn caret(want: i64) -> i64 {\n\
+         \x20   match units::find(want) {\n\
+         \x20       Ok(ByteOffset(b)) => b\n\
+         \x20       Err(_) => 0\n\x20   }\n}\n\n\
+         pub fn width(found: Option<Span>) -> i64 {\n\
+         \x20   match found {\n\
+         \x20       Some(Span { start, end }) => end - start\n\
+         \x20       None => -1\n\x20   }\n}\n",
+    )
+    .unwrap();
+    let app = write_app_project(
+        &root,
+        "\"example.com/unitlib\" = { path = \"../unitlib\" }\n",
+        "use unitlib\n\nfn main() {\n\
+         \x20   let s = unitlib::units::Span { start: 2, end: 9 }\n\
+         \x20   println(f\"{unitlib::user::caret(3)} {unitlib::user::caret(-1)} {unitlib::user::width(Some(s))}\")\n}\n",
+    );
+    let expected = "3 0 7";
+    let vm = project_run_vm(&app);
+    assert_eq!(vm.2, Some(0), "stderr: {}", vm.1);
+    assert_eq!(vm.0.trim(), expected);
+    let jit = Command::new(gos_bin())
+        .args(["run", "."])
+        .current_dir(&app)
+        .env("GOSSAMER_JIT_THRESHOLD", "1")
+        .env("GOSSAMER_JIT_MIN_WORK", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn gos");
+    let jit = run_with_timeout(jit);
+    assert_eq!(jit.2, Some(0), "stderr: {}", jit.1);
+    assert_eq!(jit.0.trim(), expected);
+    let native = project_build_run(&app, "app");
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(native.2, Some(0), "stderr: {}", native.1);
+    assert_eq!(native.0.trim(), expected);
+}
+
+#[test]
+fn a_library_names_the_module_it_is_imported_as() {
+    let root = fresh_dir("dep-lib-name");
+    let dep = write_dep_project(
+        &root,
+        "windowing-gos",
+        "example.com/windowing-gos",
+        "pub fn who() -> String { \"w\" }\n",
+    );
+    fs::write(
+        dep.join("project.toml"),
+        "[project]\nid = \"example.com/windowing-gos\"\nversion = \"0.1.0\"\n\n\
+         [lib]\nname = \"windowing\"\n",
+    )
+    .unwrap();
+    let app = write_app_project(
+        &root,
+        "\"example.com/windowing-gos\" = { path = \"../windowing-gos\" }\n",
+        "use windowing\nuse \"example.com/windowing-gos\" as w\n\n\
+         fn main() { println(\"{} {}\", windowing::who(), w::who()) }\n",
+    );
+    let out = project_run_vm(&app);
+    assert_eq!(out.2, Some(0), "stderr: {}", out.1);
+    assert_eq!(out.0.trim(), "w w", "stdout: {:?}", out.0);
+
+    let tidy = Command::new(gos_bin())
+        .arg("tidy")
+        .current_dir(&app)
+        .output()
+        .expect("spawn gos tidy");
+    assert!(
+        tidy.status.success(),
+        "{}",
+        String::from_utf8_lossy(&tidy.stderr)
+    );
+    let manifest = fs::read_to_string(app.join("project.toml")).unwrap();
+    assert!(
+        manifest.contains("example.com/windowing-gos"),
+        "tidy kept the dependency imported by its declared name: {manifest}"
+    );
+
+    fs::write(
+        app.join("project.toml"),
+        "[project]\nid = \"example.com/app\"\nversion = \"0.1.0\"\n\n[dependencies]\n\
+         \"example.com/windowing-gos\" = { path = \"../windowing-gos\", module = \"win\" }\n",
+    )
+    .unwrap();
+    fs::write(
+        app.join("main.gos"),
+        "use win\n\nfn main() { println(\"{}\", win::who()) }\n",
+    )
+    .unwrap();
+    let out = project_run_vm(&app);
+    let tidy = Command::new(gos_bin())
+        .arg("tidy")
+        .current_dir(&app)
+        .output()
+        .expect("spawn gos tidy");
+    let manifest = fs::read_to_string(app.join("project.toml")).unwrap();
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(out.2, Some(0), "stderr: {}", out.1);
+    assert_eq!(out.0.trim(), "w", "stdout: {:?}", out.0);
+    assert!(
+        tidy.status.success(),
+        "{}",
+        String::from_utf8_lossy(&tidy.stderr)
+    );
+    assert!(
+        manifest.contains("module = \"win\""),
+        "tidy kept the dependency imported by its override: {manifest}"
+    );
 }
 
 /// A dependency whose public structs make the autoderive stage synthesize

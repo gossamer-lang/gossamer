@@ -1397,6 +1397,7 @@ fn builtin_channel_join(args: &[Value]) -> RuntimeResult<Value> {
             vec![Value::String("join on a non-handle value".into())],
         ));
     };
+    crate::vm::goroutine::run_queued_inline(channel.identity());
     let outcome = channel.recv();
     // Joining is how a child's outcome reaches the program, so a failure
     // read here is not one the root cohort reports as unobserved at exit.

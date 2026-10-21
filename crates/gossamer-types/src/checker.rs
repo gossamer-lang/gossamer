@@ -252,11 +252,14 @@ pub(crate) const WEBSOCKET_CONN_OFFSET: u32 = 62;
 /// Sentinel offset of `bytes::Buffer`, apart from `regex::Pattern`'s 26.
 pub(crate) const BYTES_BUFFER_OFFSET: u32 = 63;
 
+/// Sentinel offset of `io::MemoryStream`, an in-memory reader or writer.
+pub(crate) const IO_STREAM_OFFSET: u32 = 64;
+
 /// Widest sentinel offset any stdlib handle occupies, the handle bands and
 /// the pre-band handles alike. A receiver inside this span whose display name
 /// is module-qualified answers a closed method table, which is what lets an
 /// unknown name on one be named at the call site.
-pub(crate) const HANDLE_SENTINEL_SPAN: u32 = BYTES_BUFFER_OFFSET;
+pub(crate) const HANDLE_SENTINEL_SPAN: u32 = IO_STREAM_OFFSET;
 
 /// One constructor of a runtime handle: the module path it is written
 /// under, and the associated function's name.
@@ -309,6 +312,9 @@ const PURE_HANDLES: &[HandleRow] = &[
     // The byte buffers are typed at their constructors by `bytes_handle_ty`;
     // the rows give a written `bytes::Buffer` parameter the same type.
     (BYTES_BUFFER_OFFSET, "bytes::Buffer", &[]),
+    // The `std::io` streams are answered by free functions their signatures
+    // type; the row gives a written `io::MemoryStream` the same type.
+    (IO_STREAM_OFFSET, "io::MemoryStream", &[]),
     (27, "bytes::Builder", &[]),
     // `websocket::connect` answers its connection through a `Result`, and
     // `serve` hands one to the handler, so neither is a bare constructor.
@@ -840,6 +846,11 @@ struct TypeChecker<'a> {
     /// checked; drives literal re-typing at explicit `return`
     /// statements (the block-tail path is handled in `check_fn`).
     current_fn_ret: Option<Ty>,
+    /// Source name of the function body currently being checked. The
+    /// generated `__gos_static_init*` bodies assign a `static` its
+    /// declared initializer, which a user body may not write, so the
+    /// assign check keys off this to let those through.
+    current_fn_name: Option<String>,
     /// Per-enclosing-`loop` break-value type var plus whether any value
     /// break fired. A `loop` pushes `(fresh_var, false)`; each `break value`
     /// inside unifies its value with the var and sets the flag, so `let x =
@@ -1332,6 +1343,7 @@ impl<'a> TypeChecker<'a> {
             fn_sigs: HashMap::new(),
             method_arg_sigs: HashMap::new(),
             current_fn_ret: None,
+            current_fn_name: None,
             loop_break_tys: Vec::new(),
             method_ret_types: HashMap::new(),
             method_param_types: HashMap::new(),
@@ -1855,8 +1867,8 @@ impl<'a> TypeChecker<'a> {
                 }
                 self.emit(
                     TypeError::TraitBoundNotSatisfied {
-                        ty: ty_name.clone(),
-                        bound: bound.clone(),
+                        ty: crate::printer::public_type_name(&ty_name).into_owned(),
+                        bound: crate::printer::public_type_name(bound).into_owned(),
                     },
                     span,
                 );
@@ -2294,8 +2306,8 @@ impl<'a> TypeChecker<'a> {
                     }
                     self.emit(
                         TypeError::TraitBoundNotSatisfied {
-                            ty: ty_name.clone(),
-                            bound: bound.clone(),
+                            ty: crate::printer::public_type_name(&ty_name).into_owned(),
+                            bound: crate::printer::public_type_name(bound).into_owned(),
                         },
                         span,
                     );
@@ -3622,8 +3634,10 @@ fn is_definitely_not_callable_value(kind: &TyKind) -> bool {
 fn is_channel_constructor_path(module: &[&str], last: &str) -> bool {
     matches!(
         (module, last),
-        (["channel"], "new" | "unbounded")
-            | (["sync"] | ["std", "sync"], "channel" | "channel_unbounded")
+        (
+            ["channel"] | ["sync", "channel"] | ["std", "sync", "channel"],
+            "new" | "unbounded"
+        ) | (["sync"] | ["std", "sync"], "channel" | "channel_unbounded")
             | (["sync", "Channel"] | ["std", "sync", "Channel"], "new")
     )
 }

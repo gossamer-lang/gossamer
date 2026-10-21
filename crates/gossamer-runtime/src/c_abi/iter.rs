@@ -265,7 +265,13 @@ unsafe fn string_extreme(v: *const GosVec, greatest: bool) -> i128 {
             best = Some(word);
         }
     }
-    best.map_or(1i128, |word| gos_rt_result_new(0, word))
+    // The answer is the caller's to give back, so it takes a share of the
+    // element it names while the vector keeps its own.
+    best.map_or(1i128, |word| {
+        // SAFETY: the words of a `String` vec are null or live string bodies.
+        unsafe { crate::c_abi::string::gos_rt_str_retain_typed(text(word)) };
+        gos_rt_result_new(0, word)
+    })
 }
 
 /// `xs.min() -> Option<String>` over a `Vec<String>`, ordered by text.
@@ -1338,11 +1344,13 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_from_vec_str(source: *mut GosVec) -> *
 }
 
 /// Lazy borrowed source over a `Vec<T>` whose element is wider than one slot.
-/// Each pull yields the address of the element's storage inside the retained
-/// source, which is the same shape a callback over an eager multi-slot
+/// Each pull yields the address of a counted copy of the element when
+/// `counted`, and otherwise the address of the element's storage inside the
+/// retained source; either is the shape a callback over an eager multi-slot
 /// sequence receives.
 struct BorrowedGosVecAggr {
     source: *mut GosVec,
+    counted: bool,
     generation: u64,
     mutation_generation: u64,
     len: i64,
@@ -1370,10 +1378,15 @@ impl Iterator for BorrowedGosVecAggr {
             );
             return None;
         }
-        // SAFETY: `index` is in `[0, len)` against this same live header.
-        let slot = unsafe { crate::c_abi::signal::gos_rt_vec_get_ptr(self.source, self.index) };
+        let slot = if self.counted {
+            // SAFETY: `index` is in `[0, len)` against this same live header.
+            unsafe { crate::c_abi::vec::vec_elem_shared_payload_word(source, self.index) }
+        } else {
+            // SAFETY: `index` is in `[0, len)` against this same live header.
+            unsafe { crate::c_abi::signal::gos_rt_vec_get_ptr(self.source, self.index) as i64 }
+        };
         self.index += 1;
-        Some(slot as i64)
+        Some(slot)
     }
 }
 
@@ -1387,8 +1400,12 @@ impl Drop for BorrowedGosVecAggr {
 /// Borrow `source` as a lazy stream of element addresses.
 ///
 /// This is the multi-slot counterpart of [`gos_rt_lazy_iter_from_vec_i64`]:
-/// the element stays where it is and its address rides the slot, so an element
-/// of any width reaches a callback without being packed into one.
+/// an element of any width reaches a callback through the address the slot
+/// carries. An element held inline in the buffer is handed out as a counted
+/// copy, the payload every `Option` of it holds wherever it comes from (an
+/// index read, `first`, a mapped stream), so whatever discards a pulled
+/// element gives that copy back and never reads the storage around an
+/// element it does not own.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_from_vec_aggr(
     source: *mut GosVec,
@@ -1399,11 +1416,23 @@ pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_from_vec_aggr(
         }
         // SAFETY: the caller supplies a live GosVec header.
         let header = unsafe { &*source };
+        let counted = crate::c_abi::vec::vec_elem_is_inline_aggregate(header)
+            && !crate::c_abi::vec::vec_elem_is_handle(header);
+        // A counted copy carries its own shares, so a collecting terminal
+        // takes none from the source.
         let tag = LazyElemTag {
-            class: lazy_elem_class::AGGR,
+            class: if counted {
+                lazy_elem_class::AGGR_COUNTED
+            } else {
+                lazy_elem_class::AGGR
+            },
             elem_bytes: header.elem_bytes,
             elem_kind: header.elem_kind,
-            source: source.expose_provenance(),
+            source: if counted {
+                0
+            } else {
+                source.expose_provenance()
+            },
         };
         // SAFETY: retaining the header gives the iterator state its own share
         // until `BorrowedGosVecAggr::drop`.
@@ -1412,6 +1441,7 @@ pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_from_vec_aggr(
             tag,
             BorrowedGosVecAggr {
                 source,
+                counted,
                 generation: header.generation,
                 mutation_generation: header.mutation_generation,
                 len: header.len,

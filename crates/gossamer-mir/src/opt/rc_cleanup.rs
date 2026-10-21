@@ -1527,6 +1527,15 @@ fn holder_window_is_clean(
                 ended = true;
                 break;
             }
+            // Replacing an owned field can transfer its share beyond this holder's lifetime.
+            if let StatementKind::Assign { place, .. } = &stmt.kind
+                && place.local == holder
+                && !place.projection.is_empty()
+                && crate::uniqueness::place_ty(tcx, body, place)
+                    .is_some_and(|ty| holder_rc_names(tcx, ty).is_some())
+            {
+                return false;
+            }
             if stmt_mentions_local(stmt, holder) && dirty {
                 return false;
             }
@@ -1658,6 +1667,7 @@ fn classify_holder_stmt(
 /// any mention is of another shape.
 fn classify_holder_uses(
     body: &Body,
+    mentions: &Mentions,
     holder: Local,
     rc: &HolderRc,
     is_member: &[bool],
@@ -1669,8 +1679,11 @@ fn classify_holder_uses(
     // A definition may name another member of the class, the local the class
     // borrows from, or any view of that local's value; nothing else.
     let feeds_holder = |src: Local| is_member[src.0 as usize] || chain[src.0 as usize];
-    for (bi, block) in body.blocks.iter().enumerate() {
-        for (si, stmt) in block.stmts.iter().enumerate() {
+    // Every statement this classifies names the holder, so only those are read.
+    for &(bi, at) in mentions.of_local(holder) {
+        let block = &body.blocks[bi];
+        if let Some(si) = at {
+            let stmt = &block.stmts[si];
             match classify_holder_stmt(stmt, holder, rc, &feeds_holder) {
                 HolderStmt::Reject => return None,
                 HolderStmt::Retain => retains += 1,
@@ -1685,6 +1698,7 @@ fn classify_holder_uses(
                     }
                 }
             }
+            continue;
         }
         let t = &block.terminator;
         if let Terminator::Call {
@@ -2835,6 +2849,16 @@ pub(crate) fn elide_borrowed_holder_rc(body: &mut Body, tcx: &TyCtxt, callees: &
         })
         .collect();
 
+    // Elision only empties statements, so positions found here stay valid.
+    let mentions = Mentions::of(body);
+    let facts = ElideFacts {
+        tcx,
+        callees,
+        succs: &succs,
+        share: &share,
+        eligible: &eligible,
+        mentions: &mentions,
+    };
     let mut seen = vec![false; n_locals];
     let mut elided = 0usize;
     for i in (body.arity as usize + 1)..n_locals {
@@ -2848,7 +2872,7 @@ pub(crate) fn elide_borrowed_holder_rc(body: &mut Body, tcx: &TyCtxt, callees: &
         for &m in &class.members {
             seen[m.0 as usize] = true;
         }
-        if try_elide_class(body, tcx, callees, &succs, &share, &eligible, &class) {
+        if try_elide_class(body, &facts, &class) {
             elided += class.members.len();
             continue;
         }
@@ -2860,7 +2884,7 @@ pub(crate) fn elide_borrowed_holder_rc(body: &mut Body, tcx: &TyCtxt, callees: &
                 let Some(single) = singleton_class(&rcs, &roots, &paths, member) else {
                     continue;
                 };
-                if try_elide_class(body, tcx, callees, &succs, &share, &eligible, &single) {
+                if try_elide_class(body, &facts, &single) {
                     elided += 1;
                 }
             }
@@ -2882,19 +2906,29 @@ fn counted_field_count(tcx: &TyCtxt, ty: Ty) -> usize {
 
 /// Qualifies a class and, when it holds, removes every member's accounting.
 /// Answers whether it did.
-fn try_elide_class(
-    body: &mut Body,
-    tcx: &TyCtxt,
-    callees: &CalleeParams,
-    succs: &[Vec<usize>],
-    share: &crate::ownership::ShareFacts,
-    eligible: &[bool],
-    class: &Class,
-) -> bool {
+/// What [`try_elide_class`] reads about the body, computed once per pass.
+struct ElideFacts<'f> {
+    tcx: &'f TyCtxt,
+    callees: &'f CalleeParams,
+    succs: &'f [Vec<usize>],
+    share: &'f crate::ownership::ShareFacts,
+    eligible: &'f [bool],
+    mentions: &'f Mentions,
+}
+
+fn try_elide_class(body: &mut Body, facts: &ElideFacts<'_>, class: &Class) -> bool {
+    let ElideFacts {
+        tcx,
+        callees,
+        succs,
+        share,
+        eligible,
+        mentions,
+    } = *facts;
     if share.is_goroutine_shared(class.root) || eligible[class.root.0 as usize] {
         return false;
     }
-    if !root_keeps_its_share(body, class) {
+    if !root_keeps_its_share(body, mentions, class) {
         return false;
     }
     let mut retains = 0usize;
@@ -2903,6 +2937,7 @@ fn try_elide_class(
     for &member in &class.members {
         let Some(uses) = classify_holder_uses(
             body,
+            mentions,
             member,
             class.rc_of(member),
             &class.is_member,
@@ -2934,14 +2969,46 @@ fn try_elide_class(
     {
         return false;
     }
-    for block in &mut body.blocks {
-        for stmt in &mut block.stmts {
-            if class.owns_rc_op(stmt) {
+    // A member's own count operation names the member.
+    for &member in &class.members {
+        for &(bi, at) in mentions.of_local(member) {
+            if let Some(stmt) = at.and_then(|si| body.blocks[bi].stmts.get_mut(si))
+                && class.owns_rc_op(stmt)
+            {
                 stmt.kind = StatementKind::Nop;
             }
         }
     }
     true
+}
+
+/// Where each local is mentioned, in body order: `(block, Some(statement))`
+/// for a statement and `(block, None)` for the block's terminator.
+struct Mentions(Vec<Vec<(usize, Option<usize>)>>);
+
+impl Mentions {
+    fn of(body: &Body) -> Self {
+        let mut at: Vec<Vec<(usize, Option<usize>)>> = vec![Vec::new(); body.locals.len()];
+        for (bi, block) in body.blocks.iter().enumerate() {
+            for (si, stmt) in block.stmts.iter().enumerate() {
+                for local in stmt_mentioned_locals(stmt) {
+                    if let Some(list) = at.get_mut(local.0 as usize) {
+                        list.push((bi, Some(si)));
+                    }
+                }
+            }
+            for local in term_mentioned_locals(&block.terminator) {
+                if let Some(list) = at.get_mut(local.0 as usize) {
+                    list.push((bi, None));
+                }
+            }
+        }
+        Self(at)
+    }
+
+    fn of_local(&self, local: Local) -> &[(usize, Option<usize>)] {
+        self.0.get(local.0 as usize).map_or(&[], Vec::as_slice)
+    }
 }
 
 /// Whether the class's root holds a share of its own for the class to borrow:
@@ -2951,16 +3018,18 @@ fn try_elide_class(
 /// class would keep the value alive. A root whose type carries no count, such
 /// as the address of a vector element, holds no share for a member to take:
 /// the members borrow from the structure it addresses.
-fn root_keeps_its_share(body: &Body, class: &Class) -> bool {
+fn root_keeps_its_share(body: &Body, mentions: &Mentions, class: &Class) -> bool {
     let root = class.root;
     if (root.0 as usize) <= body.arity as usize || class.rcs[root.0 as usize].is_none() {
         return true;
     }
-    body.blocks.iter().flat_map(|b| &b.stmts).any(|stmt| {
-        matches!(&stmt.kind, StatementKind::Assign {
-            rvalue: Rvalue::CallIntrinsic { name, args }, ..
-        } if is_rc_release_name(name)
-            && matches!(args.first(), Some(Operand::Copy(p)) if p.local == root))
+    mentions.of_local(root).iter().any(|&(bi, at)| {
+        at.and_then(|si| body.blocks[bi].stmts.get(si)).is_some_and(|stmt| {
+            matches!(&stmt.kind, StatementKind::Assign {
+                rvalue: Rvalue::CallIntrinsic { name, args }, ..
+            } if is_rc_release_name(name)
+                && matches!(args.first(), Some(Operand::Copy(p)) if p.local == root))
+        })
     })
 }
 

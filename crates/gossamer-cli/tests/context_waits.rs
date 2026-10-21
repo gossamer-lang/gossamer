@@ -36,8 +36,8 @@ fn main() {
         b_tx.send(7)
     })
     select {
-        v = a_rx.recv() => println(f"a {v}"),
-        v = b_rx.recv() => println(f"b {v}"),
+        Some(v) = a_rx.recv() => println(f"a {v}"),
+        Some(v) = b_rx.recv() => println(f"b {v}"),
     }
     tx.close()
     wg.done()

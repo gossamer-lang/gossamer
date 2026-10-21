@@ -53,7 +53,7 @@ fn main() {
     // With a ready arm, that arm is taken.
     stx.send(99)
     let got = select {
-        v = srx.recv() => v
+        Some(v) = srx.recv() => v
         default => -2
     }
     println("select ready {}", got)

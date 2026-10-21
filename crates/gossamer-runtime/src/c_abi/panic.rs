@@ -767,6 +767,8 @@ pub extern "C" fn gos_rt_exit(code: i32) -> ! {
     gos_rt_flush_stdout();
     crate::c_abi::rc::report_live_at_exit();
 
+    crate::stack_guard::release_stack_guard();
+
     std::process::exit(code);
 }
 

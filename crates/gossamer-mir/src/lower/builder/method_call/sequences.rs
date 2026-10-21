@@ -242,7 +242,7 @@ impl<'a> Builder<'a> {
             self.option_payload_adt_ty(payload_ty)
         };
         let dest = self.fresh(dest_ty);
-        let payload = if index < fields.len() {
+        if index < fields.len() {
             let idx = match u32::try_from(index) {
                 Ok(idx) => idx,
                 Err(_) => return MethodLowering::Pass,
@@ -256,19 +256,27 @@ impl<'a> Builder<'a> {
                 })),
                 span,
             );
-            Operand::Copy(Place::local(payload))
+            let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+            let some_disc = self.fresh(i64_ty);
+            self.emit_assign(
+                Place::local(some_disc),
+                Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                span,
+            );
+            self.lower_result_ctor_into(dest, some_disc, payload, span);
         } else {
-            Operand::Const(ConstValue::Int(0))
-        };
-        let disc = i128::from(index >= fields.len());
-        self.emit_assign(
-            Place::local(dest),
-            Rvalue::CallIntrinsic {
-                name: "gos_rt_result_new",
-                args: vec![Operand::Const(ConstValue::Int(disc)), payload],
-            },
-            span,
-        );
+            self.emit_assign(
+                Place::local(dest),
+                Rvalue::CallIntrinsic {
+                    name: "gos_rt_result_new",
+                    args: vec![
+                        Operand::Const(ConstValue::Int(1)),
+                        Operand::Const(ConstValue::Int(0)),
+                    ],
+                },
+                span,
+            );
+        }
         MethodLowering::Handled(Some(dest))
     }
 

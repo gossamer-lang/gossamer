@@ -1,0 +1,27 @@
+// A map whose values are structs with counted fields, built, read back by
+// key, and dropped inside compiled code: each entry holds a counted copy.
+struct Glyph { w: i64, cov: Vec<u8>, name: String }
+
+fn build(n: i64) -> i64 {
+    let mut cache: Map<(char, i64), Glyph> = {}
+    let mut area = 0
+    for round in 0..n {
+        for ch in "gos".chars() {
+            let key = (ch, round)
+            let g = match cache.get(key) {
+                Some(found) => found
+                None => {
+                    let made = Glyph { w: round, cov: #[7u8; round + 1], name: f"{ch}{round}" }
+                    cache[key] = made
+                    made
+                }
+            }
+            area += g.cov.len() + g.cov[0] as i64 + g.name.len()
+        }
+    }
+    let probe = cache.get(('o', 1))
+    match probe { Some(g) => area += g.w * 100 + g.cov.len(), None => area -= 1 }
+    area
+}
+
+fn main() { println(build(3)) }

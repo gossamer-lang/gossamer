@@ -1,0 +1,29 @@
+// A function item stored where a callable is expected, at any depth (a
+// struct field, a call argument, an enum payload, a vector element, a return),
+// is the same callable value on every tier.
+struct Pair(String, Option<Fn(i64) -> i64>)
+struct Holder { id: String, drag: Option<Fn(i64) -> i64> }
+enum Slot { Hook(Option<Fn(i64) -> i64>), Named { cb: Option<Fn(i64) -> i64> } }
+
+fn twice(x: i64) -> i64 { x * 2 }
+
+fn call(f: Option<Fn(i64) -> i64>, x: i64) -> i64 {
+    match f { Some(g) => g(x), None => -1 }
+}
+
+fn pick() -> Option<Fn(i64) -> i64> { Some(twice) }
+
+fn main() {
+    println(call(Some(twice), 1))
+    let p = Pair("p", Some(twice))
+    println(call(p.1, 2))
+    let s = Slot::Hook(Some(twice))
+    match s { Slot::Hook(f) => println(call(f, 3)), Slot::Named { .. } => () }
+    let n = Slot::Named { cb: Some(twice) }
+    match n { Slot::Named { cb } => println(call(cb, 4)), Slot::Hook(_) => () }
+    let v: Vec<Option<Fn(i64) -> i64>> = #[Some(twice), None]
+    println(call(v[0], 5))
+    println(call(pick(), 6))
+    let h = Holder { id: "list", drag: Some(twice) }
+    if let Some(f) = h.drag { println(f"{h.id} {f(21)}") }
+}

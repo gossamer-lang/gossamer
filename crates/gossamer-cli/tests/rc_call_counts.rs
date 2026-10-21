@@ -181,11 +181,13 @@ fn aggregate_walk_rc_calls_are_pinned() {
                     clone: 0,
                 },
             ),
+            // A value a loop region builds is given back before the region
+            // pops, and a release that only ever sees a null is dropped.
             (
                 "main",
                 RcCounts {
                     retain: 0,
-                    release: 7,
+                    release: 4,
                     clone: 0,
                 },
             ),
@@ -218,7 +220,7 @@ fn string_builder_rc_calls_are_pinned() {
                 "main",
                 RcCounts {
                     retain: 0,
-                    release: 6,
+                    release: 5,
                     clone: 0,
                 },
             ),

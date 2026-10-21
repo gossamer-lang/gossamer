@@ -1,7 +1,7 @@
 // Cross-tier parity for the `std::io` stream adapters: in-memory
 // readers and writers, limit_reader, tee_reader, multi_reader, pipe,
-// and copy_n. A Reader or Writer is an i64 handle, so every adapter
-// composes by value on the VM, the JIT, and LLVM AOT alike.
+// and copy_n. Each is an `io::MemoryStream`; adapters compose by value
+// and keep their sources alive, on the VM, the JIT, and LLVM AOT alike.
 use std::io
 
 fn main() {
@@ -22,6 +22,15 @@ fn main() {
     println("wrote={}", io::write(writer, "payload"))
     io::close_writer(writer)
     println("pipe={}", io::drain(reader))
+
+    // Two pipes alive at once are two pairs of handles.
+    let r1, w1 = io::pipe()
+    let r2, w2 = io::pipe()
+    io::write(w1, "first")
+    io::write(w2, "second")
+    io::close_writer(w1)
+    io::close_writer(w2)
+    println("pipes={} {} {}", io::drain(r1), io::drain(r2), r1 != r2)
 
     let from = io::string_reader("0123456789")
     let to = io::buffer_writer()

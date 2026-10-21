@@ -59,6 +59,9 @@ pub struct GosSet {
     /// The element type's own `cmp` for a `BTreeSet` whose element writes one,
     /// which its tables then order by.
     user_cmp: Option<UserCmp>,
+    /// Owners beyond the first: a closure environment sharing the set with
+    /// the frame that built it. The set is freed when the last one lets go.
+    extra_holders: std::sync::atomic::AtomicU32,
 }
 
 impl Clone for GosSet {
@@ -71,6 +74,7 @@ impl Clone for GosSet {
             skey_desc: self.skey_desc.clone(),
             ordered: self.ordered,
             user_cmp: self.user_cmp,
+            extra_holders: std::sync::atomic::AtomicU32::new(0),
         };
         copy.retain_all_elements();
         copy
@@ -87,6 +91,11 @@ impl Drop for GosSet {
 }
 
 impl GosSet {
+    /// The count [`crate::c_abi::map::gos_rt_set_retain`] raises.
+    pub(crate) fn extra_holders(&self) -> &std::sync::atomic::AtomicU32 {
+        &self.extra_holders
+    }
+
     /// Makes this a `BTreeSet`: every element family moves into the ordered
     /// tree. The aggregate family takes its order once the first element
     /// names its descriptor.
@@ -192,12 +201,14 @@ impl GosSet {
         let Some(desc) = &self.skey_desc else {
             return Box::new([]);
         };
-        desc.iter()
+        crate::c_abi::slot_key::desc_slots(desc)
+            .iter()
             .enumerate()
             .filter_map(|(word, kind)| {
                 let kind = match kind {
                     b'S' => vec_elem_kind::STRING,
                     b'V' => vec_elem_kind::VEC,
+                    b'B' => vec_elem_kind::RC_NODE,
                     _ => return None,
                 };
                 Some(VecSlotChild {
@@ -277,6 +288,13 @@ pub unsafe extern "C" fn gos_rt_set_mark_shared(set: *mut GosSet) {
                     // keeps it live.
                     CountedWord::Vec => unsafe {
                         crate::c_abi::vec::gos_rt_vec_mark_shared(word.cast());
+                    },
+                    // SAFETY: `word` is a payload word a stored element holds; a copy blob it
+                    // names is kept live by the element.
+                    CountedWord::Blob => unsafe {
+                        if crate::c_abi::rc::copy_blob::is_copy_blob(word) {
+                            crate::c_abi::rc::gos_rt_rc_mark_shared(word);
+                        }
                     },
                 }
             }
@@ -977,6 +995,7 @@ unsafe fn set_combine(
         // The result is read the way the receiver is: `a.union(b)` on a
         // `BTreeSet` answers a `BTreeSet`.
         ordered: a.ordered,
+        extra_holders: std::sync::atomic::AtomicU32::new(0),
     };
     // The combined table copied its elements' slots out of the operands.
     combined.retain_all_elements();
@@ -1021,9 +1040,8 @@ pub unsafe extern "C" fn gos_rt_set_insert_skey(
         if s.is_null() {
             return 0;
         }
-        // SAFETY: `desc` is this shim's argument, live for the call (C-ABI contract) or null,
-        // which `gos_str_arg_len` accepts.
-        let width = unsafe { crate::c_abi::gos_str_arg_len(desc) } * 8;
+        // SAFETY: `desc` is this shim's descriptor argument, null or live for the call.
+        let width = unsafe { crate::c_abi::slot_key::desc_width(desc) };
         // SAFETY: `key` is non-null (`build_skey_for_set` answered `Some`) and holds the `width`
         // bytes of slots `desc` describes (C-ABI contract).
         let slots = unsafe { std::slice::from_raw_parts(key, width) }
@@ -1107,9 +1125,8 @@ pub unsafe extern "C" fn gos_rt_set_to_vec_skey(
         if desc.is_null() {
             return std::ptr::null_mut();
         }
-        // SAFETY: `desc` is this shim's argument, live for the call (C-ABI contract); non-null,
-        // checked above.
-        let width = unsafe { crate::c_abi::gos_str_arg_len(desc) } * 8;
+        // SAFETY: `desc` is this shim's descriptor argument, null or live for the call.
+        let width = unsafe { crate::c_abi::slot_key::desc_width(desc) };
         let out = {
             crate::c_abi::vec::gos_rt_vec_new_typed(
                 width as u32,
@@ -1154,9 +1171,8 @@ pub unsafe extern "C" fn gos_rt_set_intersection_to_vec_skey(
         if desc.is_null() {
             return std::ptr::null_mut();
         }
-        // SAFETY: `desc` is this shim's argument, live for the call (C-ABI contract); non-null,
-        // checked above.
-        let width = unsafe { crate::c_abi::gos_str_arg_len(desc) } * 8;
+        // SAFETY: `desc` is this shim's descriptor argument, null or live for the call.
+        let width = unsafe { crate::c_abi::slot_key::desc_width(desc) };
         let out = {
             crate::c_abi::vec::gos_rt_vec_new_typed(
                 width as u32,
@@ -1566,6 +1582,7 @@ fn set_window(set: &mut GosSet, lo: usize, hi: usize, take: bool) -> GosSet {
         skey_desc: set.skey_desc.clone(),
         ordered: set.ordered,
         user_cmp: set.user_cmp,
+        extra_holders: std::sync::atomic::AtomicU32::new(0),
     };
     if !take {
         out.retain_all_elements();

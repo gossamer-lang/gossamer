@@ -14,6 +14,7 @@ pub mod jit_carrier;
 pub mod rc;
 /// ABI registry - the typed list of all `gos_rt_*` symbols.
 pub mod registry;
+pub mod static_storage;
 pub mod string_layout;
 /// Core ABI types: [`AbiType`], [`AbiSig`], [`RuntimeEntry`].
 pub mod types;

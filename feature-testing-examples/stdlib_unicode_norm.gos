@@ -8,6 +8,12 @@ fn main() {
     println("{}", unicode::nfc(decomposed))
     println("{}", unicode::nfkc(decomposed))
     println("{}", unicode::fold_case("GROSSE"))
+    // Case folding, not lowercasing: final sigma, micro sign, long s, and
+    // the sharp s each fold to the form their case-insensitive matches share.
+    for s in #["\u{3C2}", "\u{B5}", "\u{17F}", "Stra\u{DF}e", "\u{39B}\u{38C}\u{393}\u{39F}\u{3A3}"] {
+        println("{} -> {}", s, unicode::fold_case(s))
+    }
+    println("{}", unicode::fold_case("Stra\u{DF}e") == unicode::fold_case("STRASSE"))
     println("{}", unicode::to_upper_str("caf\u{e9}"))
     println("{}", unicode::grapheme_count("a\u{0301}b\u{0301}c"))
 }

@@ -1,0 +1,27 @@
+// An element a sequence lends a closure, handed by value to a function that
+// captures it in a closure of its own, keeps every child the sequence owns:
+// the optional struct field is still there on the next pass.
+struct Icon {
+    rgba: Vec<u8>
+}
+
+struct Entry {
+    tags: Vec<String>
+    image: Option<Icon>
+}
+
+fn tagged(entry: Entry, wanted: Vec<String>) -> bool {
+    wanted.iter().any(|w| entry.tags.contains(w))
+}
+
+fn main() {
+    let entries = #[
+        Entry { tags: #["a"], image: Some(Icon { rgba: #[1u8, 2u8] }) }
+        Entry { tags: #["b"], image: Some(Icon { rgba: #[3u8] }) }
+        Entry { tags: #["b", "c"], image: None }
+    ]
+    for round in 0..3 {
+        let hits = entries.filter(|e| tagged(e, #["b"])).len()
+        println(f"{round}: {hits} {entries.map(|e| e.image.map(|i| i.rgba.len()).unwrap_or(-1))}")
+    }
+}

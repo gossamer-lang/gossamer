@@ -2347,7 +2347,7 @@
 <tr>
 <td><code>Instant</code></td>
 <td><code>type Instant</code></td>
-<td>A monotonic clock reading in nanoseconds: <code>now()</code>, <code>elapsed()</code>, <code>elapsed_ms()</code>, <code>duration_since(earlier)</code>.</td>
+<td>A monotonic clock reading in nanoseconds: <code>now()</code>, <code>elapsed()</code>, <code>elapsed_ms()</code>, <code>duration_since(earlier)</code>, <code>later - earlier</code> answering the <code>Duration</code> between them, <code>+</code> / <code>-</code> a <code>Duration</code>, and ordering.</td>
 </tr>
 <tr>
 <td><code>Duration</code></td>
@@ -2372,7 +2372,7 @@
 <tr>
 <td><code>Location</code></td>
 <td><code>type Location</code></td>
-<td>Immutable IANA or fixed-offset time-zone location.</td>
+<td>Immutable IANA or fixed-offset time-zone location: <code>lookup(name)</code> (an IANA name, or <code>"Local"</code>), <code>local()</code> (the zone the system runs in: <code>TZ</code>, then the platform setting, else UTC), <code>utc()</code>, <code>fixed(offset_seconds)</code>; <code>name()</code>, <code>civil(unix_ms)</code>, <code>resolve(civil)</code>.</td>
 </tr>
 <tr>
 <td><code>Time</code></td>

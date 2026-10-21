@@ -59,6 +59,171 @@ fn allowance(name: &str) -> Allowance {
 /// (name, source). N is baked into each source, sized so a leak clears the cap.
 const SHAPES: &[(&str, &str)] = &[
     (
+        "closure_captured_map_escapes_through_call",
+        r#"
+struct Lookup { find: Fn(String) -> i64 }
+enum Widget { Coll(Lookup) }
+
+fn wrap(l: Lookup) -> Widget { Widget::Coll(l) }
+
+fn view(i: i64) -> Widget {
+    let mut index: Map<String, i64> = Map::new()
+    index[f"k{i}"] = i
+    let mut seen = Set::new()
+    seen.insert(i)
+    wrap(Lookup { find: |key: String| index.get(key).unwrap_or(-1) + seen.len() })
+}
+
+fn main() {
+    let mut total = 0
+    for i in 0..20000 {
+        match view(i) {
+            Widget::Coll(l) => total += (l.find)(f"k{i}"),
+        }
+    }
+    println(f"{total}")
+}
+"#,
+    ),
+    (
+        "lent_element_to_capturing_callee",
+        r#"
+struct Icon { rgba: Vec<u8> }
+struct Entry { tags: Vec<String>, image: Option<Icon> }
+
+fn tagged(entry: Entry, wanted: Vec<String>) -> bool {
+    wanted.iter().any(|w| entry.tags.contains(w))
+}
+
+fn main() {
+    let entries = #[Entry { tags: #["a"], image: Some(Icon { rgba: #[1u8, 2u8] }) }, Entry { tags: #["b"], image: Some(Icon { rgba: #[3u8] }) }]
+    let mut hits = 0
+    for round in 0..20000 {
+        hits += entries.filter(|e| tagged(e, #["b"])).len()
+    }
+    println(f"{hits}")
+}
+"#,
+    ),
+    (
+        "conditional_value_stored_in_element_field",
+        r#"
+struct Node { items: Vec<String> }
+struct Deco { child: W, grow: i64 }
+enum W { Empty, Field(Node), Decorated(Deco), Stack(Vec<W>) }
+struct Win { key: String, root: W, toasts: Vec<String>, dirty: bool }
+struct Sess { windows: Vec<Win>, count: i64 }
+
+fn view(n: i64) -> W {
+    W::Decorated(Deco { child: W::Field(Node { items: #[f"item {n}"] }), grow: 1 })
+}
+
+impl Sess {
+    fn note(&mut self) { self.count += 1 }
+
+    fn rebuild(&mut self, w: i64) {
+        let v = view(self.count)
+        let toasts = self.windows[w].toasts
+        self.windows[w].root = if toasts.is_empty() { v } else { W::Stack(#[v, W::Empty]) }
+        self.note()
+        self.windows[w].dirty = true
+    }
+}
+
+fn main() {
+    let mut s = Sess { windows: #[Win { key: "main", root: W::Empty, toasts: #[], dirty: false }], count: 0 }
+    for i in 0..20000 {
+        s.rebuild(0)
+    }
+    println(f"{s.count}")
+}
+"#,
+    ),
+    (
+        "closure_one_word_struct_capture",
+        r#"
+struct Order { order: Vec<i64> }
+
+impl Order {
+    fn source_of(&self, i: i64) -> i64 { if i < 0 || i >= self.order.len() { -1 } else { self.order[i] } }
+}
+
+struct List { count: i64, row: Fn(i64) -> i64 }
+
+fn view(order: Order) -> List {
+    let row = |i: i64| order.source_of(i)
+    List { count: order.order.len(), row: row }
+}
+
+fn main() {
+    let mut total = 0
+    for i in 0..20000 {
+        let l = view(Order { order: #[i, i + 1, i + 2] })
+        let f = l.row
+        total += l.count + f(0) + f(2)
+    }
+    println(f"{total}")
+}
+"#,
+    ),
+    (
+        "io_memory_streams",
+        r#"
+use std::io
+
+fn round(i: i64) -> i64 {
+    let src = io::string_reader(f"payload {i}")
+    let sink = io::buffer_writer()
+    let teed = io::tee_reader(io::limit_reader(src, 5), sink)
+    let r, w = io::pipe()
+    io::write(w, "x")
+    io::close_writer(w)
+    let all = io::multi_reader(#[teed, r])
+    io::drain(all).len() + io::contents(sink).len()
+}
+
+fn main() {
+    let mut total = 0
+    for i in 0..20000 { total += round(i) }
+    println(f"{total}")
+}
+"#,
+    ),
+    (
+        "aggregate_element_streams",
+        r#"
+struct Entry { name: String, n: i64 }
+
+fn main() {
+    let mut total = 0
+    for round in 0..2000 {
+        let pairs: Vec<(i64, String)> = (0..50).map(|i| (i, f"p{i}")).collect()
+        let entries: Vec<Entry> = (0..50).map(|i| Entry { name: f"e{i}", n: i + round }).collect()
+        let names: Vec<String> = (0..50).map(|i| f"n{i}").collect()
+        for (u, s) in names.iter().enumerate() {
+            total += u + s.byte_len()
+        }
+        for (k, s) in pairs.iter() {
+            total += k + s.byte_len()
+        }
+        for (u, (k, s)) in pairs.iter().enumerate() {
+            total += u + k + s.byte_len()
+        }
+        total += entries.iter().filter(|e| e.n % 2 == 0).count()
+        total += entries.iter().map(|e| e.name.byte_len()).sum()
+        match entries.iter().find(|e| e.n == round + 7) {
+            Some(e) => total += e.name.byte_len()
+            None => {}
+        }
+        let kept: Vec<Entry> = entries.iter().filter(|e| e.n % 3 == 0).collect()
+        total += kept.len()
+        total += pairs.iter().chain(pairs.iter()).count()
+    }
+    println(f"{total}")
+}
+"#,
+    ),
+    (
         "spawn_shared_read",
         r"
 fn rows(n: i64) -> Vec<Vec<f64>> {

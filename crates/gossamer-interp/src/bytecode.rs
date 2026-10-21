@@ -1906,7 +1906,7 @@ pub enum SelectArmKind {
 /// One arm of a native `select { … }`, referenced by [`Op::Select`]
 /// through [`FnChunk::select_arms`]. The operand registers are
 /// evaluated before the `Op::Select` runs; the handler reads the
-/// channel/value out of them, writes any received value into
+/// channel/value out of them, writes the `Option` a receive answers into
 /// `bind_reg`, and jumps to `body_block`.
 #[derive(Debug, Clone, Copy)]
 pub struct SelectArmMeta {
@@ -1922,6 +1922,10 @@ pub struct SelectArmMeta {
     pub bind_reg: Reg,
     /// Instruction index of this arm's body basic block.
     pub body_block: InstrIdx,
+    /// A `Recv` arm is ready when a value waits on its channel.
+    pub takes_value: bool,
+    /// A `Recv` arm is ready once its channel is closed and drained.
+    pub takes_close: bool,
 }
 
 /// Source position associated with a bytecode instruction.

@@ -78,8 +78,13 @@ pub(crate) struct Builder<'a> {
     pub(crate) fn_returns: &'a HashMap<gossamer_resolve::DefId, Ty>,
     pub(crate) fn_inputs: &'a HashMap<gossamer_resolve::DefId, Vec<Ty>>,
     /// Per-parameter read-only summary by callee; see `collect_shareable_params`.
-    pub(crate) fn_param_shareable:
-        &'a HashMap<gossamer_resolve::DefId, Vec<crate::lower::helpers::escape::ParamShare>>,
+    pub(crate) fn_param_shareable: &'a crate::lower::helpers::escape::ShareSummaries,
+    /// Struct-literal operands that share their value's storage; see
+    /// [`crate::ir::Body::shared_stores`].
+    pub(crate) shared_stores: Vec<(Local, usize)>,
+    /// Comparison operands placed in storage of their own; see
+    /// [`crate::ir::Body::lent_slots`].
+    pub(crate) lent_slots: Vec<Local>,
     pub(crate) consts: &'a HashMap<gossamer_resolve::DefId, ConstValue>,
     /// Scalar `static mut` items promoted to real mutable module globals,
     /// keyed by `DefId`. A path reading one lowers to a [`Rvalue::StaticLoad`]

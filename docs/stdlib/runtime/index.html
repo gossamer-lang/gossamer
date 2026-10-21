@@ -2366,6 +2366,11 @@
 <td>Reports whether this execution tier reclaims unreachable reference cycles.</td>
 </tr>
 <tr>
+<td><code>is_main_thread</code></td>
+<td><code>fn is_main_thread() -&gt; bool</code></td>
+<td>Whether the caller runs on the process main thread, the one <code>main</code> starts on. Libraries whose platform APIs belong to that thread, such as windowing on macOS, check it before calling them.</td>
+</tr>
+<tr>
 <td><code>scheduler_stats_json</code></td>
 <td><code>fn scheduler_stats_json() -&gt; String</code></td>
 <td>Returns a compact JSON snapshot of goroutine scheduler counters.</td>

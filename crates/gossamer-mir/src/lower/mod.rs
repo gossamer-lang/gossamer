@@ -458,8 +458,7 @@ pub(crate) struct ProgramTables {
     fn_ret_names: HashMap<String, Ty>,
     fn_returns: HashMap<gossamer_resolve::DefId, Ty>,
     fn_inputs: HashMap<gossamer_resolve::DefId, Vec<Ty>>,
-    fn_param_shareable:
-        HashMap<gossamer_resolve::DefId, Vec<crate::lower::helpers::escape::ParamShare>>,
+    fn_param_shareable: crate::lower::helpers::escape::ShareSummaries,
     consts: HashMap<gossamer_resolve::DefId, ConstValue>,
     mut_statics: HashMap<gossamer_resolve::DefId, crate::ir::StaticRef>,
     const_inits: HashMap<gossamer_resolve::DefId, HirExpr>,
@@ -481,7 +480,7 @@ impl ProgramTables {
         // Scalar `static mut` items become real mutable module globals;
         // remove them from the const-inline map so their reads load the
         // live cell instead of freezing at the declaration value.
-        let mut_statics = collect_mut_static_defs(program, &consts);
+        let mut_statics = collect_mut_static_defs(program, tcx, &consts);
         for def in mut_statics.keys() {
             consts.remove(def);
         }
@@ -570,7 +569,42 @@ impl ProgramTables {
 /// `bodies[start..]`. The whole list is read for what each callee declares,
 /// so bodies lowered after the first round see the same program the first
 /// round did.
-pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut TyCtxt) {
+/// Runs `pass` over every body, each on its own: in parallel where the target
+/// has threads.
+fn for_each_body(bodies: &mut [Body], tcx: &TyCtxt, pass: impl Fn(&mut Body, &TyCtxt) + Sync) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use rayon::prelude::*;
+        bodies.par_iter_mut().for_each(|body| pass(body, tcx));
+    }
+    #[cfg(target_arch = "wasm32")]
+    for body in bodies {
+        pass(body, tcx);
+    }
+}
+
+/// [`for_each_body`] with a slot of `out` per body for the pass to fill.
+fn for_each_body_with<T: Send>(
+    bodies: &mut [Body],
+    out: &mut [T],
+    tcx: &TyCtxt,
+    pass: impl Fn(&mut Body, &mut T, &TyCtxt) + Sync,
+) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use rayon::prelude::*;
+        bodies
+            .par_iter_mut()
+            .zip(out.par_iter_mut())
+            .for_each(|(body, slot)| pass(body, slot, tcx));
+    }
+    #[cfg(target_arch = "wasm32")]
+    for (body, slot) in bodies.iter_mut().zip(out) {
+        pass(body, slot, tcx);
+    }
+}
+
+pub(crate) fn finish_lowered_bodies(bodies: &mut Vec<Body>, start: usize, tcx: &mut TyCtxt) {
     // A pass reading a field of a generic struct instance reads the
     // instance's own field types, not the declaration's parameters.
     crate::monomorph::register_struct_instantiations(&bodies[start..], tcx);
@@ -580,7 +614,12 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
     // combinator reads the handle out of can be reclaimed after the call.
     let json_borrowing_fns = collect_json_borrowing_fns(bodies, tcx);
     let carrier_abi = flat_carriers::CarrierAbi::collect(bodies);
-    for body in &mut bodies[start..] {
+    // Each body runs the passes below in this order. A pass that interns a type
+    // or registers a meta in `tcx` runs over the bodies in order, so what it
+    // records, and the ids it assigns, are the same on every run; the passes
+    // between them only read `tcx`, and each body's are run in parallel.
+    let rest = &mut bodies[start..];
+    for_each_body(rest, tcx, |body, tcx| {
         // Rewrite `s = s + frag` to the in-place `gos_rt_str_concat_drop_a`
         // BEFORE inserting RC retain/release statements. The rewrite matches a
         // copy-back pattern (the concat's result copied straight back into the
@@ -594,9 +633,13 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         // unrelated). Without the binding's concrete (RC-managed) type the drop
         // pass cannot tell it owns a `String` and never releases it (a leak).
         propagate_copy_types(body, tcx);
-        // Before any ownership pass: those account for a flattened carrier
-        // as the tuple it now is.
+    });
+    // Before any ownership pass: those account for a flattened carrier as the
+    // tuple it now is.
+    for body in rest.iter_mut() {
         flat_carriers::flatten_carriers(body, &carrier_abi, tcx);
+    }
+    for_each_body(rest, tcx, |body, tcx| {
         copy_stored_containers(body, tcx);
         copy_values_into_holders(body, tcx);
         borrow_lent_payload_reads(body, tcx);
@@ -606,7 +649,11 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         crate::opt::reserve_vecs_for_counted_push_loops(body);
         // After the reservation, so a vector sized for the loop keeps that size.
         crate::opt::fuse_byte_append_loops(body, tcx);
+    });
+    for body in rest.iter_mut() {
         crate::opt::fuse_field_count_loops(body, tcx);
+    }
+    for_each_body(rest, tcx, |body, tcx| {
         crate::opt::reserve_hashmaps_for_counted_insert_loops(body, tcx);
         // Fuse `seq.substring(i, i+k)` + `m.inc(kmer)` into the borrowed-slice
         // probe before the RC passes, so the eliminated scratch String gets no
@@ -616,17 +663,27 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         read_packed_elements_by_value(body, tcx);
         release_mapped_payloads(body, tcx);
         own_carrier_payloads(body, tcx);
+    });
+    for body in rest.iter_mut() {
         record_channel_elem_kind(body, tcx);
+    }
+    for_each_body(rest, tcx, |body, tcx| {
         clear_region_on_call_results(body);
         free_overwritten_ctor_values(body, tcx, &container_ctor_free);
         own_returned_map_payloads(body, tcx);
-        insert_drops_at_returns(body, tcx);
+        own_sequence_slot_stores(body, tcx);
+        insert_drops_at_returns(body, tcx, &user_fn_names);
         complete_ok_or_err_kind(body, tcx);
+        clone_json_field_reads(body, tcx);
         insert_rc_releases(body, tcx);
         retain_borrowed_fallback_payloads(body, tcx);
         insert_aggr_copy_drops(body, tcx);
         insert_json_frees(body, tcx, &json_borrowing_fns);
+    });
+    for body in rest.iter_mut() {
         insert_vec_elem_metas(body, tcx, &user_fn_names);
+    }
+    for_each_body(rest, tcx, |body, tcx| {
         insert_signed_vec_marks(body, tcx, &user_fn_names);
         insert_early_releases(body, tcx);
         insert_copied_key_releases(body, tcx);
@@ -655,7 +712,9 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         // of what it accounts for.
         crate::opt::pop_scalar_aggregates_in_place(body, tcx);
         hold_region_node_shares(body);
-        if std::env::var("GOS_DUMP_MIR_RC").is_ok() {
+    });
+    if std::env::var("GOS_DUMP_MIR_RC").is_ok() {
+        for body in rest.iter() {
             eprintln!("=== MIR(post-rc) {} ===", body.name);
             for block in &body.blocks {
                 eprintln!("  bb{}:", block.id.as_u32());
@@ -684,18 +743,22 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         // `GOS_RC_NO_UNIQUENESS` disables them for differential measurement.
         if std::env::var_os("GOS_RC_NO_UNIQUENESS").is_none() {
             let summaries = crate::uniqueness::CallSummaries::compute(bodies, tcx);
-            for body in &mut bodies[start..] {
-                let report = crate::opt::UniquenessReport {
+            let rest = &mut bodies[start..];
+            let mut reports = vec![crate::opt::UniquenessReport::default(); rest.len()];
+            for_each_body_with(rest, &mut reports, tcx, |body, report, tcx| {
+                *report = crate::opt::UniquenessReport {
                     shares_transferred: crate::opt::transfer_last_use_shares(body, tcx, &summaries)
                         + crate::opt::transfer_carrier_payload_shares(body, tcx, &summaries)
                         + crate::opt::move_boxed_payload_sources(body, tcx, &summaries),
                     clones_moved: crate::opt::move_unique_clones(body, tcx, &summaries),
                 };
+            });
+            for (body, report) in rest.iter().zip(reports) {
                 crate::opt::record_uniqueness(&body.name, report);
             }
         }
         let callees = crate::opt::CalleeParams::compute(bodies, tcx);
-        for body in &mut bodies[start..] {
+        for_each_body(&mut bodies[start..], tcx, |body, tcx| {
             crate::opt::elide_unit_variant_rc(body);
             crate::opt::elide_null_rc_accounting(body);
             crate::opt::elide_redundant_rc_pairs(body, tcx);
@@ -705,11 +768,13 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
             crate::opt::elide_settled_guarded_walks(body);
             crate::opt::reduce_materialised_counts(body);
             crate::opt::sink_exit_releases(body, tcx);
-        }
+        });
     }
-    for body in &mut bodies[start..] {
-        crate::opt::forward_moved_temporaries(body, tcx);
-    }
+    for_each_body(
+        &mut bodies[start..],
+        tcx,
+        crate::opt::forward_moved_temporaries,
+    );
     // Perceus reuse: recycle a uniquely-owned block being released into a
     // same-type constructor in place. Runs last so it sees the final release
     // set; `GOS_RC_NO_REUSE` disables it for differential measurement and as a
@@ -717,15 +782,28 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
     // this MIR), and a runtime refcount check makes any mis-pairing fall back to
     // a fresh allocation rather than corrupt.
     if std::env::var_os("GOS_RC_NO_REUSE").is_none() {
-        for body in &mut bodies[start..] {
-            crate::opt::insert_rc_reuse(body, tcx);
-        }
+        for_each_body(&mut bodies[start..], tcx, crate::opt::insert_rc_reuse);
     }
+    // After every pass that places or moves a release, so the releases it
+    // finds past a region's pop are the final ones.
+    for_each_body(
+        &mut bodies[start..],
+        tcx,
+        crate::opt::release_region_values_before_pop,
+    );
+    for_each_body(
+        &mut bodies[start..],
+        tcx,
+        crate::opt::narrow_slot_calls_to_blob_arms,
+    );
+    // Last, so a closure it copies is copied whole and finished.
+    address_params::mark_carrier_address_params(bodies, start, tcx);
     #[cfg(debug_assertions)]
     crate::verify::debug_verify_program(bodies, tcx);
     crate::rc_verify::check_program(&bodies[start..]);
 }
 
+pub(crate) mod address_params;
 pub mod builder;
 pub(crate) mod carrier_ref;
 pub(crate) mod flat_carriers;

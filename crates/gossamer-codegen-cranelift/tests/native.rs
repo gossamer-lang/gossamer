@@ -122,6 +122,9 @@ fn typed_iterator_main() -> (Body, TyCtxt) {
             terminator_inlined: None,
         }],
         span,
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (body, tcx)
 }

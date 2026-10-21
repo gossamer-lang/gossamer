@@ -17,6 +17,22 @@ use super::*;
 
 mod mapped;
 
+/// A vector returned on one branch remains this frame's on other branches.
+///
+/// # Safety
+/// `owned` is null or this frame's live vector share; `returned` is the live
+/// allocation transferred to the caller. Equal pointers transfer that share.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_free_unless_returned(
+    owned: *mut GosVec,
+    returned: *mut GosVec,
+) {
+    if owned != returned {
+        // SAFETY: the unequal `owned` is the frame's remaining share.
+        unsafe { gos_rt_vec_free(owned) };
+    }
+}
+
 // ---------------------------------------------------------------
 // Vec runtime - a `{ elem_bytes, len, cap, ptr }` struct
 // ---------------------------------------------------------------
@@ -1106,31 +1122,6 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_borrow_arr(
     })
 }
 
-/// Builds a borrowing `*mut GosVec` view over a packed array. This is the
-/// LLVM counterpart of [`gos_rt_vec_borrow_arr`] for fixed `[u8; N]` arrays,
-/// whose native storage is `[N x i8]` rather than one 8-byte slot per element.
-#[unsafe(no_mangle)]
-pub unsafe extern "C-unwind" fn gos_rt_vec_borrow_packed_arr(
-    elem_bytes: u32,
-    data: *const u8,
-    len: i64,
-) -> *mut GosVec {
-    ffi_entry_passthrough!({
-        if len < 0 {
-            crate::c_abi::panic::panic_text("Vec length must be non-negative");
-        }
-        let v = alloc_box_vec(elem_bytes.max(1), vec_elem_kind::PRIMITIVE, 0, 0);
-        // SAFETY: `v` is the fresh vec made above, and `data` this shim's array argument of `len`
-        // elements (C-ABI contract).
-        unsafe {
-            (*v).len = len;
-            (*v).cap = len;
-            (*v).ptr = SyncRawPtr::new(data.cast_mut());
-        }
-        v
-    })
-}
-
 /// True when this header is a borrowing view in its caller's stack frame.
 pub(crate) fn vec_is_frame(v: &GosVec) -> bool {
     v.region_flag & VEC_FRAME_FLAG != 0
@@ -1189,25 +1180,6 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_borrow_arr_into(
     ffi_entry_passthrough!({
         // SAFETY: this shim's caller passes the storage and data the contract names.
         unsafe { init_frame_view(header, elem_bytes.max(8), data, len) }
-    })
-}
-
-/// [`gos_rt_vec_borrow_packed_arr`] with its header in storage the caller
-/// reserved, so the view costs no allocation.
-///
-/// # Safety
-///
-/// As `init_frame_view`, with `data` a packed array.
-#[unsafe(no_mangle)]
-pub unsafe extern "C-unwind" fn gos_rt_vec_borrow_packed_arr_into(
-    header: *mut GosVec,
-    elem_bytes: u32,
-    data: *const u8,
-    len: i64,
-) -> *mut GosVec {
-    ffi_entry_passthrough!({
-        // SAFETY: this shim's caller passes the storage and data the contract names.
-        unsafe { init_frame_view(header, elem_bytes.max(1), data, len) }
     })
 }
 
@@ -1431,8 +1403,6 @@ pub unsafe extern "C" fn gos_rt_vec_mark_shared(v: *mut GosVec) {
     });
 }
 
-/// Bump a non-region `GosVec`'s strong count by one (the header-RC
-/// counterpart of `gos_rt_str_retain` for nested-vec children).
 /// Whether `GOS_RC_TRACE` was set at first use: prints one line per vec
 /// retain and release so a leak's per-pointer balance can be read off a run.
 /// Read once, so the hot paths pay a relaxed load and nothing else.
@@ -1441,6 +1411,8 @@ pub(crate) fn rc_trace_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("GOS_RC_TRACE").is_some())
 }
 
+/// Bump a non-region `GosVec`'s strong count by one (the header-RC
+/// counterpart of `gos_rt_str_retain` for nested-vec children).
 pub(crate) unsafe fn vec_retain_header(v: *mut GosVec) {
     if v.is_null() {
         return;
@@ -1967,6 +1939,46 @@ pub unsafe extern "C" fn gos_rt_vec_set_slot_children(v: *mut GosVec, meta: *con
     if !vec_is_region(vec) {
         vec.elem_kind = vec_elem_kind::AGGR_OWNED;
         ensure_vec_owner(vec).slot_children = Some(children.into_boxed_slice());
+    }
+}
+
+/// Takes the vec's own share of every heap child its present elements hold,
+/// per the layout its element tag records. For a vec whose elements were
+/// copied in from storage that keeps its own shares, such as an array a vec
+/// is built from; a tag alone takes no shares. No-op for null / region vecs
+/// and for elements without counted children.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_share_elements(v: *mut GosVec) {
+    if v.is_null() {
+        return;
+    }
+    // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
+    let vec = unsafe { &*v };
+    if vec_is_region(vec) || vec.ptr.is_null() {
+        return;
+    }
+    let stride = vec.elem_bytes as usize;
+    if stride == 0 {
+        return;
+    }
+    let base = vec.ptr.as_ptr();
+    for i in 0..vec.len.max(0) as usize {
+        // SAFETY: element `i` lies inside the vector's buffer of `len` elements.
+        let slot = unsafe { base.add(i * stride) };
+        match vec.elem_kind {
+            // SAFETY: the slot is laid out as the recorded children describe.
+            vec_elem_kind::AGGR_OWNED => unsafe { vec_retain_slot_children(v, slot) },
+            vec_elem_kind::AGGR_GUARDED => {
+                // SAFETY: the guarded meta was recorded for this element type.
+                unsafe {
+                    crate::c_abi::rc::gos_rt_aggr_retain_children(
+                        slot,
+                        vec.elem_meta.as_const_ptr(),
+                    );
+                }
+            }
+            _ => return,
+        }
     }
 }
 
@@ -3853,10 +3865,12 @@ pub unsafe extern "C" fn gos_rt_main_exit_code(raw: i64) -> i32 {
         crate::c_abi::cohort::close_root();
         crate::sched_global::drain_goroutines_for_exit();
         crate::c_abi::exit_hooks::run_exit_hooks();
+        crate::c_abi::exit_hooks::release_program_storage();
         // Flush any buffered stdout that workers wrote so it
         // reaches the user before the process exits.
         gos_rt_flush_stdout();
         crate::c_abi::rc::report_live_at_exit();
+        crate::stack_guard::release_stack_guard();
         raw as i32
     })
 }
@@ -3875,8 +3889,10 @@ pub unsafe extern "C" fn gos_rt_main_exit_code_err(disc: i64, payload: i64) -> i
         crate::c_abi::cohort::close_root();
         crate::sched_global::drain_goroutines_for_exit();
         crate::c_abi::exit_hooks::run_exit_hooks();
+        crate::c_abi::exit_hooks::release_program_storage();
         gos_rt_flush_stdout();
         crate::c_abi::rc::report_live_at_exit();
+        crate::stack_guard::release_stack_guard();
         if disc == 0 {
             return 0;
         }

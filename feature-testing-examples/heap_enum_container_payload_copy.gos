@@ -1,0 +1,61 @@
+enum Page {
+    Empty
+    Group(Group)
+}
+
+struct Info { label: String, labels: Vec<String> }
+
+struct Group {
+    id: String
+    pages: Map<String, Page>
+    tags: Set<String>
+    labels: Vec<String>
+    extra: Option<Info>
+}
+
+impl Page {
+    fn id(&self) -> String {
+        match self {
+            Page::Group(group) => group.id
+            _ => "empty"
+        }
+    }
+
+    fn group(&self) -> Group {
+        match self {
+            Page::Group(group) => group
+            _ => Group { id: "empty", pages: Map::new(), tags: #{}, labels: #[], extra: None }
+        }
+    }
+}
+
+fn visit(page: Page) -> i64 {
+    let label = page.id()
+    assert(!label.is_empty())
+    let mut count = 1
+    if let Page::Group(group) = page {
+        for (_, child) in group.pages { count += visit(child) }
+        assert(group.tags.contains("retained"))
+        assert_eq(group.labels[0], "label")
+        let info = group.extra.unwrap()
+        assert_eq(info.label, "info")
+        assert_eq(info.labels[0], "kept")
+    }
+    count
+}
+
+fn main() {
+    let page = Page::Group(Group { id: "root", pages: { "child": Page::Empty }, tags: #{ "retained" }, labels: #["label"], extra: Some(Info { label: "info", labels: #["kept"] }) })
+    let mut copy = page.group()
+    copy.pages["second"] = Page::Empty
+    copy.tags.insert("copy")
+    copy.labels.push("second")
+    assert_eq(copy.pages.len(), 2)
+    assert_eq(page.group().pages.len(), 1)
+    assert(!page.group().tags.contains("copy"))
+    assert_eq(page.group().labels.len(), 1)
+    let mut total = 0
+    for _ in 0..10 { total += visit(page) }
+    assert_eq(total, 20)
+    println("heap enum container copies: 20 visits, source unchanged")
+}

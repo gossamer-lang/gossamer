@@ -1,12 +1,13 @@
 // Closed-channel select readiness.
 //
-// A `select` recv arm is READY when its channel is closed, yielding the
-// element-type zero value (Go's `v, ok := <-ch` for a closed channel).
-// An open-but-empty channel's recv arm stays not-ready, so the default
-// arm fires. Every selection point here is decided synchronously - no
-// goroutines, no sleeps - so stdout is bit-identical across the bytecode
-// VM (`gos` / `gos test`), the Cranelift JIT, and the LLVM AOT tier
-// (`gos build`).
+// A `select` receive answers `Option<T>`: `Some(v)` for a value, `None`
+// once the channel is closed and drained. A `Some(v)` arm is ready only
+// when a value waits, a `None` arm only once the channel is closed and
+// drained, and a bare name takes either. An open-but-empty channel's
+// recv arm stays not-ready, so the default arm fires. Every selection
+// point here is decided synchronously - no goroutines, no sleeps - so
+// stdout is bit-identical across the bytecode VM (`gos` / `gos test`),
+// the Cranelift JIT, and the LLVM AOT tier (`gos build`).
 
 use std::sync::channel
 
@@ -15,40 +16,58 @@ fn main() {
     let tx, rx = channel()
     let open = select {
         v = rx.recv() => v
-        default => -1
+        default => Some(-1)
     }
     println("open empty = {}", open)
 
-    // 2. After close, the same channel's recv arm is ready with the
-    //    zero value, chosen over the default.
+    // 2. After close, the same channel's recv arm is ready with `None`,
+    //    chosen over the default.
     tx.close()
     let closed = select {
         v = rx.recv() => v
-        default => -1
+        default => Some(-1)
     }
     println("closed = {}", closed)
 
     // 3. A closed channel still drains its buffered values in order,
-    //    then yields the zero value once empty.
+    //    then answers `None` once empty.
     let tx2, rx2 = channel::unbounded()
     tx2.send(7)
     tx2.send(8)
     tx2.close()
-    let first = select {
-        v = rx2.recv() => v
+    let mut drained = #[]
+    for _ in 0..3 {
+        let got = select {
+            Some(v) = rx2.recv() => v
+            None = rx2.recv() => 0
+            default => -1
+        }
+        drained.push(got)
+    }
+    println("buffered = {}", drained)
+
+    // 4. An arm that takes only values is not ready on a closed channel,
+    //    and one that takes only the close waits out the buffer.
+    let tx3, rx3 = channel::unbounded()
+    tx3.send(1)
+    tx3.close()
+    let close_first = select {
+        None = rx3.recv() => "closed"
+        default => "still buffered"
+    }
+    let value = select {
+        Some(v) = rx3.recv() => v
         default => -1
     }
-    let second = select {
-        v = rx2.recv() => v
+    let value_after = select {
+        Some(v) = rx3.recv() => v
         default => -1
     }
-    let third = select {
-        v = rx2.recv() => v
-        default => -1
+    let close_after = select {
+        None = rx3.recv() => "closed"
+        default => "still buffered"
     }
-    println("buffered first = {}", first)
-    println("buffered second = {}", second)
-    println("buffered third = {}", third)
+    println("{} {} {} {}", close_first, value, value_after, close_after)
 }
 
 #[cfg(test)]
@@ -61,36 +80,36 @@ mod select_closed_tests {
         let _tx, rx = channel()
         let chosen = select {
             v = rx.recv() => v
-            default => -1
+            default => Some(-1)
         }
-        let _ = testing::check(chosen == -1, "open+empty recv arm is not ready")
+        let _ = testing::check(chosen == Some(-1), "open+empty recv arm is not ready")
     }
 
     #[test]
-    fn closed_recv_arm_is_ready_with_zero() {
+    fn closed_recv_arm_is_ready_with_none() {
         let tx, rx = channel::unbounded()
         tx.close()
         let chosen = select {
             v = rx.recv() => v
-            default => -1
+            default => Some(-1)
         }
-        let _ = testing::check(chosen == 0, "closed recv arm yields the zero value")
+        let _ = testing::check(chosen.is_none(), "closed recv arm answers None")
     }
 
     #[test]
-    fn closed_channel_drains_before_zero() {
-        let tx, rx = channel()
+    fn closed_channel_drains_before_none() {
+        let tx, rx = channel::unbounded()
         tx.send(42)
         tx.close()
         let a = select {
             v = rx.recv() => v
-            default => -1
+            default => Some(-1)
         }
         let b = select {
             v = rx.recv() => v
-            default => -1
+            default => Some(-1)
         }
-        let _ = testing::check_eq(a, 42, "buffered value drains first")
-        let _ = testing::check_eq(b, 0, "zero value once drained")
+        let _ = testing::check_eq(a, Some(42), "buffered value drains first")
+        let _ = testing::check(b.is_none(), "None once drained")
     }
 }

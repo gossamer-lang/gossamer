@@ -7,11 +7,33 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 
 use crate::loaders::{load_and_check, profile_rss_stage};
 use crate::paths::resolve_entry_arg;
+
+static REPORT_TIMINGS: AtomicBool = AtomicBool::new(false);
+
+/// Makes the next run print its pre-`main` phase timings on stderr.
+pub(crate) fn report_timings() {
+    REPORT_TIMINGS.store(true, Ordering::Relaxed);
+}
+
+/// The line `--timings` prints just before `main` runs.
+fn timings_line(prepare: Duration, reused: bool, check: Duration, load: Duration) -> String {
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    format!(
+        "timings: prepare {:.2}ms{}, check {:.2}ms, load {:.2}ms, total {:.2}ms before main",
+        ms(prepare),
+        if reused { " (cached)" } else { "" },
+        ms(check),
+        ms(load),
+        ms(prepare + check + load),
+    )
+}
 
 /// Runs a source file through the bytecode VM on the process main thread,
 /// where a native build runs `main` too.
@@ -46,11 +68,13 @@ fn run_source_on_vm(
     // comptime fold evaluates `comptime { ... }` / `comptime fn` calls now
     // and splices their result literals in, so the VM compiles a constant
     // identical to what the compiled tiers see.
+    let started = Instant::now();
     let prepared = crate::unit_cache::prepare(
         user_source,
         file_label,
         origins.map_or(&[][..], |(_, spans)| spans),
     );
+    let prepare_time = started.elapsed();
     if let Some(err) = prepared.fold_error {
         return Err(err);
     }
@@ -67,7 +91,9 @@ fn run_source_on_vm(
     // Static checks always run first. A program with parse / resolve /
     // type errors has no business reaching the VM - execution would
     // either crash or produce unsound output.
+    let check_started = Instant::now();
     let (program, tcx) = load_and_check(map.source(file_id), file_id, &map, program)?;
+    let check_time = check_started.elapsed();
     gossamer_interp::set_program_name(file_label);
     gossamer_interp::set_program_args(forwarded);
     gossamer_interp::reset_lazy_iterator_state();
@@ -81,8 +107,20 @@ fn run_source_on_vm(
     vm.set_entry_points(&["main".to_string()]);
     profile_rss_stage("vm_created");
     // `load` consumes `tcx` (moves the interner into the JIT snapshot).
+    let load_started = Instant::now();
     vm.load(&program, tcx, true)
         .map_err(|err| anyhow!("vm load failed: {err}"))?;
+    if REPORT_TIMINGS.load(Ordering::Relaxed) {
+        eprintln!(
+            "{}",
+            timings_line(
+                prepare_time,
+                prepared.reused,
+                check_time,
+                load_started.elapsed()
+            )
+        );
+    }
     vm.clear_source_map();
     profile_rss_stage("vm_loaded");
     drop(program);

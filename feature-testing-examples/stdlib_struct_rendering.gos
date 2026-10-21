@@ -1,0 +1,11 @@
+// A struct the standard library declares renders under the spelling a
+// program writes for it, compares structurally, and formats on every tier.
+use std::fs
+
+fn main() {
+    let m = fs::Metadata { size: 6, is_file: true, is_dir: false, is_symlink: false, readonly: false, modified_unix_ms: 1700000000000 }
+    let d = fs::DirInfo { name: "a.txt", path: "/tmp/a.txt", is_file: true, is_dir: false, is_symlink: false, size: 3, modified_ms: 5 }
+    println(f"{m}")
+    println(f"{d:?}")
+    println(f"{m == m} {d.name} {m.size + d.size}")
+}

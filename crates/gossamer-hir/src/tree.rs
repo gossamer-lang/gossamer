@@ -81,8 +81,8 @@ pub struct HirFn {
     pub has_self: bool,
     /// Where the declaration came from.
     pub origin: FnOrigin,
-    /// The library a foreign function's `#[link(name = "...")]` names, when
-    /// it is not in the platform C library.
+    /// The libraries a foreign function's `#[link(name = "...")]` attributes
+    /// name, joined by `,`, when it is not in the platform C library.
     pub foreign_link: Option<String>,
     /// The C symbol a foreign function's `#[link_name = "..."]` names, when
     /// it differs from the function's own name.
@@ -338,12 +338,16 @@ pub struct HirSelectArm {
 #[derive(Debug, Clone)]
 pub enum HirSelectOp {
     /// `pat = chan.recv()` - receive from `channel`, binding the
-    /// received value to `pattern`.
+    /// `Option` the receive answers to `pattern`, a name or `_`.
     Recv {
-        /// Pattern that receives the value.
+        /// Pattern that receives the `Option`.
         pattern: HirPat,
         /// Channel expression.
         channel: HirExpr,
+        /// The arm is ready when a value waits on the channel.
+        takes_value: bool,
+        /// The arm is ready once the channel is closed and drained.
+        takes_close: bool,
     },
     /// `chan.send(value)` - send `value` on `channel`.
     Send {

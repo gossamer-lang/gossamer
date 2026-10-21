@@ -59,9 +59,10 @@ impl TypeChecker<'_> {
     }
 
     /// Type-checks a `select { … }` expression. Each arm is checked in its own
-    /// scope: a recv arm binds its pattern to the channel's element type, a
-    /// send arm unifies the sent value against the channel's element type, and
-    /// every arm body unifies into the shared result type.
+    /// scope: a recv arm matches its pattern against the `Option` of the
+    /// channel's element type the receive answers, a send arm unifies the sent
+    /// value against the channel's element type, and every arm body unifies
+    /// into the shared result type.
     pub(super) fn check_select(&mut self, arms: &[gossamer_ast::SelectArm]) -> Ty {
         use gossamer_ast::SelectOp;
         let result_ty = self.fresh();
@@ -75,9 +76,13 @@ impl TypeChecker<'_> {
                         TyKind::Receiver(inner) | TyKind::Sender(inner) => inner,
                         _ => self.fresh(),
                     };
+                    let received = self.option_adt_ty(elem);
                     let pat_ty = self.type_of_pattern(pattern);
-                    self.unify(pat_ty, elem, pattern.span);
-                    self.bind_pattern(pattern, elem);
+                    self.unify(pat_ty, received, pattern.span);
+                    if !self.recv_pattern_is_total(pattern, elem) {
+                        self.emit(TypeError::SelectPatternMayNotMatch, pattern.span);
+                    }
+                    self.bind_pattern(pattern, received);
                 }
                 SelectOp::Send { channel, value } => {
                     let chan_ty = self.check_expr(channel);
@@ -96,6 +101,27 @@ impl TypeChecker<'_> {
             self.pop_scope();
         }
         result_ty
+    }
+
+    /// Whether a `select` receive pattern takes every value of the outcome it
+    /// waits for: a name or `_` takes both, `Some(p)` with `p` accepting every
+    /// element takes a value, and `None` takes the close. Anything narrower
+    /// would have the arm consume a value it then cannot bind.
+    fn recv_pattern_is_total(&mut self, pattern: &Pattern, elem: Ty) -> bool {
+        match &pattern.kind {
+            PatternKind::Wildcard => true,
+            PatternKind::Ident {
+                subpattern: None,
+                name,
+                ..
+            } => name.name != "Some",
+            PatternKind::Path(path) => path.segments.last().is_some_and(|s| s.name.name == "None"),
+            PatternKind::TupleStruct { path, elems } => {
+                path.segments.last().is_some_and(|s| s.name.name == "Some")
+                    && matches!(elems.as_slice(), [inner] if self.let_pattern_problem(inner, Some(elem)).is_none())
+            }
+            _ => false,
+        }
     }
 
     pub(super) fn check_for(&mut self, pattern: &Pattern, iter: &Expr, body: &Expr) -> Ty {
@@ -1695,7 +1721,7 @@ impl TypeChecker<'_> {
         // tail to fault at runtime (GX0002 `Shape::Triangle`). Reject it
         // where the enum is known and the tail is neither a declared
         // variant nor an associated function on the enum.
-        if self.reject_unknown_variant_path(path, span) {
+        if self.reject_unknown_variant_path(node, path, span) {
             return self.tcx.error_ty();
         }
         if let Some(ty) = self.check_assoc_const_path(path, span) {
@@ -1860,53 +1886,72 @@ impl TypeChecker<'_> {
 
     pub(super) fn reject_unknown_variant_path(
         &mut self,
+        node: NodeId,
         path: &gossamer_ast::PathExpr,
         span: Span,
     ) -> bool {
-        let n = path.segments.len();
-        if n < 2 {
-            return false;
-        }
-        let enum_name = path.segments[n - 2].name.name.clone();
-        let variant = path.segments[n - 1].name.name.clone();
-        self.reject_unknown_variant(&enum_name, &variant, span)
+        let names: Vec<&str> = path.segments.iter().map(|s| s.name.name.as_str()).collect();
+        self.reject_unknown_variant(node, &names, span)
     }
 
     /// Reports GT0019 when a pattern names a variant its enum does not
     /// declare, and answers whether it did.
     pub(super) fn reject_unknown_variant_pattern(
         &mut self,
+        node: NodeId,
         path: &gossamer_ast::TypePath,
         span: Span,
     ) -> bool {
-        let n = path.segments.len();
-        if n < 2 {
-            return false;
-        }
-        let enum_name = path.segments[n - 2].name.name.clone();
-        let variant = path.segments[n - 1].name.name.clone();
-        self.reject_unknown_variant(&enum_name, &variant, span)
+        let names: Vec<&str> = path.segments.iter().map(|s| s.name.name.as_str()).collect();
+        self.reject_unknown_variant(node, &names, span)
     }
 
-    fn reject_unknown_variant(&mut self, enum_name: &str, variant: &str, span: Span) -> bool {
-        let unknown = self.enum_variants.get(enum_name).is_some_and(|variants| {
-            !variants.contains(variant)
-                && !self
-                    .user_method_owners
-                    .get(variant)
-                    .is_some_and(|owners| owners.contains(enum_name))
-        });
+    /// The resolver answers a path whose tail is not a variant with the
+    /// enum it names; the enum is the one that definition declares, not
+    /// another type that shares its name.
+    fn reject_unknown_variant(&mut self, node: NodeId, names: &[&str], span: Span) -> bool {
+        let [.., enum_name, variant] = names else {
+            return false;
+        };
+        let def = match self.resolutions.get(node) {
+            Some(Resolution::Def {
+                def,
+                kind: DefKind::Enum,
+            }) => def,
+            // A `type` alias of an enum reaches that enum's variants.
+            Some(Resolution::Def {
+                def,
+                kind: DefKind::TypeAlias,
+            }) => match self.alias_enum_def(def) {
+                Some(def) => def,
+                None => return false,
+            },
+            _ => return false,
+        };
+        let Some(variants) = self.tcx.enum_variant_names(def) else {
+            return false;
+        };
+        // An alias spells the enum under another name; its `impl` is keyed by
+        // the enum's own.
+        let declared_name = self
+            .tcx
+            .def_name(def)
+            .and_then(|name| name.rsplit("::").next())
+            .map(str::to_string);
+        let unknown = !variants.iter().any(|v| v == variant)
+            && !self.user_method_owners.get(*variant).is_some_and(|owners| {
+                owners.contains(*enum_name)
+                    || declared_name
+                        .as_ref()
+                        .is_some_and(|name| owners.contains(name.as_str()))
+            });
         if unknown {
-            let mut declared: Vec<String> = self
-                .enum_variants
-                .get(enum_name)
-                .map(|variants| variants.iter().cloned().collect())
-                .unwrap_or_default();
+            let mut declared: Vec<String> = variants.to_vec();
             declared.sort();
             self.emit(
                 TypeError::UnknownVariant {
-                    enum_name: enum_name.to_string(),
-                    variant: variant.to_string(),
+                    enum_name: (*enum_name).to_string(),
+                    variant: (*variant).to_string(),
                     declared,
                 },
                 span,

@@ -1,0 +1,41 @@
+mod effects {
+    use std::sync::AtomicI64
+    pub enum Effect { Announce(String), Focus(String), Quit }
+    static mut QUEUE: Map<i64, Effect> = {}
+    static NEXT: AtomicI64 = AtomicI64::new(0)
+    static HEAD: AtomicI64 = AtomicI64::new(0)
+    pub fn perform(effect: Effect) {
+        let n = NEXT.fetch_add(1)
+        QUEUE[n] = effect
+    }
+    pub fn take() -> Vec<Effect> {
+        let mut out = #[]
+        let end = NEXT.load()
+        let mut k = HEAD.load()
+        while k < end {
+            if let Some(e) = QUEUE.remove(k) { out.push(e) }
+            k += 1
+        }
+        HEAD.store(end)
+        out
+    }
+}
+fn main() {
+    effects::perform(effects::Effect::Announce("hello"))
+    effects::perform(effects::Effect::Focus("editor"))
+    let out = effects::take()
+    assert_eq(out.len(), 2)
+    println(f"{out.len()} effects")
+    for e in out {
+        match e {
+            effects::Effect::Announce(text) => println(f"announce {text}")
+            effects::Effect::Focus(text) => println(f"focus {text}")
+            effects::Effect::Quit => println("quit")
+        }
+    }
+    effects::perform(effects::Effect::Announce("again"))
+    let next = effects::take()
+    assert_eq(next.len(), 1)
+    assert_eq(effects::take().len(), 0)
+    println("shared static handles ok")
+}

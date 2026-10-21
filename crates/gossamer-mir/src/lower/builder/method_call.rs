@@ -203,6 +203,23 @@ impl<'a> Builder<'a> {
             self.pop_scope();
             return result;
         }
+        // A call that writes its receiver below a struct, tuple, or array
+        // `static mut` (`CATALOG.table.insert(k, v)`) works on the static's
+        // value, which is then stored back into the cell.
+        if gossamer_types::is_mutating_method_name(method.name.as_str())
+            && let Some((root, sref)) = self.aggregate_static_root(receiver)
+        {
+            let held = self.lower_expr(root)?;
+            let name = format!("__static_place_{}", receiver.id.0);
+            self.push_scope();
+            self.bind_local(&name, held);
+            let rewritten = super::expr::replace_place_root(receiver, &name);
+            let result = self.lower_method_call(&rewritten, method, args, ty, span, owner);
+            self.pop_scope();
+            self.emit_mark_shared_if_rc(held, span);
+            self.emit_static_store(sref, Operand::Copy(Place::local(held)), span);
+            return result;
+        }
         // A `&mut <scalar / String>` reference is the address of the
         // caller's slot, so a method on it dispatches on the value the slot
         // holds, exactly as `(*x).m()` does. The rebinding string methods

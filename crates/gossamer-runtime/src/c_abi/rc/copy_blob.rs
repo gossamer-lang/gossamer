@@ -218,7 +218,7 @@ pub(super) unsafe fn copy_blob_owner(payload: *mut u8) -> Option<&'static CopyBl
 /// the owner tag decides. Region storage is never a counted blob: its
 /// region's pop reclaims it, possibly already, so its bytes are never read.
 #[inline]
-pub(super) unsafe fn is_copy_blob(payload: *mut u8) -> bool {
+pub(crate) unsafe fn is_copy_blob(payload: *mut u8) -> bool {
     if in_region_arena(payload) {
         return false;
     }
@@ -298,6 +298,7 @@ unsafe fn meta_names_map_child(meta: *const i64) -> bool {
                 vec_elem_kind::HEAP,
                 vec_elem_kind::ITER,
                 vec_elem_kind::ITER_PAIR,
+                vec_elem_kind::JSON,
             ]
             .iter()
             .any(|kind| child == i64::from(*kind))
@@ -332,6 +333,7 @@ unsafe fn meta_names_map_child(meta: *const i64) -> bool {
                     | gossamer_abi::rc::RC_CHILD_HEAP
                     | gossamer_abi::rc::RC_CHILD_ITER
                     | gossamer_abi::rc::RC_CHILD_ITER_PAIR
+                    | gossamer_abi::rc::RC_CHILD_JSON
             ) {
                 return true;
             }
@@ -475,6 +477,16 @@ unsafe fn rc_alloc_from(
 
 /// Layout of a runtime-built blob whose words own no heap child.
 pub(crate) static LEAF_BLOB_META: [i64; 2] = [RC_KIND_STRUCT_GUARDED, 0];
+
+/// Layout of a runtime-built `(String, String)` blob, which owns both strings.
+pub(crate) static STRING_PAIR_META: [i64; 6] = [
+    gossamer_abi::rc::RC_KIND_STRUCT,
+    1,
+    0,
+    2,
+    gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT,
+    (gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 1,
+];
 
 /// Copies a container element's `size` bytes at `src` into a counted blob laid
 /// out by `meta`, which takes over the shares those words carry, and answers
@@ -1025,6 +1037,22 @@ pub unsafe extern "C" fn gos_rt_option_slot_retain(slot: *const i64) {
         // SAFETY: `payload` is a live copy blob.
         unsafe { gos_rt_rc_retain(payload) };
     }
+}
+
+/// Release the payload of the by-value `{disc, payload}` Option/Result at
+/// `slot` only when it is `Some` / `Ok` and the payload is a copy-blob owner:
+/// an `Err` payload that is not a copy blob is given back through its own
+/// kind, and may already be gone when the slot is. Null-safe.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_option_slot_release_ok(slot: *const i64) {
+    // SAFETY: `slot` is non-null (checked first) and this shim's two-word carrier argument (C-ABI
+    // contract).
+    if slot.is_null() || unsafe { *slot } != 0 {
+        return;
+    }
+    // SAFETY: `slot` is this shim's argument, live for the call (C-ABI contract); non-null,
+    // checked above.
+    unsafe { gos_rt_option_slot_release(slot) };
 }
 
 /// Retain the payload of the by-value `{disc, payload}` Option/Result at

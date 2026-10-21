@@ -409,38 +409,11 @@ pub unsafe extern "C" fn gos_rt_vec_format_vec_string(v: *const GosVec, bare: i3
     })
 }
 
-/// Renders a flat `[u8; N]` raw buffer as `[v0, v1, …]`. A `u8` array
-/// is byte-packed rather than slot-per-element, so it reads with a
-/// stride of one and cannot share [`gos_rt_arr_format_i64`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_arr_format_u8(p: *const u8, len: i64) -> *mut c_char {
-    ffi_entry!({
-        if p.is_null() || len <= 0 {
-            return alloc_cstring(b"[]");
-        }
-        let len_usize = len.max(0) as usize;
-        let mut out = String::with_capacity(2 + len_usize * 4);
-        out.push('[');
-        for i in 0..len_usize {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            // SAFETY: `p` is non-null (checked above) and addresses `len` bytes (C-ABI contract),
-            // and `i` is below `len`.
-            let n = unsafe { p.add(i).read_unaligned() };
-            out.push_str(&format!("{n}"));
-        }
-        out.push(']');
-        alloc_cstring(out.as_bytes())
-    })
-}
-
 /// Renders a flat `[i64; N]` raw buffer as `[v0, v1, …]`. Used by
 /// the print/format dispatch for fixed-size array literals
 /// (`let xs = [a, b, c]`) whose storage is a flat heap blob, not a
 /// `GosVec` with a header. Each element occupies one i64 slot
-/// regardless of platform pointer width; a `[u8; N]` is byte-packed
-/// instead and goes through [`gos_rt_arr_format_u8`].
+/// regardless of platform pointer width.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_arr_format_i64(p: *const i64, len: i64) -> *mut c_char {
     ffi_entry!({

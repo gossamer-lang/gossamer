@@ -33,6 +33,13 @@ pub struct GosAtomicI64 {
 
 super::rc::managed_handle!(GosAtomicI64);
 
+/// The cell of a live atomic handle, for the bytecode VM, which holds the same
+/// handle compiled code does so both tiers act on one value.
+#[must_use]
+pub fn atomic_i64_cell(a: &GosAtomicI64) -> &AtomicI64 {
+    &a.inner
+}
+
 fn record_atomic_acquire(a: &GosAtomicI64) {
     let from = a.last_release_gid.load(Ordering::Acquire);
     if from >= 0 {

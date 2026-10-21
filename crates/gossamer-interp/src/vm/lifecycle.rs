@@ -75,7 +75,7 @@ impl Vm {
         tcx_snapshot: Option<Arc<TyCtxt>>,
         enum_shape_defs: Option<Arc<std::collections::HashMap<u32, u32>>>,
         enum_shape_handles: Option<Arc<Vec<Arc<crate::value::NativeEnumShape>>>>,
-        struct_shape_defs: Option<Arc<std::collections::HashMap<u32, u32>>>,
+        struct_shape_defs: Option<Arc<std::collections::HashMap<Ty, u32>>>,
         struct_shape_handles: Option<Arc<Vec<Arc<crate::value::NativeStructShape>>>>,
         jit_eager_names: Arc<std::collections::HashSet<String>>,
         jit_cache_key: Option<Arc<str>>,
@@ -648,7 +648,7 @@ impl Vm {
         // Names of `static mut` items. The compiler lowers an
         // assignment rooted at one of these into an `Op::StoreStatic`
         // against the shared `Global::MutStatic` cell.
-        let mut_statics = crate::compile::collect_mut_statics(program);
+        let mut_statics = crate::compile::collect_mut_statics(program, &tcx);
         // (Previously: a per-program JSON struct-schema registry was
         // built here so the VM tier could intercept
         // `<Type>::from_json` calls. 0.7.0 replaces that with
@@ -792,13 +792,22 @@ impl Vm {
                         }
                         Err(err) => return Err(err),
                     };
-                    let global = if decl.mutable {
-                        Global::MutStatic(Arc::new(parking_lot::Mutex::new(value.clone())))
-                    } else {
-                        Global::Value(value.clone())
-                    };
+                    let global =
+                        if decl.mutable || !crate::compile::static_ty_is_scalar(&tcx, decl.ty) {
+                            // A shared cell, so `__gos_static_init`'s
+                            // entry-time write and every later read land on
+                            // the one value - a handle (an atomic, a mutex)
+                            // must name the same object for the whole run.
+                            Global::MutStatic(Arc::new(static_cell::StaticCell::new(
+                                value.clone(),
+                                item.def,
+                                jit_backend::shared_static_class(&tcx, decl.ty),
+                            )))
+                        } else {
+                            Global::Value(value.clone())
+                        };
                     self.register_item_value(module_prefix.as_deref(), &decl.name.name, global);
-                    if !decl.mutable {
+                    if !decl.mutable && crate::compile::static_ty_is_scalar(&tcx, decl.ty) {
                         if let Some(def) = item.def {
                             module_consts.insert(def, value);
                         }
@@ -912,9 +921,17 @@ impl Vm {
             let mut pending = Vec::new();
             let mut last_err = None;
             for item in std::mem::take(&mut deferred_initializers) {
-                let (name, value_expr, mutable) = match &item.kind {
-                    HirItemKind::Const(decl) => (&decl.name.name, &decl.value, false),
-                    HirItemKind::Static(decl) => (&decl.name.name, &decl.value, decl.mutable),
+                let (name, value_expr, mutable, ty) = match &item.kind {
+                    HirItemKind::Const(decl) => (&decl.name.name, &decl.value, false, decl.ty),
+                    // A static lands here only when its early evaluation
+                    // failed (an initializer that references an item
+                    // declared later), so nothing is registered under its
+                    // name yet and this pass is the first writer. The same
+                    // predicate pass B applies: a non-scalar static shares
+                    // the cell the `__gos_static_init` prologue writes.
+                    HirItemKind::Static(decl) => {
+                        (&decl.name.name, &decl.value, decl.mutable, decl.ty)
+                    }
                     _ => continue,
                 };
                 match self.eval_initializer(
@@ -936,8 +953,12 @@ impl Vm {
                         } else {
                             Some(item.module_path.join("::"))
                         };
-                        let global = if mutable {
-                            Global::MutStatic(Arc::new(parking_lot::Mutex::new(value)))
+                        let global = if mutable || !crate::compile::static_ty_is_scalar(&tcx, ty) {
+                            Global::MutStatic(Arc::new(static_cell::StaticCell::new(
+                                value,
+                                item.def,
+                                jit_backend::shared_static_class(&tcx, ty),
+                            )))
                         } else {
                             Global::Value(value)
                         };
@@ -1023,218 +1044,14 @@ impl Vm {
             && has_jit_eligible_fn(program)
             && !self.coverage_active()
         {
-            let mut jit_tcx = tcx.clone();
-            let slice_pattern_bodies = jit_slice_pattern_body_names(program);
-            let (shapes, enum_shape_handles) = build_native_enum_shapes(program, &jit_tcx);
-            let (struct_shapes, struct_shape_handles) =
-                build_native_struct_shapes(program, &jit_tcx);
-            // Lift closures exactly as the AOT pipeline does: MIR represents a
-            // callable as a top-level body plus an env blob holding its
-            // address, so a closure that is still an inline expression here
-            // lowers to a null placeholder the native tier would call through.
-            // The VM's own bytecode comes from the unlifted `program`, so the
-            // rewrite happens on a private copy.
-            let lifted = gossamer_hir::lift_closures(program.clone(), &mut jit_tcx);
-            // The VM's enum values are heap nodes the JIT reads in place.
-            jit_tcx.keep_enums_on_heap();
-            let mut bodies = gossamer_mir::lower_program(&lifted, &mut jit_tcx);
-            bodies.retain(|body| !slice_pattern_bodies.contains(body.name.as_str()));
-            // Drop what no entry reaches before the passes that are paid per
-            // body run over it. The snapshot exists to promote hot bodies, and
-            // a body no entry reaches is never entered, so this changes how
-            // much work the load does rather than what the program can call.
             let roots = self.entry_points.borrow().clone();
-            if !roots.is_empty() {
-                gossamer_mir::prune_scoped(
-                    &mut bodies,
-                    &roots,
-                    gossamer_mir::Scope::BeforeSpecialisation,
-                );
-            }
-            // Monomorphise before the JIT sees the bodies, exactly as the LLVM
-            // AOT pipeline does. A generic function / method / struct
-            // instantiated with a concrete type must reach the JIT as a
-            // specialised body with concrete field and return types; left as a
-            // `Param T` template, the JIT statically under-sizes a multi-slot
-            // generic-struct aggregate (`Wrapper<Point>` lays out one slot
-            // instead of two) and overflows its stack slot. The bytecode VM is
-            // unaffected - it runs the separately-compiled chunks, not these
-            // MIR bodies, which are JIT-only.
-            let template_names: std::collections::HashMap<u32, String> = bodies
-                .iter()
-                .filter_map(|body| Some((body.def?.local, body.name.clone())))
-                .collect();
-            gossamer_mir::monomorphise(&lifted, &mut bodies, &mut jit_tcx);
-            let effects = gossamer_mir::collect_program_effects(&lifted, &jit_tcx);
-            drop(lifted);
-            if !roots.is_empty() {
-                gossamer_mir::prune_unreachable(&mut bodies, &roots);
-            }
-            // The in-process JIT's win is eliding repeated bytecode dispatch
-            // inside native recursion. Gate the compile snapshot on that
-            // shape so programs that cannot promote a useful body do not
-            // prepare the native compiler.
-            if jit_backend::has_worthy_jit_body(&bodies, &jit_tcx, &shapes, &struct_shapes) {
-                // Preserve the pre-inline safety decision. Inlining an
-                // unsupported aggregate-boundary callee can erase the call
-                // edge that rejected its caller without making the resulting
-                // aggregate ABI safe to compile.
-                let pre_inline_names =
-                    jit_backend::jit_compile_body_names(&bodies, &jit_tcx, &shapes, &struct_shapes);
-                // Keep static-mut accessors as distinct bodies. Inlining one
-                // into a hot caller duplicates the accessor in MIR, after
-                // which the static-consistency gate correctly rejects the
-                // caller because the original body would remain on the VM's
-                // separate static cell.
-                if !jit_bodies_access_mut_static(&bodies) {
-                    gossamer_mir::inline_trivial_wrappers(&mut bodies);
-                    gossamer_mir::inline_small_callees(&mut bodies, &jit_tcx);
-                    gossamer_mir::inline_general(&mut bodies, &jit_tcx);
-                }
-                // Same post-inline cleanup the AOT pipeline runs: the
-                // cranelift lowering is shared with `gos build`, so the
-                // JIT must hand it the same MIR shape or the tiers can
-                // diverge on constructs only one shape exercises.
-                for body in &mut bodies {
-                    gossamer_mir::optimise_for_jit_with_effects(body, &jit_tcx, &effects);
-                }
-                gossamer_mir::propagate_entry_bounds(&mut bodies, &jit_tcx, &effects);
-                let mut compile_names =
-                    jit_backend::jit_compile_body_names(&bodies, &jit_tcx, &shapes, &struct_shapes);
-                compile_names.retain(|name| pre_inline_names.contains(name));
-                if jit_call::jit_trace() {
-                    for decision in jit_backend::jit_promotion_report(
-                        &bodies,
-                        &jit_tcx,
-                        &shapes,
-                        &struct_shapes,
-                    ) {
-                        eprintln!(
-                            "jit: decision body={} admitted={} reasons={}",
-                            decision.name,
-                            decision.admitted,
-                            decision.reasons.join(","),
-                        );
-                    }
-                }
-                bodies.retain(|body| compile_names.contains(body.name.as_str()));
-                if bodies.is_empty() {
-                    self.jit.write().compiled = JitCompileState::Failed;
-                    *self.jit_eager_names.borrow_mut() = Arc::new(std::collections::HashSet::new());
-                    gossamer_runtime::collect_process_allocator(true);
-                    if let Some(globals) = Arc::get_mut(&mut self.globals) {
-                        globals.shrink_to_fit();
-                    }
-                    return Ok(());
-                }
-                compact_jit_bodies(&mut bodies);
-                // The same gate `gos build` runs before any native backend
-                // sees MIR. A Cranelift lowering failure degrades silently to
-                // bytecode, so without this a malformed body would be a
-                // miscompile with no signal; refusing the whole promoted set
-                // keeps the program on the tier that is always correct.
-                if let Err(errors) = gossamer_mir::verify::verify_program(&bodies, &jit_tcx) {
-                    if jit_call::jit_trace() {
-                        for err in &errors {
-                            eprintln!("jit: MIR invariant violation: {err:?}");
-                        }
-                    }
-                    self.jit.write().compiled = JitCompileState::Failed;
-                    *self.jit_eager_names.borrow_mut() = Arc::new(std::collections::HashSet::new());
-                    return Ok(());
-                }
-                self.jit_counters
-                    .retained_preparation_bytes(jit_preparation_bytes(
-                        &bodies,
-                        &shapes,
-                        &struct_shapes,
-                    ));
-                // Compute the eager-compile set from the post-inlining
-                // bodies now, while they are still in hand: the deferred
-                // compile below releases `mir_bodies` for spawn-free
-                // programs, so this is the last point the set is derivable.
-                // The VM runs a generic as one chunk under its source name, not
-                // one per specialisation, so a loop-bearing specialisation makes
-                // that chunk eager: its first call is the loop's first entry.
-                let mut eager_names: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-                for name in
-                    jit_backend::jit_eager_loop_bodies(&bodies, &jit_tcx, &shapes, &struct_shapes)
-                {
-                    match gossamer_mir::template_of(&name) {
-                        Some(gossamer_mir::Template::Function(def)) => {
-                            if let Some(source) = template_names.get(&def) {
-                                eager_names.insert(source.clone());
-                            }
-                        }
-                        Some(gossamer_mir::Template::Method(base)) => {
-                            eager_names.insert(base.to_string());
-                        }
-                        None => {}
-                    }
-                    eager_names.insert(name);
-                }
-                *self.jit_eager_names.borrow_mut() = Arc::new(eager_names);
-                // Keep the full, collision-free compiler description rather
-                // than a lossy hash: an accidental cache hit could dispatch a
-                // function compiled for a different type layout. This string
-                // exists only while deferred tier-up remains possible and is
-                // released together with the MIR/type snapshot.
-                *self.jit_cache_key.borrow_mut() = Some(Arc::from(jit_artifact_key(
-                    &bodies,
-                    &jit_tcx,
-                    &shapes,
-                    &struct_shapes,
-                )));
-                *self.enum_shape_defs.borrow_mut() = Some(Arc::new(shapes));
-                *self.enum_shape_handles.borrow_mut() = Some(enum_shape_handles);
-                *self.struct_shape_defs.borrow_mut() = Some(Arc::new(struct_shapes));
-                *self.struct_shape_handles.borrow_mut() = Some(struct_shape_handles);
-                if let Some(map) = self.source_map.as_deref() {
-                    let mut locations = HashMap::new();
-                    for body in &bodies {
-                        // Every position, and every call an inliner placed
-                        // code through, since a JIT frame names both.
-                        let mut spans = Vec::new();
-                        for block in &body.blocks {
-                            let positions = block
-                                .stmts
-                                .iter()
-                                .map(|statement| (statement.span, &statement.inlined))
-                                .chain(std::iter::once((
-                                    block.terminator_span.unwrap_or(body.span),
-                                    &block.terminator_inlined,
-                                )));
-                            for (span, chain) in positions {
-                                spans.push(span);
-                                if let Some(chain) = chain {
-                                    spans.extend(chain.iter().map(|frame| frame.call));
-                                }
-                            }
-                        }
-                        for span in spans {
-                            locations.entry(span).or_insert_with(|| {
-                                crate::compile::resolve_source_location(map, span)
-                            });
-                        }
-                    }
-                    *self.jit_source_locations.borrow_mut() = Some(Arc::new(locations));
-                }
-                *self.mir_bodies.borrow_mut() = Some(Arc::new(bodies));
-                // Store the JIT-local type context. MIR lowering and
-                // monomorphisation intern additional types, so they must not
-                // mutate the `tcx` the bytecode VM compiled its chunks
-                // against; otherwise an empty promotion set can still perturb
-                // VM-only execution.
-                *self.tcx_snapshot.borrow_mut() = Some(Arc::new(jit_tcx));
-                // A spawn-free program never hands its MIR to a child Vm, so
-                // the deferred compile can free it the moment it lands - well
-                // before the program's allocation peak.
-                self.jit_droppable
-                    .set(!program_has_spawn_sites(&self.globals));
-            } else {
-                self.jit.write().compiled = JitCompileState::Failed;
-            }
+            self.jit_droppable
+                .set(!program_has_spawn_sites(&self.globals));
+            let program = program.clone();
+            let jit_tcx = tcx.clone();
+            let source_map = self.source_map.clone();
+            let prepared = prepare_jit(program, jit_tcx, &roots, source_map);
+            self.adopt_prepared_jit(&prepared);
         } else {
             self.jit.write().compiled = JitCompileState::Failed;
             // No JIT snapshot to retain. Every chunk compiled against the
@@ -1257,6 +1074,35 @@ impl Vm {
     /// runs at most once per `Arc<RwLock<JitState>>`. Failures
     /// transition to `Failed` and stay there - no observable
     /// behaviour change for the bytecode path.
+    /// Takes on a prepared promotion snapshot.
+    pub(crate) fn adopt_prepared_jit(&self, prepared: &PreparedJit) {
+        match prepared {
+            PreparedJit::Nothing { collect } => {
+                self.jit.write().compiled = JitCompileState::Failed;
+                *self.jit_eager_names.borrow_mut() = Arc::new(std::collections::HashSet::new());
+                if *collect {
+                    gossamer_runtime::collect_process_allocator(true);
+                }
+            }
+            PreparedJit::Ready(ready) => {
+                self.jit_counters
+                    .retained_preparation_bytes(ready.preparation_bytes);
+                *self.jit_eager_names.borrow_mut() = Arc::clone(&ready.eager_names);
+                *self.jit_cache_key.borrow_mut() = Some(Arc::clone(&ready.cache_key));
+                *self.enum_shape_defs.borrow_mut() = Some(Arc::clone(&ready.enum_shapes));
+                *self.enum_shape_handles.borrow_mut() = Some(Arc::clone(&ready.enum_shape_handles));
+                *self.struct_shape_defs.borrow_mut() = Some(Arc::clone(&ready.struct_shapes));
+                *self.struct_shape_handles.borrow_mut() =
+                    Some(Arc::clone(&ready.struct_shape_handles));
+                self.jit_source_locations
+                    .borrow_mut()
+                    .clone_from(&ready.source_locations);
+                *self.mir_bodies.borrow_mut() = Some(Arc::clone(&ready.bodies));
+                *self.tcx_snapshot.borrow_mut() = Some(Arc::clone(&ready.tcx));
+            }
+        }
+    }
+
     pub(crate) fn try_compile_jit_lazy(&self, _trigger: &str) {
         // Fast read-only check first: avoids exclusive locks once
         // the compile has settled (Done / Failed). The hot
@@ -1324,16 +1170,33 @@ impl Vm {
         let shape_defs_arc = self.enum_shape_defs.borrow_mut().take();
         let shape_defs: &std::collections::HashMap<u32, u32> =
             shape_defs_arc.as_deref().unwrap_or(&empty);
+        let no_struct_shapes = std::collections::HashMap::new();
         let struct_shape_defs_arc = self.struct_shape_defs.borrow_mut().take();
-        let struct_shape_defs: &std::collections::HashMap<u32, u32> =
-            struct_shape_defs_arc.as_deref().unwrap_or(&empty);
+        let struct_shape_defs: &std::collections::HashMap<Ty, u32> = struct_shape_defs_arc
+            .as_deref()
+            .unwrap_or(&no_struct_shapes);
         let cache_key = self.jit_cache_key.borrow_mut().take();
         // The JIT state is currently one-shot: after a successful compile it is
         // Done, and later hot bodies will not request another artifact. Compile
         // the whole admitted set from the first trigger so one small helper
         // cannot starve unrelated hot loops for the rest of the process.
-        let selected =
-            jit_backend::jit_compile_body_names(&bodies, &tcx, shape_defs, struct_shape_defs);
+        // Statics interpreted code has written hold VM values compiled code
+        // cannot read, so their accessors stay interpreted.
+        let vm_statics: std::collections::HashSet<String> = self
+            .globals
+            .values()
+            .filter_map(|global| match global {
+                Global::MutStatic(cell) if cell.written() => cell.symbol().map(str::to_string),
+                _ => None,
+            })
+            .collect();
+        let selected = jit_backend::jit_compile_body_names_with_vm_statics(
+            &bodies,
+            &tcx,
+            shape_defs,
+            struct_shape_defs,
+            &vm_statics,
+        );
         let entry_names = jit_backend::jit_entry_body_names_with_admitted(&bodies, &tcx, &selected);
         bodies.retain(|body| selected.contains(body.name.as_str()));
         if bodies.is_empty() {
@@ -1371,6 +1234,16 @@ impl Vm {
             &tcx,
             shape_defs,
             struct_shape_defs,
+            &vm_statics,
+            &|symbol, default| {
+                self.globals
+                    .values()
+                    .find_map(|global| match global {
+                        Global::MutStatic(cell) if cell.symbol() == Some(symbol) => Some(cell),
+                        _ => None,
+                    })
+                    .map(|cell| cell.storage(default))
+            },
         );
         let elapsed = started.elapsed();
         self.jit_counters.compile_finished(elapsed);
@@ -1480,6 +1353,9 @@ impl Vm {
         }
         drop(state);
         self.jit_counters.promoted_functions(installed_count);
+        if std::env::var("GOS_JIT_STATS").is_ok_and(|value| value == "1") {
+            eprintln!("gos-jit-stats: compiled={installed_count}");
+        }
         for chunk_state in self.chunk_state_map.borrow().values() {
             *chunk_state.jit_resolve.borrow_mut() = crate::vm::JitResolve::Unresolved;
         }
@@ -2600,6 +2476,245 @@ impl Vm {
     }
 }
 
+/// What preparing the JIT produced: the MIR and shapes a tier-up compiles
+/// from, or nothing worth compiling.
+pub(crate) enum PreparedJit {
+    /// No body can be promoted. `collect` asks the allocator to give back
+    /// what the preparation used.
+    Nothing {
+        collect: bool,
+    },
+    Ready(Box<ReadyJit>),
+}
+
+/// The prepared promotion snapshot, shared by every `Vm` that adopts it.
+pub(crate) struct ReadyJit {
+    bodies: Arc<Vec<Body>>,
+    tcx: Arc<TyCtxt>,
+    enum_shapes: Arc<std::collections::HashMap<u32, u32>>,
+    enum_shape_handles: Arc<Vec<Arc<crate::value::NativeEnumShape>>>,
+    struct_shapes: Arc<std::collections::HashMap<Ty, u32>>,
+    struct_shape_handles: Arc<Vec<Arc<crate::value::NativeStructShape>>>,
+    eager_names: Arc<std::collections::HashSet<String>>,
+    cache_key: Arc<str>,
+    source_locations: Option<Arc<HashMap<gossamer_lex::Span, crate::bytecode::SourceLocation>>>,
+    preparation_bytes: usize,
+}
+
+/// Lowers `program` to the optimised MIR the JIT promotes from, keeping only
+/// what `roots` reach.
+fn prepare_jit(
+    program: HirProgram,
+    tcx: TyCtxt,
+    roots: &[String],
+    source_map: Option<Arc<gossamer_lex::SourceMap>>,
+) -> PreparedJit {
+    let mut jit_tcx = tcx;
+    let slice_pattern_bodies = jit_slice_pattern_body_names(&program);
+    let (mut struct_shapes, mut struct_shape_handles) =
+        build_native_struct_shapes(&program, &jit_tcx);
+    let (shapes, enum_shape_handles) = build_native_enum_shapes(&program, &jit_tcx, &struct_shapes);
+    // Lift closures exactly as the AOT pipeline does: MIR represents a
+    // callable as a top-level body plus an env blob holding its
+    // address, so a closure that is still an inline expression here
+    // lowers to a null placeholder the native tier would call through.
+    // The VM's own bytecode comes from the unlifted `program`, so the
+    // rewrite happens on a private copy.
+    let lifted = gossamer_hir::lift_closures(program, &mut jit_tcx);
+    // The VM's enum values are heap nodes the JIT reads in place.
+    jit_tcx.keep_enums_on_heap();
+    let mut bodies = gossamer_mir::lower_program(&lifted, &mut jit_tcx);
+    bodies.retain(|body| !slice_pattern_bodies.contains(body.name.as_str()));
+    // Drop what no entry reaches before the passes that are paid per
+    // body run over it. The snapshot exists to promote hot bodies, and
+    // a body no entry reaches is never entered, so this changes how
+    // much work the load does rather than what the program can call.
+    if !roots.is_empty() {
+        gossamer_mir::prune_scoped(
+            &mut bodies,
+            roots,
+            gossamer_mir::Scope::BeforeSpecialisation,
+        );
+    }
+    // Monomorphise before the JIT sees the bodies, exactly as the LLVM
+    // AOT pipeline does. A generic function / method / struct
+    // instantiated with a concrete type must reach the JIT as a
+    // specialised body with concrete field and return types; left as a
+    // `Param T` template, the JIT statically under-sizes a multi-slot
+    // generic-struct aggregate (`Wrapper<Point>` lays out one slot
+    // instead of two) and overflows its stack slot. The bytecode VM is
+    // unaffected - it runs the separately-compiled chunks, not these
+    // MIR bodies, which are JIT-only.
+    let template_names: std::collections::HashMap<u32, String> = bodies
+        .iter()
+        .filter_map(|body| Some((body.def?.local, body.name.clone())))
+        .collect();
+    gossamer_mir::monomorphise(&lifted, &mut bodies, &mut jit_tcx);
+    // A generic struct lays out per instantiation, which monomorphisation
+    // has just registered, so its shapes follow it.
+    let (generic_shapes, generic_handles) =
+        build_generic_struct_shapes(&lifted, &jit_tcx, &struct_shapes);
+    if !generic_shapes.is_empty() {
+        struct_shapes.extend(generic_shapes);
+        struct_shape_handles = Arc::new(
+            struct_shape_handles
+                .iter()
+                .chain(generic_handles.iter())
+                .cloned()
+                .collect(),
+        );
+    }
+    let effects = gossamer_mir::collect_program_effects(&lifted, &jit_tcx);
+    drop(lifted);
+    if !roots.is_empty() {
+        gossamer_mir::prune_unreachable(&mut bodies, roots, &jit_tcx);
+    }
+    // The in-process JIT's win is eliding repeated bytecode dispatch
+    // inside native recursion. Gate the compile snapshot on that
+    // shape so programs that cannot promote a useful body do not
+    // prepare the native compiler.
+    if jit_backend::has_worthy_jit_body(&bodies, &jit_tcx, &shapes, &struct_shapes) {
+        // Preserve the pre-inline safety decision. Inlining an
+        // unsupported aggregate-boundary callee can erase the call
+        // edge that rejected its caller without making the resulting
+        // aggregate ABI safe to compile.
+        let pre_inline_names =
+            jit_backend::jit_compile_body_names(&bodies, &jit_tcx, &shapes, &struct_shapes);
+        // Keep static-mut accessors as distinct bodies. Inlining one
+        // into a hot caller duplicates the accessor in MIR, after
+        // which the static-consistency gate correctly rejects the
+        // caller because the original body would remain on the VM's
+        // separate static cell.
+        if !jit_bodies_access_mut_static(&bodies) {
+            gossamer_mir::inline_trivial_wrappers(&mut bodies);
+            gossamer_mir::inline_small_callees(&mut bodies, &jit_tcx);
+            gossamer_mir::inline_general(&mut bodies, &jit_tcx);
+        }
+        // Same post-inline cleanup the AOT pipeline runs: the
+        // cranelift lowering is shared with `gos build`, so the
+        // JIT must hand it the same MIR shape or the tiers can
+        // diverge on constructs only one shape exercises.
+        for body in &mut bodies {
+            gossamer_mir::optimise_for_jit_with_effects(body, &jit_tcx, &effects);
+        }
+        gossamer_mir::propagate_entry_bounds(&mut bodies, &jit_tcx, &effects);
+        let mut compile_names =
+            jit_backend::jit_compile_body_names(&bodies, &jit_tcx, &shapes, &struct_shapes);
+        compile_names.retain(|name| pre_inline_names.contains(name));
+        if jit_call::jit_trace() {
+            for decision in
+                jit_backend::jit_promotion_report(&bodies, &jit_tcx, &shapes, &struct_shapes)
+            {
+                eprintln!(
+                    "jit: decision body={} admitted={} reasons={}",
+                    decision.name,
+                    decision.admitted,
+                    decision.reasons.join(","),
+                );
+            }
+        }
+        bodies.retain(|body| compile_names.contains(body.name.as_str()));
+        if bodies.is_empty() {
+            return PreparedJit::Nothing { collect: true };
+        }
+        compact_jit_bodies(&mut bodies);
+        // The same gate `gos build` runs before any native backend
+        // sees MIR. A Cranelift lowering failure degrades silently to
+        // bytecode, so without this a malformed body would be a
+        // miscompile with no signal; refusing the whole promoted set
+        // keeps the program on the tier that is always correct.
+        if let Err(errors) = gossamer_mir::verify::verify_program(&bodies, &jit_tcx) {
+            if jit_call::jit_trace() {
+                for err in &errors {
+                    eprintln!("jit: MIR invariant violation: {err:?}");
+                }
+            }
+            return PreparedJit::Nothing { collect: false };
+        }
+        let preparation_bytes = jit_preparation_bytes(&bodies, &shapes, &struct_shapes);
+        // Compute the eager-compile set from the post-inlining
+        // bodies now, while they are still in hand: the deferred
+        // compile below releases `mir_bodies` for spawn-free
+        // programs, so this is the last point the set is derivable.
+        // The VM runs a generic as one chunk under its source name, not
+        // one per specialisation, so a loop-bearing specialisation makes
+        // that chunk eager: its first call is the loop's first entry.
+        let mut eager_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for name in jit_backend::jit_eager_loop_bodies(&bodies, &jit_tcx, &shapes, &struct_shapes) {
+            match gossamer_mir::template_of(&name) {
+                Some(gossamer_mir::Template::Function(def)) => {
+                    if let Some(source) = template_names.get(&def) {
+                        eager_names.insert(source.clone());
+                    }
+                }
+                Some(gossamer_mir::Template::Method(base)) => {
+                    eager_names.insert(base.to_string());
+                }
+                None => {}
+            }
+            eager_names.insert(name);
+        }
+
+        // Keep the full, collision-free compiler description rather
+        // than a lossy hash: an accidental cache hit could dispatch a
+        // function compiled for a different type layout. This string
+        // exists only while deferred tier-up remains possible and is
+        // released together with the MIR/type snapshot.
+        let cache_key: Arc<str> =
+            Arc::from(jit_artifact_key(&bodies, &jit_tcx, &shapes, &struct_shapes));
+        let mut source_locations = None;
+        if let Some(map) = source_map.as_deref() {
+            let mut locations = HashMap::new();
+            for body in &bodies {
+                // Every position, and every call an inliner placed
+                // code through, since a JIT frame names both.
+                let mut spans = Vec::new();
+                for block in &body.blocks {
+                    let positions = block
+                        .stmts
+                        .iter()
+                        .map(|statement| (statement.span, &statement.inlined))
+                        .chain(std::iter::once((
+                            block.terminator_span.unwrap_or(body.span),
+                            &block.terminator_inlined,
+                        )));
+                    for (span, chain) in positions {
+                        spans.push(span);
+                        if let Some(chain) = chain {
+                            spans.extend(chain.iter().map(|frame| frame.call));
+                        }
+                    }
+                }
+                for span in spans {
+                    locations
+                        .entry(span)
+                        .or_insert_with(|| crate::compile::resolve_source_location(map, span));
+                }
+            }
+            source_locations = Some(Arc::new(locations));
+        }
+        // The JIT-local type context. MIR lowering and
+        // monomorphisation intern additional types, so they must not
+        // mutate the `tcx` the bytecode VM compiled its chunks
+        // against; otherwise an empty promotion set can still perturb
+        // VM-only execution.
+        PreparedJit::Ready(Box::new(ReadyJit {
+            bodies: Arc::new(bodies),
+            tcx: Arc::new(jit_tcx),
+            enum_shapes: Arc::new(shapes),
+            enum_shape_handles,
+            struct_shapes: Arc::new(struct_shapes),
+            struct_shape_handles,
+            eager_names: Arc::new(eager_names),
+            cache_key,
+            source_locations,
+            preparation_bytes,
+        }))
+    } else {
+        PreparedJit::Nothing { collect: false }
+    }
+}
+
 fn compact_jit_bodies(bodies: &mut Vec<Body>) {
     bodies.shrink_to_fit();
     for body in bodies {
@@ -2662,7 +2777,7 @@ fn jit_artifact_key(
     bodies: &[Body],
     tcx: &TyCtxt,
     enum_shape_defs: &std::collections::HashMap<u32, u32>,
-    struct_shape_defs: &std::collections::HashMap<u32, u32>,
+    struct_shape_defs: &std::collections::HashMap<Ty, u32>,
 ) -> String {
     use sha2::Digest as _;
 
@@ -2675,7 +2790,7 @@ fn jit_artifact_key(
         }
     }
 
-    fn sorted_map(map: &std::collections::HashMap<u32, u32>) -> Vec<(u32, u32)> {
+    fn sorted_map<K: Ord + Copy>(map: &std::collections::HashMap<K, u32>) -> Vec<(K, u32)> {
         let mut entries: Vec<_> = map.iter().map(|(&key, &value)| (key, value)).collect();
         entries.sort_unstable();
         entries
@@ -2700,7 +2815,7 @@ fn jit_artifact_key(
 fn jit_preparation_bytes(
     bodies: &[Body],
     enum_shapes: &std::collections::HashMap<u32, u32>,
-    struct_shapes: &std::collections::HashMap<u32, u32>,
+    struct_shapes: &std::collections::HashMap<Ty, u32>,
 ) -> usize {
     let body_bytes = bodies.iter().fold(0usize, |total, body| {
         let statements = body
@@ -2842,6 +2957,7 @@ fn current_process_rss_bytes() -> Option<u64> {
 fn build_native_enum_shapes(
     program: &HirProgram,
     tcx: &TyCtxt,
+    struct_shapes: &std::collections::HashMap<Ty, u32>,
 ) -> (
     std::collections::HashMap<u32, u32>,
     Arc<Vec<Arc<crate::value::NativeEnumShape>>>,
@@ -2854,7 +2970,7 @@ fn build_native_enum_shapes(
     struct Cand<'a> {
         def_local: u32,
         name: &'a str,
-        variants: Vec<(&'a str, Vec<gossamer_types::Ty>)>,
+        variants: Vec<(&'a str, Vec<gossamer_types::Ty>, Vec<&'a str>)>,
     }
     let mut cands: Vec<Cand> = Vec::new();
     for item in &program.items {
@@ -2865,12 +2981,17 @@ fn build_native_enum_shapes(
             continue;
         };
         let Some(def) = item.def else { continue };
-        let vs: Vec<(&str, Vec<gossamer_types::Ty>)> = variants
+        let vs: Vec<(&str, Vec<gossamer_types::Ty>, Vec<&str>)> = variants
             .iter()
             .map(|v| {
                 (
                     v.name.name.as_str(),
                     v.struct_field_tys.clone().unwrap_or_default(),
+                    v.struct_fields
+                        .iter()
+                        .flatten()
+                        .map(|field| field.name.as_str())
+                        .collect(),
                 )
             })
             .collect();
@@ -2881,21 +3002,92 @@ fn build_native_enum_shapes(
         });
     }
     let in_set: std::collections::HashSet<u32> = cands.iter().map(|c| c.def_local).collect();
+    // A struct of scalars one word wide sits in its variant's slot as that
+    // word on every tier, so it crosses as its struct shape.
+    let inline_struct = |t: gossamer_types::Ty| -> Option<u32> {
+        let index = *struct_shapes.get(&t)?;
+        let shape = crate::value::native_struct_shape(index)?;
+        let scalar = shape.fields.iter().all(|(_, kind)| {
+            matches!(
+                kind,
+                NativeFieldKind::I64
+                    | NativeFieldKind::F64
+                    | NativeFieldKind::Bool
+                    | NativeFieldKind::Char
+            )
+        });
+        (scalar && shape.words == 1 && tcx.slot_bytes(t) <= 8 && !tcx.is_boxed_enum_payload(t))
+            .then_some(index)
+    };
+    // A struct of scalars of any width, which a variant holds in a box of its
+    // own when it is wider than a slot and a `Vec` holds inline.
+    let scalar_struct = |t: gossamer_types::Ty| -> Option<u32> {
+        let index = *struct_shapes.get(&t)?;
+        let shape = crate::value::native_struct_shape(index)?;
+        shape
+            .fields
+            .iter()
+            .all(|(_, kind)| {
+                matches!(
+                    kind,
+                    NativeFieldKind::I64
+                        | NativeFieldKind::F64
+                        | NativeFieldKind::Bool
+                        | NativeFieldKind::Char
+                )
+            })
+            .then_some(index)
+    };
     // A variant field is JIT-marshallable when it is a scalar / string, a
     // supported heap enum, a `Vec<Enum>` of a supported enum, or a
     // `Vec<(String, Enum)>` of a supported enum (the recursive `Arr` / `Obj`
     // shapes). The inner-enum support is consulted through the running
     // fixpoint set so a Vec of a still-supported enum keeps the parent alive.
+    // An `Option` / `Result` variant field sits in its node as two words; its
+    // arms may each hold a scalar, a string, or a supported enum (a nested
+    // carrier would need a box of its own).
+    let carrier_payloads = |t: gossamer_types::Ty| -> Option<Vec<gossamer_types::Ty>> {
+        let TyKind::Adt { def, substs } = tcx.kind_of(t) else {
+            return None;
+        };
+        let arms = substs.types();
+        match def.local {
+            local if local == u32::MAX - 1 => Some(vec![*arms.first()?]),
+            u32::MAX => Some(vec![*arms.first()?, *arms.get(1)?]),
+            _ => None,
+        }
+    };
+    let carrier_arm_supported =
+        |t: gossamer_types::Ty, supported: &std::collections::HashSet<u32>| match tcx.kind_of(t) {
+            TyKind::Unit
+            | TyKind::Int(_)
+            | TyKind::Float(gossamer_types::FloatTy::F64)
+            | TyKind::Bool
+            | TyKind::Char
+            | TyKind::String => true,
+            // Every user enum is a heap node on the JIT, which this shape
+            // table describes.
+            TyKind::Adt { def, .. } => supported.contains(&def.local),
+            _ => false,
+        };
     let field_supported = |t: gossamer_types::Ty,
                            supported: &std::collections::HashSet<u32>|
      -> bool {
+        if let Some(arms) = carrier_payloads(t) {
+            return arms
+                .iter()
+                .all(|arm| carrier_arm_supported(*arm, supported));
+        }
         match tcx.kind_of(t) {
             TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::String => {
                 true
             }
-            TyKind::Adt { def, .. } => supported.contains(&def.local),
+            TyKind::Adt { def, .. } => supported.contains(&def.local) || scalar_struct(t).is_some(),
             TyKind::Vec(inner) | TyKind::Slice(inner) => match tcx.kind_of(*inner) {
-                TyKind::Adt { def, .. } => supported.contains(&def.local),
+                TyKind::String => true,
+                TyKind::Adt { def, .. } => {
+                    supported.contains(&def.local) || scalar_struct(*inner).is_some()
+                }
                 TyKind::Tuple(elems) if elems.len() == 2 => {
                     matches!(tcx.kind_of(elems[0]), TyKind::String)
                         && matches!(
@@ -2917,11 +3109,19 @@ fn build_native_enum_shapes(
             if !supported.contains(&c.def_local) {
                 continue;
             }
-            let ok = c
-                .variants
-                .iter()
-                .all(|(_, tys)| tys.iter().all(|t| field_supported(*t, &supported)));
-            if !ok {
+            let blocking = c.variants.iter().find_map(|(variant, tys, _)| {
+                tys.iter()
+                    .find(|t| !field_supported(**t, &supported))
+                    .map(|t| (variant, *t))
+            });
+            if let Some((variant, ty)) = blocking {
+                if jit_call::jit_trace() {
+                    eprintln!(
+                        "jit: enum-shape-reject {} (variant {variant} field {:?})",
+                        c.name,
+                        tcx.kind_of(ty)
+                    );
+                }
                 supported.remove(&c.def_local);
                 changed = true;
             }
@@ -2955,24 +3155,40 @@ fn build_native_enum_shapes(
                 let variants: Vec<NativeVariantShape> = c
                     .variants
                     .iter()
-                    .map(|(vname, tys)| NativeVariantShape {
+                    .map(|(vname, tys, names)| NativeVariantShape {
                         name: intern_type_name(vname),
+                        field_names: names.iter().map(|n| intern_type_name(n)).collect(),
                         fields: tys
                             .iter()
                             .map(|t| match tcx.kind_of(*t) {
+                                _ if carrier_payloads(*t).is_some() => {
+                                    NativeFieldKind::Carrier(native_carrier_shape(tcx, *t, &idx_of))
+                                }
                                 TyKind::Int(_) => NativeFieldKind::I64,
                                 TyKind::Float(_) => NativeFieldKind::F64,
                                 TyKind::Bool => NativeFieldKind::Bool,
                                 TyKind::Char => NativeFieldKind::Char,
                                 TyKind::String => NativeFieldKind::Str,
-                                TyKind::Adt { def, .. } => {
-                                    NativeFieldKind::Enum(idx_of[&def.local])
-                                }
+                                TyKind::Adt { def, .. } => match idx_of.get(&def.local) {
+                                    Some(index) => NativeFieldKind::Enum(*index),
+                                    None => match inline_struct(*t) {
+                                        Some(index) => NativeFieldKind::Struct(index),
+                                        None => NativeFieldKind::BoxedStruct(
+                                            scalar_struct(*t)
+                                                .expect("filtered by the supported fixpoint"),
+                                        ),
+                                    },
+                                },
                                 TyKind::Vec(inner) | TyKind::Slice(inner) => {
                                     match tcx.kind_of(*inner) {
-                                        TyKind::Adt { def, .. } => {
-                                            NativeFieldKind::VecEnum(idx_of[&def.local])
-                                        }
+                                        TyKind::String => NativeFieldKind::VecStr,
+                                        TyKind::Adt { def, .. } => match idx_of.get(&def.local) {
+                                            Some(index) => NativeFieldKind::VecEnum(*index),
+                                            None => NativeFieldKind::VecStruct(
+                                                scalar_struct(*inner)
+                                                    .expect("filtered by the supported fixpoint"),
+                                            ),
+                                        },
                                         TyKind::Tuple(elems) if elems.len() == 2 => {
                                             let TyKind::Adt { def, .. } = tcx.kind_of(elems[1])
                                             else {
@@ -2992,6 +3208,9 @@ fn build_native_enum_shapes(
                     enum_name: intern_type_name(c.name),
                     index: idx_of[&c.def_local],
                     tagged,
+                    // Compiled code holds an enum no variant of which carries
+                    // a field as its variant index.
+                    by_index: variants.iter().all(|v| v.fields.is_empty()),
                     variants,
                     rc_meta: std::sync::OnceLock::new(),
                 })
@@ -3002,9 +3221,50 @@ fn build_native_enum_shapes(
     })
 }
 
+/// The carrier shape of an `Option` / `Result` variant field whose arms the
+/// enum shape builder accepted: scalars, strings, and enums of `idx_of`.
+fn native_carrier_shape(
+    tcx: &TyCtxt,
+    ty: gossamer_types::Ty,
+    idx_of: &std::collections::HashMap<u32, u32>,
+) -> gossamer_abi::jit_carrier::CarrierShape {
+    use gossamer_abi::jit_carrier::{CarrierNode, CarrierShape};
+    use gossamer_types::TyKind;
+    let TyKind::Adt { def, substs } = tcx.kind_of(ty) else {
+        unreachable!("filtered by the supported fixpoint")
+    };
+    let mut nodes = vec![if def.local == u32::MAX {
+        CarrierNode::Result
+    } else {
+        CarrierNode::Option
+    }];
+    let mut enum_shape = None;
+    for arm in substs.types() {
+        nodes.push(match tcx.kind_of(arm) {
+            TyKind::Unit => CarrierNode::Unit,
+            TyKind::Int(_) => CarrierNode::I64,
+            TyKind::Float(_) => CarrierNode::F64,
+            TyKind::Bool => CarrierNode::Bool,
+            TyKind::Char => CarrierNode::Char,
+            TyKind::String => CarrierNode::Str,
+            TyKind::Adt { def, .. } => {
+                enum_shape = idx_of.get(&def.local).copied();
+                CarrierNode::Enum
+            }
+            _ => unreachable!("filtered by the supported fixpoint"),
+        });
+    }
+    // The supported fixpoint admits only well-formed one-level trees.
+    let shape = CarrierShape::from_nodes(&nodes).unwrap();
+    match enum_shape {
+        Some(index) => shape.with_enum_shape(index),
+        None => shape,
+    }
+}
+
 /// Builds native shape descriptors for every user struct whose fields are
 /// scalars or `String`, registers them in the process-global struct-shape
-/// table, and returns `DefId.local -> shape index` for the Cranelift
+/// table, and returns `struct type -> shape index` for the Cranelift
 /// eligibility check. A registered struct is a flat field-slot block at the
 /// JIT boundary - one 8-byte slot per field. String slots own temporary
 /// native strings that the trampoline copies out and frees after the call.
@@ -3012,7 +3272,7 @@ fn build_native_struct_shapes(
     program: &HirProgram,
     tcx: &TyCtxt,
 ) -> (
-    std::collections::HashMap<u32, u32>,
+    std::collections::HashMap<Ty, u32>,
     Arc<Vec<Arc<crate::value::NativeStructShape>>>,
 ) {
     use crate::value::{
@@ -3020,29 +3280,62 @@ fn build_native_struct_shapes(
         register_native_struct_shapes,
     };
     use gossamer_types::{IntTy, TyKind};
+    /// A field's kind, with a nested struct named by its definition until the
+    /// shape table assigns indices.
+    #[derive(Clone, Copy)]
+    enum Field {
+        Kind(NativeFieldKind),
+        Nested(u32),
+    }
     struct Cand<'a> {
+        def: gossamer_resolve::DefId,
         def_local: u32,
         name: &'a str,
-        fields: Vec<(&'a str, NativeFieldKind)>,
+        fields: Vec<(&'a str, Field)>,
         placements: Vec<NativeFieldPlacement>,
         words: usize,
     }
+    let scalar_kind = |t: gossamer_types::Ty| match tcx.kind_of(t) {
+        TyKind::Int(_) => Some(NativeFieldKind::I64),
+        TyKind::Float(_) => Some(NativeFieldKind::F64),
+        TyKind::Bool => Some(NativeFieldKind::Bool),
+        TyKind::Char => Some(NativeFieldKind::Char),
+        _ => None,
+    };
+    let structs: Vec<(&HirItem, u32, &Vec<gossamer_ast::Ident>)> = program
+        .items
+        .iter()
+        .filter_map(|item| {
+            let HirItemKind::Adt(adt) = &item.kind else {
+                return None;
+            };
+            let gossamer_hir::HirAdtKind::Struct(names) = &adt.kind else {
+                return None;
+            };
+            Some((item, item.def?.local, names))
+        })
+        .collect();
+    // Structs whose fields are all scalars: those nest inline in another shape.
+    let nested: std::collections::HashSet<u32> = structs
+        .iter()
+        .filter(|(item, _, names)| {
+            !names.is_empty()
+                && item
+                    .def
+                    .and_then(|def| tcx.struct_field_tys(def))
+                    .is_some_and(|tys| {
+                        tys.len() == names.len() && tys.iter().all(|t| scalar_kind(*t).is_some())
+                    })
+        })
+        .map(|(_, local, _)| *local)
+        .collect();
     let mut cands: Vec<Cand> = Vec::new();
-    for item in &program.items {
+    for (item, def_local, field_names) in &structs {
         let HirItemKind::Adt(adt) = &item.kind else {
             continue;
         };
-        let gossamer_hir::HirAdtKind::Struct(field_names) = &adt.kind else {
-            continue;
-        };
         let Some(def) = item.def else { continue };
-        // Tuple / unit structs carry no field names here; only named-field
-        // structs have the positional name list the marshaller needs. A
-        // single-field struct is excluded: the compiled tier treats a
-        // 1-slot aggregate as a by-pointer scalar, so a `&self` field read
-        // dereferences the slot rather than indexing the block - the
-        // marshalled flat block is only the right shape at >= 2 fields.
-        if field_names.len() < 2 {
+        if field_names.is_empty() {
             continue;
         }
         let Some(field_tys) = tcx.struct_field_tys(def) else {
@@ -3055,15 +3348,37 @@ fn build_native_struct_shapes(
         let mut supported = true;
         for (n, t) in field_names.iter().zip(field_tys.iter()) {
             let kind = match tcx.kind_of(*t) {
-                TyKind::Int(_) => NativeFieldKind::I64,
-                TyKind::Float(_) => NativeFieldKind::F64,
-                TyKind::Bool => NativeFieldKind::Bool,
-                TyKind::Char => NativeFieldKind::Char,
-                TyKind::String => NativeFieldKind::Str,
-                _ => {
-                    supported = false;
-                    break;
+                TyKind::String => Field::Kind(NativeFieldKind::Str),
+                TyKind::Vec(elem) if matches!(tcx.kind_of(*elem), TyKind::Int(IntTy::I64)) => {
+                    Field::Kind(NativeFieldKind::VecI64)
                 }
+                TyKind::Vec(elem)
+                    if matches!(
+                        tcx.kind_of(*elem),
+                        TyKind::Float(gossamer_types::FloatTy::F64)
+                    ) =>
+                {
+                    Field::Kind(NativeFieldKind::VecF64)
+                }
+                // `sync::AtomicI64` / `I32` / `U64` / `Bool`: the runtime cell
+                // both tiers share.
+                TyKind::Adt { def: inner, .. }
+                    if (u32::MAX - 57..=u32::MAX - 54).contains(&inner.local) =>
+                {
+                    Field::Kind(NativeFieldKind::Atomic(u32::MAX - inner.local))
+                }
+                TyKind::Adt { def: inner, .. }
+                    if inner.local != *def_local && nested.contains(&inner.local) =>
+                {
+                    Field::Nested(inner.local)
+                }
+                _ => match scalar_kind(*t) {
+                    Some(k) => Field::Kind(k),
+                    None => {
+                        supported = false;
+                        break;
+                    }
+                },
             };
             fields.push((n.name.as_str(), kind));
         }
@@ -3084,21 +3399,38 @@ fn build_native_struct_shapes(
                         ),
                     })
                     .collect();
-                (placements, layout.size as usize / 8)
+                (placements, (layout.size as usize).div_ceil(8))
             }
             None => {
-                let placements = (0..fields.len())
-                    .map(|i| NativeFieldPlacement {
-                        offset: u32::try_from(i * 8).unwrap_or(u32::MAX),
-                        bytes: 8,
+                // Word-per-leaf layout: a nested struct takes as many words
+                // as it has fields.
+                let mut at = 0u32;
+                let mut placements = Vec::with_capacity(fields.len());
+                for (_, field) in &fields {
+                    let width = match field {
+                        Field::Nested(inner) => structs
+                            .iter()
+                            .find(|(_, local, _)| local == inner)
+                            .map_or(1, |(_, _, names)| names.len() as u32),
+                        Field::Kind(_) => 1,
+                    };
+                    placements.push(NativeFieldPlacement {
+                        offset: at * 8,
+                        bytes: if width == 1 {
+                            8
+                        } else {
+                            u8::try_from(width * 8).unwrap_or(u8::MAX)
+                        },
                         signed: true,
-                    })
-                    .collect();
-                (placements, fields.len())
+                    });
+                    at += width;
+                }
+                (placements, at as usize)
             }
         };
         cands.push(Cand {
-            def_local: def.local,
+            def,
+            def_local: *def_local,
             name: adt.name.name.as_str(),
             fields,
             placements,
@@ -3120,7 +3452,13 @@ fn build_native_struct_shapes(
                 let fields = c
                     .fields
                     .iter()
-                    .map(|(n, k)| (intern_type_name(n), *k))
+                    .map(|(n, f)| {
+                        let kind = match f {
+                            Field::Kind(k) => *k,
+                            Field::Nested(local) => NativeFieldKind::Struct(idx_of[local]),
+                        };
+                        (intern_type_name(n), kind)
+                    })
                     .collect();
                 std::sync::Arc::new(NativeStructShape {
                     struct_name: intern_type_name(c.name),
@@ -3132,7 +3470,154 @@ fn build_native_struct_shapes(
             })
             .collect();
         let handles = Arc::new(shapes.clone());
-        (shapes, (idx_of, handles))
+        let parameters = cands
+            .iter()
+            .filter_map(|c| {
+                let ty = tcx.interned(&TyKind::Adt {
+                    def: c.def,
+                    substs: gossamer_types::Substs::new(),
+                })?;
+                Some((ty, idx_of[&c.def_local]))
+            })
+            .collect();
+        (shapes, (parameters, handles))
+    })
+}
+
+/// The shapes of the instantiations of generic structs whose fields, with
+/// the instantiation's arguments applied, are all ones a shape carries:
+/// scalars, strings, atomics, or a struct of scalars already shaped. A
+/// generic struct keeps one word per field (see `TyCtxt::packed_layout`).
+fn build_generic_struct_shapes(
+    program: &HirProgram,
+    tcx: &TyCtxt,
+    struct_shapes: &std::collections::HashMap<Ty, u32>,
+) -> (
+    std::collections::HashMap<Ty, u32>,
+    Arc<Vec<Arc<crate::value::NativeStructShape>>>,
+) {
+    use crate::value::{
+        NativeFieldKind, NativeFieldPlacement, NativeStructShape, intern_type_name,
+        register_native_struct_shapes,
+    };
+    use gossamer_types::TyKind;
+    struct Cand<'a> {
+        ty: Ty,
+        name: &'a str,
+        fields: Vec<(&'a str, NativeFieldKind)>,
+        placements: Vec<NativeFieldPlacement>,
+        words: usize,
+    }
+    let mut cands: Vec<Cand> = Vec::new();
+    for item in &program.items {
+        let HirItemKind::Adt(adt) = &item.kind else {
+            continue;
+        };
+        let gossamer_hir::HirAdtKind::Struct(names) = &adt.kind else {
+            continue;
+        };
+        let Some(def) = item.def else { continue };
+        if names.is_empty() {
+            continue;
+        }
+        for (ty, field_tys) in tcx.struct_instantiations(def) {
+            if field_tys.len() != names.len() {
+                continue;
+            }
+            let mut fields = Vec::with_capacity(names.len());
+            let mut placements = Vec::with_capacity(names.len());
+            let mut at = 0u32;
+            let mut supported = true;
+            for (n, t) in names.iter().zip(field_tys.iter()) {
+                let (kind, width) = match tcx.kind_of(*t) {
+                    TyKind::Int(_) => (NativeFieldKind::I64, 1),
+                    TyKind::Float(_) => (NativeFieldKind::F64, 1),
+                    TyKind::Bool => (NativeFieldKind::Bool, 1),
+                    TyKind::Char => (NativeFieldKind::Char, 1),
+                    TyKind::String => (NativeFieldKind::Str, 1),
+                    TyKind::Adt { def: inner, .. }
+                        if (u32::MAX - 57..=u32::MAX - 54).contains(&inner.local) =>
+                    {
+                        (NativeFieldKind::Atomic(u32::MAX - inner.local), 1)
+                    }
+                    TyKind::Adt { .. } => {
+                        let nested = struct_shapes
+                            .get(t)
+                            .and_then(|index| crate::value::native_struct_shape(*index))
+                            .filter(|shape| {
+                                shape.fields.iter().all(|(_, kind)| {
+                                    matches!(
+                                        kind,
+                                        NativeFieldKind::I64
+                                            | NativeFieldKind::F64
+                                            | NativeFieldKind::Bool
+                                            | NativeFieldKind::Char
+                                    )
+                                })
+                            });
+                        match nested {
+                            Some(shape) => (
+                                NativeFieldKind::Struct(shape.index),
+                                u32::try_from(shape.words).unwrap_or(u32::MAX),
+                            ),
+                            None => {
+                                supported = false;
+                                break;
+                            }
+                        }
+                    }
+                    _ => {
+                        supported = false;
+                        break;
+                    }
+                };
+                placements.push(NativeFieldPlacement {
+                    offset: at * 8,
+                    bytes: u8::try_from(width * 8).unwrap_or(u8::MAX),
+                    signed: true,
+                });
+                at += width;
+                fields.push((n.name.as_str(), kind));
+            }
+            if supported {
+                cands.push(Cand {
+                    ty,
+                    name: adt.name.name.as_str(),
+                    fields,
+                    placements,
+                    words: at as usize,
+                });
+            }
+        }
+    }
+    if cands.is_empty() {
+        return (std::collections::HashMap::new(), Arc::new(Vec::new()));
+    }
+    register_native_struct_shapes(|base| {
+        let shapes: Vec<Arc<NativeStructShape>> = cands
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                Arc::new(NativeStructShape {
+                    struct_name: intern_type_name(c.name),
+                    index: base + u32::try_from(i).unwrap_or(0),
+                    fields: c
+                        .fields
+                        .iter()
+                        .map(|(n, kind)| (intern_type_name(n), *kind))
+                        .collect(),
+                    placements: c.placements.clone(),
+                    words: c.words,
+                })
+            })
+            .collect();
+        let parameters = cands
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.ty, base + u32::try_from(i).unwrap_or(0)))
+            .collect();
+        let handles = Arc::new(shapes.clone());
+        (shapes, (parameters, handles))
     })
 }
 

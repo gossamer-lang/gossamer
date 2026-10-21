@@ -279,6 +279,9 @@ pub enum TypeError {
     /// argument of its type.
     #[error("this parameter pattern might not match every argument")]
     ParamPatternMayNotMatch,
+    /// A `select` receive pattern might not match the outcome it waits for.
+    #[error("this `select` pattern might not match what its receive delivers")]
+    SelectPatternMayNotMatch,
     /// A `let &...` pattern tried to destructure a non-reference value.
     #[error(
         "`let {pattern} name = value` requires an `{pattern}` initializer; write `let name = {pattern} value` to borrow, or remove `{pattern}` to bind the value directly"
@@ -1185,6 +1188,7 @@ impl TypeError {
             Self::LetPatternMayNotMatch => "let-pattern-may-not-match",
             Self::ForPatternMayNotMatch => "for-pattern-may-not-match",
             Self::ParamPatternMayNotMatch => "param-pattern-may-not-match",
+            Self::SelectPatternMayNotMatch => "select-pattern-may-not-match",
             Self::ReferencePatternRequiresReference { .. } => {
                 "reference-pattern-requires-reference"
             }
@@ -1331,7 +1335,8 @@ impl TypeError {
             Self::CannotAssignToLiteral
             | Self::LetPatternMayNotMatch
             | Self::ForPatternMayNotMatch
-            | Self::ParamPatternMayNotMatch => "GT0047",
+            | Self::ParamPatternMayNotMatch
+            | Self::SelectPatternMayNotMatch => "GT0047",
             Self::ReferencePatternRequiresReference { .. } => "GT0048",
             Self::ReferenceParameterPatternPosition { .. } => "GT0069",
             Self::UnsizedSliceValue { .. } => "GT0049",
@@ -1691,6 +1696,13 @@ impl TypeDiagnostic {
                         "take the argument with a name and test it in the body with `if let`, `match`, or `let ... else`",
                     )
                     .with_note("a parameter pattern must accept every argument the caller can pass");
+            }
+            TypeError::SelectPatternMayNotMatch => {
+                out = out
+                    .with_help(
+                        "receive into a name, `Some(name)`, or `None`, and test the value in the arm body with `if let` or `match`",
+                    )
+                    .with_note("a receive answers `Some(value)`, or `None` once its channel is closed and drained");
             }
             TypeError::ReferencePatternRequiresReference { pattern } => {
                 out = out
@@ -2504,10 +2516,10 @@ impl TypeDiagnostic {
             TypeError::SharedPayloadUnsupported { .. } => {
                 out = out
                     .with_help(
-                        "guard a scalar or a `String`; publish a collection through a channel, or keep one `Shared` per field",
+                        "guard an integer; publish any other value through a channel or a `Mutex`, or keep one `Shared` per integer field",
                     )
                     .with_note(
-                        "the guarded slot is one word on every tier, and only a scalar or a `String` has the same reading in the bytecode VM and in compiled code",
+                        "the guarded slot is one word on every tier, and only an integer has the same reading in the bytecode VM and in compiled code",
                     );
             }
             TypeError::MutableArgumentRequiresReference { argument } => {

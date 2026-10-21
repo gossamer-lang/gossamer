@@ -57,7 +57,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 BlockResult::Unit
             } else {
                 let reg = self.compile_expr(tail)?;
-                BlockResult::ValueIn(reg)
+                BlockResult::ValueIn(self.detach_scope_result(reg))
             }
         } else {
             BlockResult::Unit

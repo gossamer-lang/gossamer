@@ -343,6 +343,11 @@ pub extern "C" fn gos_rt_library_shutdown() {
             }
         }
     }
+    // A host-runtime library leaves program storage to its shutdown the way a
+    // `main` does: static owners, the args and image registries, and the idle
+    // allocator bookkeeping all release here, or the host's leak ledger counts
+    // them.
+    super::exit_hooks::release_program_storage();
     super::print::gos_rt_flush_stdout();
 }
 

@@ -2574,30 +2574,52 @@ iteration perform the same:</p>
 <p>A closure qualifies only when the value it hands back cannot point into
 the region - a scalar result is fine, a returned tree keeps the ordinary
 reference-counted path - and a captured value counts as an outer one, so
-passing a captured collection into a call disqualifies the body.</p>
-<p>This is <strong>sound by construction</strong>. The analysis over-approximates
-escapes: if it cannot prove a body's allocations stay local - the body
-calls a method, stores a value into an outer binding, breaks/returns,
-spawns a goroutine, or calls a function that might stash a pointer - it
-does <strong>not</strong> region, and the values keep the ordinary reference-counted
-path. So automatic regioning can only make a program faster; it never
-changes a result. The trade-off is the reverse of the manual block: the
-worst case is a <em>missed speedup</em>, not a dangling pointer.</p>
+handing a captured collection to a call that may keep it disqualifies the
+body.</p>
+<p>This is <strong>sound by construction</strong>. A region is freed wholesale, so two
+things must hold for a body to get one: nothing it builds may still be
+reachable once the iteration ends, and nothing it builds may hold a share
+of a value from outside the loop, because the bulk free never gives that
+share back. The analysis over-approximates both:</p>
+<ul>
+<li>A value from outside the loop may be read, bound, or passed to a
+  function that only reads it, but not stored inside anything the body
+  builds, mutated through a method, or taken back out of a call that may
+  answer a share of it.</li>
+<li>A value the body builds may be passed to any function that cannot let
+  it escape - a goroutine, a channel, a static, or a closure - and may be
+  mutated and rebuilt inside the iteration, but not assigned to a binding
+  that outlives it.</li>
+<li><code>break</code>, <code>continue</code>, and <code>return</code> leave a regioned body only with a
+  scalar value (or none); the region is closed on each such edge.</li>
+<li>A nested loop is fine when it is regioned itself or allocates nothing,
+  so its own temporaries are still freed each inner iteration.</li>
+</ul>
+<p>Whether a function "only reads" a value, or "cannot let it escape", comes
+from a summary of what every function and method does with each of its
+parameters, followed through the calls it makes. When the analysis cannot
+prove a rule, it does <strong>not</strong> region, and the values keep the ordinary
+reference-counted path. So automatic regioning can only make a program
+faster; it never changes a result. The trade-off is the reverse of the
+manual block: the worst case is a <em>missed speedup</em>, not a dangling pointer.</p>
 <h3 id="seeing-the-decision">Seeing the decision<a class="headerlink" href="#seeing-the-decision" title="Permanent link">&para;</a></h3>
 <p>When an allocation-heavy loop runs slower than expected, set
 <code>GOS_ARENA_TRACE=1</code> at build time. Every loop and closure body prints
-whether it was auto-regioned, and if an allocating one was not, why:</p>
-<div class="language-text highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>[arena] file 0 bytes 992..993: auto-regioned (iteration heap bulk-freed)
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>[arena] file 0 bytes 806..1087: NOT regioned - allocates each iteration on the
-<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>  slow per-node RC path: body contains a nested loop. Wrap the body in `arena { }`.
-<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>[arena] file 0 bytes 1418..1437: closure body auto-regioned (per-call heap
-<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>  bulk-freed)
+whether it was auto-regioned, and if an allocating one was not, why,
+naming the call that decided it:</p>
+<div class="language-text highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>[arena] main.gos:14:5: auto-regioned (iteration heap bulk-freed)
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>[arena] main.gos:31:9: NOT regioned - allocates each iteration on the slow
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>  per-node RC path: body mutates a value from outside the loop through a
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>  method, or calls a method nothing vets (`.push()`). Wrap the body in `arena { }`.
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>[arena] main.gos:40:18: closure body auto-regioned (per-call heap bulk-freed)
 </code></pre></div>
-<p>The reason names the exact rule that disqualified the body (a method
-call, an escaping value, a nested loop, an early exit, an unvetted
-callee), so you know whether to restructure the loop or reach for an
-explicit <code>arena { }</code> - which always works, because you are then making
-the no-escape guarantee yourself.</p>
+<p>The reason names the exact rule that disqualified the body (an outer
+value mutated or handed to a function that keeps it, a heap value leaving
+the loop, a nested loop without a region of its own, an unvetted callee),
+so you know whether to restructure the loop or reach for an explicit
+<code>arena { }</code> - which always works, because you are then making the
+no-escape guarantee yourself. Setting the variable makes the build skip its
+artifact cache, so the trace always describes the compile that just ran.</p>
 <h2 id="exit-behavior">Exit behavior<a class="headerlink" href="#exit-behavior" title="Permanent link">&para;</a></h2>
 <p>The block desugars to <code>runtime::arena_push()</code> plus a block-scoped
 <code>defer runtime::arena_pop()</code>, so the arena is released on <strong>every</strong>
@@ -2632,7 +2654,10 @@ for the details.</p>
 </code></pre></div>
 <p>Edge cases, pinned: <code>Weak</code> references to arena values upgrade to
 <code>None</code>; unit-variant singletons (<code>Tree::Nil</code>) are process-immortal and
-safe to reference anywhere.</p>
+safe to reference anywhere. Maps, sets, deques, JSON values, and lazy
+iterators made inside the block belong to it like every other value and
+are released at the closing brace, including when another arena value
+holds them.</p>
 <h2 id="the-primitive">The primitive<a class="headerlink" href="#the-primitive" title="Permanent link">&para;</a></h2>
 <p><code>runtime::arena_push()</code> / <code>runtime::arena_pop()</code> are the underlying
 calls for shapes where block structure does not fit. Prefer the block:

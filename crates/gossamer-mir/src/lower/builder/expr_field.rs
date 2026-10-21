@@ -51,6 +51,7 @@ use super::Builder;
 impl<'a> Builder<'a> {
     pub(crate) fn lower_struct_call(
         &mut self,
+        literal: gossamer_hir::HirId,
         callee: &HirExpr,
         args: &[HirExpr],
         ty: Ty,
@@ -142,9 +143,11 @@ impl<'a> Builder<'a> {
                 .or_else(|| self.enums.variant_fields.get(struct_name).cloned())?,
         };
         let mut provided: HashMap<String, &HirExpr> = HashMap::new();
+        // The position each field takes among the pairs as written.
+        let mut written_at: HashMap<String, usize> = HashMap::new();
         let mut base_expr: Option<&HirExpr> = None;
         let mut chunks = pairs.chunks_exact(2);
-        for chunk in chunks.by_ref() {
+        for (at, chunk) in chunks.by_ref().enumerate() {
             let HirExprKind::Literal(HirLiteral::String(field_name)) = &chunk[0].kind else {
                 return None;
             };
@@ -157,6 +160,7 @@ impl<'a> Builder<'a> {
                 continue;
             }
             provided.insert(field_name.clone(), &chunk[1]);
+            written_at.insert(field_name.clone(), at);
         }
         if let Some(idx) = variant_idx {
             // Enum struct-variant: build a `[w, h, …]` heap
@@ -210,8 +214,15 @@ impl<'a> Builder<'a> {
             _ => None,
         };
         let mut operands = Vec::with_capacity(order.len());
+        let mut shared_operands = Vec::new();
         for (idx, field) in order.iter().enumerate() {
             if let Some(value_expr) = provided.get(field.as_str()) {
+                if written_at
+                    .get(field.as_str())
+                    .is_some_and(|&at| self.fn_param_shareable.shares_literal_field(literal, at))
+                {
+                    shared_operands.push(operands.len());
+                }
                 let mut value_local = self.lower_expr(value_expr)?;
                 // Coerce an array-literal value to a Vec when the field
                 // is declared as a growable `[T]` / slice.
@@ -316,6 +327,8 @@ impl<'a> Builder<'a> {
             }
         }
         let dest = self.fresh(ty);
+        self.shared_stores
+            .extend(shared_operands.into_iter().map(|operand| (dest, operand)));
         self.local_struct.insert(dest, struct_name.clone());
         // Make the guarded copy-blob meta for this struct type available
         // to the drop pass and the backend heap-copy site (idempotent;

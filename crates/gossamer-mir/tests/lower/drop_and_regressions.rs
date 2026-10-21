@@ -1384,6 +1384,45 @@ fn main() {
 }
 
 #[test]
+fn a_string_an_auto_region_builds_is_released_before_the_region_pops() {
+    let source = r#"
+fn nul() -> String { "\0" }
+
+fn main() {
+    let mut total = 0
+    for i in 0..50 {
+        let mut a = "q"
+        a += nul()
+        total += a.len() + i
+    }
+    println(f"{total}")
+}
+"#;
+    let (bodies, _) = build(source);
+    let main = bodies.iter().find(|b| b.name == "main").expect("main");
+    let pops: Vec<&gossamer_mir::BasicBlock> = main
+        .blocks
+        .iter()
+        .filter(|block| {
+            matches!(&block.terminator, gossamer_mir::Terminator::Call {
+                callee: gossamer_mir::Operand::Const(gossamer_mir::ConstValue::Str(name)), ..
+            } if name == "gos_rt_arena_pop")
+        })
+        .collect();
+    assert!(!pops.is_empty(), "the loop body is auto-regioned");
+    for block in pops {
+        assert!(
+            block.stmts.iter().any(|stmt| matches!(&stmt.kind,
+                gossamer_mir::StatementKind::Assign {
+                    rvalue: gossamer_mir::Rvalue::CallIntrinsic { name, .. }, ..
+                } if *name == "gos_rt_str_free_typed")),
+            "the string the iteration built is given back before its region pops: {:?}",
+            block.stmts
+        );
+    }
+}
+
+#[test]
 fn auto_regions_pop_on_every_early_exit_and_only_region_the_inner_nested_loop() {
     let early_exit = r"
 enum Node { Leaf(i64), Pair(Node, Node) }
@@ -2558,8 +2597,9 @@ fn get_def(eng: Eng, table: String) -> Result<Def, String> {
     let (bodies, _) = build(source);
     let body = bodies.iter().find(|b| b.name == "get_def").expect("body");
     assert!(
-        rc_calls_on(body, "gos_rt_option_slot_retain", Local::RETURN) >= 1,
-        "the returned carrier takes a share of the payload blob for the caller"
+        rc_calls_on(body, "gos_rt_option_slot_retain_ok", Local::RETURN) >= 1,
+        "the returned carrier takes a share of the payload blob for the caller, \
+         through the `Ok`-only helper since its `Err` is a string"
     );
     assert_eq!(
         projected_rc_calls(body, "gos_rt_rc_retain", 0)
@@ -2834,6 +2874,43 @@ impl Store {
 }
 
 #[test]
+fn map_iteration_payload_owns_children_before_cloning_its_fields() {
+    let (bodies, _) = build(r"
+fn read(owners: Map<(String, String), (String, Vec<String>)>) {
+    for (key, (window, ids)) in owners {
+        if let Some((old_window, old_ids)) = owners.get(key) {
+            assert_eq(old_window, window)
+            assert_eq(old_ids, ids)
+        }
+    }
+}
+");
+    let body = bodies.iter().find(|b| b.name == "read").expect("read body");
+    let has_field_call = |stmts: &[gossamer_mir::Statement], helper: &str, local: Local| {
+        stmts.iter().any(|stmt| matches!(&stmt.kind,
+            StatementKind::Assign { rvalue: Rvalue::CallIntrinsic { name, args }, .. }
+                if *name == helper && matches!(args.first(), Some(Operand::Copy(p))
+                    if p.local == local && p.projection == vec![gossamer_mir::Projection::Field(0)])
+        ))
+    };
+    let statements: Vec<_> = body.blocks.iter().flat_map(|b| b.stmts.clone()).collect();
+    let mut owned = 0;
+    for block in &body.blocks {
+        if let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)), destination, target: Some(target), ..
+        } = &block.terminator
+            && name == "gos_rt_result_payload"
+            && has_field_call(&statements, "gos_rt_str_free_typed", destination.local)
+        {
+            owned += 1;
+            assert!(has_field_call(&body.blocks[target.0 as usize].stmts,
+                "gos_rt_str_retain_typed", destination.local), "{body:#?}");
+        }
+    }
+    assert!(owned > 0, "the iteration value must own its extracted fields");
+}
+
+#[test]
 fn nested_map_aggregate_copy_clones_its_destination_slot() {
     let source = r"
 struct Inner { values: Map<String, String> }
@@ -2851,4 +2928,473 @@ fn wrap(inner: Inner) -> Outer { Outer { inner: inner } }
         StatementKind::Assign { rvalue: Rvalue::CallIntrinsic { name: "gos_rt_map_field_clone", args }, .. }
             if matches!(args.first(), Some(Operand::Copy(p)) if p.local == copy && p.projection == vec![gossamer_mir::Projection::Field(0), gossamer_mir::Projection::Field(0)])
     )), "{body:#?}");
+}
+
+#[test]
+fn nested_tuple_element_copy_retains_owned_fields() {
+    let (bodies, _) = build(r"
+fn extract(rows: Vec<(i64, (String, Vec<String>))>) -> Vec<(String, Vec<String>)> {
+    let mut result = #[]
+    for (_, value) in rows { result.push(value) }
+    result
+}
+");
+    let body = bodies.iter().find(|b| b.name == "extract").expect("extract body");
+    let mut found = false;
+    for block in &body.blocks {
+        for (i, stmt) in block.stmts.iter().enumerate() {
+            if let StatementKind::Assign { place, rvalue: Rvalue::BinaryOp {
+                op: BinOp::Add, rhs: Operand::Const(ConstValue::Int(8)), ..
+            } } = &stmt.kind {
+                found = true;
+                assert!(block.stmts[i + 1..].iter().any(|next| matches!(&next.kind,
+                    StatementKind::Assign { rvalue: Rvalue::CallIntrinsic { name: "gos_rt_str_retain_typed", args }, .. }
+                        if matches!(args.first(), Some(Operand::Copy(p))
+                            if p.local == place.local && p.projection == vec![gossamer_mir::Projection::Field(0)])
+                )), "{body:#?}");
+            }
+        }
+    }
+    assert!(found, "the nested tuple must be copied from its element offset");
+}
+
+#[test]
+fn returned_heap_enum_vector_field_keeps_its_owners_share() {
+    let (bodies, tcx) = build(r"
+enum Items { Values { label: String, values: Vec<String> }, Callback(Fn() -> i64) }
+fn values(items: Items) -> Vec<String> {
+    match items { Items::Values { values, .. } => values, _ => #[] }
+}
+");
+    let body = bodies.iter().find(|body| body.name == "values").expect("values body");
+    let extracts: Vec<Local> = body.blocks.iter().flat_map(|block| &block.stmts)
+        .filter_map(|stmt| match &stmt.kind {
+            StatementKind::Assign { place, rvalue: Rvalue::CallIntrinsic { name: "gos_enum_load", .. } }
+                if matches!(tcx.kind_of(body.local_ty(place.local)), gossamer_types::TyKind::Vec(_)) => Some(place.local),
+            _ => None,
+        }).collect();
+    assert!(!extracts.is_empty(), "{body:#?}");
+    assert!(extracts.iter().any(|local| rc_calls_on(body, "gos_rt_vec_retain", *local) > 0), "{body:#?}");
+}
+
+#[test]
+fn map_iteration_keeps_borrowed_key_snapshot_strings() {
+    let (bodies, _) = build(
+        r"
+enum Entry { Number(i64), Empty }
+fn walk(values: Map<String, Entry>) {
+    for (_, entry) in values {
+        match entry { Entry::Number(n) => println(n), _ => () }
+    }
+}
+
+",
+    );
+    let body = bodies.iter().find(|body| body.name == "walk").expect("walk body");
+    let keys: Vec<_> = body.blocks.iter().filter_map(|block| match &block.terminator {
+        Terminator::Call { callee: Operand::Const(ConstValue::Str(name)), destination, .. }
+            if name == "gos_load" => Some(destination.local),
+        _ => None,
+    }).collect();
+    assert!(!keys.is_empty(), "{body:#?}");
+    for key in keys { assert_eq!(rc_calls_on(body, "gos_rt_str_free_typed", key), 0, "{body:#?}"); }
+}
+
+
+#[test]
+fn method_borrow_before_returning_vector_field_keeps_frame_cleanup() {
+    let (bodies, _) = build(r"
+struct Outline { path: Vec<f64>, advance: i64 }
+struct Face { count: i64 }
+impl Face {
+    fn append(&self, path: &mut Vec<f64>) {
+        for i in 0..self.count { path.push(i as f64) }
+    }
+    fn outline(&self) -> Outline {
+        let mut path = #[]
+        self.append(&mut path)
+        Outline { path: path, advance: 12 }
+    }
+}
+");
+    let body = bodies.iter().find(|body| body.name == "Face::outline").expect("outline");
+    let vector = body.blocks.iter().find_map(|block| match &block.terminator {
+        Terminator::Call { callee: Operand::Const(ConstValue::Str(name)), destination, .. }
+            if name == "Vec::new" => Some(destination.local),
+        _ => None,
+    }).expect("path allocation");
+    // Last-use elision may transfer the frame's share into the return slot.
+    // It must never leave an extra retain with no matching frame cleanup.
+    assert_eq!(rc_calls_on(body, "gos_rt_vec_retain", vector),
+        rc_calls_on(body, "gos_rt_vec_free", vector), "{body:#?}");
+}
+
+#[test]
+fn conditional_vector_returns_without_other_drop_targets_still_cleanup() {
+    let (bodies, _) = build(r"
+fn choose(original: bool) -> Vec<i64> {
+    let mut values = #[]
+    values.push(42)
+    if original { return values }
+    let mut other = #[7]
+    for value in values { other.push(value) }
+    other
+}
+");
+    let body = bodies.iter().find(|body| body.name == "choose").expect("choose");
+    let conditional = body.blocks.iter().flat_map(|block| &block.stmts).filter(|stmt| {
+        matches!(&stmt.kind, StatementKind::Assign {
+            rvalue: Rvalue::CallIntrinsic { name: "gos_rt_vec_free_unless_returned", .. }, ..
+        })
+    }).count();
+    assert!(conditional >= 2, "{body:#?}");
+}
+
+#[test]
+fn rebound_string_moved_to_field_releases_replaced_values() {
+    let (bodies, _) = build(r#"
+enum Widget { Decorated { child: Widget, key: String }, Empty }
+impl Widget { fn id(&self) -> String { match self { Widget::Decorated { key, .. } => key, _ => "" } } }
+struct Item { widget: Widget, disabled: bool }
+struct State { pressed: String }
+fn pick(keys: Vec<Item>, state: &mut State) {
+    let mut pressed = String::new()
+    for value in keys {
+        let id = value.widget.id()
+        if !id.is_empty() && !value.disabled { pressed = id }
+    }
+    state.pressed = pressed
+}
+"#);
+    let body = bodies.iter().find(|body| body.name == "pick").expect("pick");
+    let pressed = body.locals.iter().position(|local| local.debug_name.as_ref().is_some_and(|name| name.name == "pressed")).expect("pressed binding");
+    assert!(rc_calls_on(body, "gos_rt_str_free_typed", Local(u32::try_from(pressed).unwrap())) >= 2, "{body:#?}");
+}
+
+#[test]
+fn a_loop_returned_string_still_releases_replaced_values_without_other_owners() {
+    let source = r#"
+fn pad(value: i64, width: i64) -> String {
+    let mut text = f"{value}"
+    while text.byte_len() < width { text = "0" + text }
+    text
+}
+"#;
+    let (bodies, _) = build(source);
+    let body = bodies.iter().find(|body| body.name == "pad").expect("pad");
+    let text = Local(u32::try_from(body.locals.iter().position(|local|
+        local.debug_name.as_ref().is_some_and(|name| name.name == "text")
+    ).expect("text")).unwrap());
+    assert!(body.blocks.iter().any(|block| block.stmts.windows(2).any(|pair|
+        matches!(&pair[0].kind, StatementKind::Assign {
+            rvalue: Rvalue::CallIntrinsic { name: "gos_rt_str_free_typed", args }, ..
+        } if matches!(args.as_slice(), [Operand::Copy(place)] if place.local == text))
+        && matches!(&pair[1].kind, StatementKind::Assign { place, .. } if place.local == text)
+    )), "overwriting the returned string must release its previous value");
+}
+
+#[test]
+fn aggregate_json_fields_acquire_handles_and_projected_reads_clone() {
+    let source = r"
+use std::encoding::json
+struct Holder { raw: json::Value }
+fn pair(raw: json::Value) -> (Holder, Holder) {
+    (Holder { raw: raw }, Holder { raw: raw })
+}
+fn read(holder: Holder) -> json::Value { holder.raw }
+";
+    let (bodies, _) = build(source);
+    let pair = bodies.iter().find(|body| body.name == "pair").expect("pair");
+    let count = |body: &gossamer_mir::Body, name: &str| {
+        body.blocks.iter().flat_map(|block| &block.stmts).filter(|stmt| {
+            matches!(&stmt.kind, StatementKind::Assign {
+                rvalue: Rvalue::CallIntrinsic { name: found, .. }, ..
+            } if *found == name)
+        }).count()
+    };
+    assert!(count(pair, "gos_rt_json_field_clone") >= 2, "each field must own a handle");
+    assert!(count(pair, "gos_rt_json_field_release") >= 2, "aggregate teardown must release JSON fields");
+    let read = bodies.iter().find(|body| body.name == "read").expect("read");
+    assert!(count(read, "gos_rt_json_clone") >= 1, "a returned field must survive its aggregate");
+}
+
+#[test]
+fn fixed_array_aggregate_element_reads_acquire_owned_fields() {
+    let source = r"
+use std::encoding::json
+struct Holder { raw: json::Value }
+fn read(values: [Holder; 2], index: i64) -> Holder {
+    let selected = values[index]
+    selected
+}
+";
+    let (bodies, _) = build(source);
+    let body = bodies.iter().find(|body| body.name == "read").expect("read");
+    let selected = Local(u32::try_from(body.locals.iter().position(|local|
+        local.debug_name.as_ref().is_some_and(|name| name.name == "selected")
+    ).expect("selected")).unwrap());
+    assert!(field_rc_calls_on(body, "gos_rt_json_field_clone", selected, 0) > 0,
+        "an indexed aggregate binding owns fields independently of its array");
+}
+
+#[test]
+fn consumed_string_extraction_stored_later_does_not_mint_an_unowned_share() {
+    let source = r#"
+struct Store { values: Map<String, String> }
+struct Entry { value: String }
+fn read(store: Store, key: String) -> Entry {
+    let value = match store.values.get(key) { Some(s) => s, None => "missing" }
+    Entry { value: value }
+}
+"#;
+    let (bodies, _) = build(source);
+    let body = bodies.iter().find(|body| body.name == "read").expect("read");
+    let extraction = body.blocks.iter().flat_map(|block| &block.stmts).find_map(|stmt| {
+        match &stmt.kind {
+            StatementKind::Assign { place, rvalue: Rvalue::CallIntrinsic { name: "gos_rt_result_payload", .. } } => Some(place.local),
+            _ => None,
+        }
+    }).expect("payload extraction");
+    let count = |name: &str| body.blocks.iter().flat_map(|block| &block.stmts).filter(|stmt| {
+        matches!(&stmt.kind, StatementKind::Assign { rvalue: Rvalue::CallIntrinsic { name: found, args }, .. }
+            if *found == name && matches!(args.first(), Some(Operand::Copy(p)) if p.local == extraction))
+    }).count();
+    assert_eq!(count("gos_rt_str_retain_typed"), count("gos_rt_str_free_typed"),
+        "a transferred extraction must not mint a share without a cleanup");
+}
+
+#[test]
+fn conditional_vector_call_through_branch_joins_keeps_its_cleanup() {
+    let source = r#"
+enum Wire { Text(String), Items(String, Vec<Wire>) }
+struct Item { value: String, children: Vec<String> }
+fn interfaces(p: Item) -> Vec<String> { let mut names = #["Accessible"]; if !p.value.is_empty() { names.push("Text") }; names.map(|name| "org.a11y.atspi." + name) }
+fn describe(names: Vec<String>, children: Vec<String>) -> String { f"{names.len()}:{children.len()}" }
+fn read(items: Map<String, Item>, path: String) -> Option<Vec<Wire>> {
+ let children = if path == "namespace" { #["child"] } else { #[] }
+ let supported = if path == "cache" { #["Cache"] } else if let Some(p) = items.get(path) { interfaces(p) } else if !children.is_empty() { #[] } else { return None }
+ Some(#[Wire::Text(describe(supported, children))])
+}
+"#;
+    let (bodies, _) = build(source);
+    let body = bodies.iter().find(|body| body.name == "read").expect("read");
+    let result = body.blocks.iter().find_map(|block| match &block.terminator {
+        Terminator::Call { callee: Operand::FnRef { .. }, destination, .. } => Some(destination.local),
+        _ => None,
+    }).expect("names call");
+    assert!(body.blocks[0].stmts.iter().any(|stmt| matches!(&stmt.kind,
+        StatementKind::Assign { place, rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))) }
+            if place.local == result)), "untaken call paths need a null owner");
+    assert!(body.blocks.iter().flat_map(|block| &block.stmts).any(|stmt| matches!(&stmt.kind,
+        StatementKind::Assign { rvalue: Rvalue::CallIntrinsic { name: "gos_rt_vec_free", args }, .. }
+            if matches!(args.first(), Some(Operand::Copy(p)) if p.local == result))),
+        "a conditional returned vector must retain its cleanup after phi copies");
+}
+
+#[test]
+fn loop_vector_results_stored_through_borrowed_and_indexed_fields_are_reclaimed_per_site() {
+    let source = r"
+struct Item { key: String }
+struct Store { items: Vec<Item> }
+struct App { stores: Vec<Store> }
+fn filter(store: &mut Store, app: &mut App, index: i64) {
+    for _ in 0..16 {
+        store.items = store.items.filter(|item| !item.key.is_empty())
+        app.stores[index].items = app.stores[index].items.filter(|item| !item.key.is_empty())
+    }
+}
+";
+    let (bodies, _) = build(source);
+    let body = bodies.iter().find(|body| body.name == "filter").expect("filter");
+    let mut results = Vec::new();
+    for block in &body.blocks {
+        if let Terminator::Call { callee: Operand::Const(ConstValue::Str(name)), destination, .. } = &block.terminator
+            && name == "gos_rt_iter_filter_ptr" {
+            results.push((block, destination.local));
+        }
+    }
+    assert_eq!(results.len(), 2);
+    for (block, result) in results {
+        assert!(block.stmts.iter().any(|stmt| matches!(&stmt.kind,
+            StatementKind::Assign { rvalue: Rvalue::CallIntrinsic { name: "gos_rt_vec_free", args }, .. }
+                if matches!(args.first(), Some(Operand::Copy(p)) if p.local == result))),
+            "the previous loop result must be released before its call overwrites it");
+    }
+}
+
+#[test]
+fn mutable_sequence_slot_replacement_acquires_before_displacing_its_previous_vector() {
+    let source = r"
+fn replace(rows: &mut [Vec<i64>]) { for row in rows { *row = #[7] } }
+";
+    let (bodies, _) = build(source);
+    let body = bodies.iter().find(|body| body.name == "replace").expect("replace");
+    assert!(body.blocks.iter().any(|block| block.stmts.windows(3).any(|stmts| {
+        matches!((&stmts[0].kind, &stmts[1].kind, &stmts[2].kind), (
+            StatementKind::Assign { rvalue: Rvalue::CallIntrinsic { name: "gos_rt_vec_retain", .. }, .. },
+            StatementKind::Assign { rvalue: Rvalue::CallIntrinsic { name: "gos_rt_vec_free", args }, .. },
+            StatementKind::Assign { place, .. }
+        ) if place.projection.as_slice() == [gossamer_mir::Projection::Deref]
+            && matches!(args.first(), Some(Operand::Copy(old)) if old == place))
+    })), "a mutable element slot must acquire its incoming vector before freeing the displaced one");
+}
+
+/// The intrinsic names a body calls, in block and statement order.
+fn intrinsic_names(body: &gossamer_mir::Body) -> Vec<&'static str> {
+    body.blocks
+        .iter()
+        .flat_map(|block| &block.stmts)
+        .filter_map(|stmt| match &stmt.kind {
+            StatementKind::Assign { rvalue: Rvalue::CallIntrinsic { name, .. }, .. } => Some(*name),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A vec built from an array holds copies of elements the array still owns, so
+/// after its layout tag it takes shares of their children; a vec a collecting
+/// terminal fills was handed those shares, so its tag stands alone.
+#[test]
+fn array_built_vec_shares_elements_and_collected_vec_does_not() {
+    let source = r#"
+struct P { name: String, n: i64 }
+
+fn built() -> i64 {
+    let a = [P { name: "x" + "y", n: 1 }, P { name: "z" + "w", n: 2 }]
+    let v = a.to_vec()
+    v.len() + a[0].n
+}
+
+fn collected(ps: Vec<P>) -> i64 {
+    let v: Vec<P> = ps.iter().collect()
+    v.len()
+}
+"#;
+    let (bodies, _) = build(source);
+    let built = bodies.iter().find(|b| b.name == "built").expect("built");
+    let names = intrinsic_names(built);
+    let tag = names
+        .iter()
+        .position(|n| *n == "gos_rt_vec_set_slot_children")
+        .expect("the array-built vec records its element layout");
+    assert_eq!(
+        names.get(tag + 1),
+        Some(&"gos_rt_vec_share_elements"),
+        "the share follows the tag: {names:?}"
+    );
+    let collected = bodies.iter().find(|b| b.name == "collected").expect("collected");
+    assert!(
+        !intrinsic_names(collected).contains(&"gos_rt_vec_share_elements"),
+        "a collected vec already holds its elements' shares"
+    );
+}
+
+/// `find` over wrapped elements answers `Some(element)` through the shared
+/// carrier constructor, so the element's box layout is registered and the
+/// answer's holder gives the box back.
+#[test]
+fn found_carrier_element_is_given_back_by_its_holder() {
+    let source = r"
+fn hit(opts: Vec<Option<i64>>) -> bool {
+    let r = opts.iter().find(|o| o == Some(3))
+    r.is_some()
+}
+";
+    let (bodies, _) = build(source);
+    let body = bodies.iter().find(|b| b.name == "hit").expect("hit");
+    assert!(
+        intrinsic_names(body).contains(&"gos_rt_option_slot_release"),
+        "the found carrier's boxed payload is released: {:?}",
+        intrinsic_names(body)
+    );
+}
+
+/// An `Option` of an aggregate keys a map by its payload's content: the key
+/// descriptor marks the payload word as a boxed blob and spells the blob's own
+/// layout after the per-slot part.
+#[test]
+fn option_aggregate_key_descriptor_names_its_boxed_payload() {
+    let source = r"
+fn count(k: i64) -> i64 {
+    let mut m = Map::new()
+    m.insert(Some([1, k]), 1)
+    m.len()
+}
+";
+    let (bodies, _) = build(source);
+    let body = bodies.iter().find(|b| b.name == "count").expect("count");
+    let descriptor = body.blocks.iter().find_map(|block| match &block.terminator {
+        Terminator::Call { callee: Operand::Const(ConstValue::Str(name)), args, .. }
+            if name == "gos_rt_map_insert_skey_opt" =>
+        {
+            args.iter().find_map(|arg| match arg {
+                Operand::Const(ConstValue::Str(desc)) => Some(desc.clone()),
+                _ => None,
+            })
+        }
+        _ => None,
+    });
+    assert_eq!(descriptor.as_deref(), Some("sB|(ss)"));
+}
+
+/// A sequence element handed to a method that only reads its receiver is lent
+/// in place, so the element's map field is not copied for the call; a method
+/// that can reach the sequence through a static gets a copy of its own.
+#[test]
+fn read_only_method_borrows_a_sequence_element_in_place() {
+    let source = r"
+struct Face { tables: Map<i64, i64> }
+
+impl Face {
+    fn has(&self, k: i64) -> bool { self.tables.contains_key(k) }
+    fn wipe(&self) -> i64 {
+        FACES.clear()
+        self.tables.len()
+    }
+}
+
+static mut FACES: Vec<Face> = #[]
+
+fn probe(i: i64) -> bool { FACES[0].has(i) }
+
+fn reach() -> i64 { FACES[0].wipe() }
+";
+    let (bodies, _) = build(source);
+    let probe = bodies.iter().find(|b| b.name == "probe").expect("probe");
+    let reach = bodies.iter().find(|b| b.name == "reach").expect("reach");
+    let clones = |body: &gossamer_mir::Body| {
+        intrinsic_names(body).iter().filter(|n| **n == "gos_rt_map_field_clone").count()
+    };
+    assert_eq!(clones(probe), 0, "{:?}", intrinsic_names(probe));
+    assert!(clones(reach) > 0, "{:?}", intrinsic_names(reach));
+}
+
+/// A `const` or immutable `static` table of constants that a body only reads
+/// is a constant table, which a backend keeps in read-only data; a table the
+/// body writes is not.
+#[test]
+fn constant_tables_are_the_read_only_constant_arrays() {
+    let source = r"
+const TABLE: [i64; 20] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+static ST: [i64; 20] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+
+fn read(i: i64) -> i64 { TABLE[i] + ST[i] }
+
+fn write(i: i64) -> i64 {
+    let mut t = TABLE
+    t[0] = 5
+    t[i]
+}
+";
+    let (mut bodies, tcx) = build(source);
+    // A backend reads the optimised body, whose literal elements are folded.
+    for body in &mut bodies {
+        gossamer_mir::optimise(body, &tcx);
+    }
+    let tables = |name: &str| {
+        let body = bodies.iter().find(|b| b.name == name).expect(name);
+        gossamer_mir::constant_table_locals(body, &tcx).len()
+    };
+    assert_eq!(tables("read"), 2);
+    assert_eq!(tables("write"), 0);
 }

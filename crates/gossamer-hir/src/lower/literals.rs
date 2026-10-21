@@ -124,10 +124,23 @@ impl Lowerer<'_> {
         node: NodeId,
         path: &gossamer_ast::PathExpr,
     ) -> (String, String) {
-        let mut name = path
-            .segments
+        let segments: Vec<&gossamer_ast::Ident> =
+            path.segments.iter().map(|seg| &seg.name).collect();
+        self.struct_identity(node, &segments)
+    }
+
+    /// The identity a struct named by `segments` at `node` carries at run
+    /// time (its module-qualified name, through an import or alias), and the
+    /// name it was declared with. Literals build values under the identity and
+    /// struct patterns test for it.
+    pub(super) fn struct_identity(
+        &self,
+        node: NodeId,
+        segments: &[&gossamer_ast::Ident],
+    ) -> (String, String) {
+        let mut name = segments
             .last()
-            .map(|seg| seg.name.name.clone())
+            .map(|seg| seg.name.clone())
             .unwrap_or_default();
         if let Some(Resolution::Def { def, .. }) = self.resolutions.get(node)
             && let Some(promoted) = self.module_fn_paths.get(&def)
@@ -157,7 +170,7 @@ impl Lowerer<'_> {
         if let Some(Resolution::Import { .. }) = self.resolutions.get(node)
             && let Some(def) = self.resolutions.import_def(node)
             && let Some(identity) = self.module_type_names.get(&def)
-            && path.segments.len() == 1
+            && segments.len() == 1
         {
             name.clone_from(identity);
         } else if let Some(Resolution::Import { use_id }) = self.resolutions.get(node)
@@ -184,7 +197,7 @@ impl Lowerer<'_> {
         let declared_name = alias_target
             .as_ref()
             .and_then(|target| target.last())
-            .or_else(|| path.segments.last().map(|seg| &seg.name))
+            .or_else(|| segments.last().copied())
             .map(|ident| ident.name.clone())
             .unwrap_or_default();
         (name, declared_name)

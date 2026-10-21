@@ -479,6 +479,7 @@ pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
         fn visit_item(&mut self, item: &mut gossamer_ast::Item) {
             let name = inline_module_name(item);
             self.module.extend(name.clone());
+            collapse_item_bounds(item, self.scopes.modules_in(&self.module));
             walk_item_mut(self, item);
             if name.is_some() {
                 self.module.pop();
@@ -532,6 +533,95 @@ pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
     }
 }
 
+/// Collapses the stdlib traits an item names outside type position: the
+/// trait an `impl` implements, and the bounds of its own and its methods'
+/// generic parameters and `where` clauses (`impl os::fd::Descriptor for T`,
+/// `fn f<D: os::fd::Descriptor>`).
+fn collapse_item_bounds(
+    item: &mut gossamer_ast::Item,
+    scope: &std::collections::HashMap<String, String>,
+) {
+    fn bounds_of(
+        generics: &mut gossamer_ast::Generics,
+        where_clause: &mut gossamer_ast::WhereClause,
+        scope: &std::collections::HashMap<String, String>,
+    ) {
+        for param in &mut generics.params {
+            if let gossamer_ast::GenericParam::Type { bounds, .. } = param {
+                for bound in bounds {
+                    collapse_type(&mut bound.path, scope);
+                }
+            }
+        }
+        for predicate in &mut where_clause.predicates {
+            for bound in &mut predicate.bounds {
+                collapse_type(&mut bound.path, scope);
+            }
+        }
+    }
+    match &mut item.kind {
+        gossamer_ast::ItemKind::Impl(decl) => {
+            if let Some(bound) = &mut decl.trait_ref {
+                collapse_type(&mut bound.path, scope);
+            }
+            bounds_of(&mut decl.generics, &mut decl.where_clause, scope);
+            for member in &mut decl.items {
+                if let gossamer_ast::ImplItem::Fn(f) = member {
+                    bounds_of(&mut f.generics, &mut f.where_clause, scope);
+                }
+            }
+        }
+        gossamer_ast::ItemKind::Fn(f) => bounds_of(&mut f.generics, &mut f.where_clause, scope),
+        _ => {}
+    }
+}
+
+/// The name each trait path `item` names outside type position becomes once
+/// [`collapse_item_bounds`] rewrites it: its first segment after collapsing.
+fn item_bound_names(
+    item: &gossamer_ast::Item,
+    scope: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
+    fn collapsed(
+        bound: &gossamer_ast::TraitBound,
+        scope: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
+        let mut path = bound.path.clone();
+        collapse_type(&mut path, scope);
+        path.segments.first().map(|segment| segment.name.name.clone())
+    }
+    fn bounds_of(
+        generics: &gossamer_ast::Generics,
+        where_clause: &gossamer_ast::WhereClause,
+        scope: &std::collections::HashMap<String, String>,
+        out: &mut Vec<String>,
+    ) {
+        for param in &generics.params {
+            if let gossamer_ast::GenericParam::Type { bounds, .. } = param {
+                out.extend(bounds.iter().filter_map(|b| collapsed(b, scope)));
+            }
+        }
+        for predicate in &where_clause.predicates {
+            out.extend(predicate.bounds.iter().filter_map(|b| collapsed(b, scope)));
+        }
+    }
+    let mut out = Vec::new();
+    match &item.kind {
+        gossamer_ast::ItemKind::Impl(decl) => {
+            out.extend(decl.trait_ref.as_ref().and_then(|b| collapsed(b, scope)));
+            bounds_of(&decl.generics, &decl.where_clause, scope, &mut out);
+            for member in &decl.items {
+                if let gossamer_ast::ImplItem::Fn(f) = member {
+                    bounds_of(&f.generics, &f.where_clause, scope, &mut out);
+                }
+            }
+        }
+        gossamer_ast::ItemKind::Fn(f) => bounds_of(&f.generics, &f.where_clause, scope, &mut out),
+        _ => {}
+    }
+    out
+}
+
 /// The name of the inline module `item` declares, if it declares one.
 fn inline_module_name(item: &gossamer_ast::Item) -> Option<String> {
     match &item.kind {
@@ -578,6 +668,9 @@ mod wrapper_names {
         fn visit_item(&mut self, item: &gossamer_ast::Item) {
             let name = inline_module_name(item);
             self.module.extend(name.clone());
+            for bound in super::item_bound_names(item, self.scopes.modules_in(&self.module)) {
+                self.note(&bound);
+            }
             walk_item(self, item);
             if name.is_some() {
                 self.module.pop();
@@ -688,7 +781,9 @@ use gossamer_ast::pattern::Pattern as SbkPattern;
 use gossamer_ast::stmt::Stmt as SbkStmt;
 use gossamer_lex::Span as SbkSpan;
 
-const SBK_KEY: &str = "__gos_sbk_key";
+// The comparator captures the key, and a `__gos_` name is a global that is
+// never captured, so the key binding takes a local's prefix.
+const SBK_KEY: &str = "__sbk_key";
 const SBK_A: &str = "__gos_sbk_a";
 const SBK_B: &str = "__gos_sbk_b";
 const SBK_KA: &str = "__gos_sbk_ka";

@@ -821,6 +821,9 @@ impl<'a> Builder<'a> {
         vec_local
     }
 
+    /// Converts the fixed array `raw` to a `Vec` of the same elements, as a
+    /// `[T]` / `Vec<T>` slot reads them: an element that is itself an array
+    /// keeps its inline `[T; N]` layout.
     pub(crate) fn coerce_array_to_vec(
         &mut self,
         raw: Local,
@@ -828,86 +831,7 @@ impl<'a> Builder<'a> {
         len: gossamer_types::ArrayLen,
         span: Span,
     ) -> Local {
-        use gossamer_types::TyKind;
-        let len = len.to_usize();
-        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
-
-        // Nested array: `Array{Array{T,N},M}` → `Vec<Vec<T>>`.
-        // Each inner flat array must become a heap GosVec pointer so that
-        // `gos_rt_vec_get_i64` on the outer Vec returns a valid *mut GosVec.
-        if let TyKind::Array {
-            elem: inner_elem,
-            len: inner_len,
-        } = self.tcx.kind_of(elem_ty).clone()
-        {
-            let inner_len = inner_len.to_usize();
-            let inner_elem_bytes = self.elem_bytes_of(inner_elem);
-            let inner_elem_bytes_local = self.fresh(i64_ty);
-            self.emit_assign(
-                Place::local(inner_elem_bytes_local),
-                Rvalue::Use(Operand::Const(ConstValue::Int(i128::from(
-                    inner_elem_bytes,
-                )))),
-                span,
-            );
-            let inner_len_local = self.fresh(i64_ty);
-            self.emit_assign(
-                Place::local(inner_len_local),
-                Rvalue::Use(Operand::Const(ConstValue::Int(inner_len as i128))),
-                span,
-            );
-            let outer_len_local = self.fresh(i64_ty);
-            self.emit_assign(
-                Place::local(outer_len_local),
-                Rvalue::Use(Operand::Const(ConstValue::Int(len as i128))),
-                span,
-            );
-            let inner_vec_ty = self.tcx.intern(TyKind::Vec(inner_elem));
-            let outer_vec_ty = self.tcx.intern(TyKind::Vec(inner_vec_ty));
-            let dest = self.fresh(outer_vec_ty);
-            let next = self.new_block(span);
-            self.terminate(Terminator::Call {
-                callee: Operand::Const(ConstValue::Str("gos_rt_nested_arr_to_vec".to_string())),
-                args: vec![
-                    Operand::Copy(Place::local(inner_elem_bytes_local)),
-                    Operand::Copy(Place::local(inner_len_local)),
-                    Operand::Copy(Place::local(raw)),
-                    Operand::Copy(Place::local(outer_len_local)),
-                ],
-                destination: Place::local(dest),
-                target: Some(next),
-            });
-            self.set_current(next);
-            return dest;
-        }
-
-        let elem_bytes = self.elem_bytes_of(elem_ty);
-        let elem_bytes_local = self.fresh(i64_ty);
-        self.emit_assign(
-            Place::local(elem_bytes_local),
-            Rvalue::Use(Operand::Const(ConstValue::Int(i128::from(elem_bytes)))),
-            span,
-        );
-        let len_local = self.fresh(i64_ty);
-        self.emit_assign(
-            Place::local(len_local),
-            Rvalue::Use(Operand::Const(ConstValue::Int(len as i128))),
-            span,
-        );
-        let vec_ty = self.tcx.intern(TyKind::Vec(elem_ty));
-        let dest = self.fresh(vec_ty);
-        let next = self.new_block(span);
-        self.terminate(Terminator::Call {
-            callee: Operand::Const(ConstValue::Str("gos_rt_vec_from_arr".to_string())),
-            args: vec![
-                Operand::Copy(Place::local(elem_bytes_local)),
-                Operand::Copy(Place::local(raw)),
-                Operand::Copy(Place::local(len_local)),
-            ],
-            destination: Place::local(dest),
-            target: Some(next),
-        });
-        self.set_current(next);
+        let dest = self.fixed_array_to_vec(raw, elem_ty, len, span);
         if let Some(name) = self.local_elem_struct.get(&raw).cloned() {
             self.local_elem_struct.insert(dest, name);
         }
@@ -959,12 +883,15 @@ impl<'a> Builder<'a> {
     /// parameter) into a borrowing GosVec view. Identical buffer to
     /// `coerce_array_to_vec`, but built via `gos_rt_vec_borrow_arr` so the
     /// drop pass leaves it non-owning: a borrow must not free the element
-    /// children the source array still owns. Nested-array borrows fall back
-    /// to the owning conversion (exotic; the inner vecs need real headers).
+    /// children the source array still owns.
     ///
     /// With `frame` set, the callee is known to neither keep nor resize the
     /// view, so its header goes in a slot of this frame rather than on the
     /// heap; its release is then a no-op.
+    ///
+    /// A vector of one-byte elements holds them packed, which no view over
+    /// an array's one-word slots can be, so such an array is copied into a
+    /// vector of its own instead.
     pub(crate) fn coerce_borrow_array_to_vec(
         &mut self,
         raw: Local,
@@ -974,12 +901,12 @@ impl<'a> Builder<'a> {
         span: Span,
     ) -> Local {
         use gossamer_types::TyKind;
-        if matches!(self.tcx.kind_of(elem_ty), TyKind::Array { .. }) {
+        let elem_bytes = self.elem_bytes_of(elem_ty);
+        if elem_bytes == 1 {
             return self.coerce_array_to_vec(raw, elem_ty, len, span);
         }
         let len = len.to_usize();
         let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
-        let elem_bytes = self.elem_bytes_of(elem_ty);
         let elem_bytes_local = self.fresh(i64_ty);
         self.emit_assign(
             Place::local(elem_bytes_local),

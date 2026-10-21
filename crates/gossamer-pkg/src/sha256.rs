@@ -1,13 +1,12 @@
-//! Minimal pure-Rust SHA-256.
-//! Used by the fetcher to fingerprint downloaded source trees. Phase
-//! 28 keeps the cryptographic surface tiny - we hash file contents to
-//! produce the cache key and verify tarball downloads. A full crypto
-//! crate would be overkill for a single hash function and pulls in
-//! transitive `unsafe` we'd rather avoid.
+//! SHA-256 for content fingerprints: fetched source trees, cache keys, and
+//! the language's `crypto::sha256`. Native builds hash through `sha2`, which
+//! selects the CPU's SHA instructions at run time; the wasm playground, which
+//! does not link `sha2`, hashes with the portable rounds below.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::many_single_char_names)]
 
+#[cfg(target_arch = "wasm32")]
 const K: [u32; 64] = [
     0x428a_2f98,
     0x7137_4491,
@@ -75,6 +74,7 @@ const K: [u32; 64] = [
     0xc671_78f2,
 ];
 
+#[cfg(target_arch = "wasm32")]
 const H0: [u32; 8] = [
     0x6a09_e667,
     0xbb67_ae85,
@@ -91,6 +91,39 @@ const H0: [u32; 8] = [
 /// This keeps at most one partial 64-byte block in memory, so callers that
 /// hash source trees or network streams do not need a second contiguous copy
 /// of their input merely to produce a digest.
+/// Incremental SHA-256.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Default)]
+pub struct Hasher(sha2::Sha256);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Hasher {
+    /// A hasher over no bytes yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(sha2::Sha256::default())
+    }
+
+    /// Appends `bytes` to the message.
+    pub fn update(&mut self, bytes: &[u8]) {
+        sha2::Digest::update(&mut self.0, bytes);
+    }
+
+    /// The digest of the bytes appended so far.
+    #[must_use]
+    pub fn finalize(&self) -> [u8; 32] {
+        sha2::Digest::finalize(self.0.clone()).into()
+    }
+
+    /// [`Self::finalize`] in lowercase hexadecimal.
+    #[must_use]
+    pub fn finalize_hex(&self) -> String {
+        hex_digest(self.finalize())
+    }
+}
+
+/// Incremental SHA-256.
+#[cfg(target_arch = "wasm32")]
 #[derive(Clone)]
 pub struct Hasher {
     state: [u32; 8],
@@ -99,12 +132,14 @@ pub struct Hasher {
     total_bytes: u64,
 }
 
+#[cfg(target_arch = "wasm32")]
 impl Default for Hasher {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 impl Hasher {
     /// Creates a new incremental SHA-256 hasher.
     #[must_use]
@@ -196,6 +231,7 @@ pub fn digest(bytes: &[u8]) -> [u8; 32] {
     hasher.finalize()
 }
 
+#[cfg(target_arch = "wasm32")]
 fn digest_from_state(state: [u32; 8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     for (i, word) in state.iter().enumerate() {
@@ -204,6 +240,7 @@ fn digest_from_state(state: [u32; 8]) -> [u8; 32] {
     out
 }
 
+#[cfg(target_arch = "wasm32")]
 fn compress(state: &mut [u32; 8], block: &[u8]) {
     let mut w = [0u32; 64];
     for (i, word) in w.iter_mut().enumerate().take(16) {

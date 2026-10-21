@@ -1,0 +1,50 @@
+// Scalar statics written by a body that stays interpreted (it holds a sync
+// object) and read and written by a hot compiled loop: both tiers must see
+// one value.
+use std::sync
+
+static mut COUNT: i64 = 0
+static mut SCALE: f64 = 1.5
+static mut ON: bool = false
+static mut MARK: char = 'a'
+static mut SMALL: u8 = 250
+
+struct Item {
+    name: String
+    weight: i64
+}
+
+fn record(items: Vec<Item>) {
+    let guard = sync::Mutex::new()
+    for item in items {
+        guard.lock()
+        defer guard.unlock()
+        COUNT += item.weight
+        MARK = item.name[0]
+    }
+    ON = !ON
+    SCALE *= 2.0
+    SMALL = 7
+}
+
+fn hot(n: i64) -> i64 {
+    let mut acc = 0
+    for i in 0..n {
+        acc += COUNT + i
+        COUNT += 1
+    }
+    if ON {
+        acc += 1000
+    }
+    if MARK == 'z' {
+        acc += 2000
+    }
+    acc + (SCALE * 10.0) as i64 + SMALL as i64
+}
+
+fn main() {
+    println(hot(10))
+    record(#[Item { name: "apple", weight: 5 }, Item { name: "zest", weight: 7 }])
+    println(hot(10))
+    println(f"{COUNT} {SCALE} {ON} {MARK} {SMALL}")
+}

@@ -331,6 +331,12 @@ impl __gos_time_Location {
         Ok(__gos_time_Location { spec: __gos_time_location_raw(name)? })
     }
     fn utc() -> __gos_time_Location { __gos_time_Location { spec: "UTC" } }
+    fn local() -> __gos_time_Location {
+        match __gos_time_location_raw("Local") {
+            Ok(spec) => __gos_time_Location { spec: spec }
+            Err(_) => __gos_time_Location { spec: "UTC" }
+        }
+    }
     fn fixed(offset_seconds: i64) -> Result<__gos_time_Location, errors::Error> {
         Ok(__gos_time_Location { spec: __gos_time_fixed_location_raw(offset_seconds)? })
     }
@@ -970,14 +976,14 @@ impl __gos_fd_Descriptor for fs::File {
 ";
 
 const FD_WAIT_WRAPPERS: &str = r#"
-fn __gos_fd_not_a_stream(operation: String) -> errors::Error {
-    errors::new(f"{operation}: an integer descriptor names a standard stream (0, 1, or 2); pass an opened file as its fs::File")
+fn __gos_fd_no_descriptor(operation: String) -> errors::Error {
+    errors::new(f"{operation}: the value holds no open descriptor (an integer names only a standard stream, 0, 1, or 2; pass an opened file as its fs::File)")
 }
 
 fn __gos_fd_wait_readable<D: __gos_fd_Descriptor>(fd: D, timeout_ms: i64) -> Result<bool, errors::Error> {
     let raw = fd.raw_descriptor()
     if raw < 0 {
-        return Err(__gos_fd_not_a_stream("fd::wait_readable"))
+        return Err(__gos_fd_no_descriptor("fd::wait_readable"))
     }
     let ready = __gos_fd_wait_raw(raw, 0, timeout_ms)?
     Ok(ready == 1)
@@ -986,7 +992,7 @@ fn __gos_fd_wait_readable<D: __gos_fd_Descriptor>(fd: D, timeout_ms: i64) -> Res
 fn __gos_fd_wait_writable<D: __gos_fd_Descriptor>(fd: D, timeout_ms: i64) -> Result<bool, errors::Error> {
     let raw = fd.raw_descriptor()
     if raw < 0 {
-        return Err(__gos_fd_not_a_stream("fd::wait_writable"))
+        return Err(__gos_fd_no_descriptor("fd::wait_writable"))
     }
     let ready = __gos_fd_wait_raw(raw, 1, timeout_ms)?
     Ok(ready == 1)
@@ -1042,7 +1048,7 @@ fn __gos_term_is_terminal<D: __gos_fd_Descriptor>(stream: D) -> bool {
 fn __gos_term_size<D: __gos_fd_Descriptor>(fd: D = __gos_term_STDOUT) -> Result<(i64, i64), errors::Error> {
     let raw = fd.raw_descriptor()
     if raw < 0 {
-        return Err(__gos_fd_not_a_stream("term::size"))
+        return Err(__gos_fd_no_descriptor("term::size"))
     }
     __gos_term_size_raw(raw)
 }
@@ -1050,7 +1056,7 @@ fn __gos_term_size<D: __gos_fd_Descriptor>(fd: D = __gos_term_STDOUT) -> Result<
 fn __gos_term_enter_raw<D: __gos_fd_Descriptor>(fd: D = __gos_term_STDIN) -> Result<__gos_term_RawMode, errors::Error> {
     let raw = fd.raw_descriptor()
     if raw < 0 {
-        return Err(__gos_fd_not_a_stream("term::enter_raw"))
+        return Err(__gos_fd_no_descriptor("term::enter_raw"))
     }
     __gos_term_enter_raw_on(raw, fd.keep_open())
 }
@@ -1058,7 +1064,7 @@ fn __gos_term_enter_raw<D: __gos_fd_Descriptor>(fd: D = __gos_term_STDIN) -> Res
 fn __gos_term_read_input<D: __gos_fd_Descriptor>(timeout_ms: i64, fd: D = __gos_term_STDIN) -> Result<Vec<u8>, errors::Error> {
     let raw = fd.raw_descriptor()
     if raw < 0 {
-        return Err(__gos_fd_not_a_stream("term::read_input"))
+        return Err(__gos_fd_no_descriptor("term::read_input"))
     }
     if __gos_fd_wait_raw(__gos_term_handle(raw), 0, timeout_ms)? != 1 {
         return Ok(#[])

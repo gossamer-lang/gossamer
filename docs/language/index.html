@@ -2510,7 +2510,7 @@
 </tr>
 <tr>
 <td><a href="keyword_arguments/"><code>lang::keyword_arguments</code></a></td>
-<td>Keyword arguments and constant parameter defaults: a call may name any parameter (<code>volume(depth: 4, width: 2)</code>), and a parameter may declare a constant default (<code>fn volume(width: i64, height: i64 = 2)</code>) that is spliced into every call omitting it. Positional arguments come first, then names. Both are caller-side spellings rewritten into the callee's declared order before type checking, so the calling convention is unchanged. A name on a method call is matched when every type declaring that method name would rewrite the call identically; when they disagree the call is reported (GR0013) rather than guessed.</td>
+<td>Keyword arguments and parameter defaults: a call may name any parameter (<code>volume(depth: 4, width: 2)</code>), and a parameter may declare a default known while compiling (<code>fn volume(width: i64, height: i64 = 2)</code>, <code>mode: Mode = Mode::Fast</code>, <code>parent: Option&lt;Window&gt; = None</code>) that is spliced into every call omitting it, meaning what it means where the function is declared. Positional arguments come first, then names. Both are caller-side spellings rewritten into the callee's declared order before type checking, so the calling convention is unchanged. A name on a method call is matched when every type declaring that method name would rewrite the call identically; when they disagree the call is reported (GR0013) rather than guessed.</td>
 </tr>
 <tr>
 <td><a href="move_keyword/"><code>lang::move_keyword</code></a></td>

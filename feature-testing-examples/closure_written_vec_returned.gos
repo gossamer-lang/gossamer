@@ -1,0 +1,37 @@
+// A vector a closure writes reaches the caller with the closure's writes
+// whether the function answers it as its tail, from a `return`, or from an
+// inner block.
+fn each(n: i64, f: Fn(i64)) {
+    for i in 0..n { f(i) }
+}
+
+fn tail_answer() -> Vec<f64> {
+    let mut v = #[0.0; 4]
+    each(4, |i| { v[i] = 1.0 + i as f64 })
+    println(f"inside: {v}")
+    v
+}
+
+fn returned() -> Vec<i64> {
+    let mut v = #[0; 3]
+    each(3, |i| { v[i] = i * 10 })
+    return v
+}
+
+fn from_block(n: i64) -> Vec<i64> {
+    let out = {
+        let mut v = #[]
+        each(n, |i| v.push(i * i))
+        v
+    }
+    out
+}
+
+fn main() {
+    let a = tail_answer()
+    println(f"tail: {a} {a.len()}")
+    let b = returned()
+    println(f"return: {b} {b.len()}")
+    let c = from_block(4)
+    println(f"block: {c} {c.len()}")
+}

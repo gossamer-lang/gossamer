@@ -376,6 +376,11 @@ pub const IMAGE: StdModule = StdModule {
             doc: "Builds an image from width * height RGBA8 pixels, row by row; returns zero when the byte count does not match.",
         },
         StdItem {
+            name: "release",
+            kind: StdItemKind::Function,
+            doc: "Releases an opaque image and its pixels. Returns false for an invalid or already released handle.",
+        },
+        StdItem {
             name: "to_rgba_bytes",
             kind: StdItemKind::Function,
             doc: "Returns the pixels as RGBA8 bytes, row by row; empty for an invalid handle.",
@@ -425,7 +430,7 @@ pub const TIME: StdModule = StdModule {
         StdItem {
             name: "Location",
             kind: StdItemKind::Type,
-            doc: "Immutable IANA or fixed-offset time-zone location.",
+            doc: "Immutable IANA or fixed-offset time-zone location: `lookup(name)` (an IANA name, or `\"Local\"`), `local()` (the zone the system runs in: `TZ`, then the platform setting, else UTC), `utc()`, `fixed(offset_seconds)`; `name()`, `civil(unix_ms)`, `resolve(civil)`.",
         },
         StdItem {
             name: "Time",

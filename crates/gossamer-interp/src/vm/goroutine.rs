@@ -1,6 +1,6 @@
 //! Goroutine worker pool backing the bytecode VM's `Op::Spawn`.
 
-use std::collections::VecDeque;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -55,6 +55,25 @@ static STUCK_WAITERS: AtomicU64 = AtomicU64::new(0);
 /// Goroutine task: a closure to run on a pool worker.
 type GoroutineTask = Box<dyn FnOnce() + Send + 'static>;
 
+/// A goroutine waiting for a worker, with the identity of the join handle
+/// its outcome reaches (0 when nothing can join it).
+struct QueuedTask {
+    handle: usize,
+    task: GoroutineTask,
+}
+
+/// Runs one goroutine task to its end on the calling thread.
+fn run_task(task: GoroutineTask) {
+    // A task must settle the outstanding counter even when an implementation
+    // panic escapes its VM boundary, or program exit would wait forever after
+    // main has printed all of its output. User panics are converted to
+    // RuntimeError by `spawn_goroutine_native`; this catch is the final
+    // containment for host panics.
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)).is_err() {
+        eprintln!("gossamer: goroutine worker panicked");
+    }
+}
+
 /// Spawns an OS thread that runs Gossamer goroutine code. Sizes its
 /// stack to [`crate::vm::VM_THREAD_STACK_BYTES`] - the same reserve the
 /// main VM thread uses - because a goroutine body runs the bytecode
@@ -86,10 +105,14 @@ fn spawn_goroutine_thread<F: FnOnce() + Send + 'static>(
 /// thread per CPU up front multiplies that footprint across processes.
 /// `GOSSAMER_VM_GOROUTINE_WORKERS` sets that starting size.
 ///
-/// A background watchdog then grows it, up to [`MAX_WORKERS`], but only when
-/// the pool has made zero progress for a full [`STARVATION_CHECK_INTERVAL`]
-/// while saturated - see [`GoroutinePool::start_starvation_watchdog`] for
-/// why growth is reactive rather than triggered by `spawn` itself.
+/// At most `target` goroutines run at once. A worker that parks in a
+/// channel, lock, or join wait gives up its slot, and a fresh worker is
+/// started when no idle one can take it, as Go hands a blocked thread's
+/// processor to another. A background watchdog raises `target`, up to
+/// [`MAX_WORKERS`], only when the pool has made zero progress for a full
+/// [`STARVATION_CHECK_INTERVAL`] while saturated - see
+/// [`GoroutinePool::start_starvation_watchdog`] for why that growth is
+/// reactive rather than triggered by `spawn` itself.
 ///
 /// `outstanding` tracks queued + in-flight tasks so
 /// [`join_outstanding_goroutines`] can wait for completion.
@@ -125,20 +148,67 @@ pub(crate) struct GoroutinePool {
 }
 
 struct PoolInner {
-    queue: VecDeque<GoroutineTask>,
+    /// Queued goroutines keyed by spawn order, so workers take the oldest
+    /// first and a joiner can take its own child from anywhere in line.
+    queue: BTreeMap<u64, QueuedTask>,
+    /// The key the next queued goroutine takes.
+    next_seq: u64,
+    /// The queue key of each queued goroutine that has a join handle.
+    by_handle: rustc_hash::FxHashMap<usize, u64>,
     /// `true` once the runtime is shutting down; workers exit
     /// once `queue` drains. Currently never set in practice
     /// (the process exits right after `drain()` returns), but
     /// kept for cleanliness.
     shutting_down: bool,
+    /// Workers executing a goroutine and not parked in a wait. A worker takes
+    /// a queued task only while this is below `target`, so goroutines share
+    /// `target` threads' worth of the machine however many workers exist.
+    running: usize,
+    /// Workers parked in a channel, lock, or join wait. A parked worker holds
+    /// its thread but runs nothing, so its slot passes to another worker.
+    parked: usize,
+    /// How many goroutines run at once: the starting worker count, raised by
+    /// the starvation watchdog when goroutines block outside a counted wait.
+    target: usize,
+}
+
+impl PoolInner {
+    fn push(&mut self, handle: usize, task: GoroutineTask) {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        if handle != 0 {
+            self.by_handle.insert(handle, seq);
+        }
+        self.queue.insert(seq, QueuedTask { handle, task });
+    }
+
+    /// Takes the longest-queued goroutine.
+    fn pop_oldest(&mut self) -> Option<GoroutineTask> {
+        let (_, queued) = self.queue.pop_first()?;
+        if queued.handle != 0 {
+            self.by_handle.remove(&queued.handle);
+        }
+        Some(queued.task)
+    }
+
+    /// Takes the goroutine behind join handle `handle` while no worker has.
+    fn take_joinable(&mut self, handle: usize) -> Option<GoroutineTask> {
+        let seq = self.by_handle.remove(&handle)?;
+        self.queue.remove(&seq).map(|queued| queued.task)
+    }
 }
 
 impl GoroutinePool {
     fn new(num_workers: usize) -> Arc<Self> {
         let pool = Arc::new(Self {
             inner: parking_lot::Mutex::new(PoolInner {
-                queue: VecDeque::new(),
+                queue: BTreeMap::new(),
+                next_seq: 0,
+                by_handle: rustc_hash::FxHashMap::default(),
                 shutting_down: false,
+                running: 0,
+                parked: 0,
+                target: num_workers,
             }),
             cv: parking_lot::Condvar::new(),
             drain_cv: parking_lot::Condvar::new(),
@@ -180,7 +250,10 @@ impl GoroutinePool {
                     let task = {
                         let mut inner = p.inner.lock();
                         loop {
-                            if let Some(task) = inner.queue.pop_front() {
+                            if inner.running < inner.target
+                                && let Some(task) = inner.pop_oldest()
+                            {
+                                inner.running += 1;
                                 p.injects.fetch_add(1, Ordering::Relaxed);
                                 break Some(task);
                             }
@@ -194,37 +267,8 @@ impl GoroutinePool {
                     };
                     match task {
                         Some(task) => {
-                            // A worker task must settle the outstanding counter even
-                            // when an implementation panic escapes its VM boundary.
-                            // Otherwise program exit waits forever after main has
-                            // already printed all of its output. User panics are
-                            // converted to RuntimeError by `spawn_goroutine_native`;
-                            // this catch is the final containment for host panics.
-                            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)).is_err()
-                            {
-                                eprintln!("gossamer: goroutine worker panicked");
-                            }
-                            // A panic still counts as progress: the worker is
-                            // free again either way, which is all the
-                            // starvation watchdog needs to know.
-                            p.completions.fetch_add(1, Ordering::AcqRel);
-                            // `drain()` checks `outstanding` while holding
-                            // `inner` and then waits on `drain_cv`.  Update
-                            // the predicate under that same mutex: notifying
-                            // without it admits the classic lost-wakeup race
-                            // where a completed task signals between the
-                            // check and the Condvar wait, stranding program
-                            // shutdown after all user output is printed.
-                            let inner = p.inner.lock();
-                            let prev = p.outstanding.fetch_sub(1, Ordering::AcqRel);
-                            note_progress();
-                            if prev == 1 {
-                                // Last in-flight task settled -
-                                // wake any drain() waiter.
-                                p.drain_cv.notify_all();
-                            }
-                            drop(inner);
-                            report_if_left_waiting();
+                            run_task(task);
+                            p.settle_task(true);
                         }
                         None => break,
                     }
@@ -253,6 +297,13 @@ impl GoroutinePool {
     /// tells those two apart.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn spawn(pool: &Arc<Self>, task: GoroutineTask) {
+        Self::spawn_joinable(pool, 0, task);
+    }
+
+    /// [`spawn`](Self::spawn) for a goroutine whose outcome reaches the join
+    /// handle with identity `handle`, so [`run_queued_inline`] can find it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn spawn_joinable(pool: &Arc<Self>, handle: usize, task: GoroutineTask) {
         let mut inner = pool.inner.lock();
         // Publish the counter and task under the same mutex used by
         // `drain()`, so a drain cannot observe an empty program while a
@@ -260,15 +311,67 @@ impl GoroutinePool {
         pool.outstanding.fetch_add(1, Ordering::AcqRel);
         pool.spawned.fetch_add(1, Ordering::Relaxed);
         note_progress();
-        inner.queue.push_back(task);
-        drop(inner);
-        pool.cv.notify_one();
+        inner.push(handle, task);
+        Self::admit_queued(pool, &inner);
     }
+
+    /// Settles one finished task: counts the completion, and frees the
+    /// running slot when `held_slot` says the task took one of its own.
+    fn settle_task(&self, held_slot: bool) {
+        // A panic still counts as progress: the thread is free again either
+        // way, which is all the starvation watchdog needs to know.
+        self.completions.fetch_add(1, Ordering::AcqRel);
+        // `drain()` checks `outstanding` while holding `inner` and then waits
+        // on `drain_cv`. Update the predicate under that same mutex: notifying
+        // without it admits the classic lost-wakeup race where a completed
+        // task signals between the check and the Condvar wait, stranding
+        // program shutdown after all user output is printed.
+        let mut inner = self.inner.lock();
+        if held_slot {
+            inner.running -= 1;
+        }
+        let prev = self.outstanding.fetch_sub(1, Ordering::AcqRel);
+        note_progress();
+        if prev == 1 {
+            // Last in-flight task settled - wake any drain() waiter.
+            self.drain_cv.notify_all();
+        }
+        drop(inner);
+        report_if_left_waiting();
+    }
+
+    /// Hands a queued goroutine to a worker when fewer than `target` run:
+    /// wakes an idle worker, or starts one when every worker that is not
+    /// parked is already taken. A goroutine that joins its children parks
+    /// its worker, so without this handoff a fork-join program waits on
+    /// children queued behind their own parents. Call with `inner` locked,
+    /// so the queue, the counts, and `idle` are one reading.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn admit_queued(pool: &Arc<Self>, inner: &PoolInner) {
+        if inner.queue.is_empty() || inner.running >= inner.target {
+            return;
+        }
+        let workers = pool.workers.load(Ordering::Relaxed);
+        if pool.idle.load(Ordering::Relaxed) > 0 {
+            pool.cv.notify_one();
+        } else if workers - inner.parked < inner.target && workers < MAX_WORKERS {
+            Self::start_worker(pool);
+        }
+    }
+
+    /// wasm runs every goroutine at its spawn, so no worker ever parks.
+    #[cfg(target_arch = "wasm32")]
+    fn admit_queued(_pool: &Arc<Self>, _inner: &PoolInner) {}
 
     /// Single-threaded wasm: run the goroutine body to completion
     /// immediately. A body that tries to block reaches
     /// `gossamer_coro::suspend`, which panics with the documented
     /// "blocking not supported in the playground" message.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn spawn_joinable(pool: &Arc<Self>, _handle: usize, task: GoroutineTask) {
+        Self::spawn(pool, task);
+    }
+
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn spawn(pool: &Arc<Self>, task: GoroutineTask) {
         pool.spawned.fetch_add(1, Ordering::Relaxed);
@@ -280,10 +383,10 @@ impl GoroutinePool {
     /// Starts the one background thread that grows `pool`, and only when
     /// growth is the sole way anything could proceed.
     ///
-    /// A goroutine blocked in a channel operation keeps its worker for the
-    /// duration, so a fixed-size pool can starve: four workers parked as
-    /// receivers, a fifth goroutine (the only sender that could unblock
-    /// them) stuck in the queue because no worker is ever free to run it.
+    /// A goroutine blocked outside a counted wait (a sleep, a blocking call,
+    /// a foreign lock) keeps its slot for the duration, so a fixed `target`
+    /// can starve: every running goroutine waiting on one still queued, the
+    /// only one that could release them, which no slot is ever free to run.
     /// Nothing about that state ever changes on its own, which is exactly
     /// what distinguishes it from an ordinary busy pool - a worker pool
     /// draining a large backlog also has zero idle workers and a non-empty
@@ -294,10 +397,10 @@ impl GoroutinePool {
     /// [`STARVATION_CHECK_INTERVAL`] apart. Unequal means real progress
     /// happened somewhere - a healthy pool clears this every cycle, so it is
     /// never grown for a burst it is already draining. Equal, with the
-    /// queue still non-empty and no worker idle, means nothing has
+    /// queue still non-empty and every slot taken, means nothing has
     /// completed *at all* in that whole window; only then does one more
-    /// worker get started, and the check repeats, so a program that needs
-    /// several more workers gains them one interval at a time rather than
+    /// goroutine get to run, and the check repeats, so a program that needs
+    /// several more slots gains them one interval at a time rather than
     /// all at once.
     #[cfg(not(target_arch = "wasm32"))]
     fn start_starvation_watchdog(pool: &Arc<Self>) {
@@ -314,15 +417,20 @@ impl GoroutinePool {
                     if after != before {
                         continue;
                     }
-                    let queued = p.inner.lock().queue.len();
-                    if queued == 0 || p.idle.load(Ordering::Relaxed) > 0 {
+                    let mut inner = p.inner.lock();
+                    if inner.queue.is_empty() {
                         continue;
                     }
-                    if p.workers.load(Ordering::Relaxed) < MAX_WORKERS {
-                        Self::start_worker(&p);
-                    } else {
-                        warn_worker_ceiling_once();
+                    // Every running goroutine is blocked outside a counted
+                    // wait, so one more may run beside them.
+                    if inner.running >= inner.target {
+                        if inner.target >= MAX_WORKERS {
+                            warn_worker_ceiling_once();
+                            continue;
+                        }
+                        inner.target += 1;
                     }
+                    Self::admit_queued(&p, &inner);
                 }
             });
         if let Err(e) = spawned {
@@ -537,6 +645,55 @@ fn any_cancelled(cohorts: &[i64]) -> bool {
         .any(|&id| id != 0 && crate::stdlib_builtins::cohort::chain_is_cancelled(id))
 }
 
+/// Counts the calling thread as parked when it is a pool worker, handing its
+/// slot to a fresh worker if queued goroutines need one. Answers whether the
+/// thread was counted, for [`unpark_worker`].
+fn park_worker() -> bool {
+    if !ON_GOROUTINE_WORKER.with(std::cell::Cell::get) {
+        return false;
+    }
+    let Some(pool) = POOL.get() else {
+        return false;
+    };
+    let mut inner = pool.inner.lock();
+    inner.running -= 1;
+    inner.parked += 1;
+    GoroutinePool::admit_queued(pool, &inner);
+    true
+}
+
+/// Runs the goroutine behind join handle `handle` on the calling worker when
+/// no worker has taken it yet, as a fork-join scheduler runs the child its
+/// parent is about to wait on. A joiner that parked instead would hold its
+/// thread while the child queued behind other parked parents, so a wide tree
+/// would need a thread per directory of it. Answers whether the goroutine ran
+/// here; `main` holds no worker, so it waits as before.
+pub(crate) fn run_queued_inline(handle: usize) -> bool {
+    if !ON_GOROUTINE_WORKER.with(std::cell::Cell::get) {
+        return false;
+    }
+    let Some(pool) = POOL.get() else {
+        return false;
+    };
+    let Some(task) = pool.inner.lock().take_joinable(handle) else {
+        return false;
+    };
+    pool.injects.fetch_add(1, Ordering::Relaxed);
+    crate::stdlib_builtins::cohort::nested(|| run_task(task));
+    // The joining task already holds this thread's slot.
+    pool.settle_task(false);
+    true
+}
+
+/// Ends the parked count [`park_worker`] started, when it counted one.
+fn unpark_worker(counted: bool) {
+    if counted && let Some(pool) = POOL.get() {
+        let mut inner = pool.inner.lock();
+        inner.parked -= 1;
+        inner.running += 1;
+    }
+}
+
 fn forget_waiting_cohort(id: i64) {
     let mut waiting = WAITING_COHORTS.lock();
     if let Some(at) = waiting.iter().position(|&entry| entry == id) {
@@ -605,6 +762,8 @@ pub(crate) struct ChannelWait {
     stuck: bool,
     /// The waiting thread's cohort, as recorded in [`WAITING_COHORTS`].
     cohort: i64,
+    /// Whether the waiting thread was counted as a parked pool worker.
+    parked: bool,
 }
 
 impl ChannelWait {
@@ -666,6 +825,7 @@ impl ChannelWait {
             return Some(Self {
                 stuck: true,
                 cohort,
+                parked: park_worker(),
             });
         }
         if stuck {
@@ -685,6 +845,7 @@ impl ChannelWait {
         Some(Self {
             stuck: false,
             cohort,
+            parked: park_worker(),
         })
     }
 }
@@ -737,7 +898,10 @@ fn report_fatal_deadlock(op: &str) -> ! {
 }
 
 /// Marks its thread as suspended joining a cohort for as long as it lives.
-pub(crate) struct JoinWait;
+pub(crate) struct JoinWait {
+    /// Whether the joining thread was counted as a parked pool worker.
+    parked: bool,
+}
 
 impl JoinWait {
     /// Enters a cohort join, reporting a deadlock when doing so leaves every
@@ -753,7 +917,7 @@ impl JoinWait {
     /// caller's own check and this one is never read as a deadlock.
     pub(crate) fn enter(settled: impl Fn() -> bool) -> Option<Self> {
         if !gossamer_runtime::platform::CAN_BLOCK {
-            return Some(Self);
+            return Some(Self { parked: false });
         }
         note_main_wait(Some("cohort join"));
         JOIN_WAITERS.fetch_add(1, Ordering::AcqRel);
@@ -778,12 +942,15 @@ impl JoinWait {
             }
             return None;
         }
-        Some(Self)
+        Some(Self {
+            parked: park_worker(),
+        })
     }
 }
 
 impl Drop for JoinWait {
     fn drop(&mut self) {
+        unpark_worker(self.parked);
         note_main_wait(None);
         JOIN_WAITERS.fetch_sub(1, Ordering::AcqRel);
         note_progress();
@@ -792,6 +959,7 @@ impl Drop for JoinWait {
 
 impl Drop for ChannelWait {
     fn drop(&mut self) {
+        unpark_worker(self.parked);
         note_main_wait(None);
         forget_waiting_cohort(self.cohort);
         if self.stuck {

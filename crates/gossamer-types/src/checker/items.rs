@@ -1808,6 +1808,7 @@ impl TypeChecker<'_> {
         self.reject_unscoped_spawns(decl, body);
         self.collect_write_arg_bindings(body);
         let prev_ret = self.current_fn_ret.replace(ret);
+        let prev_fn_name = self.current_fn_name.replace(decl.name.name.clone());
         // The declared return type flows into the body as its expectation
         // to constrain literals and conversions. Container identity does
         // not change: an array literal remains `[T; N]` even when `Vec<T>`
@@ -1826,6 +1827,7 @@ impl TypeChecker<'_> {
         };
         self.finish_ffi_checks();
         self.current_fn_ret = prev_ret;
+        self.current_fn_name = prev_fn_name;
         // A declared `-> ()` says the discard is deliberate, so a body whose
         // tail computes a value is accepted and the value dropped - the same
         // shape a signature with no return type has, written out. Every

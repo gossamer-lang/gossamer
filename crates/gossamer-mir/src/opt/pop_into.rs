@@ -255,9 +255,9 @@ pub(crate) fn pop_scalar_aggregates_in_place(body: &mut Body, tcx: &TyCtxt) {
 
 /// carrier local -> (block of the pop that writes it, its `_into` shim), for
 /// every carrier exactly one pop writes.
-fn pop_carriers(body: &Body) -> HashMap<Local, (usize, &'static str)> {
+fn pop_carriers(body: &Body) -> BTreeMap<Local, (usize, &'static str)> {
     let n_locals = body.locals.len();
-    let mut pops: HashMap<Local, (usize, &'static str)> = HashMap::new();
+    let mut pops: BTreeMap<Local, (usize, &'static str)> = BTreeMap::new();
     let mut doubled: Vec<Local> = Vec::new();
     for (bi, block) in body.blocks.iter().enumerate() {
         let Terminator::Call {
@@ -291,8 +291,8 @@ fn pop_carriers(body: &Body) -> HashMap<Local, (usize, &'static str)> {
 fn pop_fusions(
     body: &mut Body,
     tcx: &TyCtxt,
-    pops: &HashMap<Local, (usize, &'static str)>,
-) -> HashMap<Local, PopFusion> {
+    pops: &BTreeMap<Local, (usize, &'static str)>,
+) -> BTreeMap<Local, PopFusion> {
     let mentions = local_mention_counts(body);
     let mut settled: HashMap<Local, u32> = HashMap::new();
     for block in &body.blocks {
@@ -322,7 +322,9 @@ fn pop_fusions(
             }
         }
     }
-    let mut fusions: HashMap<Local, PopFusion> = HashMap::new();
+    // Ordered by carrier, so the locals each fusion allocates are numbered the
+    // same in every build.
+    let mut fusions: BTreeMap<Local, PopFusion> = BTreeMap::new();
     for (carrier, (pop_block, into)) in pops {
         let Some((disc_reads, payloads)) = reads.get(carrier) else {
             continue;

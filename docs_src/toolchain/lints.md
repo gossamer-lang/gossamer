@@ -209,9 +209,11 @@ Drop the `let`.
 
 ## `float_eq_zero`
 
-Equality against a float literal is almost never what you want -
-floating-point arithmetic rarely produces the exact bit pattern.
-Compare `(x - y).abs() < eps` with an explicit tolerance.
+Equality against a nonzero float literal is almost never what you
+want - floating-point arithmetic rarely produces the exact bit
+pattern. Compare `(x - y).abs() < eps` with an explicit tolerance.
+Exact zero is exempt: a guard such as `if d == 0.0` before a
+division tests the one value that matters exactly.
 
 ## `empty_else`
 

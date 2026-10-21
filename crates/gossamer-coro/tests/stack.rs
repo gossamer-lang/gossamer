@@ -146,3 +146,33 @@ fn yield_loop_through_many_resumes_does_not_corrupt_state() {
     assert_eq!(resumes, 1_001);
     assert_eq!(counter.load(Ordering::Relaxed), 1_001);
 }
+
+/// Address of a local inside a goroutine body that runs to completion.
+fn body_stack_address() -> usize {
+    let seen = Arc::new(AtomicU64::new(0));
+    let seen_in_body = Arc::clone(&seen);
+    let mut g = Goroutine::new(Box::new(move || {
+        let addr = gossamer_coro::current_stack_ptr() as u64;
+        seen_in_body.store(addr, Ordering::Release);
+    }));
+    drive_to_done(&mut g);
+    drop(g);
+    usize::try_from(seen.load(Ordering::Acquire)).expect("stack address fits usize")
+}
+
+#[test]
+fn finished_goroutines_stack_serves_the_next_spawn_on_its_thread() {
+    let first = body_stack_address();
+    let second = body_stack_address();
+    assert_eq!(first, second, "the second goroutine ran on a fresh mapping");
+}
+
+#[test]
+fn a_suspended_goroutine_dropped_unfinished_releases_cleanly() {
+    let mut g = Goroutine::new(Box::new(suspend));
+    set_current_yielder(g.yielder_ptr());
+    assert!(!g.resume());
+    clear_current_yielder();
+    drop(g);
+    body_stack_address();
+}

@@ -248,10 +248,16 @@ impl SignatureTable {
         let sig = signature_of(decl, resolutions);
         self.associated
             .insert((owner.to_string(), decl.name.name.clone()), sig.clone());
-        self.methods
-            .entry(decl.name.name.clone())
-            .or_default()
-            .push((owner.to_string(), sig));
+        // Method syntax reaches only a function with a `self` receiver.
+        if matches!(
+            decl.params.first(),
+            Some(gossamer_ast::FnParam::Receiver(_))
+        ) {
+            self.methods
+                .entry(decl.name.name.clone())
+                .or_default()
+                .push((owner.to_string(), sig));
+        }
     }
 
     fn collect_item(&mut self, item: &Item, resolutions: &Resolutions) {
@@ -445,7 +451,12 @@ impl Rewrite<'_> {
                     let mut own = candidates
                         .iter()
                         .filter(|(candidate, _)| *candidate == owner)
-                        .map(|(_, sig)| sig);
+                        .map(|(_, sig)| sig)
+                        .peekable();
+                    // A receiver of a type that declares none of them (an
+                    // `AtomicI64`'s `load`) calls its own method, which this
+                    // pass has nothing to rewrite for.
+                    own.peek()?;
                     if let Some(sig) = own.next()
                         && own.all(|other| other.rewrites_same_as(sig))
                     {

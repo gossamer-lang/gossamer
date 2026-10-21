@@ -227,15 +227,71 @@ pub(crate) fn builtin_sync_map_keys(args: &[Value]) -> RuntimeResult<Value> {
     )))
 }
 
-pub(crate) fn builtin_atomic_i64_new(args: &[Value]) -> RuntimeResult<Value> {
-    let init = args.first().and_then(value_to_int).unwrap_or(0);
-    Ok(atomic_handle("sync::AtomicI64", StdAtomicI64::new(init)))
+/// An atomic cell the bytecode VM shares with compiled code: one share of
+/// the runtime's `GosAtomicI64`, the handle a JIT-compiled body holds for the
+/// same value. Every atomic type keeps its value in this 64-bit cell.
+pub(crate) struct RtAtomic {
+    handle: std::ptr::NonNull<gossamer_runtime::c_abi::atomic::GosAtomicI64>,
 }
 
-pub(crate) fn with_atomic_i64<R>(
-    value: &Value,
-    f: impl FnOnce(&Arc<StdAtomicI64>) -> R,
-) -> Option<R> {
+// SAFETY: the handle names a runtime atomic cell, which any thread may read
+// and update; the share this value holds is released once, on drop.
+unsafe impl Send for RtAtomic {}
+// SAFETY: as above; shared access goes through the cell's atomic operations.
+unsafe impl Sync for RtAtomic {}
+
+impl RtAtomic {
+    /// A fresh cell holding `initial`.
+    pub(crate) fn new(initial: i64) -> Option<RtAtomic> {
+        let raw = gossamer_runtime::c_abi::atomic::gos_rt_atomic_i64_new(initial);
+        std::ptr::NonNull::new(raw).map(|handle| RtAtomic { handle })
+    }
+
+    /// Takes a share of the cell compiled code answered as `word`.
+    pub(crate) fn adopt(word: i64) -> Option<RtAtomic> {
+        let handle = std::ptr::NonNull::new(
+            word as usize as *mut gossamer_runtime::c_abi::atomic::GosAtomicI64,
+        )?;
+        // SAFETY: `word` is a live runtime atomic handle a native body holds.
+        unsafe { gossamer_runtime::c_abi::gos_rt_rc_retain(handle.as_ptr().cast()) };
+        Some(RtAtomic { handle })
+    }
+
+    /// The handle word compiled code receives for this cell.
+    pub(crate) fn word(&self) -> i64 {
+        self.handle.as_ptr() as usize as i64
+    }
+}
+
+impl std::ops::Deref for RtAtomic {
+    type Target = StdAtomicI64;
+
+    fn deref(&self) -> &StdAtomicI64 {
+        // SAFETY: the share this value holds keeps the cell alive.
+        gossamer_runtime::c_abi::atomic::atomic_i64_cell(unsafe { self.handle.as_ref() })
+    }
+}
+
+impl Drop for RtAtomic {
+    fn drop(&mut self) {
+        // SAFETY: releases the one share `new` or `adopt` took.
+        unsafe { gossamer_runtime::c_abi::gos_rt_rc_release(self.handle.as_ptr().cast()) };
+    }
+}
+
+/// A VM handle named `name` over a fresh runtime cell holding `initial`.
+pub(crate) fn runtime_atomic(name: &'static str, initial: i64) -> RuntimeResult<Value> {
+    RtAtomic::new(initial)
+        .map(|cell| atomic_handle(name, cell))
+        .ok_or_else(|| crate::value::RuntimeError::Panic(format!("{name}::new: out of memory")))
+}
+
+pub(crate) fn builtin_atomic_i64_new(args: &[Value]) -> RuntimeResult<Value> {
+    let init = args.first().and_then(value_to_int).unwrap_or(0);
+    runtime_atomic("sync::AtomicI64", init)
+}
+
+pub(crate) fn with_atomic_i64<R>(value: &Value, f: impl FnOnce(&Arc<RtAtomic>) -> R) -> Option<R> {
     atomic_cell(value, "sync::AtomicI64").map(|cell| f(&cell))
 }
 
@@ -292,10 +348,10 @@ pub(crate) fn builtin_atomic_i64_cas(args: &[Value]) -> RuntimeResult<Value> {
 /// its own so its arithmetic wraps at 32 bits.
 pub(crate) fn builtin_atomic_i32_new(args: &[Value]) -> RuntimeResult<Value> {
     let init = args.first().and_then(value_to_int).unwrap_or(0);
-    Ok(atomic_handle("sync::AtomicI32", StdAtomicI64::new(init)))
+    runtime_atomic("sync::AtomicI32", init)
 }
 
-fn with_atomic_i32<R>(value: &Value, f: impl FnOnce(&Arc<StdAtomicI64>) -> R) -> Option<R> {
+fn with_atomic_i32<R>(value: &Value, f: impl FnOnce(&Arc<RtAtomic>) -> R) -> Option<R> {
     atomic_cell(value, "sync::AtomicI32").map(|cell| f(&cell))
 }
 
@@ -358,20 +414,17 @@ pub(crate) fn builtin_atomic_i32_cas(args: &[Value]) -> RuntimeResult<Value> {
 
 pub(crate) fn builtin_atomic_bool_new(args: &[Value]) -> RuntimeResult<Value> {
     let init = matches!(args.first(), Some(Value::Bool(true)));
-    Ok(atomic_handle("sync::AtomicBool", StdAtomicBool::new(init)))
+    runtime_atomic("sync::AtomicBool", i64::from(init))
 }
 
-pub(crate) fn with_atomic_bool<R>(
-    value: &Value,
-    f: impl FnOnce(&Arc<StdAtomicBool>) -> R,
-) -> Option<R> {
+pub(crate) fn with_atomic_bool<R>(value: &Value, f: impl FnOnce(&Arc<RtAtomic>) -> R) -> Option<R> {
     atomic_cell(value, "sync::AtomicBool").map(|cell| f(&cell))
 }
 
 pub(crate) fn builtin_atomic_bool_load(args: &[Value]) -> RuntimeResult<Value> {
     let v = args
         .first()
-        .and_then(|v| with_atomic_bool(v, |a| a.load(Ordering::SeqCst)))
+        .and_then(|v| with_atomic_bool(v, |a| a.load(Ordering::SeqCst) != 0))
         .unwrap_or(false);
     Ok(Value::Bool(v))
 }
@@ -379,7 +432,7 @@ pub(crate) fn builtin_atomic_bool_load(args: &[Value]) -> RuntimeResult<Value> {
 pub(crate) fn builtin_atomic_bool_store(args: &[Value]) -> RuntimeResult<Value> {
     let val = matches!(args.get(1), Some(Value::Bool(true)));
     if let Some(handle) = args.first() {
-        let _ = with_atomic_bool(handle, |a| a.store(val, Ordering::SeqCst));
+        let _ = with_atomic_bool(handle, |a| a.store(i64::from(val), Ordering::SeqCst));
     }
     Ok(Value::Unit)
 }
@@ -391,8 +444,13 @@ pub(crate) fn builtin_atomic_bool_cas(args: &[Value]) -> RuntimeResult<Value> {
         .first()
         .and_then(|v| {
             with_atomic_bool(v, |a| {
-                a.compare_exchange(current, new, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
+                a.compare_exchange(
+                    i64::from(current),
+                    i64::from(new),
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
             })
         })
         .unwrap_or(false);

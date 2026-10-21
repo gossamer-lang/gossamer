@@ -1176,6 +1176,55 @@ static META_IDS: std::sync::LazyLock<parking_lot::Mutex<rustc_hash::FxHashMap<us
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(rustc_hash::FxHashMap::default()));
 static META_NEXT: AtomicUsize = AtomicUsize::new(1);
 
+/// Releases program-level pins and idle allocator bookkeeping after native
+/// shutdown. Live blocks keep their descriptor ids: the forward table and
+/// thread memo entries remain valid even after the reverse index is emptied.
+pub(crate) fn release_program_pins() {
+    // Cyclic garbage still names the cached unit nodes, so it is collected
+    // while they are immortal; nothing that remains can reach one after.
+    // SAFETY: tracked roots are maintained by this thread's RC operations.
+    unsafe { gos_rt_collect_cycles() };
+    for slot in &ENUM_UNIT_SINGLETONS {
+        let payload = slot.swap(std::ptr::null_mut(), Ordering::AcqRel);
+        if !payload.is_null() {
+            // SAFETY: native shutdown has no user frames or static owners
+            // left. Cached unit nodes are immortal during execution, so
+            // ordinary release is a no-op until their pin is removed here.
+            unsafe {
+                (*payload.sub(RC_HEADER_SIZE).cast::<RcHeader>()).strong = 1;
+                rc_live_inc();
+                gos_rt_rc_release(payload);
+            }
+        }
+    }
+    ROOTS.with(|roots| {
+        let mut roots = roots.borrow_mut();
+        roots.items.shrink_to_fit();
+        roots.positions.shrink_to_fit();
+    });
+    RELEASE_WORKLIST.with(|work| work.borrow_mut().shrink_to_fit());
+    PENDING_VEC_FREES.with(|work| work.borrow_mut().shrink_to_fit());
+    PENDING_MAP_FREES.with(|work| work.borrow_mut().shrink_to_fit());
+    PENDING_SET_FREES.with(|work| work.borrow_mut().shrink_to_fit());
+    PENDING_DEQUE_FREES.with(|work| work.borrow_mut().shrink_to_fit());
+    PENDING_ITER_FREES.with(|work| work.borrow_mut().shrink_to_fit());
+    PENDING_FINALIZERS.with(|work| work.borrow_mut().shrink_to_fit());
+    let mut metas = META_IDS.lock();
+    metas.clear();
+    metas.shrink_to_fit();
+    WEAK_OVERFLOW_COUNTS.lock().shrink_to_fit();
+    #[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
+    tsan_sizes().lock().shrink_to_fit();
+}
+
+/// Collects a worker's tracked candidates after its last user frame leaves.
+// Only native scheduler workers exit; wasm32 runs goroutines on its one thread.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn finish_worker_cycles() {
+    // SAFETY: the runtime's RC operations maintain this thread's root buffer.
+    unsafe { gos_rt_collect_cycles() };
+}
+
 /// Which interned metas carry [`gossamer_abi::rc::RC_KIND_ACYCLIC`], one bit
 /// per id, read on every surviving release.
 static META_ACYCLIC: [AtomicUsize; META_TABLE_CAP / ACYCLIC_WORD_BITS + 1] =
@@ -1355,6 +1404,11 @@ pub unsafe extern "C" fn gos_rt_rc_alloc_tagged(size: u64, meta: *const i64) -> 
         (*h).meta_id = meta_id;
     }
     rc_live_inc();
+    if crate::c_abi::vec::rc_trace_enabled() {
+        // SAFETY: the fresh block holds the header followed by the payload.
+        let payload = unsafe { base.add(RC_HEADER_SIZE) };
+        eprintln!("ALLOC {size} {payload:p}");
+    }
     let usable = if crate::c_abi::ledger::rc_alloc_stats_enabled() {
         // SAFETY: `base` is the fresh block from the global allocator.
         unsafe { rc_block_usable_size(base) }
@@ -1551,6 +1605,11 @@ pub unsafe extern "C" fn gos_rt_rc_alloc(size: u64, meta: *const i64) -> *mut u8
         (*h).meta_id = meta_id;
     }
     rc_live_inc();
+    if crate::c_abi::vec::rc_trace_enabled() {
+        // SAFETY: the fresh block holds the header followed by the payload.
+        let payload = unsafe { base.add(RC_HEADER_SIZE) };
+        eprintln!("ALLOCZ {size} {payload:p}");
+    }
     let usable = if in_region {
         total
     } else if crate::c_abi::ledger::rc_alloc_stats_enabled() {
@@ -1866,6 +1925,9 @@ pub unsafe extern "C" fn gos_rt_rc_weak_retain(payload: *mut u8) {
     let h = unsafe { header_ptr(payload) };
     // SAFETY: `h` is the header of this shim's live argument.
     unsafe { inc_weak(h) };
+    if crate::c_abi::vec::rc_trace_enabled() {
+        eprintln!("WK_RET {payload:p}");
+    }
 }
 
 /// Decrement the weak count; if both strong and weak counts are now zero,
@@ -1887,6 +1949,9 @@ pub unsafe extern "C" fn gos_rt_rc_weak_release(payload: *mut u8) {
     // `dec_weak` returns the old weak count; the new value is prev - 1. When
     // prev == 1 the count just reached 0, so the allocation can be reclaimed
     // if nothing else pins it.
+    if crate::c_abi::vec::rc_trace_enabled() {
+        eprintln!("WK_REL {payload:p}");
+    }
     // SAFETY: `h` is the header of this shim's live weak referent (C-ABI contract).
     if unsafe { dec_weak(h) } == 1 {
         // SAFETY: `payload` is the weak referent, whose last weak share just went.
@@ -2104,6 +2169,7 @@ unsafe fn release_rc_children(payload: *mut u8) {
             gossamer_abi::rc::RC_CHILD_ITER => drop_iter_child(child, false),
             gossamer_abi::rc::RC_CHILD_ITER_PAIR => drop_iter_child(child, true),
             gossamer_abi::rc::RC_CHILD_WEAK => gos_rt_rc_weak_release(child),
+            gossamer_abi::rc::RC_CHILD_JSON => crate::c_abi::json::gos_rt_json_free(child.cast()),
             gossamer_abi::rc::RC_CHILD_ERROR_FIELDS => drop(Box::from_raw(
                 child.cast::<crate::c_abi::errors::ErrorFields>(),
             )),
@@ -2244,6 +2310,9 @@ pub unsafe extern "C" fn gos_rt_rc_alloc_reuse(
 unsafe fn rc_release_impl(root: *mut u8) {
     if root.is_null() {
         return;
+    }
+    if crate::c_abi::vec::rc_trace_enabled() {
+        eprintln!("SREL {root:p}");
     }
     // SAFETY: this `unsafe fn`'s caller passes `root` live; non-null, checked above.
     if unsafe { crate::c_abi::string::is_gos_string(root.cast()) } {
@@ -2560,6 +2629,10 @@ unsafe fn release_child_of_kind(kind: i64, child: *mut u8, worklist: &mut Vec<*m
         // SAFETY: an `RC_CHILD_WEAK` child is a block the dead parent's weak share kept
         // allocated.
         gossamer_abi::rc::RC_CHILD_WEAK => unsafe { gos_rt_rc_weak_release(child) },
+        gossamer_abi::rc::RC_CHILD_JSON => {
+            // SAFETY: this child is the independent JSON handle the dead parent owns.
+            unsafe { crate::c_abi::json::gos_rt_json_free(child.cast()) };
+        }
         gossamer_abi::rc::RC_CHILD_ERROR_FIELDS => {
             // SAFETY: an `RC_CHILD_ERROR_FIELDS` child is the boxed field list its error owns
             // alone.
@@ -2820,6 +2893,9 @@ unsafe fn clone_map_children(payload: *mut u8) {
                 gossamer_abi::rc::RC_CHILD_MAP => {
                     crate::c_abi::gos_rt_map_clone(child.cast()).cast()
                 }
+                gossamer_abi::rc::RC_CHILD_JSON => {
+                    crate::c_abi::json::json_clone_handle(child.cast()).cast()
+                }
                 gossamer_abi::rc::RC_CHILD_SET => {
                     crate::c_abi::set::gos_rt_set_clone(child.cast()).cast()
                 }
@@ -2876,6 +2952,7 @@ unsafe fn visit_slot_children_meta(
             Ok(vec_elem_kind::ITER) => gossamer_abi::rc::RC_CHILD_ITER,
             Ok(vec_elem_kind::ITER_PAIR) => gossamer_abi::rc::RC_CHILD_ITER_PAIR,
             Ok(vec_elem_kind::WEAK) => gossamer_abi::rc::RC_CHILD_WEAK,
+            Ok(vec_elem_kind::JSON) => gossamer_abi::rc::RC_CHILD_JSON,
             _ => continue,
         };
         // SAFETY: each entry names a word inside the payload.
@@ -3047,6 +3124,9 @@ unsafe fn free_block(payload: *mut u8) {
     // SAFETY: `h` is that node's header.
     let base = unsafe { block_base(h) };
     rc_live_dec();
+    if crate::c_abi::vec::rc_trace_enabled() {
+        eprintln!("FREE {payload:p}");
+    }
     // Straight back to mimalloc - see `gos_rt_rc_alloc` for why a custom
     // slab/pool is not used (measured net-neutral), and
     // `rc_block_alloc_zeroed` for why the call is direct.

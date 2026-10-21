@@ -281,6 +281,14 @@ impl<'a> Lowerer<'a> {
         )
     }
 
+    /// Whether `arg` names a whole struct or tuple with no fields, which a
+    /// carrier holds as no bits at all rather than as an address.
+    pub(crate) fn is_field_free_operand(&self, arg: &Operand) -> bool {
+        matches!(arg, Operand::Copy(place)
+            if place.projection.is_empty()
+                && self.tcx.is_field_free_aggregate(self.body.local_ty(place.local)))
+    }
+
     /// Boxes a carrier's aggregate payload. The box owns the payload's heap
     /// children under the structural meta when one is registered, the way a
     /// map entry does; when `moved`, the blob takes the share the source's
@@ -574,8 +582,11 @@ impl<'a> Lowerer<'a> {
             "gos_rt_option_slot_retain"
                 | "gos_rt_option_slot_retain_ok"
                 | "gos_rt_option_slot_release"
+                | "gos_rt_option_slot_release_ok"
                 | "gos_rt_map_field_release"
                 | "gos_rt_map_field_clone"
+                | "gos_rt_json_field_clone"
+                | "gos_rt_json_field_release"
                 | "gos_rt_set_field_release"
                 | "gos_rt_set_field_clone"
                 | "gos_rt_deque_field_release"
@@ -598,7 +609,10 @@ impl<'a> Lowerer<'a> {
             } else {
                 base
             };
-            if name == "gos_rt_option_slot_release" {
+            if matches!(
+                name,
+                "gos_rt_option_slot_release" | "gos_rt_option_slot_release_ok"
+            ) {
                 // A carrier whose payload word is null - a `None`, an arm the
                 // frame did not take - has nothing to give back.
                 let at = self.fresh();
@@ -875,7 +889,9 @@ impl<'a> Lowerer<'a> {
                         let n = i64::try_from(len.to_usize()).unwrap_or(0);
                         let elem = *elem;
                         match self.tcx.kind(elem) {
-                            Some(TyKind::Int(gossamer_types::IntTy::U8)) => ConcatKind::ArrU8(n),
+                            // A `u8` slot holds the byte zero-extended, so it
+                            // reads as the word it renders as.
+                            Some(TyKind::Int(gossamer_types::IntTy::U8)) => ConcatKind::ArrI64(n),
                             Some(TyKind::Int(_)) if self.is_signed_word_int(elem) => {
                                 ConcatKind::ArrI64(n)
                             }

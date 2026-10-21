@@ -62,6 +62,9 @@ fn jit_compiles_const_int_returning_body() {
             terminator_inlined: None,
         }],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     let artifact = compile_to_jit(
         &[body],
@@ -129,6 +132,9 @@ fn jit_compiles_simple_arithmetic_function() {
             terminator_inlined: None,
         }],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     let artifact = compile_to_jit(
         &[body],
@@ -193,6 +199,9 @@ fn detached_jit_preserves_float_abi() {
             terminator_inlined: None,
         }],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     let artifact = compile_to_jit(
         &[body],
@@ -266,6 +275,9 @@ fn jit_unresolved_qualified_call_aborts_compile_not_zero_stub() {
             },
         ],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     let result = compile_to_jit(
         &[body],
@@ -324,6 +336,9 @@ fn jit_some_constructor_still_compiles_as_identity() {
             },
         ],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     let artifact = compile_to_jit(
         &[body],
@@ -375,6 +390,9 @@ fn jit_artifact_drops_without_panic() {
             terminator_inlined: None,
         }],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     let artifact = compile_to_jit(
         &[body],
@@ -417,6 +435,9 @@ fn detached_artifacts_can_be_repeatedly_called_and_reclaimed() {
             terminator_inlined: None,
         }],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
 
     for _ in 0..32 {

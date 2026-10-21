@@ -3,7 +3,7 @@
 //! Each operates on the nearest enclosing `project.toml` (or an
 //! explicit `--manifest PATH`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -406,11 +406,17 @@ pub(crate) fn tidy(manifest: Option<PathBuf>) -> Result<()> {
     let used = project_imports(&source_files)?;
     let declared: Vec<String> = m.dependencies.keys().cloned().collect();
     if !source_files.is_empty() {
-        // A dependency is reached by its key or by the module name its
-        // package normalizes to, so either spelling keeps it.
-        m.dependencies.retain(|id, _| {
-            used.contains(id) || used.contains(&gossamer_resolve::project_dep_module_name(id))
-        });
+        // A dependency is reached by its key or by the module it is
+        // imported as, so either spelling keeps it.
+        let modules: BTreeMap<String, String> = declared
+            .iter()
+            .map(|id| {
+                let module = gossamer_pkg::bundle::dependency_module_name(&m, &project_root, id);
+                (id.clone(), module)
+            })
+            .collect();
+        m.dependencies
+            .retain(|id, _| used.contains(id) || used.contains(&modules[id]));
     }
     let removed: Vec<String> = declared
         .into_iter()

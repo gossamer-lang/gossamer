@@ -39,10 +39,12 @@ use std::mem;
 use std::sync::Arc;
 
 #[cfg(target_arch = "wasm32")]
-use crate::jit_stub::{ArrayElem, JitFn, JitKind, TupleElem};
+use crate::jit_stub::{ArrayElem, JitFn, JitKind, TUPLE_RETURN_MAX, TupleElem, TupleElems};
 use gossamer_abi::jit_carrier::{CarrierNode, CarrierShape};
 #[cfg(not(target_arch = "wasm32"))]
-use gossamer_codegen_cranelift::{ArrayElem, JitFn, JitKind, TupleElem};
+use gossamer_codegen_cranelift::{
+    ArrayElem, JitFn, JitKind, TUPLE_RETURN_MAX, TupleElem, TupleElems,
+};
 use gossamer_runtime::c_abi as rt;
 
 use crate::value::{
@@ -66,6 +68,10 @@ fn build_native_arg(kind: JitKind, value: &Value) -> Option<i64> {
         JitKind::NativeVecStr => build_native_vec_str(value),
         JitKind::NativeVecF64 => build_native_vec_f64(value),
         JitKind::NativeVecTupleIF => build_native_vec_tuple_if(value),
+        JitKind::NativeVecStruct(sidx) => match value {
+            Value::Array(elems) => build_native_vec_scalar_struct(elems, sidx),
+            _ => None,
+        },
         JitKind::NativeVecU8 => build_native_vec_u8(value),
         JitKind::NativeStr => build_native_str(value),
         JitKind::U8VecHandle => build_native_u8vec(value),
@@ -82,6 +88,9 @@ fn build_native_arg(kind: JitKind, value: &Value) -> Option<i64> {
             }
             (JitKind::NativeVecF64, Value::Array(values)) => values.len().saturating_mul(8),
             (JitKind::NativeVecTupleIF, Value::Array(values)) => values.len().saturating_mul(16),
+            (JitKind::NativeVecStruct(sidx), Value::Array(values)) => values
+                .len()
+                .saturating_mul(native_struct_shape(sidx).map_or(8, |shape| shape.words * 8)),
             (JitKind::NativeVecU8, _) => value.byte_slice().map_or(0, |bytes| bytes.len()),
             (JitKind::NativeStr, Value::String(value)) => value.byte_len(),
             (JitKind::U8VecHandle, _) => {
@@ -387,18 +396,33 @@ fn enum_shape_meta(shape: &crate::value::NativeEnumShape) -> &'static [i64] {
 fn intern_enum_meta(shape: &crate::value::NativeEnumShape) -> &'static [i64] {
     let mut meta: Vec<i64> = vec![RC_KIND_ENUM, shape.variants.len() as i64];
     for (disc, v) in shape.variants.iter().enumerate() {
-        let children: Vec<i64> = v
-            .fields
-            .iter()
-            .enumerate()
-            .filter(|(_, k)| {
-                matches!(
-                    k,
-                    crate::value::NativeFieldKind::Str | crate::value::NativeFieldKind::Enum(_)
-                )
-            })
-            .map(|(i, _)| i as i64)
-            .collect();
+        use crate::value::NativeFieldKind as K;
+        use gossamer_abi::rc::{
+            RC_CHILD_KIND_SHIFT, RC_CHILD_RC_ERR, RC_CHILD_RC_OK, RC_CHILD_VEC,
+        };
+        let mut children: Vec<i64> = Vec::new();
+        for (i, kind) in v.fields.iter().enumerate() {
+            let slot = v.slot(i) as i64;
+            match kind {
+                K::Str | K::Enum(_) => children.push(slot),
+                K::VecStr | K::VecStruct(_) => {
+                    children.push((RC_CHILD_VEC << RC_CHILD_KIND_SHIFT) | slot);
+                }
+                K::BoxedStruct(_) => children.push(slot),
+                // The payload word, after the discriminant, is counted on an
+                // arm whose payload is a string or a node.
+                K::Carrier(carrier) => {
+                    for (disc, gate) in [(0, RC_CHILD_RC_OK), (1, RC_CHILD_RC_ERR)] {
+                        if carrier.arm(0, disc).is_some_and(|arm| {
+                            matches!(carrier.node(arm), CarrierNode::Str | CarrierNode::Enum)
+                        }) {
+                            children.push((gate << RC_CHILD_KIND_SHIFT) | (slot + 1));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         meta.push(disc as i64);
         meta.push(children.len() as i64);
         meta.extend(children);
@@ -477,6 +501,8 @@ enum BuiltFieldOwnership {
 struct BuiltField {
     kind: NativeFieldKind,
     word: i64,
+    /// The payload word of a two-word carrier field; zero for any other.
+    high: i64,
     ownership: BuiltFieldOwnership,
 }
 
@@ -501,6 +527,13 @@ fn build_variant_to_native_enum_inner(
         .variants
         .iter()
         .position(|v| v.name == inner.name.as_str())?;
+    if shape.by_index {
+        return Some(NativeEnumBuild {
+            ptr: i64::try_from(disc).ok()?,
+            exclusive: false,
+            actions: Vec::new(),
+        });
+    }
     let vshape = &shape.variants[disc];
     if vshape.fields.len() != inner.fields.len() {
         return None;
@@ -525,7 +558,8 @@ fn build_variant_to_native_enum_inner(
         };
     }
     let meta = enum_shape_meta(shape);
-    let size = (nfields * 8) as u64;
+    let words = vshape.words();
+    let size = (words * 8) as u64;
     // SAFETY: `meta` describes the layout and `size` matches the slot count.
     // The interpreter never holds an arena region active, so this takes the
     // headered global path the disc-byte and child writes below assume.
@@ -536,8 +570,8 @@ fn build_variant_to_native_enum_inner(
     let base = payload as usize;
     // The tagged alloc is unzeroed; zero the slots so a mid-build bail
     // releases only real children, never stack garbage.
-    // SAFETY: `nfields * 8` bytes were just allocated at `base`.
-    unsafe { std::ptr::write_bytes(base as *mut u8, 0, nfields * 8) };
+    // SAFETY: `words * 8` bytes were just allocated at `base`.
+    unsafe { std::ptr::write_bytes(base as *mut u8, 0, words * 8) };
     // Header disc byte: read by `visit_children_raw` to pick the variant's
     // child slots (and by `native_enum_disc` for header-repr reads).
     // SAFETY: headered global node; the disc byte lives at payload-3.
@@ -555,33 +589,50 @@ fn build_variant_to_native_enum_inner(
             (NativeFieldKind::I64, Value::Int(n)) => Some(BuiltField {
                 kind: *kind,
                 word: *n,
+                high: 0,
                 ownership: BuiltFieldOwnership::Scalar,
             }),
             (NativeFieldKind::I64, Value::Uint(u)) => Some(BuiltField {
                 kind: *kind,
                 word: *u as i64,
+                high: 0,
                 ownership: BuiltFieldOwnership::Scalar,
             }),
             (NativeFieldKind::F64, Value::Float(f)) => Some(BuiltField {
                 kind: *kind,
                 word: f.to_bits() as i64,
+                high: 0,
                 ownership: BuiltFieldOwnership::Scalar,
             }),
             (NativeFieldKind::Bool, Value::Bool(b)) => Some(BuiltField {
                 kind: *kind,
                 word: i64::from(*b),
+                high: 0,
                 ownership: BuiltFieldOwnership::Scalar,
             }),
             (NativeFieldKind::Char, Value::Char(c)) => Some(BuiltField {
                 kind: *kind,
                 word: *c as i64,
+                high: 0,
                 ownership: BuiltFieldOwnership::Scalar,
             }),
             (NativeFieldKind::Str, Value::String(s)) => Some(BuiltField {
                 kind: *kind,
                 word: rt::alloc_cstring(s.as_str().as_bytes()) as i64,
+                high: 0,
                 ownership: BuiltFieldOwnership::FreshOwned,
             }),
+            // A one-word scalar struct is its own word in the slot.
+            (NativeFieldKind::Struct(sidx), value @ Value::Struct(_)) => native_struct_shape(*sidx)
+                .and_then(|child| {
+                    let mut word = [0i64];
+                    write_nested_struct(&mut word, 0, &child, value).then_some(BuiltField {
+                        kind: *kind,
+                        word: word[0],
+                        high: 0,
+                        ownership: BuiltFieldOwnership::Scalar,
+                    })
+                }),
             (NativeFieldKind::Enum(sidx), Value::Variant(child)) => {
                 let child = crate::value::native_shape(*sidx)
                     .and_then(|cs| build_variant_to_native_enum_inner(child, &cs, false));
@@ -590,6 +641,7 @@ fn build_variant_to_native_enum_inner(
                     BuiltField {
                         kind: *kind,
                         word: built.ptr,
+                        high: 0,
                         ownership: BuiltFieldOwnership::FreshOwned,
                     }
                 })
@@ -604,17 +656,21 @@ fn build_variant_to_native_enum_inner(
                     Some(BuiltField {
                         kind: *kind,
                         word: h.ptr as i64,
+                        high: 0,
                         ownership: BuiltFieldOwnership::BorrowedForTransfer,
                     })
                 } else {
-                    // SAFETY: co-owning an already-native child; retain so the
-                    // parent's release balances it.
-                    unsafe { rt::gos_rt_rc_retain(h.ptr as *mut u8) };
+                    if !h.shape.by_index {
+                        // SAFETY: co-owning an already-native child; retain so
+                        // the parent's release balances it.
+                        unsafe { rt::gos_rt_rc_retain(h.ptr as *mut u8) };
+                    }
                     actions.push(NativeFieldAction::DropOriginal(i));
                     exclusive = false;
                     Some(BuiltField {
                         kind: *kind,
                         word: h.ptr as i64,
+                        high: 0,
                         ownership: BuiltFieldOwnership::RetainedOne,
                     })
                 }
@@ -624,6 +680,7 @@ fn build_variant_to_native_enum_inner(
                 marshal_vec_enum(arc, *eidx).map(|word| BuiltField {
                     kind: *kind,
                     word,
+                    high: 0,
                     ownership: BuiltFieldOwnership::FreshOwned,
                 })
             }
@@ -632,6 +689,40 @@ fn build_variant_to_native_enum_inner(
                 marshal_vec_str_enum(arc, *eidx).map(|word| BuiltField {
                     kind: *kind,
                     word,
+                    high: 0,
+                    ownership: BuiltFieldOwnership::FreshOwned,
+                })
+            }
+            (NativeFieldKind::VecStr, value @ Value::Array(_)) => {
+                build_native_vec_str(value).map(|word| BuiltField {
+                    kind: *kind,
+                    word,
+                    high: 0,
+                    ownership: BuiltFieldOwnership::FreshOwned,
+                })
+            }
+            (NativeFieldKind::BoxedStruct(sidx), value @ Value::Struct(_)) => {
+                build_boxed_scalar_struct(value, *sidx).map(|word| BuiltField {
+                    kind: *kind,
+                    word,
+                    high: 0,
+                    ownership: BuiltFieldOwnership::FreshOwned,
+                })
+            }
+            (NativeFieldKind::VecStruct(sidx), Value::Array(arc)) => {
+                build_native_vec_scalar_struct(arc, *sidx).map(|word| BuiltField {
+                    kind: *kind,
+                    word,
+                    high: 0,
+                    ownership: BuiltFieldOwnership::FreshOwned,
+                })
+            }
+            // A carrier field holds no nested carrier, so it needs no box metas.
+            (NativeFieldKind::Carrier(carrier), value) => {
+                build_native_carrier(*carrier, &[], 0, value).map(|[disc, payload]| BuiltField {
+                    kind: *kind,
+                    word: disc,
+                    high: payload,
                     ownership: BuiltFieldOwnership::FreshOwned,
                 })
             }
@@ -639,7 +730,7 @@ fn build_variant_to_native_enum_inner(
         };
         let Some(built) = built else {
             for built in &fields {
-                free_built_field(built.kind, built.word, built.ownership);
+                free_built_field(built.kind, built.word, built.high, built.ownership);
             }
             // SAFETY: live node whose slots are all still zero; the
             // children built so far were freed above.
@@ -649,8 +740,13 @@ fn build_variant_to_native_enum_inner(
         fields.push(built);
     }
     for (i, built) in fields.iter().enumerate() {
-        // SAFETY: slot `i` is within the just-allocated payload.
-        unsafe { *((base + i * 8) as *mut i64) = built.word };
+        let at = base + vshape.slot(i) * 8;
+        // SAFETY: the field's words are within the just-allocated payload.
+        unsafe { *(at as *mut i64) = built.word };
+        if built.kind.words() == 2 {
+            // SAFETY: as above, the carrier's payload word.
+            unsafe { *((at + 8) as *mut i64) = built.high };
+        }
     }
     let ptr = if shape.tagged {
         (base as i64) | ((disc as i64) << 1)
@@ -764,7 +860,7 @@ fn marshal_vec_str_enum(elems: &[Value], eidx: u32) -> Option<i64> {
 /// Frees one native field word built by [`build_variant_to_native_enum`],
 /// per its kind. Used only on the mid-build bail path (the node-meta
 /// release cannot reach `Vec` fields). Scalars own nothing and are no-ops.
-fn free_built_field(kind: NativeFieldKind, word: i64, ownership: BuiltFieldOwnership) {
+fn free_built_field(kind: NativeFieldKind, word: i64, high: i64, ownership: BuiltFieldOwnership) {
     match (kind, ownership) {
         (_, BuiltFieldOwnership::Scalar | BuiltFieldOwnership::BorrowedForTransfer) => {}
         (NativeFieldKind::Enum(_), BuiltFieldOwnership::RetainedOne) => {
@@ -792,6 +888,27 @@ fn free_built_field(kind: NativeFieldKind, word: i64, ownership: BuiltFieldOwner
         (NativeFieldKind::VecStrEnumTuple(eidx), BuiltFieldOwnership::FreshOwned) => {
             free_native_vec_str_enum(word, eidx);
         }
+        (NativeFieldKind::VecStr, BuiltFieldOwnership::FreshOwned) => {
+            if word != 0 {
+                // SAFETY: a vector built for this field; it owns its strings.
+                unsafe { rt::gos_rt_vec_free(word as *mut rt::vec::GosVec) };
+            }
+        }
+        (NativeFieldKind::Carrier(carrier), BuiltFieldOwnership::FreshOwned) => {
+            release_carrier_words(carrier, 0, word, high);
+        }
+        (NativeFieldKind::BoxedStruct(_), BuiltFieldOwnership::FreshOwned) => {
+            if word != 0 {
+                // SAFETY: the box built for this field, holding scalars only.
+                unsafe { rt::gos_rt_rc_release(word as *mut u8) };
+            }
+        }
+        (NativeFieldKind::VecStruct(_), BuiltFieldOwnership::FreshOwned) => {
+            if word != 0 {
+                // SAFETY: the vector built for this field; its elements own nothing.
+                unsafe { rt::gos_rt_vec_free(word as *mut rt::vec::GosVec) };
+            }
+        }
         (
             NativeFieldKind::I64
             | NativeFieldKind::F64
@@ -799,9 +916,63 @@ fn free_built_field(kind: NativeFieldKind, word: i64, ownership: BuiltFieldOwner
             | NativeFieldKind::Char
             | NativeFieldKind::Str
             | NativeFieldKind::VecEnum(_)
-            | NativeFieldKind::VecStrEnumTuple(_),
+            | NativeFieldKind::VecStrEnumTuple(_)
+            | NativeFieldKind::Struct(_)
+            | NativeFieldKind::Atomic(_)
+            | NativeFieldKind::VecStr
+            | NativeFieldKind::BoxedStruct(_)
+            | NativeFieldKind::VecStruct(_)
+            | NativeFieldKind::VecI64
+            | NativeFieldKind::VecF64
+            | NativeFieldKind::Carrier(_),
             _,
         ) => {}
+    }
+}
+
+/// A counted box holding the scalar struct `value` of shape `sidx`, laid out
+/// as the struct's slots, the form a variant payload wider than a slot takes.
+fn build_boxed_scalar_struct(value: &Value, sidx: u32) -> Option<i64> {
+    let shape = native_struct_shape(sidx)?;
+    let mut slots = vec![0i64; shape.words];
+    if !write_nested_struct(&mut slots, 0, &shape, value) {
+        return None;
+    }
+    // SAFETY: a fresh leaf box of the struct's size; its words are scalars,
+    // so it needs no child layout.
+    let payload = unsafe { rt::gos_rt_rc_alloc((shape.words * 8) as u64, std::ptr::null()) };
+    if payload.is_null() {
+        return None;
+    }
+    // SAFETY: `payload` holds `shape.words` slots.
+    unsafe {
+        std::ptr::copy_nonoverlapping(slots.as_ptr().cast::<u8>(), payload, shape.words * 8);
+    };
+    Some(payload as i64)
+}
+
+/// A native `Vec` of the scalar structs of shape `sidx` in `elems`, each held
+/// inline as the struct's slots.
+fn build_native_vec_scalar_struct(elems: &[Value], sidx: u32) -> Option<i64> {
+    let shape = native_struct_shape(sidx)?;
+    let elem_bytes = u32::try_from(shape.words * 8).ok()?;
+    // SAFETY: elements of scalar slots own nothing, so the vector copies each
+    // by value and frees its buffer wholesale.
+    unsafe {
+        let vec_ptr = rt::gos_rt_vec_new_typed(elem_bytes, rt::vec::vec_elem_kind::PRIMITIVE);
+        if vec_ptr.is_null() {
+            return None;
+        }
+        let mut slots = vec![0i64; shape.words];
+        for elem in elems {
+            slots.fill(0);
+            if !write_nested_struct(&mut slots, 0, &shape, elem) {
+                rt::gos_rt_vec_free(vec_ptr);
+                return None;
+            }
+            rt::gos_rt_vec_push(vec_ptr, slots.as_ptr().cast::<u8>());
+        }
+        Some(vec_ptr as i64)
     }
 }
 
@@ -897,11 +1068,18 @@ impl Drop for NativeStructBacking {
     fn drop(&mut self) {
         for (place, (_, kind)) in self.shape.placements.iter().zip(self.shape.fields.iter()) {
             let slot = read_struct_field(&self.slots, *place);
-            if matches!(kind, NativeFieldKind::Str) && slot != 0 {
-                // SAFETY: string slots are owned native strings built by
-                // `build_native_struct` or written by a native body into this
-                // trampoline-owned struct block.
-                unsafe { free_native(JitKind::NativeStr, slot) };
+            if slot == 0 {
+                continue;
+            }
+            // SAFETY: string and vector slots are owned by this block, built by
+            // `build_native_struct` or written by a native body into this
+            // trampoline-owned struct block.
+            match kind {
+                NativeFieldKind::Str => unsafe { free_native(JitKind::NativeStr, slot) },
+                NativeFieldKind::VecI64 | NativeFieldKind::VecF64 => unsafe {
+                    rt::gos_rt_vec_free(slot as *mut rt::vec::GosVec);
+                },
+                _ => {}
             }
         }
     }
@@ -1012,6 +1190,22 @@ fn build_native_struct(
     }
     let mut slots = vec![0i64; shape.words].into_boxed_slice();
     for (i, (_, kind)) in shape.fields.iter().enumerate() {
+        // A nested scalar struct is written field by field from its offset.
+        if let NativeFieldKind::Struct(idx) = kind {
+            let written = native_struct_shape(*idx).is_some_and(|child| {
+                write_nested_struct(
+                    &mut slots,
+                    shape.placements[i].offset,
+                    &child,
+                    &inner.fields[i],
+                )
+            });
+            if !written {
+                free_native_struct_slots(&slots, &shape);
+                return None;
+            }
+            continue;
+        }
         let word = match (kind, &inner.fields[i]) {
             (NativeFieldKind::I64, Value::Int(n)) => *n,
             (NativeFieldKind::I64, Value::Uint(u)) => *u as i64,
@@ -1021,6 +1215,31 @@ fn build_native_struct(
             (NativeFieldKind::Char, Value::Char(c)) => *c as i64,
             (NativeFieldKind::Str, Value::String(s)) => {
                 rt::alloc_cstring(s.as_str().as_bytes()) as i64
+            }
+            (NativeFieldKind::VecI64, value) => {
+                let Some(word) = build_native_vec_i64(value) else {
+                    free_native_struct_slots(&slots, &shape);
+                    return None;
+                };
+                word
+            }
+            (NativeFieldKind::VecF64, value) => {
+                let Some(word) = build_native_vec_f64(value) else {
+                    free_native_struct_slots(&slots, &shape);
+                    return None;
+                };
+                word
+            }
+            // The VM value keeps its share of the cell for the whole call, so
+            // the body borrows the handle.
+            (NativeFieldKind::Atomic(offset), atomic) => {
+                let Some(cell) = crate::stdlib_builtins::atomic_cell::<
+                    crate::stdlib_builtins::RtAtomic,
+                >(atomic, atomic_type_name(*offset)) else {
+                    free_native_struct_slots(&slots, &shape);
+                    return None;
+                };
+                cell.word()
             }
             // Other heap fields cannot reach a registered struct shape, and a
             // value whose kind does not match the field declines the marshal.
@@ -1034,13 +1253,88 @@ fn build_native_struct(
     Some(NativeStructBacking { slots, shape })
 }
 
+/// The VM handle name of the atomic type at handle offset `offset`.
+fn atomic_type_name(offset: u32) -> &'static str {
+    match offset {
+        55 => "sync::AtomicI32",
+        56 => "sync::AtomicU64",
+        57 => "sync::AtomicBool",
+        _ => "sync::AtomicI64",
+    }
+}
+
+/// Writes the scalar struct `value` of shape `child` into `slots` from byte
+/// `base`, answering false when `value` does not have that shape.
+fn write_nested_struct(
+    slots: &mut [i64],
+    base: u32,
+    child: &NativeStructShape,
+    value: &Value,
+) -> bool {
+    let Value::Struct(inner) = value else {
+        return false;
+    };
+    if inner.fields.len() != child.fields.len() {
+        return false;
+    }
+    for (i, (_, kind)) in child.fields.iter().enumerate() {
+        let word = match (kind, &inner.fields[i]) {
+            (NativeFieldKind::I64, Value::Int(n)) => *n,
+            (NativeFieldKind::I64, Value::Uint(u)) => *u as i64,
+            (NativeFieldKind::F64, Value::Float(f)) => f.to_bits() as i64,
+            (NativeFieldKind::F64, Value::Int(n)) => (*n as f64).to_bits() as i64,
+            (NativeFieldKind::Bool, Value::Bool(b)) => i64::from(*b),
+            (NativeFieldKind::Char, Value::Char(c)) => *c as i64,
+            _ => return false,
+        };
+        let mut place = child.placements[i];
+        place.offset += base;
+        write_struct_field(slots, place, word);
+    }
+    true
+}
+
+/// Reads the scalar struct of shape `child` stored in `slots` from byte `base`.
+pub(crate) fn read_nested_struct(slots: &[i64], base: u32, child: &NativeStructShape) -> Value {
+    let fields: Box<[(&'static str, Value)]> = child
+        .fields
+        .iter()
+        .zip(&child.placements)
+        .map(|((name, kind), place)| {
+            let mut place = *place;
+            place.offset += base;
+            let word = read_struct_field(slots, place);
+            let v = match kind {
+                NativeFieldKind::F64 => Value::Float(f64::from_bits(word as u64)),
+                NativeFieldKind::Bool => Value::Bool(word != 0),
+                NativeFieldKind::Char => {
+                    Value::Char(char::from_u32(word as u32).unwrap_or('\u{0}'))
+                }
+                _ => Value::Int(word),
+            };
+            (*name, v)
+        })
+        .collect();
+    Value::Struct(std::sync::Arc::new(StructInner {
+        name: crate::value::intern_type_tag(child.struct_name),
+        fields: crate::value::StructFields::new(fields.into_vec()),
+    }))
+}
+
 fn free_native_struct_slots(slots: &[i64], shape: &NativeStructShape) {
     for (place, (_, kind)) in shape.placements.iter().zip(shape.fields.iter()) {
         let slot = read_struct_field(slots, *place);
-        if matches!(kind, NativeFieldKind::Str) && slot != 0 {
-            // SAFETY: only slots already written by `build_native_struct` are
-            // non-zero here, and each is an owned native string.
-            unsafe { free_native(JitKind::NativeStr, slot) };
+        if slot == 0 {
+            continue;
+        }
+        // SAFETY: only slots already written by `build_native_struct` are
+        // non-zero here, each an owned native string or vector.
+        match kind {
+            NativeFieldKind::Str => unsafe { free_native(JitKind::NativeStr, slot) },
+            NativeFieldKind::VecI64 | NativeFieldKind::VecF64 => unsafe {
+                rt::gos_rt_vec_free(slot as *mut rt::vec::GosVec);
+            },
+            _ => {}
         }
     }
 }
@@ -1069,9 +1363,25 @@ fn read_native_struct(ptr: i64, shape: &NativeStructShape) -> Value {
                     Value::Char(char::from_u32(word as u32).unwrap_or('\u{0}'))
                 }
                 NativeFieldKind::Str => native_ptr_to_value(JitKind::NativeStr, word),
+                NativeFieldKind::VecI64 => native_ptr_to_value(JitKind::NativeVecI64, word),
+                NativeFieldKind::VecF64 => native_ptr_to_value(JitKind::NativeVecF64, word),
+                NativeFieldKind::Struct(idx) => native_struct_shape(*idx)
+                    .map_or(Value::Unit, |child| {
+                        read_nested_struct(slots, place.offset, &child)
+                    }),
+                NativeFieldKind::Atomic(offset) => crate::stdlib_builtins::RtAtomic::adopt(word)
+                    .map_or(Value::Unit, |cell| {
+                        crate::stdlib_builtins::atomic_handle(atomic_type_name(*offset), cell)
+                    }),
+                // Struct shapes hold scalars, strings, nested scalar structs,
+                // and atomics only.
                 NativeFieldKind::Enum(_)
                 | NativeFieldKind::VecEnum(_)
-                | NativeFieldKind::VecStrEnumTuple(_) => Value::Unit,
+                | NativeFieldKind::VecStrEnumTuple(_)
+                | NativeFieldKind::VecStr
+                | NativeFieldKind::BoxedStruct(_)
+                | NativeFieldKind::VecStruct(_)
+                | NativeFieldKind::Carrier(_) => Value::Unit,
             };
             (*name, v)
         })
@@ -1096,13 +1406,27 @@ fn read_native_struct(ptr: i64, shape: &NativeStructShape) -> Value {
 fn free_native_enum(ptr: i64, shape: &crate::value::NativeEnumShape) {
     use crate::value::native_enum_disc;
     let base = (ptr as usize) & !7;
-    if base == 0 {
+    if shape.by_index || base == 0 {
         return;
     }
     let disc = native_enum_disc(ptr as usize, shape);
     if let Some(variant) = shape.variants.get(disc) {
         for (i, kind) in variant.fields.iter().enumerate() {
-            let slot = (base + i * 8) as *mut i64;
+            // The node's meta releases a string vector, a carrier's payload,
+            // a struct box, and a vector of structs as the node is freed below,
+            // so their words stay.
+            if matches!(
+                kind,
+                NativeFieldKind::VecStr
+                    | NativeFieldKind::Carrier(_)
+                    | NativeFieldKind::BoxedStruct(_)
+                    | NativeFieldKind::VecStruct(_)
+                    | NativeFieldKind::VecI64
+                    | NativeFieldKind::VecF64
+            ) {
+                continue;
+            }
+            let slot = (base + variant.slot(i) * 8) as *mut i64;
             // SAFETY: payload slot `i` is inside the node's allocation.
             let word = unsafe { *slot };
             match kind {
@@ -1124,7 +1448,15 @@ fn free_native_enum(ptr: i64, shape: &crate::value::NativeEnumShape) {
                 NativeFieldKind::I64
                 | NativeFieldKind::F64
                 | NativeFieldKind::Bool
-                | NativeFieldKind::Char => {}
+                | NativeFieldKind::Char
+                | NativeFieldKind::Struct(_)
+                | NativeFieldKind::Atomic(_)
+                | NativeFieldKind::VecStr
+                | NativeFieldKind::BoxedStruct(_)
+                | NativeFieldKind::VecStruct(_)
+                | NativeFieldKind::VecI64
+                | NativeFieldKind::VecF64
+                | NativeFieldKind::Carrier(_) => {}
             }
             // Null the slot so the node-meta release below skips this child
             // (it was already reclaimed above) - no double free.
@@ -1159,7 +1491,7 @@ impl Drop for BuiltCarriers {
 
 /// The VM value of the carrier at node `at` of `shape` whose words are `disc`
 /// and `payload`. Reads only: every share stays with the words.
-fn carrier_to_value(shape: CarrierShape, at: usize, disc: i64, payload: i64) -> Value {
+pub(crate) fn carrier_to_value(shape: CarrierShape, at: usize, disc: i64, payload: i64) -> Value {
     let (present, absent) = if shape.node(at) == CarrierNode::Option {
         ("Some", "None")
     } else {
@@ -1174,6 +1506,12 @@ fn carrier_to_value(shape: CarrierShape, at: usize, disc: i64, payload: i64) -> 
     }
 }
 
+/// The VM value of a native `Vec<String>` word, read without taking the
+/// vector's ownership.
+pub(crate) fn native_vec_str_value(word: i64) -> Value {
+    native_ptr_to_value(JitKind::NativeVecStr, word)
+}
+
 /// The VM value of the payload word `word` whose node is `at`.
 fn carrier_payload_to_value(shape: CarrierShape, at: usize, word: i64) -> Value {
     match shape.node(at) {
@@ -1184,6 +1522,34 @@ fn carrier_payload_to_value(shape: CarrierShape, at: usize, word: i64) -> Value 
         CarrierNode::Char => Value::Char(char::from_u32(word as u32).unwrap_or('\u{fffd}')),
         CarrierNode::Str => native_ptr_to_value(JitKind::NativeStr, word),
         CarrierNode::Error => read_native_error(word),
+        CarrierNode::Struct => match shape.struct_shape().and_then(native_struct_shape) {
+            Some(child) if word != 0 => {
+                // SAFETY: the payload word points at a copy blob of the
+                // struct's `child.words` initialised slots.
+                let slots = unsafe { std::slice::from_raw_parts(word as *const i64, child.words) };
+                read_nested_struct(slots, 0, &child)
+            }
+            _ => Value::Unit,
+        },
+        CarrierNode::Enum => {
+            // The JIT names an enum payload only for a shape this VM registered,
+            // and records its index on the carrier shape.
+            let enum_shape = shape
+                .enum_shape()
+                .and_then(crate::value::native_shape)
+                .unwrap();
+            // The handle takes a share of its own, as the words keep theirs.
+            let base = (word as usize) & !7;
+            if !enum_shape.by_index && base != 0 {
+                // SAFETY: a nonzero base is a live node the words hold a share of.
+                unsafe { rt::gos_rt_rc_retain(base as *mut u8) };
+            }
+            Value::NativeEnum(Arc::new(crate::value::NativeEnumOwner {
+                ptr: word as usize,
+                shape: enum_shape,
+                owned: false,
+            }))
+        }
         CarrierNode::Option | CarrierNode::Result => {
             // SAFETY: the shape names this node a nested carrier, which
             // compiled code answers as the address of its box.
@@ -1193,10 +1559,27 @@ fn carrier_payload_to_value(shape: CarrierShape, at: usize, word: i64) -> Value 
     }
 }
 
+/// Gives back one share of the native enum `ptr`: the whole tree when the
+/// share is its last, as the runtime's release alone does not reach the
+/// strings and vectors its nodes hold.
+fn release_enum_share(ptr: i64, shape: &crate::value::NativeEnumShape) {
+    let base = (ptr as usize) & !7;
+    if shape.by_index || base == 0 {
+        return;
+    }
+    // SAFETY: `base` is a live node the caller holds a share of.
+    if unsafe { rt::rc_strong_count(base as *mut u8) } <= 1 {
+        free_native_enum(ptr, shape);
+    } else {
+        // SAFETY: as above; another share keeps the node alive.
+        unsafe { rt::gos_rt_rc_release(base as *mut u8) };
+    }
+}
+
 /// Gives back the share the words of the carrier at node `at` hold on their
 /// arm's payload: a string body, or the box of a nested carrier. A scalar
 /// owns nothing, and the runtime keeps every error node for the process.
-fn release_carrier_words(shape: CarrierShape, at: usize, disc: i64, payload: i64) {
+pub(crate) fn release_carrier_words(shape: CarrierShape, at: usize, disc: i64, payload: i64) {
     let Some(arm) = shape.arm(at, disc) else {
         return;
     };
@@ -1207,6 +1590,16 @@ fn release_carrier_words(shape: CarrierShape, at: usize, disc: i64, payload: i64
         // SAFETY: an arm whose node is a `String` holds a string body the
         // words own one share of.
         CarrierNode::Str => unsafe { free_native(JitKind::NativeStr, payload) },
+        // SAFETY: a struct arm's word is a copy blob the words hold one share of.
+        CarrierNode::Struct => unsafe { rt::gos_rt_rc_release(payload as *mut u8) },
+        CarrierNode::Enum => {
+            // As in `carrier_payload_to_value`: the shape is registered.
+            let enum_shape = shape
+                .enum_shape()
+                .and_then(crate::value::native_shape)
+                .unwrap();
+            release_enum_share(payload, &enum_shape);
+        }
         CarrierNode::Option | CarrierNode::Result => {
             let slot = [disc, payload];
             // SAFETY: `slot` is a live two-word carrier whose payload word is a
@@ -1257,6 +1650,37 @@ fn build_carrier_payload(
         (CarrierNode::Bool, Value::Bool(b)) => Some(i64::from(*b)),
         (CarrierNode::Char, Value::Char(c)) => Some(i64::from(u32::from(*c))),
         (CarrierNode::Str, Value::String(_)) => build_native_str(value),
+        (CarrierNode::Struct, Value::Struct(_)) => {
+            let child = native_struct_shape(shape.struct_shape()?)?;
+            let mut slots = vec![0i64; child.words];
+            if !write_nested_struct(&mut slots, 0, &child, value) {
+                return None;
+            }
+            // SAFETY: `slots` holds the struct's scalar words; the blob copies
+            // them and, holding nothing counted, needs no child layout.
+            let blob = unsafe {
+                rt::gos_rt_rc_alloc_copy(
+                    (child.words * 8) as u64,
+                    std::ptr::null(),
+                    slots.as_ptr().cast(),
+                )
+            };
+            (!blob.is_null()).then_some(blob as i64)
+        }
+        (CarrierNode::Enum, Value::NativeEnum(handle))
+            if Some(handle.shape.index) == shape.enum_shape() =>
+        {
+            let base = handle.ptr & !7;
+            if !handle.shape.by_index && base != 0 {
+                // SAFETY: the handle keeps the node alive; the words take a share.
+                unsafe { rt::gos_rt_rc_retain(base as *mut u8) };
+            }
+            Some(handle.ptr as i64)
+        }
+        (CarrierNode::Enum, Value::Variant(inner)) => {
+            let enum_shape = crate::value::native_shape(shape.enum_shape()?)?;
+            build_variant_to_native_enum(inner, &enum_shape)
+        }
         (CarrierNode::Option | CarrierNode::Result, _) => {
             let meta = metas.get(at).copied().flatten()?;
             let words = build_native_carrier(shape, metas, at, value)?;
@@ -1414,6 +1838,7 @@ fn native_ptr_to_value(kind: JitKind, ptr: i64) -> Value {
             }
             Value::Array(Arc::new(out))
         }
+        JitKind::NativeVecStruct(sidx) => crate::value::native_vec_struct_to_array(ptr, sidx),
         JitKind::NativeVecTupleIF => {
             if ptr == 0 {
                 return Value::Array(Arc::new(Vec::new()));
@@ -1515,10 +1940,10 @@ fn decode_tuple_elem(elem: TupleElem, word: i64) -> Value {
 /// # Safety
 /// `block` must be a live 16-byte aggregate returned by a `TupleReturn`
 /// body, with slot `i` matching `elems[i]`.
-unsafe fn decode_tuple_return(block: i64, elems: &[TupleElem; 2]) -> Value {
-    let mut out = Vec::with_capacity(2);
-    for (i, elem) in elems.iter().enumerate() {
-        // SAFETY: the block is two 8-byte slots; index `i` (0 or 1) is in range.
+unsafe fn decode_tuple_return(block: i64, elems: &TupleElems) -> Value {
+    let mut out = Vec::with_capacity(elems.as_slice().len());
+    for (i, elem) in elems.as_slice().iter().enumerate() {
+        // SAFETY: the block holds one 8-byte slot per element.
         let word = unsafe { (block as *const i64).add(i).read() };
         out.push(decode_tuple_elem(*elem, word));
         // A copied-out string slot's native buffer is freed once here; an enum
@@ -1547,6 +1972,7 @@ unsafe fn free_native(kind: JitKind, ptr: i64) {
         | JitKind::NativeVecF64
         | JitKind::NativeVecStr
         | JitKind::NativeVecTupleIF
+        | JitKind::NativeVecStruct(_)
         | JitKind::NativeVecU8
         | JitKind::NativeVecVecI64 => unsafe {
             rt::gos_rt_vec_free(ptr as *mut rt::vec::GosVec);
@@ -1613,6 +2039,7 @@ fn free_natives(natives: &[NativeArg], ret: Option<(JitKind, i64)>) {
                 | JitKind::NativeVecF64
                 | JitKind::NativeVecStr
                 | JitKind::NativeVecTupleIF
+                | JitKind::NativeVecStruct(_)
                 | JitKind::NativeVecU8
                 | JitKind::NativeStr
         );
@@ -2001,7 +2428,8 @@ macro_rules! call_through {
             | JitKind::NativeVecF64
             | JitKind::NativeVecStr
             | JitKind::NativeVecTupleIF
-            | JitKind::NativeVecU8
+
+            | JitKind::NativeVecStruct(_)| JitKind::NativeVecU8
             | JitKind::NativeVecVecI64
             | JitKind::U8VecHandle
             | JitKind::BytesView => {
@@ -3349,7 +3777,7 @@ pub(crate) struct Prepared {
     /// pointer to the `gos_rt_aggr_alloc` block (`[elem@i*8]`); the native
     /// path reads each slot per `TupleElem`, builds a `Value::Tuple`, and
     /// frees the block (shallow - element ownership transfers to the tuple).
-    tuple_return: Option<[TupleElem; 2]>,
+    tuple_return: Option<TupleElems>,
     /// `true` when any param or the return is a native aggregate, routing
     /// dispatch through `invoke_prepared_native`. The scalar/enum fast
     /// path (no native marshalling, no per-call allocation) stays
@@ -3440,6 +3868,7 @@ pub(crate) fn prepare(jit: std::sync::Arc<JitFn>) -> Option<Prepared> {
         | JitKind::NativeVecF64
         | JitKind::NativeVecStr
         | JitKind::NativeVecTupleIF
+        | JitKind::NativeVecStruct(_)
         | JitKind::NativeVecU8) => (JitKind::I64, None, Some(k), None),
         // A byte view lends a caller's storage for one call; it is never
         // answered.
@@ -3505,6 +3934,7 @@ pub(crate) fn prepare(jit: std::sync::Arc<JitFn>) -> Option<Prepared> {
                     | JitKind::NativeVecF64
                     | JitKind::NativeVecStr
                     | JitKind::NativeVecTupleIF
+                    | JitKind::NativeVecStruct(_)
                     | JitKind::NativeVecU8
                     | JitKind::BytesView
                     | JitKind::NativeVecVecI64
@@ -3637,6 +4067,7 @@ pub(crate) fn invoke_prepared(p: &Prepared, args: &[Value], graph_cache: &GraphC
                 | JitKind::NativeVecF64
                 | JitKind::NativeVecStr
                 | JitKind::NativeVecTupleIF
+                | JitKind::NativeVecStruct(_)
                 | JitKind::NativeVecU8
                 | JitKind::BytesView
                 | JitKind::NativeVecVecI64
@@ -3840,6 +4271,7 @@ fn invoke_prepared_native(p: &Prepared, args: &[Value], graph_cache: &GraphCache
             | JitKind::NativeVecF64
             | JitKind::NativeVecStr
             | JitKind::NativeVecTupleIF
+            | JitKind::NativeVecStruct(_)
             | JitKind::NativeVecU8 => {
                 // Unwrap a `&mut` write-back cell so we marshal its inner
                 // aggregate; record the cell so mutations flow back.
@@ -3998,7 +4430,7 @@ fn invoke_prepared_native(p: &Prepared, args: &[Value], graph_cache: &GraphCache
     // tuple's fixed two slots live on this stack frame; a struct's shape-sized
     // field block owns any string slots the body returns and releases them
     // when it drops after decoding.
-    let mut sret_buf = [0i64; 2];
+    let mut sret_buf = [0i64; TUPLE_RETURN_MAX];
     let mut struct_sret = match p.struct_return {
         Some(idx) => {
             let Some(shape) = native_struct_shape(idx) else {

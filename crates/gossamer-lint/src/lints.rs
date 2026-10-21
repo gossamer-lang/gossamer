@@ -8,9 +8,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use gossamer_ast::{
-    AssignOp, BinaryOp, Block, Expr, ExprKind, ImplItem, Item, ItemKind, Literal, ModBody,
-    Mutability, PathExpr, Pattern, PatternKind, SourceFile, Stmt, StmtKind, TraitItem, UnaryOp,
-    UseDecl, UseListEntry, UseTarget,
+    AssignOp, BinaryOp, Block, EnumDecl, Expr, ExprKind, ImplItem, Item, ItemKind, Literal,
+    ModBody, Mutability, NodeId, PathExpr, Pattern, PatternKind, SourceFile, Stmt, StmtKind,
+    StructBody, TraitItem, TypePath, UnaryOp, UseDecl, UseListEntry, UseTarget,
 };
 use gossamer_lex::Span;
 
@@ -505,7 +505,7 @@ fn check_use(decl: &UseDecl, sf: &SourceFile, uses: &Uses, out: &mut Vec<Finding
     }
     if let Some(list) = &decl.list {
         for entry in list {
-            check_entry(entry, decl.span, uses, out);
+            check_entry(entry, decl, uses, out);
         }
         return;
     }
@@ -541,14 +541,20 @@ fn project_id_binding(id: &str) -> String {
     id.rsplit('/').next().unwrap_or(id).to_string()
 }
 
-fn check_entry(entry: &UseListEntry, span: Span, uses: &Uses, out: &mut Vec<Finding>) {
-    let name = entry
-        .alias
-        .as_ref()
-        .map_or_else(|| entry.name.name.clone(), |a| a.name.clone());
+fn check_entry(entry: &UseListEntry, decl: &UseDecl, uses: &Uses, out: &mut Vec<Finding>) {
+    // `{self, ..}` binds the module the path names, under its last segment.
+    let name = match (&entry.alias, entry.name.name.as_str(), &decl.target) {
+        (Some(alias), _, _) => alias.name.clone(),
+        (None, "self", UseTarget::Module(path)) => path
+            .segments
+            .last()
+            .map(|s| s.name.clone())
+            .unwrap_or_default(),
+        (None, name, _) => name.to_string(),
+    };
     if !uses.contains(&name) {
         out.push((
-            span,
+            decl.span,
             format!("unused import `{name}`"),
             Some("remove it from the `use` list".to_string()),
         ));
@@ -666,18 +672,39 @@ fn lint_single_match(sf: &SourceFile) -> Vec<Finding> {
     let mut out = Vec::new();
     each_fn_body(sf, |body| {
         walk_expr(body, &mut |expr| {
-            if let ExprKind::Match { arms, .. } = &expr.kind {
-                if arms.len() == 1 {
-                    out.push((
-                        expr.span,
-                        "`match` with a single arm is clearer as `if let`".to_string(),
-                        Some("rewrite as `if let PATTERN = ...`".to_string()),
-                    ));
-                }
+            // `match x { P => body, _ => () }` is an `if let` spelled long. A
+            // lone arm is exhaustive on its own and has no `else` to drop; a
+            // synthesized `_` arm is the failure edge of a let-chain the user
+            // already wrote as `if let`.
+            if let ExprKind::Match { arms, .. } = &expr.kind
+                && let [first, rest] = arms.as_slice()
+                && first.guard.is_none()
+                && rest.guard.is_none()
+                && matches!(rest.pattern.kind, PatternKind::Wildcard)
+                && does_nothing(&rest.body)
+            {
+                out.push((
+                    expr.span,
+                    "`match` with one arm and a `_` arm that does nothing is clearer as `if let`"
+                        .to_string(),
+                    Some("rewrite as `if let PATTERN = ...`".to_string()),
+                ));
             }
         });
     });
     out
+}
+
+/// Whether `body` is `()` or an empty block the user wrote.
+fn does_nothing(body: &Expr) -> bool {
+    match &body.kind {
+        ExprKind::Literal(Literal::Unit) => true,
+        ExprKind::Tuple(items) => items.is_empty(),
+        ExprKind::Block(block) => {
+            !block.synthetic && block.stmts.is_empty() && block.tail.is_none()
+        }
+        _ => false,
+    }
 }
 
 fn lint_shadowed_binding(sf: &SourceFile) -> Vec<Finding> {
@@ -753,12 +780,36 @@ fn returns_result(expr: &Expr) -> bool {
 fn lint_empty_block(sf: &SourceFile) -> Vec<Finding> {
     let mut out = Vec::new();
     each_fn_body(sf, |body| {
+        // An empty function body, an empty match arm, and an empty `while`
+        // body each spell "do nothing here" on purpose: a platform's no-op
+        // stub, the `_ => {}` of a match that handles only some variants, a
+        // drain loop whose condition does the work (`while it.step() {}`).
+        let mut deliberate = vec![body.span];
+        walk_expr(body, &mut |expr| {
+            if let ExprKind::While { body, .. } = &expr.kind {
+                deliberate.push(body.span);
+            }
+            if let ExprKind::Match { arms, .. } = &expr.kind {
+                // An `if let`'s failure arm is desugared with its pattern on
+                // the `else` body's own span; only an arm whose pattern was
+                // written apart from its body is a match the user spelled.
+                deliberate.extend(
+                    arms.iter()
+                        .filter(|arm| arm.pattern.span != arm.body.span)
+                        .map(|arm| arm.body.span),
+                );
+            }
+        });
         walk_expr(body, &mut |expr| {
             if let ExprKind::Block(block) = &expr.kind {
                 // Parser-synthesized blocks (the implicit empty else
                 // arm of an else-less `if let`) have no source
                 // spelling - never the user's mistake.
-                if !block.synthetic && block.stmts.is_empty() && block.tail.is_none() {
+                if !block.synthetic
+                    && block.stmts.is_empty()
+                    && block.tail.is_none()
+                    && !deliberate.contains(&expr.span)
+                {
                     out.push((
                         expr.span,
                         "empty block is almost always a mistake".to_string(),
@@ -1289,7 +1340,10 @@ fn lint_needless_else_after_return(sf: &SourceFile) -> Vec<Finding> {
             else {
                 return;
             };
-            if block_ends_in_return(then_branch) {
+            // A let-chain's failure edges carry a synthesized `else` when none
+            // was written, which has nothing to un-nest.
+            let synthetic = matches!(&else_branch.kind, ExprKind::Block(block) if block.synthetic);
+            if !synthetic && block_ends_in_return(then_branch) {
                 out.push((
                     else_branch.span,
                     "needless `else` after a returning `if`".to_string(),
@@ -1489,11 +1543,22 @@ fn lint_float_eq_zero(sf: &SourceFile) -> Vec<Finding> {
             if !matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
                 return;
             }
-            let float_zero = |e: &Expr| matches!(&e.kind, ExprKind::Literal(Literal::Float { .. }));
-            if float_zero(lhs) || float_zero(rhs) {
+            // Exact zero is a value arithmetic produces exactly and a guard
+            // (a divisor, an absent axis) tests exactly, so it is exempt.
+            let nonzero_float = |e: &Expr| match &e.kind {
+                ExprKind::Literal(Literal::Float(text)) => text
+                    .trim_end_matches("f32")
+                    .trim_end_matches("f64")
+                    .replace('_', "")
+                    .parse::<f64>()
+                    .is_ok_and(|v| v != 0.0),
+                _ => false,
+            };
+            if nonzero_float(lhs) || nonzero_float(rhs) {
                 out.push((
                     expr.span,
-                    "equality against a float literal is almost never what you want".to_string(),
+                    "equality against a nonzero float literal is almost never what you want"
+                        .to_string(),
                     Some("compare `(x - y).abs() < eps` with an explicit tolerance".to_string()),
                 ));
             }
@@ -1922,15 +1987,37 @@ fn lint_chained_negation_literals(sf: &SourceFile) -> Vec<Finding> {
 fn lint_if_not_else(sf: &SourceFile) -> Vec<Finding> {
     let mut out = Vec::new();
     each_fn_body(sf, |body| {
+        // Flipping a clause of an `else if` chain nests the rest of the chain
+        // inside it, so neither the chain's head nor its clauses are flipped.
+        // An `if let` reaches the parser's `match`, whose `_` arm holds its
+        // `else` and whose other arm holds any `&&` boolean clause.
+        let mut chain_clauses = std::collections::HashSet::new();
         walk_expr(body, &mut |expr| {
+            if let ExprKind::Match { arms, .. } = &expr.kind
+                && arms
+                    .iter()
+                    .any(|arm| matches!(arm.pattern.kind, PatternKind::Wildcard))
+            {
+                for arm in arms {
+                    mark_chain_clauses(&arm.body, &mut chain_clauses);
+                }
+                return;
+            }
             let ExprKind::If {
                 condition,
-                else_branch: Some(_),
+                else_branch: Some(else_branch),
                 ..
             } = &expr.kind
             else {
                 return;
             };
+            let in_chain = chain_clauses.contains(&expr.id);
+            // A let-chain's failure edges carry a synthesized `else` when none
+            // was written, and an `if` with no `else` has nothing to flip.
+            let synthetic = matches!(&else_branch.kind, ExprKind::Block(block) if block.synthetic);
+            if mark_chain_clauses(else_branch, &mut chain_clauses) || in_chain || synthetic {
+                return;
+            }
             if matches!(
                 &condition.kind,
                 ExprKind::Unary {
@@ -1948,6 +2035,23 @@ fn lint_if_not_else(sf: &SourceFile) -> Vec<Finding> {
         });
     });
     out
+}
+
+/// Records the `if` an `else` (or an `if let`'s arm) continues into, looking
+/// through the block the parser wraps a clause in, and answers whether there
+/// was one.
+fn mark_chain_clauses(branch: &Expr, clauses: &mut std::collections::HashSet<NodeId>) -> bool {
+    match &branch.kind {
+        ExprKind::If { .. } | ExprKind::Match { .. } => {
+            clauses.insert(branch.id);
+            true
+        }
+        ExprKind::Block(block) if block.stmts.is_empty() => block
+            .tail
+            .as_deref()
+            .is_some_and(|tail| mark_chain_clauses(tail, clauses)),
+        _ => false,
+    }
 }
 
 fn lint_empty_string_concat(sf: &SourceFile) -> Vec<Finding> {
@@ -2030,6 +2134,7 @@ fn lint_match_same_arms(sf: &SourceFile, src: &str) -> Vec<Finding> {
                     if a.span.end - a.span.start > 0
                         && disjoint
                         && spans_equal_text(src, a.span, b.span)
+                        && bindings_agree(sf, src, &arms[i].pattern, &arms[j].pattern)
                     {
                         out.push((
                             arms[j].body.span,
@@ -2045,6 +2150,98 @@ fn lint_match_same_arms(sf: &SourceFile, src: &str) -> Vec<Finding> {
         });
     });
     out
+}
+
+/// Whether two arms bind the same names with the same declared types, so a
+/// body spelled alike in both means the same thing and `a | b` can merge them.
+/// A binding whose type this file does not declare is unknown and blocks the
+/// merge.
+fn bindings_agree(sf: &SourceFile, src: &str, a: &Pattern, b: &Pattern) -> bool {
+    let (Some(a), Some(b)) = (binding_types(sf, a), binding_types(sf, b)) else {
+        return false;
+    };
+    a.len() == b.len()
+        && a.iter().all(|(name, a_ty)| {
+            b.get(name)
+                .is_some_and(|b_ty| spans_equal_text(src, *a_ty, *b_ty))
+        })
+}
+
+/// The spans of the declared types of the names `pattern` binds, read off the
+/// variant declarations in this file. `None` when a binding's type is not
+/// one this file spells.
+fn binding_types(sf: &SourceFile, pattern: &Pattern) -> Option<BTreeMap<String, Span>> {
+    let mut out = BTreeMap::new();
+    match &pattern.kind {
+        PatternKind::Wildcard | PatternKind::Literal(_) | PatternKind::Path(_) => {}
+        PatternKind::TupleStruct { path, elems } => {
+            let body = variant_body(sf, path)?;
+            let StructBody::Tuple(fields) = body else {
+                return None;
+            };
+            for (elem, field) in elems.iter().zip(fields) {
+                match &elem.kind {
+                    PatternKind::Wildcard => {}
+                    PatternKind::Ident {
+                        name,
+                        subpattern: None,
+                        ..
+                    } => {
+                        out.insert(name.name.clone(), field.ty.span);
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        PatternKind::Struct { path, fields, .. } => {
+            let StructBody::Named(declared) = variant_body(sf, path)? else {
+                return None;
+            };
+            for field in fields {
+                let decl = declared.iter().find(|d| d.name.name == field.name.name)?;
+                match field.pattern.as_ref().map(|p| &p.kind) {
+                    None => {
+                        out.insert(field.name.name.clone(), decl.ty.span);
+                    }
+                    Some(PatternKind::Wildcard) => {}
+                    Some(PatternKind::Ident {
+                        name,
+                        subpattern: None,
+                        ..
+                    }) => {
+                        out.insert(name.name.clone(), decl.ty.span);
+                    }
+                    Some(_) => return None,
+                }
+            }
+        }
+        _ => return None,
+    }
+    Some(out)
+}
+
+/// The payload of the variant `path` names (`Enum::Variant`), when this file
+/// declares that enum.
+fn variant_body<'a>(sf: &'a SourceFile, path: &TypePath) -> Option<&'a StructBody> {
+    let [.., enum_name, variant] = path.segments.as_slice() else {
+        return None;
+    };
+    let decl = find_enum(&sf.items, &enum_name.name.name)?;
+    decl.variants
+        .iter()
+        .find(|v| v.name.name == variant.name.name)
+        .map(|v| &v.body)
+}
+
+fn find_enum<'a>(items: &'a [Item], name: &str) -> Option<&'a EnumDecl> {
+    items.iter().find_map(|item| match &item.kind {
+        ItemKind::Enum(decl) if decl.name.name == name => Some(decl),
+        ItemKind::Mod(decl) => match &decl.body {
+            ModBody::Inline(inner) => find_enum(inner, name),
+            ModBody::External => None,
+        },
+        _ => None,
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -2267,6 +2464,7 @@ fn imported_names(sf: &SourceFile) -> BTreeSet<String> {
 fn lint_redundant_closure(sf: &SourceFile) -> Vec<Finding> {
     let mut out = Vec::new();
     let binding_names = imported_names(sf);
+    let declared = declared_fn_names(&sf.items);
     each_fn_body(sf, |body| {
         walk_expr(body, &mut |expr| {
             let ExprKind::Closure {
@@ -2304,17 +2502,17 @@ fn lint_redundant_closure(sf: &SourceFile) -> Vec<Finding> {
                 // passable as a value on every tier. Qualified paths
                 // (`errors::new`) and use-imported names (which may be
                 // `[rust-bindings]` functions) have call-site-only
-                // lowerings, so the closure is load-bearing for them.
+                // lowerings, so the closure is load-bearing for them, and a
+                // call the parser built (an interpolated string's
+                // `__concat`) names no function at all.
                 let ExprKind::Path(callee_path) = &callee.kind else {
                     return;
                 };
-                if callee_path.segments.len() != 1 {
+                let [callee_name] = callee_path.segments.as_slice() else {
                     return;
-                }
-                if callee_path
-                    .segments
-                    .first()
-                    .is_some_and(|s| binding_names.contains(&s.name.name))
+                };
+                if binding_names.contains(&callee_name.name.name)
+                    || !declared.contains(callee_name.name.name.as_str())
                 {
                     return;
                 }

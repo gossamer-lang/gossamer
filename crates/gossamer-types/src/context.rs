@@ -530,6 +530,53 @@ impl TyCtxt {
         self.struct_fields.insert(def, fields);
     }
 
+    /// Replaces every opaque alias in the registered struct and enum field
+    /// types with its representation. HIR types are erased the same way at
+    /// lowering, so a field read typed from these tables agrees with the
+    /// expression that reads it.
+    pub fn erase_nominal_field_tys(&mut self) {
+        let mut structs = std::mem::take(&mut self.struct_fields);
+        for ty in structs.values_mut().flatten() {
+            *ty = crate::erase_nominal(self, *ty);
+        }
+        self.struct_fields = structs;
+        let mut instances = std::mem::take(&mut self.struct_fields_inst);
+        for ty in instances.values_mut().flatten() {
+            *ty = crate::erase_nominal(self, *ty);
+        }
+        self.struct_fields_inst = instances;
+        let mut variants = std::mem::take(&mut self.enum_variant_tys);
+        for ty in variants.values_mut().flatten().flatten() {
+            *ty = crate::erase_nominal(self, *ty);
+        }
+        self.enum_variant_tys = variants;
+    }
+
+    /// Whether a value of `ty` is two words held by value: an `Option`, a
+    /// `Result`, or an inline user enum. Storage that holds one in place
+    /// gives it both words.
+    #[must_use]
+    pub fn is_two_word_value(&self, ty: Ty) -> bool {
+        matches!(
+            self.kind_of(ty),
+            TyKind::Adt { def, .. } if def.local == u32::MAX || def.local == u32::MAX - 1
+        ) || self.is_inline_enum_ty(ty)
+    }
+
+    /// Whether `ty` is a struct or tuple with no fields, whose value carries
+    /// no bits.
+    #[must_use]
+    pub fn is_field_free_aggregate(&self, ty: Ty) -> bool {
+        match self.kind_of(ty) {
+            TyKind::Tuple(elems) => elems.is_empty(),
+            TyKind::Adt { def, .. } if def.local < u32::MAX - 16 => {
+                self.enum_variant_tys(*def).is_none()
+                    && self.struct_field_tys(*def).is_some_and(<[Ty]>::is_empty)
+            }
+            _ => false,
+        }
+    }
+
     /// Returns the registered field types of the struct identified
     /// by `def`, or `None` when no registration has been made.
     #[must_use]
@@ -649,6 +696,26 @@ impl TyCtxt {
             return Some(fields.as_slice());
         }
         self.struct_fields.get(&def).map(Vec::as_slice)
+    }
+
+    /// Every instantiation of the generic struct `def` the monomorphizer
+    /// registered, as its interned type and its field types, ordered by type.
+    #[must_use]
+    pub fn struct_instantiations(&self, def: gossamer_resolve::DefId) -> Vec<(Ty, &[Ty])> {
+        let mut out: Vec<(Ty, &[Ty])> = self
+            .struct_fields_inst
+            .iter()
+            .filter(|((owner, _), _)| *owner == def)
+            .filter_map(|((owner, substs), fields)| {
+                let ty = self.interned(&TyKind::Adt {
+                    def: *owner,
+                    substs: substs.clone(),
+                })?;
+                Some((ty, fields.as_slice()))
+            })
+            .collect();
+        out.sort_by_key(|(ty, _)| *ty);
+        out
     }
 
     /// Whether a container element of this type is reached by the address
@@ -1625,7 +1692,8 @@ impl TyCtxt {
     /// `sync::RwLock` (35), `rand::Rng` (42), `fs::File` (44),
     /// `fs::OpenOptions` (45), `sync::Shared` (46), the band from
     /// `sync::Mutex` (50) through `sync::AtomicBool` (57), and
-    /// `http::websocket::Conn` (62), and `bytes::Buffer` (63).
+    /// `http::websocket::Conn` (62), `bytes::Buffer` (63), and
+    /// `io::MemoryStream` (64).
     #[must_use]
     pub fn is_managed_handle(&self, ty: Ty) -> bool {
         match self.kind(ty) {
@@ -1633,7 +1701,7 @@ impl TyCtxt {
             Some(TyKind::Adt { def, .. }) => {
                 matches!(
                     u32::MAX - def.local,
-                    11..=16 | 27 | 34 | 35 | 42 | 44..=46 | 50..=57 | 62 | 63
+                    11..=16 | 27 | 34 | 35 | 42 | 44..=46 | 50..=57 | 62..=64
                 )
             }
             _ => false,

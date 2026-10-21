@@ -1,0 +1,21 @@
+enum Widget { Decorated { child: Widget, key: String }, Empty }
+impl Widget { fn id(&self) -> String { match self { Widget::Decorated { key, .. } => key, _ => "" } } }
+struct Item { widget: Widget, disabled: bool }
+struct State { pressed: String }
+fn pick(keys: Vec<Item>, state: &mut State) {
+    let mut pressed = String::new()
+    for value in keys {
+        let id = value.widget.id()
+        if !id.is_empty() && !value.disabled { pressed = id }
+    }
+    state.pressed = pressed
+}
+fn main() {
+    for i in 0..100 {
+        let keys = #[Item { widget: Widget::Decorated { child: Widget::Empty, key: f"first:{i}" }, disabled: false }, Item { widget: Widget::Decorated { child: Widget::Empty, key: f"second:{i}" }, disabled: false }]
+        let mut state = State { pressed: "" }
+        pick(keys, &mut state)
+        assert_eq(state.pressed, f"second:{i}")
+    }
+    println("rebound string field transfer: ok")
+}

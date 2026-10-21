@@ -2021,6 +2021,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#the-blob-as-the-frontend-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        The blob as the frontend contract
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#cache-key" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -2434,6 +2445,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#the-blob-as-the-frontend-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        The blob as the frontend contract
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#cache-key" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -2555,6 +2577,29 @@ cached: they are derived from these four values and only <code>gos build</code> 
 <p>Only a pass that produced <strong>zero</strong> diagnostics publishes a blob. A cache hit
 is therefore also proof that the program was accepted, which is what lets the
 gate return early without re-running the analyses.</p>
+<h2 id="the-blob-as-the-frontend-contract">The blob as the frontend contract<a class="headerlink" href="#the-blob-as-the-frontend-contract" title="Permanent link">&para;</a></h2>
+<p>The blob is the only thing a frontend hands the rest of the compiler: HIR,
+MIR, the bytecode compiler, the JIT, and LLVM emission all read it and
+nothing else, so two frontends that write the same blob for a program build
+the same binary from it.</p>
+<ul>
+<li><strong>Schema.</strong> <code>cargo xtask schema</code> traces the serde types the cache encodes
+  and writes <code>benchmarks/frontend_parser/schema/blob.json</code>: the root, then
+  every struct and enum the blob reaches, by name, with field order and
+  variant indices. postcard encodes exactly that shape - fields in order, an enum as its
+  variant index, a sequence or map as a varint length and its entries - so
+  the schema is enough to write an encoder in another language.
+  <code>cargo xtask schema --check</code> fails when the types change without the file.</li>
+<li><strong>Determinism.</strong> Every hashed map and set in the blob is written in key
+  order (<code>gossamer_ast::ordered</code>), so the bytes are a function of the program
+  alone, not of a hasher's seed. Two processes, a cold pass, and a cache
+  restore write the same blob, and a build from a restored blob lowers the
+  same MIR and links the same binary
+  (<code>crates/gossamer-cli/tests/frontend_blob_determinism.rs</code>).</li>
+<li><strong>Emission.</strong> <code>gos check --emit-frontend-blob PATH</code> writes an accepted
+  unit's blob; <code>GOS_EMIT_FRONTEND_BLOB=PATH</code> does the same for <code>gos run</code> and
+  <code>gos build</code>.</li>
+</ul>
 <h2 id="cache-key">Cache key<a class="headerlink" href="#cache-key" title="Permanent link">&para;</a></h2>
 <p>The key is a SHA-256 over every input that can change the result:</p>
 <ul>

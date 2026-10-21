@@ -14,10 +14,7 @@ use crate::ir::{
 /// Whether `ty` is an `Option` / `Result` / inline user enum: two words held
 /// by value, so a reference to one is an address rather than the value.
 pub(crate) fn is_two_word_carrier(tcx: &TyCtxt, ty: gossamer_types::Ty) -> bool {
-    matches!(
-        tcx.kind_of(ty),
-        TyKind::Adt { def, .. } if def.local == u32::MAX || def.local == u32::MAX - 1
-    ) || tcx.is_inline_enum_ty(ty)
+    tcx.is_two_word_value(ty)
 }
 
 /// Names the builtin and runtime consumers that take a carrier by value. A

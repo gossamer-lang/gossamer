@@ -1,9 +1,9 @@
 //! `sync::AtomicU64` builtins.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64 as StdAtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 
-use super::{atomic_cell, atomic_handle};
+use super::{RtAtomic, atomic_cell, runtime_atomic};
 use crate::builtins::{BuiltinFnPub, value_to_int};
 use crate::value::{RuntimeResult, Value};
 
@@ -23,16 +23,13 @@ pub(crate) fn install_sync_atomic_u64(globals: &mut Vec<(&'static str, Value)>) 
     }
 }
 
-pub(crate) fn with_atomic_u64<R>(
-    value: &Value,
-    f: impl FnOnce(&Arc<StdAtomicU64>) -> R,
-) -> Option<R> {
+pub(crate) fn with_atomic_u64<R>(value: &Value, f: impl FnOnce(&Arc<RtAtomic>) -> R) -> Option<R> {
     atomic_cell(value, "sync::AtomicU64").map(|cell| f(&cell))
 }
 
 pub(crate) fn builtin_atomic_u64_new(args: &[Value]) -> RuntimeResult<Value> {
-    let init = args.first().and_then(value_to_int).unwrap_or(0) as u64;
-    Ok(atomic_handle("sync::AtomicU64", StdAtomicU64::new(init)))
+    let init = args.first().and_then(value_to_int).unwrap_or(0);
+    runtime_atomic("sync::AtomicU64", init)
 }
 
 pub(crate) fn builtin_atomic_u64_load(args: &[Value]) -> RuntimeResult<Value> {
@@ -40,11 +37,11 @@ pub(crate) fn builtin_atomic_u64_load(args: &[Value]) -> RuntimeResult<Value> {
         .first()
         .and_then(|v| with_atomic_u64(v, |a| a.load(Ordering::SeqCst)))
         .unwrap_or(0);
-    Ok(Value::Int(n as i64))
+    Ok(Value::Int(n))
 }
 
 pub(crate) fn builtin_atomic_u64_store(args: &[Value]) -> RuntimeResult<Value> {
-    let val = args.get(1).and_then(value_to_int).unwrap_or(0) as u64;
+    let val = args.get(1).and_then(value_to_int).unwrap_or(0);
     if let Some(handle) = args.first() {
         let _ = with_atomic_u64(handle, |a| a.store(val, Ordering::SeqCst));
     }
@@ -52,26 +49,26 @@ pub(crate) fn builtin_atomic_u64_store(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 pub(crate) fn builtin_atomic_u64_fetch_add(args: &[Value]) -> RuntimeResult<Value> {
-    let delta = args.get(1).and_then(value_to_int).unwrap_or(0) as u64;
+    let delta = args.get(1).and_then(value_to_int).unwrap_or(0);
     let prev = args
         .first()
         .and_then(|v| with_atomic_u64(v, |a| a.fetch_add(delta, Ordering::SeqCst)))
         .unwrap_or(0);
-    Ok(Value::Int(prev as i64))
+    Ok(Value::Int(prev))
 }
 
 pub(crate) fn builtin_atomic_u64_fetch_sub(args: &[Value]) -> RuntimeResult<Value> {
-    let delta = args.get(1).and_then(value_to_int).unwrap_or(0) as u64;
+    let delta = args.get(1).and_then(value_to_int).unwrap_or(0);
     let prev = args
         .first()
         .and_then(|v| with_atomic_u64(v, |a| a.fetch_sub(delta, Ordering::SeqCst)))
         .unwrap_or(0);
-    Ok(Value::Int(prev as i64))
+    Ok(Value::Int(prev))
 }
 
 pub(crate) fn builtin_atomic_u64_cas(args: &[Value]) -> RuntimeResult<Value> {
-    let current = args.get(1).and_then(value_to_int).unwrap_or(0) as u64;
-    let new = args.get(2).and_then(value_to_int).unwrap_or(0) as u64;
+    let current = args.get(1).and_then(value_to_int).unwrap_or(0);
+    let new = args.get(2).and_then(value_to_int).unwrap_or(0);
     let ok = args
         .first()
         .and_then(|v| {

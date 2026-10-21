@@ -2405,6 +2405,28 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#gr0024" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GR0024
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#gr0025" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GR0025
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#gt0001" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -2475,6 +2497,17 @@
     <span class="md-ellipsis">
 
         GT0045
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#gt0121" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GT0121
 
     </span>
   </a>
@@ -4392,6 +4425,28 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#gr0024" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GR0024
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#gr0025" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GR0025
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#gt0001" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -4462,6 +4517,17 @@
     <span class="md-ellipsis">
 
         GT0045
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#gt0121" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GT0121
 
     </span>
   </a>
@@ -4942,12 +5008,22 @@ version. This page is auto-generated from the catalogue in
 <tr>
 <td><a href="#gr0022"><code>GR0022</code></a></td>
 <td>Resolve</td>
-<td>uppercase name used as a binding</td>
+<td>match arm name misspells a variant</td>
 </tr>
 <tr>
 <td><a href="#gr0023"><code>GR0023</code></a></td>
 <td>Resolve</td>
 <td>reflecting generic called without a type</td>
+</tr>
+<tr>
+<td><a href="#gr0024"><code>GR0024</code></a></td>
+<td>Resolve</td>
+<td>glob import of something other than an enum</td>
+</tr>
+<tr>
+<td><a href="#gr0025"><code>GR0025</code></a></td>
+<td>Resolve</td>
+<td>or-pattern alternatives bind different names</td>
 </tr>
 <tr>
 <td><a href="#gt0001"><code>GT0001</code></a></td>
@@ -4983,6 +5059,11 @@ version. This page is auto-generated from the catalogue in
 <td><a href="#gt0045"><code>GT0045</code></a></td>
 <td>Types</td>
 <td>question mark not supported here</td>
+</tr>
+<tr>
+<td><a href="#gt0121"><code>GT0121</code></a></td>
+<td>Types</td>
+<td><code>&amp;mut</code> passed where a value is taken</td>
 </tr>
 </tbody>
 </table>
@@ -5248,11 +5329,17 @@ version. This page is auto-generated from the catalogue in
 <p><strong>Resolve</strong> - std free call written data-last</p>
 <p>A std free function was called with its data argument in the slot it occupied before every module took its data first. The call still means what it did, so nothing else in the body is affected; write the data argument first, which is what makes <code>iter::map(xs, f)</code> read as the <code>xs.map(f)</code> it stands for.</p>
 <h2 id="gr0022"><code>GR0022</code> <a id="gr0022"></a><a class="headerlink" href="#gr0022" title="Permanent link">&para;</a></h2>
-<p><strong>Resolve</strong> - uppercase name used as a binding</p>
-<p>A pattern that is a single name starting with an uppercase letter names a unit variant or a constant, so it is read as a path and never introduces a binding. No variant or constant by that name is in scope. If a binding was meant, start its name with a lowercase letter; if a variant was meant, import it or qualify it.</p>
+<p><strong>Resolve</strong> - match arm name misspells a variant</p>
+<p>A <code>match</code> arm's pattern is a single name that no variant, struct, or const in scope answers, and it is one or two edits from a variant's name. A single name matches a value when it resolves to a unit variant, a struct, or a const, whatever its case, and binds otherwise, so this arm would match every value. Write the variant to match it, or a lowercase name to bind the value.</p>
 <h2 id="gr0023"><code>GR0023</code> <a id="gr0023"></a><a class="headerlink" href="#gr0023" title="Permanent link">&para;</a></h2>
 <p><strong>Resolve</strong> - reflecting generic called without a type</p>
 <p>A function whose body walks <code>typeInfo::&lt;T&gt;()</code> over its own type parameter is specialised once per type it is called with, and the call is what names that type. A call without a turbofish names none, so there is no specialisation for it to reach. Write the type at the call: <code>describe::&lt;Point&gt;(p)</code>.</p>
+<h2 id="gr0024"><code>GR0024</code> <a id="gr0024"></a><a class="headerlink" href="#gr0024" title="Permanent link">&para;</a></h2>
+<p><strong>Resolve</strong> - glob import of something other than an enum</p>
+<p>A <code>use path::*</code> whose path names no enum of this program. A glob import brings every variant of an enum into scope, as in <code>use shapes::Kind::*</code>; a module's items are imported by name, as in <code>use shapes::{area, Point}</code>.</p>
+<h2 id="gr0025"><code>GR0025</code> <a id="gr0025"></a><a class="headerlink" href="#gr0025" title="Permanent link">&para;</a></h2>
+<p><strong>Resolve</strong> - or-pattern alternatives bind different names</p>
+<p>An or-pattern's alternatives bind different names. Whichever alternative matches, the arm reads the same names, so a name one alternative binds and another does not would be unbound when that other one matched. Bind the name in every alternative, or match the alternatives in separate arms.</p>
 <h2 id="gt0001"><code>GT0001</code> <a id="gt0001"></a><a class="headerlink" href="#gt0001" title="Permanent link">&para;</a></h2>
 <p><strong>Types</strong> - type mismatch</p>
 <p>The type checker could not reconcile two types it expected to match. The primary label shows the location of the mismatch; the <code>note:</code> line names the conflicting types.</p>
@@ -5274,6 +5361,9 @@ version. This page is auto-generated from the catalogue in
 <h2 id="gt0045"><code>GT0045</code> <a id="gt0045"></a><a class="headerlink" href="#gt0045" title="Permanent link">&para;</a></h2>
 <p><strong>Types</strong> - question mark not supported here</p>
 <p>The <code>?</code> operator can only unwrap <code>Result</code> inside a <code>Result</code>-returning function or <code>Option</code> inside an <code>Option</code>-returning function.</p>
+<h2 id="gt0121"><code>GT0121</code> <a id="gt0121"></a><a class="headerlink" href="#gt0121" title="Permanent link">&para;</a></h2>
+<p><strong>Types</strong> - <code>&amp;mut</code> passed where a value is taken</p>
+<p>A parameter that is not <code>&amp;mut</code> holds a value of its own, and a <code>mut</code> parameter writes only that copy, so nothing the callee writes would reach the place the argument names. Declare the parameter <code>&amp;mut T</code>, or pass the value.</p>
 
 
 

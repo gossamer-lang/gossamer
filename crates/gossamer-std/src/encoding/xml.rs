@@ -7,7 +7,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use quick_xml::Reader;
@@ -136,119 +136,323 @@ pub fn parse(src: &str) -> Result<Node, Error> {
             src.len()
         )));
     }
-    let depth_cap = max_depth();
-    let mut reader = Reader::from_str(src);
-    let mut stack: Vec<(String, BTreeMap<String, String>, Vec<Node>)> = Vec::new();
-    let mut root: Option<Node> = None;
+    let mut tree = TreeBuilder::new(max_depth(), cap);
+    tree.feed(src, 0).map_err(Error::new)?;
+    tree.finish().map_err(Error::new)
+}
+
+/// How deeply entity references may nest inside the replacement text of
+/// the entities that name them.
+const MAX_ENTITY_DEPTH: usize = 16;
+
+/// Builds a [`Node`] tree from a document's events, expanding the general
+/// entities its internal DTD subset declares (XML 1.0 section 4.4).
+struct TreeBuilder {
+    stack: Vec<(String, BTreeMap<String, String>, Vec<Node>)>,
+    root: Option<Node>,
     // `quick-xml` reports entity references (`&lt;` etc.) as their own
     // `GeneralRef` events and splits surrounding character data, so text
     // is reassembled here and entity-resolved as one piece at each
     // element boundary.
-    let mut text_buf = String::new();
-    loop {
-        let event = reader
-            .read_event()
-            .map_err(|e| Error::new(format!("xml: parse: {e}")))?;
-        if !matches!(event, Event::Text(_) | Event::GeneralRef(_)) {
-            flush_text(&mut text_buf, &mut stack)?;
-        }
-        match event {
-            Event::Start(e) => {
-                if stack.len() >= depth_cap {
-                    return Err(Error::new(format!(
-                        "xml nesting depth exceeds max_depth ({depth_cap})"
-                    )));
-                }
-                let name = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
-                let mut attrs = BTreeMap::new();
-                for attr in e.attributes().flatten() {
-                    let key = String::from_utf8_lossy(attr.key.local_name().as_ref()).into_owned();
-                    let val = String::from_utf8_lossy(&attr.value).into_owned();
-                    attrs.insert(key, val);
-                }
-                stack.push((name, attrs, Vec::new()));
-            }
-            Event::Empty(e) => {
-                let name = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
-                let mut attrs = BTreeMap::new();
-                for attr in e.attributes().flatten() {
-                    let key = String::from_utf8_lossy(attr.key.local_name().as_ref()).into_owned();
-                    let val = String::from_utf8_lossy(&attr.value).into_owned();
-                    attrs.insert(key, val);
-                }
-                let node = Node::Element {
-                    name,
-                    attrs,
-                    children: vec![],
-                };
-                if let Some(parent) = stack.last_mut() {
-                    parent.2.push(node);
-                } else {
-                    root = Some(node);
-                }
-            }
-            Event::End(_) => {
-                if let Some((name, attrs, children)) = stack.pop() {
-                    let node = Node::Element {
-                        name,
-                        attrs,
-                        children,
-                    };
-                    if let Some(parent) = stack.last_mut() {
-                        parent.2.push(node);
-                    } else {
-                        root = Some(node);
-                    }
-                }
-            }
-            Event::Text(e) => {
-                let decoded = e
-                    .decode()
-                    .map_err(|err| Error::new(format!("xml: {err}")))?;
-                text_buf.push_str(&decoded);
-            }
-            Event::GeneralRef(e) => {
-                let name = e
-                    .decode()
-                    .map_err(|err| Error::new(format!("xml: {err}")))?;
-                text_buf.push('&');
-                text_buf.push_str(&name);
-                text_buf.push(';');
-            }
-            Event::CData(e) => {
-                let text = String::from_utf8_lossy(e.as_ref()).into_owned();
-                if let Some(parent) = stack.last_mut() {
-                    parent.2.push(Node::Text(text));
-                }
-            }
-            Event::Eof => break,
-            _ => {}
-        }
-    }
-    root.ok_or_else(|| Error::new("xml: empty document"))
+    text: String,
+    /// Each declared entity's replacement text: its literal with character
+    /// references expanded and entity references left to expand at use.
+    entities: HashMap<String, String>,
+    depth_cap: usize,
+    /// Bytes of replacement text expansion may still produce, so nested
+    /// references cannot multiply a small document past the size cap.
+    expansion_budget: usize,
 }
 
-/// Resolves the accumulated character data (entity references
-/// reconstructed as `&name;`), trims surrounding whitespace, and
-/// appends it as a text child of the current element. Whitespace-only
-/// runs collapse to nothing, matching the old `trim_text` behaviour.
-fn flush_text(
-    buf: &mut String,
-    stack: &mut [(String, BTreeMap<String, String>, Vec<Node>)],
-) -> Result<(), Error> {
-    if buf.is_empty() {
-        return Ok(());
-    }
-    let resolved =
-        quick_xml::escape::unescape(buf).map_err(|err| Error::new(format!("xml: {err}")))?;
-    let trimmed = resolved.trim().to_owned();
-    buf.clear();
-    if !trimmed.is_empty() {
-        if let Some(parent) = stack.last_mut() {
-            parent.2.push(Node::Text(trimmed));
+impl TreeBuilder {
+    fn new(depth_cap: usize, size_cap: usize) -> Self {
+        Self {
+            stack: Vec::new(),
+            root: None,
+            text: String::new(),
+            entities: HashMap::new(),
+            depth_cap,
+            expansion_budget: size_cap,
         }
     }
-    Ok(())
+
+    fn finish(self) -> Result<Node, String> {
+        self.root.ok_or_else(|| "xml: empty document".to_string())
+    }
+
+    /// Reads `src`, the document itself at `entity_depth` 0 and an entity's
+    /// replacement text below it, into the tree.
+    fn feed(&mut self, src: &str, entity_depth: usize) -> Result<(), String> {
+        let mut reader = Reader::from_str(src);
+        loop {
+            let event = reader
+                .read_event()
+                .map_err(|e| format!("xml: parse: {e}"))?;
+            // The end of a replacement text is not a boundary: its character
+            // data runs on into the text after the reference.
+            let continues_text = matches!(event, Event::Text(_) | Event::GeneralRef(_))
+                || (entity_depth > 0 && matches!(event, Event::Eof));
+            if !continues_text {
+                self.flush_text()?;
+            }
+            match event {
+                Event::DocType(e) if entity_depth == 0 => {
+                    let decl = e.decode().map_err(|err| format!("xml: {err}"))?;
+                    self.entities = declared_entities(&decl);
+                }
+                Event::Start(e) => {
+                    if self.stack.len() >= self.depth_cap {
+                        return Err(format!(
+                            "xml nesting depth exceeds max_depth ({})",
+                            self.depth_cap
+                        ));
+                    }
+                    let (name, attrs) = self.element(&e)?;
+                    self.stack.push((name, attrs, Vec::new()));
+                }
+                Event::Empty(e) => {
+                    let (name, attrs) = self.element(&e)?;
+                    self.attach(Node::Element {
+                        name,
+                        attrs,
+                        children: vec![],
+                    });
+                }
+                Event::End(_) => {
+                    if let Some((name, attrs, children)) = self.stack.pop() {
+                        self.attach(Node::Element {
+                            name,
+                            attrs,
+                            children,
+                        });
+                    }
+                }
+                Event::Text(e) => {
+                    let decoded = e.decode().map_err(|err| format!("xml: {err}"))?;
+                    self.text.push_str(&decoded);
+                }
+                Event::GeneralRef(e) => {
+                    let name = e.decode().map_err(|err| format!("xml: {err}"))?;
+                    // The replacement text is content of its own: its
+                    // character data joins the text around the reference and
+                    // its markup becomes elements.
+                    if let Some(text) = self.replacement(&name, entity_depth)? {
+                        self.feed(&text, entity_depth + 1)?;
+                    } else {
+                        self.text.push('&');
+                        self.text.push_str(&name);
+                        self.text.push(';');
+                    }
+                }
+                Event::CData(e) => {
+                    let text = String::from_utf8_lossy(e.as_ref()).into_owned();
+                    if let Some(parent) = self.stack.last_mut() {
+                        parent.2.push(Node::Text(text));
+                    }
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// The replacement text of the declared entity `name`, or `None` for a
+    /// character reference, a predefined entity, or an undeclared name,
+    /// which the text's own unescaping resolves or reports.
+    fn replacement(&mut self, name: &str, entity_depth: usize) -> Result<Option<String>, String> {
+        if name.starts_with('#') || quick_xml::escape::resolve_xml_entity(name).is_some() {
+            return Ok(None);
+        }
+        let Some(text) = self.entities.get(name) else {
+            return Ok(None);
+        };
+        if entity_depth >= MAX_ENTITY_DEPTH {
+            return Err(format!(
+                "xml: entity `{name}` nests deeper than {MAX_ENTITY_DEPTH} references"
+            ));
+        }
+        if text.len() > self.expansion_budget {
+            return Err("xml: entity expansion exceeds max_size".to_string());
+        }
+        self.expansion_budget -= text.len();
+        Ok(Some(text.clone()))
+    }
+
+    /// An attribute's value with its references expanded; the replacement
+    /// text of an entity an attribute names may not contain `<`.
+    fn attribute_value(&mut self, raw: &str, entity_depth: usize) -> Result<String, String> {
+        let mut out = String::with_capacity(raw.len());
+        let mut rest = raw;
+        while let Some(amp) = rest.find('&') {
+            out.push_str(&rest[..amp]);
+            let after = &rest[amp + 1..];
+            let Some(semi) = after.find(';') else {
+                return Err("xml: unterminated reference in an attribute value".to_string());
+            };
+            let name = &after[..semi];
+            if let Some(text) = self.replacement(name, entity_depth)? {
+                if text.contains('<') {
+                    return Err(format!(
+                        "xml: entity `{name}` puts `<` in an attribute value"
+                    ));
+                }
+                let expanded = self.attribute_value(&text, entity_depth + 1)?;
+                out.push_str(&expanded);
+            } else {
+                let reference = &rest[amp..amp + semi + 2];
+                let resolved =
+                    quick_xml::escape::unescape(reference).map_err(|err| escape_error(&err))?;
+                out.push_str(&resolved);
+            }
+            rest = &after[semi + 1..];
+        }
+        out.push_str(rest);
+        Ok(out)
+    }
+
+    fn element(
+        &mut self,
+        e: &quick_xml::events::BytesStart<'_>,
+    ) -> Result<(String, BTreeMap<String, String>), String> {
+        let name = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
+        let mut attrs = BTreeMap::new();
+        for attr in e.attributes().flatten() {
+            let key = String::from_utf8_lossy(attr.key.local_name().as_ref()).into_owned();
+            let raw = String::from_utf8_lossy(&attr.value).into_owned();
+            let value = self.attribute_value(&raw, 0)?;
+            attrs.insert(key, value);
+        }
+        Ok((name, attrs))
+    }
+
+    fn attach(&mut self, node: Node) {
+        if let Some(parent) = self.stack.last_mut() {
+            parent.2.push(node);
+        } else {
+            self.root = Some(node);
+        }
+    }
+
+    /// Resolves the accumulated character data (entity references
+    /// reconstructed as `&name;`), trims surrounding whitespace, and
+    /// appends it as a text child of the current element. Whitespace-only
+    /// runs collapse to nothing, matching the old `trim_text` behaviour.
+    fn flush_text(&mut self) -> Result<(), String> {
+        if self.text.is_empty() {
+            return Ok(());
+        }
+        let trimmed = quick_xml::escape::unescape(&self.text)
+            .map_err(|err| escape_error(&err))?
+            .trim()
+            .to_owned();
+        self.text.clear();
+        if !trimmed.is_empty()
+            && let Some(parent) = self.stack.last_mut()
+        {
+            parent.2.push(Node::Text(trimmed));
+        }
+        Ok(())
+    }
+}
+
+/// The general entities a DOCTYPE's internal subset declares, by name, each
+/// mapped to its literal with character references expanded. The first
+/// declaration of a name binds it; parameter and external entities are not
+/// read.
+fn declared_entities(doctype: &str) -> HashMap<String, String> {
+    let mut entities = HashMap::new();
+    let Some(open) = outside_quotes(doctype, b'[') else {
+        return entities;
+    };
+    let mut rest = &doctype[open + 1..];
+    while let Some(c) = rest.chars().next() {
+        if let Some(after) = rest.strip_prefix("<!--") {
+            rest = after.find("-->").map_or("", |end| &after[end + 3..]);
+        } else if let Some(after) = rest.strip_prefix("<?") {
+            rest = after.find("?>").map_or("", |end| &after[end + 2..]);
+        } else if let Some(after) = rest.strip_prefix("<!ENTITY") {
+            let end = outside_quotes(after, b'>').map_or(after.len(), |end| end + 1);
+            if let Some((name, literal)) = entity_declaration(&after[..end]) {
+                entities.entry(name).or_insert(literal);
+            }
+            rest = &after[end..];
+        } else if c == '"' || c == '\'' {
+            let after = &rest[1..];
+            rest = after.find(c).map_or("", |end| &after[end + 1..]);
+        } else if c == ']' {
+            break;
+        } else {
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    entities
+}
+
+/// The name and replacement text of one `<!ENTITY ...>` declaration's body,
+/// when it declares an internal general entity.
+fn entity_declaration(body: &str) -> Option<(String, String)> {
+    let body = body.trim_start();
+    if body.starts_with('%') {
+        return None;
+    }
+    let name_end = body.find(char::is_whitespace)?;
+    let name = &body[..name_end];
+    let value = body[name_end..].trim_start();
+    let quote = value.chars().next().filter(|q| *q == '"' || *q == '\'')?;
+    let literal = &value[1..];
+    let literal = &literal[..literal.find(quote)?];
+    Some((name.to_string(), expand_char_refs(literal)))
+}
+
+/// `literal` with each character reference (`&#38;`, `&#x3C;`) replaced by
+/// its character, as an entity's literal is at its declaration.
+fn expand_char_refs(literal: &str) -> String {
+    let mut out = String::with_capacity(literal.len());
+    let mut rest = literal;
+    while let Some(at) = rest.find("&#") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at..];
+        let Some(reference) = after.find(';').map(|semi| &after[..=semi]) else {
+            out.push_str(after);
+            rest = "";
+            break;
+        };
+        match quick_xml::escape::unescape(reference) {
+            Ok(c) => out.push_str(&c),
+            Err(_) => out.push_str(reference),
+        }
+        rest = &after[reference.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The message for a reference unescaping could not resolve. An undeclared
+/// entity is named without the offset, which counts from the start of the
+/// reassembled text rather than the document.
+fn escape_error(err: &quick_xml::escape::EscapeError) -> String {
+    match err {
+        quick_xml::escape::EscapeError::UnrecognizedEntity(_, name) => {
+            format!("xml: unrecognized entity `{name}`")
+        }
+        other => format!("xml: {other}"),
+    }
+}
+
+/// The byte offset of the first `byte` in `text` outside a quoted string.
+fn outside_quotes(text: &str, byte: u8) -> Option<usize> {
+    let mut quote: Option<u8> = None;
+    for (i, b) in text.bytes().enumerate() {
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None if b == b'"' || b == b'\'' => quote = Some(b),
+            None if b == byte => return Some(i),
+            None => {}
+        }
+    }
+    None
 }
 
 /// Serialises a [`Node`] tree to an XML string. Does not emit an XML declaration.

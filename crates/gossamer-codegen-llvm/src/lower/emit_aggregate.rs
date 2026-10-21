@@ -66,7 +66,6 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use crate::BuildError;
-use crate::ty::packed_byte_array_len;
 use anyhow::Result;
 use gossamer_abi as abi;
 use gossamer_mir::{
@@ -137,10 +136,16 @@ impl<'a> Lowerer<'a> {
             self.lower_place_address(place)
         };
         let place_ty = self.place_leaf_ty(place);
-        let packed_bytes = packed_byte_array_len(self.tcx, place_ty).is_some();
         let tbaa = self.aggregate_dest_tbaa(place);
         if let Some(layout) = self.tcx.packed_layout(place_ty) {
             return self.emit_packed_struct_store(&base, place_ty, &layout, operands, tbaa);
+        }
+        // A value with no fields still occupies the one word its layout
+        // floors it at, and that word is what equality, ordering, hashing,
+        // and a container's copy read.
+        if operands.is_empty() {
+            writeln!(self.out, "  store i64 0, ptr {base}{tbaa}").unwrap();
+            return Ok(());
         }
         let mut slot_idx = 0u32;
         for operand in operands {
@@ -166,21 +171,12 @@ impl<'a> Lowerer<'a> {
                 // `field_slot_offset` floor every element at one word - so
                 // the slot is zeroed and the next operand lands past it.
                 let dst = self.fresh();
-                if packed_bytes {
-                    writeln!(
-                        self.out,
-                        "  {dst} = getelementptr i8, ptr {base}, i64 {slot_idx}"
-                    )
-                    .unwrap();
-                    writeln!(self.out, "  store i8 0, ptr {dst}{tbaa}").unwrap();
-                } else {
-                    writeln!(
-                        self.out,
-                        "  {dst} = getelementptr i64, ptr {base}, i64 {slot_idx}"
-                    )
-                    .unwrap();
-                    writeln!(self.out, "  store i64 0, ptr {dst}{tbaa}").unwrap();
-                }
+                writeln!(
+                    self.out,
+                    "  {dst} = getelementptr i64, ptr {base}, i64 {slot_idx}"
+                )
+                .unwrap();
+                writeln!(self.out, "  store i64 0, ptr {dst}{tbaa}").unwrap();
                 slot_idx += 1;
                 continue;
             }
@@ -196,32 +192,21 @@ impl<'a> Lowerer<'a> {
                 let v = self.lower_operand(operand)?;
                 let op_llvm = self.operand_llvm_ty(operand);
                 let dst = self.fresh();
-                if packed_bytes {
-                    writeln!(
-                        self.out,
-                        "  {dst} = getelementptr i8, ptr {base}, i64 {slot_idx}"
-                    )
-                    .unwrap();
-                    let byte = self.fresh();
-                    writeln!(self.out, "  {byte} = trunc {op_llvm} {v} to i8").unwrap();
-                    writeln!(self.out, "  store i8 {byte}, ptr {dst}{tbaa}").unwrap();
-                } else {
-                    writeln!(
-                        self.out,
-                        "  {dst} = getelementptr i64, ptr {base}, i64 {slot_idx}"
-                    )
-                    .unwrap();
-                    // A slot is a whole word and is read back as one, so a
-                    // scalar narrower than that is widened to fill it: a
-                    // `char` or a `bool` written at its own width would leave
-                    // the rest of the slot holding whatever the frame did.
-                    match self.slot_word_of(operand, &op_llvm, &v) {
-                        Some(word) => {
-                            writeln!(self.out, "  store i64 {word}, ptr {dst}{tbaa}").unwrap();
-                        }
-                        None => {
-                            writeln!(self.out, "  store {op_llvm} {v}, ptr {dst}{tbaa}").unwrap();
-                        }
+                writeln!(
+                    self.out,
+                    "  {dst} = getelementptr i64, ptr {base}, i64 {slot_idx}"
+                )
+                .unwrap();
+                // A slot is a whole word and is read back as one, so a
+                // scalar narrower than that is widened to fill it: a
+                // `char` or a `bool` written at its own width would leave
+                // the rest of the slot holding whatever the frame did.
+                match self.slot_word_of(operand, &op_llvm, &v) {
+                    Some(word) => {
+                        writeln!(self.out, "  store i64 {word}, ptr {dst}{tbaa}").unwrap();
+                    }
+                    None => {
+                        writeln!(self.out, "  store {op_llvm} {v}, ptr {dst}{tbaa}").unwrap();
                     }
                 }
             } else {
@@ -394,8 +379,6 @@ impl<'a> Lowerer<'a> {
         } else {
             self.lower_place_address(place)
         };
-        let place_ty = self.place_leaf_ty(place);
-        let packed_bytes = packed_byte_array_len(self.tcx, place_ty).is_some();
         let tbaa = self.aggregate_dest_tbaa(place);
         let op_ty = self.operand_ty(value);
         let mut op_slots = slot_count(self.tcx, op_ty).unwrap_or(1);
@@ -529,47 +512,6 @@ impl<'a> Lowerer<'a> {
         }
         let v = self.lower_operand(value)?;
         let v_llvm = self.operand_llvm_ty(value);
-        if packed_bytes {
-            let byte = self.fresh();
-            writeln!(self.out, "  {byte} = trunc {v_llvm} {v} to i8").unwrap();
-            if count == 0 {
-                return Ok(());
-            }
-            if matches!(value, Operand::Const(ConstValue::Int(0))) {
-                writeln!(
-                    self.out,
-                    "  call void @llvm.memset.p0.i64(ptr {base}, i8 0, i64 {count}, i1 false)"
-                )
-                .unwrap();
-            } else {
-                let head = self.fresh_label("repeat_byte_head");
-                let body = self.fresh_label("repeat_byte_body");
-                let done = self.fresh_label("repeat_byte_done");
-                let counter = self.entry_alloca("i64");
-                writeln!(self.out, "  store i64 0, ptr {counter}").unwrap();
-                writeln!(self.out, "  br label %{head}").unwrap();
-                writeln!(self.out, "{head}:").unwrap();
-                let cur = self.fresh();
-                writeln!(self.out, "  {cur} = load i64, ptr {counter}").unwrap();
-                let cond = self.fresh();
-                writeln!(self.out, "  {cond} = icmp ult i64 {cur}, {count}").unwrap();
-                writeln!(self.out, "  br i1 {cond}, label %{body}, label %{done}").unwrap();
-                writeln!(self.out, "{body}:").unwrap();
-                let dst = self.fresh();
-                writeln!(
-                    self.out,
-                    "  {dst} = getelementptr i8, ptr {base}, i64 {cur}"
-                )
-                .unwrap();
-                writeln!(self.out, "  store i8 {byte}, ptr {dst}{tbaa}").unwrap();
-                let next = self.fresh();
-                writeln!(self.out, "  {next} = add i64 {cur}, 1").unwrap();
-                writeln!(self.out, "  store i64 {next}, ptr {counter}").unwrap();
-                writeln!(self.out, "  br label %{head}").unwrap();
-                writeln!(self.out, "{done}:").unwrap();
-            }
-            return Ok(());
-        }
         // A slot is a whole word and is read back as one, so the scalar being
         // repeated fills each slot it lands in.
         let (v_llvm, v) = match self.slot_word_of(value, &v_llvm, &v) {
@@ -797,14 +739,6 @@ impl<'a> Lowerer<'a> {
                 writeln!(
                     self.out,
                     "  {dest} = call ptr @gos_rt_arr_format_i64(ptr {value}, i64 {n})"
-                )
-                .unwrap();
-            }
-            ConcatKind::ArrU8(n) => {
-                declare_rt(&mut self.runtime_refs, "gos_rt_arr_format_u8");
-                writeln!(
-                    self.out,
-                    "  {dest} = call ptr @gos_rt_arr_format_u8(ptr {value}, i64 {n})"
                 )
                 .unwrap();
             }

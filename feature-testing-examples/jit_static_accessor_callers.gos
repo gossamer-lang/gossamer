@@ -1,0 +1,42 @@
+// Interpreted and compiled code agree on a `static mut`: every function that
+// reads or writes it runs on the tier the static lives on, whoever calls it,
+// and compiled code never links a call to a function it did not compile.
+mod catalog {
+    pub struct Catalog { pub locale: String, pub messages: Vec<String>, pub table: Map<String, String> }
+
+    static mut CURRENT: Catalog = Catalog { locale: "en", messages: #[], table: {} }
+
+    pub fn install(c: Catalog) {
+        CURRENT = c
+    }
+
+    pub fn tr(source: String) -> String {
+        match CURRENT.table.get(source) {
+            Some(t) => t
+            None => source
+        }
+    }
+}
+
+struct Action { label: String, id: i64 }
+
+impl Action {
+    fn new(id: i64, source: String) -> Action {
+        Action { label: catalog::tr(source), id: id }
+    }
+}
+
+fn total(n: i64) -> i64 {
+    let mut sum = 0
+    for i in 0..n {
+        let a = Action::new(i, "Open")
+        sum += a.id + a.label.len()
+    }
+    sum
+}
+
+fn main() {
+    catalog::install(catalog::Catalog { locale: "fr", messages: #["m"], table: { "Open": "Ouvrir" } })
+    println(f"{catalog::tr("Open")} {catalog::tr("Close")}")
+    println(total(1000))
+}

@@ -2351,7 +2351,12 @@
 <tr>
 <td><code>DirInfo</code></td>
 <td><code>type DirInfo</code></td>
-<td>Directory entry yielded by read_dir and walk_dir; carries path, name, is_file, is_dir, is_symlink, and size.</td>
+<td>Directory entry yielded by read_dir and walk_dir; carries path, name, is_file, is_dir, is_symlink, size, and modified_ms (milliseconds since the Unix epoch).</td>
+</tr>
+<tr>
+<td><code>Metadata</code></td>
+<td><code>type Metadata</code></td>
+<td>What <code>metadata(path)</code> answers about a file: size, is_file, is_dir, is_symlink, readonly, and modified_unix_ms (milliseconds since the Unix epoch).</td>
 </tr>
 <tr>
 <td><code>OpenOptions</code></td>
@@ -2491,7 +2496,7 @@
 <tr>
 <td><code>metadata</code></td>
 <td><code>fn metadata(path: String) -&gt; Result&lt;fs::Metadata, io::Error&gt;</code></td>
-<td>Returns filesystem metadata for a path.</td>
+<td><code>metadata(path) -&gt; Result&lt;Metadata, io::Error&gt;</code>: the size, kind, permissions, and modification time of the file at <code>path</code>.</td>
 </tr>
 <tr>
 <td><code>sync_dir</code></td>

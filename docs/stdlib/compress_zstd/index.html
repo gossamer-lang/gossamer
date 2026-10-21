@@ -2359,6 +2359,11 @@
 <td><code>fn decode(data: Vec&lt;u8&gt;) -&gt; Result&lt;Vec&lt;u8&gt;, errors::Error&gt;</code></td>
 <td>One-shot Zstandard decompress.</td>
 </tr>
+<tr>
+<td><code>decode_limited</code></td>
+<td><code>fn decode_limited(data: Vec&lt;u8&gt;, max_bytes: i64) -&gt; Result&lt;Vec&lt;u8&gt;, errors::Error&gt;</code></td>
+<td><code>decode(data)</code>, refusing output past <code>max_bytes</code>.</td>
+</tr>
 </tbody>
 </table>
 <!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->

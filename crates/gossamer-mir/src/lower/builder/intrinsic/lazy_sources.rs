@@ -492,6 +492,7 @@ impl<'a> Builder<'a> {
         // The key binding names the element's storage, not a copy: an
         // aggregate slot is addressed in place, exactly as a struct-valued
         // binding is, so field reads deref the snapshot's own memory.
+        let aggregate_keyed = matches!(keyed, KeyedPairs::Aggregate(_));
         let (key_ref_ty, keys_helper, key_reader, lookup_helper, descriptor) = match keyed {
             KeyedPairs::Aggregate(descriptor) => (
                 self.tcx.intern(TyKind::Ref {
@@ -558,14 +559,16 @@ impl<'a> Builder<'a> {
 
         self.set_current(body_block);
         self.push_scope();
+        // A carrier key is a two-word value rather than a run of slots read
+        // in place, so the binding holds the element's words themselves.
+        let by_value = aggregate_keyed && self.tcx.is_two_word_value(key_struct_ty);
         let key_local = self.push_local(
             key_ref_ty,
-            key_binding.as_ref().map(|(n, _)| n.clone()),
-            key_binding.as_ref().is_some_and(|(_, m)| *m),
+            (!by_value)
+                .then(|| key_binding.as_ref().map(|(n, _)| n.clone()))
+                .flatten(),
+            !by_value && key_binding.as_ref().is_some_and(|(_, m)| *m),
         );
-        if let Some((name, _)) = &key_binding {
-            self.bind_local(&name.name, key_local);
-        }
         let after_ptr = self.new_block(span);
         self.terminate(Terminator::Call {
             callee: Operand::Const(ConstValue::Str(key_reader.to_string())),
@@ -577,6 +580,27 @@ impl<'a> Builder<'a> {
             target: Some(after_ptr),
         });
         self.set_current(after_ptr);
+        let key_local = if by_value {
+            let value = self.push_local(
+                key_struct_ty,
+                key_binding.as_ref().map(|(n, _)| n.clone()),
+                key_binding.as_ref().is_some_and(|(_, m)| *m),
+            );
+            self.emit_assign(
+                Place::local(value),
+                Rvalue::Use(Operand::Copy(Place {
+                    local: key_local,
+                    projection: vec![crate::ir::Projection::Deref],
+                })),
+                span,
+            );
+            value
+        } else {
+            key_local
+        };
+        if let Some((name, _)) = &key_binding {
+            self.bind_local(&name.name, key_local);
+        }
 
         // `m.get(k)` in its content-keyed form: an `Option<V>` whose payload
         // word is the stored value, so the binding takes the payload directly.

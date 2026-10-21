@@ -719,8 +719,8 @@ spawn(|| produce(tx_lo, #[10, 20]))
 let mut total = 0
 for _ in 0..5 {
     select {
-        v = rx_hi.recv() => total += v,
-        v = rx_lo.recv() => total += v,
+        Some(v) = rx_hi.recv() => total += v,
+        Some(v) = rx_lo.recv() => total += v,
     }
 }
 println(f"merged total = {total}")

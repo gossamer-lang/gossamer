@@ -99,6 +99,18 @@ pub(crate) fn render_ty(tcx: &TyCtxt, ty: Ty) -> String {
 /// return-only type, so a zero-sized parameter (a field-less struct, `()`)
 /// takes an unread pointer word instead. Definition, declaration, and call
 /// site all go through this so the three agree on arity and shape.
+/// The LLVM type parameter `i` of `body` crosses as: the address of the
+/// value's storage for a parameter the body takes by address, and the value's
+/// own type otherwise.
+pub(crate) fn body_param_llvm_ty(tcx: &TyCtxt, body: &gossamer_mir::Body, i: u32) -> String {
+    let local = gossamer_mir::Local(i + 1);
+    if body.address_params.contains(&local) {
+        "ptr".to_string()
+    } else {
+        param_llvm_ty(tcx, body.local_ty(local))
+    }
+}
+
 pub(crate) fn param_llvm_ty(tcx: &TyCtxt, ty: Ty) -> String {
     let rendered = render_ty(tcx, ty);
     if rendered == "void" {
@@ -287,19 +299,7 @@ pub(crate) fn slot_count(tcx: &TyCtxt, ty: Ty) -> Option<u32> {
 
 /// Byte footprint for an inline aggregate's flat-slot representation.
 pub(crate) fn aggregate_storage_bytes(tcx: &TyCtxt, ty: Ty) -> Option<u64> {
-    if let Some(len) = packed_byte_array_len(tcx, ty) {
-        return Some(len.max(1));
-    }
     slot_count(tcx, ty).map(|slots| u64::from(slots.max(1)) * 8)
-}
-
-/// Direct fixed arrays of bytes use their declared element width in native
-/// stack storage. Integer arithmetic still uses the canonical i64 value model.
-pub(crate) fn packed_byte_array_len(tcx: &TyCtxt, ty: Ty) -> Option<u64> {
-    let TyKind::Array { elem, len } = tcx.kind(ty)? else {
-        return None;
-    };
-    matches!(tcx.kind(*elem), Some(TyKind::Int(IntTy::U8))).then(|| len.to_usize() as u64)
 }
 
 /// Size in slots of a *single element* of an aggregate type -

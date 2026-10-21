@@ -2360,6 +2360,16 @@
 <td>True if r is in general-category group L.</td>
 </tr>
 <tr>
+<td><code>is_xid_start</code></td>
+<td><code>fn is_xid_start(rune: char) -&gt; bool</code></td>
+<td>True if r may begin an identifier: Unicode XID_Start (UAX #31) or <code>_</code>.</td>
+</tr>
+<tr>
+<td><code>is_xid_continue</code></td>
+<td><code>fn is_xid_continue(rune: char) -&gt; bool</code></td>
+<td>True if r may continue an identifier: Unicode XID_Continue (UAX #31).</td>
+</tr>
+<tr>
 <td><code>is_digit</code></td>
 <td><code>fn is_digit(rune: char) -&gt; bool</code></td>
 <td>True if r is a decimal digit (category Nd).</td>
@@ -2462,7 +2472,7 @@
 <tr>
 <td><code>fold_case</code></td>
 <td><code>fn fold_case(text: String) -&gt; String</code></td>
-<td>Simple case-folded comparison form for a string.</td>
+<td>Case-folded comparison form for a string (Unicode full case folding): two strings fold alike exactly when they match ignoring case, so <code>Straße</code> and <code>STRASSE</code> both fold to <code>strasse</code> and final sigma to sigma.</td>
 </tr>
 <tr>
 <td><code>nfc</code></td>
@@ -2522,7 +2532,7 @@
 <tr>
 <td><code>word_bounds</code></td>
 <td><code>fn word_bounds(text: String) -&gt; Vec&lt;String&gt;</code></td>
-<td>UAX #29 word boundaries (includes punct + whitespace runs).</td>
+<td>UAX #29 word-boundary segments of a string, punctuation and whitespace runs included.</td>
 </tr>
 <tr>
 <td><code>word_count</code></td>

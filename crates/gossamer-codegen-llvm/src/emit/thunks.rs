@@ -503,7 +503,7 @@ pub(super) fn cabi_thunk_param_tys(
         return vec!["ptr".to_string(); arity];
     };
     (0..body.arity)
-        .map(|i| crate::ty::param_llvm_ty(tcx, body.local_ty(gossamer_mir::Local(i + 1))))
+        .map(|i| crate::ty::body_param_llvm_ty(tcx, body, i))
         .collect()
 }
 
@@ -708,13 +708,15 @@ pub(super) fn validate_global_decl_shape(g: &str) -> Result<()> {
         || trimmed.starts_with('$')
         || trimmed.starts_with("declare ")
         || trimmed.starts_with("define internal ")
+        // A static cell's finalizer coalesces with its cell across chunks.
+        || trimmed.starts_with("define linkonce_odr ")
         // An `#[export]` entry: the library's external interface.
         || trimmed.starts_with("define dso_local ")
         || trimmed.starts_with("define dllexport ");
     if !valid {
         return Err(anyhow!(
             "llvm backend: malformed module-level entry (expected `@symbol = ...`, \
-             `$comdat = ...`, `declare ...`, or `define internal|dso_local|dllexport ...`, got: {snippet:?}). This is the same shape regression that \
+             `$comdat = ...`, `declare ...`, or `define internal|linkonce_odr|dso_local|dllexport ...`, got: {snippet:?}). This is the same shape regression that \
              caused the 2026-04-28 / 2026-04-30 silent Cranelift-fallback incidents.",
             snippet = if trimmed.len() > 80 {
                 &trimmed[..80]
@@ -751,8 +753,7 @@ fn extern_declare(body: &Body, tcx: &TyCtxt) -> String {
         if i > 0 {
             params.push_str(", ");
         }
-        let local = gossamer_mir::Local(i + 1);
-        let p_ty = crate::ty::param_llvm_ty(tcx, body.local_ty(local));
+        let p_ty = crate::ty::body_param_llvm_ty(tcx, body, i);
         let _ = write!(params, "{p_ty}");
     }
     format!(
@@ -1085,6 +1086,9 @@ mod cabi_thunk_tests {
                 terminator_inlined: None,
             }],
             span,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 }

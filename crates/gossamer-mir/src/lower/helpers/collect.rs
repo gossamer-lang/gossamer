@@ -300,19 +300,22 @@ fn collect_expr_const_values(
     }
 }
 
-/// Collects the `static mut` items that become real mutable module
-/// globals: those whose initializer folds to a scalar (`Int` / `Float` /
-/// `Bool` / `Char`). `consts` is the full fold map (from
-/// [`collect_const_values`]) so an initializer that references another
-/// const resolves. A mutable static with a non-scalar or non-foldable
-/// initializer is intentionally omitted - it keeps the inline-the-
-/// initial-value fallback through the const map. Known limitation:
-/// aggregate `static mut` (Vec / struct / String) therefore has no
-/// shared mutable storage - writes are not observable. `static mut`
-/// is supported for scalar types; guard a shared aggregate behind a
-/// `sync::Mutex` instead.
+/// Collects the `static` items that become real mutable module
+/// globals: mutable ones regardless of initializer shape, and immutable
+/// ones whose declared type is not a scalar. `consts` is the full fold
+/// map (from [`collect_const_values`]) so an initializer that references
+/// another const resolves. A mutable static with a non-scalar or
+/// non-foldable initializer keeps the placeholder `Int(0)` init here -
+/// the entry prologue writes the real value before anything reads it.
+/// Immutable statics join the map so a handle-typed one (an atomic, a
+/// mutex, a channel) names ONE shared object on every tier, the way the
+/// interpreter already treats it; a scalar immutable static stays on the
+/// const path, where a read answers the folded value. An immutable
+/// static with a non-scalar type is never stored to by user code (its
+/// binding is immutable), so the cell it names keeps its one value.
 pub(crate) fn collect_mut_static_defs(
     program: &HirProgram,
+    tcx: &TyCtxt,
     consts: &HashMap<gossamer_resolve::DefId, ConstValue>,
 ) -> HashMap<gossamer_resolve::DefId, crate::ir::StaticRef> {
     let mut out = HashMap::new();
@@ -321,7 +324,9 @@ pub(crate) fn collect_mut_static_defs(
         let HirItemKind::Static(decl) = &item.kind else {
             continue;
         };
-        if !decl.mutable {
+        // An immutable static of scalar type keeps the const-folded read
+        // path: its value never changes and never escapes as a handle.
+        if !decl.mutable && static_ty_is_scalar(tcx, decl.ty) {
             continue;
         }
         // A scalar cell carries its value in the global's own initializer. A
@@ -347,6 +352,31 @@ pub(crate) fn collect_mut_static_defs(
         );
     }
     out
+}
+
+/// Whether a static's declared type is one the global's own initializer
+/// can carry and every read can answer from that constant: an integer, a
+/// float, a `bool`, a `char`, or a string. A string static's value is a
+/// compile-time reference into the constant pool, so it needs no cell and
+/// must not be assigned (a reference cannot be rebound).
+fn static_ty_is_scalar(tcx: &TyCtxt, ty: Ty) -> bool {
+    // `&str` reaches the MIR as `Ref { inner: String }`; a shared reference
+    // to a string is still a constant-pool value.
+    let ty = match tcx.kind_of(ty) {
+        gossamer_types::TyKind::Ref {
+            mutability: gossamer_types::Mutbl::Not,
+            inner,
+        } => *inner,
+        _ => ty,
+    };
+    matches!(
+        tcx.kind_of(ty),
+        gossamer_types::TyKind::Int(_)
+            | gossamer_types::TyKind::Float(_)
+            | gossamer_types::TyKind::Bool
+            | gossamer_types::TyKind::Char
+            | gossamer_types::TyKind::String
+    )
 }
 
 pub(crate) fn const_value_of_expr(
@@ -690,6 +720,9 @@ fn handler_env_wrap_body(
             },
         ],
         span,
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     }
 }
 
@@ -784,6 +817,9 @@ fn handler_ok_wrap_body(
         locals,
         blocks: vec![call_block, pack_block],
         span,
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     }
 }
 
@@ -1266,10 +1302,7 @@ pub(crate) fn collect_item(
     fn_ret_names: &HashMap<String, Ty>,
     fn_returns: &HashMap<gossamer_resolve::DefId, Ty>,
     fn_inputs: &HashMap<gossamer_resolve::DefId, Vec<Ty>>,
-    fn_param_shareable: &HashMap<
-        gossamer_resolve::DefId,
-        Vec<crate::lower::helpers::escape::ParamShare>,
-    >,
+    fn_param_shareable: &crate::lower::helpers::escape::ShareSummaries,
     consts: &HashMap<gossamer_resolve::DefId, ConstValue>,
     mut_statics: &HashMap<gossamer_resolve::DefId, crate::ir::StaticRef>,
     const_inits: &HashMap<gossamer_resolve::DefId, HirExpr>,
@@ -1427,10 +1460,7 @@ pub(crate) fn lower_fn(
     fn_ret_names: &HashMap<String, Ty>,
     fn_returns: &HashMap<gossamer_resolve::DefId, Ty>,
     fn_inputs: &HashMap<gossamer_resolve::DefId, Vec<Ty>>,
-    fn_param_shareable: &HashMap<
-        gossamer_resolve::DefId,
-        Vec<crate::lower::helpers::escape::ParamShare>,
-    >,
+    fn_param_shareable: &crate::lower::helpers::escape::ShareSummaries,
     consts: &HashMap<gossamer_resolve::DefId, ConstValue>,
     mut_statics: &HashMap<gossamer_resolve::DefId, crate::ir::StaticRef>,
     const_inits: &HashMap<gossamer_resolve::DefId, HirExpr>,
@@ -1644,6 +1674,9 @@ pub(crate) fn lower_fn(
         locals: builder.locals,
         blocks: builder.blocks,
         span,
+        shared_stores: builder.shared_stores,
+        lent_slots: builder.lent_slots,
+        address_params: Vec::new(),
     };
     crate::lower::carrier_ref::deref_carrier_reads(&mut body, builder.tcx);
     crate::lower::carrier_ref::split_carrier_writebacks(&mut body, builder.tcx);

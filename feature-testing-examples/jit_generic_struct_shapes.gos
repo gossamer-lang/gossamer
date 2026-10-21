@@ -1,0 +1,41 @@
+// Generic structs cross between the VM and compiled code by their
+// instantiation: `W<i64>`, `W<String>`, and `W<P>` (a struct of scalars) each
+// have a shape of their own, so the hot functions taking them compile.
+
+#[derive(PartialEq)]
+struct W<T> { v: T, n: i64 }
+
+struct P { x: i64, y: i64 }
+
+fn bump(w: W<i64>) -> W<i64> {
+    let mut v = w.v
+    for _ in 0..10 { v += 1 }
+    W { v: v, n: w.n + 2 }
+}
+
+fn label(w: W<String>) -> String {
+    let mut out = ""
+    for _ in 0..2 { out += w.v }
+    f"{out}:{w.n}"
+}
+
+fn shift(w: W<P>) -> W<P> {
+    let mut x = w.v.x
+    for _ in 0..3 { x += 1 }
+    W { v: P { x: x, y: w.v.y }, n: w.n }
+}
+
+fn main() {
+    let tx, rx = channel()
+    spawn(|| { tx.send(1); tx.close() })
+    let mut w = W { v: 1, n: 0 }
+    let mut s = ""
+    let mut p = W { v: P { x: 0, y: 7 }, n: 1 }
+    for i in 0..300 {
+        w = bump(w)
+        s = label(W { v: f"a{i % 3}", n: i })
+        p = shift(p)
+    }
+    while let Some(_) = rx.recv() {}
+    println(f"{w.v} {w.n} {s} {p.v.x} {p.v.y} {p.n} {w == W { v: 3001, n: 600 }}")
+}

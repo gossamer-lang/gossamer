@@ -1005,7 +1005,16 @@ pub(crate) fn hoist_loop_carried_releases(body: &mut Body, tcx: &gossamer_types:
     let unit_ty = tcx.unit_interned().unwrap_or(body.locals[0].ty);
     let mut next_local = body.locals.len();
     // Descending insertion order keeps earlier indices valid.
-    hoists.sort_by_key(|h| std::cmp::Reverse((h.at_block, h.after_stmt)));
+    // A head insertion uses the sentinel MAX, but its actual position is zero.
+    // Insert it last so it cannot shift another release's original index.
+    hoists.sort_by_key(|h| {
+        let at = if h.after_stmt == usize::MAX {
+            0
+        } else {
+            h.after_stmt + 1
+        };
+        std::cmp::Reverse((h.at_block, at))
+    });
     for h in hoists {
         let span = body.blocks[h.at_block].span;
         let rel_dest = Local(u32::try_from(next_local).expect("local overflow"));

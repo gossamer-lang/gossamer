@@ -1783,13 +1783,13 @@ Example (from examples.md):
 
 ```
 select {
-  Ok(msg) = rx_ok.recv() => println("success: {}", msg),
-  Err(err) = rx_err.recv() => println("error: {}", err),
+  Some(msg) = rx_msgs.recv() => println("message: {}", msg),
+  Some(err) = rx_errs.recv() => println("error: {}", err),
 }
 ```
 
-The binding pattern on the left (`Ok(msg)`) matches the `Result` returned
-by `.recv()` (see §8.3).
+The pattern on the left (`Some(msg)`) matches the `Option` returned by
+`.recv()` (see §8.3).
 
 ### 4.5 The `?` operator
 
@@ -2719,6 +2719,15 @@ select {
   default              => do_other(),
 }
 ```
+
+A receive arm is ready for the outcomes its pattern takes: `Some(p)` when
+a value waits on the channel, `None` once the channel is closed and
+drained, and a name or `_` for either, binding the whole `Option`. An arm
+never takes a value it cannot bind, so `Some(v)` alone on a closed channel
+is never ready, and `None` waits out any buffered values. The pattern inside
+`Some` must accept every element (GT0047): test the value in the arm body.
+Under a cancelled cohort every receive answers `None`, so the select resolves
+through its first arm that takes `None`, or its `default`.
 
 ### 8.4 `defer` and goroutines
 

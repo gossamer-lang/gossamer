@@ -1,0 +1,71 @@
+use std::image
+
+static mut ROWS: Vec<i64> = #[1]
+static mut VALUES: Map<String, Vec<String>> = {}
+static mut KEYS: Set<String> = #{}
+static mut TITLE: Option<String> = None
+fn replace(title: String) {
+    for i in 0..100 {
+        ROWS = #[i]
+        VALUES = Map::new()
+        VALUES[title] = #[title]
+        KEYS = #{}
+        KEYS.insert(title)
+        TITLE = Some(title)
+    }
+}
+fn check_statics() {
+    replace("saved")
+    ROWS = ROWS
+    VALUES = VALUES
+    KEYS = KEYS
+    TITLE = TITLE
+    assert_eq(ROWS, #[99])
+    assert_eq(VALUES.get("saved").unwrap(), #["saved"])
+    assert(KEYS.contains("saved"))
+    assert_eq(TITLE.unwrap(), "saved")
+
+}
+
+fn choose(original: bool) -> Vec<i64> {
+    let mut values = #[]
+    values.push(42)
+    if original { return values }
+    let mut other = #[7]
+    for value in values { other.push(value) }
+    other
+}
+
+fn candidate(i: i64) -> Vec<i64> { if i == 2 { #[42] } else { #[] } }
+fn first_nonempty() -> Vec<i64> {
+    for i in 0..3 {
+        let values = candidate(i)
+        if !values.is_empty() { return values }
+    }
+    #[]
+}
+struct Wrap { values: Vec<i64> }
+fn wrap(clone: bool) -> Wrap {
+    let mut values = #[]
+    values.push(42)
+    if clone { return Wrap { values: values.clone() } }
+    Wrap { values: values }
+}
+fn image_width(handle: i64) -> i64 { image::width(handle) }
+fn main() {
+    check_statics()
+    for _ in 0..100 {
+        assert_eq(first_nonempty(), #[42])
+        assert_eq(wrap(false).values, #[42])
+        assert_eq(wrap(true).values, #[42])
+        assert_eq(choose(true), #[42])
+        assert_eq(choose(false), #[7, 42])
+        let handle = image::filled(16, 16, 0xff00ffff)
+        assert_eq(image_width(handle), 16)
+        assert(image::release(handle))
+        assert_eq(image_width(handle), 0)
+        assert(!image::release(handle))
+    }
+    assert(!image::release(0))
+    println("native owner lifecycles: ok")
+}

@@ -36,8 +36,22 @@ unsafe fn text_arg<'a>(s: *const c_char) -> &'a str {
 /// `r` is zero or a handle `gos_rt_serde_rd_new` answered that nothing else
 /// uses for the call.
 unsafe fn with_reader<T>(r: i64, fallback: T, f: impl FnOnce(&mut TypedReader) -> T) -> T {
+    // SAFETY: the caller provides the same reader-handle contract.
+    unsafe { with_reader_or_else(r, || fallback, f) }
+}
+
+/// Like `with_reader`, but only constructs an owned fallback for a missing reader.
+///
+/// # Safety
+///
+/// The reader-handle contract is the same as `with_reader`.
+unsafe fn with_reader_or_else<T>(
+    r: i64,
+    fallback: impl FnOnce() -> T,
+    f: impl FnOnce(&mut TypedReader) -> T,
+) -> T {
     if r == 0 {
-        return fallback;
+        return fallback();
     }
     // SAFETY: a nonzero handle is the address `gos_rt_serde_rd_new` leaked,
     // live until `gos_rt_serde_rd_free`, and the caller holds it alone.
@@ -271,9 +285,11 @@ pub unsafe extern "C" fn gos_rt_serde_rd_json(r: i64) -> *mut GosJson {
     ffi_entry!({
         // SAFETY: `r` is this shim's reader handle.
         unsafe {
-            with_reader(r, super::json::json_raw_handle("null"), |reader| {
-                super::json::json_raw_handle(reader.raw_value())
-            })
+            with_reader_or_else(
+                r,
+                || super::json::json_raw_handle("null"),
+                |reader| super::json::json_raw_handle(reader.raw_value()),
+            )
         }
     })
 }
@@ -349,9 +365,11 @@ pub unsafe extern "C" fn gos_rt_serde_rd_map_key(r: i64, index: i64) -> *mut c_c
     ffi_entry!({
         // SAFETY: `r` is this shim's reader handle.
         unsafe {
-            with_reader(r, alloc_cstring(b""), |reader| {
-                alloc_cstring(reader.map_key(index_arg(index)).as_bytes())
-            })
+            with_reader_or_else(
+                r,
+                || alloc_cstring(b""),
+                |reader| alloc_cstring(reader.map_key(index_arg(index)).as_bytes()),
+            )
         }
     })
 }
@@ -538,4 +556,34 @@ pub unsafe extern "C" fn gos_rt_serde_wr_json(w: i64, value: *const GosJson) {
         // SAFETY: `w` is this shim's writer handle.
         unsafe { with_writer(w, |out| out.extend_from_slice(&rendered)) };
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reader_fallback_is_constructed_only_for_a_missing_handle() {
+        let calls = std::cell::Cell::new(0);
+        let fallback = || {
+            calls.set(calls.get() + 1);
+            String::from("fallback")
+        };
+        let mut reader = TypedReader::new("42");
+        let handle = (&raw mut reader) as i64;
+        // SAFETY: the stack reader stays live and exclusively borrowed for this call.
+        let value = unsafe {
+            with_reader_or_else(handle, fallback, |reader| reader.raw_value().to_owned())
+        };
+        assert_eq!(value, "42");
+        assert_eq!(
+            calls.get(),
+            0,
+            "live readers must not allocate unused fallbacks"
+        );
+        // SAFETY: zero denotes a missing reader.
+        let value = unsafe { with_reader_or_else(0, fallback, |_| panic!("missing reader")) };
+        assert_eq!(value, "fallback");
+        assert_eq!(calls.get(), 1);
+    }
 }

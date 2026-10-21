@@ -66,7 +66,6 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use crate::BuildError;
-use crate::ty::packed_byte_array_len;
 use anyhow::Result;
 use gossamer_abi as abi;
 use gossamer_mir::{
@@ -104,6 +103,7 @@ impl<'a> Lowerer<'a> {
             direct_bodies: std::collections::BTreeSet::new(),
             address_taken: std::cell::OnceCell::new(),
             params_in_place: std::cell::OnceCell::new(),
+            const_tables: gossamer_mir::constant_table_locals(body, tcx),
         }
     }
 
@@ -311,8 +311,7 @@ impl<'a> Lowerer<'a> {
             if i > 0 {
                 params.push_str(", ");
             }
-            let local = Local(i + 1);
-            let p_ty = param_llvm_ty(self.tcx, self.body.local_ty(local));
+            let p_ty = crate::ty::body_param_llvm_ty(self.tcx, self.body, i);
             // `readonly nocapture`: the body's only use of a by-pointer
             // aggregate parameter is the entry memcpy that copies it into this
             // frame's own slot - it never writes through the pointer and never
@@ -585,11 +584,16 @@ impl<'a> Lowerer<'a> {
                 .unwrap();
                 continue;
             }
+            if let Some(words) = self.const_tables.get(&Local(i as u32)).cloned() {
+                let table = self.const_table_global(&words);
+                writeln!(
+                    self.out,
+                    "  {slot} = getelementptr inbounds i8, ptr {table}, i64 0"
+                )
+                .unwrap();
+                continue;
+            }
             if is_aggregate(self.tcx, decl.ty) {
-                if let Some(bytes) = packed_byte_array_len(self.tcx, decl.ty) {
-                    writeln!(self.out, "  {slot} = alloca [{bytes} x i8]").unwrap();
-                    continue;
-                }
                 if let Some(bytes) = self.heap_spilled_local_bytes(Local(i as u32)) {
                     declare_rt(&mut self.runtime_refs, "gos_rt_aggr_alloc");
                     // `noalias`: the allocator hands back a block no live
@@ -714,11 +718,33 @@ impl<'a> Lowerer<'a> {
 
     pub(crate) fn heap_spilled_local_bytes(&self, local: Local) -> Option<u64> {
         let ty = self.body.local_ty(local);
-        if !is_aggregate(self.tcx, ty) || self.answers_in_caller_storage(local) {
+        if !is_aggregate(self.tcx, ty)
+            || self.answers_in_caller_storage(local)
+            || self.const_tables.contains_key(&local)
+        {
             return None;
         }
         let bytes = aggregate_storage_bytes(self.tcx, ty)?;
         (bytes > STACK_AGGREGATE_SPILL_BYTES).then_some(bytes)
+    }
+
+    /// The read-only global holding a constant table's `words`, named by its
+    /// contents so every use of one table shares one copy.
+    fn const_table_global(&mut self, words: &[u64]) -> String {
+        // FNV-1a: a stable name for the same contents on every build.
+        let hash = words.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, w| {
+            w.to_le_bytes()
+                .iter()
+                .fold(h, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3))
+        });
+        let name = format!("@__gos_ctab_{hash:016x}_{}", words.len());
+        let body: Vec<String> = words.iter().map(|w| format!("i64 {}", *w as i64)).collect();
+        self.runtime_refs.insert(format!(
+            "{name} = private unnamed_addr constant [{} x i64] [{}], align 8",
+            words.len(),
+            body.join(", ")
+        ));
+        name
     }
 
     /// Bytes of the storage `local`'s slot occupies.
@@ -760,6 +786,13 @@ impl<'a> Lowerer<'a> {
                 continue;
             }
             let slot = local_slot(local);
+            if self.body.address_params.contains(&local) {
+                let ty = render_ty(self.tcx, local_ty);
+                let value = self.fresh();
+                writeln!(self.out, "  {value} = load {ty}, ptr %p{i}").unwrap();
+                writeln!(self.out, "  store {ty} {value}, ptr {slot}").unwrap();
+                continue;
+            }
             if self.param_read_in_place(i) {
                 continue;
             }

@@ -13,10 +13,9 @@
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss
 )]
-//! Gossamer-callable `std::io` stream adapters. A Reader or Writer is
-//! an `i64` handle into `gossamer_std::io_handles`, so `limit_reader`,
-//! `tee_reader`, `multi_reader`, and `pipe` compose as plain scalars -
-//! the same representation the compiled tiers carry.
+//! Gossamer-callable `std::io` stream adapters. A reader or writer is an
+//! `io::MemoryStream` naming a counted row of `gossamer_std::io_handles`; the row
+//! is given back with the last copy of the value.
 
 use std::sync::Arc;
 
@@ -50,62 +49,66 @@ pub(crate) fn install_io_streams(globals: &mut Vec<(&'static str, Value)>) {
     }
 }
 
+/// The registry row an `io::MemoryStream` argument names.
 fn handle(v: Option<&Value>) -> i64 {
-    v.and_then(value_to_int).unwrap_or(0)
+    v.and_then(super::time::handle_id).unwrap_or(0)
 }
 
-/// `io::string_reader(text) -> Reader`.
+/// An `io::MemoryStream` value owning the reference to row `id` its creation took.
+fn stream(id: i64) -> Value {
+    super::time::handle_struct("io::MemoryStream", id, handles::retire)
+}
+
+/// `io::string_reader(text) -> io::MemoryStream`.
 pub(crate) fn builtin_io_string_reader(args: &[Value]) -> RuntimeResult<Value> {
-    Ok(Value::Int(handles::string_reader(
+    Ok(stream(handles::string_reader(
         args.first().and_then(as_str).unwrap_or(""),
     )))
 }
 
-/// `io::buffer_writer() -> Writer`.
+/// `io::buffer_writer() -> io::MemoryStream`.
 pub(crate) fn builtin_io_buffer_writer(_args: &[Value]) -> RuntimeResult<Value> {
-    Ok(Value::Int(handles::buffer_writer()))
+    Ok(stream(handles::buffer_writer()))
 }
 
-/// `io::limit_reader(src, limit) -> Reader`.
+/// `io::limit_reader(src, limit) -> io::MemoryStream`.
 pub(crate) fn builtin_io_limit_reader(args: &[Value]) -> RuntimeResult<Value> {
-    Ok(Value::Int(handles::limit_reader(
-        handle(args.first()),
-        handle(args.get(1)),
-    )))
+    let limit = args.get(1).and_then(value_to_int).unwrap_or(0);
+    Ok(stream(handles::limit_reader(handle(args.first()), limit)))
 }
 
-/// `io::tee_reader(src, sink) -> Reader`.
+/// `io::tee_reader(src, sink) -> io::MemoryStream`.
 pub(crate) fn builtin_io_tee_reader(args: &[Value]) -> RuntimeResult<Value> {
-    Ok(Value::Int(handles::tee_reader(
+    Ok(stream(handles::tee_reader(
         handle(args.first()),
         handle(args.get(1)),
     )))
 }
 
-/// `io::multi_reader(sources) -> Reader`.
+/// `io::multi_reader(sources) -> io::MemoryStream`.
 pub(crate) fn builtin_io_multi_reader(args: &[Value]) -> RuntimeResult<Value> {
     let ids = args
         .first()
         .map(collect_array)
         .unwrap_or_default()
         .iter()
-        .filter_map(value_to_int)
+        .filter_map(super::time::handle_id)
         .collect();
-    Ok(Value::Int(handles::multi_reader(ids)))
+    Ok(stream(handles::multi_reader(ids)))
 }
 
-/// `io::pipe() -> (Reader, Writer)`.
+/// `io::pipe() -> (io::MemoryStream, io::MemoryStream)`.
 pub(crate) fn builtin_io_pipe(_args: &[Value]) -> RuntimeResult<Value> {
     let (reader, writer) = handles::pipe();
     Ok(Value::Tuple(Arc::from(vec![
-        Value::Int(reader),
-        Value::Int(writer),
+        stream(reader),
+        stream(writer),
     ])))
 }
 
 /// `io::copy_n(dst, src, n) -> Result<i64, errors::Error>`.
 pub(crate) fn builtin_io_copy_n(args: &[Value]) -> RuntimeResult<Value> {
-    let n = handle(args.get(2));
+    let n = args.get(2).and_then(value_to_int).unwrap_or(0);
     if n < 0 {
         return Ok(err_variant("io::copy_n: negative byte count"));
     }

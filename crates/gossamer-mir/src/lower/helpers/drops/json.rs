@@ -2,6 +2,35 @@
 
 use super::*;
 
+/// A field's JSON handle belongs to its aggregate. Give a binding read from
+/// that field an independent handle before its aggregate can be overwritten or
+/// released, including a field returned directly to the caller.
+pub(crate) fn clone_json_field_reads(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+    for block in &mut body.blocks {
+        for stmt in &mut block.stmts {
+            let StatementKind::Assign { place, rvalue } = &mut stmt.kind else {
+                continue;
+            };
+            if !place.projection.is_empty()
+                || !matches!(
+                    tcx.kind_of(body.locals[place.local.0 as usize].ty),
+                    gossamer_types::TyKind::JsonValue
+                )
+            {
+                continue;
+            }
+            if let Rvalue::Use(Operand::Copy(source)) = rvalue
+                && !source.projection.is_empty()
+            {
+                *rvalue = Rvalue::CallIntrinsic {
+                    name: "gos_rt_json_clone",
+                    args: vec![Operand::Copy(source.clone())],
+                };
+            }
+        }
+    }
+}
+
 /// `true` when `name` is a runtime entry that takes a `json::Value` handle.
 /// `xml::encode` reads the tree `xml::parse` answers, which is a `json::Value`.
 pub(super) fn json_runtime_entry(name: &str) -> bool {
@@ -510,8 +539,16 @@ pub(crate) fn insert_json_frees(
                     check_op(operand, false, false, &is_carrier, &mut candidate);
                 }
                 Rvalue::Aggregate { operands, .. } => {
-                    for a in operands {
-                        check_op(a, false, false, &is_carrier, &mut candidate);
+                    let fields =
+                        aggregate_rc_field_paths(tcx, body.locals[place.local.0 as usize].ty);
+                    for (index, a) in operands.iter().enumerate() {
+                        // The aggregate's field acquisition clones this handle
+                        // into its destination slot. Its source remains owned
+                        // by the frame and must be released too.
+                        let cloned = fields.iter().any(|(path, kind)| {
+                            *kind == FieldRcKind::Json && path.as_slice() == [index as u32]
+                        });
+                        check_op(a, cloned, false, &is_carrier, &mut candidate);
                     }
                 }
                 Rvalue::Repeat { value, .. } => {

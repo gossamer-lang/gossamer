@@ -25,6 +25,9 @@ fn plain_retain_matches(name: &str, tcx: &TyCtxt, ty: Ty) -> bool {
             matches!(tcx.kind_of(ty), TyKind::String)
         }
         "gos_rt_rc_retain" => tcx.is_rc_managed(ty),
+        // A map has no count, so its copy's "retain" is a clone of the table;
+        // handing the source's own table on instead is the same transfer.
+        "gos_rt_map_field_clone" => matches!(tcx.kind_of(ty), TyKind::HashMap { .. }),
         _ => false,
     }
 }
@@ -439,6 +442,7 @@ fn paired_releases(name: &str) -> &'static [&'static str] {
             &["gos_rt_str_free_typed", "gos_rt_str_free"]
         }
         "gos_rt_rc_retain" => &["gos_rt_rc_release"],
+        "gos_rt_map_field_clone" => &["gos_rt_map_field_release"],
         _ => &[],
     }
 }
@@ -543,16 +547,41 @@ fn released_on_every_path_by(
             _ => None,
         }
     };
+    if let Some(answer) = scan(block, from) {
+        return answer;
+    }
+    // Only blocks reachable from here can decide the answer.
     let n = body.blocks.len();
-    let whole: Vec<Option<bool>> = (0..n).map(|bi| scan(bi, 0)).collect();
+    let mut reachable: Vec<usize> = Vec::new();
+    let mut seen = vec![false; n];
+    let mut stack: Vec<usize> = successor_indices(&body.blocks[block].terminator);
+    while let Some(bi) = stack.pop() {
+        if bi >= n || std::mem::replace(&mut seen[bi], true) {
+            continue;
+        }
+        reachable.push(bi);
+        stack.extend(successor_indices(&body.blocks[bi].terminator));
+    }
+    let whole: Vec<Option<bool>> = (0..n)
+        .map(|bi| if seen[bi] { scan(bi, 0) } else { None })
+        .collect();
+    let succs: Vec<Vec<usize>> = (0..n)
+        .map(|bi| {
+            if seen[bi] {
+                successor_indices(&body.blocks[bi].terminator)
+            } else {
+                Vec::new()
+            }
+        })
+        .collect();
     let mut must = vec![true; n];
     loop {
         let mut changed = false;
-        for bi in 0..n {
+        for &bi in &reachable {
             let value = whole[bi].unwrap_or_else(|| {
-                successor_indices(&body.blocks[bi].terminator)
-                    .into_iter()
-                    .all(|s| must.get(s).copied().unwrap_or(false))
+                succs[bi]
+                    .iter()
+                    .all(|&s| must.get(s).copied().unwrap_or(false))
             });
             if value != must[bi] {
                 must[bi] = value;
@@ -563,11 +592,9 @@ fn released_on_every_path_by(
             break;
         }
     }
-    scan(block, from).unwrap_or_else(|| {
-        successor_indices(&body.blocks[block].terminator)
-            .into_iter()
-            .all(|s| must.get(s).copied().unwrap_or(false))
-    })
+    successor_indices(&body.blocks[block].terminator)
+        .into_iter()
+        .all(|s| must.get(s).copied().unwrap_or(false))
 }
 
 /// The retains [`transfer_last_use_shares`] can drop, with where each
@@ -585,7 +612,7 @@ fn find_share_transfers(
     let share_cell = std::cell::OnceCell::new();
     let share = || share_cell.get_or_init(|| crate::ownership::ShareFacts::compute(body));
     let preds = block_predecessor_counts(body);
-    let mut out = Vec::new();
+    let mut out: Vec<ShareTransfer> = Vec::new();
     for (bi, block) in body.blocks.iter().enumerate() {
         for (i, stmt) in block.stmts.iter().enumerate() {
             let StatementKind::Assign {
@@ -604,6 +631,14 @@ fn find_share_transfers(
             let Some((source, before)) = retained_source(block, i, retained) else {
                 continue;
             };
+            // A source owns one share, so it stands in for one retain of the
+            // group after its handoff; the others pay for holders made later.
+            if out
+                .iter()
+                .any(|t| t.block == bi && places_overlap(&t.source, &source))
+            {
+                continue;
+            }
             let root = source.local;
             let ri = root.0 as usize;
             if ri <= body.arity as usize

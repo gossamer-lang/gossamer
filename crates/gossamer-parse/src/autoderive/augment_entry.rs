@@ -102,7 +102,15 @@ fn augment(source: &str) -> (String, Option<SourceFile>) {
     // code compiles + runs on every tier. `rewrite_stdlib_struct_surface`
     // (in parse_with_autoderive) redirects the user's
     // `encoding::pem::*` call / literal / type sites onto these.
-    let stdlib_wrappers = synthesize_stdlib_wrappers(source, parsed.as_ref());
+    let mut stdlib_wrappers = synthesize_stdlib_wrappers(source, parsed.as_ref());
+    // The wrappers' structs render, compare, and order like the program's
+    // own, so they take the same synthesized methods.
+    if !stdlib_wrappers.is_empty()
+        && let (Some(wrapper_tree), _) = clean_parse_with_tokens(&stdlib_wrappers)
+    {
+        let wrapper_derives = synthesize_derive_impls(&wrapper_tree);
+        stdlib_wrappers.push_str(&wrapper_derives);
+    }
     if synth_is_empty(&serde)
         && stdlib_wrappers.is_empty()
         && primitive_surface.is_empty()

@@ -154,6 +154,9 @@ pub const RC_CHILD_VEC_ERR: i64 = 16;
 pub const RC_CHILD_WEAK_OK: i64 = 17;
 /// Child kind: a `Weak` in a carrier field's payload word on the `Err` arm.
 pub const RC_CHILD_WEAK_ERR: i64 = 18;
+/// Child entry naming an owned JSON handle. A copied field clones the handle
+/// onto the same document, and release drops that independent handle.
+pub const RC_CHILD_JSON: i64 = 19;
 
 /// The child kind for a carrier field whose payload is a heap value of child
 /// kind `base` (`RC_CHILD_RC`, `RC_CHILD_VEC`, or `RC_CHILD_WEAK`) on the arm

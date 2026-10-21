@@ -40,29 +40,30 @@ pub(super) fn answer_is_discarded(
     }
     hop.is_some_and(|h| reads.get(&h.0).copied().unwrap_or(0) == 0)
 }
-/// Keyed containers whose storage COPIES a `String` key's text rather than
-/// keeping the pointer it was handed.
+/// Keyed containers that read a `String` key's text without keeping the
+/// pointer it was handed.
 ///
 /// The frame stays the key's only owner, so it reclaims the key per site
-/// rather than only at the return - which is what a map filled in a loop
-/// needs. An enum key is the other case: the map keeps that node and releases
-/// it itself.
+/// rather than only at the return - which is what a map probed in a loop
+/// needs. A consuming call (an insert) takes the argument's share and gives
+/// it back itself, so the frame has nothing left to release there.
 pub(super) fn copies_string_key(name: &str) -> bool {
     (name.starts_with("gos_rt_map_") || name.starts_with("gos_rt_set_"))
         && (name.contains("_str") || name.contains("_skey"))
+        && !is_consuming_call(name)
 }
 
-/// Releases a `String` a keyed container copied and nothing else names.
+/// Releases a `String` a keyed container read and nothing else names.
 ///
-/// A key built at the call site - `m.insert(format("k{i}"), v)` - is a
-/// temporary the frame owns: the container keeps the text, not the pointer, so
-/// the string has no other holder once the call returns. Only a key bound to a
-/// name reaches the binding's own release, so an unbound one is reclaimed
-/// here, at the call that consumed it.
+/// A key built at the call site - `m.get(format("k{i}"))` - is a temporary the
+/// frame owns: the container reads the text, not the pointer, so the string
+/// has no other holder once the call returns. Only a key bound to a name
+/// reaches the binding's own release, so an unbound one is reclaimed here, at
+/// the call that read it.
 ///
 /// The condition is deliberately narrow: the operand must be a bare local of
 /// `String` type, read exactly once in the whole body (this argument), and
-/// written by a call rather than aliased from another binding.
+/// written by an owning call rather than borrowed from another holder.
 pub(crate) fn insert_copied_key_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
     use gossamer_types::TyKind;
     if body.locals.is_empty() {
@@ -80,11 +81,25 @@ pub(crate) fn insert_copied_key_releases(body: &mut Body, tcx: &gossamer_types::
                 written_otherwise[place.local.0 as usize] = true;
             }
         }
-        if let Terminator::Call { destination, .. } = &block.terminator
+        if let Terminator::Call {
+            callee,
+            destination,
+            ..
+        } = &block.terminator
             && destination.projection.is_empty()
             && (destination.local.0 as usize) < written_by_call.len()
         {
-            written_by_call[destination.local.0 as usize] = true;
+            let owned = match callee {
+                Operand::FnRef { .. } => true,
+                Operand::Const(ConstValue::Str(name)) => mints_owned_string(name),
+                _ => false,
+            };
+            // Slot reads keep the pointee's share with its existing holder.
+            if owned {
+                written_by_call[destination.local.0 as usize] = true;
+            } else {
+                written_otherwise[destination.local.0 as usize] = true;
+            }
         }
     }
     let mut sites: Vec<(usize, Local)> = Vec::new();
@@ -153,6 +168,36 @@ pub(crate) fn insert_copied_key_releases(body: &mut Body, tcx: &gossamer_types::
             },
         );
     }
+}
+
+/// Whether statement `si` of `block` is the at-return sweep's release of
+/// `local`: the last release of it in a returning block.
+fn is_return_sweep_release(
+    block: &BasicBlock,
+    si: usize,
+    local: Local,
+    accounting: &impl Fn(&str) -> bool,
+) -> bool {
+    matches!(block.terminator, Terminator::Return)
+        && !block.stmts[si + 1..].iter().any(|stmt| {
+            matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    rvalue: Rvalue::CallIntrinsic { name, args },
+                    ..
+                } if accounting(name)
+                    && matches!(args.first(), Some(Operand::Copy(p)) if p.local == local && p.projection.is_empty())
+            )
+        })
+}
+
+/// A block's mentions of one local: its last statement doing so, and whether
+/// its terminator does.
+#[derive(Clone, Copy)]
+struct BlockMention {
+    block: usize,
+    last_stmt: Option<usize>,
+    term: bool,
 }
 
 pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
@@ -337,23 +382,30 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
     // appearance of the bare local in a non-accounting statement or in
     // a terminator. Constant stores (the zero-inits) don't count.
     let mut pinned: Vec<bool> = vec![false; n_locals];
-    let mut mention_stmt: Vec<Vec<Option<usize>>> = vec![vec![None; n_locals]; n_blocks];
-    let mut mention_term: Vec<Vec<bool>> = vec![vec![false; n_locals]; n_blocks];
+    // Per local, each block that mentions it in block order: the last
+    // statement doing so, and whether the terminator does.
+    let mut mentioned: Vec<Vec<BlockMention>> = vec![Vec::new(); n_locals];
     {
-        let mark = |l: Local,
-                    bi: usize,
-                    si: Option<usize>,
-                    mention_stmt: &mut Vec<Vec<Option<usize>>>,
-                    mention_term: &mut Vec<Vec<bool>>| {
-            let i = l.0 as usize;
-            if i >= n_locals {
-                return;
-            }
-            match si {
-                Some(si) => mention_stmt[bi][i] = Some(si),
-                None => mention_term[bi][i] = true,
-            }
-        };
+        let mark =
+            |l: Local, bi: usize, si: Option<usize>, mentioned: &mut Vec<Vec<BlockMention>>| {
+                let Some(list) = mentioned.get_mut(l.0 as usize) else {
+                    return;
+                };
+                if list.last().is_none_or(|m| m.block != bi) {
+                    list.push(BlockMention {
+                        block: bi,
+                        last_stmt: None,
+                        term: false,
+                    });
+                }
+                let Some(entry) = list.last_mut() else {
+                    return;
+                };
+                match si {
+                    Some(si) => entry.last_stmt = Some(si),
+                    None => entry.term = true,
+                }
+            };
         let locals_in_operand = |op: &Operand, out: &mut Vec<Local>| {
             if let Operand::Copy(p) = op {
                 out.push(p.local);
@@ -370,13 +422,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                         continue;
                     }
                     StatementKind::SetDiscriminant { place, .. } => {
-                        mark(
-                            place.local,
-                            bi,
-                            Some(si),
-                            &mut mention_stmt,
-                            &mut mention_term,
-                        );
+                        mark(place.local, bi, Some(si), &mut mentioned);
                         continue;
                     }
                     StatementKind::StaticStore { value, .. } => {
@@ -384,7 +430,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                         let mut ls: Vec<Local> = Vec::new();
                         locals_in_operand(value, &mut ls);
                         for l in ls {
-                            mark(l, bi, Some(si), &mut mention_stmt, &mut mention_term);
+                            mark(l, bi, Some(si), &mut mentioned);
                         }
                         continue;
                     }
@@ -393,7 +439,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                         locals_in_operand(source, &mut ls);
                         ls.push(dst.local);
                         for l in ls {
-                            mark(l, bi, Some(si), &mut mention_stmt, &mut mention_term);
+                            mark(l, bi, Some(si), &mut mentioned);
                         }
                         continue;
                     }
@@ -408,7 +454,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                             locals_in_operand(arg, &mut ls);
                         }
                         for l in ls {
-                            mark(l, bi, Some(si), &mut mention_stmt, &mut mention_term);
+                            mark(l, bi, Some(si), &mut mentioned);
                         }
                         continue;
                     }
@@ -417,28 +463,25 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                         iter_place,
                         ..
                     } => {
-                        mark(
-                            dst_option.local,
-                            bi,
-                            Some(si),
-                            &mut mention_stmt,
-                            &mut mention_term,
-                        );
-                        mark(
-                            iter_place.local,
-                            bi,
-                            Some(si),
-                            &mut mention_stmt,
-                            &mut mention_term,
-                        );
+                        mark(dst_option.local, bi, Some(si), &mut mentioned);
+                        mark(iter_place.local, bi, Some(si), &mut mentioned);
                         continue;
                     }
                 };
                 let mut ls: Vec<Local> = Vec::new();
                 match rvalue {
                     Rvalue::CallIntrinsic { name, args } if accounting(name) => {
-                        // Accounting calls are not program uses.
-                        let _ = args;
+                        // The at-return sweep's own release is what this pass
+                        // relocates, so it is no use. Any other release gives
+                        // up a share the local still holds: the relocated
+                        // release and its null must follow it, or it would
+                        // read the null and its share would never return.
+                        if let Some(Operand::Copy(p)) = args.first()
+                            && p.projection.is_empty()
+                            && !is_return_sweep_release(block, si, p.local, &accounting)
+                        {
+                            ls.push(p.local);
+                        }
                     }
                     Rvalue::Use(Operand::Const(_)) => {
                         // Constant (re)initialisation - the zero-init
@@ -496,7 +539,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                     }
                 }
                 for l in ls {
-                    mark(l, bi, Some(si), &mut mention_stmt, &mut mention_term);
+                    mark(l, bi, Some(si), &mut mentioned);
                 }
             }
             let mut ls: Vec<Local> = Vec::new();
@@ -532,7 +575,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                 _ => {}
             }
             for l in ls {
-                mark(l, bi, None, &mut mention_stmt, &mut mention_term);
+                mark(l, bi, None, &mut mentioned);
             }
         }
     }
@@ -560,42 +603,50 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
     let mut inserts_after_stmt: Vec<Vec<PendingRelease>> = vec![Vec::new(); n_blocks];
     let mut inserts_at_head: Vec<Vec<(Local, &'static str, Option<String>)>> =
         vec![Vec::new(); n_blocks];
+    // Blocks whose exit reaches a mention, found by walking predecessors back
+    // from the mentioning blocks; a stamp per candidate marks them.
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n_blocks];
+    for (bi, list) in succs.iter().enumerate() {
+        for &s in list {
+            if let Some(p) = preds.get_mut(s) {
+                p.push(bi);
+            }
+        }
+    }
+    let mut reach_stamp: Vec<u32> = vec![0; n_blocks];
+    let mut stamp = 0u32;
+    let mut stack: Vec<usize> = Vec::new();
     for (l, release, meta) in &candidates {
         let li = l.0 as usize;
         if li >= n_locals || pinned[li] {
             continue;
         }
-        let mentions: Vec<bool> = (0..n_blocks)
-            .map(|bi| mention_stmt[bi][li].is_some() || mention_term[bi][li])
-            .collect();
-        let mut reach: Vec<bool> = vec![false; n_blocks];
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for bi in 0..n_blocks {
-                if reach[bi] {
-                    continue;
-                }
-                let r = succs[bi].iter().any(|&s| mentions[s] || reach[s]);
-                if r {
-                    reach[bi] = true;
-                    changed = true;
-                }
-            }
+        stamp += 1;
+        stack.clear();
+        for m in &mentioned[li] {
+            stack.extend(preds[m.block].iter().copied());
         }
-        for bi in 0..n_blocks {
-            if !mentions[bi] || reach[bi] {
+        while let Some(bi) = stack.pop() {
+            if reach_stamp[bi] == stamp {
+                continue;
+            }
+            reach_stamp[bi] = stamp;
+            stack.extend(preds[bi].iter().copied());
+        }
+        for m in &mentioned[li] {
+            let bi = m.block;
+            if reach_stamp[bi] == stamp {
                 continue;
             }
             if matches!(body.blocks[bi].terminator, Terminator::Return) {
                 // The backstop already covers this block.
                 continue;
             }
-            if mention_term[bi][li] {
+            if m.term {
                 for &s in &succs[bi] {
                     inserts_at_head[s].push((*l, release, meta.clone()));
                 }
-            } else if let Some(si) = mention_stmt[bi][li] {
+            } else if let Some(si) = m.last_stmt {
                 inserts_after_stmt[bi].push((si, *l, release, meta.clone()));
             }
         }
@@ -814,7 +865,7 @@ pub(crate) fn holds_counted_blob_arm(tcx: &gossamer_types::TyCtxt, ty: gossamer_
             .types()
             .iter()
             .take(2)
-            .any(|p| tcx.aggr_copy_meta(*p).is_some()),
+            .any(|p| has_counted_blob_meta(tcx, *p)),
         _ => false,
     }
 }
@@ -824,18 +875,36 @@ pub(crate) fn holds_counted_blob_arm(tcx: &gossamer_types::TyCtxt, ty: gossamer_
 /// The share is taken at the head of the block a passthrough combinator's call
 /// continues in, where the answer is already written. Later passes place the
 /// receiver's last-use release at that same head, and a release that runs first
-/// would free the blob the answer still names.
+/// would free the blob the answer still names. A share the block takes on a
+/// carrier it writes itself - a receiver bound just before the call it is
+/// handed to - stays after that write, so it names the value the call reads.
 pub(crate) fn lead_passthrough_shares(body: &mut Body) {
     for block in &mut body.blocks {
-        let (mut leading, rest): (Vec<Statement>, Vec<Statement>) =
-            std::mem::take(&mut block.stmts)
-                .into_iter()
-                .partition(|stmt| {
-                    matches!(&stmt.kind, StatementKind::Assign {
-                    rvalue: Rvalue::CallIntrinsic { name, .. },
+        let mut leading: Vec<Statement> = Vec::new();
+        let mut rest: Vec<Statement> = Vec::new();
+        for stmt in std::mem::take(&mut block.stmts) {
+            let shared = match &stmt.kind {
+                StatementKind::Assign {
+                    rvalue: Rvalue::CallIntrinsic { name, args },
                     ..
-                } if *name == "gos_rt_option_slot_retain_ok")
-                });
+                } if *name == "gos_rt_option_slot_retain_ok" => match args.first() {
+                    Some(Operand::Copy(p)) => Some(p.local),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let written_before = shared.is_some_and(|local| {
+                rest.iter().any(|earlier| {
+                    matches!(&earlier.kind, StatementKind::Assign { place, .. }
+                        if place.local == local)
+                })
+            });
+            if shared.is_some() && !written_before {
+                leading.push(stmt);
+            } else {
+                rest.push(stmt);
+            }
+        }
         leading.extend(rest);
         block.stmts = leading;
     }
@@ -1186,5 +1255,32 @@ fn release_displaced_aggregates(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
                 inlined: None,
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::holds_counted_blob_arm;
+    use gossamer_types::{Substs, TyCtxt, TyKind};
+
+    #[test]
+    fn container_copy_metadata_does_not_make_its_carrier_a_blob_holder() {
+        let mut tcx = TyCtxt::new();
+        let string = tcx.intern(TyKind::String);
+        let map = tcx.intern(TyKind::HashMap {
+            key: string,
+            value: string,
+            ordered: false,
+        });
+        let vector = tcx.intern(TyKind::Vec(string));
+        let tuple = tcx.intern(TyKind::Tuple(vec![string, string]));
+        for (payload, expected) in [(map, false), (vector, false), (tuple, true)] {
+            tcx.register_aggr_copy_meta(payload, "copy_meta_for_other_context");
+            let carrier = tcx.intern(TyKind::Adt {
+                def: gossamer_resolve::DefId::local(u32::MAX - 1),
+                substs: Substs::from_types([payload]),
+            });
+            assert_eq!(holds_counted_blob_arm(&tcx, carrier), expected);
+        }
     }
 }

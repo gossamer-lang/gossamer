@@ -1575,6 +1575,48 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/map_index_parameter_key_rc.gos"),
     spec("feature-testing-examples/map_enum_value_replacement.gos"),
     spec("feature-testing-examples/module_scoped_structural_derives.gos"),
+    spec("feature-testing-examples/static_shared_atomic_handles.gos"),
+    spec("feature-testing-examples/static_aggregate_storage.gos"),
+    spec("feature-testing-examples/static_aggregate_carrier_storage.gos"),
+    spec("feature-testing-examples/static_carrier_aggregate_payload.gos"),
+    spec("feature-testing-examples/fd_descriptor_user_impl.gos"),
+    spec("feature-testing-examples/jit_scalar_static_shared_cell.gos"),
+    spec("feature-testing-examples/jit_static_accessor_callers.gos"),
+    spec("feature-testing-examples/sort_by_key_callable_keys.gos"),
+    spec("feature-testing-examples/newtype_fields_in_variant_payloads.gos"),
+    spec("feature-testing-examples/read_only_bindings_share_storage.gos"),
+    spec("feature-testing-examples/jit_unit_enum_fields.gos"),
+    spec("feature-testing-examples/static_place_writes.gos"),
+    spec("feature-testing-examples/aggregate_element_streams.gos"),
+    spec("feature-testing-examples/shared_literal_storage.gos"),
+    spec("feature-testing-examples/carrier_map_payload_shares.gos"),
+    spec("feature-testing-examples/map_literal_string_entries.gos"),
+    spec("feature-testing-examples/enum_one_word_struct_payload.gos"),
+    spec("feature-testing-examples/callable_payloads_from_fn_items.gos"),
+    spec("feature-testing-examples/variant_named_like_module_item.gos"),
+    spec("feature-testing-examples/jit_enum_struct_variant_fields.gos"),
+    spec("feature-testing-examples/jit_struct_valued_maps.gos"),
+    spec("feature-testing-examples/jit_json_aggregate_locals.gos"),
+    spec("feature-testing-examples/struct_patterns_in_modules.gos"),
+    spec("feature-testing-examples/jit_struct_nested_and_atomic_fields.gos"),
+    spec("feature-testing-examples/jit_generic_struct_shapes.gos"),
+    spec("feature-testing-examples/closure_one_word_struct_capture.gos"),
+    spec("feature-testing-examples/closure_written_vec_returned.gos"),
+    spec("feature-testing-examples/lent_element_to_capturing_callee.gos"),
+    spec("feature-testing-examples/xml_internal_entities.gos"),
+    spec("feature-testing-examples/closure_captured_handles_escape.gos"),
+    spec("feature-testing-examples/jit_enum_struct_payloads.gos"),
+    spec("feature-testing-examples/jit_struct_boundary_shapes.gos"),
+    spec("feature-testing-examples/assoc_fn_closure_param_types.gos"),
+    spec("feature-testing-examples/stdlib_struct_rendering.gos"),
+    spec("feature-testing-examples/aggregate_field_share_transfer.gos"),
+    spec("feature-testing-examples/heap_enum_vector_field_return.gos"),
+    spec("feature-testing-examples/heap_enum_container_payload_copy.gos"),
+    spec("feature-testing-examples/map_tuple_payload_repeated_lookup.gos"),
+    spec("feature-testing-examples/native_owner_lifecycles.gos"),
+    spec("feature-testing-examples/method_vector_return_cleanup.gos"),
+    spec("feature-testing-examples/rebound_string_field_transfer.gos"),
+    spec("feature-testing-examples/carrier_unordered_payload_equality.gos"),
     spec("feature-testing-examples/module_scoped_auto_derives.gos"),
     spec("feature-testing-examples/map_owned_struct_value_rc.gos"),
     spec("feature-testing-examples/mut_string_return.gos"),
@@ -2136,6 +2178,9 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/local_const_initializers.gos"),
     // Unit values in sequences, tuples, and carriers.
     spec("feature-testing-examples/unit_values_in_containers.gos"),
+    // Arrays nested in arrays, tuples, structs, and map values, byte arrays
+    // included, and carriers found, captured, and read out of tuples.
+    spec("feature-testing-examples/nested_array_values.gos"),
     // Tail calls in `if` / `match` arms run past the VM frame limit.
     spec("feature-testing-examples/tail_calls_in_arms.gos"),
     // A closure opening a line, `let`-else over a slice with `mut`, an
@@ -2585,6 +2630,7 @@ fn run_jit(src: &Path, args: &[&str], stdin: &[u8]) -> Run {
     cmd.arg("run")
         .arg(src)
         .env("GOSSAMER_JIT_THRESHOLD", "1")
+        .env("GOSSAMER_JIT_MIN_WORK", "0")
         // Makes the Cranelift tier report how many native entries it
         // installed, so `parity_walk` can prove the run was not a second
         // bytecode-VM execution wearing the JIT's label.

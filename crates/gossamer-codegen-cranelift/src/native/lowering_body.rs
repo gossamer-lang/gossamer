@@ -189,7 +189,7 @@ pub(super) fn collect_body_str_consts(body: &Body) -> Vec<String> {
 /// Every `static mut` referenced by a load or store in `body`, so the caller
 /// can pre-intern the backing writable data object in the real module before
 /// the parallel IR phase (the `OfflineModule` panics on `declare_data`).
-pub(super) fn collect_body_static_refs(body: &Body) -> Vec<&gossamer_mir::StaticRef> {
+pub(crate) fn collect_body_static_refs(body: &Body) -> Vec<&gossamer_mir::StaticRef> {
     let mut out: Vec<&gossamer_mir::StaticRef> = Vec::new();
     for block in &body.blocks {
         for stmt in &block.stmts {
@@ -412,6 +412,20 @@ pub(super) fn lower_body(
         for (index, param_local_u32) in (1..=body.arity).enumerate() {
             let local = Local(param_local_u32);
             let param_value = builder.block_params(entry)[index];
+            if body.address_params.contains(&local) {
+                let value =
+                    builder
+                        .ins()
+                        .load(types::I128, MemFlagsData::trusted(), param_value, 0);
+                define_var_to(
+                    &mut builder,
+                    &mut locals,
+                    &intrinsics.body_cl_types,
+                    local,
+                    value,
+                );
+                continue;
+            }
             if let Some(slots) = by_address_param_slots(tcx, body, local) {
                 let slot = builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
@@ -535,6 +549,8 @@ pub(super) fn lower_body(
                 field_store_targets.insert(destination.local.0);
             }
         }
+        intrinsics.body_const_tables = gossamer_mir::constant_table_locals(body, tcx);
+        field_store_targets.extend(intrinsics.body_const_tables.keys().map(|local| local.0));
         let mut targets: Vec<u32> = field_store_targets.into_iter().collect();
         targets.sort_unstable();
         for local_u32 in targets {
@@ -559,6 +575,16 @@ pub(super) fn lower_body(
             // it would bind the variable to a pointer where the body expects
             // the packed value, zeroing every read through it.
             if is_inline_two_word_ty(tcx, ty) {
+                continue;
+            }
+            // A constant table's storage is the read-only data that holds its
+            // words; its aggregate assignment builds nothing.
+            if let Some(words) = intrinsics.body_const_tables.get(&local)
+                && let Some(&id) = intrinsics.const_tables.get(words)
+            {
+                let gv = module.declare_data_in_func(id, builder.func);
+                let addr = builder.ins().symbol_value(ptr_ty, gv);
+                define_var_to_with(&mut builder, &mut locals, local, addr, Some(ptr_ty));
                 continue;
             }
             let slots = type_slot_count(tcx, ty);

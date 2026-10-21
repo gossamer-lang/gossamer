@@ -160,11 +160,20 @@ pub(super) struct IntrinsicContext {
     /// object, and pre-populated before the parallel phase so no
     /// emit-time call reaches `OfflineModule::declare_data`.
     pub(super) tuple_tags: HashMap<Vec<u8>, DataId>,
+    /// Read-only data holding each constant table's words, shared by every
+    /// local of the same contents and interned before the parallel phase.
+    pub(super) const_tables: HashMap<Vec<u64>, DataId>,
+    /// Per-function: the locals holding a constant table, with their words
+    /// (see [`gossamer_mir::constant_table_locals`]). Cleared between bodies.
+    pub(super) body_const_tables: HashMap<Local, Vec<u64>>,
     /// Cached `DataId` for each scalar `static mut`'s backing writable data
     /// object, keyed by the static's mangled symbol. A read in `main` and a
     /// write in a helper both resolve to this one cell so mutations persist
     /// across the compiled module.
     pub(super) statics: HashMap<String, DataId>,
+    /// Statics whose storage the program owns: the module imports them by
+    /// symbol instead of defining a cell of its own.
+    pub(super) imported_statics: std::sync::Arc<std::collections::HashSet<String>>,
     /// Monotonic counter for freshly-generated rodata symbol names.
     pub(super) next_str_id: u32,
     /// Mirror of `function_ids_by_name` from [`compile_to_object`].
@@ -271,7 +280,10 @@ impl IntrinsicContext {
             preempt_requested: None,
             rc_metas: HashMap::new(),
             tuple_tags: HashMap::new(),
+            const_tables: HashMap::new(),
+            body_const_tables: HashMap::new(),
             statics: HashMap::new(),
+            imported_statics: std::sync::Arc::default(),
             next_str_id: 0,
             functions: HashMap::new(),
             functions_by_def: HashMap::new(),
@@ -381,25 +393,36 @@ impl IntrinsicContext {
         module: &mut dyn Module,
         sref: &gossamer_mir::StaticRef,
         cl_ty: ir::Type,
+        tcx: &TyCtxt,
     ) -> Result<DataId> {
         if let Some(id) = self.statics.get(&sref.symbol).copied() {
+            return Ok(id);
+        }
+        if self.imported_statics.contains(&sref.symbol) {
+            let id = module
+                .declare_data(&sref.symbol, Linkage::Import, true, false)
+                .map_err(|e| anyhow!("declare static {}: {e}", sref.symbol))?;
+            self.statics.insert(sref.symbol.clone(), id);
             return Ok(id);
         }
         let id = module
             .declare_data(&sref.symbol, Linkage::Local, true, false)
             .map_err(|e| anyhow!("declare static {}: {e}", sref.symbol))?;
-        let raw: u64 = match &sref.init {
-            ConstValue::Int(n) => i64_truncate(*n) as u64,
-            ConstValue::Bool(b) => u64::from(*b),
-            ConstValue::Char(c) => u64::from(u32::from(*c)),
-            ConstValue::Float(bits) => *bits,
+        let raw: u128 = match &sref.init {
+            ConstValue::Int(n) => *n as u128,
+            ConstValue::Bool(b) => u128::from(*b),
+            ConstValue::Char(c) => u128::from(u32::from(*c)),
+            ConstValue::Float(bits) => u128::from(*bits),
             ConstValue::Unit => 0,
-            ConstValue::Str(_) => {
-                bail!("native codegen: static mut string init unsupported; running on VM")
-            }
+            ConstValue::Str(_) => 0,
         };
-        let width = cl_ty.bytes() as usize;
-        let bytes = raw.to_le_bytes()[..width].to_vec();
+        let bytes = if super::lowering_place::is_inline_aggregate(tcx, sref.ty) {
+            vec![0; type_slot_count(tcx, sref.ty).max(1) as usize * 8]
+        } else if matches!(sref.init, ConstValue::Str(_)) {
+            vec![0; cl_ty.bytes() as usize]
+        } else {
+            raw.to_le_bytes()[..cl_ty.bytes() as usize].to_vec()
+        };
         let mut description = DataDescription::new();
         description.define(bytes.into_boxed_slice());
         description.set_align(8);
@@ -475,6 +498,36 @@ impl IntrinsicContext {
             .define_data(id, &description)
             .map_err(|e| anyhow!("define {symbol}: {e}"))?;
         self.tuple_tags.insert(tags.to_vec(), id);
+        Ok(id)
+    }
+
+    /// Returns the `DataId` of read-only data holding `words`, defining it on
+    /// first use. Identical tables share one object.
+    pub(super) fn intern_const_table(
+        &mut self,
+        module: &mut dyn Module,
+        words: &[u64],
+    ) -> Result<DataId> {
+        if let Some(id) = self.const_tables.get(words).copied() {
+            return Ok(id);
+        }
+        let symbol = format!(".Lctab{}", self.next_str_id);
+        self.next_str_id += 1;
+        let id = module
+            .declare_data(&symbol, Linkage::Local, false, false)
+            .map_err(|e| anyhow!("declare {symbol}: {e}"))?;
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let mut description = DataDescription::new();
+        description.define(bytes.into_boxed_slice());
+        // Read as whole words.
+        description.set_align(8);
+        // Reached only through a section-relative relocation; keep the atom
+        // alive for the dead-strip pass (see `intern_string`).
+        description.set_used(true);
+        module
+            .define_data(id, &description)
+            .map_err(|e| anyhow!("define {symbol}: {e}"))?;
+        self.const_tables.insert(words.to_vec(), id);
         Ok(id)
     }
 

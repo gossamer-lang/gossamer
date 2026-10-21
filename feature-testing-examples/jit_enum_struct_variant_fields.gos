@@ -1,0 +1,48 @@
+// Enum values compiled code builds, with struct variants, a one-word struct, an
+// `Option` field, a `Vec<String>` field, answered as `Option<Enum>` to
+// interpreted code that matches and prints them.
+use std::sync
+
+struct Mods { shift: bool, ctrl: bool }
+enum Ev {
+    Moved { window: u32, x: f64 }
+    Key { mods: Mods, code: i64 }
+    Text { body: String }
+    Menu { source: Option<u32>, item: u32 }
+    Files { names: Vec<String> }
+    Quit
+}
+
+fn make(i: i64) -> Option<Ev> {
+    let mut k = 0
+    for _ in 0..2 { k += 1 }
+    match i % 7 {
+        0 => Some(Ev::Moved { window: 2, x: 1.5 })
+        1 => Some(Ev::Key { mods: Mods { shift: true, ctrl: false }, code: i + k })
+        2 => Some(Ev::Text { body: "hi" })
+        3 => Some(Ev::Menu { source: Some(4), item: 9 })
+        4 => Some(Ev::Files { names: #["a", "b"] })
+        5 => Some(Ev::Quit)
+        _ => None
+    }
+}
+
+fn main() {
+    let guard = sync::Mutex::new()
+    for i in 0..7 {
+        guard.lock()
+        match make(i) {
+            Some(e) => {
+                println(f"{e:?}")
+                match e {
+                    Ev::Key { mods, code } => println(f"key {mods.shift} {code}")
+                    Ev::Menu { source, item } => println(f"menu {source} {item}")
+                    Ev::Files { names } => println(f"files {names.len()}")
+                    _ => ()
+                }
+            }
+            None => println("none")
+        }
+        guard.unlock()
+    }
+}

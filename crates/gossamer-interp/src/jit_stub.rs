@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 
 use gossamer_abi::jit_carrier::{CarrierBoxMetas, CarrierShape};
+pub use gossamer_abi::static_storage::{StaticClass, StaticStorage};
 
 /// ABI classification of a JIT slot. Mirrors the cranelift enum so the
 /// VM's trampoline (`jit_call`) type-checks; no instance is ever
@@ -64,6 +65,8 @@ pub enum JitKind {
     NativeVecStr,
     /// `Vec<(i64, f64)>` as a native `GosVec` of 16-byte primitive slots.
     NativeVecTupleIF,
+    /// A `Vec` of a struct of scalars as a native `*mut GosVec`.
+    NativeVecStruct(u32),
     /// `Vec<u8>` as a native `GosVec` of one-byte primitive slots.
     NativeVecU8,
     /// `&mut [u8]` as a header lending the caller's bytes in place.
@@ -74,7 +77,7 @@ pub enum JitKind {
     U8VecHandle,
     /// A 2-element tuple RETURN of scalars / heap enums; payload is the
     /// per-element decode kind. Return-only.
-    TupleReturn([TupleElem; 2]),
+    TupleReturn(TupleElems),
     /// `[T; N]` over a scalar element as a pointer to a flat block of `N`
     /// 8-byte slots; payloads are the element count and slot encoding.
     ArrayBlockPtr(u32, ArrayElem),
@@ -108,6 +111,40 @@ pub enum TupleElem {
     Str,
     /// Heap enum slot; payload is the VM shape-table index.
     Enum(u32),
+}
+
+/// The elements of a tuple a body answers through its result block, two to
+/// [`TUPLE_RETURN_MAX`], one slot each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TupleElems {
+    len: u8,
+    elems: [TupleElem; TUPLE_RETURN_MAX],
+}
+
+/// The widest tuple a body answers through its result block.
+pub const TUPLE_RETURN_MAX: usize = 4;
+
+impl TupleElems {
+    /// `elems` as a tuple return, or `None` outside two to
+    /// [`TUPLE_RETURN_MAX`] elements.
+    #[must_use]
+    pub fn new(elems: &[TupleElem]) -> Option<Self> {
+        if !(2..=TUPLE_RETURN_MAX).contains(&elems.len()) {
+            return None;
+        }
+        let mut out = [TupleElem::I64; TUPLE_RETURN_MAX];
+        out[..elems.len()].copy_from_slice(elems);
+        Some(Self {
+            len: u8::try_from(elems.len()).ok()?,
+            elems: out,
+        })
+    }
+
+    /// The elements in order.
+    #[must_use]
+    pub fn as_slice(&self) -> &[TupleElem] {
+        &self.elems[..usize::from(self.len)]
+    }
 }
 
 /// A compiled function handle. On wasm none is ever produced.
@@ -156,6 +193,26 @@ pub struct JitArtifact {
     pub cacheable: bool,
 }
 
+/// Finds the program's storage for a static. Mirrors the native backend.
+pub type StaticResolver<'r> =
+    dyn Fn(&str, StaticStorage) -> Option<std::sync::Arc<StaticStorage>> + 'r;
+
+/// The class of a static whose storage holds its value, matching the native
+/// backend so the VM keeps scalar statics the same way on every target.
+#[must_use]
+pub fn shared_static_class(
+    tcx: &gossamer_types::TyCtxt,
+    ty: gossamer_types::Ty,
+) -> Option<StaticClass> {
+    match tcx.kind_of(ty) {
+        gossamer_types::TyKind::Int(_) => Some(StaticClass::Int),
+        gossamer_types::TyKind::Float(_) => Some(StaticClass::Float),
+        gossamer_types::TyKind::Bool => Some(StaticClass::Bool),
+        gossamer_types::TyKind::Char => Some(StaticClass::Char),
+        _ => None,
+    }
+}
+
 /// Static admission record matching the native backend API.
 pub struct JitBodyDecision {
     /// Body name.
@@ -172,7 +229,7 @@ pub fn has_worthy_jit_body(
     _bodies: &[gossamer_mir::Body],
     _tcx: &gossamer_types::TyCtxt,
     _enum_shapes: &HashMap<u32, u32>,
-    _struct_shapes: &HashMap<u32, u32>,
+    _struct_shapes: &HashMap<gossamer_types::Ty, u32>,
 ) -> bool {
     false
 }
@@ -183,7 +240,19 @@ pub fn jit_compile_body_names(
     _bodies: &[gossamer_mir::Body],
     _tcx: &gossamer_types::TyCtxt,
     _enum_shapes: &HashMap<u32, u32>,
-    _struct_shapes: &HashMap<u32, u32>,
+    _struct_shapes: &HashMap<gossamer_types::Ty, u32>,
+) -> std::collections::HashSet<String> {
+    std::collections::HashSet::new()
+}
+
+/// wasm retains no native compiler snapshot.
+#[must_use]
+pub fn jit_compile_body_names_with_vm_statics(
+    _bodies: &[gossamer_mir::Body],
+    _tcx: &gossamer_types::TyCtxt,
+    _enum_shapes: &HashMap<u32, u32>,
+    _struct_shapes: &HashMap<gossamer_types::Ty, u32>,
+    _vm_statics: &std::collections::HashSet<String>,
 ) -> std::collections::HashSet<String> {
     std::collections::HashSet::new()
 }
@@ -194,7 +263,7 @@ pub fn jit_compile_body_names_for_trigger(
     _bodies: &[gossamer_mir::Body],
     _tcx: &gossamer_types::TyCtxt,
     _enum_shapes: &HashMap<u32, u32>,
-    _struct_shapes: &HashMap<u32, u32>,
+    _struct_shapes: &HashMap<gossamer_types::Ty, u32>,
     _trigger: &str,
 ) -> std::collections::HashSet<String> {
     std::collections::HashSet::new()
@@ -206,7 +275,7 @@ pub fn jit_entry_body_names(
     _bodies: &[gossamer_mir::Body],
     _tcx: &gossamer_types::TyCtxt,
     _enum_shapes: &HashMap<u32, u32>,
-    _struct_shapes: &HashMap<u32, u32>,
+    _struct_shapes: &HashMap<gossamer_types::Ty, u32>,
 ) -> std::collections::HashSet<String> {
     std::collections::HashSet::new()
 }
@@ -227,7 +296,7 @@ pub fn jit_promotion_report(
     bodies: &[gossamer_mir::Body],
     _tcx: &gossamer_types::TyCtxt,
     _enum_shapes: &HashMap<u32, u32>,
-    _struct_shapes: &HashMap<u32, u32>,
+    _struct_shapes: &HashMap<gossamer_types::Ty, u32>,
 ) -> Vec<JitBodyDecision> {
     bodies
         .iter()
@@ -245,7 +314,7 @@ pub fn jit_eager_loop_bodies(
     _bodies: &[gossamer_mir::Body],
     _tcx: &gossamer_types::TyCtxt,
     _enum_shapes: &HashMap<u32, u32>,
-    _struct_shapes: &HashMap<u32, u32>,
+    _struct_shapes: &HashMap<gossamer_types::Ty, u32>,
 ) -> Vec<String> {
     Vec::new()
 }
@@ -257,7 +326,7 @@ pub fn compile_to_jit(
     _bodies: &[gossamer_mir::Body],
     _tcx: &gossamer_types::TyCtxt,
     _enum_shapes: &HashMap<u32, u32>,
-    _struct_shapes: &HashMap<u32, u32>,
+    _struct_shapes: &HashMap<gossamer_types::Ty, u32>,
 ) -> Result<JitArtifact, String> {
     Ok(JitArtifact::default())
 }
@@ -268,7 +337,7 @@ pub fn compile_to_jit_for_promotion(
     _bodies: &[gossamer_mir::Body],
     _tcx: &gossamer_types::TyCtxt,
     _enum_shapes: &HashMap<u32, u32>,
-    _struct_shapes: &HashMap<u32, u32>,
+    _struct_shapes: &HashMap<gossamer_types::Ty, u32>,
 ) -> Result<JitArtifact, String> {
     Ok(JitArtifact::default())
 }
@@ -279,7 +348,9 @@ pub fn compile_to_jit_for_promotion_owned(
     _bodies: Vec<gossamer_mir::Body>,
     _tcx: &gossamer_types::TyCtxt,
     _enum_shapes: &HashMap<u32, u32>,
-    _struct_shapes: &HashMap<u32, u32>,
+    _struct_shapes: &HashMap<gossamer_types::Ty, u32>,
+    _vm_statics: &std::collections::HashSet<String>,
+    _statics: &StaticResolver<'_>,
 ) -> Result<JitArtifact, String> {
     Ok(JitArtifact::default())
 }

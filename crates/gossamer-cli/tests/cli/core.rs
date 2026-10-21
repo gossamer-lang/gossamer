@@ -68,6 +68,27 @@ fn gos_run_script_accepts_a_hashbang() {
 }
 
 #[test]
+fn gos_run_timings_reports_the_phases_before_main() {
+    let fixture = write_fixture("timings", "fn main() { println(\"timed run\") }\n");
+    let out = Command::new(gos_bin())
+        .arg("run")
+        .arg("--timings")
+        .arg(&fixture)
+        .output()
+        .expect("spawn gos run --timings");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr: {stderr}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "timed run");
+    let line = stderr
+        .lines()
+        .find(|line| line.starts_with("timings: "))
+        .unwrap_or_else(|| panic!("no timings line: {stderr}"));
+    for phase in ["prepare ", "check ", "load ", "total "] {
+        assert!(line.contains(phase), "{phase} missing from {line}");
+    }
+}
+
+#[test]
 fn gos_run_executes_existing_files_with_any_extension() {
     for suffix in ["", ".txt"] {
         let fixture = env::temp_dir().join(format!(

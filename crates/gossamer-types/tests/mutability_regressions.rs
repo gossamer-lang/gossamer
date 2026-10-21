@@ -954,11 +954,11 @@ fn concurrency_takes_aggregates_without_growable_storage() {
     for (name, source) in [
         (
             "scalar struct goroutine argument",
-            "struct Pair { left: i64, right: i64 }\nfn work(value: Pair) {}\nfn main() { let value = Pair { left: 1, right: 2 }\n spawn(|| work(value)) }",
+            "struct Pair { left: i64, right: i64 }\nfn work(value: Pair) {}\nfn main() { let value = Pair { left: 1, right: 2 }\n let _ = spawn(|| work(value)) }",
         ),
         (
             "fixed array goroutine argument",
-            "fn work(value: [i64; 2]) {}\nfn main() { let value = [1, 2]\n spawn(|| work(value)) }",
+            "fn work(value: [i64; 2]) {}\nfn main() { let value = [1, 2]\n let _ = spawn(|| work(value)) }",
         ),
         (
             "struct of runtime handles goroutine argument",
@@ -987,4 +987,28 @@ fn a_channel_takes_an_aggregate_carrying_growable_storage() {
     ] {
         assert_accepted(name, source);
     }
+}
+
+#[test]
+fn sync_primitives_never_need_a_writable_receiver() {
+    // A lock or an atomic changes the state it shares, never the place that
+    // holds it, so a method name that writes elsewhere (`swap`, `insert`) is
+    // an unknown method here, not an assignment.
+    for source in [
+        "use std::sync::AtomicBool\nstatic FLAG: AtomicBool = AtomicBool::new(false)\nfn main() { let was = FLAG.swap(false) }",
+        "use std::sync::AtomicI64\nfn main() { let n = AtomicI64::new(0)\n n.push(1) }",
+    ] {
+        let diagnostics = check(source);
+        assert!(
+            !diagnostics.is_empty()
+                && diagnostics
+                    .iter()
+                    .all(|d| !matches!(d.error, TypeError::AssignToImmutable { .. })),
+            "an unknown sync-primitive method must report only the missing method; diagnostics: {diagnostics:#?}\nsource:\n{source}"
+        );
+    }
+    assert_accepted(
+        "atomic static",
+        "use std::sync::AtomicI64\nstatic HITS: AtomicI64 = AtomicI64::new(0)\nfn main() { let before = HITS.fetch_add(1)\n HITS.store(before) }",
+    );
 }

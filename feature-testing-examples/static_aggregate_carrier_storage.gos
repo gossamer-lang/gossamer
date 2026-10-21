@@ -1,0 +1,20 @@
+struct Child { text: String, values: Vec<i64> }
+struct Holder { maybe: Option<Child> }
+static mut CURRENT: Holder = Holder { maybe: Some(Child { text: "first", values: #[1, 2] }) }
+fn replace() { CURRENT = Holder { maybe: Some(Child { text: "next", values: #[3, 4] }) } }
+fn clear() { CURRENT = Holder { maybe: None } }
+fn main() {
+    let old = CURRENT
+    replace()
+    match old.maybe { Some(c) => println(f"{c.text} {c.values.len()}"), None => println("none") }
+    for _ in 0..2 {
+        match CURRENT.maybe { Some(c) => println(f"{c.text} {c.values.len()}"), None => println("none") }
+    }
+    let next = CURRENT
+    clear()
+    match CURRENT.maybe { Some(_) => panic("expected an empty static"), None => println("cleared") }
+    match next.maybe { Some(c) => println(f"retained {c.text} {c.values.len()}"), None => panic("expected the saved copy") }
+    clear()
+    replace()
+    match CURRENT.maybe { Some(c) => println(f"restored {c.text} {c.values.len()}"), None => panic("expected a restored value") }
+}

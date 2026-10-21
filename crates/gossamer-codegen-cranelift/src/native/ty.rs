@@ -196,17 +196,6 @@ pub(super) fn cl_type_of(tcx: &TyCtxt, ty: Ty, module: &dyn Module) -> ir::Type 
     }
 }
 
-/// True when a `static mut` of this type is a single inline scalar word the
-/// native backend can back with a writable data object. String/ref/aggregate
-/// statics fall back to the VM: their initializer is a heap value, not an
-/// inline word.
-pub(super) fn is_scalar_static_ty(tcx: &TyCtxt, ty: Ty) -> bool {
-    matches!(
-        tcx.kind_of(ty),
-        TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Float(_)
-    )
-}
-
 pub(super) fn resolve_place_cl_type(
     tcx: &TyCtxt,
     body: &Body,

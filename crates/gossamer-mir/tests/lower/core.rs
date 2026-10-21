@@ -2366,3 +2366,23 @@ fn main() { let mut w: Vec<i64> = #[0, 0]; f(#[1, 2], &mut w, 0, 2); println(w[0
     assert_eq!(checked(&body, BinOp::Add), 1, "only the checked original computes `base + c` checked");
     assert!(checked(&body, BinOp::WrappingAdd) >= 1, "the clone computes it wrapping");
 }
+
+#[test]
+fn map_container_values_keep_handle_ownership_when_copy_metadata_exists() {
+    use gossamer_types::{IntTy, TyKind};
+    let (_, mut tcx) = build("fn main() {}
+");
+    let string = tcx.intern(TyKind::String);
+    let byte = tcx.intern(TyKind::Int(IntTy::U8));
+    let map = tcx.intern(TyKind::HashMap { key: string, value: string, ordered: false });
+    let vector = tcx.intern(TyKind::Vec(string));
+    let bytes = tcx.intern(TyKind::Vec(byte));
+    for (ty, expected) in [
+        (map, Some("gos_rt_map_set_map_values")),
+        (vector, Some("gos_rt_map_set_vec_values")),
+        (bytes, None),
+    ] {
+        tcx.register_aggr_copy_meta(ty, "copy_meta_for_other_context");
+        assert_eq!(gossamer_mir::map_value_owner_marker(&tcx, ty), expected);
+    }
+}

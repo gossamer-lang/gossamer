@@ -46,6 +46,24 @@ impl TypeChecker<'_> {
         self.user_type_defs.get(&name).copied()
     }
 
+    /// The type a non-generic `type` alias `def` spells, when that is a user
+    /// type.
+    pub(super) fn alias_enum_def(
+        &mut self,
+        def: gossamer_resolve::DefId,
+    ) -> Option<gossamer_resolve::DefId> {
+        let (params, rhs) = self.alias_targets.get(&def).cloned()?;
+        if !params.is_empty() {
+            return None;
+        }
+        let ty = self.type_from_ast(&rhs);
+        let ty = self.infer.resolve(self.tcx, ty);
+        match self.tcx.kind_of(ty) {
+            TyKind::Adt { def, .. } => Some(*def),
+            _ => None,
+        }
+    }
+
     /// The registered name of the enum a non-generic `type` alias `def`
     /// spells, when it spells one.
     fn alias_enum_identity(&mut self, def: gossamer_resolve::DefId) -> Option<String> {
@@ -476,7 +494,22 @@ impl TypeChecker<'_> {
         self.check_ffi_expr(expr, ty);
         self.check_expected_integer_literal_range(expr, expected, ty);
         self.leave_recursion();
-        self.record(expr.id, ty)
+        let ty = self.record(expr.id, ty);
+        // A function item checked where a callable is expected, at any depth
+        // of the expected type (`call(Some(twice))`, `Hook(Some(twice))`,
+        // `#[Some(twice)]`), is a callable value there. A bare item keeps its
+        // `FnDef` type, which names the instantiation lowering builds and
+        // wraps for the slot; only a value holding one takes the slot's shape
+        // here.
+        if let Expectation::HasType(want) | Expectation::Coerce(want) = expected
+            && !matches!(
+                self.tcx.kind(self.infer.resolve(self.tcx, ty)),
+                Some(TyKind::FnDef { .. })
+            )
+        {
+            self.record_fn_item_coercion(expr, want);
+        }
+        ty
     }
 
     pub(super) fn check_expected_integer_literal_range(
@@ -1484,9 +1517,45 @@ impl TypeChecker<'_> {
         self.check_exponent_placeholder(callee, args);
         self.check_callback_arguments(callee, args, &arg_tys);
         self.check_assert_eq_operands(callee, args, &arg_tys);
+        self.check_assert_operands(callee, args, &arg_tys);
         let ret = self.check_call_inner(callee, args, callee_ty, &arg_tys, expected);
         self.check_ffi_operation(callee, args, &arg_tys, ret);
         ret
+    }
+
+    /// `assert(condition)` and `assert(condition, message)` test a `bool`
+    /// and report a `String`. A user function of that name is typed by its
+    /// own signature instead.
+    pub(super) fn check_assert_operands(&mut self, callee: &Expr, args: &[Expr], arg_tys: &[Ty]) {
+        let ExprKind::Path(path) = &callee.kind else {
+            return;
+        };
+        if path.segments.len() != 1
+            || path.segments[0].name.name != "assert"
+            || matches!(
+                self.resolutions.get(callee.id),
+                Some(Resolution::Def { .. })
+            )
+        {
+            return;
+        }
+        if args.is_empty() || args.len() > 2 {
+            self.emit(
+                TypeError::CallArityMismatch {
+                    callee: "assert".to_string(),
+                    expected: if args.is_empty() { 1 } else { 2 },
+                    found: args.len(),
+                },
+                callee.span,
+            );
+            return;
+        }
+        let bool_ty = self.tcx.bool_ty();
+        self.unify(bool_ty, arg_tys[0], args[0].span);
+        if let (Some(message), Some(message_ty)) = (args.get(1), arg_tys.get(1)) {
+            let string = self.tcx.string_ty();
+            self.unify(string, *message_ty, message.span);
+        }
     }
 
     /// `assert_eq(a, b)` compares its operands with `==`, so they share one

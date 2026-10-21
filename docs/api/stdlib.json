@@ -2,6 +2,25 @@
   "schema_version": 1,
   "entries": [
     {
+      "id": "std-archive-enclosed-path",
+      "name": "std::archive::enclosed_path",
+      "kind": "function",
+      "signature": "fn enclosed_path(name: String) -> Option<String>",
+      "description": "`enclosed_path(name) -> Option<String>`: an entry name as a relative path that stays inside the directory it is extracted to, `.` and inner `..` steps resolved, or `None` for an absolute path, a drive prefix, or a path that leaves the directory. Check every name before writing an entry by it.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdarchive",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-archive-tar-TarEntry",
       "name": "std::archive::tar::TarEntry",
       "kind": "type",
@@ -21,11 +40,49 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-archive-tar-extract",
+      "name": "std::archive::tar::extract",
+      "kind": "function",
+      "signature": "fn extract(data: Vec<u8>, dir: String) -> Result<i64, errors::Error>",
+      "description": "`extract(data, dir) -> Result<i64, Error>`: writes every file and directory under `dir`, refusing the archive before writing anything when a name would land outside it (`archive::enclosed_path`); answers how many entries it wrote.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdarchivetar",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-archive-tar-read",
       "name": "std::archive::tar::read",
       "kind": "function",
       "signature": "fn read(data: Vec<u8>) -> Result<Vec<tar::TarEntry>, errors::Error>",
       "description": "Reads all entries from a tar archive.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdarchivetar",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-archive-tar-read-limited",
+      "name": "std::archive::tar::read_limited",
+      "kind": "function",
+      "signature": "fn read_limited(data: Vec<u8>, max_entries: i64, max_entry_bytes: i64, max_total_bytes: i64) -> Result<Vec<tar::TarEntry>, errors::Error>",
+      "description": "`read(data)` refusing an archive with more than `max_entries` entries, an entry over `max_entry_bytes`, or more than `max_total_bytes` in all, counted as the bytes are read.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -78,11 +135,49 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-archive-zip-extract",
+      "name": "std::archive::zip::extract",
+      "kind": "function",
+      "signature": "fn extract(data: Vec<u8>, dir: String) -> Result<i64, errors::Error>",
+      "description": "`extract(data, dir) -> Result<i64, Error>`: writes every file and directory under `dir`, refusing the archive before writing anything when a name would land outside it (`archive::enclosed_path`); answers how many entries it wrote.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdarchivezip",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-archive-zip-read",
       "name": "std::archive::zip::read",
       "kind": "function",
       "signature": "fn read(data: Vec<u8>) -> Result<Vec<zip::ZipEntry>, errors::Error>",
       "description": "Reads all file entries from a zip stored in `data`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdarchivezip",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-archive-zip-read-limited",
+      "name": "std::archive::zip::read_limited",
+      "kind": "function",
+      "signature": "fn read_limited(data: Vec<u8>, max_entries: i64, max_entry_bytes: i64, max_total_bytes: i64) -> Result<Vec<zip::ZipEntry>, errors::Error>",
+      "description": "`read(data)` refusing an archive with more than `max_entries` entries, an entry over `max_entry_bytes`, or more than `max_total_bytes` in all, counted as the bytes are read.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -538,7 +633,7 @@
       "name": "std::compress::bzip2::compress",
       "kind": "function",
       "signature": "fn compress(data: Vec<u8>, level: i64) -> Result<Vec<u8>, errors::Error>",
-      "description": "One-shot bzip2 compress.",
+      "description": "One-shot bzip2 compress at `level`, `1` (fastest) to `9` (best).",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -572,11 +667,30 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-compress-bzip2-decompress-limited",
+      "name": "std::compress::bzip2::decompress_limited",
+      "kind": "function",
+      "signature": "fn decompress_limited(data: Vec<u8>, max_bytes: i64) -> Result<Vec<u8>, errors::Error>",
+      "description": "`decompress(data)`, refusing output past `max_bytes`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdcompressbzip2",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-compress-flate-compress",
       "name": "std::compress::flate::compress",
       "kind": "function",
       "signature": "fn compress(data: Vec<u8>, level: i64) -> Result<Vec<u8>, errors::Error>",
-      "description": "One-shot DEFLATE compress.",
+      "description": "One-shot DEFLATE compress at `level`, `0` (store only) to `9` (best).",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -610,11 +724,49 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-compress-flate-decompress-limited",
+      "name": "std::compress::flate::decompress_limited",
+      "kind": "function",
+      "signature": "fn decompress_limited(data: Vec<u8>, max_bytes: i64) -> Result<Vec<u8>, errors::Error>",
+      "description": "`decompress(data)`, refusing output past `max_bytes`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdcompressflate",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-compress-gzip-decode",
       "name": "std::compress::gzip::decode",
       "kind": "function",
       "signature": "fn decode(data: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
-      "description": "Decompresses a gzip-formatted payload.",
+      "description": "Decompresses a gzip payload; concatenated members decode as one stream. Output is unbounded - use `decode_limited` for untrusted input.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdcompressgzip",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-compress-gzip-decode-limited",
+      "name": "std::compress::gzip::decode_limited",
+      "kind": "function",
+      "signature": "fn decode_limited(data: Vec<u8>, max_bytes: i64) -> Result<Vec<u8>, errors::Error>",
+      "description": "`decode(data)`, refusing output past `max_bytes`: an archive bomb answers `Err` instead of exhausting memory.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -652,7 +804,7 @@
       "name": "std::compress::zlib::compress",
       "kind": "function",
       "signature": "fn compress(data: Vec<u8>, level: i64) -> Result<Vec<u8>, errors::Error>",
-      "description": "One-shot zlib compress.",
+      "description": "One-shot zlib compress at `level`, `0` (store only) to `9` (best).",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -686,11 +838,49 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-compress-zlib-decompress-limited",
+      "name": "std::compress::zlib::decompress_limited",
+      "kind": "function",
+      "signature": "fn decompress_limited(data: Vec<u8>, max_bytes: i64) -> Result<Vec<u8>, errors::Error>",
+      "description": "`decompress(data)`, refusing output past `max_bytes`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdcompresszlib",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-compress-zstd-decode",
       "name": "std::compress::zstd::decode",
       "kind": "function",
       "signature": "fn decode(data: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
       "description": "One-shot Zstandard decompress.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdcompresszstd",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-compress-zstd-decode-limited",
+      "name": "std::compress::zstd::decode_limited",
+      "kind": "function",
+      "signature": "fn decode_limited(data: Vec<u8>, max_bytes: i64) -> Result<Vec<u8>, errors::Error>",
+      "description": "`decode(data)`, refusing output past `max_bytes`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -4870,7 +5060,7 @@
       "name": "std::fs::DirInfo",
       "kind": "type",
       "signature": null,
-      "description": "Directory entry yielded by read_dir and walk_dir; carries path, name, is_file, is_dir, is_symlink, and size.",
+      "description": "Directory entry yielded by read_dir and walk_dir; carries path, name, is_file, is_dir, is_symlink, size, and modified_ms (milliseconds since the Unix epoch).",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -4890,6 +5080,25 @@
       "kind": "type",
       "signature": null,
       "description": "Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family. The file closes at `close()` or with its last handle. `std::term` and `os::fd` calls take the file itself, which keeps it open while they use it; `fd()` answers the OS descriptor (a handle on Windows) for a foreign call.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdfs",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-fs-Metadata",
+      "name": "std::fs::Metadata",
+      "kind": "type",
+      "signature": null,
+      "description": "What `metadata(path)` answers about a file: size, is_file, is_dir, is_symlink, readonly, and modified_unix_ms (milliseconds since the Unix epoch).",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -5212,7 +5421,7 @@
       "name": "std::fs::metadata",
       "kind": "function",
       "signature": "fn metadata(path: String) -> Result<fs::Metadata, io::Error>",
-      "description": "Returns filesystem metadata for a path.",
+      "description": "`metadata(path) -> Result<Metadata, io::Error>`: the size, kind, permissions, and modification time of the file at `path`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -8381,6 +8590,25 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-image-release",
+      "name": "std::image::release",
+      "kind": "function",
+      "signature": "fn release(image: i64) -> bool",
+      "description": "Releases an opaque image and its pixels. Returns false for an invalid or already released handle.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdimage",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-image-set-pixel",
       "name": "std::image::set_pixel",
       "kind": "function",
@@ -8514,6 +8742,25 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-io-MemoryStream",
+      "name": "std::io::MemoryStream",
+      "kind": "type",
+      "signature": null,
+      "description": "An in-memory reader or writer made by the functions below. Copies of a stream name the same stream, and adapters built on it keep it alive; it is freed with the last of them.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdio",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-io-ReadAll",
       "name": "std::io::ReadAll",
       "kind": "function",
@@ -8574,8 +8821,8 @@
       "id": "std-io-buffer-writer",
       "name": "std::io::buffer_writer",
       "kind": "function",
-      "signature": "fn buffer_writer() -> i64",
-      "description": "`buffer_writer() -> i64` - a Writer handle collecting everything written to it; read it back with `io::contents`.",
+      "signature": "fn buffer_writer() -> io::MemoryStream",
+      "description": "`buffer_writer() -> io::MemoryStream` - a writer collecting everything written to it; read it back with `io::contents`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -8593,8 +8840,8 @@
       "id": "std-io-close-writer",
       "name": "std::io::close_writer",
       "kind": "function",
-      "signature": "fn close_writer(writer: i64)",
-      "description": "`close_writer(writer: i64)` - signals end of stream on a pipe Writer; later writes are rejected.",
+      "signature": "fn close_writer(writer: io::MemoryStream)",
+      "description": "`close_writer(writer: io::MemoryStream)` - signals end of stream on a pipe writer; later writes are rejected.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -8612,8 +8859,8 @@
       "id": "std-io-contents",
       "name": "std::io::contents",
       "kind": "function",
-      "signature": "fn contents(writer: i64) -> String",
-      "description": "`contents(writer: i64) -> String` - everything written to a buffer or pipe Writer, as UTF-8 text.",
+      "signature": "fn contents(writer: io::MemoryStream) -> String",
+      "description": "`contents(writer: io::MemoryStream) -> String` - everything written to a buffer or pipe writer, as UTF-8 text.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -8631,8 +8878,8 @@
       "id": "std-io-copy-n",
       "name": "std::io::copy_n",
       "kind": "function",
-      "signature": "fn copy_n(dst: i64, src: i64, n: i64) -> Result<i64, errors::Error>",
-      "description": "`copy_n(dst: i64, src: i64, n: i64) -> Result<i64, errors::Error>` - copies at most `n` bytes and returns the count actually transferred. Go's `io.CopyN`.",
+      "signature": "fn copy_n(dst: io::MemoryStream, src: io::MemoryStream, n: i64) -> Result<i64, errors::Error>",
+      "description": "`copy_n(dst: io::MemoryStream, src: io::MemoryStream, n: i64) -> Result<i64, errors::Error>` - copies at most `n` bytes and returns the count actually transferred. Go's `io.CopyN`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -8650,8 +8897,8 @@
       "id": "std-io-drain",
       "name": "std::io::drain",
       "kind": "function",
-      "signature": "fn drain(src: i64) -> String",
-      "description": "`drain(src: i64) -> String` - reads a Reader handle to end of stream as UTF-8 text.",
+      "signature": "fn drain(src: io::MemoryStream) -> String",
+      "description": "`drain(src: io::MemoryStream) -> String` - reads a reader to the end of stream as UTF-8 text.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -8669,8 +8916,8 @@
       "id": "std-io-limit-reader",
       "name": "std::io::limit_reader",
       "kind": "function",
-      "signature": "fn limit_reader(src: i64, limit: i64) -> i64",
-      "description": "`limit_reader(src: i64, limit: i64) -> i64` - a Reader yielding at most `limit` bytes from `src`, Go's `io.LimitReader`. Example: `io::drain(io::limit_reader(src, 5))`.",
+      "signature": "fn limit_reader(src: io::MemoryStream, limit: i64) -> io::MemoryStream",
+      "description": "`limit_reader(src: io::MemoryStream, limit: i64) -> io::MemoryStream` - a reader yielding at most `limit` bytes from `src`, Go's `io.LimitReader`. Example: `io::drain(io::limit_reader(src, 5))`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -8688,8 +8935,8 @@
       "id": "std-io-multi-reader",
       "name": "std::io::multi_reader",
       "kind": "function",
-      "signature": "fn multi_reader(sources: Vec<i64>) -> i64",
-      "description": "`multi_reader(sources: Vec<i64>) -> i64` - a Reader draining each source in turn, Go's `io.MultiReader`. Example: `io::multi_reader(#[a, b])`.",
+      "signature": "fn multi_reader(sources: Vec<io::MemoryStream>) -> io::MemoryStream",
+      "description": "`multi_reader(sources: Vec<io::MemoryStream>) -> io::MemoryStream` - a reader draining each source in turn, Go's `io.MultiReader`. Example: `io::multi_reader(#[a, b])`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -8707,8 +8954,8 @@
       "id": "std-io-pipe",
       "name": "std::io::pipe",
       "kind": "function",
-      "signature": "fn pipe() -> (i64, i64)",
-      "description": "`pipe() -> (i64, i64)` - a connected `(reader, writer)` pair sharing one in-memory buffer. Reads return the bytes written so far and never block; `io::close_writer` marks the writer done. Example: `let r, w = io::pipe()`.",
+      "signature": "fn pipe() -> (io::MemoryStream, io::MemoryStream)",
+      "description": "`pipe() -> (io::MemoryStream, io::MemoryStream)` - a connected `(reader, writer)` pair sharing one in-memory buffer. Reads return the bytes written so far and never block; `io::close_writer` marks the writer done. Example: `let r, w = io::pipe()`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -8783,8 +9030,8 @@
       "id": "std-io-string-reader",
       "name": "std::io::string_reader",
       "kind": "function",
-      "signature": "fn string_reader(text: String) -> i64",
-      "description": "`string_reader(text: String) -> i64` - a Reader handle over an in-memory buffer. Reader and Writer handles are plain integers, so the adapters below compose by value. Example: `let src = io::string_reader(\"hello\")`.",
+      "signature": "fn string_reader(text: String) -> io::MemoryStream",
+      "description": "`string_reader(text: String) -> io::MemoryStream` - a reader over an in-memory buffer. The adapters below compose streams by value. Example: `let src = io::string_reader(\"hello\")`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -8802,8 +9049,8 @@
       "id": "std-io-tee-reader",
       "name": "std::io::tee_reader",
       "kind": "function",
-      "signature": "fn tee_reader(src: i64, sink: i64) -> i64",
-      "description": "`tee_reader(src: i64, sink: i64) -> i64` - a Reader mirroring every byte read from `src` into the Writer `sink`, Go's `io.TeeReader`.",
+      "signature": "fn tee_reader(src: io::MemoryStream, sink: io::MemoryStream) -> io::MemoryStream",
+      "description": "`tee_reader(src: io::MemoryStream, sink: io::MemoryStream) -> io::MemoryStream` - a reader mirroring every byte read from `src` into the writer `sink`, Go's `io.TeeReader`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -8821,8 +9068,8 @@
       "id": "std-io-write",
       "name": "std::io::write",
       "kind": "function",
-      "signature": "fn write(writer: i64, text: String) -> i64",
-      "description": "`write(writer: i64, text: String) -> i64` - appends text to a Writer handle and returns the byte count accepted.",
+      "signature": "fn write(writer: io::MemoryStream, text: String) -> i64",
+      "description": "`write(writer: io::MemoryStream, text: String) -> i64` - appends text to a writer and returns the byte count accepted.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15164,6 +15411,25 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-runtime-is-main-thread",
+      "name": "std::runtime::is_main_thread",
+      "kind": "function",
+      "signature": "fn is_main_thread() -> bool",
+      "description": "Whether the caller runs on the process main thread, the one `main` starts on. Libraries whose platform APIs belong to that thread, such as windowing on macOS, check it before calling them.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdruntime",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-runtime-root",
       "name": "std::runtime::root",
       "kind": "function",
@@ -15639,11 +15905,68 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-strings-byte-find",
+      "name": "std::strings::byte_find",
+      "kind": "function",
+      "signature": "fn byte_find(text: String, needle: String | char) -> Option<i64>",
+      "description": "Byte offset of the first match, in the unit `substring`, `slice`, and `byte_at` take; `find` answers a scalar index instead.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdstrings",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-strings-byte-len",
       "name": "std::strings::byte_len",
       "kind": "function",
       "signature": "fn byte_len(text: String) -> i64",
       "description": "Returns the UTF-8 byte length.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdstrings",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-strings-byte-offset",
+      "name": "std::strings::byte_offset",
+      "kind": "function",
+      "signature": "fn byte_offset(text: String, char_index: i64) -> Option<i64>",
+      "description": "`byte_offset(text, char_index) -> Option<i64>`: where a scalar index (a `find` answer) starts in bytes; one past the last scalar answers the byte length.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdstrings",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-strings-byte-rfind",
+      "name": "std::strings::byte_rfind",
+      "kind": "function",
+      "signature": "fn byte_rfind(text: String, needle: String | char) -> Option<i64>",
+      "description": "Byte offset of the last match.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15682,6 +16005,25 @@
       "kind": "function",
       "signature": "fn center(text: String, width: i64, fill: char) -> String",
       "description": "Symmetric pad to `width` using the given pad character.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdstrings",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-strings-char-index",
+      "name": "std::strings::char_index",
+      "kind": "function",
+      "signature": "fn char_index(text: String, byte_offset: i64) -> Option<i64>",
+      "description": "`char_index(text, byte_offset) -> Option<i64>`: the scalar index starting at a byte offset, or `None` inside a scalar or past the end.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15814,7 +16156,7 @@
       "name": "std::strings::find",
       "kind": "function",
       "signature": "fn find(text: String, needle: String | char) -> Option<i64>",
-      "description": "Returns the character index of the first match, or None.",
+      "description": "Returns the Unicode scalar index of the first match, or None; `byte_find` answers the byte offset `substring` and `slice` take.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -16441,7 +16783,7 @@
       "name": "std::sync::AtomicBool",
       "kind": "type",
       "signature": null,
-      "description": "Atomic boolean.",
+      "description": "Atomic boolean. Build with `AtomicBool::new(v)`; `load()`, `store(v)`, `compare_exchange(current, new)` (stores `new` and answers true when the value was `current`).",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -16460,7 +16802,7 @@
       "name": "std::sync::AtomicI32",
       "kind": "type",
       "signature": null,
-      "description": "Atomic 32-bit signed integer.",
+      "description": "Atomic 32-bit signed integer. Build with `AtomicI32::new(v)`; `load()`, `store(v)`, `compare_exchange(current, new)` (stores `new` and answers true when the value was `current`), `fetch_add(v)` and `fetch_sub(v)` (answer the value before the change).",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -16479,7 +16821,7 @@
       "name": "std::sync::AtomicI64",
       "kind": "type",
       "signature": null,
-      "description": "Atomic 64-bit signed integer.",
+      "description": "Atomic 64-bit signed integer. Build with `AtomicI64::new(v)`; `load()`, `store(v)`, `compare_exchange(current, new)` (stores `new` and answers true when the value was `current`), `fetch_add(v)` and `fetch_sub(v)` (answer the value before the change).",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -16498,7 +16840,7 @@
       "name": "std::sync::AtomicU64",
       "kind": "type",
       "signature": null,
-      "description": "Atomic 64-bit unsigned integer.",
+      "description": "Atomic 64-bit unsigned integer. Build with `AtomicU64::new(v)`; `load()`, `store(v)`, `compare_exchange(current, new)` (stores `new` and answers true when the value was `current`), `fetch_add(v)` and `fetch_sub(v)` (answer the value before the change).",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -16517,7 +16859,7 @@
       "name": "std::sync::Barrier",
       "kind": "type",
       "signature": null,
-      "description": "Synchronisation barrier across goroutines.",
+      "description": "Synchronisation barrier across goroutines: `wait()` returns once every party has arrived.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -16593,7 +16935,7 @@
       "name": "std::sync::Once",
       "kind": "type",
       "signature": null,
-      "description": "One-shot initialisation latch.",
+      "description": "One-shot initialisation latch: `call(f)` runs `f` the first time and answers whether this call ran it.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -16612,7 +16954,7 @@
       "name": "std::sync::Receiver",
       "kind": "type",
       "signature": null,
-      "description": "The receiving end of a channel: `recv() -> Option<T>`, `None` once it is closed and drained.",
+      "description": "The receiving end of a channel: `recv() -> Option<T>` waits for a value, `None` once it is closed and drained; `try_recv() -> Option<T>` answers at once, `None` when nothing is queued.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -16688,7 +17030,7 @@
       "name": "std::sync::WaitGroup",
       "kind": "type",
       "signature": null,
-      "description": "Counts goroutines and waits for them to finish.",
+      "description": "Counts goroutines and waits for them to finish: `add(n)`, `done()`, `wait()`, and `wait_ctx(ctx)`, which answers whether the group finished before `ctx` ended.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -17144,7 +17486,7 @@
       "name": "std::time::Instant",
       "kind": "type",
       "signature": null,
-      "description": "A monotonic clock reading in nanoseconds: `now()`, `elapsed()`, `elapsed_ms()`, `duration_since(earlier)`.",
+      "description": "A monotonic clock reading in nanoseconds: `now()`, `elapsed()`, `elapsed_ms()`, `duration_since(earlier)`, `later - earlier` answering the `Duration` between them, `+` / `-` a `Duration`, and ordering.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -17163,7 +17505,7 @@
       "name": "std::time::Location",
       "kind": "type",
       "signature": null,
-      "description": "Immutable IANA or fixed-offset time-zone location.",
+      "description": "Immutable IANA or fixed-offset time-zone location: `lookup(name)` (an IANA name, or `\"Local\"`), `local()` (the zone the system runs in: `TZ`, then the platform setting, else UTC), `utc()`, `fixed(offset_seconds)`; `name()`, `civil(unix_ms)`, `resolve(civil)`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -17790,7 +18132,7 @@
       "name": "std::unicode::fold_case",
       "kind": "function",
       "signature": "fn fold_case(text: String) -> String",
-      "description": "Simple case-folded comparison form for a string.",
+      "description": "Case-folded comparison form for a string (Unicode full case folding): two strings fold alike exactly when they match ignoring case, so `Straße` and `STRASSE` both fold to `strasse` and final sigma to sigma.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -18185,6 +18527,44 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-unicode-is-xid-continue",
+      "name": "std::unicode::is_xid_continue",
+      "kind": "function",
+      "signature": "fn is_xid_continue(rune: char) -> bool",
+      "description": "True if r may continue an identifier: Unicode XID_Continue (UAX #31).",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdunicode",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-unicode-is-xid-start",
+      "name": "std::unicode::is_xid_start",
+      "kind": "function",
+      "signature": "fn is_xid_start(rune: char) -> bool",
+      "description": "True if r may begin an identifier: Unicode XID_Start (UAX #31) or `_`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdunicode",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-unicode-nfc",
       "name": "std::unicode::nfc",
       "kind": "function",
@@ -18436,7 +18816,7 @@
       "name": "std::unicode::word_bounds",
       "kind": "function",
       "signature": "fn word_bounds(text: String) -> Vec<String>",
-      "description": "UAX #29 word boundaries (includes punct + whitespace runs).",
+      "description": "UAX #29 word-boundary segments of a string, punctuation and whitespace runs included.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",

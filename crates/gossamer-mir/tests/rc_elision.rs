@@ -170,3 +170,63 @@ fn a_store_paid_for_twice_keeps_its_accounting() {
     );
     assert!(count_calls(body(&bodies, "f"), "gos_rt_str_retain_typed") >= 1);
 }
+
+#[test]
+fn a_carrier_of_a_vector_is_no_blob_holder_when_the_vector_type_has_a_copy_meta() {
+    // Storing a `Vec<String>` into a static registers a copy meta for that
+    // type, which describes its elements; a `Result` of one still holds a
+    // handle, not a blob, so nothing releases it as an option slot.
+    let source = "use std::errors\n\
+        struct StringList { items: Vec<String> }\n\
+        static mut NAMES: Vec<String> = #[]\n\
+        fn parse(text: String) -> Result<StringList, errors::Error> {\n\
+         if text.is_empty() { Err(errors::new(\"empty\")) } else { Ok(StringList { items: #[text] }) }\n}\n\
+        fn list(text: String) -> Vec<String> {\n parse(text).map(|v| v.items).unwrap_or(#[])\n}\n\
+        fn main() {\n NAMES = #[\"a\"]\n println(f\"{list(\"\").len()}\")\n}\n";
+    let (bodies, tcx) = lower(source);
+    let list = body(&bodies, "list");
+    let slot_releases: Vec<String> = list
+        .blocks
+        .iter()
+        .flat_map(|block| &block.stmts)
+        .filter_map(|stmt| match &stmt.kind {
+            StatementKind::Assign {
+                rvalue:
+                    Rvalue::CallIntrinsic {
+                        name: "gos_rt_option_slot_release",
+                        args,
+                    },
+                ..
+            } => match args.first() {
+                Some(Operand::Copy(place)) => Some(gossamer_types::printer::render_ty(
+                    &tcx,
+                    list.locals[place.local.0 as usize].ty,
+                )),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert!(
+        slot_releases
+            .iter()
+            .all(|ty| !ty.starts_with("Result<Vec<")),
+        "slot releases of handle carriers: {slot_releases:?}"
+    );
+}
+
+#[test]
+fn a_closure_answering_a_captured_vector_gives_the_caller_a_share() {
+    let (bodies, _) = lower(
+        "fn keeps(d: Vec<u8>) -> Vec<u8> {\n let f = || d\n f()\n}\nfn main() {\n let data = #[1u8, 2u8]\n let mut kept = keeps(data)\n kept[0] = 9u8\n println(kept.len() + data.len())\n}\n",
+    );
+    let closure = bodies
+        .iter()
+        .find(|b| b.name.starts_with("__closure"))
+        .expect("the lifted closure");
+    assert_eq!(
+        count_calls(closure, "gos_rt_vec_retain"),
+        1,
+        "the capture stays the environment's, so the answer takes its own share"
+    );
+}

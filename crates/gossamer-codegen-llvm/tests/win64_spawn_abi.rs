@@ -29,21 +29,13 @@ fn spawn_main(ret_words: i64) -> (Body, TyCtxt) {
 
     let assign = |local: u32, rvalue: Rvalue| Statement {
         kind: StatementKind::Assign {
-            place: Place {
-                local: Local(local),
-                projection: Vec::new(),
-            },
+            place: Place::local(Local(local)),
             rvalue,
         },
         span,
         inlined: None,
     };
-    let copy = |local: u32| {
-        Operand::Copy(Place {
-            local: Local(local),
-            projection: Vec::new(),
-        })
-    };
+    let copy = |local: u32| Operand::Copy(Place::local(Local(local)));
 
     let body = Body {
         name: "main".to_string(),
@@ -121,6 +113,9 @@ fn spawn_main(ret_words: i64) -> (Body, TyCtxt) {
             },
         ],
         span,
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (body, tcx)
 }

@@ -1078,6 +1078,26 @@ pub unsafe extern "C" fn gos_rt_vec_eq(a: *const GosVec, b: *const GosVec, elem_
         if la != unsafe { (*b).len } {
             return false;
         }
+        // SAFETY: both handles are non-null and live for the call (checked above).
+        let (va, vb) = unsafe { (&*a, &*b) };
+        // A word compare is bit equality, so two buffers packed the same way
+        // compare as one block of memory.
+        if !matches!(elem_tag, 2 | 5)
+            && va.elem_bytes == vb.elem_bytes
+            && va.elem_kind == vb.elem_kind
+            && va.elem_bytes <= 8
+            && !crate::c_abi::vec::vec_elem_is_inline_aggregate(va)
+        {
+            if la == 0 {
+                return true;
+            }
+            let bytes = la as usize * va.elem_bytes as usize;
+            // SAFETY: each buffer holds `la` elements of `elem_bytes` bytes.
+            return unsafe {
+                std::slice::from_raw_parts(va.ptr.as_ptr(), bytes)
+                    == std::slice::from_raw_parts(vb.ptr.as_ptr(), bytes)
+            };
+        }
         for i in 0..la {
             // SAFETY: `i` is below both vecs' length, and `a` is non-null and live (checked
             // above; C-ABI contract).

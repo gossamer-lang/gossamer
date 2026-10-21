@@ -61,6 +61,22 @@ impl<'tcx> FnBuilder<'tcx> {
             let consume_body = self.value_consumable_here(&arm.body);
             let body_reg = self.compile_expr(&arm.body)?;
             self.writeback_variant_payload(scrutinee, scrut, arm)?;
+            // A match result is a value of its own even when its arm names a payload binding.
+            let body_reg = if self.reg_is_bound_local(body_reg)
+                && (self.expr_is_map(&arm.body)
+                    || self.expr_is_hashset(&arm.body)
+                    || self.expr_is_slot_container(&arm.body)
+                    || self.expr_is_aggregate_with_container(&arm.body))
+            {
+                let copy = self.alloc_reg();
+                self.emit(Op::CloneMapLike {
+                    dst: copy,
+                    src: body_reg,
+                });
+                copy
+            } else {
+                self.cloned_returned_field_container(&arm.body, body_reg)
+            };
             if consume_body {
                 self.emit(Op::MoveConsume {
                     dst: result,
@@ -185,7 +201,12 @@ impl<'tcx> FnBuilder<'tcx> {
         // index is filled in pass 2 once each body is laid down.
         for arm in arms {
             let meta = match &arm.op {
-                HirSelectOp::Recv { channel, .. } => {
+                HirSelectOp::Recv {
+                    channel,
+                    takes_value,
+                    takes_close,
+                    ..
+                } => {
                     let channel_reg = self.compile_expr(channel)?;
                     let bind_reg = self.alloc_reg();
                     SelectArmMeta {
@@ -194,6 +215,8 @@ impl<'tcx> FnBuilder<'tcx> {
                         value_reg: 0,
                         bind_reg,
                         body_block: 0,
+                        takes_value: *takes_value,
+                        takes_close: *takes_close,
                     }
                 }
                 HirSelectOp::Send { channel, value } => {
@@ -205,6 +228,8 @@ impl<'tcx> FnBuilder<'tcx> {
                         value_reg,
                         bind_reg: 0,
                         body_block: 0,
+                        takes_value: false,
+                        takes_close: false,
                     }
                 }
                 HirSelectOp::Default => SelectArmMeta {
@@ -213,6 +238,8 @@ impl<'tcx> FnBuilder<'tcx> {
                     value_reg: 0,
                     bind_reg: 0,
                     body_block: 0,
+                    takes_value: false,
+                    takes_close: false,
                 },
             };
             self.select_arms.push(meta);

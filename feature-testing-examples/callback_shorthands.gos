@@ -11,7 +11,7 @@ fn main() {
     // A std free function stands for the closure that calls it.
     println("{:?}", raw.map(math::abs))
     println("{:?}", #["  a  ", " b "].map(strings::trim))
-    println("{:?}", #["ab", "cd"].map(base64::encode))
+    println("{:?}", #["ab".as_bytes(), "cd".as_bytes()].map(base64::encode))
 
     // Every other callback is a written closure.
     println("{:?}", raw.map(|v| v.abs()))

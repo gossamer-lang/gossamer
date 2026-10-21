@@ -176,9 +176,12 @@ pub(super) fn read_after(body: &Body, local: Local, block: usize, stmt: usize) -
         }
         None
     };
-    match scan(block, stmt + 1) {
-        Some(read) => return read,
-        None => {}
+    // A store the terminator makes is followed by the block's successors
+    // only; the terminator itself is the store.
+    if stmt < body.blocks[block].stmts.len()
+        && let Some(read) = scan(block, stmt + 1)
+    {
+        return read;
     }
     let mut seen = vec![false; body.blocks.len()];
     let mut queue: Vec<usize> = block_successors(&body.blocks[block].terminator)
@@ -215,8 +218,9 @@ pub(super) fn source_outlives_store(
     let (origin, chain, place) = stored_origin(body, tcx, value);
     let chain_read = || chain.iter().any(|l| read_after(body, *l, block, stmt));
     match origin {
-        StoredOrigin::Fresh => false,
-        StoredOrigin::Binding => !ret && chain_read(),
+        // A value built for the store that the frame still reads afterwards
+        // is named after all: a call result taken straight into a binding.
+        StoredOrigin::Fresh | StoredOrigin::Binding => !ret && chain_read(),
         StoredOrigin::Place => {
             let Some(place) = place else { return true };
             // A referent belongs to the caller, which outlives this frame.
@@ -374,7 +378,18 @@ pub(crate) fn copy_values_into_holders(body: &mut Body, tcx: &gossamer_types::Ty
             };
             match rvalue {
                 Rvalue::Aggregate { operands, .. } => {
+                    // A lent comparison slot reads the value where it lies.
+                    if place.projection.is_empty() && body.lent_slots.contains(&place.local) {
+                        continue;
+                    }
                     for (k, op) in operands.iter().enumerate() {
+                        // An operand the literal shares with a binding nothing
+                        // writes, in a value only read, keeps that storage.
+                        if place.projection.is_empty()
+                            && body.shared_stores.contains(&(place.local, k))
+                        {
+                            continue;
+                        }
                         if let Some(l) = bare(op) {
                             sites.push((bi, si, StoreSite::Aggregate(k), l));
                         }

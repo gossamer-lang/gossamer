@@ -68,4 +68,8 @@ pub(crate) use self_deref::*;
 
 pub use drops::lent_payloads::is_payload_view;
 pub use drops::slots::map_value_owner_marker;
+pub use drops::{
+    AggregateOwnershipField, aggregate_ownership_fields, is_option_slot_holder,
+    option_slot_helpers, value_ownership_fields,
+};
 pub use misc::mangle_callable_shape;

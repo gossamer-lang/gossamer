@@ -231,7 +231,23 @@ impl Checker<'_> {
                 self.walk_optional(end.as_deref());
             }
             ExprKind::Cast { value, .. } => self.walk_expr(value),
-            _ => {}
+            ExprKind::Select(arms) => {
+                for arm in arms {
+                    match &arm.op {
+                        gossamer_ast::SelectOp::Recv { channel, .. } => self.walk_expr(channel),
+                        gossamer_ast::SelectOp::Send { channel, value } => {
+                            self.walk_expr(channel);
+                            self.walk_expr(value);
+                        }
+                        gossamer_ast::SelectOp::Default => {}
+                    }
+                    self.walk_expr(&arm.body);
+                }
+            }
+            ExprKind::Literal(_)
+            | ExprKind::Path(_)
+            | ExprKind::Continue { .. }
+            | ExprKind::Error => {}
         }
     }
 

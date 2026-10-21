@@ -299,21 +299,57 @@ pub(crate) type MutSelfMethods = std::collections::HashSet<String>;
 /// the guess from reaching a module's free function of the same name.
 pub(crate) type ImplMethodNames = std::collections::HashSet<String>;
 
-/// Bare names of every `static mut` item in the program. The bytecode
-/// compiler consults this set to lower an assignment whose place is
-/// rooted at a mutable static into an [`Op::StoreStatic`] against the
-/// shared `Global::MutStatic` cell, rather than treating the path as a
-/// local. Reads need no entry here: a mutable static is excluded from
+/// Whether a static's declared type is one the global's own initializer
+/// can carry and every read can answer from that constant: an integer, a
+/// float, a `bool`, a `char`, or a string. A string static's value is a
+/// compile-time reference into the constant pool, so it needs no cell and
+/// must not be assigned (a reference cannot be rebound). Mirrors the test
+/// the MIR collector applies, so both tiers route the same statics to a
+/// shared cell.
+pub(crate) fn static_ty_is_scalar(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -> bool {
+    use gossamer_types::{Mutbl, TyKind};
+    // `&str` reaches the HIR as `Ref { inner: String }`; a shared reference
+    // to a string is still a constant-pool value.
+    let ty = match tcx.kind_of(ty) {
+        TyKind::Ref {
+            mutability: Mutbl::Not,
+            inner,
+        } => *inner,
+        _ => ty,
+    };
+    matches!(
+        tcx.kind_of(ty),
+        TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::String
+    )
+}
+
+/// Bare names of every `static` item that backs onto a shared
+/// [`crate::vm::Global::MutStatic`] cell: every `static mut`, and every immutable
+/// static whose type is not a scalar. The bytecode compiler consults
+/// this set to lower an assignment whose place is rooted at such a
+/// static into an [`Op::StoreStatic`] against the shared cell, rather
+/// than treating the path as a local - the generated
+/// `__gos_static_init` body is the one writer an immutable static has.
+/// Reads need no entry here for a mutable static: it is excluded from
 /// the const-inlining snapshot, so its path already lowers to a
 /// `LoadGlobal` that resolves the cell at runtime.
 pub(crate) type MutStatics = std::collections::HashSet<String>;
 
-/// Collects the [`MutStatics`] set: the name of every `static mut` item.
-pub fn collect_mut_statics(program: &gossamer_hir::HirProgram) -> MutStatics {
+/// Collects the [`MutStatics`] set: the name of every static that backs
+/// onto a shared cell.
+pub fn collect_mut_statics(
+    program: &gossamer_hir::HirProgram,
+    tcx: &gossamer_types::TyCtxt,
+) -> MutStatics {
+    use gossamer_types::TyKind;
     let mut out = MutStatics::new();
     for item in &program.items {
         if let gossamer_hir::HirItemKind::Static(decl) = &item.kind
-            && decl.mutable
+            && (decl.mutable
+                || !matches!(
+                    tcx.kind_of(decl.ty),
+                    TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char
+                ))
         {
             out.insert(decl.name.name.clone());
         }

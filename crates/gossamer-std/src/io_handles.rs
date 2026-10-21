@@ -2,11 +2,12 @@
 //!
 //! Every stream adapter the language exposes - in-memory readers and
 //! writers, `limit_reader`, `tee_reader`, `multi_reader`, and `pipe` -
-//! is a small integer handle into one process-wide registry. Handles
-//! compose by holding the ids of their sources, so a chain such as
-//! `tee_reader(limit_reader(src, 8), sink)` is three registry rows and
-//! no trait objects, which is what lets the compiled tiers carry the
-//! same value as a bare `i64`.
+//! is a row of one process-wide registry, named by an id. Rows compose by
+//! holding the ids of their sources, so a chain such as
+//! `tee_reader(limit_reader(src, 8), sink)` is three rows and no trait
+//! objects. A row is counted: the `io::MemoryStream` value naming it holds one
+//! reference and every adapter reading from it holds another, so the row is
+//! removed, with what it reads from, when the last of them is gone.
 //!
 //! The runtime mirrors this module in `gossamer-runtime`'s
 //! `c_abi::io_handles`; the two must stay behaviourally identical.
@@ -43,14 +44,72 @@ enum Node {
     Pipe(Arc<PipeBuffer>),
 }
 
-static NEXT_ID: AtomicI64 = AtomicI64::new(1);
-static REGISTRY: Mutex<Option<HashMap<i64, Node>>> = Mutex::new(None);
+/// A row and the references held to it.
+#[derive(Debug)]
+struct Row {
+    refs: usize,
+    node: Node,
+}
 
+static NEXT_ID: AtomicI64 = AtomicI64::new(1);
+static REGISTRY: Mutex<Option<HashMap<i64, Row>>> = Mutex::new(None);
+
+/// Registers `node` with the one reference its handle holds.
 fn insert(node: Node) -> i64 {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let mut guard = REGISTRY.lock();
-    guard.get_or_insert_with(HashMap::new).insert(id, node);
+    guard
+        .get_or_insert_with(HashMap::new)
+        .insert(id, Row { refs: 1, node });
     id
+}
+
+/// Takes a reference to each row an adapter reads from.
+fn share(ids: &[i64]) {
+    let mut guard = REGISTRY.lock();
+    if let Some(table) = guard.as_mut() {
+        for id in ids {
+            if let Some(row) = table.get_mut(id) {
+                row.refs += 1;
+            }
+        }
+    }
+}
+
+/// Gives back one reference to row `id`; the last one removes the row and
+/// gives back the references it held to the rows it reads from.
+pub fn retire(id: i64) {
+    let mut pending = vec![id];
+    while let Some(id) = pending.pop() {
+        let mut guard = REGISTRY.lock();
+        let Some(table) = guard.as_mut() else {
+            return;
+        };
+        let Some(row) = table.get_mut(&id) else {
+            continue;
+        };
+        row.refs = row.refs.saturating_sub(1);
+        if row.refs > 0 {
+            continue;
+        }
+        if let Some(row) = table.remove(&id) {
+            match row.node {
+                Node::Limit { src, .. } => pending.push(src),
+                Node::Tee { src, sink } => pending.extend([src, sink]),
+                Node::Multi { sources, .. } => pending.extend(sources),
+                Node::Memory { .. } | Node::Buffer(_) | Node::Pipe(_) => {}
+            }
+        }
+    }
+}
+
+/// Whether row `id` is still registered.
+#[cfg(test)]
+fn is_live(id: i64) -> bool {
+    REGISTRY
+        .lock()
+        .as_ref()
+        .is_some_and(|table| table.contains_key(&id))
 }
 
 /// Registers an in-memory reader over `text`; returns its handle.
@@ -71,6 +130,7 @@ pub fn buffer_writer() -> i64 {
 /// Registers a reader yielding at most `limit` bytes from `src`.
 #[must_use]
 pub fn limit_reader(src: i64, limit: i64) -> i64 {
+    share(&[src]);
     insert(Node::Limit {
         src,
         remaining: limit.max(0),
@@ -81,12 +141,14 @@ pub fn limit_reader(src: i64, limit: i64) -> i64 {
 /// `sink` before returning it.
 #[must_use]
 pub fn tee_reader(src: i64, sink: i64) -> i64 {
+    share(&[src, sink]);
     insert(Node::Tee { src, sink })
 }
 
 /// Registers a reader that drains each source in turn.
 #[must_use]
 pub fn multi_reader(sources: Vec<i64>) -> i64 {
+    share(&sources);
     insert(Node::Multi { sources, index: 0 })
 }
 
@@ -114,7 +176,7 @@ fn step(id: i64, max: usize) -> Step {
     let Some(table) = guard.as_mut() else {
         return Step::Exhausted;
     };
-    match table.get_mut(&id) {
+    match table.get_mut(&id).map(|row| &mut row.node) {
         Some(Node::Memory { data, pos }) => {
             let end = (*pos + max).min(data.len());
             let out = data[*pos..end].to_vec();
@@ -149,14 +211,21 @@ fn step(id: i64, max: usize) -> Step {
 
 fn consume_limit(id: i64, n: i64) {
     let mut guard = REGISTRY.lock();
-    if let Some(Node::Limit { remaining, .. }) = guard.as_mut().and_then(|t| t.get_mut(&id)) {
+    if let Some(Node::Limit { remaining, .. }) = guard
+        .as_mut()
+        .and_then(|t| t.get_mut(&id))
+        .map(|row| &mut row.node)
+    {
         *remaining = (*remaining - n).max(0);
     }
 }
 
 fn advance_multi(id: i64, from: usize) {
     let mut guard = REGISTRY.lock();
-    if let Some(Node::Multi { index, .. }) = guard.as_mut().and_then(|t| t.get_mut(&id))
+    if let Some(Node::Multi { index, .. }) = guard
+        .as_mut()
+        .and_then(|t| t.get_mut(&id))
+        .map(|row| &mut row.node)
         && *index == from
     {
         *index += 1;
@@ -206,7 +275,7 @@ pub fn write(id: i64, bytes: &[u8]) -> usize {
     let Some(table) = guard.as_mut() else {
         return 0;
     };
-    match table.get_mut(&id) {
+    match table.get_mut(&id).map(|row| &mut row.node) {
         Some(Node::Buffer(buf)) => {
             buf.extend_from_slice(bytes);
             bytes.len()
@@ -260,7 +329,7 @@ pub fn drain(id: i64) -> String {
 #[must_use]
 pub fn contents(id: i64) -> String {
     let guard = REGISTRY.lock();
-    let bytes = match guard.as_ref().and_then(|t| t.get(&id)) {
+    let bytes = match guard.as_ref().and_then(|t| t.get(&id)).map(|row| &row.node) {
         Some(Node::Buffer(buf)) => buf.clone(),
         Some(Node::Pipe(shared)) => shared.bytes.lock().clone(),
         _ => Vec::new(),
@@ -271,7 +340,7 @@ pub fn contents(id: i64) -> String {
 /// Marks a pipe writer closed so its reader stops accepting writes.
 pub fn close_writer(id: i64) {
     let guard = REGISTRY.lock();
-    if let Some(Node::Pipe(shared)) = guard.as_ref().and_then(|t| t.get(&id)) {
+    if let Some(Node::Pipe(shared)) = guard.as_ref().and_then(|t| t.get(&id)).map(|row| &row.node) {
         shared.closed.store(true, Ordering::Release);
     }
 }
@@ -279,6 +348,38 @@ pub fn close_writer(id: i64) {
 #[cfg(test)]
 mod io_handles_tests {
     use super::*;
+
+    #[test]
+    fn adapters_keep_their_sources_until_the_last_reference_goes() {
+        let src = string_reader("abcdef");
+        let sink = buffer_writer();
+        let limited = limit_reader(src, 4);
+        let teed = tee_reader(limited, sink);
+        // The handles naming the source and the limit go; the tee still reads
+        // through both.
+        retire(src);
+        retire(limited);
+        assert!(is_live(src) && is_live(limited));
+        assert_eq!(drain(teed), "abcd");
+        retire(teed);
+        assert!(!is_live(teed) && !is_live(limited) && !is_live(src));
+        // The sink's own handle keeps it after the tee is gone.
+        assert_eq!(contents(sink), "abcd");
+        retire(sink);
+        assert!(!is_live(sink));
+    }
+
+    #[test]
+    fn a_multi_reader_gives_back_every_source() {
+        let a = string_reader("one ");
+        let b = string_reader("two");
+        let all = multi_reader(vec![a, b]);
+        retire(a);
+        retire(b);
+        assert_eq!(drain(all), "one two");
+        retire(all);
+        assert!(!is_live(all) && !is_live(a) && !is_live(b));
+    }
 
     #[test]
     fn limit_reader_stops_at_its_budget() {

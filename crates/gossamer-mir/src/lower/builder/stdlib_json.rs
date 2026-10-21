@@ -372,32 +372,38 @@ impl<'a> Builder<'a> {
             while let gossamer_types::TyKind::Ref { inner, .. } = self.tcx.kind_of(peeled) {
                 peeled = *inner;
             }
-            if let gossamer_types::TyKind::Adt { def, .. } = self.tcx.kind_of(peeled).clone() {
-                if let Some(result) = self.lower_json_encode_stream(args, peeled, span, pretty) {
-                    return Some(result);
-                }
-                if let Some(result) = self.lower_json_render_adt(args, def, span, pretty) {
-                    return Some(result);
-                }
+            let adt_def = match self.tcx.kind_of(peeled) {
+                gossamer_types::TyKind::Adt { def, .. } => Some(*def),
+                _ => None,
+            };
+            if adt_def.is_some()
+                && let Some(result) = self.lower_json_encode_stream(args, peeled, span, pretty)
+            {
+                return Some(result);
+            }
+            // The argument is evaluated once, whichever walk renders it.
+            let value_local = self.lower_expr(&args[0])?;
+            if let Some(def) = adt_def
+                && let Some(json_obj) = self.build_struct_json_object(value_local, def, span)
+            {
+                return Some(self.render_json_value(json_obj, span, pretty));
             }
             // Scalar / array / json::Value args. `gos_rt_json_render`
             // dereferences its argument as a `*GosJson`, so a bare i64
             // (`encode(42)`) would be read as a wild pointer and a typed
             // scalar `*GosVec` (`encode([1,2,3])`) would be misread as a
             // Value. Box the argument into a `*GosJson` first.
-            if let Some(result) = self.lower_json_render_value(args, peeled, span, pretty) {
+            if let Some(result) = self.lower_json_render_value(value_local, peeled, span, pretty) {
                 return Some(result);
             }
             // An aggregate the scalar boxing does not cover - a sequence of
             // structs, a tuple, a nested sequence - is walked element by
             // element. A shape neither reaches renders as `null` rather than
             // handing the renderer something that is not a `*GosJson`.
-            if let Some(value_local) = self.lower_expr(&args[0]) {
-                let json_local = self
-                    .build_json_value(value_local, peeled, span)
-                    .unwrap_or_else(|| self.build_json_null(span));
-                return Some(self.render_json_value(json_local, span, pretty));
-            }
+            let json_local = self
+                .build_json_value(value_local, peeled, span)
+                .unwrap_or_else(|| self.build_json_null(span));
+            return Some(self.render_json_value(json_local, span, pretty));
         }
         // Only the leading value arg crosses the FFI for the renderers;
         // `encode_pretty`'s optional indent arg is dropped here so the
@@ -475,18 +481,6 @@ impl<'a> Builder<'a> {
         });
         self.set_current(next);
         Some(dest)
-    }
-
-    pub(crate) fn lower_json_render_adt(
-        &mut self,
-        args: &[HirExpr],
-        def: gossamer_resolve::DefId,
-        span: Span,
-        pretty: bool,
-    ) -> Option<Local> {
-        let struct_local = self.lower_expr(&args[0])?;
-        let json_obj = self.build_struct_json_object(struct_local, def, span)?;
-        Some(self.render_json_value(json_obj, span, pretty))
     }
 
     /// Emits the calls that turn one already-lowered struct local into a
@@ -1333,7 +1327,7 @@ impl<'a> Builder<'a> {
     /// caller fall through.
     pub(crate) fn lower_json_render_value(
         &mut self,
-        args: &[HirExpr],
+        arg_local: Local,
         value_ty: gossamer_types::Ty,
         span: Span,
         pretty: bool,
@@ -1341,7 +1335,6 @@ impl<'a> Builder<'a> {
         use gossamer_types::TyKind;
         let string_ty = self.tcx.string_ty();
         let json_val_ty = self.tcx.json_value_ty();
-        let arg_local = self.lower_expr(&args[0])?;
 
         // Produce a `*GosJson` local from the argument.
         let json_local = match self.tcx.kind_of(value_ty).clone() {

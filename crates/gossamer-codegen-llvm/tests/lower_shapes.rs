@@ -97,6 +97,9 @@ fn build_binop_main(op: BinOp, lhs: i64, rhs: i64) -> (Body, TyCtxt) {
             terminator_inlined: None,
         }],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (body, tcx)
 }
@@ -123,6 +126,9 @@ fn build_const_int_main(value: i64) -> (Body, TyCtxt) {
             terminator_inlined: None,
         }],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (body, tcx)
 }
@@ -170,6 +176,9 @@ fn build_integer_abs_main() -> (Body, TyCtxt) {
             terminator_inlined: None,
         }],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (body, tcx)
 }
@@ -231,6 +240,9 @@ fn build_vec_pop_main() -> (Body, TyCtxt) {
             },
         ],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (body, tcx)
 }
@@ -297,6 +309,9 @@ fn build_chan_recv_option_main(try_recv: bool) -> (Body, TyCtxt) {
             },
         ],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (body, tcx)
 }
@@ -364,6 +379,9 @@ fn build_vec_swap_main() -> (Body, TyCtxt) {
             },
         ],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (body, tcx)
 }
@@ -428,6 +446,9 @@ fn build_string_map_capacity_main() -> (Body, TyCtxt) {
             },
         ],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (body, tcx)
 }
@@ -676,6 +697,9 @@ fn large_fixed_array_local_spills_to_heap_storage() {
             terminator_inlined: None,
         }],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
 
     let ir = render_ir_to_string(&[body], &tcx, false).unwrap();
@@ -695,7 +719,7 @@ fn large_fixed_array_local_spills_to_heap_storage() {
 }
 
 #[test]
-fn fixed_u8_array_uses_packed_native_storage() {
+fn fixed_u8_array_keeps_one_slot_per_element() {
     let mut tcx = TyCtxt::new();
     let unit_ty = tcx.intern(TyKind::Unit);
     let u8_ty = tcx.intern(TyKind::Int(IntTy::U8));
@@ -740,15 +764,16 @@ fn fixed_u8_array_uses_packed_native_storage() {
             terminator_inlined: None,
         }],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
 
+    // A byte array is laid out as every tier, descriptor, and runtime walk
+    // reads it: one word per element.
     let ir = render_ir_to_string(&[body], &tcx, false).unwrap();
-    assert!(ir.contains("alloca [64 x i8]"), "IR was:\n{ir}");
-    assert!(
-        ir.contains("@llvm.memset.p0.i64(ptr %l1, i8 0, i64 64"),
-        "IR was:\n{ir}"
-    );
-    assert!(!ir.contains("alloca [64 x i64]"), "IR was:\n{ir}");
+    assert!(ir.contains("alloca [64 x i64]"), "IR was:\n{ir}");
+    assert!(!ir.contains("alloca [64 x i8]"), "IR was:\n{ir}");
 }
 
 #[test]
@@ -931,6 +956,9 @@ fn build_ffi_put_main(
             terminator_inlined: None,
         }],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (body, tcx)
 }
@@ -1012,6 +1040,9 @@ fn build_ffi_scalar_main(
             terminator_inlined: None,
         }],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (body, tcx)
 }
@@ -1108,8 +1139,52 @@ fn build_unit_intrinsic_main(helper: &'static str, args: Vec<Operand>) -> (Body,
             terminator_inlined: None,
         }],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (body, tcx)
+}
+
+#[test]
+fn native_static_finalizer_is_shared_across_stores_and_functions() {
+    let (mut body, mut tcx) = build_binop_main(BinOp::Add, 1, 2);
+    let text_ty = tcx.intern(TyKind::String);
+    let target = gossamer_mir::StaticRef {
+        symbol: "gos_static_cleanup_test".to_string(),
+        ty: text_ty,
+        init: ConstValue::Int(0),
+    };
+    let store = |text: &str| Statement {
+        span: dummy_span(),
+        inlined: None,
+        kind: StatementKind::StaticStore {
+            target: target.clone(),
+            value: Operand::Const(ConstValue::Str(text.to_string())),
+        },
+    };
+    body.blocks[0].stmts.insert(0, store("first"));
+    body.blocks[0].stmts.push(store("second"));
+    let mut other = body.clone();
+    other.name = "replace_static".to_string();
+    let ir = render_ir_to_string(&[body, other], &tcx, false).unwrap();
+    assert_eq!(
+        ir.matches("define linkonce_odr void @gos_static_cleanup_test__drop()")
+            .count(),
+        1,
+        "{ir}"
+    );
+    assert_eq!(
+        ir.matches("call void @gos_rt_register_static_drop(")
+            .count(),
+        4,
+        "{ir}"
+    );
+    assert!(ir.contains("call void @gos_rt_str_free_typed("), "{ir}");
+    assert!(
+        ir.contains("store ptr null, ptr @gos_static_cleanup_test"),
+        "{ir}"
+    );
 }
 
 fn gos_main_ir(body: Body, tcx: &TyCtxt) -> String {
@@ -1202,6 +1277,9 @@ fn build_byte_array_answer() -> (Vec<Body>, TyCtxt) {
             Terminator::Return,
         )],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     let main = Body {
         name: "main".to_string(),
@@ -1225,6 +1303,9 @@ fn build_byte_array_answer() -> (Vec<Body>, TyCtxt) {
             block(1, Vec::new(), Terminator::Return),
         ],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (vec![fill, main], tcx)
 }
@@ -1289,6 +1370,9 @@ fn build_triple_param_call(args: Vec<Operand>) -> (Vec<Body>, TyCtxt) {
             Terminator::Return,
         )],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     let main = Body {
         name: "main".to_string(),
@@ -1312,6 +1396,9 @@ fn build_triple_param_call(args: Vec<Operand>) -> (Vec<Body>, TyCtxt) {
             block(1, Vec::new(), Terminator::Return),
         ],
         span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
     };
     (vec![first, main], tcx)
 }
@@ -1347,4 +1434,28 @@ fn an_aggregate_passed_twice_reaches_the_callee_as_two_copies() {
         2,
         "each `noalias` parameter gets storage of its own:\n{main}"
     );
+}
+
+#[test]
+fn boxed_enum_payload_clones_containers_in_the_destination() {
+    let (bodies, tcx) = build_from_source(
+        r#"
+enum Page { Empty, Tabs(Tabs), Child(Page) }
+struct Meta { label: String, labels: Vec<String> }
+struct Tabs { id: String, pages: Map<String, Page>, values: Set<String>, meta: Option<Meta> }
+impl Page {
+    fn id(&self) -> String { match self { Page::Tabs(t) => t.id, _ => "" } }
+}
+fn main() {
+    let p = Page::Tabs(Tabs { id: "tabs", pages: Map::new(), values: Set::new(), meta: Some(Meta { label: "meta", labels: #["kept"] }) })
+    println(p.id())
+}
+"#,
+    );
+    let ir = render_ir_to_string(&bodies, &tcx, false).unwrap();
+    let body = body_text(&ir, "define ptr @\"Page::id\"(");
+    assert!(body.contains("@gos_rt_map_field_clone"), "{body}");
+    assert!(body.contains("@gos_rt_set_field_clone"), "{body}");
+    assert!(body.contains("@gos_rt_aggr_retain_children"), "{body}");
+    assert!(!body.contains("@gos_rt_rc_retain_children"), "{body}");
 }

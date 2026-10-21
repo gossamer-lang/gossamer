@@ -1,0 +1,44 @@
+// A newtype read from a struct field keeps its representation's layout, so a
+// variant payload built from it, in any field order, stores the same word a
+// value from a method or a literal would.
+newtype WindowId = u32
+
+struct Native { handle: i64, id: WindowId }
+
+impl Native {
+    fn id(&self) -> WindowId { self.id }
+}
+
+struct Window { name: String, native: Native }
+
+struct Rect { x: i64 }
+
+impl Rect {
+    fn center(&self) -> i64 { self.x + 1 }
+}
+
+enum Event {
+    Wheel { window: WindowId, dx: f64, x: f64 }
+    Close(WindowId)
+}
+
+fn describe(e: Event) -> String {
+    match e {
+        Event::Wheel { window, dx, x } => f"wheel {window} {dx} {x}"
+        Event::Close(w) => f"close {w}"
+    }
+}
+
+fn main() {
+    let windows = #[Window { name: "main", native: Native { handle: 1, id: 7u32.into() } }]
+    let r = Rect { x: 4 }
+    let events = #[
+        Event::Wheel { window: windows[0].native.id, x: r.center() as f64, dx: 1.5 }
+        Event::Wheel { window: windows[0].native.id(), x: 2.0, dx: -3.0 }
+        Event::Close(windows[0].native.id)
+    ]
+    for e in events {
+        println(describe(e))
+    }
+    println(windows[0].name)
+}
