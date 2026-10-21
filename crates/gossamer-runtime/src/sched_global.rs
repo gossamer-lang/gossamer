@@ -56,6 +56,7 @@ struct Globals {
     gid_alloc: AtomicU64,
     /// Set after the poller thread has been started.
     poller_started: AtomicBool,
+    poller_thread: Mutex<Option<thread::JoinHandle<()>>>,
     /// Set by [`request_shutdown`] to ask the poller loop to exit
     /// cleanly so the runtime can flush in-flight I/O before
     /// `gos_rt_exit`. Without this signal the poller thread was
@@ -82,6 +83,7 @@ fn globals() -> &'static Globals {
             wakers: Mutex::new(WakerMap::new()),
             gid_alloc: AtomicU64::new(1_000_000),
             poller_started: AtomicBool::new(false),
+            poller_thread: Mutex::new(None),
             poller_shutdown: AtomicBool::new(false),
         }
     })
@@ -108,10 +110,11 @@ fn ensure_poller_thread(g: &'static Globals) {
     if g.poller_started.swap(true, Ordering::AcqRel) {
         return;
     }
-    thread::Builder::new()
+    let thread = thread::Builder::new()
         .name("gos-netpoller".to_string())
         .spawn(poller_loop)
         .expect("spawn netpoller thread");
+    *g.poller_thread.lock() = Some(thread);
 }
 
 fn poller_loop() {
@@ -169,6 +172,37 @@ pub fn drain_goroutines_for_exit() {
             .scheduler
             .wait_quiescent(std::time::Duration::from_secs(5));
     }
+}
+
+/// Whether native main can release process-owned values without racing live
+/// goroutines, including services excluded from the bounded exit drain.
+pub(crate) fn program_storage_is_idle() -> bool {
+    GLOBALS
+        .get()
+        .is_none_or(|g| g.scheduler.live_goroutines() == 0)
+}
+
+/// Stops native program runtime threads after all user goroutines finish.
+/// Embedders keep their runtime alive for later calls.
+pub(crate) fn finish_idle_runtime() -> bool {
+    if !program_entered() {
+        return true;
+    }
+    if !crate::blocking_pool::shutdown_idle() {
+        return false;
+    }
+    if let Some(g) = GLOBALS.get() {
+        if !g.scheduler.shutdown_and_join_idle() {
+            return false;
+        }
+        request_shutdown();
+        if let Some(thread) = g.poller_thread.lock().take() {
+            let _ = thread.join();
+        }
+        g.wakers.lock().shrink_to_fit();
+    }
+    crate::preempt::shutdown_idle();
+    true
 }
 
 /// True if [`request_shutdown`] has been called. Long-running
@@ -682,13 +716,8 @@ pub fn note_scheduler_progress() {
     SCHEDULER_EPOCH.fetch_add(1, Ordering::AcqRel);
 }
 
-/// The OS thread a compiled program's `main` runs on.
-static MAIN_THREAD: OnceLock<std::thread::ThreadId> = OnceLock::new();
-
 fn is_main_thread() -> bool {
-    MAIN_THREAD
-        .get()
-        .is_some_and(|id| *id == std::thread::current().id())
+    on_main_thread()
 }
 
 /// What `main` is waiting on while it waits on the program's goroutines.
@@ -873,7 +902,6 @@ pub fn on_main_thread() -> bool {
 /// shim a compiled binary emits, and from nowhere else.
 pub fn mark_program_entered() {
     mark_main_thread();
-    let _ = MAIN_THREAD.set(std::thread::current().id());
     PROGRAM_ENTERED.store(true, Ordering::Release);
 }
 

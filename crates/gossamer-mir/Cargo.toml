@@ -19,6 +19,10 @@ gossamer-resolve = { workspace = true }
 gossamer-types = { workspace = true }
 gossamer-abi = { workspace = true }
 
+# Bodies are finished in parallel where threads exist.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = { workspace = true }
+
 [dev-dependencies]
 gossamer-parse = { workspace = true }
 gossamer-pkg = { workspace = true }

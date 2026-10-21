@@ -1023,7 +1023,7 @@ fn builtin_fs_list_dir(args: &[Value]) -> RuntimeResult<Value> {
     };
     let path = gossamer_runtime::comptime_paths::resolve(path);
     crate::comptime_gate::guard_read("fs::read_dir", &path)?;
-    let entries = match fs_std::read_dir(fs_std::decode_path(&path)) {
+    let entries = match gossamer_runtime::dir_scan::scan_dir(&fs_std::decode_path(&path)) {
         Ok(es) => es,
         Err(e) => return Ok(err_variant(format!("{e}"))),
     };
@@ -1033,36 +1033,30 @@ fn builtin_fs_list_dir(args: &[Value]) -> RuntimeResult<Value> {
 
 /// Builds the `DirInfo` struct value shared by `fs::read_dir` and
 /// `fs::walk_dir`; field order matches the compiled tier's blob.
-fn dir_info_fields(entry: &fs_std::DirEntry) -> Vec<(&'static str, Value)> {
+fn dir_info_fields(
+    entry: &gossamer_runtime::dir_scan::ScannedEntry,
+) -> Vec<(&'static str, Value)> {
+    let path_str = fs_std::encode_path(&entry.path);
     // Every entry a compile-time listing hands back is an input of the
     // fold: its name, size, and modification time are all values the
     // region can compile into the program. A walk reaches each
     // directory it descends into through here too, so recording the
     // entry covers the whole tree rather than only the root.
-    gossamer_runtime::comptime_inputs::record(&fs_std::encode_path(&entry.path));
-    let (size, modified_ms) = std::fs::metadata(&entry.path).map_or((0_i64, 0_i64), |m| {
-        let size = i64::try_from(m.len()).unwrap_or(i64::MAX);
-        let modified_ms = m
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
-        (size, modified_ms)
-    });
-    let path_str = fs_std::encode_path(&entry.path);
+    gossamer_runtime::comptime_inputs::record(&path_str);
+    let name = fs_std::encode_path(std::path::Path::new(&entry.name));
     vec![
-        ("name", Value::String(SmolStr::from(entry.name.clone()))),
+        ("name", Value::String(SmolStr::from(name))),
         ("path", Value::String(SmolStr::from(path_str))),
         ("is_file", Value::Bool(entry.is_file)),
         ("is_dir", Value::Bool(entry.is_dir)),
         ("is_symlink", Value::Bool(entry.is_symlink)),
-        ("size", Value::Int(size)),
-        ("modified_ms", Value::Int(modified_ms)),
+        ("size", Value::Int(entry.size)),
+        ("modified_ms", Value::Int(entry.modified_ms)),
     ]
 }
 
 /// The `DirInfo` struct value `fs::walk_dir` hands its visitor.
-fn dir_info_value(entry: &fs_std::DirEntry) -> Value {
+fn dir_info_value(entry: &gossamer_runtime::dir_scan::ScannedEntry) -> Value {
     Value::struct_("DirInfo", dir_info_fields(entry))
 }
 
@@ -1075,7 +1069,7 @@ pub(crate) fn builtin_fs_read_dir_raw(args: &[Value]) -> RuntimeResult<Value> {
     };
     let path = gossamer_runtime::comptime_paths::resolve(path);
     crate::comptime_gate::guard_read("fs::read_dir", &path)?;
-    let entries = match fs_std::read_dir(fs_std::decode_path(&path)) {
+    let entries = match gossamer_runtime::dir_scan::scan_dir(&fs_std::decode_path(&path)) {
         Ok(es) => es,
         Err(e) => return Ok(err_variant(format!("{e}"))),
     };
@@ -1115,7 +1109,7 @@ fn native_fs_walk_dir(dispatch: &mut dyn NativeDispatch, args: &[Value]) -> Runt
 fn walk_dir_with(
     dispatch: &mut dyn NativeDispatch,
     args: &[Value],
-    entry_value: impl Fn(&fs_std::DirEntry) -> Value,
+    entry_value: impl Fn(&gossamer_runtime::dir_scan::ScannedEntry) -> Value,
 ) -> RuntimeResult<Value> {
     let Some(root) = args.first().and_then(as_str) else {
         return Ok(err_variant("fs::walk_dir: root argument must be a string"));
@@ -1125,16 +1119,16 @@ fn walk_dir_with(
     let mut fault: Option<RuntimeError> = None;
     let root = gossamer_runtime::comptime_paths::resolve(root);
     crate::comptime_gate::guard_read("fs::walk_dir", &root)?;
-    let visit_result = fs_std::walk_dir(fs_std::decode_path(&root), |entry| {
+    let visit_result = gossamer_runtime::dir_scan::walk(&fs_std::decode_path(&root), |entry| {
         match dispatch.call_value(&visit, vec![entry_value(entry)]) {
             Ok(Value::Variant(v)) if v.name == "Err" => {
                 stop_err = Some(v.fields.first().cloned().unwrap_or(Value::Unit));
-                Err(std::io::Error::other("gossamer visitor stop"))
+                std::ops::ControlFlow::Break(())
             }
-            Ok(_) => Ok(()),
+            Ok(_) => std::ops::ControlFlow::Continue(()),
             Err(e) => {
                 fault = Some(e);
-                Err(std::io::Error::other("gossamer visitor fault"))
+                std::ops::ControlFlow::Break(())
             }
         }
     });
@@ -1145,7 +1139,7 @@ fn walk_dir_with(
         return Ok(Value::variant("Err", vec![payload]));
     }
     match visit_result {
-        Ok(()) => Ok(ok_variant(Value::Unit)),
+        Ok(_) => Ok(ok_variant(Value::Unit)),
         Err(e) => Ok(err_variant(format!("{e}"))),
     }
 }

@@ -22,5 +22,6 @@ include!("opt/csv_tables.rs");
 include!("opt/field_count_loops.rs");
 include!("opt/pop_into.rs");
 include!("opt/exit_releases.rs");
+include!("opt/region_pops.rs");
 include!("opt/move_forward.rs");
 include!("opt/tests.rs");

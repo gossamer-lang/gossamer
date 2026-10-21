@@ -220,12 +220,14 @@ fn fetch_both(a: String, b: String) -> Result<(), errors::Error> {
 }
 ```
 
-`select` is Go-shaped:
+`select` is Go-shaped, with Go's `v, ok := <-rx` spelled as the
+`Option` the receive answers:
 
 <!-- fragment -->
 ```gos
 select {
-    v = rx.recv() => println("got {v}")
+    Some(v) = rx.recv() => println("got {v}")
+    None = rx.recv() => println("closed")
     tx.send(42) => println("sent")
     default => println("would block")
 }

@@ -66,7 +66,6 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use crate::BuildError;
-use crate::ty::packed_byte_array_len;
 use anyhow::Result;
 use gossamer_abi as abi;
 use gossamer_mir::{
@@ -340,11 +339,6 @@ impl<'a> Lowerer<'a> {
         let name = match gossamer_abi::checked_integer_entry(&name) {
             Some(checked) => checked.to_string(),
             None => name,
-        };
-        let name = if name == "gos_rt_bytearr_slice_result" {
-            "gos_rt_packed_bytearr_slice_result".to_string()
-        } else {
-            name
         };
         // `__concat` is the parser's lowering of `println!`-style
         // formatted output: it takes a heterogeneous arg list,
@@ -1296,78 +1290,6 @@ impl<'a> Lowerer<'a> {
             self.lower_hashmap_from_array(&args[0], destination, target)?;
             return Ok(());
         }
-        // A frame view over packed `[u8; N]` storage takes the packed stride.
-        if name == "gos_rt_vec_borrow_arr_into"
-            && args.get(2).is_some_and(|arg| {
-                matches!(
-                    arg,
-                    Operand::Copy(place)
-                        if place.projection.is_empty()
-                            && packed_byte_array_len(self.tcx, self.body.local_ty(place.local))
-                                .is_some()
-                )
-            })
-        {
-            return self.emit_named_call(
-                "gos_rt_vec_borrow_packed_arr_into",
-                args,
-                destination,
-                target,
-            );
-        }
-        if matches!(
-            name.as_str(),
-            "gos_rt_vec_from_arr" | "gos_rt_vec_borrow_arr"
-        ) && args.get(1).is_some_and(|arg| {
-            matches!(
-                arg,
-                Operand::Copy(place)
-                    if place.projection.is_empty()
-                        && packed_byte_array_len(self.tcx, self.body.local_ty(place.local))
-                            .is_some()
-            )
-        }) {
-            let symbol = if name == "gos_rt_vec_borrow_arr" {
-                "gos_rt_vec_borrow_packed_arr"
-            } else {
-                "gos_rt_vec_from_packed_arr"
-            };
-            declare_rt(&mut self.runtime_refs, symbol);
-            let elem_bytes = if let Some(arg) = args.first() {
-                self.lower_operand(arg)?
-            } else {
-                "1".to_string()
-            };
-            let elem_bytes_i32 = self.fresh();
-            writeln!(
-                self.out,
-                "  {elem_bytes_i32} = trunc i64 {elem_bytes} to i32"
-            )
-            .unwrap();
-            let data = self.lower_operand(&args[1])?;
-            let data_ptr = self.coerce_llvm_value(&data, &self.operand_llvm_ty(&args[1]), "ptr");
-            let len = if let Some(arg) = args.get(2) {
-                self.lower_operand(arg)?
-            } else {
-                "0".to_string()
-            };
-            let len_i64 = self.coerce_llvm_value(
-                &len,
-                &args
-                    .get(2)
-                    .map_or("i64".to_string(), |arg| self.operand_llvm_ty(arg)),
-                "i64",
-            );
-            let tmp = self.fresh();
-            writeln!(
-                self.out,
-                "  {tmp} = call ptr @\"{symbol}\"(i32 {elem_bytes_i32}, ptr {data_ptr}, i64 {len_i64})"
-            )
-            .unwrap();
-            self.store_value_to_place(destination, "ptr", &tmp);
-            emit_terminator_branch(&mut self.out, target);
-            return Ok(());
-        }
         let mapped = map_prelude_symbol(&name);
         // `map_prelude_symbol` returns the name unchanged only for a
         // user-defined function (every runtime/prelude name maps to a
@@ -1455,6 +1377,20 @@ impl<'a> Lowerer<'a> {
                     ));
                 }
             };
+            // Each insert consumes a share of the strings it is handed, and
+            // the array keeps the shares it holds, so the insert is handed
+            // shares of its own.
+            for (slot, ty) in [(&key, *key_ty), (&val, *val_ty)] {
+                if slot.llvm_ty == "ptr" && matches!(self.tcx.kind(ty), Some(TyKind::String)) {
+                    declare_rt(&mut self.runtime_refs, "gos_rt_str_retain_typed");
+                    writeln!(
+                        self.out,
+                        "  call void @gos_rt_str_retain_typed(ptr {})",
+                        slot.value
+                    )
+                    .unwrap();
+                }
+            }
             declare_rt(&mut self.runtime_refs, helper);
             writeln!(
                 self.out,
@@ -1984,12 +1920,10 @@ impl<'a> Lowerer<'a> {
                     .unwrap();
                     // A view of a box its caller keeps takes no shares.
                     if !gossamer_mir::is_payload_view(args) {
-                        declare_rt(&mut self.runtime_refs, "gos_rt_rc_retain_children");
-                        writeln!(
-                            self.out,
-                            "  call void @gos_rt_rc_retain_children(ptr {boxp})"
-                        )
-                        .unwrap();
+                        // The binding owns its copied fields. Counted children
+                        // need shares, while maps and other unique containers
+                        // need replacement handles in the destination slots.
+                        self.static_aggregate_children(dest_ty_mir, &slot, true, true);
                     }
                     writeln!(self.out, "  br label %{after_l}").unwrap();
                     writeln!(self.out, "{after_l}:").unwrap();
@@ -2134,6 +2068,16 @@ impl<'a> Lowerer<'a> {
                         "  call void @gos_rt_race_access(i64 {addr_int}, i32 0)"
                     )
                     .unwrap();
+                }
+                // A two-word value is held in both of its words.
+                if dest_ty == "i128" && self.tcx.is_two_word_value(dest_ty_mir) {
+                    let wide = self.fresh();
+                    writeln!(self.out, "  {wide} = load i128, ptr {addr}").unwrap();
+                    self.store_value_to_place(destination, "i128", &wide);
+                    if target.is_some() {
+                        emit_terminator_branch(&mut self.out, target);
+                    }
+                    return Ok(());
                 }
                 let loaded = self.fresh();
                 writeln!(self.out, "  {loaded} = load i64, ptr {addr}").unwrap();

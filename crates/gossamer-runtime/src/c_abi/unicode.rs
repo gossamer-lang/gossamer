@@ -321,9 +321,16 @@ pub unsafe extern "C" fn gos_rt_unicode_fold_case(s: *const c_char) -> *mut c_ch
         // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
         // `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
-        let out: String = text.chars().flat_map(char::to_lowercase).collect();
-        alloc_cstring(out.as_bytes())
+        alloc_cstring(fold_case(text).as_bytes())
     })
+}
+
+/// Unicode case folding (CaseFolding.txt statuses C and F): the form two
+/// strings share exactly when they match case-insensitively, `ß` folding to
+/// `ss` and final sigma to sigma.
+#[must_use]
+pub fn fold_case(text: &str) -> String {
+    unicase::UniCase::new(text).to_folded_case()
 }
 
 // ---------------------------------------------------------------

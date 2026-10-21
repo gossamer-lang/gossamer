@@ -64,6 +64,57 @@ fn patterns_that_may_not_match_are_refused_where_every_value_must() {
 }
 
 #[test]
+fn a_select_receive_binds_the_option_and_refuses_a_pattern_it_could_not_fill() {
+    let ok = "use std::sync::channel_unbounded\n\
+              enum Cmd { Go(i64), Stop }\n\
+              fn main() {\n\
+              \x20   let tx, rx = channel_unbounded()\n\
+              \x20   tx.send(Cmd::Go(1))\n\
+              \x20   tx.close()\n\
+              \x20   for _ in 0..3 {\n\
+              \x20       select {\n\
+              \x20           Some(c) = rx.recv() => match c { Cmd::Go(n) => println(f\"go {n}\"), Cmd::Stop => println(\"stop\") }\n\
+              \x20           None = rx.recv() => println(\"closed\")\n\
+              \x20       }\n\
+              \x20   }\n\
+              }\n";
+    let out = gos(&["run"], ok, "select_option");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "go 1\nclosed\nclosed\n"
+    );
+    let refused = "use std::sync::channel_unbounded\n\
+                   fn main() {\n\
+                   \x20   let tx, rx = channel_unbounded()\n\
+                   \x20   tx.send(3)\n\
+                   \x20   select { Some(3) = rx.recv() => println(\"three\"), default => () }\n\
+                   }\n";
+    let out = gos(&["check"], refused, "select_refutable");
+    let text = stderr(&out);
+    assert!(!out.status.success());
+    assert_eq!(text.matches("error[GT0047]").count(), 1, "{text}");
+}
+
+#[test]
+fn a_match_in_a_select_arm_is_checked_for_exhaustiveness() {
+    let source = "use std::sync::channel_unbounded\n\
+                  enum Cmd { Go(i64), Stop }\n\
+                  fn main() {\n\
+                  \x20   let tx, rx = channel_unbounded()\n\
+                  \x20   tx.send(Cmd::Stop)\n\
+                  \x20   select {\n\
+                  \x20       Some(c) = rx.recv() => match c { Cmd::Go(n) => println(f\"go {n}\") }\n\
+                  \x20       None = rx.recv() => println(\"closed\")\n\
+                  \x20   }\n\
+                  }\n";
+    let out = gos(&["check"], source, "select_exhaustive");
+    let text = stderr(&out);
+    assert!(!out.status.success());
+    assert!(text.contains("error[GM0001]"), "{text}");
+}
+
+#[test]
 fn a_match_arm_that_misspells_a_variant_names_it() {
     let source = "enum Shape { Circle, Square }\n\
                   fn main() {\n\

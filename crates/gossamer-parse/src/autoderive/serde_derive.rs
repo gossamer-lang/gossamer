@@ -246,7 +246,7 @@ fn classify_structs(
     aliases: &HashMap<String, gossamer_ast::Type>,
 ) -> Vec<(TyId, SerdeShape)> {
     let mut classified = Vec::new();
-    for (module, item) in flatten_items_with_modules(&parsed.items) {
+    for (module, item) in flatten_active_items_with_modules(&parsed.items) {
         let ItemKind::Struct(decl) = &item.kind else {
             continue;
         };
@@ -297,7 +297,7 @@ fn classify_enums(
     aliases: &HashMap<String, gossamer_ast::Type>,
 ) -> Vec<(TyId, SerdeShape)> {
     let mut classified = Vec::new();
-    for (module, item) in flatten_items_with_modules(&parsed.items) {
+    for (module, item) in flatten_active_items_with_modules(&parsed.items) {
         let ItemKind::Enum(decl) = &item.kind else {
             continue;
         };
@@ -534,6 +534,10 @@ fn ty_is_renderable_within(
         {
             true
         }
+        TypeKind::Path(path) if path.segments.len() > 1 => {
+            path.segments.iter().all(|segment| segment.generics.is_empty())
+                && formattable.contains(&type_path_spelling(path))
+        }
         TypeKind::Path(path) if path.segments.len() == 1 => {
             let seg = &path.segments[0];
             let name = seg.name.name.as_str();
@@ -659,49 +663,276 @@ fn is_noncomparable_head(name: &str) -> bool {
     )
 }
 
-/// A field type over which a synthesized `eq` and `cmp` are correct and
-/// lower identically on every tier: a scalar / `String` leaf, or a nested
-/// struct / enum already proven comparable. Containers, tuples, generic
-/// parameters, and channel / fn types are deliberately excluded - those need
-/// an explicit `#[derive(PartialEq)]` / `#[derive(Ord)]`, which force the
-/// synthesis without the by-value guarantee.
-fn ty_is_comparable(ty: &gossamer_ast::Type, comparable: &HashSet<String>) -> bool {
+/// Every non-generic alias and newtype declared under each name, from every
+/// module. Names collide across modules (`pub type Id = inner::Id` re-exports
+/// the `newtype Id` it names), so each name keeps all its targets.
+fn alias_candidates(items: &[Item]) -> HashMap<String, Vec<gossamer_ast::Type>> {
+    let mut out: HashMap<String, Vec<gossamer_ast::Type>> = HashMap::new();
+    for (_, item) in flatten_active_items_with_modules(items) {
+        if let ItemKind::TypeAlias(decl) = &item.kind
+            && decl.generics.params.is_empty()
+        {
+            out.entry(decl.name.name.clone()).or_default().push(decl.ty.clone());
+        }
+    }
+    out
+}
+
+/// Whether every type declared under the alias `name` satisfies `admits`.
+/// A target that names `name` again re-exports a declaration that is itself
+/// in the list, so it is skipped; at least one other target must remain.
+fn alias_targets_all(
+    name: &str,
+    aliases: &HashMap<String, Vec<gossamer_ast::Type>>,
+    depth: u32,
+    admits: impl Fn(&gossamer_ast::Type) -> bool,
+) -> bool {
+    if depth >= MAX_ALIAS_DEPTH {
+        return false;
+    }
+    let Some(targets) = aliases.get(name) else {
+        return false;
+    };
+    let mut real = targets
+        .iter()
+        .filter(|target| match &target.kind {
+            TypeKind::Path(path) => path.segments.last().is_none_or(|seg| seg.name.name != name),
+            _ => true,
+        })
+        .peekable();
+    real.peek().is_some() && real.all(admits)
+}
+
+/// Container heads whose `==` compares their contents on every tier, given
+/// element types that compare.
+fn is_equatable_container_head(name: &str) -> bool {
+    matches!(
+        name,
+        "Option" | "Result" | "Vec" | "Map" | "Set" | "BTreeMap" | "BTreeSet"
+    )
+}
+
+/// Container heads whose `<` orders their contents on every tier, given
+/// element types that order.
+fn is_orderable_container_head(name: &str) -> bool {
+    matches!(name, "Option" | "Result" | "Vec")
+}
+
+/// Whether every type argument of `seg` satisfies `admits`, the segment
+/// having at least one.
+fn generic_args_all(
+    seg: &gossamer_ast::TypePathSegment,
+    admits: impl Fn(&gossamer_ast::Type) -> bool,
+) -> bool {
+    !seg.generics.is_empty()
+        && seg.generics.iter().all(|arg| match arg {
+            gossamer_ast::GenericArg::Type(t) => admits(t),
+            gossamer_ast::GenericArg::Const(_) => false,
+        })
+}
+
+/// A field type over which a synthesized `eq` is correct and lowers
+/// identically on every tier: a scalar / `String` leaf, a nested struct /
+/// enum already proven comparable, an alias or newtype of one, or a tuple,
+/// array, `Option`, `Result`, sequence, map, or set of those. Generic
+/// parameters and channel / fn types are excluded; those need an explicit
+/// `#[derive(PartialEq)]`. `depth` bounds alias expansion, per
+/// [`MAX_ALIAS_DEPTH`].
+fn ty_is_comparable(
+    ty: &gossamer_ast::Type,
+    comparable: &HashSet<String>,
+    aliases: &HashMap<String, Vec<gossamer_ast::Type>>,
+    depth: u32,
+) -> bool {
+    let inner = |t: &gossamer_ast::Type| ty_is_comparable(t, comparable, aliases, depth);
     match &ty.kind {
-        TypeKind::Ref { inner, .. } => ty_is_comparable(inner, comparable),
+        TypeKind::Unit => true,
+        TypeKind::Ref { inner: t, .. } => inner(t),
+        TypeKind::Tuple(elems) => elems.iter().all(inner),
+        TypeKind::Array { elem, .. } | TypeKind::Slice(elem) => inner(elem),
         TypeKind::Path(path) => {
             let Some(seg) = path.segments.last() else {
                 return false;
             };
-            if !seg.generics.is_empty() {
-                return false;
+            if path.segments.len() > 1 && comparable.contains(&type_path_spelling(path)) {
+                return true;
             }
             let name = seg.name.name.as_str();
-            !is_noncomparable_head(name) && (is_scalar_fmt_name(name) || comparable.contains(name))
+            if !seg.generics.is_empty() {
+                return is_equatable_container_head(name) && generic_args_all(seg, inner);
+            }
+            if is_noncomparable_head(name) {
+                return false;
+            }
+            if is_scalar_fmt_name(name) || comparable.contains(name) {
+                return true;
+            }
+            alias_targets_all(name, aliases, depth, |target| {
+                ty_is_comparable(target, comparable, aliases, depth + 1)
+            })
         }
         _ => false,
     }
 }
 
-/// Like [`ty_is_comparable`] but for ordering (`cmp`), which additionally
-/// excludes `bool`: `<` on a `bool` does not lower on the compiled tiers, so a
-/// struct carrying a `bool` is equatable (`==`) but not auto-orderable - it
-/// gets `eq` but not `cmp`. (Equality on a `bool` field lowers fine.)
-fn ty_is_orderable(ty: &gossamer_ast::Type, orderable: &HashSet<String>) -> bool {
+/// Like [`ty_is_comparable`] but for ordering (`cmp`): maps and sets have no
+/// order, so a type holding one gets `eq` but not `cmp`.
+fn ty_is_orderable(
+    ty: &gossamer_ast::Type,
+    orderable: &HashSet<String>,
+    aliases: &HashMap<String, Vec<gossamer_ast::Type>>,
+    depth: u32,
+) -> bool {
+    let inner = |t: &gossamer_ast::Type| ty_is_orderable(t, orderable, aliases, depth);
     match &ty.kind {
-        TypeKind::Ref { inner, .. } => ty_is_orderable(inner, orderable),
+        TypeKind::Unit => true,
+        TypeKind::Ref { inner: t, .. } => inner(t),
+        TypeKind::Tuple(elems) => elems.iter().all(inner),
+        TypeKind::Array { elem, .. } | TypeKind::Slice(elem) => inner(elem),
         TypeKind::Path(path) => {
             let Some(seg) = path.segments.last() else {
                 return false;
             };
-            if !seg.generics.is_empty() {
-                return false;
+            if path.segments.len() > 1 && orderable.contains(&type_path_spelling(path)) {
+                return true;
             }
             let name = seg.name.name.as_str();
-            name != "bool"
-                && !is_noncomparable_head(name)
-                && (is_scalar_fmt_name(name) || orderable.contains(name))
+            if !seg.generics.is_empty() {
+                return is_orderable_container_head(name) && generic_args_all(seg, inner);
+            }
+            if is_noncomparable_head(name) {
+                return false;
+            }
+            if is_scalar_fmt_name(name) || orderable.contains(name) {
+                return true;
+            }
+            alias_targets_all(name, aliases, depth, |target| {
+                ty_is_orderable(target, orderable, aliases, depth + 1)
+            })
         }
         _ => false,
+    }
+}
+
+fn type_path_spelling(path: &gossamer_ast::TypePath) -> String {
+    path.segments.iter().map(|segment| segment.name.name.as_str()).collect::<Vec<_>>().join("::")
+}
+
+/// Each bare declaration name with the one declaration it names, or `None`
+/// when several declarations share it.
+fn unique_bare_declarations<'a>(
+    declarations: &'a HashMap<String, Vec<&gossamer_ast::Type>>,
+) -> HashMap<&'a str, Option<&'a str>> {
+    let mut index: HashMap<&str, Option<&str>> = HashMap::new();
+    for name in declarations.keys() {
+        let bare = name.rsplit("::").next().unwrap_or(name);
+        index
+            .entry(bare)
+            .and_modify(|seen| *seen = None)
+            .or_insert(Some(name.as_str()));
+    }
+    index
+}
+
+/// The module a declaration identity sits in, `""` at the root.
+fn owner_module(owner: &str) -> &str {
+    owner.rsplit_once("::").map_or("", |(module, _)| module)
+}
+
+/// Type identities visible under bare and anchored names in `module`.
+fn derive_names_in_scope(
+    module: &str,
+    admitted: &HashSet<String>,
+    declarations: &HashMap<String, Vec<&gossamer_ast::Type>>,
+    unique_bare: &HashMap<&str, Option<&str>>,
+) -> HashSet<String> {
+    let mut visible = admitted.clone();
+    for identity in admitted {
+        visible.insert(format!("crate::{identity}"));
+        let mut scope = module.to_string();
+        let mut anchor = "self::".to_string();
+        loop {
+            let prefix = if scope.is_empty() { String::new() } else { format!("{scope}::") };
+            if let Some(relative) = identity.strip_prefix(&prefix) {
+                visible.insert(format!("{anchor}{relative}"));
+                if scope == module && relative.contains("::") {
+                    visible.insert(relative.to_string());
+                }
+            }
+            if scope.is_empty() { break; }
+            scope = scope.rsplit_once("::").map_or_else(String::new, |(parent, _)| parent.to_string());
+            anchor = if anchor == "self::" { "super::".to_string() } else { format!("super::{anchor}") };
+        }
+    }
+    for declaration in declarations.keys() {
+        let bare = declaration.rsplit("::").next().unwrap_or(declaration);
+        let local = TyId::new(module, bare).path;
+        let resolved = if declarations.contains_key(&local) {
+            Some(local.as_str())
+        } else if declarations.contains_key(bare) {
+            Some(bare)
+        } else {
+            unique_bare.get(bare).copied().flatten()
+        };
+        if resolved.is_some_and(|name| admitted.contains(name)) {
+            visible.insert(bare.to_string());
+        } else {
+            visible.remove(bare);
+        }
+    }
+    visible
+}
+
+/// The greatest set of `field_tys` names whose every field `admits` given the
+/// set itself, plus `seeds`. Every candidate starts admitted and a pass takes
+/// away the ones a field disproves, so a type that holds itself, or holds a
+/// type that holds it back, settles in the set when nothing else rules it
+/// out; admitting one name at a time would leave every such cycle waiting on
+/// itself.
+fn greatest_field_fixpoint(
+    field_tys: &HashMap<String, Vec<&gossamer_ast::Type>>,
+    type_params: &HashMap<String, HashSet<String>>,
+    seeds: &HashSet<String>,
+    admits: impl Fn(&gossamer_ast::Type, &HashSet<String>) -> bool,
+) -> HashSet<String> {
+    let unique_bare = unique_bare_declarations(field_tys);
+    let mut admitted: HashSet<String> = field_tys.keys().cloned().collect();
+    admitted.extend(seeds.iter().cloned());
+    loop {
+        // Every declaration of one module sees the same names, so a pass
+        // builds each module's scope once.
+        let mut scopes: HashMap<&str, HashSet<String>> = HashMap::new();
+        let mut disproven: Vec<String> = Vec::new();
+        for name in admitted.iter().filter(|name| !seeds.contains(*name)) {
+            let module = owner_module(name);
+            let visible = scopes.entry(module).or_insert_with(|| {
+                derive_names_in_scope(module, &admitted, field_tys, &unique_bare)
+            });
+            // A field of the type's own parameter compares as whatever
+            // instantiates it: the synthesized methods are generic too.
+            let with_params;
+            let reachable = match type_params.get(name) {
+                Some(params) => {
+                    let mut names = visible.clone();
+                    names.extend(params.iter().cloned());
+                    with_params = names;
+                    &with_params
+                }
+                None => &*visible,
+            };
+            if !field_tys
+                .get(name)
+                .is_some_and(|tys| tys.iter().all(|ty| admits(ty, reachable)))
+            {
+                disproven.push(name.clone());
+            }
+        }
+        if disproven.is_empty() {
+            return admitted;
+        }
+        for name in disproven {
+            admitted.remove(&name);
+        }
     }
 }
 
@@ -768,7 +999,7 @@ fn ty_head_is_scalar(
 /// structural one.
 fn types_with_user_method(parsed: &SourceFile, method: &str) -> HashSet<String> {
     let mut out = HashSet::new();
-    for item in flatten_items(&parsed.items) {
+    for (module, item) in flatten_active_items_with_modules(&parsed.items) {
         if let ItemKind::Impl(decl) = &item.kind
             && let Some(name) = type_head_name(&decl.self_ty)
             && decl
@@ -776,7 +1007,7 @@ fn types_with_user_method(parsed: &SourceFile, method: &str) -> HashSet<String> 
                 .iter()
                 .any(|i| matches!(i, gossamer_ast::ImplItem::Fn(f) if f.name.name == method))
         {
-            out.insert(name.to_string());
+            out.insert(TyId::new(&module, name).path);
         }
     }
     out
@@ -797,7 +1028,7 @@ fn impl_trait_head(decl: &gossamer_ast::ImplDecl) -> Option<&str> {
 /// caller reaches it by.
 fn types_with_user_display(parsed: &SourceFile) -> HashSet<String> {
     let mut out = types_with_user_method(parsed, "to_string");
-    for item in flatten_items(&parsed.items) {
+    for (module, item) in flatten_active_items_with_modules(&parsed.items) {
         if let ItemKind::Impl(decl) = &item.kind
             && impl_trait_head(decl) == Some("Display")
             && let Some(name) = type_head_name(&decl.self_ty)
@@ -806,7 +1037,7 @@ fn types_with_user_display(parsed: &SourceFile) -> HashSet<String> {
                 .iter()
                 .any(|i| matches!(i, gossamer_ast::ImplItem::Fn(f) if f.name.name == "fmt"))
         {
-            out.insert(name.to_string());
+            out.insert(TyId::new(&module, name).path);
         }
     }
     out
@@ -816,7 +1047,7 @@ fn types_with_user_display(parsed: &SourceFile) -> HashSet<String> {
 /// any block other than the one that names `Display`.
 fn types_with_user_debug(parsed: &SourceFile) -> HashSet<String> {
     let mut out = HashSet::new();
-    for item in flatten_items(&parsed.items) {
+    for (module, item) in flatten_active_items_with_modules(&parsed.items) {
         if let ItemKind::Impl(decl) = &item.kind
             && impl_trait_head(decl) != Some("Display")
             && let Some(name) = type_head_name(&decl.self_ty)
@@ -825,24 +1056,24 @@ fn types_with_user_debug(parsed: &SourceFile) -> HashSet<String> {
                 .iter()
                 .any(|i| matches!(i, gossamer_ast::ImplItem::Fn(f) if f.name.name == "fmt"))
         {
-            out.insert(name.to_string());
+            out.insert(TyId::new(&module, name).path);
         }
     }
     out
 }
 
-/// Bare names of the types that have a `default()`: a `#[derive(Default)]`,
+/// Qualified identities of the types that have a `default()`: a `#[derive(Default)]`,
 /// an `impl Default`, or an inherent `fn default`.
 fn types_with_default(parsed: &SourceFile) -> HashSet<String> {
     let mut out = types_with_user_method(parsed, "default");
-    for item in flatten_items(&parsed.items) {
+    for (module, item) in flatten_active_items_with_modules(&parsed.items) {
         let (attrs, name) = match &item.kind {
             ItemKind::Struct(decl) => (&item.attrs, &decl.name.name),
             ItemKind::Enum(decl) => (&item.attrs, &decl.name.name),
             _ => continue,
         };
         if derive_list(attrs).iter().any(|d| d == "Default") {
-            out.insert(name.clone());
+            out.insert(TyId::new(&module, name).path);
         }
     }
     out
@@ -853,7 +1084,7 @@ fn types_with_default(parsed: &SourceFile) -> HashSet<String> {
 fn checked_default_literal(kind: &FieldKind, with_default: &HashSet<String>) -> Option<String> {
     match kind {
         FieldKind::Struct(ty) | FieldKind::Enum(ty) => {
-            with_default.contains(&ty.bare).then(|| kind.default_literal())
+            with_default.contains(&ty.path).then(|| kind.default_literal())
         }
         FieldKind::Tuple(elems) => {
             let parts: Option<Vec<String>> = elems
@@ -879,12 +1110,31 @@ fn field_default_literal(
 ) -> Option<String> {
     match &ty.kind {
         gossamer_ast::TypeKind::Slice(_) => return Some("Vec::from([])".to_string()),
+        gossamer_ast::TypeKind::Tuple(elems) if !elems.is_empty() => {
+            let parts: Option<Vec<String>> = elems
+                .iter()
+                .map(|e| field_default_literal(e, module, structs, aliases, with_default))
+                .collect();
+            return Some(format!("({})", parts?.join(", ")));
+        }
         gossamer_ast::TypeKind::Path(path) if path.segments.len() == 1 => {
             let segment = &path.segments[0];
             match (segment.name.name.as_str(), segment.generics.len()) {
                 ("Option", 1) => return Some("None".to_string()),
                 ("Vec", 1) => return Some("Vec::from([])".to_string()),
                 ("Map", 2) => return Some("Map::new()".to_string()),
+                (name, 0) => {
+                    // A newtype is a distinct type over its representation, so
+                    // its zero value is the representation's, converted in.
+                    if let Some(repr) = structs.newtype(module, name)
+                        && !matches!(&repr.kind, gossamer_ast::TypeKind::Path(p)
+                            if p.segments.last().is_some_and(|seg| seg.name.name == name))
+                    {
+                        let inner =
+                            field_default_literal(repr, module, structs, aliases, with_default)?;
+                        return Some(format!("({inner}).into()"));
+                    }
+                }
                 _ => {}
             }
         }
@@ -933,7 +1183,7 @@ pub(crate) fn derive_default_diags(sf: &SourceFile) -> Vec<ParseDiagnostic> {
     let aliases = alias_targets(&sf.items);
     let with_default = types_with_default(sf);
     let mut out = Vec::new();
-    for (module, item) in flatten_items_with_modules(&sf.items) {
+    for (module, item) in flatten_active_items_with_modules(&sf.items) {
         let ItemKind::Struct(decl) = &item.kind else {
             continue;
         };
@@ -980,7 +1230,7 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
     // paired with the declaration's own type-parameter names.
     let mut field_tys: HashMap<String, Vec<&gossamer_ast::Type>> = HashMap::new();
     let mut type_params: HashMap<String, HashSet<String>> = HashMap::new();
-    for item in flatten_items(&parsed.items) {
+    for (module, item) in flatten_active_items_with_modules(&parsed.items) {
         match &item.kind {
             ItemKind::Struct(decl) => {
                 let tys: Vec<&gossamer_ast::Type> = match &decl.body {
@@ -988,15 +1238,15 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
                     StructBody::Tuple(fields) => fields.iter().map(|f| &f.ty).collect(),
                     StructBody::Unit => Vec::new(),
                 };
-                field_tys.insert(decl.name.name.clone(), tys);
-                type_params.insert(decl.name.name.clone(), param_name_set(&decl.generics));
+                field_tys.insert(TyId::new(&module, &decl.name.name).path, tys);
+                type_params.insert(TyId::new(&module, &decl.name.name).path, param_name_set(&decl.generics));
             }
             ItemKind::Enum(decl) => {
                 field_tys.insert(
-                    decl.name.name.clone(),
+                    TyId::new(&module, &decl.name.name).path,
                     decl.variants.iter().flat_map(variant_fields).collect(),
                 );
-                type_params.insert(decl.name.name.clone(), param_name_set(&decl.generics));
+                type_params.insert(TyId::new(&module, &decl.name.name).path, param_name_set(&decl.generics));
             }
             _ => {}
         }
@@ -1010,19 +1260,19 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
     // render - so a field referencing a non-formattable type (or a container)
     // never produces a `format!("{}", field)` the compiled tiers cannot lower.
     let mut formattable: HashSet<String> = HashSet::new();
-    for item in flatten_items(&parsed.items) {
+    for (module, item) in flatten_active_items_with_modules(&parsed.items) {
         let derives = derive_list(&item.attrs);
         let name = match &item.kind {
             ItemKind::Struct(d)
                 if matches!(&d.body, StructBody::Named(_) | StructBody::Tuple(_)) =>
             {
-                Some(&d.name.name)
+                Some(TyId::new(&module, &d.name.name).path)
             }
-            ItemKind::Enum(d) => Some(&d.name.name),
+            ItemKind::Enum(d) => Some(TyId::new(&module, &d.name.name).path),
             _ => None,
         };
         if let Some(n) = name
-            && (derives.iter().any(|d| d == "Debug") || user_fmt.contains(n))
+            && (derives.iter().any(|d| d == "Debug") || user_fmt.contains(&n))
         {
             formattable.insert(n.clone());
         }
@@ -1040,20 +1290,27 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
     for name in &formattable {
         candidates.remove(name);
     }
+    let unique_bare = unique_bare_declarations(&field_tys);
     loop {
         let mut reachable = formattable.clone();
         reachable.extend(candidates.iter().cloned());
-        let disproven: Vec<String> = candidates
-            .iter()
-            .filter(|name| {
-                let params = type_params.get(*name).cloned().unwrap_or_default();
-                !field_tys.get(*name).is_some_and(|tys| {
-                    tys.iter()
-                        .all(|ty| ty_is_renderable(ty, &reachable, &params, &aliases))
-                })
-            })
-            .cloned()
-            .collect();
+        // Every declaration of one module sees the same names, so a pass
+        // builds each module's scope once.
+        let mut scopes: HashMap<&str, HashSet<String>> = HashMap::new();
+        let mut disproven: Vec<String> = Vec::new();
+        for name in &candidates {
+            let module = owner_module(name);
+            let visible = scopes.entry(module).or_insert_with(|| {
+                derive_names_in_scope(module, &reachable, &field_tys, &unique_bare)
+            });
+            let params = type_params.get(name).cloned().unwrap_or_default();
+            if !field_tys.get(name).is_some_and(|tys| {
+                tys.iter()
+                    .all(|ty| ty_is_renderable(ty, visible, &params, &aliases))
+            }) {
+                disproven.push(name.clone());
+            }
+        }
         if disproven.is_empty() {
             break;
         }
@@ -1063,60 +1320,51 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
     }
     formattable.extend(candidates);
 
-    // Grow the set of structs / enums that compare by value structurally on
-    // every tier: a type is comparable once every field is a scalar / String
-    // or an already-comparable nested type. This drives automatic `eq` / `cmp`
+    // The structs / enums that compare by value structurally on every tier:
+    // a type is comparable when every field is a scalar / String, an alias or
+    // newtype of one, or a comparable nested type. A type whose `eq` is the
+    // user's own or an explicit derive's has one whatever its fields, so it
+    // is comparable as a field too. This drives automatic `eq` / `cmp`
     // synthesis, so `==` / `<` work on a plain `struct Point { x, y }` with no
     // `#[derive(...)]` - exactly as they already do on tuples.
-    let mut comparable: HashSet<String> = HashSet::new();
-    loop {
-        let mut changed = false;
-        for (name, tys) in &field_tys {
-            if comparable.contains(name) {
-                continue;
-            }
-            if tys.iter().all(|ty| ty_is_comparable(ty, &comparable)) {
-                comparable.insert(name.clone());
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
+    let explicit_with = |names: &[&str]| -> HashSet<String> {
+        flatten_active_items_with_modules(&parsed.items)
+            .into_iter()
+            .filter(|(_, item)| derive_list(&item.attrs).iter().any(|d| names.contains(&d.as_str())))
+            .filter_map(|(module, item)| match &item.kind {
+                ItemKind::Struct(d) => Some(TyId::new(&module, &d.name.name).path),
+                ItemKind::Enum(d) => Some(TyId::new(&module, &d.name.name).path),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut eq_seeds = explicit_with(&["PartialEq", "Eq"]);
+    eq_seeds.extend(user_eq.iter().cloned());
+    let every_alias = alias_candidates(&parsed.items);
+    let comparable = greatest_field_fixpoint(&field_tys, &type_params, &eq_seeds, |ty, set| {
+        ty_is_comparable(ty, set, &every_alias, 0)
+    });
 
-    // Orderable types (drives `cmp`): comparable, minus any `bool` field, since
-    // `<` on a `bool` does not lower on the compiled tiers. A bool-bearing type
-    // is still in `comparable` (it gets `eq`), just not here.
-    let mut orderable: HashSet<String> = HashSet::new();
-    loop {
-        let mut changed = false;
-        for (name, tys) in &field_tys {
-            if orderable.contains(name) {
-                continue;
-            }
-            if tys.iter().all(|ty| ty_is_orderable(ty, &orderable)) {
-                orderable.insert(name.clone());
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
+    // Orderable types (drives `cmp`): comparable, minus any map or set field,
+    // which has no order. Such a type is still in `comparable` (it gets `eq`).
+    let mut cmp_seeds = explicit_with(&["PartialOrd", "Ord"]);
+    cmp_seeds.extend(user_cmp.iter().cloned());
+    let orderable = greatest_field_fixpoint(&field_tys, &type_params, &cmp_seeds, |ty, set| {
+        ty_is_orderable(ty, set, &every_alias, 0)
+    });
 
     let mut out = String::new();
-    for (module, item) in flatten_items_with_modules(&parsed.items) {
+    for (module, item) in flatten_active_items_with_modules(&parsed.items) {
         let mut derives = derive_list(&item.attrs);
         // Synthesize a structural `fmt` for every formattable struct / enum that
         // lacks one, so `{}` / `{:?}` lowers on the compiled tiers exactly as it
         // renders on the VM.
         let implicit_target = match &item.kind {
-            ItemKind::Struct(d) => Some(&d.name.name),
-            ItemKind::Enum(d) => Some(&d.name.name),
+            ItemKind::Struct(d) => Some(TyId::new(&module, &d.name.name).path),
+            ItemKind::Enum(d) => Some(TyId::new(&module, &d.name.name).path),
             _ => None,
         };
-        if let Some(tn) = implicit_target
+        if let Some(tn) = &implicit_target
             && formattable.contains(tn)
             && !derives.iter().any(|d| d == "Debug")
         {
@@ -1126,14 +1374,14 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
         // `to_string` and `{:?}` reaches `fmt`. A type with no `impl Display`
         // still shows through `{}`, so it carries the structural rendering
         // under that spelling too.
-        if let Some(tn) = implicit_target
+        if let Some(tn) = &implicit_target
             && formattable.contains(tn)
         {
             derives.push(IMPLICIT_DISPLAY.to_string());
         }
         // A method the source already supplies is never re-emitted, whatever
         // a `#[derive(..)]` asks for: one name, one body.
-        if let Some(tn) = implicit_target {
+        if let Some(tn) = &implicit_target {
             if user_fmt.contains(tn) {
                 derives.retain(|d| d != "Debug");
             }
@@ -1146,7 +1394,7 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
         // `#[derive(...)]`. The synthesized methods key off the same `PartialEq`
         // / `Ord` markers an explicit derive uses, so the two paths never
         // double-emit.
-        if let Some(tn) = implicit_target {
+        if let Some(tn) = &implicit_target {
             if comparable.contains(tn)
                 && !user_eq.contains(tn)
                 && !derives.iter().any(|d| d == "PartialEq" || d == "Eq")
@@ -1225,7 +1473,7 @@ fn emit_comparators(
     orderable: &HashSet<String>,
 ) {
     let searches = searches_sorted_sequences(parsed);
-    for (module, item) in flatten_items_with_modules(&parsed.items) {
+    for (module, item) in flatten_active_items_with_modules(&parsed.items) {
         let (name, generics) = match &item.kind {
             ItemKind::Struct(decl) => (&decl.name.name, &decl.generics),
             ItemKind::Enum(decl) => (&decl.name.name, &decl.generics),
@@ -1234,9 +1482,10 @@ fn emit_comparators(
         let derives_ord = derive_list(&item.attrs)
             .iter()
             .any(|d| d == "Ord" || d == "PartialOrd");
-        let prefix = if user_cmp.contains(name) {
+        let identity = TyId::new(&module, name);
+        let prefix = if user_cmp.contains(&identity.path) {
             USER_COMPARATOR_PREFIX
-        } else if orderable.contains(name) || derives_ord {
+        } else if orderable.contains(&identity.path) || derives_ord {
             STRUCTURAL_COMPARATOR_PREFIX
         } else {
             continue;
@@ -1821,7 +2070,7 @@ fn emit_struct_derive_impl(
     for render_method in &render_methods {
         emit_named_struct_fmt_impl(
             out,
-            &decl.name.name,
+            &public_stdlib_type_spelling(&decl.name.name).unwrap_or_else(|| decl.name.name.clone()),
             render_method,
             &field_names,
             fields,

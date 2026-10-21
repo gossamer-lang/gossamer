@@ -401,32 +401,30 @@ impl<'tcx> FnBuilder<'tcx> {
             return Ok(());
         }
         if let HirExprKind::Path { segments, .. } = &place.kind {
-            if let Some(first) = segments.first() {
-                if let Some(target) = self.lookup_local(&first.name) {
-                    // Typed-local reassignment: compile the
-                    // RHS in the destination kind so no box /
-                    // unbox round-trip happens in hot loops.
-                    let rhs_start = self.cur_idx();
-                    let src_tr = self.compile_expr_ex(value)?;
-                    if self.expr_has_uint_display_provenance(value) {
-                        self.uint_display_locals.insert(target.reg);
-                    } else {
-                        self.uint_display_locals.remove(&target.reg);
-                    }
-                    if target.kind == RegKind::I64
-                        && src_tr.kind == RegKind::I64
-                        && self.try_fold_i64_move(rhs_start, src_tr.reg, target.reg)
-                    {
-                        return Ok(());
-                    }
-                    if let Some(cell) = self.capture_cell_for_local(target) {
-                        let src_v = self.as_value(src_tr);
-                        self.rebind_capture_cell(target.reg, cell, src_v);
-                        return Ok(());
-                    }
-                    self.emit_move_into(target, src_tr);
+            if let Some(target) = self.path_local(segments) {
+                // Typed-local reassignment: compile the
+                // RHS in the destination kind so no box /
+                // unbox round-trip happens in hot loops.
+                let rhs_start = self.cur_idx();
+                let src_tr = self.compile_expr_ex(value)?;
+                if self.expr_has_uint_display_provenance(value) {
+                    self.uint_display_locals.insert(target.reg);
+                } else {
+                    self.uint_display_locals.remove(&target.reg);
+                }
+                if target.kind == RegKind::I64
+                    && src_tr.kind == RegKind::I64
+                    && self.try_fold_i64_move(rhs_start, src_tr.reg, target.reg)
+                {
                     return Ok(());
                 }
+                if let Some(cell) = self.capture_cell_for_local(target) {
+                    let src_v = self.as_value(src_tr);
+                    self.rebind_capture_cell(target.reg, cell, src_v);
+                    return Ok(());
+                }
+                self.emit_move_into(target, src_tr);
+                return Ok(());
             }
         }
         // Native `local.field = value` and `local[i] = value`
@@ -435,108 +433,102 @@ impl<'tcx> FnBuilder<'tcx> {
         // fast path.
         if let HirExprKind::Field { receiver, name } = &place.kind {
             if let HirExprKind::Path { segments, .. } = &receiver.kind {
-                if let Some(first) = segments.first() {
-                    if let Some(target) = self.lookup_local(&first.name) {
-                        if target.kind == RegKind::Value {
-                            let value_is_i64 =
-                                matches!(self.tcx.kind(value.ty), Some(TyKind::Int(IntTy::I64)));
-                            let receiver_ty = self.unwrap_ref(receiver.ty);
-                            let offset =
-                                self.resolve_struct_field_offset(receiver_ty, name.name.as_str());
-                            if value_is_i64 && let Some(offset) = offset {
-                                let value_tr = self.compile_expr_ex(value)?;
-                                let value_i = self.as_i64(value_tr);
-                                self.emit(Op::FieldSetI64ByOffset {
-                                    receiver: target.reg,
-                                    offset,
-                                    value_i,
-                                });
-                                return Ok(());
-                            }
-                            let value_reg = self.compile_expr(value)?;
-                            let name_idx = self.const_idx(
-                                ConstKey::String(name.name.clone()),
-                                Value::String(SmolStr::from(name.name.clone())),
-                            );
-                            self.emit(Op::FieldSet {
+                if let Some(target) = self.path_local(segments) {
+                    if target.kind == RegKind::Value {
+                        let value_is_i64 =
+                            matches!(self.tcx.kind(value.ty), Some(TyKind::Int(IntTy::I64)));
+                        let receiver_ty = self.unwrap_ref(receiver.ty);
+                        let offset =
+                            self.resolve_struct_field_offset(receiver_ty, name.name.as_str());
+                        if value_is_i64 && let Some(offset) = offset {
+                            let value_tr = self.compile_expr_ex(value)?;
+                            let value_i = self.as_i64(value_tr);
+                            self.emit(Op::FieldSetI64ByOffset {
                                 receiver: target.reg,
-                                name_idx,
-                                value: value_reg,
+                                offset,
+                                value_i,
                             });
                             return Ok(());
                         }
-                        // Typed local can't be a struct;
-                        // fall through to the deferred path.
+                        let value_reg = self.compile_expr(value)?;
+                        let name_idx = self.const_idx(
+                            ConstKey::String(name.name.clone()),
+                            Value::String(SmolStr::from(name.name.clone())),
+                        );
+                        self.emit(Op::FieldSet {
+                            receiver: target.reg,
+                            name_idx,
+                            value: value_reg,
+                        });
+                        return Ok(());
                     }
+                    // Typed local can't be a struct;
+                    // fall through to the deferred path.
                 }
             }
         }
         if let HirExprKind::Index { base, index } = &place.kind {
             if let HirExprKind::Path { segments, .. } = &base.kind {
-                if let Some(first) = segments.first() {
-                    if let Some(target) = self.lookup_local(&first.name) {
-                        if target.kind == RegKind::Value {
-                            // Typed flat-f64 store fast path: when
-                            // the receiver is a `Value::FloatVec`
-                            // and the RHS is f64-typed, write
-                            // straight from the f64 register file.
-                            // Mirrors the IntArray IndexSet bypass
-                            // in `IntArray` users.
-                            let value_is_f64 = matches!(
-                                self.tcx.kind(value.ty),
-                                Some(TyKind::Float(FloatTy::F64))
-                            );
-                            if value_is_f64 && self.flat_float_locals.contains(&target.reg) {
-                                let idx_tr = self.compile_expr_ex(index)?;
-                                let idx_i = self.as_i64(idx_tr);
-                                let value_tr = self.compile_expr_ex(value)?;
-                                let value_f = self.as_f64(value_tr);
-                                self.emit(Op::FloatVecSetF64 {
-                                    base: target.reg,
-                                    index_i: idx_i,
-                                    value_f,
-                                });
-                                return Ok(());
-                            }
-                            // Mirror typed-i64 store fast path for
-                            // `Value::IntArray`-backed locals:
-                            // `arr[i] = v` where `arr: [i64; N]`
-                            // skips the box/unbox the generic
-                            // `Op::IndexSet` would impose. fannkuch's
-                            // `perm[j] = perm1[j]` and count
-                            // manipulation rely on this path. The
-                            // gate is purely the receiver tracking
-                            // (any `flat_int_locals` member is
-                            // guaranteed `Value::IntArray` storage),
-                            // because the value's HIR type can be a
-                            // still-bound `TyKind::Var` for arithmetic
-                            // expressions that typeck couldn't
-                            // substitute in-place.
-                            // A range index splices a window back, which
-                            // only the generic `IndexSet` does.
-                            let index_is_range =
-                                matches!(self.tcx.kind(index.ty), Some(TyKind::Iterator(_)));
-                            if self.flat_int_locals.contains(&target.reg) && !index_is_range {
-                                let idx_tr = self.compile_expr_ex(index)?;
-                                let idx_i = self.as_i64(idx_tr);
-                                let value_tr = self.compile_expr_ex(value)?;
-                                let value_i = self.as_i64(value_tr);
-                                self.emit(Op::IntArraySetI64 {
-                                    base: target.reg,
-                                    index_i: idx_i,
-                                    value_i,
-                                });
-                                return Ok(());
-                            }
-                            let idx_reg = self.compile_expr(index)?;
-                            let value_reg = self.compile_expr(value)?;
-                            self.emit(Op::IndexSet {
+                if let Some(target) = self.path_local(segments) {
+                    if target.kind == RegKind::Value {
+                        // Typed flat-f64 store fast path: when
+                        // the receiver is a `Value::FloatVec`
+                        // and the RHS is f64-typed, write
+                        // straight from the f64 register file.
+                        // Mirrors the IntArray IndexSet bypass
+                        // in `IntArray` users.
+                        let value_is_f64 =
+                            matches!(self.tcx.kind(value.ty), Some(TyKind::Float(FloatTy::F64)));
+                        if value_is_f64 && self.flat_float_locals.contains(&target.reg) {
+                            let idx_tr = self.compile_expr_ex(index)?;
+                            let idx_i = self.as_i64(idx_tr);
+                            let value_tr = self.compile_expr_ex(value)?;
+                            let value_f = self.as_f64(value_tr);
+                            self.emit(Op::FloatVecSetF64 {
                                 base: target.reg,
-                                index: idx_reg,
-                                value: value_reg,
+                                index_i: idx_i,
+                                value_f,
                             });
                             return Ok(());
                         }
+                        // Mirror typed-i64 store fast path for
+                        // `Value::IntArray`-backed locals:
+                        // `arr[i] = v` where `arr: [i64; N]`
+                        // skips the box/unbox the generic
+                        // `Op::IndexSet` would impose. fannkuch's
+                        // `perm[j] = perm1[j]` and count
+                        // manipulation rely on this path. The
+                        // gate is purely the receiver tracking
+                        // (any `flat_int_locals` member is
+                        // guaranteed `Value::IntArray` storage),
+                        // because the value's HIR type can be a
+                        // still-bound `TyKind::Var` for arithmetic
+                        // expressions that typeck couldn't
+                        // substitute in-place.
+                        // A range index splices a window back, which
+                        // only the generic `IndexSet` does.
+                        let index_is_range =
+                            matches!(self.tcx.kind(index.ty), Some(TyKind::Iterator(_)));
+                        if self.flat_int_locals.contains(&target.reg) && !index_is_range {
+                            let idx_tr = self.compile_expr_ex(index)?;
+                            let idx_i = self.as_i64(idx_tr);
+                            let value_tr = self.compile_expr_ex(value)?;
+                            let value_i = self.as_i64(value_tr);
+                            self.emit(Op::IntArraySetI64 {
+                                base: target.reg,
+                                index_i: idx_i,
+                                value_i,
+                            });
+                            return Ok(());
+                        }
+                        let idx_reg = self.compile_expr(index)?;
+                        let value_reg = self.compile_expr(value)?;
+                        self.emit(Op::IndexSet {
+                            base: target.reg,
+                            index: idx_reg,
+                            value: value_reg,
+                        });
+                        return Ok(());
                     }
                 }
             }
@@ -550,91 +542,89 @@ impl<'tcx> FnBuilder<'tcx> {
         if let HirExprKind::Field { receiver, name } = &place.kind {
             if let HirExprKind::Index { base, index } = &receiver.kind {
                 if let HirExprKind::Path { segments, .. } = &base.kind {
-                    if let Some(first) = segments.first() {
-                        if let Some(target) = self.lookup_local(&first.name) {
-                            if target.kind == RegKind::Value {
-                                let name_idx = self.const_idx(
-                                    ConstKey::String(name.name.clone()),
-                                    Value::String(SmolStr::from(name.name.clone())),
-                                );
-                                // Phase-2 typed store: when the RHS is
-                                // an f64 expression, write straight
-                                // from the float register file into
-                                // `base[i].field`, skipping the
-                                // `BoxF64` that the generic path
-                                // would emit.
-                                let value_is_f64 = matches!(
-                                    self.tcx.kind(value.ty),
-                                    Some(TyKind::Float(FloatTy::F64))
-                                );
-                                if value_is_f64 {
-                                    // Resolve the struct's field
-                                    // offset for this write; emit the
-                                    // offset-based op when possible.
-                                    let elem_ty = self.array_elem_ty(base.ty);
-                                    let offset = elem_ty.and_then(|t| {
-                                        self.resolve_struct_field_offset(t, name.name.as_str())
-                                    });
-                                    // Compile the index in its native
-                                    // register file: an int-bank index
-                                    // (loop counter) feeds the flat write
-                                    // directly, skipping the per-access
-                                    // `BoxI64`.
-                                    let idx_tr = self.compile_expr_ex(index)?;
-                                    let value_tr = self.compile_expr_ex(value)?;
-                                    let value_f = self.as_f64(value_tr);
-                                    // Known-flat fast path.
-                                    if let (Some(offset), Some(&stride)) =
-                                        (offset, self.flat_locals.get(&target.reg))
-                                    {
-                                        if idx_tr.kind == RegKind::I64 {
-                                            self.emit(Op::FlatSetF64I {
-                                                base: target.reg,
-                                                index_i: idx_tr.reg,
-                                                stride,
-                                                offset,
-                                                value_f,
-                                            });
-                                        } else {
-                                            let idx_reg = self.as_value(idx_tr);
-                                            self.emit(Op::FlatSetF64 {
-                                                base: target.reg,
-                                                index: idx_reg,
-                                                stride,
-                                                offset,
-                                                value_f,
-                                            });
-                                        }
-                                        return Ok(());
-                                    }
-                                    let idx_reg = self.as_value(idx_tr);
-                                    if let Some(offset) = offset {
-                                        self.emit(Op::IndexedFieldSetF64ByOffset {
+                    if let Some(target) = self.path_local(segments) {
+                        if target.kind == RegKind::Value {
+                            let name_idx = self.const_idx(
+                                ConstKey::String(name.name.clone()),
+                                Value::String(SmolStr::from(name.name.clone())),
+                            );
+                            // Phase-2 typed store: when the RHS is
+                            // an f64 expression, write straight
+                            // from the float register file into
+                            // `base[i].field`, skipping the
+                            // `BoxF64` that the generic path
+                            // would emit.
+                            let value_is_f64 = matches!(
+                                self.tcx.kind(value.ty),
+                                Some(TyKind::Float(FloatTy::F64))
+                            );
+                            if value_is_f64 {
+                                // Resolve the struct's field
+                                // offset for this write; emit the
+                                // offset-based op when possible.
+                                let elem_ty = self.array_elem_ty(base.ty);
+                                let offset = elem_ty.and_then(|t| {
+                                    self.resolve_struct_field_offset(t, name.name.as_str())
+                                });
+                                // Compile the index in its native
+                                // register file: an int-bank index
+                                // (loop counter) feeds the flat write
+                                // directly, skipping the per-access
+                                // `BoxI64`.
+                                let idx_tr = self.compile_expr_ex(index)?;
+                                let value_tr = self.compile_expr_ex(value)?;
+                                let value_f = self.as_f64(value_tr);
+                                // Known-flat fast path.
+                                if let (Some(offset), Some(&stride)) =
+                                    (offset, self.flat_locals.get(&target.reg))
+                                {
+                                    if idx_tr.kind == RegKind::I64 {
+                                        self.emit(Op::FlatSetF64I {
                                             base: target.reg,
-                                            index: idx_reg,
+                                            index_i: idx_tr.reg,
+                                            stride,
                                             offset,
                                             value_f,
                                         });
                                     } else {
-                                        self.emit(Op::IndexedFieldSetF64 {
+                                        let idx_reg = self.as_value(idx_tr);
+                                        self.emit(Op::FlatSetF64 {
                                             base: target.reg,
                                             index: idx_reg,
-                                            name_idx,
+                                            stride,
+                                            offset,
                                             value_f,
                                         });
                                     }
                                     return Ok(());
                                 }
-                                let idx_reg = self.compile_expr(index)?;
-                                let value_reg = self.compile_expr(value)?;
-                                self.emit(Op::IndexedFieldSet {
-                                    base: target.reg,
-                                    index: idx_reg,
-                                    name_idx,
-                                    value: value_reg,
-                                });
+                                let idx_reg = self.as_value(idx_tr);
+                                if let Some(offset) = offset {
+                                    self.emit(Op::IndexedFieldSetF64ByOffset {
+                                        base: target.reg,
+                                        index: idx_reg,
+                                        offset,
+                                        value_f,
+                                    });
+                                } else {
+                                    self.emit(Op::IndexedFieldSetF64 {
+                                        base: target.reg,
+                                        index: idx_reg,
+                                        name_idx,
+                                        value_f,
+                                    });
+                                }
                                 return Ok(());
                             }
+                            let idx_reg = self.compile_expr(index)?;
+                            let value_reg = self.compile_expr(value)?;
+                            self.emit(Op::IndexedFieldSet {
+                                base: target.reg,
+                                index: idx_reg,
+                                name_idx,
+                                value: value_reg,
+                            });
+                            return Ok(());
                         }
                     }
                 }
@@ -759,8 +749,7 @@ impl<'tcx> FnBuilder<'tcx> {
     fn str_place_local_reg(&self, place: &HirExpr) -> Option<Reg> {
         match &place.kind {
             HirExprKind::Path { segments, .. } => {
-                let first = segments.first()?;
-                let target = self.lookup_local(&first.name)?;
+                let target = self.path_local(segments)?;
                 (target.kind == RegKind::Value).then_some(target.reg)
             }
             HirExprKind::Unary {
@@ -776,9 +765,7 @@ impl<'tcx> FnBuilder<'tcx> {
     /// local binding. A static-rooted place returns `false`.
     pub(crate) fn place_root_is_local(&self, place: &HirExpr) -> bool {
         match &place.kind {
-            HirExprKind::Path { segments, .. } => segments
-                .first()
-                .is_some_and(|s| self.lookup_local(&s.name).is_some()),
+            HirExprKind::Path { segments, .. } => self.path_local(segments).is_some(),
             HirExprKind::Field { receiver, .. } | HirExprKind::TupleIndex { receiver, .. } => {
                 self.place_root_is_local(receiver)
             }
@@ -821,8 +808,7 @@ impl<'tcx> FnBuilder<'tcx> {
         // addresses the flat cell registered under the unqualified or
         // module-joined name, so strip the relative prefix first.
         let segments = strip_module_relative(segments);
-        let first = segments.first()?;
-        if self.lookup_local(&first.name).is_some() {
+        if self.path_local(segments).is_some() {
             return None;
         }
         let last = segments.last()?;
@@ -1102,7 +1088,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 let Some(first) = segments.first() else {
                     return Err(RuntimeError::Unsupported("assignment to empty path"));
                 };
-                if let Some(target) = self.lookup_local(&first.name) {
+                if let Some(target) = self.path_local(segments) {
                     self.emit_move_into(
                         target,
                         TypedReg {

@@ -639,7 +639,7 @@ impl Vm {
                                 let name: &str = &chunk.globals[idx as usize];
                                 let value = match self.lookup_global_ref(name) {
                                     Some(Global::Value(v)) => v.clone(),
-                                    Some(Global::MutStatic(cell)) => cell.lock().clone(),
+                                    Some(Global::MutStatic(cell)) => cell.get(),
                                     Some(Global::Fn(_)) => Value::String(SmolStr::from(name)),
                                     None => {
                                         return Err(RuntimeError::UnresolvedName(name.to_string()));
@@ -651,7 +651,7 @@ impl Vm {
                                 let name: &str = &chunk.globals[name_idx as usize];
                                 match self.lookup_global_ref(name) {
                                     Some(Global::MutStatic(cell)) => {
-                                        *cell.lock() = registers[src as usize].clone();
+                                        cell.set(registers[src as usize].clone());
                                     }
                                     _ => {
                                         return Err(RuntimeError::UnresolvedName(name.to_string()));
@@ -4479,10 +4479,13 @@ impl Vm {
                             }
                             Op::StructIs { dst, src, name_idx } => {
                                 let expected: &'static str = chunk.shape_names[name_idx as usize];
-                                let matches = matches!(
-                                    &registers[src as usize],
-                                    Value::Struct(inner) if inner.name.as_str() == expected
-                                );
+                                let matches = match &registers[src as usize] {
+                                    Value::Struct(inner) => inner.name.as_str() == expected,
+                                    Value::NativeEnum(owner) => {
+                                        crate::value::native_struct_variant_is(owner, expected)
+                                    }
+                                    _ => false,
+                                };
                                 registers[dst as usize] = Value::Bool(matches);
                             }
                             Op::VariantFieldConsume { dst, src, idx } => {
@@ -4582,8 +4585,9 @@ impl Vm {
                             } => unsafe {
                                 let idx = *ints.get_unchecked(index_i as usize);
                                 let b = registers.get_unchecked(base as usize);
-                                let i = usize::try_from(idx)
-                                    .map_err(|_| crate::vm::index_oob_panic(idx, 0))?;
+                                let i = usize::try_from(idx).map_err(|_| {
+                                    crate::vm::index_oob_panic(idx, flat_receiver_len(b))
+                                })?;
                                 let value = match b {
                                     Value::IntArray(data) => {
                                         data.get(i).copied().ok_or_else(|| {
@@ -4646,8 +4650,9 @@ impl Vm {
                                     &Value::Int(new_val),
                                 );
                                 let b = registers.get_unchecked_mut(base as usize);
-                                let i = usize::try_from(idx)
-                                    .map_err(|_| crate::vm::index_oob_panic(idx, 0))?;
+                                let i = usize::try_from(idx).map_err(|_| {
+                                    crate::vm::index_oob_panic(idx, flat_receiver_len(b))
+                                })?;
                                 match b {
                                     Value::IntArray(data) => {
                                         if i >= data.len() {
@@ -4825,8 +4830,9 @@ impl Vm {
                             } => unsafe {
                                 let idx = *ints.get_unchecked(index_i as usize);
                                 let b = registers.get_unchecked(base as usize);
-                                let i = usize::try_from(idx)
-                                    .map_err(|_| crate::vm::index_oob_panic(idx, 0))?;
+                                let i = usize::try_from(idx).map_err(|_| {
+                                    crate::vm::index_oob_panic(idx, flat_receiver_len(b))
+                                })?;
                                 let value = match b {
                                     Value::FloatVec(data) => {
                                         data.get(i).copied().ok_or_else(|| {
@@ -4874,8 +4880,9 @@ impl Vm {
                                     &Value::Float(new_f),
                                 );
                                 let b = registers.get_unchecked_mut(base as usize);
-                                let i = usize::try_from(idx)
-                                    .map_err(|_| crate::vm::index_oob_panic(idx, 0))?;
+                                let i = usize::try_from(idx).map_err(|_| {
+                                    crate::vm::index_oob_panic(idx, flat_receiver_len(b))
+                                })?;
                                 match b {
                                     Value::FloatVec(data_arc) => {
                                         let buf = Arc::make_mut(data_arc);
@@ -5520,17 +5527,16 @@ fn select_try_once(
                     continue;
                 };
                 let ch = ch.clone();
-                if let Some(value) = ch.try_recv() {
-                    registers[arm.bind_reg as usize] = value;
+                if arm.takes_value
+                    && let Some(value) = ch.try_recv()
+                {
+                    registers[arm.bind_reg as usize] = crate::builtins::some_variant(value);
                     return Some(arm.body_block);
                 }
-                // Go semantics: a recv arm on a closed (and drained)
-                // channel is always ready, binding the element-type
-                // zero value. The 8-byte select payload contract is
-                // i64-shaped on every tier, so the VM mirrors the
-                // compiled tier's `last_value = 0`.
-                if ch.is_closed() {
-                    registers[arm.bind_reg as usize] = Value::Int(0);
+                // `is_closed` holds only once the buffer is drained, which is
+                // when the close is an outcome.
+                if arm.takes_close && ch.is_closed() {
+                    registers[arm.bind_reg as usize] = crate::builtins::none_variant();
                     return Some(arm.body_block);
                 }
             }
@@ -5565,9 +5571,10 @@ fn select_try_once(
 /// channel arm when nothing is ready and no `default` exists. Any
 /// send, recv, close, or receiver-arrival event wakes the waiter and
 /// the VM re-polls all arms in a fresh pseudo-random order.
-/// The arm a select resolves to once its cohort is cancelled: the
-/// `default` arm when one is written, else the first arm, whose recv
-/// yields the element-type zero the way a closed channel does.
+/// The arm a select resolves to once its cohort is cancelled, where every
+/// receive answers `None`: the first recv arm that takes the close. A select
+/// with no such arm waits on its channels alone, as one that only takes
+/// values does.
 fn select_cancelled_target(
     arms: &[crate::bytecode::SelectArmMeta],
     registers: &mut [Value],
@@ -5575,12 +5582,8 @@ fn select_cancelled_target(
     use crate::bytecode::SelectArmKind;
     let arm = arms
         .iter()
-        .find(|a| a.kind == SelectArmKind::Default)
-        .or_else(|| arms.first())?;
-    if arm.kind == SelectArmKind::Recv {
-        // The same element-type zero a closed channel's recv arm binds.
-        registers[arm.bind_reg as usize] = Value::Int(0);
-    }
+        .find(|a| a.kind == SelectArmKind::Recv && a.takes_close)?;
+    registers[arm.bind_reg as usize] = crate::builtins::none_variant();
     Some(arm.body_block)
 }
 

@@ -2367,7 +2367,7 @@
 <tr>
 <td><code>find</code></td>
 <td><code>fn find(text: String, needle: String | char) -&gt; Option&lt;i64&gt;</code></td>
-<td>Returns the character index of the first match, or None.</td>
+<td>Returns the Unicode scalar index of the first match, or None; <code>byte_find</code> answers the byte offset <code>substring</code> and <code>slice</code> take.</td>
 </tr>
 <tr>
 <td><code>replace</code></td>
@@ -2418,6 +2418,26 @@
 <td><code>byte_at</code></td>
 <td><code>fn byte_at(text: String, index: i64) -&gt; i64</code></td>
 <td>Returns the UTF-8 byte at an index.</td>
+</tr>
+<tr>
+<td><code>byte_find</code></td>
+<td><code>fn byte_find(text: String, needle: String | char) -&gt; Option&lt;i64&gt;</code></td>
+<td>Byte offset of the first match, in the unit <code>substring</code>, <code>slice</code>, and <code>byte_at</code> take; <code>find</code> answers a scalar index instead.</td>
+</tr>
+<tr>
+<td><code>byte_rfind</code></td>
+<td><code>fn byte_rfind(text: String, needle: String | char) -&gt; Option&lt;i64&gt;</code></td>
+<td>Byte offset of the last match.</td>
+</tr>
+<tr>
+<td><code>byte_offset</code></td>
+<td><code>fn byte_offset(text: String, char_index: i64) -&gt; Option&lt;i64&gt;</code></td>
+<td><code>byte_offset(text, char_index) -&gt; Option&lt;i64&gt;</code>: where a scalar index (a <code>find</code> answer) starts in bytes; one past the last scalar answers the byte length.</td>
+</tr>
+<tr>
+<td><code>char_index</code></td>
+<td><code>fn char_index(text: String, byte_offset: i64) -&gt; Option&lt;i64&gt;</code></td>
+<td><code>char_index(text, byte_offset) -&gt; Option&lt;i64&gt;</code>: the scalar index starting at a byte offset, or <code>None</code> inside a scalar or past the end.</td>
 </tr>
 <tr>
 <td><code>bytes</code></td>

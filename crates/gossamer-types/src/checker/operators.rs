@@ -1245,14 +1245,14 @@ impl TypeChecker<'_> {
         if n < 2 {
             return None;
         }
-        let enum_name = path.segments[n - 2].name.name.as_str();
+        let enum_name = self.variant_path_enum_key(callee.id, path);
         let var_name = path.segments[n - 1].name.name.as_str();
         if self
             .enum_variants
-            .get(enum_name)
+            .get(&enum_name)
             .is_some_and(|vs| vs.contains(var_name))
         {
-            self.enum_tys.get(enum_name).copied()
+            self.enum_tys.get(&enum_name).copied()
         } else {
             None
         }
@@ -2428,7 +2428,24 @@ impl TypeChecker<'_> {
         }
         match self.place_mutability(place) {
             PlaceMut::ImmutableBinding => {
-                self.emit(TypeError::AssignToImmutable { name }, place.span);
+                // The generated `__gos_static_init*` bodies run a heap
+                // static's declared initializer once at entry. A static's
+                // own prologue is the one writer its cell has, so the
+                // immutable-binding report does not apply there.
+                let in_static_init = self
+                    .current_fn_name
+                    .as_deref()
+                    .is_some_and(|n| n.starts_with(gossamer_ast::STATIC_INIT_FN));
+                let is_static_def = matches!(
+                    self.resolutions.get(place.id),
+                    Some(Resolution::Def {
+                        kind: gossamer_resolve::DefKind::Static,
+                        ..
+                    })
+                );
+                if !(in_static_init && is_static_def) {
+                    self.emit(TypeError::AssignToImmutable { name }, place.span);
+                }
             }
             PlaceMut::SharedReference => {
                 self.emit(TypeError::AssignThroughSharedReference { name }, place.span);
@@ -3025,6 +3042,86 @@ impl TypeChecker<'_> {
     /// hole is closed with a direct GT0001 here. Skips a scrutinee whose
     /// head is still an inference variable so a not-yet-resolved shape is
     /// never flagged.
+    /// Whether a variant pattern naming the user enum `found` cannot match a
+    /// scrutinee of type `scrutinee`. Against a user enum the written path
+    /// decides: a variant the scrutinee's enum declares, or a path headed by
+    /// that enum's own name, fits. Against an `Option`, `Result`, struct, or
+    /// scalar no user variant fits.
+    fn variant_pattern_misfits(
+        &self,
+        scrutinee: Ty,
+        pattern: &Pattern,
+        found: gossamer_resolve::DefId,
+    ) -> bool {
+        let (PatternKind::TupleStruct { path, .. }
+        | PatternKind::Struct { path, .. }
+        | PatternKind::Path(path)) = &pattern.kind
+        else {
+            return false;
+        };
+        match self.tcx.kind(scrutinee) {
+            Some(TyKind::Adt { def, .. }) if *def == found => false,
+            Some(TyKind::Adt { def, .. }) if def.local < u32::MAX - 64 => {
+                let Some(variants) = self.tcx.enum_variant_names(*def) else {
+                    return false;
+                };
+                let segments = &path.segments;
+                let variant = segments.last().map(|s| s.name.name.as_str());
+                let head = segments
+                    .len()
+                    .checked_sub(2)
+                    .map(|i| segments[i].name.name.as_str());
+                let own = self.tcx.def_name(*def).and_then(|n| n.rsplit("::").next());
+                !variant.is_some_and(|v| variants.iter().any(|d| d == v))
+                    && head.is_some()
+                    && head != own
+            }
+            Some(TyKind::Adt { def, .. }) if def.local >= u32::MAX - 1 => true,
+            Some(
+                TyKind::Int(_)
+                | TyKind::Float(_)
+                | TyKind::Bool
+                | TyKind::Char
+                | TyKind::String
+                | TyKind::Tuple(_),
+            ) => true,
+            _ => false,
+        }
+    }
+
+    /// The user enum a variant pattern (`Cmd::Go(n)`, `Cmd::Stop`,
+    /// `Ev::Moved { .. }`) names, when the resolver bound it to a variant.
+    fn user_variant_pattern_enum(&self, pattern: &Pattern) -> Option<gossamer_resolve::DefId> {
+        let (PatternKind::TupleStruct { path, .. }
+        | PatternKind::Struct { path, .. }
+        | PatternKind::Path(path)) = &pattern.kind
+        else {
+            return None;
+        };
+        // `Ok` / `Err` / `Some` / `None` are the prelude's constructors, which
+        // the carrier check above judges, whatever a user enum also declares.
+        if Self::bare_result_option_ctor(path).is_some() {
+            return None;
+        }
+        // `Enum::Variant` resolves to its enum; a variant imported bare
+        // (`use Cmd::*`) resolves to the variant, whose enum declares it.
+        match self.resolutions.get(pattern.id)? {
+            Resolution::Def {
+                def,
+                kind: gossamer_resolve::DefKind::Enum,
+            } => Some(def),
+            Resolution::Def {
+                def,
+                kind: gossamer_resolve::DefKind::Variant,
+            } => {
+                let declared = self.resolutions.path_of(def)?;
+                let (_, owner) = declared.split_last()?;
+                self.user_type_defs.get(&owner.join("::")).copied()
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn reject_constructor_scrutinee_mismatch(
         &mut self,
         scrut_ty: Ty,
@@ -3044,6 +3141,21 @@ impl TypeChecker<'_> {
             _ => {}
         }
         for arm in arms {
+            if let Some(found_enum) = self.user_variant_pattern_enum(&arm.pattern)
+                && self.variant_pattern_misfits(resolved, &arm.pattern, found_enum)
+            {
+                let expected = self.render_public_ty(resolved);
+                let found = self
+                    .resolutions
+                    .path_of(found_enum)
+                    .and_then(|path| path.last().cloned())
+                    .unwrap_or_default();
+                self.emit(
+                    TypeError::TypeMismatch { expected, found },
+                    arm.pattern.span,
+                );
+                continue;
+            }
             let ctor = match &arm.pattern.kind {
                 PatternKind::TupleStruct { path, .. } | PatternKind::Path(path) => {
                     Self::bare_result_option_ctor(path)

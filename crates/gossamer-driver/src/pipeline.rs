@@ -84,20 +84,20 @@ pub fn foreign_link_libraries(sf: &SourceFile, program_end: usize) -> ForeignLin
                     if (item.span.start as usize) < program_end {
                         out.declares_foreign = true;
                     }
-                    if let Some(library) = item.attrs.link_library() {
-                        let list = if item.attrs.link_kind().as_deref() == Some("framework") {
+                    for link in item.attrs.links() {
+                        let list = if link.kind.as_deref() == Some("framework") {
                             &mut out.frameworks
                         } else {
                             &mut out.libraries
                         };
-                        if !list.contains(&library) {
-                            list.push(library);
+                        if !list.contains(&link.name) {
+                            list.push(link.name);
                         }
-                    }
-                    if let Some(dir) = item.attrs.link_search() {
-                        let entry = (dependency.map(str::to_string), dir);
-                        if !out.search.contains(&entry) {
-                            out.search.push(entry);
+                        if let Some(dir) = link.search {
+                            let entry = (dependency.map(str::to_string), dir);
+                            if !out.search.contains(&entry) {
+                                out.search.push(entry);
+                            }
                         }
                     }
                 }
@@ -378,7 +378,7 @@ fn lower_to_mir_reporting_prune(
         gossamer_mir::Scope::BeforeSpecialisation,
     );
     gossamer_mir::monomorphise(&hir, &mut bodies, &mut tcx);
-    let late = gossamer_mir::prune_unreachable(&mut bodies, &roots);
+    let late = gossamer_mir::prune_unreachable(&mut bodies, &roots, &tcx);
     // A library unit names no entry, so pruning kept every body; the generic
     // templates among them are compiled only as the instantiations callers use.
     if !roots

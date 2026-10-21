@@ -1,0 +1,22 @@
+struct Model { sender: Sender<i64> }
+mod alpha {
+    #[derive(Default)]
+    pub struct Model { pub n: i64 }
+    impl Display for Model { fn fmt(&self) -> String { f"alpha:{self.n}" } }
+}
+mod beta {
+    #[derive(Default)]
+    pub struct Model { pub text: String }
+}
+struct Pair { left: alpha::Model, right: beta::Model }
+fn main() {
+    let a = Pair { left: alpha::Model { n: 3 }, right: beta::Model { text: "x" } }
+    let b = Pair { left: alpha::Model { n: 3 }, right: beta::Model { text: "x" } }
+    assert(a == b)
+    println(f"{a.left} {b.right}")
+    let x = alpha::Model::default()
+    let y = beta::Model::default()
+    assert_eq(x.n, 0)
+    assert_eq(y.text, "")
+    println("scoped ok")
+}

@@ -13,7 +13,7 @@ Wall-clock and monotonic time facilities.
 | `SystemTime` | `type SystemTime` | Wall-clock point-in-time. |
 | `CivilTime` | `type CivilTime` | Calendar fields interpreted only with an explicit location. |
 | `CivilResolution` | `type CivilResolution` | Explicit unique, gap, or fold result of resolving civil fields. |
-| `Location` | `type Location` | Immutable IANA or fixed-offset time-zone location. |
+| `Location` | `type Location` | Immutable IANA or fixed-offset time-zone location: `lookup(name)` (an IANA name, or `"Local"`), `local()` (the zone the system runs in: `TZ`, then the platform setting, else UTC), `utc()`, `fixed(offset_seconds)`; `name()`, `civil(unix_ms)`, `resolve(civil)`. |
 | `Time` | `type Time` | A wall-clock instant with the location it is read in: `now()`, `from_unix` / `from_unix_ms` / `from_unix_nanos`, `parse_rfc3339` (keeps the written offset), `format_rfc3339`, `civil()`, `in_location` / `utc`, `+` / `-` a `Duration`, and `a - b` answering the `Duration` between two instants. |
 | `sleep` | `fn sleep(ms: i64) -> ()` | Suspends the current goroutine for a `Duration`, or for an integer count of milliseconds. |
 | `after` | `fn after(d: time::Duration) -> Receiver<i64>` | A `Receiver` that yields once after `Duration`, so a deadline composes with `select` and `while let` the way any other channel does. |

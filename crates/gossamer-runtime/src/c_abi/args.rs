@@ -54,6 +54,21 @@ static ARGS_VEC: AtomicUsize = AtomicUsize::new(0);
 // leaked CString allocated by `set_program_name`.
 static PROGRAM_NAME_PTR: AtomicUsize = AtomicUsize::new(0);
 
+/// Releases the runtime's argument and program-name owners after native main
+/// and its exit hooks finish. Readers must have stopped before this is called.
+pub(crate) fn release_program_args() {
+    let args = ARGS_VEC.swap(0, Ordering::SeqCst) as *mut GosVec;
+    let name = PROGRAM_NAME_PTR.swap(0, Ordering::SeqCst) as *mut c_char;
+    ARGS_PTR.store(0, Ordering::SeqCst);
+    ARGS_LEN.store(0, Ordering::SeqCst);
+    // SAFETY: the swapped pointers are the runtime's owned values, no longer
+    // published to readers. Both release helpers accept null.
+    unsafe {
+        gos_rt_vec_free(args);
+        gos_rt_str_free(name);
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_args(argc: c_int, argv: *const *const c_char) {
     ffi_entry!({
@@ -535,37 +550,23 @@ fn escape_path_prefix(path: &str) -> String {
     )
 }
 
-fn dir_info(entry: std::fs::DirEntry) -> Option<DirInfoData> {
-    let entry_path = entry.path();
-    // Use std::fs::metadata (opens a handle) rather than entry.metadata()
-    // (reads from FindFile cache on Windows). The latter returns 0 for
-    // directory sizes on Windows because WIN32_FIND_DATA stores nFileSize=0
-    // for directories; the former calls GetFileInformationByHandle and
-    // returns the real NTFS directory-index allocation, matching what the
-    // interpreter gets via the same syscall path.
-    let meta = std::fs::metadata(&entry_path).ok()?;
-    let ft = entry.file_type().ok()?;
-    Some(DirInfoData {
-        name: encode_os_path(std::path::Path::new(&entry.file_name())),
-        path: encode_os_path(&entry_path),
-        is_file: ft.is_file(),
-        is_dir: ft.is_dir(),
-        is_symlink: ft.is_symlink(),
-        size: i64::try_from(meta.len()).unwrap_or(0),
-        modified_ms: meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .and_then(|d| i64::try_from(d.as_millis()).ok())
-            .unwrap_or(0),
-    })
+fn dir_info(entry: &crate::dir_scan::ScannedEntry) -> DirInfoData {
+    DirInfoData {
+        name: encode_os_path(std::path::Path::new(&entry.name)),
+        path: encode_os_path(&entry.path),
+        is_file: entry.is_file,
+        is_dir: entry.is_dir,
+        is_symlink: entry.is_symlink,
+        size: entry.size,
+        modified_ms: entry.modified_ms,
+    }
 }
 
 fn list_dir_data(path: &str) -> Result<Vec<DirInfoData>, std::io::Error> {
-    let mut entries: Vec<std::fs::DirEntry> =
-        std::fs::read_dir(decode_os_path(path))?.flatten().collect();
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-    Ok(entries.into_iter().filter_map(dir_info).collect())
+    Ok(crate::dir_scan::scan_dir(&decode_os_path(path))?
+        .iter()
+        .map(dir_info)
+        .collect())
 }
 
 /// Slot children of one `(name, path, is_file, is_dir, is_symlink, size,
@@ -640,25 +641,16 @@ fn walk_dir_visit(
     root: &str,
     mut visit: impl FnMut(&DirInfoData) -> Result<(), i64>,
 ) -> Result<Result<(), i64>, std::io::Error> {
-    let mut stack = vec![decode_os_path(root)];
-    while let Some(dir) = stack.pop() {
-        let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(&dir)?.flatten().collect();
-        entries.sort_by_key(std::fs::DirEntry::file_name);
-        for entry in entries {
-            let child = entry.path();
-            let Some(info) = dir_info(entry) else {
-                continue;
-            };
-            let descend = info.is_dir && !info.is_symlink;
-            if let Err(payload) = visit(&info) {
-                return Ok(Err(payload));
-            }
-            if descend {
-                stack.push(child);
-            }
+    let flow = crate::dir_scan::walk(&decode_os_path(root), |entry| {
+        match visit(&dir_info(entry)) {
+            Ok(()) => std::ops::ControlFlow::Continue(()),
+            Err(payload) => std::ops::ControlFlow::Break(payload),
         }
-    }
-    Ok(Ok(()))
+    })?;
+    Ok(match flow {
+        std::ops::ControlFlow::Continue(()) => Ok(()),
+        std::ops::ControlFlow::Break(payload) => Err(payload),
+    })
 }
 
 /// `fs::walk_dir(root, visit) -> Result<(), errors::Error>`. Recursive

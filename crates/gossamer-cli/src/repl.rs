@@ -2214,7 +2214,7 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
         let prompt = if tty {
             "\x1b[32m>>>\x1b[0m ".to_string()
         } else {
-            ">>> ".to_string()
+            String::new()
         };
         let line = match editor.readline(&prompt) {
             Ok(line) => line,

@@ -88,6 +88,22 @@ pub fn init() {
 }
 
 #[cfg(all(unix, not(miri)))]
+static SIGNAL_THREAD: parking_lot::Mutex<
+    Option<(signal_hook::iterator::Handle, std::thread::JoinHandle<()>)>,
+> = parking_lot::Mutex::new(None);
+
+/// Stops the signal dispatcher after native workers have joined.
+// Only the native scheduler's shutdown calls this; wasm32 has no workers.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn shutdown_idle() {
+    #[cfg(all(unix, not(miri)))]
+    if let Some((signals, thread)) = SIGNAL_THREAD.lock().take() {
+        signals.close();
+        let _ = thread.join();
+    }
+}
+
+#[cfg(all(unix, not(miri)))]
 fn install_signal_handler() {
     use signal_hook::iterator::Signals;
     use std::sync::Once;
@@ -96,14 +112,17 @@ fn install_signal_handler() {
         let Ok(mut signals) = Signals::new([signal_hook::consts::SIGURG]) else {
             return;
         };
-        std::thread::Builder::new()
+        let handle = signals.handle();
+        if let Ok(thread) = std::thread::Builder::new()
             .name("gos-preempt".to_string())
             .spawn(move || {
                 for _sig in signals.forever() {
                     request_yield_all();
                 }
             })
-            .ok();
+        {
+            *SIGNAL_THREAD.lock() = Some((handle, thread));
+        }
     });
 }
 

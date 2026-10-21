@@ -400,7 +400,7 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
                 // An arm holding a counted aggregate blob makes the carrier an
                 // option holder, whose walk owns the blob and releases it
                 // after every field copied out of it has taken its share.
-                if tys.iter().take(2).any(|p| tcx.aggr_copy_meta(*p).is_some()) {
+                if tys.iter().take(2).any(|p| has_counted_blob_meta(tcx, *p)) {
                     return None;
                 }
                 let kinds = (arm(tys.first()), arm(tys.get(1)));
@@ -495,6 +495,7 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
     // wrapped in a one-element tuple for `gos_rt_desc_cmp`. The comparator
     // reads the words and keeps none of them, so a carrier placed in one is
     // lent rather than handed over.
+    let lent = super::lent_slot_flags(body);
     let mut comparator_temp = vec![true; n_locals];
     {
         let mut built = vec![false; n_locals];
@@ -560,6 +561,11 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
         }
         for (local, built) in built.into_iter().enumerate() {
             comparator_temp[local] &= built;
+        }
+        // A slot the builder lent to a comparison is one too, whichever
+        // runtime comparison reads it.
+        for (temp, is_lent) in comparator_temp.iter_mut().zip(&lent) {
+            *temp |= *is_lent;
         }
     }
 

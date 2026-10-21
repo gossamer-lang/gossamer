@@ -394,11 +394,6 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
          `stdlib_builtins/os_user.rs` over the same OS calls",
     ),
     (
-        "gos_rt_packed_bytearr_slice_result",
-        "the VM slices a packed byte array with the range-index operation on \
-         `Value::ByteArray`",
-    ),
-    (
         "gos_rt_panic_*",
         "the VM raises an out-of-bounds index as its own runtime error with the \
          same message",
@@ -449,6 +444,11 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
         "gos_rt_race_access",
         "the VM runs goroutines under its own scheduler and has no instrumented \
          memory accesses to report",
+    ),
+    (
+        "gos_rt_register_static_drop",
+        "the VM lowers a static's drop registration to a release of the value \
+         itself, and `Value::Static` holds the value alive by its own `Arc`",
     ),
     (
         "gos_rt_rc_*",

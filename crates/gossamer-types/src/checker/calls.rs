@@ -371,7 +371,7 @@ impl TypeChecker<'_> {
         let n = path.segments.len();
         if n >= 2 {
             let key = (
-                path.segments[n - 2].name.name.clone(),
+                self.variant_path_enum_key(callee.id, path),
                 path.segments[n - 1].name.name.clone(),
             );
             if let Some(payloads) = self.enum_variant_payloads.get(&key).cloned()
@@ -391,6 +391,9 @@ impl TypeChecker<'_> {
                 // by (enum, variant) name and a same-named pair from
                 // another scope must not unify into this call.
                 return Some(payloads.iter().map(|t| Expectation::Coerce(*t)).collect());
+            }
+            if let Some(shaped) = self.assoc_fn_arg_expectations(callee, path, n_args) {
+                return Some(shaped);
             }
         }
         let last = path.segments[n - 1].name.name.as_str();
@@ -434,6 +437,38 @@ impl TypeChecker<'_> {
             }
         }
         self.stdlib_signature_arg_expectations(callee.id, path, n_args)
+    }
+
+    /// `Type::function(..)` on a user type: the declared parameter types
+    /// shape the arguments, so a closure argument's parameters take their
+    /// types before its body is checked. A method named through its type
+    /// takes the receiver first.
+    fn assoc_fn_arg_expectations(
+        &self,
+        callee: &Expr,
+        path: &gossamer_ast::PathExpr,
+        n_args: usize,
+    ) -> Option<Vec<Expectation>> {
+        let Some(Resolution::Def { def, kind }) = self.resolutions.get(callee.id) else {
+            return None;
+        };
+        if !matches!(
+            kind,
+            gossamer_resolve::DefKind::Struct | gossamer_resolve::DefKind::Enum
+        ) {
+            return None;
+        }
+        let owner = self.tcx.def_name(def)?.to_string();
+        let method = path.segments.last()?.name.name.clone();
+        let params = self.method_param_types.get(&(owner, method))?;
+        if params.len() == n_args {
+            return Some(params.iter().copied().map(Expectation::HasType).collect());
+        }
+        (params.len() + 1 == n_args).then(|| {
+            std::iter::once(Expectation::None)
+                .chain(params.iter().copied().map(Expectation::HasType))
+                .collect()
+        })
     }
 
     /// Rejects `json::render` / `json::encode` of an enum value
@@ -647,6 +682,7 @@ impl TypeChecker<'_> {
             self.check_stdlib_signature_arity(
                 module,
                 last,
+                &callee_display_name(callee),
                 args.len(),
                 usize::from(self.pipe_stage_callees.contains(&callee.id)),
                 callee.span,
@@ -965,6 +1001,14 @@ impl TypeChecker<'_> {
         if owner.is_empty() {
             return None;
         }
+        if let Some(Resolution::Def {
+            def,
+            kind: gossamer_resolve::DefKind::TypeAlias,
+        }) = self.resolutions.get(callee.id)
+            && self.nominal_aliases.contains(&def)
+        {
+            return self.reject_unknown_newtype_assoc_fn(owner, fn_name, callee.span);
+        }
         // A type reached through its module (`lib::Point::new`) is keyed
         // by the identity it registers under, so try the written path
         // before the bare name two modules could share.
@@ -1049,6 +1093,52 @@ impl TypeChecker<'_> {
         let base =
             crate::printer::public_type_name(type_name.rsplit("::").next().unwrap_or(type_name))
                 .into_owned();
+        self.emit(
+            TypeError::UnknownAssocItem {
+                base,
+                name: fn_name.to_string(),
+                declared,
+            },
+            span,
+        );
+        Some(self.tcx.error_ty())
+    }
+
+    /// Reports `Newtype::name(..)` when no `impl` on the newtype declares
+    /// `name`. A newtype inherits none of its representation's functions, so
+    /// such a call has nothing to reach on any tier. A declared function is
+    /// typed by the general call path, so this answers `None` for one.
+    fn reject_unknown_newtype_assoc_fn(
+        &mut self,
+        owner: &[&str],
+        fn_name: &str,
+        span: Span,
+    ) -> Option<Ty> {
+        let candidates = self.owner_identity_candidates(owner);
+        let declared_here = |checker: &Self, name: &str| {
+            candidates.iter().any(|candidate| {
+                checker
+                    .method_arities
+                    .contains_key(&(candidate.clone(), name.to_string()))
+                    || checker
+                        .user_method_owners
+                        .get(name)
+                        .is_some_and(|owners| owners.contains(candidate))
+            })
+        };
+        if declared_here(self, fn_name) {
+            return None;
+        }
+        let mut declared: Vec<String> = self
+            .method_arities
+            .keys()
+            .filter(|(type_name, _)| candidates.contains(type_name))
+            .map(|(_, name)| name.clone())
+            .filter(|name| !name.starts_with("__"))
+            .collect();
+        declared.sort();
+        declared.dedup();
+        let base = owner.last().copied().unwrap_or_default().to_string();
         self.emit(
             TypeError::UnknownAssocItem {
                 base,
@@ -1714,6 +1804,49 @@ impl TypeChecker<'_> {
     /// shape collection literals before this point, but shaping alone is not a
     /// type check. Every supplied payload must still unify with its declared
     /// slot, and the constructor's result remains the nominal enum type.
+    /// The name a `..::Enum::Variant` path's enum is registered under: the
+    /// identity of the declaration the resolver reached, so a same-named enum
+    /// elsewhere (the consuming package's, another module's) is never
+    /// consulted. The written name when the path resolved to no variant.
+    pub(super) fn variant_path_enum_key(
+        &self,
+        node: gossamer_ast::NodeId,
+        path: &gossamer_ast::PathExpr,
+    ) -> String {
+        use gossamer_resolve::DefKind;
+        let n = path.segments.len();
+        let written = || path.segments[n.saturating_sub(2)].name.name.clone();
+        let resolved = match self.resolutions.get(node) {
+            Some(Resolution::Def { def, kind }) => Some((def, kind)),
+            Some(Resolution::Import { .. }) => self
+                .resolutions
+                .import_def(node)
+                .and_then(|def| self.resolutions.kind_of(def).map(|kind| (def, kind))),
+            _ => None,
+        };
+        let identity = resolved.and_then(|(def, kind)| {
+            let declared = self.resolutions.path_of(def)?;
+            match kind {
+                DefKind::Variant => declared.split_last().map(|(_, owner)| owner.join("::")),
+                DefKind::Enum => Some(declared.join("::")),
+                // A module head: the segments written after it, up to the
+                // variant, name the enum inside it.
+                DefKind::Mod => Some(
+                    declared
+                        .iter()
+                        .cloned()
+                        .chain(path.segments[1..n - 1].iter().map(|s| s.name.name.clone()))
+                        .collect::<Vec<_>>()
+                        .join("::"),
+                ),
+                _ => None,
+            }
+        });
+        identity
+            .filter(|key| self.enum_variants.contains_key(key))
+            .unwrap_or_else(written)
+    }
+
     pub(super) fn check_enum_variant_ctor_call(
         &mut self,
         callee: &Expr,
@@ -1727,7 +1860,7 @@ impl TypeChecker<'_> {
         if n < 2 {
             return None;
         }
-        let enum_name = path.segments[n - 2].name.name.clone();
+        let enum_name = self.variant_path_enum_key(callee.id, path);
         let variant_name = path.segments[n - 1].name.name.clone();
         let payloads = self
             .enum_variant_payloads

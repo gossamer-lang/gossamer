@@ -296,6 +296,7 @@ pub fn compile_to_object_with_options(
         options.omit_c_main_shim,
         define_only_set.as_ref(),
         LoweringMode::Parallel,
+        &std::sync::Arc::default(),
     )?;
 
     if !options.omit_c_main_shim {
@@ -348,6 +349,7 @@ pub fn compile_to_object_at_path_with_options(
         options.omit_c_main_shim,
         define_only_set.as_ref(),
         LoweringMode::Parallel,
+        &std::sync::Arc::default(),
     )?;
 
     if !options.omit_c_main_shim {
@@ -404,15 +406,27 @@ pub(super) fn body_returns_sret_aggregate(body: &Body, tcx: &TyCtxt) -> bool {
     if is_inline_two_word_ty(tcx, ret) {
         return false;
     }
-    // One-word address-represented aggregates (a single-managed-field struct)
-    // return through sret too: their locals may be stack-slot-backed, so a raw
+    // Every by-value aggregate, one word wide or more, is held through the
+    // address of its words, and its locals may be stack-slot-backed: a raw
     // one-word return could hand the caller a pointer into the dying frame,
     // and the sret copy (plus the fresh-block free) keeps hot
     // aggregate-returning loops from leaking a heap block per call.
     matches!(
         tcx.kind_of(ret),
         TyKind::Tuple(_) | TyKind::Array { .. } | TyKind::Adt { .. }
-    ) && (type_slot_count(tcx, ret) > 1 || single_slot_addr_aggregate(tcx, ret))
+    ) && !tcx.is_rc_managed(ret)
+        && (type_slot_count(tcx, ret) > 1
+            || single_slot_addr_aggregate(tcx, ret)
+            || match tcx.kind_of(ret) {
+                TyKind::Adt { def, .. } => tcx.struct_field_tys(*def).is_some(),
+                _ => true,
+            })
+}
+
+/// Words of storage a static's cell spans: its slots, or the two words of an
+/// `Option` / `Result` carrier.
+pub(crate) fn static_slot_count(tcx: &TyCtxt, ty: gossamer_types::Ty) -> u32 {
+    type_slot_count(tcx, ty).max(2)
 }
 
 /// Cranelift type of one slot in a callable's signature: an inline two-word
@@ -442,7 +456,10 @@ pub(super) fn build_signature_from_types(
     for pidx in 1..=body.arity {
         let local = Local(pidx);
         let ty = body.local_ty(local);
-        let cl = if is_inline_two_word_ty(tcx, ty) {
+        // A parameter the body takes by address crosses as that address.
+        let cl = if body.address_params.contains(&local) {
+            module.target_config().pointer_type()
+        } else if is_inline_two_word_ty(tcx, ty) {
             types::I128
         } else {
             bct.get(local.0 as usize)
@@ -503,6 +520,7 @@ pub(crate) fn lower_program_serial(
     bodies: &[Body],
     tcx: &TyCtxt,
     entry_symbol_for_main: Option<&str>,
+    imported_statics: &std::sync::Arc<HashSet<String>>,
 ) -> Result<LoweredProgram> {
     lower_program_full(
         module,
@@ -512,6 +530,7 @@ pub(crate) fn lower_program_serial(
         false,
         None,
         LoweringMode::Serial,
+        imported_statics,
     )
 }
 
@@ -538,6 +557,7 @@ pub(crate) fn lower_program_with_linkage(
         matches!(linkage, Linkage::Export),
         None,
         LoweringMode::Parallel,
+        &std::sync::Arc::default(),
     )
 }
 
@@ -560,6 +580,7 @@ pub(crate) fn lower_program_full(
     cross_object: bool,
     define_only: Option<&HashSet<String>>,
     mode: LoweringMode,
+    imported_statics: &std::sync::Arc<HashSet<String>>,
 ) -> Result<LoweredProgram> {
     if std::env::var("GOS_DUMP_MIR").is_ok() {
         for body in bodies {
@@ -653,6 +674,7 @@ pub(crate) fn lower_program_full(
     // N9-A: Seed the IntrinsicContext with all function maps so that
     // clones sent to rayon threads carry complete function-pointer tables.
     let mut intrinsics = IntrinsicContext::new();
+    intrinsics.imported_statics = std::sync::Arc::clone(imported_statics);
     intrinsics.functions.clone_from(&function_ids_by_name);
     intrinsics.functions_by_def.clone_from(&function_ids_by_def);
     // Per-callee sret return-slot count: for every body that returns a
@@ -864,16 +886,32 @@ pub(crate) fn lower_program_full(
         }
     }
 
-    // Pre-intern every scalar `static mut` referenced by a load or store so
-    // the parallel phase resolves the backing writable data object from the
-    // intrinsic cache instead of calling declare_data on the OfflineModule.
-    // Non-scalar statics are left un-interned: their lowering declines the
-    // body, which then runs on the VM.
+    // Parallel lowering resolves persistent cells and their ownership helpers from this cache.
     for body in bodies {
+        for words in gossamer_mir::constant_table_locals(body, tcx).values() {
+            intrinsics.intern_const_table(module, words)?;
+        }
         for sref in collect_body_static_refs(body) {
-            if is_scalar_static_ty(tcx, sref.ty) {
-                let cl_ty = cl_type_of(tcx, sref.ty, module);
-                intrinsics.intern_static(module, sref, cl_ty)?;
+            let cl_ty = callable_slot_ty(tcx, sref.ty, module);
+            intrinsics.intern_static(module, sref, cl_ty, tcx)?;
+            if let Some(symbol) = tcx.aggr_copy_meta(sref.ty)
+                && let Some(meta) = tcx.rc_meta(symbol)
+                && meta.len() > 2
+            {
+                intrinsics.intern_rc_meta(module, symbol, meta)?;
+                intrinsics.extern_fn_by_name(module, "gos_rt_aggr_retain_children")?;
+                intrinsics.extern_fn_by_name(module, "gos_rt_aggr_release_children")?;
+            }
+            for field in gossamer_mir::aggregate_ownership_fields(tcx, sref.ty)
+                .into_iter()
+                .chain(gossamer_mir::value_ownership_fields(tcx, sref.ty))
+            {
+                intrinsics.extern_fn_by_name(module, field.retain)?;
+                intrinsics.extern_fn_by_name(module, field.release)?;
+            }
+            if gossamer_mir::is_option_slot_holder(tcx, sref.ty) {
+                let (_, release) = gossamer_mir::option_slot_helpers(tcx, sref.ty);
+                intrinsics.extern_fn_by_name(module, release)?;
             }
         }
     }
@@ -1064,10 +1102,10 @@ pub(super) fn capture_clif<T>(lower: impl FnOnce() -> T) -> (T, HashMap<String, 
 }
 
 /// The copy-blob meta symbols of the aggregate payloads `body` wraps in a
-/// `Result` / `Option` carrier.
+/// `Result` / `Option` carrier or stores as a map entry's value.
 fn carrier_payload_copy_metas(body: &Body, tcx: &TyCtxt) -> Vec<String> {
-    let payload_meta = |args: &[gossamer_mir::Operand]| {
-        let gossamer_mir::Operand::Copy(place) = args.get(1)? else {
+    let payload_meta = |args: &[gossamer_mir::Operand], at: usize| {
+        let gossamer_mir::Operand::Copy(place) = args.get(at)? else {
             return None;
         };
         if !place.projection.is_empty() {
@@ -1087,8 +1125,11 @@ fn carrier_payload_copy_metas(body: &Body, tcx: &TyCtxt) -> Vec<String> {
                     .map(str::to_owned)
             })
     };
-    let is_carrier_ctor =
-        |name: &str| matches!(name, "gos_rt_result_new" | "gos_rt_result_new_owned");
+    // The argument a carrier constructor boxes, or a map call stores.
+    let boxed_arg = |name: &str| match name {
+        "gos_rt_result_new" | "gos_rt_result_new_owned" => Some(1),
+        _ => super::lowering_calls::map_stored_value_arg(name).map(|(at, _)| at),
+    };
     let mut metas = Vec::new();
     for block in &body.blocks {
         for stmt in &block.stmts {
@@ -1096,8 +1137,8 @@ fn carrier_payload_copy_metas(body: &Body, tcx: &TyCtxt) -> Vec<String> {
                 rvalue: gossamer_mir::Rvalue::CallIntrinsic { name, args },
                 ..
             } = &stmt.kind
-                && is_carrier_ctor(name)
-                && let Some(sym) = payload_meta(args)
+                && let Some(at) = boxed_arg(name)
+                && let Some(sym) = payload_meta(args, at)
             {
                 metas.push(sym);
             }
@@ -1107,8 +1148,8 @@ fn carrier_payload_copy_metas(body: &Body, tcx: &TyCtxt) -> Vec<String> {
             args,
             ..
         } = &block.terminator
-            && is_carrier_ctor(name)
-            && let Some(sym) = payload_meta(args)
+            && let Some(at) = boxed_arg(name)
+            && let Some(sym) = payload_meta(args, at)
         {
             metas.push(sym);
         }
@@ -1239,6 +1280,9 @@ mod win64_abi_tests {
                 terminator_inlined: None,
             }],
             span,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 
@@ -1286,6 +1330,9 @@ mod win64_abi_tests {
                 terminator_inlined: None,
             }],
             span,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
         // Reaching the assertion is the point: an unguarded walk never returns.
         let kind = crate::native::operand::operand_print_kind(
@@ -1363,6 +1410,9 @@ mod win64_abi_tests {
                 },
             ],
             span,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 
@@ -1385,6 +1435,7 @@ mod win64_abi_tests {
                 false,
                 None,
                 LoweringMode::Serial,
+                &std::sync::Arc::default(),
             )
         });
         lowered.expect("a registry call taking a carrier must lower for Win64");
@@ -1411,6 +1462,7 @@ mod win64_abi_tests {
                 false,
                 None,
                 LoweringMode::Serial,
+                &std::sync::Arc::default(),
             )
         });
         lowered.expect("a registry call taking a carrier must lower for System V");
@@ -1468,6 +1520,9 @@ mod win64_abi_tests {
                 terminator_inlined: None,
             }],
             span,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
         let caller = Body {
             name: "main".to_string(),
@@ -1548,6 +1603,9 @@ mod win64_abi_tests {
                 },
             ],
             span,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
         vec![callback, caller]
     }
@@ -1614,6 +1672,9 @@ mod win64_abi_tests {
                 },
             ],
             span,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 
@@ -1635,6 +1696,7 @@ mod win64_abi_tests {
                 false,
                 None,
                 LoweringMode::Serial,
+                &std::sync::Arc::default(),
             )
         });
         lowered.expect("an env-dispatched carrier-returning call must lower for Win64");
@@ -1661,6 +1723,7 @@ mod win64_abi_tests {
                 false,
                 None,
                 LoweringMode::Serial,
+                &std::sync::Arc::default(),
             )
         });
         lowered.expect("an env-dispatched carrier-returning call must lower for System V");
@@ -1696,6 +1759,7 @@ mod win64_abi_tests {
             false,
             None,
             LoweringMode::Serial,
+            &std::sync::Arc::default(),
         )
         .expect("a body handing a carrier-returning closure to a combinator must lower");
         assert!(
@@ -1719,6 +1783,7 @@ mod win64_abi_tests {
             false,
             None,
             LoweringMode::Serial,
+            &std::sync::Arc::default(),
         )
         .expect("a body handing a carrier-returning closure to a combinator must lower");
         assert!(
@@ -1740,6 +1805,7 @@ mod win64_abi_tests {
             false,
             None,
             LoweringMode::Serial,
+            &std::sync::Arc::default(),
         )
         .expect("a body passing a Result/Option carrier to a runtime helper must lower for Win64");
     }

@@ -165,6 +165,16 @@ impl<'a> Builder<'a> {
         None
     }
 
+    /// The local a path names: only a single-segment path can name one. A
+    /// module-anchored path (`text::layout::COUNT`) starts with a module,
+    /// whatever local shares that module's name.
+    pub(crate) fn path_local(&self, segments: &[Ident]) -> Option<Local> {
+        match segments {
+            [only] => self.lookup_local(&only.name),
+            _ => None,
+        }
+    }
+
     pub(crate) fn bind_reference_alias(&mut self, name: &str, local: Local) {
         if let Some(scope) = self.reference_aliases.last_mut() {
             scope.insert(name.to_string(), local);
@@ -285,11 +295,36 @@ impl<'a> Builder<'a> {
     pub(crate) fn emit_static_store(
         &mut self,
         target: crate::ir::StaticRef,
-        value: Operand,
+        mut value: Operand,
         span: Span,
     ) {
         if self.current.is_none() {
             return;
+        }
+        let _ = self.ensure_aggr_copy_meta(target.ty);
+        // Persistent value containers own independent stores. Keep the
+        // source frame's cleanup, and transfer this fresh copy to the cell.
+        let clone = crate::value_ownership_fields(self.tcx, target.ty)
+            .into_iter()
+            .find(|field| field.path.is_empty())
+            .and_then(|field| match field.release {
+                "gos_rt_vec_free" | "gos_rt_bheap_field_release" => Some("gos_rt_vec_clone"),
+                "gos_rt_map_field_release" => Some("gos_rt_map_clone"),
+                "gos_rt_set_field_release" => Some("gos_rt_set_clone"),
+                "gos_rt_deque_field_release" => Some("gos_rt_deque_clone"),
+                _ => None,
+            });
+        if let Some(name) = clone {
+            let owned = self.fresh(target.ty);
+            self.emit_assign(
+                Place::local(owned),
+                Rvalue::CallIntrinsic {
+                    name,
+                    args: vec![value],
+                },
+                span,
+            );
+            value = Operand::Copy(Place::local(owned));
         }
         let stmt = Statement {
             kind: StatementKind::StaticStore { target, value },
@@ -419,6 +454,33 @@ impl<'a> Builder<'a> {
         self.current = None;
     }
 
+    /// The counted value a one-word aggregate holds as its only leaf: a
+    /// `Vec` or an RC-managed value reached through single-field structs and
+    /// one-element tuples.
+    fn one_word_counted_leaf(&self, ty: Ty) -> Option<(Ty, Vec<u32>)> {
+        use gossamer_types::TyKind;
+        let mut at = ty;
+        let mut path = Vec::new();
+        while self.is_inline_aggregate_ty(at) && self.type_slot_bytes(at) == 8 {
+            let fields: Vec<Ty> = match self.tcx.kind_of(at) {
+                TyKind::Adt { def, substs } => self.tcx.adt_field_tys(*def, substs)?.to_vec(),
+                TyKind::Tuple(elems) => elems.clone(),
+                _ => return None,
+            };
+            let [only] = fields.as_slice() else {
+                return None;
+            };
+            at = *only;
+            path.push(0);
+        }
+        if path.is_empty() {
+            return None;
+        }
+        let counted = matches!(self.tcx.kind_of(at), TyKind::Vec(_) | TyKind::Slice(_))
+            || (self.tcx.is_rc_managed(at) && !self.tcx.is_weak_ty(at));
+        counted.then_some((at, path))
+    }
+
     /// Registers the child layout of a lifted closure's environment and
     /// answers the codegen symbol naming it.
     ///
@@ -452,12 +514,41 @@ impl<'a> Builder<'a> {
         // RC-managed one, so its child layout is decided by their types.
         let mut capture_locals = Vec::with_capacity(captures.len());
         let mut vec_captures = vec![false; captures.len()];
+        let mut capture_words: Vec<i64> = Vec::with_capacity(captures.len());
+        let mut wide_captures = vec![false; captures.len()];
+        let mut blob_captures = vec![false; captures.len()];
+        // The leaf of a one-word aggregate capture the environment takes a
+        // share of: its field path and whether it is a `Vec`.
+        let mut leaf_captures: Vec<Option<(Vec<u32>, bool)>> = vec![None; captures.len()];
+        // The retain that gives the environment its own share of a captured
+        // map, set, deque, or heap.
+        let mut handle_retains: Vec<Option<&'static str>> = vec![None; captures.len()];
         let mut child_entries: Vec<i64> = Vec::new();
+        // Word 0 holds the body's address; each capture follows in as many
+        // words as its value takes, as the lifted body's prologue reads them.
+        let mut next_word = 1i64;
         for (i, cap) in captures.iter().enumerate() {
             let mut value_local = self.lower_expr(cap)?;
             let value_ty = self.locals[value_local.0 as usize].ty;
-            let word = i as i64 + 1;
-            if self.is_inline_aggregate_ty(value_ty) && self.type_slot_bytes(value_ty) > 8 {
+            let word = next_word;
+            let wide = self.tcx.is_two_word_value(value_ty);
+            next_word += if wide { 2 } else { 1 };
+            capture_words.push(word);
+            wide_captures[i] = wide;
+            if wide {
+                // An `Option` / `Result` / inline enum takes both of its
+                // words, and the environment holds a share of the payload
+                // the gated arm names, given back at its death.
+                if let Some(gate) = self.carrier_blob_gate(value_ty) {
+                    use gossamer_abi::rc::rc_child_blob_kind;
+                    child_entries
+                        .push((rc_child_blob_kind(gate) << RC_CHILD_KIND_SHIFT) | (word + 1));
+                    blob_captures[i] = true;
+                }
+                child_entries.extend(crate::lower::helpers::carrier_heap_child_entries(
+                    self.tcx, value_ty, word,
+                ));
+            } else if self.is_inline_aggregate_ty(value_ty) && self.type_slot_bytes(value_ty) > 8 {
                 // A multi-slot aggregate travels in its word as a box. The box
                 // carries the aggregate's child meta and holds a share of each
                 // counted field, so the environment owns it as an RC child and
@@ -465,6 +556,20 @@ impl<'a> Builder<'a> {
                 // reaches those fields through it.
                 value_local = self.box_aggregate_payload(value_local, value_ty, span);
                 child_entries.push(word);
+            } else if let Some((leaf, path)) = self.one_word_counted_leaf(value_ty) {
+                // A one-word aggregate (`struct Order { order: Vec<i64> }`)
+                // travels as its single counted leaf, so the environment
+                // owns that leaf as it would the leaf captured alone.
+                let vector = matches!(
+                    self.tcx.kind_of(leaf),
+                    gossamer_types::TyKind::Vec(_) | gossamer_types::TyKind::Slice(_)
+                );
+                if vector {
+                    child_entries.push(word | (RC_CHILD_VEC << RC_CHILD_KIND_SHIFT));
+                } else {
+                    child_entries.push(word);
+                }
+                leaf_captures[i] = Some((path, vector));
             } else if self.tcx.is_weak_ty(value_ty) {
                 // The store takes a weak share, which the environment gives
                 // back at its death; it never owns the target.
@@ -477,6 +582,15 @@ impl<'a> Builder<'a> {
             ) {
                 child_entries.push(word | (RC_CHILD_VEC << RC_CHILD_KIND_SHIFT));
                 vec_captures[i] = true;
+            } else if let Some((kind, retain)) = self
+                .shared_handle_capture(cap.ty)
+                .or_else(|| self.shared_handle_capture(value_ty))
+            {
+                // The closure names the frame's own table, so the environment
+                // holds a share of it beside the frame's and gives that back
+                // at its death; either may outlive the other.
+                child_entries.push(word | (kind << RC_CHILD_KIND_SHIFT));
+                handle_retains[i] = Some(retain);
             }
             capture_locals.push(value_local);
         }
@@ -495,7 +609,7 @@ impl<'a> Builder<'a> {
         // store sinks around it are plain words and say so.
         let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
         let unit_ty = self.tcx.unit();
-        let size = i128::from((captures.len() + 1) as i64 * 8);
+        let size = i128::from(next_word * 8);
         let size_local = self.fresh(i64_ty);
         self.emit_assign(
             Place::local(size_local),
@@ -554,7 +668,7 @@ impl<'a> Builder<'a> {
             span,
         );
         for (i, value_local) in capture_locals.into_iter().enumerate() {
-            let offset = (i as i64 + 1) * 8;
+            let offset = capture_words[i] * 8;
             let offset_local = self.fresh(i64_ty);
             self.emit_assign(
                 Place::local(offset_local),
@@ -565,6 +679,40 @@ impl<'a> Builder<'a> {
             // capture is retained by the store, which the drop pass reads as
             // an acquisition; a Vec carries its count outside the RC header,
             // so its share is taken here, exactly as an enum payload's is.
+            // The environment's own share of a one-word aggregate's leaf,
+            // which the store of the aggregate's word does not take.
+            if let Some((path, vector)) = &leaf_captures[i] {
+                let retain_dest = self.fresh(unit_ty);
+                self.emit_assign(
+                    Place::local(retain_dest),
+                    Rvalue::CallIntrinsic {
+                        name: if *vector {
+                            "gos_rt_vec_retain"
+                        } else {
+                            "gos_rt_rc_retain"
+                        },
+                        args: vec![Operand::Copy(Place {
+                            local: value_local,
+                            projection: path
+                                .iter()
+                                .map(|f| crate::ir::Projection::Field(*f))
+                                .collect(),
+                        })],
+                    },
+                    span,
+                );
+            }
+            if let Some(retain) = handle_retains[i] {
+                let retain_dest = self.fresh(unit_ty);
+                self.emit_assign(
+                    Place::local(retain_dest),
+                    Rvalue::CallIntrinsic {
+                        name: retain,
+                        args: vec![Operand::Copy(Place::local(value_local))],
+                    },
+                    span,
+                );
+            }
             if vec_captures[i] {
                 let retain_dest = self.fresh(unit_ty);
                 self.emit_assign(
@@ -580,7 +728,11 @@ impl<'a> Builder<'a> {
             self.emit_assign(
                 Place::local(sink),
                 Rvalue::CallIntrinsic {
-                    name: "gos_store",
+                    name: if wide_captures[i] {
+                        "gos_store_i128"
+                    } else {
+                        "gos_store"
+                    },
                     args: vec![
                         Operand::Copy(Place::local(env_local)),
                         Operand::Copy(Place::local(offset_local)),
@@ -589,15 +741,66 @@ impl<'a> Builder<'a> {
                 },
                 span,
             );
+            // The environment's shares of a two-word capture's payload: the
+            // enclosing scope keeps its own, and the child entries above
+            // give these back.
+            if wide_captures[i] {
+                let value_ty = self.locals[value_local.0 as usize].ty;
+                if blob_captures[i] {
+                    let dest = self.fresh(unit_ty);
+                    self.emit_assign(
+                        Place::local(dest),
+                        Rvalue::CallIntrinsic {
+                            name: "gos_rt_option_slot_retain",
+                            args: vec![Operand::Copy(Place::local(value_local))],
+                        },
+                        span,
+                    );
+                }
+                if let Some(crate::lower::helpers::FieldRcKind::Carrier { ok, err }) =
+                    crate::lower::helpers::carrier_field_kind(self.tcx, value_ty)
+                {
+                    let dest = self.fresh(unit_ty);
+                    self.emit_assign(
+                        Place::local(dest),
+                        Rvalue::CallIntrinsic {
+                            name: "gos_rt_result_payload_retain",
+                            args: vec![
+                                Operand::Copy(Place::local(value_local)),
+                                Operand::Const(ConstValue::Int(i128::from(ok))),
+                                Operand::Const(ConstValue::Int(i128::from(err))),
+                            ],
+                        },
+                        span,
+                    );
+                }
+            }
         }
         self.local_closure.insert(env_local, name.name.clone());
         Some(env_local)
     }
 
+    /// The environment child kind and retain for a captured value reached
+    /// through a handle that carries an owner count of its own rather than
+    /// an RC header: a map, a set, a deque, or a heap.
+    fn shared_handle_capture(&self, ty: Ty) -> Option<(i64, &'static str)> {
+        use crate::lower::helpers::HandleContainer;
+        use gossamer_abi::rc::{RC_CHILD_DEQUE, RC_CHILD_HEAP, RC_CHILD_MAP, RC_CHILD_SET};
+        if matches!(self.tcx.kind_of(ty), gossamer_types::TyKind::HashMap { .. }) {
+            return Some((RC_CHILD_MAP, "gos_rt_map_retain"));
+        }
+        Some(
+            match crate::lower::helpers::handle_container(self.tcx, ty)? {
+                HandleContainer::Set => (RC_CHILD_SET, "gos_rt_set_retain"),
+                HandleContainer::Deque => (RC_CHILD_DEQUE, "gos_rt_deque_retain"),
+                HandleContainer::Heap => (RC_CHILD_HEAP, "gos_rt_vec_retain"),
+            },
+        )
+    }
+
     pub(crate) fn receiver_local_from_path(&self, expr: &HirExpr) -> Option<Local> {
         if let HirExprKind::Path { segments, .. } = &expr.kind {
-            let first = segments.first()?;
-            return self.lookup_local(&first.name);
+            return self.path_local(segments);
         }
         None
     }

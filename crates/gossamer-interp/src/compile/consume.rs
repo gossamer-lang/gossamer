@@ -403,7 +403,9 @@ impl Analyzer {
                 for arm in arms {
                     self.push_scope();
                     match &arm.op {
-                        gossamer_hir::HirSelectOp::Recv { pattern, channel } => {
+                        gossamer_hir::HirSelectOp::Recv {
+                            pattern, channel, ..
+                        } => {
                             self.visit_expr(channel, depth, in_closure, false);
                             self.record_bindings(pattern, depth);
                         }
@@ -903,7 +905,9 @@ impl BlockLastUse {
                 for arm in arms {
                     let snapshot = shadowed.clone();
                     match &arm.op {
-                        gossamer_hir::HirSelectOp::Recv { pattern, channel } => {
+                        gossamer_hir::HirSelectOp::Recv {
+                            pattern, channel, ..
+                        } => {
                             self.visit_expr(channel, stmt_idx, shadowed, captured);
                             self.shadow_pattern(pattern, shadowed);
                         }

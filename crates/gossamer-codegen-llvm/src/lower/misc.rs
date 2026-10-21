@@ -253,6 +253,18 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// `ty` with its references and newtypes peeled: the type whose layout
+    /// the runtime value actually has, since a newtype adds none.
+    pub(crate) fn runtime_ty(&self, mut ty: Ty) -> Ty {
+        loop {
+            match self.tcx.kind(ty) {
+                Some(TyKind::Ref { inner, .. }) => ty = *inner,
+                Some(TyKind::Nominal { repr, .. }) => ty = *repr,
+                _ => return ty,
+            }
+        }
+    }
+
     /// When `arg` is a `Copy` of a stack-aggregate local whose
     /// slot contents will outlive the current frame as data -
     /// but whose stack address won't - emit a heap copy and
@@ -267,6 +279,14 @@ impl<'a> Lowerer<'a> {
         self.maybe_heap_copy_aggregate_with(
             arg, /* leak */ false, /* map_owned */ false, false,
         )
+    }
+
+    /// Whether `arg` names a whole struct or tuple with no fields, which a
+    /// carrier holds as no bits at all rather than as an address.
+    pub(crate) fn is_field_free_operand(&self, arg: &Operand) -> bool {
+        matches!(arg, Operand::Copy(place)
+            if place.projection.is_empty()
+                && self.tcx.is_field_free_aggregate(self.body.local_ty(place.local)))
     }
 
     /// Boxes a carrier's aggregate payload. The box owns the payload's heap
@@ -562,8 +582,11 @@ impl<'a> Lowerer<'a> {
             "gos_rt_option_slot_retain"
                 | "gos_rt_option_slot_retain_ok"
                 | "gos_rt_option_slot_release"
+                | "gos_rt_option_slot_release_ok"
                 | "gos_rt_map_field_release"
                 | "gos_rt_map_field_clone"
+                | "gos_rt_json_field_clone"
+                | "gos_rt_json_field_release"
                 | "gos_rt_set_field_release"
                 | "gos_rt_set_field_clone"
                 | "gos_rt_deque_field_release"
@@ -586,7 +609,10 @@ impl<'a> Lowerer<'a> {
             } else {
                 base
             };
-            if name == "gos_rt_option_slot_release" {
+            if matches!(
+                name,
+                "gos_rt_option_slot_release" | "gos_rt_option_slot_release_ok"
+            ) {
                 // A carrier whose payload word is null - a `None`, an arm the
                 // frame did not take - has nothing to give back.
                 let at = self.fresh();
@@ -863,7 +889,9 @@ impl<'a> Lowerer<'a> {
                         let n = i64::try_from(len.to_usize()).unwrap_or(0);
                         let elem = *elem;
                         match self.tcx.kind(elem) {
-                            Some(TyKind::Int(gossamer_types::IntTy::U8)) => ConcatKind::ArrU8(n),
+                            // A `u8` slot holds the byte zero-extended, so it
+                            // reads as the word it renders as.
+                            Some(TyKind::Int(gossamer_types::IntTy::U8)) => ConcatKind::ArrI64(n),
                             Some(TyKind::Int(_)) if self.is_signed_word_int(elem) => {
                                 ConcatKind::ArrI64(n)
                             }
@@ -1564,7 +1592,7 @@ impl<'a> Lowerer<'a> {
         fns: &mut Vec<String>,
         method: &str,
     ) -> Option<Vec<u8>> {
-        let ty = self.unwrap_ref(ty);
+        let ty = self.runtime_ty(ty);
         match self.tcx.kind(ty) {
             Some(TyKind::Tuple(elems)) => {
                 let elems: Vec<Ty> = elems.clone();
@@ -1691,7 +1719,7 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(crate) fn tuple_elem_tags(&self, elem: Ty) -> Option<Vec<u8>> {
-        if let Some(TyKind::Tuple(nested)) = self.tcx.kind(self.unwrap_ref(elem)) {
+        if let Some(TyKind::Tuple(nested)) = self.tcx.kind(self.runtime_ty(elem)) {
             let nested: Vec<Ty> = nested.clone();
             if nested.is_empty() || nested.len() > usize::from(u8::MAX) {
                 return None;
@@ -1706,7 +1734,7 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(crate) fn tuple_elem_tag(&self, elem: Ty) -> Option<u8> {
-        match self.tcx.kind(self.unwrap_ref(elem)) {
+        match self.tcx.kind(self.runtime_ty(elem)) {
             // A `u64` / `usize` slot spans the whole unsigned range, so it
             // reads as unsigned wherever a tag stream names it.
             Some(TyKind::Int(IntTy::U64 | IntTy::Usize)) => Some(1),

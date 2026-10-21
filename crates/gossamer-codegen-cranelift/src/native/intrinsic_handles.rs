@@ -205,6 +205,9 @@ pub(super) fn lower_intrinsic_call_handles(
         // Each frees a heap-owned runtime container so the
         // process doesn't leak its contents across calls.
         "gos_rt_map_free"
+        | "gos_rt_map_retain"
+        | "gos_rt_set_retain"
+        | "gos_rt_deque_retain"
         | "gos_rt_vec_free"
         | "gos_rt_vec_retain"
         | "gos_rt_vec_mark_rc_elems"
@@ -212,10 +215,14 @@ pub(super) fn lower_intrinsic_call_handles(
         | "gos_rt_vec_mark_vec_elems"
         | "gos_rt_vec_mark_weak_elems"
         | "gos_rt_vec_compact_elems"
+        | "gos_rt_vec_share_elements"
         | "gos_rt_set_free"
         | "gos_rt_arr_iter_free" => {
             let static_name: &'static str = match name {
                 "gos_rt_map_free" => "gos_rt_map_free",
+                "gos_rt_map_retain" => "gos_rt_map_retain",
+                "gos_rt_set_retain" => "gos_rt_set_retain",
+                "gos_rt_deque_retain" => "gos_rt_deque_retain",
                 "gos_rt_vec_free" => "gos_rt_vec_free",
                 "gos_rt_vec_retain" => "gos_rt_vec_retain",
                 "gos_rt_vec_mark_rc_elems" => "gos_rt_vec_mark_rc_elems",
@@ -223,6 +230,7 @@ pub(super) fn lower_intrinsic_call_handles(
                 "gos_rt_vec_mark_vec_elems" => "gos_rt_vec_mark_vec_elems",
                 "gos_rt_vec_mark_weak_elems" => "gos_rt_vec_mark_weak_elems",
                 "gos_rt_vec_compact_elems" => "gos_rt_vec_compact_elems",
+                "gos_rt_vec_share_elements" => "gos_rt_vec_share_elements",
                 "gos_rt_set_free" => "gos_rt_set_free",
                 "gos_rt_arr_iter_free" => "gos_rt_arr_iter_free",
                 _ => unreachable!(),
@@ -395,22 +403,22 @@ pub(super) fn lower_intrinsic_call_handles(
                 Some(a) => lower_operand(module, builder, locals, body, tcx, a, None, intrinsics)?,
                 None => builder.ins().iconst(types::I64, 0),
             };
-            let d_val = match args.get(2) {
-                Some(a) => lower_operand(module, builder, locals, body, tcx, a, None, intrinsics)?,
-                None => builder.ins().iconst(types::I64, 0),
-            };
+            let d64 =
+                map_default_word(module, builder, locals, body, tcx, args.get(2), intrinsics)?;
             let k64 = coerce_arg_to(builder, k_val, types::I64)?;
-            let d64 = coerce_arg_to(builder, d_val, types::I64)?;
             let fref = module.declare_func_in_func(get_or_fn, builder.func);
             let call = builder.ins().call(fref, &[m, k64, d64]);
             let v = builder.inst_results(call)[0];
-            define_var_to(
+            define_map_read(
+                module,
                 builder,
                 locals,
-                &intrinsics.body_cl_types,
-                destination.local,
+                body,
+                tcx,
+                intrinsics,
+                destination,
                 v,
-            );
+            )?;
             Ok(true)
         }
         // String-keyed `get_or` for `HashMap<String, i64>`. The key
@@ -442,21 +450,21 @@ pub(super) fn lower_intrinsic_call_handles(
                 )?,
                 None => builder.ins().iconst(ptr_ty, 0),
             };
-            let d_val = match args.get(2) {
-                Some(a) => lower_operand(module, builder, locals, body, tcx, a, None, intrinsics)?,
-                None => builder.ins().iconst(types::I64, 0),
-            };
-            let d64 = coerce_arg_to(builder, d_val, types::I64)?;
+            let d64 =
+                map_default_word(module, builder, locals, body, tcx, args.get(2), intrinsics)?;
             let fref = module.declare_func_in_func(get_or_fn, builder.func);
             let call = builder.ins().call(fref, &[m, k_val, d64]);
             let v = builder.inst_results(call)[0];
-            define_var_to(
+            define_map_read(
+                module,
                 builder,
                 locals,
-                &intrinsics.body_cl_types,
-                destination.local,
+                body,
+                tcx,
+                intrinsics,
+                destination,
                 v,
-            );
+            )?;
             Ok(true)
         }
         // String-keyed, string-valued `get_or`. Default and result
@@ -1664,4 +1672,81 @@ fn sent_aggregate_copy(
     let src = coerce_arg_to(builder, value, ptr_ty)?;
     let call = builder.ins().call(alloc_ref, &[bytes, meta, src]);
     Ok(builder.inst_results(call)[0])
+}
+
+/// Whether `ty` is an `Option` / `Result` carrier, which a map keeps boxed.
+fn is_map_carrier(tcx: &TyCtxt, ty: gossamer_types::Ty) -> bool {
+    matches!(
+        tcx.kind_of(ty),
+        TyKind::Adt { def, .. } if def.local == u32::MAX || def.local == u32::MAX - 1
+    )
+}
+
+/// The word a map `get_or` takes as its default: a two-word carrier travels
+/// as the address of its words, the way a stored value is a box address, and
+/// anything else as itself.
+pub(super) fn map_default_word(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    locals: &mut HashMap<Local, Variable>,
+    body: &Body,
+    tcx: &TyCtxt,
+    arg: Option<&Operand>,
+    intrinsics: &mut IntrinsicContext,
+) -> Result<ir::Value> {
+    let Some(arg) = arg else {
+        return Ok(builder.ins().iconst(types::I64, 0));
+    };
+    let value = lower_operand(module, builder, locals, body, tcx, arg, None, intrinsics)?;
+    let carrier = matches!(arg, Operand::Copy(place)
+        if place.projection.is_empty() && is_map_carrier(tcx, body.local_ty(place.local)));
+    if !carrier {
+        return coerce_arg_to(builder, value, types::I64);
+    }
+    let ptr_ty = module.target_config().pointer_type();
+    let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+        cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+        16,
+        3,
+    ));
+    let addr = builder.ins().stack_addr(ptr_ty, slot, 0);
+    let wide = coerce_arg_to(builder, value, types::I128)?;
+    builder.ins().store(MemFlagsData::trusted(), wide, addr, 0);
+    coerce_arg_to(builder, addr, types::I64)
+}
+
+/// Binds what a map reader answers: a two-word carrier destination reads its
+/// words back from the box address the reader answers.
+pub(super) fn define_map_read(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    locals: &mut HashMap<Local, Variable>,
+    body: &Body,
+    tcx: &TyCtxt,
+    intrinsics: &mut IntrinsicContext,
+    destination: &gossamer_mir::Place,
+    value: ir::Value,
+) -> Result<()> {
+    let value = if destination.projection.is_empty()
+        && is_map_carrier(tcx, body.local_ty(destination.local))
+    {
+        super::lowering_calls::emit_rt_call_by_name(
+            module,
+            builder,
+            intrinsics,
+            "gos_rt_carrier_from_box",
+            &[value],
+        )?
+        .ok_or_else(|| anyhow!("gos_rt_carrier_from_box answers the carrier"))?
+    } else {
+        value
+    };
+    define_var_to(
+        builder,
+        locals,
+        &intrinsics.body_cl_types,
+        destination.local,
+        value,
+    );
+    Ok(())
 }

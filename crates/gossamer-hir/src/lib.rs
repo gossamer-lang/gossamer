@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 
+mod accessors;
 mod capture_cells;
 mod disjoint_windows;
 mod f32_round;

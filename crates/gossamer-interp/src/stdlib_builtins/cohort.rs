@@ -189,8 +189,10 @@ static COHORTS: LazyLock<parking_lot::Mutex<HashMap<i64, Arc<CohortNode>>>> =
 static NEXT_ID: AtomicI64 = AtomicI64::new(1);
 
 thread_local! {
-    /// The cohort current on this goroutine. A VM goroutine owns its
-    /// thread for its whole life, so thread-local is per goroutine here.
+    /// The cohort current on this goroutine. A VM goroutine runs on one
+    /// thread for its whole life, and one run nested inside its joiner gives
+    /// the joiner's back through [`nested`], so thread-local is per goroutine
+    /// here.
     static CURRENT: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
 }
 
@@ -211,6 +213,16 @@ pub(crate) fn current_cohort() -> i64 {
 
 fn set_current(id: i64) {
     CURRENT.with(|cell| cell.set(id));
+}
+
+/// Runs `body`, a goroutine nested on this thread inside the one joining it,
+/// and restores the joiner's current cohort once the nested goroutine has
+/// entered and left its own.
+pub(crate) fn nested<R>(body: impl FnOnce() -> R) -> R {
+    let outer = CURRENT.with(std::cell::Cell::get);
+    let out = body();
+    set_current(outer);
+    out
 }
 
 /// Whether `id` or any enclosing cohort is cancelled.

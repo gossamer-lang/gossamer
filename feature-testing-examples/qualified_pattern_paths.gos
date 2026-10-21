@@ -1,0 +1,50 @@
+// A pattern may name its enum the way a path expression does: through
+// `super::`, `crate::`, or `self::`, from inside a module and from the root.
+
+enum Parsed { Valid(f64), Invalid(String), Empty }
+
+fn parse(s: String) -> Parsed {
+    if s.is_empty() {
+        return Parsed::Empty
+    }
+    match s.to_f64() {
+        Some(v) => Parsed::Valid(v)
+        None => Parsed::Invalid(s)
+    }
+}
+
+mod inner {
+    pub enum Level { Low, High(i64) }
+
+    pub fn invalid(s: String) -> bool {
+        matches(super::parse(s), super::Parsed::Invalid(_))
+    }
+
+    pub fn rank(s: String) -> i64 {
+        match super::parse(s) {
+            super::Parsed::Valid(v) => v as i64
+            crate::Parsed::Invalid(_) => -1
+            super::Parsed::Empty => 0
+        }
+    }
+
+    pub fn level(n: i64) -> i64 {
+        let l = if n > 5 { Level::High(n) } else { Level::Low }
+        match l {
+            self::Level::High(v) => v
+            self::Level::Low => 0
+        }
+    }
+}
+
+fn main() {
+    println(f"{inner::invalid("x")} {inner::invalid("2")}")
+    println(f"{inner::rank("7")} {inner::rank("q")} {inner::rank("")}")
+    println(f"{inner::level(9)} {inner::level(1)}")
+    match parse("3.5") {
+        crate::Parsed::Valid(v) => println(f"root {v}")
+        _ => println("root other")
+    }
+    let hit = matches(inner::Level::High(2), crate::inner::Level::High(_))
+    println(f"{hit}")
+}

@@ -2352,7 +2352,12 @@
 <tr>
 <td><code>decode</code></td>
 <td><code>fn decode(data: Vec&lt;u8&gt;) -&gt; Result&lt;Vec&lt;u8&gt;, errors::Error&gt;</code></td>
-<td>Decompresses a gzip-formatted payload.</td>
+<td>Decompresses a gzip payload; concatenated members decode as one stream. Output is unbounded - use <code>decode_limited</code> for untrusted input.</td>
+</tr>
+<tr>
+<td><code>decode_limited</code></td>
+<td><code>fn decode_limited(data: Vec&lt;u8&gt;, max_bytes: i64) -&gt; Result&lt;Vec&lt;u8&gt;, errors::Error&gt;</code></td>
+<td><code>decode(data)</code>, refusing output past <code>max_bytes</code>: an archive bomb answers <code>Err</code> instead of exhausting memory.</td>
 </tr>
 </tbody>
 </table>

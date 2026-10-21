@@ -46,6 +46,7 @@ pub const DEFAULT_BLOCKING_QUEUE_AGE_LIMIT: Duration = Duration::from_secs(1);
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
 struct PoolState {
+    stopping: bool,
     /// Waiting jobs, each with the instant it was queued.
     queue: VecDeque<(Instant, Job)>,
     /// Threads alive, busy or idle.
@@ -61,6 +62,7 @@ struct PoolState {
 /// A set of blocking threads and the queue that feeds them.
 struct Pool {
     state: Mutex<PoolState>,
+    threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     work: Condvar,
     /// Signalled when a thread takes a job, for OS-thread submitters.
     room: Condvar,
@@ -79,12 +81,14 @@ impl Pool {
     const fn new() -> Self {
         Self {
             state: Mutex::new(PoolState {
+                stopping: false,
                 queue: VecDeque::new(),
                 threads: 0,
                 idle: 0,
                 parked_submitters: VecDeque::new(),
                 blocked_submitters: 0,
             }),
+            threads: Mutex::new(Vec::new()),
             work: Condvar::new(),
             room: Condvar::new(),
             thread_cap: AtomicUsize::new(DEFAULT_BLOCKING_THREAD_CAP),
@@ -109,6 +113,9 @@ impl Pool {
 
     fn submit(&'static self, job: Job) -> Result<(), String> {
         let mut state = self.state.lock();
+        if state.stopping {
+            return Err("blocking pool is shut down".to_string());
+        }
         // A thread taking a job is what makes room, so with no thread alive
         // the job is admitted: it is what starts one.
         while state.threads > 0 && !self.has_room(&state) {
@@ -127,6 +134,9 @@ impl Pool {
                 state.blocked_submitters -= 1;
             }
         }
+        if state.stopping {
+            return Err("blocking pool is shut down".to_string());
+        }
         state.queue.push_back((Instant::now(), job));
         if state.idle > 0 {
             self.work.notify_one();
@@ -144,21 +154,46 @@ impl Pool {
         let spawned = std::thread::Builder::new()
             .name("gos-blocking".to_string())
             .spawn(move || self.worker());
-        if let Err(e) = spawned {
-            let mut state = self.state.lock();
-            state.threads -= 1;
-            if state.threads == 0 {
-                // Nothing alive would ever take the job just queued.
-                state.queue.pop_back();
-                return Err(format!("spawn blocking worker: {e}"));
+        match spawned {
+            Ok(thread) => self.threads.lock().push(thread),
+            Err(e) => {
+                let mut state = self.state.lock();
+                state.threads -= 1;
+                if state.threads == 0 {
+                    // Nothing alive would ever take the job just queued.
+                    state.queue.pop_back();
+                    return Err(format!("spawn blocking worker: {e}"));
+                }
             }
         }
         Ok(())
     }
 
     fn worker(&self) {
+        self.serve();
+        self.retire();
+    }
+
+    /// Lets go of the calling worker's own handle as it leaves, which detaches
+    /// it, so a thread that retired is never left neither joined nor
+    /// detached. A handle `shutdown_idle` already took is joined there.
+    fn retire(&self) {
+        let me = std::thread::current().id();
+        let mut threads = self.threads.lock();
+        if let Some(at) = threads.iter().position(|t| t.thread().id() == me) {
+            drop(threads.swap_remove(at));
+        }
+    }
+
+    /// Runs queued jobs until the pool stops or the thread has waited out its
+    /// keep-alive with nothing to do.
+    fn serve(&self) {
         let mut state = self.state.lock();
         loop {
+            if state.stopping && state.queue.is_empty() {
+                state.threads -= 1;
+                return;
+            }
             if let Some((_, job)) = state.queue.pop_front() {
                 self.admit_next(&mut state);
                 drop(state);
@@ -167,6 +202,7 @@ impl Pool {
                 continue;
             }
             state.idle += 1;
+            self.room.notify_all();
             let keep_alive = Duration::from_millis(self.keep_alive_ms.load(Ordering::Relaxed));
             let timed_out = self.work.wait_for(&mut state, keep_alive).timed_out();
             state.idle -= 1;
@@ -200,9 +236,38 @@ impl Pool {
                 .map_or(0, |(queued, _)| millis(queued.elapsed())),
         }
     }
+
+    fn shutdown_idle(&self) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut state = self.state.lock();
+        while !state.queue.is_empty()
+            || state.threads != state.idle
+            || state.blocked_submitters != 0
+            || !state.parked_submitters.is_empty()
+        {
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            self.room.wait_for(&mut state, deadline - now);
+        }
+        state.stopping = true;
+        self.work.notify_all();
+        drop(state);
+        let threads = std::mem::take(&mut *self.threads.lock());
+        for thread in threads {
+            let _ = thread.join();
+        }
+        true
+    }
 }
 
 static POOL: Pool = Pool::new();
+
+/// Joins idle blocking workers before native program storage is released.
+pub(crate) fn shutdown_idle() -> bool {
+    POOL.shutdown_idle()
+}
 
 /// Sets the most blocking threads alive at once; at least one.
 pub fn set_blocking_thread_cap(cap: usize) {
@@ -282,12 +347,50 @@ mod tests {
         assert!(blocking_threads() <= DEFAULT_BLOCKING_THREAD_CAP);
     }
 
-    /// A pool of its own, so its limits leave the process pool alone.
+    /// A pool of its own, so its limits leave the process pool alone. A test
+    /// shuts it down at its end, which joins the threads it started.
     fn private_pool(threads: usize, queue: usize) -> &'static Pool {
         let pool: &'static Pool = Box::leak(Box::new(Pool::new()));
         pool.thread_cap.store(threads, Ordering::Relaxed);
         pool.queue_cap.store(queue, Ordering::Relaxed);
         pool
+    }
+
+    #[test]
+    fn a_worker_that_outlives_its_keep_alive_leaves_no_handle_behind() {
+        let pool = private_pool(1, 2);
+        pool.keep_alive_ms.store(0, Ordering::Relaxed);
+        let (tx, rx) = std::sync::mpsc::channel();
+        pool.submit(Box::new(move || {
+            tx.send(()).unwrap();
+        }))
+        .unwrap();
+        rx.recv().unwrap();
+        // The worker retires on its own; its handle goes with it, so nothing
+        // is left for the process to end with neither joined nor detached.
+        while !pool.threads.lock().is_empty() {
+            std::thread::yield_now();
+        }
+        assert_eq!(pool.stats().threads, 0);
+        assert!(pool.shutdown_idle());
+    }
+
+    #[test]
+    fn idle_shutdown_joins_blocking_workers_and_rejects_late_jobs() {
+        let pool = private_pool(1, 2);
+        let (tx, rx) = std::sync::mpsc::channel();
+        pool.submit(Box::new(move || {
+            tx.send(()).unwrap();
+        }))
+        .unwrap();
+        rx.recv().unwrap();
+        assert!(pool.shutdown_idle());
+        assert_eq!(pool.stats().threads, 0);
+        assert!(pool.threads.lock().is_empty());
+        assert!(
+            pool.submit(Box::new(|| panic!("a stopped pool ran a job")))
+                .is_err()
+        );
     }
 
     #[test]
@@ -323,6 +426,7 @@ mod tests {
         release_tx.send(()).expect("release the thread");
         submitter.join().expect("submitter");
         assert!(admitted.load(Ordering::Acquire));
+        assert!(pool.shutdown_idle());
     }
 
     #[test]
@@ -345,5 +449,6 @@ mod tests {
         assert_eq!(pool.stats().queued, 1, "held back below the depth cap");
         release_tx.send(()).expect("release the thread");
         submitter.join().expect("submitter").expect("third job");
+        assert!(pool.shutdown_idle());
     }
 }

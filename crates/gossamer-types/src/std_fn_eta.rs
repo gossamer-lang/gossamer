@@ -34,7 +34,7 @@ const ETA_PARAM_PREFIX: &str = "__gos_eta";
 
 /// Expands every std free function used as a value into the closure
 /// that calls it. Returns the number of paths rewritten.
-pub fn expand_std_fn_values(sf: &mut SourceFile, resolutions: &Resolutions) -> usize {
+pub fn expand_std_fn_values(sf: &mut SourceFile, resolutions: &mut Resolutions) -> usize {
     let mut ids = NodeIdGenerator::new();
     while ids.issued() < sf.next_node_id {
         let _ = ids.next();
@@ -55,7 +55,7 @@ pub fn expand_std_fn_values(sf: &mut SourceFile, resolutions: &Resolutions) -> u
 
 struct Expand<'a> {
     ids: &'a mut NodeIdGenerator,
-    resolutions: &'a Resolutions,
+    resolutions: &'a mut Resolutions,
     /// Payload arity of every tuple variant this unit declares, keyed by
     /// `(enum, variant)`.
     tuple_variants: HashMap<(String, String), usize>,
@@ -141,12 +141,14 @@ impl Expand<'_> {
         )
     }
 
-    /// Builds `|p0, .., pn| path(p0, .., pn)` around `path`.
+    /// Builds `|p0, .., pn| path(p0, .., pn)` around `path`. The pass runs
+    /// after resolution, so it records what each new path names: an argument
+    /// its parameter, and the callee what `path` itself resolved to.
     fn eta_expand(&mut self, path: &PathExpr, expr: &Expr, arity: usize) -> ExprKind {
         let names: Vec<String> = (0..arity)
             .map(|i| format!("{ETA_PARAM_PREFIX}{i}"))
             .collect();
-        let params = names
+        let params: Vec<ClosureParam> = names
             .iter()
             .map(|name| ClosureParam {
                 pattern: Pattern::new(
@@ -163,15 +165,22 @@ impl Expand<'_> {
             .collect();
         let args = names
             .iter()
-            .map(|name| {
-                Expr::new(
+            .zip(&params)
+            .map(|(name, param)| {
+                let arg = Expr::new(
                     self.ids.next(),
                     expr.span,
                     ExprKind::Path(PathExpr::single(name.clone())),
-                )
+                );
+                self.resolutions
+                    .insert(arg.id, Resolution::Local(param.pattern.id));
+                arg
             })
             .collect();
         let callee = Expr::new(self.ids.next(), expr.span, ExprKind::Path(path.clone()));
+        if let Some(resolution) = self.resolutions.get(expr.id) {
+            self.resolutions.insert(callee.id, resolution);
+        }
         let body = Expr::new(
             self.ids.next(),
             expr.span,
@@ -238,8 +247,8 @@ mod tests {
         let file = map.add_file("eta.gos".to_string(), source.to_string());
         let (mut sf, diags) = gossamer_parse::parse_source_file(source, file);
         assert!(diags.is_empty(), "parse errors: {diags:?}");
-        let (resolutions, _) = gossamer_resolve::resolve_source_file(&sf);
-        let count = expand_std_fn_values(&mut sf, &resolutions);
+        let (mut resolutions, _) = gossamer_resolve::resolve_source_file(&sf);
+        let count = expand_std_fn_values(&mut sf, &mut resolutions);
         (sf, count)
     }
 

@@ -1,0 +1,114 @@
+// Arrays nested in arrays, tuples, structs, vectors, and map values keep one
+// layout for every element type: they copy, compare, order, print, and convert
+// to vectors alike, byte arrays included. An `Option` of an aggregate keys a
+// map or set by its payload's content, and an array of bytes or flags passed
+// where a slice is expected reads each element. A `const` or immutable
+// `static` table is read in place.
+
+const SQUARES: [i64; 20] = [0, 1, 4, 9, 16, 25, 36, 49, 64, 81, 100, 121, 144, 169, 196, 225, 256, 289, 324, 361]
+static HALVES: [f64; 16] = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5, 13.5, 14.5, 15.5]
+
+#[derive(PartialEq)]
+struct Block { data: [u8; 4], n: i64 }
+
+fn first_bytes(rows: [[u8; 3]]) -> u8 { rows[1][2] }
+fn row_total(rows: [[i64; 2]]) -> i64 { rows[1][0] + rows.len() }
+
+fn shapes(k: i64) -> String {
+    let n = [[1, 2], [3, k]]
+    let m = [[1, 2], [3, 2]]
+    let x: [[u8; 3]; 2] = [[1, 2, 3], [4, 5, k as u8]]
+    let y: [[u8; 3]; 2] = [[1, 2, 3], [4, 5, 2]]
+    let pairs = [(1, k), (3, 4)]
+    let b = Block { data: [k as u8, 2, 3, 4], n: 7 }
+    let c = Block { data: [2, 2, 3, 4], n: 7 }
+    f"{n == m} {n < m} {x == y} {pairs == [(1, 2), (3, 4)]} {b == c} {first_bytes(x)} {row_total(n)}"
+}
+
+fn conversions(k: i64) -> String {
+    let rows: [[u8; 3]; 2] = [[1, 2, 3], [4, 5, k as u8]]
+    let mut v = rows.to_vec()
+    v.push([7, 8, 9])
+    let grid = [[1, 2], [3, k]]
+    let g = grid.to_vec()
+    let found = grid.contains([3, 2])
+    let bytes = Some(rows[1])
+    let held = { "a": [k, k + 1], "b": [0, 0] }
+    f"{v:?} {v.len()} {g[1][1]} {found} {bytes:?} {held["a"]:?}"
+}
+
+fn carriers(k: i64) -> String {
+    let opts = #[Some(1), None, Some(k)]
+    let target = Some(2)
+    let near = |o: Option<i64>| o == target
+    let hit = opts.iter().find(|o| o == Some(k))
+    let t = (Some(k), "a" + "b", 9)
+    f"{opts.iter().position(near):?} {hit:?} {t.get(0):?} {t.get(1):?} {opts.iter().filter(near).count()}"
+}
+
+fn bytes_total(xs: [u8]) -> i64 {
+    let mut t = 0
+    for x in xs { t += x as i64 }
+    t + xs.len()
+}
+
+fn flags_set(xs: [bool]) -> i64 {
+    let mut t = 0
+    for x in xs {
+        if x { t += 1 }
+    }
+    t
+}
+
+fn narrow_total(xs: [u16]) -> i64 {
+    let mut t = 0
+    for x in xs { t += x as i64 }
+    t
+}
+
+fn tables(k: i64) -> String {
+    let mut lo = 0
+    let mut hi = SQUARES.len() - 1
+    let want = k * k * 9
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if SQUARES[mid] < want { lo = mid + 1 } else { hi = mid }
+    }
+    let copy = SQUARES
+    f"{lo} {HALVES[k as i64]} {copy[19]} {HALVES.len()}"
+}
+
+fn slices(k: i64) -> String {
+    let bytes: [u8; 3] = [1, 2, k as u8]
+    let flags = [true, k > 1, true]
+    let wide: [u16; 2] = [300, k as u16]
+    f"{bytes_total(bytes)} {flags_set(flags)} {narrow_total(wide)}"
+}
+
+fn boxed_keys(k: i64) -> String {
+    let mut m = Map::new()
+    m.insert(Some([1, k]), 1)
+    m.insert(Some([1, 2]), 2)
+    m.insert(None, 3)
+    let mut seen = 0
+    for (key, value) in m {
+        if key.is_some() { seen += value }
+    }
+    let mut s = Set::new()
+    s.insert(Some((f"k{k}", k)))
+    s.insert(Some(("k2", 2)))
+    let mut keys = m.keys()
+    keys.sort()
+    f"{m.len()} {m.get(Some([1, 2])):?} {seen} {keys:?} {s.len()} {s.contains(Some(("k1", 1)))}"
+}
+
+fn main() {
+    for k in 1..4 {
+        println(shapes(k))
+        println(conversions(k))
+        println(carriers(k))
+        println(boxed_keys(k))
+        println(slices(k))
+        println(tables(k))
+    }
+}

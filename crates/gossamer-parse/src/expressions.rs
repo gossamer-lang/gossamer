@@ -2486,6 +2486,12 @@ impl Parser<'_> {
     }
 
     fn parse_struct_literal_fields(&mut self, path: PathExpr) -> ExprKind {
+        // A field value is a value position, where `{}` is the empty map,
+        // whatever brace-leading position the literal itself sits in.
+        self.with_empty_braces_as_maps(|parser| parser.parse_struct_literal_field_list(path))
+    }
+
+    fn parse_struct_literal_field_list(&mut self, path: PathExpr) -> ExprKind {
         let mut fields = Vec::new();
         let mut base = None;
         let mut positional_index = 0usize;
@@ -2620,6 +2626,12 @@ impl Parser<'_> {
         let expected = if macro_name == "vec" {
             "a Vec literal `#[...]` - Gossamer has no `vec!`; `#[...]` creates a `Vec<T>` \
              and `[...]` creates a fixed `[T; N]` array"
+                .to_string()
+        } else if macro_name == "cfg" {
+            // Conditional compilation selects items, not values: dropping the
+            // `!` would leave an ordinary call to a function nobody defined.
+            "an item gated with `#[cfg(...)]` - Gossamer has no `cfg!` expression; define \
+             the item twice, under `#[cfg(...)]` and `#[cfg(not(...))]`"
                 .to_string()
         } else {
             format!("`{macro_name}(...)` - Gossamer has no user-defined macros, drop the `!`")

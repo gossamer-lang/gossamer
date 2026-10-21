@@ -1,0 +1,36 @@
+// A write below a `static mut` lands in the static on every tier: a field of
+// an element of a static vector, a field of a struct static (scalar, string,
+// vector element, map entry), an element of a tuple or array static, and a
+// write whose value reads the place it replaces.
+struct Face { family: String, units: i64 }
+struct Catalog { locale: String, count: i64, faces: Vec<Face>, table: Map<String, i64> }
+
+static mut LIST: Vec<Face> = #[]
+static mut CUR: Catalog = Catalog { locale: "en", count: 0, faces: #[], table: {} }
+static mut PAIR: (i64, String) = (1, "one")
+static mut GRID: [i64; 3] = [0, 0, 0]
+
+fn bump(i: i64) { LIST[i].units += 1 }
+
+fn main() {
+    LIST.push(Face { family: "Sans", units: 2048 })
+    LIST.push(Face { family: "Mono", units: 1000 })
+    LIST[0].units = 4096
+    LIST[1].family = "Serif"
+    bump(1)
+    bump(1)
+    CUR.count = 3
+    CUR.count = CUR.count * 2 + 1
+    CUR.locale = "fr"
+    CUR.faces.push(Face { family: "x", units: 1 })
+    CUR.faces[0].units = 9
+    CUR.table["a"] = 5
+    CUR.table["a"] += 1
+    PAIR.0 = 2
+    PAIR.1 = "two"
+    GRID[1] = 7
+    GRID[2] = GRID[1] * 3
+    println(f"{LIST[0].family} {LIST[0].units} {LIST[1].family} {LIST[1].units}")
+    println(f"{CUR.locale} {CUR.count} {CUR.faces.len()} {CUR.faces[0].units} {CUR.table["a"]}")
+    println(f"{PAIR.0} {PAIR.1} {GRID[0]} {GRID[1]} {GRID[2]}")
+}

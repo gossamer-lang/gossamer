@@ -1138,16 +1138,22 @@ impl Drop for GosChan {
 //
 // The compiled tiers lower a `select` to a builder: one `gos_rt_select_new`,
 // one `gos_rt_select_arm_*` per arm in source order, then `gos_rt_select_wait`
-// (poll + park), `gos_rt_select_value` (the popped recv payload), and
-// `gos_rt_select_free`. This sequence-of-scalar-calls shape keeps the MIR
-// lowering free of array construction while the transfer stays atomic inside
-// `wait` (no recheck-after-return TOCTOU). Semantics match the VM walker:
-// ready arms are polled in pseudo-random order, a closed+drained recv arm is
-// always ready (yielding the element-type zero value, matching Go), and the
-// default arm fires only when nothing else is.
+// (poll + park), `gos_rt_select_value` and `gos_rt_select_closed` (what the
+// chosen recv arm received), and `gos_rt_select_free`. This
+// sequence-of-scalar-calls shape keeps the MIR lowering free of array
+// construction while the transfer stays atomic inside `wait` (no
+// recheck-after-return TOCTOU). Semantics match the VM walker: ready arms are
+// polled in pseudo-random order, a recv arm is ready for a value or for the
+// close of a drained channel as its pattern accepts (`Some(v)` / `None`), and
+// the default arm fires only when nothing else is.
+
+/// A recv arm's pattern takes a received value.
+const RECV_TAKES_VALUE: i64 = 1;
+/// A recv arm's pattern takes the close of a drained channel.
+const RECV_TAKES_CLOSE: i64 = 2;
 
 enum SelectArmRt {
-    Recv(*mut GosChan),
+    Recv(*mut GosChan, i64),
     Send(*mut GosChan, i64),
     Default,
 }
@@ -1182,6 +1188,7 @@ fn select_shuffle_indices(n: usize) -> Vec<usize> {
 pub struct SelectBuilder {
     arms: Vec<SelectArmRt>,
     last_value: i64,
+    last_closed: bool,
 }
 
 /// A builder holds a share of each arm's channel from the arm's registration
@@ -1190,7 +1197,7 @@ pub struct SelectBuilder {
 impl Drop for SelectBuilder {
     fn drop(&mut self) {
         for arm in &self.arms {
-            if let SelectArmRt::Recv(c) | SelectArmRt::Send(c, _) = arm {
+            if let SelectArmRt::Recv(c, _) | SelectArmRt::Send(c, _) = arm {
                 // SAFETY: the arm's registration took this share.
                 unsafe { chan_release(*c) };
             }
@@ -1213,19 +1220,26 @@ pub extern "C" fn gos_rt_select_new(n: i64) -> *mut SelectBuilder {
         Box::into_raw(Box::new(SelectBuilder {
             arms: Vec::with_capacity(cap),
             last_value: 0,
+            last_closed: false,
         }))
     })
 }
 
+/// Appends a recv arm on `c`. `accepts` is the mask of outcomes the arm's
+/// pattern takes: `1` a received value, `2` the close of a drained channel.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_select_arm_recv(b: *mut SelectBuilder, c: *mut GosChan) {
+pub unsafe extern "C" fn gos_rt_select_arm_recv(
+    b: *mut SelectBuilder,
+    c: *mut GosChan,
+    accepts: i64,
+) {
     ffi_entry!({
         if b.is_null() {
             return;
         }
         retain_arm(c);
         // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
-        unsafe { &mut *b }.arms.push(SelectArmRt::Recv(c));
+        unsafe { &mut *b }.arms.push(SelectArmRt::Recv(c, accepts));
     });
 }
 
@@ -1256,11 +1270,13 @@ pub unsafe extern "C" fn gos_rt_select_arm_default(b: *mut SelectBuilder) {
 /// its waiter registrations. The check happens after every arm is registered,
 /// so a readiness transition cannot be lost between the main select poll and
 /// suspension.
-fn select_arm_is_ready(kind: u8, chan: &GosChan) -> bool {
+fn select_arm_is_ready(kind: u8, accepts: i64, chan: &GosChan) -> bool {
     let guard = chan.buf.lock();
     match kind {
-        // Receive is ready for a queued value or a closed-and-drained channel.
-        0 => storage_len(&guard) != 0 || *chan.closed.lock(),
+        // Receive is ready for a queued value or a closed-and-drained channel,
+        // whichever its pattern takes.
+        0 if storage_len(&guard) != 0 => accepts & RECV_TAKES_VALUE != 0,
+        0 => accepts & RECV_TAKES_CLOSE != 0 && *chan.closed.lock(),
         // Send is ready when buffer space exists. An unbuffered send instead
         // needs a receiver that has already published its interest.
         1 if chan.cap == 0 => {
@@ -1284,14 +1300,15 @@ pub unsafe extern "C-unwind" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64
         }
         // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
         let builder = unsafe { &mut *b };
-        // Snapshot (kind, chan, send_val) so the poll/park loops don't hold a
-        // borrow of `builder` across the `last_value` write. 0=recv, 1=send,
-        // 2=default. Raw pointers are Copy; the snapshot is cheap.
+        // Snapshot (kind, chan, send_val or recv accepts) so the poll/park
+        // loops don't hold a borrow of `builder` across the `last_value`
+        // write. 0=recv, 1=send, 2=default. Raw pointers are Copy; the
+        // snapshot is cheap.
         let arms: Vec<(u8, *mut GosChan, i64)> = builder
             .arms
             .iter()
             .map(|a| match a {
-                SelectArmRt::Recv(c) => (0u8, *c, 0i64),
+                SelectArmRt::Recv(c, accepts) => (0u8, *c, *accepts),
                 SelectArmRt::Send(c, v) => (1u8, *c, *v),
                 SelectArmRt::Default => (2u8, std::ptr::null_mut(), 0i64),
             })
@@ -1309,24 +1326,28 @@ pub unsafe extern "C-unwind" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64
                     let width = one_word_width(chan);
                     let mut tmp = 0i64;
                     let mut guard = chan.buf.lock();
-                    // SAFETY: `tmp` is a live local of `width` bytes.
-                    if let Some(consumed_id) = unsafe {
-                        pop_front(&mut guard, std::ptr::addr_of_mut!(tmp).cast::<u8>(), width)
-                    } {
-                        drop(guard);
-                        record_chan_handoff(chan);
-                        wake_send_after_consume(chan, consumed_id);
-                        builder.last_value = tmp;
-                        return i as i64;
+                    if v & RECV_TAKES_VALUE != 0 {
+                        // SAFETY: `tmp` is a live local of `width` bytes.
+                        if let Some(consumed_id) = unsafe {
+                            pop_front(&mut guard, std::ptr::addr_of_mut!(tmp).cast::<u8>(), width)
+                        } {
+                            drop(guard);
+                            record_chan_handoff(chan);
+                            wake_send_after_consume(chan, consumed_id);
+                            builder.last_value = tmp;
+                            builder.last_closed = false;
+                            return i as i64;
+                        }
                     }
-                    // Go semantics: a closed+drained recv arm is always
-                    // ready, yielding the element-type zero value. Hold the
-                    // `buf` lock while reading `closed` (same lock order as
-                    // `gos_rt_chan_recv`) so an empty-then-closed transition
-                    // is observed atomically.
-                    if *chan.closed.lock() {
+                    // The close is an outcome only once the buffer is drained.
+                    // Hold the `buf` lock while reading `closed` (same lock
+                    // order as `gos_rt_chan_recv`) so an empty-then-closed
+                    // transition is observed atomically.
+                    if v & RECV_TAKES_CLOSE != 0 && storage_len(&guard) == 0 && *chan.closed.lock()
+                    {
                         drop(guard);
                         builder.last_value = 0;
+                        builder.last_closed = true;
                         return i as i64;
                     }
                 } else if kind == 1 {
@@ -1346,15 +1367,23 @@ pub unsafe extern "C-unwind" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64
             if let Some(idx) = default_index {
                 return idx as i64;
             }
-            // A cancelled cohort makes every blocking arm behave the way a
-            // closed channel does, so a select under cancellation resolves
-            // instead of waiting for a partner that will never come. The
-            // check sits after the poll above: an arm that is already ready
-            // is taken, because cancellation ends the wait rather than
-            // discarding a value the channel is holding.
-            if super::cohort::current_is_cancelled() {
+            // A cancelled cohort makes every receive answer `None`, so a
+            // select under cancellation resolves through its first recv arm
+            // that takes the close instead of waiting for a partner that will
+            // never come. The check sits after the poll above: an arm that is
+            // already ready is taken, because cancellation ends the wait
+            // rather than discarding a value the channel is holding. A select
+            // with no such arm waits on its channels alone, as one that only
+            // takes values does.
+            let cancelled = super::cohort::current_is_cancelled();
+            if cancelled
+                && let Some(index) = arms
+                    .iter()
+                    .position(|(kind, _, v)| *kind == 0 && v & RECV_TAKES_CLOSE != 0)
+            {
                 builder.last_value = 0;
-                return default_index.map_or(0, |index| index as i64);
+                builder.last_closed = true;
+                return index as i64;
             }
             // Nothing ready, no default: block until a channel changes, then
             // re-poll. Mirrors the single-channel recv/send park discipline,
@@ -1366,7 +1395,9 @@ pub unsafe extern "C-unwind" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64
                 let mut cohort_wait = 0i64;
                 crate::sched_global::park(crate::sched::ParkReason::Chan, |parker| {
                     parked_as = Some(parker.gid);
-                    cohort_wait = super::cohort::register_waiter(parker.gid);
+                    if !cancelled {
+                        cohort_wait = super::cohort::register_waiter(parker.gid);
+                    }
                     for (kind, c, _) in &arms {
                         if c.is_null() {
                             continue;
@@ -1389,9 +1420,9 @@ pub unsafe extern "C-unwind" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64
                     // before its waiter entry was published. Recheck after
                     // all entries exist; `unpark` records a pre-unpark wake
                     // until this coroutine has actually suspended.
-                    if arms.iter().any(|(kind, c, _)| {
+                    if arms.iter().any(|(kind, c, v)| {
                         // SAFETY: a non-null arm channel is live for the select (C-ABI contract).
-                        !c.is_null() && select_arm_is_ready(*kind, unsafe { &**c })
+                        !c.is_null() && select_arm_is_ready(*kind, *v, unsafe { &**c })
                     }) {
                         crate::sched_global::scheduler().unpark(parker.gid);
                     }
@@ -1424,13 +1455,13 @@ pub unsafe extern "C-unwind" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64
                 // receivers, as a parked goroutine's select does, so a sender
                 // arriving on any of them reads as a handoff rather than as a
                 // program with nobody left to take the value.
-                let waits: Vec<(u8, &GosChan)> = arms
+                let waits: Vec<(u8, i64, &GosChan)> = arms
                     .iter()
                     .filter(|(kind, c, _)| *kind != 2 && !c.is_null())
                     // SAFETY: a non-null arm channel is live for the select (C-ABI contract).
-                    .map(|(kind, c, _)| (*kind, unsafe { &**c }))
+                    .map(|(kind, c, v)| (*kind, *v, unsafe { &**c }))
                     .collect();
-                for (kind, chan) in &waits {
+                for (kind, _, chan) in &waits {
                     let guard = chan.buf.lock();
                     if *kind == 0 {
                         chan.recv_waiters.fetch_add(1, Ordering::AcqRel);
@@ -1444,12 +1475,12 @@ pub unsafe extern "C-unwind" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64
                 // raised nothing, so the arms are read again before sleeping.
                 let ready = waits
                     .iter()
-                    .any(|(kind, chan)| select_arm_is_ready(*kind, chan));
+                    .any(|(kind, v, chan)| select_arm_is_ready(*kind, *v, chan));
                 if !ready {
                     signal.wait();
                 }
                 crate::sched_global::adjust_channel_waiters(false);
-                for (kind, chan) in &waits {
+                for (kind, _, chan) in &waits {
                     let guard = chan.buf.lock();
                     if *kind == 0 {
                         chan.recv_waiters.fetch_sub(1, Ordering::AcqRel);
@@ -1473,6 +1504,19 @@ pub unsafe extern "C" fn gos_rt_select_value(b: *mut SelectBuilder) -> i64 {
         }
         // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &*b }.last_value
+    })
+}
+
+/// Whether the most recent `gos_rt_select_wait` recv outcome on this builder
+/// was the close of a drained channel (1) rather than a received value (0).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_select_closed(b: *mut SelectBuilder) -> i64 {
+    ffi_entry!({
+        if b.is_null() {
+            return 0;
+        }
+        // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
+        i64::from(unsafe { &*b }.last_closed)
     })
 }
 

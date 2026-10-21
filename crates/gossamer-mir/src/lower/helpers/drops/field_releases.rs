@@ -125,6 +125,30 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
             payload_view[place.local.0 as usize] = true;
         }
     }
+    // An element read in place names the container's storage, which keeps the
+    // element's children, so the binding has none of its own either.
+    for block in &body.blocks {
+        if let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            destination,
+            ..
+        } = &block.terminator
+            && matches!(
+                name.as_str(),
+                "gos_rt_vec_get_ptr" | "gos_rt_vec_get_ptr_unchecked"
+            )
+            && destination.projection.is_empty()
+            && (destination.local.0 as usize) < n_locals
+        {
+            payload_view[destination.local.0 as usize] = true;
+        }
+    }
+    let lent = super::lent_slot_flags(body);
+    for (i, is_lent) in lent.iter().enumerate() {
+        if *is_lent {
+            payload_view[i] = true;
+        }
+    }
     let guarded_locals: Vec<(Local, String)> = ((arity + 1)..n_locals)
         .filter(|&i| !body.locals[i].region && !payload_view[i])
         .filter_map(|i| {
@@ -144,18 +168,8 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
 
     // By-value Option/Result locals whose payload type registered a
     // copy-blob meta on either side.
-    let is_guarded_option = |ty: gossamer_types::Ty| -> bool {
-        match tcx.kind_of(ty) {
-            TyKind::Adt { def, substs } if def.local == u32::MAX || def.local == u32::MAX - 1 => {
-                substs
-                    .types()
-                    .iter()
-                    .take(2)
-                    .any(|p| tcx.aggr_copy_meta(*p).is_some())
-            }
-            _ => false,
-        }
-    };
+    let is_guarded_option =
+        |ty: gossamer_types::Ty| -> bool { super::is_option_slot_holder(tcx, ty) };
     // A runtime call answering its aggregate payload as a counted blob hands
     // the frame the only share of that blob, so the destination holds it the
     // way a carrier the frame built does.
@@ -173,11 +187,75 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
             counted_answer[destination.local.0 as usize] = true;
         }
     }
+    // A binding copied from such an answer names the same blob, so it holds a
+    // share of its own the way the answer does.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for stmt in body.blocks.iter().flat_map(|b| &b.stmts) {
+            if let StatementKind::Assign {
+                place,
+                rvalue: Rvalue::Use(Operand::Copy(src)),
+            } = &stmt.kind
+                && place.projection.is_empty()
+                && src.projection.is_empty()
+                && (place.local.0 as usize) < n_locals
+                && (src.local.0 as usize) < n_locals
+                && counted_answer[src.local.0 as usize]
+                && !counted_answer[place.local.0 as usize]
+                && body.locals[place.local.0 as usize].ty == body.locals[src.local.0 as usize].ty
+            {
+                counted_answer[place.local.0 as usize] = true;
+                changed = true;
+            }
+        }
+    }
+    // A carrier a call answers as a view of what something else holds - an
+    // element a sequence keeps, an upgrade's value its pinned handle keeps -
+    // has no share of its payload, and neither has a copy of one.
+    let mut lent_answer = vec![false; n_locals];
+    for block in &body.blocks {
+        if let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            destination,
+            ..
+        } = &block.terminator
+            && destination.projection.is_empty()
+            && (destination.local.0 as usize) < n_locals
+            && super::answers_borrowed_element(name)
+            && !counted_answer[destination.local.0 as usize]
+        {
+            lent_answer[destination.local.0 as usize] = true;
+        }
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for stmt in body.blocks.iter().flat_map(|b| &b.stmts) {
+            if let StatementKind::Assign {
+                place,
+                rvalue: Rvalue::Use(Operand::Copy(src)),
+            } = &stmt.kind
+                && place.projection.is_empty()
+                && src.projection.is_empty()
+                && (place.local.0 as usize) < n_locals
+                && (src.local.0 as usize) < n_locals
+                && lent_answer[src.local.0 as usize]
+                && !lent_answer[place.local.0 as usize]
+                && body.locals[place.local.0 as usize].ty == body.locals[src.local.0 as usize].ty
+            {
+                lent_answer[place.local.0 as usize] = true;
+                changed = true;
+            }
+        }
+    }
     let option_holder = |l: Local| -> bool {
         let i = l.0 as usize;
         i > arity
             && i < n_locals
             && !body.locals[i].region
+            && !lent_answer[i]
+            && !lent[i]
             && (is_guarded_option(body.locals[i].ty) || counted_answer[i])
     };
     // `result_new` destinations whose payload type carries a copy-blob
@@ -197,17 +275,46 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
                 && let Some(Operand::Copy(pp)) = args.get(1)
                 && pp.projection.is_empty()
                 && (pp.local.0 as usize) < n_locals
-                && tcx
-                    .aggr_copy_meta(body.locals[pp.local.0 as usize].ty)
-                    .is_some()
+                // A copy meta registered on a container type describes its
+                // elements, not a blob the carrier owns: only an aggregate
+                // kept in a counted copy is one.
+                && super::has_counted_blob_meta(tcx, body.locals[pp.local.0 as usize].ty)
             {
                 mint_holders[place.local.0 as usize] = true;
+            }
+        }
+    }
+    if std::env::var_os("GOS_DEBUG_HOLDERS").is_some() {
+        for i in (arity + 1)..n_locals {
+            if is_guarded_option(body.locals[i].ty) || mint_holders[i] || counted_answer[i] {
+                eprintln!(
+                    "holder {} _{} {:?} payload={:?} counted_node={} guarded={} mint={} counted={}",
+                    body.name,
+                    i,
+                    tcx.kind_of(body.locals[i].ty),
+                    match tcx.kind_of(body.locals[i].ty) {
+                        gossamer_types::TyKind::Adt { substs, .. } =>
+                            substs.types().first().map(|t| (
+                                tcx.kind_of(*t).clone(),
+                                tcx.is_counted_node(*t),
+                                tcx.elem_is_addressed_aggregate(*t),
+                                tcx.aggr_copy_meta(*t).map(|m| m.to_string())
+                            )),
+                        _ => None,
+                    },
+                    0,
+                    is_guarded_option(body.locals[i].ty),
+                    mint_holders[i],
+                    counted_answer[i]
+                );
             }
         }
     }
     let option_holders: Vec<Local> = ((arity + 1)..n_locals)
         .filter(|&i| {
             !body.locals[i].region
+                && !lent_answer[i]
+                && !lent[i]
                 && (is_guarded_option(body.locals[i].ty) || mint_holders[i] || counted_answer[i])
         })
         .map(|i| Local(u32::try_from(i).unwrap_or(0)))
@@ -387,6 +494,25 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
         let len = block.stmts.len();
         let span = block.span;
         for (si, stmt) in block.stmts.iter().enumerate() {
+            // A static cell outlives the frame, so it takes its own share of
+            // a stored carrier's payload blob, as a container store does; the
+            // frame's holder is still released by its own cleanup.
+            if let StatementKind::StaticStore {
+                target,
+                value: Operand::Copy(p),
+            } = &stmt.kind
+                && p.projection.is_empty()
+                && super::is_option_slot_holder(tcx, target.ty)
+            {
+                gaps[bi][si + 1].push(call_stmt(
+                    "gos_rt_option_slot_retain",
+                    vec![Operand::Copy(p.clone())],
+                    span,
+                    &mut next_unit,
+                    &mut extra_locals,
+                ));
+                continue;
+            }
             let StatementKind::Assign { place, rvalue } = &stmt.kind else {
                 continue;
             };
@@ -569,6 +695,29 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
                     &mut extra_locals,
                 ));
             }
+        }
+        // A word load copies an aggregate the addressed storage keeps - a
+        // closure's captured value, a container's slot - so the destination,
+        // which gives its children back at its death, takes its own shares
+        // once the load has answered.
+        if let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            destination,
+            target: Some(target),
+            ..
+        } = &block.terminator
+            && name == "gos_load"
+            && destination.projection.is_empty()
+            && let Some((_, sym)) = guarded_locals.iter().find(|(l, _)| *l == destination.local)
+            && let Some(head) = gaps.get_mut(target.0 as usize).and_then(|g| g.first_mut())
+        {
+            head.push(call_stmt(
+                "gos_rt_aggr_retain_children",
+                walk_args(destination.local, sym),
+                span,
+                &mut next_unit,
+                &mut extra_locals,
+            ));
         }
         // `unwrap` copies out the words of a payload its carrier keeps, and the
         // carrier gives those words' children back when it is released, so a

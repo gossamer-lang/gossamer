@@ -126,6 +126,10 @@ enum Command {
         /// Require a matching `project.lock`.
         #[arg(long)]
         locked: bool,
+        /// Print how long each phase before `main` took, on stderr: source
+        /// preparation, checking, and loading into the VM and the JIT.
+        #[arg(long)]
+        timings: bool,
         /// Arguments forwarded to the interpreted program.
         #[arg(allow_hyphen_values = true)]
         args: Vec<String>,
@@ -961,7 +965,7 @@ const BASH_BUILD_COMPLETION: &str = r#"        gos__subcmd__build)
 "#;
 
 const BASH_RUN_COMPLETION: &str = r#"        gos__subcmd__run)
-            opts="-v -h --no-jit --main-thread --locked --verbose --help"
+            opts="-v -h --no-jit --main-thread --locked --timings --verbose --help"
             if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1213,13 +1217,24 @@ fn dispatch(
             no_jit,
             main_thread: _,
             locked,
+            timings,
             args,
         }) => {
             crate::cmd::pkg::enforce_lockfile_if_requested(locked)?;
             if no_jit {
                 gossamer_interp::set_jit_disabled();
             }
-            cmd::run::dispatch(file, &args)
+            if timings {
+                cmd::run::report_timings();
+            }
+            // The forwarded list takes hyphen values so `gos run app --flag`
+            // reaches the program, which also hands it a leading `--`; that
+            // separator ends `gos run`'s own options and is not an argument.
+            let args = match args.split_first() {
+                Some((first, rest)) if first == "--" => rest,
+                _ => args.as_slice(),
+            };
+            cmd::run::dispatch(file, args)
         }
         Some(Command::Watch {
             file,

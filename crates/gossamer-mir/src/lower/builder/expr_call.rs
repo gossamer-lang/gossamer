@@ -220,6 +220,7 @@ impl<'a> Builder<'a> {
 
     pub(crate) fn lower_call(
         &mut self,
+        call: gossamer_hir::HirId,
         callee: &HirExpr,
         args: &[HirExpr],
         ty: Ty,
@@ -897,7 +898,7 @@ impl<'a> Builder<'a> {
                 ty
             }
         };
-        if let Some(local) = self.lower_struct_call(callee, args, ty, span) {
+        if let Some(local) = self.lower_struct_call(call, callee, args, ty, span) {
             return Some(local);
         }
         // Free-function `json::*` calls that route to runtime
@@ -1088,9 +1089,17 @@ impl<'a> Builder<'a> {
                 self.fn_param_shareable.get(def).map(|shares| {
                     let type_args =
                         crate::monomorph::subst_type_arguments(&self.substs_of(callee.ty));
+                    // A parameter the callee carries into its answer takes the
+                    // argument's storage where the analysis found nothing
+                    // writes the argument or the answer.
                     shares
                         .iter()
-                        .map(|share| share.holds(self.tcx, &type_args))
+                        .enumerate()
+                        .map(|(idx, share)| {
+                            share.holds(self.tcx, &type_args)
+                                || (*share == crate::lower::helpers::escape::ParamShare::Carried
+                                    && self.fn_param_shareable.shares_carried_arg(call, idx))
+                        })
                         .collect()
                 })
             }
@@ -1106,10 +1115,24 @@ impl<'a> Builder<'a> {
         }
         // A method reached through its type (`Type::method(value, ..)`) states
         // its parameters, receiver first, under the name its body carries.
+        // A call inside a dependency module joins the callee path with the
+        // module prefix (`gui::widgets::Widget::decorate`), while this map is
+        // keyed the way the impl declares it (`Widget::decorate`), so retry
+        // with the last two segments before giving up: without the parameter
+        // types a lifted bare-closure argument skips its Fn wrap and reaches
+        // the callee as a raw name string.
         .or_else(|| {
-            joined_path
-                .as_ref()
-                .and_then(|name| self.impl_method_inputs.get(name).cloned())
+            joined_path.as_ref().and_then(|name| {
+                self.impl_method_inputs.get(name).cloned().or_else(|| {
+                    let segments: Vec<&str> = name.split("::").collect();
+                    if segments.len() > 2 {
+                        let suffix = segments[segments.len() - 2..].join("::");
+                        self.impl_method_inputs.get(&suffix).cloned()
+                    } else {
+                        None
+                    }
+                })
+            })
         })
         // A callee that is not a resolved name - a closure, an `Fn`
         // parameter, a local holding a function value - states its
@@ -1205,9 +1228,8 @@ impl<'a> Builder<'a> {
             // skip this path.
             let in_closure_map = self.local_closure.contains_key(&local);
             let in_fn_name_map = self.local_fn_name.contains_key(&local);
-            let local_ty = self.locals[local.0 as usize].ty;
             let local_kind_is_fn = matches!(
-                self.tcx.kind_of(local_ty),
+                self.tcx.kind_of(self.locals[local.0 as usize].ty),
                 gossamer_types::TyKind::FnDef { .. } | gossamer_types::TyKind::FnPtr(_)
             );
             let arg_is_fn_item = !in_closure_map

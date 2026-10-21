@@ -1,0 +1,58 @@
+// A binding nothing can write reads its source's storage in place, and a
+// write anywhere still lands on a value of its own: a field read through a
+// shared receiver, a field accessor, and a closure that only reads its
+// captures all keep value semantics on every tier.
+struct Face { name: String, data: Vec<u8> }
+
+impl Face {
+    pub fn bytes(&self) -> Vec<u8> { self.data }
+    pub fn label(&self) -> String { self.name }
+    pub fn first(&self) -> i64 {
+        let d = self.data
+        d[0] as i64
+    }
+}
+
+struct Wrap<T> { v: T }
+
+impl<T> Wrap<T> {
+    fn get(&self) -> T { self.v }
+}
+
+fn total(face: Face) -> i64 {
+    let d = face.bytes()
+    let mut t = 0
+    for b in d { t += b as i64 }
+    t
+}
+
+fn class_of(d: Vec<u8>, at: i64) -> i64 { d[at] as i64 }
+
+fn count_ones(d: Vec<u8>, xs: Vec<i64>) -> i64 {
+    let wanted = 1
+    let wanted_at = |v: i64| -> bool { class_of(d, v) == wanted }
+    let mut n = 0
+    for x in xs { if wanted_at(x) { n += 1 } }
+    n
+}
+
+fn keeps(d: Vec<u8>) -> Vec<u8> {
+    let f = || d
+    f()
+}
+
+fn main() {
+    let face = Face { name: "mono", data: #[1u8, 2u8, 1u8, 3u8] }
+    let mut t = 0
+    for _ in 0..3 { t += total(face) + face.first() }
+    let mut own = face.bytes()
+    own[0] = 9u8
+    let mut kept = keeps(face.data)
+    kept[1] = 8u8
+    let w = Wrap { v: #[1, 2, 3] }
+    let mut g = w.get()
+    g.push(4)
+    println(f"{t} {face.data} {own} {kept} {face.label()}")
+    println(f"{w.v} {g} {Wrap { v: 5 }.get()}")
+    println(count_ones(face.data, #[0, 1, 2, 3]))
+}

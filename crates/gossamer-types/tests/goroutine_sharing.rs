@@ -195,6 +195,29 @@ fn main() {{
     }
 }
 
+/// A `Shared<T>` annotation naming a type the slot cannot carry is refused
+/// where it is written, and its uses report nothing further.
+#[test]
+fn a_shared_annotation_the_slot_cannot_carry_is_its_only_error() {
+    let source = r#"
+use std::sync::Shared
+
+fn main() {
+    let m: Shared<Map<i64, String>> = Shared::new(Map::new())
+    let mut copy = m.get()
+    copy[1] = "a"
+    m.set(copy)
+    println(f"{m.get().get(1)}")
+}
+"#;
+    let codes = codes(source);
+    assert!(!codes.is_empty(), "expected GT0077");
+    assert!(
+        codes.iter().all(|c| c == "GT0077"),
+        "only GT0077, got {codes:?}"
+    );
+}
+
 #[test]
 fn an_integer_payload_is_accepted() {
     let source = r"

@@ -2,12 +2,62 @@
 
 use super::*;
 
+/// A sequence slot owns one share independently of the binding assigned to it.
+/// Acquire the incoming share before releasing the displaced one so assigning
+/// a slot to itself remains valid. This covers `*row = replacement` while
+/// iterating a mutable sequence of vectors.
+pub(crate) fn own_sequence_slot_stores(body: &mut Body, tcx: &TyCtxt) {
+    use gossamer_types::TyKind;
+    let unit_ty = tcx.unit_interned().unwrap_or(body.locals[0].ty);
+    for block in &mut body.blocks {
+        let original = std::mem::take(&mut block.stmts);
+        for stmt in original {
+            if let StatementKind::Assign {
+                place,
+                rvalue: Rvalue::Use(value),
+            } = &stmt.kind
+                && place.projection.as_slice() == [crate::ir::Projection::Deref]
+                && let TyKind::Ref { inner, .. } =
+                    tcx.kind_of(body.locals[place.local.0 as usize].ty)
+                && matches!(tcx.kind_of(*inner), TyKind::Vec(_) | TyKind::Slice(_))
+            {
+                for (name, operand) in [
+                    ("gos_rt_vec_retain", value.clone()),
+                    ("gos_rt_vec_free", Operand::Copy(place.clone())),
+                ] {
+                    let destination =
+                        Local(u32::try_from(body.locals.len()).expect("local overflow"));
+                    body.locals.push(LocalDecl {
+                        ty: unit_ty,
+                        debug_name: None,
+                        mutable: false,
+                        region: false,
+                    });
+                    block.stmts.push(Statement {
+                        kind: StatementKind::Assign {
+                            place: Place::local(destination),
+                            rvalue: Rvalue::CallIntrinsic {
+                                name,
+                                args: vec![operand],
+                            },
+                        },
+                        span: stmt.span,
+                        inlined: None,
+                    });
+                }
+            }
+            block.stmts.push(stmt);
+        }
+    }
+}
+
 // Slot-child kinds, mirroring `gossamer_runtime::c_abi::vec::vec_elem_kind`
 // (kept in sync by value). `RC_NODE` covers user enum / struct heap
 // pointers (tag-bit-encoded) released via `gos_rt_rc_release`.
 pub(super) const SLOT_KIND_STRING: i64 = 1;
 pub(super) const SLOT_KIND_VEC: i64 = 2;
 pub(super) const SLOT_KIND_MAP: i64 = 3;
+pub(super) const SLOT_KIND_JSON: i64 = 12;
 pub(super) const SLOT_KIND_RC_NODE: i64 = 7;
 pub(super) const SLOT_KIND_SET: i64 = 11;
 pub(super) const SLOT_KIND_DEQUE: i64 = 13;
@@ -157,6 +207,10 @@ pub(super) fn collect_field_rc(
         }
         TyKind::String => {
             out.push((-1, 0, word, SLOT_KIND_STRING));
+            *has_direct = true;
+        }
+        TyKind::JsonValue => {
+            out.push((-1, 0, word, SLOT_KIND_JSON));
             *has_direct = true;
         }
         TyKind::Vec(_) | TyKind::Slice(_) => {
@@ -409,11 +463,29 @@ pub fn map_value_owner_marker(
     if tcx.is_weak_ty(value) {
         return Some("gos_rt_map_set_weak_values");
     }
-    // The backend copies an aggregate value into a blob whenever EITHER meta
-    // is registered - it reads the structural one first and falls back to the
-    // guarded copy meta - so the map has to be tagged as holding blob values
-    // under exactly the same condition. Tagging is what makes the entry take
-    // its own share and give it back at the entry's death.
+    match tcx.kind_of(value) {
+        // A byte sequence is stored as the bytes themselves - the insert copies
+        // them out and the entry owns no handle - so tagging the map as holding
+        // vec shares would release something no entry holds.
+        TyKind::Vec(elem) | TyKind::Slice(elem) => {
+            let bytes = matches!(tcx.kind_of(*elem), TyKind::Int(gossamer_types::IntTy::U8));
+            return (!bytes).then_some("gos_rt_map_set_vec_values");
+        }
+        // A table carries no reference count, so each entry owns a copy.
+        TyKind::HashMap { .. } => return Some("gos_rt_map_set_map_values"),
+        _ => {}
+    }
+    if let Some(container) = handle_container(tcx, value) {
+        return Some(match container {
+            HandleContainer::Set => "gos_rt_map_set_set_values",
+            HandleContainer::Deque => "gos_rt_map_set_deque_values",
+            HandleContainer::Heap => "gos_rt_map_set_heap_values",
+        });
+    }
+    // Only inline aggregates/carriers take the backend's copy-blob path.
+    // A native container may also have copy metadata registered by an enum
+    // payload or generated helper, but its stored word is still its handle.
+    // Its ownership class must therefore take precedence over that metadata.
     let structural = format!("gos_rc_meta_boxaggr_{}", value.as_u32());
     if tcx.aggr_copy_meta(value).is_some()
         || tcx.rc_meta(&structural).is_some()
@@ -421,22 +493,7 @@ pub fn map_value_owner_marker(
     {
         return Some("gos_rt_map_set_blob_values");
     }
-    match tcx.kind_of(value) {
-        // A byte sequence is stored as the bytes themselves - the insert copies
-        // them out and the entry owns no handle - so tagging the map as holding
-        // vec shares would release something no entry holds.
-        TyKind::Vec(elem) | TyKind::Slice(elem) => {
-            let bytes = matches!(tcx.kind_of(*elem), TyKind::Int(gossamer_types::IntTy::U8));
-            (!bytes).then_some("gos_rt_map_set_vec_values")
-        }
-        // A table carries no reference count, so each entry owns a copy.
-        TyKind::HashMap { .. } => Some("gos_rt_map_set_map_values"),
-        _ => handle_container(tcx, value).map(|container| match container {
-            HandleContainer::Set => "gos_rt_map_set_set_values",
-            HandleContainer::Deque => "gos_rt_map_set_deque_values",
-            HandleContainer::Heap => "gos_rt_map_set_heap_values",
-        }),
-    }
+    None
 }
 
 /// Tags vecs whose element type carries a guarded copy-blob meta, right
@@ -534,6 +591,9 @@ pub(crate) fn insert_vec_elem_metas(
     enum VecMeta {
         Guarded(String),
         Owned(String),
+        /// The vec's elements were copied from storage that keeps its own
+        /// shares, so after its layout tag the vec takes shares of its own.
+        ShareElements,
         RcElems,
         VecElems,
         WeakElems,
@@ -680,6 +740,12 @@ pub(crate) fn insert_vec_elem_metas(
         None
     };
 
+    // A vec built from an array holds raw copies of elements the array still
+    // owns. Each list below is inserted in reverse, so the share call is
+    // queued ahead of the tag it has to follow.
+    let copies_elements = |name: &str, meta: &VecMeta| {
+        name == "gos_rt_vec_from_arr" && matches!(meta, VecMeta::Owned(_) | VecMeta::Guarded(_))
+    };
     // (block, stmt-gap, dest local, meta) for statement ctors; block-head
     // inserts at the call target for terminator ctors.
     let mut stmt_inserts: Vec<(usize, usize, Local, VecMeta)> = Vec::new();
@@ -695,6 +761,9 @@ pub(crate) fn insert_vec_elem_metas(
                 if is_vec_ctor(name)
                     && let Some(meta) = vec_meta_of(place.local)
                 {
+                    if copies_elements(name, &meta) {
+                        stmt_inserts.push((bi, si + 1, place.local, VecMeta::ShareElements));
+                    }
                     stmt_inserts.push((bi, si + 1, place.local, meta));
                 }
                 if is_map_ctor(name)
@@ -725,6 +794,9 @@ pub(crate) fn insert_vec_elem_metas(
             if is_vec_ctor(name)
                 && let Some(meta) = vec_meta_of(destination.local)
             {
+                if copies_elements(name, &meta) {
+                    head_inserts.push((t.0 as usize, destination.local, VecMeta::ShareElements));
+                }
                 head_inserts.push((t.0 as usize, destination.local, meta));
             }
             if is_map_ctor(name)
@@ -822,6 +894,10 @@ pub(crate) fn insert_vec_elem_metas(
                     Operand::Copy(Place::local(l)),
                     Operand::Const(ConstValue::Str(sym.clone())),
                 ],
+            },
+            VecMeta::ShareElements => Rvalue::CallIntrinsic {
+                name: "gos_rt_vec_share_elements",
+                args: vec![Operand::Copy(Place::local(l))],
             },
             VecMeta::RcElems => Rvalue::CallIntrinsic {
                 name: "gos_rt_vec_mark_rc_elems",

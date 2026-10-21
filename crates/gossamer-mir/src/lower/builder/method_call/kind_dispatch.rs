@@ -1438,6 +1438,12 @@ impl<'a> Builder<'a> {
         let method_inputs = [
             owner.map(|owner| owner.name.clone()),
             self.struct_name_of(receiver_ty),
+            // An enum is not in the struct index, so its impl is reached
+            // through the enum index: without it a method on an enum
+            // receiver finds no parameter list and a lifted bare-closure
+            // argument skips its Fn wrap, reaching the callee as a raw
+            // name string.
+            self.enum_index_name_of(receiver_ty),
             self.struct_name_from_expr(receiver),
             self.builtin_impl_owner_name(receiver_ty),
         ]
@@ -1454,6 +1460,19 @@ impl<'a> Builder<'a> {
         } else {
             None
         };
+        // An element read out of a sequence for a method that only reads its
+        // receiver - lets nothing escape, keeps nothing of it, and so cannot
+        // reach the sequence either - is lent to the call in place: it owns
+        // none of the element's heap fields, so none are copied for it.
+        if matches!(receiver.kind, HirExprKind::Index { .. })
+            && self.is_inline_aggregate_ty(self.locals[receiver_local.0 as usize].ty)
+            && callee_effects.as_ref().is_some_and(|summary| {
+                let recv = summary.param(0);
+                !summary.escapes && recv.leaves_untouched() && !recv.resizes
+            })
+        {
+            self.lent_slots.push(receiver_local);
+        }
         let (receiver_local, mut arg_operands) = self.build_fallback_arg_operands(
             runtime_symbol,
             receiver_local,
@@ -2304,16 +2323,36 @@ impl<'a> Builder<'a> {
         // The impl whose receiver is the type in front of us. Two impls on one
         // type is a coherence error the checker reports, so more than one
         // match names no single body and falls through with the rest.
-        let unique_impl = match recorded.as_deref() {
-            Some(mangled) => Some(mangled),
-            None => match on_receiver.as_slice() {
-                [only] => Some(*only),
-                _ => match named.as_slice() {
+        // A receiver of a built-in scalar or string type reaches a user impl
+        // only when that impl's declared receiver is the same type: a
+        // program's lone `PaintCx::abs` is not what `x.abs()` on an `f64`
+        // calls.
+        let receiver_is_builtin = matches!(
+            self.tcx.kind_of(receiver_key),
+            gossamer_types::TyKind::Int(_)
+                | gossamer_types::TyKind::Float(_)
+                | gossamer_types::TyKind::Bool
+                | gossamer_types::TyKind::Char
+                | gossamer_types::TyKind::String
+        );
+        let unique_impl =
+            match recorded.as_deref() {
+                Some(mangled) => Some(mangled),
+                None => match on_receiver.as_slice() {
                     [only] => Some(*only),
-                    _ => None,
+                    _ => match named.as_slice() {
+                        [only]
+                            if !receiver_is_builtin
+                                || self.impl_method_receivers.get(*only).is_some_and(
+                                    |declared| self.peel_ref_ty(*declared) == receiver_key,
+                                ) =>
+                        {
+                            Some(*only)
+                        }
+                        _ => None,
+                    },
                 },
-            },
-        };
+            };
         if let Some(mangled) = unique_impl {
             let dest_ty = match self.tcx.kind_of(ty) {
                 gossamer_types::TyKind::Error | gossamer_types::TyKind::Var(_) => self

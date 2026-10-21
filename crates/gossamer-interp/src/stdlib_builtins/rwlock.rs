@@ -97,8 +97,7 @@ impl Lock {
             }
             state.waiting += 1;
             let Some(waiting) = crate::vm::goroutine::ChannelWait::enter("RwLock", || {
-                crate::value::any_live_channel_can_progress()
-                    || crate::stdlib_builtins::context::deadline_pending()
+                crate::stdlib_builtins::context::deadline_pending()
                     || crate::stdlib_builtins::cohort::deadline_pending()
             }) else {
                 state.waiting -= 1;

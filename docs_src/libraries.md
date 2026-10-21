@@ -67,6 +67,8 @@ path = "src/main.gos"
 # build the library by convention.
 # Without a `kind`, `gos build` compiles the library natively and
 # links nothing: dependents build it from source.
+# `name` is also the module dependents import the library as
+# (`use widget`), unless their manifest names another with `module`.
 [lib]
 name = "widget"
 path = "src/lib.gos"
@@ -131,8 +133,9 @@ by the module name source imports it as:
 pgsql_gos = { git = "https://github.com/gossamer-lang/pgsql-gos" }
 ```
 
-A package name may carry `-`, which no identifier may, so its module name is
-the final path segment with each `-` replaced by `_`. Every import spelling
+A library names the module it is imported as with `[lib] name`; without one,
+its module name is the final path segment of its id. A package name may carry
+`-`, which no identifier may, so each `-` in either is replaced by `_`. Every import spelling
 that names that module reaches the package: `use pgsql_gos`,
 `use pgsql_gos::greet`, `use pgsql_gos::{greet}`, `use pgsql_gos as pg`, and
 `use "github.com/gossamer-lang/pgsql-gos"`. A `use pgsql-gos` is rejected

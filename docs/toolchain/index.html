@@ -1386,6 +1386,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#serving-files" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Serving files
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#housekeeping" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -2539,6 +2550,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#serving-files" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Serving files
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#housekeeping" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -2703,7 +2725,7 @@ the implementation by a rev.</p>
 </tr>
 <tr>
 <td><code>gos lint [--deny-warnings] [--explain ID] [--fix] PATH</code></td>
-<td>Run the lint suite (50 lints). <code>--fix</code> writes auto-applicable suggestions back to disk; <code>--explain ID</code> prints long-form rationale.</td>
+<td>Run the lint suite (56 lints), Rust's naming conventions among them. <code>--fix</code> writes auto-applicable suggestions back to disk; <code>--explain ID</code> prints long-form rationale.</td>
 </tr>
 <tr>
 <td><code>gos explain CODE</code></td>
@@ -2745,6 +2767,28 @@ the implementation by a rev.</p>
 </tr>
 </tbody>
 </table>
+<h2 id="serving-files">Serving files<a class="headerlink" href="#serving-files" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>gos serve [DIR] [--port PORT] [--bind ADDR]</code></td>
+<td>Serve the files under <code>DIR</code> (default the current directory) over HTTP, as <code>python -m http.server</code> does. Listens on <code>127.0.0.1</code> port <code>8000</code> unless <code>--bind</code> and <code>--port</code> say otherwise; <code>--bind 0.0.0.0</code> answers every network the machine is on, and <code>--port 0</code> picks a free port. The first line on stdout names the URL; each request is logged to stderr. A directory's <code>index.html</code> is its page, and a directory without one is listed. <code>GET</code> and <code>HEAD</code> are answered, with <code>ETag</code> / <code>Last-Modified</code> revalidation and byte ranges; a path that leaves <code>DIR</code> is <code>404</code>, and any other method is <code>405</code>.</td>
+</tr>
+</tbody>
+</table>
+<div class="language-sh highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>gos<span class="w"> </span>serve<span class="w">                         </span><span class="c1"># ./ at http://127.0.0.1:8000/</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>gos<span class="w"> </span>serve<span class="w"> </span>site<span class="w"> </span>--port<span class="w"> </span><span class="m">3000</span><span class="w">        </span><span class="c1"># ./site at http://127.0.0.1:3000/</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>gos<span class="w"> </span>serve<span class="w"> </span>--bind<span class="w"> </span><span class="m">0</span>.0.0.0<span class="w">          </span><span class="c1"># reachable from other machines</span>
+</code></pre></div>
+<p><code>gos serve</code> is for development and sharing files on a trusted network: it
+has no TLS and no access control. A program that serves files in
+production uses <code>http::static_files::FileServer</code> behind its own router.</p>
 <h2 id="housekeeping">Housekeeping<a class="headerlink" href="#housekeeping" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -2981,20 +3025,20 @@ directly:</p>
 configuration and <code>gos mcp</code> in an agent's MCP configuration - the
 two are not interchangeable.</p>
 <p>Claude Code:</p>
-<div class="language-bash highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>claude<span class="w"> </span>mcp<span class="w"> </span>add<span class="w"> </span>gossamer<span class="w"> </span>--<span class="w"> </span>gos<span class="w"> </span>mcp
+<div class="language-bash highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>claude<span class="w"> </span>mcp<span class="w"> </span>add<span class="w"> </span>gossamer<span class="w"> </span>--<span class="w"> </span>gos<span class="w"> </span>mcp
 </code></pre></div>
 <p>Generic client config:</p>
-<div class="language-json highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">&quot;mcpServers&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;gossamer&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;command&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;gos&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;args&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;mcp&quot;</span><span class="p">]</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+<div class="language-json highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">&quot;mcpServers&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;gossamer&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;command&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;gos&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;args&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;mcp&quot;</span><span class="p">]</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
 </code></pre></div>
 <h2 id="smoke-test">Smoke-test<a class="headerlink" href="#smoke-test" title="Permanent link">&para;</a></h2>
-<div class="language-sh highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>python3<span class="w"> </span>-<span class="w"> </span><span class="s">&lt;&lt;&#39;PY&#39;</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="s">import json, subprocess</span>
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="s">p = subprocess.Popen([&quot;gos&quot;, &quot;lsp&quot;], stdin=subprocess.PIPE, stdout=subprocess.PIPE)</span>
-<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="s">body = json.dumps({&quot;jsonrpc&quot;: &quot;2.0&quot;, &quot;id&quot;: 1, &quot;method&quot;: &quot;initialize&quot;,</span>
-<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="s">                   &quot;params&quot;: {&quot;processId&quot;: None, &quot;capabilities&quot;: {}}}).encode()</span>
-<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="s">p.stdin.write(f&quot;Content-Length: {len(body)}\r\n\r\n&quot;.encode() + body); p.stdin.flush()</span>
-<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="s">print(p.stdout.readline(), p.stdout.readline())</span>
-<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="s">PY</span>
+<div class="language-sh highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>python3<span class="w"> </span>-<span class="w"> </span><span class="s">&lt;&lt;&#39;PY&#39;</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="s">import json, subprocess</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="s">p = subprocess.Popen([&quot;gos&quot;, &quot;lsp&quot;], stdin=subprocess.PIPE, stdout=subprocess.PIPE)</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="s">body = json.dumps({&quot;jsonrpc&quot;: &quot;2.0&quot;, &quot;id&quot;: 1, &quot;method&quot;: &quot;initialize&quot;,</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="s">                   &quot;params&quot;: {&quot;processId&quot;: None, &quot;capabilities&quot;: {}}}).encode()</span>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="s">p.stdin.write(f&quot;Content-Length: {len(body)}\r\n\r\n&quot;.encode() + body); p.stdin.flush()</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="s">print(p.stdout.readline(), p.stdout.readline())</span>
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="s">PY</span>
 </code></pre></div>
 
 

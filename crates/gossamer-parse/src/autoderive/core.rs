@@ -105,24 +105,82 @@ impl FieldKind {
         aliases: &HashMap<String, gossamer_ast::Type>,
         depth: u32,
     ) -> Option<Self> {
+        // An alias declared elsewhere names its target where it is declared.
         let alias = match structs.local(module, name) {
             Some(DeclaredType::Struct(ty)) => return Some(Self::Struct(ty.clone())),
             Some(DeclaredType::Enum(ty)) => return Some(Self::Enum(ty.clone())),
-            Some(DeclaredType::Alias(target)) => Some(target),
+            Some(DeclaredType::Alias(target)) => Some((module, target)),
             Some(DeclaredType::Other) => return None,
-            None => aliases.get(name),
+            None => match structs.first_alias(name) {
+                Some((home, target)) => Some((home.as_str(), target)),
+                None => aliases.get(name).map(|target| (module, target)),
+            },
         };
-        if let Some(target) = alias {
+        if let Some((home, target)) = alias {
             if depth >= MAX_ALIAS_DEPTH {
                 return None;
             }
-            return Self::from_type_within(target, module, structs, aliases, depth + 1);
+            return Self::from_type_within(target, home, structs, aliases, depth + 1);
         }
         structs
             .first(name)
             .cloned()
             .map(Self::Struct)
             .or_else(|| structs.first_enum(name).cloned().map(Self::Enum))
+    }
+
+    /// The kind of a type written as a module path (`crate::m::T`,
+    /// `super::T`, `m::T`), read where the declaring module declares it.
+    fn qualified(
+        segs: &[gossamer_ast::TypePathSegment],
+        module: &str,
+        structs: &StructIdentities,
+        aliases: &HashMap<String, gossamer_ast::Type>,
+        depth: u32,
+    ) -> Option<Self> {
+        let (last, prefix) = segs.split_last()?;
+        if !last.generics.is_empty() || prefix.iter().any(|seg| !seg.generics.is_empty()) {
+            return None;
+        }
+        let mut path: Vec<&str> = Vec::new();
+        let mut anchored = false;
+        for (i, seg) in prefix.iter().enumerate() {
+            match seg.name.name.as_str() {
+                "crate" if i == 0 => anchored = true,
+                "self" if i == 0 => {
+                    path.extend(module.split("::").filter(|m| !m.is_empty()));
+                    anchored = true;
+                }
+                "super" if i == 0 || anchored => {
+                    if !anchored {
+                        path.extend(module.split("::").filter(|m| !m.is_empty()));
+                        anchored = true;
+                    }
+                    path.pop()?;
+                }
+                name => path.push(name),
+            }
+        }
+        let absolute = path.join("::");
+        // An unanchored path names a child of the writing module first, as
+        // the resolver reads it, and otherwise a module from the crate root.
+        let candidates = if anchored || module.is_empty() {
+            vec![absolute]
+        } else {
+            vec![format!("{module}::{absolute}"), absolute]
+        };
+        let name = last.name.name.as_str();
+        let (target_module, declared) = candidates
+            .into_iter()
+            .find_map(|m| structs.local(&m, name).map(|declared| (m, declared)))?;
+        match declared {
+            DeclaredType::Struct(ty) => Some(Self::Struct(ty.clone())),
+            DeclaredType::Enum(ty) => Some(Self::Enum(ty.clone())),
+            DeclaredType::Alias(target) if depth < MAX_ALIAS_DEPTH => {
+                Self::from_type_within(target, &target_module, structs, aliases, depth + 1)
+            }
+            DeclaredType::Alias(_) | DeclaredType::Other => None,
+        }
     }
 
     /// `depth` bounds alias expansion, per [`MAX_ALIAS_DEPTH`].
@@ -152,7 +210,7 @@ impl FieldKind {
                     return Some(Self::Json);
                 }
                 if segs.len() != 1 {
-                    return None;
+                    return Self::qualified(segs, module, structs, aliases, depth);
                 }
                 let seg = &segs[0];
                 let name = seg.name.name.as_str();
@@ -333,6 +391,9 @@ pub(crate) struct StructIdentities {
     scoped: HashMap<String, HashMap<String, DeclaredType>>,
     first: HashMap<String, TyId>,
     first_enum: HashMap<String, TyId>,
+    first_newtype: HashMap<String, gossamer_ast::Type>,
+    newtypes_in: HashMap<String, HashMap<String, gossamer_ast::Type>>,
+    first_alias: HashMap<String, (String, gossamer_ast::Type)>,
 }
 
 impl StructIdentities {
@@ -349,9 +410,29 @@ impl StructIdentities {
         self.first.get(name)
     }
 
+    /// The first non-generic alias declared as `name` anywhere in the tree,
+    /// with the module that declares it, which its target is read in.
+    pub(crate) fn first_alias(&self, name: &str) -> Option<&(String, gossamer_ast::Type)> {
+        self.first_alias.get(name)
+    }
+
     /// The first non-generic enum declared as `name` anywhere in the tree.
     pub(crate) fn first_enum(&self, name: &str) -> Option<&TyId> {
         self.first_enum.get(name)
+    }
+
+    /// The representation of the newtype `name` names in `module`: its own
+    /// declaration, or else the first one anywhere in the tree. `None` when
+    /// the name is not a newtype there.
+    pub(crate) fn newtype(&self, module: &str, name: &str) -> Option<&gossamer_ast::Type> {
+        match self.local(module, name) {
+            Some(DeclaredType::Alias(_)) => self
+                .newtypes_in
+                .get(module)
+                .and_then(|names| names.get(name)),
+            Some(_) => None,
+            None => self.first_newtype.get(name),
+        }
     }
 }
 
@@ -372,6 +453,19 @@ pub(crate) fn struct_identities(items: &[Item]) -> StructIdentities {
             }
             ItemKind::Struct(decl) => (&decl.name.name, DeclaredType::Other),
             ItemKind::TypeAlias(decl) if decl.generics.params.is_empty() => {
+                out.first_alias
+                    .entry(decl.name.name.clone())
+                    .or_insert_with(|| (module.clone(), decl.ty.clone()));
+                if decl.nominal {
+                    out.first_newtype
+                        .entry(decl.name.name.clone())
+                        .or_insert_with(|| decl.ty.clone());
+                    out.newtypes_in
+                        .entry(module.clone())
+                        .or_default()
+                        .entry(decl.name.name.clone())
+                        .or_insert_with(|| decl.ty.clone());
+                }
                 (&decl.name.name, DeclaredType::Alias(decl.ty.clone()))
             }
             ItemKind::TypeAlias(decl) => (&decl.name.name, DeclaredType::Other),
@@ -421,7 +515,15 @@ pub(crate) fn alias_targets(items: &[Item]) -> HashMap<String, gossamer_ast::Typ
 /// that declares it (empty at the unit root).
 pub(crate) fn flatten_items_with_modules(items: &[Item]) -> Vec<(String, &Item)> {
     let mut out = Vec::new();
-    collect_flat_items_with_modules(items, &mut String::new(), &mut out);
+    collect_flat_items_with_modules(items, &mut String::new(), &mut out, false);
+    out
+}
+
+/// [`flatten_items_with_modules`] limited to the items this build compiles:
+/// an inactive `#[cfg(..)]` item, and everything in an inactive module, is left out.
+pub(crate) fn flatten_active_items_with_modules(items: &[Item]) -> Vec<(String, &Item)> {
+    let mut out = Vec::new();
+    collect_flat_items_with_modules(items, &mut String::new(), &mut out, true);
     out
 }
 
@@ -429,8 +531,12 @@ fn collect_flat_items_with_modules<'a>(
     items: &'a [Item],
     module: &mut String,
     out: &mut Vec<(String, &'a Item)>,
+    active_only: bool,
 ) {
     for item in items {
+        if active_only && !gossamer_ast::cfg::item_is_active(&item.attrs) {
+            continue;
+        }
         out.push((module.clone(), item));
         if let ItemKind::Mod(decl) = &item.kind
             && let ModBody::Inline(inner) = &decl.body
@@ -440,7 +546,7 @@ fn collect_flat_items_with_modules<'a>(
                 module.push_str("::");
             }
             module.push_str(&decl.name.name);
-            collect_flat_items_with_modules(inner, module, out);
+            collect_flat_items_with_modules(inner, module, out, active_only);
             module.truncate(restore);
         }
     }

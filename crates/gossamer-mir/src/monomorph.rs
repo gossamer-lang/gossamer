@@ -1048,7 +1048,7 @@ fn call_site_method_substs(
 /// `true` if any of `body`'s locals carry a generic `Param`, marking it a
 /// generic template (a method on a generic struct, or a generic function)
 /// that needs a per-instantiation copy before codegen.
-fn body_has_param(body: &Body, tcx: &TyCtxt) -> bool {
+pub(crate) fn body_has_param(body: &Body, tcx: &TyCtxt) -> bool {
     body.locals.iter().any(|l| ty_contains_param(tcx, l.ty))
 }
 
@@ -1869,6 +1869,9 @@ mod tests {
                 0,
                 0,
             ),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
         let before = body.locals[1].ty;
         let mut bodies = vec![body];

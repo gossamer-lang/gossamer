@@ -1,0 +1,35 @@
+// A variant pattern is nominal: `Key::S` matches the variant even where
+// another module declares a constant named `S`, while a constant named in a
+// pattern - bare or through its module - still matches by value.
+
+mod bidi {
+    pub const B: i64 = 1
+    pub const S: i64 = 2
+}
+
+mod keys {
+    pub enum Key { A, B, S }
+
+    pub fn label(k: Key) -> String {
+        match k {
+            Key::A => "a"
+            Key::B => "b"
+            Key::S => "s"
+        }
+    }
+}
+
+const LIMIT: i64 = 2
+
+fn class(n: i64) -> String {
+    match n {
+        bidi::B => "bidi-b"
+        LIMIT => "limit"
+        _ => "other"
+    }
+}
+
+fn main() {
+    println(f"{keys::label(keys::Key::S)} {keys::label(keys::Key::B)} {keys::label(keys::Key::A)}")
+    println(f"{class(1)} {class(2)} {class(3)} {bidi::S}")
+}

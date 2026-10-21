@@ -1,0 +1,28 @@
+enum State {
+    Fields(Map<String, String>)
+    Number(i64)
+}
+struct Store { entries: Map<String, State> }
+impl Store {
+    fn set(&mut self, key: String, value: State) {
+        self.entries[key] = value
+    }
+    fn field(&self, key: String, name: String) -> String {
+        match self.entries.get(key) {
+            Some(State::Fields(fields)) => fields.get(name).unwrap_or("")
+            _ => ""
+        }
+    }
+}
+fn main() {
+    let mut store = Store { entries: Map::new() }
+    for i in 0..50 {
+        let value = f"value-{i}"
+        let mut fields = Map::new()
+        fields["text"] = value
+        store.set("editor", State::Fields(fields))
+        assert_eq(store.field("editor", "text"), value)
+        store.set("other", State::Number(i))
+    }
+    println("state replacement ok")
+}

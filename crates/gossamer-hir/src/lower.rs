@@ -50,6 +50,7 @@ pub fn lower_source_file(
         &mut module_type_names,
     );
     let alias_targets = collect_alias_targets(resolutions, &source.items, &module_type_names);
+    tcx.erase_nominal_field_tys();
     let mut lowerer = Lowerer {
         resolutions,
         table,
@@ -105,6 +106,7 @@ pub fn lower_source_file(
         &mut *lowerer.tcx,
         &mut lowerer.ids,
     );
+    crate::accessors::inline_field_accessors(&mut program, lowerer.tcx, &mut lowerer.ids);
     crate::place_refs::inline_place_references(&mut program, &mut lowerer.ids);
     program
 }
@@ -225,9 +227,10 @@ fn lower_items(
 /// definition symbol - two modules may then define the same function
 /// name without colliding.
 /// Collects the qualified name (`lib::P::new`) of every associated
-/// function declared by an `impl` inside an inline module. Below HIR
-/// these bodies are keyed by that spelling, so a bare `P::new` written
-/// inside the module has to be respelled to reach them.
+/// function an `impl` declares for a type inside an inline module, whether
+/// the impl is written in that module or names the type by its path from
+/// outside it. Below HIR these bodies are keyed by that spelling, so a bare
+/// `P::new` written inside the module has to be respelled to reach them.
 fn collect_module_impl_fns(
     items: &[AstItem],
     module_path: &mut Vec<String>,
@@ -245,21 +248,38 @@ fn collect_module_impl_fns(
                     module_path.pop();
                 }
             }
-            AstItemKind::Impl(decl) if !module_path.is_empty() => {
+            AstItemKind::Impl(decl) => {
                 let gossamer_ast::TypeKind::Path(tp) = &decl.self_ty.kind else {
                     continue;
                 };
-                let Some(owner) = tp.segments.last() else {
-                    continue;
-                };
+                // The owner's identity is the module the impl is written in
+                // followed by the self type's own path, so an impl spelled
+                // `impl style::Style` at the root (as the derive splices it)
+                // keys its functions exactly as one written inside `style`.
+                let mut owner: Vec<&str> = module_path.iter().map(String::as_str).collect();
+                for seg in &tp.segments {
+                    match seg.name.name.as_str() {
+                        "crate" | "root" => owner.clear(),
+                        "self" => {}
+                        "super" => {
+                            owner.pop();
+                        }
+                        name => owner.push(name),
+                    }
+                }
+                let owner = owner.join("::");
+                let last = tp.segments.last().map(|seg| seg.name.name.as_str());
                 for impl_item in &decl.items {
                     if let gossamer_ast::ImplItem::Fn(fn_decl) = impl_item {
-                        out.insert(format!(
-                            "{}::{}::{}",
-                            module_path.join("::"),
-                            owner.name.name,
-                            fn_decl.name.name
-                        ));
+                        let name = &fn_decl.name.name;
+                        if owner.contains("::") {
+                            out.insert(format!("{owner}::{name}"));
+                        }
+                        if !module_path.is_empty()
+                            && let Some(last) = last
+                        {
+                            out.insert(format!("{}::{last}::{name}", module_path.join("::")));
+                        }
                     }
                 }
             }
@@ -2249,10 +2269,10 @@ impl Lowerer<'_> {
             .map(|arm| {
                 let op = match &arm.op {
                     gossamer_ast::SelectOp::Recv { pattern, channel } => {
-                        crate::tree::HirSelectOp::Recv {
-                            pattern: self.lower_pat(pattern),
-                            channel: self.lower_expr(channel),
-                        }
+                        let pattern = self.lower_pat(pattern);
+                        let channel = self.lower_expr(channel);
+                        let body = self.lower_expr(&arm.body);
+                        return self.lower_select_recv(pattern, channel, body);
                     }
                     gossamer_ast::SelectOp::Send { channel, value } => {
                         crate::tree::HirSelectOp::Send {
@@ -2269,6 +2289,77 @@ impl Lowerer<'_> {
             })
             .collect();
         HirExprKind::Select { arms: lowered }
+    }
+
+    /// A recv arm whose pattern names or ignores the received `Option` binds
+    /// it directly. `Some(p)` and `None` take one outcome each: the arm binds
+    /// the `Option` under a hidden name and its body matches the pattern
+    /// against it, which the arm's readiness guarantees succeeds.
+    fn lower_select_recv(
+        &mut self,
+        pattern: HirPat,
+        channel: HirExpr,
+        body: HirExpr,
+    ) -> crate::tree::HirSelectArm {
+        let (takes_value, takes_close) = match &pattern.kind {
+            HirPatKind::Wildcard | HirPatKind::Binding { .. } => (true, true),
+            HirPatKind::Variant { name, .. } => (name.name != "None", name.name == "None"),
+            _ => (true, true),
+        };
+        if takes_value && takes_close {
+            return crate::tree::HirSelectArm {
+                op: crate::tree::HirSelectOp::Recv {
+                    pattern,
+                    channel,
+                    takes_value,
+                    takes_close,
+                },
+                body,
+            };
+        }
+        let name = Ident::new(format!("__gos_select_recv_{}", pattern.id.0));
+        let span = pattern.span;
+        let option_ty = pattern.ty;
+        let binding = HirPat {
+            id: self.fresh(),
+            span,
+            ty: option_ty,
+            kind: HirPatKind::Binding {
+                name: name.clone(),
+                mutable: false,
+            },
+        };
+        let scrutinee = HirExpr {
+            id: self.fresh(),
+            span,
+            ty: option_ty,
+            kind: HirExprKind::Path {
+                segments: vec![name],
+                def: None,
+            },
+        };
+        let body = HirExpr {
+            id: self.fresh(),
+            span: body.span,
+            ty: body.ty,
+            kind: HirExprKind::Match {
+                scrutinee: Box::new(scrutinee),
+                arms: vec![crate::tree::HirMatchArm {
+                    pattern,
+                    guard: None,
+                    body,
+                }],
+            },
+        };
+        crate::tree::HirSelectArm {
+            op: crate::tree::HirSelectOp::Recv {
+                pattern: binding,
+                channel,
+                takes_value,
+                takes_close,
+            },
+            body,
+        }
     }
 
     fn lower_tuple_struct_call(

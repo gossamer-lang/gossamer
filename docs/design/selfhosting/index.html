@@ -2493,6 +2493,13 @@ monomorphisation, traits with static dispatch, byte literals, and
 the <code>matches</code> / <code>format</code> desugar calls - and the <code>examples/selfhost/</code>
 ports it references are no longer in the tree. Read it as a record of
 where self-hosting stood then, not as the current surface.</p>
+<p>In 0.72.0 the parser was ported in full, byte-identical with the Rust
+parser's output on every file of the repository and the build corpus, and
+measured inside <code>gos check</code>. Even rewritten onto a flat, index-addressed
+tree it ran at 1.07x to 1.41x the Rust frontend, so no part of the
+frontend is self-hosted yet. Both ports now live in
+<code>benchmarks/frontend_parser/</code>, where the cost of reference-counted trees
+is measured.</p>
 </blockquote>
 <h2 id="scope">Scope<a class="headerlink" href="#scope" title="Permanent link">&para;</a></h2>
 <p>Phase 30 of the implementation plan asks whether the Gossamer compiler

@@ -25,6 +25,12 @@ use super::*;
 //                    field count followed by that many descriptors
 //   DESC_SELF        the enclosing enum's own descriptor, for a field
 //                    whose type is that enum
+//   DESC_ENUM_REF    a `u16` distance back to an enclosing DESC_ENUM entry,
+//                    for a field whose type is that enum
+//   DESC_FLAT_ENUM   region count, each region's slot span, variant count,
+//                    then per variant its field count followed by, per
+//                    field, its region and its descriptor; the value is a
+//                    discriminant slot, then the regions in order
 // ---------------------------------------------------------------
 
 /// What a walk decides: an order, or only whether two values are equal.
@@ -117,6 +123,22 @@ unsafe fn desc_span_walk(tags: *const u8, cursor: &mut usize) -> usize {
             1
         }
         gossamer_abi::DESC_SELF => 1,
+        gossamer_abi::DESC_ENUM_REF => {
+            let tag_at = *cursor - 1;
+            // SAFETY: `cursor` addresses the two distance bytes of the entry.
+            let start = unsafe { enum_ref_target(tags, tag_at) };
+            *cursor += 2;
+            // SAFETY: the distance names an enclosing entry of the same descriptor.
+            unsafe { desc_slot_span(tags, start) }
+        }
+        gossamer_abi::DESC_FLAT_ENUM => {
+            *cursor -= 1;
+            // SAFETY: `cursor` addresses the flat enum entry just stepped back to.
+            let layout = unsafe { flat_enum_layout(tags, *cursor) };
+            // SAFETY: `cursor` addresses the flat enum entry.
+            unsafe { skip_cmp_desc(tags, cursor) };
+            1 + layout.spans.iter().sum::<usize>()
+        }
         gossamer_abi::DESC_PACKED => {
             // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
             // caller), and the read stays inside the entry at `cursor`.
@@ -188,8 +210,85 @@ pub(crate) unsafe fn skip_cmp_desc(tags: *const u8, cursor: &mut usize) {
                 }
             }
         }
+        gossamer_abi::DESC_ENUM_REF => *cursor += 2,
+        gossamer_abi::DESC_FLAT_ENUM => {
+            // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
+            // caller), and the read stays inside the entry at `cursor`.
+            let regions = unsafe { *tags.add(*cursor) } as usize;
+            *cursor += 1 + regions;
+            // SAFETY: as above.
+            let variants = unsafe { *tags.add(*cursor) } as usize;
+            *cursor += 1;
+            for _ in 0..variants {
+                // SAFETY: as above.
+                let fields = unsafe { *tags.add(*cursor) } as usize;
+                *cursor += 1;
+                for _ in 0..fields {
+                    *cursor += 1;
+                    // SAFETY: `cursor` addresses the field's descriptor.
+                    unsafe { skip_cmp_desc(tags, cursor) };
+                }
+            }
+        }
         _ => {}
     }
+}
+
+/// The start of the enclosing entry a `DESC_ENUM_REF` at `tag_at` names.
+///
+/// # Safety
+/// `tags` is a compiler-emitted ordering descriptor with a `DESC_ENUM_REF`
+/// entry at `tag_at`.
+unsafe fn enum_ref_target(tags: *const u8, tag_at: usize) -> usize {
+    // SAFETY: the two distance bytes follow the tag inside the entry.
+    let back = u16::from_le_bytes(unsafe { [*tags.add(tag_at + 1), *tags.add(tag_at + 2)] });
+    tag_at.saturating_sub(usize::from(back))
+}
+
+/// Where a by-value enum's regions sit, and where each variant's fields are
+/// described, read from the `DESC_FLAT_ENUM` entry at `start`.
+pub(crate) struct FlatEnumDesc {
+    /// The slot span of each region, in order after the discriminant slot.
+    spans: Vec<usize>,
+    /// Per variant, each field's region and the cursor of its descriptor.
+    variants: Vec<Vec<(usize, usize)>>,
+}
+
+/// Reads the `DESC_FLAT_ENUM` entry at `start`.
+///
+/// # Safety
+/// `tags` is a compiler-emitted ordering descriptor with a flat enum entry at
+/// `start`.
+pub(crate) unsafe fn flat_enum_layout(tags: *const u8, start: usize) -> FlatEnumDesc {
+    let mut cursor = start + 1;
+    // SAFETY: the reads stay inside the entry this `unsafe fn`'s caller names.
+    let regions = unsafe { *tags.add(cursor) } as usize;
+    cursor += 1;
+    // SAFETY: as above.
+    let spans = (0..regions)
+        .map(|r| (unsafe { *tags.add(cursor + r) } as usize).max(1))
+        .collect();
+    cursor += regions;
+    // SAFETY: as above.
+    let count = unsafe { *tags.add(cursor) } as usize;
+    cursor += 1;
+    let mut variants = Vec::with_capacity(count);
+    for _ in 0..count {
+        // SAFETY: as above.
+        let fields = unsafe { *tags.add(cursor) } as usize;
+        cursor += 1;
+        let mut placed = Vec::with_capacity(fields);
+        for _ in 0..fields {
+            // SAFETY: as above.
+            let region = unsafe { *tags.add(cursor) } as usize;
+            cursor += 1;
+            placed.push((region, cursor));
+            // SAFETY: `cursor` addresses the field's descriptor.
+            unsafe { skip_cmp_desc(tags, &mut cursor) };
+        }
+        variants.push(placed);
+    }
+    FlatEnumDesc { spans, variants }
 }
 
 /// `true` when a descriptor is one byte long and covers one slot, so a walk
@@ -205,6 +304,8 @@ const fn desc_tag_is_flat(tag: u8) -> bool {
             | gossamer_abi::DESC_VEC
             | gossamer_abi::DESC_SELF
             | gossamer_abi::DESC_PACKED
+            | gossamer_abi::DESC_FLAT_ENUM
+            | gossamer_abi::DESC_ENUM_REF
     )
 }
 
@@ -609,6 +710,59 @@ pub(crate) unsafe fn compare_desc_in(
             }
             result
         }
+        gossamer_abi::DESC_FLAT_ENUM => {
+            // SAFETY: `cursor` addresses the flat enum entry.
+            let layout = unsafe { flat_enum_layout(tags, *cursor) };
+            // SAFETY: `cursor` addresses the flat enum entry.
+            unsafe { skip_cmp_desc(tags, cursor) };
+            // SAFETY: this `unsafe fn`'s caller passes `a` and `b` values laid out as the entry
+            // describes.
+            let (base_a, base_b) = unsafe { inline_bases(a, b, storage) };
+            if base_a.is_null() || base_b.is_null() {
+                return ord_code(base_a.cmp(&base_b));
+            }
+            // SAFETY: a by-value enum's first slot is its discriminant.
+            let da = unsafe { (base_a as *const i64).read_unaligned() };
+            // SAFETY: as above.
+            let db = unsafe { (base_b as *const i64).read_unaligned() };
+            if da != db {
+                return ord_code(da.cmp(&db));
+            }
+            let Some(fields) = usize::try_from(da)
+                .ok()
+                .and_then(|d| layout.variants.get(d))
+            else {
+                return 0;
+            };
+            let mut offsets = Vec::with_capacity(layout.spans.len());
+            let mut slot = 1usize;
+            for span in &layout.spans {
+                offsets.push(slot);
+                slot += span;
+            }
+            for &(region, field_desc) in fields {
+                let Some(&at) = offsets.get(region) else {
+                    return 0;
+                };
+                let mut c = field_desc;
+                // SAFETY: the field lives in its region, laid out as its descriptor says.
+                let ord = unsafe {
+                    compare_desc_in(
+                        mode,
+                        base_a.add(at * 8),
+                        base_b.add(at * 8),
+                        tags,
+                        &mut c,
+                        CmpStorage::Inline,
+                        self_desc,
+                    )
+                };
+                if ord != 0 {
+                    return ord;
+                }
+            }
+            0
+        }
         gossamer_abi::DESC_PACKED => {
             // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
             // caller), and the read stays inside the entry at `cursor`.
@@ -635,6 +789,15 @@ pub(crate) unsafe fn compare_desc_in(
                 }
             }
             0
+        }
+        gossamer_abi::DESC_ENUM_REF => {
+            // SAFETY: `cursor` addresses a `DESC_ENUM_REF` entry of `tags`.
+            let start = unsafe { enum_ref_target(tags, *cursor) };
+            *cursor += 3;
+            let mut c = start;
+            // SAFETY: the reference names an enclosing entry, and the values are laid out as
+            // it describes.
+            unsafe { compare_desc_in(mode, a, b, tags, &mut c, CmpStorage::Inline, Some(start)) }
         }
         gossamer_abi::DESC_SELF => {
             *cursor += 1;

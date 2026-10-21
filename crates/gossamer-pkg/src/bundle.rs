@@ -85,7 +85,12 @@ pub fn bundle_path_dependencies_traced(
     while i < worklist.len() {
         let (dep_root, dep_entry) = worklist[i].clone();
         i += 1;
-        let Some((dep_id, _)) = path_dep_entry(&dep_root) else {
+        let Some(PathDependency {
+            id: dep_id,
+            module: own_module,
+            ..
+        }) = path_dep_entry(&dep_root)
+        else {
             continue;
         };
         let Ok(dep_source) = fs::read_to_string(&dep_entry) else {
@@ -95,11 +100,8 @@ pub fn bundle_path_dependencies_traced(
         collect_path_deps_with_modules(&dep_entry, visited, &mut worklist, &mut dep_modules);
         // A `module = "..."` override in the manifest that declares the
         // dependency names the module its source is reached under; without
-        // one the final segment of its id does.
-        let mod_name = dep_modules
-            .get(&dep_id)
-            .cloned()
-            .unwrap_or_else(|| gossamer_resolve::project_dep_module_name(&dep_id));
+        // one the dependency's own `[lib] name`, then its id, does.
+        let mod_name = dep_modules.get(&dep_id).cloned().unwrap_or(own_module);
         // The attribute is what tells the resolver this module came from
         // another package, so a reference to it needs the matching import.
         let header = format!(
@@ -130,8 +132,8 @@ pub fn path_dependency_roots(entry: &Path) -> Vec<(String, PathBuf)> {
     while i < worklist.len() {
         let (dep_root, dep_entry) = worklist[i].clone();
         i += 1;
-        if let Some((id, _)) = path_dep_entry(&dep_root) {
-            roots.push((id, dep_root));
+        if let Some(dependency) = path_dep_entry(&dep_root) {
+            roots.push((dependency.id, dep_root));
         }
         collect_path_deps(&dep_entry, &mut visited, &mut worklist);
     }
@@ -205,8 +207,8 @@ pub fn collect_path_deps_with_modules(
         }
         visited.push(identity);
         let dep_root = lexically_normalized(&spelled);
-        if let Some((_, dep_entry)) = path_dep_entry(&dep_root) {
-            worklist.push((dep_root, dep_entry));
+        if let Some(dependency) = path_dep_entry(&dep_root) {
+            worklist.push((dep_root, dependency.entry));
         }
     }
 }
@@ -229,6 +231,32 @@ fn lexically_normalized(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// The module the dependency `key` of the manifest in `manifest_dir` is
+/// imported as: that manifest's `module = "..."` override, else the name
+/// the dependency's own manifest declares when its source is on disk, else
+/// the final segment of its key.
+#[must_use]
+pub fn dependency_module_name(manifest: &Manifest, manifest_dir: &Path, key: &str) -> String {
+    if let Some(module) = manifest.dependency_modules.get(key) {
+        return module.clone();
+    }
+    manifest
+        .dependencies
+        .get(key)
+        .and_then(|spec| {
+            dependency_path(spec).map_or_else(
+                || prepared_dependency_root(manifest_dir, key, spec),
+                |rel| Some(manifest_dir.join(rel)),
+            )
+        })
+        .and_then(|root| fs::read_to_string(root.join("project.toml")).ok())
+        .and_then(|text| Manifest::parse(&text).ok())
+        .map_or_else(
+            || gossamer_resolve::project_dep_module_name(key),
+            |dependency| dependency.module_name(),
+        )
 }
 
 /// The directory holding a fetched dependency's source, for the sources
@@ -268,18 +296,27 @@ fn dependency_path(spec: &DependencySpec) -> Option<&str> {
     }
 }
 
+/// A path dependency's project id, entry source file, and the module it
+/// names for itself.
+struct PathDependency {
+    id: String,
+    entry: PathBuf,
+    module: String,
+}
+
 /// Resolves a path dependency's project id and entry source file:
-/// `lib.gos` (flat or under `src/`) is the library entry; `main.gos`
-/// is accepted as a fallback for binary-shaped projects.
-fn path_dep_entry(dep_root: &Path) -> Option<(String, PathBuf)> {
+/// `[lib] path`, then `lib.gos` (flat or under `src/`), is the library
+/// entry; `main.gos` is accepted as a fallback for binary-shaped projects.
+fn path_dep_entry(dep_root: &Path) -> Option<PathDependency> {
     let manifest_text = fs::read_to_string(dep_root.join("project.toml")).ok()?;
     let manifest = Manifest::parse(&manifest_text).ok()?;
     let entry = manifest
-        .project
-        .entry
-        .as_deref()
-        .map(|rel| dep_root.join(rel))
+        .lib
+        .as_ref()
+        .and_then(|lib| lib.path.as_deref())
         .into_iter()
+        .chain(manifest.project.entry.as_deref())
+        .map(|rel| dep_root.join(rel))
         .chain([
             dep_root.join("src/lib.gos"),
             dep_root.join("lib.gos"),
@@ -287,7 +324,11 @@ fn path_dep_entry(dep_root: &Path) -> Option<(String, PathBuf)> {
             dep_root.join("main.gos"),
         ])
         .find(|p| p.is_file())?;
-    Some((manifest.project.id.as_str().to_string(), entry))
+    Some(PathDependency {
+        id: manifest.project.id.as_str().to_string(),
+        entry,
+        module: manifest.module_name(),
+    })
 }
 
 /// One auto-bundled module: its `name`, its already-assembled `body`,
@@ -617,6 +658,22 @@ fn is_valid_module_ident(name: &str) -> bool {
         }
     }
     true
+}
+
+/// The `(start, end, file)` ranges of an assembled unit a compile-time fold
+/// anchors each region's relative reads at, outermost first.
+#[must_use]
+pub fn comptime_origins(spans: &[BundledSpan]) -> Vec<(u32, u32, String)> {
+    spans
+        .iter()
+        .map(|span| {
+            (
+                span.start,
+                span.end,
+                span.origin.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
 }
 
 /// Assembles the compilation unit for `entry` from `source`: its

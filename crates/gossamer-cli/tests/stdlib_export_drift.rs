@@ -32,6 +32,7 @@ const SOURCE_VISIBLE_VIA_REWRITE: &[&str] = &[
     "time::CivilResolution::Unique",
     "time::Location::civil",
     "time::Location::fixed",
+    "time::Location::local",
     "time::Location::lookup",
     "time::Location::name",
     "time::Location::resolve",

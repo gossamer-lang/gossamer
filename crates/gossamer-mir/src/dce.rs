@@ -15,6 +15,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ir::{Body, ConstValue, Operand, Rvalue, StatementKind, Terminator};
+use gossamer_types::TyCtxt;
 
 /// Environment variable that turns the pass off, so a suspected
 /// miscompile can be bisected against a build that lowered everything.
@@ -35,8 +36,23 @@ pub struct PruneReport {
 /// function, the test and benchmark items a test build runs, and a
 /// library's exported surface. A name in `roots` that no body carries is
 /// ignored: the caller states an intent, not a fact about this program.
-pub fn prune_unreachable(bodies: &mut Vec<Body>, roots: &[String]) -> PruneReport {
-    prune_scoped(bodies, roots, Scope::Exact)
+///
+/// It runs after specialisation, so a generic template is reached only by
+/// the `FnRef` its callers name or through an instantiation's mangled name;
+/// a string that happens to spell a template's name is data, not an edge.
+pub fn prune_unreachable(bodies: &mut Vec<Body>, roots: &[String], tcx: &TyCtxt) -> PruneReport {
+    let templates: HashSet<String> = bodies
+        .iter()
+        .filter(|body| crate::monomorph::body_has_param(body, tcx))
+        .map(|body| body.name.clone())
+        .collect();
+    prune_unreachable_enabled(
+        bodies,
+        roots,
+        Scope::Exact,
+        &templates,
+        std::env::var_os(DISABLE).is_none(),
+    )
 }
 
 /// How much of the graph is trusted, which depends on whether
@@ -58,7 +74,13 @@ pub enum Scope {
 
 /// [`prune_unreachable`] with the trust in the graph stated.
 pub fn prune_scoped(bodies: &mut Vec<Body>, roots: &[String], scope: Scope) -> PruneReport {
-    prune_unreachable_enabled(bodies, roots, scope, std::env::var_os(DISABLE).is_none())
+    prune_unreachable_enabled(
+        bodies,
+        roots,
+        scope,
+        &HashSet::new(),
+        std::env::var_os(DISABLE).is_none(),
+    )
 }
 
 /// [`prune_unreachable`] with the switch supplied rather than read, so
@@ -67,6 +89,7 @@ fn prune_unreachable_enabled(
     bodies: &mut Vec<Body>,
     roots: &[String],
     scope: Scope,
+    unnamed: &HashSet<String>,
     enabled: bool,
 ) -> PruneReport {
     if !enabled {
@@ -75,7 +98,7 @@ fn prune_unreachable_enabled(
             pruned: 0,
         };
     }
-    let live = reachable(bodies, roots, scope);
+    let live = reachable(bodies, roots, scope, unnamed);
     // A program in which no root resolves to a body is not one whose
     // reachable set is empty - it is one whose roots cannot be named
     // here, which is what a library unit or a lowering harness with no
@@ -98,8 +121,14 @@ fn prune_unreachable_enabled(
     }
 }
 
-/// The transitive closure of `roots` over the bodies' call graph.
-fn reachable(bodies: &[Body], roots: &[String], scope: Scope) -> HashSet<String> {
+/// The transitive closure of `roots` over the bodies' call graph. A body in
+/// `unnamed` is reached only through a `FnRef`, never by a string.
+fn reachable(
+    bodies: &[Body],
+    roots: &[String],
+    scope: Scope,
+    unnamed: &HashSet<String>,
+) -> HashSet<String> {
     let by_name: HashMap<&str, &Body> = bodies.iter().map(|b| (b.name.as_str(), b)).collect();
     // A `FnRef` names its callee by `DefId`; the body it refers to is the
     // one that carries that `DefId`. A monomorphised copy carries none,
@@ -143,7 +172,9 @@ fn reachable(bodies: &[Body], roots: &[String], scope: Scope) -> HashSet<String>
                 // happens to read like one. The last costs a body that
                 // did not have to be kept; missing one of the first two
                 // costs a call into nothing.
-                if let Some(target) = by_name.get(text.as_str()) {
+                if let Some(target) = by_name.get(text.as_str())
+                    && !unnamed.contains(text)
+                {
                     reached.push(target.name.as_str());
                 }
             }
@@ -245,8 +276,7 @@ mod tests {
     use crate::ir::{BasicBlock, BlockId, Local, LocalDecl, Place, Statement};
     use gossamer_types::TyCtxt;
 
-    fn body(name: &str, calls: &[&str]) -> Body {
-        let mut tcx = TyCtxt::new();
+    fn body(tcx: &mut TyCtxt, name: &str, calls: &[&str]) -> Body {
         let unit = tcx.unit();
         let blocks = vec![BasicBlock {
             id: BlockId::ENTRY,
@@ -278,17 +308,41 @@ mod tests {
             blocks,
             def: None,
             span: gossamer_lex::Span::default(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 
     #[test]
+    fn a_string_spelling_a_generic_template_does_not_keep_it() {
+        let mut tcx = TyCtxt::new();
+        let param = tcx.intern(gossamer_types::TyKind::Param {
+            idx: gossamer_types::ParamIdx(0),
+            name: "D".into(),
+        });
+        let mut template = body(&mut tcx, "ready", &[]);
+        template.locals.push(LocalDecl {
+            ty: param,
+            debug_name: None,
+            mutable: false,
+            region: false,
+        });
+        let mut bodies = vec![body(&mut tcx, "main", &["ready"]), template];
+        let report = prune_unreachable(&mut bodies, &["main".to_string()], &tcx);
+        assert_eq!(report.pruned, 1);
+        assert!(bodies.iter().all(|b| b.name != "ready"));
+    }
+
+    #[test]
     fn a_body_no_root_reaches_is_dropped() {
+        let mut tcx = TyCtxt::new();
         let mut bodies = vec![
-            body("main", &["used"]),
-            body("used", &[]),
-            body("dead", &[]),
+            body(&mut tcx, "main", &["used"]),
+            body(&mut tcx, "used", &[]),
+            body(&mut tcx, "dead", &[]),
         ];
-        let report = prune_unreachable(&mut bodies, &["main".to_string()]);
+        let report = prune_unreachable(&mut bodies, &["main".to_string()], &tcx);
         assert_eq!(report.kept, 2);
         assert_eq!(report.pruned, 1);
         let names: Vec<&str> = bodies.iter().map(|b| b.name.as_str()).collect();
@@ -301,21 +355,26 @@ mod tests {
     /// null call if it is pruned.
     #[test]
     fn a_body_named_only_by_a_string_constant_survives() {
-        let mut bodies = vec![body("main", &["handler"]), body("handler", &[])];
-        let report = prune_unreachable(&mut bodies, &["main".to_string()]);
+        let mut tcx = TyCtxt::new();
+        let mut bodies = vec![
+            body(&mut tcx, "main", &["handler"]),
+            body(&mut tcx, "handler", &[]),
+        ];
+        let report = prune_unreachable(&mut bodies, &["main".to_string()], &tcx);
         assert_eq!(report.pruned, 0);
     }
 
     #[test]
     fn reachability_is_transitive_and_survives_a_cycle() {
+        let mut tcx = TyCtxt::new();
         let mut bodies = vec![
-            body("main", &["a"]),
-            body("a", &["b"]),
-            body("b", &["a"]),
-            body("dead", &["also_dead"]),
-            body("also_dead", &[]),
+            body(&mut tcx, "main", &["a"]),
+            body(&mut tcx, "a", &["b"]),
+            body(&mut tcx, "b", &["a"]),
+            body(&mut tcx, "dead", &["also_dead"]),
+            body(&mut tcx, "also_dead", &[]),
         ];
-        let report = prune_unreachable(&mut bodies, &["main".to_string()]);
+        let report = prune_unreachable(&mut bodies, &["main".to_string()], &tcx);
         assert_eq!(report.kept, 3);
         assert_eq!(report.pruned, 2);
     }
@@ -325,13 +384,14 @@ mod tests {
     /// one turns a rendering the program performs into a build failure.
     #[test]
     fn a_rendering_method_is_a_root_without_being_called() {
+        let mut tcx = TyCtxt::new();
         let mut bodies = vec![
-            body("main", &[]),
-            body("Part::fmt", &["Inner::to_string"]),
-            body("Inner::to_string", &[]),
-            body("Part::area", &[]),
+            body(&mut tcx, "main", &[]),
+            body(&mut tcx, "Part::fmt", &["Inner::to_string"]),
+            body(&mut tcx, "Inner::to_string", &[]),
+            body(&mut tcx, "Part::area", &[]),
         ];
-        let report = prune_unreachable(&mut bodies, &["main".to_string()]);
+        let report = prune_unreachable(&mut bodies, &["main".to_string()], &tcx);
         let names: Vec<&str> = bodies.iter().map(|b| b.name.as_str()).collect();
         assert!(names.contains(&"Part::fmt"), "{names:?}");
         assert!(names.contains(&"Inner::to_string"), "{names:?}");
@@ -343,16 +403,22 @@ mod tests {
     /// keeps every body: nothing here can say what reaches what.
     #[test]
     fn a_program_with_no_root_at_all_keeps_every_body() {
-        let mut bodies = vec![body("step", &[]), body("helper", &[])];
-        let report = prune_unreachable(&mut bodies, &["main".to_string()]);
+        let mut tcx = TyCtxt::new();
+        let mut bodies = vec![body(&mut tcx, "step", &[]), body(&mut tcx, "helper", &[])];
+        let report = prune_unreachable(&mut bodies, &["main".to_string()], &tcx);
         assert_eq!(report.kept, 2);
         assert_eq!(report.pruned, 0);
     }
 
     #[test]
     fn a_root_no_body_carries_is_ignored() {
-        let mut bodies = vec![body("main", &[])];
-        let report = prune_unreachable(&mut bodies, &["main".to_string(), "absent".to_string()]);
+        let mut tcx = TyCtxt::new();
+        let mut bodies = vec![body(&mut tcx, "main", &[])];
+        let report = prune_unreachable(
+            &mut bodies,
+            &["main".to_string(), "absent".to_string()],
+            &tcx,
+        );
         assert_eq!(report.kept, 1);
         assert_eq!(report.pruned, 0);
     }
@@ -361,9 +427,15 @@ mod tests {
     /// miscompile is bisected against a build that lowered everything.
     #[test]
     fn the_disable_switch_keeps_every_body() {
-        let mut bodies = vec![body("main", &[]), body("dead", &[])];
-        let report =
-            prune_unreachable_enabled(&mut bodies, &["main".to_string()], Scope::Exact, false);
+        let mut tcx = TyCtxt::new();
+        let mut bodies = vec![body(&mut tcx, "main", &[]), body(&mut tcx, "dead", &[])];
+        let report = prune_unreachable_enabled(
+            &mut bodies,
+            &["main".to_string()],
+            Scope::Exact,
+            &HashSet::new(),
+            false,
+        );
         assert_eq!(report.kept, 2);
         assert_eq!(report.pruned, 0);
     }

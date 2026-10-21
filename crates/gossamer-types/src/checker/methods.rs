@@ -2545,6 +2545,11 @@ impl TypeChecker<'_> {
         while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(resolved) {
             resolved = self.infer.resolve(self.tcx, *inner);
         }
+        if let Some(TyKind::Adt { def, .. }) = self.tcx.kind(resolved)
+            && super::handles::is_sync_primitive_def(def.local)
+        {
+            return false;
+        }
         if let Some(TyKind::Param { idx, .. }) = self.tcx.kind(resolved) {
             return self
                 .current_param_bounds

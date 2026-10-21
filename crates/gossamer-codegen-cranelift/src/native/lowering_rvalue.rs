@@ -680,6 +680,13 @@ pub(super) fn lower_rvalue_into(
                 let alloc_call = builder.ins().call(alloc_ref, &[size_val]);
                 builder.inst_results(alloc_call)[0]
             };
+            // A value with no fields still occupies the one word its layout
+            // floors it at, and that word is what equality, ordering,
+            // hashing, and a container's copy read.
+            if operands.is_empty() && packed.is_none() {
+                let zero = builder.ins().iconst(types::I64, 0);
+                builder.ins().store(MemFlagsData::trusted(), zero, base, 0);
+            }
             // Padding between a packed struct's narrow fields is part of the
             // value's words, so it starts zeroed and equal values have equal
             // bytes.
@@ -1151,21 +1158,39 @@ pub(super) fn lower_rvalue_into(
         Rvalue::CallIntrinsic { .. } => {
             unreachable!("CallIntrinsic must be routed through the statement path")
         }
-        // `static mut` scalar read: load from the static's backing writable
-        // data object. Non-scalar statics (String/aggregate) keep the VM
-        // fallback since their init is a heap value, not an inline word.
+        // A persistent cell owns its bytes; a loaded aggregate takes a separate frame copy.
         Rvalue::StaticLoad(sref) => {
-            if !is_scalar_static_ty(tcx, sref.ty) {
-                bail!(
-                    "native codegen: static mut load of non-scalar type unsupported; running on VM"
-                )
-            }
-            let cl_ty = cl_type_of(tcx, sref.ty, module);
-            let data_id = intrinsics.intern_static(module, sref, cl_ty)?;
+            // A carrier cell holds the packed two-word value its locals do.
+            let cl_ty = callable_slot_ty(tcx, sref.ty, module);
+            let data_id = intrinsics.intern_static(module, sref, cl_ty, tcx)?;
             let ptr_ty = module.target_config().pointer_type();
             let gv = module.declare_data_in_func(data_id, builder.func);
             let addr = builder.ins().symbol_value(ptr_ty, gv);
-            builder.ins().load(cl_ty, MemFlagsData::trusted(), addr, 0)
+            if super::lowering_place::is_inline_aggregate(tcx, sref.ty) {
+                let slots = type_slot_count(tcx, sref.ty).max(1);
+                let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    slots * 8,
+                    3,
+                ));
+                let dst = builder.ins().stack_addr(ptr_ty, slot, 0);
+                for word in 0..slots {
+                    let offset = (word * 8) as i32;
+                    let value =
+                        builder
+                            .ins()
+                            .load(types::I64, MemFlagsData::trusted(), addr, offset);
+                    builder
+                        .ins()
+                        .store(MemFlagsData::trusted(), value, dst, offset);
+                }
+                super::lowering_stmt_term::static_aggregate_children(
+                    module, builder, intrinsics, tcx, sref.ty, dst, true, false,
+                )?;
+                dst
+            } else {
+                builder.ins().load(cl_ty, MemFlagsData::trusted(), addr, 0)
+            }
         }
     })
 }

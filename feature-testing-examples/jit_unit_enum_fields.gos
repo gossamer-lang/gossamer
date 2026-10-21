@@ -1,0 +1,76 @@
+// An enum none of whose variants carries a field is its variant index in
+// compiled code. A compiled function answering a variant that holds one (or an
+// `Option` of one) hands the interpreter that index, which reads it as the
+// variant it numbers: odd indices and enums of more than eight variants
+// included.
+#[derive(Debug, PartialEq, Eq)]
+enum Theme { Light, Dark, Unknown }
+
+#[derive(Debug, PartialEq, Eq)]
+enum Op { Copy, Move, Link }
+
+#[derive(Debug, PartialEq, Eq)]
+enum Wide { A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10 }
+
+#[derive(Debug, PartialEq)]
+enum Event {
+    Themed { theme: Theme }
+    Dragged { drag: i64, operation: Option<Op> }
+    Picked(Wide)
+    Plain
+}
+
+static mut LOG: Vec<i64> = #[]
+
+fn theme_from(code: i64) -> Theme {
+    match code {
+        1 => Theme::Light
+        2 => Theme::Dark
+        _ => Theme::Unknown
+    }
+}
+
+fn op_from(code: i64) -> Option<Op> {
+    match code {
+        1 => Some(Op::Copy)
+        2 => Some(Op::Move)
+        3 => Some(Op::Link)
+        _ => None
+    }
+}
+
+fn wide_from(code: i64) -> Wide {
+    match code {
+        0 => Wide::A0
+        1 => Wide::A1
+        3 => Wide::A3
+        9 => Wide::A9
+        _ => Wide::A10
+    }
+}
+
+// Reaching the static makes this a compiled entry the interpreter calls.
+fn decode(kind: i64, code: i64) -> Option<Event> {
+    LOG.push(kind)
+    match kind {
+        0 => Some(Event::Themed { theme: theme_from(code) })
+        1 => Some(Event::Dragged { drag: code * 10, operation: op_from(code) })
+        2 => Some(Event::Picked(wide_from(code)))
+        3 => Some(Event::Plain)
+        _ => None
+    }
+}
+
+fn main() {
+    let cases = #[(0, 1), (0, 2), (0, 7), (1, 1), (1, 2), (1, 3), (1, 9), (2, 0), (2, 1), (2, 3), (2, 9), (2, 10), (3, 0), (4, 0)]
+    for (kind, code) in cases {
+        let e = decode(kind, code)
+        println(f"{kind} {code}: {e:?}")
+        if let Some(Event::Themed { theme }) = e && theme == Theme::Dark {
+            println("dark")
+        }
+    }
+    println(logged())
+}
+
+fn logged() -> i64 { LOG.len() }

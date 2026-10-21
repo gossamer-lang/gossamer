@@ -354,6 +354,24 @@
 
 
 
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Debugging
+
+
+
+  </span>
+
+
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+
       <a href="./" class="md-nav__link md-nav__link--active">
 
 
@@ -370,6 +388,47 @@
 
 
       </a>
+
+
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+
+
+
+
+
+
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+
+        <li class="md-nav__item">
+  <a href="#optimization-remarks" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Optimization remarks
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#arena-memory-after-its-block" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Arena memory after its block
+
+    </span>
+  </a>
+
+</li>
+
+    </ul>
+
+</nav>
 
     </li>
 
@@ -2311,6 +2370,36 @@
 
 
 
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+
+        <li class="md-nav__item">
+  <a href="#optimization-remarks" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Optimization remarks
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#arena-memory-after-its-block" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Arena memory after its block
+
+    </span>
+  </a>
+
+</li>
+
+    </ul>
+
 </nav>
                   </div>
                 </div>
@@ -2387,6 +2476,34 @@ prints the call stack with source lines, which is often enough without a
 debugger.</p>
 <p><code>lldb</code> works the same way: <code>lldb ./target/debug/main</code>, then
 <code>breakpoint set --name area</code>, <code>run</code>, and <code>frame variable</code>.</p>
+<h2 id="optimization-remarks">Optimization remarks<a class="headerlink" href="#optimization-remarks" title="Permanent link">&para;</a></h2>
+<p>Two variables make <code>gos build --release</code> explain what it did with a loop,
+one line per site, with the file, line, and column it was written at.
+Setting either makes the build skip its artifact cache, so the remarks always
+describe the compile that just ran.</p>
+<p><code>GOS_BOUNDS_REMARKS=1</code> reports every index access <code>xs[i]</code> on a vector of
+scalars: whether its bounds check was removed, versioned (an unchecked copy of
+the loop runs behind one check at loop entry, with the checked loop as the
+fallback), or kept. A check inside a <code>for i in 0..xs.len()</code> loop that stays
+because something in the loop could change the vector's length names that
+construct:</p>
+<div class="language-text highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>[bounds] main.gos:12:19: index check removed in `kernel`
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>[bounds] main.gos:24:17: index check kept in `rebuild`: `grow` may resize the vector
+</code></pre></div>
+<p>A call inside such a loop keeps the proof when the called function cannot
+change the length of the vector it is handed, however deep the calls go, and a
+function whose every caller indexes it with a loop counter below the vector's
+length gets the same proof for its own <code>xs[i]</code>.</p>
+<p><code>GOS_ARENA_TRACE=1</code> reports which loop and closure bodies were given an
+automatic arena region, and why an allocating one was not; see
+<a href="../language/arena/#automatic-arenas-no-annotation-needed">Automatic arenas</a>.</p>
+<h2 id="arena-memory-after-its-block">Arena memory after its block<a class="headerlink" href="#arena-memory-after-its-block" title="Permanent link">&para;</a></h2>
+<p>An arena's memory is unreadable once its block ends, on every platform: a
+program that still read it would crash. <code>GOS_ARENA_POISON=1</code> also stops the
+runtime from keeping a finished arena's memory for the next one, so that
+such a read crashes every time rather than only when the memory was not
+reused. It is meant for chasing a crash near an <code>arena { }</code> block or a loop
+<code>GOS_ARENA_TRACE</code> reports as auto-regioned.</p>
 
 
 

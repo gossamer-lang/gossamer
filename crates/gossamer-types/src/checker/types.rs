@@ -255,6 +255,16 @@ impl TypeChecker<'_> {
                     } | Resolution::Primitive(_)
                 )
             )
+            && !self.resolutions.import_def(node).is_some_and(|def| {
+                matches!(
+                    self.resolutions.kind_of(def),
+                    Some(
+                        gossamer_resolve::DefKind::Struct
+                            | gossamer_resolve::DefKind::Enum
+                            | gossamer_resolve::DefKind::TypeAlias
+                    )
+                )
+            })
             && (STDLIB_TRAIT_NAMES.contains(&last.name.name.as_str())
                 || self.trait_own_methods.contains_key(&last.name.name))
         {
@@ -719,6 +729,21 @@ impl TypeChecker<'_> {
             .map(|seg| seg.name.name.as_str())
             .collect();
         if let Some((offset, name)) = stdlib_handle_by_path(&written) {
+            // The guarded slot carries an integer on every tier, so a
+            // `Shared<T>` naming anything else is refused where it is
+            // written, and the binding it types reports nothing further.
+            if name == "sync::Shared"
+                && let Some(guarded) = self.substs_from_ast(path).types().first().copied()
+            {
+                let guarded = self.infer.resolve(self.tcx, guarded);
+                if self.is_concrete(guarded)
+                    && !matches!(self.tcx.kind_of(guarded), TyKind::Int(_) | TyKind::Error)
+                {
+                    let ty = self.render_public_ty(guarded);
+                    self.emit(TypeError::SharedPayloadUnsupported { ty }, span);
+                    return self.tcx.error_ty();
+                }
+            }
             return self.stdlib_handle_ty(offset, name);
         }
         self.fresh()
@@ -1384,6 +1409,42 @@ impl TypeChecker<'_> {
         }
     }
 
+    /// Binds each alternative of an or-pattern against `ty`.
+    fn bind_or_pattern(&mut self, alts: &[Pattern], ty: Ty) {
+        // Rust requires every alternative to bind a name with the
+        // same mode. Until that receives its own diagnostic, use the
+        // strict capability intersection: one immutable occurrence
+        // keeps the resulting binding immutable regardless of order.
+        let mut mutability = HashMap::new();
+        for alt in alts {
+            Self::collect_pattern_binding_mutability(alt, &mut mutability);
+        }
+        // One body reads a name whichever alternative matched, so the
+        // name has one type: each alternative's binding must agree
+        // with the first's.
+        let mut first: HashMap<String, Ty> = HashMap::new();
+        for alt in alts {
+            self.bind_pattern(alt, ty);
+            for name in mutability.keys() {
+                let Some(bound) = self.lookup_local(name) else {
+                    continue;
+                };
+                match first.get(name) {
+                    Some(expected) => self.unify(*expected, bound, alt.span),
+                    None => {
+                        first.insert(name.clone(), bound);
+                    }
+                }
+            }
+        }
+        for (name, bound) in &first {
+            self.bind_local(name, *bound);
+        }
+        for (name, mutable) in mutability {
+            self.bind_local_mutability(&name, mutable);
+        }
+    }
+
     pub(super) fn bind_pattern(&mut self, pattern: &Pattern, ty: Ty) {
         self.binding_types.insert(pattern.id, ty);
         self.table.insert(pattern.id, ty);
@@ -1424,11 +1485,11 @@ impl TypeChecker<'_> {
                 }
             }
             PatternKind::Struct { path, fields, .. } => {
-                self.reject_unknown_variant_pattern(path, pattern.span);
+                self.reject_unknown_variant_pattern(pattern.id, path, pattern.span);
                 self.bind_struct_pattern(path, fields, ty);
             }
             PatternKind::TupleStruct { path, elems } => {
-                self.reject_unknown_variant_pattern(path, pattern.span);
+                self.reject_unknown_variant_pattern(pattern.id, path, pattern.span);
                 // For built-in generic enums (`Option<T>`,
                 // `Result<T, E>`) pull the payload type out of the
                 // scrutinee's substs and bind it to the matching
@@ -1446,22 +1507,7 @@ impl TypeChecker<'_> {
                     self.bind_pattern(elem, elem_ty);
                 }
             }
-            PatternKind::Or(alts) => {
-                for alt in alts {
-                    self.bind_pattern(alt, ty);
-                }
-                // Rust requires every alternative to bind a name with the
-                // same mode. Until that receives its own diagnostic, use the
-                // strict capability intersection: one immutable occurrence
-                // keeps the resulting binding immutable regardless of order.
-                let mut mutability = HashMap::new();
-                for alt in alts {
-                    Self::collect_pattern_binding_mutability(alt, &mut mutability);
-                }
-                for (name, mutable) in mutability {
-                    self.bind_local_mutability(&name, mutable);
-                }
-            }
+            PatternKind::Or(alts) => self.bind_or_pattern(alts, ty),
             PatternKind::Ref { inner, mutability } => {
                 let resolved = self.infer.resolve(self.tcx, ty);
                 let inner_ty = match self.tcx.kind(resolved).cloned() {
@@ -1486,7 +1532,7 @@ impl TypeChecker<'_> {
                 self.bind_pattern(inner, inner_ty);
             }
             PatternKind::Path(path) => {
-                self.reject_unknown_variant_pattern(path, pattern.span);
+                self.reject_unknown_variant_pattern(pattern.id, path, pattern.span);
             }
             PatternKind::Wildcard
             | PatternKind::Literal(_)

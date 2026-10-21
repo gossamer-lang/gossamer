@@ -121,7 +121,10 @@ pub fn zip_read(data: &[u8], limits: Limits) -> Result<Vec<Entry>, String> {
         let file = archive
             .by_index(i)
             .map_err(|e| format!("zip entry {i}: {e}"))?;
-        let name = file.name().to_owned();
+        let name = file
+            .name()
+            .map_err(|e| format!("zip entry {i}: {e}"))?
+            .into_owned();
         let kind = if file.is_dir() {
             EntryKind::Dir
         } else if file.is_symlink() {

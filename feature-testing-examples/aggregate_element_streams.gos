@@ -1,0 +1,43 @@
+// Iterator streams over vectors of tuples and structs.
+//
+// A pulled element of a vector of structs or tuples is read, filtered,
+// mapped, found, counted, collected, and chained. Every tier answers the
+// same values, and each pulled element is given back exactly once.
+
+struct Entry { name: String, n: i64 }
+
+fn main() {
+    let pairs: Vec<(i64, String)> = (0..6).map(|i| (i * 10, f"p{i}")).collect()
+    let entries: Vec<Entry> = (0..6).map(|i| Entry { name: f"entry{i}", n: i }).collect()
+    let names: Vec<String> = (0..6).map(|i| f"name{i}").collect()
+
+    let mut lengths = #[]
+    for (u, s) in names.iter().enumerate() {
+        lengths.push(u + s.byte_len())
+    }
+    println(f"enumerate: {lengths}")
+
+    let mut keyed = #[]
+    for (k, s) in pairs.iter() {
+        keyed.push(f"{k}={s}")
+    }
+    for (u, (k, s)) in pairs.iter().enumerate() {
+        keyed.push(f"{u}:{k}:{s}")
+    }
+    println(f"pairs: {keyed}")
+
+    let even = entries.iter().filter(|e| e.n % 2 == 0).count()
+    let name_bytes: i64 = entries.iter().map(|e| e.name.byte_len()).sum()
+    println(f"even: {even}, name bytes: {name_bytes}")
+
+    match entries.iter().find(|e| e.n == 4) {
+        Some(e) => println(f"found: {e.name}")
+        None => println("found nothing")
+    }
+
+    let kept: Vec<Entry> = entries.iter().filter(|e| e.n % 3 == 0).collect()
+    let kept_names = kept.map(|e| e.name)
+    println(f"kept: {kept_names}")
+    println(f"chained: {pairs.iter().chain(pairs.iter()).count()}")
+    println(f"still: {entries[5].name} {pairs[2].1}")
+}

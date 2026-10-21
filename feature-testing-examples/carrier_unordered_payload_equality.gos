@@ -1,0 +1,23 @@
+// A map arm prevents ordering, but every active arm still has value equality.
+#[derive(PartialEq)]
+enum Answer { Text(String), Values(Map<String, String>) }
+
+fn option_equal(a: Option<Answer>, b: Option<Answer>) -> bool { a == b }
+fn result_equal(a: Result<Answer, String>, b: Result<Answer, String>) -> bool { a == b }
+
+fn main() {
+    for _ in 0..20 {
+        assert(option_equal(Some(Answer::Text("same")), Some(Answer::Text("same"))))
+        assert(!option_equal(Some(Answer::Text("same")), Some(Answer::Text("different"))))
+        assert(!option_equal(Some(Answer::Text("same")), None))
+        assert(option_equal(None, None))
+        assert(option_equal(Some(Answer::Values({ "a": "one", "b": "two" })), Some(Answer::Values({ "b": "two", "a": "one" }))))
+        assert(!option_equal(Some(Answer::Values({ "a": "one" })), Some(Answer::Values({ "a": "two" }))))
+        assert(Some(Answer::Text("same")) != Some(Answer::Text("different")))
+        assert(result_equal(Ok(Answer::Text("same")), Ok(Answer::Text("same"))))
+        assert(result_equal(Err("same"), Err("same")))
+        assert(!result_equal(Ok(Answer::Text("same")), Err("same")))
+        assert(Some({ "a": "one" }) == Some({ "a": "one" }))
+    }
+    println("unordered carrier payloads: structural equality")
+}

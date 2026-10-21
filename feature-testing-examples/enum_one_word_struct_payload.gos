@@ -1,0 +1,63 @@
+// A one-word struct held by an enum variant lives in the variant's own slot,
+// so an enum built in one call and read after later calls keeps its own
+// flags, and a `&mut` binding writes the slot in place.
+struct Mods { shift: bool, ctrl: bool, alt: bool }
+
+enum Event {
+    Key { mods: Mods, code: i64 }
+    Quit
+}
+
+fn make(i: i64) -> Event {
+    if i < 0 {
+        return make(i + 1)
+    }
+    Event::Key { mods: Mods { shift: i == 0, ctrl: i == 1, alt: i == 2 }, code: i }
+}
+
+fn flags(e: Event) -> i64 {
+    match e {
+        Event::Key { mods, code } => {
+            let mut f = code * 1000
+            if mods.shift { f += 1 }
+            if mods.ctrl { f += 10 }
+            if mods.alt { f += 100 }
+            f
+        }
+        Event::Quit => -1
+    }
+}
+
+fn flip(e: &mut Event) {
+    match e {
+        Event::Key { mods, .. } => mods.shift = !mods.shift
+        Event::Quit => ()
+    }
+}
+
+fn probe(n: i64) -> i64 {
+    let mut out = 0
+    for _ in 0..n {
+        let a = make(0)
+        let b = make(1)
+        let c = make(2)
+        out = flags(a) * 1000000 + flags(b) * 1000 + flags(c)
+    }
+    out
+}
+
+fn flipped(n: i64) -> i64 {
+    let mut total = 0
+    for i in 0..n {
+        let mut e = make(i % 3)
+        flip(&mut e)
+        total += flags(e)
+    }
+    total
+}
+
+fn main() {
+    println(probe(3))
+    println(flipped(9))
+    println(flags(Event::Quit))
+}

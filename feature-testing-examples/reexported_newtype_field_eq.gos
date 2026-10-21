@@ -1,0 +1,29 @@
+// A struct whose field is a newtype compares by its fields when another
+// module re-exports the newtype under the same name.
+
+mod disp {
+    pub newtype DisplayId = u32
+
+    pub struct Display {
+        pub id: DisplayId
+        pub name: String
+    }
+
+    pub fn make(name: String) -> Display {
+        Display { id: 1u32.into(), name: name }
+    }
+}
+
+type DisplayId = disp::DisplayId
+
+fn main() {
+    let first: DisplayId = 1u32.into()
+    let wanted = disp::make("b")
+    let mut found = 0
+    for name in #["a", "b", "c", "b"] {
+        if disp::make(name) == wanted {
+            found += 1
+        }
+    }
+    println(f"{found} {disp::make("a") == disp::make("b")} {first == wanted.id}")
+}

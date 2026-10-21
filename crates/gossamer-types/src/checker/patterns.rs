@@ -59,9 +59,10 @@ impl TypeChecker<'_> {
     }
 
     /// Type-checks a `select { … }` expression. Each arm is checked in its own
-    /// scope: a recv arm binds its pattern to the channel's element type, a
-    /// send arm unifies the sent value against the channel's element type, and
-    /// every arm body unifies into the shared result type.
+    /// scope: a recv arm matches its pattern against the `Option` of the
+    /// channel's element type the receive answers, a send arm unifies the sent
+    /// value against the channel's element type, and every arm body unifies
+    /// into the shared result type.
     pub(super) fn check_select(&mut self, arms: &[gossamer_ast::SelectArm]) -> Ty {
         use gossamer_ast::SelectOp;
         let result_ty = self.fresh();
@@ -75,9 +76,13 @@ impl TypeChecker<'_> {
                         TyKind::Receiver(inner) | TyKind::Sender(inner) => inner,
                         _ => self.fresh(),
                     };
+                    let received = self.option_adt_ty(elem);
                     let pat_ty = self.type_of_pattern(pattern);
-                    self.unify(pat_ty, elem, pattern.span);
-                    self.bind_pattern(pattern, elem);
+                    self.unify(pat_ty, received, pattern.span);
+                    if !self.recv_pattern_is_total(pattern, elem) {
+                        self.emit(TypeError::SelectPatternMayNotMatch, pattern.span);
+                    }
+                    self.bind_pattern(pattern, received);
                 }
                 SelectOp::Send { channel, value } => {
                     let chan_ty = self.check_expr(channel);
@@ -96,6 +101,27 @@ impl TypeChecker<'_> {
             self.pop_scope();
         }
         result_ty
+    }
+
+    /// Whether a `select` receive pattern takes every value of the outcome it
+    /// waits for: a name or `_` takes both, `Some(p)` with `p` accepting every
+    /// element takes a value, and `None` takes the close. Anything narrower
+    /// would have the arm consume a value it then cannot bind.
+    fn recv_pattern_is_total(&mut self, pattern: &Pattern, elem: Ty) -> bool {
+        match &pattern.kind {
+            PatternKind::Wildcard => true,
+            PatternKind::Ident {
+                subpattern: None,
+                name,
+                ..
+            } => name.name != "Some",
+            PatternKind::Path(path) => path.segments.last().is_some_and(|s| s.name.name == "None"),
+            PatternKind::TupleStruct { path, elems } => {
+                path.segments.last().is_some_and(|s| s.name.name == "Some")
+                    && matches!(elems.as_slice(), [inner] if self.let_pattern_problem(inner, Some(elem)).is_none())
+            }
+            _ => false,
+        }
     }
 
     pub(super) fn check_for(&mut self, pattern: &Pattern, iter: &Expr, body: &Expr) -> Ty {
@@ -1047,7 +1073,10 @@ impl TypeChecker<'_> {
         })
     }
 
-    /// Rejects an aggregate written inline at a spawned call.
+    /// Rejects an aggregate argument at a spawned call that holds nested
+    /// growable storage, the one layout the spawn boundary cannot copy with
+    /// a single ownership descriptor. Scalars, strings, and runtime handles
+    /// inside an aggregate cross as the captured snapshot they already are.
     ///
     /// The argument is a closure, so the call it wraps is one level in: a
     /// `spawn(|| f(Pair { .. }))` puts the aggregate where the boundary is.
@@ -1074,7 +1103,7 @@ impl TypeChecker<'_> {
                 }
                 _ => false,
             };
-            if inline {
+            if inline && self.ty_is_unshareable_across_goroutines(resolved) {
                 let ty = self.render_public_ty(resolved);
                 self.emit(
                     TypeError::ConcurrentAggregateUnsupported {
@@ -1593,11 +1622,7 @@ impl TypeChecker<'_> {
             def,
             substs: crate::Substs::from_types(substs),
         });
-        let enum_name = self
-            .tcx
-            .def_name(def)
-            .and_then(|name| name.rsplit("::").next())
-            .map(str::to_string);
+        let enum_name = self.tcx.def_name(def).map(str::to_string);
         let variant_name = path
             .segments
             .last()
@@ -1618,6 +1643,71 @@ impl TypeChecker<'_> {
         self.finish_struct_literal_consts(ty, &consts, expected, path, span)
     }
 
+    /// Type of a path expression that resolves to the definition `def`.
+    fn def_path_value_ty(
+        &mut self,
+        node: NodeId,
+        (def, kind): (gossamer_resolve::DefId, gossamer_resolve::DefKind),
+        path: &gossamer_ast::PathExpr,
+        span: Span,
+        expected: Expectation,
+    ) -> Ty {
+        match kind {
+            gossamer_resolve::DefKind::Struct => {
+                if self
+                    .struct_fields
+                    .get(&def)
+                    .is_some_and(|fields| !fields.is_empty() || self.tcx.is_tuple_struct(def.local))
+                    && !self.callee_path_nodes.contains(&node)
+                {
+                    let name = self
+                        .tcx
+                        .def_name(def)
+                        .map_or_else(|| "<struct>".to_string(), ToString::to_string);
+                    let error = if self.tcx.is_tuple_struct(def.local) {
+                        TypeError::TupleStructConstructorParenthesesRequired { name }
+                    } else {
+                        TypeError::StructConstructorBracesRequired { name }
+                    };
+                    self.emit(error, span);
+                }
+                self.tcx.intern(TyKind::Adt {
+                    def,
+                    substs: crate::Substs::new(),
+                })
+            }
+            gossamer_resolve::DefKind::Enum => {
+                self.enum_path_value_ty(node, def, path, span, expected)
+            }
+            gossamer_resolve::DefKind::Fn => {
+                // Pull turbofish args (`ident::<i64, bool>`) off
+                // the last path segment, resolve each to a
+                // concrete [`Ty`], and stamp the callee's type as
+                // `TyKind::FnDef { def, substs }` so that the MIR
+                // lowerer reads the real substitution instead of
+                // deriving one heuristically from argument types.
+                let substs = self.fn_item_path_substs(node, def, path);
+                self.tcx.intern(TyKind::FnDef { def, substs })
+            }
+            gossamer_resolve::DefKind::Const | gossamer_resolve::DefKind::Static => {
+                self.const_path_ty(def, path)
+            }
+            gossamer_resolve::DefKind::TypeParam => {
+                match self.check_param_assoc_fn_path(def, path) {
+                    Some(ty) => ty,
+                    None => self.fresh(),
+                }
+            }
+            // `ui::Event::Window`: a variant reached through the module
+            // that declares its enum.
+            gossamer_resolve::DefKind::Mod => match self.enum_def_through_module(def, path) {
+                Some(enum_def) => self.enum_path_value_ty(node, enum_def, path, span, expected),
+                None => self.fresh(),
+            },
+            _ => self.fresh(),
+        }
+    }
+
     pub(super) fn check_path_expr(
         &mut self,
         node: NodeId,
@@ -1631,7 +1721,7 @@ impl TypeChecker<'_> {
         // tail to fault at runtime (GX0002 `Shape::Triangle`). Reject it
         // where the enum is known and the tail is neither a declared
         // variant nor an associated function on the enum.
-        if self.reject_unknown_variant_path(path, span) {
+        if self.reject_unknown_variant_path(node, path, span) {
             return self.tcx.error_ty();
         }
         if let Some(ty) = self.check_assoc_const_path(path, span) {
@@ -1679,52 +1769,9 @@ impl TypeChecker<'_> {
                 self.fresh()
             }
             Resolution::Primitive(prim) => self.type_from_primitive(prim),
-            Resolution::Def { def, kind } => match kind {
-                gossamer_resolve::DefKind::Struct => {
-                    if self.struct_fields.get(&def).is_some_and(|fields| {
-                        !fields.is_empty() || self.tcx.is_tuple_struct(def.local)
-                    }) && !self.callee_path_nodes.contains(&node)
-                    {
-                        let name = self
-                            .tcx
-                            .def_name(def)
-                            .map_or_else(|| "<struct>".to_string(), ToString::to_string);
-                        let error = if self.tcx.is_tuple_struct(def.local) {
-                            TypeError::TupleStructConstructorParenthesesRequired { name }
-                        } else {
-                            TypeError::StructConstructorBracesRequired { name }
-                        };
-                        self.emit(error, span);
-                    }
-                    self.tcx.intern(TyKind::Adt {
-                        def,
-                        substs: crate::Substs::new(),
-                    })
-                }
-                gossamer_resolve::DefKind::Enum => {
-                    self.enum_path_value_ty(node, def, path, span, expected)
-                }
-                gossamer_resolve::DefKind::Fn => {
-                    // Pull turbofish args (`ident::<i64, bool>`) off
-                    // the last path segment, resolve each to a
-                    // concrete [`Ty`], and stamp the callee's type as
-                    // `TyKind::FnDef { def, substs }` so that the MIR
-                    // lowerer reads the real substitution instead of
-                    // deriving one heuristically from argument types.
-                    let substs = self.fn_item_path_substs(node, def, path);
-                    self.tcx.intern(TyKind::FnDef { def, substs })
-                }
-                gossamer_resolve::DefKind::Const | gossamer_resolve::DefKind::Static => {
-                    self.const_path_ty(def, path)
-                }
-                gossamer_resolve::DefKind::TypeParam => {
-                    match self.check_param_assoc_fn_path(def, path) {
-                        Some(ty) => ty,
-                        None => self.fresh(),
-                    }
-                }
-                _ => self.fresh(),
-            },
+            Resolution::Def { def, kind } => {
+                self.def_path_value_ty(node, (def, kind), path, span, expected)
+            }
             Resolution::Import { .. } | Resolution::Err => {
                 // A `use` of this unit's own item keeps its opaque
                 // `Import` resolution so lowering still qualifies the
@@ -1839,53 +1886,72 @@ impl TypeChecker<'_> {
 
     pub(super) fn reject_unknown_variant_path(
         &mut self,
+        node: NodeId,
         path: &gossamer_ast::PathExpr,
         span: Span,
     ) -> bool {
-        let n = path.segments.len();
-        if n < 2 {
-            return false;
-        }
-        let enum_name = path.segments[n - 2].name.name.clone();
-        let variant = path.segments[n - 1].name.name.clone();
-        self.reject_unknown_variant(&enum_name, &variant, span)
+        let names: Vec<&str> = path.segments.iter().map(|s| s.name.name.as_str()).collect();
+        self.reject_unknown_variant(node, &names, span)
     }
 
     /// Reports GT0019 when a pattern names a variant its enum does not
     /// declare, and answers whether it did.
     pub(super) fn reject_unknown_variant_pattern(
         &mut self,
+        node: NodeId,
         path: &gossamer_ast::TypePath,
         span: Span,
     ) -> bool {
-        let n = path.segments.len();
-        if n < 2 {
-            return false;
-        }
-        let enum_name = path.segments[n - 2].name.name.clone();
-        let variant = path.segments[n - 1].name.name.clone();
-        self.reject_unknown_variant(&enum_name, &variant, span)
+        let names: Vec<&str> = path.segments.iter().map(|s| s.name.name.as_str()).collect();
+        self.reject_unknown_variant(node, &names, span)
     }
 
-    fn reject_unknown_variant(&mut self, enum_name: &str, variant: &str, span: Span) -> bool {
-        let unknown = self.enum_variants.get(enum_name).is_some_and(|variants| {
-            !variants.contains(variant)
-                && !self
-                    .user_method_owners
-                    .get(variant)
-                    .is_some_and(|owners| owners.contains(enum_name))
-        });
+    /// The resolver answers a path whose tail is not a variant with the
+    /// enum it names; the enum is the one that definition declares, not
+    /// another type that shares its name.
+    fn reject_unknown_variant(&mut self, node: NodeId, names: &[&str], span: Span) -> bool {
+        let [.., enum_name, variant] = names else {
+            return false;
+        };
+        let def = match self.resolutions.get(node) {
+            Some(Resolution::Def {
+                def,
+                kind: DefKind::Enum,
+            }) => def,
+            // A `type` alias of an enum reaches that enum's variants.
+            Some(Resolution::Def {
+                def,
+                kind: DefKind::TypeAlias,
+            }) => match self.alias_enum_def(def) {
+                Some(def) => def,
+                None => return false,
+            },
+            _ => return false,
+        };
+        let Some(variants) = self.tcx.enum_variant_names(def) else {
+            return false;
+        };
+        // An alias spells the enum under another name; its `impl` is keyed by
+        // the enum's own.
+        let declared_name = self
+            .tcx
+            .def_name(def)
+            .and_then(|name| name.rsplit("::").next())
+            .map(str::to_string);
+        let unknown = !variants.iter().any(|v| v == variant)
+            && !self.user_method_owners.get(*variant).is_some_and(|owners| {
+                owners.contains(*enum_name)
+                    || declared_name
+                        .as_ref()
+                        .is_some_and(|name| owners.contains(name.as_str()))
+            });
         if unknown {
-            let mut declared: Vec<String> = self
-                .enum_variants
-                .get(enum_name)
-                .map(|variants| variants.iter().cloned().collect())
-                .unwrap_or_default();
+            let mut declared: Vec<String> = variants.to_vec();
             declared.sort();
             self.emit(
                 TypeError::UnknownVariant {
-                    enum_name: enum_name.to_string(),
-                    variant: variant.to_string(),
+                    enum_name: (*enum_name).to_string(),
+                    variant: (*variant).to_string(),
                     declared,
                 },
                 span,

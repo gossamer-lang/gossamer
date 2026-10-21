@@ -415,6 +415,7 @@ struct ParkShard {
 struct Shared {
     injector: Injector<SendTask>,
     workers: Mutex<Vec<Arc<WorkerSlot>>>,
+    threads: Mutex<Vec<JoinHandle<()>>>,
     parked: Box<[Mutex<ParkShard>]>,
     /// Live (spawned but not yet finished) goroutine count. The
     /// scheduler refuses new spawns above `max_live`.
@@ -519,6 +520,7 @@ impl MultiScheduler {
         let shared = Arc::new(Shared {
             injector: Injector::new(),
             workers: Mutex::new(Vec::new()),
+            threads: Mutex::new(Vec::new()),
             parked: (0..PARK_SHARDS)
                 .map(|_| Mutex::new(ParkShard::default()))
                 .collect(),
@@ -729,15 +731,16 @@ impl MultiScheduler {
                 return;
             }
             let inner = Arc::clone(&self.inner);
-            thread::Builder::new()
+            let thread = thread::Builder::new()
                 .name("gos-preempt-watchdog".to_string())
                 .spawn(move || watchdog_loop(inner))
                 .expect("spawn watchdog");
+            self.inner.threads.lock().push(thread);
         }
     }
 
-    /// Signals every worker to exit once their deques drain, then
-    /// joins them.
+    /// Signals every worker to exit once their deques drain. Native program
+    /// teardown subsequently joins idle workers before releasing storage.
     pub fn shutdown(&self) {
         self.inner.stopping.store(true, Ordering::Release);
         let workers = self.inner.workers.lock().clone();
@@ -745,11 +748,34 @@ impl MultiScheduler {
             slot.retired.store(true, Ordering::Release);
             slot.wake();
         }
-        // Joining the threads themselves happens inside
-        // `reconcile_pool` / the ParkedJoinHandles store; there is no
-        // join handle stored here because workers self-detach when
-        // they retire. A future iteration could move handles into
-        // `Shared` for a deterministic join.
+    }
+
+    /// Joins idle native-program workers so their thread-local owners finish
+    /// before process storage is released. Never joins from a worker itself.
+    pub(crate) fn shutdown_and_join_idle(&self) -> bool {
+        if current_worker_index().is_some() || self.live_goroutines() != 0 {
+            return false;
+        }
+        self.shutdown();
+        loop {
+            let threads = std::mem::take(&mut *self.inner.threads.lock());
+            if threads.is_empty() {
+                break;
+            }
+            for thread in threads {
+                let _ = thread.join();
+            }
+        }
+        self.inner.workers.lock().clear();
+        for shard in &self.inner.parked {
+            let mut shard = shard.lock();
+            shard.entries.clear();
+            shard.entries.shrink_to_fit();
+            shard.early.clear();
+            shard.early.shrink_to_fit();
+        }
+        self.inner.watchdog_started.store(false, Ordering::Release);
+        true
     }
 
     /// Parks the goroutine identified by `gid`. The supplied `task`
@@ -1014,10 +1040,23 @@ impl MultiScheduler {
         }
         self.inner.live_workers.fetch_add(1, Ordering::AcqRel);
         let inner = Arc::clone(&self.inner);
-        let _: JoinHandle<()> = thread::Builder::new()
+        let thread = thread::Builder::new()
             .name(format!("gos-sched-{index}"))
-            .spawn(move || worker_loop(index, deque, slot, inner))
+            .spawn(move || {
+                worker_loop(index, deque, slot, inner);
+                crate::c_abi::rc::finish_worker_cycles();
+            })
             .expect("scheduler worker thread spawn failed");
+        let mut threads = self.inner.threads.lock();
+        let mut completed = 0;
+        while completed < threads.len() {
+            if threads[completed].is_finished() {
+                let _ = threads.swap_remove(completed).join();
+            } else {
+                completed += 1;
+            }
+        }
+        threads.push(thread);
     }
 
     fn wake_any(&self) {
@@ -1731,6 +1770,9 @@ impl<T: Task> Task for GidStamped<T> {
             if let Some(service) = self.service.take() {
                 service.fetch_sub(1, Ordering::AcqRel);
             }
+            // A finished goroutine leaves its worker before the worker counts
+            // it finished, so a quiescent pool shows no placement held.
+            self.release_placement();
         }
         result
     }
@@ -2044,4 +2086,17 @@ mod tests {
         assert_eq!(sched.worker_count(), 4);
         let _ = sched.run();
     }
+}
+
+#[cfg(test)]
+#[test]
+#[cfg_attr(miri, ignore)]
+fn idle_shutdown_joins_workers_and_releases_thread_handles() {
+    let sched = MultiScheduler::new(2);
+    sched.start();
+    assert!(!sched.inner.threads.lock().is_empty());
+    assert!(sched.shutdown_and_join_idle());
+    assert_eq!(sched.inner.live_workers.load(Ordering::Acquire), 0);
+    assert!(sched.inner.threads.lock().is_empty());
+    assert!(sched.inner.workers.lock().is_empty());
 }

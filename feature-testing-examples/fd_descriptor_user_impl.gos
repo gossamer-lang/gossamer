@@ -1,0 +1,39 @@
+use std::{env, errors, fs, os}
+
+// A type that owns a file and lends its descriptor, the way a library
+// lends a socket a C library keeps open.
+struct Source {
+    file: fs::File
+}
+
+impl os::fd::Descriptor for Source {
+    fn raw_descriptor(&self) -> i64 {
+        self.file.fd().unwrap_or(-1)
+    }
+
+    fn keep_open(&self) -> Fn() -> () {
+        let file = self.file
+        || {
+            let _ = file
+        }
+    }
+}
+
+fn ready<D: os::fd::Descriptor>(source: D) -> Result<bool, errors::Error> {
+    os::fd::wait_readable(source, 0)
+}
+
+fn run() -> Result<(), errors::Error> {
+    let path = f"{env::temp_dir()}/gos-fd-descriptor-user-impl.txt"
+    fs::write(path, "ready".bytes())?
+    let source = Source { file: fs::File::open(path)? }
+    println(f"readable {ready(source)?}")
+    println(f"writable {os::fd::wait_writable(source, 0)?}")
+    fs::remove_file(path)
+}
+
+fn main() {
+    if let Err(e) = run() {
+        println(f"failed: {e}")
+    }
+}

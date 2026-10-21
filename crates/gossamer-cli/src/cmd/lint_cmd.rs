@@ -25,6 +25,8 @@ pub(crate) fn dispatch(
 
 fn run(path: &PathBuf, deny_warnings: bool, explain: Option<&str>, fix: bool) -> Result<()> {
     if let Some(id) = explain {
+        // A diagnostic prints the code, so `--explain` takes it as well as the name.
+        let id = gossamer_lint::lint_for_code(id).unwrap_or(id);
         match gossamer_lint::lint_explanation(id) {
             Some(text) => {
                 outln!("lint `{id}`\n\n{text}");

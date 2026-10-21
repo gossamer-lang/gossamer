@@ -54,7 +54,14 @@ fn install_level(file_label: &str) -> ComptimeIo {
 /// (the caller's real pass re-runs the gate and reports those errors).
 /// Returns `Err` when a comptime region is not compile-time-known or
 /// does not evaluate to a scalar or string.
-pub(crate) fn fold_comptime(augmented: String, file_label: &str) -> Result<String> {
+///
+/// `origins` names the file each `(start, end)` range of an assembled unit
+/// was written in, so a region in a bundled dependency reads relative to it.
+pub(crate) fn fold_comptime(
+    augmented: String,
+    file_label: &str,
+    origins: Vec<(u32, u32, String)>,
+) -> Result<String> {
     if !gossamer_lex::mentions_comptime(&augmented) {
         return Ok(augmented);
     }
@@ -68,7 +75,7 @@ pub(crate) fn fold_comptime(augmented: String, file_label: &str) -> Result<Strin
     // thread, unlike `run` / `test`, which already execute inside
     // `with_vm_stack`.
     let file_label = file_label.to_string();
-    crate::cmd::with_vm_stack(move || fold_comptime_on_vm(augmented, file_label))
+    crate::cmd::with_vm_stack(move || fold_comptime_on_vm(augmented, file_label, origins))
 }
 
 /// Evaluates the comptime regions of `augmented` on the current thread,
@@ -76,7 +83,11 @@ pub(crate) fn fold_comptime(augmented: String, file_label: &str) -> Result<Strin
 /// [`crate::cmd::with_vm_stack`] so the bytecode VM has a generous native
 /// stack regardless of which command (`build` / `check` / `run` / `test`)
 /// reached the fold.
-fn fold_comptime_on_vm(augmented: String, file_label: String) -> Result<String> {
+fn fold_comptime_on_vm(
+    augmented: String,
+    file_label: String,
+    origins: Vec<(u32, u32, String)>,
+) -> Result<String> {
     let mut map = gossamer_lex::SourceMap::new();
     let file_id = map.add_file(file_label.clone(), augmented);
     let outcome = gossamer_driver::check_frontend(map.source(file_id), file_id);
@@ -95,6 +106,13 @@ fn fold_comptime_on_vm(augmented: String, file_label: String) -> Result<String> 
     } = outcome.checked;
     let program = gossamer_hir::lower_source_file(&sf, &resolutions, &table, &mut tcx);
 
-    gossamer_interp::fold_into_source(&program, tcx, map.source(file_id), &file_label)
-        .map_err(|message| anyhow!(message))
+    gossamer_interp::fold_into_source_anchored(
+        &program,
+        tcx,
+        map.source(file_id),
+        &file_label,
+        &file_label,
+        origins,
+    )
+    .map_err(|message| anyhow!(message))
 }

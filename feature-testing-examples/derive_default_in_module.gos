@@ -1,0 +1,43 @@
+// `#[derive(Default)]` fills every field with its zero value, a newtype's
+// being its representation's converted in, and a tuple's being each
+// element's. The derived `default()` is reached by a bare `Type::default()`
+// written inside the module that declares the type as well as from outside
+// it, and a struct holding a tuple of newtypes renders like any other.
+
+newtype Id = i64
+newtype Tag = String
+
+mod style {
+    #[derive(Debug, Default)]
+    pub struct Style {
+        pub width: i64
+        pub name: String
+        pub tags: Vec<String>
+    }
+
+    pub fn make() -> Style {
+        let mut s = Style::default()
+        s.width = 3
+        s
+    }
+}
+
+#[derive(Debug, Default)]
+struct Shape {
+    id: Id
+    tag: Tag
+    pair: (Id, f64)
+    label: String
+}
+
+fn main() {
+    let a = style::make()
+    let b = style::Style::default()
+    println(f"{a.width} {b.width} {b.name.len()} {b.tags.len()}")
+    let mut c = Shape::default()
+    println(f"{c.id} [{c.tag}] {c.pair} {c.label.len()}")
+    c.id = 9.into()
+    c.pair = (4.into(), 2.5)
+    println(c)
+    println(f"{c:?}")
+}

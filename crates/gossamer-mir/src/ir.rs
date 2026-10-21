@@ -68,6 +68,16 @@ pub struct Body {
     pub blocks: Vec<BasicBlock>,
     /// Source span of the source-level function declaration.
     pub span: Span,
+    /// `(aggregate, operand)` for each operand of a struct literal that takes
+    /// the storage of a binding nothing writes, into a value only read: the
+    /// two share that storage, so the store needs no copy of its own.
+    pub shared_stores: Vec<(Local, usize)>,
+    /// Locals built only to hand a runtime comparison a value's words by
+    /// address. They own none of what those words name.
+    pub lent_slots: Vec<Local>,
+    /// Parameters a caller passes as the address of their storage rather
+    /// than by value; each backend loads them into the frame at entry.
+    pub address_params: Vec<Local>,
 }
 
 impl Body {
@@ -709,7 +719,8 @@ pub struct ForeignCall<'a> {
     pub ret: char,
     /// A struct result's layout spelling, inside `s(..)`.
     pub ret_layout: Option<&'a str>,
-    /// The library `#[link(name = ..)]` names, or `""`.
+    /// The libraries the `#[link(name = ..)]` attributes name, joined by `,`,
+    /// or `""`.
     pub library: &'a str,
 }
 
@@ -890,7 +901,8 @@ pub fn export_symbols(bodies: &[Body]) -> Vec<String> {
 pub struct ForeignStatic<'a> {
     /// The C symbol.
     pub symbol: &'a str,
-    /// The library `#[link(name = ..)]` names, or `""`.
+    /// The libraries the `#[link(name = ..)]` attributes name, joined by `,`,
+    /// or `""`.
     pub library: &'a str,
 }
 

@@ -894,3 +894,14 @@ fn sum_checked(xs: i64) -> Result<i64, String> {
         "expected Ok(6), got {ok:?}"
     );
 }
+
+#[test]
+fn matched_aggregate_payload_results_keep_independent_container_storage() {
+    let output = run_program(include_str!(
+        "../../../feature-testing-examples/heap_enum_container_payload_copy.gos"
+    ));
+    assert_eq!(
+        output,
+        "heap enum container copies: 20 visits, source unchanged\n"
+    );
+}

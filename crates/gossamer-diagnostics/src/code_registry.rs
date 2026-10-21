@@ -1264,13 +1264,12 @@ pub const REGISTRY: &[(&str, &str)] = &[
     ),
     (
         "GT0055",
-        "A by-value aggregate would cross a concurrency boundary whose compiled\n\
-                     publication ABI cannot preserve that layout and all nested child\n\
-                     ownership. Direct goroutine arguments therefore accept scalar and\n\
-                     supported top-level runtime containers, not inline structs, tuples,\n\
-                     or arrays. Channels also reject aggregates containing nested Vec\n\
-                     storage. Publish supported fields separately and reconstruct the\n\
-                     aggregate in the receiver.",
+        "A by-value aggregate holding nested Vec storage would cross a\n\
+                     concurrency boundary whose compiled publication ABI cannot preserve\n\
+                     all of its nested child ownership. A struct, tuple, or array of\n\
+                     scalars, strings, and runtime handles crosses as a snapshot; one\n\
+                     carrying a Vec does not. Publish the Vec separately and reconstruct\n\
+                     the aggregate in the receiver.",
     ),
     (
         "GT0056",

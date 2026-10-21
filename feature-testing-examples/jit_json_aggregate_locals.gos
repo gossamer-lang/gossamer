@@ -1,0 +1,42 @@
+// JSON values held in structs and maps inside compiled code: decoded, kept as
+// a field, rendered, and dropped on every iteration.
+use std::encoding::json
+
+struct Holder { raw: json::Value }
+struct Nested { node: Holder }
+enum Node { Empty, Payload(Holder), Next(Node) }
+fn decoded(text: String) -> Holder { json::decode::<Holder>(text).unwrap() }
+fn escaped() -> json::Value {
+    let holder = decoded("{\"raw\":{\"escaped\":true}}")
+    holder.raw
+}
+fn show(holder: Holder) -> String { json::render(holder.raw) }
+fn enum_text(node: Node) -> String {
+    match node { Node::Payload(holder) => show(holder), _ => "empty" }
+}
+fn main() {
+    for _ in 0..4 {
+        let raw = json::parse("{\"kept\":true}").unwrap()
+        let first = Holder { raw: raw }
+        let second = first
+        let mut changed = second
+        changed = decoded("{\"raw\":[1,2]}")
+        println("{} {} {}", json::render(raw), show(first), show(changed))
+        let nested = Nested { node: first }
+        let nested_copy = nested
+        println("nested {}", show(nested_copy.node))
+        let escaped = escaped()
+        println("escaped {}", json::render(escaped))
+        let holders = #[first, second]
+        let held = holders[0]
+        println("vec {} {}", show(held), show(holders[1]))
+        let mut table: Map<i64, Holder> = {}
+        table[1] = first
+        let mapped = table.get(1).unwrap()
+        println("map {} {}", show(mapped), show(table.get(1).unwrap()))
+        let repeated = [first; 2]
+        println("array {}", show(repeated[1]))
+        let node = Node::Payload(first)
+        println("enum {} {}", enum_text(node), enum_text(node))
+    }
+}

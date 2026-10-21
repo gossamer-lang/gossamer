@@ -2012,6 +2012,9 @@ mod codegen_partition_tests {
             locals: Vec::new(),
             blocks,
             span,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 

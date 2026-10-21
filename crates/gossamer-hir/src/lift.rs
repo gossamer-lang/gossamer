@@ -78,7 +78,9 @@ pub fn lift_closures(mut program: HirProgram, tcx: &mut gossamer_types::TyCtxt) 
         character: tcx.char_ty(),
         string: tcx.string_ty(),
     };
+    let tcx: &gossamer_types::TyCtxt = tcx;
     let mut lifter = Lifter {
+        tcx,
         next_id: 0,
         lifted: Vec::new(),
         scopes: Vec::new(),
@@ -327,7 +329,9 @@ fn is_synthetic_global<H: std::hash::BuildHasher>(
         || name.starts_with(gossamer_ast::STRUCTURAL_COMPARATOR_PREFIX)
 }
 
-struct Lifter {
+struct Lifter<'t> {
+    /// Answers the storage width of a capture's type.
+    tcx: &'t gossamer_types::TyCtxt,
     next_id: u32,
     lifted: Vec<HirItem>,
     ids: HirIdGenerator,
@@ -361,7 +365,7 @@ struct ScalarTys {
     string: gossamer_types::Ty,
 }
 
-impl Lifter {
+impl Lifter<'_> {
     /// Runs `body` with a fresh scope holding `params`' bindings.
     fn in_scope(&mut self, params: &[HirParam], body: impl FnOnce(&mut Self)) {
         let mut scope = HashSet::new();
@@ -762,9 +766,19 @@ impl Lifter {
         // via `gos_load(env, offset)`, binds it to a local of the
         // same name, then evaluates the original body.
         let mut stmts: Vec<HirStmt> = Vec::with_capacity(captures.len());
+        // Word 0 holds the body's address; each capture follows in as many
+        // words as its value takes, two for an `Option` / `Result` / inline
+        // enum.
+        let mut offset = 8;
         for (i, (cap, _)) in captures.iter().enumerate() {
-            let offset = (i as i64 + 1) * 8;
             let cap_ty = capture_types[i];
+            let this_offset = offset;
+            offset += if self.tcx.is_two_word_value(cap_ty) {
+                16
+            } else {
+                8
+            };
+            let offset = this_offset;
             let load_call = self.make_env_load(ENV_PARAM, offset, body.span, cap_ty);
             stmts.push(HirStmt {
                 id: self.ids.next(),

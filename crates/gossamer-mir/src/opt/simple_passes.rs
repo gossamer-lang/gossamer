@@ -552,6 +552,9 @@ pub fn copy_propagate(body: &mut Body, tcx: &TyCtxt) {
     let unsigned_words = unsigned_word_locals(body, tcx);
     for block in &mut body.blocks {
         let mut bindings: HashMap<Local, Operand> = HashMap::new();
+        // For each local, the locals a binding last recorded as a bare copy
+        // of it; an entry may since have been rebound, so each is checked.
+        let mut copies_of: HashMap<Local, Vec<Local>> = HashMap::new();
         for stmt in &mut block.stmts {
             if let StatementKind::StaticStore { value, .. } = &mut stmt.kind {
                 substitute_operand(value, &bindings);
@@ -571,9 +574,13 @@ pub fn copy_propagate(body: &mut Body, tcx: &TyCtxt) {
                 // a stale value (e.g. a null-init constant) would be
                 // propagated past the reassignment into later uses.
                 bindings.remove(&place.local);
-                bindings.retain(|_, v| {
-                    !matches!(v, Operand::Copy(p) if p.local == place.local && p.projection.is_empty())
-                });
+                for dest in copies_of.remove(&place.local).unwrap_or_default() {
+                    if matches!(bindings.get(&dest), Some(Operand::Copy(p))
+                        if p.local == place.local && p.projection.is_empty())
+                    {
+                        bindings.remove(&dest);
+                    }
+                }
                 // Record a fresh copy/const binding only for `Use` of a
                 // simple, non-aggregate operand.
                 if let Rvalue::Use(operand) = rvalue {
@@ -586,6 +593,11 @@ pub fn copy_propagate(body: &mut Body, tcx: &TyCtxt) {
                         Operand::Copy(p) => p.is_simple(),
                     };
                     if !dest_aggregate && operand_is_simple {
+                        if let Operand::Copy(p) = operand
+                            && p.projection.is_empty()
+                        {
+                            copies_of.entry(p.local).or_default().push(place.local);
+                        }
                         bindings.insert(place.local, operand.clone());
                     }
                 }
@@ -704,6 +716,8 @@ fn reads_arg_as_slot(name: &str) -> bool {
     matches!(
         name,
         "gos_rt_map_field_clone"
+        | "gos_rt_json_field_clone"
+        | "gos_rt_json_field_release"
             | "gos_rt_map_field_release"
             | "gos_rt_option_slot_retain"
             | "gos_rt_option_slot_retain_ok"

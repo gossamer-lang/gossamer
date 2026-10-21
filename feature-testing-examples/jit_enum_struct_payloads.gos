@@ -1,0 +1,110 @@
+// Enum variants that carry a struct wider than a slot, or a `Vec` of
+// structs, cross between interpreted and compiled code in both directions:
+// as arguments, as answers, and inside other enums.
+struct Affine {
+    a: f64
+    b: f64
+    c: f64
+    d: f64
+    e: f64
+    f: f64
+}
+
+struct Stop {
+    offset: f64
+    value: f64
+}
+
+enum Shader {
+    Flat(f64)
+    Linear(Affine, Vec<Stop>)
+    Grid { cells: Vec<Stop>, count: i64 }
+}
+
+fn shade(s: Shader, x: f64, y: f64) -> f64 {
+    match s {
+        Shader::Flat(v) => v
+        Shader::Linear(m, stops) => {
+            let t = (m.a * x + m.c * y + m.e).max(0.0).min(1.0)
+            stops[0].value + (stops[1].value - stops[0].value) * t
+        }
+        Shader::Grid { cells, count } => cells[count % cells.len()].value + x * 0.0
+    }
+}
+
+fn render(s: Shader, n: i64) -> f64 {
+    let mut total = 0.0
+    for y in 0..n {
+        for x in 0..n { total += shade(s, x as f64, y as f64) }
+    }
+    total
+}
+
+enum Label {
+    Plain(String)
+    Many(Vec<String>)
+    Maybe(Option<String>)
+}
+
+fn many(n: i64) -> Label {
+    let mut words = #[]
+    for i in 0..n { words.push(f"w{i}") }
+    Label::Many(words)
+}
+
+fn maybe(n: i64) -> Label {
+    let mut text = ""
+    for i in 0..n { text += f"{i}" }
+    Label::Maybe(if n % 2 == 0 { Some(text) } else { None })
+}
+
+fn words(l: Label) -> i64 {
+    match l {
+        Label::Plain(_) => 1
+        Label::Many(ws) => ws.len()
+        Label::Maybe(m) => if m.is_some() { 1 } else { 0 }
+    }
+}
+
+// Built in compiled code and read back by the interpreter.
+fn ramp(scale: f64, steps: i64) -> Shader {
+    let mut stops = #[]
+    for i in 0..steps { stops.push(Stop { offset: i as f64, value: i as f64 * scale }) }
+    Shader::Linear(Affine { a: scale, b: 0.0, c: 0.0, d: 1.0, e: 0.5, f: 0.0 }, stops)
+}
+
+fn grid(n: i64) -> Shader {
+    let mut cells = #[]
+    for i in 0..n { cells.push(Stop { offset: 0.0, value: i as f64 }) }
+    Shader::Grid { cells: cells, count: n + 1 }
+}
+
+fn describe(s: Shader) -> String {
+    match s {
+        Shader::Flat(v) => f"flat {v}"
+        Shader::Linear(m, stops) => f"linear a={m.a} e={m.e} stops={stops.len()} last={stops[stops.len() - 1].value}"
+        Shader::Grid { cells, count } => f"grid {cells.len()} {count}"
+    }
+}
+
+fn main() {
+    let s = Shader::Linear(Affine { a: 0.001, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 }, #[Stop { offset: 0.0, value: 1.0 }, Stop { offset: 1.0, value: 3.0 }])
+    println(f"{render(s, 200):.1}")
+    println(f"{render(Shader::Flat(2.0), 10):.1}")
+    let r = ramp(0.5, 4)
+    println(describe(r))
+    println(f"{render(r, 20):.2}")
+    let g = grid(3)
+    println(describe(g))
+    println(f"{render(g, 5):.1}")
+    let mut all = #[]
+    for i in 1..4 { all.push(ramp(i as f64, i + 1)) }
+    let mut sum = 0.0
+    for sh in all { sum += render(sh, 4) }
+    println(f"{sum:.2}")
+    let mut count = 0
+    for i in 0..6 {
+        count += words(many(i)) + words(maybe(i)) + words(Label::Plain("p"))
+    }
+    println(f"labels: {count}")
+}

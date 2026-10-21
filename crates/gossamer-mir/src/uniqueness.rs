@@ -394,14 +394,14 @@ impl UniquenessFacts<'_> {
             return Uniqueness::Shared;
         }
         let state = self.state_before(point);
-        if state.base[li] == Base::Shared {
+        if state.base_of(local) == Base::Shared {
             return Uniqueness::Shared;
         }
-        let live = self.liveness.live_before(self.body, point);
-        let borrowed = state
-            .borrowers
-            .get(&local.0)
-            .is_some_and(|refs| refs.iter().any(|r| live.contains(Local(*r))));
+        let bi = point.block.0 as usize;
+        let borrowed = state.borrowers.get(&local.0).is_some_and(|refs| {
+            refs.iter()
+                .any(|r| self.liveness.live_before(bi, point.stmt, Local(*r)))
+        });
         if borrowed {
             Uniqueness::Borrowed
         } else {
@@ -414,7 +414,8 @@ impl UniquenessFacts<'_> {
     /// ends, not an observer of its object.
     #[must_use]
     pub fn live_after(&self, point: Point, local: Local) -> bool {
-        self.liveness.live_after(self.body, point).contains(local)
+        self.liveness
+            .live_after(point.block.0 as usize, point.stmt, local)
     }
 
     /// Whether `local` is read on entry to `block`.
@@ -444,14 +445,13 @@ impl UniquenessFacts<'_> {
         let bi = point.block.0 as usize;
         let block = &self.body.blocks[bi];
         let mut state = self.entry[bi].clone();
-        let live_after = self.liveness.live_after_each(self.body, bi);
         let transfer = Transfer {
             body: self.body,
             tcx: self.tcx,
             summaries: self.summaries,
         };
         for (si, stmt) in block.stmts.iter().enumerate().take(point.stmt) {
-            transfer.statement(&mut state, stmt, &live_after[si]);
+            transfer.statement(&mut state, stmt, &self.liveness.after(bi, si));
         }
         state
     }
@@ -471,10 +471,14 @@ pub fn analyze<'b>(
     let goroutine_shared = (0..n_locals)
         .map(|i| share.is_goroutine_shared(Local(u32::try_from(i).unwrap_or(u32::MAX))))
         .collect();
-    let mut start = State::new(n_locals);
+    let slots = Slots::of(body, tcx);
+    let mut start = State::new(&slots);
     for param in 1..=body.arity as usize {
         if param < n_locals {
-            start.base[param] = Base::Shared;
+            start.set(
+                Local(u32::try_from(param).unwrap_or(u32::MAX)),
+                Base::Shared,
+            );
         }
     }
     let mut entry: Vec<Option<State>> = vec![None; n_blocks];
@@ -486,37 +490,41 @@ pub fn analyze<'b>(
         tcx,
         summaries,
     };
-    let mut work: Vec<usize> = vec![0];
-    let mut queued = vec![false; n_blocks];
-    if n_blocks > 0 {
-        queued[0] = true;
+    // Blocks are taken in reverse postorder, so a block's predecessors along
+    // forward edges are settled first and only loops revisit.
+    let order = reverse_postorder(body);
+    let mut rank = vec![usize::MAX; n_blocks];
+    for (at, &bi) in order.iter().enumerate() {
+        rank[bi] = at;
     }
-    while let Some(bi) = work.pop() {
-        queued[bi] = false;
+    let mut work: BTreeSet<(usize, usize)> = BTreeSet::new();
+    if n_blocks > 0 {
+        work.insert((rank[0], 0));
+    }
+    while let Some((_, bi)) = work.pop_first() {
         let Some(mut state) = entry[bi].clone() else {
             continue;
         };
         let block = &body.blocks[bi];
-        let live_after = liveness.live_after_each(body, bi);
         for (si, stmt) in block.stmts.iter().enumerate() {
-            transfer.statement(&mut state, stmt, &live_after[si]);
+            transfer.statement(&mut state, stmt, &liveness.after(bi, si));
         }
-        let out = transfer.terminator(state, block, &live_after[block.stmts.len()]);
-        for (succ, succ_state) in out {
+        let (out, succs) =
+            transfer.terminator(state, block, &liveness.after(bi, block.stmts.len()));
+        for succ in succs {
             let si = succ.0 as usize;
             if si >= n_blocks {
                 continue;
             }
             let changed = match &mut entry[si] {
-                Some(existing) => existing.join(&succ_state),
+                Some(existing) => existing.join(&out),
                 slot @ None => {
-                    *slot = Some(succ_state);
+                    *slot = Some(out.clone());
                     true
                 }
             };
-            if changed && !queued[si] {
-                queued[si] = true;
-                work.push(si);
+            if changed {
+                work.insert((rank[si], si));
             }
         }
     }
@@ -526,7 +534,7 @@ pub fn analyze<'b>(
         summaries,
         entry: entry
             .into_iter()
-            .map(|state| state.unwrap_or_else(|| State::new(n_locals)))
+            .map(|state| state.unwrap_or_else(|| State::new(&slots)))
             .collect(),
         liveness,
         goroutine_shared,
@@ -542,17 +550,56 @@ enum Base {
     Shared,
 }
 
+/// Each tracked local's index in a [`State`]: a local whose type holds no
+/// handle has none, since nothing this analysis answers reads its state.
+#[derive(Debug, PartialEq, Eq)]
+struct Slots(Vec<u32>);
+
+impl Slots {
+    const NONE: u32 = u32::MAX;
+
+    fn of(body: &Body, tcx: &TyCtxt) -> std::rc::Rc<Self> {
+        let mut next = 0u32;
+        let slots = body
+            .locals
+            .iter()
+            .map(|decl| {
+                if tracks(tcx, decl.ty) {
+                    next += 1;
+                    next - 1
+                } else {
+                    Self::NONE
+                }
+            })
+            .collect();
+        std::rc::Rc::new(Self(slots))
+    }
+
+    fn len(&self) -> usize {
+        self.0.iter().filter(|&&slot| slot != Self::NONE).count()
+    }
+
+    fn of_local(&self, local: Local) -> Option<usize> {
+        match self.0.get(local.0 as usize) {
+            Some(&slot) if slot != Self::NONE => Some(slot as usize),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct State {
+    slots: std::rc::Rc<Slots>,
     base: Vec<Base>,
     /// For each local a reference has been taken to, the reference locals.
     borrowers: BTreeMap<u32, BTreeSet<u32>>,
 }
 
 impl State {
-    fn new(n_locals: usize) -> Self {
+    fn new(slots: &std::rc::Rc<Slots>) -> Self {
         Self {
-            base: vec![Base::Uninit; n_locals],
+            slots: std::rc::Rc::clone(slots),
+            base: vec![Base::Uninit; slots.len()],
             borrowers: BTreeMap::new(),
         }
     }
@@ -575,20 +622,28 @@ impl State {
     }
 
     fn base_of(&self, local: Local) -> Base {
-        self.base
-            .get(local.0 as usize)
+        self.slots
+            .of_local(local)
+            .and_then(|slot| self.base.get(slot))
             .copied()
             .unwrap_or(Base::Shared)
     }
 
     fn set(&mut self, local: Local, base: Base) {
-        if let Some(slot) = self.base.get_mut(local.0 as usize) {
+        if let Some(slot) = self
+            .slots
+            .of_local(local)
+            .and_then(|slot| self.base.get_mut(slot))
+        {
             *slot = base;
         }
     }
 
     fn widen(&mut self, local: Local, base: Base) {
-        if let Some(slot) = self.base.get_mut(local.0 as usize)
+        if let Some(slot) = self
+            .slots
+            .of_local(local)
+            .and_then(|slot| self.base.get_mut(slot))
             && base > *slot
         {
             *slot = base;
@@ -650,7 +705,7 @@ impl Transfer<'_> {
     /// The state an operand hands to whatever it is written into, applying
     /// what handing it on does to its source: a live source now shares its
     /// object, and a dead one moves it.
-    fn hand_on(&self, state: &mut State, op: &Operand, live_after: &LocalSet) -> Base {
+    fn hand_on(&self, state: &mut State, op: &Operand, live_after: &LiveAfter<'_>) -> Base {
         match op {
             Operand::Const(ConstValue::Str(_)) => Base::Shared,
             Operand::Const(_) | Operand::FnRef { .. } => Base::Unique,
@@ -706,7 +761,7 @@ impl Transfer<'_> {
         state.widen(root, incoming);
     }
 
-    fn statement(&self, state: &mut State, stmt: &Statement, live_after: &LocalSet) {
+    fn statement(&self, state: &mut State, stmt: &Statement, live_after: &LiveAfter<'_>) {
         match &stmt.kind {
             StatementKind::Assign { place, rvalue } => {
                 if place.projection.is_empty() && self.is_reference(place.local) {
@@ -746,7 +801,7 @@ impl Transfer<'_> {
         state: &mut State,
         dest: &Place,
         rvalue: &Rvalue,
-        live_after: &LocalSet,
+        live_after: &LiveAfter<'_>,
     ) -> Base {
         match rvalue {
             Rvalue::Use(op) | Rvalue::Cast { operand: op, .. } => {
@@ -837,7 +892,7 @@ impl Transfer<'_> {
         state: &mut State,
         args: &[Operand],
         kept_no_handle: impl Fn(usize) -> bool,
-        live_after: &LocalSet,
+        live_after: &LiveAfter<'_>,
     ) {
         let mut stored = Base::Unique;
         let mut receivers: Vec<Local> = Vec::new();
@@ -864,13 +919,14 @@ impl Transfer<'_> {
         }
     }
 
-    /// The successor states `block`'s terminator produces from `state`.
+    /// The state `block`'s terminator hands every successor, and those
+    /// successors.
     fn terminator(
         &self,
         mut state: State,
         block: &BasicBlock,
-        live_after: &LocalSet,
-    ) -> Vec<(BlockId, State)> {
+        live_after: &LiveAfter<'_>,
+    ) -> (State, Vec<BlockId>) {
         match &block.terminator {
             Terminator::Call {
                 callee,
@@ -935,14 +991,45 @@ impl Transfer<'_> {
                     }
                 }
                 self.write(&mut state, destination, answer);
-                target.map(|t| vec![(t, state)]).unwrap_or_default()
+                (state, target.iter().copied().collect())
             }
-            other => successors(other)
-                .into_iter()
-                .map(|b| (b, state.clone()))
-                .collect(),
+            other => (state, successors(other)),
         }
     }
+}
+
+/// The blocks reachable from the entry, in reverse postorder.
+fn reverse_postorder(body: &Body) -> Vec<usize> {
+    let n = body.blocks.len();
+    let succs: Vec<Vec<BlockId>> = body
+        .blocks
+        .iter()
+        .map(|block| successors(&block.terminator))
+        .collect();
+    let mut seen = vec![false; n];
+    let mut post = Vec::with_capacity(n);
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    if n > 0 {
+        seen[0] = true;
+        stack.push((0, 0));
+    }
+    while let Some(&(bi, next)) = stack.last() {
+        if let Some(succ) = succs[bi].get(next) {
+            if let Some(top) = stack.last_mut() {
+                top.1 += 1;
+            }
+            let si = succ.0 as usize;
+            if si < n && !seen[si] {
+                seen[si] = true;
+                stack.push((si, 0));
+            }
+        } else {
+            post.push(bi);
+            stack.pop();
+        }
+    }
+    post.reverse();
+    post
 }
 
 fn successors(terminator: &Terminator) -> Vec<BlockId> {
@@ -1038,6 +1125,7 @@ pub(crate) fn is_release_intrinsic(name: &str) -> bool {
         name,
         "gos_rt_rc_release"
             | "gos_rt_vec_free"
+            | "gos_rt_vec_free_unless_returned"
             | "gos_rt_str_free"
             | "gos_rt_str_free_typed"
             | "gos_rt_map_free"
@@ -1046,6 +1134,7 @@ pub(crate) fn is_release_intrinsic(name: &str) -> bool {
             | "gos_rt_map_field_release"
             | "gos_rt_aggr_release_children"
             | "gos_rt_option_slot_release"
+            | "gos_rt_option_slot_release_ok"
             | "gos_rt_result_payload_release"
             | "gos_rt_result_ok_payload_release"
     )
@@ -1179,6 +1268,7 @@ pub(crate) fn runtime_arg_kept_no_handle(name: &str, index: usize) -> bool {
             | "gos_rt_vec_mark_weak_elems"
             | "gos_rt_vec_set_elem_meta"
             | "gos_rt_vec_set_slot_children"
+            | "gos_rt_vec_share_elements"
             | "gos_rt_vec_len"
             | "gos_rt_len"
             | "gos_rt_len_is_zero"
@@ -1274,6 +1364,12 @@ impl LocalSet {
         }
     }
 
+    fn subtract(&mut self, other: &Self) {
+        for (word, gone) in self.0.iter_mut().zip(&other.0) {
+            *word &= !gone;
+        }
+    }
+
     fn union(&mut self, other: &Self) -> bool {
         let mut changed = false;
         for (mine, theirs) in self.0.iter_mut().zip(&other.0) {
@@ -1287,13 +1383,50 @@ impl LocalSet {
 
 /// Which locals are read later, counting a local's own releases as no read.
 struct Liveness {
-    n_locals: usize,
     live_in: Vec<LocalSet>,
     live_out: Vec<LocalSet>,
-    /// Locals whose storage is the value itself - a tuple, an array, or a
-    /// struct or enum that is not reference counted - so writing one of
-    /// their fields reads nothing.
-    inline: LocalSet,
+    /// Per block, each local the block mentions with the positions that
+    /// decide its liveness, in order: `(position, read)`, where `read` says
+    /// the statement (or, at the statement count, the terminator) reads the
+    /// local and otherwise gives it a whole new value.
+    events: Vec<HashMap<u32, Vec<(u32, bool)>>>,
+}
+
+/// Whether locals are live just after one statement of a block.
+struct LiveAfter<'a> {
+    liveness: &'a Liveness,
+    block: usize,
+    stmt: usize,
+}
+
+impl LiveAfter<'_> {
+    fn contains(&self, local: Local) -> bool {
+        self.liveness.live_after(self.block, self.stmt, local)
+    }
+}
+
+/// What a statement does to liveness, read backward: the locals it gives a
+/// whole new value, then the locals it reads.
+#[derive(Default)]
+struct LiveEffect {
+    kills: Vec<Local>,
+    gens: Vec<Local>,
+}
+
+/// Where a liveness transfer writes its effect.
+trait LiveSink {
+    fn gen_local(&mut self, local: Local);
+    fn kill_local(&mut self, local: Local);
+}
+
+impl LiveSink for LiveEffect {
+    fn gen_local(&mut self, local: Local) {
+        self.gens.push(local);
+    }
+
+    fn kill_local(&mut self, local: Local) {
+        self.kills.push(local);
+    }
 }
 
 impl Liveness {
@@ -1310,6 +1443,50 @@ impl Liveness {
             }
         }
         let n_blocks = body.blocks.len();
+        // Each block's effect, read backward, is `gen ∪ (live - kill)`; the
+        // fixpoint below applies it whole instead of statement by statement.
+        let mut gens = vec![LocalSet::new(n_locals); n_blocks];
+        let mut kills = vec![LocalSet::new(n_locals); n_blocks];
+        let mut events: Vec<HashMap<u32, Vec<(u32, bool)>>> = Vec::with_capacity(n_blocks);
+        for (bi, block) in body.blocks.iter().enumerate() {
+            let mut effects: Vec<LiveEffect> = block
+                .stmts
+                .iter()
+                .map(|stmt| {
+                    let mut effect = LiveEffect::default();
+                    statement_liveness(stmt, &inline, &mut effect);
+                    effect
+                })
+                .collect();
+            let mut last = LiveEffect::default();
+            terminator_liveness(&block.terminator, &mut last);
+            effects.push(last);
+            let mut block_events: HashMap<u32, Vec<(u32, bool)>> = HashMap::new();
+            for (at, effect) in effects.iter().enumerate() {
+                let at = u32::try_from(at).unwrap_or(u32::MAX);
+                for local in &effect.kills {
+                    if !effect.gens.contains(local) {
+                        block_events.entry(local.0).or_default().push((at, false));
+                    }
+                }
+                for local in &effect.gens {
+                    let positions = block_events.entry(local.0).or_default();
+                    if positions.last() != Some(&(at, true)) {
+                        positions.push((at, true));
+                    }
+                }
+            }
+            for effect in effects.iter().rev() {
+                for local in &effect.kills {
+                    gens[bi].remove(*local);
+                    kills[bi].insert(*local);
+                }
+                for local in &effect.gens {
+                    gens[bi].insert(*local);
+                }
+            }
+            events.push(block_events);
+        }
         let mut live_in = vec![LocalSet::new(n_locals); n_blocks];
         let mut live_out = vec![LocalSet::new(n_locals); n_blocks];
         let preds = predecessors(body);
@@ -1324,11 +1501,8 @@ impl Liveness {
                 }
             }
             let mut live = out.clone();
-            let block = &body.blocks[bi];
-            terminator_liveness(&block.terminator, &mut live);
-            for stmt in block.stmts.iter().rev() {
-                statement_liveness(stmt, &inline, &mut live);
-            }
+            live.subtract(&kills[bi]);
+            live.union(&gens[bi]);
             live_out[bi] = out;
             if live != live_in[bi] {
                 live_in[bi] = live;
@@ -1341,44 +1515,43 @@ impl Liveness {
             }
         }
         Self {
-            n_locals,
             live_in,
             live_out,
-            inline,
+            events,
         }
     }
 
-    /// For each statement index of block `bi` (and the terminator, at the
-    /// statement count), the locals live just after it.
-    fn live_after_each(&self, body: &Body, bi: usize) -> Vec<LocalSet> {
-        let block = &body.blocks[bi];
-        let mut out = vec![LocalSet::new(self.n_locals); block.stmts.len() + 1];
-        let mut live = self.live_out[bi].clone();
-        out[block.stmts.len()] = live.clone();
-        terminator_liveness(&block.terminator, &mut live);
-        for (si, stmt) in block.stmts.iter().enumerate().rev() {
-            out[si] = live.clone();
-            statement_liveness(stmt, &self.inline, &mut live);
+    /// The liveness just after statement `stmt` of block `block` (the
+    /// terminator at the statement count).
+    fn after(&self, block: usize, stmt: usize) -> LiveAfter<'_> {
+        LiveAfter {
+            liveness: self,
+            block,
+            stmt,
         }
-        out
     }
 
-    fn live_after(&self, body: &Body, point: Point) -> LocalSet {
-        self.live_after_each(body, point.block.0 as usize)
-            .swap_remove(point.stmt)
+    /// The first position at or past `from` that decides `local`, or the
+    /// block's exit.
+    fn decided_from(&self, block: usize, from: usize, local: Local) -> bool {
+        let from = u32::try_from(from).unwrap_or(u32::MAX);
+        if let Some(list) = self.events.get(block).and_then(|e| e.get(&local.0)) {
+            let at = list.partition_point(|&(position, _)| position < from);
+            if let Some(&(_, read)) = list.get(at) {
+                return read;
+            }
+        }
+        self.live_out
+            .get(block)
+            .is_some_and(|set| set.contains(local))
     }
 
-    fn live_before(&self, body: &Body, point: Point) -> LocalSet {
-        let bi = point.block.0 as usize;
-        let block = &body.blocks[bi];
-        if point.stmt >= block.stmts.len() {
-            let mut live = self.live_out[bi].clone();
-            terminator_liveness(&block.terminator, &mut live);
-            return live;
-        }
-        let mut live = self.live_after(body, point);
-        statement_liveness(&block.stmts[point.stmt], &self.inline, &mut live);
-        live
+    fn live_after(&self, block: usize, stmt: usize, local: Local) -> bool {
+        self.decided_from(block, stmt.saturating_add(1), local)
+    }
+
+    fn live_before(&self, block: usize, stmt: usize, local: Local) -> bool {
+        self.decided_from(block, stmt, local)
     }
 }
 
@@ -1394,16 +1567,16 @@ fn predecessors(body: &Body) -> Vec<Vec<usize>> {
     preds
 }
 
-fn gen_place(place: &Place, live: &mut LocalSet) {
-    live.insert(place.local);
+fn gen_place(place: &Place, live: &mut impl LiveSink) {
+    live.gen_local(place.local);
     for step in &place.projection {
         if let Projection::Index(i) = step {
-            live.insert(*i);
+            live.gen_local(*i);
         }
     }
 }
 
-fn gen_operand(op: &Operand, live: &mut LocalSet) {
+fn gen_operand(op: &Operand, live: &mut impl LiveSink) {
     if let Operand::Copy(place) = op {
         gen_place(place, live);
     }
@@ -1417,6 +1590,21 @@ fn count_adjusted_local(rvalue: &Rvalue) -> Option<Local> {
     };
     if !is_share_neutral_intrinsic(name) {
         return None;
+    }
+    // `gos_rt_vec_free_unless_returned` releases its first argument's share
+    // when it is not the frame's returned value; the second only names the
+    // value the frame keeps.
+    if *name == "gos_rt_vec_free_unless_returned" {
+        return match args.first() {
+            Some(Operand::Copy(p))
+                if p.projection
+                    .iter()
+                    .all(|s| matches!(s, Projection::Field(_))) =>
+            {
+                Some(p.local)
+            }
+            _ => None,
+        };
     }
     let mut root = None;
     for op in args {
@@ -1441,11 +1629,11 @@ fn count_adjusted_local(rvalue: &Rvalue) -> Option<Local> {
     root
 }
 
-fn statement_liveness(stmt: &Statement, inline: &LocalSet, live: &mut LocalSet) {
+fn statement_liveness(stmt: &Statement, inline: &LocalSet, live: &mut impl LiveSink) {
     match &stmt.kind {
         StatementKind::Assign { place, rvalue } => {
             if place.projection.is_empty() {
-                live.remove(place.local);
+                live.kill_local(place.local);
             } else if !(inline.contains(place.local)
                 && place
                     .projection
@@ -1484,7 +1672,7 @@ fn statement_liveness(stmt: &Statement, inline: &LocalSet, live: &mut LocalSet) 
     }
 }
 
-fn rvalue_liveness(rvalue: &Rvalue, live: &mut LocalSet) {
+fn rvalue_liveness(rvalue: &Rvalue, live: &mut impl LiveSink) {
     match rvalue {
         Rvalue::Use(op)
         | Rvalue::Cast { operand: op, .. }
@@ -1506,7 +1694,7 @@ fn rvalue_liveness(rvalue: &Rvalue, live: &mut LocalSet) {
     }
 }
 
-fn terminator_liveness(terminator: &Terminator, live: &mut LocalSet) {
+fn terminator_liveness(terminator: &Terminator, live: &mut impl LiveSink) {
     match terminator {
         Terminator::Call {
             callee,
@@ -1515,7 +1703,7 @@ fn terminator_liveness(terminator: &Terminator, live: &mut LocalSet) {
             ..
         } => {
             if destination.projection.is_empty() {
-                live.remove(destination.local);
+                live.kill_local(destination.local);
             } else {
                 gen_place(destination, live);
             }
@@ -1527,7 +1715,7 @@ fn terminator_liveness(terminator: &Terminator, live: &mut LocalSet) {
         Terminator::SwitchInt { discriminant, .. } => gen_operand(discriminant, live),
         Terminator::Assert { cond, .. } => gen_operand(cond, live),
         Terminator::Drop { place, .. } => gen_place(place, live),
-        Terminator::Return => live.insert(Local::RETURN),
+        Terminator::Return => live.gen_local(Local::RETURN),
         _ => {}
     }
 }

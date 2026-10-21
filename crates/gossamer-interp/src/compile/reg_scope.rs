@@ -82,6 +82,26 @@ impl<'tcx> FnBuilder<'tcx> {
         }
     }
 
+    /// `reg`, the value the innermost scope answers, in a register that
+    /// stays valid once the scope closes. A binding whose capture cell the
+    /// scope installed holds its value in the cell, and after the scope
+    /// closes nothing loads the binding's home register from it again.
+    pub(crate) fn detach_scope_result(&mut self, reg: Reg) -> Reg {
+        let mark = self
+            .scopes
+            .last()
+            .map_or(0, |scope| scope.capture_cell_mark);
+        if !self.capture_cells[mark..]
+            .iter()
+            .any(|(home, _)| *home == reg)
+        {
+            return reg;
+        }
+        let out = self.alloc_reg();
+        self.emit(Op::Move { dst: out, src: reg });
+        out
+    }
+
     /// Register holding the capture cell that backs a local binding.
     /// Typed locals live in their own register files, where a matching
     /// number names a different slot, so only a `Value` binding can be
@@ -238,6 +258,16 @@ impl<'tcx> FnBuilder<'tcx> {
             }
         }
         None
+    }
+
+    /// The local a path names: only a single-segment path can name one. A
+    /// module-anchored path (`text::layout::COUNT`) starts with a module,
+    /// whatever local shares that module's name.
+    pub(crate) fn path_local(&self, segments: &[gossamer_ast::Ident]) -> Option<TypedReg> {
+        match segments {
+            [only] => self.lookup_local(&only.name),
+            _ => None,
+        }
     }
 
     /// Whether `reg` is the home of a binding that is still in scope.

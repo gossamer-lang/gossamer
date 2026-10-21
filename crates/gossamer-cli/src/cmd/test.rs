@@ -1018,7 +1018,7 @@ fn validate_test_file(file: &Path) -> Result<()> {
     // references stay valid and a real static error is surfaced with its
     // "refusing to execute" trailer rather than swallowed.
     let unit = crate::paths::read_entry_unit(file)?;
-    let prepared = crate::unit_cache::prepare(&unit.source, &file.to_string_lossy());
+    let prepared = crate::unit_cache::prepare(&unit.source, &file.to_string_lossy(), &unit.origins);
     // A comptime region that will not evaluate is a static failure, and the
     // constant it should have produced is what the tests run against.
     // Falling back to the unfolded source runs them against a program the
@@ -1111,7 +1111,7 @@ fn run_tests_filtered_inner(
     // than skipped: `--parallel` reaches this without the static validator,
     // and a suite that answers green because its bodies never ran is the
     // one outcome a test command must never produce.
-    let prepared = crate::unit_cache::prepare(&unit.source, &file.to_string_lossy());
+    let prepared = crate::unit_cache::prepare(&unit.source, &file.to_string_lossy(), &unit.origins);
     if let Some(error) = prepared.fold_error {
         return vec![TestRecord {
             file: file.display().to_string(),

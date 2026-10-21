@@ -195,7 +195,10 @@ impl Vm {
                 // than recursively entering `apply -> run`. The destination
                 // register belongs to the suspended frame; the child result
                 // is written just before that frame resumes.
-                let mut suspended: Vec<(u16, crate::vm::run::SuspendedFrame, usize)> = Vec::new();
+                // Each suspended caller keeps the trace frames its own tail
+                // calls pushed, which leave the trace when it returns.
+                let mut suspended: Vec<(u16, crate::vm::run::SuspendedFrame, usize, usize)> =
+                    Vec::new();
                 let mut resumed: Option<crate::vm::run::SuspendedFrame> = None;
                 // A fault the resumed frame raises at the call it is suspended
                 // at, so its landing pad runs before the fault leaves it.
@@ -334,7 +337,8 @@ impl Vm {
                                 if jit_call::jit_trace() {
                                     eprintln!("jit: native hit {}", prepared.jit.name);
                                 }
-                                if let Some((dst, mut parent, bytes)) = suspended.pop() {
+                                if let Some((dst, mut parent, bytes, parent_tail)) = suspended.pop()
+                                {
                                     self.release_heap_frame(bytes);
                                     // A nested native body completes exactly
                                     // like `RunControl::Return`: publish its
@@ -347,7 +351,7 @@ impl Vm {
                                         stack.pop();
                                     }
                                     drop(stack);
-                                    tail_frames = 0;
+                                    tail_frames = parent_tail;
                                     parent.registers[dst as usize] = value;
                                     chunk = Arc::clone(&parent.chunk);
                                     resumed = Some(parent);
@@ -409,7 +413,7 @@ impl Vm {
                             // A suspended caller with deferred expressions
                             // pending at its call runs them before the fault
                             // reaches the callers above it.
-                            if let Some(at) = suspended.iter().rposition(|(_, parent, _)| {
+                            if let Some(at) = suspended.iter().rposition(|(_, parent, _, _)| {
                                 err.unwinds_defers()
                                     && parent
                                         .chunk
@@ -424,12 +428,12 @@ impl Vm {
                                     .set(self.call_depth.get().saturating_sub(left));
                                 let mut leaving = suspended.split_off(at);
                                 self.release_heap_frame(leaving.iter().map(|s| s.2).sum());
-                                let (_, parent, _) = leaving.remove(0);
+                                let (_, parent, _, parent_tail) = leaving.remove(0);
                                 chunk = Arc::clone(&parent.chunk);
                                 resumed = Some(parent);
                                 resumed_fault = Some(err);
                                 args = Vec::new();
-                                tail_frames = 0;
+                                tail_frames = parent_tail;
                                 continue;
                             }
                             // The explicit parents will not get individual
@@ -447,7 +451,7 @@ impl Vm {
                     };
                     match control {
                         crate::vm::run::RunControl::Return(value) => {
-                            if let Some((dst, mut parent, bytes)) = suspended.pop() {
+                            if let Some((dst, mut parent, bytes, parent_tail)) = suspended.pop() {
                                 self.release_heap_frame(bytes);
                                 // The child completed successfully. Its
                                 // logical frame (and any tail frames it grew)
@@ -458,7 +462,7 @@ impl Vm {
                                     stack.pop();
                                 }
                                 drop(stack);
-                                tail_frames = 0;
+                                tail_frames = parent_tail;
                                 parent.registers[dst as usize] = value;
                                 chunk = Arc::clone(&parent.chunk);
                                 resumed = Some(parent);
@@ -542,7 +546,7 @@ impl Vm {
                             self.call_stack
                                 .borrow_mut()
                                 .push(VmCallStackFrame::new(next_chunk.name));
-                            suspended.push((dst, parent, bytes));
+                            suspended.push((dst, parent, bytes, tail_frames));
                             chunk = next_chunk;
                             args = call_args;
                             tail_frames = 0;
@@ -576,7 +580,7 @@ impl Vm {
             // A `static mut` holding a callable value - load the current
             // value and dispatch it as a plain value.
             Global::MutStatic(cell) => {
-                let value = cell.lock().clone();
+                let value = cell.get();
                 self.apply(Global::Value(value), args)
             }
         }
@@ -596,7 +600,7 @@ impl Vm {
     /// not block. Programs that mix `gos` invocations within one
     /// process would see stale per-worker state here; the bench-game
     /// shape (one program per process) does not.
-    fn spawn_on_pool<F>(&self, origin: GoroutineOrigin, task: F)
+    fn spawn_on_pool<F>(&self, origin: GoroutineOrigin, handle: usize, task: F)
     where
         F: FnOnce(&Vm) + Send + 'static,
     {
@@ -621,20 +625,29 @@ impl Vm {
         let jit_cache_key = self.jit_cache_key.borrow().clone();
         let comptime_gate = self.comptime_gate.get();
         let comptime_root = gossamer_runtime::comptime_policy::Confined::root();
-        crate::vm::goroutine::GoroutinePool::spawn(
+        crate::vm::goroutine::GoroutinePool::spawn_joinable(
             crate::vm::goroutine::pool(),
+            handle,
             Box::new(move || {
                 // The entry describes a live goroutine, so it is retired on
                 // every path out of the task, a panic included, and the
                 // worker is left bound to no goroutine for the next one.
-                struct Registered(u32);
+                // A goroutine joined before any worker took it runs nested
+                // inside its joiner, which is active again once it returns.
+                struct Registered {
+                    gid: u32,
+                    outer: u32,
+                }
                 impl Drop for Registered {
                     fn drop(&mut self) {
-                        gossamer_runtime::sigquit::set_active_gid(u32::MAX);
-                        gossamer_runtime::sigquit::unregister(self.0);
+                        gossamer_runtime::sigquit::set_active_gid(self.outer);
+                        gossamer_runtime::sigquit::unregister(self.gid);
                     }
                 }
-                let _registered = Registered(gid);
+                let _registered = Registered {
+                    gid,
+                    outer: gossamer_runtime::sigquit::active_gid().unwrap_or(u32::MAX),
+                };
                 gossamer_runtime::sigquit::set_active_gid(gid);
                 thread_local! {
                     static THREAD_VM: std::cell::OnceCell<std::cell::RefCell<Option<Vm>>> =
@@ -715,7 +728,7 @@ impl Vm {
             tcx_snapshot: Option<Arc<gossamer_types::TyCtxt>>,
             enum_shape_defs: Option<Arc<std::collections::HashMap<u32, u32>>>,
             enum_shape_handles: Option<Arc<Vec<Arc<crate::value::NativeEnumShape>>>>,
-            struct_shape_defs: Option<Arc<std::collections::HashMap<u32, u32>>>,
+            struct_shape_defs: Option<Arc<std::collections::HashMap<gossamer_types::Ty, u32>>>,
             struct_shape_handles: Option<Arc<Vec<Arc<crate::value::NativeStructShape>>>>,
             jit_eager_names: Arc<std::collections::HashSet<String>>,
             jit_cache_key: Option<Arc<str>>,
@@ -796,7 +809,7 @@ impl Vm {
     /// on stderr, and never propagates to the spawning thread.
     pub(crate) fn spawn_goroutine_native(&self, callee: Value, args: Vec<Value>) {
         let origin = Self::goroutine_origin(&callee);
-        self.spawn_on_pool(origin, move |vm| {
+        self.spawn_on_pool(origin, 0, move |vm| {
             if let Err(err) = vm.as_comparator_host(|| vm.dispatch_call(&callee, args)) {
                 if !vm.invoke_panic_hook(&crate::panic_message(&err)) {
                     // Report an unobserved goroutine panic with the same single
@@ -817,7 +830,7 @@ impl Vm {
             file: String::new(),
             line: 0,
         };
-        self.spawn_on_pool(origin, move |vm| {
+        self.spawn_on_pool(origin, 0, move |vm| {
             task(&mut super::native_dispatch::VmDispatch::new(vm));
         });
     }
@@ -845,7 +858,7 @@ impl Vm {
             },
             SpawnTarget::Callable(callee) => Self::goroutine_origin(callee),
         };
-        self.spawn_on_pool(origin, move |vm| {
+        self.spawn_on_pool(origin, 0, move |vm| {
             let outcome = match target {
                 SpawnTarget::Named(name) => match vm.lookup_global(&name) {
                     Some(global) => vm.apply(global, args),
@@ -883,7 +896,7 @@ impl Vm {
         };
         crate::stdlib_builtins::cohort::note_child_handle(channel.identity(), cohort, index);
         let origin = Self::goroutine_origin(&callee);
-        self.spawn_on_pool(origin, move |vm| {
+        self.spawn_on_pool(origin, channel.identity(), move |vm| {
             crate::stdlib_builtins::cohort::enter_child(cohort);
             let result = vm.as_comparator_host(|| vm.dispatch_call(&callee, args));
             // A child fails by panicking or by answering `Err`, the same

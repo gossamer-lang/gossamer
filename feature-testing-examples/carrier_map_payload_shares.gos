@@ -1,0 +1,35 @@
+// `map` on a `Result` or `Option` whose payload is a struct, answering
+// another type: the `Err` and empty arms build the answer's own carrier, so
+// every holder releases only the shares it took.
+
+use std::errors
+
+struct Pair { a: Vec<i64>, b: String }
+
+fn parse(t: String) -> Result<Pair, String> {
+    if t.is_empty() { Err(f"empty {t.len()}") } else { Ok(Pair { a: #[1, 2], b: t }) }
+}
+
+fn find(t: String) -> Option<Pair> {
+    if t.is_empty() { None } else { Some(Pair { a: #[3], b: t }) }
+}
+
+fn fail(t: String) -> Result<Pair, errors::Error> {
+    if t.is_empty() { Err(errors::new("no")) } else { Ok(Pair { a: #[4], b: t }) }
+}
+
+fn main() {
+    let mut out = #[]
+    for t in ["", "xy"] {
+        let r = parse(t).map(|p| p.a)
+        out.push(f"{r}")
+        let o = find(t).map(|p| p.b)
+        out.push(f"{o}")
+        let e = fail(t).map(|p| (p.a, p.b))
+        out.push(f"{e.is_err()}")
+        let kept = parse(t)
+        let again = kept.map(|p| p.b.len())
+        out.push(f"{kept.is_ok()} {again}")
+    }
+    println(f"{out}")
+}

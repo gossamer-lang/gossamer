@@ -1,0 +1,101 @@
+// A closure capturing a map, a set, a deque, or a heap shares it with the
+// frame that built it: the closure sees the frame's writes, and keeps the
+// container alive after that frame returns, however the closure leaves it.
+struct Lookup {
+    find: Fn(String) -> i64
+}
+
+enum Widget {
+    Coll(Lookup)
+}
+
+fn wrap(l: Lookup) -> Widget {
+    Widget::Coll(l)
+}
+
+fn through_call(keys: Vec<String>) -> Widget {
+    let mut index: Map<String, i64> = Map::new()
+    for k in keys { index[k] = k.len() }
+    wrap(Lookup { find: |key: String| index.get(key).unwrap_or(-1) })
+}
+
+fn built_in_place(keys: Vec<String>) -> Widget {
+    let mut index: Map<String, i64> = Map::new()
+    for k in keys { index[k] = k.len() * 10 }
+    Widget::Coll(Lookup { find: |key: String| index.get(key).unwrap_or(-1) })
+}
+
+fn member_test(words: Vec<String>) -> Fn(String) -> bool {
+    let mut seen = Set::new()
+    for w in words { seen.insert(w) }
+    |w: String| seen.contains(w)
+}
+
+fn front_reader() -> Fn() -> i64 {
+    let mut q = Deque::new()
+    q.push_back(4)
+    q.push_back(5)
+    || q.len()
+}
+
+fn smallest() -> Fn() -> i64 {
+    let mut h = MinHeap::new()
+    h.push(9)
+    h.push(2)
+    || h.len()
+}
+
+fn pass(f: Fn() -> i64) -> Fn() -> i64 {
+    f
+}
+
+fn queued_through_call() -> Fn() -> i64 {
+    let mut q = Queue::new()
+    q.push(1)
+    q.push(2)
+    q.push(3)
+    pass(|| q.len())
+}
+
+fn heap_through_call() -> Fn() -> i64 {
+    let mut h = MaxHeap::new()
+    h.push(3)
+    pass(|| h.len())
+}
+
+fn set_through_call() -> Fn() -> i64 {
+    let mut s = Set::new()
+    s.insert("a")
+    s.insert("b")
+    pass(|| s.len())
+}
+
+fn find(w: Widget, key: String) -> i64 {
+    match w {
+        Widget::Coll(l) => (l.find)(key)
+    }
+}
+
+fn main() {
+    let a = through_call(#["a", "bb"])
+    let b = built_in_place(#["ccc"])
+    let mut churn = #[]
+    for i in 0..50 { churn.push(Map::from([(f"k{i}", i)])) }
+    println(f"call: {find(a, "a")} {find(a, "bb")} {find(a, "zz")}")
+    println(f"in place: {find(b, "ccc")} {find(b, "a")}")
+    let has = member_test(#["x", "y"])
+    println(f"set: {has("x")} {has("q")}")
+    let q = front_reader()
+    let h = smallest()
+    println(f"deque: {q()} heap: {h()} churn: {churn.len()}")
+    let qc = queued_through_call()
+    let hc = heap_through_call()
+    let sc = set_through_call()
+    let mut more = #[]
+    for i in 0..50 { more.push(Set::from([i])) }
+    println(f"through calls: {qc()} {hc()} {sc()} {more.len()}")
+    let mut live: Map<String, i64> = Map::new()
+    let count = || live.len()
+    live["later"] = 1
+    println(f"sees later writes: {count()}")
+}

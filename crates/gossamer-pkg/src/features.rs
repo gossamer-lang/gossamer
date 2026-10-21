@@ -233,7 +233,8 @@ impl Resolver {
         name: &str,
     ) -> Result<(String, DependencyFeatures), FeatureError> {
         let package = &self.packages[id];
-        let Some(key) = dependency_key(&package.manifest, name) else {
+        let declared_name = |dep: &str| self.packages.get(dep).map(|p| p.manifest.module_name());
+        let Some(key) = dependency_key(&package.manifest, name, declared_name) else {
             return Err(FeatureError::NotADependency {
                 package: package.label.clone(),
                 feature: feature.to_string(),
@@ -274,8 +275,13 @@ fn chosen_features(manifest: &Manifest, dep: &str) -> DependencyFeatures {
 }
 
 /// The `[dependencies]` key `name` refers to: the key itself, or the one
-/// reached under the module `name`.
-fn dependency_key(manifest: &Manifest, name: &str) -> Option<String> {
+/// reached under the module `name`. `declared_name` answers the module a
+/// dependency's own manifest names for itself, when that manifest is known.
+fn dependency_key(
+    manifest: &Manifest,
+    name: &str,
+    declared_name: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
     if manifest.dependencies.contains_key(name) {
         return Some(name.to_string());
     }
@@ -287,6 +293,7 @@ fn dependency_key(manifest: &Manifest, name: &str) -> Option<String> {
                 .dependency_modules
                 .get(*id)
                 .cloned()
+                .or_else(|| declared_name(id))
                 .unwrap_or_else(|| gossamer_resolve::project_dep_module_name(id));
             module == name
         })

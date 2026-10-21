@@ -210,10 +210,11 @@ pub struct Vm {
     /// index lookup table holds only `Weak`s, so dropping this program releases
     /// its descriptors instead of retaining them process-wide.
     pub(crate) enum_shape_handles: RefCell<Option<Arc<Vec<Arc<crate::value::NativeEnumShape>>>>>,
-    /// DefId.local -> native struct-shape index for all-scalar user
-    /// structs whose values may cross the JIT boundary as a flat
-    /// field-slot block pointer.
-    pub(crate) struct_shape_defs: RefCell<Option<Arc<std::collections::HashMap<u32, u32>>>>,
+    /// Struct type (one per instantiation of a generic struct) -> native
+    /// struct-shape index for user structs whose values may cross the JIT
+    /// boundary as a flat field-slot block pointer.
+    pub(crate) struct_shape_defs:
+        RefCell<Option<Arc<std::collections::HashMap<gossamer_types::Ty, u32>>>>,
     /// Strong handles for this program's native scalar-struct descriptors.
     pub(crate) struct_shape_handles:
         RefCell<Option<Arc<Vec<Arc<crate::value::NativeStructShape>>>>>,
@@ -355,6 +356,10 @@ pub struct Vm {
     /// Populated by `load` when [`Self::collect_comptime`] is set; drained
     /// by the CLI to splice results back into the source.
     pub(crate) comptime_folds: RefCell<Vec<ComptimeFold>>,
+    /// The file each region of an assembled unit was written in, as
+    /// `(start, end, path)` byte ranges of the unit, outermost first. A
+    /// comptime region's relative reads resolve against its own file.
+    pub(crate) comptime_origins: RefCell<Vec<(u32, u32, String)>>,
 }
 
 /// One lazily materialised `Type::method` spelling owned by a [`Vm`]. A compact
@@ -1079,13 +1084,11 @@ impl std::fmt::Debug for Vm {
 pub(crate) enum Global {
     Fn(Arc<FnChunk>),
     Value(Value),
-    /// A `static mut` cell. The shared `Arc<Mutex<Value>>` is cloned
-    /// into every spawned goroutine's `globals` map (which itself is an
-    /// `Arc`), so writes from one goroutine are observable in all
-    /// others; the `Mutex` makes the concurrent access sound. Reads
-    /// (`LoadGlobal`) load the current value; writes (`Op::StoreStatic`)
-    /// replace it.
-    MutStatic(Arc<parking_lot::Mutex<Value>>),
+    /// A `static mut` cell. The shared `Arc` is cloned into every spawned
+    /// goroutine's `globals` map (which itself is an `Arc`), so writes from
+    /// one goroutine are observable in all others. Reads (`LoadGlobal`) load
+    /// the current value; writes (`Op::StoreStatic`) replace it.
+    MutStatic(Arc<static_cell::StaticCell>),
 }
 
 /// Maximum Gossamer call frames per goroutine on a thread whose native
@@ -1134,6 +1137,7 @@ mod lifecycle;
 mod native_dispatch;
 mod resolve;
 pub(crate) mod run;
+mod static_cell;
 pub(crate) mod user_order;
 
 impl Default for Vm {
@@ -2143,9 +2147,9 @@ fn hir_expr_has_slice_pattern(expr: &gossamer_hir::HirExpr) -> bool {
         }
         K::Select { arms } => arms.iter().any(|arm| {
             let op_has_pattern = match &arm.op {
-                gossamer_hir::HirSelectOp::Recv { pattern, channel } => {
-                    hir_pat_has_slice_pattern(pattern) || hir_expr_has_slice_pattern(channel)
-                }
+                gossamer_hir::HirSelectOp::Recv {
+                    pattern, channel, ..
+                } => hir_pat_has_slice_pattern(pattern) || hir_expr_has_slice_pattern(channel),
                 gossamer_hir::HirSelectOp::Send { channel, value } => {
                     hir_expr_has_slice_pattern(channel) || hir_expr_has_slice_pattern(value)
                 }
@@ -2524,6 +2528,11 @@ fn field_get(receiver: &Value, name: &str) -> RuntimeResult<Value> {
         return Err(RuntimeError::Type(format!(
             "unknown field `{name}` on struct value"
         )));
+    }
+    if let Value::NativeEnum(owner) = receiver
+        && let Some(value) = crate::value::native_enum_named_field(owner, name)
+    {
+        return Ok(value);
     }
     Err(RuntimeError::Type(format!(
         "field access on non-struct `{receiver}`"

@@ -7,8 +7,8 @@
 
 //! Compiled-tier `std::io` stream adapters. Behavioural mirror of
 //! `gossamer_std::io_handles`: every reader / writer the language
-//! exposes is an integer handle into one process-wide registry, and
-//! adapters compose by holding their sources' ids. The two copies must
+//! exposes is a counted row of one process-wide registry, and adapters
+//! compose by holding references to their sources' rows. The two copies must
 //! stay identical - the crate graph keeps `gossamer-std` out of the
 //! runtime, so the logic is duplicated rather than shared.
 
@@ -46,14 +46,64 @@ enum Node {
     Pipe(Arc<PipeBuffer>),
 }
 
-static NEXT_ID: AtomicI64 = AtomicI64::new(1);
-static REGISTRY: Mutex<Option<HashMap<i64, Node>>> = Mutex::new(None);
+/// A row and the references held to it: the `io::MemoryStream` handle naming it
+/// and every adapter reading from it.
+#[derive(Debug)]
+struct Row {
+    refs: usize,
+    node: Node,
+}
 
+static NEXT_ID: AtomicI64 = AtomicI64::new(1);
+static REGISTRY: Mutex<Option<HashMap<i64, Row>>> = Mutex::new(None);
+
+/// Registers `node` with the one reference its handle holds.
 fn insert(node: Node) -> i64 {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let mut guard = REGISTRY.lock();
-    guard.get_or_insert_with(HashMap::new).insert(id, node);
+    guard
+        .get_or_insert_with(HashMap::new)
+        .insert(id, Row { refs: 1, node });
     id
+}
+
+/// Takes a reference to each row an adapter reads from.
+fn share(ids: &[i64]) {
+    let mut guard = REGISTRY.lock();
+    if let Some(table) = guard.as_mut() {
+        for id in ids {
+            if let Some(row) = table.get_mut(id) {
+                row.refs += 1;
+            }
+        }
+    }
+}
+
+/// Gives back one reference to row `id`; the last one removes the row and
+/// gives back the references it held to the rows it reads from.
+pub(crate) fn retire(id: i64) {
+    let mut pending = vec![id];
+    while let Some(id) = pending.pop() {
+        let mut guard = REGISTRY.lock();
+        let Some(table) = guard.as_mut() else {
+            return;
+        };
+        let Some(row) = table.get_mut(&id) else {
+            continue;
+        };
+        row.refs = row.refs.saturating_sub(1);
+        if row.refs > 0 {
+            continue;
+        }
+        if let Some(row) = table.remove(&id) {
+            match row.node {
+                Node::Limit { src, .. } => pending.push(src),
+                Node::Tee { src, sink } => pending.extend([src, sink]),
+                Node::Multi { sources, .. } => pending.extend(sources),
+                Node::Memory { .. } | Node::Buffer(_) | Node::Pipe(_) => {}
+            }
+        }
+    }
 }
 
 /// Registers an in-memory reader over `text`; returns its handle.
@@ -74,6 +124,7 @@ pub fn buffer_writer() -> i64 {
 /// Registers a reader yielding at most `limit` bytes from `src`.
 #[must_use]
 pub fn limit_reader(src: i64, limit: i64) -> i64 {
+    share(&[src]);
     insert(Node::Limit {
         src,
         remaining: limit.max(0),
@@ -84,12 +135,14 @@ pub fn limit_reader(src: i64, limit: i64) -> i64 {
 /// `sink` before returning it.
 #[must_use]
 pub fn tee_reader(src: i64, sink: i64) -> i64 {
+    share(&[src, sink]);
     insert(Node::Tee { src, sink })
 }
 
 /// Registers a reader that drains each source in turn.
 #[must_use]
 pub fn multi_reader(sources: Vec<i64>) -> i64 {
+    share(&sources);
     insert(Node::Multi { sources, index: 0 })
 }
 
@@ -117,7 +170,7 @@ fn step(id: i64, max: usize) -> Step {
     let Some(table) = guard.as_mut() else {
         return Step::Exhausted;
     };
-    match table.get_mut(&id) {
+    match table.get_mut(&id).map(|row| &mut row.node) {
         Some(Node::Memory { data, pos }) => {
             let end = (*pos + max).min(data.len());
             let out = data[*pos..end].to_vec();
@@ -152,14 +205,21 @@ fn step(id: i64, max: usize) -> Step {
 
 fn consume_limit(id: i64, n: i64) {
     let mut guard = REGISTRY.lock();
-    if let Some(Node::Limit { remaining, .. }) = guard.as_mut().and_then(|t| t.get_mut(&id)) {
+    if let Some(Node::Limit { remaining, .. }) = guard
+        .as_mut()
+        .and_then(|t| t.get_mut(&id))
+        .map(|row| &mut row.node)
+    {
         *remaining = (*remaining - n).max(0);
     }
 }
 
 fn advance_multi(id: i64, from: usize) {
     let mut guard = REGISTRY.lock();
-    if let Some(Node::Multi { index, .. }) = guard.as_mut().and_then(|t| t.get_mut(&id))
+    if let Some(Node::Multi { index, .. }) = guard
+        .as_mut()
+        .and_then(|t| t.get_mut(&id))
+        .map(|row| &mut row.node)
         && *index == from
     {
         *index += 1;
@@ -209,7 +269,7 @@ pub fn write(id: i64, bytes: &[u8]) -> usize {
     let Some(table) = guard.as_mut() else {
         return 0;
     };
-    match table.get_mut(&id) {
+    match table.get_mut(&id).map(|row| &mut row.node) {
         Some(Node::Buffer(buf)) => {
             buf.extend_from_slice(bytes);
             bytes.len()
@@ -262,7 +322,7 @@ pub fn drain(id: i64) -> String {
 #[must_use]
 pub fn contents(id: i64) -> String {
     let guard = REGISTRY.lock();
-    let bytes = match guard.as_ref().and_then(|t| t.get(&id)) {
+    let bytes = match guard.as_ref().and_then(|t| t.get(&id)).map(|row| &row.node) {
         Some(Node::Buffer(buf)) => buf.clone(),
         Some(Node::Pipe(shared)) => shared.bytes.lock().clone(),
         _ => Vec::new(),
@@ -273,7 +333,7 @@ pub fn contents(id: i64) -> String {
 /// Marks a pipe writer closed so its reader stops accepting writes.
 pub fn close_writer(id: i64) {
     let guard = REGISTRY.lock();
-    if let Some(Node::Pipe(shared)) = guard.as_ref().and_then(|t| t.get(&id)) {
+    if let Some(Node::Pipe(shared)) = guard.as_ref().and_then(|t| t.get(&id)).map(|row| &row.node) {
         shared.closed.store(true, Ordering::Release);
     }
 }
@@ -288,33 +348,44 @@ unsafe fn borrowed(p: *const c_char) -> String {
     unsafe { crate::c_abi::gos_str_arg_string(p) }
 }
 
-/// `io::string_reader(text) -> Reader` handle.
+/// The handle compiled code holds for the new row `id`: a counted node
+/// whose last share gives the row's reference back.
+fn stream(id: i64) -> i64 {
+    super::registry_key::key_handle(id, retire)
+}
+
+/// The row a handle from compiled code names.
+fn row(h: i64) -> i64 {
+    super::registry_key::key_id(h)
+}
+
+/// `io::string_reader(text) -> io::MemoryStream`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_io_string_reader(text: *const c_char) -> i64 {
     // SAFETY: `text` is this shim's argument, live for the call (C-ABI contract) or null, which
     // `borrowed` accepts.
-    ffi_entry!({ string_reader(&unsafe { borrowed(text) }) })
+    ffi_entry!({ stream(string_reader(&unsafe { borrowed(text) })) })
 }
 
-/// `io::buffer_writer() -> Writer` handle.
+/// `io::buffer_writer() -> io::MemoryStream`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_io_buffer_writer() -> i64 {
-    ffi_entry!({ buffer_writer() })
+    ffi_entry!({ stream(buffer_writer()) })
 }
 
-/// `io::limit_reader(src, limit) -> Reader` handle.
+/// `io::limit_reader(src, limit) -> io::MemoryStream`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_io_limit_reader(src: i64, limit: i64) -> i64 {
-    ffi_entry!({ limit_reader(src, limit) })
+    ffi_entry!({ stream(limit_reader(row(src), limit)) })
 }
 
-/// `io::tee_reader(src, sink) -> Reader` handle.
+/// `io::tee_reader(src, sink) -> io::MemoryStream`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_io_tee_reader(src: i64, sink: i64) -> i64 {
-    ffi_entry!({ tee_reader(src, sink) })
+    ffi_entry!({ stream(tee_reader(row(src), row(sink))) })
 }
 
-/// `io::multi_reader(sources) -> Reader` handle over a `Vec<i64>`.
+/// `io::multi_reader(sources) -> io::MemoryStream` over a `Vec<io::MemoryStream>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_io_multi_reader(sources: *const GosVec) -> i64 {
     ffi_entry!({
@@ -323,28 +394,30 @@ pub unsafe extern "C" fn gos_rt_io_multi_reader(sources: *const GosVec) -> i64 {
         let ids: Vec<i64> = unsafe { sources.as_ref() }.map_or_else(Vec::new, |header| {
             (0..header.len)
                 // SAFETY: `i` counts below the vec's length.
-                .map(|i| unsafe { crate::c_abi::vec::vec_elem_load_i64(header, i) })
+                .map(|i| row(unsafe { crate::c_abi::vec::vec_elem_load_i64(header, i) }))
                 .collect()
         });
-        multi_reader(ids)
+        stream(multi_reader(ids))
     })
 }
 
-/// `io::pipe() -> (Reader, Writer)` - the pair packed as a 2-slot tuple.
+thread_local! {
+    static PIPE_ANSWER: std::cell::Cell<[i64; 2]> = const { std::cell::Cell::new([0; 2]) };
+}
+
+/// `io::pipe() -> (io::MemoryStream, io::MemoryStream)` - the pair as a 2-slot tuple, each
+/// handle holding its share for the caller.
+///
+/// The answer points at this thread's answer slot, which compiled code copies
+/// into its own tuple as the call returns, before it can call again.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_io_pipe() -> *mut i64 {
     ffi_entry!({
         let (reader, writer) = pipe();
-        #[repr(C)]
-        struct Pair {
-            a: i64,
-            b: i64,
-        }
-        Box::into_raw(Box::new(Pair {
-            a: reader,
-            b: writer,
-        }))
-        .cast()
+        PIPE_ANSWER.with(|slot| {
+            slot.set([stream(reader), stream(writer)]);
+            slot.as_ptr().cast::<i64>()
+        })
     })
 }
 
@@ -357,20 +430,20 @@ pub extern "C" fn gos_rt_io_copy_n(dst: i64, src: i64, n: i64) -> i128 {
                 crate::c_abi::errors::error_new_from_bytes(b"io::copy_n: negative byte count");
             return gos_rt_result_new(1, err as i64);
         }
-        gos_rt_result_new(0, copy_n(dst, src, n))
+        gos_rt_result_new(0, copy_n(row(dst), row(src), n))
     })
 }
 
-/// `io::drain(src) -> String` - reads the handle to end of stream.
+/// `io::drain(src) -> String` - reads the stream to its end.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_io_drain(src: i64) -> *mut c_char {
-    ffi_entry!({ alloc_cstring(drain(src).as_bytes()) })
+    ffi_entry!({ alloc_cstring(drain(row(src)).as_bytes()) })
 }
 
 /// `io::contents(writer) -> String` - everything written so far.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_io_contents(writer: i64) -> *mut c_char {
-    ffi_entry!({ alloc_cstring(contents(writer).as_bytes()) })
+    ffi_entry!({ alloc_cstring(contents(row(writer)).as_bytes()) })
 }
 
 /// `io::write(writer, text) -> i64` - bytes accepted by the writer.
@@ -379,12 +452,12 @@ pub unsafe extern "C" fn gos_rt_io_write_str(writer: i64, text: *const c_char) -
     ffi_entry!({
         // SAFETY: `text` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `borrowed` accepts.
-        write(writer, unsafe { borrowed(text) }.as_bytes()) as i64
+        write(row(writer), unsafe { borrowed(text) }.as_bytes()) as i64
     })
 }
 
 /// `io::close_writer(writer)` - signals end of stream on a pipe.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_io_close_writer(writer: i64) {
-    ffi_entry!({ close_writer(writer) });
+    ffi_entry!({ close_writer(row(writer)) });
 }

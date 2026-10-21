@@ -164,6 +164,22 @@ pub(super) fn is_carrier_ty(tcx: &TyCtxt, ty: Ty) -> bool {
     )
 }
 
+/// True when `ty` is a by-value aggregate one word wide that a payload slot
+/// holds inline: its local names the address of that word, while an enum node
+/// or a raw heap slot stores the word itself, as the LLVM tier does.
+pub(super) fn inline_word_aggregate(tcx: &TyCtxt, ty: Ty) -> bool {
+    let aggregate = match tcx.kind_of(ty) {
+        TyKind::Tuple(_) | TyKind::Array { .. } => true,
+        TyKind::Adt { def, .. } => tcx.struct_field_tys(*def).is_some(),
+        _ => false,
+    };
+    aggregate
+        && !tcx.is_rc_managed(ty)
+        && !is_inline_two_word_ty(tcx, ty)
+        && type_slot_count(tcx, ty) == 1
+        && boxed_payload_slots(tcx, ty).is_none()
+}
+
 /// Slot count of an enum variant payload the constructor heap-boxes, or
 /// `None` when the payload is held in the node's own word.
 ///

@@ -1,0 +1,40 @@
+use std::ffi::Ptr
+use std::sync::{AtomicBool, AtomicI64}
+
+// A struct holding a nested scalar struct, a foreign pointer, and atomics
+// crosses into compiled code with every field; the atomics are one cell
+// whichever tier updates them.
+struct Pos { x: i32, y: i32 }
+
+struct Walker {
+    at: Pos
+    base: Ptr<u8>
+    steps: AtomicI64
+    done: AtomicBool
+    label: String
+}
+
+impl Walker {
+    fn walk(&mut self, k: i64) -> i64 {
+        let mut last = 0
+        for i in 0..k {
+            self.at.x += 1
+            self.at.y -= 2
+            last = self.steps.fetch_add(i)
+        }
+        if self.at.x > 20 {
+            self.done.store(true)
+        }
+        last
+    }
+}
+
+fn main() {
+    let mut w = Walker { at: Pos { x: 1, y: 5 }, base: Ptr::null(), steps: AtomicI64::new(3), done: AtomicBool::new(false), label: "w" }
+    for round in 0..4 {
+        let last = w.walk(6)
+        println(f"round {round}: at {w.at.x},{w.at.y} last {last} steps {w.steps.load()} done {w.done.load()} {w.label} {w.base.address()}")
+    }
+    w.steps.store(100)
+    println(f"after store {w.walk(1)} {w.steps.load()}")
+}

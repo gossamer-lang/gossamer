@@ -16,7 +16,7 @@ fn main() {
     let tx, rx = channel()
     spawn(|| prod(tx))
     let got = select {
-        m = rx.recv() => m.v + m.s.len()
+        Some(m) = rx.recv() => m.v + m.s.len()
     }
     println("select_struct={}", got)
 }

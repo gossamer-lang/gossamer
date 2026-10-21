@@ -117,6 +117,41 @@ use corosensei::stack::DefaultStack;
 #[cfg(not(target_arch = "wasm32"))]
 use corosensei::{Coroutine, CoroutineResult, Yielder};
 
+/// Finished goroutines' stacks a thread keeps for its next spawns, so a
+/// spawn reuses a mapping instead of paying `mmap`, the guard page's
+/// `mprotect`, and a later `munmap`. Bounded because a cached stack keeps
+/// the pages its last goroutine touched committed.
+#[cfg(not(target_arch = "wasm32"))]
+const STACK_CACHE_DEPTH: usize = 32;
+
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    static STACK_CACHE: std::cell::RefCell<Vec<DefaultStack>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A stack of [`stack_size`] bytes, from this thread's cache when it has one.
+#[cfg(not(target_arch = "wasm32"))]
+fn take_stack() -> std::io::Result<DefaultStack> {
+    let cached = STACK_CACHE
+        .try_with(|cache| cache.borrow_mut().pop())
+        .ok()
+        .flatten();
+    cached.map_or_else(|| DefaultStack::new(stack_size()), Ok)
+}
+
+/// Returns a finished goroutine's stack to this thread's cache, or unmaps
+/// it when the cache is full or the thread is shutting down.
+#[cfg(not(target_arch = "wasm32"))]
+fn recycle_stack(stack: DefaultStack) {
+    let _ = STACK_CACHE.try_with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() < STACK_CACHE_DEPTH {
+            cache.push(stack);
+        }
+    });
+}
+
 /// Default goroutine stack size in bytes (1 MiB). Override via the
 /// `GOSSAMER_GOROUTINE_STACK` environment variable, parsed at the
 /// first [`Goroutine::new`] call after process start.
@@ -254,7 +289,9 @@ pub fn disarm_stack_guard() {
 /// completion across one or more `resume()` calls.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct Goroutine {
-    coro: Coroutine<(), (), (), DefaultStack>,
+    /// Taken out only by `drop`, which hands a finished coroutine's stack
+    /// to [`recycle_stack`].
+    coro: std::mem::ManuallyDrop<Coroutine<(), (), (), DefaultStack>>,
     yielder_slot: Arc<AtomicPtr<()>>,
     /// This goroutine's [`local_word`], held here while it is suspended.
     local: usize,
@@ -305,7 +342,7 @@ impl Goroutine {
         let yielder_slot_clone = Arc::clone(&yielder_slot);
         let stack_origin_slot: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
         let stack_origin_slot_clone = Arc::clone(&stack_origin_slot);
-        let stack = DefaultStack::new(stack_size())?;
+        let stack = take_stack()?;
         let coro = Coroutine::with_stack(stack, move |yielder: &Yielder<(), ()>, ()| {
             // The yielder is a stack value with an address that is
             // stable for the lifetime of the coroutine. Two writes
@@ -349,7 +386,7 @@ impl Goroutine {
             }
         });
         Ok(Self {
-            coro,
+            coro: std::mem::ManuallyDrop::new(coro),
             yielder_slot,
             local: 0,
             stack_origin_slot,
@@ -501,6 +538,15 @@ impl Drop for Goroutine {
             && let Some(drop_word) = LOCAL_WORD_DROP.get()
         {
             drop_word(self.local);
+        }
+        if self.coro.done() {
+            // SAFETY: `drop` runs once and nothing reads `self.coro` after this take.
+            let coro = unsafe { std::mem::ManuallyDrop::take(&mut self.coro) };
+            recycle_stack(coro.into_stack());
+        } else {
+            // SAFETY: `drop` runs once and nothing reads `self.coro` after this drop; a
+            // suspended coroutine unwinds its own stack here.
+            unsafe { std::mem::ManuallyDrop::drop(&mut self.coro) };
         }
     }
 }

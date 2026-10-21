@@ -186,7 +186,9 @@ fn diagnostics_for(file: &Path, candidate: &str) -> (usize, usize) {
     let raw_id = map.add_file(file.to_string_lossy().into_owned(), candidate.to_string());
     let parse_errors = gossamer_parse::parse_source_file(candidate, raw_id).1.len();
     let augmented = gossamer_parse::autoderive::augment_source(candidate);
-    let Ok(folded) = crate::comptime_fold::fold_comptime(augmented, &file.to_string_lossy()) else {
+    let Ok(folded) =
+        crate::comptime_fold::fold_comptime(augmented, &file.to_string_lossy(), Vec::new())
+    else {
         return (usize::MAX, usize::MAX);
     };
     let id = map.add_file(file.to_string_lossy().into_owned(), folded.clone());

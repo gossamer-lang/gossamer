@@ -154,7 +154,8 @@ fn validate(entry: &Path, locked: bool, status: &Status) -> Result<BTreeSet<Path
     let source_path = entry.to_path_buf();
     let unit = crate::paths::read_entry_unit(&source_path)?;
     let user_source = unit.source;
-    let prepared = crate::unit_cache::prepare(&user_source, &entry.to_string_lossy());
+    let prepared =
+        crate::unit_cache::prepare(&user_source, &entry.to_string_lossy(), &unit.origins);
     if let Some(err) = prepared.fold_error {
         return Err(err);
     }

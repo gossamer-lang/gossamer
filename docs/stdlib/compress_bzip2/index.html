@@ -2347,12 +2347,17 @@
 <tr>
 <td><code>compress</code></td>
 <td><code>fn compress(data: Vec&lt;u8&gt;, level: i64) -&gt; Result&lt;Vec&lt;u8&gt;, errors::Error&gt;</code></td>
-<td>One-shot bzip2 compress.</td>
+<td>One-shot bzip2 compress at <code>level</code>, <code>1</code> (fastest) to <code>9</code> (best).</td>
 </tr>
 <tr>
 <td><code>decompress</code></td>
 <td><code>fn decompress(data: Vec&lt;u8&gt;) -&gt; Result&lt;Vec&lt;u8&gt;, errors::Error&gt;</code></td>
 <td>One-shot bzip2 decompress.</td>
+</tr>
+<tr>
+<td><code>decompress_limited</code></td>
+<td><code>fn decompress_limited(data: Vec&lt;u8&gt;, max_bytes: i64) -&gt; Result&lt;Vec&lt;u8&gt;, errors::Error&gt;</code></td>
+<td><code>decompress(data)</code>, refusing output past <code>max_bytes</code>.</td>
 </tr>
 </tbody>
 </table>

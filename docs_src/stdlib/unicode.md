@@ -33,7 +33,7 @@ Unicode general-category predicates, casing, normalization, and segmentation.
 | `combining_class` | `fn combining_class(rune: char) -> i64` | Canonical combining class (0-254) for r. |
 | `to_upper_str` | `fn to_upper_str(text: String) -> String` | Full uppercase mapping for a string (ss -> SS). |
 | `to_lower_str` | `fn to_lower_str(text: String) -> String` | Full lowercase mapping for a string. |
-| `fold_case` | `fn fold_case(text: String) -> String` | Simple case-folded comparison form for a string. |
+| `fold_case` | `fn fold_case(text: String) -> String` | Case-folded comparison form for a string (Unicode full case folding): two strings fold alike exactly when they match ignoring case, so `Straße` and `STRASSE` both fold to `strasse` and final sigma to sigma. |
 | `nfc` | `fn nfc(text: String) -> String` | Normalize a string to NFC (canonical composition). |
 | `nfd` | `fn nfd(text: String) -> String` | Normalize a string to NFD (canonical decomposition). |
 | `nfkc` | `fn nfkc(text: String) -> String` | Normalize a string to NFKC (compat composition). |
@@ -45,7 +45,7 @@ Unicode general-category predicates, casing, normalization, and segmentation.
 | `graphemes` | `fn graphemes(text: String) -> Vec<String>` | UAX #29 extended grapheme clusters of a string. |
 | `grapheme_count` | `fn grapheme_count(text: String) -> i64` | Number of UAX #29 grapheme clusters in a string. |
 | `words` | `fn words(text: String) -> Vec<String>` | UAX #29 Unicode words in a string (skips punct/whitespace). |
-| `word_bounds` | `fn word_bounds(text: String) -> Vec<(i64, i64)>` | UAX #29 word boundaries (includes punct + whitespace runs). |
+| `word_bounds` | `fn word_bounds(text: String) -> Vec<String>` | UAX #29 word-boundary segments of a string, punctuation and whitespace runs included. |
 | `word_count` | `fn word_count(text: String) -> i64` | Number of UAX #29 words in a string. |
 | `sentences` | `fn sentences(text: String) -> Vec<String>` | UAX #29 Unicode sentences in a string. |
 | `sentence_count` | `fn sentence_count(text: String) -> i64` | Number of UAX #29 sentences in a string. |

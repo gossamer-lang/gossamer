@@ -134,6 +134,67 @@ use rayon::prelude::*;
 
 use super::*;
 
+/// Applies ownership operations to the fields of persistent or copied aggregate storage.
+pub(super) fn static_aggregate_children(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    intrinsics: &mut IntrinsicContext,
+    tcx: &TyCtxt,
+    ty: Ty,
+    base: ir::Value,
+    retain: bool,
+    guarded: bool,
+) -> Result<()> {
+    for field in gossamer_mir::aggregate_ownership_fields(tcx, ty) {
+        let mut leaf = ty;
+        let mut offset = 0;
+        for index in field.path {
+            offset += field_byte_offset(tcx, leaf, index);
+            leaf = field_ty_at(tcx, leaf, index).expect("aggregate field type");
+        }
+        let addr = builder.ins().iadd_imm_u(base, i64::from(offset));
+        let helper = if retain { field.retain } else { field.release };
+        let args = if field.by_address {
+            vec![addr]
+        } else if let Some((ok, err)) = field.carrier {
+            let value = builder
+                .ins()
+                .load(types::I128, MemFlagsData::trusted(), addr, 0);
+            let ok = builder.ins().iconst(types::I64, i64::from(ok));
+            let err = builder.ins().iconst(types::I64, i64::from(err));
+            vec![value, ok, err]
+        } else {
+            vec![builder.ins().load(
+                module.target_config().pointer_type(),
+                MemFlagsData::trusted(),
+                addr,
+                0,
+            )]
+        };
+        let _ = emit_rt_call_by_name(module, builder, intrinsics, helper, &args)?;
+    }
+    if guarded
+        && let Some(symbol) = tcx.aggr_copy_meta(ty)
+        && tcx.rc_meta(symbol).is_some_and(|meta| meta.len() > 2)
+    {
+        let id = *intrinsics
+            .rc_metas
+            .get(symbol)
+            .expect("static copy metadata is pre-interned");
+        let gv = module.declare_data_in_func(id, builder.func);
+        let meta = builder
+            .ins()
+            .symbol_value(module.target_config().pointer_type(), gv);
+        let helper = if retain {
+            "gos_rt_aggr_retain_children"
+        } else {
+            "gos_rt_aggr_release_children"
+        };
+        let _ = emit_rt_call_by_name(module, builder, intrinsics, helper, &[base, meta])?;
+    }
+    Ok(())
+}
+
 fn emit_lazy_iter_runtime_call(
     module: &mut dyn Module,
     builder: &mut FunctionBuilder<'_>,
@@ -696,6 +757,18 @@ fn is_aggregate_copy_src(body: &Body, tcx: &TyCtxt, rvalue: &Rvalue) -> bool {
     let Rvalue::Use(Operand::Copy(src)) = rvalue else {
         return false;
     };
+    // Runtime element-address results name storage whose words the destination owns separately.
+    if src.projection.is_empty()
+        && body.blocks.iter().any(|block| {
+            matches!(&block.terminator,
+                Terminator::Call {
+                    callee: Operand::Const(ConstValue::Str(name)), destination, ..
+                } if destination == src && matches!(name.as_str(),
+                    "gos_rt_vec_get_ptr" | "gos_rt_vec_get_ptr_unchecked"))
+        })
+    {
+        return true;
+    }
     // Peel `&T` wrappers: the inliner rewrites a `*param` deref-copy as a
     // bare `Copy(ref_local)` into a value-typed destination, and the ref
     // local's VALUE is the source address the memcpy needs. Without the
@@ -842,6 +915,13 @@ pub(super) fn lower_statement(
     }
     match &statement.kind {
         StatementKind::Assign { place, rvalue } => {
+            // A constant table's storage already holds its words.
+            if place.projection.is_empty()
+                && matches!(rvalue, Rvalue::Aggregate { .. })
+                && intrinsics.body_const_tables.contains_key(&place.local)
+            {
+                return Ok(());
+            }
             // Route rvalue-position intrinsic calls (gos_alloc,
             // gos_store, gos_load, …) through the same handler the
             // terminator path uses. Keeps the heap primitives usable
@@ -1223,17 +1303,10 @@ pub(super) fn lower_statement(
                 ir::immediates::Offset32::new(0),
             );
         }
-        // `static mut` scalar write: store into the static's backing
-        // writable data object. Non-scalar statics keep the VM fallback
-        // since their init is a heap value, not an inline word.
+        // Persistent aggregate cells own their copied fields independently of the frame.
         StatementKind::StaticStore { target, value } => {
-            if !is_scalar_static_ty(tcx, target.ty) {
-                bail!(
-                    "native codegen: static mut store of non-scalar type unsupported; running on VM"
-                )
-            }
-            let cl_ty = cl_type_of(tcx, target.ty, module);
-            let data_id = intrinsics.intern_static(module, target, cl_ty)?;
+            let cl_ty = callable_slot_ty(tcx, target.ty, module);
+            let data_id = intrinsics.intern_static(module, target, cl_ty, tcx)?;
             let val = lower_operand(
                 module,
                 builder,
@@ -1247,8 +1320,69 @@ pub(super) fn lower_statement(
             let ptr_ty = module.target_config().pointer_type();
             let gv = module.declare_data_in_func(data_id, builder.func);
             let addr = builder.ins().symbol_value(ptr_ty, gv);
-            builder.ins().store(MemFlagsData::trusted(), val, addr, 0);
+            if super::lowering_place::is_inline_aggregate(tcx, target.ty) {
+                static_aggregate_children(
+                    module, builder, intrinsics, tcx, target.ty, addr, false, true,
+                )?;
+                for word in 0..type_slot_count(tcx, target.ty).max(1) {
+                    let offset = (word * 8) as i32;
+                    let value =
+                        builder
+                            .ins()
+                            .load(types::I64, MemFlagsData::trusted(), val, offset);
+                    builder
+                        .ins()
+                        .store(MemFlagsData::trusted(), value, addr, offset);
+                }
+                static_aggregate_children(
+                    module, builder, intrinsics, tcx, target.ty, addr, true, true,
+                )?;
+            } else {
+                release_static_previous(module, builder, intrinsics, tcx, target.ty, addr)?;
+                builder.ins().store(MemFlagsData::trusted(), val, addr, 0);
+            }
         }
+    }
+    Ok(())
+}
+
+/// Releases what a non-aggregate static cell at `addr` holds before a store
+/// replaces it: a handle or carrier the cell owns as a whole, and the
+/// copy-blob share of a carrier whose payload is an aggregate.
+fn release_static_previous(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    intrinsics: &mut IntrinsicContext,
+    tcx: &TyCtxt,
+    ty: Ty,
+    addr: ir::Value,
+) -> Result<()> {
+    for field in gossamer_mir::value_ownership_fields(tcx, ty) {
+        if !field.path.is_empty() {
+            continue;
+        }
+        let args = if field.by_address {
+            vec![addr]
+        } else if let Some((ok, err)) = field.carrier {
+            let value = builder
+                .ins()
+                .load(types::I128, MemFlagsData::trusted(), addr, 0);
+            let ok = builder.ins().iconst(types::I64, i64::from(ok));
+            let err = builder.ins().iconst(types::I64, i64::from(err));
+            vec![value, ok, err]
+        } else {
+            vec![builder.ins().load(
+                module.target_config().pointer_type(),
+                MemFlagsData::trusted(),
+                addr,
+                0,
+            )]
+        };
+        let _ = emit_rt_call_by_name(module, builder, intrinsics, field.release, &args)?;
+    }
+    if gossamer_mir::is_option_slot_holder(tcx, ty) {
+        let (_, release) = gossamer_mir::option_slot_helpers(tcx, ty);
+        let _ = emit_rt_call_by_name(module, builder, intrinsics, release, &[addr])?;
     }
     Ok(())
 }
@@ -2141,6 +2275,8 @@ pub(super) fn lower_terminator(
                         .unwrap_or_default();
                     let mut arg_values: Vec<ir::Value> = Vec::with_capacity(args.len());
                     let ptr_ty_local = module.target_config().pointer_type();
+                    let stored_value = super::lowering_calls::map_stored_value_arg(name);
+                    let mut minted = None;
                     for (idx, op) in args.iter().enumerate() {
                         let mut v = if idx == 1 && gossamer_abi::takes_elem_by_address(name) {
                             lower_elem_by_address(
@@ -2153,6 +2289,18 @@ pub(super) fn lower_terminator(
                         } else {
                             lower_operand(module, builder, locals, body, tcx, op, None, intrinsics)?
                         };
+                        // A map entry holds a counted copy of a by-value aggregate.
+                        if let Some((value_idx, release)) = stored_value
+                            && idx == value_idx
+                            && let Some(blob) = super::lowering_calls::map_value_copy(
+                                module, builder, intrinsics, body, tcx, op, v,
+                            )?
+                        {
+                            v = blob;
+                            if release {
+                                minted = Some(blob);
+                            }
+                        }
                         // Special case: char→ptr promotion for
                         // string-API helpers where the user
                         // passed a `char` literal where a
@@ -2194,6 +2342,11 @@ pub(super) fn lower_terminator(
                     )?;
                     let call = builder.ins().call(func_ref, &arg_values);
                     let results = builder.inst_results(call).to_vec();
+                    if let Some(blob) = minted {
+                        super::lowering_calls::release_map_value_copy(
+                            module, builder, intrinsics, blob,
+                        )?;
+                    }
                     if let Some(&ret) = results.first() {
                         store_runtime_call_result(
                             module,
@@ -2234,6 +2387,8 @@ pub(super) fn lower_terminator(
                             .filter_map(|t| abi_type_to_cranelift(*t))
                             .collect();
                         let mut arg_values: Vec<ir::Value> = Vec::with_capacity(args.len());
+                        let stored_value = super::lowering_calls::map_stored_value_arg(name);
+                        let mut minted = None;
                         for (idx, op) in args.iter().enumerate() {
                             let mut v = if idx == 1 && gossamer_abi::takes_elem_by_address(name) {
                                 lower_elem_by_address(
@@ -2248,6 +2403,18 @@ pub(super) fn lower_terminator(
                                     module, builder, locals, body, tcx, op, None, intrinsics,
                                 )?
                             };
+                            // A map entry holds a counted copy of a by-value aggregate.
+                            if let Some((value_idx, release)) = stored_value
+                                && idx == value_idx
+                                && let Some(blob) = super::lowering_calls::map_value_copy(
+                                    module, builder, intrinsics, body, tcx, op, v,
+                                )?
+                            {
+                                v = blob;
+                                if release {
+                                    minted = Some(blob);
+                                }
+                            }
                             if let Some(want) = logical.get(idx).copied() {
                                 v = coerce_arg_to(builder, v, want)?;
                             }
@@ -2260,6 +2427,11 @@ pub(super) fn lower_terminator(
                             entry.name,
                             &arg_values,
                         )?;
+                        if let Some(blob) = minted {
+                            super::lowering_calls::release_map_value_copy(
+                                module, builder, intrinsics, blob,
+                            )?;
+                        }
                         if let Some(ret) = result {
                             store_runtime_call_result(
                                 module,

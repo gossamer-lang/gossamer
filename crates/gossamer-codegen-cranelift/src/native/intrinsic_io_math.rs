@@ -1089,12 +1089,45 @@ pub(super) fn lower_intrinsic_call_io_math(
                     sig_params.push(ty);
                 }
             }
+            let mut minted = None;
             if has_word {
-                let w = match args.get(3) {
-                    Some(arg) => {
-                        lower_operand(module, builder, locals, body, tcx, arg, None, intrinsics)?
+                let w = if static_name == "gos_rt_map_get_or_ekey" {
+                    super::intrinsic_handles::map_default_word(
+                        module,
+                        builder,
+                        locals,
+                        body,
+                        tcx,
+                        args.get(3),
+                        intrinsics,
+                    )?
+                } else {
+                    let w = match args.get(3) {
+                        Some(arg) => lower_operand(
+                            module, builder, locals, body, tcx, arg, None, intrinsics,
+                        )?,
+                        None => builder.ins().iconst(types::I64, 0),
+                    };
+                    // A map entry holds a counted copy of a by-value aggregate.
+                    match (
+                        super::lowering_calls::map_stored_value_arg(static_name),
+                        args.get(3),
+                    ) {
+                        (Some((3, release)), Some(arg)) => {
+                            match super::lowering_calls::map_value_copy(
+                                module, builder, intrinsics, body, tcx, arg, w,
+                            )? {
+                                Some(blob) => {
+                                    if release {
+                                        minted = Some(blob);
+                                    }
+                                    blob
+                                }
+                                None => w,
+                            }
+                        }
+                        _ => w,
                     }
-                    None => builder.ins().iconst(types::I64, 0),
                 };
                 call_args.push(coerce_arg_to(builder, w, types::I64).unwrap_or(w));
                 sig_params.push(types::I64);
@@ -1109,13 +1142,32 @@ pub(super) fn lower_intrinsic_call_io_math(
                 &call_args,
             )?
             .unwrap_or_else(|| builder.ins().iconst(ret_ty, 0));
-            define_var_to(
-                builder,
-                locals,
-                &intrinsics.body_cl_types,
-                destination.local,
-                result,
-            );
+            if let Some(blob) = minted {
+                super::lowering_calls::release_map_value_copy(module, builder, intrinsics, blob)?;
+            }
+            if matches!(
+                static_name,
+                "gos_rt_map_get_or_ekey" | "gos_rt_map_or_insert_ekey"
+            ) {
+                super::intrinsic_handles::define_map_read(
+                    module,
+                    builder,
+                    locals,
+                    body,
+                    tcx,
+                    intrinsics,
+                    destination,
+                    result,
+                )?;
+            } else {
+                define_var_to(
+                    builder,
+                    locals,
+                    &intrinsics.body_cl_types,
+                    destination.local,
+                    result,
+                );
+            }
             Ok(true)
         }
         "gos_rt_vec_set_slot_children" => {
@@ -1163,6 +1215,8 @@ pub(super) fn lower_intrinsic_call_io_math(
         // and a reference holds the address of one.
         "gos_rt_map_field_release"
         | "gos_rt_map_field_clone"
+        | "gos_rt_json_field_clone"
+        | "gos_rt_json_field_release"
         | "gos_rt_set_field_release"
         | "gos_rt_set_field_clone"
         | "gos_rt_deque_field_release"
@@ -1225,6 +1279,8 @@ pub(super) fn lower_intrinsic_call_io_math(
             // The interner keeps the symbol for the module's lifetime, so the
             // name is re-spelled as a literal rather than borrowed from the MIR.
             let sym: &'static str = match name {
+                "gos_rt_json_field_clone" => "gos_rt_json_field_clone",
+                "gos_rt_json_field_release" => "gos_rt_json_field_release",
                 "gos_rt_map_field_clone" => "gos_rt_map_field_clone",
                 "gos_rt_map_field_release" => "gos_rt_map_field_release",
                 "gos_rt_set_field_clone" => "gos_rt_set_field_clone",
@@ -1352,7 +1408,8 @@ pub(super) fn lower_intrinsic_call_io_math(
         }
         "gos_rt_option_slot_retain"
         | "gos_rt_option_slot_retain_ok"
-        | "gos_rt_option_slot_release" => {
+        | "gos_rt_option_slot_release"
+        | "gos_rt_option_slot_release_ok" => {
             // The helpers read the payload word beside the discriminant, so
             // they take the carrier's address. A carrier this backend holds by
             // value is spilled to a slot for the call, and a release reads it
@@ -1364,6 +1421,7 @@ pub(super) fn lower_intrinsic_call_io_math(
             let sym: &'static str = match name {
                 "gos_rt_option_slot_retain" => "gos_rt_option_slot_retain",
                 "gos_rt_option_slot_retain_ok" => "gos_rt_option_slot_retain_ok",
+                "gos_rt_option_slot_release_ok" => "gos_rt_option_slot_release_ok",
                 _ => "gos_rt_option_slot_release",
             };
             let f = intrinsics.extern_fn(module, sym, &[ptr_ty], &[])?;
@@ -1373,7 +1431,10 @@ pub(super) fn lower_intrinsic_call_io_math(
                 spill_carrier_local(module, builder, locals, body, tcx, place, intrinsics)
             {
                 builder.ins().call(fref, &[addr]);
-                if sym == "gos_rt_option_slot_release" {
+                if matches!(
+                    sym,
+                    "gos_rt_option_slot_release" | "gos_rt_option_slot_release_ok"
+                ) {
                     reload_carrier_local(builder, var, addr);
                 }
                 return Ok(true);
@@ -1679,16 +1740,11 @@ pub(super) fn lower_intrinsic_call_io_math(
                         off,
                     );
                 }
-                // A view of a box its caller keeps takes no shares.
+                // Value-container fields acquire handles in the destination copy.
                 if !gossamer_mir::is_payload_view(args) {
-                    let retain = intrinsics.extern_fn(
-                        module,
-                        "gos_rt_rc_retain_children",
-                        &[ptr_ty],
-                        &[],
+                    super::lowering_stmt_term::static_aggregate_children(
+                        module, builder, intrinsics, tcx, dest_ty, dst, true, true,
                     )?;
-                    let retain_ref = module.declare_func_in_func(retain, builder.func);
-                    builder.ins().call(retain_ref, &[v]);
                 }
                 builder.ins().jump(after_b, &[]);
                 builder.switch_to_block(after_b);
@@ -1702,6 +1758,22 @@ pub(super) fn lower_intrinsic_call_io_math(
                 );
                 return Ok(true);
             }
+            // A one-word aggregate's word lives in the slot: an in-place
+            // binding names the slot (null for a tagged-null unit variant), a
+            // read takes a copy of its own.
+            let bound_ty = match tcx.kind_of(dest_ty) {
+                TyKind::Ref { inner, .. } => *inner,
+                _ => dest_ty,
+            };
+            let v = if !inline_word_aggregate(tcx, bound_ty) {
+                v
+            } else if name == "gos_enum_slot_ptr" {
+                let slot = builder.ins().iadd(base, off);
+                let zero = builder.ins().iconst(types::I64, 0);
+                builder.ins().select(base, slot, zero)
+            } else {
+                inline_word_local(builder, module, v)
+            };
             define_var_to(
                 builder,
                 locals,
@@ -2102,6 +2174,19 @@ pub(super) fn lower_intrinsic_call_io_math(
             let offset_val = coerce_arg_to(builder, offset_raw, types::I64).unwrap_or(offset_raw);
             // The wide store keeps both words of a two-word carrier; every
             // other slot in the language is the one word `gos_store` writes.
+            // A one-word aggregate local names its word's address; the slot
+            // takes the word.
+            let value = match &args[2] {
+                Operand::Copy(place)
+                    if place.projection.is_empty()
+                        && inline_word_aggregate(tcx, body.local_ty(place.local)) =>
+                {
+                    builder
+                        .ins()
+                        .load(types::I64, MemFlagsData::trusted(), value, 0)
+                }
+                _ => value,
+            };
             let value = if name == "gos_store_i128" {
                 coerce_arg_to(builder, value, types::I128).unwrap_or(value)
             } else {
@@ -2152,12 +2237,25 @@ pub(super) fn lower_intrinsic_call_io_math(
             } else {
                 builder.ins().ireduce(ptr_ty, addr_i64)
             };
+            // A two-word value is held in both of its words.
+            let width = if destination.projection.is_empty()
+                && tcx.is_two_word_value(body.local_ty(destination.local))
+            {
+                types::I128
+            } else {
+                types::I64
+            };
             let loaded = builder.ins().load(
-                types::I64,
+                width,
                 MemFlagsData::trusted(),
                 addr,
                 ir::immediates::Offset32::new(0),
             );
+            let loaded = if inline_word_aggregate(tcx, body.local_ty(destination.local)) {
+                inline_word_local(builder, module, loaded)
+            } else {
+                loaded
+            };
             define_var_to(
                 builder,
                 locals,
@@ -2628,4 +2726,22 @@ fn reload_carrier_local(builder: &mut FunctionBuilder<'_>, var: Variable, addr: 
         .load(types::I64, MemFlagsData::trusted(), addr, 8);
     let reloaded = builder.ins().iconcat(lo, hi);
     builder.def_var(var, reloaded);
+}
+
+/// The address of a fresh frame slot holding `word`: the representation a
+/// one-word aggregate local takes when its word is read out of a heap slot.
+fn inline_word_local(
+    builder: &mut FunctionBuilder<'_>,
+    module: &dyn Module,
+    word: ir::Value,
+) -> ir::Value {
+    let ptr_ty = module.target_config().pointer_type();
+    let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+        cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+        8,
+        3,
+    ));
+    let addr = builder.ins().stack_addr(ptr_ty, slot, 0);
+    builder.ins().store(MemFlagsData::trusted(), word, addr, 0);
+    addr
 }

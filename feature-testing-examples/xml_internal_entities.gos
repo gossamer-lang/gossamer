@@ -1,0 +1,54 @@
+// `xml::parse` expands the general entities a document's internal DTD
+// subset declares, in text and in attribute values, and resolves references
+// in attribute values; nested references and markup in replacement text
+// expand too, and runaway expansion is an error.
+use std::encoding::{json, xml}
+
+fn show(label: String, text: String) {
+    match xml::parse(text) {
+        Ok(node) => println(f"{label}: {json::render(node)}")
+        Err(e) => println(f"{label}: error {e}")
+    }
+}
+
+fn main() {
+    show("text and attributes", """
+    <!DOCTYPE svg [
+        <!ENTITY st1 "fill:#ff0000;">
+        <!ENTITY ns_x "http://example.com/x">
+    ]>
+    <svg xmlns:x="&ns_x;" style="&st1;">&st1; &amp;</svg>
+    """)
+    show("nested, markup, character references", """
+    <!DOCTYPE doc [
+        <!-- a comment with <!ENTITY fake "no"> inside -->
+        <!ENTITY % param "ignored">
+        <!ENTITY who "World">
+        <!ENTITY greet "Hello, &who;&#33;">
+        <!ENTITY bold "<b>&greet; &amp; more</b>">
+        <!ENTITY who "Again">
+    ]>
+    <doc title="&greet;">before &bold; after</doc>
+    """)
+    show("attribute references", """<a href="x?a=1&amp;b=2" q="&quot;&#65;&#x42;"/>""")
+    let node = xml::parse("""<a href="x?a=1&amp;b=2">t &lt; u</a>""")
+    match node {
+        Ok(n) => println(f"round trip: {xml::encode(n)}")
+        Err(e) => println(f"round trip: error {e}")
+    }
+    show("undeclared", "<a>&nope;</a>")
+    show("markup in an attribute", """<!DOCTYPE a [<!ENTITY m "<b/>">]><a v="&m;"/>""")
+    show("runaway", """
+    <!DOCTYPE a [
+        <!ENTITY a0 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa">
+        <!ENTITY a1 "&a0;&a0;&a0;&a0;&a0;&a0;&a0;&a0;&a0;&a0;&a0;&a0;&a0;&a0;&a0;&a0;">
+        <!ENTITY a2 "&a1;&a1;&a1;&a1;&a1;&a1;&a1;&a1;&a1;&a1;&a1;&a1;&a1;&a1;&a1;&a1;">
+        <!ENTITY a3 "&a2;&a2;&a2;&a2;&a2;&a2;&a2;&a2;&a2;&a2;&a2;&a2;&a2;&a2;&a2;&a2;">
+        <!ENTITY a4 "&a3;&a3;&a3;&a3;&a3;&a3;&a3;&a3;&a3;&a3;&a3;&a3;&a3;&a3;&a3;&a3;">
+        <!ENTITY a5 "&a4;&a4;&a4;&a4;&a4;&a4;&a4;&a4;&a4;&a4;&a4;&a4;&a4;&a4;&a4;&a4;">
+        <!ENTITY a6 "&a5;&a5;&a5;&a5;&a5;&a5;&a5;&a5;&a5;&a5;&a5;&a5;&a5;&a5;&a5;&a5;">
+    ]>
+    <a>&a6;</a>
+    """)
+    show("self reference", """<!DOCTYPE a [<!ENTITY r "x&r;">]><a>&r;</a>""")
+}

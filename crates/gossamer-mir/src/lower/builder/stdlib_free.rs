@@ -600,9 +600,10 @@ impl<'a> Builder<'a> {
     /// Returns `None` for anything but a materialised sequence of 2-tuples,
     /// leaving the fixed-array fast path each backend unrolls to run.
     /// `Map::from([(k, v), ...])` where `k` is a struct, tuple, or fixed
-    /// array. Such a key is content-hashed through its slot descriptor, which
-    /// only the `skey` entry points accept, so the literal's entries are
-    /// inserted one by one here rather than through a backend's array walk.
+    /// array, or `v` is an aggregate. Such a key is content-hashed through its
+    /// slot descriptor, which only the `skey` entry points accept, and such a
+    /// value crosses as a counted blob, so the literal's entries are inserted
+    /// one by one here rather than through a backend's word-typed array walk.
     fn lower_map_from_aggregate_key_literal(
         &mut self,
         arg: &HirExpr,
@@ -627,8 +628,16 @@ impl<'a> Builder<'a> {
         // A struct, tuple, or array key content-hashes through its slot
         // descriptor; a user enum key hashes by discriminant and payload, as
         // `m.insert(k, v)` keys one.
+        let map_ty = self.tcx.intern(TyKind::HashMap {
+            key: key_ty,
+            value: val_ty,
+            ordered,
+        });
         let (insert, descriptor) = if self.is_aggregate_key(key_ty) {
-            ("gos_rt_map_insert_skey_opt", self.key_descriptor(key_ty)?)
+            (
+                "gos_rt_map_insert_skey_opt",
+                Some(self.key_descriptor(key_ty)?),
+            )
         } else if self.struct_name_of(key_ty).is_none()
             && let Some(desc) = self.ensure_enum_eq_desc(key_ty)
         {
@@ -636,15 +645,17 @@ impl<'a> Builder<'a> {
             if self.is_inline_aggregate_ty(val_ty) {
                 let _ = self.ensure_aggr_copy_meta(val_ty);
             }
-            ("gos_rt_map_insert_ekey_opt", desc)
+            ("gos_rt_map_insert_ekey_opt", Some(desc))
+        } else if self.is_inline_aggregate_ty(val_ty) || self.map_value_is_carrier(map_ty) {
+            // An aggregate value crosses an insert as one handle word whose
+            // blob owns the heap children the structural meta names, the
+            // shape `m.insert(k, v)` gives it.
+            let _ = self.ensure_aggr_struct_meta(val_ty);
+            let _ = self.ensure_aggr_copy_meta(val_ty);
+            (self.map_insert_helper(map_ty), None)
         } else {
             return None;
         };
-        let map_ty = self.tcx.intern(TyKind::HashMap {
-            key: key_ty,
-            value: val_ty,
-            ordered,
-        });
         let ctor = if ordered { "BTreeMap::new" } else { "Map::new" };
         let map = self.emit_stdlib_free_call(ctor, map_ty, &[], span)?;
         let prior_ty = self.option_payload_adt_ty(val_ty);
@@ -669,17 +680,15 @@ impl<'a> Builder<'a> {
                 })),
                 span,
             );
-            let _ = self.emit_combinator_call(
-                insert,
-                vec![
-                    Operand::Copy(Place::local(map)),
-                    Operand::Copy(Place::local(key)),
-                    Operand::Const(ConstValue::Str(descriptor.clone())),
-                    Operand::Copy(Place::local(value)),
-                ],
-                prior_ty,
-                span,
-            );
+            let mut args = vec![
+                Operand::Copy(Place::local(map)),
+                Operand::Copy(Place::local(key)),
+            ];
+            if let Some(desc) = &descriptor {
+                args.push(Operand::Const(ConstValue::Str(desc.clone())));
+            }
+            args.push(Operand::Copy(Place::local(value)));
+            let _ = self.emit_combinator_call(insert, args, prior_ty, span);
         }
         Some(map)
     }
@@ -2201,6 +2210,7 @@ impl<'a> Builder<'a> {
             "image::width" => ("gos_rt_image_width", i64_ty),
             "image::height" => ("gos_rt_image_height", i64_ty),
             "image::pixel" => ("gos_rt_image_pixel", i64_ty),
+            "image::release" => ("gos_rt_image_release", self.tcx.bool_ty()),
             "image::set_pixel" => ("gos_rt_image_set_pixel", self.tcx.bool_ty()),
             "image::from_rgba_bytes" => ("gos_rt_image_from_rgba_bytes", i64_ty),
             "image::to_rgba_bytes" => {

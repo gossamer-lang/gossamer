@@ -68,10 +68,15 @@ impl PartialEq<&str> for TypeTag {
 /// The leak is bounded by that set, not by call count.
 #[must_use]
 pub(crate) fn intern_type_name(name: &str) -> &'static str {
-    static INTERNED: OnceLock<parking_lot::Mutex<rustc_hash::FxHashSet<&'static str>>> =
+    // Every struct and variant value built on any goroutine looks its name up
+    // here, and almost every lookup hits, so hits share a read lock.
+    static INTERNED: OnceLock<parking_lot::RwLock<rustc_hash::FxHashSet<&'static str>>> =
         OnceLock::new();
-    let set = INTERNED.get_or_init(|| parking_lot::Mutex::new(rustc_hash::FxHashSet::default()));
-    let mut guard = set.lock();
+    let set = INTERNED.get_or_init(|| parking_lot::RwLock::new(rustc_hash::FxHashSet::default()));
+    if let Some(&s) = set.read().get(name) {
+        return s;
+    }
+    let mut guard = set.write();
     if let Some(&s) = guard.get(name) {
         return s;
     }

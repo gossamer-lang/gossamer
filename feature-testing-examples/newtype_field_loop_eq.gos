@@ -1,0 +1,16 @@
+// An enum whose only field is a newtype compares by that field when the
+// value is a `for` loop's binding, not by the slot it is read from.
+
+newtype Id = u32
+
+enum Ev {
+    Occluded { window: Id }
+}
+
+fn main() {
+    let id: Id = 2u32.into()
+    let a = Ev::Occluded { window: id }
+    for x in #[Ev::Occluded { window: id }] {
+        println(f"{x == a}")
+    }
+}

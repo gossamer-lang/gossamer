@@ -626,6 +626,10 @@ impl<'a> Lowerer<'a> {
                 .unwrap();
                 a_v = copy;
             }
+            if result_new_heap_copy && i == 1 && self.is_field_free_operand(arg) {
+                arg_text.push_str("i64 0");
+                continue;
+            }
             if result_new_heap_copy
                 && i == 1
                 && let Some(heap_v) = self

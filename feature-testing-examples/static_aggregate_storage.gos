@@ -1,0 +1,22 @@
+struct Entry { label: String, values: Vec<i64>, index: Map<String, i64> }
+
+static mut CURRENT: Entry = Entry { label: "first", values: #[1, 2], index: { "a": 3 } }
+static NAMES: [String; 2] = ["alpha", "beta"]
+
+fn replace() {
+    CURRENT = Entry { label: f"next {2}", values: #[4, 5], index: { "b": 6 } }
+}
+
+fn main() {
+    let mut first = CURRENT
+    first.values.push(9)
+    first.index["a"] = 8
+    println(f"{CURRENT.label} {CURRENT.values.len()} {CURRENT.index["a"]}")
+    replace()
+    let mut next = CURRENT
+    next.values.push(10)
+    next.index["b"] = 11
+    println(f"{CURRENT.label} {CURRENT.values.len()} {CURRENT.index["b"]}")
+    println(f"{first.label} {first.values.len()} {first.index["a"]}")
+    for _ in 0..3 { println(f"{NAMES[0]} {NAMES[1]}") }
+}

@@ -2313,10 +2313,10 @@ pub(crate) fn register_effects(
             effect.v_reads.push(map_reg);
             effect.i_reads.push(key_i);
         }
+        Op::Return { value } => effect.v_reads.push(value),
         Op::LoadConst { .. }
         | Op::LoadGlobal { .. }
         | Op::Jump { .. }
-        | Op::Return { .. }
         | Op::ReturnUnit
         | Op::ResumeUnwind
         | Op::Panic { .. }
@@ -3169,6 +3169,8 @@ mod tests {
             value_reg: 0,
             bind_reg: 0,
             body_block: 99,
+            takes_value: false,
+            takes_close: false,
         });
         bad_body.instrs = vec![Op::Select { first: 0, count: 1 }, Op::ReturnUnit];
         assert!(matches!(
@@ -3184,6 +3186,8 @@ mod tests {
             value_reg: 0,
             bind_reg: 0,
             body_block: 1,
+            takes_value: false,
+            takes_close: false,
         });
         bad_recv_reg.instrs = vec![Op::Select { first: 0, count: 1 }, Op::ReturnUnit];
         assert!(matches!(
@@ -3202,6 +3206,8 @@ mod tests {
             value_reg: 1,
             bind_reg: 0,
             body_block: 1,
+            takes_value: false,
+            takes_close: false,
         });
         bad_send_reg.instrs = vec![Op::Select { first: 0, count: 1 }, Op::ReturnUnit];
         assert!(matches!(

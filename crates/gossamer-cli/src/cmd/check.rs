@@ -265,7 +265,7 @@ fn check_unit(
     // `build`. The fold runs the program, so a failure is reported only
     // once the front end has accepted the unfolded unit - the order the
     // editor uses - and the front end's warnings are reported alongside it.
-    let prepared = crate::unit_cache::prepare(&user_source, &file.to_string_lossy());
+    let prepared = crate::unit_cache::prepare(&user_source, &file.to_string_lossy(), &unit.origins);
     let source = prepared.source;
     let mut map = gossamer_lex::SourceMap::new();
     let file_id = map.add_file(file.to_string_lossy().into_owned(), source.clone());
@@ -586,7 +586,7 @@ fn recheck(file: &Path) -> usize {
 /// worse outcome than any diagnostic and is never an improvement.
 fn recheck_codes(file: &Path) -> Option<BTreeMap<String, usize>> {
     let unit = crate::paths::read_entry_unit(file).ok()?;
-    let prepared = crate::unit_cache::prepare(&unit.source, &file.to_string_lossy());
+    let prepared = crate::unit_cache::prepare(&unit.source, &file.to_string_lossy(), &unit.origins);
     if prepared.fold_error.is_some() {
         return None;
     }

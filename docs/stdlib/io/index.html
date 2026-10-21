@@ -2406,59 +2406,64 @@
 <td>Errors raised by I/O operations.</td>
 </tr>
 <tr>
+<td><code>MemoryStream</code></td>
+<td><code>type MemoryStream</code></td>
+<td>An in-memory reader or writer made by the functions below. Copies of a stream name the same stream, and adapters built on it keep it alive; it is freed with the last of them.</td>
+</tr>
+<tr>
 <td><code>string_reader</code></td>
-<td><code>fn string_reader(text: String) -&gt; i64</code></td>
-<td><code>string_reader(text: String) -&gt; i64</code> - a Reader handle over an in-memory buffer. Reader and Writer handles are plain integers, so the adapters below compose by value. Example: <code>let src = io::string_reader("hello")</code>.</td>
+<td><code>fn string_reader(text: String) -&gt; io::MemoryStream</code></td>
+<td><code>string_reader(text: String) -&gt; io::MemoryStream</code> - a reader over an in-memory buffer. The adapters below compose streams by value. Example: <code>let src = io::string_reader("hello")</code>.</td>
 </tr>
 <tr>
 <td><code>buffer_writer</code></td>
-<td><code>fn buffer_writer() -&gt; i64</code></td>
-<td><code>buffer_writer() -&gt; i64</code> - a Writer handle collecting everything written to it; read it back with <code>io::contents</code>.</td>
+<td><code>fn buffer_writer() -&gt; io::MemoryStream</code></td>
+<td><code>buffer_writer() -&gt; io::MemoryStream</code> - a writer collecting everything written to it; read it back with <code>io::contents</code>.</td>
 </tr>
 <tr>
 <td><code>limit_reader</code></td>
-<td><code>fn limit_reader(src: i64, limit: i64) -&gt; i64</code></td>
-<td><code>limit_reader(src: i64, limit: i64) -&gt; i64</code> - a Reader yielding at most <code>limit</code> bytes from <code>src</code>, Go's <code>io.LimitReader</code>. Example: <code>io::drain(io::limit_reader(src, 5))</code>.</td>
+<td><code>fn limit_reader(src: io::MemoryStream, limit: i64) -&gt; io::MemoryStream</code></td>
+<td><code>limit_reader(src: io::MemoryStream, limit: i64) -&gt; io::MemoryStream</code> - a reader yielding at most <code>limit</code> bytes from <code>src</code>, Go's <code>io.LimitReader</code>. Example: <code>io::drain(io::limit_reader(src, 5))</code>.</td>
 </tr>
 <tr>
 <td><code>tee_reader</code></td>
-<td><code>fn tee_reader(src: i64, sink: i64) -&gt; i64</code></td>
-<td><code>tee_reader(src: i64, sink: i64) -&gt; i64</code> - a Reader mirroring every byte read from <code>src</code> into the Writer <code>sink</code>, Go's <code>io.TeeReader</code>.</td>
+<td><code>fn tee_reader(src: io::MemoryStream, sink: io::MemoryStream) -&gt; io::MemoryStream</code></td>
+<td><code>tee_reader(src: io::MemoryStream, sink: io::MemoryStream) -&gt; io::MemoryStream</code> - a reader mirroring every byte read from <code>src</code> into the writer <code>sink</code>, Go's <code>io.TeeReader</code>.</td>
 </tr>
 <tr>
 <td><code>multi_reader</code></td>
-<td><code>fn multi_reader(sources: Vec&lt;i64&gt;) -&gt; i64</code></td>
-<td><code>multi_reader(sources: Vec&lt;i64&gt;) -&gt; i64</code> - a Reader draining each source in turn, Go's <code>io.MultiReader</code>. Example: <code>io::multi_reader(#[a, b])</code>.</td>
+<td><code>fn multi_reader(sources: Vec&lt;io::MemoryStream&gt;) -&gt; io::MemoryStream</code></td>
+<td><code>multi_reader(sources: Vec&lt;io::MemoryStream&gt;) -&gt; io::MemoryStream</code> - a reader draining each source in turn, Go's <code>io.MultiReader</code>. Example: <code>io::multi_reader(#[a, b])</code>.</td>
 </tr>
 <tr>
 <td><code>pipe</code></td>
-<td><code>fn pipe() -&gt; (i64, i64)</code></td>
-<td><code>pipe() -&gt; (i64, i64)</code> - a connected <code>(reader, writer)</code> pair sharing one in-memory buffer. Reads return the bytes written so far and never block; <code>io::close_writer</code> marks the writer done. Example: <code>let r, w = io::pipe()</code>.</td>
+<td><code>fn pipe() -&gt; (io::MemoryStream, io::MemoryStream)</code></td>
+<td><code>pipe() -&gt; (io::MemoryStream, io::MemoryStream)</code> - a connected <code>(reader, writer)</code> pair sharing one in-memory buffer. Reads return the bytes written so far and never block; <code>io::close_writer</code> marks the writer done. Example: <code>let r, w = io::pipe()</code>.</td>
 </tr>
 <tr>
 <td><code>copy_n</code></td>
-<td><code>fn copy_n(dst: i64, src: i64, n: i64) -&gt; Result&lt;i64, errors::Error&gt;</code></td>
-<td><code>copy_n(dst: i64, src: i64, n: i64) -&gt; Result&lt;i64, errors::Error&gt;</code> - copies at most <code>n</code> bytes and returns the count actually transferred. Go's <code>io.CopyN</code>.</td>
+<td><code>fn copy_n(dst: io::MemoryStream, src: io::MemoryStream, n: i64) -&gt; Result&lt;i64, errors::Error&gt;</code></td>
+<td><code>copy_n(dst: io::MemoryStream, src: io::MemoryStream, n: i64) -&gt; Result&lt;i64, errors::Error&gt;</code> - copies at most <code>n</code> bytes and returns the count actually transferred. Go's <code>io.CopyN</code>.</td>
 </tr>
 <tr>
 <td><code>drain</code></td>
-<td><code>fn drain(src: i64) -&gt; String</code></td>
-<td><code>drain(src: i64) -&gt; String</code> - reads a Reader handle to end of stream as UTF-8 text.</td>
+<td><code>fn drain(src: io::MemoryStream) -&gt; String</code></td>
+<td><code>drain(src: io::MemoryStream) -&gt; String</code> - reads a reader to the end of stream as UTF-8 text.</td>
 </tr>
 <tr>
 <td><code>contents</code></td>
-<td><code>fn contents(writer: i64) -&gt; String</code></td>
-<td><code>contents(writer: i64) -&gt; String</code> - everything written to a buffer or pipe Writer, as UTF-8 text.</td>
+<td><code>fn contents(writer: io::MemoryStream) -&gt; String</code></td>
+<td><code>contents(writer: io::MemoryStream) -&gt; String</code> - everything written to a buffer or pipe writer, as UTF-8 text.</td>
 </tr>
 <tr>
 <td><code>write</code></td>
-<td><code>fn write(writer: i64, text: String) -&gt; i64</code></td>
-<td><code>write(writer: i64, text: String) -&gt; i64</code> - appends text to a Writer handle and returns the byte count accepted.</td>
+<td><code>fn write(writer: io::MemoryStream, text: String) -&gt; i64</code></td>
+<td><code>write(writer: io::MemoryStream, text: String) -&gt; i64</code> - appends text to a writer and returns the byte count accepted.</td>
 </tr>
 <tr>
 <td><code>close_writer</code></td>
-<td><code>fn close_writer(writer: i64)</code></td>
-<td><code>close_writer(writer: i64)</code> - signals end of stream on a pipe Writer; later writes are rejected.</td>
+<td><code>fn close_writer(writer: io::MemoryStream)</code></td>
+<td><code>close_writer(writer: io::MemoryStream)</code> - signals end of stream on a pipe writer; later writes are rejected.</td>
 </tr>
 </tbody>
 </table>

@@ -2,8 +2,8 @@
 
 use super::{
     FILE_SERVER_OFFSET, LEGACY_HANDLE_CTORS, PURE_HANDLE_HI_OFFSET, PURE_HANDLE_LO_OFFSET,
-    PURE_HANDLES, SYNC_HANDLE_LO_OFFSET, TRACE_ENDED_SPAN_OFFSET, TRACE_SPAN_OFFSET, Ty,
-    U8_VEC_OFFSET,
+    PURE_HANDLES, SYNC_HANDLE_HI_OFFSET, SYNC_HANDLE_LO_OFFSET, TRACE_ENDED_SPAN_OFFSET,
+    TRACE_SPAN_OFFSET, Ty, U8_VEC_OFFSET,
 };
 
 /// `(sentinel offset, name)` of the runtime handle the stdlib constructor
@@ -83,6 +83,7 @@ pub(super) const OPAQUE_HANDLE_OFFSETS: &[u32] = &[
     FILE_SERVER_OFFSET,
     super::WEBSOCKET_CONN_OFFSET,
     super::BYTES_BUFFER_OFFSET,
+    super::IO_STREAM_OFFSET,
 ];
 
 /// A parameter or return shape in [`HANDLE_METHODS`].
@@ -296,6 +297,14 @@ pub(super) fn atomic_method(
     }
 }
 
+/// True when `def` names a lock, wait group, once, barrier, or atomic: its
+/// methods change the state the handle shares, never the place holding it, so
+/// none needs a writable receiver.
+pub(super) fn is_sync_primitive_def(local: u32) -> bool {
+    let offset = u32::MAX - local;
+    offset == 35 || (SYNC_HANDLE_LO_OFFSET..SYNC_HANDLE_HI_OFFSET).contains(&offset)
+}
+
 /// True when `def` names a runtime handle rather than a value with a
 /// representation of its own.
 pub(super) fn is_opaque_handle_def(local: u32) -> bool {
@@ -317,9 +326,17 @@ pub(super) fn stdlib_handle_def_offset(tail: &str) -> Option<u32> {
         _ => {
             return stdlib_net_handle(tail)
                 .map(|(offset, _)| offset)
-                .or_else(|| stdlib_fs_handle(tail).map(|(offset, _)| offset));
+                .or_else(|| stdlib_fs_handle(tail).map(|(offset, _)| offset))
+                .or_else(|| stdlib_io_handle(tail).map(|(offset, _)| offset));
         }
     })
+}
+
+/// `(sentinel offset, canonical name)` for the in-memory `std::io` stream, so
+/// a written `io::MemoryStream` and a signature slot naming it land on one
+/// `Adt` under one spelling.
+pub(super) fn stdlib_io_handle(tail: &str) -> Option<(u32, &'static str)> {
+    (tail == "MemoryStream").then_some((super::IO_STREAM_OFFSET, "io::MemoryStream"))
 }
 
 /// `(sentinel offset, canonical name)` for the streaming filesystem

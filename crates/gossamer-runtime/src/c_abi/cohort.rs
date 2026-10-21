@@ -864,6 +864,14 @@ pub fn close_root() {
     pop_current();
 }
 
+/// Returns unused registry capacity after native main and its children finish.
+pub(crate) fn trim_idle_registries() {
+    COHORTS.lock().shrink_to_fit();
+    CURRENT_BY_GID.lock().shrink_to_fit();
+    CHILD_HANDLES.lock().shrink_to_fit();
+    OBSERVED_AHEAD.lock().shrink_to_fit();
+}
+
 /// The spawn indices of `node`'s children that never left, as a phrase to
 /// append to a drain report. Empty when every child finished: an
 /// unfinished child is what the invariant is about, so it is named rather

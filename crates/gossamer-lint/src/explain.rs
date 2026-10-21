@@ -105,9 +105,11 @@ pub fn lint_explanation(id: &str) -> Option<&'static str> {
             Drop the `let`."
         }
         "float_eq_zero" => {
-            "Equality against a float literal is almost never what you want -\n\
-            floating-point arithmetic rarely produces the exact bit pattern.\n\
-            Compare `(x - y).abs() < eps` with an explicit tolerance."
+            "Equality against a nonzero float literal is almost never what you\n\
+            want - floating-point arithmetic rarely produces the exact bit\n\
+            pattern. Compare `(x - y).abs() < eps` with an explicit tolerance.\n\
+            Exact zero is exempt: a guard such as `if d == 0.0` before a\n\
+            division tests the one value that matters exactly."
         }
         "empty_else" => {
             "`else {}` adds no information. Drop the else and let the `if`\n\

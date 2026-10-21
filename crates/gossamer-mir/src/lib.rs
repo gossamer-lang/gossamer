@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod cleanup;
+mod const_tables;
 mod dce;
 mod escape;
 mod ir;
@@ -25,6 +26,7 @@ pub use cleanup::{
     CleanupEntry, CleanupPlan, DropAt, HEAP_ALLOCATOR_PAIRS, plan as plan_cleanup,
     plan_with_summary as plan_cleanup_with_summary,
 };
+pub use const_tables::constant_table_locals;
 pub use dce::{PruneReport, Scope, prune_scoped, prune_unreachable};
 pub use escape::{
     CaptureSummary, EscapeSet, analyse as analyse_escape,
@@ -45,7 +47,11 @@ pub use lower::builder::unwind::{
 pub use lower::helpers::effects::{
     FnEffects, ParamEffects, ProgramEffects, collect_program_effects,
 };
-pub use lower::helpers::escape::{ParamShare, collect_shareable_params};
+pub use lower::helpers::escape::{ParamShare, ShareSummaries, collect_shareable_params};
+pub use lower::helpers::{
+    AggregateOwnershipField, aggregate_ownership_fields, is_option_slot_holder,
+    option_slot_helpers, value_ownership_fields,
+};
 pub use lower::{is_payload_view, map_value_owner_marker};
 pub use lower::{lower_program, mangle_callable_shape};
 pub use monomorph::{

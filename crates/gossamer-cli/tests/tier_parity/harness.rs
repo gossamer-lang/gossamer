@@ -728,6 +728,33 @@ const SPECS: &[Spec] = &[
     // ordering (all six operators) are bit-identical across tiers (the VM
     // walks them at runtime; compiled routes to gos_rt_tuple_cmp / vec_eq).
     spec("feature-testing-examples/aggregate_compare.gos"),
+    // Structs and enums compare and order by their fields whatever they
+    // hold - newtypes, carriers, sequences, nested and mutually recursive
+    // enums, type parameters - including a by-value enum bound by a `for`
+    // loop and a newtype another module re-exports.
+    spec("feature-testing-examples/structural_compare_fields.gos"),
+    spec("feature-testing-examples/newtype_field_loop_eq.gos"),
+    spec("feature-testing-examples/reexported_newtype_field_eq.gos"),
+    // A struct read out of a sequence by index and answered by value owns
+    // its fields, whether a method, a `let`, or a `static mut` hands it back.
+    spec("feature-testing-examples/element_returned_by_value.gos"),
+    // A derived `default()` fills newtype and tuple fields and is reached by
+    // `Type::default()` inside the module that declares the type.
+    spec("feature-testing-examples/derive_default_in_module.gos"),
+    // A pattern names its enum through `super::`, `crate::`, or `self::`.
+    spec("feature-testing-examples/qualified_pattern_paths.gos"),
+    // `unicode::word_bounds` answers its segments as strings on every tier.
+    spec("feature-testing-examples/unicode_word_bounds_segments.gos"),
+    // `Key::S` stays a variant pattern beside a module's `const S`; a const
+    // named in a pattern still matches by value.
+    spec("feature-testing-examples/variant_named_like_a_const.gos"),
+    // A module's `static mut` is reached by its path beside a parameter
+    // named like the module.
+    spec("feature-testing-examples/module_static_beside_same_named_local.gos"),
+    // Aggregates of scalars, strings, and handles cross a spawned call.
+    spec("feature-testing-examples/spawn_aggregate_arguments.gos"),
+    // A generic type's method taking `Fn(M) -> ..` accepts a named function.
+    spec("feature-testing-examples/generic_method_takes_named_fn.gos"),
     // `sort_by_key` / `sort_by_key_desc` Vec methods with scalar and tuple
     // (multi-key) keys; the key body is inlined into a `sort_by` comparator
     // that orders with `<`, identical on every tier.
@@ -1545,6 +1572,53 @@ const SPECS: &[Spec] = &[
     },
     spec("feature-testing-examples/rc_release_drops.gos"),
     spec("feature-testing-examples/map_insert_borrowed_key_rc.gos"),
+    spec("feature-testing-examples/map_index_parameter_key_rc.gos"),
+    spec("feature-testing-examples/map_enum_value_replacement.gos"),
+    spec("feature-testing-examples/module_scoped_structural_derives.gos"),
+    spec("feature-testing-examples/static_shared_atomic_handles.gos"),
+    spec("feature-testing-examples/static_aggregate_storage.gos"),
+    spec("feature-testing-examples/static_aggregate_carrier_storage.gos"),
+    spec("feature-testing-examples/static_carrier_aggregate_payload.gos"),
+    spec("feature-testing-examples/fd_descriptor_user_impl.gos"),
+    spec("feature-testing-examples/jit_scalar_static_shared_cell.gos"),
+    spec("feature-testing-examples/jit_static_accessor_callers.gos"),
+    spec("feature-testing-examples/sort_by_key_callable_keys.gos"),
+    spec("feature-testing-examples/newtype_fields_in_variant_payloads.gos"),
+    spec("feature-testing-examples/read_only_bindings_share_storage.gos"),
+    spec("feature-testing-examples/jit_unit_enum_fields.gos"),
+    spec("feature-testing-examples/static_place_writes.gos"),
+    spec("feature-testing-examples/aggregate_element_streams.gos"),
+    spec("feature-testing-examples/shared_literal_storage.gos"),
+    spec("feature-testing-examples/carrier_map_payload_shares.gos"),
+    spec("feature-testing-examples/map_literal_string_entries.gos"),
+    spec("feature-testing-examples/enum_one_word_struct_payload.gos"),
+    spec("feature-testing-examples/callable_payloads_from_fn_items.gos"),
+    spec("feature-testing-examples/variant_named_like_module_item.gos"),
+    spec("feature-testing-examples/jit_enum_struct_variant_fields.gos"),
+    spec("feature-testing-examples/jit_struct_valued_maps.gos"),
+    spec("feature-testing-examples/jit_json_aggregate_locals.gos"),
+    spec("feature-testing-examples/struct_patterns_in_modules.gos"),
+    spec("feature-testing-examples/jit_struct_nested_and_atomic_fields.gos"),
+    spec("feature-testing-examples/jit_generic_struct_shapes.gos"),
+    spec("feature-testing-examples/closure_one_word_struct_capture.gos"),
+    spec("feature-testing-examples/closure_written_vec_returned.gos"),
+    spec("feature-testing-examples/lent_element_to_capturing_callee.gos"),
+    spec("feature-testing-examples/xml_internal_entities.gos"),
+    spec("feature-testing-examples/closure_captured_handles_escape.gos"),
+    spec("feature-testing-examples/jit_enum_struct_payloads.gos"),
+    spec("feature-testing-examples/jit_struct_boundary_shapes.gos"),
+    spec("feature-testing-examples/jit_byte_fields_and_unit_enums.gos"),
+    spec("feature-testing-examples/assoc_fn_closure_param_types.gos"),
+    spec("feature-testing-examples/stdlib_struct_rendering.gos"),
+    spec("feature-testing-examples/aggregate_field_share_transfer.gos"),
+    spec("feature-testing-examples/heap_enum_vector_field_return.gos"),
+    spec("feature-testing-examples/heap_enum_container_payload_copy.gos"),
+    spec("feature-testing-examples/map_tuple_payload_repeated_lookup.gos"),
+    spec("feature-testing-examples/native_owner_lifecycles.gos"),
+    spec("feature-testing-examples/method_vector_return_cleanup.gos"),
+    spec("feature-testing-examples/rebound_string_field_transfer.gos"),
+    spec("feature-testing-examples/carrier_unordered_payload_equality.gos"),
+    spec("feature-testing-examples/module_scoped_auto_derives.gos"),
     spec("feature-testing-examples/map_owned_struct_value_rc.gos"),
     spec("feature-testing-examples/mut_string_return.gos"),
     spec("feature-testing-examples/string_accumulator_return.gos"),
@@ -1662,6 +1736,7 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/static_map_of_structs.gos"),
     spec("feature-testing-examples/mut_field_beside_sibling_reads.gos"),
     spec("feature-testing-examples/param_stored_into_field.gos"),
+    spec("feature-testing-examples/cfg_inactive_static_mut.gos"),
     spec("feature-testing-examples/user_methods_named_like_carrier_predicates.gos"),
     Spec {
         allow_nonzero: true,
@@ -2104,6 +2179,9 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/local_const_initializers.gos"),
     // Unit values in sequences, tuples, and carriers.
     spec("feature-testing-examples/unit_values_in_containers.gos"),
+    // Arrays nested in arrays, tuples, structs, and map values, byte arrays
+    // included, and carriers found, captured, and read out of tuples.
+    spec("feature-testing-examples/nested_array_values.gos"),
     // Tail calls in `if` / `match` arms run past the VM frame limit.
     spec("feature-testing-examples/tail_calls_in_arms.gos"),
     // A closure opening a line, `let`-else over a slice with `mut`, an
@@ -2553,6 +2631,7 @@ fn run_jit(src: &Path, args: &[&str], stdin: &[u8]) -> Run {
     cmd.arg("run")
         .arg(src)
         .env("GOSSAMER_JIT_THRESHOLD", "1")
+        .env("GOSSAMER_JIT_MIN_WORK", "0")
         // Makes the Cranelift tier report how many native entries it
         // installed, so `parity_walk` can prove the run was not a second
         // bytecode-VM execution wearing the JIT's label.

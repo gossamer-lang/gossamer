@@ -119,9 +119,69 @@ fn comparison_to_bool_literal_fires() {
 }
 
 #[test]
-fn single_match_fires_with_one_arm() {
-    let diags = lint("fn demo(x: i64) -> i64 { match x { _ => 1i64 } }\n");
+fn single_match_fires_on_one_arm_beside_a_wildcard_that_does_nothing() {
+    let diags = lint("fn demo(x: Option<i64>) { match x { Some(v) => println(v), _ => () } }\n");
     assert!(has_code(&diags, "GL0007"), "{:?}", diags_codes(&diags));
+}
+
+#[test]
+fn single_match_is_silent_on_an_exhaustive_lone_arm_and_on_let_chains() {
+    let diags = lint(
+        "enum K { A { id: i64 }, B { id: i64 } }\n\
+         fn id(k: K) -> i64 { match k { K::A { id } | K::B { id } => id } }\n\
+         fn same(o: Option<i64>, n: i64) -> i64 { if let Some(c) = o && c == n { return 0 }\n n }\n",
+    );
+    assert!(!has_code(&diags, "GL0007"), "{:?}", diags_codes(&diags));
+    assert!(!has_code(&diags, "GL0021"), "{:?}", diags_codes(&diags));
+}
+
+#[test]
+fn if_not_else_is_silent_on_else_if_chains() {
+    let diags = lint(
+        "fn pick(a: bool, b: bool, o: Option<i64>) -> i64 {\n\
+         if !a { 1 } else if !b { 2 } else if let Some(v) = o { v } else if !a { 3 } else { 4 } }\n",
+    );
+    assert!(!has_code(&diags, "GL0034"), "{:?}", diags_codes(&diags));
+}
+
+#[test]
+fn if_not_else_is_silent_on_a_let_chain_without_else() {
+    let diags = lint(
+        "fn f(o: Option<String>, flag: bool) { if let Some(s) = o && flag && !s.is_empty() { println(s) } }\n",
+    );
+    assert!(!has_code(&diags, "GL0034"), "{:?}", diags_codes(&diags));
+}
+
+#[test]
+fn float_comparison_with_exact_zero_is_exempt() {
+    let diags = lint("fn ratio(n: f64, d: f64) -> f64 { if d == 0.0 { 0.0 } else { n / d } }\n");
+    assert!(!has_code(&diags, "GL0025"), "{:?}", diags_codes(&diags));
+    let diags = lint("fn half(d: f64) -> bool { d == 0.5 }\n");
+    assert!(has_code(&diags, "GL0025"), "{:?}", diags_codes(&diags));
+}
+
+#[test]
+fn redundant_closure_is_silent_on_an_interpolated_string() {
+    let diags = lint("fn show(xs: Vec<i64>) -> Vec<String> { xs.map(|x| f\"{x}\") }\n");
+    assert!(!has_code(&diags, "GL0041"), "{:?}", diags_codes(&diags));
+}
+
+#[test]
+fn same_arms_with_differently_typed_bindings_are_not_merged() {
+    let diags = lint(
+        "struct P { id: String }\nstruct Q { id: String }\n\
+         enum C { A(P), B(Q), D(P) }\n\
+         fn id(c: C) -> String { match c { C::A(p) => p.id, C::B(p) => p.id, C::D(p) => p.id } }\n",
+    );
+    assert_eq!(
+        diags_codes(&diags)
+            .iter()
+            .filter(|c| **c == "GL0037")
+            .count(),
+        1,
+        "{:?}",
+        diags_codes(&diags)
+    );
 }
 
 #[test]
@@ -148,6 +208,21 @@ fn empty_block_silent_on_else_less_if_let() {
     // parser-synthesized empty block, not a user mistake.
     let diags =
         lint("fn main() {\n let m = Some(1i64)\n if let Some(n) = m { let _y: i64 = n }\n}\n");
+    assert!(!has_code(&diags, "GL0010"), "{:?}", diags_codes(&diags));
+}
+
+#[test]
+fn empty_block_silent_on_an_empty_fn_body_and_a_do_nothing_match_arm() {
+    let diags =
+        lint("fn stub() {}\nfn main() {\n stub()\n match 2i64 {\n 1 => stub()\n _ => {}\n }\n}\n");
+    assert!(!has_code(&diags, "GL0010"), "{:?}", diags_codes(&diags));
+}
+
+#[test]
+fn empty_block_silent_on_a_drain_loop_whose_condition_does_the_work() {
+    let diags = lint(
+        "fn main() {\n let mut xs = #[1, 2, 3]\n while xs.pop().is_some() {}\n println(f\"{xs.len()}\")\n}\n",
+    );
     assert!(!has_code(&diags, "GL0010"), "{:?}", diags_codes(&diags));
 }
 

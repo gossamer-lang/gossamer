@@ -3,9 +3,9 @@ source: crates/gossamer-diagnostics/tests/snapshots.rs
 expression: rendered
 ---
 --- plain ---
-error[GT0055]: A by-value aggregate would cross a concurrency boundary whose compiled - here
+error[GT0055]: A by-value aggregate holding nested Vec storage would cross a - here
 --- framed ---
-error[GT0055]: A by-value aggregate would cross a concurrency boundary whose compiled
+error[GT0055]: A by-value aggregate holding nested Vec storage would cross a
   --> snap.gos:2:5
      2 |     let x = 1
        |     ^^^^^

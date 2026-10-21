@@ -298,27 +298,28 @@ impl<'a> Builder<'a> {
                 self.tcx.int_ty(gossamer_types::IntTy::I64),
             ),
             "io::ReadAll" => ("gos_rt_io_read_all", self.result_string_error_adt_ty()),
-            // Handle-based stream adapters: a Reader / Writer is an i64
-            // registry id, so the whole family composes as plain scalars
-            // across the C-ABI.
+            // The stream adapters answer an `io::MemoryStream`: a counted handle
+            // whose last share gives its registry row back.
             "io::string_reader" | "io::buffer_writer" | "io::limit_reader" | "io::tee_reader"
-            | "io::multi_reader" | "io::write" => {
-                let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+            | "io::multi_reader" => {
                 let sym = match joined {
                     "io::string_reader" => "gos_rt_io_string_reader",
                     "io::buffer_writer" => "gos_rt_io_buffer_writer",
                     "io::limit_reader" => "gos_rt_io_limit_reader",
                     "io::tee_reader" => "gos_rt_io_tee_reader",
-                    "io::multi_reader" => "gos_rt_io_multi_reader",
-                    _ => "gos_rt_io_write_str",
+                    _ => "gos_rt_io_multi_reader",
                 };
-                (sym, i64_ty)
+                (sym, self.sync_handle_ty(64))
             }
+            "io::write" => (
+                "gos_rt_io_write_str",
+                self.tcx.int_ty(gossamer_types::IntTy::I64),
+            ),
             "io::pipe" => {
-                let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+                let stream = self.sync_handle_ty(64);
                 let tup = self
                     .tcx
-                    .intern(gossamer_types::TyKind::Tuple(vec![i64_ty, i64_ty]));
+                    .intern(gossamer_types::TyKind::Tuple(vec![stream, stream]));
                 ("gos_rt_io_pipe", tup)
             }
             "io::copy_n" => ("gos_rt_io_copy_n", self.result_i64_error_adt_ty()),

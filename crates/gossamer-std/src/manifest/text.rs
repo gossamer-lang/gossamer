@@ -690,7 +690,7 @@ pub const UNICODE: StdModule = StdModule {
         StdItem {
             name: "fold_case",
             kind: StdItemKind::Function,
-            doc: "Simple case-folded comparison form for a string.",
+            doc: "Case-folded comparison form for a string (Unicode full case folding): two strings fold alike exactly when they match ignoring case, so `Straße` and `STRASSE` both fold to `strasse` and final sigma to sigma.",
         },
         StdItem {
             name: "nfc",
@@ -750,7 +750,7 @@ pub const UNICODE: StdModule = StdModule {
         StdItem {
             name: "word_bounds",
             kind: StdItemKind::Function,
-            doc: "UAX #29 word boundaries (includes punct + whitespace runs).",
+            doc: "UAX #29 word-boundary segments of a string, punctuation and whitespace runs included.",
         },
         StdItem {
             name: "word_count",

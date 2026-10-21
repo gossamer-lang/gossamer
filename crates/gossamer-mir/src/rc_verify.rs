@@ -664,6 +664,9 @@ mod tests {
                 })
                 .collect(),
             span: gossamer_lex::Span::default(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 

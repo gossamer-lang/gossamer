@@ -257,3 +257,29 @@ fn a_deque_binding_takes_the_table_its_constructor_built() {
         "a freshly built deque is bound without a copy: {names:?}"
     );
 }
+
+#[test]
+fn a_struct_update_still_pays_for_the_base_field_it_shares_after_a_handoff() {
+    let (bodies, _) = lower(
+        "struct N { tags: Vec<i64>, n: i64 }\nfn f() -> i64 {\n let a = N { tags: #[1, 2], n: 1 }\n let b = N { n: 2, ..a }\n b.tags[0] + a.tags.len()\n}\n",
+    );
+    let body = bodies.iter().find(|body| body.name == "f").expect("f");
+    let retains = body
+        .blocks
+        .iter()
+        .flat_map(|block| &block.stmts)
+        .filter(|stmt| {
+            matches!(
+                &stmt.kind,
+                gossamer_mir::StatementKind::Assign {
+                    rvalue: gossamer_mir::Rvalue::CallIntrinsic { name, .. },
+                    ..
+                } if *name == "gos_rt_vec_retain"
+            )
+        })
+        .count();
+    assert!(
+        retains >= 1,
+        "`a` and `b` both hold the vector, so one of them takes a retain"
+    );
+}

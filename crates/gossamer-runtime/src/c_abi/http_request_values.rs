@@ -150,15 +150,11 @@ pub unsafe extern "C" fn gos_rt_http_request_basic_auth(req: *const GosHttpReque
         let Some((user, pass)) = decode_basic_credentials(header) else {
             return crate::c_abi::result::gos_rt_result_new(1, 0);
         };
-        #[repr(C)]
-        struct Pair {
-            a: i64,
-            b: i64,
-        }
-        let pair = Box::into_raw(Box::new(Pair {
-            a: alloc_cstring(user.as_bytes()) as i64,
-            b: alloc_cstring(pass.as_bytes()) as i64,
-        }));
+        let words = [
+            alloc_cstring(user.as_bytes()) as i64,
+            alloc_cstring(pass.as_bytes()) as i64,
+        ];
+        let pair = crate::c_abi::rc::counted_words(&words, &crate::c_abi::rc::STRING_PAIR_META);
         crate::c_abi::result::gos_rt_result_new(0, pair as i64)
     })
 }

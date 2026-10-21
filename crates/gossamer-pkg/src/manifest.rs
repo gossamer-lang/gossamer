@@ -456,6 +456,20 @@ pub fn find_manifest(start: &std::path::Path) -> Option<std::path::PathBuf> {
 }
 
 impl Manifest {
+    /// The module a consumer imports this package as when its own manifest
+    /// names none: `[lib] name`, else the final segment of the project id,
+    /// each with `-` spelled `_`.
+    #[must_use]
+    pub fn module_name(&self) -> String {
+        self.lib
+            .as_ref()
+            .and_then(|lib| lib.name.as_deref())
+            .map_or_else(
+                || gossamer_resolve::project_dep_module_name(self.project.id.as_str()),
+                gossamer_resolve::project_dep_module_name,
+            )
+    }
+
     /// Parses a `project.toml` document.
     pub fn parse(source: &str) -> Result<Self, ManifestError> {
         if source.len() > MAX_MANIFEST_BYTES {

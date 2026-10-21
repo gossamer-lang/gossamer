@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn gos_bin() -> PathBuf {
-    PathBuf::from(std::env::var("CARGO_BIN_EXE_gos").expect("CARGO_BIN_EXE_gos"))
+    PathBuf::from(env!("CARGO_BIN_EXE_gos"))
 }
 
 fn fixture() -> PathBuf {

@@ -72,6 +72,7 @@ pub(crate) fn install_image(globals: &mut Vec<(&'static str, Value)>) {
         ("pixel", image_pixel),
         ("set_pixel", image_set_pixel),
         ("from_rgba_bytes", image_from_rgba_bytes),
+        ("release", image_release),
         ("to_rgba_bytes", image_to_rgba_bytes),
         ("encode_png_base64", image_encode_png),
         ("encode_jpeg_base64", image_encode_jpeg),
@@ -88,6 +89,13 @@ fn insert(image: image_std::Image) -> Value {
         images.borrow_mut().insert(id, image);
     });
     Value::Int(id)
+}
+
+fn image_release(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Bool(
+        id(args.first().unwrap_or(&Value::Unit))
+            .is_some_and(|id| with_images(|images| images.borrow_mut().remove(&id).is_some())),
+    ))
 }
 fn image_new(args: &[Value]) -> RuntimeResult<Value> {
     let width = non_negative_u32(args, 0, "image::new: width")?;

@@ -283,6 +283,9 @@ pub enum VerifyError {
 ///         terminator_inlined: None,
 ///     }],
 ///     span,
+///     shared_stores: Vec::new(),
+///     lent_slots: Vec::new(),
+///     address_params: Vec::new(),
 /// };
 ///
 /// verify_body(&body).expect("MIR verifier rejected body");

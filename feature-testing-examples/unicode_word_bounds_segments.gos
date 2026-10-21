@@ -1,0 +1,20 @@
+// `unicode::word_bounds` answers the UAX #29 word-boundary segments of a
+// string - words, punctuation, and whitespace runs - as strings, so they read
+// back, rejoin, and measure the same on every tier.
+
+use std::unicode
+
+fn main() {
+    let text = "héllo, wörld 42"
+    let parts = unicode::word_bounds(text)
+    println(f"{parts.len()} segments")
+    let mut joined = String::new()
+    for part in parts {
+        joined += part
+        print(f"[{part}:{part.len()}]")
+    }
+    println("")
+    println(f"{joined == text}")
+    let words = parts.filter(|p| unicode::word_count(p) > 0)
+    println(f"{words}")
+}

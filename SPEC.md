@@ -1783,13 +1783,13 @@ Example (from examples.md):
 
 ```
 select {
-  Ok(msg) = rx_ok.recv() => println("success: {}", msg),
-  Err(err) = rx_err.recv() => println("error: {}", err),
+  Some(msg) = rx_msgs.recv() => println("message: {}", msg),
+  Some(err) = rx_errs.recv() => println("error: {}", err),
 }
 ```
 
-The binding pattern on the left (`Ok(msg)`) matches the `Result` returned
-by `.recv()` (see §8.3).
+The pattern on the left (`Some(msg)`) matches the `Option` returned by
+`.recv()` (see §8.3).
 
 ### 4.5 The `?` operator
 
@@ -2615,10 +2615,12 @@ copy directly. A named Vec argument is cloned before the goroutine is
 published, including nested Vec storage, so later growth occurs on independent
 buffers. Every managed child reachable from that Vec is marked shared before
 publication. Runtime synchronization handles keep their documented
-shared-handle semantics. GT0055 rejects every inline struct, tuple, or
-fixed-array argument at a spawned call because the compiled spawn ABI
-cannot yet copy arbitrary inline layouts. Publish supported fields separately
-and reconstruct the aggregate in the receiving goroutine.
+shared-handle semantics. A struct, tuple, or fixed-array argument crosses as
+the captured snapshot it is when it holds scalars, strings, and runtime
+handles (`Sender`, `Shared`, `Mutex`, ...). GT0055 rejects one that holds
+nested Vec storage, which the spawn boundary cannot yet copy with a single
+ownership descriptor; publish that Vec separately and reconstruct the
+aggregate in the receiving goroutine.
 
 A spawned call may not capture or pass a `&T` or `&mut T`. The tracked
 `&`/`&mut` access markers are lexical write-intent markers (§7.5) and cannot be
@@ -2717,6 +2719,15 @@ select {
   default              => do_other(),
 }
 ```
+
+A receive arm is ready for the outcomes its pattern takes: `Some(p)` when
+a value waits on the channel, `None` once the channel is closed and
+drained, and a name or `_` for either, binding the whole `Option`. An arm
+never takes a value it cannot bind, so `Some(v)` alone on a closed channel
+is never ready, and `None` waits out any buffered values. The pattern inside
+`Some` must accept every element (GT0047): test the value in the arm body.
+Under a cancelled cohort every receive answers `None`, so the select resolves
+through its first arm that takes `None`, or its `default`.
 
 ### 8.4 `defer` and goroutines
 

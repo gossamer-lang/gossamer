@@ -127,6 +127,9 @@ struct Resolver {
     /// one name for different items; a path written in a module reads its
     /// own module's import first.
     module_imports: std::collections::HashMap<(String, String), String>,
+    /// The `use` declaration behind each `(module, name)` entry of
+    /// `module_imports`.
+    module_import_ids: std::collections::HashMap<(String, String), NodeId>,
     /// alias -> inlined dependency module name, for `use "id" as
     /// alias` bindings that resolved to a bundled module. Qualified
     /// item paths are registered under the module's real name, so
@@ -217,6 +220,7 @@ impl Resolver {
             deferred_project_uses: Vec::new(),
             imported_targets: std::collections::HashMap::new(),
             module_imports: std::collections::HashMap::new(),
+            module_import_ids: std::collections::HashMap::new(),
             project_alias_modules: std::collections::HashMap::new(),
             module_scopes: std::collections::HashMap::new(),
             collect_mod_stack: Vec::new(),
@@ -1204,6 +1208,76 @@ impl Resolver {
             .or_else(|| self.imported_targets.get(name))
     }
 
+    /// The `use` that binds `name` for the module being resolved: its own,
+    /// or the nearest enclosing module's.
+    fn import_use_id(&self, name: &str) -> Option<NodeId> {
+        (0..=self.current_module.len()).rev().find_map(|depth| {
+            self.module_import_ids
+                .get(&(self.current_module[..depth].join("::"), name.to_string()))
+                .copied()
+        })
+    }
+
+    /// `binding` as the module being resolved sees it. Every `use` binds into
+    /// one shared scope, so an import found there may be another module's
+    /// import of the same name; the module's own import is the one its paths
+    /// follow.
+    fn localized(&self, name: &str, binding: Binding) -> Binding {
+        match binding.resolution {
+            Resolution::Import { use_id } if use_id != crate::scope::PRELUDE_SENTINEL => {
+                self.import_use_id(name).map_or(binding, |own| Binding {
+                    resolution: Resolution::Import { use_id: own },
+                })
+            }
+            _ => binding,
+        }
+    }
+
+    /// The import a module below the root wrote for `name` - its own or an
+    /// enclosing module's - when it names an item rather than restating a
+    /// module's own name (`use win`).
+    fn module_import_here(&self, name: &str) -> Option<NodeId> {
+        (1..=self.current_module.len()).rev().find_map(|depth| {
+            let key = (self.current_module[..depth].join("::"), name.to_string());
+            let target = self.module_imports.get(&key)?;
+            (target != name)
+                .then(|| self.module_import_ids.get(&key).copied())
+                .flatten()
+        })
+    }
+
+    /// [`ScopeStack::lookup_type`] as the module being resolved sees it: a
+    /// local or the module's own item first, then the module's own import,
+    /// which stands in front of anything the root declares under that name.
+    fn lookup_type_here(&self, name: &str) -> Option<Binding> {
+        if let Some(binding) = self.scopes.lookup_type_inner(name) {
+            return Some(self.localized(name, binding));
+        }
+        if let Some(own) = self.module_import_here(name) {
+            return Some(Binding {
+                resolution: Resolution::Import { use_id: own },
+            });
+        }
+        self.scopes
+            .lookup_type(name)
+            .map(|binding| self.localized(name, binding))
+    }
+
+    /// [`ScopeStack::lookup_value`] as the module being resolved sees it.
+    fn lookup_value_here(&self, name: &str) -> Option<Binding> {
+        if let Some(binding) = self.scopes.lookup_value_inner(name) {
+            return Some(self.localized(name, binding));
+        }
+        if let Some(own) = self.module_import_here(name) {
+            return Some(Binding {
+                resolution: Resolution::Import { use_id: own },
+            });
+        }
+        self.scopes
+            .lookup_value(name)
+            .map(|binding| self.localized(name, binding))
+    }
+
     fn define_import(
         &mut self,
         name: &str,
@@ -1227,6 +1301,7 @@ impl Resolver {
             }
             return;
         }
+        self.module_import_ids.insert(key.clone(), use_id);
         self.module_imports.insert(key, target.to_string());
         let module = self.scopes.module_mut();
         // Allow imports to shadow prelude entries (Gossamer's
@@ -1491,20 +1566,21 @@ impl Resolver {
                 .or_default()
                 .push((decl.name.name.clone(), module_path.to_vec()));
             let name = variant.name.name.as_str();
-            // Variants of different enums may share a name: each is reached
-            // through its enum, and a bare reference that more than one of
-            // them answers is reported where it is written. Only a clash
-            // with an item that is not a variant is a redeclaration.
+            // A variant is reached through its enum, so its bare name is a
+            // convenience: variants of different enums may share it (a bare
+            // reference more than one answers is reported where it is
+            // written), and a module item of the same name keeps it. Only a
+            // name that is not a binding at all can fail to register here.
             let own_module_ok = match self.collect_mod_stack.last().copied() {
                 Some(mod_id) => self.module_scopes.get_mut(&mod_id).is_none_or(|scope| {
                     let occupant = scope.lookup_value(name);
-                    scope.insert_value(name, binding) || is_variant_binding(occupant)
+                    scope.insert_value(name, binding) || occupant.is_some()
                 }),
                 None => true,
             };
             let root_occupant = self.scopes.module_mut().lookup_value(name);
-            let root_ok = self.scopes.module_mut().insert_value(name, binding)
-                || is_variant_binding(root_occupant);
+            let root_ok =
+                self.scopes.module_mut().insert_value(name, binding) || root_occupant.is_some();
             // The root module's own enum answers a bare name at the root
             // ahead of a variant a nested module registered there first.
             if module_path.is_empty()
@@ -1547,7 +1623,7 @@ impl Resolver {
             inserted_any |= module.insert_type(&name.name, binding);
         }
         if kind.is_value_ns() {
-            inserted_any |= module.insert_value(&name.name, binding);
+            inserted_any |= insert_value_over_variant(module, &name.name, binding);
         }
         if !inserted_any && (kind.is_type_ns() || kind.is_value_ns()) {
             self.emit(
@@ -1592,7 +1668,7 @@ impl Resolver {
                 inserted_any |= scope.insert_type(&name.name, binding);
             }
             if kind.is_value_ns() {
-                inserted_any |= scope.insert_value(&name.name, binding);
+                inserted_any |= insert_value_over_variant(scope, &name.name, binding);
             }
             if !inserted_any && (kind.is_type_ns() || kind.is_value_ns()) {
                 module_scope_ok = false;
@@ -2047,7 +2123,7 @@ impl Resolver {
             return;
         };
         let name = &head.name.name;
-        let Some(binding) = self.scopes.lookup_type(name) else {
+        let Some(binding) = self.lookup_type_here(name) else {
             return;
         };
         self.check_visibility(binding.resolution, Some(name), span);
@@ -2130,10 +2206,27 @@ impl Resolver {
             }
             return;
         }
+        // A qualified pattern names its type through modules (`units::P`,
+        // `super::Shape::Circle`): the longest prefix that is a type is the
+        // enum (or struct) the pattern matches. The head alone would name
+        // the module.
+        let written: Vec<&str> = path.segments.iter().map(|s| s.name.name.as_str()).collect();
+        if written.len() > 1 {
+            if let Some(resolution) = (2..=written.len())
+                .rev()
+                .find_map(|end| self.lookup_qualified_type(&written[..end]))
+            {
+                self.check_visibility(resolution, None, span);
+                self.resolutions.insert(anchor, resolution);
+                for segment in &path.segments {
+                    self.resolve_generic_args(&segment.generics);
+                }
+                return;
+            }
+        }
         let resolution = self
-            .scopes
-            .lookup_value(name)
-            .or_else(|| self.scopes.lookup_type(name))
+            .lookup_value_here(name)
+            .or_else(|| self.lookup_type_here(name))
             .map_or(Resolution::Err, |b| b.resolution);
         if matches!(resolution, Resolution::Err) {
             self.emit_unresolved_or_rename(name, span);
@@ -2143,6 +2236,9 @@ impl Resolver {
             self.reject_ambiguous_variant(resolution, name, span);
         }
         self.resolutions.insert(anchor, resolution);
+        // A pattern naming an imported type tests that type's own identity,
+        // which lowering reads from the `use`'s target.
+        self.record_import_def(resolution, name, anchor);
         for segment in &path.segments {
             self.resolve_generic_args(&segment.generics);
         }
@@ -2274,8 +2370,7 @@ impl Resolver {
         let resolution = if is_self_type(name) {
             Resolution::Err
         } else {
-            self.scopes
-                .lookup_type(name)
+            self.lookup_type_here(name)
                 .map(|binding| binding.resolution)
                 .or_else(|| self.synthesized_lookup(name))
                 .or_else(|| self.const_generic_in_type_position(name, path))
@@ -2752,7 +2847,7 @@ impl Resolver {
         // to the real module and leave the rest to the
         // type-directed passes.
         if effective[1..].iter().any(|seg| !starts_lowercase(seg))
-            && let Some(binding) = self.scopes.lookup_type(&real)
+            && let Some(binding) = self.lookup_type_here(&real)
         {
             let resolution = binding.resolution;
             self.resolutions.insert(anchor, resolution);
@@ -2846,7 +2941,7 @@ impl Resolver {
             // rename rather than an opaque missing path.
             if let Some(head_name) = effective.first()
                 && self.lookup_qualified_value_or_type(&written).is_none()
-                && self.scopes.lookup_type(head_name).is_none()
+                && self.lookup_type_here(head_name).is_none()
                 && crate::stdlib_exports::canonical_collection_name(head_name).is_some()
             {
                 self.emit_unresolved_or_rename(head_name, span);
@@ -2919,7 +3014,7 @@ impl Resolver {
         // VM tier would then dispatch the call as a method-on-string,
         // silently returning Unit.
         let resolution = if effective.len() > 1 {
-            self.scopes.lookup_type(lookup_name).map(|b| b.resolution)
+            self.lookup_type_here(lookup_name).map(|b| b.resolution)
         } else {
             self.lookup_value_or_type(lookup_name)
                 .filter(|resolution| !is_module_resolution(*resolution))
@@ -3048,7 +3143,7 @@ impl Resolver {
             })
             .flatten();
         let resolution = joined
-            .or_else(|| self.scopes.lookup_type(lookup_name).map(|b| b.resolution))
+            .or_else(|| self.lookup_type_here(lookup_name).map(|b| b.resolution))
             .or_else(|| self.synthesized_lookup(lookup_name))
             .unwrap_or_else(|| {
                 self.emit_unresolved_or_rename(lookup_name, span);
@@ -3133,14 +3228,14 @@ impl Resolver {
     fn lookup_qualified_type(&self, segments: &[&str]) -> Option<Resolution> {
         self.qualified_candidates(segments)
             .iter()
-            .find_map(|key| self.scopes.lookup_type(key).map(|b| b.resolution))
+            .find_map(|key| self.lookup_type_here(key).map(|b| b.resolution))
     }
 
     fn lookup_value_or_type(&self, name: &str) -> Option<Resolution> {
-        if let Some(binding) = self.scopes.lookup_value(name) {
+        if let Some(binding) = self.lookup_value_here(name) {
             return Some(binding.resolution);
         }
-        self.scopes.lookup_type(name).map(|b| b.resolution)
+        self.lookup_type_here(name).map(|b| b.resolution)
     }
 
     fn resolve_struct_expr_field(&mut self, field: &StructExprField) {
@@ -3497,7 +3592,7 @@ impl Resolver {
         if self.imported_variant(name).is_some() {
             return true;
         }
-        let Some(binding) = self.scopes.lookup_value(name) else {
+        let Some(binding) = self.lookup_value_here(name) else {
             return false;
         };
         match binding.resolution {
@@ -3847,6 +3942,21 @@ fn target_path_text(target: &UseTarget) -> String {
 }
 
 /// Whether `binding` names an enum variant.
+/// Binds `name` to an item in `scope`'s value namespace, taking it from an
+/// enum variant that claimed it first: the variant stays reachable through
+/// its enum.
+fn insert_value_over_variant(
+    scope: &mut crate::scope::Scope,
+    name: &str,
+    binding: Binding,
+) -> bool {
+    if is_variant_binding(scope.lookup_value(name)) {
+        scope.shadow_value(name, binding);
+        return true;
+    }
+    scope.insert_value(name, binding)
+}
+
 fn is_variant_binding(binding: Option<Binding>) -> bool {
     matches!(
         binding,

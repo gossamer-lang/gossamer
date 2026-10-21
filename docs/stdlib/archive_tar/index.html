@@ -2359,6 +2359,16 @@
 <td><code>fn write(entries: Vec&lt;(String, Vec&lt;u8&gt;)&gt;) -&gt; Result&lt;Vec&lt;u8&gt;, errors::Error&gt;</code></td>
 <td>Builds a tar archive from (name, data) pairs.</td>
 </tr>
+<tr>
+<td><code>read_limited</code></td>
+<td><code>fn read_limited(data: Vec&lt;u8&gt;, max_entries: i64, max_entry_bytes: i64, max_total_bytes: i64) -&gt; Result&lt;Vec&lt;tar::TarEntry&gt;, errors::Error&gt;</code></td>
+<td><code>read(data)</code> refusing an archive with more than <code>max_entries</code> entries, an entry over <code>max_entry_bytes</code>, or more than <code>max_total_bytes</code> in all, counted as the bytes are read.</td>
+</tr>
+<tr>
+<td><code>extract</code></td>
+<td><code>fn extract(data: Vec&lt;u8&gt;, dir: String) -&gt; Result&lt;i64, errors::Error&gt;</code></td>
+<td><code>extract(data, dir) -&gt; Result&lt;i64, Error&gt;</code>: writes every file and directory under <code>dir</code>, refusing the archive before writing anything when a name would land outside it (<code>archive::enclosed_path</code>); answers how many entries it wrote.</td>
+</tr>
 </tbody>
 </table>
 <!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->

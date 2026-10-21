@@ -322,3 +322,44 @@ fn main() {
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_method_two_user_types_declare_differently_still_resolves_on_other_receivers() {
+    // `AtomicI64::load` is no user type's, and `Catalog::load` takes no
+    // receiver, so neither makes `COUNT.load()` ambiguous; `b.load(uri: ..)`
+    // still fills its defaults from `Book`'s declaration.
+    expect_on_every_tier(
+        "method_name_shared_by_types",
+        r#"use std::sync::AtomicI64
+
+static COUNT: AtomicI64 = AtomicI64::new(0)
+
+pub struct Catalog { pub name: String }
+
+impl Catalog {
+    pub fn load(file: String) -> Catalog { Catalog { name: file } }
+}
+
+pub struct Page { pub id: i64 }
+
+impl Page {
+    pub fn load(&self, uri: String) { println(f"{self.id} {uri}") }
+}
+
+pub struct Book { pub pages: i64 }
+
+impl Book {
+    pub fn load(&self, uri: String, depth: i64 = 1) { println(f"book {uri} {depth}") }
+}
+
+fn main() {
+    COUNT.store(3)
+    println(f"{COUNT.load()} {Catalog::load("c").name}")
+    Page { id: 1 }.load("x")
+    let b = Book { pages: 2 }
+    b.load(uri: "y")
+}
+"#,
+        "3 c\n1 x\nbook y 1\n",
+    );
+}

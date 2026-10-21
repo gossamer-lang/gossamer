@@ -1,0 +1,86 @@
+// Structs and enums compare and order by their fields whatever those
+// fields are: a newtype or alias, an `Option`, a tuple, a `Vec`, a nested
+// enum with fields of its own, a type parameter, a `bool`, or an enum that
+// reaches this one back through a sequence. A by-value enum compares the
+// same bound by a `for` loop, read by index, or nested in a container.
+
+newtype Id = u32
+type Meters = f64
+
+enum Color { Red, Green }
+
+struct Tagged { id: Id, len: Meters }
+
+enum Flat {
+    A { c: Color, n: u8, label: String }
+    B { x: f64, flag: bool }
+    C(Option<String>, (i64, String))
+}
+
+enum Window { Occluded { window: Id } }
+
+enum Choice {
+    Chosen { paths: Vec<String>, filter: Option<i64> }
+    Cancelled
+}
+
+enum Closed { Dialog { id: u64, choice: Choice } }
+
+enum Expr {
+    Num(i64)
+    Group(Vec<Query>)
+}
+
+enum Query {
+    Where(Expr)
+    All
+}
+
+struct Wrap<T> { v: T }
+
+fn main() {
+    let a = Tagged { id: 3u32.into(), len: 1.5 }
+    let b = Tagged { id: 3u32.into(), len: 1.5 }
+    println(f"newtype fields {a == b} {a != b}")
+
+    let id: Id = 2u32.into()
+    let w = Window::Occluded { window: id }
+    for x in #[Window::Occluded { window: id }] {
+        println(f"loop binding {x == w}")
+    }
+    let ws = #[Window::Occluded { window: id }]
+    println(f"indexed {ws[0] == w}")
+
+    let fs = #[
+        Flat::C(Some("z"), (2, "b"))
+        Flat::A { c: Color::Green, n: 7, label: "q" }
+        Flat::B { x: 2.5, flag: true }
+        Flat::A { c: Color::Red, n: 9, label: "q" }
+        Flat::C(Some("z"), (1, "b"))
+        Flat::C(None, (1, "b"))
+    ]
+    let mut sorted = fs.clone()
+    sorted.sort()
+    println(f"sorted {sorted}")
+    let red = Flat::A { c: Color::Red, n: 9, label: "q" }
+    let other = Flat::A { c: Color::Red, n: 8, label: "q" }
+    println(f"contains {fs.contains(red)} {fs.contains(other)}")
+    let opt = Some(Flat::B { x: 2.5, flag: true })
+    println(f"option {opt == Some(Flat::B { x: 2.5, flag: true })} {opt == Some(Flat::B { x: 2.5, flag: false })}")
+    println(f"vec {fs == fs.clone()}")
+    println(f"bool field order {Flat::B { x: 1.0, flag: false } < Flat::B { x: 1.0, flag: true }}")
+    let pair = (Flat::C(None, (1, "b")), 4)
+    println(f"tuple {pair == (Flat::C(None, (1, "b")), 4)}")
+
+    let c1 = Closed::Dialog { id: 1, choice: Choice::Chosen { paths: #["a"], filter: Some(1) } }
+    let c2 = Closed::Dialog { id: 1, choice: Choice::Chosen { paths: #["a"], filter: Some(1) } }
+    let c3 = Closed::Dialog { id: 1, choice: Choice::Cancelled }
+    println(f"nested enum {c1 == c2} {c1 == c3}")
+
+    let e1 = Expr::Group(#[Query::Where(Expr::Num(1)), Query::All])
+    let e2 = Expr::Group(#[Query::Where(Expr::Num(1)), Query::All])
+    let e3 = Expr::Group(#[Query::Where(Expr::Num(2))])
+    println(f"mutual {e1 == e2} {e1 == e3} {#[Query::All] == #[Query::All]}")
+
+    println(f"generic {Wrap { v: 4 } == Wrap { v: 4 }} {Wrap { v: "a" } < Wrap { v: "b" }}")
+}

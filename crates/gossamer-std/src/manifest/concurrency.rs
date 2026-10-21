@@ -113,7 +113,7 @@ pub const SYNC: StdModule = StdModule {
         StdItem {
             name: "Receiver",
             kind: StdItemKind::Type,
-            doc: "The receiving end of a channel: `recv() -> Option<T>`, `None` once it is closed and drained.",
+            doc: "The receiving end of a channel: `recv() -> Option<T>` waits for a value, `None` once it is closed and drained; `try_recv() -> Option<T>` answers at once, `None` when nothing is queued.",
         },
         StdItem {
             name: "Mutex",
@@ -133,37 +133,37 @@ pub const SYNC: StdModule = StdModule {
         StdItem {
             name: "Once",
             kind: StdItemKind::Type,
-            doc: "One-shot initialisation latch.",
+            doc: "One-shot initialisation latch: `call(f)` runs `f` the first time and answers whether this call ran it.",
         },
         StdItem {
             name: "WaitGroup",
             kind: StdItemKind::Type,
-            doc: "Counts goroutines and waits for them to finish.",
+            doc: "Counts goroutines and waits for them to finish: `add(n)`, `done()`, `wait()`, and `wait_ctx(ctx)`, which answers whether the group finished before `ctx` ended.",
         },
         StdItem {
             name: "Barrier",
             kind: StdItemKind::Type,
-            doc: "Synchronisation barrier across goroutines.",
+            doc: "Synchronisation barrier across goroutines: `wait()` returns once every party has arrived.",
         },
         StdItem {
             name: "AtomicI64",
             kind: StdItemKind::Type,
-            doc: "Atomic 64-bit signed integer.",
+            doc: "Atomic 64-bit signed integer. Build with `AtomicI64::new(v)`; `load()`, `store(v)`, `compare_exchange(current, new)` (stores `new` and answers true when the value was `current`), `fetch_add(v)` and `fetch_sub(v)` (answer the value before the change).",
         },
         StdItem {
             name: "AtomicI32",
             kind: StdItemKind::Type,
-            doc: "Atomic 32-bit signed integer.",
+            doc: "Atomic 32-bit signed integer. Build with `AtomicI32::new(v)`; `load()`, `store(v)`, `compare_exchange(current, new)` (stores `new` and answers true when the value was `current`), `fetch_add(v)` and `fetch_sub(v)` (answer the value before the change).",
         },
         StdItem {
             name: "AtomicU64",
             kind: StdItemKind::Type,
-            doc: "Atomic 64-bit unsigned integer.",
+            doc: "Atomic 64-bit unsigned integer. Build with `AtomicU64::new(v)`; `load()`, `store(v)`, `compare_exchange(current, new)` (stores `new` and answers true when the value was `current`), `fetch_add(v)` and `fetch_sub(v)` (answer the value before the change).",
         },
         StdItem {
             name: "AtomicBool",
             kind: StdItemKind::Type,
-            doc: "Atomic boolean.",
+            doc: "Atomic boolean. Build with `AtomicBool::new(v)`; `load()`, `store(v)`, `compare_exchange(current, new)` (stores `new` and answers true when the value was `current`).",
         },
         StdItem {
             name: "Map",

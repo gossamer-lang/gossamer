@@ -399,6 +399,10 @@ pub fn prune(
                 if !reclaim_runner_workdir(&unit.path, root) {
                     continue;
                 }
+            } else if class == CacheClass::Native && unit.whole_dir {
+                if !reclaim_native_build(&unit.path, root) {
+                    continue;
+                }
             } else {
                 remove_unit(&unit, root);
             }
@@ -455,9 +459,10 @@ pub fn prune_runner_root(
     Ok((reclaimed, count))
 }
 
-/// One reclaimable cache unit: a single file, or - for the runner class - a
-/// whole workdir, whose artifacts and freshness stamp only mean anything
-/// together.
+/// One reclaimable cache unit: a single file, or - for the runner and native
+/// classes - a whole directory: a runner workdir, whose artifacts and
+/// freshness stamp only mean anything together, or a native build tree, whose
+/// configuration names the files its generators wrote.
 #[derive(Debug)]
 struct CacheUnit {
     path: PathBuf,
@@ -467,10 +472,10 @@ struct CacheUnit {
     whole_dir: bool,
 }
 
-/// Enumerates what the class reclaims in one piece: a runner root hands back
-/// one unit per workdir, every other root one unit per file.
+/// Enumerates what the class reclaims in one piece: a runner or native root
+/// hands back one unit per directory, every other root one unit per file.
 fn collect_units(class: CacheClass, root: &Path) -> Vec<CacheUnit> {
-    if class != CacheClass::Runners {
+    if !matches!(class, CacheClass::Runners | CacheClass::Native) {
         let mut files = Vec::new();
         collect_files(root, &mut files);
         return files
@@ -519,6 +524,43 @@ fn collect_units(class: CacheClass, root: &Path) -> Vec<CacheUnit> {
         }
     }
     units
+}
+
+/// Removes one native build directory while holding the lock its builds take,
+/// and answers whether the removal happened.
+///
+/// A build holds that lock from configuring the tree to installing what it
+/// built, so a build in progress keeps its directory. The lock file goes last,
+/// as a runner workdir's does.
+fn reclaim_native_build(path: &Path, root: &Path) -> bool {
+    let lock_path = path.join("lock");
+    let lock = match fs::File::open(&lock_path) {
+        Ok(file) => {
+            if file.try_lock().is_err() {
+                return false;
+            }
+            Some(file)
+        }
+        Err(_) => None,
+    };
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if child == lock_path {
+                continue;
+            }
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                let _ = fs::remove_dir_all(&child);
+            } else {
+                let _ = fs::remove_file(&child);
+            }
+        }
+    }
+    drop(lock);
+    let _ = fs::remove_file(&lock_path);
+    let _ = fs::remove_dir(path);
+    cleanup_empty_cache_dirs(path, root);
+    true
 }
 
 /// Reclaims one unit and the empty cache directories it leaves behind.
@@ -911,6 +953,28 @@ mod tests {
             (0, 0)
         );
         assert!(workdir.join("runner").join("gos-runner").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_native_build_tree_is_pruned_whole_and_kept_while_its_lock_is_held() {
+        let root = scratch("native-build-tree");
+        let _ = fs::remove_dir_all(&root);
+        let tree = root.join("cmake-static-0123456789abcdef");
+        fs::create_dir_all(tree.join("build")).unwrap();
+        fs::write(tree.join("build").join("CMakeCache.txt"), b"cache").unwrap();
+        fs::write(tree.join("build").join("cmake_pch.h"), b"generated").unwrap();
+        fs::write(tree.join("lock"), b"").unwrap();
+        let units = collect_units(CacheClass::Native, &root);
+        assert_eq!(units.len(), 1);
+        assert!(units[0].whole_dir);
+        let held = fs::File::open(tree.join("lock")).unwrap();
+        held.lock().unwrap();
+        assert!(!reclaim_native_build(&tree, &root));
+        assert!(tree.join("build").join("cmake_pch.h").exists());
+        drop(held);
+        assert!(reclaim_native_build(&tree, &root));
+        assert!(!tree.exists());
         let _ = fs::remove_dir_all(&root);
     }
 }

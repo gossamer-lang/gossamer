@@ -331,7 +331,8 @@ fn main() {
   Cancellation is cooperative: a cancelled `recv` answers `None`, `sleep`
   returns early, `defer` runs; long pure computation polls
   `runtime::cohort_cancelled()`.
-- `select { v = rx.recv() => .., default => .. }` multiplexes;
+- `select { Some(v) = rx.recv() => .., None = rx.recv() => .., default => .. }`
+  multiplexes (a receive answers `Option<T>`; a bare name binds it whole);
   `time::after(Duration::from_millis(n))` is a timeout arm.
 - `std::sync` has `Mutex`, `RwLock`, atomics, `WaitGroup`, `Once`;
   `sync::with_timeout(f, ms)`, `sync::shield(f)`. There is no OS-thread

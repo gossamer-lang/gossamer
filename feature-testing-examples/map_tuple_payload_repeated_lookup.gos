@@ -1,0 +1,46 @@
+fn read(owners: Map<(String, String), (String, Vec<String>)>) {
+    for (key, (window, ids)) in owners {
+        if let Some((old_window, old_ids)) = owners.get(key) {
+            assert_eq(old_window, window)
+            assert_eq(old_ids, ids)
+        }
+    }
+}
+fn main() {
+    let mut boxed_keys: Map<String, (String, String)> = Map::new()
+    boxed_keys["hold"] = ("workspace", "held")
+    assert_eq(boxed_keys.get("hold").unwrap().1, "held")
+    let mut owners: Map<(String, String), (String, Vec<String>)> = Map::new()
+    owners[("workspace", "doc1")] = ("main", #["editor-doc1"])
+    for _ in 0..20 { read(owners) }
+    for _ in 0..20 {
+        let rows = keyed_rows()
+        let held = Some(rows[0].1)
+        let collected = collect_rows()
+        assert_eq(collected.len(), 5)
+        assert(rows[0].1.1.starts_with("doc-"))
+        assert(held.unwrap().1.starts_with("doc-"))
+    }
+    println("tuple map lookup and borrowed key insertion: ok")
+}
+
+enum Page { Text(String), Group(Map<String, Page>) }
+
+fn keyed_rows() -> Vec<(Page, (String, String))> {
+    let mut source: Map<String, i64> = Map::new()
+    for i in 0..5 { source[f"doc-{i}"] = i }
+    let mut rows = #[]
+    for (key, value) in source { rows.push((Page::Text(f"page-{value}"), ("workspace", key))) }
+    rows
+}
+
+fn collect_rows() -> Map<(String, String), (String, Vec<String>)> {
+    let rows = keyed_rows()
+    let mut result: Map<(String, String), (String, Vec<String>)> = Map::new()
+    for (value, key) in rows {
+        assert(!result.contains_key(key))
+        let _ = value
+        result[key] = ("main", #["retained"])
+    }
+    result
+}

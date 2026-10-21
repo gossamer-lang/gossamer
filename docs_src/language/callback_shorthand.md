@@ -17,7 +17,7 @@ use std::{encoding::base64, math}
 
 fn main() {
     println("{:?}", #[1.0, -2.0].map(math::abs))
-    println("{:?}", #["ab", "cd"].map(base64::encode))
+    println("{:?}", #["ab".as_bytes(), "cd".as_bytes()].map(base64::encode))
 }
 ```
 

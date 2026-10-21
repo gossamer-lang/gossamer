@@ -31,10 +31,12 @@ pub mod native_symbols;
 
 pub use emit::{FunctionText, Module, emit_function, emit_module};
 pub use jit::{
-    ArrayElem, JitArtifact, JitBodyDecision, JitFn, JitKind, TupleElem, compile_to_jit,
+    ArrayElem, JitArtifact, JitBodyDecision, JitFn, JitKind, StaticClass, StaticResolver,
+    StaticStorage, TUPLE_RETURN_MAX, TupleElem, TupleElems, compile_to_jit,
     compile_to_jit_for_promotion, compile_to_jit_for_promotion_owned, has_worthy_jit_body,
-    jit_compile_body_names, jit_compile_body_names_for_trigger, jit_eager_loop_bodies,
-    jit_entry_body_names, jit_entry_body_names_with_admitted, jit_promotion_report,
+    jit_compile_body_names, jit_compile_body_names_for_trigger,
+    jit_compile_body_names_with_vm_statics, jit_eager_loop_bodies, jit_entry_body_names,
+    jit_entry_body_names_with_admitted, jit_promotion_report, shared_static_class,
 };
 pub use jit_frames::{JitFrame, active_frames as active_jit_frames};
 pub use native::{

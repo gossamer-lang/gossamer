@@ -182,6 +182,20 @@ impl<'a> Builder<'a> {
         ty
     }
 
+    /// The place an in-place collection operation works through: the
+    /// receiver's own place, projections included, or - for a growable
+    /// receiver that names no place, such as a `static mut` - a local holding
+    /// its handle, which reaches the same buffer.
+    pub(crate) fn in_place_receiver(&mut self, receiver: &HirExpr) -> Option<Place> {
+        if let Some(place) = self.lower_place_expr(receiver) {
+            return Some(place);
+        }
+        match self.tcx.kind_of(receiver.ty) {
+            gossamer_types::TyKind::Vec(_) => Some(Place::local(self.lower_expr(receiver)?)),
+            _ => None,
+        }
+    }
+
     pub(crate) fn try_lower_sequence_fill(
         &mut self,
         receiver: &HirExpr,
@@ -190,7 +204,7 @@ impl<'a> Builder<'a> {
     ) -> Option<Local> {
         use gossamer_types::{IntTy, Mutbl, TyKind};
 
-        let recv_place = self.lower_place_expr(receiver)?;
+        let recv_place = self.in_place_receiver(receiver)?;
         let recv_ty = self.place_ty(&recv_place);
         let recv_kind = match self.tcx.kind_of(recv_ty) {
             TyKind::Ref { inner, .. } => self.tcx.kind_of(*inner).clone(),
@@ -326,7 +340,7 @@ impl<'a> Builder<'a> {
     ) -> Option<Local> {
         use gossamer_types::{IntTy, TyKind};
 
-        let recv_place = self.lower_place_expr(receiver)?;
+        let recv_place = self.in_place_receiver(receiver)?;
         let recv_ty = self.place_ty(&recv_place);
         let mut peeled = recv_ty;
         while let TyKind::Ref { inner, .. } = self.tcx.kind_of(peeled) {
@@ -438,7 +452,8 @@ impl<'a> Builder<'a> {
     ///
     /// A tuple or struct local is already that run of slots. Any other value
     /// is a word or a carrier held by value, so it is placed in a one-field
-    /// tuple, whose storage is exactly the element's slots.
+    /// tuple, whose storage is exactly the element's slots. The tuple is lent:
+    /// the value keeps every share its words name.
     pub(crate) fn ordered_value_slots(&mut self, value: Local, elem: Ty, span: Span) -> Local {
         use gossamer_types::TyKind;
 
@@ -458,6 +473,7 @@ impl<'a> Builder<'a> {
             },
             span,
         );
+        self.lent_slots.push(slots);
         slots
     }
 
@@ -477,7 +493,7 @@ impl<'a> Builder<'a> {
     ) -> Option<Local> {
         use gossamer_types::{IntTy, TyKind};
 
-        let recv_place = self.lower_place_expr(receiver)?;
+        let recv_place = self.in_place_receiver(receiver)?;
         let recv_ty = self.place_ty(&recv_place);
         let mut peeled = recv_ty;
         while let TyKind::Ref { inner, .. } = self.tcx.kind_of(peeled) {
@@ -591,7 +607,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn try_lower_tuple_sort(&mut self, receiver: &HirExpr, span: Span) -> Option<Local> {
         use gossamer_types::{IntTy, TyKind};
 
-        let recv_place = self.lower_place_expr(receiver)?;
+        let recv_place = self.in_place_receiver(receiver)?;
         let recv_ty = self.place_ty(&recv_place);
         let mut peeled = recv_ty;
         while let TyKind::Ref { inner, .. } = self.tcx.kind_of(peeled) {
@@ -619,7 +635,7 @@ impl<'a> Builder<'a> {
             );
             Operand::Copy(Place::local(local))
         };
-        let mut args = vec![Operand::Copy(Place::local(recv_place.local))];
+        let mut args = vec![Operand::Copy(recv_place.clone())];
         let helper = if let Some(len) = fixed_len {
             args.push(int_arg(self, i128::try_from(len).unwrap_or(0)));
             args.push(int_arg(self, i128::from(self.type_slot_bytes(elem).max(1))));
@@ -681,7 +697,7 @@ impl<'a> Builder<'a> {
                 (
                     helper,
                     vec![
-                        Operand::Copy(Place::local(recv_place.local)),
+                        Operand::Copy(recv_place.clone()),
                         Operand::Copy(Place::local(len_local)),
                     ],
                 )
@@ -698,7 +714,7 @@ impl<'a> Builder<'a> {
                 (
                     "gos_rt_arr_reverse",
                     vec![
-                        Operand::Copy(Place::local(recv_place.local)),
+                        Operand::Copy(recv_place.clone()),
                         Operand::Copy(Place::local(len_local)),
                         Operand::Copy(Place::local(bytes_local)),
                     ],
@@ -727,7 +743,7 @@ impl<'a> Builder<'a> {
         span: Span,
     ) -> Option<Local> {
         use gossamer_types::{IntTy, TyKind};
-        let recv_place = self.lower_place_expr(receiver)?;
+        let recv_place = self.in_place_receiver(receiver)?;
         let recv_ty = self.place_ty(&recv_place);
         let recv_kind = match self.tcx.kind_of(recv_ty) {
             TyKind::Ref { inner, .. } => self.tcx.kind_of(*inner).clone(),
@@ -813,7 +829,7 @@ impl<'a> Builder<'a> {
                 self.terminate(Terminator::Call {
                     callee: Operand::Const(ConstValue::Str(vec_helper.to_string())),
                     args: vec![
-                        Operand::Copy(Place::local(recv_place.local)),
+                        Operand::Copy(recv_place.clone()),
                         Operand::Copy(Place::local(closure_local)),
                     ],
                     destination: Place::local(dest),
@@ -831,7 +847,7 @@ impl<'a> Builder<'a> {
                     span,
                 );
                 let mut args = vec![
-                    Operand::Copy(Place::local(recv_place.local)),
+                    Operand::Copy(recv_place.clone()),
                     Operand::Copy(Place::local(len_local)),
                 ];
                 if elem_is_aggregate {

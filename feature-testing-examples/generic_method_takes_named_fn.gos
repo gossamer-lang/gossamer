@@ -1,0 +1,49 @@
+// A generic type's method whose parameter is a callable over the type's own
+// parameter (`Fn(M) -> Vec<i64>`) takes a named function: the function's
+// signature says what `M` is, so the call compiles on every tier and the
+// callable is invoked with its own argument and result types.
+
+struct App<M> {
+    init: Fn() -> M
+    cmds: Fn(M) -> Vec<i64>
+    scale: Fn(M, f64) -> f64
+}
+
+fn application<M>(init: Fn() -> M) -> App<M> {
+    App { init: init, cmds: |_m| #[], scale: |_m, x| x }
+}
+
+impl<M> App<M> {
+    fn commands(self, cmds: Fn(M) -> Vec<i64>) -> App<M> {
+        let mut a = self
+        a.cmds = cmds
+        a
+    }
+
+    fn scaled(self, scale: Fn(M, f64) -> f64) -> App<M> {
+        let mut a = self
+        a.scale = scale
+        a
+    }
+
+    fn run(self) -> String {
+        let m = (self.init)()
+        f"{(self.cmds)(m)} {(self.scale)(m, 1.5)}"
+    }
+}
+
+fn commands(m: String) -> Vec<i64> {
+    #[m.len(), 2]
+}
+
+fn scale(m: String, x: f64) -> f64 {
+    x * m.len() as f64
+}
+
+fn app() -> App<String> {
+    application(|| "abc").commands(commands).scaled(scale)
+}
+
+fn main() {
+    println(app().run())
+}

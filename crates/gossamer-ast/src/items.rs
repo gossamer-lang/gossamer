@@ -111,6 +111,18 @@ pub struct Attrs {
     pub inner: Vec<Attribute>,
 }
 
+/// One `#[link(name = "...", search = "dir", kind = "framework")]` attribute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkAttr {
+    /// The library it names.
+    pub name: String,
+    /// The directory it names for the library, as written: relative to the
+    /// root of the package that declares it.
+    pub search: Option<String>,
+    /// Its kind: `framework` names a macOS framework.
+    pub kind: Option<String>,
+}
+
 impl Attrs {
     /// Returns `true` when no attributes are attached.
     #[must_use]
@@ -137,39 +149,36 @@ impl Attrs {
             .any(|attr| attr.lists_argument(name, argument))
     }
 
-    /// The library a `#[link(name = "lib")]` attribute names.
+    /// Every `#[link(..)]` attribute, in the order written; an extern block
+    /// may name several libraries, one attribute each.
     #[must_use]
-    pub fn link_library(&self) -> Option<String> {
-        self.link_argument("name")
-    }
-
-    /// The directory a `#[link(name = "...", search = "dir")]` attribute
-    /// names for its library, as written: relative to the root of the
-    /// package that declares it.
-    #[must_use]
-    pub fn link_search(&self) -> Option<String> {
-        self.link_argument("search")
-    }
-
-    /// The kind a `#[link(name = "...", kind = "framework")]` attribute
-    /// gives its library: `framework` names a macOS framework.
-    #[must_use]
-    pub fn link_kind(&self) -> Option<String> {
-        self.link_argument("kind")
-    }
-
-    /// The value of `key` in the `#[link(key = "value", ..)]` attribute.
-    fn link_argument(&self, key: &str) -> Option<String> {
-        let tokens = self
-            .outer
+    pub fn links(&self) -> Vec<LinkAttr> {
+        self.outer
             .iter()
-            .find(|attr| attr.is_named("link"))?
-            .tokens
-            .as_deref()?;
-        tokens.split(',').find_map(|pair| {
-            let (name, value) = pair.split_once('=')?;
-            (name.trim() == key).then(|| value.trim().trim_matches('"').to_string())
-        })
+            .filter(|attr| attr.is_named("link"))
+            .filter_map(|attr| {
+                let tokens = attr.tokens.as_deref()?;
+                let argument = |key: &str| {
+                    tokens.split(',').find_map(|pair| {
+                        let (name, value) = pair.split_once('=')?;
+                        (name.trim() == key).then(|| value.trim().trim_matches('"').to_string())
+                    })
+                };
+                Some(LinkAttr {
+                    name: argument("name")?,
+                    search: argument("search"),
+                    kind: argument("kind"),
+                })
+            })
+            .collect()
+    }
+
+    /// The libraries the `#[link(name = "lib")]` attributes name, joined by
+    /// `,` (a library name has none): the form foreign calls carry.
+    #[must_use]
+    pub fn link_libraries(&self) -> Option<String> {
+        let names: Vec<String> = self.links().into_iter().map(|link| link.name).collect();
+        (!names.is_empty()).then(|| names.join(","))
     }
 
     /// The symbol a `#[link_name = "symbol"]` attribute names.

@@ -31,7 +31,6 @@ use gossamer_runtime::{
 };
 
 mod channel;
-pub(crate) use channel::any_live_channel_can_progress;
 mod descriptor;
 mod native;
 mod render;
@@ -45,11 +44,13 @@ pub use descriptor::{
     element_render_descriptor, json_descriptor, ordering_descriptor, render_descriptor,
     repl_render_descriptor,
 };
+pub(crate) use native::native_vec_struct_to_array;
 pub use native::{
     NativeEnumOwner, NativeEnumShape, NativeFieldKind, NativeFieldPlacement, NativeStructShape,
     NativeVariantShape, native_enum_disc, native_enum_field, native_enum_field_consume,
-    native_enum_to_variant, native_shape, native_struct_shape, register_native_shapes,
-    register_native_struct_shapes, registry_stats_for_test,
+    native_enum_named_field, native_enum_to_variant, native_shape, native_struct_shape,
+    native_struct_variant_is, register_native_shapes, register_native_struct_shapes,
+    registry_stats_for_test,
 };
 use native::{RegistryEntry, register_heap, take_heap};
 use render::repr_value;
@@ -868,7 +869,13 @@ impl WeakValue {
                 let base = r.ptr & !7;
                 // SAFETY: reading the strong count of a weak-pinned (still
                 // allocated) node; > 0 means a strong owner survives.
-                if base != 0
+                if r.shape.by_index {
+                    Some(Value::NativeEnum(Arc::new(NativeEnumOwner {
+                        ptr: r.ptr,
+                        shape: Arc::clone(&r.shape),
+                        owned: false,
+                    })))
+                } else if base != 0
                     && unsafe { gossamer_runtime::c_abi::rc_strong_count(base as *mut u8) } > 0
                 {
                     // SAFETY: co-owning a live node; the returned borrowed handle

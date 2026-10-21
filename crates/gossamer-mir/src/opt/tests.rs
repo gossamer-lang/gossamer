@@ -143,6 +143,9 @@ mod elision_tests {
                 },
             ],
             span: sp,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
 
         elide_vec_clone_of_fresh_temporary(&mut body, &tcx);
@@ -215,6 +218,9 @@ mod elision_tests {
                 ..block_at(span())
             }],
             span: span(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
 
         scalar_replace_short_lived_aggregates(&mut body);
@@ -305,6 +311,9 @@ mod elision_tests {
                 },
             ],
             span: span(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
         (body, tcx)
     }
@@ -422,6 +431,9 @@ mod elision_tests {
                 },
             ],
             span: span(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
         (body, tcx)
     }
@@ -473,6 +485,9 @@ mod elision_tests {
                 ..block_at(span())
             }],
             span: span(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
 
         scalar_replace_short_lived_aggregates(&mut body);
@@ -528,6 +543,9 @@ mod elision_tests {
                 ..block_at(span())
             }],
             span: span(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
 
         scalar_replace_short_lived_aggregates(&mut body);
@@ -591,6 +609,9 @@ mod elision_tests {
                 },
             ],
             span: span(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
 
         scalar_replace_short_lived_aggregates(&mut body);
@@ -648,6 +669,9 @@ mod elision_tests {
                 ..block_at(span())
             }],
             span: span(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 
@@ -702,6 +726,9 @@ mod elision_tests {
                 },
             ],
             span: span(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 
@@ -787,6 +814,9 @@ mod elision_tests {
                 },
             ],
             span: span(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
         elide_borrowed_holder_rc(&mut body, &tcx, &crate::opt::CalleeParams::unknown());
         assert!(is_nop(&body.blocks[1].stmts[1]), "retain of the holder should go");
@@ -876,6 +906,9 @@ mod elision_tests {
                 },
             ],
             span: span(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 
@@ -949,6 +982,9 @@ mod elision_tests {
                 },
             ],
             span: span(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 
@@ -1006,6 +1042,9 @@ mod elision_tests {
                 },
             ],
             span: span(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 
@@ -1153,6 +1192,9 @@ mod elision_tests {
                 },
             ],
             span: span(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 
@@ -1315,6 +1357,9 @@ mod elision_tests {
                 },
             ],
             span: span(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 
@@ -1457,6 +1502,9 @@ mod elision_tests {
                 },
             ],
             span: span(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 
@@ -1508,6 +1556,17 @@ mod elision_tests {
             is_nop(&body.blocks[1].stmts[0]),
             "the matching field release should go with it"
         );
+    }
+
+    #[test]
+    fn keeps_field_share_when_the_holder_transfers_its_field() {
+        let mut tcx = TyCtxt::new();
+        let moved_field = Place { local: Local(2), projection: vec![Projection::Field(0)] };
+        let clear = assign(moved_field, Rvalue::Use(Operand::Const(ConstValue::Int(0))));
+        let mut body = field_holder_body(&mut tcx, vec![clear]);
+        elide_borrowed_holder_rc(&mut body, &tcx, &crate::opt::CalleeParams::unknown());
+        assert_eq!(intrinsic_name(&body.blocks[0].stmts[1]), Some("gos_rt_vec_retain"));
+        assert_eq!(intrinsic_name(&body.blocks[1].stmts[0]), Some("gos_rt_vec_free"));
     }
 
     #[test]
@@ -1821,6 +1880,9 @@ mod elision_tests {
             locals,
             blocks,
             span: sp,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 
@@ -1952,6 +2014,9 @@ mod elision_tests {
             locals,
             blocks,
             span: sp,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
         local_branch_bounds_check_elim(&mut body, &tcx, &ProgramEffects::default());
         let Terminator::Call { callee, .. } = &body.blocks[2].terminator else {
@@ -2048,6 +2113,9 @@ mod elision_tests {
             locals,
             blocks,
             span: sp,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
         local_branch_bounds_check_elim(&mut body, &tcx, &ProgramEffects::default());
         let Terminator::Call { callee, .. } = &body.blocks[2].terminator else {
@@ -2157,6 +2225,9 @@ mod elision_tests {
                 },
             ],
             span: sp,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
 
         local_branch_bounds_check_elim(&mut body, &tcx, &ProgramEffects::default());
@@ -2264,6 +2335,9 @@ mod elision_tests {
                 },
             ],
             span: sp,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
 
         local_branch_bounds_check_elim(&mut body, &tcx, &ProgramEffects::default());
@@ -2373,6 +2447,9 @@ mod elision_tests {
                 },
             ],
             span: sp,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
 
         local_branch_bounds_check_elim(&mut body, &tcx, &ProgramEffects::default());
@@ -2487,6 +2564,9 @@ mod elision_tests {
             locals,
             blocks,
             span: sp,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
 
         fuse_slice_parse_ranges(&mut body);
@@ -2517,6 +2597,28 @@ mod elision_tests {
 
     #[test]
     fn reserve_vecs_rewrites_counted_push_loop_constructor() {
+        let mut body = counted_push_loop_body();
+
+        reserve_vecs_for_counted_push_loops(&mut body);
+
+        let Terminator::Call { callee, args, .. } = &body.blocks[0].terminator else {
+            panic!("expected constructor call")
+        };
+        assert!(
+            matches!(callee, Operand::Const(ConstValue::Str(name)) if name == "gos_rt_vec_with_capacity")
+        );
+        assert_eq!(args.len(), 2);
+        assert!(matches!(
+            args[1],
+            Operand::Copy(Place {
+                local: Local(3),
+                projection: _
+            })
+        ));
+    }
+
+    /// `v = Vec::new(); while i < n { v.push(x); i += 1 }` over word locals.
+    fn counted_push_loop_body() -> Body {
         let mut tcx = TyCtxt::new();
         let unit = tcx.unit();
         let i64_ty = tcx.int_ty(gossamer_types::IntTy::I64);
@@ -2530,7 +2632,7 @@ mod elision_tests {
             decl(unit),   // L6 push result
         ];
         let sp = span();
-        let mut body = Body {
+        Body {
             name: "reserve".into(),
             def: None,
             arity: 3,
@@ -2599,24 +2701,10 @@ mod elision_tests {
                 },
             ],
             span: sp,
-        };
-
-        reserve_vecs_for_counted_push_loops(&mut body);
-
-        let Terminator::Call { callee, args, .. } = &body.blocks[0].terminator else {
-            panic!("expected constructor call")
-        };
-        assert!(
-            matches!(callee, Operand::Const(ConstValue::Str(name)) if name == "gos_rt_vec_with_capacity")
-        );
-        assert_eq!(args.len(), 2);
-        assert!(matches!(
-            args[1],
-            Operand::Copy(Place {
-                local: Local(3),
-                projection: _
-            })
-        ));
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
+        }
     }
 
     #[test]
@@ -2659,6 +2747,9 @@ mod elision_tests {
                 },
             ],
             span: sp,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
         assert!(loop_body_has_exactly_one_vec_push(
             &body,
@@ -2691,6 +2782,19 @@ mod elision_tests {
 
     #[test]
     fn reserve_vecs_skips_bounds_computed_after_constructor() {
+        let mut body = late_bound_push_loop_body();
+
+        reserve_vecs_for_counted_push_loops(&mut body);
+
+        let Terminator::Call { callee, args, .. } = &body.blocks[0].terminator else {
+            panic!("expected constructor call")
+        };
+        assert!(matches!(callee, Operand::Const(ConstValue::Str(name)) if name == "Vec::new"));
+        assert_eq!(args.len(), 1);
+    }
+
+    /// A counted push loop whose bound is assigned after the constructor.
+    fn late_bound_push_loop_body() -> Body {
         let mut tcx = TyCtxt::new();
         let unit = tcx.unit();
         let i64_ty = tcx.int_ty(gossamer_types::IntTy::I64);
@@ -2704,7 +2808,7 @@ mod elision_tests {
             decl(unit),   // L6 push result
         ];
         let sp = span();
-        let mut body = Body {
+        Body {
             name: "reserve_skip".into(),
             def: None,
             arity: 0,
@@ -2782,15 +2886,10 @@ mod elision_tests {
                 },
             ],
             span: sp,
-        };
-
-        reserve_vecs_for_counted_push_loops(&mut body);
-
-        let Terminator::Call { callee, args, .. } = &body.blocks[0].terminator else {
-            panic!("expected constructor call")
-        };
-        assert!(matches!(callee, Operand::Const(ConstValue::Str(name)) if name == "Vec::new"));
-        assert_eq!(args.len(), 1);
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
+        }
     }
 
     #[test]
@@ -2822,6 +2921,9 @@ mod elision_tests {
                 },
             ],
             span: sp,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         };
         let bound = Operand::Copy(Place::local(Local(1)));
         assert!(reserve_bound_available_at_entry(&body, &bound, BlockId(1)));
@@ -2919,6 +3021,9 @@ mod elision_tests {
                 BasicBlock { id: BlockId(4), stmts: join_stmts, ..block_at(span()) },
             ],
             span: span(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 
@@ -3038,6 +3143,9 @@ mod elision_tests {
                 BasicBlock { id: BlockId(2), stmts: tail, ..block_at(span()) },
             ],
             span: span(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
         }
     }
 

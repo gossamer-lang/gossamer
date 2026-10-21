@@ -22,14 +22,21 @@ pub enum CarrierNode {
     Str,
     /// An `errors::Error` payload: the word is a runtime error node.
     Error,
+    /// A heap enum payload: the word is the enum's tagged pointer, holding a
+    /// share of it. Its layout is the shape's [`CarrierShape::enum_shape`].
+    Enum,
     /// An `Option`; the node for its `Some` payload follows.
     Option,
     /// A `Result`; the node for its `Ok` payload follows, then its `Err` payload.
     Result,
+    /// A struct of scalars: the word is a counted copy blob of the struct's
+    /// slots, holding a share of it. Its layout is the shape's
+    /// [`CarrierShape::struct_shape`].
+    Struct,
 }
 
 impl CarrierNode {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 11] = [
         Self::Unit,
         Self::I64,
         Self::F64,
@@ -39,6 +46,8 @@ impl CarrierNode {
         Self::Error,
         Self::Option,
         Self::Result,
+        Self::Enum,
+        Self::Struct,
     ];
 
     /// Whether this node is itself a two-word carrier.
@@ -58,6 +67,8 @@ impl CarrierNode {
             Self::Error => 7,
             Self::Option => 8,
             Self::Result => 9,
+            Self::Enum => 10,
+            Self::Struct => 11,
         }
     }
 }
@@ -73,6 +84,12 @@ const BITS_PER_NODE: u32 = 4;
 pub struct CarrierShape {
     bits: u64,
     len: u8,
+    /// The VM shape-table index every [`CarrierNode::Enum`] node uses, or
+    /// `u32::MAX` when the tree holds none.
+    enum_shape: u32,
+    /// The VM struct-shape index every [`CarrierNode::Struct`] node uses, or
+    /// `u32::MAX` when the tree holds none.
+    struct_shape: u32,
 }
 
 impl CarrierShape {
@@ -86,12 +103,57 @@ impl CarrierShape {
         if nodes.len() > Self::MAX_NODES || !nodes.first().is_some_and(|n| n.is_carrier()) {
             return None;
         }
-        let mut shape = Self { bits: 0, len: 0 };
+        let mut shape = Self {
+            bits: 0,
+            len: 0,
+            enum_shape: u32::MAX,
+            struct_shape: u32::MAX,
+        };
         for (i, node) in nodes.iter().enumerate() {
             shape.bits |= node.code() << (i as u32 * BITS_PER_NODE);
         }
         shape.len = u8::try_from(nodes.len()).ok()?;
         (shape.subtree_end(0)? == nodes.len()).then_some(shape)
+    }
+
+    /// This shape with its [`CarrierNode::Enum`] nodes laid out as the VM
+    /// enum shape `index`.
+    #[must_use]
+    pub const fn with_enum_shape(self, index: u32) -> Self {
+        Self {
+            enum_shape: index,
+            ..self
+        }
+    }
+
+    /// This shape with its [`CarrierNode::Struct`] nodes laid out as the VM
+    /// struct shape `index`.
+    #[must_use]
+    pub const fn with_struct_shape(self, index: u32) -> Self {
+        Self {
+            struct_shape: index,
+            ..self
+        }
+    }
+
+    /// The VM struct-shape index of the tree's struct payloads.
+    #[must_use]
+    pub const fn struct_shape(&self) -> Option<u32> {
+        if self.struct_shape == u32::MAX {
+            None
+        } else {
+            Some(self.struct_shape)
+        }
+    }
+
+    /// The VM shape-table index of the tree's enum payloads.
+    #[must_use]
+    pub const fn enum_shape(&self) -> Option<u32> {
+        if self.enum_shape == u32::MAX {
+            None
+        } else {
+            Some(self.enum_shape)
+        }
     }
 
     /// Number of nodes in the tree.
@@ -163,5 +225,14 @@ mod tests {
         assert!(CarrierShape::from_nodes(&[N::Result, N::Str]).is_none());
         assert!(CarrierShape::from_nodes(&[N::Option, N::Str, N::Str]).is_none());
         assert!(CarrierShape::from_nodes(&[N::Option; 17]).is_none());
+    }
+
+    #[test]
+    fn an_enum_payload_carries_its_shape_index() {
+        let shape = CarrierShape::from_nodes(&[N::Option, N::Enum]).unwrap();
+        assert_eq!(shape.enum_shape(), None);
+        let shape = shape.with_enum_shape(7);
+        assert_eq!(shape.node(shape.arm(0, 0).unwrap()), N::Enum);
+        assert_eq!(shape.enum_shape(), Some(7));
     }
 }

@@ -45,6 +45,28 @@ mod autoderive_tests {
     }
 
     #[test]
+    fn implicit_derives_keep_same_named_declarations_separate() {
+        let runtime = "struct Model { requests: Sender<i64> }\n";
+        let value = "mod values { pub struct Model { value: i64 } }\n";
+        for source in [format!("{runtime}{value}"), format!("{value}{runtime}")] {
+            let augmented = super::augment_source(&source);
+            let generated = &augmented[source.len()..];
+            assert!(!generated.contains("impl Model {"), "{generated}");
+            assert!(generated.contains("impl values::Model {"), "{generated}");
+        }
+    }
+
+    #[test]
+    fn implicit_derives_follow_qualified_field_types() {
+        let source = "struct Model { requests: Sender<i64> }\nmod values { pub struct Model { value: i64 } }\nstruct Wrapper { value: values::Model }\n";
+        let augmented = super::augment_source(source);
+        let generated = &augmented[source.len()..];
+        assert!(generated.contains("impl Wrapper {"), "{generated}");
+        let start = generated.find("impl Wrapper {").expect("wrapper impl");
+        assert!(generated[start..].contains("fn eq("), "{generated}");
+    }
+
+    #[test]
     fn wrapper_names_match_the_rewritten_tree_on_every_fixture() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut with_names = 0;
@@ -148,6 +170,22 @@ mod autoderive_tests {
         let src = "struct Point { x: i64 }\n                   type P = Point\n                   fn main() { let _ = to_json::<P>(Point { x: 1 }); }";
         assert!(serde_target_refusals(src).is_empty());
         assert!(serde_field_errors(src).is_empty());
+    }
+
+    #[test]
+    fn serde_diagnostics_agree_with_rewrite_for_a_nested_module_import() {
+        let src = "mod library {
+            pub mod services { pub struct StringList { items: Vec<String> } }
+            mod dialogs {
+                use crate::library::services
+                fn decode(text: String) {
+                    let _ = from_json::<services::StringList>(text)
+                }
+            }
+        }";
+        let augmented = super::augment_source(src);
+        assert!(augmented.contains("fn __gos_serde_from_json_library__services__StringList"));
+        assert!(autoderive_diags(src).is_empty());
     }
 
     /// A callable field names its own type in the report rather than the

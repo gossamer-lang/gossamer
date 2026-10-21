@@ -57,7 +57,10 @@ fn abi_of_rust(ty: &str) -> Option<AbiType> {
     if ty.is_empty() || ty == "()" || ty == "!" {
         return Some(AbiType::Void);
     }
-    if ty.starts_with('*') {
+    if ty.starts_with('*')
+        || ty.starts_with("unsafe extern \"C\" fn(")
+        || ty.starts_with("extern \"C\" fn(")
+    {
         return Some(AbiType::Ptr);
     }
     Some(match ty {

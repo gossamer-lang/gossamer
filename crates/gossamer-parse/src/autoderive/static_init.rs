@@ -1,11 +1,15 @@
-// Runs a heap-valued `static mut`'s initializer at entry so the cell holds it.
+// Runs a heap-valued `static`'s initializer at entry so the cell holds it.
 
-/// Prepends, to the entry function, an assignment of every `static mut`
+/// Prepends, to the entry function, an assignment of every `static`
 /// declaration whose value is not a scalar constant.
 ///
 /// A scalar cell carries its value in the global's own initializer. A cell
-/// holding a container or a string names heap storage instead, which only a
-/// running program can build, so the entry writes it before anything reads it.
+/// holding a container, a string, or a runtime handle (an atomic, a mutex,
+/// a channel) names heap storage instead, which only a running program can
+/// build, so the entry writes it before anything reads it. Immutable
+/// statics join their mutable siblings here: a static names one shared
+/// value for the whole program, so a handle-typed one must be built once,
+/// not afresh at every read.
 pub(crate) fn initialize_heap_mut_statics(sf: &mut SourceFile) {
     let mut inits: Vec<(Vec<String>, Expr)> = Vec::new();
     collect_heap_mut_statics(&sf.items, &mut Vec::new(), &mut inits);
@@ -139,7 +143,7 @@ fn add_init_fn(
     });
 }
 
-/// Collects the module-qualified path and initializer of every `static mut`
+/// Collects the module-qualified path and initializer of every `static`
 /// the entry has to build at run time.
 fn collect_heap_mut_statics(
     items: &[Item],
@@ -147,12 +151,16 @@ fn collect_heap_mut_statics(
     out: &mut Vec<(Vec<String>, Expr)>,
 ) {
     for item in items {
+        // An item `#[cfg]` leaves out of this build is not there to assign.
+        if !gossamer_ast::cfg::item_is_active(&item.attrs) {
+            continue;
+        }
         match &item.kind {
             // A foreign static is a C global; its placeholder initializer
             // never runs.
             ItemKind::Static(_) if item.attrs.has_word(gossamer_ast::FOREIGN_STATIC_ATTR) => {}
             ItemKind::Static(decl)
-                if decl.mutability == gossamer_ast::common::Mutability::Mutable && !scalar_static_ty(&decl.ty) =>
+                if !scalar_static_ty(&decl.ty) =>
             {
                 let mut path = module.clone();
                 path.push(decl.name.name.clone());
@@ -170,32 +178,57 @@ fn collect_heap_mut_statics(
     }
 }
 
-/// Whether a static's declared type is one the global's own initializer can
-/// carry: an integer, a float, a `bool`, or a `char`.
+/// Whether a static's declared type is one the global's own initializer
+/// can carry and every read can answer from that constant: an integer, a
+/// float, a `bool`, a `char`, or a string. A string static's value is a
+/// compile-time reference into the constant pool, so it needs no cell and
+/// must not be assigned (a reference cannot be rebound).
 fn scalar_static_ty(ty: &gossamer_ast::Type) -> bool {
-    let TypeKind::Path(path) = &ty.kind else {
-        return false;
+    // `&str` is written as a reference around the string path; a shared
+    // reference to a string is still a constant-pool value.
+    let ty = match &ty.kind {
+        TypeKind::Ref {
+            mutability: gossamer_ast::Mutability::Immutable,
+            inner,
+        } => inner.as_ref(),
+        _ => ty,
     };
-    let [seg] = path.segments.as_slice() else {
-        return false;
-    };
-    matches!(
-        seg.name.name.as_str(),
-        "bool"
-            | "char"
-            | "f32"
-            | "f64"
-            | "i8"
-            | "i16"
-            | "i32"
-            | "i64"
-            | "isize"
-            | "u8"
-            | "u16"
-            | "u32"
-            | "u64"
-            | "usize"
-    )
+    match &ty.kind {
+        // A string static's value is a compile-time reference into the
+        // constant pool: it needs no run-time prologue, and assigning it
+        // would report a reference rebinding (GT0052).
+        TypeKind::Path(path)
+            if matches!(
+                path.segments.as_slice(),
+                [seg] if matches!(seg.name.name.as_str(), "str" | "String")
+            ) =>
+        {
+            true
+        }
+        TypeKind::Path(path) => {
+            let [seg] = path.segments.as_slice() else {
+                return false;
+            };
+            matches!(
+                seg.name.name.as_str(),
+                "bool"
+                    | "char"
+                    | "f32"
+                    | "f64"
+                    | "i8"
+                    | "i16"
+                    | "i32"
+                    | "i64"
+                    | "isize"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "usize"
+            )
+        }
+        _ => false,
+    }
 }
 
 /// The name of the per-module initializer a module's heap statics are built in.

@@ -124,10 +124,23 @@ impl Lowerer<'_> {
         node: NodeId,
         path: &gossamer_ast::PathExpr,
     ) -> (String, String) {
-        let mut name = path
-            .segments
+        let segments: Vec<&gossamer_ast::Ident> =
+            path.segments.iter().map(|seg| &seg.name).collect();
+        self.struct_identity(node, &segments)
+    }
+
+    /// The identity a struct named by `segments` at `node` carries at run
+    /// time (its module-qualified name, through an import or alias), and the
+    /// name it was declared with. Literals build values under the identity and
+    /// struct patterns test for it.
+    pub(super) fn struct_identity(
+        &self,
+        node: NodeId,
+        segments: &[&gossamer_ast::Ident],
+    ) -> (String, String) {
+        let mut name = segments
             .last()
-            .map(|seg| seg.name.name.clone())
+            .map(|seg| seg.name.clone())
             .unwrap_or_default();
         if let Some(Resolution::Def { def, .. }) = self.resolutions.get(node)
             && let Some(promoted) = self.module_fn_paths.get(&def)
@@ -150,8 +163,17 @@ impl Lowerer<'_> {
             name.clone_from(identity);
         }
         // A literal may name its type through an import (`use a::Point`,
-        // `use a::Point as P`); the import's target path is that identity.
-        if let Some(Resolution::Import { use_id }) = self.resolutions.get(node)
+        // `use a::Point as P`); the imported type's own identity is what the
+        // literal builds. The resolver followed the `use` from the module it
+        // is written in - `crate::` inside a dependency names that
+        // dependency's root - so its answer is preferred over the spelling.
+        if let Some(Resolution::Import { .. }) = self.resolutions.get(node)
+            && let Some(def) = self.resolutions.import_def(node)
+            && let Some(identity) = self.module_type_names.get(&def)
+            && segments.len() == 1
+        {
+            name.clone_from(identity);
+        } else if let Some(Resolution::Import { use_id }) = self.resolutions.get(node)
             && let Some(entries) = self.import_targets.get(&use_id)
             && let Some((_, full)) = entries.iter().find(|(bound, _)| *bound == name)
         {
@@ -175,7 +197,7 @@ impl Lowerer<'_> {
         let declared_name = alias_target
             .as_ref()
             .and_then(|target| target.last())
-            .or_else(|| path.segments.last().map(|seg| &seg.name))
+            .or_else(|| segments.last().copied())
             .map(|ident| ident.name.clone())
             .unwrap_or_default();
         (name, declared_name)

@@ -400,7 +400,7 @@ fn analyse_unit(name: &str, bundled: &str, origins: Vec<BundledSpan>) -> UnitAna
     if fatal.is_empty()
         && let Some(diag) = crate::comptime::fold_diagnostic(
             name,
-            &augmented,
+            (&augmented, &origins),
             &sf,
             &resolutions,
             &types,

@@ -1,0 +1,37 @@
+// A closure capturing a one-word struct (its one field a Vec) keeps that Vec
+// alive and intact after the enclosing function reads the struct again and
+// returns the closure inside another struct.
+struct Order {
+    order: Vec<i64>
+}
+
+impl Order {
+    fn source_of(&self, i: i64) -> i64 {
+        if i < 0 || i >= self.order.len() { -1 } else { self.order[i] }
+    }
+}
+
+struct Names(Vec<String>)
+
+struct List {
+    count: i64
+    row: Fn(i64) -> String
+}
+
+fn view(order: Order) -> List {
+    let row = |i: i64| f"s{order.source_of(i)}"
+    List { count: order.order.len(), row: row }
+}
+
+fn labels(names: Names) -> (i64, Fn(i64) -> String) {
+    let pick = |i: i64| names.0[i]
+    (names.0.len(), pick)
+}
+
+fn main() {
+    let l = view(Order { order: #[7, 8, 9] })
+    let f = l.row
+    println(f"{l.count}: {f(0)} {f(1)} {f(2)} {f(3)}")
+    let n, pick = labels(Names(#["a", "b"]))
+    println(f"{n}: {pick(0)} {pick(1)}")
+}

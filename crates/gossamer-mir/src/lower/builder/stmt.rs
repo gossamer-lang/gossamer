@@ -334,23 +334,51 @@ impl<'a> Builder<'a> {
 
     /// Whether `let pattern = init` may share `value` rather than copy it:
     /// `init` names a parameter or a single-binding `let` declared without
-    /// `mut` that is not a reference, and `pattern` binds nothing `mut`, so
-    /// no write can reach either side.
+    /// `mut` that is not a reference, or a field path below one (or below a
+    /// shared `&self`), and `pattern` binds nothing `mut`, so no write can
+    /// reach either side.
     fn shares_unwritable_source(&self, init: &HirExpr, value: Local, pattern: &HirPat) -> bool {
-        let bare_local = matches!(
-            &init.kind,
-            HirExprKind::Path { segments, def: None } if segments.len() == 1
-        );
-        let decl = &self.locals[value.0 as usize];
-        let unwritable_source = !decl.mutable
-            && (self.param_locals.contains(&value) || self.immutable_let_locals.contains(&value))
-            && !matches!(
-                self.tcx.kind_of(init.ty),
-                gossamer_types::TyKind::Ref { .. }
-            );
         let mut mutable = std::collections::HashSet::new();
         gossamer_hir::collect_mutable_pattern_names(pattern, &mut mutable);
-        bare_local && unwritable_source && mutable.is_empty()
+        if !mutable.is_empty() {
+            return false;
+        }
+        let mut base = init;
+        let mut through_field = false;
+        while let HirExprKind::Field { receiver, .. } | HirExprKind::TupleIndex { receiver, .. } =
+            &base.kind
+        {
+            base = receiver;
+            through_field = true;
+        }
+        let HirExprKind::Path {
+            segments,
+            def: None,
+        } = &base.kind
+        else {
+            return false;
+        };
+        let [segment] = segments.as_slice() else {
+            return false;
+        };
+        let source = if through_field {
+            match self.lookup_local(&segment.name) {
+                Some(source) => source,
+                None => return false,
+            }
+        } else {
+            value
+        };
+        let decl = &self.locals[source.0 as usize];
+        let reference_ok = match self.tcx.kind_of(base.ty) {
+            gossamer_types::TyKind::Ref { mutability, .. } => {
+                through_field && matches!(mutability, gossamer_types::Mutbl::Not)
+            }
+            _ => true,
+        };
+        !decl.mutable
+            && (self.param_locals.contains(&source) || self.immutable_let_locals.contains(&source))
+            && reference_ok
     }
 
     fn is_vec_like_ty(&self, ty: gossamer_types::Ty) -> bool {
@@ -879,6 +907,11 @@ impl<'a> Builder<'a> {
                                 || self.fresh_results.contains(&value)
                                 || self.is_owned_carrier_payload(value)
                                 || self.holds_owned_carrier_payload(value)
+                                // A struct literal is a value of its own: each
+                                // field it stores already took storage of its
+                                // own where its source can still see it.
+                                || (!self.named_locals.contains(&value)
+                                    && is_struct_literal(init))
                                 // A `.clone()` result already took its deep
                                 // per-field copy at the dispatch, so the
                                 // binding takes the handles as they are - a
@@ -984,6 +1017,13 @@ impl<'a> Builder<'a> {
             HirStmtKind::Item(_) => {}
         }
     }
+}
+
+/// Whether `e` is a struct literal (`S { .. }`), which builds a value of its own.
+fn is_struct_literal(e: &HirExpr) -> bool {
+    matches!(&e.kind, HirExprKind::Call { callee, .. }
+        if matches!(&callee.kind, HirExprKind::Path { segments, def: None }
+            if matches!(segments.as_slice(), [only] if only.name == "__struct")))
 }
 
 /// Runtime constructors whose results are fresh owned values. Other runtime

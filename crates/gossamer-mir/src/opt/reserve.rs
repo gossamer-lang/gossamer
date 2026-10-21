@@ -662,7 +662,6 @@ fn fresh_vec_temporary_sources(body: &Body) -> HashSet<Local> {
                 | "gos_rt_intarr_slice_result"
                 | "gos_rt_floatarr_slice_result"
                 | "gos_rt_bytearr_slice_result"
-                | "gos_rt_packed_bytearr_slice_result"
         ) || !destination.projection.is_empty()
         {
             continue;

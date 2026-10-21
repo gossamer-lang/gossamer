@@ -251,10 +251,7 @@ pub(super) enum PrintKind {
 /// adjacent bytes); `bool` (low bit) and `char` (low 32 bits) read
 /// through a mask, so both are safe.
 fn tuple_elem_tag(tcx: &TyCtxt, ty: Ty) -> Option<u8> {
-    let mut ty = ty;
-    while let TyKind::Ref { inner, .. } = tcx.kind_of(ty) {
-        ty = *inner;
-    }
+    let ty = runtime_ty(tcx, ty);
     match tcx.kind_of(ty) {
         // A `u64` / `usize` slot spans the whole unsigned range, so it reads
         // as unsigned wherever a tag stream names it.
@@ -299,11 +296,20 @@ fn debug_payload_kind(tcx: &TyCtxt, ty: Ty) -> Option<u8> {
 /// Tags describing `ty` in a `gos_rt_tuple_format` stream: one byte for
 /// a scalar, or the `8, count, <nested tags…>` form for a nested tuple
 /// whose slots are flattened into the parent's buffer.
-fn tuple_elem_tags(tcx: &TyCtxt, ty: Ty) -> Option<Vec<u8>> {
-    let mut peeled = ty;
-    while let TyKind::Ref { inner, .. } = tcx.kind_of(peeled) {
-        peeled = *inner;
+/// `ty` with its references and newtypes peeled: the type whose layout the
+/// runtime value actually has, since a newtype adds none.
+fn runtime_ty(tcx: &TyCtxt, mut ty: Ty) -> Ty {
+    loop {
+        match tcx.kind_of(ty) {
+            TyKind::Ref { inner, .. } => ty = *inner,
+            TyKind::Nominal { repr, .. } => ty = *repr,
+            _ => return ty,
+        }
     }
+}
+
+fn tuple_elem_tags(tcx: &TyCtxt, ty: Ty) -> Option<Vec<u8>> {
+    let peeled = runtime_ty(tcx, ty);
     if let TyKind::Tuple(nested) = tcx.kind_of(peeled) {
         let nested: Vec<Ty> = nested.clone();
         if nested.is_empty() || nested.len() > usize::from(u8::MAX) {

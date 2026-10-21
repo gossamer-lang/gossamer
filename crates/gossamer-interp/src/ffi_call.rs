@@ -200,18 +200,19 @@ fn resolve(symbol: &str, library: &str) -> RuntimeResult<usize> {
     if let Some(&addr) = table.get(&key) {
         return Ok(addr);
     }
-    let libraries: Vec<String> = if library.is_empty() {
-        Vec::new()
-    } else {
-        vec![library.to_string()]
-    };
+    // `library` lists every library the declaration links, joined by `,`.
+    let libraries: Vec<String> = library
+        .split(',')
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect();
     let addr = platform::resolve(symbol, &libraries).ok_or_else(|| {
         RuntimeError::Panic(format!(
             "foreign function `{symbol}` was not found in the process{}",
             if library.is_empty() {
                 String::new()
             } else {
-                format!(" or in library `{library}`")
+                format!(" or in library `{}`", library.replace(',', "`, `"))
             }
         ))
     })?;

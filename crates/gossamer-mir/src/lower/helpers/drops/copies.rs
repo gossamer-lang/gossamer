@@ -272,16 +272,20 @@ pub(super) fn for_each_stmt_place(kind: &StatementKind, f: &mut impl FnMut(&Plac
     }
 }
 
-/// The receiver arm a `Result` entry point leaves nobody holding, with the
-/// receiver's argument position: `0` for `Ok`, `1` for `Err`.
+/// The receiver arm a `Result` or `Option` entry point leaves nobody holding,
+/// with the receiver's argument position: `0` for `Ok` / `Some`, `1` for `Err`.
 ///
-/// `map` and `and_then` hand the closure the `Ok` payload, `map_err` and
+/// `map` and `and_then` hand the closure the `Ok` / `Some` payload, which the
+/// closure only borrows, `map_err` and
 /// `or_else` the `Err` one. A call that answers the `Ok` payload or a fallback,
 /// or turns the carrier into an `Option` of one arm, leaves the other arm's
 /// payload unheld. The arm it does not name is the one its answer holds.
 pub(super) fn discarded_receiver_arm(name: &str) -> Option<(usize, usize)> {
     Some(match name {
-        "gos_rt_result_map" | "gos_rt_result_map_bare" | "gos_rt_result_and_then" => (0, 0),
+        "gos_rt_result_map"
+        | "gos_rt_result_map_bare"
+        | "gos_rt_result_and_then"
+        | "gos_rt_option_and_then" => (0, 0),
         "gos_rt_result_map_i64" => (0, 1),
         "gos_rt_result_default" | "gos_rt_result_default_f64" => (1, 1),
         "gos_rt_result_to_opt_err" | "gos_rt_result_err" => (0, 0),

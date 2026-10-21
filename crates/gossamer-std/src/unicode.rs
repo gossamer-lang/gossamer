@@ -222,12 +222,11 @@ pub fn to_upper_str(s: &str) -> String {
     s.chars().flat_map(char::to_uppercase).collect()
 }
 
-/// Returns the Unicode simple-case-folded form of `s` - the
-/// canonical comparison form for case-insensitive equality. Built
-/// by composing the simple lower mapping rune-by-rune.
+/// Returns the Unicode case-folded form of `s` (CaseFolding.txt statuses C
+/// and F) - the canonical comparison form for case-insensitive equality.
 #[must_use]
 pub fn fold_case(s: &str) -> String {
-    s.chars().flat_map(char::to_lowercase).collect()
+    gossamer_runtime::c_abi::unicode::fold_case(s)
 }
 
 // ---------------------------------------------------------------------------

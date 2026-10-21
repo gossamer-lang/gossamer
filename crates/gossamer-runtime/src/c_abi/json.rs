@@ -436,6 +436,47 @@ pub(crate) unsafe fn json_clone_handle(p: *const GosJson) -> *mut GosJson {
     })
 }
 
+/// Returns an independently owned handle onto the same JSON document.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_clone(p: *const GosJson) -> *mut GosJson {
+    ffi_entry!({
+        // SAFETY: `p` is the shim's live JSON argument, or null.
+        unsafe { json_clone_handle(p) }
+    })
+}
+
+/// Replaces a copied aggregate's JSON field with its own handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_field_clone(slot: *mut *mut GosJson) {
+    ffi_entry!({
+        if slot.is_null() {
+            return;
+        }
+        // SAFETY: `slot` is the shim's live JSON field storage.
+        let value = unsafe { slot.read_unaligned() };
+        // SAFETY: the copied field contains a live handle or null.
+        let cloned = unsafe { json_clone_handle(value) };
+        // SAFETY: `slot` is the field storage read above.
+        unsafe { slot.write_unaligned(cloned) };
+    });
+}
+
+/// Releases and clears the JSON handle an aggregate field owns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_field_release(slot: *mut *mut GosJson) {
+    ffi_entry!({
+        if slot.is_null() || crate::c_abi::rc::in_region_arena(slot.cast()) {
+            return;
+        }
+        // SAFETY: `slot` is the shim's live JSON field storage.
+        let value = unsafe { slot.read_unaligned() };
+        // SAFETY: clearing this field makes repeated cleanup null-safe.
+        unsafe { slot.write_unaligned(std::ptr::null_mut()) };
+        // SAFETY: the field owns the handle just removed, or null.
+        unsafe { gos_rt_json_free(value) };
+    });
+}
+
 /// Frees the `GosJson` handles a builder vector holds, then the vector.
 ///
 /// A container constructor copies every child it is handed, so the boxes the
@@ -2034,6 +2075,55 @@ pub unsafe extern "C" fn gos_rt_json_writer_finish(w: *mut JsonTokenWriter) -> *
 mod tests {
     use super::*;
     use std::ffi::CStr;
+
+    #[test]
+    fn aggregate_json_fields_clone_handles_and_release_once() {
+        let original = GosJson::into_raw(serde_json::json!({"kept": true}));
+        let mut field = original;
+        // SAFETY: the field contains the live original handle, and each release
+        // below consumes a distinct owned handle or the cleared null field.
+        unsafe {
+            gos_rt_json_field_clone(&raw mut field);
+            assert_ne!(original, field);
+            assert!(std::sync::Arc::ptr_eq(&(*original).tree, &(*field).tree));
+            assert_eq!(std::sync::Arc::strong_count(&(*field).tree), 2);
+            gos_rt_json_free(original);
+            assert_eq!(
+                (*field).json_ref().to_value(),
+                serde_json::json!({"kept": true})
+            );
+            assert_eq!(std::sync::Arc::strong_count(&(*field).tree), 1);
+            gos_rt_json_field_release(&raw mut field);
+            assert!(field.is_null());
+            gos_rt_json_field_release(&raw mut field);
+        }
+    }
+
+    #[test]
+    fn copied_aggregate_metadata_owns_its_json_child() {
+        use gossamer_abi::rc::{RC_CHILD_JSON, RC_CHILD_KIND_SHIFT, RC_KIND_STRUCT};
+        let original = GosJson::into_raw(serde_json::json!({"kept": true}));
+        let meta = [
+            RC_KIND_STRUCT,
+            1,
+            0,
+            1,
+            RC_CHILD_JSON << RC_CHILD_KIND_SHIFT,
+        ];
+        let source = [original as usize];
+        // SAFETY: the one-word source contains a live JSON handle, exactly as
+        // the metadata describes. The returned blob and original are freed once.
+        unsafe {
+            let copy =
+                crate::c_abi::rc::gos_rt_enum_box_aggr(8, meta.as_ptr(), source.as_ptr().cast());
+            let child = copy.cast::<*mut GosJson>().read_unaligned();
+            assert_ne!(child, original);
+            assert_eq!(std::sync::Arc::strong_count(&(*original).tree), 2);
+            crate::c_abi::rc::gos_rt_rc_release(copy);
+            assert_eq!(std::sync::Arc::strong_count(&(*original).tree), 1);
+            gos_rt_json_free(original);
+        }
+    }
 
     #[test]
     #[cfg_attr(

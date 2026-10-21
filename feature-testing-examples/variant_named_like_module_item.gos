@@ -1,0 +1,23 @@
+// A variant is reached through its enum, so a struct of the same name in the
+// same module keeps the bare name, in either declaration order.
+pub enum Event {
+    Frame { page: i64 }
+    Other
+}
+
+pub struct Frame { pub width: i64 }
+
+mod inner {
+    pub struct Tick(pub i64)
+    pub enum Signal { Tick(i64), Stop }
+    pub fn both() -> i64 {
+        let t = Tick(4)
+        match Signal::Tick(t.0 + 1) { Signal::Tick(n) => n, Signal::Stop => 0 }
+    }
+}
+
+fn main() {
+    let f = Frame { width: 3 }
+    match (Event::Frame { page: 2 }) { Event::Frame { page } => println(f"{f.width} {page}"), Event::Other => () }
+    println(inner::both())
+}

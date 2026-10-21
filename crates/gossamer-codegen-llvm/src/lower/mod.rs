@@ -221,6 +221,10 @@ pub(crate) struct Lowerer<'a> {
     pub(crate) address_taken: std::cell::OnceCell<std::collections::HashSet<u32>>,
     /// Parameters read in the caller's storage; see `Lowerer::param_read_in_place`.
     pub(crate) params_in_place: std::cell::OnceCell<Vec<bool>>,
+    /// Locals holding a constant table the body only reads, with the words
+    /// their slots hold: each one's storage is read-only data, never built in
+    /// the frame.
+    pub(crate) const_tables: std::collections::HashMap<Local, Vec<u64>>,
 }
 
 /// Byte width of a return value an aggregate-returning body writes into
@@ -406,12 +410,6 @@ pub(super) enum ConcatKind {
     /// `[i64; N]` flat-buffer literal; the embedded length is
     /// passed alongside the buffer pointer to the runtime helper.
     ArrI64(i64),
-    /// `[u8; N]` flat buffer. This backend lays a byte array out packed
-    /// rather than one element per slot, so its debug form reads with a
-    /// stride of one. The Cranelift backend keeps whole slots and formats
-    /// the same array through [`ConcatKind::ArrI64`]; each tier renders the
-    /// layout it emitted, and the printed text agrees.
-    ArrU8(i64),
     ArrF64(i64),
     ArrBool(i64),
     ArrChar(i64),

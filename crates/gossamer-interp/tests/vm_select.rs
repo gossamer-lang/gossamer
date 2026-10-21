@@ -53,7 +53,7 @@ fn main() {
     let tx, rx = channel::unbounded()
     tx.send(7)
     let v = select {
-        x = rx.recv() => x,
+        Some(x) = rx.recv() => x,
         default => -1,
     }
     println("v={}", v)
@@ -87,7 +87,7 @@ use std::sync::channel
 fn main() {
     let _tx, rx = channel()
     let v = select {
-        x = rx.recv() => x,
+        Some(x) = rx.recv() => x,
         default => -1,
     }
     println("v={}", v)
@@ -116,7 +116,7 @@ fn main() {
     let tx, rx = channel()
     spawn(|| producer(tx))
     let v = select {
-        x = rx.recv() => x,
+        Some(x) = rx.recv() => x,
     }
     println("got={}", v)
 }

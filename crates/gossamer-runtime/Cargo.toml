@@ -90,6 +90,7 @@ chrono-tz.workspace = true
 # crates as gossamer-std so the property data is single-sourced
 # (Unicode 16 via unicode-rs).
 unicode-properties = { workspace = true }
+unicase = { workspace = true }
 unicode-normalization = { workspace = true }
 unicode-segmentation = { workspace = true }
 unicode-width = { workspace = true }
@@ -116,7 +117,7 @@ sha2 = { version = "0.10", default-features = false, features = ["std"] }
 # leaf intrinsics produce byte-identical results to the VM tier.
 x509-parser = "0.18"
 tar = "0.4"
-zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 # The browser has a clock; Rust's `std::time` shims for
 # wasm32-unknown-unknown panic instead of reading it. `web-time` is the
@@ -133,6 +134,8 @@ web-time = "1"
 # use them are gated out of the wasm VM build (see lib.rs / c_abi.rs);
 # native (cfg-not-wasm is always true there) keeps the identical set.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The system's own time zone for `time::Location::local`.
+iana-time-zone.workspace = true
 # AEAD + password-hashing crypto, used only by the compiled-tier
 # `crypto_aead` / `crypto_extra` / `crypto` shims (all gated out of the
 # wasm VM). aes-gcm/chacha20poly1305 default-enable `getrandom` (via
@@ -215,8 +218,9 @@ getrandom = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-# POSIX user / group lookup for `std::os::user` compiled-tier helpers.
-nix = { version = "0.31", default-features = false, features = ["user"] }
+# POSIX user / group lookup for `std::os::user` compiled-tier helpers, and
+# directory-relative stat for `dir_scan`.
+nix = { version = "0.31", default-features = false, features = ["user", "dir"] }
 
 # Audit M21: Windows preemption uses QueueUserAPC. `windows-sys`
 # is the lighter-weight binding (compared to `winapi`) and is

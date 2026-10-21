@@ -62,10 +62,7 @@ impl<'a> Builder<'a> {
         fn_ret_names: &'a HashMap<String, Ty>,
         fn_returns: &'a HashMap<gossamer_resolve::DefId, Ty>,
         fn_inputs: &'a HashMap<gossamer_resolve::DefId, Vec<Ty>>,
-        fn_param_shareable: &'a HashMap<
-            gossamer_resolve::DefId,
-            Vec<crate::lower::helpers::escape::ParamShare>,
-        >,
+        fn_param_shareable: &'a crate::lower::helpers::escape::ShareSummaries,
         consts: &'a HashMap<gossamer_resolve::DefId, ConstValue>,
         mut_statics: &'a HashMap<gossamer_resolve::DefId, crate::ir::StaticRef>,
         const_inits: &'a HashMap<gossamer_resolve::DefId, HirExpr>,
@@ -92,6 +89,8 @@ impl<'a> Builder<'a> {
             fn_returns,
             fn_inputs,
             fn_param_shareable,
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
             consts,
             mut_statics,
             const_inits,
@@ -609,17 +608,27 @@ impl<'a> Builder<'a> {
     /// descriptor flattens them. `Vec` / nested-enum fields aren't keyable.
     pub(crate) fn key_descriptor(&self, ty: Ty) -> Option<String> {
         let mut out = String::new();
-        if self.append_key_descriptor(ty, &mut out) {
-            Some(out)
-        } else {
-            None
+        let mut boxed = Vec::new();
+        if !self.append_key_descriptor(ty, &mut out, &mut boxed) {
+            return None;
         }
+        // The layouts the `B` slots point at follow the per-slot part, one
+        // parenthesised descriptor each, in slot order.
+        if !boxed.is_empty() {
+            out.push('|');
+            for inner in boxed {
+                out.push('(');
+                out.push_str(&inner);
+                out.push(')');
+            }
+        }
+        Some(out)
     }
 
-    fn append_key_descriptor(&self, ty: Ty, out: &mut String) -> bool {
+    fn append_key_descriptor(&self, ty: Ty, out: &mut String, boxed: &mut Vec<String>) -> bool {
         use gossamer_types::TyKind;
         match self.tcx.kind_of(ty) {
-            TyKind::Ref { inner, .. } => self.append_key_descriptor(*inner, out),
+            TyKind::Ref { inner, .. } => self.append_key_descriptor(*inner, out, boxed),
             TyKind::Int(_) | TyKind::Bool | TyKind::Char | TyKind::Float(_) => {
                 out.push('s');
                 true
@@ -644,7 +653,10 @@ impl<'a> Builder<'a> {
             }
             TyKind::Tuple(elems) => {
                 let elems = elems.clone();
-                !elems.is_empty() && elems.iter().all(|e| self.append_key_descriptor(*e, out))
+                !elems.is_empty()
+                    && elems
+                        .iter()
+                        .all(|e| self.append_key_descriptor(*e, out, boxed))
             }
             // A fixed array is N inline copies of its element, so its slots
             // are the element's descriptor repeated. A const-generic length
@@ -654,19 +666,33 @@ impl<'a> Builder<'a> {
                 let gossamer_types::ArrayLen::Concrete(len) = *len else {
                     return false;
                 };
-                len > 0 && (0..len).all(|_| self.append_key_descriptor(elem, out))
+                len > 0 && (0..len).all(|_| self.append_key_descriptor(elem, out, boxed))
             }
             // An `Option<T>` key is its two-word carrier: the discriminant,
-            // then the payload the `Some` arm holds. Both slots are the key's
-            // own content, so the same descriptor that spells a tuple spells
-            // this.
+            // then the payload the `Some` arm holds. A one-word payload is the
+            // key's own content, spelled as a tuple's would be; an aggregate
+            // payload lives in a blob the payload word points at, which keys
+            // by its own content.
             TyKind::Adt { def, substs } if def.local == u32::MAX - 1 => {
                 let substs = substs.clone();
                 out.push('s');
-                substs
-                    .types()
-                    .first()
-                    .is_some_and(|payload| self.append_key_descriptor(*payload, out))
+                let Some(payload) = substs.types().first().copied() else {
+                    return false;
+                };
+                if self.is_inline_aggregate_ty(payload)
+                    || self.is_result_or_option_adt(payload)
+                    || self.tcx.is_inline_enum_ty(payload)
+                    || self.tcx.is_flat_enum_ty(payload)
+                {
+                    let Some(inner) = self.key_descriptor(payload) else {
+                        return false;
+                    };
+                    out.push('B');
+                    boxed.push(inner);
+                    true
+                } else {
+                    self.append_key_descriptor(payload, out, boxed)
+                }
             }
             // An enum stored by value is its tag, then its regions. A
             // variant leaves the regions it does not use zeroed, so equal
@@ -680,7 +706,7 @@ impl<'a> Builder<'a> {
                 out.push('s');
                 regions
                     .iter()
-                    .all(|region| self.append_key_descriptor(*region, out))
+                    .all(|region| self.append_key_descriptor(*region, out, boxed))
             }
             // A two-word enum whose payloads are scalars is its discriminant
             // and its payload word.
@@ -713,7 +739,9 @@ impl<'a> Builder<'a> {
                 // A field-less struct contributes no slots: every value of it
                 // holds the same (empty) content, so they all key one entry.
                 match fields {
-                    Some(fields) => fields.iter().all(|f| self.append_key_descriptor(*f, out)),
+                    Some(fields) => fields
+                        .iter()
+                        .all(|f| self.append_key_descriptor(*f, out, boxed)),
                     None => false,
                 }
             }
@@ -2121,6 +2149,11 @@ impl<'a> Builder<'a> {
                 // An iterator field holds a share of the handle, which the
                 // aggregate gives back at its death.
                 out.push((kind << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | word);
+            } else if matches!(self.tcx.kind_of(fty), TyKind::JsonValue) {
+                out.push(
+                    (gossamer_abi::rc::RC_CHILD_JSON << gossamer_abi::rc::RC_CHILD_KIND_SHIFT)
+                        | word,
+                );
             } else if self.tcx.is_weak_ty(fty) {
                 out.push(
                     (gossamer_abi::rc::RC_CHILD_WEAK << gossamer_abi::rc::RC_CHILD_KIND_SHIFT)
@@ -2518,11 +2551,9 @@ impl<'a> Builder<'a> {
                 // inference-variable leakage) before walking the
                 // base's static type.
                 if let HirExprKind::Path { segments, .. } = &base.kind {
-                    if let Some(first) = segments.first() {
-                        if let Some(local) = self.lookup_local(&first.name) {
-                            if let Some(name) = self.local_elem_struct.get(&local).cloned() {
-                                return Some(name);
-                            }
+                    if let Some(local) = self.path_local(segments) {
+                        if let Some(name) = self.local_elem_struct.get(&local).cloned() {
+                            return Some(name);
                         }
                     }
                 }
@@ -2551,8 +2582,7 @@ impl<'a> Builder<'a> {
                 }
             }
             HirExprKind::Path { segments, .. } => {
-                let first = segments.first()?;
-                let local = self.lookup_local(&first.name)?;
+                let local = self.path_local(segments)?;
                 // A variant constructor's type is left a `Var`, so recover the
                 // struct / enum name from the `local_struct` tag first.
                 if let Some(name) = self.local_struct.get(&local).cloned() {

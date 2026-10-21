@@ -31,7 +31,7 @@ pub fn fold_into_source(
     augmented: &str,
     file_label: &str,
 ) -> Result<String, String> {
-    fold_into_source_anchored(program, tcx, augmented, file_label, file_label)
+    fold_into_source_anchored(program, tcx, augmented, file_label, file_label, Vec::new())
 }
 
 /// Same as [`fold_into_source`], with the directory that relative
@@ -41,12 +41,17 @@ pub fn fold_into_source(
 /// A front end whose label is not a filesystem path, such as the
 /// editor's, names the real document here so an embedded asset resolves
 /// the same file the command line reads.
+///
+/// `origins` names the file each `(start, end)` byte range of an assembled
+/// unit was written in, outermost first; a region inside one reads relative
+/// to that file instead of `anchor_source`.
 pub fn fold_into_source_anchored(
     program: &HirProgram,
     tcx: gossamer_types::TyCtxt,
     augmented: &str,
     file_label: &str,
     anchor_source: &str,
+    origins: Vec<(u32, u32, String)>,
 ) -> Result<String, String> {
     // An embedded asset belongs to the source that embeds it, so a
     // relative path inside a `comptime` region reads the same file
@@ -63,6 +68,7 @@ pub fn fold_into_source_anchored(
     gossamer_runtime::comptime_inputs::begin();
     let mut vm = crate::vm::Vm::new();
     vm.set_collect_comptime(true);
+    vm.set_comptime_origins(origins);
     vm.set_comptime_gate(true);
     vm.load(program, tcx, false)
         .map_err(|err| format!("comptime evaluation failed: {err}"))?;

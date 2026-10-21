@@ -356,6 +356,7 @@ fn serde_unsupported_field_diags(sf: &SourceFile) -> Vec<ParseDiagnostic> {
     let resolved = |written: &str| -> String {
         symbols
             .get(written)
+            .or_else(|| symbols.get(written.rsplit("::").next().unwrap_or(written)))
             .cloned()
             .unwrap_or_else(|| written.to_string())
     };
@@ -727,6 +728,15 @@ fn mangled_stdlib_name(parent: &str, item: &str) -> Option<&'static str> {
         .iter()
         .find(|(p, i, _)| *p == parent && *i == item)
         .map(|(_, _, name)| *name)
+}
+
+/// The spelling a program writes for the injected stdlib type `mangled`
+/// (`fs::Metadata` for `__gos_fs_Metadata`), which its rendering shows.
+fn public_stdlib_type_spelling(mangled: &str) -> Option<String> {
+    MANGLED_STDLIB_NAMES
+        .iter()
+        .find(|(_, item, name)| *name == mangled && item.starts_with(|c: char| c.is_ascii_uppercase()))
+        .map(|(parent, item, _)| format!("{parent}::{item}"))
 }
 
 /// Collapses the `csrf::RouteAuth::X` enum-variant and the

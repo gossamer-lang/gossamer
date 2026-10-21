@@ -40,7 +40,7 @@ fn main() {
 
     // A module alias and an item import reach the same functions and types
     // as the qualified spellings above.
-    let _ = f::write(path::join(dir, "alias.txt"), "via alias")
+    let _ = f::write(path::join(dir, "alias.txt"), "via alias".bytes())
     match f::read_to_string(path::join(dir, "alias.txt")) {
         Ok(text) => println("alias_read={}", text)
         Err(e) => println("alias_read_err={}", e)

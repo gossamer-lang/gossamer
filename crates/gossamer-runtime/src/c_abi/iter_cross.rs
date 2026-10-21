@@ -555,9 +555,17 @@ unsafe fn select_by(
 /// of its storage, which is the payload word the carrier holds for it; every
 /// other class travels as the word its slot spells.
 unsafe fn some_elem_at(v: *const GosVec, idx: i64, pass: ElemPass) -> i128 {
+    // An element laid out as a slot block is answered as a counted copy of its
+    // words, which the carrier owns while the vector keeps its own shares.
     // SAFETY: `v` is a live GosVec and `idx` is in range.
     unsafe {
         match pass {
+            ElemPass::Ptr
+                if crate::c_abi::vec::vec_elem_is_inline_aggregate(&*v)
+                    && !crate::c_abi::vec::vec_elem_is_handle(&*v) =>
+            {
+                some_of(crate::c_abi::vec::vec_elem_shared_payload_word(&*v, idx))
+            }
             ElemPass::Ptr => some_of(gos_rt_vec_get_ptr(v, idx) as usize as i64),
             _ => some_of(gos_rt_vec_get_i64(v, idx)),
         }

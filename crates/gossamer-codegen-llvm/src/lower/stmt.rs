@@ -269,12 +269,25 @@ impl<'a> Lowerer<'a> {
                 // Store the value into the backing `static mut` global.
                 let llvm_ty = render_ty(self.tcx, target.ty);
                 self.register_static_global(target, &llvm_ty);
+                self.register_static_drop(target);
+                if is_aggregate(self.tcx, target.ty)
+                    && let Some(bytes) = aggregate_storage_bytes(self.tcx, target.ty)
+                {
+                    let src = self.lower_operand(value)?;
+                    let base = format!("@{}", target.symbol);
+                    self.static_aggregate_children(target.ty, &base, false, true);
+                    writeln!(self.out,
+                        "  call void @llvm.memcpy.p0.p0.i64(ptr {base}, ptr {src}, i64 {bytes}, i1 false)").unwrap();
+                    self.static_aggregate_children(target.ty, &base, true, true);
+                    return Ok(());
+                }
                 let val = self.lower_operand(value)?;
                 // A constructor's answer is typed by its own destination
                 // local, which need not be the cell's shape: a handle read as
                 // a word still has to be stored as the pointer the cell holds.
                 let operand_ty = self.operand_llvm_ty(value);
                 let val = self.coerce_llvm_value(&val, &operand_ty, &llvm_ty);
+                self.release_static_previous(target);
                 writeln!(
                     self.out,
                     "  store {llvm_ty} {val}, ptr @{sym}",
@@ -428,6 +441,12 @@ impl<'a> Lowerer<'a> {
         // populate the stack aggregate in-place rather than
         // producing a scalar value to store.
         match rvalue {
+            // A constant table's storage already holds its words.
+            Rvalue::Aggregate { .. }
+                if place.projection.is_empty() && self.const_tables.contains_key(&place.local) =>
+            {
+                return Ok(());
+            }
             Rvalue::Aggregate { operands, .. } => {
                 return self.emit_aggregate_store(place, operands);
             }
@@ -473,6 +492,20 @@ impl<'a> Lowerer<'a> {
         // as a single scalar.
         let leaf_ty = self.place_leaf_ty(place);
         if is_aggregate(self.tcx, leaf_ty) {
+            if let Rvalue::StaticLoad(sref) = rvalue {
+                let bytes =
+                    aggregate_storage_bytes(self.tcx, leaf_ty).expect("static aggregate layout");
+                self.register_static_global(sref, &render_ty(self.tcx, sref.ty));
+                let dst = self.lower_place_address(place);
+                writeln!(
+                    self.out,
+                    "  call void @llvm.memcpy.p0.p0.i64(ptr {dst}, ptr @{}, i64 {bytes}, i1 false)",
+                    sref.symbol
+                )
+                .unwrap();
+                self.static_aggregate_children(leaf_ty, &dst, true, false);
+                return Ok(());
+            }
             if let Rvalue::Use(Operand::Copy(src_place)) = rvalue {
                 let src_leaf_ty = self.place_leaf_ty(src_place);
                 if is_aggregate(self.tcx, src_leaf_ty) {
@@ -580,9 +613,7 @@ impl<'a> Lowerer<'a> {
                 "  call void @llvm.memcpy.p0.p0.i64(ptr {addr}, ptr {src_ptr}, i64 {bytes}, i1 false)"
             )
             .unwrap();
-        } else if self.place_is_packed_byte_element(place)
-            || self.packed_integer_field(place).is_some()
-        {
+        } else if self.packed_integer_field(place).is_some() {
             self.store_value_to_place(place, &leaf_llvm, &value);
         } else {
             let tbaa = self.place_payload_tbaa(place);
@@ -762,6 +793,7 @@ pub(crate) fn takes_slot_address(name: &str) -> bool {
             | "gos_rt_option_slot_retain"
             | "gos_rt_option_slot_retain_ok"
             | "gos_rt_option_slot_release"
+            | "gos_rt_option_slot_release_ok"
             | "gos_rt_vec_set_elem_meta"
             | "gos_rt_lazy_iter_set_elem_meta"
             | "gos_rt_vec_set_slot_children"
@@ -778,6 +810,8 @@ pub(crate) fn takes_slot_address(name: &str) -> bool {
             | "gos_rt_set_ordered_by"
             | "gos_rt_map_field_release"
             | "gos_rt_map_field_clone"
+            | "gos_rt_json_field_clone"
+            | "gos_rt_json_field_release"
             | "gos_rt_set_field_release"
             | "gos_rt_set_field_clone"
             | "gos_rt_deque_field_release"

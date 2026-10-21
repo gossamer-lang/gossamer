@@ -90,6 +90,102 @@ impl<'a> Builder<'a> {
         local
     }
 
+    /// The `Option` a `select` recv arm binds: `Some` of the received word
+    /// read as the channel's element, or `None` for the close of a drained
+    /// channel. `closed` is the runtime's answer for an arm that takes
+    /// either outcome.
+    fn lower_select_received(
+        &mut self,
+        pattern: &gossamer_hir::HirPat,
+        channel: &HirExpr,
+        recv_val: Local,
+        closed: Local,
+        (takes_value, takes_close): (bool, bool),
+    ) -> Option<Local> {
+        let span = pattern.span;
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let mut ch_ty = channel.ty;
+        while let gossamer_types::TyKind::Ref { inner, .. } = self.tcx.kind_of(ch_ty) {
+            ch_ty = *inner;
+        }
+        let elem_ty = match self.tcx.kind_of(ch_ty) {
+            gossamer_types::TyKind::Receiver(e) => *e,
+            _ => i64_ty,
+        };
+        let option_ty = pattern.ty;
+        if !takes_value {
+            return self.lower_result_no_payload(1, option_ty, span);
+        }
+        if !takes_close {
+            return self.lower_select_value(pattern, recv_val, elem_ty, option_ty);
+        }
+        let repr = self.result_repr_ty(option_ty);
+        let received = self.fresh(repr);
+        let some_block = self.new_block(span);
+        let none_block = self.new_block(span);
+        let join = self.new_block(span);
+        self.terminate(Terminator::SwitchInt {
+            discriminant: Operand::Copy(Place::local(closed)),
+            arms: vec![(0, some_block)],
+            default: none_block,
+        });
+        self.set_current(some_block);
+        let some = self.lower_select_value(pattern, recv_val, elem_ty, option_ty)?;
+        self.emit_assign(
+            Place::local(received),
+            Rvalue::Use(Operand::Copy(Place::local(some))),
+            span,
+        );
+        self.terminate(Terminator::Goto { target: join });
+        self.set_current(none_block);
+        let none = self.lower_result_no_payload(1, option_ty, span)?;
+        self.emit_assign(
+            Place::local(received),
+            Rvalue::Use(Operand::Copy(Place::local(none))),
+            span,
+        );
+        self.terminate(Terminator::Goto { target: join });
+        self.set_current(join);
+        Some(received)
+    }
+
+    /// `Some` of the word a `select` recv arm received. The word is a scalar,
+    /// or a boxed pointer for a struct payload, so it is read through a local
+    /// typed as the channel's element, which a struct payload box-derefs from;
+    /// only a received value holds a word that can be read that way.
+    fn lower_select_value(
+        &mut self,
+        pattern: &gossamer_hir::HirPat,
+        recv_val: Local,
+        elem_ty: Ty,
+        option_ty: Ty,
+    ) -> Option<Local> {
+        let span = pattern.span;
+        let value = if elem_ty == self.tcx.int_ty(gossamer_types::IntTy::I64) {
+            recv_val
+        } else {
+            let bound = self.fresh(elem_ty);
+            self.emit_assign(
+                Place::local(bound),
+                Rvalue::Use(Operand::Copy(Place::local(recv_val))),
+                span,
+            );
+            bound
+        };
+        let hidden = format!("__gos_select_value_{}", pattern.id.0);
+        self.bind_local(&hidden, value);
+        let value_path = HirExpr {
+            id: pattern.id,
+            span,
+            ty: elem_ty,
+            kind: HirExprKind::Path {
+                segments: vec![gossamer_ast::Ident::new(hidden)],
+                def: None,
+            },
+        };
+        self.lower_result_ctor(0, &value_path, option_ty, span)
+    }
+
     pub(crate) fn lower_expr(&mut self, expr: &HirExpr) -> Option<Local> {
         let outer = std::mem::replace(&mut self.expr_span, expr.span);
         let local = self.lower_expr_kind(expr);
@@ -113,7 +209,9 @@ impl<'a> Builder<'a> {
                 self.lower_assign(place, value, expr.span);
                 Some(self.lower_unit(expr.span))
             }
-            HirExprKind::Call { callee, args } => self.lower_call(callee, args, expr.ty, expr.span),
+            HirExprKind::Call { callee, args } => {
+                self.lower_call(expr.id, callee, args, expr.ty, expr.span)
+            }
             HirExprKind::If {
                 condition,
                 then_branch,
@@ -259,8 +357,15 @@ impl<'a> Builder<'a> {
                 for arm in arms {
                     let d = self.fresh(unit_ty);
                     match &arm.op {
-                        HirSelectOp::Recv { channel, .. } => {
+                        HirSelectOp::Recv {
+                            channel,
+                            takes_value,
+                            takes_close,
+                            ..
+                        } => {
                             let ch = self.lower_expr(channel)?;
+                            let accepts =
+                                i128::from(*takes_value) | (i128::from(*takes_close) << 1);
                             self.emit_assign(
                                 Place::local(d),
                                 Rvalue::CallIntrinsic {
@@ -268,6 +373,7 @@ impl<'a> Builder<'a> {
                                     args: vec![
                                         Operand::Copy(Place::local(builder)),
                                         Operand::Copy(Place::local(ch)),
+                                        Operand::Const(ConstValue::Int(accepts)),
                                     ],
                                 },
                                 span,
@@ -319,6 +425,17 @@ impl<'a> Builder<'a> {
                     },
                     span,
                 );
+                // Whether the chosen recv arm saw the close rather than a
+                // value, for an arm whose pattern takes either.
+                let closed = self.fresh(i64_ty);
+                self.emit_assign(
+                    Place::local(closed),
+                    Rvalue::CallIntrinsic {
+                        name: "gos_rt_select_closed",
+                        args: vec![Operand::Copy(Place::local(builder))],
+                    },
+                    span,
+                );
                 let freed = self.fresh(unit_ty);
                 self.emit_assign(
                     Place::local(freed),
@@ -345,42 +462,28 @@ impl<'a> Builder<'a> {
                 for (arm, block) in arms.iter().zip(arm_blocks) {
                     self.set_current(block);
                     self.push_scope();
-                    if let HirSelectOp::Recv { pattern, channel } = &arm.op {
+                    if let HirSelectOp::Recv {
+                        pattern,
+                        channel,
+                        takes_value,
+                        takes_close,
+                    } = &arm.op
+                    {
                         match &pattern.kind {
                             HirPatKind::Binding { name, .. } => {
-                                // `gos_rt_select_value` is the raw word the
-                                // firing arm produced - a scalar, or a boxed
-                                // pointer for a struct payload. Bind the name
-                                // through a local typed as the channel's
-                                // element so a struct payload box-derefs on
-                                // field access instead of reading the pointer
-                                // bits inline.
-                                let mut ch_ty = channel.ty;
-                                while let gossamer_types::TyKind::Ref { inner, .. } =
-                                    self.tcx.kind_of(ch_ty)
-                                {
-                                    ch_ty = *inner;
-                                }
-                                let elem_ty = match self.tcx.kind_of(ch_ty) {
-                                    gossamer_types::TyKind::Receiver(e) => *e,
-                                    _ => i64_ty,
-                                };
-                                if elem_ty == i64_ty {
-                                    self.bind_local(&name.name, recv_val);
-                                } else {
-                                    let bound = self.fresh(elem_ty);
-                                    self.emit_assign(
-                                        Place::local(bound),
-                                        Rvalue::Use(Operand::Copy(Place::local(recv_val))),
-                                        span,
-                                    );
-                                    self.bind_local(&name.name, bound);
-                                }
+                                let received = self.lower_select_received(
+                                    pattern,
+                                    channel,
+                                    recv_val,
+                                    closed,
+                                    (*takes_value, *takes_close),
+                                )?;
+                                self.bind_local(&name.name, received);
                             }
                             HirPatKind::Wildcard => {}
                             _ => panic!(
                                 "MIR lower: select recv arm has an unsupported pattern \
-                                 shape; bind the received value to a name or `_`"
+                                 shape; HIR binds the received Option to a name or `_`"
                             ),
                         }
                     }
@@ -536,10 +639,8 @@ impl<'a> Builder<'a> {
         ty: Ty,
         span: Span,
     ) -> Option<Local> {
-        if let Some(first) = segments.first() {
-            if let Some(local) = self.lookup_local(&first.name) {
-                return Some(local);
-            }
+        if let Some(local) = self.path_local(segments) {
+            return Some(local);
         }
         // `T::name` used as a value names a trait function through a type
         // parameter. It is spelled the way a call through the parameter is,
@@ -562,10 +663,22 @@ impl<'a> Builder<'a> {
             return Some(local);
         }
         // A `static mut` read loads the live global cell rather than
-        // inlining the declaration value.
+        // inlining the declaration value. An immutable static holding an
+        // array of constants never changes, so its read builds that value
+        // the way a `const`'s does, which compiled code keeps as read-only
+        // data rather than copying the cell.
         if let Some(def) = def
             && let Some(sref) = self.mut_statics.get(&def).cloned()
+            && !self.const_inits.get(&def).is_some_and(|init| {
+                matches!(&init.kind, HirExprKind::Array(gossamer_hir::HirArrayExpr::List(items))
+                if items.iter().all(|item| {
+                    crate::lower::helpers::const_value_of_expr(item, self.consts).is_some_and(
+                        |value| !matches!(value, ConstValue::Str(_) | ConstValue::Unit),
+                    )
+                }))
+            })
         {
+            let _ = self.ensure_aggr_copy_meta(sref.ty);
             let local = self.fresh(sref.ty);
             self.emit_assign(Place::local(local), Rvalue::StaticLoad(sref), span);
             return Some(local);
@@ -1625,6 +1738,28 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        // A struct or enum with no `eq` / `cmp` of its own still compares by
+        // its fields, through its ordering descriptor, never by the address
+        // its value happens to sit at.
+        if matches!(
+            op,
+            HirBinaryOp::Eq
+                | HirBinaryOp::Ne
+                | HirBinaryOp::Lt
+                | HirBinaryOp::Le
+                | HirBinaryOp::Gt
+                | HirBinaryOp::Ge
+        ) {
+            let tys = [
+                lhs.ty,
+                self.locals[lhs_local.0 as usize].ty,
+                rhs.ty,
+                self.locals[rhs_local.0 as usize].ty,
+            ];
+            if let Some(dest) = self.lower_adt_desc_compare(op, lhs_local, rhs_local, &tys, span) {
+                return Some(dest);
+            }
+        }
         // Arithmetic operator overloading: route `a + b` (and `- * /`) on a
         // user struct/enum to its `add`/`sub`/`mul`/`div` impl method. The
         // checker has already typed the result as that method's return type
@@ -1702,6 +1837,16 @@ impl<'a> Builder<'a> {
                 .or_else(|| self.tuple_cmp_tags(self.locals[lhs_local.0 as usize].ty))
             {
                 return Some(self.lower_tuple_cmp(op, lhs_local, rhs_local, tags, span));
+            }
+            let tys = [
+                lhs.ty,
+                self.locals[lhs_local.0 as usize].ty,
+                rhs.ty,
+                self.locals[rhs_local.0 as usize].ty,
+            ];
+            if let Some(dest) = self.lower_inline_desc_compare(op, lhs_local, rhs_local, &tys, span)
+            {
+                return Some(dest);
             }
         }
         // Sequence ordering: a `Vec` or a slice orders lexicographically, each
@@ -2093,6 +2238,24 @@ impl<'a> Builder<'a> {
             self.emit_static_store(sref, Operand::Copy(Place::local(value_local)), span);
             return;
         }
+        // A write below a struct, tuple, or array `static mut`
+        // (`CATALOG.count = 3`, `CATALOG.faces[0].units = 9`) has no local to
+        // project from: the static is read, the write lands on that value, and
+        // the value is stored back into the cell.
+        if let Some((root, sref)) = self.aggregate_static_root(place) {
+            let Some(held) = self.lower_expr(root) else {
+                return;
+            };
+            let name = format!("__static_place_{}", place.id.0);
+            self.push_scope();
+            self.bind_local(&name, held);
+            let rewritten = replace_place_root(place, &name);
+            self.lower_assign(&rewritten, value, span);
+            self.pop_scope();
+            self.emit_mark_shared_if_rc(held, span);
+            self.emit_static_store(sref, Operand::Copy(Place::local(held)), span);
+            return;
+        }
         // `xs[idx] = v` on a `Vec<T>` / `Slice<T>` receiver routes
         // through the runtime helper `gos_rt_vec_set_i64`. The
         // generic projection path computes a flat-array address
@@ -2426,13 +2589,18 @@ impl<'a> Builder<'a> {
     /// when the type has no ordering the language defines - a map, a set, a
     /// handle - so the caller can decline rather than compare raw words.
     pub(crate) fn ordering_stream(&self, ty: Ty) -> Option<Vec<u8>> {
-        self.ordering_stream_inner(ty, None, 0)
+        self.ordering_stream_inner(ty, &[], 0, 0)
     }
 
+    /// The descriptor of `ty` as it begins at byte `at` of the whole stream.
+    /// `enclosing` lists the enums being described around it, innermost
+    /// last, so a field reaching one of them refers back to it instead of
+    /// describing it again.
     fn ordering_stream_inner(
         &self,
         ty: Ty,
-        self_enum: Option<gossamer_resolve::DefId>,
+        enclosing: &[Enclosing],
+        at: usize,
         depth: u32,
     ) -> Option<Vec<u8>> {
         use gossamer_types::{ArrayLen, IntTy, TyKind};
@@ -2440,8 +2608,13 @@ impl<'a> Builder<'a> {
             return None;
         }
         let mut peeled = ty;
-        while let TyKind::Ref { inner, .. } = self.tcx.kind_of(peeled) {
-            peeled = *inner;
+        loop {
+            match self.tcx.kind_of(peeled) {
+                TyKind::Ref { inner, .. } => peeled = *inner,
+                // A newtype orders as the value it wraps.
+                TyKind::Nominal { repr, .. } => peeled = *repr,
+                _ => break,
+            }
         }
         match self.tcx.kind_of(peeled) {
             // An unsigned integer orders as one: a narrow one stored at its
@@ -2463,13 +2636,23 @@ impl<'a> Builder<'a> {
                 let count = u8::try_from(n).ok()?;
                 let span = u8::try_from(self.type_slot_bytes(elem).max(8) / 8).ok()?;
                 let mut out = vec![gossamer_abi::DESC_ARRAY, count, span];
-                out.extend(self.ordering_stream_inner(elem, self_enum, depth + 1)?);
+                out.extend(self.ordering_stream_inner(
+                    elem,
+                    enclosing,
+                    at + out.len(),
+                    depth + 1,
+                )?);
                 Some(out)
             }
             TyKind::Vec(elem) | TyKind::Slice(elem) => {
                 let elem = *elem;
                 let mut out = vec![gossamer_abi::DESC_VEC];
-                out.extend(self.ordering_stream_inner(elem, self_enum, depth + 1)?);
+                out.extend(self.ordering_stream_inner(
+                    elem,
+                    enclosing,
+                    at + out.len(),
+                    depth + 1,
+                )?);
                 Some(out)
             }
             TyKind::Tuple(elems) => {
@@ -2477,7 +2660,12 @@ impl<'a> Builder<'a> {
                 let arity = u8::try_from(elems.len()).ok()?;
                 let mut out = vec![gossamer_abi::TUPLE_TAG_NESTED, arity];
                 for e in &elems {
-                    out.extend(self.ordering_stream_inner(*e, self_enum, depth + 1)?);
+                    out.extend(self.ordering_stream_inner(
+                        *e,
+                        enclosing,
+                        at + out.len(),
+                        depth + 1,
+                    )?);
                 }
                 Some(out)
             }
@@ -2492,28 +2680,57 @@ impl<'a> Builder<'a> {
                     } else {
                         gossamer_abi::DESC_RESULT
                     }];
-                    out.extend(self.ordering_stream_inner(*tys.first()?, self_enum, depth + 1)?);
+                    let first = *tys.first()?;
+                    out.extend(self.ordering_stream_inner(
+                        first,
+                        enclosing,
+                        at + out.len(),
+                        depth + 1,
+                    )?);
                     if !is_option {
+                        let second = *tys.get(1)?;
                         out.extend(self.ordering_stream_inner(
-                            *tys.get(1)?,
-                            self_enum,
+                            second,
+                            enclosing,
+                            at + out.len(),
                             depth + 1,
                         )?);
                     }
                     return Some(out);
                 }
-                if self_enum == Some(def) {
-                    return Some(vec![gossamer_abi::DESC_SELF]);
+                if let Some(index) = enclosing.iter().rposition(|e| e.def == def) {
+                    let target = enclosing[index];
+                    // `DESC_SELF` reads the innermost enum's node through its
+                    // word; a by-value enum's slots are read in place.
+                    if index + 1 == enclosing.len() && !target.by_value {
+                        return Some(vec![gossamer_abi::DESC_SELF]);
+                    }
+                    let back = u16::try_from(at - target.at).ok()?.to_le_bytes();
+                    return Some(vec![gossamer_abi::DESC_ENUM_REF, back[0], back[1]]);
+                }
+                if let Some(layout) = self.tcx.flat_enum_layout(peeled).cloned() {
+                    let mut inner = enclosing.to_vec();
+                    inner.push(Enclosing {
+                        def,
+                        at,
+                        by_value: true,
+                    });
+                    return self.flat_enum_ordering_stream(&layout, &inner, at, depth);
                 }
                 if let Some(stream) = self.packed_ordering_stream(peeled) {
                     return Some(stream);
                 }
-                if let Some(fields) = self.tcx.struct_field_tys(def) {
+                if let Some(fields) = self.tcx.adt_field_tys(def, &substs) {
                     let fields = fields.to_vec();
                     let arity = u8::try_from(fields.len()).ok()?;
                     let mut out = vec![gossamer_abi::TUPLE_TAG_NESTED, arity];
                     for f in &fields {
-                        out.extend(self.ordering_stream_inner(*f, self_enum, depth + 1)?);
+                        out.extend(self.ordering_stream_inner(
+                            *f,
+                            enclosing,
+                            at + out.len(),
+                            depth + 1,
+                        )?);
                     }
                     return Some(out);
                 }
@@ -2521,16 +2738,67 @@ impl<'a> Builder<'a> {
                 let count = u8::try_from(variants.len()).ok()?;
                 let inline = u8::from(self.tcx.is_inline_enum_ty(peeled));
                 let mut out = vec![gossamer_abi::DESC_ENUM, inline, count];
+                let mut inner = enclosing.to_vec();
+                inner.push(Enclosing {
+                    def,
+                    at,
+                    by_value: false,
+                });
                 for fields in &variants {
                     out.push(u8::try_from(fields.len()).ok()?);
                     for f in fields {
-                        out.extend(self.ordering_stream_inner(*f, Some(def), depth + 1)?);
+                        out.extend(self.ordering_stream_inner(
+                            *f,
+                            &inner,
+                            at + out.len(),
+                            depth + 1,
+                        )?);
                     }
                 }
                 Some(out)
             }
             _ => None,
         }
+    }
+
+    /// The `DESC_FLAT_ENUM` descriptor of an enum stored by value. A field
+    /// held in a shared word - an integer, `bool`, `char`, or unit-only enum
+    /// in an `i64`, a float in an `f64` - is described as the one slot it
+    /// occupies there.
+    fn flat_enum_ordering_stream(
+        &self,
+        layout: &gossamer_types::FlatEnumLayout,
+        enclosing: &[Enclosing],
+        at: usize,
+        depth: u32,
+    ) -> Option<Vec<u8>> {
+        let mut out = vec![
+            gossamer_abi::DESC_FLAT_ENUM,
+            u8::try_from(layout.regions.len()).ok()?,
+        ];
+        for region in &layout.regions {
+            out.push(u8::try_from(self.type_slot_bytes(*region).max(8) / 8).ok()?);
+        }
+        out.push(u8::try_from(layout.variant_field_tys.len()).ok()?);
+        for (fields, regions) in layout.variant_field_tys.iter().zip(&layout.variant_regions) {
+            out.push(u8::try_from(fields.len()).ok()?);
+            for (field, region) in fields.iter().zip(regions) {
+                out.push(u8::try_from(*region).ok()?);
+                // A unit-only enum keeps only its discriminant in a shared
+                // word, where its own descriptor would read two slots.
+                if crate::lower::flat_enums::is_unit_only_enum(self.tcx, *field) {
+                    out.push(0);
+                } else {
+                    out.extend(self.ordering_stream_inner(
+                        *field,
+                        enclosing,
+                        at + out.len(),
+                        depth + 1,
+                    )?);
+                }
+            }
+        }
+        Some(out)
     }
 
     /// Whether `ty` is an enum some variant of which carries fields.
@@ -2575,11 +2843,9 @@ impl<'a> Builder<'a> {
         ) {
             return Some((1, vec![1]));
         }
-        if let (Some(layout), Some(stream)) = (
-            self.tcx.packed_layout(peeled),
-            self.packed_ordering_stream(peeled),
-        ) {
-            return Some(((layout.size / 8) as usize, stream));
+        // A packed struct is one descriptor entry, however many slots it spans.
+        if let Some(stream) = self.packed_ordering_stream(peeled) {
+            return Some((1, stream));
         }
         let Some(elems) = self.inline_field_tys(peeled).filter(|e| !e.is_empty()) else {
             // An element whose slot word is not its own order - a sequence
@@ -2736,6 +3002,20 @@ impl<'a> Builder<'a> {
         if let Some(local) =
             self.lower_sequence_eq(HirBinaryOp::Eq, lhs_local, rhs_local, &[ty, lhs_ty], span)
         {
+            return local;
+        }
+        if let Some(local) =
+            self.lower_adt_desc_compare(HirBinaryOp::Eq, lhs_local, rhs_local, &[ty, lhs_ty], span)
+        {
+            return local;
+        }
+        if let Some(local) = self.lower_inline_desc_compare(
+            HirBinaryOp::Eq,
+            lhs_local,
+            rhs_local,
+            &[ty, lhs_ty],
+            span,
+        ) {
             return local;
         }
         let cmp = self.fresh(bool_ty);
@@ -3037,11 +3317,16 @@ impl<'a> Builder<'a> {
         tys: &[Ty],
         span: Span,
     ) -> Option<Local> {
-        let (carrier, desc) = tys
+        let carrier = tys
             .iter()
             .map(|ty| self.peel_ref_ty(*ty))
-            .find(|ty| self.is_result_or_option_adt(*ty))
-            .and_then(|ty| self.ordering_stream(ty).map(|desc| (ty, desc)))?;
+            .find(|ty| self.is_result_or_option_adt(*ty))?;
+        let Some(desc) = self.ordering_stream(carrier) else {
+            // Equality is also defined for unordered payloads, including an
+            // enum with a Map arm. Compare the active arm through its typed
+            // equality instead of falling back to carrier pointer bits.
+            return Some(self.lower_unordered_carrier_eq(op, lhs_local, rhs_local, carrier, span));
+        };
         let lhs_slots = self.ordered_value_slots(lhs_local, carrier, span);
         let rhs_slots = self.ordered_value_slots(rhs_local, carrier, span);
         let desc_text: String = desc.iter().map(|&b| b as char).collect();
@@ -3051,6 +3336,189 @@ impl<'a> Builder<'a> {
             Operand::Const(ConstValue::Str(desc_text)),
         ];
         Some(self.lower_equality_call(op, "gos_rt_desc_eq", args, span))
+    }
+
+    fn lower_unordered_carrier_eq(
+        &mut self,
+        op: HirBinaryOp,
+        lhs: Local,
+        rhs: Local,
+        carrier: Ty,
+        span: Span,
+    ) -> Local {
+        let gossamer_types::TyKind::Adt { def, substs } = self.tcx.kind_of(carrier) else {
+            unreachable!("carrier type checked by caller");
+        };
+        let is_option = def.local == u32::MAX - 1;
+        let payloads = substs.types().clone();
+        let bool_ty = self.tcx.bool_ty();
+        let int_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let left_disc = self.fresh(int_ty);
+        let right_disc = self.fresh(int_ty);
+        for (dest, source) in [(left_disc, lhs), (right_disc, rhs)] {
+            self.emit_assign(
+                Place::local(dest),
+                Rvalue::CallIntrinsic {
+                    name: "gos_rt_result_disc",
+                    args: vec![Operand::Copy(Place::local(source))],
+                },
+                span,
+            );
+        }
+        let same_disc = self.fresh(bool_ty);
+        self.emit_assign(
+            Place::local(same_disc),
+            Rvalue::BinaryOp {
+                op: BinOp::Eq,
+                lhs: Operand::Copy(Place::local(left_disc)),
+                rhs: Operand::Copy(Place::local(right_disc)),
+            },
+            span,
+        );
+        let result = self.fresh(bool_ty);
+        let same = self.new_block(span);
+        let different = self.new_block(span);
+        let joined = self.new_block(span);
+        self.terminate(Terminator::SwitchInt {
+            discriminant: Operand::Copy(Place::local(same_disc)),
+            arms: vec![(0, different)],
+            default: same,
+        });
+        self.set_current(different);
+        self.emit_assign(
+            Place::local(result),
+            Rvalue::Use(Operand::Const(ConstValue::Bool(false))),
+            span,
+        );
+        self.terminate(Terminator::Goto { target: joined });
+        self.set_current(same);
+        let first = self.new_block(span);
+        let second = self.new_block(span);
+        self.terminate(Terminator::SwitchInt {
+            discriminant: Operand::Copy(Place::local(left_disc)),
+            arms: vec![(0, first)],
+            default: second,
+        });
+        for (arm, block) in [(0, first), (1, second)] {
+            self.set_current(block);
+            if is_option && arm == 1 {
+                self.emit_assign(
+                    Place::local(result),
+                    Rvalue::Use(Operand::Const(ConstValue::Bool(true))),
+                    span,
+                );
+            } else {
+                let ty = payloads[arm];
+                let left = self.fresh(ty);
+                let right = self.fresh(ty);
+                for (dest, source) in [(left, lhs), (right, rhs)] {
+                    self.emit_assign(
+                        Place::local(dest),
+                        Rvalue::CallIntrinsic {
+                            name: "gos_rt_result_payload",
+                            args: vec![Operand::Copy(Place::local(source))],
+                        },
+                        span,
+                    );
+                }
+                let equal = self.emit_structural_eq(left, right, ty, span);
+                self.emit_assign(
+                    Place::local(result),
+                    Rvalue::Use(Operand::Copy(Place::local(equal))),
+                    span,
+                );
+            }
+            self.terminate(Terminator::Goto { target: joined });
+        }
+        self.set_current(joined);
+        if matches!(op, HirBinaryOp::Ne) {
+            let negated = self.fresh(bool_ty);
+            self.emit_assign(
+                Place::local(negated),
+                Rvalue::UnaryOp {
+                    op: UnOp::Not,
+                    operand: Operand::Copy(Place::local(result)),
+                },
+                span,
+            );
+            negated
+        } else {
+            result
+        }
+    }
+
+    /// A comparison of two values of a user struct or enum through its
+    /// ordering descriptor: `gos_rt_desc_eq` for `==` / `!=`, `gos_rt_desc_cmp`
+    /// for an ordering. `None` when no candidate type is a user struct or enum
+    /// with a descriptor.
+    fn lower_adt_desc_compare(
+        &mut self,
+        op: HirBinaryOp,
+        lhs_local: Local,
+        rhs_local: Local,
+        tys: &[Ty],
+        span: Span,
+    ) -> Option<Local> {
+        use gossamer_types::TyKind;
+        let (adt, desc) = tys
+            .iter()
+            .map(|ty| self.tcx.peel_nominal(self.peel_ref_ty(*ty)))
+            .find(|ty| {
+                matches!(self.tcx.kind_of(*ty), TyKind::Adt { def, .. }
+                    if def.local < u32::MAX - 64
+                        && (self.tcx.struct_field_tys(*def).is_some()
+                            || self.tcx.enum_variant_tys(*def).is_some()))
+            })
+            .and_then(|ty| self.ordering_stream(ty).map(|desc| (ty, desc)))?;
+        let lhs_slots = self.ordered_value_slots(lhs_local, adt, span);
+        let rhs_slots = self.ordered_value_slots(rhs_local, adt, span);
+        let desc_text: String = desc.iter().map(|&b| b as char).collect();
+        let args = vec![
+            Operand::Copy(Place::local(lhs_slots)),
+            Operand::Copy(Place::local(rhs_slots)),
+            Operand::Const(ConstValue::Str(desc_text)),
+        ];
+        if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne) {
+            return Some(self.lower_equality_call(op, "gos_rt_desc_eq", args, span));
+        }
+        Some(self.lower_ordering_call(op, "gos_rt_desc_cmp", args, span))
+    }
+
+    /// A comparison of two fixed arrays or tuples whose elements are not all
+    /// scalars - nested arrays, structs, tuples, carriers - through the
+    /// value's ordering descriptor, or `None` when no candidate type is such
+    /// an aggregate with one.
+    fn lower_inline_desc_compare(
+        &mut self,
+        op: HirBinaryOp,
+        lhs_local: Local,
+        rhs_local: Local,
+        tys: &[Ty],
+        span: Span,
+    ) -> Option<Local> {
+        use gossamer_types::TyKind;
+        let (value, desc) = tys
+            .iter()
+            .map(|ty| self.peel_ref_ty(*ty))
+            .find(|ty| {
+                matches!(
+                    self.tcx.kind_of(*ty),
+                    TyKind::Array { .. } | TyKind::Tuple(_)
+                )
+            })
+            .and_then(|ty| self.ordering_stream(ty).map(|desc| (ty, desc)))?;
+        let lhs_slots = self.ordered_value_slots(lhs_local, value, span);
+        let rhs_slots = self.ordered_value_slots(rhs_local, value, span);
+        let desc_text: String = desc.iter().map(|&b| b as char).collect();
+        let args = vec![
+            Operand::Copy(Place::local(lhs_slots)),
+            Operand::Copy(Place::local(rhs_slots)),
+            Operand::Const(ConstValue::Str(desc_text)),
+        ];
+        if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne) {
+            return Some(self.lower_equality_call(op, "gos_rt_desc_eq", args, span));
+        }
+        Some(self.lower_ordering_call(op, "gos_rt_desc_cmp", args, span))
     }
 
     /// `==` / `!=` over two sequences whose elements are compared field by
@@ -3675,13 +4143,49 @@ impl<'a> Builder<'a> {
         true
     }
 
+    /// The `static mut` a projected place (`S.f`, `S.0`, `S[i]`, nested) is
+    /// rooted at, when that static holds its struct, tuple, or array by value.
+    pub(super) fn aggregate_static_root<'e>(
+        &self,
+        place: &'e HirExpr,
+    ) -> Option<(&'e HirExpr, crate::ir::StaticRef)> {
+        let mut root = match &place.kind {
+            HirExprKind::Field { receiver, .. } | HirExprKind::TupleIndex { receiver, .. } => {
+                receiver.as_ref()
+            }
+            HirExprKind::Index { base, .. } => base.as_ref(),
+            _ => return None,
+        };
+        loop {
+            root = match &root.kind {
+                HirExprKind::Field { receiver, .. } | HirExprKind::TupleIndex { receiver, .. } => {
+                    receiver
+                }
+                HirExprKind::Index { base, .. } => base,
+                HirExprKind::Path { def: Some(def), .. } => {
+                    let sref = self.mut_statics.get(def)?;
+                    let by_value = matches!(
+                        self.tcx.kind_of(sref.ty),
+                        gossamer_types::TyKind::Adt { .. }
+                            | gossamer_types::TyKind::Tuple(_)
+                            | gossamer_types::TyKind::Array { .. }
+                    ) && !self.tcx.is_rc_managed(sref.ty)
+                        && self.map_or_set_clone_symbol(sref.ty).is_none();
+                    return by_value.then(|| (root, sref.clone()));
+                }
+                _ => return None,
+            };
+        }
+    }
+
+    /// Whether `expr` names a `static mut`.
+    fn names_mut_static(&self, expr: &HirExpr) -> bool {
+        matches!(&expr.kind, HirExprKind::Path { def: Some(def), .. } if self.mut_statics.contains_key(def))
+    }
+
     pub(crate) fn lower_place_expr(&mut self, expr: &HirExpr) -> Option<Place> {
         match &expr.kind {
-            HirExprKind::Path { segments, .. } => {
-                let first = segments.first()?;
-                let local = self.lookup_local(&first.name)?;
-                Some(Place::local(local))
-            }
+            HirExprKind::Path { segments, .. } => Some(Place::local(self.path_local(segments)?)),
             HirExprKind::Field { receiver, name } => {
                 let mut base = self.lower_place_expr(receiver)?;
                 // Resolve which struct's field ordering to use.
@@ -3800,7 +4304,16 @@ impl<'a> Builder<'a> {
                         // element's struct tag is propagated so the
                         // `Field` arm can resolve field indices.
                         use gossamer_types::{Mutbl, TyKind};
-                        let base_place = self.lower_place_expr(base)?;
+                        // A `static mut` vector has no local to project from;
+                        // its value is the handle of the storage it names, so
+                        // the loaded handle reaches the same elements.
+                        let base_place = match self.lower_place_expr(base) {
+                            Some(place) => place,
+                            None if self.names_mut_static(base) => {
+                                Place::local(self.lower_expr(base)?)
+                            }
+                            None => return None,
+                        };
                         // The helper takes the Vec handle itself. A Vec
                         // reached through a projection (`self.columns[i]`,
                         // `rows[j].cells[i]`) has to be loaded out of its
@@ -4749,5 +5262,35 @@ pub(crate) const fn narrow_int_width(ty: gossamer_types::IntTy) -> Option<u32> {
         IntTy::I16 | IntTy::U16 => Some(16),
         IntTy::I32 | IntTy::U32 => Some(32),
         _ => None,
+    }
+}
+
+/// An enum whose ordering descriptor is being written around a field: its
+/// definition, the byte its entry begins at, and whether its values are
+/// stored by value rather than as a node.
+#[derive(Clone, Copy)]
+struct Enclosing {
+    def: gossamer_resolve::DefId,
+    at: usize,
+    by_value: bool,
+}
+
+/// `place` with the path at its root replaced by the local `name`.
+pub(super) fn replace_place_root(place: &HirExpr, name: &str) -> HirExpr {
+    let mut out = place.clone();
+    let mut cursor = &mut out;
+    loop {
+        match &mut cursor.kind {
+            HirExprKind::Field { receiver, .. } | HirExprKind::TupleIndex { receiver, .. } => {
+                cursor = receiver;
+            }
+            HirExprKind::Index { base, .. } => cursor = base,
+            HirExprKind::Path { segments, def } => {
+                *segments = vec![gossamer_ast::Ident::new(name)];
+                *def = None;
+                return out;
+            }
+            _ => return out,
+        }
     }
 }

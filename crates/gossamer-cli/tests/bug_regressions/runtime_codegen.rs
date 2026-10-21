@@ -1571,3 +1571,350 @@ fn main() {
     }
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn negative_index_into_a_parameter_reports_the_sequence_length_on_every_tier() {
+    let src = r#"
+fn poke(xs: Vec<i64>, i: i64) -> i64 {
+    xs[i]
+}
+
+fn main() {
+    println(f"{poke(#[1, 2], -1)}")
+}
+"#;
+    let needle = "the len is 2 but the index is -1";
+    let dir = fresh_dir("negative_index_param_len");
+    let path = write_source(&dir, "negative_index_param_len", src);
+
+    let vm = run_vm(&path);
+    assert_eq!(vm.2, Some(101), "vm stderr: {}", vm.1);
+    assert!(vm.1.contains(needle), "vm stderr: {}", vm.1);
+
+    let jit = Command::new(gos_bin())
+        .arg("run")
+        .arg(&path)
+        .env("GOSSAMER_JIT_THRESHOLD", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn jit run");
+    let jit = run_with_timeout(jit);
+    assert_eq!(jit.2, Some(101), "jit stderr: {}", jit.1);
+    assert!(jit.1.contains(needle), "jit stderr: {}", jit.1);
+
+    for release in [false, true] {
+        let scratch = dir.join(if release { "release" } else { "debug" });
+        fs::create_dir_all(&scratch).unwrap();
+        let bin = build_native_with_flag(&path, &scratch, release).expect("native build");
+        let native = run_native(&bin);
+        assert_eq!(native.2, Some(101), "native stderr: {}", native.1);
+        assert!(native.1.contains(needle), "native stderr: {}", native.1);
+    }
+}
+
+#[test]
+fn a_tail_call_whose_callee_calls_a_closure_leaves_no_frame_in_a_later_trace() {
+    let src = r#"
+use std::errors
+
+fn create(n: i64) -> Result<i64, errors::Error> {
+    let props = n
+    let set = |k: i64| -> Result<(), errors::Error> {
+        if k + props < 0 {
+            return Err(errors::new("negative"))
+        }
+        Ok(())
+    }
+    set(1)?
+    set(2)?
+    Ok(n + 1)
+}
+
+fn check(n: i64) {
+    if n < 0 {
+        println(f"negative {n}")
+    }
+}
+
+fn outer(n: i64) -> Result<i64, errors::Error> {
+    check(n)
+    create(n)
+}
+
+fn poke(xs: Vec<u8>, i: i64) -> u8 {
+    xs[i]
+}
+
+fn run() -> Result<(), errors::Error> {
+    let a = outer(1)?
+    println(f"{poke(#[1u8], a - 100)}")
+    Ok(())
+}
+
+fn main() {
+    let _ = run()
+}
+"#;
+    let dir = fresh_dir("tail_call_closure_trace");
+    let path = write_source(&dir, "tail_call_closure_trace", src);
+    let vm = Command::new(gos_bin())
+        .arg("run")
+        .arg("--no-jit")
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn gos");
+    let vm = run_with_timeout(vm);
+    assert_eq!(vm.2, Some(101), "vm stderr: {}", vm.1);
+    let frames: Vec<&str> = vm
+        .1
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("at "))
+        .map(|frame| frame.split(' ').next().unwrap_or(frame))
+        .collect();
+    assert_eq!(frames, ["main", "run", "poke"], "vm stderr: {}", vm.1);
+}
+
+#[test]
+fn boxed_enum_field_reads_preserve_the_callers_containers() {
+    let src = r#"
+struct TabPanel { id: String, pages: Map<String, Widget>, tags: Set<String> }
+enum Widget { Empty, Tabs(TabPanel), Child(Widget) }
+impl Widget {
+    fn id(&self) -> String {
+        match self { Widget::Tabs(t) => t.id, _ => "" }
+    }
+    fn count(&self) -> i64 {
+        match self { Widget::Tabs(t) => t.pages.len() + t.tags.len(), _ => 0 }
+    }
+}
+fn main() {
+    let mut pages: Map<String, Widget> = {}
+    pages["page"] = Widget::Empty
+    let mut tags: Set<String> = #{}
+    tags.insert("kept")
+    let widget = Widget::Tabs(TabPanel { id: "tabs", pages: pages, tags: tags })
+    for _ in 0..32 {
+        println("{} {}", widget.id(), widget.count())
+    }
+    println("original {} {}", pages.len(), tags.len())
+}
+"#;
+    let dir = fresh_dir("boxed_enum_container_reads");
+    let path = write_source(&dir, "boxed_enum_container_reads", src);
+    let expected = format!("{}original 1 1\n", "tabs 2\n".repeat(32));
+    let vm = run_vm(&path);
+    assert_eq!(vm.2, Some(0), "VM stderr: {}", vm.1);
+    assert_eq!(vm.0, expected);
+    for release in [false, true] {
+        let scratch = dir.join(if release { "release" } else { "debug" });
+        fs::create_dir_all(&scratch).unwrap();
+        let bin = build_native_with_flag(&path, &scratch, release).expect("native build");
+        let native = run_native(&bin);
+        assert_eq!(native.2, Some(0), "native stderr: {}", native.1);
+        assert_eq!(native.0, expected);
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn json_aggregate_copies_and_reads_keep_independent_handles() {
+    let src = r#"
+use std::encoding::json
+struct Holder { raw: json::Value }
+struct Nested { node: Holder }
+enum Node { Empty, Payload(Holder), Next(Node) }
+fn decoded(text: String) -> Holder { json::decode::<Holder>(text).unwrap() }
+fn escaped() -> json::Value {
+    let holder = decoded("{\"raw\":{\"escaped\":true}}")
+    holder.raw
+}
+fn show(holder: Holder) -> String { json::render(holder.raw) }
+fn enum_text(node: Node) -> String {
+    match node { Node::Payload(holder) => show(holder), _ => "empty" }
+}
+fn main() {
+    for _ in 0..4 {
+        let raw = json::parse("{\"kept\":true}").unwrap()
+        let first = Holder { raw: raw }
+        let second = first
+        let mut changed = second
+        changed = decoded("{\"raw\":[1,2]}")
+        println("{} {} {}", json::render(raw), show(first), show(changed))
+        let nested = Nested { node: first }
+        let nested_copy = nested
+        println("nested {}", show(nested_copy.node))
+        let escaped = escaped()
+        println("escaped {}", json::render(escaped))
+        let holders = #[first, second]
+        let held = holders[0]
+        println("vec {} {}", show(held), show(holders[1]))
+        let mut table: Map<i64, Holder> = {}
+        table[1] = first
+        let mapped = table.get(1).unwrap()
+        println("map {} {}", show(mapped), show(table.get(1).unwrap()))
+        let repeated = [first; 2]
+        println("array {}", show(repeated[1]))
+        let node = Node::Payload(first)
+        println("enum {} {}", enum_text(node), enum_text(node))
+    }
+}
+"#;
+    let dir = fresh_dir("json_aggregate_owners");
+    let path = write_source(&dir, "json_aggregate_owners", src);
+    let expected = "{\"kept\":true} {\"kept\":true} [1,2]\nnested {\"kept\":true}\nescaped {\"escaped\":true}\nvec {\"kept\":true} {\"kept\":true}\nmap {\"kept\":true} {\"kept\":true}\narray {\"kept\":true}\nenum {\"kept\":true} {\"kept\":true}\n".repeat(4);
+    let vm = run_vm(&path);
+    assert_eq!(vm.2, Some(0), "VM stderr: {}", vm.1);
+    assert_eq!(vm.0, expected);
+    for release in [false, true] {
+        let scratch = dir.join(if release { "release" } else { "debug" });
+        fs::create_dir_all(&scratch).unwrap();
+        let bin = build_native_with_flag(&path, &scratch, release).expect("native build");
+        let native = run_native(&bin);
+        assert_eq!(native.2, Some(0), "native stderr: {}", native.1);
+        assert_eq!(native.0, expected);
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn conditional_vector_queries_and_stored_string_extractions_preserve_values() {
+    let src = r#"
+struct Store { values: Map<String, String>, next: i64 }
+struct Entry { value: String }
+impl Store {
+    fn get(&mut self, key: String) -> String {
+        let value = match self.values.get(key) {
+            Some(s) => s,
+            None => { let s = f"value-{self.next}"; self.next += 1; self.values[key] = s; s }
+        }
+        let entry = Entry { value: value }
+        entry.value
+    }
+}
+enum Wire { Text(String), Items(String, Vec<Wire>) }
+struct Item { value: String, children: Vec<String> }
+fn interfaces(item: Item) -> Vec<String> {
+    let mut names = #["Accessible"]
+    if !item.value.is_empty() { names.push("Text") }
+    names.map(|name| "org.a11y.atspi." + name)
+}
+fn describe(names: Vec<String>, children: Vec<String>) -> String { f"{names.len()}:{children.len()}" }
+fn query(items: Map<String, Item>, path: String) -> Option<Vec<Wire>> {
+    let children = if path == "namespace" { #["child"] } else { #[] }
+    let supported = if path == "cache" { #["Cache"] }
+        else if let Some(item) = items.get(path) { interfaces(item) }
+        else if !children.is_empty() { #[] } else { return None }
+    Some(#[Wire::Text(describe(supported, children))])
+}
+fn main() {
+    let mut store = Store { values: {}, next: 1 }
+    let items = { "item": Item { value: "value", children: #[] } }
+    for _ in 0..4 {
+        println(store.get("key"))
+        for key in #["item", "cache", "namespace", "missing"] {
+            match query(items, key) {
+                Some(values) => if let Wire::Text(text) = values[0] { println(text) },
+                None => println("none"),
+            }
+        }
+    }
+}
+"#;
+    let dir = fresh_dir("conditional_query_owners");
+    let path = write_source(&dir, "conditional_query_owners", src);
+    let expected = "value-1\n2:0\n1:0\n0:1\nnone\n".repeat(4);
+    let vm = run_vm(&path);
+    assert_eq!(vm.2, Some(0), "VM stderr: {}", vm.1);
+    assert_eq!(vm.0, expected);
+    for release in [false, true] {
+        let scratch = dir.join(if release { "release" } else { "debug" });
+        fs::create_dir_all(&scratch).unwrap();
+        let bin = build_native_with_flag(&path, &scratch, release).expect("native build");
+        let native = run_native(&bin);
+        assert_eq!(native.2, Some(0), "native stderr: {}", native.1);
+        assert_eq!(native.0, expected);
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn statics_written_before_tier_up_keep_their_values_in_compiled_code() {
+    let src = r#"
+mod catalog {
+    pub struct Catalog { pub table: Map<String, String> }
+
+    static mut CURRENT: Catalog = Catalog { table: {} }
+
+    pub fn install(c: Catalog) {
+        CURRENT = c
+    }
+
+    pub fn tr(source: String) -> String {
+        match CURRENT.table.get(source) {
+            Some(t) => t
+            None => source
+        }
+    }
+}
+
+static mut LIMIT: i64 = 0
+static mut STEP: f64 = 0.0
+
+fn labels(n: i64) -> i64 {
+    let mut sum = 0
+    for i in 0..n {
+        sum += i + catalog::tr("Open").len()
+    }
+    sum
+}
+
+fn scaled(n: i64) -> i64 {
+    let mut acc = 0
+    for i in 0..n {
+        acc += i % LIMIT
+        STEP += 0.5
+    }
+    acc
+}
+
+fn main() {
+    LIMIT = 7
+    catalog::install(catalog::Catalog { table: {"Open": "Ouvrir"} })
+    println(labels(1000))
+    println(scaled(100000))
+    println(f"{STEP} {LIMIT}")
+}
+"#;
+    let expected = "505500
+299995
+50000 7
+";
+    let dir = fresh_dir("statics_written_before_tier_up");
+    let path = write_source(&dir, "statics_written_before_tier_up", src);
+    // `main` writes both statics and reaches their readers, so the default
+    // tier-up compiles before `main` runs; the scalar statics are one cell
+    // for both tiers, and the catalog is never written by bytecode.
+    let child = Command::new(gos_bin())
+        .arg("run")
+        .arg(&path)
+        .env("GOS_JIT_STATS", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn gos");
+    let (stdout, stderr, status) = run_with_timeout(child);
+    assert_eq!(status, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, expected);
+    assert!(
+        stderr.lines().any(|line| line.starts_with("gos-jit-stats: compiled=")
+            && !line.ends_with("compiled=0")),
+        "the hot loop compiles: {stderr}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}

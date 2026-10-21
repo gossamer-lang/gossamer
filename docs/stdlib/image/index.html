@@ -2396,6 +2396,11 @@
 <td>Builds an image from width * height RGBA8 pixels, row by row; returns zero when the byte count does not match.</td>
 </tr>
 <tr>
+<td><code>release</code></td>
+<td><code>fn release(image: i64) -&gt; bool</code></td>
+<td>Releases an opaque image and its pixels. Returns false for an invalid or already released handle.</td>
+</tr>
+<tr>
 <td><code>to_rgba_bytes</code></td>
 <td><code>fn to_rgba_bytes(image: i64) -&gt; Vec&lt;u8&gt;</code></td>
 <td>Returns the pixels as RGBA8 bytes, row by row; empty for an invalid handle.</td>

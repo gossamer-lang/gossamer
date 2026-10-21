@@ -431,8 +431,8 @@ impl<'a> Builder<'a> {
     ///
     /// The closure's aggregate answer is written into a local of this frame
     /// and boxed by the `Some` / `Ok` constructor, which gives it the copy-blob
-    /// layout every holder of the carrier releases. An empty or `Err` receiver
-    /// is the answer as it stands.
+    /// layout every holder of the carrier releases. An empty receiver answers
+    /// `None`, and an `Err` one an `Err` of the answer's type around its error.
     pub(crate) fn lower_map_inline(
         &mut self,
         recv: Local,
@@ -490,11 +490,40 @@ impl<'a> Builder<'a> {
         self.lower_result_ctor_into(dest, present_disc, mapped, span);
         self.terminate(Terminator::Goto { target: join });
         self.set_current(otherwise);
-        self.emit_assign(
-            Place::local(dest),
-            Rvalue::Use(Operand::Copy(Place::local(recv))),
-            span,
-        );
+        match self.enum_payload_ty(receiver_ty, 1) {
+            // The answer's `Err` is a carrier of its own type around the
+            // receiver's error, built as `Err(e)` is, so it holds a share of
+            // that error beside the receiver's.
+            Some(err_ty) => {
+                let err = self.fresh(err_ty);
+                self.emit_assign(
+                    Place::local(err),
+                    Rvalue::CallIntrinsic {
+                        name: "gos_rt_result_payload",
+                        args: vec![Operand::Copy(Place::local(recv))],
+                    },
+                    span,
+                );
+                let err_disc = self.fresh(i64_ty);
+                self.emit_assign(
+                    Place::local(err_disc),
+                    Rvalue::Use(Operand::Const(ConstValue::Int(1))),
+                    span,
+                );
+                self.lower_result_ctor_into(dest, err_disc, err, span);
+            }
+            None => self.emit_assign(
+                Place::local(dest),
+                Rvalue::CallIntrinsic {
+                    name: "gos_rt_result_new",
+                    args: vec![
+                        Operand::Const(ConstValue::Int(1)),
+                        Operand::Const(ConstValue::Int(0)),
+                    ],
+                },
+                span,
+            ),
+        }
         self.terminate(Terminator::Goto { target: join });
         self.set_current(join);
         dest
@@ -1439,28 +1468,15 @@ impl<'a> Builder<'a> {
             Rvalue::Use(Operand::Copy(slot_place)),
             span,
         );
-        // An aggregate payload outlives the vec it was read from, so the
-        // backend's heap copy needs this element's guarded layout to reclaim it.
-        if self.is_inline_aggregate_ty(elem_ty) {
-            let _ = self.ensure_aggr_copy_meta(elem_ty);
-        }
         let some_disc = self.fresh(i64_ty);
         self.emit_assign(
             Place::local(some_disc),
             Rvalue::Use(Operand::Const(ConstValue::Int(0))),
             span,
         );
-        self.emit_assign(
-            Place::local(dest),
-            Rvalue::CallIntrinsic {
-                name: "gos_rt_result_new",
-                args: vec![
-                    Operand::Copy(Place::local(some_disc)),
-                    Operand::Copy(Place::local(payload)),
-                ],
-            },
-            span,
-        );
+        // An aggregate payload outlives the vec it was read from; the shared
+        // constructor registers the layouts that reclaim the backend's copy.
+        self.lower_result_ctor_into(dest, some_disc, payload, span);
         self.terminate(Terminator::Goto { target: join });
 
         self.set_current(none_block);

@@ -2357,7 +2357,7 @@
 <tr>
 <td><code>Receiver</code></td>
 <td><code>type Receiver</code></td>
-<td>The receiving end of a channel: <code>recv() -&gt; Option&lt;T&gt;</code>, <code>None</code> once it is closed and drained.</td>
+<td>The receiving end of a channel: <code>recv() -&gt; Option&lt;T&gt;</code> waits for a value, <code>None</code> once it is closed and drained; <code>try_recv() -&gt; Option&lt;T&gt;</code> answers at once, <code>None</code> when nothing is queued.</td>
 </tr>
 <tr>
 <td><code>Mutex</code></td>
@@ -2377,37 +2377,37 @@
 <tr>
 <td><code>Once</code></td>
 <td><code>type Once</code></td>
-<td>One-shot initialisation latch.</td>
+<td>One-shot initialisation latch: <code>call(f)</code> runs <code>f</code> the first time and answers whether this call ran it.</td>
 </tr>
 <tr>
 <td><code>WaitGroup</code></td>
 <td><code>type WaitGroup</code></td>
-<td>Counts goroutines and waits for them to finish.</td>
+<td>Counts goroutines and waits for them to finish: <code>add(n)</code>, <code>done()</code>, <code>wait()</code>, and <code>wait_ctx(ctx)</code>, which answers whether the group finished before <code>ctx</code> ended.</td>
 </tr>
 <tr>
 <td><code>Barrier</code></td>
 <td><code>type Barrier</code></td>
-<td>Synchronisation barrier across goroutines.</td>
+<td>Synchronisation barrier across goroutines: <code>wait()</code> returns once every party has arrived.</td>
 </tr>
 <tr>
 <td><code>AtomicI64</code></td>
 <td><code>type AtomicI64</code></td>
-<td>Atomic 64-bit signed integer.</td>
+<td>Atomic 64-bit signed integer. Build with <code>AtomicI64::new(v)</code>; <code>load()</code>, <code>store(v)</code>, <code>compare_exchange(current, new)</code> (stores <code>new</code> and answers true when the value was <code>current</code>), <code>fetch_add(v)</code> and <code>fetch_sub(v)</code> (answer the value before the change).</td>
 </tr>
 <tr>
 <td><code>AtomicI32</code></td>
 <td><code>type AtomicI32</code></td>
-<td>Atomic 32-bit signed integer.</td>
+<td>Atomic 32-bit signed integer. Build with <code>AtomicI32::new(v)</code>; <code>load()</code>, <code>store(v)</code>, <code>compare_exchange(current, new)</code> (stores <code>new</code> and answers true when the value was <code>current</code>), <code>fetch_add(v)</code> and <code>fetch_sub(v)</code> (answer the value before the change).</td>
 </tr>
 <tr>
 <td><code>AtomicU64</code></td>
 <td><code>type AtomicU64</code></td>
-<td>Atomic 64-bit unsigned integer.</td>
+<td>Atomic 64-bit unsigned integer. Build with <code>AtomicU64::new(v)</code>; <code>load()</code>, <code>store(v)</code>, <code>compare_exchange(current, new)</code> (stores <code>new</code> and answers true when the value was <code>current</code>), <code>fetch_add(v)</code> and <code>fetch_sub(v)</code> (answer the value before the change).</td>
 </tr>
 <tr>
 <td><code>AtomicBool</code></td>
 <td><code>type AtomicBool</code></td>
-<td>Atomic boolean.</td>
+<td>Atomic boolean. Build with <code>AtomicBool::new(v)</code>; <code>load()</code>, <code>store(v)</code>, <code>compare_exchange(current, new)</code> (stores <code>new</code> and answers true when the value was <code>current</code>).</td>
 </tr>
 <tr>
 <td><code>Map</code></td>

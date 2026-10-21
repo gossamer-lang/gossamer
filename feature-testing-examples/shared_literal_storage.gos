@@ -1,0 +1,110 @@
+// A struct literal or a call answer that takes a vector nothing writes
+// shares its storage, and every write still reaches only the value it names.
+//
+// Each case writes one side of a value that may share storage with another
+// and prints both, so a write that leaked through shared storage shows up as
+// a changed original on some tier.
+
+struct Gdef { classes: i64, data: Vec<i64> }
+
+struct Holder { g: Gdef, tag: i64 }
+
+fn from_param(d: Vec<i64>) -> Gdef { Gdef { classes: 1, data: d } }
+
+fn wrap(d: Vec<i64>) -> Gdef { from_param(d) }
+
+fn from_field(g: Gdef) -> Gdef { Gdef { classes: g.classes + 1, data: g.data } }
+
+fn maybe(d: Vec<i64>) -> Option<Gdef> { Some(Gdef { classes: 2, data: d }) }
+
+fn first(g: Gdef) -> i64 { g.data[0] }
+
+fn read_kept(g: Gdef, at: i64) -> i64 {
+    let local = Gdef { classes: 3, data: g.data }
+    first(local) + local.data[at]
+}
+
+fn grow_local(g: Gdef) -> Vec<i64> {
+    let mut local = Gdef { classes: 4, data: g.data }
+    local.data.push(99)
+    local.data
+}
+
+// Two values of one answer built from the same storage are still two values:
+// writing one leaves the other alone.
+fn twice_local() -> (Gdef, Vec<i64>) {
+    let v = #[1]
+    let a = Gdef { classes: 0, data: v }
+    (a, v)
+}
+
+fn twice_param(p: Vec<i64>) -> (Gdef, Vec<i64>) { (Gdef { classes: 0, data: p }, p) }
+
+fn through_call(p: Vec<i64>) -> (Gdef, Vec<i64>) { (from_param(p), p) }
+
+fn main() {
+    let v = #[1, 2, 3]
+
+    let mut a = Gdef { classes: 0, data: v }
+    a.data.push(4)
+    println(f"literal into mut: {v} {a.data}")
+
+    let mut b = from_param(v)
+    b.data.push(5)
+    println(f"answer into mut: {v} {b.data}")
+
+    let mut c = wrap(v)
+    c.data[0] = 50
+    println(f"forwarded answer into mut: {v} {c.data}")
+
+    let shared = from_param(v)
+    let mut d = shared
+    d.data.push(6)
+    println(f"rebound answer: {v} {shared.data} {d.data}")
+
+    let kept = Gdef { classes: 0, data: v }
+    let mut list = #[]
+    list.push(kept)
+    list[0].data.push(7)
+    println(f"stored literal: {v} {list[0].data}")
+
+    let mut src = #[8, 9]
+    let e = from_param(src)
+    src.push(10)
+    println(f"written source: {src} {e.data}")
+
+    match maybe(v) {
+        Some(mut m) => {
+            m.data.push(11)
+            println(f"option answer: {v} {m.data}")
+        }
+        None => println("none")
+    }
+
+    let mut h = Holder { g: from_param(v), tag: 1 }
+    h.g.data.push(12)
+    println(f"nested holder: {v} {h.g.data} {h.tag}")
+
+    let g = Gdef { classes: 7, data: v }
+    let f = from_field(g)
+    let mut f2 = from_field(g)
+    f2.data.push(13)
+    println(f"field answer: {v} {g.data} {f.data} {f2.data} {f.classes}")
+
+    println(f"read through a local literal: {read_kept(g, 2)}")
+    println(f"grown local: {grow_local(g)} {g.data} {v}")
+
+    let counted = (0..3).map(|i| from_param(v).data.len() + i).sum()
+    println(f"answers read in a closure: {counted} {v}")
+
+    let mut x, mut y = twice_local()
+    y.push(2)
+    println(f"answer twice from a local: {x.data} {y}")
+    let mut p, mut q = twice_param(v)
+    q.push(3)
+    println(f"answer twice from a parameter: {p.data} {q} {v}")
+    let mut r, mut t = through_call(v)
+    t.push(4)
+    r.data.push(5)
+    println(f"answer twice through a call: {r.data} {t} {v}")
+}

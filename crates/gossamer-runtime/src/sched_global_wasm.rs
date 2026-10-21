@@ -45,6 +45,16 @@ pub fn request_shutdown() {
 /// there is nothing outstanding to drain at exit.
 pub fn drain_goroutines_for_exit() {}
 
+/// WebAssembly runs the scheduler eagerly, leaving no live work at exit.
+pub(crate) fn program_storage_is_idle() -> bool {
+    true
+}
+
+/// The eager WebAssembly scheduler has no native threads to join.
+pub(crate) fn finish_idle_runtime() -> bool {
+    true
+}
+
 /// Returns `true` once [`request_shutdown`] has been called.
 #[must_use]
 pub fn is_shutdown_requested() -> bool {

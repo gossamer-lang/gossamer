@@ -184,6 +184,24 @@ fn insert(image: Image) -> i64 {
     id
 }
 
+/// Releases an opaque image handle and its pixels. Invalid or already released
+/// handles answer false; later reads of a released handle use invalid defaults.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_image_release(handle: i64) -> i64 {
+    i64::from(lock_images().remove(&handle).is_some())
+}
+
+/// Native shutdown releases any remaining opaque handles after user hooks.
+pub(crate) fn release_program_images() {
+    if let Some(images) = IMAGES.get() {
+        let mut images = images
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        images.clear();
+        images.shrink_to_fit();
+    }
+}
+
 fn dimension(value: i64) -> u32 {
     if value < 0 {
         crate::c_abi::panic::panic_text("image dimension must be non-negative");
@@ -347,4 +365,21 @@ pub extern "C-unwind" fn gos_rt_image_encode_jpeg_base64(handle: i64, quality: i
             .map_or_else(String::new, |bytes| crate::codec::base64::encode(&bytes));
         alloc_cstring(text.as_bytes())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn releasing_an_image_retires_the_handle_and_pixels() {
+        let handle = gos_rt_image_filled(32, 16, 0xff00ffff);
+        assert!(handle > 0);
+        assert_eq!(gos_rt_image_width(handle), 32);
+        assert_eq!(gos_rt_image_release(handle), 1);
+        assert!(!lock_images().contains_key(&handle));
+        assert_eq!(gos_rt_image_width(handle), 0);
+        assert_eq!(gos_rt_image_release(handle), 0);
+        assert_eq!(gos_rt_image_release(0), 0);
+    }
 }

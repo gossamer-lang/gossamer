@@ -736,7 +736,7 @@ fn validate_source(
     // much an input of this build as the source is: the same text over
     // different bytes is a different program, and the stamp has to be able
     // to tell.
-    let prepared = crate::unit_cache::prepare(&source, &file.to_string_lossy());
+    let prepared = crate::unit_cache::prepare(&source, &file.to_string_lossy(), origins.1);
     // The prepared text supersedes the file contents for every subsequent
     // frontend stage. Release the original before parsing so large generated
     // files do not overlap the resolver, type table, and backend artifacts.
@@ -1701,6 +1701,44 @@ fn trace_link_command(cmd: &std::process::Command) {
     }
 }
 
+/// Appends the system libraries a target's executable links against after
+/// the program's own archives, so a single-pass linker resolves the runtime's
+/// references to them.
+fn push_system_libraries(cmd: &mut std::process::Command, lt: &LinkTarget) {
+    // `-ldl` only exists on Linux (libdl). macOS folds `dl*` into
+    // `libSystem` and Windows/mingw has no `libdl` at all - passing
+    // it on either fails the link ("cannot find -ldl"). `libpthread`
+    // / `libm` resolve as real libs (winpthreads on mingw) or stub-
+    // forwarders on every target, so we keep those.
+    cmd.arg("-lpthread");
+    if lt.os == TargetOs::Linux {
+        cmd.arg("-ldl");
+    }
+    cmd.arg("-lm");
+    // The runtime reads the local time zone through CoreFoundation.
+    if lt.os == TargetOs::MacOs {
+        cmd.args(["-framework", "CoreFoundation"]);
+    }
+    if lt.os == TargetOs::Windows {
+        // Windows-GNU `gos` drives mingw's `cc` directly, so unlike a
+        // rustc-driven link it must name the Win32 import libraries the
+        // Rust runtime staticlib references but mingw's default specs
+        // don't auto-link: ws2_32 (mio sockets), bcrypt/advapi32
+        // (getrandom / std RNG), userenv (env home dir), ntdll (std
+        // internals). All are core mingw-w64 import libs. Listed after
+        // the archives so the single-pass GNU linker resolves their
+        // symbols. The Windows-MSVC path links via `link.exe`
+        // (`link_windows_msvc`) and never reaches here.
+        for lib in ["ws2_32", "bcrypt", "advapi32", "userenv", "ntdll"] {
+            cmd.arg(format!("-l{lib}"));
+        }
+        cmd.args(mingw_reproducible_link_flags(
+            gossamer_codegen_llvm::reproducible_enabled(),
+        ));
+        cmd.arg(mingw_stack_reserve_flag());
+    }
+}
+
 /// POSIX/macOS link path. On Linux release builds with the rustup
 /// musl target installed and `--dynamic` not set, this routes through
 /// `link_posix_static_musl` to produce a fully static binary.
@@ -1770,34 +1808,7 @@ fn link_posix(
     cmd.args(framework_args(lt, libraries)?);
     cmd.args(&libraries.staticlib_args);
     cmd.arg("-o").arg(out_path);
-    // `-ldl` only exists on Linux (libdl). macOS folds `dl*` into
-    // `libSystem` and Windows/mingw has no `libdl` at all - passing
-    // it on either fails the link ("cannot find -ldl"). `libpthread`
-    // / `libm` resolve as real libs (winpthreads on mingw) or stub-
-    // forwarders on every target, so we keep those.
-    cmd.arg("-lpthread");
-    if lt.os == TargetOs::Linux {
-        cmd.arg("-ldl");
-    }
-    cmd.arg("-lm");
-    if lt.os == TargetOs::Windows {
-        // Windows-GNU `gos` drives mingw's `cc` directly, so unlike a
-        // rustc-driven link it must name the Win32 import libraries the
-        // Rust runtime staticlib references but mingw's default specs
-        // don't auto-link: ws2_32 (mio sockets), bcrypt/advapi32
-        // (getrandom / std RNG), userenv (env home dir), ntdll (std
-        // internals). All are core mingw-w64 import libs. Listed after
-        // the archives so the single-pass GNU linker resolves their
-        // symbols. The Windows-MSVC path links via `link.exe`
-        // (`link_windows_msvc`) and never reaches here.
-        for lib in ["ws2_32", "bcrypt", "advapi32", "userenv", "ntdll"] {
-            cmd.arg(format!("-l{lib}"));
-        }
-        cmd.args(mingw_reproducible_link_flags(
-            gossamer_codegen_llvm::reproducible_enabled(),
-        ));
-        cmd.arg(mingw_stack_reserve_flag());
-    }
+    push_system_libraries(&mut cmd, lt);
     if !extra_archives.is_empty() {
         // The rust-bindings staticlib pulls in `gossamer-runtime`
         // as a transitive Cargo dep, which produces a second copy

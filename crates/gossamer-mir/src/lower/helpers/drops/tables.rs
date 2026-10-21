@@ -415,7 +415,11 @@ pub(super) fn frame_owned_carriers(body: &Body) -> Vec<bool> {
     owned_carrier
 }
 
-pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+pub(crate) fn insert_drops_at_returns(
+    body: &mut Body,
+    tcx: &gossamer_types::TyCtxt,
+    user_fn_names: &std::collections::HashSet<String>,
+) {
     use gossamer_types::TyKind;
 
     if body.locals.is_empty() {
@@ -475,6 +479,7 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
     // assigned by something other than a recognised constructor,
     // or has been disqualified by a subsequent re-assignment.
     let mut owner_ctor: Vec<Option<&'static str>> = vec![None; body.locals.len()];
+    let borrowed_carrier = borrowed_carriers(body);
     let mut moved_into_return: Vec<bool> = vec![false; body.locals.len()];
     // An iterator a caller passes by value is this frame's from then on: the
     // caller gives up its owner record at the call, so what this frame
@@ -763,7 +768,25 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
                 }
                 _ => None,
             };
+            // A payload unwrapped out of a carrier that views a container's
+            // element (`rows[i].unwrap()`, `xs.first().unwrap()`) stays the
+            // container's: the frame gives back only what it owns.
+            let unwraps_viewed_element = matches!(
+                callee,
+                Operand::Const(ConstValue::Str(s))
+                    if matches!(
+                        s.as_str(),
+                        "gos_rt_option_unwrap" | "gos_rt_result_unwrap" | "gos_rt_option_expect"
+                            | "gos_rt_result_expect"
+                    )
+            ) && matches!(
+                args.first(),
+                Some(Operand::Copy(c))
+                    if c.projection.is_empty()
+                        && borrowed_carrier.get(c.local.0 as usize).copied().unwrap_or(false)
+            );
             let borrowed_callee = unwraps_lent_map
+                || unwraps_viewed_element
                 || matches!(
                     callee,
                     Operand::Const(ConstValue::Str(s))
@@ -905,26 +928,53 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
         // A field nested in a by-value field is written the same way, and
         // given back with the aggregate the same way.
         let writes_owned_field = |place: &Place| -> bool {
-            let Some(written): Option<Vec<u32>> = place
-                .projection
-                .iter()
-                .map(|step| match step {
-                    crate::ir::Projection::Field(idx) => Some(*idx),
-                    _ => None,
-                })
-                .collect()
+            let Some(decl) = body.locals.get(place.local.0 as usize) else {
+                return false;
+            };
+            if place.projection.as_slice() == [crate::ir::Projection::Deref]
+                && let TyKind::Ref { inner, .. } = tcx.kind_of(decl.ty)
+                && matches!(tcx.kind_of(*inner), TyKind::Vec(_) | TyKind::Slice(_))
+            {
+                return true;
+            }
+            let Some((crate::ir::Projection::Field(last), prefix)) = place.projection.split_last()
             else {
                 return false;
             };
-            !written.is_empty()
-                && body.locals.get(place.local.0 as usize).is_some_and(|decl| {
-                    aggregate_rc_field_paths(tcx, decl.ty)
-                        .iter()
-                        .any(|(path, kind)| {
-                            (matches!(kind, FieldRcKind::Vec) || kind.is_value_container())
-                                && *path == written
-                        })
+            let mut ty = pointee_of(tcx, decl.ty);
+            for step in prefix {
+                ty = match step {
+                    crate::ir::Projection::Field(index) => {
+                        let Some(field) = holder_copies::field_ty_at(tcx, ty, &[*index]) else {
+                            return false;
+                        };
+                        field
+                    }
+                    crate::ir::Projection::Index(_) => match tcx.kind_of(ty) {
+                        TyKind::Vec(elem) | TyKind::Slice(elem) | TyKind::Array { elem, .. } => {
+                            *elem
+                        }
+                        _ => return false,
+                    },
+                    crate::ir::Projection::Deref => pointee_of(tcx, ty),
+                    crate::ir::Projection::Downcast(_) | crate::ir::Projection::Discriminant => {
+                        return false;
+                    }
+                };
+                ty = pointee_of(tcx, ty);
+            }
+            aggregate_rc_field_paths(tcx, ty)
+                .iter()
+                .any(|(path, kind)| {
+                    (matches!(kind, FieldRcKind::Vec) || kind.is_value_container())
+                        && path.as_slice() == [*last]
                 })
+        };
+        // A rebound owner takes a share of its own of every value copied
+        // into it, so the copy leaves the source's share with its frame.
+        let rebound = crate::lower::helpers::drops::rebound_vec_owners(body, tcx);
+        let copies_into_rebound = |dest: &Place| {
+            dest.projection.is_empty() && rebound.get(dest.local.0 as usize).copied() == Some(true)
         };
         for block in &body.blocks {
             for stmt in &block.stmts {
@@ -935,6 +985,7 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
                     && p.projection.is_empty()
                     && (p.local.0 as usize) < aliased.len()
                     && !writes_owned_field(dest)
+                    && !copies_into_rebound(dest)
                 {
                     aliased[p.local.0 as usize] = true;
                 }
@@ -1560,6 +1611,41 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
         }
         boxes
     };
+    // A closure environment holds its own share of a captured map, set,
+    // deque, or heap, which its descriptor gives back.
+    let closure_env_locals: Vec<bool> = {
+        let mut envs = vec![false; body.locals.len()];
+        for stmt in body.blocks.iter().flat_map(|b| &b.stmts) {
+            if let StatementKind::Assign {
+                place,
+                rvalue: Rvalue::CallIntrinsic { name, args },
+            } = &stmt.kind
+                && *name == "gos_rc_alloc"
+                && place.projection.is_empty()
+                && (place.local.0 as usize) < envs.len()
+                && matches!(args.get(1), Some(Operand::Const(ConstValue::Str(meta)))
+                    if meta.starts_with("gos_rc_meta_closure_"))
+            {
+                envs[place.local.0 as usize] = true;
+            }
+        }
+        envs
+    };
+    // A set or deque local is a bare handle word, so its constructor's free
+    // names it where its type does not.
+    let is_shared_handle_local = |op: &Operand| -> bool {
+        matches!(op, Operand::Copy(p) if p.projection.is_empty()
+        && (p.local.0 as usize) < body.locals.len()
+        && {
+            let ty = body.locals[p.local.0 as usize].ty;
+            matches!(tcx.kind_of(ty), gossamer_types::TyKind::HashMap { .. })
+                || super::handle_container(tcx, ty).is_some()
+                || matches!(
+                    owner_ctor[p.local.0 as usize],
+                    Some("gos_rt_map_free" | "gos_rt_set_free" | "gos_rt_deque_free")
+                )
+        })
+    };
     let is_container_local = |op: &Operand| -> bool {
         matches!(op, Operand::Copy(p) if p.projection.is_empty()
         && (p.local.0 as usize) < body.locals.len()
@@ -1651,7 +1737,9 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
                                 // returned box.
                                 let balanced =
                                     enum_box_locals.get(obj_idx).copied().unwrap_or(false)
-                                        && is_container_local(val);
+                                        && (is_container_local(val)
+                                            || (closure_env_locals[obj_idx]
+                                                && is_shared_handle_local(val)));
                                 if !balanced {
                                     propagate_call_args(
                                         std::slice::from_ref(val),
@@ -1899,7 +1987,7 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
         moved
     };
 
-    let mints_own_share = aggregates_minting_their_own_share(body, tcx);
+    let mints_own_share = aggregates_minting_their_own_share(body, tcx, user_fn_names);
 
     // Pass 3: collect drop targets in stable local-index order.
     // The constructor-name → free-name table already restricts
@@ -1964,6 +2052,39 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
         })
         .collect();
 
+    // A vector that escapes through one return still belongs to this frame
+    // at a different return. Comparing allocation identity handles joined
+    // copy chains without treating every possible escape as a global move.
+    let conditional_vectors: Vec<Local> = if matches!(
+        tcx.kind_of(body.locals[0].ty),
+        TyKind::Vec(_) | TyKind::Slice(_)
+    ) {
+        (1..owner_ctor.len())
+            .filter(|&i| {
+                owner_ctor[i] == Some("gos_rt_vec_free")
+                    && moved_into_return[i]
+                    && !mints_own_share[i]
+                    && !stored_in_static[i]
+            })
+            .map(|i| Local(u32::try_from(i).expect("local overflow")))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for local in &conditional_vectors {
+        body.blocks[0].stmts.insert(
+            0,
+            Statement {
+                kind: StatementKind::Assign {
+                    place: Place::local(*local),
+                    rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                },
+                span: body.span,
+                inlined: None,
+            },
+        );
+    }
+
     // Non-aliased container ctor locals get full per-site management below
     // (zero-init + drop-before-overwrite + at-return, all null-safe) so a
     // container rebuilt each loop iteration frees every prior allocation
@@ -2005,7 +2126,29 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
         .filter(|(l, _)| !reuse_set.contains(&l.0))
         .collect();
 
-    if drop_targets.is_empty() && reuse.is_empty() {
+    // A conditional call result can feed a phi through several bare copies.
+    // Aliasing excludes it from per-site reuse, but it still owns the call's
+    // reference. Initialize these vector owners to null so every return can
+    // release them, including returns reached without executing the call.
+    // Otherwise must-init rejects the cleanup at the branch join and strands
+    // the original vector even when the final binding clones its storage.
+    for (local, free) in &drop_targets {
+        if *free == "gos_rt_vec_free" && local.0 as usize > arity {
+            body.blocks[0].stmts.insert(
+                0,
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: Place::local(*local),
+                        rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                    },
+                    span: body.span,
+                    inlined: None,
+                },
+            );
+        }
+    }
+
+    if drop_targets.is_empty() && reuse.is_empty() && conditional_vectors.is_empty() {
         return;
     }
 
@@ -2035,6 +2178,29 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
             continue;
         }
         let span = body.blocks[block_idx].span;
+        for local in &conditional_vectors {
+            let dest = Local(u32::try_from(body.locals.len()).expect("local overflow"));
+            body.locals.push(LocalDecl {
+                ty: tcx.unit_interned().unwrap_or(body.locals[0].ty),
+                debug_name: None,
+                mutable: false,
+                region: false,
+            });
+            body.blocks[block_idx].stmts.push(Statement {
+                kind: StatementKind::Assign {
+                    place: Place::local(dest),
+                    rvalue: Rvalue::CallIntrinsic {
+                        name: "gos_rt_vec_free_unless_returned",
+                        args: vec![
+                            Operand::Copy(Place::local(*local)),
+                            Operand::Copy(Place::local(Local::RETURN)),
+                        ],
+                    },
+                },
+                span,
+                inlined: None,
+            });
+        }
         let init_row = &init_at_return[block_idx];
         for (target_idx, (local, free_name)) in drop_targets.iter().enumerate() {
             if !init_row[target_idx] {

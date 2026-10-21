@@ -66,7 +66,6 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use crate::BuildError;
-use crate::ty::packed_byte_array_len;
 use anyhow::Result;
 use gossamer_abi as abi;
 use gossamer_mir::{
@@ -180,13 +179,7 @@ impl<'a> Lowerer<'a> {
             return addr;
         }
         let tbaa = self.place_payload_tbaa(place);
-        if self.place_is_packed_byte_element(place) {
-            let byte = self.fresh();
-            writeln!(self.out, "  {byte} = load i8, ptr {addr}{tbaa}").unwrap();
-            let tmp = self.fresh();
-            writeln!(self.out, "  {tmp} = zext i8 {byte} to i64").unwrap();
-            tmp
-        } else if let Some((storage, signed)) = self.packed_integer_field(place) {
+        if let Some((storage, signed)) = self.packed_integer_field(place) {
             let stored = self.fresh();
             writeln!(self.out, "  {stored} = load {storage}, ptr {addr}{tbaa}").unwrap();
             let tmp = self.fresh();
@@ -219,11 +212,7 @@ impl<'a> Lowerer<'a> {
             self.lower_place_address(place)
         };
         let tbaa = self.place_payload_tbaa(place);
-        if self.place_is_packed_byte_element(place) {
-            let byte = self.fresh();
-            writeln!(self.out, "  {byte} = trunc {llvm_ty} {value} to i8").unwrap();
-            writeln!(self.out, "  store i8 {byte}, ptr {addr}{tbaa}").unwrap();
-        } else if let Some((storage, _)) = self.packed_integer_field(place) {
+        if let Some((storage, _)) = self.packed_integer_field(place) {
             let narrow = self.fresh();
             writeln!(
                 self.out,
@@ -477,13 +466,7 @@ impl<'a> Lowerer<'a> {
                         stride_slots = elem_slots(self.tcx, current_ty);
                         continue;
                     }
-                    if packed_byte_array_len(self.tcx, current_ty).is_some() {
-                        writeln!(
-                            self.out,
-                            "  {next} = getelementptr i8, ptr {current}, i64 {idx_raw}"
-                        )
-                        .unwrap();
-                    } else if stride_slots == 1 {
+                    if stride_slots == 1 {
                         writeln!(
                             self.out,
                             "  {next} = getelementptr i64, ptr {current}, i64 {idx_raw}"
@@ -657,24 +640,5 @@ impl<'a> Lowerer<'a> {
             _ => return None,
         };
         Some((storage, signed))
-    }
-
-    pub(crate) fn place_is_packed_byte_element(&self, place: &Place) -> bool {
-        let mut ty = self.body.local_ty(place.local);
-        for projection in &place.projection {
-            match projection {
-                Projection::Index(_) => {
-                    if packed_byte_array_len(self.tcx, ty).is_some() {
-                        return true;
-                    }
-                    ty = match self.tcx.kind(ty) {
-                        Some(TyKind::Array { elem, .. }) => *elem,
-                        _ => ty,
-                    };
-                }
-                _ => {}
-            }
-        }
-        false
     }
 }

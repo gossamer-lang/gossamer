@@ -85,6 +85,13 @@ pub fn install_stack_guard() {
     }
 }
 
+/// Releases an alternate stack owned by this thread after its runtime work ends.
+/// Native C entry points do not run Rust's main-thread TLS destructors.
+pub(crate) fn release_stack_guard() {
+    #[cfg(unix)]
+    unix::release();
+}
+
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 /// Name pointer + length of the in-process-JIT-compiled body currently
@@ -201,7 +208,7 @@ pub(crate) const STACK_OVERFLOW_MESSAGE: &[u8] =
 
 #[cfg(unix)]
 mod unix {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::mem::MaybeUninit;
     use std::sync::Once;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -212,7 +219,7 @@ mod unix {
     // kernel always has a valid `ss_sp` for the calling thread -
     // `sigaltstack` is a per-thread setting, not process-wide.
     thread_local! {
-        static ALT_STACK: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
+        static ALT_STACK: RefCell<Option<AltStack>> = const { RefCell::new(None) };
         static STACK_LO: Cell<usize> = const { Cell::new(0) };
         static STACK_HI: Cell<usize> = const { Cell::new(0) };
         static INSTALLED: Cell<bool> = const { Cell::new(false) };
@@ -223,6 +230,54 @@ mod unix {
     // running on every thread.
     static ACTION_INSTALLED: AtomicBool = AtomicBool::new(false);
     static ACTION_ONCE: Once = Once::new();
+
+    struct AltStack {
+        buffer: Option<Box<[u8]>>,
+        previous: libc::stack_t,
+    }
+
+    /// `descriptor` as `sigaltstack` takes it back. A disabled stack is
+    /// handed over with a valid size: Darwin checks the size before it reads
+    /// the flags, and refuses the zero size it reports for no stack.
+    pub(super) fn restorable(descriptor: libc::stack_t) -> libc::stack_t {
+        if descriptor.ss_flags & libc::SS_DISABLE == 0 {
+            return descriptor;
+        }
+        libc::stack_t {
+            ss_sp: std::ptr::null_mut(),
+            ss_flags: libc::SS_DISABLE,
+            ss_size: libc::MINSIGSTKSZ,
+        }
+    }
+
+    impl Drop for AltStack {
+        fn drop(&mut self) {
+            let Some(buffer) = self.buffer.as_mut() else {
+                return;
+            };
+            // SAFETY: the kernel writes the current thread's stack descriptor
+            // into `current`; no new stack is installed by this query.
+            let mut current: libc::stack_t = unsafe { MaybeUninit::zeroed().assume_init() };
+            // SAFETY: `current` is writable; a null input only queries state.
+            let queried = unsafe { libc::sigaltstack(std::ptr::null(), &raw mut current) };
+            let previous = restorable(self.previous);
+            if queried != 0
+                || (current.ss_sp == buffer.as_mut_ptr().cast()
+                    // SAFETY: the previous descriptor was obtained on this
+                    // thread before installing our still-live buffer.
+                    && unsafe { libc::sigaltstack(&raw const previous, std::ptr::null_mut()) } != 0)
+            {
+                // A failed restore must not leave the kernel pointing at freed
+                // storage. This can only happen while running on the alt stack.
+                std::mem::forget(self.buffer.take());
+            }
+        }
+    }
+
+    pub(super) fn release() {
+        ALT_STACK.with(|stack| drop(stack.borrow_mut().take()));
+        INSTALLED.with(|installed| installed.set(false));
+    }
 
     pub(super) fn install() {
         // AddressSanitizer installs its own SIGSEGV handler + alt
@@ -252,24 +307,106 @@ mod unix {
     }
 
     fn install_alt_stack() {
-        // `Box::into_raw` returns a valid heap allocation
-        // of `ALT_STACK_BYTES`. The pointer is parked thread-local
-        // and never freed - the thread either exits (kernel reaps
-        // the alt stack first via SS_DISABLE on thread exit) or
-        // lives until process abort.
-        let buf: Box<[u8]> = vec![0_u8; ALT_STACK_BYTES].into_boxed_slice();
-        let raw = Box::into_raw(buf).cast::<u8>();
-        ALT_STACK.with(|cell| cell.set(raw));
-
+        // Rust-created threads already have an alternate stack. Reuse it
+        // rather than replacing and losing the owner's allocation at teardown.
+        // Our signal handler uses bounded stack buffers and no symbolication.
+        // SAFETY: zero is a valid initial stack descriptor, filled by the query.
+        let mut previous: libc::stack_t = unsafe { MaybeUninit::zeroed().assume_init() };
+        // SAFETY: `previous` is writable and querying changes no signal state.
+        if unsafe { libc::sigaltstack(std::ptr::null(), &raw mut previous) } != 0 {
+            return;
+        }
+        if previous.ss_flags & libc::SS_DISABLE == 0 && previous.ss_size >= libc::MINSIGSTKSZ {
+            return;
+        }
+        let mut buffer = vec![0_u8; ALT_STACK_BYTES].into_boxed_slice();
         let ss = libc::stack_t {
-            ss_sp: raw.cast::<libc::c_void>(),
+            ss_sp: buffer.as_mut_ptr().cast::<libc::c_void>(),
             ss_flags: 0,
             ss_size: ALT_STACK_BYTES,
         };
         // SAFETY: `ss` is a valid `stack_t` describing an owned
-        // buffer; the second argument is null to discard the old
-        // alternate stack (we never need to restore it).
-        let _ = unsafe { libc::sigaltstack(&raw const ss, std::ptr::null_mut()) };
+        // buffer. Retain the previous descriptor for restoration before free.
+        if unsafe { libc::sigaltstack(&raw const ss, std::ptr::null_mut()) } == 0 {
+            ALT_STACK.with(|stack| {
+                *stack.borrow_mut() = Some(AltStack {
+                    buffer: Some(buffer),
+                    previous,
+                });
+            });
+        }
+    }
+
+    #[cfg(test)]
+    mod alt_stack_tests {
+        use super::*;
+
+        fn current_stack() -> libc::stack_t {
+            // SAFETY: zero is valid initial storage for this descriptor.
+            let mut current = unsafe { MaybeUninit::<libc::stack_t>::zeroed().assume_init() };
+            // SAFETY: a null input queries state into writable stack storage.
+            let result = unsafe { libc::sigaltstack(std::ptr::null(), &raw mut current) };
+            assert_eq!(result, 0);
+            current
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn existing_signal_stack_is_preserved() {
+            if std::env::var_os("ASAN_OPTIONS").is_some() {
+                return;
+            }
+            std::thread::spawn(|| {
+                let before = current_stack();
+                install();
+                let installed = current_stack();
+                if before.ss_flags & libc::SS_DISABLE == 0 && before.ss_size >= libc::MINSIGSTKSZ {
+                    assert_eq!(installed.ss_sp, before.ss_sp);
+                    ALT_STACK.with(|owned| assert!(owned.borrow().is_none()));
+                }
+                release();
+                assert_eq!(current_stack().ss_sp, before.ss_sp);
+            })
+            .join()
+            .unwrap();
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn owned_signal_stack_is_restored_and_released() {
+            if std::env::var_os("ASAN_OPTIONS").is_some() {
+                return;
+            }
+            std::thread::spawn(|| {
+                let before = current_stack();
+                let disabled = super::restorable(libc::stack_t {
+                    ss_sp: std::ptr::null_mut(),
+                    ss_flags: libc::SS_DISABLE,
+                    ss_size: 0,
+                });
+                // SAFETY: runs on the regular thread stack; the host's storage
+                // stays live and is restored before the thread returns.
+                let result =
+                    unsafe { libc::sigaltstack(&raw const disabled, std::ptr::null_mut()) };
+                assert_eq!(result, 0, "disabling: {}", std::io::Error::last_os_error());
+                install();
+                let owned = current_stack();
+                assert_eq!(owned.ss_size, ALT_STACK_BYTES);
+                ALT_STACK.with(|stack| assert!(stack.borrow().is_some()));
+                install();
+                assert_eq!(current_stack().ss_sp, owned.ss_sp);
+                release();
+                assert_ne!(current_stack().ss_flags & libc::SS_DISABLE, 0);
+                ALT_STACK.with(|stack| assert!(stack.borrow().is_none()));
+                let before = super::restorable(before);
+                // SAFETY: restore the unchanged host descriptor before its
+                // owner, Rust's thread runtime, performs its teardown.
+                let result = unsafe { libc::sigaltstack(&raw const before, std::ptr::null_mut()) };
+                assert_eq!(result, 0, "restoring: {}", std::io::Error::last_os_error());
+            })
+            .join()
+            .unwrap();
+        }
     }
 
     fn install_sigaction() {

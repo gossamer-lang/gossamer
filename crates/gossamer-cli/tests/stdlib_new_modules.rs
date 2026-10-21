@@ -168,9 +168,100 @@ fn main() {
     let jpeg = image::decode_base64(image::encode_jpeg_base64(source, 90))
     println(image::width(jpeg))
     println(image::height(jpeg))
+    println(image::release(source))
+    println(image::release(decoded))
+    println(image::release(jpeg))
+    println(image::width(source))
+    println(image::release(source))
+    println(image::release(0))
 }
 "#;
-    assert_vm_output("image_png_jpeg", src, "true\n2\n1\n16711935\ntrue\n2\n1");
+    assert_vm_output(
+        "image_png_jpeg",
+        src,
+        "true\n2\n1\n16711935\ntrue\n2\n1\ntrue\ntrue\ntrue\n0\nfalse\nfalse",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fs_read_dir_reports_symlinks_by_their_own_metadata_across_tiers() {
+    let fixture = scratch("read_dir_symlinks_fixture");
+    fs::write(fixture.join("big"), vec![0_u8; 5000]).unwrap();
+    std::os::unix::fs::symlink("big", fixture.join("link")).unwrap();
+    std::os::unix::fs::symlink("nowhere", fixture.join("dangling")).unwrap();
+    let src = r#"
+use std::fs
+fn main() {
+    for e in fs::read_dir("FIXTURE").unwrap() {
+        println(f"{e.name} {e.is_file} {e.is_symlink} {e.size}")
+    }
+}
+"#
+    .replace("FIXTURE", &fixture.to_string_lossy());
+    assert_vm_output(
+        "read_dir_symlinks",
+        &src,
+        "big true false 5000\ndangling false true 7\nlink false true 3",
+    );
+}
+
+/// Wider than the worker ceiling: every parent joins a child of its own, so
+/// a scheduler that parks each joiner on a thread runs out of threads.
+#[test]
+fn fork_join_wider_than_the_worker_ceiling_completes_across_tiers() {
+    let src = r"
+use std::errors
+
+fn leaf(n: i64) -> i64 { n }
+
+fn parent(n: i64) -> Result<i64, errors::Error> {
+    let mut total = 0
+    cohort {
+        let child = spawn(|| leaf(n))
+        total += child.join().unwrap()
+    }?
+    Ok(total)
+}
+
+fn main() {
+    let mut total = 0
+    let _ = cohort {
+        let handles = (0..1500).map(|n| spawn(|| parent(n))).collect::<Vec<_>>()
+        for h in handles { total += h.join().unwrap().unwrap() }
+    }
+    println(total)
+}
+";
+    assert_vm_output("fork_join_wide", src, "1124250");
+}
+
+/// A child joined before any worker took it runs inside its joiner, which
+/// must still own its cohort afterwards: the second child's failure is the
+/// cohort's.
+#[test]
+fn joined_child_leaves_the_joiners_cohort_in_place_across_tiers() {
+    let src = r#"
+use std::errors
+
+fn work() -> Result<(), errors::Error> {
+    cohort {
+        let first = spawn(|| 1)
+        let _ = first.join()
+        spawn(|| -> Result<i64, errors::Error> { Err(errors::new("second failed")) })
+    }
+}
+
+fn main() {
+    let h = spawn(|| work())
+    match h.join() {
+        Ok(Ok(())) => println("ok"),
+        Ok(Err(e)) => println(f"err: {e}"),
+        Err(p) => println(f"panic: {p}"),
+    }
+}
+"#;
+    assert_vm_output("joined_child_cohort", src, "err: second failed");
 }
 
 #[test]

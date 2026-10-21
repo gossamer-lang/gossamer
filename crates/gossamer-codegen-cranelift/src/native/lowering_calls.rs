@@ -262,6 +262,132 @@ fn heap_copy_aggregate(
     Ok(block)
 }
 
+/// The argument of map call `name` that becomes an entry value, and whether
+/// the frame gives back the share it minted for it once the call returns (an
+/// `or_insert` default's share leaves with the call). The same table the LLVM
+/// tier's call lowering applies.
+pub(super) fn map_stored_value_arg(name: &str) -> Option<(usize, bool)> {
+    match name {
+        "gos_rt_map_insert_i64_i64"
+        | "gos_rt_map_insert_str_i64"
+        | "gos_rt_map_insert_typed_str_i64"
+        | "gos_rt_map_insert_i64_i64_opt"
+        | "gos_rt_map_insert_str_i64_opt"
+        | "gos_rt_map_insert_typed_str_i64_opt" => Some((2, true)),
+        "gos_rt_map_insert_skey" | "gos_rt_map_insert_skey_opt" | "gos_rt_map_insert_ekey_opt" => {
+            Some((3, true))
+        }
+        "gos_rt_map_or_insert_i64_i64"
+        | "gos_rt_map_or_insert_str_i64"
+        | "gos_rt_map_or_insert_typed_str_i64" => Some((2, false)),
+        _ => None,
+    }
+}
+
+/// A counted copy of the by-value aggregate or two-word carrier `arg` names,
+/// laid out by the meta that walks what a map entry owns, for a map that
+/// stores the value: the struct's structural meta, a carrier's box meta, or
+/// its copy meta. `None` for any other operand, which is stored as it is.
+/// `value` is the operand already lowered: an aggregate's address, or a
+/// carrier's two words.
+pub(super) fn map_value_copy(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    intrinsics: &mut IntrinsicContext,
+    body: &Body,
+    tcx: &TyCtxt,
+    arg: &Operand,
+    value: ir::Value,
+) -> Result<Option<ir::Value>> {
+    let Operand::Copy(place) = arg else {
+        return Ok(None);
+    };
+    if !place.projection.is_empty() {
+        return Ok(None);
+    }
+    let ty = body.local_ty(place.local);
+    let carrier = matches!(
+        tcx.kind_of(ty),
+        TyKind::Adt { def, .. } if def.local == u32::MAX || def.local == u32::MAX - 1
+    );
+    let aggregate = match tcx.kind_of(ty) {
+        TyKind::Tuple(_) | TyKind::Array { .. } => true,
+        TyKind::Adt { def, .. } => {
+            tcx.struct_field_tys(*def).is_some()
+                && !tcx.is_rc_managed(ty)
+                && !is_inline_two_word_ty(tcx, ty)
+        }
+        _ => false,
+    };
+    if !carrier && !aggregate {
+        return Ok(None);
+    }
+    let structural = format!("gos_rc_meta_boxaggr_{}", ty.as_u32());
+    let carrier_box = format!("gos_rc_meta_carrierbox_{}", ty.as_u32());
+    let symbol = tcx
+        .rc_meta(&structural)
+        .map(|_| structural)
+        .or_else(|| {
+            carrier
+                .then(|| tcx.rc_meta(&carrier_box).map(|_| carrier_box))
+                .flatten()
+        })
+        .or_else(|| tcx.aggr_copy_meta(ty).map(str::to_owned));
+    let Some(symbol) = symbol else {
+        return Ok(None);
+    };
+    let ptr_ty = module.target_config().pointer_type();
+    let meta = if symbol.is_empty() {
+        builder.ins().iconst(ptr_ty, 0)
+    } else {
+        let Some(blob) = tcx.rc_meta(&symbol) else {
+            return Ok(None);
+        };
+        let data_id = intrinsics.intern_rc_meta(module, &symbol, blob)?;
+        let gv = module.declare_data_in_func(data_id, builder.func);
+        builder.ins().symbol_value(ptr_ty, gv)
+    };
+    let (src, bytes) = if carrier {
+        // The carrier's two words, spilled so the allocator copies them.
+        let slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
+            ir::StackSlotKind::ExplicitSlot,
+            16,
+            3,
+        ));
+        let addr = builder.ins().stack_addr(ptr_ty, slot, 0);
+        let wide = coerce_arg_to(builder, value, types::I128).unwrap_or(value);
+        builder.ins().store(MemFlagsData::trusted(), wide, addr, 0);
+        (addr, 16)
+    } else {
+        let slots = type_slot_count(tcx, ty).max(1);
+        (coerce_arg_to(builder, value, ptr_ty)?, i64::from(slots) * 8)
+    };
+    let alloc_fn = intrinsics.extern_fn(
+        module,
+        "gos_rt_rc_alloc_copy",
+        &[types::I64, ptr_ty, ptr_ty],
+        &[ptr_ty],
+    )?;
+    let alloc_ref = module.declare_func_in_func(alloc_fn, builder.func);
+    let size = builder.ins().iconst(types::I64, bytes);
+    let call = builder.ins().call(alloc_ref, &[size, meta, src]);
+    Ok(Some(builder.inst_results(call)[0]))
+}
+
+/// Gives back the share `map_value_copy` minted once the map holds its own.
+pub(super) fn release_map_value_copy(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    intrinsics: &mut IntrinsicContext,
+    blob: ir::Value,
+) -> Result<()> {
+    let ptr_ty = module.target_config().pointer_type();
+    let release = intrinsics.extern_fn(module, "gos_rt_rc_release", &[ptr_ty], &[])?;
+    let release_ref = module.declare_func_in_func(release, builder.func);
+    builder.ins().call(release_ref, &[blob]);
+    Ok(())
+}
+
 /// Calls runtime symbol `name` using the signature the ABI registry records
 /// for it, marshalling every `i128` slot the way [`emit_win64_rt_call`]
 /// documents. Call sites that already know their slot types call that
@@ -328,6 +454,13 @@ fn lower_inline_result_carrier_call(
                 None => builder.ins().iconst(types::I64, 0),
             };
             let payload = match args.get(1) {
+                // A payload with no fields carries no bits, as `()` does.
+                Some(Operand::Copy(place))
+                    if place.projection.is_empty()
+                        && tcx.is_field_free_aggregate(body.local_ty(place.local)) =>
+                {
+                    builder.ins().iconst(types::I64, 0)
+                }
                 // A multi-slot payload - a struct, a tuple, a fixed array -
                 // lives in the constructing frame's stack slot, which is gone
                 // the moment that frame returns. The carrier travels with the
@@ -751,6 +884,8 @@ pub(super) fn lower_generic_rt_call(
         abi_type_to_cranelift(entry.sig.ret),
     );
     let mut arg_values = Vec::with_capacity(params.len());
+    let stored_value = map_stored_value_arg(name);
+    let mut minted = None;
     for (i, param_ty) in params.iter().enumerate() {
         let v = match args.get(i) {
             Some(a) if i == 1 && gossamer_abi::takes_elem_by_address(name) => {
@@ -785,10 +920,28 @@ pub(super) fn lower_generic_rt_call(
                 }
             }
         };
+        // A map entry holds a counted copy of a by-value aggregate.
+        let v = match (stored_value, args.get(i)) {
+            (Some((value_idx, release)), Some(a)) if i == value_idx => {
+                match map_value_copy(module, builder, intrinsics, body, tcx, a, v)? {
+                    Some(blob) => {
+                        if release {
+                            minted = Some(blob);
+                        }
+                        blob
+                    }
+                    None => v,
+                }
+            }
+            _ => v,
+        };
         let coerced = coerce_arg_to(builder, v, *param_ty)?;
         arg_values.push(coerced);
     }
     let result = emit_win64_rt_call(module, builder, intrinsics, name, params, ret, &arg_values)?;
+    if let Some(blob) = minted {
+        release_map_value_copy(module, builder, intrinsics, blob)?;
+    }
     if let Some(value) = result
         && gossamer_abi::returns_fresh_aggregate(name)
     {

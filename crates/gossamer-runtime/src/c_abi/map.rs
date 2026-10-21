@@ -29,7 +29,7 @@ use super::*;
 // ---------------------------------------------------------------
 
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use super::map_table::{Table, TableOrder};
 use super::slot_key::UserCmp;
@@ -144,6 +144,9 @@ pub struct GosMap {
     /// Whether that comparator takes its keys by address (an aggregate) or by
     /// value (a one-word key).
     user_cmp_by_address: std::sync::atomic::AtomicBool,
+    /// Owners beyond the first: a closure environment sharing the map with
+    /// the frame that built it. The table is freed when the last one lets go.
+    extra_holders: AtomicU32,
 }
 
 const MAP_HASHED: u8 = 0;
@@ -898,6 +901,7 @@ pub extern "C" fn gos_rt_map_new(_key_bytes: u32, _val_bytes: u32) -> *mut GosMa
             ordered: AtomicU8::new(MAP_HASHED),
             user_cmp: std::sync::atomic::AtomicUsize::new(0),
             user_cmp_by_address: std::sync::atomic::AtomicBool::new(false),
+            extra_holders: AtomicU32::new(0),
         })
     })
 }
@@ -939,6 +943,7 @@ pub extern "C-unwind" fn gos_rt_map_new_with_capacity(
             ordered: AtomicU8::new(MAP_HASHED),
             user_cmp: std::sync::atomic::AtomicUsize::new(0),
             user_cmp_by_address: std::sync::atomic::AtomicBool::new(false),
+            extra_holders: AtomicU32::new(0),
         })
     })
 }
@@ -978,6 +983,7 @@ pub extern "C-unwind" fn gos_rt_map_new_with_capacity_typed(
             ordered: AtomicU8::new(MAP_HASHED),
             user_cmp: std::sync::atomic::AtomicUsize::new(0),
             user_cmp_by_address: std::sync::atomic::AtomicBool::new(false),
+            extra_holders: AtomicU32::new(0),
         })
     })
 }
@@ -1299,11 +1305,39 @@ pub(crate) unsafe fn build_skey_for_set(key: *const u8, desc: *const c_char) -> 
     // caller).
     let desc = unsafe { crate::c_abi::gos_str_arg_bytes(desc) };
     let mut out = Vec::with_capacity(desc.len() * 8);
+    // SAFETY: `key` is non-null (checked above) and holds the slots `desc` describes (this
+    // `unsafe fn`'s caller).
+    unsafe { encode_skey(key, desc, &mut out) }?;
+    Some(out)
+}
+
+/// Appends the canonical encoding of the slots at `key`, laid out as `desc`
+/// describes, to `out`. A `B` slot folds in a presence word and then, when it
+/// names a payload, that payload's own encoding, so equal payloads boxed at
+/// distinct addresses key alike.
+///
+/// # Safety
+/// `key` addresses live slots laid out as `desc` describes.
+unsafe fn encode_skey(key: *const u8, desc: &[u8], out: &mut Vec<u8>) -> Option<()> {
+    let mut boxed = crate::c_abi::slot_key::desc_boxed(desc).into_iter();
     let mut off = 0usize;
-    for &c in desc {
-        // SAFETY: `off` is below `desc.len() * 8`, inside the key's slots.
+    for &c in crate::c_abi::slot_key::desc_slots(desc) {
+        // SAFETY: `off` is below the descriptor's slot count times eight, inside the key's slots.
         let slot = unsafe { key.add(off) };
         match c {
+            b'B' => {
+                let inner = boxed.next()?;
+                // SAFETY: `slot` addresses one 8-byte slot of the key.
+                let raw = unsafe { crate::c_abi::vec::slot_read_word(slot) }.expose_provenance();
+                let payload: *const u8 = std::ptr::with_exposed_provenance(raw);
+                if payload.is_null() {
+                    out.extend_from_slice(&0u64.to_le_bytes());
+                } else {
+                    out.extend_from_slice(&1u64.to_le_bytes());
+                    // SAFETY: a non-null `B` slot names a live payload laid out as `inner`.
+                    unsafe { encode_skey(payload, inner, out) }?;
+                }
+            }
             // SAFETY: `slot` addresses one 8-byte slot of the key.
             b's' => out.extend_from_slice(unsafe { std::slice::from_raw_parts(slot, 8) }),
             b'S' => {
@@ -1375,7 +1409,7 @@ pub(crate) unsafe fn build_skey_for_set(key: *const u8, desc: *const c_char) -> 
         }
         off += 8;
     }
-    Some(out)
+    Some(())
 }
 
 #[allow(dead_code)]
@@ -1388,9 +1422,8 @@ unsafe fn skey_bytes(m: *const GosMap, key: *const u8, desc: *const c_char) -> O
         if key.is_null() || desc.is_null() {
             return None;
         }
-        // SAFETY: `desc` is non-null (checked above) and a live descriptor string (this `unsafe
-        // fn`'s caller).
-        let width = unsafe { crate::c_abi::gos_str_arg_len(desc) } * 8;
+        // SAFETY: `desc` is this shim's descriptor argument, null or live for the call.
+        let width = unsafe { crate::c_abi::slot_key::desc_width(desc) };
         // SAFETY: the key names an aggregate of the slots the descriptor
         // counts, which is the width the comparator reads.
         return Some(unsafe { std::slice::from_raw_parts(key, width) }.to_vec());
@@ -1450,11 +1483,23 @@ pub(crate) unsafe fn consume_moved_skey(key: *const u8, desc: *const c_char) {
     // SAFETY: `desc` is non-null (checked above) and a live descriptor string (this `unsafe fn`'s
     // caller).
     let desc = unsafe { crate::c_abi::gos_str_arg_bytes(desc) };
-    for (index, &kind) in desc.iter().enumerate() {
+    for (index, &kind) in crate::c_abi::slot_key::desc_slots(desc).iter().enumerate() {
         let raw =
             // SAFETY: `index * 8` is inside the key's slots, one per descriptor character.
             unsafe { crate::c_abi::vec::slot_read_word(key.add(index * 8)) }.expose_provenance();
         match kind {
+            b'B' => {
+                let payload: *mut u8 = std::ptr::with_exposed_provenance_mut(raw);
+                // A `B` slot holds null or a payload word; the blob it names
+                // carries the moved share this call consumes.
+                if !payload.is_null()
+                    // SAFETY: `payload` is a non-null candidate the blob probe accepts.
+                    && unsafe { crate::c_abi::rc::copy_blob::is_copy_blob(payload) }
+                {
+                    // SAFETY: `payload` is a copy blob holding the moved key's share.
+                    unsafe { crate::c_abi::rc::gos_rt_rc_release(payload) };
+                }
+            }
             b'S' => {
                 let text: *mut c_char = std::ptr::with_exposed_provenance_mut(raw);
                 if !text.is_null() {
@@ -2984,11 +3029,23 @@ struct DescEntry {
     /// Slot indices holding a sequence this entry rebuilt while decoding,
     /// released the same way.
     owned_vecs: Vec<usize>,
+    /// Slot indices holding a payload blob this entry rebuilt while decoding,
+    /// released the same way.
+    owned_blobs: Vec<usize>,
     value: i64,
 }
 
 impl DescEntry {
     fn release(&self) {
+        for &index in &self.owned_blobs {
+            let ptr: *mut u8 =
+                std::ptr::with_exposed_provenance_mut(self.key_slots[index] as usize);
+            if !ptr.is_null() {
+                // SAFETY: `owned_blobs` names key slots holding blobs this snapshot rebuilt, whose
+                // shares it owns.
+                unsafe { crate::c_abi::rc::gos_rt_rc_release(ptr) };
+            }
+        }
         for &index in &self.owned_vecs {
             let ptr: *mut GosVec =
                 std::ptr::with_exposed_provenance_mut(self.key_slots[index] as usize);
@@ -3018,7 +3075,7 @@ unsafe fn map_aggregate_entries(m: *const GosMap) -> Vec<DescEntry> {
     let storage = map.storage.lock();
     match &*storage {
         MapStorage::SkeyVal { entries, desc } => {
-            let slots = desc.len();
+            let slots = crate::c_abi::slot_key::desc_slots(desc).len();
             let mut keys: Vec<&ByteKey> = entries.keys().collect();
             if !entries.is_ordered() {
                 keys.sort_by_cached_key(|key| skey_order(key.as_slice(), desc));
@@ -3044,29 +3101,27 @@ unsafe fn map_aggregate_entries(m: *const GosMap) -> Vec<DescEntry> {
                             key_by_word: false,
                             owned_strings: Vec::new(),
                             owned_vecs: Vec::new(),
+                            owned_blobs: Vec::new(),
                             value: entries[k],
                         });
                     }
                     if !decode_skey_into(k.as_slice(), desc, &mut key_slots) {
                         return None;
                     }
-                    let owned_strings = desc
-                        .iter()
-                        .enumerate()
-                        .filter(|&(_, &code)| code == b'S')
-                        .map(|(index, _)| index)
-                        .collect();
-                    let owned_vecs = desc
-                        .iter()
-                        .enumerate()
-                        .filter(|&(_, &code)| code == b'V')
-                        .map(|(index, _)| index)
-                        .collect();
+                    let slots_of = |want: u8| -> Vec<usize> {
+                        crate::c_abi::slot_key::desc_slots(desc)
+                            .iter()
+                            .enumerate()
+                            .filter(|&(_, &code)| code == want)
+                            .map(|(index, _)| index)
+                            .collect()
+                    };
                     Some(DescEntry {
                         key_slots,
                         key_by_word: false,
-                        owned_strings,
-                        owned_vecs,
+                        owned_strings: slots_of(b'S'),
+                        owned_vecs: slots_of(b'V'),
+                        owned_blobs: slots_of(b'B'),
                         value: entries[k],
                     })
                 })
@@ -3085,6 +3140,7 @@ unsafe fn map_aggregate_entries(m: *const GosMap) -> Vec<DescEntry> {
                         key_by_word: true,
                         owned_strings: Vec::new(),
                         owned_vecs: Vec::new(),
+                        owned_blobs: Vec::new(),
                         value: entry.value,
                     }
                 })
@@ -3649,6 +3705,7 @@ pub unsafe extern "C" fn gos_rt_map_clone(src: *const GosMap) -> *mut GosMap {
             user_cmp_by_address: std::sync::atomic::AtomicBool::new(
                 source.user_cmp_by_address.load(Ordering::Acquire),
             ),
+            extra_holders: AtomicU32::new(0),
         })
     })
 }
@@ -3783,6 +3840,10 @@ pub unsafe extern "C" fn gos_rt_map_free(m: *mut GosMap) {
     ffi_entry!({
         // A map in region storage is finalized by its region's pop.
         if m.is_null() || crate::c_abi::rc::in_region_arena(m.cast()) {
+            return;
+        }
+        // SAFETY: `m` is non-null (checked above) and live (C-ABI contract).
+        if release_extra_holder(unsafe { &(*m).extra_holders }) {
             return;
         }
         crate::c_abi::ledger::map_dec();
@@ -4121,11 +4182,57 @@ pub unsafe extern "C" fn gos_rt_set_free(s: *mut GosSet) {
         if s.is_null() || crate::c_abi::rc::in_region_arena(s.cast()) {
             return;
         }
+        // SAFETY: `s` is non-null (checked above) and live (C-ABI contract).
+        if release_extra_holder(unsafe { (*s).extra_holders() }) {
+            return;
+        }
         crate::c_abi::ledger::set_dec();
         // SAFETY: `s` is non-null (checked above) and is the set `gos_rt_set_new` boxed, whose
         // last owner frees it here (C-ABI contract).
         drop(unsafe { Box::from_raw(s) });
     });
+}
+
+/// Gives back one of the owners beyond the first that `holders` counts,
+/// answering false when there was none: the caller is the last owner and
+/// reclaims the value.
+pub(crate) fn release_extra_holder(holders: &AtomicU32) -> bool {
+    let mut n = holders.load(Ordering::Acquire);
+    while n > 0 {
+        match holders.compare_exchange_weak(n, n - 1, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return true,
+            Err(now) => n = now,
+        }
+    }
+    false
+}
+
+/// Takes one more owner's share of a map, which [`gos_rt_map_free`] gives
+/// back. A closure environment capturing the map holds one, so the table
+/// lives until both the environment and the frame that built it let go.
+///
+/// # Safety
+/// `m` is null or a live map.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_retain(m: *mut GosMap) {
+    if m.is_null() || crate::c_abi::rc::in_region_arena(m.cast()) {
+        return;
+    }
+    // SAFETY: `m` is non-null (checked above) and live (this shim's contract).
+    unsafe { (*m).extra_holders.fetch_add(1, Ordering::AcqRel) };
+}
+
+/// [`gos_rt_map_retain`] for a `Set`, given back by [`gos_rt_set_free`].
+///
+/// # Safety
+/// `s` is null or a live set.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_set_retain(s: *mut GosSet) {
+    if s.is_null() || crate::c_abi::rc::in_region_arena(s.cast()) {
+        return;
+    }
+    // SAFETY: `s` is non-null (checked above) and live (this shim's contract).
+    unsafe { (*s).extra_holders().fetch_add(1, Ordering::AcqRel) };
 }
 
 /// Snapshots the i64 keys of an i64-keyed `HashMap` into a fresh
@@ -4408,6 +4515,7 @@ pub unsafe extern "C" fn gos_rt_map_window(
             user_cmp_by_address: std::sync::atomic::AtomicBool::new(
                 map.user_cmp_by_address.load(Ordering::Acquire),
             ),
+            extra_holders: AtomicU32::new(0),
         })
     })
 }
@@ -5060,7 +5168,7 @@ pub unsafe extern "C" fn gos_rt_map_keys_skey(m: *const GosMap) -> *mut GosVec {
         let MapStorage::SkeyVal { entries, desc } = &*storage else {
             return gos_rt_vec_new(8);
         };
-        let slots = desc.len();
+        let slots = crate::c_abi::slot_key::desc_slots(desc).len();
         // A field-less key occupies the one slot every inline aggregate is
         // sized at, and decodes no content into it.
         let elem_bytes = (slots.max(1) * 8) as u32;
@@ -5097,12 +5205,13 @@ pub unsafe extern "C" fn gos_rt_map_keys_skey(m: *const GosMap) -> *mut GosVec {
         // String and sequence slots hold a freshly allocated c-string or vec
         // the snapshot owns, so record where they sit for `gos_rt_vec_free` to
         // release them.
-        let string_slots: Vec<i64> = desc
+        let string_slots: Vec<i64> = crate::c_abi::slot_key::desc_slots(desc)
             .iter()
             .enumerate()
             .filter_map(|(i, c)| match *c {
                 b'S' => Some([-1, 0, i as i64, i64::from(vec_elem_kind::STRING)]),
                 b'V' => Some([-1, 0, i as i64, i64::from(vec_elem_kind::VEC)]),
+                b'B' => Some([-1, 0, i as i64, i64::from(vec_elem_kind::RC_NODE)]),
                 _ => None,
             })
             .flatten()
@@ -5129,6 +5238,8 @@ enum SkeyField<'a> {
     /// A sequence's elements, widened to whole words so they order by value
     /// the way the interpreter orders the same elements.
     Seq(Vec<i64>),
+    /// A boxed payload's own fields, or `None` for a slot that names none.
+    Boxed(Option<Vec<SkeyField<'a>>>),
 }
 
 /// Field-wise ordering key for one stored aggregate key.
@@ -5142,7 +5253,14 @@ pub(crate) fn skey_order_key(key: &[u8], desc: &[u8]) -> Vec<u8> {
     // compare in the same order: a word as its big-endian two's-complement
     // encoding with the sign bit flipped, text and sequences by content.
     let mut out = Vec::with_capacity(key.len());
-    for field in skey_order(key, desc) {
+    push_order_fields(skey_order(key, desc), &mut out);
+    out
+}
+
+/// Appends the comparable bytes of `fields` to `out`, as [`skey_order_key`]
+/// spells them.
+fn push_order_fields(fields: Vec<SkeyField<'_>>, out: &mut Vec<u8>) {
+    for field in fields {
         match field {
             SkeyField::Word(word) => {
                 out.push(0);
@@ -5160,9 +5278,13 @@ pub(crate) fn skey_order_key(key: &[u8], desc: &[u8]) -> Vec<u8> {
                 }
                 out.push(0);
             }
+            SkeyField::Boxed(None) => out.push(3),
+            SkeyField::Boxed(Some(inner)) => {
+                out.push(4);
+                push_order_fields(inner, out);
+            }
         }
     }
-    out
 }
 
 /// Orders two stored aggregate keys field by field under `desc`.
@@ -5171,35 +5293,43 @@ pub(crate) fn skey_order_cmp(a: &[u8], b: &[u8], desc: &[u8]) -> std::cmp::Order
 }
 
 fn skey_order<'a>(key: &'a [u8], desc: &[u8]) -> Vec<SkeyField<'a>> {
-    let mut fields = Vec::with_capacity(desc.len());
     let mut cursor = 0usize;
-    for &code in desc {
+    skey_order_at(key, &mut cursor, desc)
+}
+
+/// [`skey_order`] read from `cursor`, which ends past the fields `desc`
+/// describes.
+fn skey_order_at<'a>(key: &'a [u8], cursor: &mut usize, desc: &[u8]) -> Vec<SkeyField<'a>> {
+    let mut boxed = crate::c_abi::slot_key::desc_boxed(desc).into_iter();
+    let slots = crate::c_abi::slot_key::desc_slots(desc);
+    let mut fields = Vec::with_capacity(slots.len());
+    for &code in slots {
         match code {
             b's' => {
-                let Some(word) = key.get(cursor..cursor + 8) else {
+                let Some(word) = key.get(*cursor..*cursor + 8) else {
                     break;
                 };
                 let mut bytes = [0u8; 8];
                 bytes.copy_from_slice(word);
                 fields.push(SkeyField::Word(i64::from_ne_bytes(bytes)));
-                cursor += 8;
+                *cursor += 8;
             }
             b'S' => {
-                let Some(len_bytes) = key.get(cursor..cursor + 8) else {
+                let Some(len_bytes) = key.get(*cursor..*cursor + 8) else {
                     break;
                 };
                 let mut raw = [0u8; 8];
                 raw.copy_from_slice(len_bytes);
                 let len = u64::from_le_bytes(raw) as usize;
-                cursor += 8;
-                let Some(text) = key.get(cursor..cursor + len) else {
+                *cursor += 8;
+                let Some(text) = key.get(*cursor..*cursor + len) else {
                     break;
                 };
-                cursor += len;
+                *cursor += len;
                 fields.push(SkeyField::Text(text));
             }
             b'V' => {
-                let Some(header) = key.get(cursor..cursor + 16) else {
+                let Some(header) = key.get(*cursor..*cursor + 16) else {
                     break;
                 };
                 let mut raw = [0u8; 8];
@@ -5207,12 +5337,24 @@ fn skey_order<'a>(key: &'a [u8], desc: &[u8]) -> Vec<SkeyField<'a>> {
                 let len = u64::from_le_bytes(raw) as usize;
                 raw.copy_from_slice(&header[8..]);
                 let stride = (u64::from_le_bytes(raw) as usize).max(1);
-                cursor += 16;
-                let Some(bytes) = key.get(cursor..cursor + len * stride) else {
+                *cursor += 16;
+                let Some(bytes) = key.get(*cursor..*cursor + len * stride) else {
                     break;
                 };
-                cursor += len * stride;
+                *cursor += len * stride;
                 fields.push(SkeyField::Seq(seq_words(bytes, stride)));
+            }
+            b'B' => {
+                let Some(inner) = boxed.next() else {
+                    break;
+                };
+                let Some(marker) = key.get(*cursor..*cursor + 8) else {
+                    break;
+                };
+                let present = marker.iter().any(|&b| b != 0);
+                *cursor += 8;
+                let payload = present.then(|| skey_order_at(key, cursor, inner));
+                fields.push(SkeyField::Boxed(payload));
             }
             _ => break,
         }
@@ -5238,38 +5380,46 @@ fn seq_words(bytes: &[u8], stride: usize) -> Vec<i64> {
 /// which cannot happen for a key this map encoded.
 fn decode_skey_into(key: &[u8], desc: &[u8], slots: &mut [i64]) -> bool {
     let mut cursor = 0usize;
-    for (index, &code) in desc.iter().enumerate() {
+    decode_skey_at(key, &mut cursor, desc, slots)
+}
+
+/// [`decode_skey_into`] read from `cursor`, which ends past the fields `desc`
+/// describes. A `B` slot that names a payload rebuilds it as a counted blob of
+/// its own, which owns the strings and sequences decoded into it.
+fn decode_skey_at(key: &[u8], cursor: &mut usize, desc: &[u8], slots: &mut [i64]) -> bool {
+    let mut boxed = crate::c_abi::slot_key::desc_boxed(desc).into_iter();
+    for (index, &code) in crate::c_abi::slot_key::desc_slots(desc).iter().enumerate() {
         match code {
             b's' => {
-                let Some(word) = key.get(cursor..cursor + 8) else {
+                let Some(word) = key.get(*cursor..*cursor + 8) else {
                     return false;
                 };
                 let mut bytes = [0u8; 8];
                 bytes.copy_from_slice(word);
                 slots[index] = i64::from_ne_bytes(bytes);
-                cursor += 8;
+                *cursor += 8;
             }
             b'S' => {
-                let Some(len_bytes) = key.get(cursor..cursor + 8) else {
+                let Some(len_bytes) = key.get(*cursor..*cursor + 8) else {
                     return false;
                 };
                 let mut raw = [0u8; 8];
                 raw.copy_from_slice(len_bytes);
                 let len = u64::from_le_bytes(raw) as usize;
-                cursor += 8;
+                *cursor += 8;
                 // A zero length covers both an empty string and an absent
                 // one; both rebuild as an owned empty c-string, which is the
                 // representation a `String` slot always holds.
-                let Some(text) = key.get(cursor..cursor + len) else {
+                let Some(text) = key.get(*cursor..*cursor + len) else {
                     return false;
                 };
-                cursor += len;
+                *cursor += len;
                 slots[index] = alloc_cstring(text) as usize as i64;
             }
             // A sequence key rebuilds as a fresh vec over the bytes the key
             // folded, which the renderer reads and the entry then releases.
             b'V' => {
-                let Some(header) = key.get(cursor..cursor + 16) else {
+                let Some(header) = key.get(*cursor..*cursor + 16) else {
                     return false;
                 };
                 let mut raw = [0u8; 8];
@@ -5277,11 +5427,11 @@ fn decode_skey_into(key: &[u8], desc: &[u8], slots: &mut [i64]) -> bool {
                 let len = u64::from_le_bytes(raw) as usize;
                 raw.copy_from_slice(&header[8..]);
                 let stride = (u64::from_le_bytes(raw) as usize).max(1);
-                cursor += 16;
-                let Some(bytes) = key.get(cursor..cursor + len * stride) else {
+                *cursor += 16;
+                let Some(bytes) = key.get(*cursor..*cursor + len * stride) else {
                     return false;
                 };
-                cursor += len * stride;
+                *cursor += len * stride;
                 let vec = {
                     crate::c_abi::vec::gos_rt_vec_new_typed(
                         stride as u32,
@@ -5294,6 +5444,36 @@ fn decode_skey_into(key: &[u8], desc: &[u8], slots: &mut [i64]) -> bool {
                     unsafe { crate::c_abi::vec::gos_rt_vec_push(vec, chunk.as_ptr()) };
                 }
                 slots[index] = vec as usize as i64;
+            }
+            b'B' => {
+                let Some(inner) = boxed.next() else {
+                    return false;
+                };
+                let Some(marker) = key.get(*cursor..*cursor + 8) else {
+                    return false;
+                };
+                let present = marker.iter().any(|&b| b != 0);
+                *cursor += 8;
+                if !present {
+                    slots[index] = 0;
+                    continue;
+                }
+                let width = crate::c_abi::slot_key::desc_slots(inner).len().max(1);
+                let mut payload = vec![0i64; width];
+                if !decode_skey_at(key, cursor, inner, &mut payload) {
+                    return false;
+                }
+                let meta = crate::c_abi::slot_key::boxed_blob_meta(inner);
+                // SAFETY: `payload` holds `width` decoded words laid out as `meta` names, whose
+                // fresh shares the blob takes over.
+                let blob = unsafe {
+                    crate::c_abi::rc::copy_blob::gos_rt_rc_alloc_move(
+                        (width * 8) as u64,
+                        meta,
+                        payload.as_ptr().cast::<u8>(),
+                    )
+                };
+                slots[index] = blob as usize as i64;
             }
             _ => return false,
         }
@@ -6052,21 +6232,21 @@ unsafe fn ekey_insert(m: *mut GosMap, key: *mut u8, desc: *const i64, val: i64) 
     // accepts, and `key` a live node, whose share the entry takes.
     unsafe {
         with_ekey_entries(m, true, |entries, len| {
+            // An equal key already stored stays, and so does the node it
+            // names, which an ordered table's key is: only the value changes.
+            if let Some(entry) = entries.get_mut(ByteKeyRef::new(bytes.as_slice())) {
+                return Some(std::mem::replace(&mut entry.value, val));
+            }
             crate::c_abi::rc::gos_rt_rc_retain(key);
-            let replaced = entries.insert(
+            entries.insert(
                 bytes.into(),
                 EnumEntry {
                     value: val,
                     key_node: key,
                 },
             );
-            // The replaced entry's own share of its key node is done.
-            if let Some(prev) = &replaced {
-                crate::c_abi::rc::gos_rt_rc_release(prev.key_node);
-            } else {
-                *len += 1;
-            }
-            replaced.map(|prev| prev.value)
+            *len += 1;
+            None
         })
         .flatten()
     }

@@ -102,7 +102,29 @@ impl Lowerer<'_> {
                 }
             }
             AstPatKind::Literal(lit) => HirPatKind::Literal(lower_literal(lit)),
-            AstPatKind::Path(path) => self.lower_path_pat(path),
+            AstPatKind::Path(path) => self.lower_path_pat(pattern.id, path, ty),
+            // A tuple struct named through a module (`units::Bytes(b)`) is
+            // its positional-field struct pattern, the form a bare name is
+            // rewritten to while parsing.
+            AstPatKind::TupleStruct { path, elems }
+                if matches!(
+                    self.resolutions.get(pattern.id),
+                    Some(Resolution::Def {
+                        kind: gossamer_resolve::DefKind::Struct,
+                        ..
+                    })
+                ) =>
+            {
+                let fields: Vec<AstFieldPat> = elems
+                    .iter()
+                    .enumerate()
+                    .map(|(i, elem)| AstFieldPat {
+                        name: Ident::new(i.to_string()),
+                        pattern: Some(elem.clone()),
+                    })
+                    .collect();
+                self.lower_struct_pat(pattern.id, path, &fields, false)
+            }
             AstPatKind::TupleStruct { path, elems } => {
                 let name = path
                     .segments
@@ -143,7 +165,12 @@ impl Lowerer<'_> {
     }
 
     /// Lowers a path pattern, resolving it to a const value, unit struct, or unit variant.
-    fn lower_path_pat(&mut self, path: &gossamer_ast::TypePath) -> HirPatKind {
+    fn lower_path_pat(
+        &mut self,
+        node: NodeId,
+        path: &gossamer_ast::TypePath,
+        ty: gossamer_types::Ty,
+    ) -> HirPatKind {
         let name = path
             .segments
             .last()
@@ -160,8 +187,35 @@ impl Lowerer<'_> {
                 rest: false,
             };
         }
+        // A path headed by a type (`Key::S`), or a lone name that resolves to
+        // a variant or a type, is nominal whatever constant elsewhere shares
+        // its last segment.
+        let nominal = match self.resolutions.get(node) {
+            Some(Resolution::Def { kind, .. }) if path.segments.len() > 1 => matches!(
+                kind,
+                gossamer_resolve::DefKind::Variant
+                    | gossamer_resolve::DefKind::Enum
+                    | gossamer_resolve::DefKind::Struct
+                    | gossamer_resolve::DefKind::TypeAlias
+            ),
+            Some(Resolution::Def { kind, .. }) => matches!(
+                kind,
+                gossamer_resolve::DefKind::Variant
+                    | gossamer_resolve::DefKind::Enum
+                    | gossamer_resolve::DefKind::Struct
+            ),
+            _ => false,
+        };
+        let mut matched_ty = ty;
+        while let gossamer_types::TyKind::Ref { inner, .. } = self.tcx.kind_of(matched_ty) {
+            matched_ty = *inner;
+        }
+        // The matched enum supplies the variant identity even for generated patterns.
+        let nominal = nominal
+            || matches!(self.tcx.kind_of(matched_ty), gossamer_types::TyKind::Adt { def, .. }
+                if self.tcx.enum_variant_names(*def).is_some_and(|names| names.contains(&name.name)));
         match self.const_literals.get(name.name.as_str()) {
-            Some(lit) if !self.ctor_arity.contains_key(name.name.as_str()) => {
+            Some(lit) if !nominal && !self.ctor_arity.contains_key(name.name.as_str()) => {
                 HirPatKind::Literal(lit.clone())
             }
             _ => HirPatKind::Variant {
@@ -183,11 +237,13 @@ impl Lowerer<'_> {
             .segments
             .last()
             .map_or_else(|| Ident::new("<error>"), |seg| seg.name.clone());
-        if let Some(Resolution::Def { def, .. }) = self.resolutions.get(id)
-            && let Some(promoted) = self.module_fn_paths.get(&def)
-            && let Some(promoted_name) = promoted.last()
-        {
-            name.clone_from(promoted_name);
+        // The pattern tests for the identity a literal of the same struct
+        // builds its values under: the module-qualified name of a struct
+        // declared in a module.
+        let segments: Vec<&Ident> = path.segments.iter().map(|seg| &seg.name).collect();
+        let (identity, _) = self.struct_identity(id, &segments);
+        if !identity.is_empty() {
+            name.name = identity;
         }
         HirPatKind::Struct {
             name,

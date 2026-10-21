@@ -248,6 +248,16 @@ fn basic_expression_error_cases() -> &'static [BasicErrorCase] {
             "enum K { A, B }\nfn f(k: K) -> i64 { match k { K::A => 1, K::Gone => 2, _ => 0 } }\n",
             |error| matches!(error, TypeError::UnknownVariant { variant, .. } if variant == "Gone"),
         ),
+        (
+            "variant through a type alias",
+            "mod inner { pub enum Tone { Muted, Accent } }\ntype Tone = inner::Tone\nfn main() { let t = Tone::Default }\n",
+            |error| matches!(error, TypeError::UnknownVariant { variant, .. } if variant == "Default"),
+        ),
+        (
+            "variant pattern through a type alias",
+            "mod inner { pub enum Tone { Muted, Accent } }\ntype Tone = inner::Tone\nfn f(t: Tone) -> i64 { match t { Tone::Loud => 1, _ => 0 } }\n",
+            |error| matches!(error, TypeError::UnknownVariant { variant, .. } if variant == "Loud"),
+        ),
     ]
 }
 
@@ -5161,5 +5171,146 @@ fn clock_arithmetic_answers_a_duration_between_instants() {
             "{prelude}{body}\nprintln(\"{{}}\", r)\nlet _ = (a, b, d) }}\n"
         ));
         assert!(has_code(&d, "GT0003"), "{body}: {d:?}");
+    }
+}
+
+#[test]
+fn a_struct_variant_literal_checks_its_fields_however_its_path_is_spelled() {
+    let checked = run("mod ev {\n\
+             pub enum Ev {\n\
+                 Focus { window: i64 }\n\
+             }\n\
+         }\n\
+         type Event = ev::Ev\n\
+         fn main() {\n\
+             let _ = ev::Ev::Focus { window: \"through the module\" }\n\
+             let _ = Event::Focus { window: \"through the alias\" }\n\
+         }\n");
+    let mismatches = checked
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            matches!(&diagnostic.error, TypeError::TypeMismatch { expected, found }
+                if expected == "i64" && found == "String")
+        })
+        .count();
+    assert_eq!(mismatches, 2, "{:?}", checked.diagnostics);
+}
+
+#[test]
+fn newtype_assoc_call_reaches_only_its_own_impl() {
+    let checked = run("newtype Id = i64\n\
+         impl Id { fn make(n: i64) -> Id { n.into() } }\n\
+         fn main() {\n    let a = Id::make(1)\n    let b = Id::from(2)\n}\n");
+    let unknown: Vec<(&str, &[String])> = checked
+        .diagnostics
+        .iter()
+        .filter_map(|d| match &d.error {
+            TypeError::UnknownAssocItem { name, declared, .. } => {
+                Some((name.as_str(), declared.as_slice()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        unknown,
+        vec![("from", &["make".to_string()][..])],
+        "{:?}",
+        checked.diagnostics
+    );
+}
+
+#[test]
+fn variant_reached_through_its_module_has_the_enum_type() {
+    let checked = run("mod m {\n    pub enum F { A, B(i64), C { x: i64 } }\n}\n\
+         fn main() {\n    let a: bool = m::F::A\n    let c: bool = m::F::C { x: 1 }\n}\n");
+    let mismatches = checked
+        .diagnostics
+        .iter()
+        .filter(|d| matches!(&d.error, TypeError::TypeMismatch { .. }))
+        .count();
+    assert_eq!(mismatches, 2, "{:?}", checked.diagnostics);
+}
+
+#[test]
+fn imported_types_take_precedence_over_prelude_trait_names() {
+    let checked = run(r"
+use screen::{Display, Debug}
+mod screen {
+    pub struct Display { pub id: i64 }
+    pub enum Debug { Ready }
+}
+fn display() -> Option<Display> { Some(screen::Display { id: 1 }) }
+fn debug() -> Vec<Debug> { #[screen::Debug::Ready] }
+fn main() { let _ = display(); let _ = debug() }
+");
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+}
+
+#[test]
+fn prelude_traits_still_reject_value_type_positions() {
+    let checked =
+        run("trait Display { fn fmt(&self) -> String }\nfn show(value: Option<Display>) {}\n");
+    assert!(
+        checked
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d.error, TypeError::TraitInTypePosition { .. }))
+    );
+}
+
+#[test]
+fn a_std_function_value_is_checked_against_the_elements_it_is_applied_to() {
+    let checked = run(
+        "use std::math\nfn main() { let xs: Vec<i64> = #[-1, 2]\n let v = xs.map(math::abs) }\n",
+    );
+    assert!(
+        checked
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d.error, TypeError::TypeMismatch { .. })),
+        "{:?}",
+        checked.diagnostics
+    );
+}
+
+#[test]
+fn an_or_pattern_binds_each_name_at_one_type() {
+    let checked = run(
+        "struct P { id: String }\nstruct Q { id: String }\nenum C { A(P), B(Q), D(P) }\n\
+         fn same(c: C) -> String { match c { C::A(p) | C::D(p) => p.id, C::B(q) => q.id } }\n\
+         fn mixed(c: C) -> String { match c { C::A(p) | C::B(p) => p.id, C::D(p) => p.id } }\n",
+    );
+    let mismatches: Vec<_> = checked
+        .diagnostics
+        .iter()
+        .filter(|d| matches!(d.error, TypeError::TypeMismatch { .. }))
+        .collect();
+    assert_eq!(mismatches.len(), 1, "{:?}", checked.diagnostics);
+}
+
+#[test]
+fn a_variant_pattern_of_another_type_is_a_mismatch() {
+    for (source, expected) in [
+        (
+            "enum Cmd { Go(i64), Stop }\nfn f(c: Option<Cmd>) -> i64 { match c { Cmd::Go(n) => n, Some(_) => 1, None => 0 } }\n",
+            1,
+        ),
+        (
+            "enum Cmd { Go(i64), Stop }\nenum Theme { Light, Dark }\nfn f(t: Theme) -> i64 { match t { Cmd::Stop => 1, _ => 0 } }\n",
+            1,
+        ),
+        (
+            "enum Cmd { Go(i64), Stop }\nfn f(c: Cmd) -> i64 { match c { Cmd::Go(n) => n, Cmd::Stop => 0 } }\n",
+            0,
+        ),
+    ] {
+        let checked = run(source);
+        let mismatches = checked
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(d.error, TypeError::TypeMismatch { .. }))
+            .count();
+        assert_eq!(mismatches, expected, "{source}: {:?}", checked.diagnostics);
     }
 }

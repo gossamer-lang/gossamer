@@ -260,22 +260,31 @@ pub fn apply_package_features(sf: &mut crate::SourceFile) {
             parse_cfg_expr(cfg).is_none_or(|expr| evaluate(&settle(expr, package)))
         });
     }
-    if mentions_feature(&sf.items) {
+    if mentions_package_cfg(&sf.items) {
         settle_items(&mut sf.items, "");
     }
 }
 
-fn mentions_feature(items: &[crate::Item]) -> bool {
+// A `feature` test always depends on the package; a `test` flag does only
+// while `gos test` runs, since only the package under test builds its tests.
+fn mentions_package_cfg(items: &[crate::Item]) -> bool {
+    let tests = test_cfg_enabled();
     items.iter().any(|item| {
         item.attrs
             .outer
             .iter()
             .chain(&item.attrs.inner)
-            .any(|attr| attr.is_named("cfg") && attr.tokens.as_deref().is_some_and(|t| t.contains("feature")))
+            .any(|attr| {
+                attr.is_named("cfg")
+                    && attr
+                        .tokens
+                        .as_deref()
+                        .is_some_and(|t| t.contains("feature") || (tests && t.contains("test")))
+            })
             || matches!(
                 &item.kind,
                 crate::ItemKind::Mod(decl)
-                    if matches!(&decl.body, crate::ModBody::Inline(inner) if mentions_feature(inner))
+                    if matches!(&decl.body, crate::ModBody::Inline(inner) if mentions_package_cfg(inner))
             )
     })
 }
@@ -318,6 +327,8 @@ fn settle(expr: CfgExpr, package: &str) -> CfgExpr {
                 CfgExpr::Any(Vec::new())
             }
         }
+        // Tests build for the package `gos test` runs, never a dependency.
+        CfgExpr::Flag(name) if name == "test" && !package.is_empty() => CfgExpr::Any(Vec::new()),
         CfgExpr::Not(inner) => CfgExpr::Not(Box::new(settle(*inner, package))),
         CfgExpr::All(parts) => {
             CfgExpr::All(parts.into_iter().map(|p| settle(p, package)).collect())

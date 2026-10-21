@@ -224,8 +224,32 @@ fn parse_location(spec: &str) -> Result<CivilLocation, String> {
 /// # Errors
 /// When `spec` is neither `UTC`, an IANA zone, nor a `UTC±hh:mm` offset.
 pub fn location_name(spec: &str) -> Result<String, String> {
+    if spec == "Local" {
+        return Ok(local_location_name());
+    }
     parse_location(spec)?;
     Ok(spec.to_string())
+}
+
+/// The IANA name of the zone the system runs in: `TZ` when it names one
+/// (`Europe/Paris`, `:Europe/Paris`, or a path into a zoneinfo tree), then the
+/// platform's own setting, and `UTC` when neither names a zone.
+#[must_use]
+pub fn local_location_name() -> String {
+    if let Ok(tz) = std::env::var("TZ") {
+        let name = tz.trim_start_matches(':');
+        let name = name.rsplit_once("zoneinfo/").map_or(name, |(_, zone)| zone);
+        if parse_location(name).is_ok() {
+            return name.to_string();
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Ok(name) = iana_time_zone::get_timezone()
+        && parse_location(&name).is_ok()
+    {
+        return name;
+    }
+    "UTC".to_string()
 }
 
 /// The `UTC±hh:mm` name of a fixed offset of `offset_seconds` east of UTC.
