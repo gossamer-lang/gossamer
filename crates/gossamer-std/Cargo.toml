@@ -69,7 +69,7 @@ serde_norway = "0.9"
 quick-xml = "0.41"
 
 # Archive readers/writers (`std::archive::{zip,tar}`).
-zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 tar = "0.4"
 
 # Arbitrary-precision integers (`std::math::big`).

@@ -663,8 +663,7 @@ impl MutexCell {
         while state.held {
             state.waiting += 1;
             let Some(_waiting) = crate::vm::goroutine::ChannelWait::enter("Mutex::lock", || {
-                crate::value::any_live_channel_can_progress()
-                    || crate::stdlib_builtins::context::deadline_pending()
+                crate::stdlib_builtins::context::deadline_pending()
                     || crate::stdlib_builtins::cohort::deadline_pending()
             }) else {
                 state.waiting -= 1;

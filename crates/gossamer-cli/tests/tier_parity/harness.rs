@@ -1607,6 +1607,7 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/closure_captured_handles_escape.gos"),
     spec("feature-testing-examples/jit_enum_struct_payloads.gos"),
     spec("feature-testing-examples/jit_struct_boundary_shapes.gos"),
+    spec("feature-testing-examples/jit_byte_fields_and_unit_enums.gos"),
     spec("feature-testing-examples/assoc_fn_closure_param_types.gos"),
     spec("feature-testing-examples/stdlib_struct_rendering.gos"),
     spec("feature-testing-examples/aggregate_field_share_transfer.gos"),

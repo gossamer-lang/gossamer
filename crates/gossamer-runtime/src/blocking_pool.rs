@@ -340,7 +340,8 @@ mod tests {
         assert!(blocking_threads() <= DEFAULT_BLOCKING_THREAD_CAP);
     }
 
-    /// A pool of its own, so its limits leave the process pool alone.
+    /// A pool of its own, so its limits leave the process pool alone. A test
+    /// shuts it down at its end, which joins the threads it started.
     fn private_pool(threads: usize, queue: usize) -> &'static Pool {
         let pool: &'static Pool = Box::leak(Box::new(Pool::new()));
         pool.thread_cap.store(threads, Ordering::Relaxed);
@@ -399,6 +400,7 @@ mod tests {
         release_tx.send(()).expect("release the thread");
         submitter.join().expect("submitter");
         assert!(admitted.load(Ordering::Acquire));
+        assert!(pool.shutdown_idle());
     }
 
     #[test]
@@ -421,5 +423,6 @@ mod tests {
         assert_eq!(pool.stats().queued, 1, "held back below the depth cap");
         release_tx.send(()).expect("release the thread");
         submitter.join().expect("submitter").expect("third job");
+        assert!(pool.shutdown_idle());
     }
 }

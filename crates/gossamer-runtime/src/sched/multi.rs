@@ -1770,6 +1770,9 @@ impl<T: Task> Task for GidStamped<T> {
             if let Some(service) = self.service.take() {
                 service.fetch_sub(1, Ordering::AcqRel);
             }
+            // A finished goroutine leaves its worker before the worker counts
+            // it finished, so a quiescent pool shows no placement held.
+            self.release_placement();
         }
         result
     }

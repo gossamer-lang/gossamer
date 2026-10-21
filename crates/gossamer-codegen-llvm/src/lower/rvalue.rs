@@ -285,9 +285,10 @@ impl<'a> Lowerer<'a> {
             } else if let Some((ok, err)) = field.carrier {
                 let value = self.fresh();
                 writeln!(self.out, "  {value} = load i128, ptr {addr}, align 8").unwrap();
+                let carrier = self.fat_i128_call_arg(&value);
                 writeln!(
                     self.out,
-                    "  call void @{helper}(i128 {value}, i64 {ok}, i64 {err})"
+                    "  call void @{helper}({carrier}, i64 {ok}, i64 {err})"
                 )
                 .unwrap();
             } else {
@@ -340,6 +341,9 @@ impl<'a> Lowerer<'a> {
         let base = format!("@{}", sref.symbol);
         let saved = std::mem::take(&mut self.out);
         let saved_ssa = std::mem::replace(&mut self.next_ssa, 0);
+        // The finalizer is a function of its own, so the slots its calls
+        // spill into belong in its entry block, not the enclosing body's.
+        let saved_allocas = std::mem::take(&mut self.entry_allocas);
         let comdat = if let Some(decl) = crate::emit::coff_comdat_decl("linkonce_odr", &callback) {
             self.runtime_refs.insert(decl);
             " comdat"
@@ -367,7 +371,9 @@ impl<'a> Lowerer<'a> {
             writeln!(self.out, "  store {llvm_ty} {zero}, ptr {base}").unwrap();
         }
         writeln!(self.out, "  ret void\n}}").unwrap();
-        let definition = std::mem::replace(&mut self.out, saved);
+        let body = std::mem::replace(&mut self.out, saved);
+        let allocas = std::mem::replace(&mut self.entry_allocas, saved_allocas).concat();
+        let definition = body.replacen("entry:\n", &format!("entry:\n{allocas}"), 1);
         self.next_ssa = saved_ssa;
         self.runtime_refs.insert(definition);
         declare_rt(&mut self.runtime_refs, "gos_rt_register_static_drop");

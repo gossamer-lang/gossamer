@@ -775,7 +775,8 @@ fn jit_compile_set<'a>(
     let mut included: std::collections::HashSet<&str> = bodies
         .iter()
         .filter(|b| {
-            let kinds_ok = body_kinds(b, tcx, enum_shapes, struct_shapes).is_some();
+            let kinds = classify_body_kinds(b, tcx, enum_shapes, struct_shapes);
+            let kinds_ok = kinds.is_ok();
             let unlowerable_local =
                 body_uses_unlowerable_local_repr(b, tcx, enum_shapes, struct_shapes);
             let goroutine_hit = body_has_cross_goroutine_ops(b);
@@ -801,8 +802,12 @@ fn jit_compile_set<'a>(
                      unlowerable_local={unlowerable_local} \
                      goroutine={goroutine_hit} \
                      unsupported={unsupported} \
-                     recursive_rc_return={recursive_rc_return})",
-                    b.name
+                     recursive_rc_return={recursive_rc_return}){}",
+                    b.name,
+                    kinds
+                        .as_ref()
+                        .err()
+                        .map_or(String::new(), |why| format!(": {why}"))
                 );
             }
             kinds_ok
@@ -2889,52 +2894,75 @@ fn body_kinds(
     enum_shapes: &HashMap<u32, u32>,
     struct_shapes: &HashMap<Ty, u32>,
 ) -> Option<(Vec<JitKind>, JitKind)> {
+    classify_body_kinds(body, tcx, enum_shapes, struct_shapes).ok()
+}
+
+/// The boundary kinds of `body`'s parameters and return, or the slot that has
+/// none, named with its type for `GOS_JIT_TRACE`.
+fn classify_body_kinds(
+    body: &Body,
+    tcx: &TyCtxt,
+    enum_shapes: &HashMap<u32, u32>,
+    struct_shapes: &HashMap<Ty, u32>,
+) -> std::result::Result<(Vec<JitKind>, JitKind), String> {
+    let render = |ty: Ty| gossamer_types::printer::render_ty(tcx, ty);
     let mut params = Vec::with_capacity(body.arity as usize);
     for pidx in 1..=body.arity {
         let local = gossamer_mir::Local(pidx);
         let ty = body.local_ty(local);
-        let kind = param_kind(body, tcx, pidx, enum_shapes, struct_shapes)?;
+        let Some(kind) = param_kind(body, tcx, pidx, enum_shapes, struct_shapes) else {
+            return Err(format!(
+                "param {pidx} `{}` has no boundary kind",
+                render(ty)
+            ));
+        };
         // A lazy iterator is a runtime handle when compiled code built it and
         // a bytecode registry index when the VM did. The two are
         // indistinguishable in a parameter, so a body that takes one stays on
         // bytecode, where both spellings mean the same thing.
         if matches!(tcx.kind_of(ty), TyKind::Iterator(_)) {
-            return None;
+            return Err(format!("param {pidx} `{}` is a lazy iterator", render(ty)));
         }
         // A `Vec<String>` the trampoline built is freed - strings and all -
         // after the call, so it may only be lent to the body. Taken by value
         // the body owns its elements and may consume them, and the free would
         // then read storage the body already released.
         if matches!(kind, JitKind::NativeVecStr) && !matches!(tcx.kind_of(ty), TyKind::Ref { .. }) {
-            return None;
+            return Err(format!(
+                "param {pidx} `{}` takes strings by value",
+                render(ty)
+            ));
         }
         // `Result<Enum, errors::Error>` and `TupleReturn` are return-only
         // marshalling shapes; the trampoline has no inbound path for them.
         if matches!(kind, JitKind::ResultEnumPtr(_) | JitKind::TupleReturn(_)) {
-            return None;
+            return Err(format!(
+                "param {pidx} `{}` is a return-only shape",
+                render(ty)
+            ));
         }
         params.push(kind);
     }
-    param_carrier_box_metas(body, tcx, &params)?;
-    if matches!(
-        tcx.kind_of(body.local_ty(gossamer_mir::Local(0))),
-        TyKind::Iterator(_)
-    ) {
-        return None;
+    if param_carrier_box_metas(body, tcx, &params).is_none() {
+        return Err("a carrier parameter has no box layout".to_string());
     }
-    let returns = ty_to_kind(
-        tcx,
-        body.local_ty(gossamer_mir::Local::RETURN),
-        enum_shapes,
-        struct_shapes,
-    )?;
+    let ret = body.local_ty(gossamer_mir::Local::RETURN);
+    if matches!(tcx.kind_of(ret), TyKind::Iterator(_)) {
+        return Err(format!("return `{}` is a lazy iterator", render(ret)));
+    }
+    let Some(returns) = ty_to_kind(tcx, ret, enum_shapes, struct_shapes) else {
+        return Err(format!("return `{}` has no boundary kind", render(ret)));
+    };
     // A flat array block is an inbound marshalling shape only: a returned
     // one would have to outlive the body with no owner to free it. A
     // borrowed scalar is lent for the call and has nothing to return.
     if matches!(returns, JitKind::ArrayBlockPtr(..) | JitKind::ScalarRef) {
-        return None;
+        return Err(format!(
+            "return `{}` is a parameter-only shape",
+            render(ret)
+        ));
     }
-    Some((params, returns))
+    Ok((params, returns))
 }
 
 /// The slot encoding for a fixed array's element, or `None` when the
@@ -3332,6 +3360,18 @@ fn ty_to_kind(
         TyKind::Adt { def, .. } if tcx.is_rc_managed(ty) => enum_shapes
             .get(&def.local)
             .map(|idx| JitKind::EnumPtr(*idx)),
+        // An enum no variant of which carries a field is its variant index on
+        // the compiled tiers, the word its by-index shape reads and writes.
+        TyKind::Adt { def, .. }
+            if enum_shapes.contains_key(&def.local)
+                && tcx
+                    .enum_variant_tys(*def)
+                    .is_some_and(|variants| variants.iter().all(Vec::is_empty)) =>
+        {
+            enum_shapes
+                .get(&def.local)
+                .map(|idx| JitKind::EnumPtr(*idx))
+        }
         // A carrier crosses by value; a reference to one is a pointer to a
         // caller slot the trampoline has no write-back path for.
         TyKind::Adt { def, .. }

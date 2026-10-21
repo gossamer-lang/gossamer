@@ -776,12 +776,13 @@ impl ChannelWait {
     /// count short and the program reads as able to progress - which it is.
     ///
     /// Returns `None` when every participant is waiting on a channel and no
-    /// channel holds a waiter that could proceed. `can_progress` recomputes
-    /// that second condition from the channels themselves, so a counter left
-    /// behind by an interleaving cannot turn a working program into a
-    /// failure. Nothing can deliver a
-    /// value in that state, so waiting longer cannot change the answer and
-    /// the caller reports a deadlock.
+    /// channel holds a waiter that could proceed. Readiness is the count each
+    /// channel and lock keeps in step under its own lock, never a probe of
+    /// another thread's lock, so every reading is one the next participant to
+    /// move reads again; `can_progress` adds what the count does not carry,
+    /// such as a pending deadline. Nothing can deliver a value in that state,
+    /// so waiting longer cannot change the answer and the caller reports a
+    /// deadlock.
     ///
     /// Call with the channel's own lock held and the caller already counted
     /// among that channel's waiters, so a handoff this caller completes is
@@ -872,7 +873,6 @@ fn report_if_left_waiting() {
         },
         || {
             a_waiter_is_cancelled()
-                || crate::value::any_live_channel_can_progress()
                 || crate::stdlib_builtins::context::deadline_pending()
                 || crate::stdlib_builtins::cohort::deadline_pending()
         },

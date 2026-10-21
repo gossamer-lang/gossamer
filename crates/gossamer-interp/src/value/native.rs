@@ -197,6 +197,9 @@ pub enum NativeFieldKind {
     /// A struct's `Vec<f64>` field: the slot holds a `*mut GosVec` of 8-byte
     /// float slots the struct owns.
     VecF64,
+    /// A struct's `Vec<u8>` field: the slot holds a `*mut GosVec` of one-byte
+    /// slots the struct owns, the packed layout the compiled tiers index.
+    VecU8,
 }
 
 impl NativeFieldKind {
@@ -332,6 +335,7 @@ fn release_native_enum_tree(ptr: usize, shape: &NativeEnumShape) {
                     | NativeFieldKind::VecStruct(_)
                     | NativeFieldKind::VecI64
                     | NativeFieldKind::VecF64
+                    | NativeFieldKind::VecU8
                     | NativeFieldKind::Struct(_)
                     | NativeFieldKind::Atomic(_)
                     | NativeFieldKind::I64
@@ -503,7 +507,8 @@ fn free_exclusive_enum_tree(root_ptr: usize, root_shape: Arc<NativeEnumShape>) {
                 NativeFieldKind::VecStr
                 | NativeFieldKind::VecStruct(_)
                 | NativeFieldKind::VecI64
-                | NativeFieldKind::VecF64 => {
+                | NativeFieldKind::VecF64
+                | NativeFieldKind::VecU8 => {
                     if payload_word != 0 {
                         // SAFETY: the node's own share of a live vector.
                         unsafe { rt::gos_rt_vec_free(payload_word as *mut rt::vec::GosVec) };
@@ -774,9 +779,10 @@ pub fn native_enum_field(owner: &NativeEnumOwner, idx: usize) -> Value {
         NativeFieldKind::VecStruct(sidx) => native_vec_struct_to_array(word, *sidx),
         // Enum shapes never name an atomic field or a scalar vector, which
         // only struct shapes hold.
-        NativeFieldKind::Atomic(_) | NativeFieldKind::VecI64 | NativeFieldKind::VecF64 => {
-            Value::Unit
-        }
+        NativeFieldKind::Atomic(_)
+        | NativeFieldKind::VecI64
+        | NativeFieldKind::VecF64
+        | NativeFieldKind::VecU8 => Value::Unit,
         NativeFieldKind::VecStr => crate::jit_call::native_vec_str_value(word),
         NativeFieldKind::Carrier(shape) => {
             // SAFETY: a carrier field spans two payload words.

@@ -332,6 +332,10 @@ fn start_library(init: *const u8) {
 pub extern "C" fn gos_rt_library_shutdown() {
     super::print::gos_rt_flush_stdout();
     attach_foreign_thread();
+    // A goroutine an export joined can still be leaving its worker when the
+    // call returns, so the drain `main`'s exit runs comes first here too:
+    // program storage is released only once no goroutine is live.
+    crate::sched_global::drain_goroutines_for_exit();
     loop {
         match super::par::run_deferred(super::exit_hooks::run_exit_hooks) {
             Ok(()) => break,

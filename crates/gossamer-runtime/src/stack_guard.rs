@@ -236,6 +236,20 @@ mod unix {
         previous: libc::stack_t,
     }
 
+    /// `descriptor` as `sigaltstack` takes it back. A disabled stack is
+    /// handed over with a valid size: Darwin checks the size before it reads
+    /// the flags, and refuses the zero size it reports for no stack.
+    pub(super) fn restorable(descriptor: libc::stack_t) -> libc::stack_t {
+        if descriptor.ss_flags & libc::SS_DISABLE == 0 {
+            return descriptor;
+        }
+        libc::stack_t {
+            ss_sp: std::ptr::null_mut(),
+            ss_flags: libc::SS_DISABLE,
+            ss_size: libc::MINSIGSTKSZ,
+        }
+    }
+
     impl Drop for AltStack {
         fn drop(&mut self) {
             let Some(buffer) = self.buffer.as_mut() else {
@@ -246,11 +260,12 @@ mod unix {
             let mut current: libc::stack_t = unsafe { MaybeUninit::zeroed().assume_init() };
             // SAFETY: `current` is writable; a null input only queries state.
             let queried = unsafe { libc::sigaltstack(std::ptr::null(), &raw mut current) };
+            let previous = restorable(self.previous);
             if queried != 0
                 || (current.ss_sp == buffer.as_mut_ptr().cast()
                     // SAFETY: the previous descriptor was obtained on this
                     // thread before installing our still-live buffer.
-                    && unsafe { libc::sigaltstack(&raw const self.previous, std::ptr::null_mut()) } != 0)
+                    && unsafe { libc::sigaltstack(&raw const previous, std::ptr::null_mut()) } != 0)
             {
                 // A failed restore must not leave the kernel pointing at freed
                 // storage. This can only happen while running on the alt stack.
@@ -364,16 +379,16 @@ mod unix {
             }
             std::thread::spawn(|| {
                 let before = current_stack();
-                let disabled = libc::stack_t {
+                let disabled = super::restorable(libc::stack_t {
                     ss_sp: std::ptr::null_mut(),
                     ss_flags: libc::SS_DISABLE,
                     ss_size: 0,
-                };
+                });
                 // SAFETY: runs on the regular thread stack; the host's storage
                 // stays live and is restored before the thread returns.
                 let result =
                     unsafe { libc::sigaltstack(&raw const disabled, std::ptr::null_mut()) };
-                assert_eq!(result, 0);
+                assert_eq!(result, 0, "disabling: {}", std::io::Error::last_os_error());
                 install();
                 let owned = current_stack();
                 assert_eq!(owned.ss_size, ALT_STACK_BYTES);
@@ -383,10 +398,11 @@ mod unix {
                 release();
                 assert_ne!(current_stack().ss_flags & libc::SS_DISABLE, 0);
                 ALT_STACK.with(|stack| assert!(stack.borrow().is_none()));
+                let before = super::restorable(before);
                 // SAFETY: restore the unchanged host descriptor before its
                 // owner, Rust's thread runtime, performs its teardown.
                 let result = unsafe { libc::sigaltstack(&raw const before, std::ptr::null_mut()) };
-                assert_eq!(result, 0);
+                assert_eq!(result, 0, "restoring: {}", std::io::Error::last_os_error());
             })
             .join()
             .unwrap();

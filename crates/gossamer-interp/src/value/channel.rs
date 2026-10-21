@@ -59,6 +59,10 @@ enum ChannelCapacity {
 struct ChannelMessage {
     id: u64,
     value: Value,
+    /// Woken when a receiver takes this value: the unbuffered sender waiting
+    /// for its handoff, which waits on this alone so a receive wakes only the
+    /// sender whose value it took.
+    handed: Option<Arc<parking_lot::Condvar>>,
 }
 
 struct ChannelState {
@@ -77,6 +81,25 @@ struct ChannelState {
 }
 
 impl ChannelState {
+    /// Takes the oldest value, waking the sender waiting for its handoff.
+    fn pop_message(&mut self) -> Option<Value> {
+        let msg = self.buf.pop_front()?;
+        if let Some(handed) = &msg.handed {
+            handed.notify_one();
+        }
+        Some(msg.value)
+    }
+
+    /// Wakes every sender still waiting for a handoff, so each re-reads the
+    /// channel: it closed, a cancellation landed, or progress needs checking.
+    fn wake_senders(&self) {
+        for msg in &self.buf {
+            if let Some(handed) = &msg.handed {
+                handed.notify_one();
+            }
+        }
+    }
+
     /// True when a thread already waiting on this channel would complete if
     /// it woke right now: a queued value with a receiver to take it, or room
     /// (or a receiver) for a blocked sender's value.
@@ -142,7 +165,7 @@ impl std::task::Wake for ChannelWake {
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        drop(self.0.state.lock());
+        self.0.state.lock().wake_senders();
         self.0.cv.notify_all();
     }
 }
@@ -158,60 +181,13 @@ fn register_live_channel(inner: &Arc<ChannelInner>) {
     live.push(Arc::downgrade(inner));
 }
 
-/// True when any channel other than `holding` has a waiter that would
-/// complete, or is being changed right now by another thread.
-///
-/// Called only once the waiter counts already say every participant is
-/// blocked, so the walk is rare. A channel whose lock is held elsewhere is
-/// mid-update and counts as progress: reporting a deadlock over a state
-/// still being written would turn a working program into a failure, while
-/// missing one only means the program waits as it did before.
-/// Whether any live channel holds a waiter that could proceed, for a wait on
-/// something other than a channel.
-pub(crate) fn any_live_channel_can_progress() -> bool {
-    let live = LIVE_CHANNELS.lock();
-    for weak in live.iter() {
-        let Some(inner) = weak.upgrade() else {
-            continue;
-        };
-        let Some(state) = inner.state.try_lock() else {
-            return true;
-        };
-        if state.has_ready_waiter() {
-            return true;
-        }
-    }
-    false
-}
-
-fn any_channel_can_progress(holding: &ChannelInner) -> bool {
-    let live = LIVE_CHANNELS.lock();
-    for weak in live.iter() {
-        let Some(inner) = weak.upgrade() else {
-            continue;
-        };
-        if std::ptr::eq(Arc::as_ptr(&inner), std::ptr::from_ref(holding)) {
-            continue;
-        }
-        let Some(state) = inner.state.try_lock() else {
-            return true;
-        };
-        if state.has_ready_waiter() {
-            return true;
-        }
-    }
-    false
-}
-
 /// Wakes every goroutine parked on a channel so each re-evaluates whether
 /// the program can still make progress. Called once when `main` returns:
 /// the set of participants shrinks at that moment, and a waiter parked
 /// before it can only learn so by being given a chance to look again.
 pub fn wake_all_channel_waiters() {
-    // The registry is released before any channel lock is taken. A waiter
-    // deciding whether to park holds its own channel's lock and reads the
-    // registry from under it, so a walk that held the registry and then
-    // waited on a channel's lock would take the two in the opposite order.
+    // The registry is released before any channel lock is taken, so a
+    // channel being created never waits behind a walk of the others.
     let channels: Vec<Arc<ChannelInner>> = {
         let live = LIVE_CHANNELS.lock();
         live.iter().filter_map(std::sync::Weak::upgrade).collect()
@@ -222,7 +198,7 @@ pub fn wake_all_channel_waiters() {
         // without it can land in the gap between that decision and
         // the wait, waking nobody and leaving the waiter asleep on a
         // condition that has already changed.
-        drop(inner.state.lock());
+        inner.state.lock().wake_senders();
         inner.cv.notify_all();
     }
 }
@@ -315,7 +291,12 @@ impl Channel {
             ChannelCapacity::Unbuffered => {
                 let id = guard.next_send_id;
                 guard.next_send_id = guard.next_send_id.wrapping_add(1).max(1);
-                guard.buf.push_back(ChannelMessage { id, value });
+                let handed = Arc::new(parking_lot::Condvar::new());
+                guard.buf.push_back(ChannelMessage {
+                    id,
+                    value,
+                    handed: Some(Arc::clone(&handed)),
+                });
                 // Register before announcing: a receiver that wakes on the
                 // notify must find this sender already on record, or the
                 // channel reads as holding a value nobody is waiting to hand
@@ -333,13 +314,12 @@ impl Channel {
                 {
                     let Some(_waiting) = crate::vm::goroutine::ChannelWait::enter("send", || {
                         guard.has_ready_waiter()
-                            || any_channel_can_progress(&self.inner)
                             || crate::stdlib_builtins::cohort::deadline_pending()
                     }) else {
                         deadlocked = true;
                         break;
                     };
-                    self.inner.cv.wait(&mut guard);
+                    handed.wait(&mut guard);
                 }
                 guard.waiting_senders = guard.waiting_senders.saturating_sub(1);
                 Self::sync_ready_count(&mut guard);
@@ -348,7 +328,11 @@ impl Channel {
                 }
             }
             ChannelCapacity::Unbounded => {
-                guard.buf.push_back(ChannelMessage { id: 0, value });
+                guard.buf.push_back(ChannelMessage {
+                    id: 0,
+                    value,
+                    handed: None,
+                });
                 self.notify_channel_changed(&mut guard);
             }
             ChannelCapacity::Bounded(capacity) => {
@@ -359,7 +343,7 @@ impl Channel {
                     while guard.buf.len() >= capacity {
                         let Some(_waiting) =
                             crate::vm::goroutine::ChannelWait::enter("send", || {
-                                guard.has_ready_waiter() || any_channel_can_progress(&self.inner)
+                                guard.has_ready_waiter()
                             })
                         else {
                             deadlocked = true;
@@ -373,7 +357,11 @@ impl Channel {
                         return SendOutcome::Deadlocked;
                     }
                 }
-                guard.buf.push_back(ChannelMessage { id: 0, value });
+                guard.buf.push_back(ChannelMessage {
+                    id: 0,
+                    value,
+                    handed: None,
+                });
                 self.notify_channel_changed(&mut guard);
             }
         }
@@ -401,12 +389,20 @@ impl Channel {
                 if guard.waiting_receivers == 0 {
                     return SendOutcome::Deadlocked;
                 }
-                guard.buf.push_back(ChannelMessage { id: 0, value });
+                guard.buf.push_back(ChannelMessage {
+                    id: 0,
+                    value,
+                    handed: None,
+                });
                 self.notify_channel_changed(&mut guard);
                 SendOutcome::Sent
             }
             ChannelCapacity::Unbounded => {
-                guard.buf.push_back(ChannelMessage { id: 0, value });
+                guard.buf.push_back(ChannelMessage {
+                    id: 0,
+                    value,
+                    handed: None,
+                });
                 self.notify_channel_changed(&mut guard);
                 SendOutcome::Sent
             }
@@ -414,7 +410,11 @@ impl Channel {
                 if guard.buf.len() >= capacity {
                     return SendOutcome::Deadlocked;
                 }
-                guard.buf.push_back(ChannelMessage { id: 0, value });
+                guard.buf.push_back(ChannelMessage {
+                    id: 0,
+                    value,
+                    handed: None,
+                });
                 self.notify_channel_changed(&mut guard);
                 SendOutcome::Sent
             }
@@ -435,6 +435,7 @@ impl Channel {
             return false;
         }
         guard.closed = true;
+        guard.wake_senders();
         self.notify_channel_changed(&mut guard);
         true
     }
@@ -445,7 +446,7 @@ impl Channel {
     #[must_use]
     pub fn try_recv(&self) -> Option<Value> {
         let mut guard = self.inner.state.lock();
-        let value = guard.buf.pop_front().map(|msg| msg.value);
+        let value = guard.pop_message();
         if value.is_some() {
             self.notify_channel_changed(&mut guard);
         }
@@ -474,13 +475,13 @@ impl Channel {
             // child's outcome on this path, and the failure that cancelled
             // the cohort is often the very value waiting in the buffer.
             if crate::stdlib_builtins::cohort::current_is_cancelled() {
-                if let Some(msg) = guard.buf.pop_front() {
-                    break RecvOutcome::Value(msg.value);
+                if let Some(value) = guard.pop_message() {
+                    break RecvOutcome::Value(value);
                 }
                 break RecvOutcome::Closed;
             }
-            if let Some(msg) = guard.buf.pop_front() {
-                break RecvOutcome::Value(msg.value);
+            if let Some(value) = guard.pop_message() {
+                break RecvOutcome::Value(value);
             }
             if guard.closed {
                 break RecvOutcome::Closed;
@@ -493,7 +494,6 @@ impl Channel {
             }
             let Some(_waiting) = crate::vm::goroutine::ChannelWait::enter("receive", || {
                 guard.has_ready_waiter()
-                    || any_channel_can_progress(&self.inner)
                     || crate::stdlib_builtins::context::deadline_pending()
                     || crate::stdlib_builtins::cohort::deadline_pending()
             }) else {
@@ -522,9 +522,9 @@ impl Channel {
         }
         let mut guard = self.inner.state.lock();
         loop {
-            if let Some(msg) = guard.buf.pop_front() {
+            if let Some(value) = guard.pop_message() {
                 self.notify_channel_changed(&mut guard);
-                return Some(msg.value);
+                return Some(value);
             }
             if guard.closed || is_cancelled() {
                 return None;
@@ -536,9 +536,11 @@ impl Channel {
                 return None;
             }
             guard.waiting_receivers += 1;
+            Self::sync_ready_count(&mut guard);
             self.wake_select_waiters(&guard);
             self.inner.cv.wait(&mut guard);
             guard.waiting_receivers = guard.waiting_receivers.saturating_sub(1);
+            Self::sync_ready_count(&mut guard);
         }
     }
 

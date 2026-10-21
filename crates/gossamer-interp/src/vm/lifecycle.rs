@@ -3360,6 +3360,9 @@ fn build_native_struct_shapes(
                 {
                     Field::Kind(NativeFieldKind::VecF64)
                 }
+                TyKind::Vec(elem) if matches!(tcx.kind_of(*elem), TyKind::Int(IntTy::U8)) => {
+                    Field::Kind(NativeFieldKind::VecU8)
+                }
                 // `sync::AtomicI64` / `I32` / `U64` / `Bool`: the runtime cell
                 // both tiers share.
                 TyKind::Adt { def: inner, .. }

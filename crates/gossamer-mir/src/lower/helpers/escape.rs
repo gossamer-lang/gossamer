@@ -816,7 +816,7 @@ pub fn collect_shareable_params(program: &HirProgram, tcx: &TyCtxt) -> ShareSumm
                     vec![name.name.as_str().to_string()],
                     ret_carries,
                 );
-                scan.block(&body.block, false, ret_carries);
+                scan.settle(|scan| scan.block(&body.block, false, ret_carries));
                 if scan.escaped {
                     break 'param ParamShare::Never;
                 }
@@ -978,7 +978,7 @@ impl<'a> AnswerScans<'a> {
             let ret_carries = answer_carries(self.tcx, owner);
             let mut scan = ShareScan::new(self.tcx, self.lifted, owner, Vec::new(), ret_carries);
             scan.tracked_expr = Some(call);
-            scan.block(&body.block, false, ret_carries);
+            scan.settle(|scan| scan.block(&body.block, false, ret_carries));
             (!scan.escaped && scan.copy_params.is_empty()).then_some((scan.carried, scan.forwards))
         });
         self.cache.insert(key, answer.clone());
@@ -1313,6 +1313,15 @@ fn std_call_reads_args(tcx: &TyCtxt, callee: &HirExpr, answer: Ty) -> bool {
 /// Whether a value of `ty` has nowhere to hold a container: a scalar, a
 /// `String`, or an `Option`, `Result`, or tuple built only from those.
 pub(crate) fn cannot_carry(tcx: &TyCtxt, ty: Ty) -> bool {
+    cannot_carry_within(tcx, ty, 0)
+}
+
+/// [`cannot_carry`], `depth` levels into a value's fields: a struct holding
+/// itself through a carrier is read as one that may carry.
+fn cannot_carry_within(tcx: &TyCtxt, ty: Ty, depth: u32) -> bool {
+    if depth > 8 {
+        return false;
+    }
     match tcx.kind_of(ty) {
         TyKind::Int(_)
         | TyKind::Float(_)
@@ -1321,9 +1330,21 @@ pub(crate) fn cannot_carry(tcx: &TyCtxt, ty: Ty) -> bool {
         | TyKind::Unit
         | TyKind::String
         | TyKind::DynError => true,
-        TyKind::Tuple(elems) => elems.iter().all(|t| cannot_carry(tcx, *t)),
-        TyKind::Adt { def, substs } if def.local == u32::MAX || def.local == u32::MAX - 1 => {
-            substs.types().iter().all(|t| cannot_carry(tcx, *t))
+        TyKind::Tuple(elems) => elems
+            .iter()
+            .all(|t| cannot_carry_within(tcx, *t, depth + 1)),
+        TyKind::Adt { def, substs } if def.local == u32::MAX || def.local == u32::MAX - 1 => substs
+            .types()
+            .iter()
+            .all(|t| cannot_carry_within(tcx, *t, depth + 1)),
+        // A struct of such fields has nowhere to hold one either.
+        TyKind::Adt { def, substs } if substs.types().is_empty() => {
+            tcx.struct_field_tys(*def).is_some_and(|fields| {
+                !fields.is_empty()
+                    && fields
+                        .iter()
+                        .all(|t| cannot_carry_within(tcx, *t, depth + 1))
+            })
         }
         _ => false,
     }
@@ -1383,6 +1404,29 @@ const READ_ONLY_ARG_METHODS: &[&str] = &[
 /// Sequence methods that answer the elements they read in a vector of its own.
 const FRESH_COPY_METHODS: &[&str] = &["clone", "slice", "to_vec"];
 
+/// Methods of an `Option`, a `Result`, a sequence, or a map that call the
+/// callback they are handed while they run and keep nothing of it: what the
+/// callback reaches it reaches during the call, and only through its answer
+/// afterwards, which becomes part of the method's own answer.
+const CALLING_METHODS: &[&str] = &[
+    "all",
+    "and_then",
+    "any",
+    "filter",
+    "filter_map",
+    "find",
+    "is_none_or",
+    "is_ok_and",
+    "is_some_and",
+    "map",
+    "map_err",
+    "map_or",
+    "map_or_else",
+    "or_else",
+    "position",
+    "unwrap_or_else",
+];
+
 /// Walks a body looking for any mention of one parameter outside a read-only
 /// place position.
 /// Whether every mention of `name` inside `e` is the callee of a call, so
@@ -1400,6 +1444,270 @@ fn only_called(name: &str, e: &HirExpr) -> bool {
     let mut ok = true;
     gossamer_hir::for_each_child_expr(e, &mut |child| ok = ok && only_called(name, child));
     ok
+}
+
+/// Whether `e` builds a vector of its own: a literal or `Vec::new()`.
+fn is_fresh_vec(e: &HirExpr) -> bool {
+    match &e.kind {
+        HirExprKind::Array(_) => true,
+        HirExprKind::Call { callee, args } if args.is_empty() => matches!(&callee.kind,
+            HirExprKind::Path { segments, .. }
+                if matches!(segments.as_slice(), [ty, f] if ty.name == "Vec" && f.name == "new")),
+        _ => false,
+    }
+}
+
+/// Whether the mutable vector `name` is only pushed onto and read in `stmts`
+/// and `tail`: never written through, reassigned, changed by another method,
+/// lent `&mut`, or captured by a closure.
+fn accumulates_only(tcx: &TyCtxt, name: &str, stmts: &[HirStmt], tail: Option<&HirExpr>) -> bool {
+    stmts.iter().all(|s| match &s.kind {
+        HirStmtKind::Let { init, .. } => {
+            init.as_ref().is_none_or(|e| accumulate_safe(tcx, name, e))
+        }
+        HirStmtKind::Expr { expr, .. } | HirStmtKind::Defer(expr) => {
+            accumulate_safe(tcx, name, expr)
+        }
+        HirStmtKind::Item(_) => true,
+    }) && tail.is_none_or(|e| accumulate_safe(tcx, name, e))
+}
+
+fn accumulate_safe(tcx: &TyCtxt, name: &str, e: &HirExpr) -> bool {
+    match &e.kind {
+        HirExprKind::Assign { place, value } => {
+            !rooted_at(name, place)
+                && accumulate_safe(tcx, name, place)
+                && accumulate_safe(tcx, name, value)
+        }
+        HirExprKind::MethodCall {
+            receiver,
+            name: method,
+            args,
+            ..
+        } => {
+            let pushed = method.name == "push"
+                && matches!(&receiver.kind, HirExprKind::Path { segments, .. }
+                    if matches!(segments.as_slice(), [only] if only.name == name));
+            if !pushed
+                && rooted_at(name, receiver)
+                && (is_mutating_method_name(&method.name) || is_user_adt(tcx, receiver.ty))
+            {
+                return false;
+            }
+            accumulate_safe(tcx, name, receiver)
+                && args.iter().all(|a| accumulate_safe(tcx, name, a))
+        }
+        HirExprKind::Unary {
+            op: gossamer_hir::HirUnaryOp::RefMut,
+            operand,
+        } if rooted_at(name, operand) => false,
+        HirExprKind::Closure { .. } | HirExprKind::LiftedClosure { .. } => !mentions(name, e),
+        HirExprKind::Path { .. } => true,
+        _ => {
+            let mut ok = true;
+            gossamer_hir::for_each_child_expr(e, &mut |child| {
+                ok = ok && accumulate_safe(tcx, name, child);
+            });
+            ok
+        }
+    }
+}
+
+/// Whether the mutable local `name` is only ever reassigned whole in `stmts`
+/// and `tail`: never written through a field or element, handed to a method
+/// that may change it, lent `&mut`, or captured by a closure.
+fn reassigned_only(tcx: &TyCtxt, name: &str, stmts: &[HirStmt], tail: Option<&HirExpr>) -> bool {
+    stmts.iter().all(|s| match &s.kind {
+        HirStmtKind::Let { init, .. } => init.as_ref().is_none_or(|e| reassign_safe(tcx, name, e)),
+        HirStmtKind::Expr { expr, .. } | HirStmtKind::Defer(expr) => reassign_safe(tcx, name, expr),
+        HirStmtKind::Item(_) => true,
+    }) && tail.is_none_or(|e| reassign_safe(tcx, name, e))
+}
+
+fn reassign_safe(tcx: &TyCtxt, name: &str, e: &HirExpr) -> bool {
+    match &e.kind {
+        HirExprKind::Assign { place, value } => {
+            let whole = matches!(&place.kind, HirExprKind::Path { segments, .. }
+                if matches!(segments.as_slice(), [only] if only.name == name));
+            if whole {
+                return reassign_safe(tcx, name, value);
+            }
+            !rooted_at(name, place)
+                && reassign_safe(tcx, name, place)
+                && reassign_safe(tcx, name, value)
+        }
+        HirExprKind::MethodCall {
+            receiver,
+            name: method,
+            args,
+            ..
+        } => {
+            // A user type's method may take `&mut self`, and the standard
+            // containers say which of theirs do by name.
+            if rooted_at(name, receiver)
+                && (is_mutating_method_name(&method.name) || is_user_adt(tcx, receiver.ty))
+            {
+                return false;
+            }
+            reassign_safe(tcx, name, receiver) && args.iter().all(|a| reassign_safe(tcx, name, a))
+        }
+        HirExprKind::Unary {
+            op: gossamer_hir::HirUnaryOp::RefMut,
+            operand,
+        } if rooted_at(name, operand) => false,
+        HirExprKind::Closure { .. } | HirExprKind::LiftedClosure { .. } => !mentions(name, e),
+        HirExprKind::Path { .. } => true,
+        _ => {
+            let mut ok = true;
+            gossamer_hir::for_each_child_expr(e, &mut |child| {
+                ok = ok && reassign_safe(tcx, name, child);
+            });
+            ok
+        }
+    }
+}
+
+/// Whether `e` is `name` or a field or element read of it.
+fn rooted_at(name: &str, e: &HirExpr) -> bool {
+    match &e.kind {
+        HirExprKind::Path { segments, .. } => {
+            matches!(segments.as_slice(), [only] if only.name == name)
+        }
+        HirExprKind::Field { receiver, .. }
+        | HirExprKind::TupleIndex { receiver, .. }
+        | HirExprKind::Index { base: receiver, .. } => rooted_at(name, receiver),
+        _ => false,
+    }
+}
+
+/// Whether `name` appears anywhere inside `e`.
+fn mentions(name: &str, e: &HirExpr) -> bool {
+    if let HirExprKind::Path { segments, .. } = &e.kind {
+        return matches!(segments.as_slice(), [only] if only.name == name);
+    }
+    let mut found = false;
+    gossamer_hir::for_each_child_expr(e, &mut |child| found = found || mentions(name, child));
+    found
+}
+
+/// Whether `ty` is a type the program declares, whose methods the walk does
+/// not know.
+fn is_user_adt(tcx: &TyCtxt, ty: Ty) -> bool {
+    let mut ty = ty;
+    while let TyKind::Ref { inner, .. } = tcx.kind_of(ty) {
+        ty = *inner;
+    }
+    // Built-in types sit at the top of the definition space.
+    matches!(tcx.kind_of(ty), TyKind::Adt { def, .. } if def.local < u32::MAX - 256)
+}
+
+/// Whether every name `pattern` binds is bound immutably, by value.
+fn binds_immutably(pattern: &HirPat) -> bool {
+    use gossamer_hir::HirPatKind;
+    match &pattern.kind {
+        HirPatKind::Binding { mutable, .. } => !mutable,
+        HirPatKind::At { mutable, sub, .. } => !mutable && binds_immutably(sub),
+        HirPatKind::Ref { .. } => false,
+        HirPatKind::Tuple(subs)
+        | HirPatKind::Variant { fields: subs, .. }
+        | HirPatKind::Or(subs) => subs.iter().all(binds_immutably),
+        HirPatKind::Slice {
+            prefix,
+            rest,
+            suffix,
+        } => {
+            prefix.iter().chain(suffix).all(binds_immutably)
+                && rest.as_deref().is_none_or(binds_immutably)
+        }
+        HirPatKind::Struct { fields, .. } => fields
+            .iter()
+            .all(|field| field.pattern.as_ref().is_none_or(binds_immutably)),
+        HirPatKind::Wildcard
+        | HirPatKind::Literal(_)
+        | HirPatKind::Range { .. }
+        | HirPatKind::Rest => true,
+    }
+}
+
+/// Every name `pattern` binds.
+fn collect_binding_names(pattern: &HirPat, out: &mut Vec<String>) {
+    use gossamer_hir::HirPatKind;
+    match &pattern.kind {
+        HirPatKind::Binding { name, .. } => out.push(name.name.as_str().to_string()),
+        HirPatKind::At { name, sub, .. } => {
+            out.push(name.name.as_str().to_string());
+            collect_binding_names(sub, out);
+        }
+        HirPatKind::Ref { inner, .. } => collect_binding_names(inner, out),
+        HirPatKind::Tuple(subs)
+        | HirPatKind::Variant { fields: subs, .. }
+        | HirPatKind::Or(subs) => {
+            for sub in subs {
+                collect_binding_names(sub, out);
+            }
+        }
+        HirPatKind::Slice {
+            prefix,
+            rest,
+            suffix,
+        } => {
+            for sub in prefix.iter().chain(suffix) {
+                collect_binding_names(sub, out);
+            }
+            if let Some(rest) = rest {
+                collect_binding_names(rest, out);
+            }
+        }
+        HirPatKind::Struct { fields, .. } => {
+            for field in fields {
+                match &field.pattern {
+                    Some(sub) => collect_binding_names(sub, out),
+                    None => out.push(field.name.name.as_str().to_string()),
+                }
+            }
+        }
+        HirPatKind::Wildcard
+        | HirPatKind::Literal(_)
+        | HirPatKind::Range { .. }
+        | HirPatKind::Rest => {}
+    }
+}
+
+/// The type of the values a value of `ty` hands a callback: an `Option`'s or a
+/// `Result`'s success payload, a sequence's element. `None` for anything else.
+fn lent_value_ty(tcx: &TyCtxt, ty: Ty) -> Option<Ty> {
+    let mut ty = ty;
+    while let TyKind::Ref { inner, .. } = tcx.kind_of(ty) {
+        ty = *inner;
+    }
+    match tcx.kind_of(ty) {
+        TyKind::Adt { def, substs } if def.local == u32::MAX || def.local == u32::MAX - 1 => {
+            substs.types().first().copied()
+        }
+        TyKind::Vec(elem) | TyKind::Slice(elem) | TyKind::Array { elem, .. } => Some(*elem),
+        _ => None,
+    }
+}
+
+/// A closure's body as the walk reads it: a lifted function's block, or an
+/// inline closure's expression.
+enum ClosureBody<'a> {
+    Block(&'a HirBlock),
+    Expr(&'a HirExpr),
+}
+
+/// Whether a value of `ty` hands its own values to a callback its methods
+/// call: an `Option`, a `Result`, a sequence, or a map.
+fn lends_to_callback(tcx: &TyCtxt, ty: Ty) -> bool {
+    let mut ty = ty;
+    while let TyKind::Ref { inner, .. } = tcx.kind_of(ty) {
+        ty = *inner;
+    }
+    match tcx.kind_of(ty) {
+        TyKind::Adt { def, .. } => def.local == u32::MAX || def.local == u32::MAX - 1,
+        TyKind::Vec(_) | TyKind::Slice(_) | TyKind::Array { .. } | TyKind::HashMap { .. } => true,
+        _ => false,
+    }
 }
 
 struct ShareScan<'a> {
@@ -1439,6 +1747,22 @@ struct ShareScan<'a> {
     carried: bool,
     /// A call whose answer the walk follows in place of a name.
     tracked_expr: Option<HirId>,
+    /// The names the walk started from, which a settling pass starts from
+    /// again.
+    initial_names: Vec<String>,
+    /// Mutable locals the body only ever reassigns whole: never written
+    /// through, mutated by a method, lent `&mut`, or captured.
+    reassigned_only: HashSet<String>,
+    /// Reassigned-only locals tracked from their declaration, because some
+    /// assignment hands them a value reaching the storage.
+    rebound: HashSet<String>,
+    /// Reassigned-only locals found this pass to need tracking from their
+    /// declaration.
+    needs_rebound: HashSet<String>,
+    /// Fresh vectors the body only pushes onto and reads: a value pushed onto
+    /// one is held by it, so one handed the storage is tracked like a
+    /// reassigned-only local.
+    accumulators: HashSet<String>,
 }
 
 impl<'a> ShareScan<'a> {
@@ -1449,6 +1773,7 @@ impl<'a> ShareScan<'a> {
         names: Vec<String>,
         carry: bool,
     ) -> Self {
+        let names_copy = names.clone();
         Self {
             tcx,
             names,
@@ -1461,6 +1786,32 @@ impl<'a> ShareScan<'a> {
             carry,
             carried: false,
             tracked_expr: None,
+            initial_names: names_copy,
+            reassigned_only: HashSet::new(),
+            rebound: HashSet::new(),
+            needs_rebound: HashSet::new(),
+            accumulators: HashSet::new(),
+        }
+    }
+
+    /// Runs `walk` until the reassigned-only locals it tracks settle: a local
+    /// a later assignment hands the storage is tracked from its declaration,
+    /// since a loop reaches its earlier uses after the assignment.
+    fn settle(&mut self, walk: impl Fn(&mut Self)) {
+        loop {
+            walk(self);
+            if self.needs_rebound.is_subset(&self.rebound) {
+                return;
+            }
+            let found: Vec<String> = self.needs_rebound.drain().collect();
+            self.rebound.extend(found);
+            self.names = self.initial_names.clone();
+            self.escaped = false;
+            self.carried = false;
+            self.forwards.clear();
+            self.copy_params.clear();
+            self.reassigned_only.clear();
+            self.accumulators.clear();
         }
     }
 
@@ -1504,10 +1855,12 @@ impl<'a> ShareScan<'a> {
     }
 
     /// Whether a value of `ty` reaches none of the parameter's storage that a
-    /// write could change: a copy, or a string, which is never written in
-    /// place.
+    /// write could change: a copy, a string, which is never written in place,
+    /// or a value with nowhere to hold a container.
     fn shares_nothing(&mut self, ty: Ty) -> bool {
-        matches!(self.tcx.kind_of(ty), TyKind::String) || self.copy(ty)
+        matches!(self.tcx.kind_of(ty), TyKind::String)
+            || self.copy(ty)
+            || cannot_carry(self.tcx, ty)
     }
 
     /// Whether `receiver.method(..)` answers elements copied out of the
@@ -1537,32 +1890,18 @@ impl<'a> ShareScan<'a> {
         rest: &[HirStmt],
         tail: Option<&HirExpr>,
     ) -> bool {
-        let HirExprKind::LiftedClosure { name, captures } = &init.kind else {
+        if !matches!(
+            init.kind,
+            HirExprKind::LiftedClosure { .. } | HirExprKind::Closure { .. }
+        ) || !self.mentions_tracked(init)
+        {
             return false;
-        };
+        }
         let gossamer_hir::HirPatKind::Binding {
             name: binding,
             mutable: false,
         } = &pattern.kind
         else {
-            return false;
-        };
-        let captured: Vec<String> = captures
-            .iter()
-            .filter_map(|c| match &c.kind {
-                HirExprKind::Path { segments, .. } if self.is_tracked(segments) => {
-                    segments.first().map(|s| s.name.as_str().to_string())
-                }
-                _ => None,
-            })
-            .collect();
-        if captured.is_empty() {
-            return false;
-        }
-        let Some(lifted) = self.lifted.get(name.name.as_str()).copied() else {
-            return false;
-        };
-        let Some(body) = &lifted.body else {
             return false;
         };
         let binding = binding.name.as_str();
@@ -1574,20 +1913,148 @@ impl<'a> ShareScan<'a> {
         if !only_called {
             return false;
         }
-        let ret_carries = answer_carries(self.tcx, lifted);
-        let mut scan = ShareScan::new(self.tcx, self.lifted, lifted, captured, false);
-        scan.ret_carries = ret_carries;
-        scan.block(&body.block, false, ret_carries);
-        if scan.escaped || !scan.copy_params.is_empty() {
+        if self.closure_reach(init, false, false).is_none() {
             self.escaped = true;
-        } else {
-            self.forwards
-                .extend(scan.forwards.into_iter().map(|f| Forward {
-                    in_closure: true,
-                    ..f
-                }));
         }
         true
+    }
+
+    /// Where the closure `closure` takes the walked storage while it runs:
+    /// `None` when it keeps it, otherwise whether its answer reaches it. The
+    /// closure reaches the storage through the tracked names it captures, and
+    /// through its own parameters when `lent` says it is handed the storage's
+    /// values. `carry` says an answer reaching the storage is followed rather
+    /// than kept. Forwards its body makes join this walk's.
+    fn closure_reach(&mut self, closure: &HirExpr, lent: bool, carry: bool) -> Option<bool> {
+        let (owner, mut names, body, params, ret_carries) = match &closure.kind {
+            HirExprKind::LiftedClosure { name, captures } => {
+                let lifted = self.lifted.get(name.name.as_str()).copied()?;
+                let names: Vec<String> = captures
+                    .iter()
+                    .filter_map(|c| match &c.kind {
+                        HirExprKind::Path { segments, .. } if self.is_tracked(segments) => {
+                            segments.first().map(|s| s.name.as_str().to_string())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let body = &lifted.body.as_ref()?.block;
+                // The first parameter of a capturing closure is its
+                // environment, which the body reads through the capture
+                // bindings instead.
+                let params = lifted.params.get(usize::from(!captures.is_empty())..)?;
+                let ret_carries = answer_carries(self.tcx, lifted);
+                (lifted, names, ClosureBody::Block(body), params, ret_carries)
+            }
+            HirExprKind::Closure { params, body, .. } => {
+                // An inline body names the tracked bindings themselves, except
+                // where a parameter shadows one.
+                let mut shadowed = Vec::new();
+                for p in params {
+                    collect_binding_names(&p.pattern, &mut shadowed);
+                }
+                let names: Vec<String> = self
+                    .names
+                    .iter()
+                    .filter(|n| !shadowed.contains(n))
+                    .cloned()
+                    .collect();
+                let ret_carries = !cannot_carry(self.tcx, body.ty);
+                (
+                    self.owner,
+                    names,
+                    ClosureBody::Expr(body),
+                    params.as_slice(),
+                    ret_carries,
+                )
+            }
+            _ => return Some(false),
+        };
+        if lent {
+            for p in params {
+                collect_binding_names(&p.pattern, &mut names);
+            }
+        }
+        if names.is_empty() {
+            return Some(false);
+        }
+        let mut scan = ShareScan::new(self.tcx, self.lifted, owner, names, carry);
+        scan.ret_carries = ret_carries;
+        match body {
+            ClosureBody::Block(block) => scan.settle(|scan| scan.block(block, false, ret_carries)),
+            ClosureBody::Expr(expr) => scan.settle(|scan| scan.expr(expr, false, ret_carries)),
+        }
+        if scan.escaped || !scan.copy_params.is_empty() {
+            return None;
+        }
+        self.forwards
+            .extend(scan.forwards.into_iter().map(|f| Forward {
+                in_closure: true,
+                ..f
+            }));
+        Some(scan.carried)
+    }
+
+    /// Whether the value of `e` may reach the walked storage by a path the
+    /// forwards do not already follow: a projection of a tracked name, a
+    /// method's answer over one, a closure capturing one, a holder of one, or
+    /// a branch answering one. A call handing the storage to a function is a
+    /// forward, whose answer that function's summary describes.
+    fn may_alias(&self, e: &HirExpr) -> bool {
+        if self.tracked_expr == Some(e.id) {
+            return true;
+        }
+        match &e.kind {
+            HirExprKind::Path { segments, .. } => self.is_tracked(segments),
+            HirExprKind::Field { receiver, .. } | HirExprKind::TupleIndex { receiver, .. } => {
+                self.may_alias(receiver)
+            }
+            HirExprKind::Index { base, .. } => self.may_alias(base),
+            HirExprKind::MethodCall { receiver, args, .. } => {
+                self.may_alias(receiver)
+                    || args.iter().any(|a| {
+                        matches!(
+                            a.kind,
+                            HirExprKind::Closure { .. } | HirExprKind::LiftedClosure { .. }
+                        ) && self.mentions_tracked(a)
+                    })
+            }
+            HirExprKind::Closure { .. } | HirExprKind::LiftedClosure { .. } => {
+                self.mentions_tracked(e)
+            }
+            HirExprKind::Call { .. } => Self::holder_values(e)
+                .is_some_and(|values| values.iter().any(|v| self.may_alias(v))),
+            HirExprKind::Tuple(items) => items.iter().any(|i| self.may_alias(i)),
+            HirExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.may_alias(then_branch)
+                    || else_branch.as_ref().is_some_and(|b| self.may_alias(b))
+            }
+            HirExprKind::Match { scrutinee, arms } => {
+                self.may_alias(scrutinee) || arms.iter().any(|arm| self.may_alias(&arm.body))
+            }
+            HirExprKind::Block(b) => b.tail.as_ref().is_some_and(|t| self.may_alias(t)),
+            _ => false,
+        }
+    }
+
+    /// Whether `e` names a tracked binding anywhere inside it, a closure's
+    /// captures included.
+    fn mentions_tracked(&self, e: &HirExpr) -> bool {
+        if self.tracked_expr == Some(e.id) {
+            return true;
+        }
+        if let HirExprKind::Path { segments, .. } = &e.kind {
+            return self.is_tracked(segments);
+        }
+        let mut found = false;
+        gossamer_hir::for_each_child_expr(e, &mut |child| {
+            found = found || self.mentions_tracked(child);
+        });
+        found
     }
 
     fn block(&mut self, b: &HirBlock, place: bool, returned: bool) {
@@ -1652,6 +2119,72 @@ impl<'a> ShareScan<'a> {
                             self.names.push(name.name.as_str().to_string());
                             continue;
                         }
+                        // A mutable binding of a table read out of the storage
+                        // takes a table of its own on every tier, so reading
+                        // the table is the only use of the storage it makes.
+                        if let gossamer_hir::HirPatKind::Binding { mutable: true, .. } =
+                            &pattern.kind
+                            && matches!(self.tcx.kind_of(e.ty), TyKind::HashMap { .. })
+                            && self.projection_of_tracked(e)
+                        {
+                            self.walk_projection_indices(e);
+                            continue;
+                        }
+                        // A fresh vector the body only pushes onto and reads
+                        // holds what it is handed, so one handed the storage
+                        // is tracked from here.
+                        if let gossamer_hir::HirPatKind::Binding {
+                            name,
+                            mutable: true,
+                        } = &pattern.kind
+                            && is_fresh_vec(e)
+                            && accumulates_only(
+                                self.tcx,
+                                name.name.as_str(),
+                                &stmts[at + 1..],
+                                tail,
+                            )
+                        {
+                            let name = name.name.as_str().to_string();
+                            self.accumulators.insert(name.clone());
+                            if self.rebound.contains(&name) {
+                                self.names.push(name);
+                            }
+                            continue;
+                        }
+                        // A mutable local the body only reassigns whole holds
+                        // whatever it is handed without writing it, so one
+                        // handed the storage joins the tracked names.
+                        if let gossamer_hir::HirPatKind::Binding {
+                            name,
+                            mutable: true,
+                        } = &pattern.kind
+                            && !self.shares_nothing(e.ty)
+                            && !cannot_carry(self.tcx, e.ty)
+                            && reassigned_only(self.tcx, name.name.as_str(), &stmts[at + 1..], tail)
+                        {
+                            let name = name.name.as_str().to_string();
+                            self.reassigned_only.insert(name.clone());
+                            if self.rebound.contains(&name) || self.may_alias(e) {
+                                self.expr(e, true, false);
+                                self.names.push(name);
+                                continue;
+                            }
+                        }
+                        // An immutable binding of any other value that may
+                        // reach the walked storage names that storage as well:
+                        // the value is read where it sits, and the bindings
+                        // join the tracked names, so what the body does with
+                        // them is judged as a use of the storage.
+                        if !self.shares_nothing(e.ty)
+                            && !cannot_carry(self.tcx, e.ty)
+                            && binds_immutably(pattern)
+                            && self.may_alias(e)
+                        {
+                            self.expr(e, true, false);
+                            self.track_pattern_bindings(pattern);
+                            continue;
+                        }
                         self.expr(e, false, false);
                     }
                 }
@@ -1709,8 +2242,12 @@ impl<'a> ShareScan<'a> {
         match &e.kind {
             HirExprKind::Path { segments, .. } => {
                 // A copy holds none of the parameter's storage, whatever
-                // binding it was read through.
-                if self.is_tracked(segments) && !self.shares_nothing(e.ty) {
+                // binding it was read through, and neither does a value with
+                // nowhere to hold a container.
+                if self.is_tracked(segments)
+                    && !self.shares_nothing(e.ty)
+                    && !cannot_carry(self.tcx, e.ty)
+                {
                     if returned {
                         self.reach_answer();
                     } else if !place {
@@ -1719,6 +2256,27 @@ impl<'a> ShareScan<'a> {
                 }
             }
             // Reading through the parameter keeps its storage inside the call.
+            HirExprKind::MethodCall {
+                receiver,
+                name,
+                args,
+                ..
+            } if name.name == "push"
+                && args.len() == 1
+                && matches!(&receiver.kind, HirExprKind::Path { segments, .. }
+                    if matches!(segments.as_slice(), [only] if self.accumulators.contains(only.name.as_str()))) =>
+            {
+                // The pushed value is held by the accumulator, which a value
+                // reaching the storage makes tracked from its declaration.
+                if let HirExprKind::Path { segments, .. } = &receiver.kind
+                    && let [only] = segments.as_slice()
+                    && !self.is_tracked(segments)
+                    && self.may_alias(&args[0])
+                {
+                    self.needs_rebound.insert(only.name.as_str().to_string());
+                }
+                self.expr(&args[0], true, false);
+            }
             HirExprKind::MethodCall {
                 receiver,
                 name,
@@ -1738,13 +2296,61 @@ impl<'a> ShareScan<'a> {
                 let scalar = self.shares_nothing(e.ty)
                     || cannot_carry(self.tcx, e.ty)
                     || self.answers_fresh_copy(receiver, &name.name);
+                let calls_back = CALLING_METHODS.contains(&name.name.as_str())
+                    && lends_to_callback(self.tcx, receiver.ty);
+                // The callback is handed the receiver's own values, so it
+                // reaches the storage whenever the receiver does.
+                let lends = calls_back && self.may_alias(receiver);
                 self.expr(receiver, place || scalar, returned && !scalar);
                 // A method that only reads the argument it is handed leaves
                 // the argument's storage inside the call, exactly as a field
                 // read does, so a parameter passed to one is still only read.
                 let reads_args = READ_ONLY_ARG_METHODS.contains(&name.name.as_str());
+                let mut answer_reaches = false;
                 for a in args {
+                    if calls_back
+                        && matches!(
+                            a.kind,
+                            HirExprKind::LiftedClosure { .. } | HirExprKind::Closure { .. }
+                        )
+                    {
+                        match self.closure_reach(a, lends, true) {
+                            Some(carried) => answer_reaches |= carried,
+                            None => self.escaped = true,
+                        }
+                        continue;
+                    }
+                    // A function named as the callback is handed the
+                    // receiver's values as its first argument, which reach
+                    // the storage unless they are copies.
+                    if lends
+                        && lent_value_ty(self.tcx, receiver.ty)
+                            .is_none_or(|t| !self.shares_nothing(t))
+                        && let HirExprKind::Path { def: Some(def), .. } = &a.kind
+                        && matches!(
+                            self.tcx.kind_of(a.ty),
+                            TyKind::FnDef { .. } | TyKind::FnPtr(_)
+                        )
+                    {
+                        self.forwards.push(Forward {
+                            callee: *def,
+                            position: 0,
+                            call: e.id,
+                            owner: self.owner,
+                            in_closure: false,
+                        });
+                        continue;
+                    }
                     self.expr(a, reads_args, false);
+                }
+                // A callback answering the storage hands it to the method's
+                // answer, which is then judged where it sits.
+                if answer_reaches && !scalar {
+                    if returned {
+                        self.reach_answer();
+                    } else if !place {
+                        self.escaped = true;
+                    }
                 }
             }
             HirExprKind::Index { base, index } => {
@@ -1795,10 +2401,44 @@ impl<'a> ShareScan<'a> {
                         });
                         continue;
                     }
+                    // Any other argument that may reach the storage - a
+                    // lookup in it, an entry of it - is read where it sits
+                    // and handed on the same way.
+                    if let Some(def) = target
+                        && !self.shares_nothing(a.ty)
+                        && !cannot_carry(self.tcx, a.ty)
+                        && self.may_alias(a)
+                    {
+                        self.expr(a, true, false);
+                        self.forwards.push(Forward {
+                            callee: def,
+                            position: idx,
+                            call: e.id,
+                            owner: self.owner,
+                            in_closure: false,
+                        });
+                        continue;
+                    }
                     self.expr(a, false, false);
                 }
             }
             HirExprKind::Assign { place: lhs, value } => {
+                // A reassigned-only local takes the value whole, so a value
+                // reaching the storage is held by a tracked name.
+                if let HirExprKind::Path { segments, .. } = &lhs.kind
+                    && let [only] = segments.as_slice()
+                    && self.reassigned_only.contains(only.name.as_str())
+                {
+                    if self.is_tracked(segments) {
+                        self.expr(value, true, false);
+                        return;
+                    }
+                    if self.may_alias(value) {
+                        self.needs_rebound.insert(only.name.as_str().to_string());
+                        self.expr(value, true, false);
+                        return;
+                    }
+                }
                 self.expr(lhs, false, false);
                 self.expr(value, false, false);
             }
@@ -1839,12 +2479,22 @@ impl<'a> ShareScan<'a> {
                 let destructured = !walked
                     && self.projection_of_tracked(scrutinee)
                     && !self.shares_nothing(scrutinee.ty);
+                // Any other scrutinee that may reach the storage - a lookup in
+                // it, a call handed it - is only taken apart into the arms'
+                // bindings, which are then tracked the same way.
+                let aliased = !walked
+                    && !destructured
+                    && !self.shares_nothing(scrutinee.ty)
+                    && !cannot_carry(self.tcx, scrutinee.ty)
+                    && self.may_alias(scrutinee);
                 if walked {
                     if let HirExprKind::MethodCall { receiver, .. } = &scrutinee.kind {
                         self.walk_projection_indices(receiver);
                     }
                 } else if destructured {
                     self.walk_projection_indices(scrutinee);
+                } else if aliased {
+                    self.expr(scrutinee, true, false);
                 } else {
                     self.expr(scrutinee, false, false);
                 }
@@ -1853,7 +2503,7 @@ impl<'a> ShareScan<'a> {
                     let outer_names = self.names.len();
                     if walked {
                         self.track_some_binding(&arm.pattern);
-                    } else if destructured {
+                    } else if destructured || aliased {
                         self.track_pattern_bindings(&arm.pattern);
                     }
                     if let Some(g) = &arm.guard {
@@ -1879,9 +2529,10 @@ impl<'a> ShareScan<'a> {
                     self.expr(t, false, false);
                 }
             }
+            // A tuple holds its items wherever it sits itself.
             HirExprKind::Tuple(items) => {
                 for i in items {
-                    self.expr(i, false, returned);
+                    self.expr(i, place, returned);
                 }
             }
             // An early exit answers the function wherever the answer's type

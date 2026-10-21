@@ -106,60 +106,55 @@ fn build_native_arg(kind: JitKind, value: &Value) -> Option<i64> {
 /// Builds an owned `*mut GosVec` of 8-byte `f64` slots from a VM float
 /// vector. Returns the pointer as `i64` (trampoline-owned).
 fn build_native_vec_f64(value: &Value) -> Option<i64> {
-    // SAFETY: `gos_rt_vec_new_typed` returns an owned header or null;
-    // `gos_rt_vec_push` copies 8 bytes from the float's bit pattern.
-    unsafe {
-        // Same one-copy path as the integer case: a `FloatVec` is a packed
-        // `Vec<f64>`, whose in-memory form is the native element layout.
-        if let Value::FloatVec(arc) = value {
-            let len = i64::try_from(arc.len()).ok()?;
-            let v = rt::gos_rt_vec_from_packed_arr(8, arc.as_ptr().cast::<u8>(), len);
-            return (!v.is_null()).then_some(v as i64);
+    // Every shape a `Vec<f64>` arrives as crosses as one copy of its floats: a
+    // packed vector is the native element layout already, and a boxed one is
+    // converted once rather than pushed a slot at a time.
+    let converted: Vec<f64>;
+    let floats: &[f64] = match value {
+        Value::FloatVec(arc) => arc,
+        Value::FloatArray(inner) => &inner.data,
+        Value::Array(arc) => {
+            converted = arc
+                .iter()
+                .map(|elem| match elem {
+                    Value::Float(x) => Some(*x),
+                    Value::Int(n) => Some(*n as f64),
+                    _ => None,
+                })
+                .collect::<Option<_>>()?;
+            &converted
         }
-        let v = rt::gos_rt_vec_new_typed(8, rt::vec::vec_elem_kind::PRIMITIVE);
-        if v.is_null() {
-            return None;
+        _ => return None,
+    };
+    let len = i64::try_from(floats.len()).ok()?;
+    // SAFETY: `floats` is `len` initialised `f64`s, copied into the fresh
+    // vector before this borrow ends.
+    let v = unsafe { rt::gos_rt_vec_from_packed_arr(8, floats.as_ptr().cast::<u8>(), len) };
+    (!v.is_null()).then_some(v as i64)
+}
+
+/// The 8-byte slots of the native vector `v`, copied out in one pass.
+///
+/// # Safety
+///
+/// `v` is a live `GosVec` of 8-byte primitive slots, each a valid `T`.
+unsafe fn native_slots<T: Copy + Default>(v: *const rt::vec::GosVec) -> Vec<T> {
+    debug_assert_eq!(std::mem::size_of::<T>(), 8);
+    // SAFETY: the caller's contract makes `v` a live header.
+    let len = usize::try_from(unsafe { rt::gos_rt_vec_len(v) }).unwrap_or(0);
+    let mut out = vec![T::default(); len];
+    if len > 0 {
+        // SAFETY: the buffer holds `len` initialised 8-byte slots, and `out`
+        // has room for exactly as many.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                (*v).ptr.0.cast_const(),
+                out.as_mut_ptr().cast::<u8>(),
+                len * 8,
+            );
         }
-        let push_bits = |bits: u64| {
-            let b = bits.to_ne_bytes();
-            rt::gos_rt_vec_push(v, b.as_ptr());
-        };
-        match value {
-            // A `Vec<f64>` is stored flat as `FloatVec`, and an array of an
-            // all-f64 struct as `FloatArray`; both back their data with a
-            // `Vec<f64>` the runtime can copy element-wise. Mirroring the
-            // `IntArray` arm of `build_native_vec_i64`, these are the shapes a
-            // `Vec<f64>` argument actually arrives as - without them every
-            // `Vec<f64>` param falls back per call and the body demotes.
-            Value::FloatVec(arc) => {
-                for &x in arc.iter() {
-                    push_bits(x.to_bits());
-                }
-            }
-            Value::FloatArray(inner) => {
-                for &x in inner.data.iter() {
-                    push_bits(x.to_bits());
-                }
-            }
-            Value::Array(arc) => {
-                for elem in arc.iter() {
-                    match elem {
-                        Value::Float(x) => push_bits(x.to_bits()),
-                        Value::Int(n) => push_bits((*n as f64).to_bits()),
-                        _ => {
-                            rt::gos_rt_vec_free(v);
-                            return None;
-                        }
-                    }
-                }
-            }
-            _ => {
-                rt::gos_rt_vec_free(v);
-                return None;
-            }
-        }
-        Some(v as i64)
     }
+    out
 }
 
 /// Builds an owned `*mut GosVec` of 16-byte `(i64, f64)` tuple slots
@@ -324,28 +319,22 @@ fn build_native_vec_i64(value: &Value) -> Option<i64> {
             let v = rt::gos_rt_vec_from_packed_arr(8, arc.as_ptr().cast::<u8>(), len);
             return (!v.is_null()).then_some(v as i64);
         }
-        let v = rt::gos_rt_vec_new_typed(8, rt::vec::vec_elem_kind::PRIMITIVE);
-        if v.is_null() {
-            return None;
-        }
-        // Only a boxed element sequence remains: its elements need
-        // conversion, not copying, so they still cross one at a time.
+        // A boxed element sequence is converted once and crosses the same way.
         let Value::Array(arc) = value else {
-            rt::gos_rt_vec_free(v);
             return None;
         };
-        for elem in arc.iter() {
-            match elem {
-                Value::Int(n) => rt::gos_rt_vec_push_i64(v, *n),
-                Value::Bool(b) => rt::gos_rt_vec_push_i64(v, i64::from(*b)),
-                Value::Char(c) => rt::gos_rt_vec_push_i64(v, *c as i64),
-                _ => {
-                    rt::gos_rt_vec_free(v);
-                    return None;
-                }
-            }
-        }
-        Some(v as i64)
+        let words: Vec<i64> = arc
+            .iter()
+            .map(|elem| match elem {
+                Value::Int(n) => Some(*n),
+                Value::Bool(b) => Some(i64::from(*b)),
+                Value::Char(c) => Some(*c as i64),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        let len = i64::try_from(words.len()).ok()?;
+        let v = rt::gos_rt_vec_from_packed_arr(8, words.as_ptr().cast::<u8>(), len);
+        (!v.is_null()).then_some(v as i64)
     }
 }
 
@@ -924,6 +913,7 @@ fn free_built_field(kind: NativeFieldKind, word: i64, high: i64, ownership: Buil
             | NativeFieldKind::VecStruct(_)
             | NativeFieldKind::VecI64
             | NativeFieldKind::VecF64
+            | NativeFieldKind::VecU8
             | NativeFieldKind::Carrier(_),
             _,
         ) => {}
@@ -1076,7 +1066,7 @@ impl Drop for NativeStructBacking {
             // trampoline-owned struct block.
             match kind {
                 NativeFieldKind::Str => unsafe { free_native(JitKind::NativeStr, slot) },
-                NativeFieldKind::VecI64 | NativeFieldKind::VecF64 => unsafe {
+                NativeFieldKind::VecI64 | NativeFieldKind::VecF64 | NativeFieldKind::VecU8 => unsafe {
                     rt::gos_rt_vec_free(slot as *mut rt::vec::GosVec);
                 },
                 _ => {}
@@ -1230,6 +1220,13 @@ fn build_native_struct(
                 };
                 word
             }
+            (NativeFieldKind::VecU8, value) => {
+                let Some(word) = build_native_vec_u8(value) else {
+                    free_native_struct_slots(&slots, &shape);
+                    return None;
+                };
+                word
+            }
             // The VM value keeps its share of the cell for the whole call, so
             // the body borrows the handle.
             (NativeFieldKind::Atomic(offset), atomic) => {
@@ -1331,7 +1328,7 @@ fn free_native_struct_slots(slots: &[i64], shape: &NativeStructShape) {
         // non-zero here, each an owned native string or vector.
         match kind {
             NativeFieldKind::Str => unsafe { free_native(JitKind::NativeStr, slot) },
-            NativeFieldKind::VecI64 | NativeFieldKind::VecF64 => unsafe {
+            NativeFieldKind::VecI64 | NativeFieldKind::VecF64 | NativeFieldKind::VecU8 => unsafe {
                 rt::gos_rt_vec_free(slot as *mut rt::vec::GosVec);
             },
             _ => {}
@@ -1365,6 +1362,7 @@ fn read_native_struct(ptr: i64, shape: &NativeStructShape) -> Value {
                 NativeFieldKind::Str => native_ptr_to_value(JitKind::NativeStr, word),
                 NativeFieldKind::VecI64 => native_ptr_to_value(JitKind::NativeVecI64, word),
                 NativeFieldKind::VecF64 => native_ptr_to_value(JitKind::NativeVecF64, word),
+                NativeFieldKind::VecU8 => native_ptr_to_value(JitKind::NativeVecU8, word),
                 NativeFieldKind::Struct(idx) => native_struct_shape(*idx)
                     .map_or(Value::Unit, |child| {
                         read_nested_struct(slots, place.offset, &child)
@@ -1423,6 +1421,7 @@ fn free_native_enum(ptr: i64, shape: &crate::value::NativeEnumShape) {
                     | NativeFieldKind::VecStruct(_)
                     | NativeFieldKind::VecI64
                     | NativeFieldKind::VecF64
+                    | NativeFieldKind::VecU8
             ) {
                 continue;
             }
@@ -1456,6 +1455,7 @@ fn free_native_enum(ptr: i64, shape: &crate::value::NativeEnumShape) {
                 | NativeFieldKind::VecStruct(_)
                 | NativeFieldKind::VecI64
                 | NativeFieldKind::VecF64
+                | NativeFieldKind::VecU8
                 | NativeFieldKind::Carrier(_) => {}
             }
             // Null the slot so the node-meta release below skips this child
@@ -1807,15 +1807,11 @@ fn native_ptr_to_value(kind: JitKind, ptr: i64) -> Value {
             if ptr == 0 {
                 return Value::IntArray(Arc::new(Vec::new()));
             }
-            let v = ptr as *const rt::vec::GosVec;
-            // SAFETY: `v` is a live `GosVec` (a param we built or the
-            // body's owned return); `len`/`get` read initialised slots.
-            let len = unsafe { rt::gos_rt_vec_len(v) }.max(0);
-            let mut out = Vec::with_capacity(len as usize);
-            for i in 0..len {
-                out.push(unsafe { rt::gos_rt_vec_get_i64(v, i) });
-            }
-            Value::IntArray(Arc::new(out))
+            // SAFETY: `ptr` is a live `GosVec` of 8-byte integer slots (a
+            // param we built or the body's owned return).
+            Value::IntArray(Arc::new(unsafe {
+                native_slots::<i64>(ptr as *const rt::vec::GosVec)
+            }))
         }
         JitKind::NativeVecU8 => {
             // SAFETY: `ptr` is null or a live `GosVec` (a param we built or the
@@ -1825,18 +1821,15 @@ fn native_ptr_to_value(kind: JitKind, ptr: i64) -> Value {
         }
         JitKind::NativeVecF64 => {
             if ptr == 0 {
-                return Value::Array(Arc::new(Vec::new()));
+                return Value::FloatVec(Arc::new(Vec::new()));
             }
-            let v = ptr as *const rt::vec::GosVec;
+            // A `Vec<f64>` comes back packed, the representation the VM gives
+            // one of its own, so the next call crosses it as one copy.
             // SAFETY: live `GosVec` of 8-byte slots; each slot's bits are a
             // valid `f64`.
-            let len = unsafe { rt::gos_rt_vec_len(v) }.max(0);
-            let mut out = Vec::with_capacity(len as usize);
-            for i in 0..len {
-                let bits = unsafe { rt::gos_rt_vec_get_i64(v, i) } as u64;
-                out.push(Value::Float(f64::from_bits(bits)));
-            }
-            Value::Array(Arc::new(out))
+            Value::FloatVec(Arc::new(unsafe {
+                native_slots::<f64>(ptr as *const rt::vec::GosVec)
+            }))
         }
         JitKind::NativeVecStruct(sidx) => crate::value::native_vec_struct_to_array(ptr, sidx),
         JitKind::NativeVecTupleIF => {

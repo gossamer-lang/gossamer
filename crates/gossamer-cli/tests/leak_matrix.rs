@@ -1103,6 +1103,24 @@ fn main() {
 }
 "#,
     ),
+    (
+        "option_and_then_lends_its_payload",
+        r#"
+fn pick(m: Map<String, String>, i: i64) -> i64 {
+    let found = m.get("k").and_then(|h| if i % 2 == 0 { Some(h) } else { None })
+    found.unwrap_or("").len()
+}
+fn main() {
+    let mut m = Map::new()
+    let mut v = String::new()
+    v += "a lookup payload long enough to count"
+    m["k"] = v
+    let mut total = 0
+    for i in 0..200000 { total += pick(m, i) }
+    println(total)
+}
+"#,
+    ),
 ];
 
 fn gnu_time_ok() -> bool {
