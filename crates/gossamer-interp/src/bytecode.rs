@@ -1732,7 +1732,7 @@ pub(crate) struct CacheSlot {
     pub builtin_fn: Option<BuiltinFnPtr>,
     /// The call pointer and name of a resolved `Value::Native` builtin, which
     /// takes the VM as its dispatcher.
-    pub native_fn: Option<(crate::value::NativeCall, &'static str)>,
+    pub native_fn: Option<(crate::value::NativeEntry, &'static str)>,
     /// General path: when the resolved target is a Gossamer
     /// function (`Global::Fn(Arc<FnChunk>)`) - i.e. user code
     /// or stdlib body, not a builtin - its chunk is cached

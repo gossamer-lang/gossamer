@@ -158,7 +158,7 @@ fn projects_sharing_a_cmake_package_share_its_build() {
         .expect("write the app");
         let output = std::process::Command::new(crate::support::gos_binary())
             .current_dir(&app)
-            .args(["run", "."])
+            .args(["run", "--native", "."])
             .env("XDG_CACHE_HOME", &cache)
             .output()
             .expect("run gos");

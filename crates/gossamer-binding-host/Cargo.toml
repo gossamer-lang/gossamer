@@ -1,0 +1,33 @@
+[package]
+name = "gossamer-binding-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Loads Rust binding libraries into `gos` and calls them from the VM and the JIT."
+
+[lints]
+workspace = true
+
+[dependencies]
+gossamer-binding-abi = { workspace = true }
+gossamer-codegen-cranelift = { workspace = true }
+gossamer-interp = { workspace = true }
+gossamer-resolve = { workspace = true }
+gossamer-runtime = { workspace = true }
+gossamer-std = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+
+[dev-dependencies]
+parking_lot = { workspace = true }

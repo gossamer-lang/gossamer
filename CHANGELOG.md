@@ -1,8 +1,33 @@
 # Changelog
 
-## 0.75.0 - Native `gos run` with a shared package build cache, faster native builds, and select, serde, and path fixes
+## 0.75.0 - Rust bindings loaded into `gos run`, `gos run --native`, faster native builds, and select, serde, and path fixes
 
-- `gos run` runs the program's native executable, the one `gos build` makes, for a project and for a single file alike: a current release build starts at once, otherwise the program is built with the debug profile first and the release build follows in the background, at low priority, for the next run. The VM and its JIT run the program when asked for (`GOS_RUN_ENGINE=vm`, `--no-jit`, `--timings`, or the VM's own `GOS_JIT*`, `GOSSAMER_JIT*`, `GOSSAMER_VM_*`, `GOS_DUMP_CLIF`, `GOS_PROFILE_RSS`, and `GOS_VM_PROFILE` variables), for `gos -e`, and on a host without the LLVM tools, which `gos run` says in one line. A file outside any project keeps its builds in the user cache rather than beside the file. The program's output is its own: a build that succeeds keeps what it had to say about the toolchain in its `build.log`, and one that fails shows its diagnostics and refuses the run.
+- `gos run`, `gos test`, `gos check`, and the REPL load `[rust-bindings]` as optimized shared libraries into the running `gos` instead of building and running a per-project copy of the toolchain: a program's bindings build once with Cargo into the user cache as one library, shared by every project that names the same set, so a Rust crate two bindings depend on is one copy as in a native build, and a project using one starts about as fast as one that does not. Building a binding no longer needs the toolchain's source tree or `GOSSAMER_ROOT`, and `gos clean --runners` is now `gos clean --bindings`.
+- `gos publish` packs the library of the package's `path` bindings, built for the publishing machine, into the signed package, and a program on that target with the same bindings loads it on first run without a Rust toolchain.
+- A root project with `ffi = false` refuses Rust bindings, its own and its dependencies', as it refuses `extern` declarations.
+- A library built for another major version of the binding ABI, or one whose signatures changed since they were recorded, is refused with a message before any of its items runs.
+- A Rust panic inside a binding is a Gossamer panic with the binding's message on every tier, where it answered a zero or empty value, and a `#[gos_opaque]` method called with a handle its registry does not hold panics naming the method.
+- A `PersistentCallback` keeps the closure it was handed until the binding drops it, so a callable one binding call stores can be called from a later one on every tier.
+- `#[gos_blocking]` lets the scheduler run other goroutines while the call blocks.
+- `Result<T, GosError>` crosses in every shape `Result<T, String>` does, and a module declares any number of items.
+- A binding's `Bytes` answer is a `Vec<u8>`.
+- A binding takes and answers shapes that nest composites on every tier, `Option<(i64, String)>`, `Result<Option<i64>, String>`, `Result<(i64, i64), String>`, `Vec<Bytes>`, `Vec` and `Option` of a `GosStruct`, `Vec<Option<i64>>`, and `Option<Option<i64>>` among them, where the binding crate failed to build.
+- Native builds and the JIT no longer leak the strings, vectors, tuples, structs, `Bytes`, and `Option` / `Result` values a binding call passes or answers.
+- Matching a `DynValue` against an enum's patterns is `GT0001`; it compiled and read garbage on native builds.
+- `gossamer_binding::testing::call` calls a binding's item from the crate's own `cargo test`, without `gos`. Hand-written `FromGos` / `ToGos` impls convert to the binding crate's own `Value`, which no longer names the interpreter's.
+- `gos run --native` runs the program's native executable, the one `gos build` makes, for a project and for a single file alike: a current release build starts at once, otherwise the program is built with the debug profile first and the release build follows in the background, at low priority, for the next run. On a host without the LLVM tools it runs the program on the VM, which it says in one line. A file outside any project keeps its builds in the user cache rather than beside the file. The program's output is its own: a build that succeeds keeps what it had to say about the toolchain in its `build.log`, and one that fails shows its diagnostics and refuses the run. Plain `gos run` still runs on the VM and its JIT, which start a program without building it.
+- A package's `[rust-bindings]` are built into every program that depends on it, as the bindings guide said; they were ignored unless the program declared them itself.
+- `gos run` of a project with Rust bindings starts in a fraction of the time it took: finding the project's runner no longer walks every cached runner's build tree.
+- A struct a binding answers is read as the program's struct of the same name on every tier; with no such struct it is `GT0122`, where native builds stopped with an internal error.
+- `json::encode`, `json::render`, and `json::encode_pretty` take a user enum value itself, externally tagged, where the checker refused one that was not inside a struct; `GT0016` now covers only a forgotten `?` on a `Result` or `Option`.
+- Typed serde reads and writes a `char` as a one-character string on every tier, in fields, sequences, options, and enum payloads; a string of any other length is a decode error.
+- A typed serde call naming a type by its bare name reads the type the calling module declares, so two modules may each declare a `struct Names` and decode their own, where both were refused as having no encoding.
+- A typed serde call naming an imported type reads the type that module imports, where a same-named type another module or dependency package imported could take its place.
+- A typed serde call naming an imported type is no longer refused as having no encoding when another module declares a type of the same name that has none.
+- A field type spelled `crate::m::T` inside a dependency names that package's `T` for typed serde, so a dependency that declares two types of one name in different modules encodes and decodes its own, where the program refused it.
+- The JIT leaves a function that calls a binding item which calls Gossamer back on the VM; it compiled the function and stopped with `can't resolve symbol`.
+- `#[derive(Default)]` on a struct holding a newtype over a narrow integer or `f32` (`newtype WindowId = u32`) builds; the zero value converts from the newtype's own width instead of failing with `GT0066`.
+- A Linux release build of a program that links Rust bindings, its own or a dependency's, takes the dynamic glibc link a program with its own foreign declarations takes, so a binding over a C library (SDL, X11, Wayland) builds and loads as it does under `gos run`, where the static musl link failed to build it.
 - A native build on a host whose linker cannot pack relative relocations for its architecture no longer passes the option and warns on every link.
 - Native objects are shared between projects: a debug build compiles each dependency whole, names every symbol by its source path instead of by numbers the program chose, and compiles a generic's specialisations into each module that uses them, so a dependency's modules compile to the same objects in every program using them and a new program built on a library compiles only its own modules. The object cache moved from each project's `.gos-cache/ir-cache` to the user cache, and `gos cache` covers the builds `gos run` keeps.
 - A build links its executable beside the destination and moves it into place in one step, so a program running from that path keeps running and nothing starts a half-written binary.
@@ -21,8 +46,7 @@
 - Assigning a `Vec`, a `Map`, a `Set`, or a struct holding one from a binding or a field gives the target a value of its own on every tier, where native builds shared one vector or table between the two names and the VM shared nested maps; a container local each loop turn refills from a call no longer leaks the value it replaces.
 - A struct-variant literal may name its fields in any order on the VM, where a literal ordering them differently from an earlier one swapped their values.
 - A send on an unbuffered channel that a receiver took completes on the VM even when the receiver closes the channel at once, instead of failing with "send on closed channel".
-- A static `Vec`, `Map`, or `String` answered by value from a function stays intact on native builds, and on the VM changing a map answered from a static leaves the static as it was.
-- A `static mut` `Vec`, `Map`, or `String` answered by value from a function stays intact on native builds, and on the VM changing a map answered from a static leaves the static as it was.
+- A `static` or `static mut` `Vec`, `Map`, or `String` answered by value from a function stays intact on native builds, and on the VM changing a map answered from a static leaves the static as it was.
 
 ## 0.74.0 - Broader JIT, shared statics, structural comparison, and memory-safety fixes
 

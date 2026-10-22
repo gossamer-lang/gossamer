@@ -2147,9 +2147,10 @@ impl TypeChecker<'_> {
             B::F64 => self.tcx.float_ty(FloatTy::F64),
             B::Char => self.tcx.char_ty(),
             B::String => self.tcx.string_ty(),
+            // A binding answers a buffer of its own, which the caller owns.
             B::Bytes => {
                 let byte = self.tcx.int_ty(IntTy::U8);
-                self.tcx.intern(TyKind::Slice(byte))
+                self.tcx.intern(TyKind::Vec(byte))
             }
             B::Tuple(elems) => {
                 let elems = elems
@@ -2181,8 +2182,25 @@ impl TypeChecker<'_> {
                 })
             }
             B::Variant(arms) if arms.is_empty() => self.tcx.intern(TyKind::DynValue),
-            B::Variant(_) | B::Callback(..) | B::Opaque(_) | B::Any => return None,
+            B::Opaque(name) => return self.binding_struct_ty(name),
+            B::Variant(_) | B::Callback(..) | B::Any => return None,
         })
+    }
+
+    /// The program's own non-generic type named `name`, which a binding's
+    /// `#[derive(GosStruct)]` struct of that name crosses into.
+    pub(super) fn binding_struct_ty(&mut self, name: &str) -> Option<Ty> {
+        if let Some(ty) = self.enum_tys.get(name) {
+            return Some(*ty);
+        }
+        let def = *self.user_type_defs.get(name)?;
+        if self.struct_generic_arity.contains_key(&def) {
+            return None;
+        }
+        Some(self.tcx.intern(TyKind::Adt {
+            def,
+            substs: crate::Substs::from_types(std::iter::empty()),
+        }))
     }
 
     pub(super) fn check_stdlib_module_ret_ty(

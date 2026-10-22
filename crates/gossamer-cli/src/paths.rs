@@ -237,6 +237,15 @@ impl ProjectContext {
             .as_ref()
             .map(|result| result.as_ref().map_err(String::as_str))
     }
+
+    /// The manifest with the `[rust-bindings]` of every package the program
+    /// depends on merged in: what `gos run` loads and a native build links.
+    pub(crate) fn binding_manifest(&self) -> Option<std::result::Result<Manifest, &str>> {
+        let dir = self.manifest_dir().unwrap_or_else(|| PathBuf::from("."));
+        self.manifest_result().map(|result| {
+            result.map(|manifest| gossamer_pkg::bundle::with_dependency_bindings(manifest, &dir))
+        })
+    }
 }
 
 fn load_project_context(start: &Path) -> ProjectContext {

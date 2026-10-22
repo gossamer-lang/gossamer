@@ -1,0 +1,10 @@
+use bench_binding
+
+fn main() {
+    let text = "a string of some forty bytes, give or take"
+    let mut len = 0
+    for _ in 0..100000 {
+        len += bench_binding::echo(text).len()
+    }
+    println("{}", len)
+}

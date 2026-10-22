@@ -1879,16 +1879,17 @@ fn jit_module(
         builder.symbol(symbol.clone(), cell.addr());
     }
     let mut runtime_symbol_set = register_runtime_symbols(&mut builder);
-    // Register every `gos_binding_<...>` C-ABI thunk advertised by
-    // the binding crates. Without these, `JITModule::finalize_definitions`
-    // panics with `can't resolve symbol gos_binding_<...>` because
-    // the default libloading-based resolver only sees the dynamic
-    // symbol table, and Cargo binaries don't expose statically-linked
-    // `pub extern "C"` symbols there.
-    let leaked_binding_names = register_binding_symbols(&mut builder);
-    runtime_symbol_set.extend(leaked_binding_names);
+    // A binding loaded on demand is resolved when a body calling it is
+    // finalized, so a program whose JIT never compiles such a body never
+    // loads the library for the JIT.
+    runtime_symbol_set.extend(crate::native_symbols::lazy_binding_symbol_names());
     let libraries = foreign_libraries(filtered);
     builder.symbol_lookup_fn(Box::new(move |name| {
+        if name.starts_with("gos_binding_")
+            && let Some(addr) = crate::native_symbols::resolve_lazy_binding_symbol(name)
+        {
+            return Some(addr);
+        }
         gossamer_runtime::c_abi::ffi::resolve_symbol(name, &libraries)
     }));
     Ok((JITModule::new(builder), runtime_symbol_set))
@@ -2277,6 +2278,16 @@ fn body_jit_unsupported(body: &Body, tcx: &TyCtxt) -> bool {
     use gossamer_mir::{ConstValue, Operand, Rvalue, StatementKind, Terminator};
     use gossamer_types::Mutbl;
 
+    if calls_vm_binding(body, &crate::native_symbols::lazy_binding_symbol_names()) {
+        if std::env::var("GOS_JIT_TRACE").is_ok() {
+            eprintln!(
+                "jit: unsupported {} calls a calling-back binding",
+                body.name
+            );
+        }
+        return true;
+    }
+
     if body_has_oversized_fixed_aggregate(body, tcx) {
         if std::env::var("GOS_JIT_TRACE").is_ok() {
             eprintln!("jit: unsupported {} oversized fixed aggregate", body.name);
@@ -2402,6 +2413,20 @@ fn body_jit_unsupported(body: &Body, tcx: &TyCtxt) -> bool {
         }
     }
     false
+}
+
+/// Whether `body` calls a binding item that is not among the wire `symbols`
+/// native code can call: an item that calls Gossamer callables back runs on
+/// the VM, which native code cannot call into, so its caller stays there too.
+fn calls_vm_binding(body: &Body, symbols: &[&str]) -> bool {
+    use gossamer_mir::{ConstValue, Operand, Terminator};
+    body.blocks.iter().any(|block| {
+        matches!(
+            &block.terminator,
+            Terminator::Call { callee: Operand::Const(ConstValue::Str(name)), .. }
+                if name.starts_with("gos_binding_") && !symbols.contains(&name.as_str())
+        )
+    })
 }
 
 /// Whether a `gos_rt_str_append_bytes` call writes into a `&mut String`
@@ -3586,48 +3611,6 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         .collect()
 }
 
-/// Walks both binding-symbol registration paths and registers each
-/// `(name, addr)` with the JIT builder.
-///
-/// - [`crate::native_symbols::NATIVE_SYMBOLS`] - the link-time
-///   `linkme::distributed_slice` populated by
-///   `gossamer_binding::register_module!` for every binding item.
-/// - [`crate::native_symbols::native_symbols_snapshot`] - the
-///   runtime `Mutex<Vec>` registry populated by the legacy
-///   `force_link()` path. Kept for backward compatibility with
-///   bindings that publish from a runtime hook.
-///
-/// Returns the leaked `&'static str` names so the caller can fold
-/// them into the runtime-symbol set used by [`body_calls_jit_unsafe`] -
-/// that keeps bodies that call bindings eligible for JIT
-/// promotion (the `body_kinds` primitive-only filter still vetoes
-/// anything the dispatch trampoline can't marshal).
-fn register_binding_symbols(builder: &mut JITBuilder) -> Vec<&'static str> {
-    use std::collections::HashSet;
-
-    let mut names: Vec<&'static str> = Vec::new();
-    let mut seen: HashSet<&'static str> = HashSet::new();
-    // `linkme::DistributedSlice` doesn't impl `IntoIterator` for
-    // `&Self`; the explicit `.iter()` is the only way in.
-    #[allow(
-        clippy::explicit_iter_loop,
-        reason = "DistributedSlice has no &Self IntoIterator impl"
-    )]
-    for entry in crate::native_symbols::NATIVE_SYMBOLS.iter() {
-        if seen.insert(entry.name) {
-            builder.symbol(entry.name, (entry.addr_fn)());
-            names.push(entry.name);
-        }
-    }
-    for sym in crate::native_symbols::native_symbols_snapshot() {
-        if seen.insert(sym.name) {
-            builder.symbol(sym.name, sym.addr);
-            names.push(sym.name);
-        }
-    }
-    names
-}
-
 #[cfg(test)]
 mod promotion_report_tests {
     use super::{
@@ -3677,6 +3660,20 @@ mod promotion_report_tests {
             lent_slots: Vec::new(),
             address_params: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_call_to_a_calling_back_binding_keeps_its_body_on_the_vm() {
+        let mut tcx = TyCtxt::new();
+        let mut b = body("caller", tcx.unit(), false);
+        b.blocks[0].terminator = Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("gos_binding_host__call".to_string())),
+            args: Vec::new(),
+            destination: Place::local(Local(0)),
+            target: None,
+        };
+        assert!(super::calls_vm_binding(&b, &[]));
+        assert!(!super::calls_vm_binding(&b, &["gos_binding_host__call"]));
     }
 
     /// A looping body over one `&mut` parameter of `elem`'s vector.

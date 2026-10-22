@@ -1,9 +1,8 @@
 //! Tiny binding crate exposing string helpers to Gossamer code.
 //!
-//! The `register_module!` macro emits both an interpreter thunk
-//! (consumed by the bytecode VM) and a C-ABI thunk
-//! (`gos_binding_echo__shout`, etc.) used by the compiled-mode
-//! linker.
+//! The `register_module!` macro emits both a VM thunk (the bytecode VM
+//! calls it in the library `gos run` loads) and a C-ABI thunk
+//! (`gos_binding_echo__shout`, etc.) a native build links.
 
 use gossamer_binding::register_module;
 
@@ -26,7 +25,3 @@ register_module!(
     }
 );
 
-/// Linker hook required by the runner template.
-pub fn __bindings_force_link() {
-    binding::force_link();
-}

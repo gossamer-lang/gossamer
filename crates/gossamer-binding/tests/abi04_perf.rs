@@ -40,6 +40,7 @@ const ITERS: usize = 1_000;
 
 #[test]
 fn bytes_64k_round_trip_throughput() {
+    gossamer_binding::testing::install_host();
     let payload: Vec<u8> = (0..64 * 1024).map(|i| (i & 0xff) as u8).collect();
     let start = Instant::now();
     for _ in 0..ITERS {
@@ -59,6 +60,7 @@ fn bytes_64k_round_trip_throughput() {
 
 #[test]
 fn map_30_entries_round_trip_throughput() {
+    gossamer_binding::testing::install_host();
     let mut m: HashMap<String, String> = HashMap::with_capacity(30);
     for i in 0..30 {
         m.insert(format!("header-{i}"), format!("value-{i}"));
@@ -81,6 +83,7 @@ fn map_30_entries_round_trip_throughput() {
 
 #[test]
 fn dyn_value_depth_8_round_trip_throughput() {
+    gossamer_binding::testing::install_host();
     let mut v = DynValue::Int(42);
     for i in 0..8 {
         v = DynValue::Tagged {

@@ -1,0 +1,9 @@
+[project]
+id = "example.com/binding_shared_state"
+version = "0.1.0"
+
+[dependencies]
+
+[rust-bindings]
+bump_probe = { path = "../../example-external-libraries/shared_state/bump_probe" }
+read_probe = { path = "../../example-external-libraries/shared_state/read_probe" }

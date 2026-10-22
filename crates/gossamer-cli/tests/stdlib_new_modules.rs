@@ -57,7 +57,6 @@ fn drive(mut child: std::process::Child) -> (String, String, Option<i32>) {
 fn run_gos(src: &Path) -> (String, String, Option<i32>) {
     let child = Command::new(gos_bin())
         .arg("run")
-        .env("GOS_RUN_ENGINE", "vm")
         .arg(src)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

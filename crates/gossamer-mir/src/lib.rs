@@ -65,3 +65,20 @@ pub use opt::{
     optimise_for_jit_with_effects, optimise_with_effects, propagate_entry_bounds,
     report_bounds_sites, share_exit_tails, statement_count,
 };
+
+/// Whether any of `bodies` calls a `[rust-bindings]` item, which a native
+/// entry point then initialises before `main` runs.
+#[must_use]
+pub fn calls_bindings(bodies: &[Body]) -> bool {
+    bodies.iter().any(|body| {
+        body.blocks.iter().any(|block| {
+            matches!(
+                &block.terminator,
+                Terminator::Call {
+                    callee: Operand::Const(ConstValue::Str(name)),
+                    ..
+                } if name.starts_with("gos_binding_")
+            )
+        })
+    })
+}

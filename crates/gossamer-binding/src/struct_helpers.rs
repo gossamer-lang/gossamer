@@ -1,29 +1,19 @@
-//! Helpers shared with the `#[derive(GosStruct)]` proc-macro.
-//!
-//! The derive emits calls to these functions to materialise a
-//! `Value::Struct` without depending on `gossamer-ast` from the
-//! binding crate.
+//! Helpers the `#[derive(GosStruct)]` proc-macro emits calls to.
 
-use gossamer_interp::value::{StructFields, Value, intern_field_name};
+use crate::value::Value;
 
-/// Builds a `Value::Struct` with the supplied name and ordered
-/// field list. Field names are interned to `&'static str` on the
-/// way in so the wire layout matches `Value::struct_` exactly.
+/// A struct value named `name` with `fields`.
 #[must_use]
 pub fn build_struct(name: &str, fields: Vec<(String, Value)>) -> Value {
-    let mapped: Vec<(&'static str, Value)> = fields
-        .into_iter()
-        .map(|(k, v)| (intern_field_name(&k), v))
-        .collect();
-    Value::struct_(name, mapped)
+    Value::struct_(name, fields)
 }
 
-/// Looks up a struct's field value by name, returning
-/// `Value::Unit` if missing. Used by the derive's `FromGos`.
+/// The value of the field `name`, or the unit value when there is none.
 #[must_use]
-pub fn struct_field<'a>(fields: &'a StructFields, name: &str) -> &'a Value {
+pub fn struct_field<'a>(fields: &'a [(String, Value)], name: &str) -> &'a Value {
+    static UNIT: Value = Value::Unit;
     fields
         .iter()
-        .find_map(|(k, v)| if *k == name { Some(v) } else { None })
-        .unwrap_or(&Value::Unit)
+        .find_map(|(k, v)| (k == name).then_some(v))
+        .unwrap_or(&UNIT)
 }

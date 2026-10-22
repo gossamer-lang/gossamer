@@ -265,6 +265,17 @@ impl<T: AsRef<str>> TypedReader<T> {
         b
     }
 
+    /// The current value as a `char`: a string holding exactly one.
+    pub fn read_char(&mut self, message: &str) -> char {
+        let text = self.read_string(message);
+        let mut chars = text.chars();
+        let (Some(c), None) = (chars.next(), chars.next()) else {
+            self.fail(message);
+            return '\0';
+        };
+        c
+    }
+
     /// The current value as a string.
     pub fn read_string(&mut self, message: &str) -> String {
         let Some(Value::String(s)) = self.scalar() else {

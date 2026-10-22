@@ -29,58 +29,24 @@ use std::os::raw::c_char;
 
 use crate::conv::{Bytes, DynValue};
 use crate::types::Type;
+use crate::value::{
+    CallbackOrigin, CallbackRef, NativeDispatch, RuntimeError, RuntimeResult, Value,
+};
+use crate::wire_json::{Nested, WireJson};
 
-// Bring `gos_rt_gc_alloc` into scope. Defined in
-// `gossamer-runtime`'s `c_abi.rs`; the binding crate links it
-// transitively via `gossamer-interp`. Allocations from this
-// arena are what the runtime expects to read past for compound
-// types - matching domains is what makes Vec/String/Option/etc.
-// flow correctly through the compiled-mode boundary.
-unsafe extern "C" {
-    fn gos_rt_gc_alloc(size: u64) -> *mut u8;
-    fn gos_rt_vec_with_capacity(elem_bytes: u32, cap: i64) -> *mut GosVec;
-}
-
-/// Arena-backed allocator used by every compound `to_output`
-/// path. Returns a raw pointer (not `Box`) so the runtime's
-/// `gos_rt_*` readers can dereference it safely; the runtime
-/// owns reclamation via `gos_rt_gc_reset`.
-///
-/// Rounds the request up to a multiple of 8 bytes. The
-/// underlying bump allocator is byte-aligned, so without this
-/// rounding a header struct following a non-multiple-of-8
-/// allocation (e.g. a 13-byte cstring) would land at a
-/// misaligned offset and trip `ptr::copy_nonoverlapping`'s
-/// alignment precondition. 8 bytes covers every shape this
-/// crate writes (`GosVec`, `GosVariant`, `GosTuple`,
-/// `GosVariantValue`).
-fn arena_alloc(bytes: usize) -> *mut u8 {
-    if bytes == 0 {
+/// Moves `items` into a field array the runtime's allocator made, laid
+/// out as the `Box<[T]>` the runtime frees it as; null when empty.
+fn host_slice<T: Copy>(items: &[T]) -> *mut T {
+    if items.is_empty() {
         return std::ptr::null_mut();
     }
-    let aligned = bytes.div_ceil(8) * 8;
-    // SAFETY: `gos_rt_gc_alloc` is part of `gossamer-runtime`'s
-    // C-ABI surface; the binding's staticlib links it. Returns a
-    // pointer into a thread-local arena valid until the next
-    // `gos_rt_gc_reset` (the runtime's tick boundary).
-    unsafe { gos_rt_gc_alloc(aligned as u64) }
-}
-
-/// Allocates one `T`-shaped slot in the arena, writes `value`
-/// into it, and returns the pointer. Used to manufacture
-/// header structs (`GosVec`, `GosVariant`, `GosTuple`,
-/// `GosVariantValue`) without going through Box.
-fn arena_box<T>(value: T) -> *mut T {
-    let p = arena_alloc(std::mem::size_of::<T>()).cast::<T>();
+    let Ok(layout) = std::alloc::Layout::array::<T>(items.len()) else {
+        return std::ptr::null_mut();
+    };
+    let p = crate::host::alloc(layout.size(), layout.align()).cast::<T>();
     if !p.is_null() {
-        // SAFETY: `p` is a fresh arena allocation aligned for
-        // `T` (the runtime's bump arena returns word-aligned
-        // pointers, which suffices for every shape we
-        // manufacture here - `GosVec`, `GosVariant`, etc. all
-        // have alignment ≤ 8).
-        unsafe {
-            std::ptr::write(p, value);
-        }
+        // SAFETY: `p` is a fresh allocation for `items.len()` values of `T`.
+        unsafe { std::ptr::copy_nonoverlapping(items.as_ptr(), p, items.len()) };
     }
     p
 }
@@ -152,7 +118,7 @@ pub union GosVariantPayload {
     pub bool_: bool,
     /// `char` payload (`u32` Unicode code point).
     pub char_: u32,
-    /// String payload (NUL-terminated, arena-allocated).
+    /// String payload: a runtime string the receiver owns.
     pub string: *mut c_char,
     /// Nested vec payload.
     pub vec: *mut GosVec,
@@ -182,10 +148,8 @@ pub struct GosTuple {
 
 /// Aggregate matching the runtime's `Bytes` ABI.
 ///
-/// ABI 0.4. Header lives on the heap (boxed via `Box::into_raw`)
-/// so the runtime's `gos_rt_bytes_free` reclaims it the same way
-/// `GosVec` is reclaimed. Data buffer is a heap `Vec<u8>` whose
-/// pointer is leaked into `ptr` (cap = len in v1).
+/// The header and its buffer come from the runtime's allocator, laid out
+/// as the `Box<GosBytes>` and `Vec<u8>` (cap = len) the runtime frees.
 #[repr(C)]
 #[derive(Debug)]
 pub struct GosBytes {
@@ -212,8 +176,8 @@ pub struct GosBytes {
 /// transfer points. Pointers of this type MUST NOT be handed to
 /// `gos_rt_map_free` - that helper `Box::from_raw`s the runtime
 /// layout and would drop a `parking_lot::Mutex` over garbage. Use
-/// `gossamer_runtime::c_abi::gos_rt_binding_map_free` or let the
-/// GC arena reclaim the allocation.
+/// `gossamer_runtime::c_abi::gos_rt_binding_map_free`, which frees both
+/// halves and what their elements own.
 #[repr(C)]
 #[derive(Debug)]
 pub struct BindingGosMap {
@@ -236,14 +200,14 @@ pub use BindingGosMap as GosMap;
 
 /// Aggregate matching the runtime's `Variant` ABI.
 ///
-/// ABI 0.4. Carries an arm name (NUL-terminated, arena-allocated)
+/// ABI 0.4. Carries an arm name (a NUL-terminated runtime string)
 /// plus a payload list. The arm name is the only piece of
 /// metadata runtime code needs to dispatch on; payload typing is
 /// the binding signature's responsibility.
 #[repr(C)]
 #[derive(Debug)]
 pub struct GosDynVariant {
-    /// Arm name as a NUL-terminated C string (arena-allocated).
+    /// Arm name as a NUL-terminated runtime string.
     pub name: *const c_char,
     /// Payload count.
     pub payload_len: i32,
@@ -295,6 +259,10 @@ pub trait BindingAbi: Sized {
     /// pick the matching pack/unpack lowering.
     const TYPE: Type;
 
+    /// Whether the value crosses as JSON text ([`crate::wire_json`]), which
+    /// the caller's generated walk writes or reads on every tier.
+    const JSON: bool = false;
+
     /// Materialises the Rust value from its `Input` shape. Called
     /// at the start of the macro-generated thunk.
     ///
@@ -308,6 +276,22 @@ pub trait BindingAbi: Sized {
     /// the end of the macro-generated thunk to hand the value
     /// back to the calling Gossamer code.
     fn to_output(self) -> Self::Output;
+
+    /// The value a [`Self::JSON`] type's text spells, for a VM call, which
+    /// passes the same text the compiled tiers do.
+    ///
+    /// # Errors
+    /// The text does not spell a value of this type, or the type does not
+    /// cross as text.
+    fn read_wire_text(text: &str) -> Result<Self, String> {
+        let _ = text;
+        Err("this type does not cross as text".to_string())
+    }
+
+    /// The text a [`Self::JSON`] type crosses as; empty for any other type.
+    fn write_wire_text(&self) -> String {
+        String::new()
+    }
 }
 
 // --- Primitive impls ------------------------------------------------
@@ -406,22 +390,12 @@ impl BindingAbi for String {
     }
 
     fn to_output(self) -> *mut c_char {
-        // Strip interior NULs so the C-string view stops at our
-        // explicit terminator. Allocate `len + 1` arena bytes,
-        // copy payload, write trailing NUL.
-        let bytes: Vec<u8> = self.into_bytes().into_iter().filter(|b| *b != 0).collect();
-        let total = bytes.len() + 1;
-        let p = arena_alloc(total);
-        if p.is_null() {
-            return std::ptr::null_mut();
+        // A NUL ends the text where a reader of the C string stops, so
+        // interior ones are left out.
+        if self.contains('\0') {
+            return crate::host::str_new(&self.replace('\0', ""));
         }
-        // SAFETY: arena allocation is `total` bytes; we write
-        // exactly `total` bytes (`bytes.len()` payload + NUL).
-        unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
-            *p.add(bytes.len()) = 0;
-        }
-        p.cast::<c_char>()
+        crate::host::str_new(&self)
     }
 }
 
@@ -432,12 +406,12 @@ impl BindingAbi for String {
 /// Binding outputs must go through the runtime allocator: the header carries
 /// a versioned owner with its generation and destructor identity, so a later
 /// compiled-tier drop never needs to infer provenance from the header address.
-fn make_gos_vec<T: Copy>(elements: &[T]) -> *mut GosVec {
+fn make_gos_vec<T: Copy>(elements: &[T], elem_kind: u8) -> *mut GosVec {
     let elem_bytes = u32::try_from(std::mem::size_of::<T>()).unwrap_or(0);
     let len = i64::try_from(elements.len()).unwrap_or(0);
     // SAFETY: runtime allocator returns a header valid for this ABI prefix;
     // copying `T: Copy` bytes into its reserved buffer preserves the element.
-    let out = unsafe { gos_rt_vec_with_capacity(elem_bytes, len) };
+    let out = crate::host::vec_with_capacity(elem_bytes, len, elem_kind).cast::<GosVec>();
     if out.is_null() || elements.is_empty() {
         return out;
     }
@@ -547,28 +521,6 @@ unsafe fn read_gos_vec_bools(p: *const GosVec) -> Vec<bool> {
         .collect()
 }
 
-unsafe fn read_gos_vec_vec_i64(p: *const GosVec) -> Vec<Vec<i64>> {
-    if p.is_null() {
-        return Vec::new();
-    }
-    let header = unsafe { &*p };
-    let (len, stride) = vec_len_stride(header);
-    if header.ptr.is_null() || len == 0 {
-        return Vec::new();
-    }
-    // Inner-vec slots are pointers - same corrupt-header guard as
-    // `read_gos_vec_strings`.
-    if stride < 8 {
-        return Vec::new();
-    }
-    (0..len)
-        .map(|i| {
-            let inner = unsafe { vec_elem_word(header, i, stride) } as usize as *const GosVec;
-            unsafe { read_gos_vec_i64(inner) }
-        })
-        .collect()
-}
-
 impl BindingAbi for Vec<i64> {
     type Input = *const GosVec;
     type Output = *mut GosVec;
@@ -579,7 +531,7 @@ impl BindingAbi for Vec<i64> {
     }
 
     fn to_output(self) -> *mut GosVec {
-        make_gos_vec(&self)
+        make_gos_vec(&self, gossamer_binding_abi::vec_kind::PRIMITIVE)
     }
 }
 
@@ -593,7 +545,7 @@ impl BindingAbi for Vec<f64> {
     }
 
     fn to_output(self) -> *mut GosVec {
-        make_gos_vec(&self)
+        make_gos_vec(&self, gossamer_binding_abi::vec_kind::PRIMITIVE)
     }
 }
 
@@ -608,7 +560,7 @@ impl BindingAbi for Vec<bool> {
 
     fn to_output(self) -> *mut GosVec {
         let bytes: Vec<u8> = self.into_iter().map(u8::from).collect();
-        make_gos_vec(&bytes)
+        make_gos_vec(&bytes, gossamer_binding_abi::vec_kind::PRIMITIVE)
     }
 }
 
@@ -623,22 +575,7 @@ impl BindingAbi for Vec<String> {
 
     fn to_output(self) -> *mut GosVec {
         let ptrs: Vec<*mut c_char> = self.into_iter().map(BindingAbi::to_output).collect();
-        make_gos_vec(&ptrs)
-    }
-}
-
-impl BindingAbi for Vec<Vec<i64>> {
-    type Input = *const GosVec;
-    type Output = *mut GosVec;
-    const TYPE: Type = Type::Vec(&Type::Vec(&Type::I64));
-
-    unsafe fn from_input(input: *const GosVec) -> Self {
-        unsafe { read_gos_vec_vec_i64(input) }
-    }
-
-    fn to_output(self) -> *mut GosVec {
-        let ptrs: Vec<*mut GosVec> = self.into_iter().map(BindingAbi::to_output).collect();
-        make_gos_vec(&ptrs)
+        make_gos_vec(&ptrs, gossamer_binding_abi::vec_kind::STRING)
     }
 }
 
@@ -662,21 +599,8 @@ unsafe fn variant_value_string(s: String) -> GosVariantValue {
 
 fn make_variant(tag: i32, payload: Vec<GosVariantValue>) -> *mut GosVariant {
     let payload_len = i32::try_from(payload.len()).unwrap_or(0);
-    let payload_ptr: *mut GosVariantValue = if payload.is_empty() {
-        std::ptr::null_mut()
-    } else {
-        let bytes = std::mem::size_of_val(payload.as_slice());
-        let buf = arena_alloc(bytes).cast::<GosVariantValue>();
-        if !buf.is_null() {
-            // SAFETY: arena buffer is `bytes` long, fresh, and
-            // exclusively ours; payload slice is non-overlapping.
-            unsafe {
-                std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
-            }
-        }
-        buf
-    };
-    arena_box(GosVariant {
+    let payload_ptr: *mut GosVariantValue = host_slice(&payload);
+    host_box(GosVariant {
         tag,
         payload_len,
         payload: payload_ptr,
@@ -731,38 +655,53 @@ impl BindingAbi for Option<i64> {
     }
 }
 
-impl BindingAbi for Result<i64, String> {
+impl<E: WireError> BindingAbi for Result<i64, E> {
     type Input = *const GosVariant;
     type Output = *mut GosVariant;
-    const TYPE: Type = Type::Result(&Type::I64, &Type::String);
+    const TYPE: Type = Type::Result(&Type::I64, &E::TYPE);
 
     unsafe fn from_input(input: *const GosVariant) -> Self {
-        unsafe { read_result_i64_string(input) }
+        unsafe { read_result_i64_string(input) }.map_err(E::from_wire)
     }
 
     fn to_output(self) -> *mut GosVariant {
         match self {
             Ok(v) => make_variant(1, vec![unsafe { variant_value_i64(v) }]),
-            Err(e) => make_variant(0, vec![unsafe { variant_value_string(e) }]),
+            Err(e) => make_variant(0, vec![unsafe { variant_value_string(e.into_wire()) }]),
         }
     }
 }
 
 // --- ABI 0.4: Bytes (Vec<u8> via the `Bytes` newtype) ----------------
 
-/// Builds a `GosBytes` header on the heap; the data buffer is
-/// `Vec::leak`'d so the runtime's `gos_rt_bytes_free` can reclaim
-/// it with `Vec::from_raw_parts`. Arena allocation is not used
-/// here because reclamation happens at GC-reset boundaries that
-/// the binding may outlive (e.g. an HTTP body returned to a
-/// long-running connection handler).
+/// Builds a `GosBytes` header and its buffer with the runtime's allocator,
+/// laid out as the `Box<GosBytes>` and `Vec<u8>` the runtime frees them as.
 fn make_gos_bytes(bytes: Vec<u8>) -> *mut GosBytes {
-    let len = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
-    let cap = i64::try_from(bytes.capacity()).unwrap_or(len);
-    let mut boxed = bytes.into_boxed_slice();
-    let ptr = boxed.as_mut_ptr();
-    std::mem::forget(boxed);
-    Box::into_raw(Box::new(GosBytes { len, cap, ptr }))
+    let len = bytes.len();
+    let ptr = if len == 0 {
+        std::ptr::NonNull::<u8>::dangling().as_ptr()
+    } else {
+        let buf = crate::host::alloc(len, 1);
+        if buf.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: `buf` holds `len` fresh bytes.
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len) };
+        buf
+    };
+    let len = i64::try_from(len).unwrap_or(i64::MAX);
+    host_box(GosBytes { len, cap: len, ptr })
+}
+
+/// Moves `value` into memory the runtime's allocator made, laid out as the
+/// `Box<T>` the runtime frees it as.
+fn host_box<T>(value: T) -> *mut T {
+    let p = crate::host::alloc(std::mem::size_of::<T>(), std::mem::align_of::<T>()).cast::<T>();
+    if !p.is_null() {
+        // SAFETY: `p` is a fresh allocation sized and aligned for `T`.
+        unsafe { std::ptr::write(p, value) };
+    }
+    p
 }
 
 unsafe fn read_gos_bytes(p: *const GosBytes) -> Vec<u8> {
@@ -796,18 +735,23 @@ impl BindingAbi for Bytes {
 
 /// Builds a `BindingGosMap` from parallel-vec halves. Each half is
 /// a heap-owned `GosVec` produced through [`make_gos_vec`]; the
-/// outer `BindingGosMap` is heap-allocated via `Box::into_raw`.
+/// outer `BindingGosMap` comes from the runtime's allocator.
 /// Reclamation is the consumer's responsibility - bindings MUST
 /// NOT call `gos_rt_map_free` on this pointer (that helper
 /// targets the runtime's incompatible `GosMap` layout); use
 /// `gos_rt_binding_map_free` instead.
-fn make_gos_map<K: Copy, V: Copy>(keys: &[K], values: &[V]) -> *mut BindingGosMap {
-    let keys_ptr = make_gos_vec(keys);
-    let values_ptr = make_gos_vec(values);
-    Box::into_raw(Box::new(BindingGosMap {
+fn make_gos_map<K: Copy, V: Copy>(
+    keys: &[K],
+    values: &[V],
+    key_kind: u8,
+    value_kind: u8,
+) -> *mut BindingGosMap {
+    let keys_ptr = make_gos_vec(keys, key_kind);
+    let values_ptr = make_gos_vec(values, value_kind);
+    host_box(BindingGosMap {
         keys: keys_ptr,
         values: values_ptr,
-    }))
+    })
 }
 
 unsafe fn read_gos_map_keys_values_i64(p: *const BindingGosMap) -> (Vec<i64>, Vec<i64>) {
@@ -865,7 +809,12 @@ impl BindingAbi for std::collections::HashMap<i64, i64> {
             keys.push(k);
             values.push(v);
         }
-        make_gos_map(&keys, &values)
+        make_gos_map(
+            &keys,
+            &values,
+            gossamer_binding_abi::vec_kind::PRIMITIVE,
+            gossamer_binding_abi::vec_kind::PRIMITIVE,
+        )
     }
 }
 
@@ -894,7 +843,12 @@ impl BindingAbi for std::collections::HashMap<String, String> {
             key_ptrs.push(k.to_output());
             val_ptrs.push(v.to_output());
         }
-        make_gos_map(&key_ptrs, &val_ptrs)
+        make_gos_map(
+            &key_ptrs,
+            &val_ptrs,
+            gossamer_binding_abi::vec_kind::STRING,
+            gossamer_binding_abi::vec_kind::STRING,
+        )
     }
 }
 
@@ -923,28 +877,19 @@ impl BindingAbi for std::collections::HashMap<String, i64> {
             key_ptrs.push(k.to_output());
             values.push(v);
         }
-        make_gos_map(&key_ptrs, &values)
+        make_gos_map(
+            &key_ptrs,
+            &values,
+            gossamer_binding_abi::vec_kind::STRING,
+            gossamer_binding_abi::vec_kind::PRIMITIVE,
+        )
     }
 }
 
 // --- ABI 0.4: Variant (DynValue) -------------------------------------
 
-fn arena_cstr(s: &str) -> *const c_char {
-    let bytes = s.as_bytes();
-    // Strip interior NULs for safe C-string round-trip.
-    let clean: Vec<u8> = bytes.iter().copied().filter(|b| *b != 0).collect();
-    let total = clean.len() + 1;
-    let p = arena_alloc(total);
-    if p.is_null() {
-        return std::ptr::null();
-    }
-    // SAFETY: arena allocation is `total` bytes; we write exactly
-    // `clean.len()` payload bytes plus one NUL.
-    unsafe {
-        std::ptr::copy_nonoverlapping(clean.as_ptr(), p, clean.len());
-        *p.add(clean.len()) = 0;
-    }
-    p.cast::<c_char>()
+fn host_cstr(s: &str) -> *const c_char {
+    String::from(s).to_output().cast_const()
 }
 
 fn dyn_to_variant_value(d: &DynValue) -> GosVariantValue {
@@ -977,13 +922,12 @@ fn dyn_to_variant_value(d: &DynValue) -> GosVariantValue {
         },
         DynValue::Bytes(buf) => {
             // Bytes route through the i64-array vec for v0.4 wire
-            // compatibility; the runtime sees them as a typed
-            // packed `Vec<i64>` on the interp tier and as a
-            // `GosBytes` on the compiled tier (via the Bytes
-            // BindingAbi). Here, inside a DynValue payload, we
+            // compatibility; a `Bytes` value of its own crosses as a
+            // `GosBytes` (via the Bytes BindingAbi). Here, inside a
+            // DynValue payload, we
             // pack them as a nested vec.
             let widened: Vec<i64> = buf.iter().map(|b| i64::from(*b)).collect();
-            let vec = make_gos_vec(&widened);
+            let vec = make_gos_vec(&widened, gossamer_binding_abi::vec_kind::PRIMITIVE);
             GosVariantValue {
                 tag: 5,
                 data: GosVariantPayload { vec },
@@ -994,21 +938,8 @@ fn dyn_to_variant_value(d: &DynValue) -> GosVariantValue {
             // For variant-of-variant nesting, we wrap the list
             // as a tuple-shape payload.
             let len = i32::try_from(payload.len()).unwrap_or(0);
-            let fields_ptr: *mut GosVariantValue = if payload.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                let bytes = std::mem::size_of_val(payload.as_slice());
-                let buf = arena_alloc(bytes).cast::<GosVariantValue>();
-                if !buf.is_null() {
-                    // SAFETY: fresh arena buffer, payload slice
-                    // owned by this call; non-overlapping.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
-                    }
-                }
-                buf
-            };
-            let tuple = arena_box(GosTuple {
+            let fields_ptr: *mut GosVariantValue = host_slice(&payload);
+            let tuple = host_box(GosTuple {
                 len,
                 fields: fields_ptr,
             });
@@ -1051,21 +982,8 @@ fn dyn_to_variant_value(d: &DynValue) -> GosVariantValue {
 
 fn tuple_to_variant_value(items: &[GosVariantValue]) -> GosVariantValue {
     let len = i32::try_from(items.len()).unwrap_or(0);
-    let fields_ptr: *mut GosVariantValue = if items.is_empty() {
-        std::ptr::null_mut()
-    } else {
-        let bytes = std::mem::size_of_val(items);
-        let buf = arena_alloc(bytes).cast::<GosVariantValue>();
-        if !buf.is_null() {
-            // SAFETY: fresh arena buffer; items slice owned by
-            // the caller; non-overlapping.
-            unsafe {
-                std::ptr::copy_nonoverlapping(items.as_ptr(), buf, items.len());
-            }
-        }
-        buf
-    };
-    let tuple = arena_box(GosTuple {
+    let fields_ptr: *mut GosVariantValue = host_slice(items);
+    let tuple = host_box(GosTuple {
         len,
         fields: fields_ptr,
     });
@@ -1075,25 +993,12 @@ fn tuple_to_variant_value(items: &[GosVariantValue]) -> GosVariantValue {
     }
 }
 
-/// Builds a `GosDynVariant` (an arm-named variant) on the arena.
+/// Builds a `GosDynVariant` (an arm-named variant) the receiver owns.
 fn make_dyn_variant(name: &str, payload: Vec<GosVariantValue>) -> *mut GosDynVariant {
-    let name_ptr = arena_cstr(name);
+    let name_ptr = host_cstr(name);
     let payload_len = i32::try_from(payload.len()).unwrap_or(0);
-    let payload_ptr: *mut GosVariantValue = if payload.is_empty() {
-        std::ptr::null_mut()
-    } else {
-        let bytes = std::mem::size_of_val(payload.as_slice());
-        let buf = arena_alloc(bytes).cast::<GosVariantValue>();
-        if !buf.is_null() {
-            // SAFETY: fresh arena buffer, payload slice owned by
-            // this call; non-overlapping.
-            unsafe {
-                std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
-            }
-        }
-        buf
-    };
-    arena_box(GosDynVariant {
+    let payload_ptr: *mut GosVariantValue = host_slice(&payload);
+    host_box(GosDynVariant {
         name: name_ptr,
         payload_len,
         pad: 0,
@@ -1164,9 +1069,9 @@ fn read_variant_value(v: &GosVariantValue) -> DynValue {
             5 => {
                 let vec = v.data.vec;
                 let items = read_gos_vec_i64(vec);
-                // Heuristic: an i64-vec whose every element is in
-                // u8 range is treated as Bytes - matching the
-                // interp-tier policy in `conv.rs::value_to_dyn`.
+                // An i64-vec whose every element is in u8 range is
+                // treated as Bytes, as `conv.rs::value_to_dyn` reads the
+                // same vector from a VM call.
                 if items.iter().all(|x| (0..=255).contains(x)) {
                     DynValue::Bytes(items.iter().map(|x| *x as u8).collect())
                 } else {
@@ -1244,41 +1149,13 @@ impl BindingAbi for DynValue {
     }
 }
 
-// --- ABI 0.4: Callback (compiled-tier) -------------------------------
+// --- Callbacks on the compiled tiers -----------------------------------
 //
-// On the compiled tier, a Gossamer-side callable is represented
-// as a u64 handle into a per-call dispatch table. The codegen
-// emits the registration before the binding call and the cleanup
-// after - bindings receive only the handle.
-//
-// For ABI 0.4, the compiled-tier invocation surface is the
-// runtime helper `gos_rt_callback_invoke` declared below. Calling
-// it from inside a binding requires the binding to use the
-// returned handle to thread back into the Gossamer scheduler.
-// The handle is INVALID after the binding fn returns; bindings
-// MUST NOT retain it.
+// A compiled caller registers each callable argument with the runtime's
+// callback registry and passes the binding its handle; the handle lives
+// while the call runs, and while a `PersistentCallback` holds a share.
 
-unsafe extern "C" {
-    /// Compiled-tier callback dispatcher. Returns 0 on success,
-    /// non-zero on error. Result is written into `result_out`
-    /// (caller-allocated `GosVariantValue`).
-    #[allow(dead_code)]
-    fn gos_rt_callback_invoke(
-        handle: u64,
-        args: *const GosVariantValue,
-        args_len: u32,
-        result_out: *mut GosVariantValue,
-    ) -> i32;
-}
-
-/// Compiled-tier handle to a Gossamer-side callback. ABI 0.4
-/// passes this as a `u64` over the wire.
-///
-/// This is the compiled-tier counterpart to
-/// [`crate::conv::BindingCallback`] (the interp-tier wrapper).
-/// Binding code that needs to work in both tiers should accept
-/// `BindingCallback` for the interp path and use this type via
-/// the `BindingAbi` impl for the compiled path.
+/// Compiled-tier handle to a Gossamer-side callback, passed as a `u64`.
 #[derive(Debug, Clone, Copy)]
 pub struct NativeCallback {
     /// Opaque dispatch-table handle.
@@ -1289,10 +1166,8 @@ impl NativeCallback {
     /// Invokes the callback with `args` and returns the result.
     ///
     /// # Safety
-    /// `self.handle` must be a valid handle handed to the
-    /// binding by the codegen during the current binding call.
-    /// Calling after the binding fn returns is undefined
-    /// behaviour.
+    /// `self.handle` must be a handle the runtime still holds: one handed to
+    /// the binding call running now, or one a `PersistentCallback` keeps.
     pub unsafe fn invoke_raw(&self, args: &[GosVariantValue]) -> Result<GosVariantValue, i32> {
         let mut result = GosVariantValue {
             tag: 0,
@@ -1304,10 +1179,15 @@ impl NativeCallback {
             args.as_ptr()
         };
         let args_len = u32::try_from(args.len()).unwrap_or(0);
-        // SAFETY: the contract above plus the codegen's guarantee
-        // that gos_rt_callback_invoke is reachable in the runtime.
-        let rc =
-            unsafe { gos_rt_callback_invoke(self.handle, args_ptr, args_len, &raw mut result) };
+        // SAFETY: the contract above; `args` and `result` outlive the call.
+        let rc = unsafe {
+            crate::host::callback_invoke(
+                self.handle,
+                args_ptr.cast(),
+                args_len,
+                (&raw mut result).cast(),
+            )
+        };
         if rc == 0 { Ok(result) } else { Err(rc) }
     }
 }
@@ -1326,27 +1206,21 @@ impl BindingAbi for NativeCallback {
     }
 }
 
-// `NativeCallback` is a compiled-tier-only handle. The interp
-// path materialises it from a `Value::Int(handle as i64)` and
-// returns it as the same shape. Bindings that want a true
-// interp-side callable should declare `BindingCallback` instead.
 impl crate::conv::FromGos for NativeCallback {
-    fn from_gos(
-        value: &gossamer_interp::value::Value,
-    ) -> gossamer_interp::value::RuntimeResult<Self> {
+    fn from_gos(value: &Value) -> RuntimeResult<Self> {
         match value {
-            gossamer_interp::value::Value::Int(i) => Ok(Self { handle: *i as u64 }),
-            gossamer_interp::value::Value::Uint(u) => Ok(Self { handle: *u }),
-            other => Err(gossamer_interp::value::RuntimeError::Type(format!(
-                "expected callback handle (u64), found {other:?}"
-            ))),
+            Value::Int(i) => Ok(Self { handle: *i as u64 }),
+            Value::Callback(callback) => Ok(Self {
+                handle: callback.handle,
+            }),
+            other => crate::conv::type_err("callback handle (u64)", other),
         }
     }
 }
 
 impl crate::conv::ToGos for NativeCallback {
-    fn to_gos(self) -> gossamer_interp::value::Value {
-        gossamer_interp::value::Value::Int(self.handle as i64)
+    fn to_gos(self) -> Value {
+        Value::Int(self.handle as i64)
     }
 }
 
@@ -1384,99 +1258,50 @@ impl BindingAbi for crate::conv::PersistentCallback {
     }
 }
 
-// --- Callbacks on the compiled tiers ---------------------------------
+/// Marks the running thread as inside a wire thunk while the guard lives.
+#[doc(hidden)]
+#[must_use]
+pub fn enter_wire_call() -> impl Drop {
+    crate::host::InCall::enter()
+}
 
-unsafe extern "C" {
-    /// Releases a runtime string the compiled callback answered.
-    fn gos_rt_str_free(s: *mut c_char);
+/// Records the panic a wire thunk caught, for its compiled caller to raise
+/// once the thunk returns.
+#[doc(hidden)]
+pub fn raise_wire_panic(payload: &(dyn std::any::Any + Send)) {
+    crate::host::raise_panic(&crate::abi::panic_message(payload));
 }
 
 /// Wire tag for a callback that answers the unit value.
 const WIRE_TAG_UNIT: i32 = 9;
 
-/// The dispatch a `cb_fn` binding receives on the compiled tiers.
-///
-/// A compiled program has no interpreter to re-enter. A callback argument
-/// arrives as the runtime handle [`crate::PersistentCallback::invoke`] and
-/// [`crate::BindingCallback::invoke`] call through, so this dispatch answers
-/// only that nothing here can run interpreted code.
+/// The dispatch a `cb_fn` binding receives on the compiled tiers: callables
+/// arrive as runtime handles, which it calls through the runtime's registry.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CompiledDispatch;
 
-fn no_interpreter<T>() -> gossamer_interp::value::RuntimeResult<T> {
-    Err(gossamer_interp::value::RuntimeError::Type(
-        "a compiled program has no interpreter to call into; call a callback through its \
-         `invoke`"
-            .to_string(),
-    ))
-}
-
-impl gossamer_interp::value::NativeDispatch for CompiledDispatch {
-    fn call_fn(
-        &mut self,
-        _name: &str,
-        _args: Vec<gossamer_interp::value::Value>,
-    ) -> gossamer_interp::value::RuntimeResult<gossamer_interp::value::Value> {
-        no_interpreter()
-    }
-
-    fn has_fn(&self, _name: &str) -> bool {
-        false
-    }
-
-    fn call_value(
-        &mut self,
-        _callee: &gossamer_interp::value::Value,
-        _args: Vec<gossamer_interp::value::Value>,
-    ) -> gossamer_interp::value::RuntimeResult<gossamer_interp::value::Value> {
-        no_interpreter()
-    }
-
-    fn spawn_callable(
-        &mut self,
-        _callable: gossamer_interp::value::Value,
-        _args: Vec<gossamer_interp::value::Value>,
-    ) -> gossamer_interp::value::RuntimeResult<()> {
-        no_interpreter()
-    }
-
-    fn spawn_join(
-        &mut self,
-        _callable: gossamer_interp::value::Value,
-        _args: Vec<gossamer_interp::value::Value>,
-    ) -> gossamer_interp::value::RuntimeResult<gossamer_interp::value::Value> {
-        no_interpreter()
-    }
-
-    fn spawn_with_outcome(
-        &mut self,
-        _target: gossamer_interp::value::SpawnTarget,
-        _args: Vec<gossamer_interp::value::Value>,
-        sink: Box<
-            dyn FnOnce(gossamer_interp::value::RuntimeResult<gossamer_interp::value::Value>) + Send,
-        >,
-    ) {
-        sink(no_interpreter());
+impl NativeDispatch for CompiledDispatch {
+    fn invoke_callback(&mut self, callback: CallbackRef, args: Vec<Value>) -> RuntimeResult<Value> {
+        match callback.origin {
+            CallbackOrigin::Compiled => invoke_compiled_callback(callback.handle, &args),
+            CallbackOrigin::Vm => Err(RuntimeError::Unsupported(
+                "a VM callable called from compiled code",
+            )),
+        }
     }
 }
 
 /// Calls the compiled callback registered under `handle` with `args` and
 /// answers its result.
 ///
-/// The handle is valid for the binding call that received it: the compiled
-/// caller releases it when that call returns, after which this reports an
-/// error rather than calling anything.
-pub(crate) fn invoke_compiled_callback(
-    handle: u64,
-    args: &[gossamer_interp::value::Value],
-) -> gossamer_interp::value::RuntimeResult<gossamer_interp::value::Value> {
-    use gossamer_interp::value::{RuntimeError, Value};
+/// A handle the runtime no longer holds reports an error rather than
+/// calling anything.
+pub(crate) fn invoke_compiled_callback(handle: u64, args: &[Value]) -> RuntimeResult<Value> {
     let mut strings: Vec<std::ffi::CString> = Vec::new();
     let mut wire: Vec<GosVariantValue> = Vec::with_capacity(args.len());
     for arg in args {
         let (tag, data) = match arg {
             Value::Int(n) => (0, GosVariantPayload { i64_: *n }),
-            Value::Uint(n) => (0, GosVariantPayload { i64_: *n as i64 }),
             Value::Float(f) => (1, GosVariantPayload { f64_: *f }),
             Value::Bool(b) => (
                 2,
@@ -1501,20 +1326,20 @@ pub(crate) fn invoke_compiled_callback(
             other => {
                 return Err(RuntimeError::Type(format!(
                     "a compiled callback takes integers, floats, bools, chars, and strings; \
-                     found {other:?}"
+                     found {}",
+                    other.kind()
                 )));
             }
         };
         wire.push(GosVariantValue { tag, data });
     }
     let callback = NativeCallback { handle };
-    // SAFETY: the handle was registered by the compiled caller for the
-    // duration of the binding call that received it, and the string
-    // arguments stay alive in `strings` until the call returns.
+    // SAFETY: the runtime checks the handle, and the string arguments stay
+    // alive in `strings` until the call returns.
     let result = unsafe { callback.invoke_raw(&wire) }.map_err(|code| {
         RuntimeError::Type(format!(
-            "callback {handle} could not be called (status {code}); a compiled callback is \
-             valid only during the binding call that received it"
+            "callback {handle} could not be called (status {code}); a compiled callback lives \
+             while its binding call runs or a PersistentCallback holds it"
         ))
     })?;
     drop(strings);
@@ -1532,7 +1357,7 @@ pub(crate) fn invoke_compiled_callback(
                 } else {
                     let text = CStr::from_ptr(ptr).to_string_lossy().into_owned();
                     // The callback answered an owned runtime string.
-                    gos_rt_str_free(ptr);
+                    crate::host::str_free(ptr);
                     Value::String(text.into())
                 }
             }
@@ -1561,7 +1386,7 @@ impl BindingAbi for Vec<u8> {
     }
 
     fn to_output(self) -> *mut GosVec {
-        make_gos_vec(&self)
+        make_gos_vec(&self, gossamer_binding_abi::vec_kind::PRIMITIVE)
     }
 }
 
@@ -1608,7 +1433,6 @@ const VAR_TAG_F64: i32 = 1;
 const VAR_TAG_BOOL: i32 = 2;
 const VAR_TAG_CHAR: i32 = 3;
 const VAR_TAG_STRING: i32 = 4;
-const VAR_TAG_VEC: i32 = 5;
 #[allow(dead_code, reason = "documents the GosVariantValue tag namespace")]
 const VAR_TAG_VARIANT: i32 = 6;
 #[allow(dead_code, reason = "documents the GosVariantValue tag namespace")]
@@ -1645,13 +1469,6 @@ unsafe fn variant_value_string_owned(s: String) -> GosVariantValue {
         data: GosVariantPayload {
             string: s.to_output(),
         },
-    }
-}
-
-unsafe fn variant_value_vec(p: *mut GosVec) -> GosVariantValue {
-    GosVariantValue {
-        tag: VAR_TAG_VEC,
-        data: GosVariantPayload { vec: p },
     }
 }
 
@@ -1778,301 +1595,128 @@ impl BindingAbi for Option<char> {
     }
 }
 
-impl BindingAbi for Option<Vec<i64>> {
-    type Input = *const GosVariant;
-    type Output = *mut GosVariant;
-    const TYPE: Type = Type::Option(&Type::Vec(&Type::I64));
-
-    unsafe fn from_input(input: *const GosVariant) -> Self {
-        let (tag, payload) = match unsafe { read_single_payload(input) } {
-            Some(x) => x,
-            None => return None,
-        };
-        if tag == 0 {
-            return None;
-        }
-        Some(unsafe { read_gos_vec_i64(payload.data.vec) })
-    }
-
-    fn to_output(self) -> *mut GosVariant {
-        match self {
-            None => make_variant(0, Vec::new()),
-            Some(v) => {
-                let inner = make_gos_vec(&v);
-                make_variant(1, vec![unsafe { variant_value_vec(inner) }])
-            }
-        }
-    }
-}
-
-impl BindingAbi for Option<Vec<String>> {
-    type Input = *const GosVariant;
-    type Output = *mut GosVariant;
-    const TYPE: Type = Type::Option(&Type::Vec(&Type::String));
-
-    unsafe fn from_input(input: *const GosVariant) -> Self {
-        let (tag, payload) = match unsafe { read_single_payload(input) } {
-            Some(x) => x,
-            None => return None,
-        };
-        if tag == 0 {
-            return None;
-        }
-        Some(unsafe { read_gos_vec_strings(payload.data.vec) })
-    }
-
-    fn to_output(self) -> *mut GosVariant {
-        match self {
-            None => make_variant(0, Vec::new()),
-            Some(v) => {
-                let ptrs: Vec<*mut c_char> = v.into_iter().map(BindingAbi::to_output).collect();
-                let inner = make_gos_vec(&ptrs);
-                make_variant(1, vec![unsafe { variant_value_vec(inner) }])
-            }
-        }
-    }
-}
-
 // --- Result<T, String> impls (additions) -----------------------------
 
-impl BindingAbi for Result<String, String> {
+impl<E: WireError> BindingAbi for Result<String, E> {
     type Input = *const GosVariant;
     type Output = *mut GosVariant;
-    const TYPE: Type = Type::Result(&Type::String, &Type::String);
+    const TYPE: Type = Type::Result(&Type::String, &E::TYPE);
 
     unsafe fn from_input(input: *const GosVariant) -> Self {
         let (tag, payload) = match unsafe { read_single_payload(input) } {
             Some(x) => x,
-            None => return Err(String::new()),
+            None => return Err(E::from_wire(String::new())),
         };
         let s = unsafe { String::from_input(payload.data.string) };
-        if tag == 1 { Ok(s) } else { Err(s) }
+        if tag == 1 {
+            Ok(s)
+        } else {
+            Err(E::from_wire(s))
+        }
     }
 
     fn to_output(self) -> *mut GosVariant {
         match self {
             Ok(s) => make_variant(1, vec![unsafe { variant_value_string_owned(s) }]),
-            Err(s) => make_variant(0, vec![unsafe { variant_value_string_owned(s) }]),
+            Err(s) => make_variant(
+                0,
+                vec![unsafe { variant_value_string_owned(s.into_wire()) }],
+            ),
         }
     }
 }
 
-impl BindingAbi for Result<bool, String> {
+impl<E: WireError> BindingAbi for Result<bool, E> {
     type Input = *const GosVariant;
     type Output = *mut GosVariant;
-    const TYPE: Type = Type::Result(&Type::Bool, &Type::String);
+    const TYPE: Type = Type::Result(&Type::Bool, &E::TYPE);
 
     unsafe fn from_input(input: *const GosVariant) -> Self {
         let (tag, payload) = match unsafe { read_single_payload(input) } {
             Some(x) => x,
-            None => return Err(String::new()),
+            None => return Err(E::from_wire(String::new())),
         };
         if tag == 1 {
             Ok(unsafe { payload.data.bool_ })
         } else {
-            Err(unsafe { String::from_input(payload.data.string) })
+            Err(E::from_wire(unsafe {
+                String::from_input(payload.data.string)
+            }))
         }
     }
 
     fn to_output(self) -> *mut GosVariant {
         match self {
             Ok(b) => make_variant(1, vec![unsafe { variant_value_bool(b) }]),
-            Err(s) => make_variant(0, vec![unsafe { variant_value_string_owned(s) }]),
+            Err(s) => make_variant(
+                0,
+                vec![unsafe { variant_value_string_owned(s.into_wire()) }],
+            ),
         }
     }
 }
 
-impl BindingAbi for Result<f64, String> {
+impl<E: WireError> BindingAbi for Result<f64, E> {
     type Input = *const GosVariant;
     type Output = *mut GosVariant;
-    const TYPE: Type = Type::Result(&Type::F64, &Type::String);
+    const TYPE: Type = Type::Result(&Type::F64, &E::TYPE);
 
     unsafe fn from_input(input: *const GosVariant) -> Self {
         let (tag, payload) = match unsafe { read_single_payload(input) } {
             Some(x) => x,
-            None => return Err(String::new()),
+            None => return Err(E::from_wire(String::new())),
         };
         if tag == 1 {
             Ok(unsafe { payload.data.f64_ })
         } else {
-            Err(unsafe { String::from_input(payload.data.string) })
+            Err(E::from_wire(unsafe {
+                String::from_input(payload.data.string)
+            }))
         }
     }
 
     fn to_output(self) -> *mut GosVariant {
         match self {
             Ok(v) => make_variant(1, vec![unsafe { variant_value_f64(v) }]),
-            Err(s) => make_variant(0, vec![unsafe { variant_value_string_owned(s) }]),
+            Err(s) => make_variant(
+                0,
+                vec![unsafe { variant_value_string_owned(s.into_wire()) }],
+            ),
         }
     }
 }
 
-impl BindingAbi for Result<(), String> {
+impl<E: WireError> BindingAbi for Result<(), E> {
     type Input = *const GosVariant;
     type Output = *mut GosVariant;
-    const TYPE: Type = Type::Result(&Type::Unit, &Type::String);
+    const TYPE: Type = Type::Result(&Type::Unit, &E::TYPE);
 
     unsafe fn from_input(input: *const GosVariant) -> Self {
         let (tag, payload) = match unsafe { read_single_payload(input) } {
             Some(x) => x,
-            None => return Err(String::new()),
+            None => return Err(E::from_wire(String::new())),
         };
         if tag == 1 {
             Ok(())
         } else {
-            Err(unsafe { String::from_input(payload.data.string) })
+            Err(E::from_wire(unsafe {
+                String::from_input(payload.data.string)
+            }))
         }
     }
 
     fn to_output(self) -> *mut GosVariant {
         match self {
             Ok(()) => make_variant(1, vec![unsafe { variant_value_unit() }]),
-            Err(s) => make_variant(0, vec![unsafe { variant_value_string_owned(s) }]),
-        }
-    }
-}
-
-impl BindingAbi for Result<Vec<i64>, String> {
-    type Input = *const GosVariant;
-    type Output = *mut GosVariant;
-    const TYPE: Type = Type::Result(&Type::Vec(&Type::I64), &Type::String);
-
-    unsafe fn from_input(input: *const GosVariant) -> Self {
-        let (tag, payload) = match unsafe { read_single_payload(input) } {
-            Some(x) => x,
-            None => return Err(String::new()),
-        };
-        if tag == 1 {
-            Ok(unsafe { read_gos_vec_i64(payload.data.vec) })
-        } else {
-            Err(unsafe { String::from_input(payload.data.string) })
-        }
-    }
-
-    fn to_output(self) -> *mut GosVariant {
-        match self {
-            Ok(v) => {
-                let inner = make_gos_vec(&v);
-                make_variant(1, vec![unsafe { variant_value_vec(inner) }])
-            }
-            Err(s) => make_variant(0, vec![unsafe { variant_value_string_owned(s) }]),
-        }
-    }
-}
-
-impl BindingAbi for Result<Vec<String>, String> {
-    type Input = *const GosVariant;
-    type Output = *mut GosVariant;
-    const TYPE: Type = Type::Result(&Type::Vec(&Type::String), &Type::String);
-
-    unsafe fn from_input(input: *const GosVariant) -> Self {
-        let (tag, payload) = match unsafe { read_single_payload(input) } {
-            Some(x) => x,
-            None => return Err(String::new()),
-        };
-        if tag == 1 {
-            Ok(unsafe { read_gos_vec_strings(payload.data.vec) })
-        } else {
-            Err(unsafe { String::from_input(payload.data.string) })
-        }
-    }
-
-    fn to_output(self) -> *mut GosVariant {
-        match self {
-            Ok(v) => {
-                let ptrs: Vec<*mut c_char> = v.into_iter().map(BindingAbi::to_output).collect();
-                let inner = make_gos_vec(&ptrs);
-                make_variant(1, vec![unsafe { variant_value_vec(inner) }])
-            }
-            Err(s) => make_variant(0, vec![unsafe { variant_value_string_owned(s) }]),
-        }
-    }
-}
-
-/// Fallible binary payloads are the common wire contract for Redis,
-/// protobuf/RPC, MessagePack, and CBOR adapters. Inside a `Result` variant,
-/// bytes use the established vector payload tag: `GosVariantValue` predates
-/// `GosBytes` and has no bytes pointer arm of its own.
-impl BindingAbi for Result<Bytes, String> {
-    type Input = *const GosVariant;
-    type Output = *mut GosVariant;
-    const TYPE: Type = Type::Result(&Type::Bytes, &Type::String);
-
-    unsafe fn from_input(input: *const GosVariant) -> Self {
-        let (tag, payload) = match unsafe { read_single_payload(input) } {
-            Some(x) => x,
-            None => return Err(String::new()),
-        };
-        if tag == 1 {
-            Ok(Bytes::new(unsafe { read_gos_vec_u8(payload.data.vec) }))
-        } else {
-            Err(unsafe { String::from_input(payload.data.string) })
-        }
-    }
-
-    fn to_output(self) -> *mut GosVariant {
-        match self {
-            Ok(bytes) => {
-                let inner = make_gos_vec(&bytes.into_inner());
-                make_variant(1, vec![unsafe { variant_value_vec(inner) }])
-            }
-            Err(message) => make_variant(0, vec![unsafe { variant_value_string_owned(message) }]),
+            Err(s) => make_variant(
+                0,
+                vec![unsafe { variant_value_string_owned(s.into_wire()) }],
+            ),
         }
     }
 }
 
 // --- HashMap impls (additions) ---------------------------------------
-
-unsafe fn read_gos_map_keys_values_str_vec_i64(
-    p: *const BindingGosMap,
-) -> (Vec<String>, Vec<*const GosVec>) {
-    if p.is_null() {
-        return (Vec::new(), Vec::new());
-    }
-    let m = unsafe { &*p };
-    let keys = unsafe { read_gos_vec_strings(m.keys) };
-    // values is a GosVec of *const GosVec pointers
-    if m.values.is_null() {
-        return (keys, Vec::new());
-    }
-    let vh = unsafe { &*m.values };
-    let len = usize::try_from(vh.len.max(0)).unwrap_or(0);
-    if vh.ptr.is_null() || len == 0 {
-        return (keys, Vec::new());
-    }
-    let slice = unsafe { std::slice::from_raw_parts(vh.ptr.cast::<*const GosVec>(), len) };
-    (keys, slice.to_vec())
-}
-
-#[allow(
-    clippy::implicit_hasher,
-    reason = "ABI surface; binding receives a freshly built HashMap."
-)]
-impl BindingAbi for std::collections::HashMap<String, Vec<i64>> {
-    type Input = *const BindingGosMap;
-    type Output = *mut BindingGosMap;
-    const TYPE: Type = Type::Map(&Type::String, &Type::Vec(&Type::I64));
-
-    unsafe fn from_input(input: *const BindingGosMap) -> Self {
-        let (keys, value_ptrs) = unsafe { read_gos_map_keys_values_str_vec_i64(input) };
-        let mut out = HashMap::with_capacity(keys.len());
-        for (k, vptr) in keys.into_iter().zip(value_ptrs) {
-            let v = unsafe { read_gos_vec_i64(vptr) };
-            out.entry(k).or_insert(v);
-        }
-        out
-    }
-
-    fn to_output(self) -> *mut BindingGosMap {
-        let mut key_ptrs: Vec<*mut c_char> = Vec::with_capacity(self.len());
-        let mut value_ptrs: Vec<*mut GosVec> = Vec::with_capacity(self.len());
-        for (k, v) in self {
-            key_ptrs.push(k.to_output());
-            value_ptrs.push(make_gos_vec(&v));
-        }
-        make_gos_map(&key_ptrs, &value_ptrs)
-    }
-}
 
 unsafe fn read_gos_map_keys_values_i64_str(p: *const BindingGosMap) -> (Vec<i64>, Vec<String>) {
     if p.is_null() {
@@ -2109,7 +1753,12 @@ impl BindingAbi for std::collections::HashMap<i64, String> {
             keys.push(k);
             val_ptrs.push(v.to_output());
         }
-        make_gos_map(&keys, &val_ptrs)
+        make_gos_map(
+            &keys,
+            &val_ptrs,
+            gossamer_binding_abi::vec_kind::PRIMITIVE,
+            gossamer_binding_abi::vec_kind::STRING,
+        )
     }
 }
 
@@ -2143,7 +1792,12 @@ impl BindingAbi for std::collections::HashMap<String, bool> {
             key_ptrs.push(k.to_output());
             values.push(u8::from(v));
         }
-        make_gos_map(&key_ptrs, &values)
+        make_gos_map(
+            &key_ptrs,
+            &values,
+            gossamer_binding_abi::vec_kind::STRING,
+            gossamer_binding_abi::vec_kind::PRIMITIVE,
+        )
     }
 }
 
@@ -2177,7 +1831,12 @@ impl BindingAbi for std::collections::HashMap<String, f64> {
             key_ptrs.push(k.to_output());
             values.push(v);
         }
-        make_gos_map(&key_ptrs, &values)
+        make_gos_map(
+            &key_ptrs,
+            &values,
+            gossamer_binding_abi::vec_kind::STRING,
+            gossamer_binding_abi::vec_kind::PRIMITIVE,
+        )
     }
 }
 
@@ -2192,21 +1851,8 @@ impl BindingAbi for std::collections::HashMap<String, f64> {
 
 fn make_gos_tuple(fields: Vec<GosVariantValue>) -> *mut GosTuple {
     let len = i32::try_from(fields.len()).unwrap_or(0);
-    let fields_ptr: *mut GosVariantValue = if fields.is_empty() {
-        std::ptr::null_mut()
-    } else {
-        let bytes = std::mem::size_of_val(fields.as_slice());
-        let buf = arena_alloc(bytes).cast::<GosVariantValue>();
-        if !buf.is_null() {
-            // SAFETY: arena buffer is `bytes` long, fresh, and
-            // exclusively ours; payload slice is non-overlapping.
-            unsafe {
-                std::ptr::copy_nonoverlapping(fields.as_ptr(), buf, fields.len());
-            }
-        }
-        buf
-    };
-    arena_box(GosTuple {
+    let fields_ptr: *mut GosVariantValue = host_slice(&fields);
+    host_box(GosTuple {
         len,
         fields: fields_ptr,
     })
@@ -2370,145 +2016,37 @@ impl BindingAbi for (String, String) {
         }])
     }
 }
+/// An error type a `Result` crosses the wire with: its message, as a string.
+///
+/// `GosError` folds its cause chain into the message (`GosError::render`),
+/// so a binding answering `Result<T, GosError>` and one answering
+/// `Result<T, String>` reach the caller alike.
+pub trait WireError: Sized {
+    /// The error's type in a signature.
+    const TYPE: Type = Type::String;
+    /// The message that crosses the wire.
+    fn into_wire(self) -> String;
+    /// The error a message read off the wire stands for.
+    fn from_wire(message: String) -> Self;
+}
 
-// --- Result<T, GosError> impls (Phase 2) -----------------------------
-//
-// Wire-equivalent to `Result<T, String>` - the rendered message
-// is the Err payload. Cause chains are flattened at the boundary
-// by `GosError::render()`. Bindings get `?`-propagation with rich
-// causes (interp tier preserves the full chain via the Variant
-// payload); the compiled tier sees the rendered string.
-
-impl BindingAbi for Result<i64, crate::error::GosError> {
-    type Input = *const GosVariant;
-    type Output = *mut GosVariant;
-    const TYPE: Type = Type::Result(&Type::I64, &Type::String);
-
-    unsafe fn from_input(input: *const GosVariant) -> Self {
-        let (tag, payload) = match unsafe { read_single_payload(input) } {
-            Some(x) => x,
-            None => return Err(crate::error::GosError::new("")),
-        };
-        if tag == 1 {
-            Ok(unsafe { payload.data.i64_ })
-        } else {
-            let msg = unsafe { String::from_input(payload.data.string) };
-            Err(crate::error::GosError::new(msg))
-        }
+impl WireError for String {
+    fn into_wire(self) -> String {
+        self
     }
 
-    fn to_output(self) -> *mut GosVariant {
-        match self {
-            Ok(v) => make_variant(1, vec![unsafe { variant_value_i64(v) }]),
-            Err(e) => make_variant(0, vec![unsafe { variant_value_string_owned(e.render()) }]),
-        }
+    fn from_wire(message: String) -> Self {
+        message
     }
 }
 
-impl BindingAbi for Result<String, crate::error::GosError> {
-    type Input = *const GosVariant;
-    type Output = *mut GosVariant;
-    const TYPE: Type = Type::Result(&Type::String, &Type::String);
-
-    unsafe fn from_input(input: *const GosVariant) -> Self {
-        let (tag, payload) = match unsafe { read_single_payload(input) } {
-            Some(x) => x,
-            None => return Err(crate::error::GosError::new("")),
-        };
-        let s = unsafe { String::from_input(payload.data.string) };
-        if tag == 1 {
-            Ok(s)
-        } else {
-            Err(crate::error::GosError::new(s))
-        }
+impl WireError for crate::error::GosError {
+    fn into_wire(self) -> String {
+        self.render()
     }
 
-    fn to_output(self) -> *mut GosVariant {
-        match self {
-            Ok(s) => make_variant(1, vec![unsafe { variant_value_string_owned(s) }]),
-            Err(e) => make_variant(0, vec![unsafe { variant_value_string_owned(e.render()) }]),
-        }
-    }
-}
-
-impl BindingAbi for Result<(), crate::error::GosError> {
-    type Input = *const GosVariant;
-    type Output = *mut GosVariant;
-    const TYPE: Type = Type::Result(&Type::Unit, &Type::String);
-
-    unsafe fn from_input(input: *const GosVariant) -> Self {
-        let (tag, payload) = match unsafe { read_single_payload(input) } {
-            Some(x) => x,
-            None => return Err(crate::error::GosError::new("")),
-        };
-        if tag == 1 {
-            Ok(())
-        } else {
-            let msg = unsafe { String::from_input(payload.data.string) };
-            Err(crate::error::GosError::new(msg))
-        }
-    }
-
-    fn to_output(self) -> *mut GosVariant {
-        match self {
-            Ok(()) => make_variant(1, vec![unsafe { variant_value_unit() }]),
-            Err(e) => make_variant(0, vec![unsafe { variant_value_string_owned(e.render()) }]),
-        }
-    }
-}
-
-impl BindingAbi for Result<bool, crate::error::GosError> {
-    type Input = *const GosVariant;
-    type Output = *mut GosVariant;
-    const TYPE: Type = Type::Result(&Type::Bool, &Type::String);
-
-    unsafe fn from_input(input: *const GosVariant) -> Self {
-        let (tag, payload) = match unsafe { read_single_payload(input) } {
-            Some(x) => x,
-            None => return Err(crate::error::GosError::new("")),
-        };
-        if tag == 1 {
-            Ok(unsafe { payload.data.bool_ })
-        } else {
-            let msg = unsafe { String::from_input(payload.data.string) };
-            Err(crate::error::GosError::new(msg))
-        }
-    }
-
-    fn to_output(self) -> *mut GosVariant {
-        match self {
-            Ok(b) => make_variant(1, vec![unsafe { variant_value_bool(b) }]),
-            Err(e) => make_variant(0, vec![unsafe { variant_value_string_owned(e.render()) }]),
-        }
-    }
-}
-
-impl BindingAbi for Result<Vec<i64>, crate::error::GosError> {
-    type Input = *const GosVariant;
-    type Output = *mut GosVariant;
-    const TYPE: Type = Type::Result(&Type::Vec(&Type::I64), &Type::String);
-
-    unsafe fn from_input(input: *const GosVariant) -> Self {
-        let (tag, payload) = match unsafe { read_single_payload(input) } {
-            Some(x) => x,
-            None => return Err(crate::error::GosError::new("")),
-        };
-        if tag == 1 {
-            Ok(unsafe { read_gos_vec_i64(payload.data.vec) })
-        } else {
-            let msg = unsafe { String::from_input(payload.data.string) };
-            Err(crate::error::GosError::new(msg))
-        }
-    }
-
-    fn to_output(self) -> *mut GosVariant {
-        match self {
-            Ok(v) => {
-                let inner = make_gos_vec(&v);
-                make_variant(1, vec![unsafe { variant_value_vec(inner) }])
-            }
-            Err(e) => make_variant(0, vec![unsafe { variant_value_string_owned(e.render()) }]),
-        }
+    fn from_wire(message: String) -> Self {
+        Self::new(message)
     }
 }
 
@@ -2538,12 +2076,56 @@ impl BindingAbi for (i64, String, bool) {
     }
 }
 
+// --- Composites that cross as JSON text ------------------------------
+
+/// The shared halves of a JSON-wired impl: the text crosses as a runtime
+/// string, read and written by [`crate::wire_json`].
+macro_rules! json_wire_impl {
+    ([$($gen:tt)*] $ty:ty) => {
+        impl<$($gen)*> BindingAbi for $ty {
+            type Input = *const c_char;
+            type Output = *mut c_char;
+            const TYPE: Type = <$ty as crate::SigType>::TYPE;
+            const JSON: bool = true;
+
+            unsafe fn from_input(input: *const c_char) -> Self {
+                // SAFETY: the caller's `from_input` contract.
+                let text = unsafe { String::from_input(input) };
+                crate::wire_json::from_text(&text)
+                    .unwrap_or_else(|e| panic!("invalid binding argument text: {e}"))
+            }
+
+            fn to_output(self) -> *mut c_char {
+                crate::wire_json::to_text(&self).to_output()
+            }
+
+            fn read_wire_text(text: &str) -> Result<Self, String> {
+                crate::wire_json::from_text(text)
+            }
+
+            fn write_wire_text(&self) -> String {
+                crate::wire_json::to_text(self)
+            }
+        }
+    };
+}
+
+json_wire_impl!([T: Nested + crate::SigType] Option<T>);
+json_wire_impl!([T: Nested + crate::SigType] Vec<T>);
+json_wire_impl!([T: Nested + crate::SigType, E: WireJson + crate::SigType] Result<T, E>);
+json_wire_impl!([V: Nested + crate::SigType] std::collections::HashMap<String, V>);
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn host() {
+        crate::testing::install_host();
+    }
+
     #[test]
     fn primitive_round_trip_through_abi() {
+        host();
         unsafe {
             assert_eq!(<i64 as BindingAbi>::from_input(7), 7);
             assert!(<bool as BindingAbi>::from_input(true));
@@ -2553,18 +2135,17 @@ mod tests {
 
     #[test]
     fn string_round_trip() {
+        host();
         let s = String::from("hello");
         let raw = s.to_output();
         let back = unsafe { String::from_input(raw) };
         assert_eq!(back, "hello");
-        // No explicit free: arena reclamation lives behind
-        // `gos_rt_gc_reset`, called at the runtime's tick
-        // boundary. The test exits before any reset, so the
-        // arena holds the bytes for the duration of the test.
+        // The testing host leaks the string, as it frees nothing.
     }
 
     #[test]
     fn vec_i64_round_trip() {
+        host();
         let v: Vec<i64> = vec![1, 2, 3];
         let raw = v.to_output();
         let back: Vec<i64> = unsafe { <Vec<i64> as BindingAbi>::from_input(raw) };
@@ -2587,6 +2168,7 @@ mod tests {
 
     #[test]
     fn vec_i64_input_honors_packed_byte_stride() {
+        host();
         // The `resp.raw_bytes` shape: elem_bytes=1, one byte per
         // element. A fixed 8-byte stride would read garbage here.
         let raw = packed_vec(&[0x68, 0xFF, 0x00, 0x69], 1, 4);
@@ -2596,6 +2178,7 @@ mod tests {
 
     #[test]
     fn vec_i64_input_honors_half_and_word_strides() {
+        host();
         let half = packed_vec(&500u16.to_le_bytes(), 2, 1);
         let back: Vec<i64> = unsafe { <Vec<i64> as BindingAbi>::from_input(half) };
         assert_eq!(back, vec![500]);
@@ -2607,6 +2190,7 @@ mod tests {
 
     #[test]
     fn vec_u8_input_truncates_word_width_slots() {
+        host();
         // Canonical runtime byte-vec shape: one i64 slot per byte.
         let mut bytes = Vec::new();
         for v in [0x68i64, 0xFF, 0x00] {
@@ -2619,6 +2203,7 @@ mod tests {
 
     #[test]
     fn vec_vec_i64_round_trip() {
+        host();
         let v: Vec<Vec<i64>> = vec![vec![1, 2], vec![3, 4]];
         let raw = v.to_output();
         let back: Vec<Vec<i64>> = unsafe { <Vec<Vec<i64>> as BindingAbi>::from_input(raw) };
@@ -2627,6 +2212,7 @@ mod tests {
 
     #[test]
     fn option_round_trip() {
+        host();
         let some_raw = Some(42_i64).to_output();
         assert_eq!(
             unsafe { <Option<i64> as BindingAbi>::from_input(some_raw) },
@@ -2642,6 +2228,7 @@ mod tests {
 
     #[test]
     fn result_round_trip() {
+        host();
         let ok_raw = Ok::<i64, String>(7).to_output();
         let back = unsafe { <Result<i64, String> as BindingAbi>::from_input(ok_raw) };
         assert_eq!(back, Ok(7));
@@ -2653,6 +2240,7 @@ mod tests {
 
     #[test]
     fn result_bytes_round_trip() {
+        host();
         let payload = Bytes::new(vec![0, 1, 127, 255]);
         let raw = Ok::<Bytes, String>(payload.clone()).to_output();
         let back = unsafe { <Result<Bytes, String> as BindingAbi>::from_input(raw) };
@@ -2667,6 +2255,7 @@ mod tests {
 
     #[test]
     fn bytes_round_trip() {
+        host();
         let payload: Vec<u8> = (0..=255u8).collect();
         let bytes = Bytes::new(payload.clone());
         let raw = bytes.to_output();
@@ -2676,6 +2265,7 @@ mod tests {
 
     #[test]
     fn bytes_empty_round_trip() {
+        host();
         let bytes = Bytes::default();
         let raw = bytes.to_output();
         let back = unsafe { <Bytes as BindingAbi>::from_input(raw) };
@@ -2684,6 +2274,7 @@ mod tests {
 
     #[test]
     fn bytes_large_round_trip() {
+        host();
         let payload: Vec<u8> = (0..16 * 1024).map(|i| (i % 256) as u8).collect();
         let bytes = Bytes::new(payload.clone());
         let raw = bytes.to_output();
@@ -2694,6 +2285,7 @@ mod tests {
 
     #[test]
     fn vec_u8_round_trip() {
+        host();
         let payload: Vec<u8> = vec![0, 1, 127, 200, 255];
         let raw = payload.clone().to_output();
         let back = unsafe { <Vec<u8> as BindingAbi>::from_input(raw) };
@@ -2702,6 +2294,7 @@ mod tests {
 
     #[test]
     fn hash_map_i64_i64_round_trip() {
+        host();
         let mut m: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
         m.insert(1, 100);
         m.insert(2, 200);
@@ -2713,6 +2306,7 @@ mod tests {
 
     #[test]
     fn hash_map_string_string_round_trip() {
+        host();
         let mut m: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         m.insert("content-type".into(), "application/json".into());
         m.insert("x-request-id".into(), "abc123".into());
@@ -2724,6 +2318,7 @@ mod tests {
 
     #[test]
     fn hash_map_empty_round_trip() {
+        host();
         let m: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
         let raw = m.to_output();
         let back = unsafe { <std::collections::HashMap<i64, i64> as BindingAbi>::from_input(raw) };
@@ -2732,6 +2327,7 @@ mod tests {
 
     #[test]
     fn dyn_value_nil_round_trip() {
+        host();
         let raw = DynValue::Nil.to_output();
         let back = unsafe { <DynValue as BindingAbi>::from_input(raw) };
         // A bare value crosses under a `$`-headed wire name no declared arm
@@ -2741,6 +2337,7 @@ mod tests {
 
     #[test]
     fn dyn_value_tagged_round_trip() {
+        host();
         let v = DynValue::Tagged {
             name: "Integer".to_string(),
             payload: vec![DynValue::Int(42)],
@@ -2756,6 +2353,7 @@ mod tests {
 
     #[test]
     fn dyn_value_redis_resp_array_shape() {
+        host();
         // Mirrors a Redis RESP array of mixed types: an integer
         // followed by a bulk-string-encoded byte payload.
         let v = DynValue::Tagged {
@@ -2782,6 +2380,7 @@ mod tests {
 
     #[test]
     fn native_callback_passes_handle_through() {
+        host();
         let cb = NativeCallback { handle: 42 };
         let raw = cb.to_output();
         let back = unsafe { <NativeCallback as BindingAbi>::from_input(raw) };

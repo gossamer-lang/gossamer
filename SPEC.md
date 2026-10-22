@@ -3373,8 +3373,8 @@ must be installed to compile natively on the Pi.
 
 | Mode | Command | Backend | Pipeline | Speed | Output quality |
 |---|---|---|---|---|---|
-| Run | `gos run file.gos` | LLVM | The current release build, else a debug build made first; the release build follows in the background | An edit rebuilds only the modules it changed; dependency objects are shared between projects | The shipped binary's behavior |
-| Interpret | `GOS_RUN_ENGINE=vm gos run file.gos` | Bytecode VM | Direct dispatch; in-process Cranelift JIT tiers up hot bodies | No native toolchain needed | No native codegen |
+| Run | `gos run file.gos` | Bytecode VM | Direct dispatch; in-process Cranelift JIT tiers up hot bodies | Starts at once; no native toolchain needed | No native codegen |
+| Native run | `gos run --native file.gos` | LLVM | The current release build, else a debug build made first; the release build follows in the background | An edit rebuilds only the modules it changed; dependency objects are shared between projects | The shipped binary's behavior |
 | Debug build | `gos build` | LLVM | `opt -O1`, then `llc -O0` | Sub-second for small programs | Optimized enough for development, with panic frames |
 | Release build | `gos build --release` | LLVM | `opt -O3 \| llc -O3 -mcpu=native -mattr=+prefer-256-bit` | Seconds for thousands of LoC | Vectorised, inlined |
 
@@ -3382,14 +3382,13 @@ LLVM is the canonical native backend; the Cranelift code path is
 reserved for the in-process JIT inside `gossamer-interp` and is not
 reachable from `gos build`. Any MIR shape the LLVM lowerer cannot
 handle is a hard `gos build` failure rather than a silent per-function
-Cranelift fallback. `gos run` runs the program's native executable, as
-`go run` does: a current release build starts at once, otherwise a debug
-build is made first (reusing every object an earlier build of any project
-left) and the release build follows in the background for the next run. The
-register-based bytecode VM runs a program when asked for
-(`GOS_RUN_ENGINE=vm`, `--no-jit`, `--timings`, or a VM variable such as
-`GOS_JIT`), for `gos -e`, and, with a note, on a host without the LLVM
-tools; it is also the `gos test`, `gos repl`, and `comptime` engine. There
+Cranelift fallback. `gos run` runs a program on the register-based bytecode
+VM; `gos run --native` runs its native executable, as `go run` does: a
+current release build starts at once, otherwise a debug build is made first
+(reusing every object an earlier build of any project left) and the release
+build follows in the background for the next run. The VM also runs `gos -e`,
+a `--native` run on a host without the LLVM tools (with a note), and is the
+`gos test`, `gos repl`, and `comptime` engine. There
 is no tree-walker interpreter. VM correctness is pinned by the tier-parity
 suite and the VM-vs-LLVM-AOT differential.
 
@@ -3781,13 +3780,12 @@ declarations differ.
 
 The `[rust-bindings]` section of `project.toml` remains the way to call
 Rust code. A Rust crate registers its entry points with
-`gossamer_binding::register_module!`; the toolchain compiles the crate
-into a per-project runner and links it into the produced binary or
-interpreter. Types crossing that boundary use the `gossamer-binding` ABI
+`gossamer_binding::register_module!`; `gos run` builds the crate once as a
+shared library and loads it, and `gos build` links it into the binary. Types crossing that boundary use the `gossamer-binding` ABI
 (`Unit`, `Bool`, `I64`, `F64`, `Char`, `String`, `Tuple`, `Vec`,
 `Option`, `Result`, `Opaque`, `Any`, `Bytes`, `Map`, `Variant`,
 `Callback`); see `docs_src/libraries.md` and
-`crates/gossamer-binding/ABI_0_4.md`.
+`crates/gossamer-binding/ABI.md`.
 
 ---
 
@@ -4026,7 +4024,7 @@ locations are performance details and may be removed with `gos clean`. Use
 entries older than 30 days or beyond the `GOS_CACHE_MAX_BYTES` total budget
 (20 GiB by default). Objects compiled from `[native]` sources live under
 `.gos-cache/native/`, and `gos clean --native` removes only those.
-`gos clean --all` also clears Rust-binding runners,
+`gos clean --all` also clears Rust-binding builds (`--bindings` alone),
 package sources, and legacy build artifacts.
 
 ### 16.6 Subcommands
@@ -4036,7 +4034,7 @@ package sources, and legacy build artifacts.
 - `gos add ID[@VERSION]` - add a dependency entry.
 - `gos remove ID` - remove a dependency entry.
 - `gos build` - compile the current project.
-- `gos run` - build and run the current project's native executable.
+- `gos run` - run the current project on the VM; `--native` builds and runs its native executable.
 - `gos test` - run the project's tests.
 - `gos fetch` - resolve and download (but do not build) all deps.
 - `gos update` - update deps within their declared ranges.

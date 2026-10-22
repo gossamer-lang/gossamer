@@ -1,0 +1,45 @@
+// Typed serde of a `char` (a one-character string), a newtype (its inner
+// value), and a user enum encoded as the value itself, not only as a field.
+use std::encoding::json
+
+newtype WindowId = u32
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Mods { shift: bool, ctrl: bool }
+
+#[derive(Debug, PartialEq, Eq)]
+enum Key { A, Char(char), Other(u32) }
+
+#[derive(Debug)]
+enum Event {
+    QuitRequested
+    KeyDown { window: WindowId, key: Key, mods: Mods, repeat: bool }
+    Text { window: WindowId, text: String }
+    Pair(i64, String)
+}
+
+struct Glyph { c: char, fallback: Option<char>, row: Vec<char> }
+
+fn main() {
+    let events = #[
+        Event::QuitRequested
+        Event::KeyDown { window: 2u32.into(), key: Key::Char('['), mods: Mods { shift: false, ctrl: true }, repeat: false }
+        Event::KeyDown { window: 2u32.into(), key: Key::Other(7), mods: Mods::default(), repeat: true }
+        Event::Text { window: 3u32.into(), text: "héllo \"q\"" }
+        Event::Pair(7, "x")
+    ]
+    for e in events {
+        let text = json::encode(e)
+        println(text)
+        println(f"{json::decode::<Event>(text).unwrap():?}")
+    }
+    let g = Glyph { c: 'é', fallback: Some('\n'), row: #['a', '世', '"'] }
+    let text = json::encode(g)
+    println(text)
+    let back = json::decode::<Glyph>(text).unwrap()
+    println(f"{back.c} {back.fallback:?} {back.row:?}")
+    match json::decode::<Glyph>("{\"c\":\"ab\",\"fallback\":null,\"row\":[]}") {
+        Ok(_) => println("two characters decoded as one")
+        Err(e) => println(f"refused: {e}")
+    }
+}

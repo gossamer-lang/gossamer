@@ -1,0 +1,50 @@
+// Times binding calls: a scalar, a string, an opaque handle, and a 4 KB
+// buffer, in ns per call. `gos run` measures the VM and the JIT,
+// `gos run --no-jit` the VM alone.
+use std::time
+use bench_binding
+use Tally
+
+fn per_call(started: time::Instant, n: i64) -> i64 {
+    started.elapsed().as_nanos() / n
+}
+
+fn scalar(n: i64) -> i64 {
+    let mut acc = 0
+    for i in 0..n {
+        acc = bench_binding::add(acc, i)
+    }
+    acc
+}
+
+fn main() {
+    let n = 200_000
+    let scalar_start = time::Instant::now()
+    let acc = scalar(n)
+    println("scalar {} ns/call ({})", per_call(scalar_start, n), acc)
+
+    let text = "a string of some forty bytes, give or take"
+    let string_start = time::Instant::now()
+    let mut len = 0
+    for _ in 0..n {
+        len += bench_binding::echo(text).len()
+    }
+    println("string {} ns/call ({})", per_call(string_start, n), len)
+
+    let tally = Tally::new()
+    let opaque_start = time::Instant::now()
+    let mut last = 0
+    for i in 0..n {
+        last = Tally::add(tally, i)
+    }
+    println("opaque {} ns/call ({})", per_call(opaque_start, n), last)
+
+    let buffer: Vec<u8> = #[7; 4096]
+    let m = 20_000
+    let buffer_start = time::Instant::now()
+    let mut sum = 0
+    for _ in 0..m {
+        sum += bench_binding::checksum(buffer)
+    }
+    println("buffer4k {} ns/call ({})", per_call(buffer_start, m), sum)
+}

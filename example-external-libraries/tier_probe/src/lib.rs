@@ -18,7 +18,3 @@ register_module!(
     }
 );
 
-/// Keeps the registration linked into the runner.
-pub fn __bindings_force_link() {
-    __gos_tier_probe::force_link();
-}

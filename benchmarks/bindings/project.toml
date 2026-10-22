@@ -1,0 +1,8 @@
+[project]
+id = "example.com/benchmarks/bindings"
+version = "0.1.0"
+
+[dependencies]
+
+[rust-bindings]
+bench_binding = { path = "bench_binding" }

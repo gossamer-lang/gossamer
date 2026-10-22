@@ -1,7 +1,6 @@
 //! Phase 1 regression: the expanded type vocabulary
 //! (`Option<String>`, `Result<bool, String>`, tuples, additional
-//! `HashMap` combinations) registers, marshals through the interp
-//! thunk, and round-trips compile-tier where applicable.
+//! `HashMap` combinations) registers and marshals through the VM entry.
 
 #![allow(
     unsafe_code,
@@ -69,64 +68,8 @@ fn dispatch_module() -> &'static gossamer_binding::Module {
         .expect("p1 module registered")
 }
 
-struct NullDispatch;
-impl gossamer_binding::value::NativeDispatch for NullDispatch {
-    fn call_value(
-        &mut self,
-        _value: &Value,
-        _args: Vec<Value>,
-    ) -> gossamer_binding::value::RuntimeResult<Value> {
-        Err(gossamer_binding::value::RuntimeError::Type(
-            "no dispatch".into(),
-        ))
-    }
-    fn has_fn(&self, _name: &str) -> bool {
-        false
-    }
-
-    fn call_fn(
-        &mut self,
-        _name: &str,
-        _args: Vec<Value>,
-    ) -> gossamer_binding::value::RuntimeResult<Value> {
-        Err(gossamer_binding::value::RuntimeError::Type(
-            "no dispatch".into(),
-        ))
-    }
-    fn spawn_callable(
-        &mut self,
-        _callable: Value,
-        _args: Vec<Value>,
-    ) -> gossamer_binding::value::RuntimeResult<()> {
-        Err(gossamer_binding::value::RuntimeError::Type(
-            "no dispatch".into(),
-        ))
-    }
-    fn spawn_join(
-        &mut self,
-        _callable: Value,
-        _args: Vec<Value>,
-    ) -> gossamer_binding::value::RuntimeResult<Value> {
-        Err(gossamer_binding::value::RuntimeError::Type(
-            "no dispatch".into(),
-        ))
-    }
-
-    fn spawn_with_outcome(
-        &mut self,
-        _target: gossamer_binding::value::SpawnTarget,
-        _args: Vec<Value>,
-        _sink: Box<dyn FnOnce(gossamer_binding::value::RuntimeResult<Value>) + Send>,
-    ) {
-        // A null dispatcher runs nothing, so the sink is never called.
-    }
-}
-
 fn call(name: &str, args: Vec<Value>) -> Value {
-    let m = dispatch_module();
-    let item = m.items.iter().find(|i| i.name == name).expect("item");
-    let mut d = NullDispatch;
-    (item.call)(&mut d, &args).expect("call")
+    gossamer_binding::testing::call(&format!("p1::{name}"), &args).expect("call")
 }
 
 #[test]
@@ -205,8 +148,7 @@ fn series_hashmap_round_trip() {
     let Value::Map(m) = &v else {
         panic!("expected Map, got {v:?}")
     };
-    let guard = m.lock();
-    assert_eq!(guard.len(), 2);
+    assert_eq!(m.len(), 2);
 }
 
 #[test]
@@ -215,8 +157,7 @@ fn labels_hashmap_round_trip() {
     let Value::Map(m) = &v else {
         panic!("expected Map, got {v:?}")
     };
-    let guard = m.lock();
-    assert_eq!(guard.len(), 2);
+    assert_eq!(m.len(), 2);
 }
 
 #[test]

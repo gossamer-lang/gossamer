@@ -103,6 +103,7 @@ unsafe extern "C" {
 
 #[test]
 fn bytes_round_trip_through_extern_c() {
+    gossamer_binding::testing::install_host();
     let input = Bytes::new(b"hello".to_vec());
     let in_ptr = input.to_output();
     let out_ptr = unsafe { gos_binding_test__abi04__upper(in_ptr) };
@@ -112,6 +113,7 @@ fn bytes_round_trip_through_extern_c() {
 
 #[test]
 fn bytes_with_large_payload_through_extern_c() {
+    gossamer_binding::testing::install_host();
     let payload: Vec<u8> = (0..32 * 1024).map(|i| (i & 0xff) as u8).collect();
     let in_ptr = Bytes::new(payload.clone()).to_output();
     let out_ptr = unsafe { gos_binding_test__abi04__double_bytes(in_ptr) };
@@ -123,6 +125,7 @@ fn bytes_with_large_payload_through_extern_c() {
 
 #[test]
 fn empty_bytes_through_extern_c() {
+    gossamer_binding::testing::install_host();
     let out_ptr = unsafe { gos_binding_test__abi04__empty_bytes() };
     let out = unsafe { <Bytes as BindingAbi>::from_input(out_ptr) };
     assert!(out.is_empty());
@@ -130,6 +133,7 @@ fn empty_bytes_through_extern_c() {
 
 #[test]
 fn map_input_count_through_extern_c() {
+    gossamer_binding::testing::install_host();
     let mut m: HashMap<String, String> = HashMap::new();
     m.insert("a".to_string(), "1".to_string());
     m.insert("b".to_string(), "2".to_string());
@@ -141,6 +145,7 @@ fn map_input_count_through_extern_c() {
 
 #[test]
 fn map_output_string_string_through_extern_c() {
+    gossamer_binding::testing::install_host();
     let out_ptr = unsafe { gos_binding_test__abi04__build_headers() };
     let out: HashMap<String, String> =
         unsafe { <HashMap<String, String> as BindingAbi>::from_input(out_ptr) };
@@ -153,6 +158,7 @@ fn map_output_string_string_through_extern_c() {
 
 #[test]
 fn map_output_i64_i64_through_extern_c() {
+    gossamer_binding::testing::install_host();
     let out_ptr = unsafe { gos_binding_test__abi04__build_int_map() };
     let out: HashMap<i64, i64> = unsafe { <HashMap<i64, i64> as BindingAbi>::from_input(out_ptr) };
     assert_eq!(out.get(&1), Some(&10));
@@ -161,6 +167,7 @@ fn map_output_i64_i64_through_extern_c() {
 
 #[test]
 fn dyn_value_integer_through_extern_c() {
+    gossamer_binding::testing::install_host();
     let raw = unsafe { gos_binding_test__abi04__make_resp_integer(42) };
     let out = unsafe { <DynValue as BindingAbi>::from_input(raw) };
     let DynValue::Tagged { name, payload } = out else {
@@ -172,6 +179,7 @@ fn dyn_value_integer_through_extern_c() {
 
 #[test]
 fn dyn_value_array_with_bytes_through_extern_c() {
+    gossamer_binding::testing::install_host();
     let raw = unsafe { gos_binding_test__abi04__make_resp_array() };
     let out = unsafe { <DynValue as BindingAbi>::from_input(raw) };
     let DynValue::Tagged { name, payload } = out else {
@@ -207,6 +215,7 @@ fn dyn_value_array_with_bytes_through_extern_c() {
 
 #[test]
 fn dyn_value_reflect_through_extern_c() {
+    gossamer_binding::testing::install_host();
     let in_value = DynValue::Tagged {
         name: "TestArm".to_string(),
         payload: vec![DynValue::Int(99), DynValue::String("nine-nine".to_string())],
@@ -225,6 +234,7 @@ fn dyn_value_reflect_through_extern_c() {
 
 #[test]
 fn callback_handle_through_extern_c() {
+    gossamer_binding::testing::install_host();
     let cb = NativeCallback { handle: 99_999 };
     let out = unsafe { gos_binding_test__abi04__callback_pass_through(cb.handle) };
     assert_eq!(out, 99_999);
@@ -263,6 +273,7 @@ fn signature_metadata_matches_abi04_types() {
 
 #[test]
 fn fuzz_bytes_round_trip_random_lengths() {
+    gossamer_binding::testing::install_host();
     // Lightweight inline fuzzer: deterministic seeded LCG covers
     // a spread of payload sizes including zero, single byte,
     // word-aligned, page-sized, and odd sizes around alignment
@@ -290,6 +301,7 @@ fn fuzz_bytes_round_trip_random_lengths() {
 
 #[test]
 fn fuzz_dyn_value_deep_nesting() {
+    gossamer_binding::testing::install_host();
     // Build a 32-level-nested tagged variant and round-trip it.
     let mut v = DynValue::Int(0);
     for i in 0..32 {

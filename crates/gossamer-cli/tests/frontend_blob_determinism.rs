@@ -131,6 +131,7 @@ fn build(file: &Path, dir: &Path, cache: &Path, out: &str) -> (String, Vec<u8>) 
         .arg(dir.join(out))
         .current_dir(dir)
         .env("GOSSAMER_CACHE_DIR", cache)
+        .env("GOS_BUILD_CACHE", cache.join("objects"))
         .env("GOS_LLVM_DUMP_MIR", "1")
         .env_remove("GOS_NO_CACHE")
         .output()
@@ -144,7 +145,15 @@ fn build(file: &Path, dir: &Path, cache: &Path, out: &str) -> (String, Vec<u8>) 
     let binary = fs::read(dir.join(out).join(stem))
         .or_else(|_| fs::read(dir.join(out).join(stem).with_extension("exe")))
         .expect("binary");
-    (String::from_utf8_lossy(&output.stderr).into_owned(), binary)
+    // Build notes print only when a compile runs, so a build served from
+    // the object cache prints fewer of them; the dump is the header lines
+    // and the indented lines under them.
+    let mir = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .filter(|line| line.starts_with("=== MIR ") || line.starts_with(' '))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (mir, binary)
 }
 
 #[test]

@@ -30,6 +30,7 @@ use crate::tree::{
     HirStmt, HirStmtKind,
 };
 
+mod binding_wire;
 mod render_calls;
 
 /// The runtime entry a serde step names, or `None` for a name that is not
@@ -121,6 +122,8 @@ enum Kind {
     F64,
     F32,
     Bool,
+    /// A `char`, written as a one-character string.
+    Char,
     Str,
     Json,
     Seq(Ty),
@@ -128,6 +131,8 @@ enum Kind {
     Tuple(Vec<Ty>),
     Map(Ty),
     Adt(DefId, Ty),
+    /// A `Result`, which only the binding wire spells.
+    Res(Ty, Ty),
 }
 
 /// A user type the bodies reach.
@@ -171,12 +176,15 @@ pub(crate) fn generate_serde_bodies(
         encoders: HashMap::new(),
         renderers: HashMap::new(),
         decoders: HashMap::new(),
+        wire_encoders: HashMap::new(),
+        wire_decoders: HashMap::new(),
         roots: HashMap::new(),
         pending: Vec::new(),
         items: Vec::new(),
         temp: 0,
         span: Span::default(),
         rendering: false,
+        wire: false,
     };
     for item in &mut program.items {
         let span = item.span;
@@ -191,6 +199,9 @@ pub(crate) fn generate_serde_bodies(
         }
     }
     for item in &mut program.items {
+        builder.wire_binding_calls(item);
+    }
+    for item in &mut program.items {
         builder.render_json_calls(item);
     }
     builder.drain();
@@ -201,6 +212,8 @@ enum Pending {
     Encode(DefId, Ty, String),
     Render(DefId, Ty, String),
     Decode(DefId, Ty, String),
+    WireEncode(DefId, Ty, String),
+    WireDecode(DefId, Ty, String),
     Root(DefId, Ty, Ty, String),
 }
 
@@ -212,6 +225,9 @@ struct Gen<'a> {
     /// The functions writing a type the way `json::encode` does.
     renderers: HashMap<DefId, String>,
     decoders: HashMap<DefId, String>,
+    /// The functions writing and reading a type as the binding wire spells it.
+    wire_encoders: HashMap<DefId, String>,
+    wire_decoders: HashMap<DefId, String>,
     roots: HashMap<DefId, String>,
     pending: Vec<Pending>,
     items: Vec<HirItem>,
@@ -222,6 +238,10 @@ struct Gen<'a> {
     /// struct's members in byte order of their names, every float with its
     /// fraction, and the shapes the typed surface does not take.
     rendering: bool,
+    /// Whether the walk being written spells values as a binding item's text
+    /// crosses (`gossamer_binding::wire_json`): `Option` as `[]` / `[v]`,
+    /// `Result` as `[0, v]` / `[1, e]`, and a fixed array as a sequence.
+    wire: bool,
 }
 
 /// The reader's local in a decode function, and the writer's in an encode.
@@ -297,6 +317,16 @@ impl Gen<'_> {
     }
 
     fn encoder(&mut self, def: DefId, ty: Ty) -> String {
+        if self.wire {
+            if let Some(name) = self.wire_encoders.get(&def) {
+                return name.clone();
+            }
+            let name = format!("__gos_serde_wenc_{}", def.local);
+            self.wire_encoders.insert(def, name.clone());
+            self.pending
+                .push(Pending::WireEncode(def, ty, name.clone()));
+            return name;
+        }
         if let Some(name) = self.encoders.get(&def) {
             return name.clone();
         }
@@ -317,6 +347,16 @@ impl Gen<'_> {
     }
 
     fn decoder(&mut self, def: DefId, ty: Ty) -> String {
+        if self.wire {
+            if let Some(name) = self.wire_decoders.get(&def) {
+                return name.clone();
+            }
+            let name = format!("__gos_serde_wdec_{}", def.local);
+            self.wire_decoders.insert(def, name.clone());
+            self.pending
+                .push(Pending::WireDecode(def, ty, name.clone()));
+            return name;
+        }
         if let Some(name) = self.decoders.get(&def) {
             return name.clone();
         }
@@ -338,6 +378,18 @@ impl Gen<'_> {
                     item
                 }
                 Pending::Decode(def, ty, name) => self.decode_fn(def, ty, &name),
+                Pending::WireEncode(def, ty, name) => {
+                    let outer = std::mem::replace(&mut self.wire, true);
+                    let item = self.encode_fn(def, ty, &name);
+                    self.wire = outer;
+                    item
+                }
+                Pending::WireDecode(def, ty, name) => {
+                    let outer = std::mem::replace(&mut self.wire, true);
+                    let item = self.decode_fn(def, ty, &name);
+                    self.wire = outer;
+                    item
+                }
                 Pending::Root(def, ty, ret, name) => Some(self.root_fn(def, ty, ret, &name)),
             };
             if let Some(item) = item {
@@ -595,6 +647,7 @@ impl Gen<'_> {
                 self.write_step(out, step, wide, span);
             }
             Kind::Bool => self.write_step(out, "wr_bool", value, span),
+            Kind::Char => self.write_step(out, "wr_char", value, span),
             Kind::Str => self.write_step(out, "wr_str", value, span),
             Kind::Json => self.write_step(out, "wr_json", value, span),
             Kind::Adt(def, adt_ty) => {
@@ -611,41 +664,58 @@ impl Gen<'_> {
             Kind::Opt(inner) => {
                 let payload = self.fresh("x");
                 let mut some = Emit::default();
+                if self.wire {
+                    some.raw("[");
+                }
                 let payload_value = self.local(&payload, inner, span);
                 self.encode(&mut some, payload_value, inner, span);
+                if self.wire {
+                    some.raw("]");
+                }
                 let some_stmts = self.finish(some, span);
                 let some_body = self.block(some_stmts, None, unit, span);
                 let mut none = Emit::default();
-                none.raw("null");
+                none.raw(if self.wire { "[]" } else { "null" });
                 let none_stmts = self.finish(none, span);
                 let none_body = self.block(none_stmts, None, unit, span);
                 let matched =
                     self.match_option(value, &payload, inner, some_body, none_body, unit, span);
                 out.stmt(self.expr_stmt(matched, span));
             }
-            Kind::Tuple(elems) => {
-                let tuple = self.fresh("tuple");
-                out.stmt(self.let_stmt(&tuple, false, ty, value, span));
-                out.raw("[");
-                for (i, elem) in elems.iter().enumerate() {
-                    if i > 0 {
-                        out.raw(",");
-                    }
-                    let tuple_value = self.local(&tuple, ty, span);
-                    let item = self.expr(
-                        *elem,
-                        span,
-                        HirExprKind::TupleIndex {
-                            receiver: Box::new(tuple_value),
-                            index: u32::try_from(i).unwrap_or(u32::MAX),
-                        },
-                    );
-                    self.encode(out, item, *elem, span);
-                }
-                out.raw("]");
-            }
+            Kind::Tuple(elems) => self.encode_tuple(out, value, ty, &elems, span),
             Kind::Map(value_ty) => self.encode_map(out, value, ty, value_ty, span),
+            Kind::Res(ok_ty, err_ty) => {
+                let (ok_name, on_ok) = self.encode_wire_arm("[0,", ok_ty, span);
+                let (err_name, on_err) = self.encode_wire_arm("[1,", err_ty, span);
+                let matched = self.match_result(
+                    value, &ok_name, ok_ty, on_ok, &err_name, err_ty, on_err, unit, span,
+                );
+                out.stmt(self.expr_stmt(matched, span));
+            }
         }
+    }
+
+    /// A tuple as an array of its elements.
+    fn encode_tuple(&mut self, out: &mut Emit, value: HirExpr, ty: Ty, elems: &[Ty], span: Span) {
+        let tuple = self.fresh("tuple");
+        out.stmt(self.let_stmt(&tuple, false, ty, value, span));
+        out.raw("[");
+        for (i, elem) in elems.iter().enumerate() {
+            if i > 0 {
+                out.raw(",");
+            }
+            let tuple_value = self.local(&tuple, ty, span);
+            let item = self.expr(
+                *elem,
+                span,
+                HirExprKind::TupleIndex {
+                    receiver: Box::new(tuple_value),
+                    index: u32::try_from(i).unwrap_or(u32::MAX),
+                },
+            );
+            self.encode(out, item, *elem, span);
+        }
+        out.raw("]");
     }
 
     /// A sequence as an array of its elements.
@@ -1003,6 +1073,8 @@ impl Gen<'_> {
         match kind {
             Kind::Adt(def, adt_ty) => self.decode_adt(out, def, adt_ty, ty, path, span),
             Kind::Seq(elem) => self.decode_seq(out, ty, elem, path, span),
+            Kind::Opt(inner) if self.wire => self.decode_wire_option(out, ty, inner, path, span),
+            Kind::Res(ok_ty, err_ty) => self.decode_wire_result(out, ty, ok_ty, err_ty, path, span),
             Kind::Opt(inner) => {
                 let bool_ty = self.tcx.bool_ty();
                 let r = self.reader(span);
@@ -1032,12 +1104,18 @@ impl Gen<'_> {
             Kind::F64 => ("rd_f64", "f64", f64_ty),
             Kind::F32 => ("rd_f64", "f32", f64_ty),
             Kind::Bool => ("rd_bool", "bool", self.tcx.bool_ty()),
+            Kind::Char => ("rd_char", "char", self.tcx.char_ty()),
             Kind::Str => ("rd_str", "string", self.tcx.string_ty()),
             Kind::Json => {
                 let r = self.reader(span);
                 return self.step("rd_json", vec![r], ty, span);
             }
-            Kind::Adt(..) | Kind::Seq(_) | Kind::Opt(_) | Kind::Tuple(_) | Kind::Map(_) => {
+            Kind::Adt(..)
+            | Kind::Seq(_)
+            | Kind::Opt(_)
+            | Kind::Tuple(_)
+            | Kind::Map(_)
+            | Kind::Res(..) => {
                 return self.zero_value(ty, span);
             }
         };
@@ -1256,6 +1334,7 @@ impl Gen<'_> {
                 HirExprKind::Literal(HirLiteral::Float("0.0".to_string())),
             ),
             Kind::Bool => self.expr(ty, span, HirExprKind::Literal(HirLiteral::Bool(false))),
+            Kind::Char => self.expr(ty, span, HirExprKind::Literal(HirLiteral::Char('\0'))),
             Kind::Str => self.string_lit("", span),
             Kind::Json => self.path_segments(
                 &["json".to_string(), "Value".to_string(), "Null".to_string()],
@@ -1269,6 +1348,10 @@ impl Gen<'_> {
             }
             Kind::Opt(_) => self.none(ty, span),
             Kind::Map(_) => self.call_path(&["Map", "new"], Vec::new(), ty, span),
+            Kind::Res(ok_ty, _) => {
+                let ok = self.zero_value(*ok_ty, span);
+                self.ctor("Ok", vec![ok], ty, span)
+            }
             Kind::Tuple(_) | Kind::Adt(..) => self.unit_lit(span),
         }
     }
@@ -1316,6 +1399,7 @@ impl Gen<'_> {
             TyKind::Float(FloatTy::F32) => Kind::F32,
             TyKind::Float(_) => Kind::F64,
             TyKind::Bool => Kind::Bool,
+            TyKind::Char => Kind::Char,
             TyKind::String => Kind::Str,
             TyKind::JsonValue => Kind::Json,
             TyKind::Vec(elem) | TyKind::Slice(elem) => Kind::Seq(elem),
@@ -1324,6 +1408,11 @@ impl Gen<'_> {
             TyKind::Adt { def, substs } if def.local == u32::MAX - 1 => {
                 Kind::Opt(*substs.types().first()?)
             }
+            TyKind::Adt { def, substs } if self.wire && def.local == u32::MAX => {
+                let types = substs.types();
+                Kind::Res(*types.first()?, *types.get(1)?)
+            }
+            TyKind::Array { elem, .. } if self.wire => Kind::Seq(elem),
             TyKind::Adt { def, .. } if self.adts.contains_key(&def) => Kind::Adt(def, peeled),
             _ => return None,
         })

@@ -45,7 +45,6 @@ struct Run {
 fn run_interpreter(source: &Path) -> Run {
     let out = Command::new(gos_bin())
         .arg("run")
-        .env("GOS_RUN_ENGINE", "vm")
         .arg(source)
         .output()
         .expect("spawn gos");

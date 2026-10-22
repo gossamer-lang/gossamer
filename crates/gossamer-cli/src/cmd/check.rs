@@ -34,9 +34,6 @@ pub(crate) struct CheckOptions {
 /// `gos check` dispatcher: routes between single-file and
 /// whole-project walks.
 pub(crate) fn dispatch(path: Option<PathBuf>, options: &CheckOptions) -> Result<()> {
-    if let Err(err) = crate::binding_dispatch::ensure_external_signatures() {
-        eprintln!("warning: failed to load rust-binding signatures: {err}");
-    }
     let resolved = match path {
         Some(p) => p,
         None => default_test_root()?,

@@ -1208,8 +1208,13 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/borrowed_option_result.gos"),
     spec("feature-testing-examples/aggregate_binding.gos"),
     // A `[rust-bindings]` call answers the same on every tier. The fixture is
-    // a project, so each tier builds the binding runner from its manifest.
+    // a project, so each tier loads or links the binding its manifest names.
     spec("feature-testing-examples/binding_all_tiers/src/main.gos"),
+    // Every wire shape a binding takes or answers, and callables a binding
+    // keeps from one call and calls from a later one, alike on every tier.
+    spec("feature-testing-examples/binding_wire_shapes/src/main.gos"),
+    // Two bindings depending on one Rust crate share one copy of its state.
+    spec("feature-testing-examples/binding_shared_state/src/main.gos"),
     // A value whose last use hands it to a new holder keeps its contents:
     // constructor fields, a dead copy, a pushed element view, and an aggregate
     // copy returned after its source field is set to null.
@@ -2148,6 +2153,8 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/operator_rhs_types.gos"),
     // Typed serde over enums, and `#[rename]` / `#[skip]` / `#[default]`.
     spec("feature-testing-examples/serde_enums_and_field_attrs.gos"),
+    // Typed serde of `char`, a newtype, and a user enum as the encoded value.
+    spec("feature-testing-examples/serde_chars_and_top_level_enums.gos"),
     // `time::Time`: an instant with its UTC offset, parsed, formatted,
     // shifted by durations, and compared.
     spec("feature-testing-examples/time_time.gos"),
@@ -2574,8 +2581,8 @@ fn run_vm(src: &Path, args: &[&str], stdin: &[u8]) -> Run {
     let mut cmd = Command::new(&gos);
     // `gos run` starts a native build unless asked for the VM, and this
     // tier is the VM with its JIT.
-    cmd.arg("run").arg(src).env("GOS_RUN_ENGINE", "vm");
-    let mut parts: Vec<String> = vec!["GOS_RUN_ENGINE=vm".to_string(), gos.display().to_string()];
+    cmd.arg("run").arg(src);
+    let mut parts: Vec<String> = vec![gos.display().to_string()];
     parts.push("run".to_string());
     parts.push(src.display().to_string());
     if !args.is_empty() {
@@ -2779,14 +2786,13 @@ fn run_native(bin: &Path, args: &[&str], stdin: &[u8]) -> Run {
     )
 }
 
-/// Builds the binding runner a `[rust-bindings]` fixture's project needs,
+/// Builds the binding libraries a `[rust-bindings]` fixture's project needs,
 /// once per project and outside any tier's deadline.
 ///
-/// The runner is a cargo build of the whole toolchain plus the bindings; the
-/// first `gos` command against the project pays for it and every later one
-/// reuses it. Charging it to whichever tier happens to run first would time
-/// a toolchain build against a program's run.
-fn prepare_binding_runner(src: &Path) -> Result<(), String> {
+/// The first `gos` command against the project builds each binding with
+/// Cargo and every later one reuses the build. Charging it to whichever tier
+/// happens to run first would time a Cargo build against a program's run.
+fn prepare_bindings(src: &Path) -> Result<(), String> {
     static PREPARED: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<PathBuf>>> =
         std::sync::OnceLock::new();
     let Some(project) = src
@@ -2810,7 +2816,7 @@ fn prepare_binding_runner(src: &Path) -> Result<(), String> {
         .expect("spawn gos check");
     if !out.status.success() {
         return Err(format!(
-            "preparing the binding runner for {} failed:\n  stderr: {}",
+            "building the bindings of {} failed:\n  stderr: {}",
             project.display(),
             String::from_utf8_lossy(&out.stderr)
         ));
@@ -2821,7 +2827,7 @@ fn prepare_binding_runner(src: &Path) -> Result<(), String> {
 
 fn run_tier(spec: &Spec, tier: Tier) -> Result<Run, String> {
     let src = workspace_root().join(spec.path);
-    prepare_binding_runner(&src)?;
+    prepare_bindings(&src)?;
     match tier {
         Tier::Vm => Ok(run_vm(&src, spec.args, spec.stdin)),
         Tier::Bytecode => Ok(run_bytecode(&src, spec.args, spec.stdin)),

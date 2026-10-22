@@ -1,0 +1,10 @@
+// Two bindings that depend on one Rust crate share one copy of it on every
+// tier: what one binding writes there, the other reads.
+use bump_probe
+use read_probe
+
+fn main() {
+    bump_probe::bump()
+    bump_probe::bump()
+    println(read_probe::count())
+}

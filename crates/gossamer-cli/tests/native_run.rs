@@ -1,8 +1,8 @@
-//! `gos run` runs the program's native executable: a stale build is redone
-//! with the debug profile before the run, the release build follows in the
-//! background, and the VM runs the program only when asked for or when the
-//! host cannot build native code. The program reports which executable runs
-//! it.
+//! `gos run` runs the program on the VM, and `gos run --native` runs its
+//! native executable: a stale build is redone with the debug profile before
+//! the run, the release build follows in the background, and a host that
+//! cannot build native code runs the program on the VM instead. The program
+//! reports which executable runs it.
 #![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
@@ -42,9 +42,8 @@ fn program(label: &str) -> String {
 fn run(entry: &Path, cache: &Path, env: &[(&str, &str)]) -> Output {
     let mut command = Command::new(gos_bin());
     command
-        .arg("run")
+        .args(["run", "--native"])
         .arg(entry)
-        .env_remove("GOS_RUN_ENGINE")
         .env("XDG_CACHE_HOME", cache);
     for (name, value) in env {
         command.env(name, value);
@@ -104,26 +103,47 @@ fn a_stale_project_builds_and_runs_natively_and_the_release_build_follows() {
 }
 
 #[test]
-fn the_vm_runs_the_program_when_asked_for() {
+fn a_plain_run_uses_the_vm_and_builds_nothing() {
     let dir = project("vm");
     let entry = dir.join("src/main.gos");
     std::fs::write(&entry, program("vm")).expect("write main");
     let cache = dir.join("cache");
-    assert_eq!(
-        stdout_of(&run(&entry, &cache, &[("GOS_RUN_ENGINE", "vm")])),
-        "vm gos"
-    );
-    let out = Command::new(gos_bin())
-        .args(["run", "--no-jit"])
-        .arg(&entry)
-        .env("XDG_CACHE_HOME", &cache)
-        .output()
-        .expect("spawn gos run");
-    assert_eq!(stdout_of(&out), "vm gos");
+    for flags in [&["run"][..], &["run", "--no-jit"][..]] {
+        let out = Command::new(gos_bin())
+            .args(flags)
+            .arg(&entry)
+            .env("XDG_CACHE_HOME", &cache)
+            .output()
+            .expect("spawn gos run");
+        assert_eq!(stdout_of(&out), "vm gos", "{flags:?}");
+    }
     assert!(
         !dir.join(".gos-cache/run").exists(),
         "a VM run builds nothing"
     );
+    assert!(
+        !cache.join("gossamer/run").exists(),
+        "a VM run builds nothing"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn native_does_not_combine_with_the_vm_only_flags() {
+    let dir = project("conflict");
+    let entry = dir.join("src/main.gos");
+    std::fs::write(&entry, program("conflict")).expect("write main");
+    for flag in ["--no-jit", "--timings"] {
+        let out = Command::new(gos_bin())
+            .args(["run", "--native", flag])
+            .arg(&entry)
+            .output()
+            .expect("spawn gos run");
+        assert!(!out.status.success(), "{flag} was accepted with --native");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("cannot be used with"), "{stderr}");
+        assert!(out.stdout.is_empty(), "nothing ran");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

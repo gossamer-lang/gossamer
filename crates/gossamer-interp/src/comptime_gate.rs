@@ -356,17 +356,20 @@ fn capabilities() -> &'static FxHashMap<&'static str, Capability> {
 /// Address of a builtin's implementation, tagged by which of the two
 /// callable shapes it is so a plain and a dispatching builtin can
 /// never collide.
-fn implementation_of(value: &Value) -> Option<(u8, usize)> {
+fn implementation_of(value: &Value) -> Option<(u8, usize, usize)> {
     match value {
-        Value::Builtin(inner) => Some((0, inner.call as usize)),
-        Value::Native(inner) => Some((1, inner.call as usize)),
+        Value::Builtin(inner) => Some((0, inner.call as usize, usize::MAX)),
+        Value::Native(inner) => {
+            let (call, data) = inner.entry.identity();
+            Some((1, call, data))
+        }
         _ => None,
     }
 }
 
 fn build_table(entries: &'static [(&'static str, Value)]) -> FxHashMap<&'static str, Capability> {
     let mut by_name: FxHashMap<&'static str, Capability> = FxHashMap::default();
-    let mut by_implementation: FxHashMap<(u8, usize), Capability> = FxHashMap::default();
+    let mut by_implementation: FxHashMap<(u8, usize, usize), Capability> = FxHashMap::default();
 
     for (name, value) in entries {
         let Some(capability) = classify_qualified(name) else {

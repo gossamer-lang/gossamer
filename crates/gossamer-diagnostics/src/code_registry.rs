@@ -1843,6 +1843,14 @@ pub const REGISTRY: &[(&str, &str)] = &[
             `x`, or pass `x` to hand the callee a value of its own.",
     ),
     (
+        "GT0122",
+        "A `[rust-bindings]` item answers a `#[derive(GosStruct)]` struct, and\n\
+            the program declares no type of that name. The struct crosses field\n\
+            by field into the program's struct that shares its name, so declare\n\
+            `struct Name { .. }` with the Rust struct's fields, in the same order\n\
+            and with the same types.",
+    ),
+    (
         "GX0001",
         "An operation received a value of an incompatible type. The\n\
                      diagnostic names the type that was required and the type\n\

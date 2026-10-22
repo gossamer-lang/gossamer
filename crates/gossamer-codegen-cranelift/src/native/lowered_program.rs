@@ -661,7 +661,13 @@ pub(crate) fn emit_carrier_entry_thunk(
     Ok((thunk_id, frames))
 }
 
-pub(super) fn emit_c_main_shim(module: &mut dyn Module, gos_main: FuncId) -> Result<()> {
+/// Emits the C `main`; a program calling bindings hands their
+/// `gos_binding_init` the runtime's table before anything else runs.
+pub(super) fn emit_c_main_shim(
+    module: &mut dyn Module,
+    gos_main: FuncId,
+    init_bindings: bool,
+) -> Result<()> {
     let ptr_ty = module.target_config().pointer_type();
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(types::I32));
@@ -705,6 +711,23 @@ pub(super) fn emit_c_main_shim(module: &mut dyn Module, gos_main: FuncId) -> Res
         let argv = builder.block_params(entry)[1];
         let program_start_ref = module.declare_func_in_func(program_start, builder.func);
         let _ = builder.ins().call(program_start_ref, &[]);
+        if init_bindings {
+            let mut init_sig = module.make_signature();
+            init_sig.params.push(AbiParam::new(ptr_ty));
+            init_sig.returns.push(AbiParam::new(ptr_ty));
+            let init = module
+                .declare_function("gos_binding_init", Linkage::Import, &init_sig)
+                .map_err(|e| anyhow!("declare gos_binding_init: {e}"))?;
+            let mut hand_sig = module.make_signature();
+            hand_sig.params.push(AbiParam::new(ptr_ty));
+            let hand = module
+                .declare_function("gos_rt_binding_init", Linkage::Import, &hand_sig)
+                .map_err(|e| anyhow!("declare gos_rt_binding_init: {e}"))?;
+            let init_ref = module.declare_func_in_func(init, builder.func);
+            let init_addr = builder.ins().func_addr(ptr_ty, init_ref);
+            let hand_ref = module.declare_func_in_func(hand, builder.func);
+            let _ = builder.ins().call(hand_ref, &[init_addr]);
+        }
         let set_args_ref = module.declare_func_in_func(set_args, builder.func);
         let _ = builder.ins().call(set_args_ref, &[argc, argv]);
         let gos_main_ref = module.declare_func_in_func(gos_main, builder.func);

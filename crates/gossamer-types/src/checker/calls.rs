@@ -2,12 +2,13 @@
 
 use super::{
     AstGenericArg, DefId, DeferredStructural, DeferredStructuralKind, Expectation, Expr, ExprKind,
-    FnSig, IntTy, LiteralConsts, Mutbl, REVERSE_DEF_LOCAL, Resolution, Span, StrArgShape,
-    StringParamMeta, Ty, TyKind, TypeChecker, TypeError, TypePath, UnaryOp, argument_value_display,
-    builtin_type_constructors, callee_display_name, combinator_module_name,
-    core_type_own_method_names, is_catalog_type_param, is_definitely_not_callable_value,
-    string_argument_found_type, strings_fn_arity, strings_fn_char_params, strings_fn_int_params,
-    strings_fn_param_metadata, strings_fn_str_params,
+    FnSig, IntTy, LiteralConsts, Mutbl, OPTION_DEF_LOCAL, RESULT_DEF_LOCAL, REVERSE_DEF_LOCAL,
+    Resolution, Span, StrArgShape, StringParamMeta, Ty, TyKind, TypeChecker, TypeError, TypePath,
+    UnaryOp, argument_value_display, builtin_type_constructors, callee_display_name,
+    combinator_module_name, core_type_own_method_names, is_catalog_type_param,
+    is_definitely_not_callable_value, string_argument_found_type, strings_fn_arity,
+    strings_fn_char_params, strings_fn_int_params, strings_fn_param_metadata,
+    strings_fn_str_params,
 };
 
 impl TypeChecker<'_> {
@@ -471,13 +472,11 @@ impl TypeChecker<'_> {
         })
     }
 
-    /// Rejects `json::render` / `json::encode` of an enum value
-    /// (`Result` / `Option` / user enum). The encoder is polymorphic
-    /// over `json::Value`, scalars, arrays, and structs, but an enum
-    /// has no JSON form and is almost always a `json::parse(..)` whose
-    /// `?` was forgotten. The VM tolerated the misuse (emitting the
-    /// `Ok` payload) while a native build silently emitted `""`, so the
-    /// checker rejects it uniformly with a `?`-pointing diagnostic.
+    /// Rejects `json::render` / `json::encode` of a `Result` or `Option`
+    /// value. Such a carrier has no JSON form and is almost always a
+    /// `json::parse(..)` whose `?` was forgotten, so the checker rejects it
+    /// with a `?`-pointing diagnostic. A user enum encodes externally
+    /// tagged, as `json::decode` reads it back.
     pub(super) fn reject_json_enum_arg(
         &mut self,
         op: &str,
@@ -497,6 +496,7 @@ impl TypeChecker<'_> {
             _ => None,
         };
         if let Some(def) = adt_def
+            && matches!(def.local, RESULT_DEF_LOCAL | OPTION_DEF_LOCAL)
             && self.tcx.struct_field_tys(def).is_none()
         {
             let span = args.first().map_or(callee.span, |a| a.span);
@@ -801,6 +801,16 @@ impl TypeChecker<'_> {
             }
             if let Some(ty) = self.binding_ty(&item.ret) {
                 return Some(ty);
+            }
+            if let gossamer_resolve::BindingType::Opaque(name) = &item.ret {
+                self.emit(
+                    TypeError::BindingStructUndeclared {
+                        binding: callee_name.clone(),
+                        name: name.clone(),
+                    },
+                    callee.span,
+                );
+                return Some(self.tcx.error_ty());
             }
         }
         if let Some(ty) = self.check_stdlib_module_ret_ty(

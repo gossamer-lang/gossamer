@@ -3,9 +3,10 @@
 A **binding crate** brings Rust code into a Gossamer program: an ordinary
 Rust library that depends on `gossamer-binding`, marks
 the functions it wants to publish, and is named in the project's
-`project.toml` under `[rust-bindings]`. The toolchain compiles it,
-links it into the interpreter and into `gos build` binaries, and the
-functions become `use`-able from `.gos` source like any other module.
+`project.toml` under `[rust-bindings]`. `gos run` builds it once as an
+optimized shared library and loads it, `gos build` links it into the
+binary, and the functions become `use`-able from `.gos` source like any
+other module.
 
 C functions need no crate: declare them in an `unsafe extern "C"` block
 ([Foreign functions](language/unsafe_extern.md)); a project refuses them
@@ -65,8 +66,8 @@ native-binding = { path = "native" }
 ```
 
 The `gossamer-binding` dependency the template writes is pinned to the
-toolchain that scaffolded it; the toolchain resolves it against its own
-copy when it builds the binding, so nothing has to be fetched for it.
+toolchain that scaffolded it; the toolchain patches it to its own copy when
+it builds the binding, so nothing has to be fetched for it.
 
 Call it from Gossamer. The module is the string in `#[gos_module]`,
 and - like every other module - it has to be imported before a path
@@ -89,10 +90,11 @@ gos run src/main.gos      # hello, world
 gos build src/main.gos    # a native binary with the binding linked in
 ```
 
-The first run against a project builds a per-project runner with
-Cargo, which takes a while; later runs reuse the cached build under
-`$XDG_CACHE_HOME/gossamer/runners/`. Changing `[rust-bindings]`
-re-fingerprints the runner and rebuilds it.
+The first run builds the binding with Cargo, in release, into
+`$XDG_CACHE_HOME/gossamer/bindings/`; every project that names the same
+binding with the same features shares that build, and a `path` binding is
+rebuilt when its sources change. Later runs start in a few milliseconds, and
+the library loads only when the program first calls one of its items.
 
 ## Declaring the module
 
@@ -128,16 +130,22 @@ ABI knows. Anything else is a compile error in the binding crate
 | `f64` | `f64` | |
 | `char` | `char` | |
 | `String` | `String` | |
-| `[u8]` | `Bytes` | Newtype over `Vec<u8>`; `b.0` is the vector. |
-| `Vec<T>` | `Vec<T>` | Over any element the table already lists. |
-| `Option<T>` | `Option<T>` | |
+| `[u8]` / `Vec<u8>` | `Bytes` | Newtype over `Vec<u8>`; `b.0` is the vector. A parameter takes any `[u8]`; an answer is a `Vec<u8>` the caller owns. |
+| `Vec<T>` | `Vec<T>` | Over any element in this table, nested as deep as needed. |
+| `Option<T>` | `Option<T>` | Over any element, `Option<Option<T>>` included. |
 | `Result<T, E>` | `Result<T, E>` | See [Errors](#errors). |
-| `Map<K, V>` | `HashMap<K, V>` | `<i64, i64>`, `<String, String>`, `<String, i64>`. |
-| tuple | tuple | `(i64, i64)`, `(f64, f64)`, `(i64, String)`, `(String, i64)`, `(String, String)`, `(i64, String, bool)`. |
-| a struct | `#[derive(GosStruct)]` struct | Crosses by value, field by field. |
+| `Map<K, V>` | `HashMap<K, V>` | `String` keys over any value; `<i64, i64>` and `<i64, String>` too. |
+| tuple | tuple | Up to four elements inside another shape; on its own, `(i64, i64)`, `(f64, f64)`, `(i64, String)`, `(String, i64)`, `(String, String)`, `(i64, String, bool)`. |
+| a struct | `#[derive(GosStruct)]` struct | Crosses by value, field by field, and inside any other shape. |
 | `DynValue` | `DynValue` | A value whose shape the data decides; see [Dynamic values](#dynamic-values). |
 | a declared arm set | `Type::Variant(&[VariantArm..])` | Matched as the Gossamer enum spelling the same arms. |
 | a closure | `PersistentCallback` / `BindingCallback` | Taken by a `cb_fn`; see [Callbacks](#callbacks). |
+
+A shape that nests composites (`Option<(i64, String)>`, `Vec<Bytes>`,
+`Result<Vec<Probe>, String>`, `Vec<Option<i64>>`) crosses as JSON text that a
+walk the compiler generates for its Gossamer type writes and reads, so it
+answers the same on every tier. A top-level tuple must be one listed above;
+put a richer one in a `Vec`, `Option`, or struct.
 
 Shapes outside that set need a hand-written wrapper on the Rust side:
 take the pieces the table covers and assemble the richer value inside
@@ -167,18 +175,17 @@ match native::parse_int("nope") {
 ```
 
 `Result<T, String>` works too, when a plain message is all the caller
-needs.
+needs; both error types carry the same shapes.
 
-A **panic** inside a binding is caught at the boundary rather than
-unwinding into Gossamer code: the thunk returns the output type's
-default (a null pointer, a zero, an empty value). Return an `Err`
+A **panic** inside a binding is caught at the boundary and raised as a
+Gossamer panic with the binding's message, on every tier. Return an `Err`
 rather than panicking for anything a caller should handle.
 
 ## Long synchronous work
 
 A binding call runs on the goroutine that made it, so a long blocking
-call would hold a scheduler thread. `#[gos_blocking]` moves the body
-onto the blocking pool:
+call would hold a scheduler thread. `#[gos_blocking]` marks the body as a
+blocking call, and the scheduler runs other goroutines meanwhile:
 
 ```rust
 use gossamer_binding::gos_blocking;
@@ -234,7 +241,8 @@ fn main() {
 ```
 
 Each type gets its own registry of `Mutex`-guarded values, so a handle
-is safe to pass between goroutines.
+is safe to pass between goroutines. A handle the registry does not hold is a
+panic naming the method.
 
 ## Structs by value
 
@@ -252,6 +260,18 @@ pub struct Point {
 pub fn shift(p: Point, dx: i64) -> Point {
     Point { x: p.x + dx, y: p.y }
 }
+```
+
+The program declares the struct it reads, with the same name and the Rust
+struct's fields in order; the value crosses field by field into it. A binding
+answering a struct the program does not declare is `GT0122`.
+
+<!-- fragment -->
+```gossamer
+struct Point { x: i64, y: i64 }
+
+let p = native::shift(Point { x: 1, y: 2 }, 3)
+println(f"{p.x}")   // 4
 ```
 
 ## Dynamic values
@@ -278,7 +298,9 @@ every other kind); `len()`, `at(i)`, and `key_at(i)` read the values it holds;
 `as_bytes` a `Vec`. Two values are equal when their contents are, an arm
 matching on its name and every payload field.
 
-A binding returning `DynValue` hands back exactly that value.
+A binding returning `DynValue` hands back exactly that value. Its shape is
+read through these accessors: matching it against an enum's patterns is
+`GT0001`, and a binding that knows its arms declares them.
 
 ### Declaring the arms
 
@@ -337,11 +359,12 @@ let k = 3
 println("{}", events::apply(|x| x * k, 14))
 ```
 
-The closure is **call-scoped**: it is valid only until the binding
-function returns. A compiled program releases it then, and a later
-`invoke` reports an error instead of calling anything. A callback that
-must outlive the call needs a different design - hand the binding a
-channel, or have Gossamer poll.
+A `BindingCallback` is **call-scoped**: it is valid until the binding
+function returns. A `PersistentCallback` holds a share of the closure for as
+long as the binding keeps it, so a callable one call stores (a resize hook, an
+event handler) can be called by a later `cb_fn` through that call's dispatch.
+Under `gos run`, a function that calls a `cb_fn` runs on the VM, so a
+callable from VM or JIT code can be called back.
 
 The closure's parameters and result are integers, floats, `bool`,
 `char`, and `String` (its result may also be `()`), and it takes at
@@ -413,11 +436,11 @@ see them.
 
 ## Tiers and the ABI
 
-Bindings are aimed at `gos build`, which links each binding crate into
-the native binary, and are supported by `gos run` and `gos test`,
-which build a per-project copy of `gos` with the bindings linked in.
-The REPL does not load them: it notes a project's `[rust-bindings]`
-at startup, and `gos run` or `gos build` is the way to call them.
+`gos run`, `gos test`, `gos check`, and the REPL load a program's bindings,
+its own and its dependencies', as one shared library over the C ABI in
+`gossamer-binding-abi`; `gos build` links the same binding crates into the
+native binary. Either way the bindings are one crate graph, so a Rust crate
+two bindings depend on is one copy, with one copy of its global state.
 
 Binding calls run on the bytecode VM, the Cranelift JIT, and LLVM AOT
 (`gos build`, `gos build --release`).
@@ -430,10 +453,7 @@ boundary crossing, so the same program prints the same thing on every tier.
 ### What stays compatible
 
 A binding crate depends on `gossamer-binding` by version, and the toolchain
-building the program supplies its own copy of that crate through Cargo's
-`[patch]`. The binding is therefore always compiled against the toolchain in
-use, and the wire shapes between it and the runtime are the toolchain's own.
-Two consequences:
+building it supplies its own copy of that crate through Cargo's `[patch]`.
 
 - **The Rust source API is the contract.** `#[gos_module]`, `#[gos_opaque]`,
   `#[gos_blocking]`, `#[derive(GosStruct)]`, the `BindingAbi` trait, and the
@@ -441,23 +461,39 @@ Two consequences:
   [compatibility policy](compatibility.md): a minor release only adds to them,
   and a removal goes through a deprecation period. A binding that builds
   against one release builds against the next.
-- **The binary layout is not a contract.** The wire structs, the
-  `gos_binding_*` symbol scheme, and the ABI version `gossamer-binding`
-  records (currently `2.0`) may change in any release, because no binary built
-  by one toolchain is ever linked by another. There is no pre-built binding
-  archive to keep compatible.
+- **The binary interface is versioned.** A library records the binding ABI
+  it was built for (currently `3.0`); `gos` refuses one built for another
+  major version, and one whose signatures changed since they were cached,
+  before any call.
 
-`crates/gossamer-binding/ABI_0_4.md` in the repository documents each
-wire shape's layout, ownership, and reclamation rules - read it before
-writing a `BindingAbi` impl of your own.
+`crates/gossamer-binding/ABI.md` in the repository documents the entry
+points, the wire shapes, and their ownership rules - read it before writing a
+`BindingAbi` impl of your own.
+
+## Testing a binding
+
+`gossamer_binding::testing::call("module::item", &[Value::Int(1)])` calls an
+item through the entry `gos run` uses, so a binding crate's own `cargo test`
+needs no Gossamer toolchain.
 
 ## Shipping a library that carries a binding
 
 A published Gossamer package may declare `[rust-bindings]` like any
-other project; the consumer's toolchain builds the Rust crate as part
-of the consumer's runner. Keep the Rust crate inside the published
+other project; the consumer's toolchain builds the Rust crate, once, into
+its shared binding cache. Keep the Rust crate inside the published
 tree (a `path` entry), or point at a crates.io release, so a consumer
 fetching the package gets a buildable source tree.
+
+`gos publish` builds the package's `path` bindings for the machine it runs on
+and packs their library into the package under the first one's
+`gos-prebuilt/<target>/`, covered by the package's signature. A program on the
+same target whose bindings are exactly that set, with the same sources,
+features, and binding ABI, loads the library on its first run with no Rust
+toolchain installed; any other program builds the sources as before.
+
+A root project with `ffi = false` under `[project]` refuses every binding,
+its own and its dependencies', before anything builds or loads, as it refuses
+`unsafe extern "C"` declarations.
 
 Worked examples live in `example-external-libraries/` in the
 repository: a Gossamer-aware crate, a wrapper around a published crate

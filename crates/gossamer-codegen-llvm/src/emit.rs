@@ -84,9 +84,14 @@ enum MainReturn {
 /// The C `main` and the shim it runs `gos_main` through. The shim runs under
 /// `gos_rt_call_main`, so a fault on `main`'s thread unwinds through the
 /// program's frames, running their pending deferred expressions, before it
-/// is reported.
-fn render_main_entry(kind: MainReturn) -> String {
+/// is reported. A program calling bindings hands their `gos_binding_init` the
+/// runtime's table before anything else runs.
+fn render_main_entry(kind: MainReturn, init_bindings: bool) -> String {
     let mut out = String::new();
+    if init_bindings {
+        writeln!(out, "declare ptr @gos_binding_init(ptr)").unwrap();
+        writeln!(out, "declare void @gos_rt_binding_init(ptr)").unwrap();
+    }
     writeln!(out, "define void @gos_main_shim(ptr %out) #0 {{").unwrap();
     writeln!(out, "entry:").unwrap();
     match kind {
@@ -106,6 +111,13 @@ fn render_main_entry(kind: MainReturn) -> String {
     writeln!(out, "entry:").unwrap();
     writeln!(out, "  %slot = alloca i128, align 16").unwrap();
     writeln!(out, "  call void @gos_rt_program_start()").unwrap();
+    if init_bindings {
+        writeln!(
+            out,
+            "  call void @gos_rt_binding_init(ptr @gos_binding_init)"
+        )
+        .unwrap();
+    }
     writeln!(out, "  call void @gos_rt_set_args(i32 %argc, ptr %argv)").unwrap();
     writeln!(
         out,
@@ -1401,7 +1413,10 @@ fn render_chunk_module(
         } else {
             MainReturn::Word
         };
-        out.push_str(&render_main_entry(kind));
+        out.push_str(&render_main_entry(
+            kind,
+            gossamer_mir::calls_bindings(ctx.all_bodies),
+        ));
     }
 
     writeln!(out).unwrap();
@@ -2119,7 +2134,8 @@ fn render_module_to_path(
         } else {
             MainReturn::Word
         };
-        body_w.write_all(render_main_entry(kind).as_bytes())?;
+        body_w
+            .write_all(render_main_entry(kind, gossamer_mir::calls_bindings(bodies)).as_bytes())?;
     }
     writeln!(body_w)?;
     writeln!(body_w, "!0 = !{{}}")?;

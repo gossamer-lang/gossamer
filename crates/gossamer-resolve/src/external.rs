@@ -145,6 +145,23 @@ pub struct ExternalItem {
     pub ret: BindingType,
     /// One-line documentation.
     pub doc: String,
+    /// The positions that cross as JSON text, which the program's generated
+    /// walk writes and reads: bit 0 the return, bit `i + 1` parameter `i`.
+    pub json: u64,
+}
+
+impl ExternalItem {
+    /// Whether the return crosses as JSON text.
+    #[must_use]
+    pub fn json_ret(&self) -> bool {
+        self.json & 1 != 0
+    }
+
+    /// Whether parameter `index` crosses as JSON text.
+    #[must_use]
+    pub fn json_param(&self, index: usize) -> bool {
+        index < 63 && self.json & (1 << (index + 1)) != 0
+    }
 }
 
 /// Process-wide table populated once at runner startup.
@@ -216,6 +233,7 @@ mod tests {
                 params: vec![BindingType::Vec(Box::new(BindingType::I64))],
                 ret: BindingType::Vec(Box::new(BindingType::Vec(Box::new(BindingType::I64)))),
                 doc: String::new(),
+                json: 0,
             }],
         }]
     }

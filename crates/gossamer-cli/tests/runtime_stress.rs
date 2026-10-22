@@ -70,7 +70,6 @@ fn run_with_timeout(mut child: std::process::Child) -> (String, String, common::
 fn run_vm(src: &Path) -> (String, String, common::RunExit) {
     let child = Command::new(gos_bin())
         .arg("run")
-        .env("GOS_RUN_ENGINE", "vm")
         .arg(src)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

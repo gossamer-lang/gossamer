@@ -78,6 +78,7 @@ fn kind_is_emittable(kind: &FieldKind, emittable: &HashSet<String>) -> bool {
         | FieldKind::I64
         | FieldKind::Float(_)
         | FieldKind::Bool
+        | FieldKind::Char
         | FieldKind::String
         | FieldKind::Json => true,
     }
@@ -130,14 +131,7 @@ fn named_serde_symbols(parsed: &SourceFile) -> HashSet<String> {
     let symbols = serde_symbol_index(tree);
     calls
         .into_iter()
-        .map(|(_, written, _)| {
-            let bare = written.rsplit("::").next().unwrap_or(&written).to_string();
-            symbols
-                .get(&written)
-                .or_else(|| symbols.get(&bare))
-                .cloned()
-                .unwrap_or(bare)
-        })
+        .map(|(_, written, _, module)| serde_symbol_for(&symbols, &module, &written))
         .collect()
 }
 
@@ -1132,6 +1126,14 @@ fn field_default_literal(
                     {
                         let inner =
                             field_default_literal(repr, module, structs, aliases, with_default)?;
+                        // A bare numeric literal reads as `i64` / `f64`; a newtype over
+                        // another width converts only from that width.
+                        if let gossamer_ast::TypeKind::Path(p) = &repr.kind
+                            && let [seg] = p.segments.as_slice()
+                            && is_numeric_scalar(&seg.name.name)
+                        {
+                            return Some(format!("({inner} as {}).into()", seg.name.name));
+                        }
                         return Some(format!("({inner}).into()"));
                     }
                 }
@@ -1142,6 +1144,14 @@ fn field_default_literal(
     }
     let kind = FieldKind::from_type(ty, module, structs, aliases)?;
     checked_default_literal(&kind, with_default)
+}
+
+/// Whether `name` is a primitive integer or float type.
+fn is_numeric_scalar(name: &str) -> bool {
+    matches!(
+        name,
+        "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" | "f32" | "f64"
+    )
 }
 
 /// The first field of a `#[derive(Default)]` struct that the derive cannot

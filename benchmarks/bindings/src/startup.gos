@@ -1,0 +1,7 @@
+// The startup a project with a Rust binding pays: one call, which loads the
+// library.
+use bench_binding
+
+fn main() {
+    println("{}", bench_binding::add(1, 2))
+}

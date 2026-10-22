@@ -265,3 +265,45 @@ fn render_round_trips_crates_form_with_features() {
     let m2 = Manifest::parse(&rendered).unwrap();
     assert_eq!(m, m2);
 }
+
+fn write(path: &std::path::Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+#[test]
+fn a_dependency_binding_joins_the_program_rebased_onto_its_package() {
+    let root = std::env::temp_dir().join(format!("gos-dependency-bindings-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let app = root.join("app");
+    let lib = root.join("lib");
+    write(
+        &app.join("project.toml"),
+        "[project]\nid = \"example.com/app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\n\"example.com/lib\" = { path = \"../lib\" }\n\n\
+         [rust-bindings]\nshared = { path = \"own\" }\n",
+    );
+    write(&app.join("src/main.gos"), "fn main() {}\n");
+    write(
+        &lib.join("project.toml"),
+        "[project]\nid = \"example.com/lib\"\nversion = \"0.1.0\"\n\n\
+         [rust-bindings]\nlib-native = { path = \"native\" }\nshared = { path = \"theirs\" }\n",
+    );
+    write(&lib.join("src/lib.gos"), "pub fn f() {}\n");
+
+    let manifest =
+        Manifest::parse(&std::fs::read_to_string(app.join("project.toml")).unwrap()).unwrap();
+    let merged = gossamer_pkg::bundle::with_dependency_bindings(&manifest, &app);
+
+    match &merged.rust_bindings["lib-native"] {
+        RustBindingSpec::Path { path, .. } => {
+            assert_eq!(PathBuf::from(path), lib.join("native"));
+        }
+        other => panic!("expected a path binding, got {other:?}"),
+    }
+    match &merged.rust_bindings["shared"] {
+        RustBindingSpec::Path { path, .. } => assert_eq!(path, "own"),
+        other => panic!("expected a path binding, got {other:?}"),
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}

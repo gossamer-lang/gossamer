@@ -1394,15 +1394,34 @@ dependencies = [
 name = "gossamer-binding"
 version = "0.75.0"
 dependencies = [
+ "gossamer-binding-abi",
  "gossamer-binding-macros",
- "gossamer-codegen-cranelift",
- "gossamer-interp",
- "gossamer-resolve",
- "gossamer-std",
  "linkme",
  "parking_lot",
  "pastey",
  "rustc-hash",
+]
+
+[[package]]
+name = "gossamer-binding-abi"
+version = "0.75.0"
+
+[[package]]
+name = "gossamer-binding-host"
+version = "0.75.0"
+dependencies = [
+ "gossamer-binding-abi",
+ "gossamer-codegen-cranelift",
+ "gossamer-interp",
+ "gossamer-resolve",
+ "gossamer-runtime",
+ "gossamer-std",
+ "libc",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1426,6 +1445,7 @@ dependencies = [
  "flate2",
  "gossamer-abi",
  "gossamer-ast",
+ "gossamer-binding-host",
  "gossamer-codegen-llvm",
  "gossamer-coro",
  "gossamer-diagnostics",
@@ -1485,7 +1505,6 @@ dependencies = [
  "gossamer-resolve",
  "gossamer-runtime",
  "gossamer-types",
- "linkme",
  "object 0.39.1",
  "parking_lot",
  "rayon",
@@ -1544,6 +1563,7 @@ dependencies = [
  "anyhow",
  "gossamer-abi",
  "gossamer-ast",
+ "gossamer-binding-abi",
  "gossamer-codegen-cranelift",
  "gossamer-codegen-llvm",
  "gossamer-diagnostics",
@@ -1553,9 +1573,7 @@ dependencies = [
  "gossamer-parse",
  "gossamer-pkg",
  "gossamer-resolve",
- "gossamer-runner-template",
  "gossamer-types",
- "libc",
  "parking_lot",
  "postcard",
  "serde",
@@ -1749,14 +1767,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gossamer-runner-template"
-version = "0.75.0"
-dependencies = [
- "syn",
- "toml",
-]
-
-[[package]]
 name = "gossamer-runtime"
 version = "0.75.0"
 dependencies = [
@@ -1775,6 +1785,7 @@ dependencies = [
  "flate2",
  "getrandom 0.3.4",
  "gossamer-abi",
+ "gossamer-binding-abi",
  "gossamer-core",
  "gossamer-coro",
  "gossamer-http3",

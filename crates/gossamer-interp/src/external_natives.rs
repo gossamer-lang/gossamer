@@ -1,6 +1,6 @@
 //! Process-wide registry of binding-installed native functions.
 //!
-//! `gossamer-binding::install_all` populates this table once at
+//! `gossamer-binding-host::install` populates this table once at
 //! startup; [`crate::Vm::new`] merges the snapshot into its
 //! per-instance globals so qualified binding paths (e.g.
 //! `tuigoose::layout::rect`) resolve through the same `Value::Native`
@@ -18,7 +18,11 @@ static EXTERNAL_NATIVES: Mutex<Vec<(&'static str, Value)>> = Mutex::new(Vec::new
 /// pre-leaks the qualified spelling so this entry point never
 /// touches lifetime concerns.
 pub fn register_external_native(name: &'static str, call: NativeCall) {
-    let value = Value::native(name, call);
+    register_external_value(name, Value::native(name, call));
+}
+
+/// Registers `value` as the global `name` of every VM built afterwards.
+pub fn register_external_value(name: &'static str, value: Value) {
     EXTERNAL_NATIVES.lock().push((name, value));
 }
 

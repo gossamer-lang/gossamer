@@ -13,9 +13,9 @@ literal `--`. Put `gos run` options before `FILE`.
 | `gos new example.com/app --path ./app` | Scaffold a project |
 | `gos new example.com/app --template lib` | Scaffold a library (`bin`, `lib`, `service`, `workspace`, `binding`) |
 | `gos init example.com/app` | Scaffold just `project.toml` in the CWD |
-| `gos run src/main.gos` | Build (debug first, release in the background) and run the native executable |
-| `GOS_RUN_ENGINE=vm gos run src/main.gos` | Register-based bytecode VM with in-process Cranelift JIT |
+| `gos run src/main.gos` | Register-based bytecode VM with in-process Cranelift JIT; starts at once |
 | `gos run --no-jit src/main.gos` | The VM with pure bytecode dispatch (JIT off) |
+| `gos run --native src/main.gos` | Build (debug first, release in the background) and run the native executable |
 | `gos check src/main.gos` | Type-check + exhaustiveness |
 | `gos build src/main.gos` | Native build via LLVM AOT with checked arithmetic (`opt -O1 | llc -O0`), then links the user's object against the `gossamer-runtime` staticlib into an ELF/Mach-O/PE. |
 | `gos build --release src/main.gos` | Optimised native build - full LLVM `opt -O3 | llc -O3` pipeline, static musl on Linux. |
@@ -44,8 +44,14 @@ literal `--`. Put `gos run` options before `FILE`.
 
 ## How `gos run` starts a program
 
-`gos run` runs the same native executable `gos build` makes, so a run
-behaves exactly as the shipped binary does:
+`gos run` runs the program on the bytecode VM and its JIT, which start it
+without building anything, so a script or a tool edited and rerun starts in
+milliseconds.
+
+`gos run --native` runs the same native executable `gos build` makes
+instead, so a run behaves, and performs, exactly as the shipped binary does.
+A program whose speed matters while it runs, such as a GUI application, runs
+this way:
 
 1. When the release build of the current sources is up to date, it starts
    at once.
@@ -68,11 +74,10 @@ shared by every project on the machine: a library such as a GUI toolkit is
 compiled once, and a new program using it compiles only its own code.
 `gos cache` reports both, and `gos cache --prune --scope all` trims them.
 
-The bytecode VM and its JIT run the program instead when asked for with
-`GOS_RUN_ENGINE=vm`, `--no-jit`, `--timings`, or one of the VM's own
-variables (`GOS_JIT`, `GOS_JIT_TRACE`, `GOS_VM_PROFILE`, ...). Inline source
-(`gos -e`) runs on the VM, and so does every program on a host without the
-LLVM tools, after a one-line note saying why.
+`--native` does not combine with the VM's own flags (`--no-jit`,
+`--timings`). On a host without the LLVM tools, `gos run --native` runs the
+program on the VM after a one-line note saying why. Inline source (`gos -e`)
+always runs on the VM.
 
 ## Entry file
 

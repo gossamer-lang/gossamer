@@ -58,6 +58,7 @@ unnecessary_safety_comment = "deny"
 # shim is gated out, so they stay in the unconditional table.
 [dependencies]
 unicode-ident = { workspace = true }
+gossamer-binding-abi = { workspace = true }
 gossamer-core = { workspace = true }
 itoa = "1"
 base64-simd = "0.8"
@@ -236,6 +237,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Kernel",
     "Win32_System_Memory",
+    "Win32_System_Pipes",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }

@@ -57,6 +57,15 @@ mod autoderive_tests {
     }
 
     #[test]
+    fn a_derived_default_converts_a_newtype_zero_from_its_own_width() {
+        let source = "newtype WindowId = u32\nnewtype Ratio = f32\n#[derive(Default)]\nstruct W { id: WindowId, ratio: Ratio }\n";
+        let augmented = super::augment_source(source);
+        let generated = &augmented[source.len()..];
+        assert!(generated.contains("id: (0 as u32).into()"), "{generated}");
+        assert!(generated.contains("ratio: (0.0 as f32).into()"), "{generated}");
+    }
+
+    #[test]
     fn implicit_derives_follow_qualified_field_types() {
         let source = "struct Model { requests: Sender<i64> }\nmod values { pub struct Model { value: i64 } }\nstruct Wrapper { value: values::Model }\n";
         let augmented = super::augment_source(source);
@@ -121,6 +130,72 @@ mod autoderive_tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_turbofish_names_the_type_its_own_module_declares() {
+        let module = |name: &str| {
+            format!(
+                "mod {name} {{\n    use std::encoding::json\n    struct Names {{ items: Vec<String> }}\n    \
+                 pub fn read(text: String) -> Vec<String> {{\n        \
+                 json::decode::<Names>(text).map(|n| n.items).unwrap_or(#[])\n    }}\n}}\n"
+            )
+        };
+        let source = format!("{}{}", module("a"), module("b"));
+        assert!(serde_target_refusals(&source).is_empty(), "{:?}", serde_target_refusals(&source));
+        let augmented = super::augment_source(&source);
+        assert!(augmented.contains("__gos_serde_from_json_a__Names"), "{augmented}");
+        assert!(augmented.contains("__gos_serde_from_json_b__Names"), "{augmented}");
+    }
+
+    /// An imported name stands for the type the importing module brings in,
+    /// even when another module imports a different type under that name.
+    #[test]
+    fn a_turbofish_names_the_type_its_module_imports() {
+        let package = |name: &str| {
+            format!(
+                "mod {name} {{\n    mod event {{\n        pub struct Event {{ n: i64 }}\n    }}\n    \
+                 mod support {{\n        use std::encoding::json\n        use crate::{name}::event::Event\n        \
+                 pub fn read(text: String) -> i64 {{\n            \
+                 json::decode::<Event>(text).map(|e| e.n).unwrap_or(0)\n        }}\n    }}\n}}\n"
+            )
+        };
+        let source = format!("{}{}", package("a"), package("b"));
+        let augmented = super::augment_source(&source);
+        assert!(augmented.contains("__gos_serde_from_json_a__event__Event"), "{augmented}");
+        assert!(augmented.contains("__gos_serde_from_json_b__event__Event"), "{augmented}");
+    }
+
+    /// Inside a dependency, `crate::` in a field type names that package's
+    /// module, where a same-named type elsewhere in it would otherwise win.
+    #[test]
+    fn a_dependency_field_reads_crate_as_its_own_package() {
+        let source = "#[dependency(\"dev.gossamer/gui\")]\nmod gui {\n    \
+                      mod render {\n        mod icons {\n            pub enum Icon { Add, Search }\n        }\n    }\n    \
+                      mod widgets {\n        pub struct Icon { name: String }\n        \
+                      mod collections {\n            \
+                      pub struct Row { key: String, icon: Option<crate::render::icons::Icon> }\n        }\n    }\n    \
+                      mod support {\n        use std::encoding::json\n        \
+                      use crate::gui::widgets::collections::Row\n        \
+                      pub fn read(text: String) -> bool {\n            json::decode::<Row>(text).is_ok()\n        }\n    }\n}\n";
+        assert!(serde_target_refusals(source).is_empty(), "{:?}", serde_target_refusals(source));
+        let augmented = super::augment_source(source);
+        assert!(
+            augmented.contains("__gos_serde_from_json_gui__widgets__collections__Row"),
+            "{augmented}"
+        );
+    }
+
+    /// An imported type is not refused for sharing its name with a type
+    /// another module declares that has no encoding.
+    #[test]
+    fn an_imported_target_is_not_refused_for_a_same_named_type_elsewhere() {
+        let source = "mod dep {\n    mod event {\n        pub enum Event { Quit, Key(i64) }\n    }\n    \
+                      mod support {\n        use std::encoding::json\n        use crate::dep::event::Event\n        \
+                      pub fn read(text: String) -> i64 {\n            \
+                      json::decode::<Event>(text).map(|_| 1).unwrap_or(0)\n        }\n    }\n}\n\
+                      mod w {\n    pub enum Event { Paint(Fn(i64) -> i64) }\n}\n";
+        assert!(serde_target_refusals(source).is_empty());
     }
 
     /// A parse error elsewhere leaves the codecs unsynthesized, which says
@@ -277,3 +352,4 @@ mod autoderive_tests {
         assert!(super::program_source_end(&augmented) >= src.len());
     }
 }
+

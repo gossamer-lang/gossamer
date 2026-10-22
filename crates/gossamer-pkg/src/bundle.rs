@@ -21,7 +21,7 @@ use std::path::{Component, Path, PathBuf};
 use crate::cache::{cached_source_dir, default_cache_root};
 use crate::lockfile::Lockfile;
 use crate::resolver::dependency_identity;
-use crate::{DependencySpec, InlineDependency, Manifest};
+use crate::{DependencySpec, InlineDependency, Manifest, RustBindingSpec};
 
 pub use crate::bundled_span::BundledSpan;
 
@@ -138,6 +138,56 @@ pub fn path_dependency_roots(entry: &Path) -> Vec<(String, PathBuf)> {
         collect_path_deps(&dep_entry, &mut visited, &mut worklist);
     }
     roots
+}
+
+/// `manifest` with the `[rust-bindings]` of every package its program
+/// bundles merged in, so a library's Rust crates are linked into each
+/// program that uses it.
+///
+/// A dependency's `path` and `src` entries are rebased onto that
+/// dependency's directory. An entry the project itself declares wins over
+/// a dependency's entry of the same crate name, and the first dependency
+/// to declare a name wins over later ones.
+#[must_use]
+pub fn with_dependency_bindings(manifest: &Manifest, manifest_dir: &Path) -> Manifest {
+    let mut merged = manifest.clone();
+    for (_, root) in path_dependency_roots(&manifest_dir.join("project.toml")) {
+        let Ok(text) = fs::read_to_string(root.join("project.toml")) else {
+            continue;
+        };
+        let Ok(dependency) = Manifest::parse(&text) else {
+            continue;
+        };
+        for (name, spec) in dependency.rust_bindings {
+            merged
+                .rust_bindings
+                .entry(name)
+                .or_insert_with(|| rebased_binding(spec, &root));
+        }
+    }
+    merged
+}
+
+fn rebased_binding(spec: RustBindingSpec, root: &Path) -> RustBindingSpec {
+    let rebase = |p: String| root.join(&p).to_string_lossy().into_owned();
+    match spec {
+        RustBindingSpec::Path {
+            version,
+            path,
+            features,
+            default_features,
+        } => RustBindingSpec::Path {
+            version,
+            path: rebase(path),
+            features,
+            default_features,
+        },
+        RustBindingSpec::Src { src, deps } => RustBindingSpec::Src {
+            src: rebase(src),
+            deps,
+        },
+        other @ (RustBindingSpec::Git { .. } | RustBindingSpec::Crates { .. }) => other,
+    }
 }
 
 /// Appends the (root, entry) of each not-yet-visited path dependency

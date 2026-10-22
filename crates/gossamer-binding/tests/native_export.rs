@@ -51,7 +51,7 @@ unsafe extern "C" {
     fn gos_binding_test__nativeexport__add(a: i64, b: i64) -> i64;
     fn gos_binding_test__nativeexport__shout(text: *const c_char) -> *mut c_char;
     fn gos_binding_test__nativeexport__double_each(items: *const GosVec) -> *mut GosVec;
-    fn gos_binding_test__nativeexport__nest(items: *const GosVec) -> *mut GosVec;
+    fn gos_binding_test__nativeexport__nest(items: *const GosVec) -> *mut std::os::raw::c_char;
     fn gos_binding_test__nativeexport__flag_to_int(flag: bool) -> i64;
     fn gos_binding_test__nativeexport__maybe(
         flag: bool,
@@ -64,6 +64,7 @@ unsafe extern "C" {
 
 #[test]
 fn primitive_export_round_trip() {
+    gossamer_binding::testing::install_host();
     let result = unsafe { gos_binding_test__nativeexport__add(2, 3) };
     assert_eq!(result, 5);
     let bool_result = unsafe { gos_binding_test__nativeexport__flag_to_int(true) };
@@ -72,6 +73,7 @@ fn primitive_export_round_trip() {
 
 #[test]
 fn string_export_round_trip() {
+    gossamer_binding::testing::install_host();
     let input = CString::new("hello").unwrap();
     let raw = unsafe { gos_binding_test__nativeexport__shout(input.as_ptr()) };
     let out = unsafe { CStr::from_ptr(raw) }
@@ -86,6 +88,7 @@ fn string_export_round_trip() {
 
 #[test]
 fn vec_i64_export_round_trip() {
+    gossamer_binding::testing::install_host();
     let v: Vec<i64> = vec![1, 2, 3, 4];
     let in_ptr = v.to_output();
     let out_ptr = unsafe { gos_binding_test__nativeexport__double_each(in_ptr) };
@@ -94,16 +97,19 @@ fn vec_i64_export_round_trip() {
 }
 
 #[test]
-fn vec_vec_i64_export_returns_nested_buffer() {
+fn a_nested_vector_crosses_as_its_text() {
+    gossamer_binding::testing::install_host();
+    const { assert!(<Vec<Vec<i64>> as BindingAbi>::JSON) };
     let v: Vec<i64> = vec![10, 20];
     let in_ptr = v.to_output();
     let out_ptr = unsafe { gos_binding_test__nativeexport__nest(in_ptr) };
-    let out: Vec<Vec<i64>> = unsafe { <Vec<Vec<i64>> as BindingAbi>::from_input(out_ptr) };
-    assert_eq!(out, vec![vec![10, 20], vec![10, 20]]);
+    let text = unsafe { <String as BindingAbi>::from_input(out_ptr) };
+    assert_eq!(text, "[[10,20],[10,20]]");
 }
 
 #[test]
 fn option_export_round_trip() {
+    gossamer_binding::testing::install_host();
     let some_raw = unsafe { gos_binding_test__nativeexport__maybe(true) };
     let some = unsafe { <Option<i64> as BindingAbi>::from_input(some_raw) };
     assert_eq!(some, Some(7));
@@ -115,6 +121,7 @@ fn option_export_round_trip() {
 
 #[test]
 fn result_export_round_trip() {
+    gossamer_binding::testing::install_host();
     let ok_raw = unsafe { gos_binding_test__nativeexport__divide(10, 2) };
     let ok = unsafe { <Result<i64, String> as BindingAbi>::from_input(ok_raw) };
     assert_eq!(ok, Ok(5));
@@ -126,6 +133,7 @@ fn result_export_round_trip() {
 
 #[test]
 fn mangle_helper_matches_macro_emitted_symbol() {
+    gossamer_binding::testing::install_host();
     let mangled = gossamer_binding::mangle_binding_symbol("test::nativeexport", "add");
     assert_eq!(mangled, "gos_binding_test__nativeexport__add");
 }

@@ -5,6 +5,8 @@ members = [
     "crates/gossamer-core",
     "crates/gossamer-ast",
     "crates/gossamer-binding",
+    "crates/gossamer-binding-abi",
+    "crates/gossamer-binding-host",
     "crates/gossamer-binding-macros",
     "crates/gossamer-cli",
     "crates/gossamer-codegen-cranelift",
@@ -24,7 +26,6 @@ members = [
     "crates/gossamer-pkg",
     "crates/gossamer-playground",
     "crates/gossamer-resolve",
-    "crates/gossamer-runner-template",
     "crates/gossamer-runtime",
     "crates/gossamer-sched",
     "crates/gossamer-std",
@@ -34,6 +35,7 @@ members = [
     "xtask",
 ]
 exclude = [
+    "crates/gossamer-binding-host/tests/fixtures",
     "crates/gossamer-driver/tests/fixtures",
     "example-external-libraries",
 ]
@@ -101,6 +103,8 @@ gossamer-abi = { path = "crates/gossamer-abi", version = "0.75.0" }
 gossamer-core = { path = "crates/gossamer-core", version = "0.75.0" }
 gossamer-ast = { path = "crates/gossamer-ast", version = "0.75.0" }
 gossamer-binding = { path = "crates/gossamer-binding", version = "0.75.0" }
+gossamer-binding-abi = { path = "crates/gossamer-binding-abi", version = "0.75.0" }
+gossamer-binding-host = { path = "crates/gossamer-binding-host", version = "0.75.0" }
 gossamer-binding-macros = { path = "crates/gossamer-binding-macros", version = "0.75.0" }
 gossamer-codegen-cranelift = { path = "crates/gossamer-codegen-cranelift", version = "0.75.0" }
 gossamer-codegen-llvm = { path = "crates/gossamer-codegen-llvm", version = "0.75.0" }
@@ -118,7 +122,6 @@ gossamer-mir = { path = "crates/gossamer-mir", version = "0.75.0" }
 gossamer-parse = { path = "crates/gossamer-parse", version = "0.75.0" }
 gossamer-pkg = { path = "crates/gossamer-pkg", version = "0.75.0" }
 gossamer-resolve = { path = "crates/gossamer-resolve", version = "0.75.0" }
-gossamer-runner-template = { path = "crates/gossamer-runner-template", version = "0.75.0" }
 gossamer-runtime = { path = "crates/gossamer-runtime", version = "0.75.0" }
 gossamer-sched = { path = "crates/gossamer-sched", version = "0.75.0" }
 gossamer-std = { path = "crates/gossamer-std", version = "0.75.0" }

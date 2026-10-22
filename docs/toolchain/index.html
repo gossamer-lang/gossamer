@@ -2697,6 +2697,10 @@ the implementation by a rev.</p>
 <td>Execute via the register-based bytecode VM. Recursive helper workloads may promote through the in-process Cranelift JIT.</td>
 </tr>
 <tr>
+<td><code>gos run --native FILE</code></td>
+<td>Build and run the native executable <code>gos build</code> makes: a current release build starts at once, otherwise a debug build runs while the release build follows in the background.</td>
+</tr>
+<tr>
 <td><code>gos watch [PATH] [--] [ARGS...]</code></td>
 <td>Validate and restart a development service when project inputs change. This is process replacement, not in-process code patching.</td>
 </tr>

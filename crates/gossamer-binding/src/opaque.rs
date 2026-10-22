@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
-use gossamer_interp::value::{RuntimeError, RuntimeResult};
+use crate::value::{RuntimeError, RuntimeResult};
 
 /// Per-type registry mapping `i64` handles to owned Rust values.
 #[derive(Debug)]

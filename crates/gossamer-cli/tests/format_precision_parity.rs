@@ -41,7 +41,6 @@ fn write_source(name: &str, body: &str) -> PathBuf {
 fn run_interp(source: &Path) -> String {
     let out = Command::new(gos_bin())
         .arg("run")
-        .env("GOS_RUN_ENGINE", "vm")
         .arg(source)
         .output()
         .expect("spawn gos");

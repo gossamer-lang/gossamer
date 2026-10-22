@@ -60,7 +60,6 @@ fn run_vm(src: &Path) -> (String, String, Option<i32>) {
     let child = Command::new(gos_bin())
         .arg("run")
         .arg(src)
-        .env("GOS_RUN_ENGINE", "vm")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

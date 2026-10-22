@@ -3114,13 +3114,17 @@ impl TypeChecker<'_> {
                     && head != own
             }
             Some(TyKind::Adt { def, .. }) if def.local >= u32::MAX - 1 => true,
+            // A dynamic value carries no enum's discriminant: its shape is
+            // read through its accessors, or a binding declares the arms it
+            // answers and the caller reads that enum.
             Some(
                 TyKind::Int(_)
                 | TyKind::Float(_)
                 | TyKind::Bool
                 | TyKind::Char
                 | TyKind::String
-                | TyKind::Tuple(_),
+                | TyKind::Tuple(_)
+                | TyKind::DynValue,
             ) => true,
             _ => false,
         }

@@ -101,8 +101,7 @@ pub(crate) fn dispatch(mut request: BuildRequest<'_>) -> Result<()> {
         gossamer_mir::enable_uniqueness_report();
     }
     let resolved = resolve_entry_arg(request.path.take())?;
-    crate::binding_dispatch::ensure_external_signatures_for_entry(&resolved)
-        .map_err(|err| anyhow!("failed to load rust-binding signatures: {err}"))?;
+    crate::binding_dispatch::install_for_entry(&resolved)?;
     run(&resolved, &request)
 }
 
@@ -139,6 +138,14 @@ impl LinkOptions {
     fn want_strip(self) -> bool {
         !self.debug_info
     }
+}
+
+/// Whether the program at `input` links Rust bindings, its own or a
+/// dependency's.
+fn links_rust_bindings(input: &Path) -> bool {
+    crate::paths::project_context_for_entry(input)
+        .binding_manifest()
+        .is_some_and(|manifest| manifest.is_ok_and(|m| !m.rust_bindings.is_empty()))
 }
 
 /// Explicit Apple linker optimization level for a profile. Kept pure so Linux
@@ -469,7 +476,7 @@ fn prepare_target<'t>(
     warn_if_pgo_profile_is_stale(file);
     let cross_target = cross_target(target)?;
     if explain_profile {
-        print_profile_plan(cross_target, opts);
+        print_profile_plan(cross_target, opts, file);
     }
     Ok(cross_target)
 }
@@ -544,10 +551,11 @@ fn report_artifact(outcome: &NativeBuildOutcome, out_path: &Path) {
 /// Emits a stable, machine-readable summary of the selected optimization
 /// policy. This is deliberately available before the artifact-cache return so
 /// a reporter can prove profile selection even when no codegen reruns.
-fn print_profile_plan(cross_target: Option<&str>, opts: LinkOptions) {
+fn print_profile_plan(cross_target: Option<&str>, opts: LinkOptions, input: &Path) {
     let planned_target = resolve_link_target(cross_target);
     let target = &planned_target;
-    let static_musl = target.env == TargetEnv::Musl || opts.want_static_musl();
+    let static_musl =
+        target.env == TargetEnv::Musl || (opts.want_static_musl() && !links_rust_bindings(input));
     let profile = if opts.release { "release" } else { "debug" };
     let (mir, llvm) = if opts.release {
         ("release-inline+optimise", "O3")
@@ -700,7 +708,8 @@ fn build_artifact_key(
     // installing or removing the musl target between builds must invalidate a
     // cached dynamic/static artifact rather than reusing the wrong binary.
     let resolved_target = resolve_link_target(target);
-    let static_musl = resolved_target.env == TargetEnv::Musl || opts.want_static_musl();
+    let static_musl = resolved_target.env == TargetEnv::Musl
+        || (opts.want_static_musl() && !links_rust_bindings(file));
     let mut hash = gossamer_pkg::sha256::Hasher::new();
     let mut add = |label: &str, bytes: &[u8]| {
         hash.update(label.as_bytes());
@@ -1605,7 +1614,9 @@ fn try_native_build(
 ) -> std::result::Result<NativeBuildOutcome, NativeBuildError> {
     let lt = resolve_link_target(target);
     let links = gossamer_driver::foreign_link_libraries(&checked.sf, program_end);
-    let links_declares_foreign = links.declares_foreign;
+    // Rust bindings are native code built for the C library `gos run` calls
+    // into, as the program's own foreign declarations are.
+    let links_declares_foreign = links.declares_foreign || links_rust_bindings(paths.input);
     let mut libraries = NativeLinks::foreign(paths.input, links);
     let tmp_dir = std::env::temp_dir().join(format!(
         "gos-build-{}-{}",
@@ -1886,38 +1897,33 @@ fn build_static_bindings_lib(
     release: bool,
     cargo_target: Option<&str>,
     libraries: &mut NativeLinks,
-) -> std::result::Result<Option<PathBuf>, gossamer_driver::binding_runner::BindingRunnerError> {
-    use gossamer_driver::binding_runner::{Profile as RunnerProfile, StaticBindingsLib};
+) -> std::result::Result<Option<PathBuf>, gossamer_driver::BindingBuildError> {
+    use gossamer_driver::{BindingProfile, StaticBindingsLib};
 
     let project = crate::paths::project_context_for_entry(entry);
-    // Mirror `dispatch_runner_if_needed`: a malformed manifest must
-    // not silently degrade to "no bindings".
-    let Some(manifest_result) = project.manifest_result() else {
+    // A malformed manifest must not silently degrade to "no bindings".
+    let Some(manifest_result) = project.binding_manifest() else {
         return Ok(None);
     };
     let manifest = match manifest_result {
         Ok(m) => m,
         Err(err) => {
-            return Err(
-                gossamer_driver::binding_runner::BindingRunnerError::Manifest(err.to_string()),
-            );
+            return Err(gossamer_driver::BindingBuildError::Manifest(
+                err.to_string(),
+            ));
         }
     };
     if manifest.rust_bindings.is_empty() {
         return Ok(None);
     }
     let manifest_dir = project.manifest_dir().unwrap_or_else(|| PathBuf::from("."));
-    let Some(gossamer_root) = crate::binding_dispatch::locate_gossamer_root() else {
-        return Ok(None);
-    };
     let profile = if release {
-        RunnerProfile::Release
+        BindingProfile::Release
     } else {
-        RunnerProfile::Debug
+        BindingProfile::Debug
     };
-    let Some(lib) =
-        StaticBindingsLib::from_manifest(manifest, &manifest_dir, &gossamer_root, profile)
-            .map_err(gossamer_driver::binding_runner::BindingRunnerError::Io)?
+    let Some(lib) = StaticBindingsLib::from_manifest(&manifest, &manifest_dir, profile)
+        .map_err(gossamer_driver::BindingBuildError::Io)?
     else {
         return Ok(None);
     };

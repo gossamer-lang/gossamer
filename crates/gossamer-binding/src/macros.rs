@@ -7,16 +7,26 @@
 //! - `fn name(arg: T, ...) -> R { body }` - plain binding fn.
 //! - `cb_fn name(dispatch, arg: T, ...) -> R { body }` - same as
 //!   plain, but the body has access to `dispatch: &mut dyn
-//!   NativeDispatch` so it can re-enter the interpreter through
-//!   [`crate::NativeDispatch::call_value`] (`Terminal::draw` and
+//!   NativeDispatch` so it can call Gossamer callables back through
+//!   [`crate::NativeDispatch::invoke_callback`] (`Terminal::draw` and
 //!   any other higher-order binding APIs).
 
-/// Internal: counts the supplied identifiers at compile time.
+/// Internal: counts the supplied identifiers at compile time, in one step
+/// whatever their number.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __binding_count {
-    () => { 0_usize };
-    ($head:ident $($tail:ident)*) => { 1_usize + $crate::__binding_count!($($tail)*) };
+    ($($x:ident)*) => { <[()]>::len(&[$($crate::__binding_unit!($x)),*]) };
+}
+
+/// Internal: `()` for any identifier, so [`__binding_count!`] has one element
+/// per identifier.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __binding_unit {
+    ($x:ident) => {
+        ()
+    };
 }
 
 /// Declares one or more Gossamer-callable functions and registers
@@ -52,37 +62,24 @@ macro_rules! __binding_count {
 /// );
 /// ```
 ///
-/// **Interp-only form (no `symbol_prefix:`):** legacy compat;
-/// modules declared this way are not reachable from `gos build`.
+/// **VM-only form (no `symbol_prefix:`):** legacy compat; modules declared
+/// this way have no wire thunks, so native builds cannot call them.
 #[macro_export]
 macro_rules! register_module {
     // New ergonomic form - single-segment path: `name: <ident>`
     // doubles as both the Gossamer-side spelling and the symbol
     // prefix. An auto-generated internal mod (`__gos_<name>`)
-    // wraps the items. No explicit `__bindings_force_link()`
-    // needed at crate root - the force-link entry is published
-    // through the link-time `__GOS_FORCE_LINK_FNS` distributed
-    // slice and the runner walks it automatically.
+    // wraps the items.
     (
         name: $name:ident,
         doc: $doc:literal,
         $($body:tt)*
     ) => {
         $crate::__paste::paste! {
-            $crate::__rm_munch! {
+            $crate::__rm_module! {
                 [< __gos_ $name >], stringify!($name), $name, $doc,
-                simple = [],
-                cb = [],
-                rest = [ $($body)* ]
+                $($body)*
             }
-        }
-        // Publish a link-time force-link entry so the runner
-        // doesn't need a per-crate `__bindings_force_link()` shim.
-        $crate::__paste::paste! {
-            #[$crate::linkme::distributed_slice($crate::FORCE_LINK_FNS)]
-            #[linkme(crate = $crate::linkme)]
-            #[allow(non_upper_case_globals, unreachable_pub, reason = "the linker anchor is named after the user's module, and the macro expands at the caller's visibility")]
-            static [< __GOS_FORCE_LINK_ $name >]: fn() = [< __gos_ $name >]::force_link;
         }
     };
 
@@ -93,191 +90,55 @@ macro_rules! register_module {
         doc: $doc:literal,
         $($body:tt)*
     ) => {
-        $crate::__rm_munch! {
+        $crate::__rm_module! {
             $modname, $path, $sym, $doc,
-            simple = [],
-            cb = [],
-            rest = [ $($body)* ]
-        }
-        $crate::__paste::paste! {
-            #[$crate::linkme::distributed_slice($crate::FORCE_LINK_FNS)]
-            #[linkme(crate = $crate::linkme)]
-            #[allow(non_upper_case_globals, unreachable_pub, reason = "the linker anchor is named after the user's module, and the macro expands at the caller's visibility")]
-            static [< __GOS_FORCE_LINK_ $sym >]: fn() = $modname::force_link;
+            $($body)*
         }
     };
 
-    // Backwards-compatible form without `symbol_prefix:` - only
-    // the interpreter thunks are emitted, so binding fns from
-    // these modules are reachable from `gos` but not
-    // `gos build`. Documented as the legacy path; new bindings
-    // should specify `symbol_prefix:` explicitly.
+    // Backwards-compatible form without `symbol_prefix:` - only the VM
+    // thunks are emitted, so binding fns from these modules are reachable
+    // from `gos run` but not from a native build. New bindings should
+    // specify `symbol_prefix:` explicitly.
     (
         $modname:ident,
         path: $path:literal,
         doc: $doc:literal,
         $($body:tt)*
     ) => {
-        $crate::__rm_munch! {
+        $crate::__rm_module! {
             $modname, $path, __nosym, $doc,
-            simple = [],
-            cb = [],
-            rest = [ $($body)* ]
-        }
-        $crate::__paste::paste! {
-            #[$crate::linkme::distributed_slice($crate::FORCE_LINK_FNS)]
-            #[linkme(crate = $crate::linkme)]
-            #[allow(non_upper_case_globals, unreachable_pub, reason = "the linker anchor is named after the user's module, and the macro expands at the caller's visibility")]
-            static [< __GOS_FORCE_LINK_ $modname >]: fn() = $modname::force_link;
+            $($body)*
         }
     };
 }
 
-/// Internal: tt-muncher that walks the binding-fn list and
-/// classifies each entry as plain or callback-aware before the
-/// final emit step.
+/// Internal: one module's items, matched in one step whatever their number:
+/// each is `fn name(args) -> R { .. }` or `cb_fn name(dispatch, args) -> R
+/// { .. }`, with optional `///` docs and an optional return type.
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __rm_munch {
-    // ---- terminal: emit module ---------------------------------
+macro_rules! __rm_module {
     (
         $modname:tt, $path:expr, $sym:tt, $doc:literal,
-        simple = [ $({
-            $sn:ident,
-            ( $($sa:ident : $st:ty),* ),
-            $sr:ty,
-            $sb:block,
-            doc = [ $($sd:literal)* ]
-        })* ],
-        cb = [ $({
-            $cn:ident,
-            $cdisp:ident,
-            ( $($ca:ident : $ct:ty),* ),
-            $cr:ty,
-            $cb_body:block,
-            doc = [ $($cd:literal)* ]
-        })* ],
-        rest = []
+        $(
+            $(#[doc = $fdoc:literal])*
+            $kind:ident $name:ident ( $($args:tt)* ) $(-> $ret:ty)? $body:block
+        )*
     ) => {
         #[allow(non_snake_case, dead_code, clippy::missing_docs_in_private_items, reason = "the module is named after the user's binding and holds generated thunks nothing else documents")]
         mod $modname {
             use super::*;
 
-            $crate::__paste::paste! {
+            $(
+                $crate::__rm_item! { $kind, $sym, $name, ( $($args)* ), ( $($ret)? ), $body }
+            )*
+
+            pub static ITEMS: &[$crate::ItemFn] = &[
                 $(
-                    pub fn $sn($($sa : $st),*) -> $sr $sb
-
-                    #[allow(non_snake_case, reason = "the thunk is named after the user's function, whose case the macro cannot change")]
-                    pub fn [< __thunk_ $sn >](
-                        _dispatch: &mut dyn $crate::NativeDispatch,
-                        args: &[$crate::Value],
-                    ) -> $crate::RuntimeResult<$crate::Value> {
-                        let expected = $crate::__binding_count!($($sa)*);
-                        if args.len() != expected {
-                            return Err($crate::RuntimeError::Arity {
-                                expected,
-                                found: args.len(),
-                            });
-                        }
-                        let mut iter = args.iter();
-                        $(
-                            let $sa: $st =
-                                <$st as $crate::FromGos>::from_gos(iter.next().unwrap())?;
-                        )*
-                        let out: $sr = $sn($($sa),*);
-                        Ok(<$sr as $crate::ToGos>::to_gos(out))
-                    }
-
-                    $crate::__rm_emit_native_export! {
-                        $sym, $sn, ( $($sa : $st),* ), $sr
-                    }
+                    $crate::__rm_entry! { $kind, $sym, $name, ( $($args)* ), ( $($ret)? ), [ $($fdoc)* ] },
                 )*
-
-                $(
-                    pub fn $cn(
-                        $cdisp: &mut dyn $crate::NativeDispatch,
-                        $($ca : $ct),*
-                    ) -> $cr $cb_body
-
-                    #[allow(non_snake_case, reason = "the thunk is named after the user's function, whose case the macro cannot change")]
-                    pub fn [< __thunk_ $cn >](
-                        _dispatch: &mut dyn $crate::NativeDispatch,
-                        args: &[$crate::Value],
-                    ) -> $crate::RuntimeResult<$crate::Value> {
-                        let expected = $crate::__binding_count!($($ca)*);
-                        if args.len() != expected {
-                            return Err($crate::RuntimeError::Arity {
-                                expected,
-                                found: args.len(),
-                            });
-                        }
-                        let mut iter = args.iter();
-                        $(
-                            let $ca: $ct =
-                                <$ct as $crate::FromGos>::from_gos(iter.next().unwrap())?;
-                        )*
-                        let out: $cr = $cn(_dispatch, $($ca),*);
-                        Ok(<$cr as $crate::ToGos>::to_gos(out))
-                    }
-
-                    $crate::__rm_emit_native_export_cb! {
-                        $sym, $cn, ( $($ca : $ct),* ), $cr
-                    }
-                )*
-
-                pub static ITEMS: &[$crate::ItemFn] = &[
-                    $(
-                        $crate::ItemFn {
-                            name: stringify!($sn),
-                            call: [< __thunk_ $sn >],
-                            signature: $crate::Signature {
-                                params: &[
-                                    $( <$st as $crate::SigType>::TYPE ),*
-                                ],
-                                ret: <$sr as $crate::SigType>::TYPE,
-                            },
-                            doc: concat!( "" $(, $sd, "\n")* ),
-                        },
-                    )*
-                    $(
-                        $crate::ItemFn {
-                            name: stringify!($cn),
-                            call: [< __thunk_ $cn >],
-                            signature: $crate::Signature {
-                                params: &[
-                                    $( <$ct as $crate::SigType>::TYPE ),*
-                                ],
-                                ret: <$cr as $crate::SigType>::TYPE,
-                            },
-                            doc: concat!( "" $(, $cd, "\n")* ),
-                        },
-                    )*
-                ];
-
-                // Compile-time signature validation: every param
-                // and return type must implement both `SigType`
-                // (for the type-checker) and `FromGos`/`ToGos`
-                // (for the interp thunk). A binding fn that names
-                // an unsupported type fails here with a clear
-                // trait-bound error at the binding's compile,
-                // rather than as a runtime install_all() panic.
-                const _: () = {
-                    $(
-                        const fn [< __validate_ $sn >]() {
-                            let _ = <$sr as $crate::SigType>::TYPE;
-                            $( let _ = <$st as $crate::SigType>::TYPE; )*
-                        }
-                        let _ = [< __validate_ $sn >];
-                    )*
-                    $(
-                        const fn [< __validate_ $cn >]() {
-                            let _ = <$cr as $crate::SigType>::TYPE;
-                            $( let _ = <$ct as $crate::SigType>::TYPE; )*
-                        }
-                        let _ = [< __validate_ $cn >];
-                    )*
-                };
-            }
+            ];
 
             pub static MODULE: $crate::Module = $crate::Module {
                 path: $path,
@@ -290,116 +151,245 @@ macro_rules! __rm_munch {
             #[allow(non_upper_case_globals, reason = "the static is named after the user's binding, whose case the macro cannot change")]
             static REGISTERED: &'static $crate::Module = &MODULE;
 
-            /// Emits a hard reference to `MODULE` so the linker
-            /// keeps the [`linkme`] entry alive across LTO. Every
-            /// binding crate must expose `pub fn
-            /// __bindings_force_link()` at its crate root that
-            /// chains into this; see
-            /// [`crate::register_module!`] for the convention.
-            ///
-            /// Also publishes each item's `gos_binding_<...>` C-ABI
-            /// thunk address into the codegen's native-symbol
-            /// registry so the cranelift JIT can resolve calls into
-            /// this module from JIT-compiled bodies.
+            /// Holds a reference to `MODULE` so the linker keeps its
+            /// registry entry through LTO.
             pub fn force_link() {
                 let _: &'static $crate::Module = &MODULE;
-                $crate::__paste::paste! {
-                    $(
-                        $crate::__rm_register_native_export! {
-                            $sym, $sn
-                        }
-                    )*
-                    $(
-                        $crate::__rm_register_native_export! {
-                            $sym, $cn
-                        }
-                    )*
-                }
             }
-        }
-    };
-
-    // ---- munch: cb_fn ------------------------------------------
-    (
-        $modname:tt, $path:expr, $sym:tt, $doc:literal,
-        simple = [ $($simple:tt)* ],
-        cb = [ $($cb:tt)* ],
-        rest = [
-            $(#[doc = $fdoc:literal])*
-            cb_fn $name:ident( $disp:ident, $($arg:ident : $argty:ty),* $(,)? ) -> $ret:ty $body:block
-            $($rest:tt)*
-        ]
-    ) => {
-        $crate::__rm_munch! {
-            $modname, $path, $sym, $doc,
-            simple = [ $($simple)* ],
-            cb = [ $($cb)* {
-                $name,
-                $disp,
-                ( $($arg : $argty),* ),
-                $ret,
-                $body,
-                doc = [ $($fdoc)* ]
-            } ],
-            rest = [ $($rest)* ]
-        }
-    };
-
-    // ---- munch: fn with no return type --------------------------
-    (
-        $modname:tt, $path:expr, $sym:tt, $doc:literal,
-        simple = [ $($simple:tt)* ],
-        cb = [ $($cb:tt)* ],
-        rest = [
-            $(#[doc = $fdoc:literal])*
-            fn $name:ident( $($arg:ident : $argty:ty),* $(,)? ) $body:block
-            $($rest:tt)*
-        ]
-    ) => {
-        $crate::__rm_munch! {
-            $modname, $path, $sym, $doc,
-            simple = [ $($simple)* ],
-            cb = [ $($cb)* ],
-            rest = [
-                $(#[doc = $fdoc])*
-                fn $name( $($arg : $argty),* ) -> () $body
-                $($rest)*
-            ]
-        }
-    };
-
-    // ---- munch: plain fn ---------------------------------------
-    (
-        $modname:tt, $path:expr, $sym:tt, $doc:literal,
-        simple = [ $($simple:tt)* ],
-        cb = [ $($cb:tt)* ],
-        rest = [
-            $(#[doc = $fdoc:literal])*
-            fn $name:ident( $($arg:ident : $argty:ty),* $(,)? ) -> $ret:ty $body:block
-            $($rest:tt)*
-        ]
-    ) => {
-        $crate::__rm_munch! {
-            $modname, $path, $sym, $doc,
-            simple = [ $($simple)* {
-                $name,
-                ( $($arg : $argty),* ),
-                $ret,
-                $body,
-                doc = [ $($fdoc)* ]
-            } ],
-            cb = [ $($cb)* ],
-            rest = [ $($rest)* ]
         }
     };
 }
 
-/// Internal: emits the `extern "C"` thunk for one plain binding
-/// fn, plus a [`crate::NativeSymbolEntry`] entry into the
-/// link-time `NATIVE_SYMBOLS` slice so the cranelift JIT can
-/// resolve calls into the binding without a runtime registration
-/// hop. Skipped when `$sym` is the `__nosym` sentinel (the legacy
-/// `register_module!` form without `symbol_prefix:`).
+/// Internal: an item's return type, `()` when it states none.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __rm_ret {
+    () => {
+        ()
+    };
+    ($ret:ty) => {
+        $ret
+    };
+}
+
+/// Internal: one item's function, its VM thunk, and its wire thunk.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __rm_item {
+    (fn, $sym:tt, $name:ident, ( $($arg:ident : $argty:ty),* $(,)? ), ( $($ret:ty)? ), $body:block) => {
+        pub fn $name($($arg : $argty),*) -> $crate::__rm_ret!($($ret)?) $body
+
+        $crate::__paste::paste! {
+            #[allow(non_snake_case, reason = "the thunk is named after the user's function, whose case the macro cannot change")]
+            unsafe extern "C" fn [< __gos_vm_ $name >](
+                ctx: *mut $crate::__abi::CallCtx,
+                args: *const $crate::__abi::AbiValue,
+                arg_count: usize,
+                out: *mut $crate::__abi::CallOut,
+            ) -> u32 {
+                // SAFETY: the host passes `arg_count` live arguments, a
+                // writable answer, and this call's context.
+                unsafe {
+                    $crate::__vm_call(ctx, args, arg_count, out, |_dispatch, args| {
+                        let expected = $crate::__binding_count!($($arg)*);
+                        if args.len() != expected {
+                            return Err($crate::RuntimeError::Arity {
+                                expected,
+                                found: args.len(),
+                            });
+                        }
+                        let mut iter = args.iter();
+                        $(
+                            let $arg: $argty = $crate::__rm_vm_arg!(
+                                $sym,
+                                $argty,
+                                iter.next().ok_or($crate::RuntimeError::Arity {
+                                    expected,
+                                    found: args.len(),
+                                })?
+                            )?;
+                        )*
+                        let out: $crate::__rm_ret!($($ret)?) = $name($($arg),*);
+                        Ok($crate::__rm_vm_ret!($sym, $crate::__rm_ret!($($ret)?), out))
+                    })
+                }
+            }
+        }
+
+        $crate::__rm_emit_native_export! {
+            $sym, $name, ( $($arg : $argty),* ), $crate::__rm_ret!($($ret)?)
+        }
+    };
+    (cb_fn, $sym:tt, $name:ident, ( $disp:ident, $($arg:ident : $argty:ty),* $(,)? ), ( $($ret:ty)? ), $body:block) => {
+        pub fn $name(
+            $disp: &mut dyn $crate::NativeDispatch,
+            $($arg : $argty),*
+        ) -> $crate::__rm_ret!($($ret)?) $body
+
+        $crate::__paste::paste! {
+            #[allow(non_snake_case, reason = "the thunk is named after the user's function, whose case the macro cannot change")]
+            unsafe extern "C" fn [< __gos_vm_ $name >](
+                ctx: *mut $crate::__abi::CallCtx,
+                args: *const $crate::__abi::AbiValue,
+                arg_count: usize,
+                out: *mut $crate::__abi::CallOut,
+            ) -> u32 {
+                // SAFETY: the host passes `arg_count` live arguments, a
+                // writable answer, and this call's context.
+                unsafe {
+                    $crate::__vm_call(ctx, args, arg_count, out, |dispatch, args| {
+                        let expected = $crate::__binding_count!($($arg)*);
+                        if args.len() != expected {
+                            return Err($crate::RuntimeError::Arity {
+                                expected,
+                                found: args.len(),
+                            });
+                        }
+                        let mut iter = args.iter();
+                        $(
+                            let $arg: $argty = $crate::__rm_vm_arg!(
+                                $sym,
+                                $argty,
+                                iter.next().ok_or($crate::RuntimeError::Arity {
+                                    expected,
+                                    found: args.len(),
+                                })?
+                            )?;
+                        )*
+                        let out: $crate::__rm_ret!($($ret)?) = $name(dispatch, $($arg),*);
+                        Ok($crate::__rm_vm_ret!($sym, $crate::__rm_ret!($($ret)?), out))
+                    })
+                }
+            }
+        }
+
+        $crate::__rm_emit_native_export_cb! {
+            $sym, $name, ( $($arg : $argty),* ), $crate::__rm_ret!($($ret)?)
+        }
+    };
+}
+
+/// Internal: one item's [`crate::ItemFn`] entry.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __rm_entry {
+    (fn, $sym:tt, $name:ident, ( $($arg:ident : $argty:ty),* $(,)? ), ( $($ret:ty)? ), [ $($doc:literal)* ]) => {
+        $crate::__rm_entry! { @entry false, $sym, $name, ( $($argty),* ), ( $($ret)? ), [ $($doc)* ] }
+    };
+    (cb_fn, $sym:tt, $name:ident, ( $disp:ident, $($arg:ident : $argty:ty),* $(,)? ), ( $($ret:ty)? ), [ $($doc:literal)* ]) => {
+        $crate::__rm_entry! { @entry true, $sym, $name, ( $($argty),* ), ( $($ret)? ), [ $($doc)* ] }
+    };
+    (@entry $calls_back:literal, $sym:tt, $name:ident, ( $($argty:ty),* ), ( $($ret:ty)? ), [ $($doc:literal)* ]) => {
+        $crate::__paste::paste! {
+            $crate::ItemFn {
+                name: stringify!($name),
+                vm: [< __gos_vm_ $name >],
+                wire_symbol: $crate::__rm_wire_symbol!($sym, $name),
+                wire: $crate::__rm_wire_addr!($sym, $name),
+                calls_back: $calls_back,
+                wire_text: $crate::__rm_wire_text!(
+                    $sym, ( $($argty),* ), $crate::__rm_ret!($($ret)?)
+                ),
+                signature: $crate::Signature {
+                    params: &[ $( <$argty as $crate::SigType>::TYPE ),* ],
+                    ret: <$crate::__rm_ret!($($ret)?) as $crate::SigType>::TYPE,
+                    json: $crate::__rm_json_mask!(
+                        $sym, ( $($argty),* ), $crate::__rm_ret!($($ret)?)
+                    ),
+                },
+                doc: concat!( "" $(, $doc, "\n")* ),
+            }
+        }
+    };
+}
+
+/// Internal: a VM call's argument. An item with a wire thunk takes a
+/// JSON-wired type as the text the compiled tiers pass.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __rm_vm_arg {
+    (__nosym, $ty:ty, $value:expr) => {
+        <$ty as $crate::FromGos>::from_gos($value)
+    };
+    ($sym:ident, $ty:ty, $value:expr) => {
+        $crate::__vm_arg::<$ty>($value)
+    };
+}
+
+/// Internal: a VM call's answer, as [`__rm_vm_arg`] takes its arguments.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __rm_vm_ret {
+    (__nosym, $ty:ty, $value:expr) => {
+        <$ty as $crate::ToGos>::to_gos($value)
+    };
+    ($sym:ident, $ty:ty, $value:expr) => {
+        $crate::__vm_ret::<$ty>($value)
+    };
+}
+
+/// Internal: an item's [`crate::WireText`], `None` for the `__nosym` form.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __rm_wire_text {
+    (__nosym, ( $($argty:ty),* ), $ret:ty) => {
+        None
+    };
+    ($sym:ident, ( $($argty:ty),* ), $ret:ty) => {
+        Some($crate::WireText {
+            args: &[ $( $crate::__value_to_entry::<$argty> ),* ],
+            ret: $crate::__entry_to_value::<$ret>,
+        })
+    };
+}
+
+/// Internal: an item's [`crate::Signature::json`] mask, zero for the
+/// `__nosym` form.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __rm_json_mask {
+    (__nosym, ( $($argty:ty),* ), $ret:ty) => {
+        0
+    };
+    ($sym:ident, ( $($argty:ty),* ), $ret:ty) => {
+        $crate::__json_mask(
+            &[ $( <$argty as $crate::native::BindingAbi>::JSON ),* ],
+            <$ret as $crate::native::BindingAbi>::JSON,
+        )
+    };
+}
+
+/// Internal: the wire symbol of an item, empty for the `__nosym` form.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __rm_wire_symbol {
+    (__nosym, $name:ident) => {
+        ""
+    };
+    ($sym:ident, $name:ident) => {
+        concat!("gos_binding_", stringify!($sym), "__", stringify!($name))
+    };
+}
+
+/// Internal: the wire thunk's address getter, `None` for the `__nosym` form.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __rm_wire_addr {
+    (__nosym, $name:ident) => {
+        None
+    };
+    ($sym:ident, $name:ident) => {
+        $crate::__paste::paste! { Some([< __addr_ $sym __ $name >]) }
+    };
+}
+
+/// Internal: emits the `extern "C"` wire thunk compiled code calls for one
+/// plain binding fn. Skipped when `$sym` is the `__nosym` sentinel (the
+/// legacy `register_module!` form without `symbol_prefix:`).
+///
+/// A panic in the body is recorded through the host for the compiled caller
+/// to raise once the thunk returns, and the thunk answers a default value
+/// nothing reads.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __rm_emit_native_export {
@@ -411,6 +401,7 @@ macro_rules! __rm_emit_native_export {
             pub extern "C" fn [< gos_binding_ $sym __ $name >](
                 $( $arg : <$argty as $crate::native::BindingAbi>::Input ),*
             ) -> <$ret as $crate::native::BindingAbi>::Output {
+                let _call = $crate::native::enter_wire_call();
                 let result = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
                     $(
                         // SAFETY: the codegen guarantees `$arg`
@@ -422,7 +413,8 @@ macro_rules! __rm_emit_native_export {
                     let out: $ret = $name($($arg),*);
                     <$ret as $crate::native::BindingAbi>::to_output(out)
                 }));
-                result.unwrap_or_else(|_| {
+                result.unwrap_or_else(|payload| {
+                    $crate::native::raise_wire_panic(&*payload);
                     <<$ret as $crate::native::BindingAbi>::Output as ::core::default::Default>::default()
                 })
             }
@@ -431,28 +423,14 @@ macro_rules! __rm_emit_native_export {
             fn [< __addr_ $sym __ $name >]() -> *const u8 {
                 [< gos_binding_ $sym __ $name >] as *const u8
             }
-
-            #[$crate::linkme::distributed_slice($crate::NATIVE_SYMBOLS)]
-            #[linkme(crate = $crate::linkme)]
-            #[allow(non_upper_case_globals, reason = "the static is named after the user's binding, whose case the macro cannot change")]
-            static [< __NATIVE_SYM_ $sym __ $name >]: $crate::NativeSymbolEntry =
-                $crate::NativeSymbolEntry {
-                    name: concat!(
-                        "gos_binding_",
-                        stringify!($sym),
-                        "__",
-                        stringify!($name),
-                    ),
-                    addr_fn: [< __addr_ $sym __ $name >],
-                };
         }
     };
 }
 
-/// Internal: the `extern "C"` thunk for one `cb_fn` binding, the compiled
-/// tiers' way in. A compiled program has no interpreter to re-enter, so the
-/// body receives [`crate::native::CompiledDispatch`]; a callback argument
-/// arrives as the runtime handle its `invoke` calls through.
+/// Internal: the `extern "C"` wire thunk for one `cb_fn` binding, the
+/// compiled tiers' way in. The body receives
+/// [`crate::native::CompiledDispatch`]; a callback argument arrives as the
+/// runtime handle it calls through.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __rm_emit_native_export_cb {
@@ -464,6 +442,7 @@ macro_rules! __rm_emit_native_export_cb {
             pub extern "C" fn [< gos_binding_ $sym __ $name >](
                 $( $arg : <$argty as $crate::native::BindingAbi>::Input ),*
             ) -> <$ret as $crate::native::BindingAbi>::Output {
+                let _call = $crate::native::enter_wire_call();
                 let result = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
                     $(
                         // SAFETY: the codegen guarantees `$arg`
@@ -475,7 +454,8 @@ macro_rules! __rm_emit_native_export_cb {
                     let out: $ret = $name(&mut $crate::native::CompiledDispatch, $($arg),*);
                     <$ret as $crate::native::BindingAbi>::to_output(out)
                 }));
-                result.unwrap_or_else(|_| {
+                result.unwrap_or_else(|payload| {
+                    $crate::native::raise_wire_panic(&*payload);
                     <<$ret as $crate::native::BindingAbi>::Output as ::core::default::Default>::default()
                 })
             }
@@ -484,47 +464,6 @@ macro_rules! __rm_emit_native_export_cb {
             fn [< __addr_ $sym __ $name >]() -> *const u8 {
                 [< gos_binding_ $sym __ $name >] as *const u8
             }
-
-            #[$crate::linkme::distributed_slice($crate::NATIVE_SYMBOLS)]
-            #[linkme(crate = $crate::linkme)]
-            #[allow(non_upper_case_globals, reason = "the static is named after the user's binding, whose case the macro cannot change")]
-            static [< __NATIVE_SYM_ $sym __ $name >]: $crate::NativeSymbolEntry =
-                $crate::NativeSymbolEntry {
-                    name: concat!(
-                        "gos_binding_",
-                        stringify!($sym),
-                        "__",
-                        stringify!($name),
-                    ),
-                    addr_fn: [< __addr_ $sym __ $name >],
-                };
-        }
-    };
-}
-
-/// Internal: at `force_link()` time, registers one binding's C-ABI
-/// thunk address with the codegen's native-symbol registry so the
-/// cranelift JIT can resolve calls into the binding from
-/// JIT-compiled bodies.
-///
-/// Skipped (no-op) when `$sym` is the `__nosym` sentinel - that
-/// form of `register_module!` doesn't emit a C-ABI thunk to begin
-/// with, so there's nothing to publish.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __rm_register_native_export {
-    (__nosym, $name:ident) => {};
-    ($sym:ident, $name:ident) => {
-        $crate::__paste::paste! {
-            $crate::__register_native_symbol(
-                concat!(
-                    "gos_binding_",
-                    stringify!($sym),
-                    "__",
-                    stringify!($name),
-                ),
-                [< gos_binding_ $sym __ $name >] as *const u8,
-            );
         }
     };
 }

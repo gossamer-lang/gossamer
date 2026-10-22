@@ -2534,13 +2534,11 @@ impl<'a> Builder<'a> {
             B::F64 => self.tcx.float_ty(gossamer_types::FloatTy::F64),
             B::Char => self.tcx.char_ty(),
             B::String => self.tcx.string_ty(),
+            // A binding answers a buffer of its own: a `Vec<u8>` the caller
+            // owns, one word per byte as every compiled byte vector holds it.
             B::Bytes => {
-                // Bytes is `[u8]` at the source level, and a slice carries
-                // that: it shares the `Vec` runtime representation - the same
-                // IntArray path `[i64]` takes - while keeping the bare-bracket
-                // spelling the source type is written in.
-                let u8_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
-                self.tcx.intern(TyKind::Slice(u8_ty))
+                let u8_ty = self.tcx.int_ty(gossamer_types::IntTy::U8);
+                self.tcx.intern(TyKind::Vec(u8_ty))
             }
             B::Vec(inner) => {
                 let inner_ty = self.binding_type_to_mir(inner);

@@ -69,49 +69,31 @@ pub extern "C" fn gos_rt_result_new_f64(disc: i64, payload: f64) -> i128 {
 
 /// Converts a `[rust-bindings]` `*mut GosVariant` (the binding ABI's
 /// `Result` / `Option` wire shape, tag `1` = Ok/Some) into the
-/// runtime's packed i128 result (disc `0` = Ok/Some). String payloads
-/// arrive as bare NUL-terminated arena bytes and are re-allocated as
-/// header'd runtime strings; every other payload word passes through
-/// bit-exact (i64/bool/char values, f64 bits, GosVec / nested
-/// pointers).
+/// runtime's packed i128 result (disc `0` = Ok/Some). The payload word
+/// passes through bit-exact - an i64/bool/char value, f64 bits, a runtime
+/// string, or a runtime vector - and the result owns it.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_binding_variant_to_result(p: *const u8) -> i128 {
+pub unsafe extern "C" fn gos_rt_binding_variant_to_result(p: *mut u8) -> i128 {
+    use super::binding_wire::{GosVariant, free_wire_fields};
     ffi_entry!({
         if p.is_null() {
             return pack_result(1, 0);
         }
-        // GosVariant layout (repr(C) in gossamer-binding):
-        // tag i32 | payload_len i32 | payload *mut GosVariantValue.
-        // SAFETY: `p` is this shim's `u8` argument, non-null (checked above), live for the call
-        // (C-ABI contract).
-        let tag = unsafe { *p.cast::<i32>() };
-        // SAFETY: `p` is this shim's `u8` argument, non-null (checked above), live for the call
-        // (C-ABI contract).
-        let payload_len = unsafe { *p.add(4).cast::<i32>() };
-        // SAFETY: `p` is this shim's `u8` argument, non-null (checked above), live for the call
-        // (C-ABI contract).
-        let payload_ptr = unsafe { *p.add(8).cast::<*const u8>() };
-        let disc = i64::from(tag != 1);
-        if payload_len <= 0 || payload_ptr.is_null() {
-            return pack_result(disc, 0);
-        }
-        // GosVariantValue layout: tag i32 | (pad) | data union at +8.
-        // Value tag 4 = string; see `gossamer-binding::native`.
-        // SAFETY: `payload_ptr` is the non-null variant payload, whose tag word is its first four
-        // bytes.
-        let value_tag = unsafe { *payload_ptr.cast::<i32>() };
-        // SAFETY: the variant payload holds its data word at offset 8.
-        let word = unsafe { *payload_ptr.add(8).cast::<i64>() };
-        let payload = if value_tag == 4 && word != 0 {
-            // HOST-CSTRING: a native Rust binding owns this pointer and
-            // publishes it as a NUL-terminated C string, not a Gossamer
-            // `String`, so it carries no length header.
-            // SAFETY: a non-zero string payload is a NUL-terminated C string the binding owns.
-            let c = unsafe { std::ffi::CStr::from_ptr(word as *const std::ffi::c_char) };
-            super::string::alloc_cstring(c.to_bytes()) as i64
+        // SAFETY: `p` is the variant a binding answered, handed to this call once (C-ABI
+        // contract); its header and field array come from the allocator the runtime frees with.
+        let wire = unsafe { Box::from_raw(p.cast::<GosVariant>()) };
+        let disc = i64::from(wire.tag != 1);
+        let len = usize::try_from(wire.payload_len.max(0)).unwrap_or(0);
+        // The carrier takes the first field's word - a scalar, a runtime string, or a vector
+        // - so only the array that held it is freed.
+        let payload = if wire.payload.is_null() || len == 0 {
+            0
         } else {
-            word
+            // SAFETY: a non-null field array holds `len >= 1` fields.
+            unsafe { (*wire.payload).data as i64 }
         };
+        // SAFETY: the array is the variant's own, read above and not again.
+        unsafe { free_wire_fields(wire.payload, len) };
         pack_result(disc, payload)
     })
 }

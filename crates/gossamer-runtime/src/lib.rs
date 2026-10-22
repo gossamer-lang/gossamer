@@ -341,6 +341,7 @@ pub mod replay;
 pub mod safe_daemon;
 pub mod safe_env;
 pub mod safe_priority;
+pub mod safe_spawn;
 pub mod sampler;
 pub mod sched;
 #[cfg(not(target_arch = "wasm32"))]

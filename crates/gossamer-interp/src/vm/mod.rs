@@ -1639,7 +1639,7 @@ fn fill_cache_slot(
         _ => None,
     };
     let native_fn = match g {
-        Global::Value(Value::Native(inner)) => Some((inner.call, inner.name)),
+        Global::Value(Value::Native(inner)) => Some((inner.entry, inner.name)),
         _ => None,
     };
     let fn_chunk = match g {

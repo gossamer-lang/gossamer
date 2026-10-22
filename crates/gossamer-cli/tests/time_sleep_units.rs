@@ -110,7 +110,6 @@ fn run_vm_timed(src: &Path) -> TimedOutput {
     let start = Instant::now();
     let out = Command::new(gos_bin())
         .arg("run")
-        .env("GOS_RUN_ENGINE", "vm")
         .arg(src)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

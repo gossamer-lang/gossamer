@@ -11,6 +11,7 @@ the implementation by a rev.
 | `gos parse FILE` | Print the AST. |
 | `gos check [--timings] FILE` | Parse + resolve + typecheck + exhaustiveness. With `--timings`, prints per-stage wall-clock times. The whole result is cached, so a re-invocation over unchanged inputs skips every front-end stage ([incremental front end](design/incremental.md)). Set `GOSSAMER_CACHE_TRACE=1` to log cache hits, `GOS_NO_CACHE=1` to disable the cache. |
 | `gos run FILE` | Execute via the register-based bytecode VM. Recursive helper workloads may promote through the in-process Cranelift JIT. |
+| `gos run --native FILE` | Build and run the native executable `gos build` makes: a current release build starts at once, otherwise a debug build runs while the release build follows in the background. |
 | `gos watch [PATH] [--] [ARGS...]` | Validate and restart a development service when project inputs change. This is process replacement, not in-process code patching. |
 | `gos build [--release] [--target TRIPLE] FILE` | Produce a native binary (ELF/Mach-O/PE) by lowering through MIR + LLVM (checked debug arithmetic, with a minimal `opt` pipeline over `llc -O1`; `--release` runs `opt -O3 | llc -O3`) and linking the user's `.o` against `libgossamer_runtime.a`. Release builds may use `--pgo-collect PATH.profraw` to emit an instrumented binary or `--pgo-profile PATH.profdata` to apply merged LLVM profile data; the modes conflict, profile input must exist, and an input older than the source produces a warning. The Cranelift code path is reserved for the in-process JIT (`gos run`), not this command. Tier 2 cross deployment is `{x86_64,aarch64}-unknown-linux-musl`, QEMU-differential-tested in CI. Other registered triples are not supported merely because a local link succeeds; macOS/Windows as cross targets are out of scope. |
 
@@ -56,7 +57,7 @@ production uses `http::static_files::FileServer` behind its own router.
 
 | Command | Purpose |
 |---------|---------|
-| `gos clean [--all] [--frontend] [--ir] [--runners] [--packages] [--build-cache] [--vendor] [--dry-run]` | Remove selected toolchain caches. With no cache-class flag it clears frontend and IR caches; `--all` includes Rust-binding runners, packages, and legacy build artifacts. `--vendor` also deletes `./vendor/`. |
+| `gos clean [--all] [--frontend] [--ir] [--bindings] [--packages] [--build-cache] [--vendor] [--dry-run]` | Remove selected toolchain caches. With no cache-class flag it clears frontend and IR caches; `--all` includes Rust-binding builds, packages, and legacy build artifacts. `--vendor` also deletes `./vendor/`. |
 | `gos cache [--path] [--prune] [--clear] [--scope SCOPE] [--dry-run]` | Show cache roots and usage, print paths only, prune files older than 30 days and files exceeding the configured total cap, or clear every class. `--scope local` (the default for `--prune` / `--clear`) reaches this project's `.gos-cache/`; `--scope global` reaches the shared roots every project reuses; `--scope all` reaches both, and is what the report shows. |
 
 ## Package manager

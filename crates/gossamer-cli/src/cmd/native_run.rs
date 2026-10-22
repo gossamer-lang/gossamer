@@ -1,6 +1,6 @@
-//! `gos run` runs a program as the native executable `gos build` makes of
-//! it, as `go run` does: every run behaves as the shipped binary does. A
-//! current release build starts at once; otherwise the program builds with
+//! `gos run --native` runs a program as the native executable `gos build`
+//! makes of it, as `go run` does: the run behaves as the shipped binary does.
+//! A current release build starts at once; otherwise the program builds with
 //! the debug profile, reusing every object an earlier build left, and starts
 //! that, while the release build follows in the background for the next run.
 
@@ -10,33 +10,6 @@ use std::process::Command;
 use anyhow::Result;
 
 use crate::cmd::build::{BACKGROUND_BUILD_KEY, BACKGROUND_BUILD_LOCK, failed_build_record};
-
-/// Names the engine a run uses: `vm` keeps every run on the bytecode VM and
-/// the JIT; anything else runs the program natively.
-pub(crate) const RUN_ENGINE: &str = "GOS_RUN_ENGINE";
-
-/// Variables that ask the VM or the JIT to report on or change a run, which a
-/// native executable cannot honour.
-const VM_ONLY_VARS: &[&str] = &["GOS_DUMP_CLIF", "GOS_PROFILE_RSS", "GOS_VM_PROFILE"];
-
-/// Prefixes of the VM's and the JIT's own families of variables.
-const VM_ONLY_PREFIXES: &[&str] = &["GOS_JIT", "GOSSAMER_JIT", "GOSSAMER_VM_"];
-
-/// Whether this run may be native: neither the command line nor the
-/// environment asks for the VM.
-pub(crate) fn allowed() -> bool {
-    if std::env::var(RUN_ENGINE).is_ok_and(|engine| engine == "vm") {
-        return false;
-    }
-    !std::env::vars_os().any(|(name, _)| {
-        name.to_str().is_some_and(|name| {
-            VM_ONLY_VARS.contains(&name)
-                || VM_ONLY_PREFIXES
-                    .iter()
-                    .any(|prefix| name.starts_with(prefix))
-        })
-    })
-}
 
 /// Why a run did not start natively.
 pub(crate) enum NotNative {
@@ -233,7 +206,7 @@ fn build_in_background(entry: &Path, dir: &Path, key: &str) {
         .stderr(log_err);
     hand_over_lock(&mut command, lock);
     detach(&mut command);
-    let _ = command.spawn();
+    let _ = gossamer_runtime::safe_spawn::spawn_apart(&mut command);
 }
 
 /// Gives the build the lock this process took, as its stdin: a lock belongs

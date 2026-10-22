@@ -47,6 +47,7 @@ fn _gos_blocking_smoke(s: String) -> String {
 
 #[test]
 fn gos_module_registers_under_supplied_path() {
+    gossamer_binding::testing::install_host();
     let m = gossamer_binding::modules()
         .iter()
         .find(|m| m.path == "p2")
@@ -60,6 +61,7 @@ fn gos_module_registers_under_supplied_path() {
 
 #[test]
 fn doc_comments_through_proc_macro_flow() {
+    gossamer_binding::testing::install_host();
     let m = gossamer_binding::modules()
         .iter()
         .find(|m| m.path == "p2")
@@ -75,6 +77,7 @@ fn doc_comments_through_proc_macro_flow() {
 
 #[test]
 fn gos_struct_derive_round_trips_through_value() {
+    gossamer_binding::testing::install_host();
     let s = Server {
         address: "0.0.0.0".to_string(),
         port: 9000,
@@ -89,6 +92,7 @@ fn gos_struct_derive_round_trips_through_value() {
 
 #[test]
 fn gos_blocking_attribute_is_transparent_inline() {
+    gossamer_binding::testing::install_host();
     assert_eq!(_gos_blocking_smoke("abc".to_string()), "ABC");
 }
 

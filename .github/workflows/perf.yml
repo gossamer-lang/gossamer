@@ -173,6 +173,13 @@ jobs:
           # String + I/O: hello world (baseline for interpreter startup)
           [[ -f examples/hello_world.gos ]] && measure_process hello_world "$GOS" run examples/hello_world.gos
 
+          # Toolchain startup with no program.
+          measure_process gos_version "$GOS" --version
+
+          # A project with a Rust binding: the warmup run builds the binding
+          # library once, and the samples measure loading and calling it.
+          measure_process binding_startup "$GOS" run benchmarks/bindings/src/startup.gos
+
           # Struct + field arithmetic: generic struct instantiation
           [[ -f examples/generic_struct.gos ]] && measure_process generic_struct "$GOS" run examples/generic_struct.gos
 

@@ -1,9 +1,9 @@
 //! `gos run [PATH]` - execute a program.
 //!
-//! A program runs as its native executable (see [`native_run`]); the
-//! bytecode VM and its JIT run it when asked for (`GOS_RUN_ENGINE=vm`,
-//! `--no-jit`, `--timings`, the VM's own variables), for inline source, and
-//! on a host that cannot build native code.
+//! A program runs on the bytecode VM and its JIT, which start it without
+//! building anything. `--native` runs it as its native executable instead
+//! (see [`native_run`]), falling back to the VM on a host that cannot build
+//! native code.
 //!
 //! [`native_run`]: crate::cmd::native_run
 
@@ -38,21 +38,18 @@ fn timings_line(prepare: Duration, reused: bool, check: Duration, load: Duration
     )
 }
 
-/// Runs a source file natively, or through the bytecode VM on the process
-/// main thread, where a native build runs `main` too.
-pub(crate) fn dispatch(path: Option<PathBuf>, args: &[String]) -> Result<()> {
+/// Runs a source file through the bytecode VM, or natively when `native`
+/// asks for it, on the process main thread, where a native build runs `main`
+/// too.
+pub(crate) fn dispatch(path: Option<PathBuf>, args: &[String], native: bool) -> Result<()> {
     let resolved = resolve_entry_arg(path)?;
-    crate::cmd::on_main_thread(|| run_file(&resolved, args))
+    crate::cmd::on_main_thread(|| run_file(&resolved, args, native))
 }
 
-fn run_file(file: &Path, forwarded: &[String]) -> Result<()> {
+fn run_file(file: &Path, forwarded: &[String], native: bool) -> Result<()> {
     let file_label = file.to_string_lossy();
     let unit = crate::paths::read_entry_unit(file)?;
-    // `--no-jit` and `--timings` ask about the VM's own run.
-    if !gossamer_interp::jit_force_disabled_state()
-        && !REPORT_TIMINGS.load(Ordering::Relaxed)
-        && crate::cmd::native_run::allowed()
-    {
+    if native {
         match crate::cmd::native_run::run(file, &unit.source, &file_label, forwarded)? {
             NotNative::Library => {}
             NotNative::Unavailable(reason) => {
