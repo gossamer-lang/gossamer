@@ -73,21 +73,85 @@ pub(crate) fn run(
     let Some(release) = crate::cmd::build::run_artifact(entry, source, &dir, true) else {
         return Ok(NotNative::Library);
     };
-    if release.current {
+    // A dump or trace the environment asks for comes from a compile, which
+    // a current build skips.
+    let reports = crate::cmd::build::compile_reports_requested();
+    if release.current && !reports {
         return Ok(start(&release.path, label, forwarded));
     }
     let debug_dir = dir.join("debug");
     let Some(debug) = crate::cmd::build::run_artifact(entry, source, &debug_dir, false) else {
         return Ok(NotNative::Library);
     };
-    if !debug.current {
+    if !debug.current || reports {
         if let Some(problem) = toolchain_problem() {
             return Ok(NotNative::Unavailable(problem));
         }
-        crate::cmd::build::build_for_run(entry, &debug_dir, false)?;
+        build_before_run(entry, &debug_dir)?;
     }
     build_in_background(entry, &dir, &release.key);
     Ok(start(&debug.path, label, forwarded))
+}
+
+/// Builds the debug executable of `entry` into `dir` with a `gos build` of
+/// its own, whose output is the run's only when the build fails or the
+/// environment asks the compile to report: the program owns the run's stdout
+/// and stderr, and what a successful build has to say
+/// about the toolchain (an LLVM version note, a linker warning) goes to
+/// `dir/build.log` instead. A program that does not build ends the run with
+/// the build's exit code after its diagnostics.
+fn build_before_run(entry: &Path, dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let mut command = build_command(entry, dir, false)?;
+    command.stdin(std::process::Stdio::null());
+    if crate::paths::stderr_supports_colour() {
+        command.env("CLICOLOR_FORCE", "1");
+    }
+    // A dump or trace the environment asked for is for its reader, so the
+    // build's stderr is the run's.
+    if crate::cmd::build::compile_reports_requested() {
+        command.stderr(std::process::Stdio::inherit());
+    }
+    let output = command.output()?;
+    let mut log = output.stdout;
+    log.extend_from_slice(&output.stderr);
+    let _ = std::fs::write(dir.join("build.log"), &log);
+    if output.status.success() {
+        return Ok(());
+    }
+    {
+        use std::io::Write as _;
+        let mut stderr = std::io::stderr().lock();
+        let _ = stderr.write_all(&log);
+        let _ = stderr.flush();
+    }
+    std::process::exit(output.status.code().unwrap_or(1));
+}
+
+/// A `gos build` of `entry` into `dir`, with the features and the
+/// compile-time capabilities this command was given, building for a run.
+fn build_command(entry: &Path, dir: &Path, release: bool) -> Result<Command> {
+    let mut command = Command::new(std::env::current_exe()?);
+    let request = crate::paths::feature_request();
+    if !request.features.is_empty() {
+        command.arg("--features").arg(request.features.join(","));
+    }
+    if request.no_default {
+        command.arg("--no-default-features");
+    }
+    if let Some(level) = crate::comptime_fold::command_line_flag() {
+        command.arg("--comptime-io").arg(level);
+    }
+    command.arg("build");
+    if release {
+        command.arg("--release");
+    }
+    command
+        .arg("--out-dir")
+        .arg(dir)
+        .arg(entry)
+        .env(crate::cmd::build::RUN_BUILD, "1");
+    Ok(command)
 }
 
 /// Why this host cannot link a native program, or `None` when it can.
@@ -153,7 +217,7 @@ fn build_in_background(entry: &Path, dir: &Path, key: &str) {
     if lock.try_lock().is_err() {
         return;
     }
-    let Ok(exe) = std::env::current_exe() else {
+    let Ok(mut command) = build_command(entry, dir, true) else {
         return;
     };
     let Ok(log) = std::fs::File::create(dir.join("build.log")) else {
@@ -162,20 +226,7 @@ fn build_in_background(entry: &Path, dir: &Path, key: &str) {
     let Ok(log_err) = log.try_clone() else {
         return;
     };
-    let mut command = Command::new(exe);
-    let request = crate::paths::feature_request();
-    if !request.features.is_empty() {
-        command.arg("--features").arg(request.features.join(","));
-    }
-    if request.no_default {
-        command.arg("--no-default-features");
-    }
     command
-        .arg("build")
-        .arg("--release")
-        .arg("--out-dir")
-        .arg(dir)
-        .arg(entry)
         .env(BACKGROUND_BUILD_LOCK, &lock_path)
         .env(BACKGROUND_BUILD_KEY, key)
         .stdout(log)

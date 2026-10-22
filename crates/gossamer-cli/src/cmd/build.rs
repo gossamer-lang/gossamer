@@ -72,7 +72,19 @@ pub(crate) enum Purpose {
     Run,
 }
 
+/// Set on a build `gos run` starts, which builds for the run.
+pub(crate) const RUN_BUILD: &str = "GOS_RUN_BUILD";
+
 impl Purpose {
+    /// The purpose of the build this process makes.
+    pub(crate) fn of_this_build() -> Self {
+        if std::env::var_os(RUN_BUILD).is_some() {
+            Self::Run
+        } else {
+            Self::Build
+        }
+    }
+
     /// What a build refuses when the program does not check.
     fn refusal(self) -> &'static str {
         match self {
@@ -220,19 +232,24 @@ fn musl_runtime_available() -> bool {
         });
         let runtime_present =
             find_runtime_lib_for_target(musl_triple_for_arch(std::env::consts::ARCH)).is_ok();
-        let present = crt_present && runtime_present;
-        if !present {
-            eprintln!(
-                "warning: the static-musl release link is unavailable \
-                 (the musl target or matching Gossamer runtime is not installed); \
-                 linking dynamically against the host libc instead. Run \
-                 `rustup target add {target}` and reinstall Gossamer to restore \
-                 self-contained release binaries.",
-                target = musl_triple_for_arch(std::env::consts::ARCH),
-            );
-        }
-        present
+        crt_present && runtime_present
     })
+}
+
+/// Says, once, that a release link which would be static musl links against
+/// the host libc instead. Only a link says it: deciding what a build would
+/// produce, as `gos run` does before starting one, is silent.
+fn warn_if_static_musl_unavailable(opts: LinkOptions) {
+    if opts.release && !opts.dynamic && cfg!(target_os = "linux") && !musl_runtime_available() {
+        eprintln!(
+            "warning: the static-musl release link is unavailable \
+             (the musl target or matching Gossamer runtime is not installed); \
+             linking dynamically against the host libc instead. Run \
+             `rustup target add {target}` and reinstall Gossamer to restore \
+             self-contained release binaries.",
+            target = musl_triple_for_arch(std::env::consts::ARCH),
+        );
+    }
 }
 
 /// Resolve where the linked binary should land. `--out-dir` wins
@@ -484,23 +501,6 @@ pub(crate) fn run_artifact(
     Some(RunArtifact { path, key, current })
 }
 
-/// Builds the executable [`run_artifact`] names, saying nothing on stdout.
-pub(crate) fn build_for_run(file: &Path, out_dir: &Path, release: bool) -> Result<()> {
-    crate::binding_dispatch::ensure_external_signatures_for_entry(file)
-        .map_err(|err| anyhow!("failed to load rust-binding signatures: {err}"))?;
-    let request = BuildRequest {
-        path: None,
-        target: None,
-        link: run_link_options(release),
-        out_dir: Some(out_dir.to_path_buf()),
-        timings: false,
-        explain_profile: false,
-        uniqueness_report: false,
-        purpose: Purpose::Run,
-    };
-    build_entry(&file.to_path_buf(), &request)
-}
-
 /// The link options of a build `gos run` starts.
 fn run_link_options(release: bool) -> LinkOptions {
     LinkOptions {
@@ -663,6 +663,25 @@ const BUILD_STAMP_VERSION: &str = "gossamer-linked-artifact-v2";
 
 /// Variables that ask a compile to write its intermediate forms out.
 const COMPILE_DUMP_VARS: [&str; 3] = ["GOS_LLVM_DUMP", "GOS_LLVM_DUMP_MIR", "GOS_DUMP_MIR_RC"];
+
+/// Variables that ask a compile to trace what it does as it goes.
+const COMPILE_TRACE_VARS: [&str; 4] = [
+    "GOS_DUMP_MIR",
+    "GOS_LLVM_TRACE",
+    "GOS_LINK_VERBOSE",
+    "GOS_PIPELINE_TRACE",
+];
+
+/// Whether the environment asks a compile to dump, trace, or remark on what
+/// it does: output its reader wants to see, and which only a compile that
+/// actually runs produces.
+pub(crate) fn compile_reports_requested() -> bool {
+    gossamer_mir::remarks::any_enabled()
+        || COMPILE_DUMP_VARS
+            .iter()
+            .chain(&COMPILE_TRACE_VARS)
+            .any(|name| std::env::var_os(name).is_some())
+}
 
 /// Fingerprints everything available before the frontend that can affect the
 /// linked artifact. The bundled source covers sibling modules, while project
@@ -1338,6 +1357,9 @@ fn link_executable(
         libraries,
     } = *inputs;
     let staged = staged_output_path(out_path);
+    let staging = staged.parent().unwrap_or(out_path).to_path_buf();
+    fs::create_dir_all(&staging)
+        .map_err(|err| NativeBuildError::Io(anyhow!("creating {}: {err}", staging.display())))?;
     let linked = if !lt.is_cross && cfg!(all(windows, target_env = "msvc")) {
         link_windows_msvc(
             objects,
@@ -1369,22 +1391,22 @@ fn link_executable(
         )
     }
     .and_then(|()| publish_artifact(&staged, out_path));
-    if linked.is_err() {
-        let _ = fs::remove_file(&staged);
-    }
+    let _ = fs::remove_dir_all(&staging);
     linked
 }
 
-/// Where a link writes the executable before it takes `out_path`'s place.
-///
-/// The path is unique to this process, so two builds of one output never
-/// write the same file, and it sits beside `out_path`, so the rename that
-/// publishes it stays on one filesystem.
+/// Where a link writes the executable before it takes `out_path`'s place:
+/// a directory of this process's own beside `out_path`, under `out_path`'s
+/// own name. The rename that publishes it stays on one filesystem, two builds
+/// of one output never write the same file, and the file keeps the name a
+/// linker may record in it (an Apple ad-hoc signature's identifier).
 fn staged_output_path(out_path: &Path) -> PathBuf {
     let name = out_path
         .file_name()
         .map_or_else(|| "out".into(), |name| name.to_string_lossy().into_owned());
-    out_path.with_file_name(format!(".{name}.{}.partial", std::process::id()))
+    out_path
+        .with_file_name(format!(".{name}.{}.partial", std::process::id()))
+        .join(name)
 }
 
 /// Moves a linked executable into place in one step: a program already
@@ -1599,6 +1621,9 @@ fn try_native_build(
     // `gos run` calls into (`target_env`), the platform's shared one, which a
     // static musl link would replace; such a host release takes the dynamic
     // link. A musl target asked for by name stays static.
+    if lt.env != TargetEnv::Musl {
+        warn_if_static_musl_unavailable(opts);
+    }
     let static_musl =
         lt.env == TargetEnv::Musl || (opts.want_static_musl() && !links_declares_foreign);
     let phase_started = Instant::now();
@@ -2081,6 +2106,7 @@ fn link_posix(
         && lt.env == TargetEnv::Gnu
         && !lt.is_cross
         && host_glibc_reads_relr()
+        && (links_with_mold(lt, libraries) || linker_packs_relative_relocs(&cc))
     {
         // Packed relative relocations keep the binary position independent
         // at a fraction of the relocation size. The linker records a
@@ -2110,6 +2136,23 @@ fn link_posix(
 /// Whether this host's glibc loads packed relative relocations (`DT_RELR`),
 /// which it does from 2.36 on. Read from `ldd --version`, whose first line
 /// ends in the glibc version; any other answer reads as no.
+/// Whether the linker `cc` drives packs relative relocations for this
+/// host's architecture. GNU ld lists `-z pack-relative-relocs` among its
+/// options only for targets it implements it for, and elsewhere warns that it
+/// ignores the option on every link.
+fn linker_packs_relative_relocs(cc: &str) -> bool {
+    static PACKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PACKS.get_or_init(|| {
+        std::process::Command::new(cc)
+            .arg("-Wl,--help")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .is_ok_and(|output| {
+                String::from_utf8_lossy(&output.stdout).contains("pack-relative-relocs")
+            })
+    })
+}
+
 fn host_glibc_reads_relr() -> bool {
     static READS_RELR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *READS_RELR.get_or_init(|| {

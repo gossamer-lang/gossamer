@@ -84,6 +84,7 @@ pub(super) fn invoke_llc_pipeline(
     let profile = opt_profile();
     let mcpu = mcpu_target(triple);
     if let Some(clang) = integrated_clang_path(triple) {
+        announce_llvm_major();
         if std::env::var_os("GOS_PIPELINE_TRACE").is_some() {
             eprintln!("llvm pipeline: clang at {}", clang.display());
         }
@@ -132,6 +133,7 @@ pub(super) fn invoke_llc_pipeline(
         OptProfile::Release => ("verify,default<O3>", "-O3"),
     };
     let opt_tool = find_opt()?;
+    announce_llvm_major();
     let mut opt_cmd = std::process::Command::new(&opt_tool);
     opt_cmd
         .arg(format!("-passes={opt_passes}"))
@@ -224,6 +226,7 @@ pub(super) fn invoke_llc_pipeline(
     // matches what `rustc -C target-cpu=native` does for the
     // bench-game references.
     let llc = find_llc()?;
+    announce_llvm_major();
     let mut llc_cmd = std::process::Command::new(&llc);
     llc_cmd
         .arg(llc_level)
@@ -639,8 +642,21 @@ fn parse_llvm_major(text: &str) -> Option<u32> {
 /// do is take part in cross-language LTO, so the warning names that and
 /// not something vaguer. Below the minimum is an error, because the IR
 /// this emitter writes is not known to parse there at all.
+/// The note a build prints about an LLVM other than the one this toolchain
+/// is built against, recorded when the tool is resolved and printed by the
+/// first compile that runs it: resolving a tool to learn whether a build is
+/// possible says nothing.
+static MAJOR_NOTE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Prints the LLVM version note, once, when there is one.
+fn announce_llvm_major() {
+    static ANNOUNCED: std::sync::Once = std::sync::Once::new();
+    if let Some(note) = MAJOR_NOTE.get() {
+        ANNOUNCED.call_once(|| eprintln!("{note}"));
+    }
+}
+
 fn check_llvm_major(tool_name: &str, path: &Path) -> std::result::Result<(), String> {
-    static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     let Some(major) = llvm_tool_major(path) else {
         return Ok(());
     };
@@ -655,14 +671,14 @@ fn check_llvm_major(tool_name: &str, path: &Path) -> std::result::Result<(), Str
             path.display(),
         ));
     }
-    WARNED.get_or_init(|| {
-        eprintln!(
+    MAJOR_NOTE.get_or_init(|| {
+        format!(
             "note: building with LLVM {major} ({}), not the LLVM \
              {PREFERRED_LLVM_MAJOR} this toolchain is built against. The program is \
              the same; a timing or a codegen difference measured against a \
              build made with LLVM {PREFERRED_LLVM_MAJOR} is not comparable.",
             path.display(),
-        );
+        )
     });
     Ok(())
 }

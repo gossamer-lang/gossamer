@@ -1,6 +1,6 @@
 //! ANSI styling for diagnostic output. Detects whether stderr is
 //! a TTY at first use and disables colour for piped/redirected
-//! output. Honours `NO_COLOR` (any value) and `CLICOLOR=0`.
+//! output. Honours `NO_COLOR` (any value), `CLICOLOR=0`, and `CLICOLOR_FORCE`.
 
 use std::io::IsTerminal;
 use std::sync::OnceLock;
@@ -27,7 +27,7 @@ fn enabled() -> bool {
         if matches!(std::env::var("CLICOLOR").as_deref(), Ok("0")) {
             return false;
         }
-        std::io::stderr().is_terminal()
+        crate::paths::colour_forced() || std::io::stderr().is_terminal()
     })
 }
 

@@ -29,6 +29,20 @@ pub(crate) fn set_command_line_level(level: Option<ComptimeIo>) {
     let _ = COMMAND_LINE_LEVEL.set(level);
 }
 
+/// The `--comptime-io` spelling of what the command line asked for, which a
+/// build this command starts is handed in turn.
+pub(crate) fn command_line_flag() -> Option<&'static str> {
+    COMMAND_LINE_LEVEL
+        .get()
+        .copied()
+        .flatten()
+        .map(|level| match level {
+            ComptimeIo::None => "none",
+            ComptimeIo::Confined => "confined",
+            ComptimeIo::Full => "full",
+        })
+}
+
 /// Resolves the effective compile-time capability level for a fold of
 /// `file_label` and installs it.
 ///

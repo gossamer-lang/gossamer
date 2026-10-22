@@ -55,6 +55,13 @@ behaves exactly as the shipped binary does:
 3. The release build then runs in the background at low priority, and the
    next run starts it.
 
+The program's stdout and stderr are its own. A build that fails shows its
+diagnostics and the program does not run; a build that succeeds keeps what it
+said (a note about the LLVM version, a linker warning) in `build.log` beside
+the executable it made. A compile dump or trace the environment asks for
+(`GOS_DUMP_MIR_RC`, `GOS_PIPELINE_TRACE`, ...) makes the run build again and
+reaches stderr.
+
 A project keeps these builds in `.gos-cache/run/`; a file outside any project
 keeps them in the user cache, so nothing is written beside it. Objects are
 shared by every project on the machine: a library such as a GUI toolkit is

@@ -20,7 +20,13 @@ pub(crate) fn stderr_supports_colour() -> bool {
     if matches!(std::env::var("CLICOLOR").as_deref(), Ok("0")) {
         return false;
     }
-    std::io::stderr().is_terminal()
+    colour_forced() || std::io::stderr().is_terminal()
+}
+
+/// Whether `CLICOLOR_FORCE` asks for colour on a stream that is not a
+/// terminal, as a command whose output another `gos` relays has.
+pub(crate) fn colour_forced() -> bool {
+    std::env::var("CLICOLOR_FORCE").is_ok_and(|value| !value.is_empty() && value != "0")
 }
 
 /// Reads `file` (after `.gos`-resolution) into a `String`. Wraps

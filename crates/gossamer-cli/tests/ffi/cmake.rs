@@ -156,18 +156,23 @@ fn projects_sharing_a_cmake_package_share_its_build() {
             "use tally_lib\n\nfn main() {\n    println(tally_lib::step(4))\n}\n",
         )
         .expect("write the app");
-        std::process::Command::new(crate::support::gos_binary())
+        let output = std::process::Command::new(crate::support::gos_binary())
             .current_dir(&app)
             .args(["run", "."])
             .env("XDG_CACHE_HOME", &cache)
             .output()
-            .expect("run gos")
+            .expect("run gos");
+        // A run keeps what its build said in the build's log, not in the
+        // program's stderr.
+        let log =
+            std::fs::read_to_string(app.join(".gos-cache/run/debug/build.log")).unwrap_or_default();
+        (output, log)
     };
-    let first = run_app("first-app");
-    let second = run_app("second-app");
+    let (first, first_log) = run_app("first-app");
+    let (second, second_log) = run_app("second-app");
     let _ = std::fs::remove_dir_all(&root);
-    let first_err = String::from_utf8_lossy(&first.stderr);
-    let second_err = String::from_utf8_lossy(&second.stderr);
+    let first_err = format!("{}{first_log}", String::from_utf8_lossy(&first.stderr));
+    let second_err = format!("{}{second_log}", String::from_utf8_lossy(&second.stderr));
     assert_eq!(
         String::from_utf8_lossy(&first.stdout).trim(),
         "7",

@@ -47,7 +47,7 @@ fn main() {
     // has to hold on all four configurations, not only the compiled two.
     for jit in [false, true] {
         let mut cmd = Command::new(gos_bin());
-        cmd.arg("run").arg(&source);
+        cmd.arg("run").arg(&source).env("GOS_RUN_ENGINE", "vm");
         if !jit {
             cmd.env("GOS_JIT", "0");
         }
@@ -156,7 +156,7 @@ fn each_formatting_call_writes_to_its_own_sink() {
 
     for jit in [false, true] {
         let mut cmd = Command::new(gos_bin());
-        cmd.arg("run").arg(&source);
+        cmd.arg("run").arg(&source).env("GOS_RUN_ENGINE", "vm");
         if !jit {
             cmd.env("GOS_JIT", "0");
         }
