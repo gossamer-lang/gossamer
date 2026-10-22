@@ -58,8 +58,13 @@ fn a_cmake_build_belongs_to_its_feature() {
     let out = project.gos(&["run", "--no-default-features", "src/main.gos"]);
     assert!(!out.ok, "the build ran without its feature:\n{}", out.all());
     assert!(
-        out.all().contains("tally_step"),
-        "expected an unresolved `tally_step`:\n{}",
+        !out.all().contains("configuring the CMake project"),
+        "the CMake project built without its feature:\n{}",
+        out.all()
+    );
+    assert!(
+        out.all().contains("tally"),
+        "expected the missing `tally` to be named:\n{}",
         out.all()
     );
 }

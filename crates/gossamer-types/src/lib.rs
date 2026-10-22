@@ -90,7 +90,7 @@ pub use frontend_checks::{
 };
 pub use infer::{InferCtxt, UnifyError};
 pub use normalize::normalize_caller_side_spellings;
-pub use printer::{public_type_name, render_public_ty, render_ty};
+pub use printer::{public_type_name, render_public_ty, render_ty, stable_type_name};
 pub use stdlib_signatures::{
     STD_FUNCTION_SIGNATURES, StdFunctionSignature, function_shape as stdlib_function_shape,
     function_signature as stdlib_function_signature,

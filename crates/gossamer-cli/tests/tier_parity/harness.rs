@@ -1608,6 +1608,17 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/jit_enum_struct_payloads.gos"),
     spec("feature-testing-examples/jit_struct_boundary_shapes.gos"),
     spec("feature-testing-examples/jit_byte_fields_and_unit_enums.gos"),
+    spec("feature-testing-examples/static_values_answered.gos"),
+    spec("feature-testing-examples/shared_exit_releases.gos"),
+    spec("feature-testing-examples/select_send_values.gos"),
+    spec("feature-testing-examples/serde_numeric_vector_fields.gos"),
+    spec("feature-testing-examples/anchored_paths_skip_local_names.gos"),
+    spec("feature-testing-examples/nearer_import_over_enclosing_item.gos"),
+    spec("feature-testing-examples/option_methods_and_std_pipes.gos"),
+    spec("feature-testing-examples/std_type_beside_same_named_user_type.gos"),
+    spec("feature-testing-examples/container_assignment_copies.gos"),
+    spec("feature-testing-examples/enum_json_encode_tagged.gos"),
+    spec("feature-testing-examples/send_completes_before_close.gos"),
     spec("feature-testing-examples/assoc_fn_closure_param_types.gos"),
     spec("feature-testing-examples/stdlib_struct_rendering.gos"),
     spec("feature-testing-examples/aggregate_field_share_transfer.gos"),
@@ -2561,8 +2572,10 @@ fn tier_report_handles_crash_and_timeout() {
 fn run_vm(src: &Path, args: &[&str], stdin: &[u8]) -> Run {
     let gos = gos_bin();
     let mut cmd = Command::new(&gos);
-    cmd.arg("run").arg(src);
-    let mut parts: Vec<String> = vec![gos.display().to_string()];
+    // `gos run` starts a native build unless asked for the VM, and this
+    // tier is the VM with its JIT.
+    cmd.arg("run").arg(src).env("GOS_RUN_ENGINE", "vm");
+    let mut parts: Vec<String> = vec!["GOS_RUN_ENGINE=vm".to_string(), gos.display().to_string()];
     parts.push("run".to_string());
     parts.push(src.display().to_string());
     if !args.is_empty() {

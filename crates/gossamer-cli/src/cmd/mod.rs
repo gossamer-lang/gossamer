@@ -23,6 +23,7 @@ pub(crate) mod fuzz;
 pub(crate) mod lint_cmd;
 pub(crate) mod lsp_cmd;
 pub(crate) mod mcp_cmd;
+pub(crate) mod native_run;
 pub(crate) mod parse;
 pub(crate) mod pkg;
 pub(crate) mod run;

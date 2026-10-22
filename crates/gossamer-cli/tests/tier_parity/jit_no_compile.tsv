@@ -330,7 +330,9 @@ feature-testing-examples/select_closed_chan_ready.gos	no hot body
 feature-testing-examples/select_ctx_cancel.gos	bytecode-only local
 feature-testing-examples/select_default_timing.gos	bytecode-only local
 feature-testing-examples/select_multiplex.gos	no hot body
+feature-testing-examples/select_send_values.gos	cross-goroutine
 feature-testing-examples/self_unit_and_generic_callbacks.gos	callable local
+feature-testing-examples/send_completes_before_close.gos	cross-goroutine
 feature-testing-examples/sequence_spelling.gos	admission gate
 feature-testing-examples/serde_enums_and_field_attrs.gos	entry shape
 feature-testing-examples/serde_typed_entry_points.gos	no hot user body

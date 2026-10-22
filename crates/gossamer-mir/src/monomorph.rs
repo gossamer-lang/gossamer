@@ -435,6 +435,7 @@ fn specialise_functions_step(
                 continue;
             }
             let template = &bodies[*src_idx];
+            tcx.register_generic_fn_name(def.local, &template.name);
             if !trait_specialised_defs.contains(&def.local)
                 && calls_trait_through_parameter(template, substs, receivers, tcx)
             {

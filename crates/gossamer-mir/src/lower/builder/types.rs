@@ -1417,6 +1417,29 @@ impl<'a> Builder<'a> {
     /// produces (with the element type from the `.iter()` result), not the
     /// receiver. (`HashMap` is not a named Adt, so `runtime_kind_from_ty`
     /// returns `None` for it - this checks the kind directly.)
+    /// Whether `receiver.iter()` walks the receiver's own elements, so a loop
+    /// over it can walk the receiver directly: a sequence, or a receiver whose
+    /// type lowering left unresolved. Any other type's `iter()` (an `Option`'s,
+    /// a user type's) answers a sequence of its own, which the loop walks.
+    pub(crate) fn iter_walks_its_receiver(&self, receiver: &gossamer_hir::HirExpr) -> bool {
+        use gossamer_types::TyKind;
+        let mut cur = self
+            .receiver_local_from_path(receiver)
+            .map_or(receiver.ty, |local| self.locals[local.0 as usize].ty);
+        while let TyKind::Ref { inner, .. } = self.tcx.kind_of(cur) {
+            cur = *inner;
+        }
+        matches!(
+            self.tcx.kind_of(cur),
+            TyKind::Vec(_)
+                | TyKind::Slice(_)
+                | TyKind::Array { .. }
+                | TyKind::Var(_)
+                | TyKind::Error
+                | TyKind::Param { .. }
+        )
+    }
+
     pub(crate) fn receiver_is_map_or_set(&self, receiver: &gossamer_hir::HirExpr) -> bool {
         use gossamer_types::TyKind;
         let mut cur = receiver.ty;

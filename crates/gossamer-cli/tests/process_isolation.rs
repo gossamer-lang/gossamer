@@ -65,6 +65,7 @@ fn write_src(tag: &str, src: &str) -> (PathBuf, PathBuf) {
 fn run_vm(source: &Path) -> Output {
     Command::new(gos_bin())
         .arg("run")
+        .env("GOS_RUN_ENGINE", "vm")
         .arg(source)
         .output()
         .expect("spawn gos")

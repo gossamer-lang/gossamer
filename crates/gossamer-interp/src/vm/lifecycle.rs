@@ -498,6 +498,31 @@ impl Vm {
         // call resolves to on every other tier. Depth decides, so the order
         // the modules are walked in does not.
         let mut bare_fn_depth: HashMap<String, usize> = HashMap::new();
+        // A struct variant is built by `__struct` under its own name, so it
+        // takes its declared field order as a struct does; every literal then
+        // keeps one layout whatever order it names the fields in. A name two
+        // enums declare with different fields has no one layout to take.
+        let mut variant_layouts: HashMap<String, Option<Vec<String>>> = HashMap::new();
+        for item in &program.items {
+            if let HirItemKind::Adt(adt) = &item.kind
+                && let gossamer_hir::HirAdtKind::Enum(variants) = &adt.kind
+            {
+                for variant in variants {
+                    let Some(fields) = &variant.struct_fields else {
+                        continue;
+                    };
+                    let names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
+                    variant_layouts
+                        .entry(variant.name.name.clone())
+                        .and_modify(|held| {
+                            if held.as_ref() != Some(&names) {
+                                *held = None;
+                            }
+                        })
+                        .or_insert(Some(names));
+                }
+            }
+        }
         for item in &program.items {
             let module_prefix = if item.module_path.is_empty() {
                 None
@@ -604,6 +629,11 @@ impl Vm {
                     }
                 }
                 _ => {}
+            }
+        }
+        for (name, layout) in variant_layouts {
+            if let Some(names) = layout {
+                name_layouts.entry(name).or_insert(names);
             }
         }
         crate::builtins::set_struct_layouts(name_layouts);
@@ -2590,13 +2620,22 @@ fn prepare_jit(
             gossamer_mir::inline_small_callees(&mut bodies, &jit_tcx);
             gossamer_mir::inline_general(&mut bodies, &jit_tcx);
         }
+        // Only a body admitted before inlining can be compiled, so only those
+        // are optimised. The others stay in hand, inlined but otherwise as
+        // lowered, for the passes that read every caller in the program.
+        let (mut candidates, others): (Vec<Body>, Vec<Body>) = bodies
+            .into_iter()
+            .partition(|body| pre_inline_names.contains(body.name.as_str()));
         // Same post-inline cleanup the AOT pipeline runs: the
         // cranelift lowering is shared with `gos build`, so the
         // JIT must hand it the same MIR shape or the tiers can
         // diverge on constructs only one shape exercises.
-        for body in &mut bodies {
+        for body in &mut candidates {
             gossamer_mir::optimise_for_jit_with_effects(body, &jit_tcx, &effects);
         }
+        let candidate_count = candidates.len();
+        bodies = candidates;
+        bodies.extend(others);
         gossamer_mir::propagate_entry_bounds(&mut bodies, &jit_tcx, &effects);
         let mut compile_names =
             jit_backend::jit_compile_body_names(&bodies, &jit_tcx, &shapes, &struct_shapes);
@@ -2613,6 +2652,7 @@ fn prepare_jit(
                 );
             }
         }
+        bodies.truncate(candidate_count);
         bodies.retain(|body| compile_names.contains(body.name.as_str()));
         if bodies.is_empty() {
             return PreparedJit::Nothing { collect: true };

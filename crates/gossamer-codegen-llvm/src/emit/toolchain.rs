@@ -721,6 +721,11 @@ fn find_clang() -> Result<PathBuf> {
     CLANG_PATH
         .get_or_init(|| {
             if let Ok(path) = std::env::var("GOS_LLVM_CLANG") {
+                if !is_executable(&path) {
+                    return Err(format!(
+                        "`GOS_LLVM_CLANG` names {path}, which is not an executable clang"
+                    ));
+                }
                 let path = PathBuf::from(path);
                 check_llvm_major("clang", &path)?;
                 return Ok(path);
@@ -781,6 +786,11 @@ fn find_llvm_tool(
     // mattering: a major below the floor cannot compile this emitter's
     // IR whoever chose it.
     let found = if let Ok(path) = std::env::var(env_var) {
+        if !is_executable(&path) {
+            return Err(format!(
+                "`{env_var}` names {path}, which is not an executable {tool}"
+            ));
+        }
         PathBuf::from(path)
     } else if let Some(bundled) = bundled_llvm_tool(tool) {
         bundled
@@ -979,6 +989,16 @@ pub fn llvm_toolchain_status() -> Vec<LlvmToolStatus> {
             resolved: resolve(find_clang()),
         },
     ]
+}
+
+/// Why a debug native build cannot run on this host, or `None` when the LLVM
+/// tools it drives resolve. Only paths are resolved; nothing is compiled.
+#[must_use]
+pub fn debug_toolchain_problem() -> Option<String> {
+    find_opt()
+        .and_then(|_| find_llc())
+        .err()
+        .map(|err| err.to_string())
 }
 
 fn missing_llvm_tool_message(tool: &str, env_var: &str) -> String {

@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.75.0 - Native `gos run` with a shared package build cache, faster native builds, and select, serde, and path fixes
+
+- `gos run` runs the program's native executable, the one `gos build` makes, for a project and for a single file alike: a current release build starts at once, otherwise the program is built with the debug profile first and the release build follows in the background, at low priority, for the next run. The VM and its JIT run the program when asked for (`GOS_RUN_ENGINE=vm`, `--no-jit`, `--timings`, or the VM's own `GOS_JIT*`, `GOSSAMER_JIT*`, `GOSSAMER_VM_*`, `GOS_DUMP_CLIF`, `GOS_PROFILE_RSS`, and `GOS_VM_PROFILE` variables), for `gos -e`, and on a host without the LLVM tools, which `gos run` says in one line. A file outside any project keeps its builds in the user cache rather than beside the file.
+- Native objects are shared between projects: a debug build compiles each dependency whole, names every symbol by its source path instead of by numbers the program chose, and compiles a generic's specialisations into each module that uses them, so a dependency's modules compile to the same objects in every program using them and a new program built on a library compiles only its own modules. The object cache moved from each project's `.gos-cache/ir-cache` to the user cache, and `gos cache` covers the builds `gos run` keeps.
+- A build links its executable beside the destination and moves it into place in one step, so a program running from that path keeps running and nothing starts a half-written binary.
+- Native builds render their LLVM modules on every core, which takes about a quarter off the time an edit takes to rebuild in a large GUI program.
+- A panic report names a generic function's specialisation by the generic it came from, and code the toolchain generates is reported as `<generated>` without a line.
+- Native builds compile each source module as its own LLVM module, in parallel, and the exits of a function share the releases they make alike, so large packages build much faster and an edit to one module of a dependency rebuilds only that module.
+- `gos run` spends less time preparing the JIT before `main` starts.
+- On native builds `opt.flatten()` and `opt.iter()` on an `Option` answer what `option::flatten` and `option::iter` do, where the first failed to build and the second built broken code, and `for x in value.iter()` over a type whose `iter()` answers a vector walks that vector.
+- A pipe into a standard function named as a value (`text |> strings::lines`) answers that function's type, as the call does, so native builds print the lines instead of their addresses; piping a reference into one is `GT0082`, as passing it is.
+- A `select` send arm hands its value over as `tx.send` does: a struct, tuple, or enum element arrives whole on native builds, where it could arrive corrupted or crash the program, a sent `String` or `Vec` no longer reaches the receiver already freed, and the value of an arm that does not fire is given back.
+- `crate::name` names the root's item and `super::name` the parent module's even where the module writing them declares an item of that name, and a module's own `use` comes before a same-named item of an enclosing module, so a library's root `type` alias no longer replaces a type one of its modules imports.
+- Under the JIT, the typed JSON decoder of a struct holding a `Vec<i64>` or `Vec<f64>` no longer faults.
+- `json::encode`, `json::render`, and `json::encode_pretty` write a user enum externally tagged, as `json::decode` reads it back (`{"Group":{"title":"main"}}`, `{"Pair":[1,2]}`), on every tier, where the VM dropped the variant's name and native builds wrote the first variant's; a recursive enum encodes instead of overflowing the compiler's stack, and a map keyed by integers inside a struct encodes on native builds instead of becoming `null`.
+- An associated function's arguments are checked against its parameters (`Widget::button(5, ..)` for a `String` is `GT0001`), as a free function's are.
+- A path through a standard module (`fs::File`) names the standard type inside a dependency even when the program declares a type of the same name.
+- Assigning a `Vec`, a `Map`, a `Set`, or a struct holding one from a binding or a field gives the target a value of its own on every tier, where native builds shared one vector or table between the two names and the VM shared nested maps; a container local each loop turn refills from a call no longer leaks the value it replaces.
+- A struct-variant literal may name its fields in any order on the VM, where a literal ordering them differently from an earlier one swapped their values.
+- A send on an unbuffered channel that a receiver took completes on the VM even when the receiver closes the channel at once, instead of failing with "send on closed channel".
+- A static `Vec`, `Map`, or `String` answered by value from a function stays intact on native builds, and on the VM changing a map answered from a static leaves the static as it was.
+- A `static mut` `Vec`, `Map`, or `String` answered by value from a function stays intact on native builds, and on the VM changing a map answered from a static leaves the static as it was.
+
 ## 0.74.0 - Broader JIT, shared statics, structural comparison, and memory-safety fixes
 
 - A `select` receive answers `Option<T>`, as the specification says: `Some(v) = rx.recv()` takes a value, `None = rx.recv()` takes the close of a drained channel, and a bare name binds the whole `Option`. A receive pattern that might not match is `GT0047`, a `match` inside an arm is checked for exhaustiveness, and a closed channel no longer hands an arm a zero value.

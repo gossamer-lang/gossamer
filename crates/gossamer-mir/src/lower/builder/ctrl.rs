@@ -4250,7 +4250,9 @@ impl<'a> Builder<'a> {
                     // snapshot Vec (`gos_rt_set_to_vec` / the map-iter pair
                     // vec) with the right element type from `iter_expr.ty`.
                     HirExprKind::MethodCall { receiver, name, .. }
-                        if name.name == "iter" && !self.receiver_is_map_or_set(receiver) =>
+                        if name.name == "iter"
+                            && !self.receiver_is_map_or_set(receiver)
+                            && self.iter_walks_its_receiver(receiver) =>
                     {
                         Some(receiver.as_ref())
                     }

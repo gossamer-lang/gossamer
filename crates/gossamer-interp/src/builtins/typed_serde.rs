@@ -313,6 +313,19 @@ fn builtin_serde_wr_f32(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Unit)
 }
 
+fn builtin_serde_wr_f64_tree(args: &[Value]) -> RuntimeResult<Value> {
+    let text = gossamer_runtime::builtins::format_json_tree_float(serde_float_arg(args));
+    with_writer(args, |out| out.extend_from_slice(text.as_bytes()));
+    Ok(Value::Unit)
+}
+
+fn builtin_serde_wr_f32_tree(args: &[Value]) -> RuntimeResult<Value> {
+    let value = gossamer_runtime::builtins::f32_as_decimal_double(serde_float_arg(args));
+    let text = gossamer_runtime::builtins::format_json_tree_float(value);
+    with_writer(args, |out| out.extend_from_slice(text.as_bytes()));
+    Ok(Value::Unit)
+}
+
 fn builtin_serde_wr_bool(args: &[Value]) -> RuntimeResult<Value> {
     let value = matches!(args.get(1), Some(Value::Bool(true)));
     with_writer(args, |out| {
@@ -375,7 +388,9 @@ const SERDE_BUILTINS: &[(&str, SerdeBuiltin)] = &[
     ("__gos_serde_rd_wrap", builtin_serde_rd_wrap),
     ("__gos_serde_wr_bool", builtin_serde_wr_bool),
     ("__gos_serde_wr_f32", builtin_serde_wr_f32),
+    ("__gos_serde_wr_f32_tree", builtin_serde_wr_f32_tree),
     ("__gos_serde_wr_f64", builtin_serde_wr_f64),
+    ("__gos_serde_wr_f64_tree", builtin_serde_wr_f64_tree),
     ("__gos_serde_wr_finish", builtin_serde_wr_finish),
     ("__gos_serde_wr_i64", builtin_serde_wr_i64),
     ("__gos_serde_wr_json", builtin_serde_wr_json),

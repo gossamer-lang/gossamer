@@ -27,12 +27,12 @@ pub use cleanup::{
     plan_with_summary as plan_cleanup_with_summary,
 };
 pub use const_tables::constant_table_locals;
-pub use dce::{PruneReport, Scope, prune_scoped, prune_unreachable};
+pub use dce::{PruneReport, Scope, concrete_bodies_under, prune_scoped, prune_unreachable};
 pub use escape::{
     CaptureSummary, EscapeSet, analyse as analyse_escape,
     analyse_with_summary as analyse_escape_with_summary, build_capture_summary,
 };
-pub use gossamer_hir::{FFI_EXPORTS_FN, STATIC_INIT_FN};
+pub use gossamer_hir::{FFI_EXPORTS_FN, LIFTED_CLOSURE_PREFIX, STATIC_INIT_FN};
 pub use ir::{
     AggregateKind, AssertMessage, BasicBlock, BinOp, BlockId, Body, ConstValue, F64MathIntrinsic,
     ForeignCall, ForeignCallback, ForeignParam, ForeignStatic, InlineChain, InlineFrame,
@@ -63,5 +63,5 @@ pub use opt::{
     copy_propagate, dead_block_sweep, dead_store_elim, enable_uniqueness_report, inline_general,
     inline_small_callees, inline_trivial_wrappers, optimise, optimise_debug, optimise_for_jit,
     optimise_for_jit_with_effects, optimise_with_effects, propagate_entry_bounds,
-    report_bounds_sites, statement_count,
+    report_bounds_sites, share_exit_tails, statement_count,
 };

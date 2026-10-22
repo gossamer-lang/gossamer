@@ -1,0 +1,35 @@
+// A path through a standard module (`fs::File`) names the standard type in
+// every module, even where the program declares its own `File`.
+struct File {
+    name: String
+}
+
+mod reader {
+    use std::{errors, fs}
+
+    fn head(f: fs::File) -> Result<Vec<u8>, errors::Error> {
+        f.read_at(4, 0)
+    }
+
+    pub fn missing(path: String) -> bool {
+        match fs::File::open(path) {
+            Ok(f) => head(f).is_err()
+            Err(_) => true
+        }
+    }
+}
+
+fn name_total(n: i64) -> i64 {
+    let mut sum = 0
+    for i in 0..n {
+        let f = File { name: "notes" }
+        sum += f.name.len() + i
+    }
+    sum
+}
+
+fn main() {
+    let f = File { name: "notes" }
+    println(f"{f.name} {reader::missing("no-such-file-for-this-fixture.txt")}")
+    println(name_total(3))
+}

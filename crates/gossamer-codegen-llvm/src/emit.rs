@@ -39,9 +39,11 @@ use thunks::{
     render_shape_thunk_with_linkage, render_spawn_wide_cabi_thunk, shape_thunk_param_tys,
     validate_global_decl_shape,
 };
+mod stable_symbols;
 mod toolchain;
 pub use toolchain::{
-    LlvmToolStatus, MINIMUM_LLVM_MAJOR, PREFERRED_LLVM_MAJOR, llvm_toolchain_status,
+    LlvmToolStatus, MINIMUM_LLVM_MAJOR, PREFERRED_LLVM_MAJOR, debug_toolchain_problem,
+    llvm_toolchain_status,
 };
 use toolchain::{
     find_llc, find_opt, host_triple, integrated_clang_path, invoke_llc_pipeline, llvm_pass_options,
@@ -800,6 +802,15 @@ struct ModuleCtx<'a> {
     fn_name_by_def: &'a std::collections::HashMap<u32, String>,
     param_tys_by_name: &'a std::collections::HashMap<String, Vec<gossamer_types::Ty>>,
     capture_summary: &'a gossamer_mir::CaptureSummary,
+    /// The program's `#[export]` symbols, which every renderer names alike.
+    exports: &'a std::collections::HashSet<String>,
+    /// The names bodies are emitted under.
+    symbols: &'a stable_symbols::StableSymbols,
+    /// For a debug build, the specialisations by symbol: each chunk carries
+    /// a `linkonce_odr` copy of every one it names, so a chunk's text depends
+    /// on its own module alone. Empty for a release build, which keeps each
+    /// specialisation in one chunk.
+    instance_by_symbol: &'a std::collections::HashMap<String, usize>,
     triple: &'a str,
 }
 
@@ -865,12 +876,38 @@ fn call_edges(bodies: &[Body]) -> Vec<Vec<usize>> {
     edges
 }
 
-/// The source module a body belongs to: the first segment of its qualified
-/// name, or the entry file (the empty string) for an unqualified one. A
-/// monomorphised instance, a lifted closure and a synthesised helper carry no
-/// module prefix and file under the entry.
-fn body_module(name: &str) -> &str {
-    name.split_once("::").map_or("", |(module, _)| module)
+/// The source module a body belongs to: the module segments its qualified
+/// name starts with, up to the type or function it names, or the entry file
+/// (the empty string) for an unqualified one. Modules are named in lower
+/// case and types in upper case, so a method files under the module that
+/// declares its type. A lifted closure files under the module of the item it
+/// is written in, which its name carries with `.` separators. A specialised
+/// generic function and a synthesised helper carry no module prefix and file
+/// under the entry.
+fn body_module(name: &str) -> std::borrow::Cow<'_, str> {
+    if let Some(owner) = name
+        .strip_prefix(gossamer_mir::LIFTED_CLOSURE_PREFIX)
+        .and_then(|rest| rest.split_once('.'))
+        .map(|(_, owner)| owner)
+    {
+        return std::borrow::Cow::Owned(module_prefix(owner, ".").replace('.', "::"));
+    }
+    std::borrow::Cow::Borrowed(module_prefix(name, "::"))
+}
+
+/// The leading lower-case segments of `path`, split at `separator`, before the
+/// segment that names a type or the item itself.
+fn module_prefix<'a>(path: &'a str, separator: &str) -> &'a str {
+    let mut end = 0;
+    let mut start = 0;
+    while let Some(at) = path[start..].find(separator) {
+        if path[start..].starts_with(|c: char| c.is_ascii_uppercase()) {
+            break;
+        }
+        end = start + at;
+        start = end + separator.len();
+    }
+    &path[..end]
 }
 
 /// Partitions bodies into LLVM modules by the source module that declares
@@ -888,15 +925,14 @@ fn codegen_chunks(bodies: &[Body]) -> Vec<Vec<usize>> {
         return vec![(0..bodies.len()).collect()];
     }
     let edges = call_edges(bodies);
+    let names: Vec<std::borrow::Cow<'_, str>> =
+        bodies.iter().map(|body| body_module(&body.name)).collect();
     let mut modules: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
-    for body in bodies {
+    for name in &names {
         let next = modules.len();
-        modules.entry(body_module(&body.name)).or_insert(next);
+        modules.entry(name.as_ref()).or_insert(next);
     }
-    let module_of: Vec<usize> = bodies
-        .iter()
-        .map(|body| modules[body_module(&body.name)])
-        .collect();
+    let module_of: Vec<usize> = names.iter().map(|name| modules[name.as_ref()]).collect();
     let mut parent: Vec<usize> = (0..modules.len()).collect();
     for component in strongly_connected_components(&edges) {
         let Some((&first, rest)) = component.split_first() else {
@@ -1058,7 +1094,7 @@ fn render_chunk_module(
     imports: &[usize],
     ctx: &ModuleCtx<'_>,
 ) -> Result<String, BuildError> {
-    let _exports = crate::lower::ExportScope::enter(ctx.all_bodies);
+    let _exports = crate::lower::ExportScope::with_symbols(ctx.exports.clone());
     let string_pool =
         std::rc::Rc::new(std::cell::RefCell::new(crate::lower::StringPool::default()));
 
@@ -1080,40 +1116,89 @@ fn render_chunk_module(
     let sret_bodies = collect_sret_bodies(ctx.all_bodies, ctx.tcx);
     let direct_bodies = collect_direct_bodies(ctx.all_bodies);
 
-    let defined = chunk_indices.iter().map(|&idx| (idx, false));
-    let copied = imports.iter().map(|&idx| (idx, true));
-    for (idx, available_externally) in defined.chain(copied) {
-        let body = &ctx.all_bodies[idx];
-        if body.name == "main" && !available_externally {
-            main_idx = Some(idx);
-        }
+    let mut pending: Vec<(usize, BodyCopy)> = chunk_indices
+        .iter()
+        .map(|&idx| (idx, BodyCopy::Defined))
+        .chain(
+            imports
+                .iter()
+                .map(|&idx| (idx, BodyCopy::AvailableExternally)),
+        )
+        .collect();
+    let mut rendered_set: std::collections::HashSet<usize> =
+        pending.iter().map(|(idx, _)| *idx).collect();
+    let mut rendered_order: Vec<usize> = Vec::new();
+    let mut linkonce_names: Vec<String> = Vec::new();
+    while !pending.is_empty() {
+        let mut named: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (idx, copy) in std::mem::take(&mut pending) {
+            let body = &ctx.all_bodies[idx];
+            if body.name == "main" && copy == BodyCopy::Defined {
+                main_idx = Some(idx);
+            }
 
-        let mut lowerer = crate::lower::Lowerer::new(body, ctx.tcx);
-        lowerer.fn_name_by_def.clone_from(ctx.fn_name_by_def);
-        lowerer.param_tys_by_name.clone_from(ctx.param_tys_by_name);
-        lowerer.strings = string_pool.clone();
-        lowerer.capture_summary = ctx.capture_summary.clone();
-        lowerer.cabi_handlers.clone_from(&cabi_handlers);
-        if let Some(sites) = cabi_thunk_sites.get(&body.name) {
-            lowerer.cabi_thunk_sites = sites.keys().copied().collect();
-            cabi_shape_thunks.extend(sites.values().cloned());
-        }
-        lowerer.sret_bodies.clone_from(&sret_bodies);
-        lowerer.direct_bodies.clone_from(&direct_bodies);
+            let mut lowerer = crate::lower::Lowerer::new(body, ctx.tcx);
+            lowerer.fn_name_by_def.clone_from(ctx.fn_name_by_def);
+            lowerer.param_tys_by_name.clone_from(ctx.param_tys_by_name);
+            lowerer.strings = string_pool.clone();
+            lowerer.capture_summary = ctx.capture_summary.clone();
+            lowerer.cabi_handlers.clone_from(&cabi_handlers);
+            if let Some(sites) = cabi_thunk_sites.get(&body.name) {
+                lowerer.cabi_thunk_sites = sites.keys().copied().collect();
+                cabi_shape_thunks.extend(sites.values().cloned());
+            }
+            lowerer.sret_bodies.clone_from(&sret_bodies);
+            lowerer.direct_bodies.clone_from(&direct_bodies);
 
-        let text = lowerer.lower()?;
-        globals_raw.extend(lowerer.take_module_globals());
-        collect_thunk_names_in_body(body, &mut thunk_names);
-        if available_externally {
-            let Some(rest) = text.strip_prefix("define ") else {
-                return Err(BuildError::InternalLoweringBug(
-                    "a lowered body does not open with its `define` line",
-                ));
-            };
-            body_irs.push(format!("define available_externally {rest}"));
-        } else {
-            body_irs.push(text);
+            let text = lowerer.lower()?;
+            let module_globals = lowerer.take_module_globals();
+            if !ctx.instance_by_symbol.is_empty() {
+                let mut seen = std::collections::HashSet::new();
+                collect_quoted_symbols(&text, &mut seen);
+                for global in &module_globals {
+                    collect_quoted_symbols(global, &mut seen);
+                }
+                named.extend(seen.into_iter().map(str::to_owned));
+            }
+            globals_raw.extend(module_globals);
+            collect_thunk_names_in_body(body, &mut thunk_names);
+            rendered_order.push(idx);
+            match copy {
+                BodyCopy::Defined => body_irs.push(text),
+                BodyCopy::AvailableExternally | BodyCopy::LinkOnce => {
+                    let Some(rest) = text.strip_prefix("define ") else {
+                        return Err(BuildError::InternalLoweringBug(
+                            "a lowered body does not open with its `define` line",
+                        ));
+                    };
+                    if copy == BodyCopy::AvailableExternally {
+                        body_irs.push(format!("define available_externally {rest}"));
+                    } else {
+                        let symbol = crate::lower::mangle_fn_name(&body.name);
+                        let emitted = ctx.symbols.emitted_name(&symbol);
+                        let comdat = linkonce_comdat(ctx.triple, &emitted);
+                        body_irs.push(linkonce_definition(rest, comdat.as_deref())?);
+                        if comdat.is_some() {
+                            linkonce_names.push(emitted.into_owned());
+                        }
+                    }
+                }
+            }
         }
+        // A specialisation this chunk names joins it as its own copy, and the
+        // ones that copy names in turn; each round takes them in the order of
+        // the names they are emitted under, which no other chunk affects.
+        let mut found: Vec<(String, usize)> = named
+            .iter()
+            .filter_map(|symbol| ctx.instance_by_symbol.get(symbol).map(|&idx| (symbol, idx)))
+            .filter(|(_, idx)| rendered_set.insert(*idx))
+            .map(|(symbol, idx)| (ctx.symbols.emitted_name(symbol).into_owned(), idx))
+            .collect();
+        found.sort();
+        pending = found
+            .into_iter()
+            .map(|(_, idx)| (idx, BodyCopy::LinkOnce))
+            .collect();
     }
 
     // Every `@"name"` the module's own text mentions. Bodies and metas
@@ -1122,9 +1207,8 @@ fn render_chunk_module(
     for text in body_irs.iter().chain(globals_raw.iter()) {
         collect_quoted_symbols(text, &mut referenced);
     }
-    let local_symbols: std::collections::HashSet<String> = chunk_indices
+    let local_symbols: std::collections::HashSet<String> = rendered_order
         .iter()
-        .chain(imports)
         .map(|&idx| crate::lower::mangle_fn_name(&ctx.all_bodies[idx].name).into_owned())
         .collect();
 
@@ -1147,16 +1231,28 @@ fn render_chunk_module(
     }
     writeln!(out).unwrap();
 
-    // Extern declares for the bodies in other chunks this module calls.
+    // Extern declares for the bodies in other chunks this module calls, in
+    // the order of the names they are emitted under.
+    let mut declares: Vec<(String, String)> = Vec::new();
     for body in ctx.all_bodies {
         let symbol = crate::lower::mangle_fn_name(&body.name);
         if referenced.contains(symbol.as_ref()) && !local_symbols.contains(symbol.as_ref()) {
             let decl = extern_declare_with(body, ctx.tcx, &sret_bodies);
-            out.push_str(decl.trim_end());
-            writeln!(out).unwrap();
+            declares.push((
+                ctx.symbols.emitted_name(&symbol).into_owned(),
+                decl.trim_end().to_string(),
+            ));
         }
     }
+    declares.sort();
+    for (_, decl) in &declares {
+        out.push_str(decl);
+        writeln!(out).unwrap();
+    }
     writeln!(out).unwrap();
+    for name in &linkonce_names {
+        writeln!(out, "$\"{name}\" = comdat any").unwrap();
+    }
 
     // Runtime declares - dedup by symbol name. Other module globals
     // (e.g. `static mut` `linkonce_odr` definitions a chunk emits once
@@ -1197,22 +1293,28 @@ fn render_chunk_module(
     // RC-managed allocation shape, referenced by `gos_rc_alloc` sites.
     // Emitted in each chunk that references them; `private` makes each
     // object file self-contained.
-    let mut emitted_any_meta = false;
+    let mut private_names: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut metas: std::collections::BTreeMap<String, &[i64]> = std::collections::BTreeMap::new();
     for (symbol, blob) in sorted_rc_metas(ctx.tcx) {
         if !referenced.contains(symbol) {
             continue;
         }
+        let name = stable_symbols::content_name(symbol, blob);
+        private_names.insert(symbol.to_string(), name.clone());
+        metas.insert(name, blob);
+    }
+    for (name, blob) in &metas {
         let elems: Vec<String> = blob.iter().map(|v| format!("i64 {v}")).collect();
         writeln!(
             out,
-            "@\"{symbol}\" = private constant [{} x i64] [{}]",
+            "@\"{name}\" = private constant [{} x i64] [{}]",
             blob.len(),
             elems.join(", ")
         )
         .unwrap();
-        emitted_any_meta = true;
     }
-    if emitted_any_meta {
+    if !metas.is_empty() {
         writeln!(out).unwrap();
     }
 
@@ -1306,7 +1408,95 @@ fn render_chunk_module(
     writeln!(out, "!0 = !{{}}").unwrap();
     out.push_str(TBAA_METADATA);
 
-    Ok(out)
+    if private_names.is_empty() {
+        return Ok(out);
+    }
+    Ok(stable_symbols::rewrite_globals(&out, |symbol| {
+        private_names
+            .get(symbol)
+            .map(|name| std::borrow::Cow::Borrowed(name.as_str()))
+    }))
+}
+
+/// How a body appears in a chunk module.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BodyCopy {
+    /// The chunk's own definition.
+    Defined,
+    /// A release chunk's inlinable copy of a body another chunk defines.
+    AvailableExternally,
+    /// A debug chunk's copy of a specialisation it names; every copy is the
+    /// same and the linker keeps one.
+    LinkOnce,
+}
+
+/// The COMDAT a `linkonce_odr` copy of `symbol` joins, or `None` on Apple
+/// targets: Mach-O has no COMDATs and its linker folds weak definitions by
+/// name.
+fn linkonce_comdat(triple: &str, symbol: &str) -> Option<String> {
+    (!triple.contains("apple")).then(|| symbol.to_string())
+}
+
+/// A lowered body's `define` line, without its leading `define `, as a
+/// `linkonce_odr` definition in `comdat` when one is given. The COMDAT goes
+/// after the parameter list, its address-space and function attributes, and
+/// before anything else the line carries.
+fn linkonce_definition(rest: &str, comdat: Option<&str>) -> Result<String, BuildError> {
+    let Some(comdat) = comdat else {
+        return Ok(format!("define linkonce_odr {rest}"));
+    };
+    let line_end = rest.find('\n').unwrap_or(rest.len());
+    let line = &rest[..line_end];
+    let Some(params) = line.find("\"(").map(|at| at + 1) else {
+        return Err(BuildError::InternalLoweringBug(
+            "a lowered body's `define` line names no parameter list",
+        ));
+    };
+    let mut depth = 0usize;
+    let mut close = None;
+    for (offset, ch) in line[params..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(params + offset + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(mut at) = close else {
+        return Err(BuildError::InternalLoweringBug(
+            "a lowered body's parameter list does not close",
+        ));
+    };
+    let tail = &line[at..];
+    let mut words = tail.split(' ').filter(|word| !word.is_empty()).peekable();
+    let mut consumed = 0;
+    while let Some(word) = words.peek() {
+        if *word == "unnamed_addr" || *word == "local_unnamed_addr" || word.starts_with('#') {
+            consumed += 1;
+            words.next();
+        } else {
+            break;
+        }
+    }
+    for word in tail
+        .split(' ')
+        .filter(|word| !word.is_empty())
+        .take(consumed)
+    {
+        at = line[at..]
+            .find(word)
+            .map_or(at, |found| at + found + word.len());
+    }
+    Ok(format!(
+        "define linkonce_odr {} comdat($\"{comdat}\"){}",
+        &rest[..at],
+        &rest[at..]
+    ))
 }
 
 /// Core of the parallel, incremental build path.
@@ -1316,12 +1506,10 @@ fn render_chunk_module(
 /// `available_externally` copies of the callees it reaches in other chunks
 /// ([`chunk_imports`]).
 ///
-/// **Render and key (serial).** Every chunk is lowered to IR text, and the
-/// text is the cache identity ([`chunk_cache_key`]): a chunk whose text an
-/// earlier build compiled is served from the object cache, and only the rest
-/// reach LLVM. Rendering is serial because [`Lowerer`] uses `Rc<RefCell<_>>`
-/// state that is not `Send`; it is a small fraction of what `opt` + `llc`
-/// cost.
+/// **Render and key.** Every chunk is lowered to IR text on a pool of
+/// workers ([`render_chunks_parallel`]), and the text is the cache identity
+/// ([`chunk_cache_key`]): a chunk whose text an earlier build compiled is
+/// served from the object cache, and only the rest reach LLVM.
 ///
 /// **Compile (parallel).** Cache misses run one `opt` + `llc` pair each on a
 /// pool of [`codegen_job_limit`] workers.
@@ -1359,52 +1547,56 @@ fn compile_bodies_parallel_incremental(
         let _ = std::fs::create_dir_all(cd);
     }
 
+    let exports: std::collections::HashSet<String> =
+        gossamer_mir::export_symbols(bodies).into_iter().collect();
+    let symbols = {
+        let _scope = crate::lower::ExportScope::with_symbols(exports.clone());
+        stable_symbols::StableSymbols::for_program(bodies, tcx)
+    };
+
+    // Reproducible mode pins the build to one module so the artifact depends
+    // only on the source and the target.
+    let mut body_chunks = if want_reproducible() {
+        vec![(0..bodies.len()).collect()]
+    } else {
+        codegen_chunks(bodies)
+    };
+    let instance_by_symbol = if matches!(profile, OptProfile::Debug) && body_chunks.len() > 1 {
+        detach_instances(bodies, &exports, &mut body_chunks, &symbols)
+    } else {
+        std::collections::HashMap::new()
+    };
+    let imports = chunk_imports(bodies, &body_chunks, profile);
     let ctx = ModuleCtx {
         all_bodies: bodies,
         tcx,
         fn_name_by_def: &fn_name_by_def,
         param_tys_by_name: &param_tys_by_name,
         capture_summary: &capture_summary,
+        exports: &exports,
+        symbols: &symbols,
+        instance_by_symbol: &instance_by_symbol,
         triple: &llvm_triple,
     };
-
-    // Reproducible mode pins the build to one module so the artifact depends
-    // only on the source and the target.
-    let body_chunks = if want_reproducible() {
-        vec![(0..bodies.len()).collect()]
-    } else {
-        codegen_chunks(bodies)
-    };
-    let imports = chunk_imports(bodies, &body_chunks, profile);
+    let mut irs = render_chunks_parallel(&body_chunks, &imports, &ctx)?;
 
     // (chunk_idx, cache_key, ll_path, obj_path)
     let mut chunks_to_compile: Vec<(usize, String, PathBuf, PathBuf)> = Vec::new();
     let mut result_objects: Vec<(usize, PathBuf)> = Vec::new();
-    let mut irs: Vec<String> = Vec::with_capacity(body_chunks.len());
-    for (chunk_idx, body_indices) in body_chunks.iter().enumerate() {
-        let started = std::time::Instant::now();
-        let ir =
-            render_chunk_module(body_indices, &imports[chunk_idx], &ctx).map_err(|e| match e {
-                BuildError::InternalLoweringBug(msg) => {
-                    anyhow!("llvm backend internal lowering bug: {msg}")
-                }
-                BuildError::Tool(msg) => anyhow!("llvm backend: tool: {msg}"),
-                BuildError::Io(err) => err,
-            })?;
-        record_phase(&RENDER_US, started);
-        irs.push(ir);
-    }
-    let exports: std::collections::HashSet<String> =
-        gossamer_mir::export_symbols(bodies).into_iter().collect();
     let body_symbols: std::collections::HashSet<String> = {
-        let _scope = crate::lower::ExportScope::enter(bodies);
+        let _scope = crate::lower::ExportScope::with_symbols(exports.clone());
         bodies
             .iter()
             .map(|body| crate::lower::mangle_fn_name(&body.name).into_owned())
             .collect()
     };
-    internalize_chunk_locals(&mut irs, &body_symbols, &exports);
+    // A debug chunk keeps every body it defines visible: which other chunks
+    // name a body depends on the whole program, and a chunk's text must not.
+    if !matches!(profile, OptProfile::Debug) {
+        internalize_chunk_locals(&mut irs, &body_symbols, &exports);
+    }
     for (chunk_idx, (body_indices, ir)) in body_chunks.iter().zip(irs).enumerate() {
+        let ir = symbols.apply(&ir);
         let obj_path = obj_dir.join(format!("chunk{chunk_idx}.o"));
         let ll_path = obj_dir.join(format!("chunk{chunk_idx}.ll"));
         keep_ir(&format!("chunk{chunk_idx}.ll"), &ir);
@@ -1419,7 +1611,9 @@ fn compile_bodies_parallel_incremental(
                 "llvm pipeline: chunk{chunk_idx} `{}` {} bodies, {} imported, {} IR bytes, {}",
                 body_indices
                     .first()
-                    .map_or("", |&idx| body_module(&bodies[idx].name)),
+                    .map_or(std::borrow::Cow::Borrowed(""), |&idx| body_module(
+                        &bodies[idx].name
+                    )),
                 body_indices.len(),
                 imports[chunk_idx].len(),
                 ir.len(),
@@ -1498,6 +1692,94 @@ fn compile_bodies_parallel_incremental(
         triple,
         Vec::new(),
     ))
+}
+
+/// Takes the specialisations out of the chunk partition of a debug build,
+/// answering them by symbol: every chunk naming one renders its own
+/// `linkonce_odr` copy (see [`render_chunk_module`]), so a library module's
+/// chunk is the same whichever program instantiates what. A specialisation
+/// the runtime calls through a C-ABI thunk keeps its one home, which defines
+/// the thunk. Each chunk's own bodies are put in the order of the names they
+/// are emitted under, which does not depend on where in the program they
+/// were lowered.
+fn detach_instances(
+    bodies: &[Body],
+    exports: &std::collections::HashSet<String>,
+    chunks: &mut Vec<Vec<usize>>,
+    symbols: &stable_symbols::StableSymbols,
+) -> std::collections::HashMap<String, usize> {
+    let _scope = crate::lower::ExportScope::with_symbols(exports.clone());
+    let cabi_handlers = collect_cabi_handlers(bodies);
+    let detached: Vec<bool> = bodies
+        .iter()
+        .map(|body| {
+            body.name != "main"
+                && gossamer_mir::template_of(&body.name).is_some()
+                && !cabi_handlers.contains_key(&body.name)
+        })
+        .collect();
+    for chunk in chunks.iter_mut() {
+        chunk.retain(|&idx| !detached[idx]);
+        chunk.sort_by_cached_key(|&idx| {
+            let symbol = crate::lower::mangle_fn_name(&bodies[idx].name);
+            symbols.emitted_name(&symbol).into_owned()
+        });
+    }
+    chunks.retain(|chunk| !chunk.is_empty());
+    bodies
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| detached[*idx])
+        .map(|(idx, body)| (crate::lower::mangle_fn_name(&body.name).into_owned(), idx))
+        .collect()
+}
+
+/// Renders every chunk's module text, the chunks spread over one worker per
+/// core. Each worker lowers with its own [`crate::lower::Lowerer`] state, and
+/// the text a chunk renders depends on the chunk alone, so the order the
+/// workers take chunks in changes nothing.
+fn render_chunks_parallel(
+    chunks: &[Vec<usize>],
+    imports: &[Vec<usize>],
+    ctx: &ModuleCtx<'_>,
+) -> Result<Vec<String>> {
+    let rendered: Vec<parking_lot::Mutex<Option<Result<String, BuildError>>>> = chunks
+        .iter()
+        .map(|_| parking_lot::Mutex::new(None))
+        .collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .min(chunks.len())
+        .max(1);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(chunk) = chunks.get(idx) else {
+                        return;
+                    };
+                    let started = std::time::Instant::now();
+                    let ir = render_chunk_module(chunk, &imports[idx], ctx);
+                    record_phase(&RENDER_US, started);
+                    *rendered[idx].lock() = Some(ir);
+                }
+            });
+        }
+    });
+    rendered
+        .into_iter()
+        .map(|slot| match slot.into_inner() {
+            Some(Ok(ir)) => Ok(ir),
+            Some(Err(BuildError::InternalLoweringBug(msg))) => {
+                Err(anyhow!("llvm backend internal lowering bug: {msg}"))
+            }
+            Some(Err(BuildError::Tool(msg))) => Err(anyhow!("llvm backend: tool: {msg}")),
+            Some(Err(BuildError::Io(err))) => Err(err),
+            None => Err(anyhow!("llvm backend: a chunk was never rendered")),
+        })
+        .collect()
 }
 
 /// Gives `internal` linkage to every program body a chunk defines that no
@@ -2059,6 +2341,25 @@ mod codegen_partition_tests {
         assert_eq!(names[0], vec!["main".to_string()]);
         assert!(names[1].iter().all(|n| n.starts_with("alpha::")));
         assert!(names[3].iter().all(|n| n.starts_with("gamma::")));
+    }
+
+    #[test]
+    fn nested_modules_get_chunks_and_methods_file_under_their_module() {
+        let mut bodies = Vec::new();
+        for i in 0..8 {
+            bodies.push(body(&format!("gui::text::layout::f{i}"), &[]));
+            bodies.push(body(&format!("gui::text::font::Face::m{i}"), &[]));
+            bodies.push(body(&format!("gui::text::font::g{i}"), &[]));
+        }
+        let names = chunk_names(&bodies, &codegen_chunks(&bodies));
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(names[0].iter().all(|n| n.starts_with("gui::text::font::")));
+        assert_eq!(names[0].len(), 16);
+        assert!(
+            names[1]
+                .iter()
+                .all(|n| n.starts_with("gui::text::layout::"))
+        );
     }
 
     #[test]

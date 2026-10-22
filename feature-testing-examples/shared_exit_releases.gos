@@ -1,0 +1,71 @@
+// Many exits that each give back the same live values, with a field moved
+// out on some paths, early `?` exits, returns from inside loops and match
+// arms, and values only some paths own.
+use std::errors
+
+struct Record {
+    name: String
+    title: String
+    tags: Vec<String>
+    notes: Vec<String>
+    attrs: Map<String, String>
+}
+
+fn record(seed: String) -> Record {
+    Record {
+        name: seed + "-name"
+        title: seed + "-title"
+        tags: #[seed + "-a", seed + "-b"]
+        notes: #[seed + "-note"]
+        attrs: { "k": seed + "-v" }
+    }
+}
+
+fn parse(text: String) -> Result<i64, errors::Error> {
+    text.to_i64().ok_or(errors::new(f"not a number: {text}"))
+}
+
+fn answer(key: String, arg: String) -> Result<String, errors::Error> {
+    let a = record("a")
+    let b = record("b")
+    if key == "name" { return Ok(a.name) }
+    if key == "title" { return Ok(b.title) }
+    let n = parse(arg)?
+    if key == "tag" { return Ok(a.tags[n % 2]) }
+    let extra = record(f"x{n}")
+    if key == "note" { return Ok(extra.notes[0] + b.notes[0]) }
+    for (i, tag) in a.tags.iter().enumerate() {
+        if key == f"find{i}" { return Ok(tag + extra.title) }
+    }
+    let label = match key {
+        "attr" => {
+            let Some(v) = b.attrs.get("k") else { return Err(errors::new("no attr")) }
+            v
+        }
+        "count" => return Ok(f"{a.tags.len() + b.notes.len() + extra.tags.len()}")
+        "fail" => return Err(errors::new(f"failed with {extra.name}"))
+        _ => "other"
+    }
+    Ok(label + "/" + a.title + "/" + extra.name)
+}
+
+fn main() {
+    let keys = #["name", "title", "tag", "note", "find0", "find1", "attr", "count", "fail", "zzz"]
+    let mut total = 0
+    for round in 0..200 {
+        for key in keys {
+            let arg = if round % 7 == 3 && key == "tag" { "bad" } else { f"{round}" }
+            match answer(key, arg) {
+                Ok(text) => {
+                    total += text.len()
+                    if round == 0 { println(f"{key}: {text}") }
+                }
+                Err(e) => {
+                    total += 1
+                    if round < 4 { println(f"{key}: error {e}") }
+                }
+            }
+        }
+    }
+    println(f"total {total}")
+}

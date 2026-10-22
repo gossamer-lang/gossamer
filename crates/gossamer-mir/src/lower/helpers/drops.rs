@@ -2107,6 +2107,11 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                     {
                         copied_from[d] = Some(src.local.0 as usize);
                     }
+                    // A `static mut` keeps the sequence a read of it names,
+                    // as an object keeps one its field read names.
+                    if matches!(rvalue, Rvalue::StaticLoad(_)) {
+                        loaded[d] = true;
+                    }
                 }
             }
             if let Terminator::Call {

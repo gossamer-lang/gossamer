@@ -1,9 +1,11 @@
-//! `gos run [PATH]` - execute a program through the bytecode VM.
+//! `gos run [PATH]` - execute a program.
 //!
-//! The register-based bytecode VM is the only execution engine for
-//! `gos run`. The tree-walker interpreter was removed in 0.14.0 (the
-//! `--tree-walker` flag in 0.5.0); no CLI / env-var path selects an
-//! engine.
+//! A program runs as its native executable (see [`native_run`]); the
+//! bytecode VM and its JIT run it when asked for (`GOS_RUN_ENGINE=vm`,
+//! `--no-jit`, `--timings`, the VM's own variables), for inline source, and
+//! on a host that cannot build native code.
+//!
+//! [`native_run`]: crate::cmd::native_run
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 
+use crate::cmd::native_run::NotNative;
 use crate::loaders::{load_and_check, profile_rss_stage};
 use crate::paths::resolve_entry_arg;
 
@@ -35,16 +38,28 @@ fn timings_line(prepare: Duration, reused: bool, check: Duration, load: Duration
     )
 }
 
-/// Runs a source file through the bytecode VM on the process main thread,
-/// where a native build runs `main` too.
+/// Runs a source file natively, or through the bytecode VM on the process
+/// main thread, where a native build runs `main` too.
 pub(crate) fn dispatch(path: Option<PathBuf>, args: &[String]) -> Result<()> {
     let resolved = resolve_entry_arg(path)?;
-    crate::cmd::on_main_thread(|| run_on_vm(&resolved, args))
+    crate::cmd::on_main_thread(|| run_file(&resolved, args))
 }
 
-fn run_on_vm(file: &Path, forwarded: &[String]) -> Result<()> {
+fn run_file(file: &Path, forwarded: &[String]) -> Result<()> {
     let file_label = file.to_string_lossy();
     let unit = crate::paths::read_entry_unit(file)?;
+    // `--no-jit` and `--timings` ask about the VM's own run.
+    if !gossamer_interp::jit_force_disabled_state()
+        && !REPORT_TIMINGS.load(Ordering::Relaxed)
+        && crate::cmd::native_run::allowed()
+    {
+        match crate::cmd::native_run::run(file, &unit.source, &file_label, forwarded)? {
+            NotNative::Library => {}
+            NotNative::Unavailable(reason) => {
+                eprintln!("note: running on the VM: {reason}");
+            }
+        }
+    }
     run_source_on_vm(
         &unit.source,
         &file_label,

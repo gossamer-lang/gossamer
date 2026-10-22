@@ -60,6 +60,9 @@ struct SourceRegion {
     end: u32,
     origin_start: u32,
     file: usize,
+    /// False for text the toolchain generated, whose lines name no place a
+    /// reader wrote.
+    located: bool,
 }
 
 /// The byte offset each line of `text` begins at.
@@ -98,6 +101,26 @@ impl SourcePositions {
         file: &str,
         file_source: &str,
     ) {
+        self.push_region(start, end, origin_start, file, file_source, true);
+    }
+
+    /// Records that the unit's bytes `start..end` hold text the toolchain
+    /// generated, reported as `file` with no line. Generated text differs
+    /// from program to program, so a line within it would make a library's
+    /// code, and its cached object, depend on the program it is built into.
+    pub fn add_generated_region(&mut self, start: u32, end: u32, file: &str) {
+        self.push_region(start, end, 0, file, "", false);
+    }
+
+    fn push_region(
+        &mut self,
+        start: u32,
+        end: u32,
+        origin_start: u32,
+        file: &str,
+        file_source: &str,
+        located: bool,
+    ) {
         let index = if let Some(index) = self.files.iter().position(|(name, _)| name == file) {
             index
         } else {
@@ -110,6 +133,7 @@ impl SourcePositions {
             end,
             origin_start,
             file: index,
+            located,
         });
     }
 
@@ -123,6 +147,9 @@ impl SourcePositions {
             .find(|region| offset >= region.start && offset < region.end)
         {
             let (name, text) = &self.files[region.file];
+            if !region.located {
+                return (name.clone(), 0, 0);
+            }
             let (line, column) = text.line_column(region.origin_start + (offset - region.start));
             (name.clone(), line, column)
         } else {

@@ -121,6 +121,10 @@ pub struct TyCtxt {
     /// structs and by sentinel registrations for `Result`/`Option`.
     #[serde(serialize_with = "gossamer_ast::ordered::map")]
     def_names: HashMap<gossamer_resolve::DefId, String>,
+    /// The body name of each generic function monomorphisation specialised,
+    /// by its `DefId.local`, which a specialisation's symbol is named after.
+    #[serde(default, serialize_with = "gossamer_ast::ordered::map")]
+    generic_fn_names: HashMap<u32, String>,
     /// The `Param` type each generic type parameter's resolver `DefId`
     /// stands for, recorded by the type checker where a path is headed by
     /// the parameter (`T::zero`). Lowering reads it to name the parameter's
@@ -1354,6 +1358,29 @@ impl TyCtxt {
     #[must_use]
     pub fn def_name(&self, def: gossamer_resolve::DefId) -> Option<&str> {
         self.def_names.get(&def).map(String::as_str)
+    }
+
+    /// The handle whose [`Ty::as_u32`] is `index`, when this context
+    /// interned one; reads back the ids a specialisation's name spells.
+    #[must_use]
+    pub fn ty_at_index(&self, index: u32) -> Option<Ty> {
+        usize::try_from(index)
+            .ok()
+            .filter(|&at| at < self.kinds.len())
+            .map(|_| Ty(index))
+    }
+
+    /// Records `name` as the body of the generic function `local`.
+    pub fn register_generic_fn_name(&mut self, local: u32, name: &str) {
+        self.generic_fn_names
+            .entry(local)
+            .or_insert_with(|| name.to_string());
+    }
+
+    /// The body name of the generic function `local`, once specialised.
+    #[must_use]
+    pub fn generic_fn_name(&self, local: u32) -> Option<&str> {
+        self.generic_fn_names.get(&local).map(String::as_str)
     }
 
     /// Records the `Param` type the generic type parameter `def` stands for.

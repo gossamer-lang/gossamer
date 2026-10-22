@@ -228,7 +228,7 @@ impl<'a> Lowerer<'a> {
                 writeln!(
                     self.out,
                     "  {tmp} = load {llvm_ty}, ptr @{sym}",
-                    sym = sref.symbol,
+                    sym = quoted_static(sref),
                 )
                 .unwrap();
                 Ok(tmp)
@@ -337,19 +337,21 @@ impl<'a> Lowerer<'a> {
         if fields.is_empty() && !guarded && !option_slot {
             return;
         }
-        let callback = format!("{}__drop", sref.symbol);
-        let base = format!("@{}", sref.symbol);
+        let callback_name = format!("{}__drop", sref.link_name);
+        let callback = format!("\"{callback_name}\"");
+        let base = format!("@{}", quoted_static(sref));
         let saved = std::mem::take(&mut self.out);
         let saved_ssa = std::mem::replace(&mut self.next_ssa, 0);
         // The finalizer is a function of its own, so the slots its calls
         // spill into belong in its entry block, not the enclosing body's.
         let saved_allocas = std::mem::take(&mut self.entry_allocas);
-        let comdat = if let Some(decl) = crate::emit::coff_comdat_decl("linkonce_odr", &callback) {
-            self.runtime_refs.insert(decl);
-            " comdat"
-        } else {
-            ""
-        };
+        let comdat =
+            if let Some(decl) = crate::emit::coff_comdat_decl("linkonce_odr", &callback_name) {
+                self.runtime_refs.insert(decl);
+                " comdat"
+            } else {
+                ""
+            };
         writeln!(
             self.out,
             "define linkonce_odr void @{callback}(){comdat} {{\nentry:"
@@ -387,7 +389,13 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn release_static_previous(&mut self, sref: &gossamer_mir::StaticRef) {
         let fields = gossamer_mir::value_ownership_fields(self.tcx, sref.ty);
         if fields.iter().any(|field| field.path.is_empty()) {
-            self.static_children(sref.ty, &format!("@{}", sref.symbol), false, false, fields);
+            self.static_children(
+                sref.ty,
+                &format!("@{}", quoted_static(sref)),
+                false,
+                false,
+                fields,
+            );
         }
         self.release_static_option_slot(sref);
     }
@@ -400,7 +408,12 @@ impl<'a> Lowerer<'a> {
         }
         let (_, release) = gossamer_mir::option_slot_helpers(self.tcx, sref.ty);
         declare_rt(&mut self.runtime_refs, release);
-        writeln!(self.out, "  call void @{release}(ptr @{})", sref.symbol).unwrap();
+        writeln!(
+            self.out,
+            "  call void @{release}(ptr @{})",
+            quoted_static(sref)
+        )
+        .unwrap();
     }
 
     /// Registers the backing module global for a `static mut`. The
@@ -423,7 +436,7 @@ impl<'a> Lowerer<'a> {
         } else {
             render_const(&sref.init)
         };
-        let comdat = match crate::emit::coff_comdat_decl("linkonce_odr", &sref.symbol) {
+        let comdat = match crate::emit::coff_comdat_decl("linkonce_odr", &sref.link_name) {
             Some(decl) => {
                 self.runtime_refs.insert(decl);
                 ", comdat"
@@ -437,7 +450,7 @@ impl<'a> Lowerer<'a> {
         };
         self.runtime_refs.insert(format!(
             "@{sym} = linkonce_odr global {llvm_ty} {init}{comdat}{alignment}",
-            sym = sref.symbol,
+            sym = quoted_static(sref),
         ));
     }
 
@@ -780,7 +793,10 @@ impl<'a> Lowerer<'a> {
         // segfaults inside `push_back`. Stack-spill the value
         // and pass the slot address, matching the Cranelift
         // backend.
-        let chan_send_spill = matches!(name, "gos_rt_chan_send" | "gos_rt_chan_try_send");
+        let chan_send_spill = matches!(
+            name,
+            "gos_rt_chan_send" | "gos_rt_chan_try_send" | "gos_rt_chan_send_select_arm"
+        );
         // `gos_rt_result_new(disc, payload)` stores `payload` as an
         // i64. For aggregate payloads (struct literals, tuples,
         // arrays built on this function's stack), the operand's
@@ -1531,4 +1547,10 @@ impl<'a> Lowerer<'a> {
         .unwrap();
         Ok(tmp)
     }
+}
+
+/// A static's native symbol as LLVM spells it, quoted: a module path may
+/// hold characters a bare LLVM name cannot.
+pub(crate) fn quoted_static(sref: &gossamer_mir::StaticRef) -> String {
+    format!("\"{}\"", sref.link_name)
 }

@@ -2818,7 +2818,8 @@ fn main() {
 #[test]
 fn a_nested_field_handed_to_a_rebound_local_leaves_or_shares_the_field() {
     // `last = cx.canvas.pixels` in a loop: the aggregate still releases its
-    // field, so the binding has to take the vector out of it or a share of it.
+    // field, so the binding has to take the vector out of it, a share of it,
+    // or a copy of its own.
     let source = r#"
 struct Canvas { pixels: Vec<u8>, width: i64 }
 struct Cx { canvas: Canvas, tags: Vec<String> }
@@ -2854,7 +2855,13 @@ fn main() {
         .iter()
         .take(4)
         .any(|s| s.contains("gos_rt_vec_retain"));
-    assert!(emptied || shared, "{stmts:#?}");
+    let copied = main.blocks.iter().any(|b| {
+        matches!(&b.terminator, gossamer_mir::Terminator::Call {
+            callee: gossamer_mir::Operand::Const(gossamer_mir::ConstValue::Str(name)),
+            ..
+        } if name == "gos_rt_vec_clone")
+    });
+    assert!(emptied || shared || copied, "{stmts:#?}");
 }
 
 #[test]

@@ -30,6 +30,8 @@ use crate::tree::{
     HirStmt, HirStmtKind,
 };
 
+mod render_calls;
+
 /// The runtime entry a serde step names, or `None` for a name that is not
 /// one: `__gos_serde_rd_i64` is `gos_rt_serde_rd_i64`.
 #[must_use]
@@ -145,12 +147,6 @@ pub(crate) fn generate_serde_bodies(
     tcx: &mut TyCtxt,
     ids: &mut HirIdGenerator,
 ) {
-    let has_stub = program.items.iter().any(
-        |item| matches!(&item.kind, HirItemKind::Fn(f) if Op::of_stub(&f.name.name).is_some()),
-    );
-    if !has_stub {
-        return;
-    }
     let mut adts = HashMap::new();
     for item in &program.items {
         if let (HirItemKind::Adt(adt), Some(def)) = (&item.kind, item.def) {
@@ -173,12 +169,14 @@ pub(crate) fn generate_serde_bodies(
         ids,
         adts,
         encoders: HashMap::new(),
+        renderers: HashMap::new(),
         decoders: HashMap::new(),
         roots: HashMap::new(),
         pending: Vec::new(),
         items: Vec::new(),
         temp: 0,
         span: Span::default(),
+        rendering: false,
     };
     for item in &mut program.items {
         let span = item.span;
@@ -192,12 +190,16 @@ pub(crate) fn generate_serde_bodies(
             f.body = Some(body);
         }
     }
+    for item in &mut program.items {
+        builder.render_json_calls(item);
+    }
     builder.drain();
     program.items.append(&mut builder.items);
 }
 
 enum Pending {
     Encode(DefId, Ty, String),
+    Render(DefId, Ty, String),
     Decode(DefId, Ty, String),
     Root(DefId, Ty, Ty, String),
 }
@@ -207,6 +209,8 @@ struct Gen<'a> {
     ids: &'a mut HirIdGenerator,
     adts: HashMap<DefId, AdtInfo>,
     encoders: HashMap<DefId, String>,
+    /// The functions writing a type the way `json::encode` does.
+    renderers: HashMap<DefId, String>,
     decoders: HashMap<DefId, String>,
     roots: HashMap<DefId, String>,
     pending: Vec<Pending>,
@@ -214,6 +218,10 @@ struct Gen<'a> {
     temp: u32,
     /// Where the generated functions say they come from: the first stub.
     span: Span,
+    /// Whether the walk being written renders as `json::encode` does: a
+    /// struct's members in byte order of their names, every float with its
+    /// fraction, and the shapes the typed surface does not take.
+    rendering: bool,
 }
 
 /// The reader's local in a decode function, and the writer's in an encode.
@@ -298,6 +306,16 @@ impl Gen<'_> {
         name
     }
 
+    fn renderer(&mut self, def: DefId, ty: Ty) -> String {
+        if let Some(name) = self.renderers.get(&def) {
+            return name.clone();
+        }
+        let name = format!("__gos_serde_ren_{}", def.local);
+        self.renderers.insert(def, name.clone());
+        self.pending.push(Pending::Render(def, ty, name.clone()));
+        name
+    }
+
     fn decoder(&mut self, def: DefId, ty: Ty) -> String {
         if let Some(name) = self.decoders.get(&def) {
             return name.clone();
@@ -313,6 +331,12 @@ impl Gen<'_> {
         while let Some(next) = self.pending.pop() {
             let item = match next {
                 Pending::Encode(def, ty, name) => self.encode_fn(def, ty, &name),
+                Pending::Render(def, ty, name) => {
+                    let outer = std::mem::replace(&mut self.rendering, true);
+                    let item = self.encode_fn(def, ty, &name);
+                    self.rendering = outer;
+                    item
+                }
                 Pending::Decode(def, ty, name) => self.decode_fn(def, ty, &name),
                 Pending::Root(def, ty, ret, name) => Some(self.root_fn(def, ty, ret, &name)),
             };
@@ -413,8 +437,19 @@ impl Gen<'_> {
     ) {
         out.raw("{");
         let mut first = true;
-        for (index, (field, field_ty)) in fields.iter().zip(field_tys).enumerate() {
-            let options = info.serde.get(index).cloned().unwrap_or_default();
+        // A rendering keeps every field under its own name, in byte order of
+        // the names, as a `json::Value` object holds its members.
+        let mut order: Vec<usize> = (0..fields.len().min(field_tys.len())).collect();
+        if self.rendering {
+            order.sort_by(|&a, &b| fields[a].name.as_bytes().cmp(fields[b].name.as_bytes()));
+        }
+        for index in order {
+            let (field, field_ty) = (&fields[index], &field_tys[index]);
+            let options = if self.rendering {
+                HirSerdeField::default()
+            } else {
+                info.serde.get(index).cloned().unwrap_or_default()
+            };
             if options.skip {
                 continue;
             }
@@ -446,13 +481,17 @@ impl Gen<'_> {
         let binds: Vec<String> = (0..tys.len()).map(|i| format!("__serde_p{i}")).collect();
         let kind = if let Some(names) = &variant.struct_fields {
             arm.raw(&format!("{{{tag}:{{"));
-            for (i, (field, field_ty)) in names.iter().zip(tys).enumerate() {
-                if i > 0 {
+            let mut order: Vec<usize> = (0..names.len().min(tys.len())).collect();
+            if self.rendering {
+                order.sort_by(|&a, &b| names[a].name.as_bytes().cmp(names[b].name.as_bytes()));
+            }
+            for (n, i) in order.into_iter().enumerate() {
+                if n > 0 {
                     arm.raw(",");
                 }
-                arm.raw(&format!("{}:", serde_json_string(&field.name)));
-                let value = self.local(&binds[i], *field_ty, span);
-                self.encode(&mut arm, value, *field_ty, span);
+                arm.raw(&format!("{}:", serde_json_string(&names[i].name)));
+                let value = self.local(&binds[i], tys[i], span);
+                self.encode(&mut arm, value, tys[i], span);
             }
             arm.raw("}}");
             let fields = names
@@ -517,6 +556,9 @@ impl Gen<'_> {
 
     /// Appends the steps that write `value`, of type `ty`.
     fn encode(&mut self, out: &mut Emit, value: HirExpr, ty: Ty, span: Span) {
+        if self.rendering && self.encode_rendered_only(out, &value, ty, span) {
+            return;
+        }
         let Some(kind) = self.kind(ty) else {
             out.raw("null");
             return;
@@ -534,17 +576,33 @@ impl Gen<'_> {
                 let wide = self.cast(value, u64_ty, span);
                 self.write_step(out, "wr_u64", wide, span);
             }
-            Kind::F64 => self.write_step(out, "wr_f64", value, span),
+            Kind::F64 => {
+                let step = if self.rendering {
+                    "wr_f64_tree"
+                } else {
+                    "wr_f64"
+                };
+                self.write_step(out, step, value, span);
+            }
             Kind::F32 => {
                 let f64_ty = self.tcx.float_ty(FloatTy::F64);
                 let wide = self.cast(value, f64_ty, span);
-                self.write_step(out, "wr_f32", wide, span);
+                let step = if self.rendering {
+                    "wr_f32_tree"
+                } else {
+                    "wr_f32"
+                };
+                self.write_step(out, step, wide, span);
             }
             Kind::Bool => self.write_step(out, "wr_bool", value, span),
             Kind::Str => self.write_step(out, "wr_str", value, span),
             Kind::Json => self.write_step(out, "wr_json", value, span),
             Kind::Adt(def, adt_ty) => {
-                let encoder = self.encoder(def, adt_ty);
+                let encoder = if self.rendering {
+                    self.renderer(def, adt_ty)
+                } else {
+                    self.encoder(def, adt_ty)
+                };
                 let w = self.local(WRITER, i64_ty, span);
                 let call = self.call_named(&encoder, vec![w, value], unit, span);
                 out.stmt(self.expr_stmt(call, span));

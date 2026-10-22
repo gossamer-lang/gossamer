@@ -220,21 +220,26 @@ impl ScopeStack {
         None
     }
 
-    /// [`Self::lookup_type`] over the scopes inside the module-level one:
-    /// locals, parameters, and an inline module's own items.
-    pub(crate) fn lookup_type_inner(&self, name: &str) -> Option<Binding> {
-        self.layers[1..]
-            .iter()
-            .rev()
-            .find_map(|scope| scope.lookup_type(name))
+    /// Number of scope layers, the module-level one included.
+    pub(crate) fn depth(&self) -> usize {
+        self.layers.len()
     }
 
-    /// [`Self::lookup_value`] over the scopes inside the module-level one.
-    pub(crate) fn lookup_value_inner(&self, name: &str) -> Option<Binding> {
-        self.layers[1..]
-            .iter()
+    /// [`Self::lookup_type`] over the scopes inside the module-level one:
+    /// locals, parameters, and an inline module's own items, with the index
+    /// of the layer that bound it.
+    pub(crate) fn lookup_type_inner_at(&self, name: &str) -> Option<(usize, Binding)> {
+        (1..self.layers.len())
             .rev()
-            .find_map(|scope| scope.lookup_value(name))
+            .find_map(|layer| Some((layer, self.layers[layer].lookup_type(name)?)))
+    }
+
+    /// [`Self::lookup_value`] over the scopes inside the module-level one,
+    /// with the index of the layer that bound it.
+    pub(crate) fn lookup_value_inner_at(&self, name: &str) -> Option<(usize, Binding)> {
+        (1..self.layers.len())
+            .rev()
+            .find_map(|layer| Some((layer, self.layers[layer].lookup_value(name)?)))
     }
 
     /// Every name visible at this point, innermost scope first, across both

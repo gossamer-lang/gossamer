@@ -74,7 +74,7 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> (String, String, boo
 
 fn run_vm(src: &Path) -> String {
     let mut cmd = Command::new(gos_bin());
-    cmd.arg("run").arg(src);
+    cmd.arg("run").env("GOS_RUN_ENGINE", "vm").arg(src);
     let (stdout, _stderr, _ok) = run_with_timeout(cmd, Duration::from_secs(30));
     stdout
 }

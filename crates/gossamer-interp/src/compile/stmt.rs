@@ -340,6 +340,31 @@ impl<'tcx> FnBuilder<'tcx> {
     /// Compiles `place = value` in expression position, yielding the
     /// `()` result in a register so callers that consume it (a block
     /// tail, `let x = (a = b)`) see a real value.
+    /// Compiles the value an assignment stores. A value read out of storage
+    /// the program still reaches (`e.d = e.c`) that holds a map, a set, or
+    /// another container behind a shared handle is copied, as a `let`
+    /// binding of it is, so a later write through either side leaves the
+    /// other alone.
+    fn compile_assigned_value(&mut self, value: &HirExpr) -> RuntimeResult<TypedReg> {
+        let stored = self.compile_expr_ex(value)?;
+        if !is_place_expr(value)
+            || matches!(self.tcx.kind(value.ty), Some(TyKind::Ref { .. }))
+            || !(self.expr_is_map(value)
+                || self.expr_is_hashset(value)
+                || self.expr_is_slot_container(value)
+                || self.expr_is_aggregate_with_container(value))
+        {
+            return Ok(stored);
+        }
+        let src = self.as_value(stored);
+        let dst = self.alloc_reg();
+        self.emit(Op::CloneMapLike { dst, src });
+        Ok(TypedReg {
+            reg: dst,
+            kind: RegKind::Value,
+        })
+    }
+
     pub(crate) fn compile_assign(
         &mut self,
         place: &HirExpr,
@@ -406,7 +431,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 // RHS in the destination kind so no box /
                 // unbox round-trip happens in hot loops.
                 let rhs_start = self.cur_idx();
-                let src_tr = self.compile_expr_ex(value)?;
+                let src_tr = self.compile_assigned_value(value)?;
                 if self.expr_has_uint_display_provenance(value) {
                     self.uint_display_locals.insert(target.reg);
                 } else {
@@ -441,7 +466,7 @@ impl<'tcx> FnBuilder<'tcx> {
                         let offset =
                             self.resolve_struct_field_offset(receiver_ty, name.name.as_str());
                         if value_is_i64 && let Some(offset) = offset {
-                            let value_tr = self.compile_expr_ex(value)?;
+                            let value_tr = self.compile_assigned_value(value)?;
                             let value_i = self.as_i64(value_tr);
                             self.emit(Op::FieldSetI64ByOffset {
                                 receiver: target.reg,
@@ -450,7 +475,10 @@ impl<'tcx> FnBuilder<'tcx> {
                             });
                             return Ok(());
                         }
-                        let value_reg = self.compile_expr(value)?;
+                        let value_reg = {
+                            let stored = self.compile_assigned_value(value)?;
+                            self.as_value(stored)
+                        };
                         let name_idx = self.const_idx(
                             ConstKey::String(name.name.clone()),
                             Value::String(SmolStr::from(name.name.clone())),
@@ -482,7 +510,7 @@ impl<'tcx> FnBuilder<'tcx> {
                         if value_is_f64 && self.flat_float_locals.contains(&target.reg) {
                             let idx_tr = self.compile_expr_ex(index)?;
                             let idx_i = self.as_i64(idx_tr);
-                            let value_tr = self.compile_expr_ex(value)?;
+                            let value_tr = self.compile_assigned_value(value)?;
                             let value_f = self.as_f64(value_tr);
                             self.emit(Op::FloatVecSetF64 {
                                 base: target.reg,
@@ -512,7 +540,7 @@ impl<'tcx> FnBuilder<'tcx> {
                         if self.flat_int_locals.contains(&target.reg) && !index_is_range {
                             let idx_tr = self.compile_expr_ex(index)?;
                             let idx_i = self.as_i64(idx_tr);
-                            let value_tr = self.compile_expr_ex(value)?;
+                            let value_tr = self.compile_assigned_value(value)?;
                             let value_i = self.as_i64(value_tr);
                             self.emit(Op::IntArraySetI64 {
                                 base: target.reg,
@@ -522,7 +550,10 @@ impl<'tcx> FnBuilder<'tcx> {
                             return Ok(());
                         }
                         let idx_reg = self.compile_expr(index)?;
-                        let value_reg = self.compile_expr(value)?;
+                        let value_reg = {
+                            let stored = self.compile_assigned_value(value)?;
+                            self.as_value(stored)
+                        };
                         self.emit(Op::IndexSet {
                             base: target.reg,
                             index: idx_reg,
@@ -572,7 +603,7 @@ impl<'tcx> FnBuilder<'tcx> {
                                 // directly, skipping the per-access
                                 // `BoxI64`.
                                 let idx_tr = self.compile_expr_ex(index)?;
-                                let value_tr = self.compile_expr_ex(value)?;
+                                let value_tr = self.compile_assigned_value(value)?;
                                 let value_f = self.as_f64(value_tr);
                                 // Known-flat fast path.
                                 if let (Some(offset), Some(&stride)) =
@@ -617,7 +648,10 @@ impl<'tcx> FnBuilder<'tcx> {
                                 return Ok(());
                             }
                             let idx_reg = self.compile_expr(index)?;
-                            let value_reg = self.compile_expr(value)?;
+                            let value_reg = {
+                                let stored = self.compile_assigned_value(value)?;
+                                self.as_value(stored)
+                            };
                             self.emit(Op::IndexedFieldSet {
                                 base: target.reg,
                                 index: idx_reg,
@@ -639,7 +673,10 @@ impl<'tcx> FnBuilder<'tcx> {
         // temporary (`make()[0] = x`) writes into the temporary, which
         // then dies. A `const` or immutable `static` root is rejected by
         // the typechecker before it reaches here.
-        let value_reg = self.compile_expr(value)?;
+        let value_reg = {
+            let stored = self.compile_assigned_value(value)?;
+            self.as_value(stored)
+        };
         self.compile_place_store(place, value_reg)
     }
 

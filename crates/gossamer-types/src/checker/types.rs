@@ -717,7 +717,9 @@ impl TypeChecker<'_> {
         // = Point>`) sits outside every path the resolver walks, so its
         // node carries no resolution. A user type named there still has to
         // land on its nominal Adt rather than a fresh variable.
-        if let Some(def) = self.adt_def_by_name.get(tail).copied() {
+        if self.resolutions.get(node).is_none()
+            && let Some(def) = self.adt_def_by_name.get(tail).copied()
+        {
             let substs = self.substs_from_ast(path);
             return self.tcx.intern(TyKind::Adt { def, substs });
         }

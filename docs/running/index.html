@@ -389,6 +389,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#how-gos-run-starts-a-program" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        How gos run starts a program
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#entry-file" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -2410,6 +2421,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#how-gos-run-starts-a-program" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        How gos run starts a program
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#entry-file" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -2488,11 +2510,15 @@ literal <code>--</code>. Put <code>gos run</code> options before <code>FILE</cod
 </tr>
 <tr>
 <td><code>gos run src/main.gos</code></td>
+<td>Build (debug first, release in the background) and run the native executable</td>
+</tr>
+<tr>
+<td><code>GOS_RUN_ENGINE=vm gos run src/main.gos</code></td>
 <td>Register-based bytecode VM with in-process Cranelift JIT</td>
 </tr>
 <tr>
 <td><code>gos run --no-jit src/main.gos</code></td>
-<td>Same VM, pure bytecode dispatch (JIT off)</td>
+<td>The VM with pure bytecode dispatch (JIT off)</td>
 </tr>
 <tr>
 <td><code>gos check src/main.gos</code></td>
@@ -2596,6 +2622,28 @@ literal <code>--</code>. Put <code>gos run</code> options before <code>FILE</cod
 </tr>
 </tbody>
 </table>
+<h2 id="how-gos-run-starts-a-program">How <code>gos run</code> starts a program<a class="headerlink" href="#how-gos-run-starts-a-program" title="Permanent link">&para;</a></h2>
+<p><code>gos run</code> runs the same native executable <code>gos build</code> makes, so a run
+behaves exactly as the shipped binary does:</p>
+<ol>
+<li>When the release build of the current sources is up to date, it starts
+   at once.</li>
+<li>Otherwise the program is built with the debug profile first and started.
+   Only the modules an edit changed are compiled again; everything else comes
+   from the object cache.</li>
+<li>The release build then runs in the background at low priority, and the
+   next run starts it.</li>
+</ol>
+<p>A project keeps these builds in <code>.gos-cache/run/</code>; a file outside any project
+keeps them in the user cache, so nothing is written beside it. Objects are
+shared by every project on the machine: a library such as a GUI toolkit is
+compiled once, and a new program using it compiles only its own code.
+<code>gos cache</code> reports both, and <code>gos cache --prune --scope all</code> trims them.</p>
+<p>The bytecode VM and its JIT run the program instead when asked for with
+<code>GOS_RUN_ENGINE=vm</code>, <code>--no-jit</code>, <code>--timings</code>, or one of the VM's own
+variables (<code>GOS_JIT</code>, <code>GOS_JIT_TRACE</code>, <code>GOS_VM_PROFILE</code>, ...). Inline source
+(<code>gos -e</code>) runs on the VM, and so does every program on a host without the
+LLVM tools, after a one-line note saying why.</p>
 <h2 id="entry-file">Entry file<a class="headerlink" href="#entry-file" title="Permanent link">&para;</a></h2>
 <p><code>gos run file.gos [ARGS...]</code> and <code>gos build file.gos</code> accept a file with no
 <code>fn main</code>: bare statements at the top of the entry file become the

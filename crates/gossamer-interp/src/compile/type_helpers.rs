@@ -132,7 +132,8 @@ impl<'tcx> FnBuilder<'tcx> {
     /// back has to be one of its own - exactly what a `let` binding of the
     /// same field takes. A bare local or parameter is not one: its own copy
     /// discipline already ran where it was bound. A closure's capture is the
-    /// exception, since it names the enclosing binding itself.
+    /// exception, since it names the enclosing binding itself, and so is a
+    /// `static mut`, which keeps naming its table after the call.
     pub(crate) fn cloned_returned_field_container(
         &mut self,
         expr: &gossamer_hir::HirExpr,
@@ -141,10 +142,12 @@ impl<'tcx> FnBuilder<'tcx> {
         use gossamer_hir::HirExprKind;
         let place = match &expr.kind {
             HirExprKind::Field { .. } | HirExprKind::TupleIndex { .. } => true,
-            HirExprKind::Path { segments, .. } => matches!(
-                segments.as_slice(),
-                [only] if self.closure_capture_names.contains(only.name.as_str())
-            ),
+            HirExprKind::Path { segments, .. } => {
+                matches!(
+                    segments.as_slice(),
+                    [only] if self.closure_capture_names.contains(only.name.as_str())
+                ) || self.place_root_is_mut_static(expr)
+            }
             _ => false,
         };
         if !place {

@@ -45,7 +45,7 @@ pub use link::{
     link,
 };
 pub use pipeline::{
-    CheckedFrontend, ForeignLinks, MirPhaseTimes, ReleaseBuild, ReleaseBuildPaths,
+    CheckedFrontend, ForeignLinks, GENERATED_FILE, MirPhaseTimes, ReleaseBuild, ReleaseBuildPaths,
     compile_at_paths_from_frontend, compile_release_at_paths_from_frontend, compile_source,
     compile_source_native, compile_source_native_from_frontend,
     compile_source_native_from_frontend_at_path, compile_source_native_release,

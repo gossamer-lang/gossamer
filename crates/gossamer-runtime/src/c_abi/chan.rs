@@ -1119,16 +1119,53 @@ impl Drop for GosChan {
         };
         let desc = std::mem::take(self.elem_desc.get_mut());
         for word in queued {
-            if kind == 3 && !desc.is_empty() {
-                // SAFETY: the descriptor the send recorded describes the copy
-                // it queued, which holds the shares released here.
-                unsafe { release_aggregate(word, &desc) };
-            } else {
-                // SAFETY: the kind the send recorded names the shape of the
-                // share it queued.
-                unsafe { release_elem(kind, word) };
-            }
+            // SAFETY: the kind and descriptor the send recorded name the shape
+            // of the share it queued.
+            unsafe { release_sent_word(kind, &desc, word) };
         }
+    }
+}
+
+/// Gives back the share a send minted for the element word `word`, of the
+/// shape the send recorded as `kind` and `desc`.
+///
+/// # Safety
+///
+/// A non-zero `word` is a value of that shape holding the share this releases.
+unsafe fn release_sent_word(kind: i64, desc: &[u8], word: i64) {
+    if kind == 3 && !desc.is_empty() {
+        // SAFETY: the descriptor describes the copy the send made, which holds
+        // the shares released here (this function's contract).
+        unsafe { release_aggregate(word, desc) };
+    } else {
+        // SAFETY: the kind names the shape of the share (this function's contract).
+        unsafe { release_elem(kind, word) };
+    }
+}
+
+impl GosChan {
+    /// Gives back the share an element a send prepared for this channel holds,
+    /// for an element the channel never took.
+    ///
+    /// # Safety
+    ///
+    /// `element` is an element this channel's send sites prepared, holding the
+    /// share their send minted.
+    unsafe fn release_unsent(&self, element: &[u8]) {
+        let kind = self.elem_kind.load(Ordering::Relaxed);
+        let Some(word) = element
+            .first_chunk::<8>()
+            .map(|bytes| i64::from_ne_bytes(*bytes))
+        else {
+            return;
+        };
+        if kind == 0 {
+            return;
+        }
+        let desc = self.elem_desc.lock().clone();
+        // SAFETY: the kind and descriptor the send sites recorded name the
+        // element's shape (this function's contract).
+        unsafe { release_sent_word(kind, &desc, word) };
     }
 }
 
@@ -1154,7 +1191,9 @@ const RECV_TAKES_CLOSE: i64 = 2;
 
 enum SelectArmRt {
     Recv(*mut GosChan, i64),
-    Send(*mut GosChan, i64),
+    /// The channel and the element the arm sends. The element holds a share
+    /// of what it names until the channel takes it.
+    Send(*mut GosChan, Vec<u8>),
     Default,
 }
 
@@ -1189,17 +1228,33 @@ pub struct SelectBuilder {
     arms: Vec<SelectArmRt>,
     last_value: i64,
     last_closed: bool,
+    /// The send arm whose element a channel took.
+    sent: Option<usize>,
 }
 
 /// A builder holds a share of each arm's channel from the arm's registration
 /// until it is freed, so a channel whose last other holder lets go while the
-/// select waits stays alive for it.
+/// select waits stays alive for it. A send arm's element that no channel took
+/// is still the builder's, so it is given back here.
 impl Drop for SelectBuilder {
     fn drop(&mut self) {
-        for arm in &self.arms {
-            if let SelectArmRt::Recv(c, _) | SelectArmRt::Send(c, _) = arm {
-                // SAFETY: the arm's registration took this share.
-                unsafe { chan_release(*c) };
+        for (index, arm) in self.arms.iter().enumerate() {
+            match arm {
+                SelectArmRt::Recv(c, _) => {
+                    // SAFETY: the arm's registration took this share.
+                    unsafe { chan_release(*c) };
+                }
+                SelectArmRt::Send(c, element) => {
+                    if self.sent != Some(index) && !c.is_null() {
+                        // SAFETY: the arm's registration keeps the channel live
+                        // until the release below, and the element holds the
+                        // share its send minted.
+                        unsafe { (**c).release_unsent(element) };
+                    }
+                    // SAFETY: the arm's registration took this share.
+                    unsafe { chan_release(*c) };
+                }
+                SelectArmRt::Default => {}
             }
         }
     }
@@ -1221,6 +1276,7 @@ pub extern "C" fn gos_rt_select_new(n: i64) -> *mut SelectBuilder {
             arms: Vec::with_capacity(cap),
             last_value: 0,
             last_closed: false,
+            sent: None,
         }))
     })
 }
@@ -1243,15 +1299,39 @@ pub unsafe extern "C" fn gos_rt_select_arm_recv(
     });
 }
 
+/// Appends a send arm to a select builder: the channel `c` and the element
+/// `val` points at, read as [`gos_rt_chan_send`] reads its element. The arm
+/// keeps the share the element holds; the channel takes it if the arm fires,
+/// and the builder gives it back when it is freed otherwise.
+///
+/// # Safety
+/// `c` is null or a live channel, `val` is null or addresses the channel's
+/// element width of readable bytes, and `b` is null or a live builder.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_select_arm_send(b: *mut SelectBuilder, c: *mut GosChan, val: i64) {
+pub unsafe extern "C" fn gos_rt_chan_send_select_arm(
+    c: *mut GosChan,
+    val: *const u8,
+    b: *mut SelectBuilder,
+) {
     ffi_entry!({
         if b.is_null() {
             return;
         }
+        let width = if c.is_null() {
+            0
+        } else {
+            // SAFETY: a non-null arm channel is live for the call (C-ABI contract).
+            unsafe { &*c }.elem_bytes as usize
+        };
+        let element = if val.is_null() {
+            vec![0; width]
+        } else {
+            // SAFETY: `val` addresses `width` readable bytes (this function's contract).
+            unsafe { std::slice::from_raw_parts(val, width) }.to_vec()
+        };
         retain_arm(c);
         // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
-        unsafe { &mut *b }.arms.push(SelectArmRt::Send(c, val));
+        unsafe { &mut *b }.arms.push(SelectArmRt::Send(c, element));
     });
 }
 
@@ -1309,7 +1389,7 @@ pub unsafe extern "C-unwind" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64
             .iter()
             .map(|a| match a {
                 SelectArmRt::Recv(c, accepts) => (0u8, *c, *accepts),
-                SelectArmRt::Send(c, v) => (1u8, *c, *v),
+                SelectArmRt::Send(c, element) => (1u8, *c, element.as_ptr() as i64),
                 SelectArmRt::Default => (2u8, std::ptr::null_mut(), 0i64),
             })
             .collect();
@@ -1354,12 +1434,11 @@ pub unsafe extern "C-unwind" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64
                     if c.is_null() {
                         continue;
                     }
-                    let send_val = v;
                     // SAFETY: `c` is a non-null arm channel, live for the select (C-ABI
-                    // contract), and `send_val` is one local word.
-                    if unsafe { gos_rt_chan_try_send(c, std::ptr::addr_of!(send_val).cast::<u8>()) }
-                        == 1
-                    {
+                    // contract), and `v` addresses the arm's element, the channel's
+                    // element width of bytes the builder keeps.
+                    if unsafe { gos_rt_chan_try_send(c, v as usize as *const u8) } == 1 {
+                        builder.sent = Some(i);
                         return i as i64;
                     }
                 }
@@ -1541,6 +1620,42 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn a_send_arm_hands_its_share_over_only_when_it_fires() {
+        // SAFETY: every pointer is a channel, builder, or counted node this
+        // test made and still holds a share of.
+        unsafe {
+            let node = super::super::rc::gos_rt_rc_alloc(8, std::ptr::null());
+            let word = node as i64;
+            let chan = gos_rt_chan_new(8, 1);
+            gos_rt_chan_set_elem_kind(chan, 3);
+
+            // The arm fires: the channel holds the share the arm was given.
+            super::super::rc::gos_rt_rc_retain(node);
+            let b = gos_rt_select_new(2);
+            gos_rt_chan_send_select_arm(chan, std::ptr::addr_of!(word).cast(), b);
+            gos_rt_select_arm_default(b);
+            assert_eq!(gos_rt_select_wait(b), 0);
+            gos_rt_select_free(b);
+            assert_eq!(super::super::rc::rc_strong_count(node), 2);
+
+            // The channel is full, so the arm does not fire and the builder
+            // gives its share back.
+            super::super::rc::gos_rt_rc_retain(node);
+            let b = gos_rt_select_new(2);
+            gos_rt_chan_send_select_arm(chan, std::ptr::addr_of!(word).cast(), b);
+            gos_rt_select_arm_default(b);
+            assert_eq!(gos_rt_select_wait(b), 1);
+            gos_rt_select_free(b);
+            assert_eq!(super::super::rc::rc_strong_count(node), 2);
+
+            // The channel's teardown gives back the share it still holds.
+            chan_release(chan);
+            assert_eq!(super::super::rc::rc_strong_count(node), 1);
+            super::super::rc::gos_rt_rc_release(node);
+        }
+    }
 
     #[test]
     fn a_new_channel_counts_its_shares_atomically() {

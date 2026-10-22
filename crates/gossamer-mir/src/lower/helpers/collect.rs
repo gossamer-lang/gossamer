@@ -342,14 +342,31 @@ pub(crate) fn collect_mut_static_defs(
             ) => value,
             _ => ConstValue::Int(0),
         };
+        let symbol = format!("gos_static_{}", def.local);
         out.insert(
             def,
             crate::ir::StaticRef {
-                symbol: format!("gos_static_{}", def.local),
+                link_name: std::iter::once("gos_static")
+                    .chain(item.module_path.iter().map(String::as_str))
+                    .chain([decl.name.name.as_str()])
+                    .collect::<Vec<_>>()
+                    .join("."),
+                symbol,
                 ty: decl.ty,
                 init,
             },
         );
+    }
+    // Two statics printing alike keep their numbered symbols, so no two
+    // cells ever share a definition.
+    let mut uses: HashMap<String, usize> = HashMap::new();
+    for sref in out.values() {
+        *uses.entry(sref.link_name.clone()).or_default() += 1;
+    }
+    for sref in out.values_mut() {
+        if uses[&sref.link_name] > 1 {
+            sref.link_name.clone_from(&sref.symbol);
+        }
     }
     out
 }

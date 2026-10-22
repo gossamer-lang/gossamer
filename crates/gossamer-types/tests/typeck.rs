@@ -5314,3 +5314,30 @@ fn a_variant_pattern_of_another_type_is_a_mismatch() {
         assert_eq!(mismatches, expected, "{source}: {:?}", checked.diagnostics);
     }
 }
+
+#[test]
+fn associated_function_arguments_meet_their_parameter_types() {
+    let checked = run(concat!(
+        "enum Icon { Close, Save }\n",
+        "enum Widget { Button(String) }\n",
+        "impl Widget {\n",
+        "    fn tool_button(id: String, icon: Icon, label: String) -> Widget { Widget::Button(id) }\n",
+        "}\n",
+        "struct Panel { n: i64 }\n",
+        "impl Panel {\n",
+        "    fn make(id: String, icon: Icon) -> Panel { Panel { n: 1 } }\n",
+        "}\n",
+        "fn main() {\n",
+        "    let _a = Widget::tool_button(\"close\", \"close\", \"Close\")\n",
+        "    let _b = Widget::tool_button(5, Icon::Save, \"Save\")\n",
+        "    let _c = Panel::make(\"x\", \"y\")\n",
+        "    let _d = Widget::tool_button(\"ok\", Icon::Close, \"Ok\")\n",
+        "}\n",
+    ));
+    let mismatches = checked
+        .diagnostics
+        .iter()
+        .filter(|d| matches!(d.error, TypeError::TypeMismatch { .. }))
+        .count();
+    assert_eq!(mismatches, 3, "{:?}", checked.diagnostics);
+}

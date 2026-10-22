@@ -511,6 +511,28 @@ pub unsafe extern "C" fn gos_rt_serde_wr_f32(w: i64, value: f64) {
     });
 }
 
+/// Appends an `f64` as a `json::Value` tree writes it, the spelling
+/// `json::encode` gives every float.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_serde_wr_f64_tree(w: i64, value: f64) {
+    ffi_entry!({
+        let text = crate::builtins::format_json_tree_float(value);
+        // SAFETY: `w` is this shim's writer handle.
+        unsafe { with_writer(w, |out| out.extend_from_slice(text.as_bytes())) };
+    });
+}
+
+/// Appends an `f32`, carried widened, as a `json::Value` tree writes it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_serde_wr_f32_tree(w: i64, value: f64) {
+    ffi_entry!({
+        let text =
+            crate::builtins::format_json_tree_float(crate::builtins::f32_as_decimal_double(value));
+        // SAFETY: `w` is this shim's writer handle.
+        unsafe { with_writer(w, |out| out.extend_from_slice(text.as_bytes())) };
+    });
+}
+
 /// Appends `true` or `false`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_serde_wr_bool(w: i64, value: i32) {

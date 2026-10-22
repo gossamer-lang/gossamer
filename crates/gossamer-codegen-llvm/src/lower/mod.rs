@@ -745,14 +745,19 @@ thread_local! {
 }
 
 /// Holds the export symbols of the program being rendered for
-/// [`mangle_fn_name`] on this thread, which renders serially, until dropped.
+/// [`mangle_fn_name`] on this thread until dropped.
 pub(crate) struct ExportScope;
 
 impl ExportScope {
     /// Records the export symbols of `bodies`.
     pub(crate) fn enter(bodies: &[gossamer_mir::Body]) -> Self {
         let symbols = gossamer_mir::export_symbols(bodies);
-        EXPORT_SYMBOLS.with(|set| *set.borrow_mut() = symbols.into_iter().collect());
+        Self::with_symbols(symbols.into_iter().collect())
+    }
+
+    /// Records `symbols`, already gathered, as the export symbols.
+    pub(crate) fn with_symbols(symbols: std::collections::HashSet<String>) -> Self {
+        EXPORT_SYMBOLS.with(|set| *set.borrow_mut() = symbols);
         Self
     }
 }

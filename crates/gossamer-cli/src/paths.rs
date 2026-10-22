@@ -74,6 +74,11 @@ pub(crate) fn set_feature_request(request: gossamer_pkg::features::FeatureReques
     *FEATURE_REQUEST.lock() = Some(request);
 }
 
+/// The features the command line asks for.
+pub(crate) fn feature_request() -> gossamer_pkg::features::FeatureRequest {
+    FEATURE_REQUEST.lock().clone().unwrap_or_default()
+}
+
 /// Resolves the features of `entry`'s program from the command line's
 /// request and installs them for the bundler (which optional dependencies
 /// it includes) and for `#[cfg(feature = "..")]`.
@@ -126,9 +131,6 @@ pub(crate) fn register_unit_origins(
     map.set_origins(unit, origins);
 }
 
-/// Name the source map gives the code autoderive synthesizes for a unit.
-const GENERATED_FILE: &str = "<generated>";
-
 /// Records the trailing `generated_len` bytes of `unit` - the code autoderive
 /// appends after the program - as a file of their own.
 ///
@@ -151,7 +153,7 @@ pub(crate) fn register_generated_tail(
         return;
     };
     let tail = source[start as usize..].to_string();
-    let generated = map.add_file(GENERATED_FILE, tail);
+    let generated = map.add_file(gossamer_driver::GENERATED_FILE, tail);
     map.add_origin(
         unit,
         gossamer_lex::OriginSpan {

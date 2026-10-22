@@ -1152,6 +1152,7 @@ fn native_static_finalizer_is_shared_across_stores_and_functions() {
     let text_ty = tcx.intern(TyKind::String);
     let target = gossamer_mir::StaticRef {
         symbol: "gos_static_cleanup_test".to_string(),
+        link_name: "gos_static_cleanup_test".to_string(),
         ty: text_ty,
         init: ConstValue::Int(0),
     };
@@ -1169,7 +1170,7 @@ fn native_static_finalizer_is_shared_across_stores_and_functions() {
     other.name = "replace_static".to_string();
     let ir = render_ir_to_string(&[body, other], &tcx, false).unwrap();
     assert_eq!(
-        ir.matches("define linkonce_odr void @gos_static_cleanup_test__drop()")
+        ir.matches("define linkonce_odr void @\"gos_static_cleanup_test__drop\"()")
             .count(),
         1,
         "{ir}"
@@ -1182,7 +1183,7 @@ fn native_static_finalizer_is_shared_across_stores_and_functions() {
     );
     assert!(ir.contains("call void @gos_rt_str_free_typed("), "{ir}");
     assert!(
-        ir.contains("store ptr null, ptr @gos_static_cleanup_test"),
+        ir.contains("store ptr null, ptr @\"gos_static_cleanup_test\""),
         "{ir}"
     );
 }

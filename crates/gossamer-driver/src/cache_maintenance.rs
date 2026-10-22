@@ -26,6 +26,8 @@ pub enum CacheClass {
     LinkStamps,
     /// Objects and libraries compiled from packages' `[native]` sources.
     Native,
+    /// Executables `gos run` builds and starts.
+    Run,
 }
 
 impl CacheClass {
@@ -40,6 +42,7 @@ impl CacheClass {
             Self::Build => "build",
             Self::LinkStamps => "link-stamps",
             Self::Native => "native",
+            Self::Run => "run",
         }
     }
 
@@ -54,6 +57,7 @@ impl CacheClass {
             Self::Build,
             Self::LinkStamps,
             Self::Native,
+            Self::Run,
         ]
     }
 
@@ -66,6 +70,7 @@ impl CacheClass {
             Self::Ir => Some("ir-cache"),
             Self::LinkStamps => Some("link-stamps"),
             Self::Native => Some("native"),
+            Self::Run => Some("run"),
             Self::Runners | Self::Packages | Self::Build => None,
         }
     }
@@ -177,7 +182,9 @@ impl CachePolicy {
             CacheClass::Runners => 10 * 1024 * 1024 * 1024,
             CacheClass::Ir => 5 * 1024 * 1024 * 1024,
             CacheClass::Frontend => 1024 * 1024 * 1024,
-            CacheClass::Packages | CacheClass::Build | CacheClass::Native => 2 * 1024 * 1024 * 1024,
+            CacheClass::Packages | CacheClass::Build | CacheClass::Native | CacheClass::Run => {
+                2 * 1024 * 1024 * 1024
+            }
             CacheClass::LinkStamps => 64 * 1024 * 1024,
         };
         let name = format!(
@@ -215,6 +222,7 @@ pub fn paths(cwd: &Path) -> Vec<(CacheClass, PathBuf)> {
         (CacheClass::Ir, shared.join("ir-cache")),
         (CacheClass::Runners, binding_root.join("runners")),
         (CacheClass::Native, shared.join("native")),
+        (CacheClass::Run, shared.join("run")),
     ]);
     // Each project anchors its `.gos-cache/` at its own `project.toml`, so a
     // workspace, an examples directory, and an integration-test tree each

@@ -1944,6 +1944,9 @@ impl TypeChecker<'_> {
                 }
             }
         }
+        if let Some(ret) = self.piped_std_function_ty(lhs, lhs_ty, rhs, resolved) {
+            return ret;
+        }
         // rhs_ty might be an unresolved Var when `rhs` is a call whose arity
         // guard fired in check_call. Recover by inspecting the call's inner
         // callee type directly.
@@ -1977,6 +1980,40 @@ impl TypeChecker<'_> {
             }
         }
         rhs_ty
+    }
+
+    /// The answer of a pipe into a standard function named as a value
+    /// (`text |> strings::lines`): the piped value is the function's one
+    /// argument, checked against its catalogued parameter, and the pipe
+    /// answers the catalogued return type, as the call `strings::lines(text)`
+    /// does.
+    fn piped_std_function_ty(
+        &mut self,
+        lhs: &Expr,
+        lhs_ty: Ty,
+        rhs: &Expr,
+        rhs_resolved: Ty,
+    ) -> Option<Ty> {
+        let ExprKind::Path(path) = &rhs.kind else {
+            return None;
+        };
+        if matches!(self.tcx.kind(rhs_resolved), Some(TyKind::FnDef { .. })) {
+            return None;
+        }
+        let names = self.resolved_value_path_names(rhs.id, path);
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (module, last) = names.split_at(names.len().checked_sub(1)?);
+        let last = *last.first()?;
+        if module.is_empty() {
+            return None;
+        }
+        let shape = crate::stdlib_signatures::function_shape_for_path(module, last)?;
+        if shape.params.len() != 1 {
+            return None;
+        }
+        let ret = self.stdlib_signature_return_ty(module, last)?;
+        self.check_stdlib_signature_args(module, last, std::slice::from_ref(lhs), &[lhs_ty]);
+        Some(ret)
     }
 
     /// Resolved reference mutability of `expr`, or `None` when its type is

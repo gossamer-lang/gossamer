@@ -381,7 +381,7 @@ impl<'a> Builder<'a> {
             && reference_ok
     }
 
-    fn is_vec_like_ty(&self, ty: gossamer_types::Ty) -> bool {
+    pub(crate) fn is_vec_like_ty(&self, ty: gossamer_types::Ty) -> bool {
         matches!(self.tcx.kind_of(ty), gossamer_types::TyKind::Vec(_))
     }
 

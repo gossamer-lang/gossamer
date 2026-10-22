@@ -13,8 +13,9 @@ literal `--`. Put `gos run` options before `FILE`.
 | `gos new example.com/app --path ./app` | Scaffold a project |
 | `gos new example.com/app --template lib` | Scaffold a library (`bin`, `lib`, `service`, `workspace`, `binding`) |
 | `gos init example.com/app` | Scaffold just `project.toml` in the CWD |
-| `gos run src/main.gos` | Register-based bytecode VM with in-process Cranelift JIT |
-| `gos run --no-jit src/main.gos` | Same VM, pure bytecode dispatch (JIT off) |
+| `gos run src/main.gos` | Build (debug first, release in the background) and run the native executable |
+| `GOS_RUN_ENGINE=vm gos run src/main.gos` | Register-based bytecode VM with in-process Cranelift JIT |
+| `gos run --no-jit src/main.gos` | The VM with pure bytecode dispatch (JIT off) |
 | `gos check src/main.gos` | Type-check + exhaustiveness |
 | `gos build src/main.gos` | Native build via LLVM AOT with checked arithmetic (`opt -O1 | llc -O0`), then links the user's object against the `gossamer-runtime` staticlib into an ELF/Mach-O/PE. |
 | `gos build --release src/main.gos` | Optimised native build - full LLVM `opt -O3 | llc -O3` pipeline, static musl on Linux. |
@@ -40,6 +41,31 @@ literal `--`. Put `gos run` options before `FILE`.
 | `gos repl` then `%info strings::trim` | Show help and the relevant module or type listing |
 | `gos repl` then `%info *trim*` | Search public catalog entries by wildcard |
 | `gos repl` then `%explain value --details` | Inspect a binding's available methods with descriptions and examples |
+
+## How `gos run` starts a program
+
+`gos run` runs the same native executable `gos build` makes, so a run
+behaves exactly as the shipped binary does:
+
+1. When the release build of the current sources is up to date, it starts
+   at once.
+2. Otherwise the program is built with the debug profile first and started.
+   Only the modules an edit changed are compiled again; everything else comes
+   from the object cache.
+3. The release build then runs in the background at low priority, and the
+   next run starts it.
+
+A project keeps these builds in `.gos-cache/run/`; a file outside any project
+keeps them in the user cache, so nothing is written beside it. Objects are
+shared by every project on the machine: a library such as a GUI toolkit is
+compiled once, and a new program using it compiles only its own code.
+`gos cache` reports both, and `gos cache --prune --scope all` trims them.
+
+The bytecode VM and its JIT run the program instead when asked for with
+`GOS_RUN_ENGINE=vm`, `--no-jit`, `--timings`, or one of the VM's own
+variables (`GOS_JIT`, `GOS_JIT_TRACE`, `GOS_VM_PROFILE`, ...). Inline source
+(`gos -e`) runs on the VM, and so does every program on a host without the
+LLVM tools, after a one-line note saying why.
 
 ## Entry file
 

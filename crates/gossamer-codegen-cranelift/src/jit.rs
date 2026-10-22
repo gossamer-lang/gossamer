@@ -1045,8 +1045,9 @@ pub fn jit_entry_body_names_with_admitted(
     bodies
         .iter()
         .filter(|body| {
-            let entry_compatible =
-                admitted.contains(body.name.as_str()) && !entry_copies_a_sequence(body, tcx);
+            let entry_compatible = admitted.contains(body.name.as_str())
+                && !entry_copies_a_sequence(body, tcx)
+                && !takes_serde_handle(body);
             // An admitted body that can reach a static the VM keeps its own
             // copy of is always an entry: compiled code uses the native cell,
             // so interpreted callers must run the compiled body too.
@@ -2111,6 +2112,33 @@ fn ty_carries_payload_enum_vec(tcx: &TyCtxt, ty: Ty) -> bool {
 /// loop calling such a helper would pay that per call, where the bytecode
 /// callee pays only for what it touches. A compiled caller hands the vector
 /// over as the handle it already holds, so the body is still compiled for it.
+/// Whether `body` reads or writes through a typed-serde handle its caller
+/// passes. The bytecode VM names a reader or writer by a slot in its own table
+/// and compiled code by the runtime's address for it, so such a body runs on
+/// the tier its caller runs on: compiled code calls it natively, and the VM
+/// keeps it in bytecode.
+fn takes_serde_handle(body: &Body) -> bool {
+    use gossamer_mir::{Operand, Rvalue, StatementKind, Terminator};
+    let is_param = |op: Option<&Operand>| {
+        matches!(op, Some(Operand::Copy(place))
+            if place.projection.is_empty() && (1..=body.arity).contains(&place.local.0))
+    };
+    body.blocks.iter().any(|block| {
+        let terminator = matches!(&block.terminator, Terminator::Call {
+                callee: Operand::Const(gossamer_mir::ConstValue::Str(name)),
+                args,
+                ..
+            } if name.starts_with("gos_rt_serde_") && is_param(args.first()));
+        terminator
+            || block.stmts.iter().any(|stmt| {
+                matches!(&stmt.kind, StatementKind::Assign {
+                    rvalue: Rvalue::CallIntrinsic { name, args },
+                    ..
+                } if name.starts_with("gos_rt_serde_") && is_param(args.first()))
+            })
+    })
+}
+
 fn entry_copies_a_sequence(body: &Body, tcx: &TyCtxt) -> bool {
     (1..=body.arity).any(|pidx| {
         let ty = body.local_ty(gossamer_mir::Local(pidx));

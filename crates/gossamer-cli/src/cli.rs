@@ -1712,6 +1712,7 @@ fn dispatch_build(
         timings: reports.timings,
         explain_profile: reports.explain_profile,
         uniqueness_report: reports.uniqueness_report,
+        purpose: cmd::build::Purpose::Build,
     })
 }
 

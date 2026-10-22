@@ -1009,6 +1009,18 @@ impl TypeChecker<'_> {
         {
             return self.reject_unknown_newtype_assoc_fn(owner, fn_name, callee.span);
         }
+        // A path through an imported standard module (`fs::File::open`)
+        // names the standard type, whatever types the program declares.
+        if owner.len() > 1
+            && !matches!(
+                self.resolutions.get(callee.id),
+                Some(Resolution::Def { .. })
+            )
+            && let [.., module, ty, _] = self.resolved_value_path_names(callee.id, path).as_slice()
+            && gossamer_resolve::is_stdlib_type_path(module, ty)
+        {
+            return None;
+        }
         // A type reached through its module (`lib::Point::new`) is keyed
         // by the identity it registers under, so try the written path
         // before the bare name two modules could share.
@@ -1025,6 +1037,18 @@ impl TypeChecker<'_> {
             .get(&(type_name.clone(), (*fn_name).to_string(), args.len()))
             .copied()
         {
+            // The arguments meet the declared parameters as a free
+            // function's do.
+            if let Some(params) = self
+                .method_param_types
+                .get(&(type_name.clone(), (*fn_name).to_string()))
+                .filter(|params| params.len() == args.len())
+                .cloned()
+            {
+                for (param, (arg_ty, arg)) in params.into_iter().zip(arg_tys.iter().zip(args)) {
+                    self.check_sig_param_arg(param, *arg_ty, arg);
+                }
+            }
             return Some(ret);
         }
         if let Some(ret) =

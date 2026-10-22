@@ -11,7 +11,7 @@
 // stay inline so the closure-classification logic is in one place.
 #![allow(clippy::too_many_lines)]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use gossamer_ast::Ident;
 use gossamer_lex::Span;
@@ -81,7 +81,8 @@ pub fn lift_closures(mut program: HirProgram, tcx: &mut gossamer_types::TyCtxt) 
     let tcx: &gossamer_types::TyCtxt = tcx;
     let mut lifter = Lifter {
         tcx,
-        next_id: 0,
+        owner: String::new(),
+        ordinals: HashMap::new(),
         lifted: Vec::new(),
         scopes: Vec::new(),
         ids: HirIdGenerator::new(),
@@ -93,6 +94,7 @@ pub fn lift_closures(mut program: HirProgram, tcx: &mut gossamer_types::TyCtxt) 
     for item in &mut program.items {
         match &mut item.kind {
             HirItemKind::Fn(decl) => {
+                lifter.owner = qualified(&item.module_path, &decl.name.name);
                 let params = decl.params.clone();
                 if let Some(body) = &mut decl.body {
                     lifter.in_scope(&params, |l| l.visit_block(&mut body.block));
@@ -104,7 +106,21 @@ pub fn lift_closures(mut program: HirProgram, tcx: &mut gossamer_types::TyCtxt) 
             // - otherwise a closure inside `impl Handler { fn serve }`
             // never lifts and the compiled tier lowers it to a null env.
             HirItemKind::Impl(imp) => {
+                let self_name = imp.self_name.as_ref().map_or("", |name| name.name.as_str());
+                let trait_name = imp.trait_name.as_ref().map(|name| name.name.as_str());
                 for method in &mut imp.methods {
+                    let method_name = match trait_name {
+                        Some(trait_name) => {
+                            format!("<{self_name} as {trait_name}>::{}", method.name.name)
+                        }
+                        None => format!("{self_name}::{}", method.name.name),
+                    };
+                    // A type declared in a module is already named by its path.
+                    lifter.owner = if self_name.contains("::") {
+                        method_name
+                    } else {
+                        qualified(&item.module_path, &method_name)
+                    };
                     let params = method.params.clone();
                     if let Some(body) = &mut method.body {
                         lifter.in_scope(&params, |l| l.visit_block(&mut body.block));
@@ -113,6 +129,10 @@ pub fn lift_closures(mut program: HirProgram, tcx: &mut gossamer_types::TyCtxt) 
             }
             HirItemKind::Trait(tr) => {
                 for method in &mut tr.methods {
+                    lifter.owner = qualified(
+                        &item.module_path,
+                        &format!("{}::{}", tr.name.name, method.name.name),
+                    );
                     let params = method.params.clone();
                     if let Some(body) = &mut method.body {
                         lifter.in_scope(&params, |l| l.visit_block(&mut body.block));
@@ -329,10 +349,22 @@ fn is_synthetic_global<H: std::hash::BuildHasher>(
         || name.starts_with(gossamer_ast::STRUCTURAL_COMPARATOR_PREFIX)
 }
 
+/// `name` behind the module path it is declared in.
+fn qualified(module_path: &[String], name: &str) -> String {
+    if module_path.is_empty() {
+        return name.to_string();
+    }
+    format!("{}::{name}", module_path.join("::"))
+}
+
 struct Lifter<'t> {
     /// Answers the storage width of a capture's type.
     tcx: &'t gossamer_types::TyCtxt,
-    next_id: u32,
+    /// The item whose body is being visited, which names the closures lifted
+    /// out of it.
+    owner: String,
+    /// How many closures each owner has had lifted so far.
+    ordinals: HashMap<String, u32>,
     lifted: Vec<HirItem>,
     ids: HirIdGenerator,
     /// Names bound by the scopes enclosing the expression being visited, so a
@@ -390,10 +422,21 @@ impl Lifter<'_> {
         shadowed_global_names(|name| self.scopes.iter().any(|scope| scope.contains(name)))
     }
 
+    /// Names a closure by the item it is written in and its place among that
+    /// item's closures, so the name, and every symbol derived from it, stays
+    /// the same in any program the item is compiled into. Counting per owner
+    /// keeps names unique even should two owners print alike. The owner's
+    /// path separators are written as `.`, so nothing reading a `::` in a
+    /// body name takes a closure for a method, and the name holds nothing a
+    /// linker reads specially (an ELF `@` names a symbol version).
     fn fresh_name(&mut self) -> Ident {
-        let idx = self.next_id;
-        self.next_id += 1;
-        Ident::new(format!("{LIFTED_CLOSURE_PREFIX}{idx}"))
+        let ordinal = self.ordinals.entry(self.owner.clone()).or_insert(0);
+        let idx = *ordinal;
+        *ordinal += 1;
+        Ident::new(format!(
+            "{LIFTED_CLOSURE_PREFIX}{idx}.{}",
+            self.owner.replace("::", ".")
+        ))
     }
 
     fn visit_block(&mut self, block: &mut HirBlock) {
