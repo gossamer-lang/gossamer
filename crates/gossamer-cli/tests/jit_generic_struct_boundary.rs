@@ -100,3 +100,11 @@ fn struct_vectors_wide_tuples_and_optional_structs_cross_the_jit_boundary() {
         &["color_at", "stats", "first_invertible", "scale_or", "blur"],
     );
 }
+
+#[test]
+fn a_nested_packed_struct_keeps_the_fields_after_it_across_the_jit_boundary() {
+    assert_boundary_parity(
+        "jit_nested_packed_struct_fields.gos",
+        &["Bar::summary", "Bar::found", "widen"],
+    );
+}

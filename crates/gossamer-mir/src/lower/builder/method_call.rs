@@ -680,6 +680,22 @@ impl<'a> Builder<'a> {
                 return Some(local);
             }
         }
+        // `outer.flatten()` and `opt.iter()` on an `Option` are the
+        // `option::flatten(outer)` and `option::iter(opt)` free forms: the
+        // nested option of a `Some`, and its payload as a zero- or
+        // one-element vector.
+        if let free @ ("option::flatten" | "option::iter") = match method.name.as_str() {
+            "flatten" => "option::flatten",
+            "iter" => "option::iter",
+            _ => "",
+        } && args.is_empty()
+            && matches!(receiver_kind_flat, TyKind::Adt { .. })
+            && self.is_option_adt(receiver_ty)
+            && let Some(local) =
+                self.try_lower_combinator_call(free, std::slice::from_ref(receiver), ty, span)
+        {
+            return Some(local);
+        }
 
         // `carrier.map(f)` calls the closure in this frame, so its argument
         // and answer keep their own types - a float, an aggregate, another

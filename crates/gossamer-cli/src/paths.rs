@@ -20,7 +20,13 @@ pub(crate) fn stderr_supports_colour() -> bool {
     if matches!(std::env::var("CLICOLOR").as_deref(), Ok("0")) {
         return false;
     }
-    std::io::stderr().is_terminal()
+    colour_forced() || std::io::stderr().is_terminal()
+}
+
+/// Whether `CLICOLOR_FORCE` asks for colour on a stream that is not a
+/// terminal, as a command whose output another `gos` relays has.
+pub(crate) fn colour_forced() -> bool {
+    std::env::var("CLICOLOR_FORCE").is_ok_and(|value| !value.is_empty() && value != "0")
 }
 
 /// Reads `file` (after `.gos`-resolution) into a `String`. Wraps
@@ -72,6 +78,11 @@ static FEATURE_REQUEST: parking_lot::Mutex<Option<gossamer_pkg::features::Featur
 /// Records the features the command line asks for.
 pub(crate) fn set_feature_request(request: gossamer_pkg::features::FeatureRequest) {
     *FEATURE_REQUEST.lock() = Some(request);
+}
+
+/// The features the command line asks for.
+pub(crate) fn feature_request() -> gossamer_pkg::features::FeatureRequest {
+    FEATURE_REQUEST.lock().clone().unwrap_or_default()
 }
 
 /// Resolves the features of `entry`'s program from the command line's
@@ -126,9 +137,6 @@ pub(crate) fn register_unit_origins(
     map.set_origins(unit, origins);
 }
 
-/// Name the source map gives the code autoderive synthesizes for a unit.
-const GENERATED_FILE: &str = "<generated>";
-
 /// Records the trailing `generated_len` bytes of `unit` - the code autoderive
 /// appends after the program - as a file of their own.
 ///
@@ -151,7 +159,7 @@ pub(crate) fn register_generated_tail(
         return;
     };
     let tail = source[start as usize..].to_string();
-    let generated = map.add_file(GENERATED_FILE, tail);
+    let generated = map.add_file(gossamer_driver::GENERATED_FILE, tail);
     map.add_origin(
         unit,
         gossamer_lex::OriginSpan {
@@ -228,6 +236,15 @@ impl ProjectContext {
         self.manifest
             .as_ref()
             .map(|result| result.as_ref().map_err(String::as_str))
+    }
+
+    /// The manifest with the `[rust-bindings]` of every package the program
+    /// depends on merged in: what `gos run` loads and a native build links.
+    pub(crate) fn binding_manifest(&self) -> Option<std::result::Result<Manifest, &str>> {
+        let dir = self.manifest_dir().unwrap_or_else(|| PathBuf::from("."));
+        self.manifest_result().map(|result| {
+            result.map(|manifest| gossamer_pkg::bundle::with_dependency_bindings(manifest, &dir))
+        })
     }
 }
 

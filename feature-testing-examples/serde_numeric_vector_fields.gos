@@ -1,0 +1,37 @@
+// Typed JSON decoding of structs whose fields are vectors of integers and
+// floats, empty or not, under the JIT: a decoder the VM reaches as well as
+// ones compiled code calls in a loop.
+use std::encoding::json
+
+struct Coverage {
+    name: String
+    ranges: Vec<i64>
+    weights: Vec<f64>
+}
+
+struct Catalog { entries: Vec<Coverage> }
+
+struct Ranges { values: Vec<i64> }
+
+fn catalog_total() -> String {
+    let mut total = 0
+    let mut last = ""
+    for i in 0..300 {
+        let text = f"{{\"entries\":[{{\"name\":\"font-{i}\",\"ranges\":[32,{i}],\"weights\":[1.5]}},{{\"name\":\"empty\",\"ranges\":[],\"weights\":[]}}]}}"
+        let catalog = json::decode::<Catalog>(text).unwrap()
+        for entry in catalog.entries {
+            total += entry.ranges.len() + entry.weights.len()
+            for r in entry.ranges { total += r }
+        }
+        last = text
+    }
+    let catalog = json::decode::<Catalog>(last).unwrap()
+    f"total {total} first {catalog.entries[0].name} {catalog.entries[0].ranges} {catalog.entries[0].weights}"
+}
+
+fn main() {
+    let ranges = json::decode::<Ranges>("{\"values\":[32,128]}").unwrap()
+    let none = json::decode::<Ranges>("{\"values\":[]}").unwrap()
+    println(f"ranges {ranges.values} {none.values.len()}")
+    println(catalog_total())
+}

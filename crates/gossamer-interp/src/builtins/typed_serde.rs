@@ -161,6 +161,11 @@ fn builtin_serde_rd_bool(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Bool(with_reader(args, false, |r| r.read_bool(&message))))
 }
 
+fn builtin_serde_rd_char(args: &[Value]) -> RuntimeResult<Value> {
+    let message = serde_text(args, 1).to_owned();
+    Ok(Value::Char(with_reader(args, '\0', |r| r.read_char(&message))))
+}
+
 fn builtin_serde_rd_str(args: &[Value]) -> RuntimeResult<Value> {
     let message = serde_text(args, 1).to_owned();
     let text = with_reader(args, String::new(), |r| r.read_string(&message));
@@ -313,10 +318,38 @@ fn builtin_serde_wr_f32(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Unit)
 }
 
+fn builtin_serde_wr_f64_tree(args: &[Value]) -> RuntimeResult<Value> {
+    let text = gossamer_runtime::builtins::format_json_tree_float(serde_float_arg(args));
+    with_writer(args, |out| out.extend_from_slice(text.as_bytes()));
+    Ok(Value::Unit)
+}
+
+fn builtin_serde_wr_f32_tree(args: &[Value]) -> RuntimeResult<Value> {
+    let value = gossamer_runtime::builtins::f32_as_decimal_double(serde_float_arg(args));
+    let text = gossamer_runtime::builtins::format_json_tree_float(value);
+    with_writer(args, |out| out.extend_from_slice(text.as_bytes()));
+    Ok(Value::Unit)
+}
+
 fn builtin_serde_wr_bool(args: &[Value]) -> RuntimeResult<Value> {
     let value = matches!(args.get(1), Some(Value::Bool(true)));
     with_writer(args, |out| {
         out.extend_from_slice(if value { b"true" } else { b"false" });
+    });
+    Ok(Value::Unit)
+}
+
+fn builtin_serde_wr_char(args: &[Value]) -> RuntimeResult<Value> {
+    let c = match args.get(1) {
+        Some(Value::Char(c)) => *c,
+        _ => '\u{FFFD}',
+    };
+    let mut buf = [0u8; 4];
+    let text = c.encode_utf8(&mut buf);
+    with_writer(args, |out| {
+        out.push(b'"');
+        gossamer_runtime::c_abi::json_escape::json_escape_into(text.as_bytes(), out);
+        out.push(b'"');
     });
     Ok(Value::Unit)
 }
@@ -351,6 +384,7 @@ const SERDE_BUILTINS: &[(&str, SerdeBuiltin)] = &[
     ("__gos_serde_rd_array", builtin_serde_rd_array),
     ("__gos_serde_rd_at", builtin_serde_rd_at),
     ("__gos_serde_rd_bool", builtin_serde_rd_bool),
+    ("__gos_serde_rd_char", builtin_serde_rd_char),
     ("__gos_serde_rd_elem", builtin_serde_rd_elem),
     ("__gos_serde_rd_enum", builtin_serde_rd_enum),
     ("__gos_serde_rd_error", builtin_serde_rd_error),
@@ -374,8 +408,11 @@ const SERDE_BUILTINS: &[(&str, SerdeBuiltin)] = &[
     ("__gos_serde_rd_u64", builtin_serde_rd_u64),
     ("__gos_serde_rd_wrap", builtin_serde_rd_wrap),
     ("__gos_serde_wr_bool", builtin_serde_wr_bool),
+    ("__gos_serde_wr_char", builtin_serde_wr_char),
     ("__gos_serde_wr_f32", builtin_serde_wr_f32),
+    ("__gos_serde_wr_f32_tree", builtin_serde_wr_f32_tree),
     ("__gos_serde_wr_f64", builtin_serde_wr_f64),
+    ("__gos_serde_wr_f64_tree", builtin_serde_wr_f64_tree),
     ("__gos_serde_wr_finish", builtin_serde_wr_finish),
     ("__gos_serde_wr_i64", builtin_serde_wr_i64),
     ("__gos_serde_wr_json", builtin_serde_wr_json),

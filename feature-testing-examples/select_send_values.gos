@@ -1,0 +1,62 @@
+// A `select` send arm hands its element over as `tx.send` does: an aggregate
+// with counted fields, a `String` and a `Vec` reach the receiver whole, a
+// binding sent and then changed keeps its own value, and an element whose arm
+// does not fire because the channel is full is given back.
+use std::sync::{channel, Sender}
+
+enum Msg { Text(String, String), Many(Vec<String>) }
+
+struct Delivery {
+    message: Msg
+    tag: Option<i64>
+}
+
+fn offer(tx: Sender<Delivery>, n: i64) -> bool {
+    let value = Delivery { message: Msg::Text("item", f"{n}"), tag: None }
+    select {
+        tx.send(value) => true
+        default => false
+    }
+}
+
+fn offer_text(tx: Sender<String>, n: i64) -> bool {
+    let text = f"value-{n}" + "-tail"
+    select {
+        tx.send(text) => true
+        default => false
+    }
+}
+
+fn main() {
+    let tx, rx = channel(4)
+    let mut accepted = 0
+    for i in 0..10 {
+        if offer(tx, i) { accepted += 1 }
+    }
+    let mut seen = #[]
+    while let Some(d) = rx.try_recv() {
+        match d.message {
+            Msg::Text(id, value) => seen.push(f"{id}:{value}:{d.tag.is_some()}")
+            Msg::Many(xs) => seen.push(f"many {xs.len()}")
+        }
+    }
+    println(f"accepted {accepted} {seen}")
+
+    let ttx, trx = channel(1)
+    let mut sent = 0
+    for i in 0..1000 {
+        if offer_text(ttx, i) { sent += 1 }
+    }
+    let Some(first) = trx.try_recv() else { return }
+    println(f"text {sent} {first}")
+
+    let vtx, vrx = channel(2)
+    let mut xs = #[1, 2, 3]
+    let ok = select {
+        vtx.send(xs) => true
+        default => false
+    }
+    xs.push(4)
+    let Some(got) = vrx.try_recv() else { return }
+    println(f"vec {ok} {got} {xs}")
+}

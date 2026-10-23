@@ -351,7 +351,7 @@ fn cache_clear_removes_every_known_cache_class() {
     ));
     let frontend = root.join("frontend");
     let binding = root.join("binding-cache");
-    let runners = binding.join("gossamer").join("runners");
+    let bindings = binding.join("gossamer").join("bindings");
     let packages = root.join("packages");
     let home = root.join("home");
     // The shared cache root follows the platform convention:
@@ -376,7 +376,7 @@ fn cache_clear_removes_every_known_cache_class() {
     let cache_roots = [
         &frontend,
         &shared_ir,
-        &runners,
+        &bindings,
         &packages,
         &build,
         &project_ir,
@@ -436,7 +436,7 @@ fn cache_clear_defaults_to_the_project_cache() {
             .as_nanos()
     ));
     let binding = root.join("binding-cache");
-    let runners = binding.join("gossamer").join("runners");
+    let bindings = binding.join("gossamer").join("bindings");
     let packages = root.join("packages");
     let home = root.join("home");
     let local_app_data = root.join("localappdata");
@@ -452,7 +452,7 @@ fn cache_clear_defaults_to_the_project_cache() {
     let project_frontend = project.join(".gos-cache").join("frontend");
     let project_ir = project.join(".gos-cache").join("ir-cache");
 
-    let shared_roots = [&shared_frontend, &shared_ir, &runners, &packages, &build];
+    let shared_roots = [&shared_frontend, &shared_ir, &bindings, &packages, &build];
     let project_roots = [&project_frontend, &project_ir];
     for path in shared_roots.iter().chain(project_roots.iter()) {
         std::fs::create_dir_all(path).expect("create cache root");

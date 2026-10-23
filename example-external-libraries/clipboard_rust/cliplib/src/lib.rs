@@ -2,9 +2,10 @@
 //! (which knows nothing about Gossamer) behind two Gossamer-callable
 //! functions.
 //!
-//! `register_module!` emits both the interpreter thunk and the C-ABI
-//! thunk (`gos_binding_clipboard__get_text`, ...), so the same crate
-//! is callable from `gos`, `gos test`, and `gos build --release`.
+//! `register_module!` emits both the VM thunk `gos run` calls and the C-ABI
+//! thunk (`gos_binding_clipboard__get_text`, ...) a native build links, so
+//! the same crate is callable from `gos run`, `gos test`, and
+//! `gos build --release`.
 //!
 //! On Linux the native arboard path (X11 protocol) is tried first;
 //! when it fails (Wayland-only session, Termux, headless), the
@@ -246,7 +247,3 @@ fn util_write(text: &str) -> Result<(), UtilError> {
     Err(last_failure.map_or(UtilError::NoneFound, UtilError::Failed))
 }
 
-/// Linker hook required by the runner template.
-pub fn __bindings_force_link() {
-    __gos_clipboard::force_link();
-}

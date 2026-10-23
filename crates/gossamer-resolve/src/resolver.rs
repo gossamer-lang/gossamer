@@ -167,6 +167,9 @@ struct Resolver {
     /// Module whose body is being resolved, outermost segment first.
     /// Empty while resolving the crate root.
     current_module: Vec<String>,
+    /// The scope layer each module of [`Self::current_module`] binds its own
+    /// items in, outermost first.
+    module_layers: Vec<usize>,
     /// Inlined dependency packages, keyed by the module name the bundler
     /// gave them, valued by the project id they are published under. A
     /// path headed by one of these names requires the matching import.
@@ -230,6 +233,7 @@ impl Resolver {
             item_homes: std::collections::HashMap::new(),
             module_visibility: std::collections::HashMap::new(),
             current_module: Vec::new(),
+            module_layers: Vec::new(),
             dependency_modules: std::collections::HashMap::new(),
             imported_dependencies: std::collections::HashSet::new(),
             imported_module_heads: std::collections::HashSet::new(),
@@ -1222,6 +1226,26 @@ impl Resolver {
     /// one shared scope, so an import found there may be another module's
     /// import of the same name; the module's own import is the one its paths
     /// follow.
+    /// `binding`, found for `name` in scope layer `layer`, unless that layer
+    /// holds an enclosing module's own items and a module nested inside it
+    /// imports `name`: the nearer module's import names what it means there.
+    fn nearer_import_or(&self, name: &str, layer: usize, binding: Binding) -> Binding {
+        let owner = self
+            .module_layers
+            .iter()
+            .position(|&module_layer| module_layer == layer)
+            .map(|index| index + 1);
+        if let Some(depth) = owner
+            && depth < self.current_module.len()
+            && let Some(own) = self.module_import_within(name, depth)
+        {
+            return Binding {
+                resolution: Resolution::Import { use_id: own },
+            };
+        }
+        self.localized(name, binding)
+    }
+
     fn localized(&self, name: &str, binding: Binding) -> Binding {
         match binding.resolution {
             Resolution::Import { use_id } if use_id != crate::scope::PRELUDE_SENTINEL => {
@@ -1237,21 +1261,29 @@ impl Resolver {
     /// enclosing module's - when it names an item rather than restating a
     /// module's own name (`use win`).
     fn module_import_here(&self, name: &str) -> Option<NodeId> {
-        (1..=self.current_module.len()).rev().find_map(|depth| {
-            let key = (self.current_module[..depth].join("::"), name.to_string());
-            let target = self.module_imports.get(&key)?;
-            (target != name)
-                .then(|| self.module_import_ids.get(&key).copied())
-                .flatten()
-        })
+        self.module_import_within(name, 0)
+    }
+
+    /// [`Self::module_import_here`] among the modules nested deeper than the
+    /// first `outer` of [`Self::current_module`].
+    fn module_import_within(&self, name: &str, outer: usize) -> Option<NodeId> {
+        (outer + 1..=self.current_module.len())
+            .rev()
+            .find_map(|depth| {
+                let key = (self.current_module[..depth].join("::"), name.to_string());
+                let target = self.module_imports.get(&key)?;
+                (target != name)
+                    .then(|| self.module_import_ids.get(&key).copied())
+                    .flatten()
+            })
     }
 
     /// [`ScopeStack::lookup_type`] as the module being resolved sees it: a
     /// local or the module's own item first, then the module's own import,
     /// which stands in front of anything the root declares under that name.
     fn lookup_type_here(&self, name: &str) -> Option<Binding> {
-        if let Some(binding) = self.scopes.lookup_type_inner(name) {
-            return Some(self.localized(name, binding));
+        if let Some((layer, binding)) = self.scopes.lookup_type_inner_at(name) {
+            return Some(self.nearer_import_or(name, layer, binding));
         }
         if let Some(own) = self.module_import_here(name) {
             return Some(Binding {
@@ -1265,8 +1297,8 @@ impl Resolver {
 
     /// [`ScopeStack::lookup_value`] as the module being resolved sees it.
     fn lookup_value_here(&self, name: &str) -> Option<Binding> {
-        if let Some(binding) = self.scopes.lookup_value_inner(name) {
-            return Some(self.localized(name, binding));
+        if let Some((layer, binding)) = self.scopes.lookup_value_inner_at(name) {
+            return Some(self.nearer_import_or(name, layer, binding));
         }
         if let Some(own) = self.module_import_here(name) {
             return Some(Binding {
@@ -1927,6 +1959,7 @@ impl Resolver {
                         .cloned()
                         .unwrap_or_default();
                     self.scopes.push_scope(own_scope);
+                    self.module_layers.push(self.scopes.depth() - 1);
                     self.current_module.push(decl.name.name.clone());
                     for nested in inner {
                         if !gossamer_ast::cfg::item_is_active(&nested.attrs) {
@@ -1935,6 +1968,7 @@ impl Resolver {
                         self.resolve_item(nested);
                     }
                     self.current_module.pop();
+                    self.module_layers.pop();
                     self.scopes.pop();
                 }
             }
@@ -2360,24 +2394,19 @@ impl Resolver {
             self.check_std_type_path(&effective, span);
         }
         // A qualifier that leaves one segment behind (`super::Point`,
-        // `crate::Point`) names that type through the scope chain, the same
-        // way the value side reaches `super::origin`. Looking the written
+        // `crate::Point`) names that type in the module its anchor picks, the
+        // same way the value side reaches `super::origin`. Looking the written
         // head up instead would search for a type called `super`.
         let name = match effective.first() {
             Some(first) if effective.len() == 1 => *first,
             _ => head.name.name.as_str(),
         };
-        let resolution = if is_self_type(name) {
-            Resolution::Err
-        } else {
-            self.lookup_type_here(name)
-                .map(|binding| binding.resolution)
-                .or_else(|| self.synthesized_lookup(name))
-                .or_else(|| self.const_generic_in_type_position(name, path))
-                .unwrap_or(Resolution::Err)
-        };
+        let (resolution, missing_member) =
+            self.type_path_fallback(&written, &effective, name, path);
         if let Some(span) = span {
-            if matches!(resolution, Resolution::Err) && !is_self_type(name) {
+            if missing_member {
+                self.emit_unresolved_or_rename(&effective.join("::"), span);
+            } else if matches!(resolution, Resolution::Err) && !is_self_type(name) {
                 self.emit_unresolved_or_rename(name, span);
             }
             self.check_visibility(resolution, Some(name), span);
@@ -2388,6 +2417,44 @@ impl Resolver {
         }
         for segment in &path.segments {
             self.resolve_generic_args(&segment.generics);
+        }
+    }
+
+    // The resolution of a type path the qualified lookups did not reach, and
+    // whether it names a member its module lacks: past those lookups, a path
+    // of several segments whose head is a module names no type, since the
+    // head alone is not the type.
+    fn type_path_fallback(
+        &mut self,
+        written: &[&str],
+        effective: &[&str],
+        name: &str,
+        path: &TypePath,
+    ) -> (Resolution, bool) {
+        let resolution = if is_self_type(name) {
+            Resolution::Err
+        } else {
+            self.lookup_anchored_item(written, false)
+                .or_else(|| {
+                    self.lookup_type_here(name)
+                        .map(|binding| binding.resolution)
+                })
+                .or_else(|| self.synthesized_lookup(name))
+                .or_else(|| self.const_generic_in_type_position(name, path))
+                .unwrap_or(Resolution::Err)
+        };
+        let missing_member = effective.len() > 1
+            && matches!(
+                resolution,
+                Resolution::Def {
+                    kind: DefKind::Mod,
+                    ..
+                }
+            );
+        if missing_member {
+            (Resolution::Err, true)
+        } else {
+            (resolution, false)
         }
     }
 
@@ -2934,6 +3001,12 @@ impl Resolver {
         if self.resolve_limit_constant(&written, path, anchor) {
             return;
         }
+        if let Some(resolution) = self.lookup_anchored_item(&written, true) {
+            self.check_visibility(resolution, None, span);
+            self.resolutions.insert(anchor, resolution);
+            self.resolve_path_generic_args(path);
+            return;
+        }
         if effective.len() > 1 {
             self.check_dependency_import(&effective, span);
             let joined = effective.join("::");
@@ -3141,7 +3214,8 @@ impl Resolver {
                 self.lookup_qualified_type(&written)
                     .or_else(|| self.resolve_through_import_head(&effective))
             })
-            .flatten();
+            .flatten()
+            .or_else(|| self.lookup_anchored_item(&written, false));
         let resolution = joined
             .or_else(|| self.lookup_type_here(lookup_name).map(|b| b.resolution))
             .or_else(|| self.synthesized_lookup(lookup_name))
@@ -3229,6 +3303,31 @@ impl Resolver {
         self.qualified_candidates(segments)
             .iter()
             .find_map(|key| self.lookup_type_here(key).map(|b| b.resolution))
+    }
+
+    /// The item an anchored path names when one name follows its anchor
+    /// (`crate::init`, `super::tree`, `self::Rec`). The anchor picks the
+    /// module, so the name is looked up by its key from the unit root, where
+    /// every item is registered, rather than through the scopes of the module
+    /// being resolved, whose own item of that name would answer first. Answers
+    /// `None` for any other path.
+    fn lookup_anchored_item(&self, segments: &[&str], value: bool) -> Option<Resolution> {
+        let anchor = segments
+            .iter()
+            .take_while(|s| matches!(**s, "self" | "super" | "crate" | "root"))
+            .count();
+        if anchor == 0 || segments.len() != anchor + 1 {
+            return None;
+        }
+        let module = self.scopes.module_ref();
+        self.qualified_candidates(segments).iter().find_map(|key| {
+            let binding = if value {
+                module.lookup_value(key).or_else(|| module.lookup_type(key))
+            } else {
+                module.lookup_type(key)
+            };
+            binding.map(|binding| binding.resolution)
+        })
     }
 
     fn lookup_value_or_type(&self, name: &str) -> Option<Resolution> {

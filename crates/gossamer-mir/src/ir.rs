@@ -1214,8 +1214,13 @@ impl RawIntrinsic {
 /// definitions emitted across object files into one shared cell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticRef {
-    /// Mangled global symbol (`gos_static_<defid>`).
+    /// Mangled global symbol (`gos_static_<defid>`), which the VM and the
+    /// JIT share a static's cell under.
     pub symbol: String,
+    /// The symbol a native build defines the static under, written by its
+    /// path (`gos_static.gui.THEME`) so it is spelled alike in every program
+    /// that compiles its module.
+    pub link_name: String,
     /// Declared value type of the static.
     pub ty: Ty,
     /// Const-folded initializer value.

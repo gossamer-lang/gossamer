@@ -104,8 +104,7 @@ pub(crate) fn new(id: &str, path: Option<PathBuf>, template: &str) -> Result<()>
             // Phase-0 `gos new --template binding`: scaffolds a
             // ready-to-edit Rust binding crate under the project
             // directory. The user fills in fn signatures inside
-            // the `#[gos_module]`-annotated module body; no
-            // `Cargo.toml`/`__bindings_force_link()` boilerplate.
+            // the `#[gos_module]`-annotated module body.
             fs::create_dir_all(dir.join("src"))
                 .with_context(|| format!("creating {}", dir.display()))?;
             let cargo_toml = binding_template_cargo_toml(project.tail());

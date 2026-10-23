@@ -301,7 +301,7 @@ pub fn compile_to_object_with_options(
 
     if !options.omit_c_main_shim {
         if let Some(gos_main) = lowered.function_ids_by_name.get("main").copied() {
-            emit_c_main_shim(&mut module, gos_main)?;
+            emit_c_main_shim(&mut module, gos_main, gossamer_mir::calls_bindings(bodies))?;
         }
     }
 
@@ -354,7 +354,7 @@ pub fn compile_to_object_at_path_with_options(
 
     if !options.omit_c_main_shim {
         if let Some(gos_main) = lowered.function_ids_by_name.get("main").copied() {
-            emit_c_main_shim(&mut module, gos_main)?;
+            emit_c_main_shim(&mut module, gos_main, gossamer_mir::calls_bindings(bodies))?;
         }
     }
 

@@ -2,12 +2,13 @@
 
 use super::{
     AstGenericArg, DefId, DeferredStructural, DeferredStructuralKind, Expectation, Expr, ExprKind,
-    FnSig, IntTy, LiteralConsts, Mutbl, REVERSE_DEF_LOCAL, Resolution, Span, StrArgShape,
-    StringParamMeta, Ty, TyKind, TypeChecker, TypeError, TypePath, UnaryOp, argument_value_display,
-    builtin_type_constructors, callee_display_name, combinator_module_name,
-    core_type_own_method_names, is_catalog_type_param, is_definitely_not_callable_value,
-    string_argument_found_type, strings_fn_arity, strings_fn_char_params, strings_fn_int_params,
-    strings_fn_param_metadata, strings_fn_str_params,
+    FnSig, IntTy, LiteralConsts, Mutbl, OPTION_DEF_LOCAL, RESULT_DEF_LOCAL, REVERSE_DEF_LOCAL,
+    Resolution, Span, StrArgShape, StringParamMeta, Ty, TyKind, TypeChecker, TypeError, TypePath,
+    UnaryOp, argument_value_display, builtin_type_constructors, callee_display_name,
+    combinator_module_name, core_type_own_method_names, is_catalog_type_param,
+    is_definitely_not_callable_value, string_argument_found_type, strings_fn_arity,
+    strings_fn_char_params, strings_fn_int_params, strings_fn_param_metadata,
+    strings_fn_str_params,
 };
 
 impl TypeChecker<'_> {
@@ -365,6 +366,9 @@ impl TypeChecker<'_> {
             }
             return None;
         }
+        if let Some(params) = self.assoc_fn_param_tys(callee, n_args) {
+            return Some(params.into_iter().map(Expectation::HasType).collect());
+        }
         let ExprKind::Path(path) = &callee.kind else {
             return None;
         };
@@ -471,13 +475,11 @@ impl TypeChecker<'_> {
         })
     }
 
-    /// Rejects `json::render` / `json::encode` of an enum value
-    /// (`Result` / `Option` / user enum). The encoder is polymorphic
-    /// over `json::Value`, scalars, arrays, and structs, but an enum
-    /// has no JSON form and is almost always a `json::parse(..)` whose
-    /// `?` was forgotten. The VM tolerated the misuse (emitting the
-    /// `Ok` payload) while a native build silently emitted `""`, so the
-    /// checker rejects it uniformly with a `?`-pointing diagnostic.
+    /// Rejects `json::render` / `json::encode` of a `Result` or `Option`
+    /// value. Such a carrier has no JSON form and is almost always a
+    /// `json::parse(..)` whose `?` was forgotten, so the checker rejects it
+    /// with a `?`-pointing diagnostic. A user enum encodes externally
+    /// tagged, as `json::decode` reads it back.
     pub(super) fn reject_json_enum_arg(
         &mut self,
         op: &str,
@@ -497,6 +499,7 @@ impl TypeChecker<'_> {
             _ => None,
         };
         if let Some(def) = adt_def
+            && matches!(def.local, RESULT_DEF_LOCAL | OPTION_DEF_LOCAL)
             && self.tcx.struct_field_tys(def).is_none()
         {
             let span = args.first().map_or(callee.span, |a| a.span);
@@ -802,6 +805,16 @@ impl TypeChecker<'_> {
             if let Some(ty) = self.binding_ty(&item.ret) {
                 return Some(ty);
             }
+            if let gossamer_resolve::BindingType::Opaque(name) = &item.ret {
+                self.emit(
+                    TypeError::BindingStructUndeclared {
+                        binding: callee_name.clone(),
+                        name: name.clone(),
+                    },
+                    callee.span,
+                );
+                return Some(self.tcx.error_ty());
+            }
         }
         if let Some(ty) = self.check_stdlib_module_ret_ty(
             (module, last, user_callee),
@@ -977,6 +990,43 @@ impl TypeChecker<'_> {
             .or_else(|| self.check_enum_variant_ctor_call(callee, args, arg_tys))
     }
 
+    /// The declared parameter types of the user associated function a
+    /// `Type::assoc(..)` callee names, when it takes `n_args` and has no type
+    /// parameters, so its closure arguments take their parameter types from
+    /// the signature before their bodies are checked.
+    pub(super) fn assoc_fn_param_tys(&self, callee: &Expr, n_args: usize) -> Option<Vec<Ty>> {
+        let ExprKind::Path(path) = &callee.kind else {
+            return None;
+        };
+        let segments: Vec<&str> = path
+            .segments
+            .iter()
+            .map(|seg| seg.name.name.as_str())
+            .collect();
+        let [owner @ .., fn_name] = segments.as_slice() else {
+            return None;
+        };
+        if owner.is_empty() {
+            return None;
+        }
+        let type_name = self
+            .owner_identity_candidates(owner)
+            .into_iter()
+            .find(|candidate| self.user_type_decls.contains(candidate))?;
+        let key = (type_name, (*fn_name).to_string());
+        self.method_ret_types
+            .get(&(key.0.clone(), key.1.clone(), n_args))?;
+        self.method_param_types
+            .get(&key)
+            .filter(|params| {
+                params.len() == n_args
+                    && params
+                        .iter()
+                        .all(|param| !self.ty_mentions_generic_param(*param))
+            })
+            .cloned()
+    }
+
     /// Return type of `Type::assoc(..)` for a user `impl`'s associated
     /// function. Without it the call's result is a fresh variable, so a
     /// `-> Self` constructor produces an untyped value and every method
@@ -1009,6 +1059,18 @@ impl TypeChecker<'_> {
         {
             return self.reject_unknown_newtype_assoc_fn(owner, fn_name, callee.span);
         }
+        // A path through an imported standard module (`fs::File::open`)
+        // names the standard type, whatever types the program declares.
+        if owner.len() > 1
+            && !matches!(
+                self.resolutions.get(callee.id),
+                Some(Resolution::Def { .. })
+            )
+            && let [.., module, ty, _] = self.resolved_value_path_names(callee.id, path).as_slice()
+            && gossamer_resolve::is_stdlib_type_path(module, ty)
+        {
+            return None;
+        }
         // A type reached through its module (`lib::Point::new`) is keyed
         // by the identity it registers under, so try the written path
         // before the bare name two modules could share.
@@ -1025,6 +1087,18 @@ impl TypeChecker<'_> {
             .get(&(type_name.clone(), (*fn_name).to_string(), args.len()))
             .copied()
         {
+            // The arguments meet the declared parameters as a free
+            // function's do.
+            if let Some(params) = self
+                .method_param_types
+                .get(&(type_name.clone(), (*fn_name).to_string()))
+                .filter(|params| params.len() == args.len())
+                .cloned()
+            {
+                for (param, (arg_ty, arg)) in params.into_iter().zip(arg_tys.iter().zip(args)) {
+                    self.check_sig_param_arg(param, *arg_ty, arg);
+                }
+            }
             return Some(ret);
         }
         if let Some(ret) =

@@ -26,7 +26,6 @@ gossamer-lex = { workspace = true }
 gossamer-mir = { workspace = true }
 gossamer-runtime = { workspace = true }
 gossamer-types = { workspace = true }
-linkme = { workspace = true }
 parking_lot = { workspace = true }
 rayon = { workspace = true }
 

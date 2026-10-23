@@ -1,0 +1,68 @@
+// Assigning a value that holds a map, or a whole `Vec` or `Map`, gives the
+// target a value of its own: a later write through either name leaves the
+// other alone, for locals, struct fields, and fields assigned from fields.
+struct Values {
+    data: Map<String, String>
+}
+
+impl Values {
+    fn set(&mut self, value: String) {
+        self.data["port"] = value
+    }
+
+    fn port(&self) -> String {
+        self.data["port"]
+    }
+}
+
+struct Draft {
+    committed: Values
+    draft: Values
+    live: Values
+}
+
+impl Draft {
+    fn cancel(&mut self) {
+        self.draft = self.committed
+        self.live = self.committed
+    }
+}
+
+fn counts(n: i64) -> i64 {
+    let mut xs = #[0; 4]
+    let mut total = 0
+    for i in 0..n {
+        let mut ys: Vec<i64> = #[]
+        ys = xs
+        ys[0] = i
+        total += xs[0] + ys[0]
+    }
+    total
+}
+
+fn main() {
+    let values = Values { data: { "port": "80" } }
+    let mut edit = Draft { committed: values, draft: values, live: values }
+    edit.draft.set("8080")
+    edit.live = edit.draft
+    edit.cancel()
+    edit.draft.set("9090")
+    println(f"{edit.committed.port()} {edit.draft.port()} {edit.live.port()}")
+
+    let m: Map<String, i64> = { "a": 1 }
+    let mut n: Map<String, i64> = {}
+    n = m
+    n["a"] = 5
+    let mut xs = #[1, 2]
+    let mut ys: Vec<i64> = #[]
+    ys = xs
+    ys[0] = 9
+    println(f"{m["a"]} {n["a"]} {xs[0]} {ys[0]} {counts(5)}")
+    let held = values
+    let mut port = ""
+    port = held.data["port"]
+    let mut copy: Map<String, String> = {}
+    copy = held.data
+    copy["port"] = "1"
+    println(f"{port} {held.data["port"]} {copy["port"]}")
+}

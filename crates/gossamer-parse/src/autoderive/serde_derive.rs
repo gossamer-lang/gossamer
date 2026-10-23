@@ -78,6 +78,7 @@ fn kind_is_emittable(kind: &FieldKind, emittable: &HashSet<String>) -> bool {
         | FieldKind::I64
         | FieldKind::Float(_)
         | FieldKind::Bool
+        | FieldKind::Char
         | FieldKind::String
         | FieldKind::Json => true,
     }
@@ -130,14 +131,7 @@ fn named_serde_symbols(parsed: &SourceFile) -> HashSet<String> {
     let symbols = serde_symbol_index(tree);
     calls
         .into_iter()
-        .map(|(_, written, _)| {
-            let bare = written.rsplit("::").next().unwrap_or(&written).to_string();
-            symbols
-                .get(&written)
-                .or_else(|| symbols.get(&bare))
-                .cloned()
-                .unwrap_or(bare)
-        })
+        .map(|(_, written, _, module)| serde_symbol_for(&symbols, &module, &written))
         .collect()
 }
 
@@ -818,6 +812,160 @@ fn type_path_spelling(path: &gossamer_ast::TypePath) -> String {
     path.segments.iter().map(|segment| segment.name.name.as_str()).collect::<Vec<_>>().join("::")
 }
 
+/// The dependency package `module` sits in, `""` in the entry's own.
+fn package_of<'m>(packages: &HashSet<String>, module: &'m str) -> &'m str {
+    let first = module.split("::").next().unwrap_or_default();
+    if packages.contains(first) { first } else { "" }
+}
+
+/// The identities a path written in `module` may name, in the order the
+/// resolver tries them: `crate`, `self`, and `super` anchor it; otherwise it
+/// reads from `module`, then its package root, then the bundle root.
+fn anchored_candidates(module: &str, package: &str, mut names: Vec<&str>) -> Vec<String> {
+    let mut scope = module.to_string();
+    let mut anchored = true;
+    match names.first().copied() {
+        Some("crate") => {
+            scope = package.to_string();
+            names.remove(0);
+        }
+        Some("self") => {
+            names.remove(0);
+        }
+        Some("super") => {}
+        _ => anchored = false,
+    }
+    while names.first() == Some(&"super") {
+        scope = owner_module(&scope).to_string();
+        names.remove(0);
+    }
+    let relative = names.join("::");
+    let join = |base: &str| if base.is_empty() { relative.clone() } else { format!("{base}::{relative}") };
+    if anchored {
+        return vec![join(&scope)];
+    }
+    let mut out = vec![join(&scope)];
+    for base in [package, ""] {
+        let candidate = join(base);
+        if !out.contains(&candidate) {
+            out.push(candidate);
+        }
+    }
+    out
+}
+
+/// What each module's `use` declarations bind: per module, each bound name
+/// with the identities its path may name.
+struct DeriveImports {
+    packages: HashSet<String>,
+    modules: HashSet<String>,
+    by_module: HashMap<String, Vec<(String, Vec<String>)>>,
+}
+
+impl DeriveImports {
+    fn of(parsed: &SourceFile) -> Self {
+        let packages: HashSet<String> = dependency_packages(&parsed.items).into_iter().collect();
+        let modules = flatten_active_items_with_modules(&parsed.items)
+            .into_iter()
+            .filter_map(|(module, item)| match &item.kind {
+                ItemKind::Mod(decl) => Some(TyId::new(&module, &decl.name.name).path),
+                _ => None,
+            })
+            .collect();
+        let mut by_module: HashMap<String, Vec<(String, Vec<String>)>> = HashMap::new();
+        for decl in &parsed.uses {
+            let gossamer_ast::UseTarget::Module(target) = &decl.target else { continue };
+            if decl.glob {
+                continue;
+            }
+            let module = decl.module.join("::");
+            let package = package_of(&packages, &module);
+            let target: Vec<&str> = target.segments.iter().map(|s| s.name.as_str()).collect();
+            let mut bound: Vec<(String, Vec<&str>)> = Vec::new();
+            if let Some(entries) = &decl.list {
+                for entry in entries {
+                    let mut path = target.clone();
+                    path.extend(entry.prefix.iter().map(|s| s.name.as_str()));
+                    path.push(entry.name.name.as_str());
+                    let name = entry.alias.as_ref().unwrap_or(&entry.name);
+                    bound.push((name.name.clone(), path));
+                }
+            } else {
+                let Some(last) = target.last() else { continue };
+                let name = decl.alias.as_ref().map_or(*last, |alias| alias.name.as_str());
+                bound.push((name.to_string(), target.clone()));
+            }
+            let entry = by_module.entry(module.clone()).or_default();
+            for (name, path) in bound {
+                entry.push((name, anchored_candidates(&module, package, path)));
+            }
+        }
+        Self { packages, modules, by_module }
+    }
+}
+
+/// Each non-generic alias identity paired with the declaration identity it
+/// stands for, following alias chains. A target resolves against the
+/// alias's own module first and its package root after, which is how the
+/// resolver reads a path a `use crate::{..}` brought into scope.
+fn alias_identities(
+    items: &[Item],
+    declarations: &HashMap<String, Vec<&gossamer_ast::Type>>,
+) -> HashMap<String, String> {
+    let packages: HashSet<String> = dependency_packages(items).into_iter().collect();
+    let mut raw: HashMap<String, Vec<String>> = HashMap::new();
+    for (module, item) in flatten_active_items_with_modules(items) {
+        let ItemKind::TypeAlias(decl) = &item.kind else { continue };
+        let TypeKind::Path(path) = &decl.ty.kind else { continue };
+        if !decl.generics.params.is_empty()
+            || path.segments.iter().any(|segment| !segment.generics.is_empty())
+        {
+            continue;
+        }
+        let names = path.segments.iter().map(|s| s.name.name.as_str()).collect();
+        raw.insert(
+            TyId::new(&module, &decl.name.name).path,
+            anchored_candidates(&module, package_of(&packages, &module), names),
+        );
+    }
+    let mut out: HashMap<String, String> = HashMap::new();
+    for _ in 0..MAX_ALIAS_DEPTH {
+        let mut grew = false;
+        for (alias, candidates) in &raw {
+            if out.contains_key(alias) {
+                continue;
+            }
+            let target = candidates.iter().find_map(|c| {
+                if declarations.contains_key(c) { Some(c.clone()) } else { out.get(c).cloned() }
+            });
+            if let Some(target) = target {
+                out.insert(alias.clone(), target);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    out
+}
+
+/// `admitted` plus every alias identity whose declaration it admits, so a
+/// path through an alias resolves wherever the declaration's own would.
+fn with_alias_identities(
+    admitted: &HashSet<String>,
+    aliases: &HashMap<String, String>,
+) -> HashSet<String> {
+    let mut out = admitted.clone();
+    out.extend(
+        aliases
+            .iter()
+            .filter(|(_, target)| admitted.contains(*target))
+            .map(|(alias, _)| alias.clone()),
+    );
+    out
+}
+
 /// Each bare declaration name with the one declaration it names, or `None`
 /// when several declarations share it.
 fn unique_bare_declarations<'a>(
@@ -845,10 +993,17 @@ fn derive_names_in_scope(
     admitted: &HashSet<String>,
     declarations: &HashMap<String, Vec<&gossamer_ast::Type>>,
     unique_bare: &HashMap<&str, Option<&str>>,
+    imports: &DeriveImports,
 ) -> HashSet<String> {
     let mut visible = admitted.clone();
+    // Inside a dependency `crate` names that package's root module.
+    let package = package_of(&imports.packages, module);
+    let package_prefix = format!("{package}::");
     for identity in admitted {
-        visible.insert(format!("crate::{identity}"));
+        let in_crate = if package.is_empty() { Some(identity.as_str()) } else { identity.strip_prefix(&package_prefix) };
+        if let Some(relative) = in_crate {
+            visible.insert(format!("crate::{relative}"));
+        }
         let mut scope = module.to_string();
         let mut anchor = "self::".to_string();
         loop {
@@ -880,6 +1035,23 @@ fn derive_names_in_scope(
             visible.remove(bare);
         }
     }
+    // An import binds its name to what its path resolves to, whatever else
+    // shares the bare name; an imported module lends its name as a prefix.
+    for (bound, candidates) in imports.by_module.get(module).into_iter().flatten() {
+        if candidates.iter().any(|c| admitted.contains(c)) {
+            visible.insert(bound.clone());
+        } else if candidates.iter().any(|c| declarations.contains_key(c)) {
+            visible.remove(bound);
+        }
+        for candidate in candidates.iter().filter(|c| imports.modules.contains(*c)) {
+            let prefix = format!("{candidate}::");
+            for identity in admitted {
+                if let Some(relative) = identity.strip_prefix(&prefix) {
+                    visible.insert(format!("{bound}::{relative}"));
+                }
+            }
+        }
+    }
     visible
 }
 
@@ -892,6 +1064,8 @@ fn derive_names_in_scope(
 fn greatest_field_fixpoint(
     field_tys: &HashMap<String, Vec<&gossamer_ast::Type>>,
     type_params: &HashMap<String, HashSet<String>>,
+    aliases: &HashMap<String, String>,
+    imports: &DeriveImports,
     seeds: &HashSet<String>,
     admits: impl Fn(&gossamer_ast::Type, &HashSet<String>) -> bool,
 ) -> HashSet<String> {
@@ -906,7 +1080,13 @@ fn greatest_field_fixpoint(
         for name in admitted.iter().filter(|name| !seeds.contains(*name)) {
             let module = owner_module(name);
             let visible = scopes.entry(module).or_insert_with(|| {
-                derive_names_in_scope(module, &admitted, field_tys, &unique_bare)
+                derive_names_in_scope(
+                    module,
+                    &with_alias_identities(&admitted, aliases),
+                    field_tys,
+                    &unique_bare,
+                    imports,
+                )
             });
             // A field of the type's own parameter compares as whatever
             // instantiates it: the synthesized methods are generic too.
@@ -1132,6 +1312,14 @@ fn field_default_literal(
                     {
                         let inner =
                             field_default_literal(repr, module, structs, aliases, with_default)?;
+                        // A bare numeric literal reads as `i64` / `f64`; a newtype over
+                        // another width converts only from that width.
+                        if let gossamer_ast::TypeKind::Path(p) = &repr.kind
+                            && let [seg] = p.segments.as_slice()
+                            && is_numeric_scalar(&seg.name.name)
+                        {
+                            return Some(format!("({inner} as {}).into()", seg.name.name));
+                        }
                         return Some(format!("({inner}).into()"));
                     }
                 }
@@ -1142,6 +1330,14 @@ fn field_default_literal(
     }
     let kind = FieldKind::from_type(ty, module, structs, aliases)?;
     checked_default_literal(&kind, with_default)
+}
+
+/// Whether `name` is a primitive integer or float type.
+fn is_numeric_scalar(name: &str) -> bool {
+    matches!(
+        name,
+        "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" | "f32" | "f64"
+    )
 }
 
 /// The first field of a `#[derive(Default)]` struct that the derive cannot
@@ -1291,6 +1487,8 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
         candidates.remove(name);
     }
     let unique_bare = unique_bare_declarations(&field_tys);
+    let alias_ids = alias_identities(&parsed.items, &field_tys);
+    let imports = DeriveImports::of(parsed);
     loop {
         let mut reachable = formattable.clone();
         reachable.extend(candidates.iter().cloned());
@@ -1301,7 +1499,13 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
         for name in &candidates {
             let module = owner_module(name);
             let visible = scopes.entry(module).or_insert_with(|| {
-                derive_names_in_scope(module, &reachable, &field_tys, &unique_bare)
+                derive_names_in_scope(
+                    module,
+                    &with_alias_identities(&reachable, &alias_ids),
+                    &field_tys,
+                    &unique_bare,
+                    &imports,
+                )
             });
             let params = type_params.get(name).cloned().unwrap_or_default();
             if !field_tys.get(name).is_some_and(|tys| {
@@ -1341,7 +1545,7 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
     let mut eq_seeds = explicit_with(&["PartialEq", "Eq"]);
     eq_seeds.extend(user_eq.iter().cloned());
     let every_alias = alias_candidates(&parsed.items);
-    let comparable = greatest_field_fixpoint(&field_tys, &type_params, &eq_seeds, |ty, set| {
+    let comparable = greatest_field_fixpoint(&field_tys, &type_params, &alias_ids, &imports, &eq_seeds, |ty, set| {
         ty_is_comparable(ty, set, &every_alias, 0)
     });
 
@@ -1349,7 +1553,7 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
     // which has no order. Such a type is still in `comparable` (it gets `eq`).
     let mut cmp_seeds = explicit_with(&["PartialOrd", "Ord"]);
     cmp_seeds.extend(user_cmp.iter().cloned());
-    let orderable = greatest_field_fixpoint(&field_tys, &type_params, &cmp_seeds, |ty, set| {
+    let orderable = greatest_field_fixpoint(&field_tys, &type_params, &alias_ids, &imports, &cmp_seeds, |ty, set| {
         ty_is_orderable(ty, set, &every_alias, 0)
     });
 

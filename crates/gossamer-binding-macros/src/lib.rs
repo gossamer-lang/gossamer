@@ -225,7 +225,7 @@ fn expand_gos_opaque(block: &ItemImpl) -> TokenStream2 {
                         fn #item_name(__handle: i64, #param_list) #ret_ty {
                             let cell = match #registry_ident.get(__handle) {
                                 Ok(c) => c,
-                                Err(_) => return ::core::default::Default::default(),
+                                Err(err) => panic!("{}: {}", stringify!(#item_name), err),
                             };
                             let guard = cell.lock();
                             <#self_ty>::#method_name(&*guard, #fwd_args)
@@ -242,7 +242,7 @@ fn expand_gos_opaque(block: &ItemImpl) -> TokenStream2 {
                         fn #item_name(__handle: i64, #param_list) #ret_ty {
                             let cell = match #registry_ident.get(__handle) {
                                 Ok(c) => c,
-                                Err(_) => return ::core::default::Default::default(),
+                                Err(err) => panic!("{}: {}", stringify!(#item_name), err),
                             };
                             let mut guard = cell.lock();
                             <#self_ty>::#method_name(&mut *guard, #fwd_args)
@@ -331,9 +331,67 @@ fn type_to_ident(ty: &Type) -> syn::Ident {
     format_ident!("Opaque")
 }
 
+/// The `WireJson` / `Nested` impls of a `GosStruct`: inside a composite the
+/// struct crosses as an object keyed by its field names, the spelling the
+/// program's struct of this name reads.
+fn wire_json_impl(
+    name: &syn::Ident,
+    name_str: &str,
+    fields: &[(syn::Ident, Type)],
+) -> TokenStream2 {
+    let field_names: Vec<&syn::Ident> = fields.iter().map(|(id, _)| id).collect();
+    let field_names_str: Vec<String> = fields.iter().map(|(id, _)| id.to_string()).collect();
+    let field_tys: Vec<&Type> = fields.iter().map(|(_, t)| t).collect();
+    let field_indices: Vec<usize> = (0..fields.len()).collect();
+    quote! {
+    impl ::gossamer_binding::wire_json::WireJson for #name {
+        fn write_json(&self, out: &mut ::std::string::String) {
+            out.push('{');
+            #(
+                ::gossamer_binding::wire_json::write_field_key(
+                    #field_names_str, #field_indices == 0, out,
+                );
+                ::gossamer_binding::wire_json::WireJson::write_json(&self.#field_names, out);
+            )*
+            out.push('}');
+        }
+
+        fn read_json(
+            p: &mut ::gossamer_binding::wire_json::Parser<'_>,
+        ) -> ::std::result::Result<Self, ::std::string::String> {
+            #(
+                let mut #field_names: ::std::option::Option<#field_tys> = None;
+            )*
+            ::gossamer_binding::wire_json::read_struct(p, |p, key| {
+                match key {
+                    #(
+                        #field_names_str => {
+                            #field_names = Some(
+                                <#field_tys as ::gossamer_binding::wire_json::WireJson>::read_json(p)?,
+                            );
+                            Ok(true)
+                        }
+                    )*
+                    _ => Ok(false),
+                }
+            })?;
+            Ok(#name {
+                #(
+                    #field_names: #field_names.ok_or_else(|| {
+                        format!(concat!("missing field `", #field_names_str, "` of ", #name_str))
+                    })?,
+                )*
+            })
+        }
+    }
+
+    impl ::gossamer_binding::wire_json::Nested for #name {}
+    }
+}
+
 /// `#[derive(GosStruct)]` - emits `FromGos` / `ToGos` /
 /// `BindingAbi` impls that round-trip a Rust struct through
-/// `Value::Struct` (interp tier) and an opaque-handle wire shape
+/// `Value::Struct` (VM entries) and an opaque-handle wire shape
 /// (compiled tier).
 #[proc_macro_derive(GosStruct)]
 pub fn derive_gos_struct(input: TokenStream) -> TokenStream {
@@ -361,6 +419,7 @@ pub fn derive_gos_struct(input: TokenStream) -> TokenStream {
     let field_names: Vec<&syn::Ident> = fields.iter().map(|(id, _)| id).collect();
     let field_names_str: Vec<String> = fields.iter().map(|(id, _)| id.to_string()).collect();
     let field_tys: Vec<&Type> = fields.iter().map(|(_, t)| t).collect();
+    let wire_json = wire_json_impl(name, &name_str, &fields);
 
     let lookup_arms: Vec<TokenStream2> = field_names
         .iter()
@@ -414,6 +473,8 @@ pub fn derive_gos_struct(input: TokenStream) -> TokenStream {
         impl ::gossamer_binding::SigType for #name {
             const TYPE: ::gossamer_binding::Type = ::gossamer_binding::Type::Opaque(#name_str);
         }
+
+        #wire_json
 
         // Compiled-tier wire shape: ride the `DynValue` ABI. The
         // struct is encoded as `DynValue::Tagged { name, payload:

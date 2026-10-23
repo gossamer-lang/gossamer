@@ -381,17 +381,38 @@ impl<'a> Builder<'a> {
                         }
                         HirSelectOp::Send { channel, value } => {
                             let ch = self.lower_expr(channel)?;
-                            let v = self.lower_expr(value)?;
-                            self.emit_assign(
-                                Place::local(d),
-                                Rvalue::CallIntrinsic {
-                                    name: "gos_rt_select_arm_send",
-                                    args: vec![
-                                        Operand::Copy(Place::local(builder)),
-                                        Operand::Copy(Place::local(ch)),
-                                        Operand::Copy(Place::local(v)),
-                                    ],
-                                },
+                            let mut v = self.lower_expr(value)?;
+                            // The arm hands its element over as a send does,
+                            // so a value read from a binding is sent as a
+                            // copy of its own and the binding keeps its value.
+                            let value_ty = self.locals[v.0 as usize].ty;
+                            let copied = match self.tcx.kind_of(value_ty) {
+                                gossamer_types::TyKind::HashMap { .. } => true,
+                                gossamer_types::TyKind::Vec(_)
+                                | gossamer_types::TyKind::Adt { .. }
+                                | gossamer_types::TyKind::Tuple(_)
+                                | gossamer_types::TyKind::Array { .. } => matches!(
+                                    value.kind,
+                                    HirExprKind::Path { .. }
+                                        | HirExprKind::Field { .. }
+                                        | HirExprKind::TupleIndex { .. }
+                                        | HirExprKind::Index { .. }
+                                ),
+                                _ => false,
+                            };
+                            if copied {
+                                let copy = self.fresh(value_ty);
+                                self.emit_owned_clone_binding(v, copy, span);
+                                v = copy;
+                            }
+                            // A consuming call in the shape of a send, so the
+                            // element is prepared exactly as `tx.send(v)`
+                            // prepares it; the builder keeps it until the arm
+                            // fires or the builder is freed.
+                            self.emit_rt_call(
+                                "gos_rt_chan_send_select_arm",
+                                vec![ch, v, builder],
+                                unit_ty,
                                 span,
                             );
                         }
@@ -2423,6 +2444,40 @@ impl<'a> Builder<'a> {
             let src_names_fn = self.local_fn_name.contains_key(&value_local);
             if dest_callable && (src_is_fn_def || src_names_fn) {
                 value_local = self.coerce_to_fn_trait_if_needed(value_local, place.ty, span);
+            }
+        }
+        // A container read out of a binding the program still reaches is
+        // assigned as a copy of its own, as a `let` of it is, so a later write
+        // through either name leaves the other's value alone.
+        // A parameter is the frame's own value: a caller hands over a copy of
+        // any argument the callee keeps, so storing it shares nothing.
+        if matches!(
+            value.kind,
+            HirExprKind::Path { .. }
+                | HirExprKind::Field { .. }
+                | HirExprKind::TupleIndex { .. }
+                | HirExprKind::Index { .. }
+        ) && !self.param_locals.contains(&value_local)
+        {
+            let value_ty = self.locals[value_local.0 as usize].ty;
+            let table = matches!(
+                self.tcx.kind_of(value_ty),
+                gossamer_types::TyKind::HashMap { .. }
+            ) || self.set_clone_symbol_for_local(value_local).is_some();
+            // A table's handle carries no count, so its copy is made in the
+            // binding that owns it, as a `let` makes it; a counted vector's
+            // copy may pass through a temporary.
+            if (table || self.is_vec_like_ty(value_ty))
+                && mir_place.projection.is_empty()
+                && self.locals[mir_place.local.0 as usize].ty == value_ty
+            {
+                self.emit_owned_clone_binding(value_local, mir_place.local, span);
+                return;
+            }
+            if table || self.is_vec_like_ty(value_ty) {
+                let copy = self.fresh(value_ty);
+                self.emit_owned_clone_binding(value_local, copy, span);
+                value_local = copy;
             }
         }
         self.emit_assign(

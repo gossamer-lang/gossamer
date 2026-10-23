@@ -97,6 +97,10 @@ fn build_and_run_profile(dir: &Path, release: bool) -> Build {
     let build = Command::new(gos_bin())
         .current_dir(dir)
         .env("GOSSAMER_CACHE_DIR", dir.join("frontend-cache"))
+        // Objects are shared by every build on the machine, so an earlier run
+        // of this test would serve the first build here; this project keeps
+        // its own.
+        .env("GOS_BUILD_CACHE", dir.join("object-cache"))
         .env("GOS_PIPELINE_TRACE", "1")
         .args(args)
         .output()

@@ -267,6 +267,18 @@ pub unsafe extern "C" fn gos_rt_serde_rd_bool(r: i64, message: *const c_char) ->
     })
 }
 
+/// The current value as a `char`, its Unicode scalar value.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_serde_rd_char(r: i64, message: *const c_char) -> i32 {
+    ffi_entry!({
+        // SAFETY: `message` is this shim's String argument.
+        let message = unsafe { text_arg(message) };
+        // SAFETY: `r` is this shim's reader handle.
+        let c = unsafe { with_reader(r, '\0', |reader| reader.read_char(message)) };
+        c as i32
+    })
+}
+
 /// The current value as a String.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_serde_rd_str(r: i64, message: *const c_char) -> *mut c_char {
@@ -511,6 +523,28 @@ pub unsafe extern "C" fn gos_rt_serde_wr_f32(w: i64, value: f64) {
     });
 }
 
+/// Appends an `f64` as a `json::Value` tree writes it, the spelling
+/// `json::encode` gives every float.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_serde_wr_f64_tree(w: i64, value: f64) {
+    ffi_entry!({
+        let text = crate::builtins::format_json_tree_float(value);
+        // SAFETY: `w` is this shim's writer handle.
+        unsafe { with_writer(w, |out| out.extend_from_slice(text.as_bytes())) };
+    });
+}
+
+/// Appends an `f32`, carried widened, as a `json::Value` tree writes it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_serde_wr_f32_tree(w: i64, value: f64) {
+    ffi_entry!({
+        let text =
+            crate::builtins::format_json_tree_float(crate::builtins::f32_as_decimal_double(value));
+        // SAFETY: `w` is this shim's writer handle.
+        unsafe { with_writer(w, |out| out.extend_from_slice(text.as_bytes())) };
+    });
+}
+
 /// Appends `true` or `false`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_serde_wr_bool(w: i64, value: i32) {
@@ -518,6 +552,27 @@ pub unsafe extern "C" fn gos_rt_serde_wr_bool(w: i64, value: i32) {
         let text: &[u8] = if value != 0 { b"true" } else { b"false" };
         // SAFETY: `w` is this shim's writer handle.
         unsafe { with_writer(w, |out| out.extend_from_slice(text)) };
+    });
+}
+
+/// Appends a `char` as the one-character string `json::encode` writes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_serde_wr_char(w: i64, value: i32) {
+    ffi_entry!({
+        let c = u32::try_from(value)
+            .ok()
+            .and_then(char::from_u32)
+            .unwrap_or('\u{FFFD}');
+        let mut buf = [0u8; 4];
+        let text = c.encode_utf8(&mut buf);
+        // SAFETY: `w` is this shim's writer handle.
+        unsafe {
+            with_writer(w, |out| {
+                out.push(b'"');
+                super::json_escape::json_escape_into(text.as_bytes(), out);
+                out.push(b'"');
+            });
+        };
     });
 }
 

@@ -326,6 +326,17 @@ impl Channel {
                 if deadlocked {
                     return SendOutcome::Deadlocked;
                 }
+                // A value a receiver took completes the send, whatever the
+                // channel did after the handoff; one still queued when the
+                // channel closed is withdrawn, so no later receive hands it
+                // over.
+                if !guard.buf.iter().any(|msg| msg.id == id) {
+                    return SendOutcome::Sent;
+                }
+                if guard.closed {
+                    guard.buf.retain(|msg| msg.id != id);
+                    return SendOutcome::Closed;
+                }
             }
             ChannelCapacity::Unbounded => {
                 guard.buf.push_back(ChannelMessage {

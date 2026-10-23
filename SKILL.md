@@ -9,9 +9,10 @@ A fast-compiling language with deterministic memory management (reference
 counting, cycle collection, `arena { }` regions - no borrow checker, no
 lifetimes, no GC pauses). Syntax is Rust-flavoured; the runtime is Go-shaped
 (goroutines, channels). Files end in `.gos`, the toolchain is `gos`, and a
-project carries a `project.toml`. Programs run on the bytecode VM and JIT
-(`gos run`) and as native binaries (`gos build`), with the same output on
-every tier; `gos feature-status` says which surface is settled.
+project carries a `project.toml`. `gos run` runs on the bytecode VM and JIT
+and `gos run --native` builds and runs the native binary `gos build` makes,
+with the same output on every tier; `gos feature-status` says which surface
+is settled.
 
 ## 2. Lean on the toolchain
 
@@ -25,8 +26,8 @@ every tier; `gos feature-status` says which surface is settled.
 - Without MCP: `gos check FILE`, `gos run FILE`, `gos explain CODE`,
   `gos doc std::<module>`. `gos check --fix` applies the rewrites diagnostics
   carry.
-- `gos check` is necessary, not sufficient: `gos run` proves semantics and
-  `gos build` proves the native tier.
+- `gos check` is necessary, not sufficient: `gos run` proves semantics on
+  the VM, and `gos run --native` on the native tier.
 
 ## 3. Cheat sheet
 

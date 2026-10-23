@@ -566,7 +566,7 @@ impl Vm {
                 Value::Native(inner) => {
                     let args = crate::value::unwrap_mut_cells_unless_writer(inner.name, args);
                     let mut dispatch = super::native_dispatch::VmDispatch::new(self);
-                    (inner.call)(&mut dispatch, &args)
+                    inner.entry.invoke(&mut dispatch, &args)
                 }
                 Value::Closure(closure) => self.invoke_closure(&closure, args),
                 Value::Variant(inner) if inner.fields.is_empty() => Ok(Value::variant(
@@ -962,7 +962,7 @@ impl Vm {
             Value::Native(inner) => {
                 let args = crate::value::unwrap_mut_cells_unless_writer(inner.name, args);
                 let mut dispatch = super::native_dispatch::VmDispatch::new(self);
-                (inner.call)(&mut dispatch, &args)
+                inner.entry.invoke(&mut dispatch, &args)
             }
             // Calling a zero-field variant value acts as that variant's
             // constructor: `Circle(1.5)` produces

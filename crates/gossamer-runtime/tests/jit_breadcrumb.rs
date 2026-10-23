@@ -46,6 +46,19 @@ fn run_crashing_child(mode: &str) -> String {
         !output.status.success(),
         "child was expected to crash, but exited cleanly"
     );
+    // The reported fault still ends the child by its own signal, without
+    // the core dump the report makes redundant.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            output.status.signal(),
+            Some(libc::SIGSEGV),
+            "{:?}",
+            output.status
+        );
+        assert!(!output.status.core_dumped(), "the child dumped core");
+    }
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 

@@ -78,10 +78,18 @@ fn parse_signature(text: &str) -> Option<(Vec<Class>, Class)> {
 /// The most parameters a registered closure may take.
 const MAX_ARITY: usize = 4;
 
-/// Registered closure contexts by handle, so a release frees the one the
-/// handle names.
-fn contexts() -> &'static Mutex<HashMap<u64, usize>> {
-    static CONTEXTS: OnceLock<Mutex<HashMap<u64, usize>>> = OnceLock::new();
+/// A registered closure context and the shares of its handle still held:
+/// the caller's for the call it passed the closure to, and one per
+/// `PersistentCallback` the binding keeps.
+struct Registration {
+    context: usize,
+    shares: usize,
+}
+
+/// Registered closure contexts by handle, so the last release frees the one
+/// the handle names.
+fn contexts() -> &'static Mutex<HashMap<u64, Registration>> {
+    static CONTEXTS: OnceLock<Mutex<HashMap<u64, Registration>>> = OnceLock::new();
     CONTEXTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -113,21 +121,53 @@ pub unsafe extern "C" fn gos_rt_binding_callback_register(
         let context = Box::into_raw(Box::new(ClosureCallback { env, params, ret }));
         let handle =
             super::signal::gos_rt_callback_register(context.cast_const().cast(), invoke_closure);
-        contexts().lock().insert(handle, context as usize);
+        contexts().lock().insert(
+            handle,
+            Registration {
+                context: context as usize,
+                shares: 1,
+            },
+        );
         handle
     })
 }
 
-/// Ends a registration made by [`gos_rt_binding_callback_register`]. After
-/// this returns the handle calls nothing, and no call through it is running.
+/// Takes another share of a registration made by
+/// [`gos_rt_binding_callback_register`], so the closure outlives the call it
+/// was passed to. A handle the runtime does not hold is ignored.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_binding_callback_retain(handle: u64) {
+    ffi_entry!({
+        if let Some(registration) = contexts().lock().get_mut(&handle) {
+            registration.shares += 1;
+        }
+    });
+}
+
+/// Gives back one share of a registration made by
+/// [`gos_rt_binding_callback_register`]. After the last share the handle calls
+/// nothing, and no call through it is running.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_binding_callback_release(handle: u64) {
     ffi_entry!({
         if handle == 0 {
             return;
         }
+        let context = {
+            let mut table = contexts().lock();
+            let Some(registration) = table.get_mut(&handle) else {
+                return;
+            };
+            registration.shares -= 1;
+            if registration.shares > 0 {
+                return;
+            }
+            table
+                .remove(&handle)
+                .map(|registration| registration.context)
+        };
         super::signal::gos_rt_callback_unregister(handle);
-        if let Some(context) = contexts().lock().remove(&handle) {
+        if let Some(context) = context {
             // SAFETY: the context was boxed at registration, and unregistering
             // waited for every call through the handle to leave it.
             let callback = unsafe { Box::from_raw(context as *mut ClosureCallback) };

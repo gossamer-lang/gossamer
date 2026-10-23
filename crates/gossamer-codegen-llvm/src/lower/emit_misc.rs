@@ -443,7 +443,10 @@ impl<'a> Lowerer<'a> {
         // Cranelift backend; a bare `inttoptr i64 N to ptr`
         // produces a wild pointer that segfaults inside the
         // runtime's `push_back`.
-        let chan_send_spill = matches!(symbol, "gos_rt_chan_send" | "gos_rt_chan_try_send");
+        let chan_send_spill = matches!(
+            symbol,
+            "gos_rt_chan_send" | "gos_rt_chan_try_send" | "gos_rt_chan_send_select_arm"
+        );
         // See `lower_runtime_call_intrinsic` for rationale: heap-copy
         // aggregate payloads passed to `gos_rt_result_new` so the
         // caller's stack alloca doesn't go dangling after return.

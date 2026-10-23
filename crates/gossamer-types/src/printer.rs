@@ -19,6 +19,20 @@ pub fn render_ty(tcx: &TyCtxt, ty: Ty) -> String {
     out
 }
 
+/// `ty` written by the names its declarations carry, so the same type prints
+/// alike in every program that contains it, or `None` when the rendering
+/// would carry a number this program's interning or resolution chose (an
+/// unnamed definition, a closure, an inference variable).
+#[must_use]
+pub fn stable_type_name(tcx: &TyCtxt, ty: Ty) -> Option<String> {
+    let text = render_ty(tcx, ty);
+    let numbered = text.contains('#')
+        || text.contains('?')
+        || text.contains("<ty:")
+        || text.contains("<error>");
+    (!numbered).then_some(text)
+}
+
 /// The name a user writes for a type: a stdlib type the parser injects as
 /// `__gos_<module>_<Type>` is `module::Type`, and every other name is itself.
 #[must_use]

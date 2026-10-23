@@ -159,6 +159,7 @@ pub use bytecode::{FnChunk, InstructionLocation, Op, SourceLocation};
 pub use comptime::{fold_into_source, fold_into_source_anchored};
 pub use external_natives::{
     clear_external_natives_for_test, external_natives_snapshot, register_external_native,
+    register_external_value,
 };
 pub use stdlib_builtins::cohort::{close_root as close_root_cohort, open_root as open_root_cohort};
 pub use value::{

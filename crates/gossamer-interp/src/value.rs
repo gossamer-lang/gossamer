@@ -1325,8 +1325,38 @@ pub struct BuiltinInner {
 pub struct NativeInner {
     /// Display name.
     pub name: &'static str,
-    /// Implementation pointer.
-    pub call: NativeCall,
+    /// What a call runs.
+    pub entry: NativeEntry,
+}
+
+/// What calling a [`Value::Native`] runs.
+#[derive(Debug, Clone, Copy)]
+pub enum NativeEntry {
+    /// A function of the dispatch and the arguments.
+    Plain(NativeCall),
+    /// A function that also takes the word it was bound with, which names
+    /// the item it calls (a loaded `[rust-bindings]` item, by index).
+    Bound(BoundNativeCall, usize),
+}
+
+impl NativeEntry {
+    /// Runs the call.
+    pub fn invoke(self, dispatch: &mut dyn NativeDispatch, args: &[Value]) -> RuntimeResult<Value> {
+        match self {
+            Self::Plain(call) => call(dispatch, args),
+            Self::Bound(call, data) => call(data, dispatch, args),
+        }
+    }
+
+    /// An identity for the implementation, distinct between the two shapes
+    /// and between the items one bound function serves.
+    #[must_use]
+    pub fn identity(self) -> (usize, usize) {
+        match self {
+            Self::Plain(call) => (call as usize, usize::MAX),
+            Self::Bound(call, data) => (call as usize, data),
+        }
+    }
 }
 
 /// The runtime object a [`Value::Opaque`] holds. Boxed behind a thin `Arc` so
@@ -1518,7 +1548,19 @@ impl Value {
     /// Constructs a [`Value::Native`].
     #[must_use]
     pub fn native(name: &'static str, call: NativeCall) -> Self {
-        Self::Native(Arc::new(NativeInner { name, call }))
+        Self::Native(Arc::new(NativeInner {
+            name,
+            entry: NativeEntry::Plain(call),
+        }))
+    }
+
+    /// Constructs a [`Value::Native`] whose call also takes `data`.
+    #[must_use]
+    pub fn native_bound(name: &'static str, call: BoundNativeCall, data: usize) -> Self {
+        Self::Native(Arc::new(NativeInner {
+            name,
+            entry: NativeEntry::Bound(call, data),
+        }))
     }
 }
 /// Callback handed to [`Value::Native`] builtins. Exposes the subset
@@ -1638,6 +1680,10 @@ pub fn dispatch_request(
 
 /// Function pointer for [`Value::Native`] builtins.
 pub type NativeCall = fn(&mut dyn NativeDispatch, &[Value]) -> RuntimeResult<Value>;
+
+/// A [`NativeCall`] that also takes the word its [`Value::Native`] was bound
+/// with.
+pub type BoundNativeCall = fn(usize, &mut dyn NativeDispatch, &[Value]) -> RuntimeResult<Value>;
 
 impl Value {
     /// Returns the unit value.

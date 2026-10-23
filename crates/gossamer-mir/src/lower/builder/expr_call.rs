@@ -913,9 +913,8 @@ impl<'a> Builder<'a> {
             return Some(local);
         }
         // External Rust binding (`tuigoose::layout::rect`, etc.).
-        // Resolves through `gossamer_resolve::external` populated
-        // either by the runner's `install_all` or the build-time
-        // `ensure_signatures` pass.
+        // Resolves through `gossamer_resolve::external`, which the
+        // signatures of the project's binding libraries populate.
         if !user_fn && let Some(local) = self.lower_external_binding_call(callee, args, span) {
             return Some(local);
         }

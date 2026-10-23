@@ -9,10 +9,8 @@ authors.workspace = true
 description = "Stable Rust-binding system for Gossamer libraries."
 
 [lints.rust]
-# Override the workspace `unsafe_code = "forbid"` because the
-# `native` module marshalling needs raw-pointer ABI work for the
-# compiled-mode export path. Stays `deny` so all other modules
-# still reject unsafe.
+# The C entry points, the host table, and the wire thunks need `unsafe`;
+# `deny` lets those modules opt in while every other module rejects it.
 unsafe_code = "deny"
 missing_docs = "warn"
 unreachable_pub = "warn"
@@ -48,15 +46,9 @@ explicit_iter_loop = "allow"
 doc_markdown = "allow"
 
 [dependencies]
+gossamer-binding-abi = { workspace = true }
 gossamer-binding-macros = { workspace = true }
-gossamer-codegen-cranelift = { workspace = true }
-gossamer-interp = { workspace = true }
-gossamer-resolve = { workspace = true }
-gossamer-std = { workspace = true }
 linkme = "0.3"
 pastey = "0.1"
 parking_lot = "0.12"
 rustc-hash = "2"
-
-[dev-dependencies]
-gossamer-interp = { workspace = true }

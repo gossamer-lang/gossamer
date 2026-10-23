@@ -367,11 +367,18 @@ fn lower_to_mir_reporting_prune(
     // compiles. The second pass runs on the finished graph, where every
     // name is final. The roots are the entry, the `#[export]` entries a
     // library's host calls, and the heap-static builds those run first.
-    let roots = [
+    let mut roots = vec![
         ENTRY_BODY.to_string(),
         gossamer_hir::FFI_EXPORTS_FN.to_string(),
         gossamer_ast::STATIC_INIT_FN.to_string(),
     ];
+    // A debug build compiles each dependency whole, so what it emits for a
+    // dependency is the same in every program using it and its objects are
+    // shared between them through the object cache.
+    if matches!(profile, MirProfile::Debug) {
+        let modules = dependency_modules(&sf.items);
+        roots.extend(gossamer_mir::concrete_bodies_under(&bodies, &modules, &tcx));
+    }
     let early = gossamer_mir::prune_scoped(
         &mut bodies,
         &roots,
@@ -418,9 +425,46 @@ fn lower_to_mir_reporting_prune(
             gossamer_mir::report_bounds_sites(&bodies, &effects);
         }
     }
+    for body in &mut bodies {
+        gossamer_mir::share_exit_tails(body);
+    }
     gossamer_mir::rc_verify::check_program(&bodies);
     phases.passes = started.elapsed();
     (bodies, tcx, prune, phases)
+}
+
+/// The module paths the bundler declares for dependency packages, outermost
+/// first.
+fn dependency_modules(items: &[gossamer_ast::Item]) -> Vec<String> {
+    fn walk(items: &[gossamer_ast::Item], prefix: &str, out: &mut Vec<String>) {
+        for item in items {
+            let gossamer_ast::ItemKind::Mod(gossamer_ast::ModDecl {
+                name,
+                body: gossamer_ast::ModBody::Inline(inner),
+                ..
+            }) = &item.kind
+            else {
+                continue;
+            };
+            let path = if prefix.is_empty() {
+                name.name.clone()
+            } else {
+                format!("{prefix}::{}", name.name)
+            };
+            if item
+                .attrs
+                .outer
+                .iter()
+                .any(|attr| attr.string_argument("dependency").is_some())
+            {
+                out.push(path.clone());
+            }
+            walk(inner, &path, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(items, "", &mut out);
+    out
 }
 
 /// Surfaces the Tier B6.3 generic-ABI check as an `anyhow::Error`
@@ -472,6 +516,9 @@ fn enforce_mir_backend_invariants(bodies: &[Body], tcx: &TyCtxt) -> anyhow::Resu
     }
 }
 
+/// The file name the toolchain registers its generated text under.
+pub const GENERATED_FILE: &str = "<generated>";
+
 /// Hands the native backend where each line of `file` begins and which file
 /// each assembled region of it was read from, so a MIR span resolves to the
 /// file and line a panic report names. The source map itself lives only for
@@ -486,6 +533,10 @@ pub fn register_source_positions(unit_name: &str, map: &SourceMap, file: FileId)
             continue;
         }
         let path = map.file_name(region.origin);
+        if path == GENERATED_FILE {
+            positions.add_generated_region(region.start, region.end, path);
+            continue;
+        }
         let name = std::path::Path::new(path).file_name().map_or_else(
             || path.to_string(),
             |base| base.to_string_lossy().into_owned(),
@@ -552,6 +603,45 @@ mod tests {
             format!("{release_main:?}"),
             "debug and release MIR must retain distinct optimization contracts"
         );
+    }
+
+    #[test]
+    fn exits_releasing_the_same_values_share_one_copy_of_the_releases() {
+        let mut source = String::from(
+            "struct Pair { a: String, b: String, c: String }\n\
+             fn pick(key: String) -> String {\n\
+             let p = Pair { a: key + \"a\", b: key + \"b\", c: key + \"c\" }\n\
+             let q = Pair { a: key + \"x\", b: key + \"y\", c: key + \"z\" }\n",
+        );
+        for i in 0..12 {
+            source.push_str(&format!("if key == \"k{i}\" {{ return \"{i}\" }}\n"));
+        }
+        source.push_str("p.a + q.a\n}\nfn main() { println(pick(\"k3\")) }\n");
+        for profile in [MirProfile::Debug, MirProfile::Release] {
+            let (bodies, _) = lower_to_mir_with_tcx(&source, "exits.gos", profile);
+            let pick = bodies
+                .iter()
+                .find(|body| body.name == "pick")
+                .expect("pick body");
+            let mut releases = std::collections::HashMap::new();
+            for block in &pick.blocks {
+                for stmt in &block.stmts {
+                    if let gossamer_mir::StatementKind::Assign {
+                        rvalue: gossamer_mir::Rvalue::CallIntrinsic { name, args },
+                        ..
+                    } = &stmt.kind
+                        && *name == "gos_rt_str_free_typed"
+                    {
+                        *releases.entry(format!("{args:?}")).or_insert(0) += 1;
+                    }
+                }
+            }
+            let most = releases.values().copied().max().unwrap_or(0);
+            assert!(
+                most <= 2,
+                "a field release is copied {most} times across the exits: {releases:?}"
+            );
+        }
     }
 
     #[test]

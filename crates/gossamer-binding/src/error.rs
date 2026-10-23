@@ -46,7 +46,7 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::sync::Arc;
 
-use gossamer_interp::value::{RuntimeError, RuntimeResult, SmolStr, Value};
+use crate::value::{RuntimeError, RuntimeResult, Str, Value};
 
 use crate::conv::{FromGos, ToGos};
 use crate::sig::SigType;
@@ -200,7 +200,7 @@ impl From<std::convert::Infallible> for GosError {
 
 impl ToGos for GosError {
     fn to_gos(self) -> Value {
-        Value::String(SmolStr::from_string(self.render()))
+        Value::String(Str::from(self.render()))
     }
 }
 

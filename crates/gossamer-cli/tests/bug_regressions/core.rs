@@ -6,7 +6,6 @@
 // after the property under test, not after a bug number - the
 // file location is the regression-guard context.
 
-
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -826,8 +825,7 @@ fn main() {
     assert_eq!(native.2, Some(0), "native stderr: {}", native.1);
     assert_eq!(native.0, vm.0);
 
-    let bounds_src =
-        "fn main() {\n    let a = [1, 2, 3]\n    for i in .. { println(a[i]) }\n}\n";
+    let bounds_src = "fn main() {\n    let a = [1, 2, 3]\n    for i in .. { println(a[i]) }\n}\n";
     let bounds_path = write_source(&dir, "open_range_bounds", bounds_src);
     let vm_bounds = run_vm(&bounds_path);
     assert_ne!(vm_bounds.2, Some(0), "VM accepted index 3");
@@ -991,10 +989,7 @@ fn assoc_missing_impl_item_is_rejected() {
         .expect("spawn gos check");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "check unexpectedly passed: {stderr}");
-    assert!(
-        stderr.contains("GT0059"),
-        "expected GT0059, got: {stderr}"
-    );
+    assert!(stderr.contains("GT0059"), "expected GT0059, got: {stderr}");
     assert!(
         stderr.contains("is missing associated item: `type Item`"),
         "diagnostic must name the omitted item: {stderr}"
@@ -1019,10 +1014,7 @@ fn break_unknown_label_is_rejected() {
         .expect("spawn gos check");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "check unexpectedly passed: {stderr}");
-    assert!(
-        stderr.contains("GR0017"),
-        "expected GR0017, got: {stderr}"
-    );
+    assert!(stderr.contains("GR0017"), "expected GR0017, got: {stderr}");
     assert!(
         stderr.contains("no enclosing loop is labelled `'wrong`"),
         "diagnostic must name the label: {stderr}"
@@ -1353,8 +1345,7 @@ fn main() {
     assert_eq!(vm.2, Some(0), "vm stderr: {}", vm.1);
     assert_eq!(native.2, Some(0), "native stderr: {}", native.1);
     assert_eq!(
-        vm.0,
-        "low high other\nknown unknown\nexact off\nred green\nmarker\n",
+        vm.0, "low high other\nknown unknown\nexact off\nred green\nmarker\n",
         "vm stdout"
     );
     assert_eq!(native.0, vm.0, "tier parity");
@@ -1453,8 +1444,7 @@ fn main() {
     assert_eq!(vm.2, Some(0), "vm stderr: {}", vm.1);
     assert_eq!(native.2, Some(0), "native stderr: {}", native.1);
     assert_eq!(
-        vm.0,
-        "literal enum ok\nliteral string ok\nwrite-back 2 3\ninline 2\n",
+        vm.0, "literal enum ok\nliteral string ok\nwrite-back 2 3\ninline 2\n",
         "vm stdout"
     );
     assert_eq!(native.0, vm.0, "tier parity");
@@ -1521,8 +1511,7 @@ fn main() {
     assert_eq!(vm.2, Some(0), "vm stderr: {}", vm.1);
     assert_eq!(native.2, Some(0), "native stderr: {}", native.1);
     assert_eq!(
-        vm.0,
-        "free a 1\nleft 1\nfield c 3\nfield d 4\ndrained 0\nint 7\nout of range\n",
+        vm.0, "free a 1\nleft 1\nfield c 3\nfield d 4\ndrained 0\nint 7\nout of range\n",
         "vm stdout"
     );
     assert_eq!(native.0, vm.0, "tier parity");
@@ -1753,8 +1742,7 @@ fn main() {
     assert_eq!(vm.2, Some(0), "vm stderr: {}", vm.1);
     assert_eq!(native.2, Some(0), "native stderr: {}", native.1);
     assert_eq!(
-        vm.0,
-        "2 :: a b \n3 :: a [b c ] d \n3 :: [a b ] [c d ] [e f ] \n0 :: \n",
+        vm.0, "2 :: a b \n3 :: a [b c ] d \n3 :: [a b ] [c d ] [e f ] \n0 :: \n",
         "vm stdout"
     );
     assert_eq!(native.0, vm.0, "tier parity");
@@ -1983,7 +1971,10 @@ fn stream_and_child_methods_answer_their_declared_types() {
         3,
         "expected three type mismatches: {stderr}"
     );
-    assert!(stderr.contains("write_all"), "expected the unknown method: {stderr}");
+    assert!(
+        stderr.contains("write_all"),
+        "expected the unknown method: {stderr}"
+    );
 }
 
 #[test]
@@ -2004,5 +1995,8 @@ fn scalar_bounds_reject_non_numeric_operands() {
         4,
         "each bad operand set is reported once: {stderr}"
     );
-    assert!(stderr.contains("a number or char"), "names what it expected: {stderr}");
+    assert!(
+        stderr.contains("a number or char"),
+        "names what it expected: {stderr}"
+    );
 }

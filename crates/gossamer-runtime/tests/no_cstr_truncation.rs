@@ -46,16 +46,6 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
         "the flag parser walks libc's argv directly",
     ),
     (
-        "result.rs",
-        "gos_rt_binding_variant_to_result",
-        "a native Rust binding publishes its string payload as a plain C string",
-    ),
-    (
-        "binding_wire.rs",
-        "wire_fields_to_slots",
-        "a native Rust binding publishes a struct's string field as a plain C string",
-    ),
-    (
         "binding_wire.rs",
         "dyn_from_wire_field",
         "a native Rust binding publishes a dynamic value's text as a plain C string",

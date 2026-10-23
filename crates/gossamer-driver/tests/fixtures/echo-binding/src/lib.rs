@@ -17,8 +17,3 @@ register_module!(
     }
 );
 
-/// Reference every `register_module!`-emitted static so the linker
-/// keeps the linkme distributed-slice entries alive after LTO.
-pub fn __bindings_force_link() {
-    binding::force_link();
-}

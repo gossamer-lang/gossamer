@@ -1,0 +1,18 @@
+// A send a receiver took completes, even when the receiver closes the
+// channel straight after taking the value.
+use std::sync::channel
+
+fn main() {
+    let mut delivered = 0
+    for i in 0..300 {
+        let tx, rx = channel()
+        spawn(|| {
+            let v = rx.recv().unwrap()
+            tx.close()
+            v
+        })
+        tx.send(i)
+        delivered += 1
+    }
+    println(f"delivered {delivered}")
+}

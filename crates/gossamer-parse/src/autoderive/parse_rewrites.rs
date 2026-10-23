@@ -353,18 +353,12 @@ fn serde_unsupported_field_diags(sf: &SourceFile) -> Vec<ParseDiagnostic> {
     // the rewriter can resolve is never reported, and one it cannot is never
     // left to surface as the mangled name.
     let symbols = serde_symbol_index(sf);
-    let resolved = |written: &str| -> String {
-        symbols
-            .get(written)
-            .or_else(|| symbols.get(written.rsplit("::").next().unwrap_or(written)))
-            .cloned()
-            .unwrap_or_else(|| written.to_string())
-    };
+    let resolved = |written: &str, module: &str| serde_symbol_for(&symbols, module, written);
 
     let mut diags = Vec::new();
     let mut reported: HashSet<String> = HashSet::new();
-    for (op, ty_name, call_span) in collect_serde_turbofish_calls(sf) {
-        let symbol = resolved(&ty_name);
+    for (op, ty_name, call_span, module) in collect_serde_turbofish_calls(sf) {
+        let symbol = resolved(&ty_name, &module);
         if reported.contains(&ty_name) || synthesized.contains(symbol.as_str()) {
             continue;
         }
@@ -448,15 +442,30 @@ fn refusal_for(sf: &SourceFile, symbol: &str) -> SerdeTargetRefusal {
 /// Collects `(op, type_name)` for every serde turbofish call in `sf`
 /// (`to_json::<T>` / `from_json::<T>` and the toml/yaml forms, bare or
 /// format-module-qualified), on the un-mangled AST.
-fn collect_serde_turbofish_calls(sf: &SourceFile) -> Vec<(String, String, Span)> {
+fn collect_serde_turbofish_calls(sf: &SourceFile) -> Vec<(String, String, Span, String)> {
     use gossamer_ast::Visitor;
     use gossamer_ast::expr::{Expr, ExprKind};
     use gossamer_ast::visitor::walk_expr;
 
     struct Collector {
-        calls: Vec<(String, String, Span)>,
+        calls: Vec<(String, String, Span, String)>,
+        module: Vec<String>,
     }
     impl Visitor for Collector {
+        fn visit_item(&mut self, item: &gossamer_ast::Item) {
+            let name = match &item.kind {
+                ItemKind::Mod(decl) if matches!(decl.body, gossamer_ast::ModBody::Inline(_)) => {
+                    Some(decl.name.name.clone())
+                }
+                _ => None,
+            };
+            self.module.extend(name.clone());
+            gossamer_ast::visitor::walk_item(self, item);
+            if name.is_some() {
+                self.module.pop();
+            }
+        }
+
         fn visit_expr(&mut self, expr: &Expr) {
             walk_expr(self, expr);
             let ExprKind::Call { callee, .. } = &expr.kind else {
@@ -505,11 +514,14 @@ fn collect_serde_turbofish_calls(sf: &SourceFile) -> Vec<(String, String, Span)>
             if written.is_empty() {
                 return;
             }
-            self.calls.push((op, written.join("::"), callee.span));
+            self.calls.push((op, written.join("::"), callee.span, self.module.join("::")));
         }
     }
 
-    let mut collector = Collector { calls: Vec::new() };
+    let mut collector = Collector {
+        calls: Vec::new(),
+        module: Vec::new(),
+    };
     collector.visit_source_file(sf);
     collector.calls
 }

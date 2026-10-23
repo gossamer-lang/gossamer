@@ -1,0 +1,49 @@
+// A `Result` holding a `Result` whose `Ok` is a struct with heap fields keeps
+// those fields when it is built from a local, by `map`, or by a decode, and
+// read through one nested pattern or two matches.
+
+use std::encoding::json
+use std::errors
+
+struct Icon {
+    rgba: Vec<i64>
+    name: String
+}
+
+fn make(name: String) -> Result<Icon, errors::Error> {
+    Ok(Icon { rgba: #[1, 2, 3], name: name })
+}
+
+fn wrapped(name: String) -> Result<Result<Icon, errors::Error>, String> {
+    let inner = make(name)
+    Ok(inner)
+}
+
+fn decoded(answer: Result<String, String>) -> Icon {
+    match answer.map(|text| json::decode::<Icon>(text)) {
+        Ok(Ok(icon)) => icon
+        Ok(Err(e)) => panic(f"decode: {e}")
+        Err(e) => panic(f"answer: {e}")
+    }
+}
+
+fn main() {
+    match wrapped("local") {
+        Ok(Ok(icon)) => println(f"{icon.name} {icon.rgba}")
+        _ => println("missing")
+    }
+    let r = wrapped("two-step")
+    match r {
+        Ok(inner) => match inner {
+            Ok(icon) => println(f"{icon.name} {icon.rgba}")
+            Err(e) => println(f"{e}")
+        }
+        Err(e) => println(e)
+    }
+    match Ok::<String, String>("mapped").map(|name| make(name)) {
+        Ok(Ok(icon)) => println(f"{icon.name} {icon.rgba}")
+        _ => println("missing")
+    }
+    let icon = decoded(Ok("{\"rgba\": [4, 5], \"name\": \"decoded\"}"))
+    println(f"{icon.name} {icon.rgba}")
+}

@@ -173,6 +173,13 @@ jobs:
           # String + I/O: hello world (baseline for interpreter startup)
           [[ -f examples/hello_world.gos ]] && measure_process hello_world "$GOS" run examples/hello_world.gos
 
+          # Toolchain startup with no program.
+          measure_process gos_version "$GOS" --version
+
+          # A project with a Rust binding: the warmup run builds the binding
+          # library once, and the samples measure loading and calling it.
+          measure_process binding_startup "$GOS" run benchmarks/bindings/src/startup.gos
+
           # Struct + field arithmetic: generic struct instantiation
           [[ -f examples/generic_struct.gos ]] && measure_process generic_struct "$GOS" run examples/generic_struct.gos
 
@@ -319,7 +326,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          resolved_cargo="$("$HOME/.cargo/bin/rustup" which cargo)"
+          # Homebrew's rustup on $PATH stands in when ~/.cargo/bin has none.
+          rustup_bin="$HOME/.cargo/bin/rustup"
+          [ -x "$rustup_bin" ] || rustup_bin="$(command -v rustup)"
+          resolved_cargo="$("$rustup_bin" which cargo)"
           echo "CARGO_BIN=$resolved_cargo" >> "$GITHUB_ENV"
 
       - name: Build release `gos`

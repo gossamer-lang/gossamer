@@ -15,7 +15,11 @@
 //! message via a raw `write(2)` syscall and calls
 //! [`std::process::abort`]. Otherwise it restores the default
 //! disposition and re-raises so the original SIGSEGV is observed
-//! by the parent process / debugger.
+//! by the parent process / debugger. The fault has already been
+//! reported, so the re-raise skips the core dump unless
+//! `GOS_CORE_DUMP` is set: a dump writes out every page the
+//! allocator holds, which takes minutes and leaves the process
+//! unkillable while it runs.
 //!
 //! On Windows the same job is done by `SetThreadStackGuarantee` +
 //! `SetUnhandledExceptionFilter`, which fires on
@@ -230,6 +234,8 @@ mod unix {
     // running on every thread.
     static ACTION_INSTALLED: AtomicBool = AtomicBool::new(false);
     static ACTION_ONCE: Once = Once::new();
+    // Read once at installation: the handler cannot read the environment.
+    static KEEP_CORE_DUMP: AtomicBool = AtomicBool::new(false);
 
     struct AltStack {
         buffer: Option<Box<[u8]>>,
@@ -411,6 +417,10 @@ mod unix {
 
     fn install_sigaction() {
         ACTION_ONCE.call_once(|| {
+            KEEP_CORE_DUMP.store(
+                std::env::var_os("GOS_CORE_DUMP").is_some(),
+                Ordering::Relaxed,
+            );
             // SAFETY: zero-init `sigaction` is a defined initial
             // state across every supported libc; we set the fields
             // we care about below.
@@ -584,9 +594,34 @@ mod unix {
                 )
             };
         }
+        if !KEEP_CORE_DUMP.load(Ordering::Relaxed) {
+            skip_core_dump();
+        }
         // Restore the default disposition and re-raise so the original
         // SIGSEGV is observed.
         propagate_signal(sig);
+    }
+
+    // The signal still ends the process; only the dump of its memory is
+    // skipped.
+    fn skip_core_dump() {
+        // A piped `core_pattern` (systemd-coredump) ignores a zero core limit,
+        // so Linux clears the dumpable flag instead.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        // SAFETY: `prctl(PR_SET_DUMPABLE)` is a plain syscall on the calling
+        // process with no memory arguments.
+        unsafe {
+            let _ = libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        // SAFETY: `setrlimit` is a plain syscall reading a stack-local limit.
+        unsafe {
+            let none = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            let _ = libc::setrlimit(libc::RLIMIT_CORE, &raw const none);
+        }
     }
 
     fn is_stack_overflow(addr: usize) -> bool {

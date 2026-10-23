@@ -602,6 +602,8 @@ pub(crate) fn copy_returned_lent_tables(body: &mut Body, tcx: &gossamer_types::T
                     Rvalue::Use(Operand::Copy(src)) if place.projection.is_empty() => {
                         LentDef::Copy(src.clone())
                     }
+                    // A `static mut` keeps the table a read of it names.
+                    Rvalue::StaticLoad(_) if place.projection.is_empty() => LentDef::Lent,
                     Rvalue::CallIntrinsic {
                         name: "gos_rt_result_payload",
                         args,

@@ -1417,6 +1417,29 @@ impl<'a> Builder<'a> {
     /// produces (with the element type from the `.iter()` result), not the
     /// receiver. (`HashMap` is not a named Adt, so `runtime_kind_from_ty`
     /// returns `None` for it - this checks the kind directly.)
+    /// Whether `receiver.iter()` walks the receiver's own elements, so a loop
+    /// over it can walk the receiver directly: a sequence, or a receiver whose
+    /// type lowering left unresolved. Any other type's `iter()` (an `Option`'s,
+    /// a user type's) answers a sequence of its own, which the loop walks.
+    pub(crate) fn iter_walks_its_receiver(&self, receiver: &gossamer_hir::HirExpr) -> bool {
+        use gossamer_types::TyKind;
+        let mut cur = self
+            .receiver_local_from_path(receiver)
+            .map_or(receiver.ty, |local| self.locals[local.0 as usize].ty);
+        while let TyKind::Ref { inner, .. } = self.tcx.kind_of(cur) {
+            cur = *inner;
+        }
+        matches!(
+            self.tcx.kind_of(cur),
+            TyKind::Vec(_)
+                | TyKind::Slice(_)
+                | TyKind::Array { .. }
+                | TyKind::Var(_)
+                | TyKind::Error
+                | TyKind::Param { .. }
+        )
+    }
+
     pub(crate) fn receiver_is_map_or_set(&self, receiver: &gossamer_hir::HirExpr) -> bool {
         use gossamer_types::TyKind;
         let mut cur = receiver.ty;
@@ -2100,6 +2123,15 @@ impl<'a> Builder<'a> {
         let carrier_entries =
             crate::lower::helpers::carrier_heap_child_entries(self.tcx, ty, base_word);
         if !carrier_entries.is_empty() {
+            // A box of the carrier owns its copy-blob arm too, as a carrier
+            // field's entries do: the heap entries name only the other arms.
+            if let Some(gate) = self.carrier_blob_gate(ty) {
+                out.push(
+                    (gossamer_abi::rc::rc_child_blob_kind(gate)
+                        << gossamer_abi::rc::RC_CHILD_KIND_SHIFT)
+                        | (base_word + 1),
+                );
+            }
             out.extend(carrier_entries);
             return;
         }
@@ -2511,13 +2543,11 @@ impl<'a> Builder<'a> {
             B::F64 => self.tcx.float_ty(gossamer_types::FloatTy::F64),
             B::Char => self.tcx.char_ty(),
             B::String => self.tcx.string_ty(),
+            // A binding answers a buffer of its own: a `Vec<u8>` the caller
+            // owns, one word per byte as every compiled byte vector holds it.
             B::Bytes => {
-                // Bytes is `[u8]` at the source level, and a slice carries
-                // that: it shares the `Vec` runtime representation - the same
-                // IntArray path `[i64]` takes - while keeping the bare-bracket
-                // spelling the source type is written in.
-                let u8_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
-                self.tcx.intern(TyKind::Slice(u8_ty))
+                let u8_ty = self.tcx.int_ty(gossamer_types::IntTy::U8);
+                self.tcx.intern(TyKind::Vec(u8_ty))
             }
             B::Vec(inner) => {
                 let inner_ty = self.binding_type_to_mir(inner);

@@ -241,7 +241,10 @@ pub(crate) fn record_channel_elem_kind(body: &mut Body, tcx: &mut gossamer_types
         else {
             continue;
         };
-        if !matches!(name.as_str(), "gos_rt_chan_send" | "gos_rt_chan_try_send") {
+        if !matches!(
+            name.as_str(),
+            "gos_rt_chan_send" | "gos_rt_chan_try_send" | "gos_rt_chan_send_select_arm"
+        ) {
             continue;
         }
         let (Some(Operand::Copy(chan)), Some(Operand::Copy(val))) = (args.first(), args.get(1))

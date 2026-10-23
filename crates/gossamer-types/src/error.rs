@@ -1143,6 +1143,15 @@ pub enum TypeError {
         /// Source-like spelling of the referenced place.
         argument: String,
     },
+    /// A Rust binding answers a `#[derive(GosStruct)]` struct, and the
+    /// program declares no type of that name to read it as.
+    #[error("`{binding}` answers the struct `{name}`, which this program does not declare")]
+    BindingStructUndeclared {
+        /// The binding item, as `module::item`.
+        binding: String,
+        /// The struct name the binding's signature carries.
+        name: String,
+    },
 }
 
 /// The cast that brings two integer operands to one type, for
@@ -1285,6 +1294,7 @@ impl TypeError {
             Self::SharedPayloadUnsupported { .. } => "shared-payload-unsupported",
             Self::MutableArgumentRequiresReference { .. } => "mutable-argument-requires-reference",
             Self::MutReferenceToValueParameter { .. } => "mut-reference-to-value-parameter",
+            Self::BindingStructUndeclared { .. } => "binding-struct-undeclared",
         }
     }
 
@@ -1413,6 +1423,7 @@ impl TypeError {
             Self::SharedPayloadUnsupported { .. } => "GT0077",
             Self::MutableArgumentRequiresReference { .. } => "GT0046",
             Self::MutReferenceToValueParameter { .. } => "GT0121",
+            Self::BindingStructUndeclared { .. } => "GT0122",
         }
     }
 }
@@ -2538,6 +2549,15 @@ impl TypeDiagnostic {
                     ))
                     .with_note(
                         "a parameter that is not `&mut`, `mut` included, holds a value of its own: a `mut` parameter writes only its copy",
+                    );
+            }
+            TypeError::BindingStructUndeclared { name, .. } => {
+                out = out
+                    .with_help(format!(
+                        "declare `struct {name} {{ .. }}` with the fields the binding's Rust struct has, in the same order and types"
+                    ))
+                    .with_note(
+                        "a binding struct crosses field by field into the program's struct of the same name",
                     );
             }
         }

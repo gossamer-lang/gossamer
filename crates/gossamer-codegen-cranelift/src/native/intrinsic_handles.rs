@@ -1163,9 +1163,10 @@ pub(super) fn lower_intrinsic_call_handles(
             );
             Ok(true)
         }
-        "gos_rt_chan_send" | "send" => {
+        "gos_rt_chan_send" | "send" | "gos_rt_chan_send_select_arm" => {
             // Stack-spill the value word so the runtime's
-            // `gos_rt_chan_send(chan, *const u8)` can memcpy it in.
+            // `gos_rt_chan_send(chan, *const u8)` can memcpy it in. A select's
+            // send arm reads its element the same way, with the builder last.
             let chan = match args.first() {
                 Some(a) => lower_operand(
                     module,
@@ -1204,9 +1205,28 @@ pub(super) fn lower_intrinsic_call_handles(
             builder
                 .ins()
                 .store(MemFlagsData::trusted(), v64, slot_addr, 0);
-            let send_fn = intrinsics.extern_fn_by_name(module, "gos_rt_chan_send")?;
-            let fref = module.declare_func_in_func(send_fn, builder.func);
-            let _ = builder.ins().call(fref, &[chan, slot_addr]);
+            if name == "gos_rt_chan_send_select_arm" {
+                let select = match args.get(2) {
+                    Some(a) => lower_operand(
+                        module,
+                        builder,
+                        locals,
+                        body,
+                        tcx,
+                        a,
+                        Some(ptr_ty),
+                        intrinsics,
+                    )?,
+                    None => bail!("chan_send_select_arm: missing builder arg"),
+                };
+                let arm_fn = intrinsics.extern_fn_by_name(module, "gos_rt_chan_send_select_arm")?;
+                let fref = module.declare_func_in_func(arm_fn, builder.func);
+                let _ = builder.ins().call(fref, &[chan, slot_addr, select]);
+            } else {
+                let send_fn = intrinsics.extern_fn_by_name(module, "gos_rt_chan_send")?;
+                let fref = module.declare_func_in_func(send_fn, builder.func);
+                let _ = builder.ins().call(fref, &[chan, slot_addr]);
+            }
             let unit = builder.ins().iconst(types::I64, 0);
             define_var_to(
                 builder,

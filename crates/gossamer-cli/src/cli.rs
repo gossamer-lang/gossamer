@@ -130,7 +130,13 @@ enum Command {
         /// preparation, checking, and loading into the VM and the JIT.
         #[arg(long)]
         timings: bool,
-        /// Arguments forwarded to the interpreted program.
+        /// Run the program as the native executable `gos build` makes of it.
+        /// A current release build starts at once; otherwise the program is
+        /// built with the debug profile and that build runs, while the release
+        /// build follows in the background for the next run.
+        #[arg(long, conflicts_with_all = ["no_jit", "timings"])]
+        native: bool,
+        /// Arguments forwarded to the program.
         #[arg(allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -731,9 +737,9 @@ enum Command {
         /// Remove LLVM incremental object caches.
         #[arg(long)]
         ir: bool,
-        /// Remove cached Rust-binding runner and staticlib builds.
+        /// Remove the `[rust-bindings]` libraries and staticlibs Cargo built.
         #[arg(long)]
-        runners: bool,
+        bindings: bool,
         /// Remove fetched package source cache entries.
         #[arg(long)]
         packages: bool,
@@ -815,7 +821,7 @@ pub fn try_fast_run(args: &[std::ffi::OsString]) -> Option<ExitCode> {
         if parsed.no_jit {
             gossamer_interp::set_jit_disabled();
         }
-        cmd::run::dispatch(parsed.file, &parsed.forwarded)
+        cmd::run::dispatch(parsed.file, &parsed.forwarded, parsed.native)
     })();
     Some(match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -830,6 +836,7 @@ struct FastRun {
     file: Option<PathBuf>,
     no_jit: bool,
     locked: bool,
+    native: bool,
     forwarded: Vec<String>,
 }
 
@@ -841,6 +848,7 @@ fn parse_fast_run(args: &[std::ffi::OsString]) -> Option<FastRun> {
         file: None,
         no_jit: false,
         locked: false,
+        native: false,
         forwarded: Vec::new(),
     };
     let mut forwarding = false;
@@ -852,9 +860,10 @@ fn parse_fast_run(args: &[std::ffi::OsString]) -> Option<FastRun> {
         }
         match arg.to_str() {
             Some("--") => forwarding = true,
-            Some("--no-jit") if !parsed.no_jit => parsed.no_jit = true,
+            Some("--no-jit") if !parsed.no_jit && !parsed.native => parsed.no_jit = true,
             Some("--main-thread") if !main_thread => main_thread = true,
             Some("--locked") if !parsed.locked => parsed.locked = true,
+            Some("--native") if !parsed.native && !parsed.no_jit => parsed.native = true,
             Some(text) if text.starts_with('-') => return None,
             _ if parsed.file.is_none() => parsed.file = Some(PathBuf::from(arg)),
             _ => parsed.forwarded.push(arg.to_str()?.to_owned()),
@@ -1119,7 +1128,7 @@ fn suppress_zsh_run_arg_file_completion(script: &mut String) {
         .find("\n;;")
         .map_or(script.len(), |offset| start + 1 + offset);
     let mut block = script[start..end].to_string();
-    if let Some(args) = block.find("*::args -- Arguments forwarded to the interpreted program") {
+    if let Some(args) = block.find("*::args -- Arguments forwarded to the program") {
         if let Some(default) = block[args..].find(":_default") {
             let default = args + default;
             block.replace_range(default..default + ":_default".len(), ":_nothing");
@@ -1218,6 +1227,7 @@ fn dispatch(
             main_thread: _,
             locked,
             timings,
+            native,
             args,
         }) => {
             crate::cmd::pkg::enforce_lockfile_if_requested(locked)?;
@@ -1234,7 +1244,7 @@ fn dispatch(
                 Some((first, rest)) if first == "--" => rest,
                 _ => args.as_slice(),
             };
-            cmd::run::dispatch(file, args)
+            cmd::run::dispatch(file, args, native)
         }
         Some(Command::Watch {
             file,
@@ -1487,7 +1497,7 @@ fn dispatch(
             dry_run,
             frontend,
             ir,
-            runners,
+            bindings,
             packages,
             build_cache,
             native,
@@ -1501,7 +1511,7 @@ fn dispatch(
                 for (enabled, class) in [
                     (frontend, CacheClass::Frontend),
                     (ir, CacheClass::Ir),
-                    (runners, CacheClass::Runners),
+                    (bindings, CacheClass::Bindings),
                     (packages, CacheClass::Packages),
                     (build_cache, CacheClass::Build),
                     (native, CacheClass::Native),
@@ -1712,6 +1722,7 @@ fn dispatch_build(
         timings: reports.timings,
         explain_profile: reports.explain_profile,
         uniqueness_report: reports.uniqueness_report,
+        purpose: cmd::build::Purpose::of_this_build(),
     })
 }
 
@@ -1830,11 +1841,11 @@ mod tests {
             "{zsh}"
         );
         assert!(
-            zsh.contains("Arguments forwarded to the interpreted program:_nothing"),
+            zsh.contains("Arguments forwarded to the program:_nothing"),
             "{zsh}"
         );
         assert!(
-            !zsh.contains("Arguments forwarded to the interpreted program:_default"),
+            !zsh.contains("Arguments forwarded to the program:_default"),
             "{zsh}"
         );
     }

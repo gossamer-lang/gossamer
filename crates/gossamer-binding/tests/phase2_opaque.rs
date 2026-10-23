@@ -46,3 +46,33 @@ fn opaque_methods_register_as_type_qualified_items() {
     assert!(names.contains(&"get"), "got {names:?}");
     assert!(names.contains(&"inc"), "got {names:?}");
 }
+
+#[test]
+fn an_opaque_handle_carries_its_state_between_calls() {
+    use gossamer_binding::Value;
+    use gossamer_binding::testing::call;
+    let handle = call("Counter::new", &[]).unwrap();
+    assert!(matches!(handle, Value::Int(_)));
+    assert_eq!(
+        call("Counter::inc", std::slice::from_ref(&handle)).unwrap(),
+        Value::Int(1)
+    );
+    assert_eq!(
+        call("Counter::inc", std::slice::from_ref(&handle)).unwrap(),
+        Value::Int(2)
+    );
+    assert_eq!(call("Counter::get", &[handle]).unwrap(), Value::Int(2));
+}
+
+#[test]
+fn an_unknown_opaque_handle_panics_with_its_name() {
+    use gossamer_binding::{RuntimeError, Value};
+    let err = gossamer_binding::testing::call("Counter::get", &[Value::Int(999_999)]).unwrap_err();
+    let RuntimeError::Panic(message) = err else {
+        panic!("expected a panic, got {err:?}");
+    };
+    assert!(
+        message.contains("get") && message.contains("999999"),
+        "{message}"
+    );
+}

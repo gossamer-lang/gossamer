@@ -3373,7 +3373,8 @@ must be installed to compile natively on the Pi.
 
 | Mode | Command | Backend | Pipeline | Speed | Output quality |
 |---|---|---|---|---|---|
-| Interpret | `gos run file.gos` | Bytecode VM | Direct dispatch; in-process Cranelift JIT tiers up hot bodies | Fastest cold start | No native codegen |
+| Run | `gos run file.gos` | Bytecode VM | Direct dispatch; in-process Cranelift JIT tiers up hot bodies | Starts at once; no native toolchain needed | No native codegen |
+| Native run | `gos run --native file.gos` | LLVM | The current release build, else a debug build made first; the release build follows in the background | An edit rebuilds only the modules it changed; dependency objects are shared between projects | The shipped binary's behavior |
 | Debug build | `gos build` | LLVM | `opt -O1`, then `llc -O0` | Sub-second for small programs | Optimized enough for development, with panic frames |
 | Release build | `gos build --release` | LLVM | `opt -O3 \| llc -O3 -mcpu=native -mattr=+prefer-256-bit` | Seconds for thousands of LoC | Vectorised, inlined |
 
@@ -3381,10 +3382,24 @@ LLVM is the canonical native backend; the Cranelift code path is
 reserved for the in-process JIT inside `gossamer-interp` and is not
 reachable from `gos build`. Any MIR shape the LLVM lowerer cannot
 handle is a hard `gos build` failure rather than a silent per-function
-Cranelift fallback. The register-based bytecode VM is the sole `gos
-run` / `gos test` engine and lowers every construct natively; there is
-no tree-walker interpreter. VM correctness is pinned by the tier-parity
+Cranelift fallback. `gos run` runs a program on the register-based bytecode
+VM; `gos run --native` runs its native executable, as `go run` does: a
+current release build starts at once, otherwise a debug build is made first
+(reusing every object an earlier build of any project left) and the release
+build follows in the background for the next run. The VM also runs `gos -e`,
+a `--native` run on a host without the LLVM tools (with a note), and is the
+`gos test`, `gos repl`, and `comptime` engine. There
+is no tree-walker interpreter. VM correctness is pinned by the tier-parity
 suite and the VM-vs-LLVM-AOT differential.
+
+A debug build compiles each dependency package whole, and every symbol it
+emits is named by source paths rather than by numbers the program chose, so a
+dependency's modules produce the same objects in every program that uses
+them. Objects are kept in the user cache (`gos cache`), keyed by the exact IR
+they were compiled from, so a second project using the same library links the
+first project's objects and compiles only its own modules. A specialisation of
+a generic is compiled into each module that uses it and folded to one copy
+at link time.
 
 ### 11.4 Cross-compilation
 
@@ -3765,13 +3780,12 @@ declarations differ.
 
 The `[rust-bindings]` section of `project.toml` remains the way to call
 Rust code. A Rust crate registers its entry points with
-`gossamer_binding::register_module!`; the toolchain compiles the crate
-into a per-project runner and links it into the produced binary or
-interpreter. Types crossing that boundary use the `gossamer-binding` ABI
+`gossamer_binding::register_module!`; `gos run` builds the crate once as a
+shared library and loads it, and `gos build` links it into the binary. Types crossing that boundary use the `gossamer-binding` ABI
 (`Unit`, `Bool`, `I64`, `F64`, `Char`, `String`, `Tuple`, `Vec`,
 `Option`, `Result`, `Opaque`, `Any`, `Bytes`, `Map`, `Variant`,
 `Callback`); see `docs_src/libraries.md` and
-`crates/gossamer-binding/ABI_0_4.md`.
+`crates/gossamer-binding/ABI.md`.
 
 ---
 
@@ -4001,13 +4015,16 @@ precedence.
 Package source trees are content-addressed under
 `~/.gossamer/cache/pkg/<sha256>/source/`, overridden by `GOS_CACHE_DIR`.
 Frontend caches follow `GOSSAMER_CACHE_DIR`, then the platform XDG/user cache
-location. Project-native IR objects use `.gos-cache/ir-cache/`. These cache
+location. Native objects live in the user cache's `ir-cache/`, shared by
+every project and keyed by the IR each was compiled from; the builds
+`gos run` starts live in a project's `.gos-cache/run/`, or the user cache's
+`run/` for a file outside any project. These cache
 locations are performance details and may be removed with `gos clean`. Use
 `gos cache` to inspect every active root and `gos cache --prune` to remove
 entries older than 30 days or beyond the `GOS_CACHE_MAX_BYTES` total budget
 (20 GiB by default). Objects compiled from `[native]` sources live under
 `.gos-cache/native/`, and `gos clean --native` removes only those.
-`gos clean --all` also clears Rust-binding runners,
+`gos clean --all` also clears Rust-binding builds (`--bindings` alone),
 package sources, and legacy build artifacts.
 
 ### 16.6 Subcommands
@@ -4017,7 +4034,7 @@ package sources, and legacy build artifacts.
 - `gos add ID[@VERSION]` - add a dependency entry.
 - `gos remove ID` - remove a dependency entry.
 - `gos build` - compile the current project.
-- `gos` - interpret the current project.
+- `gos run` - run the current project on the VM; `--native` builds and runs its native executable.
 - `gos test` - run the project's tests.
 - `gos fetch` - resolve and download (but do not build) all deps.
 - `gos update` - update deps within their declared ranges.

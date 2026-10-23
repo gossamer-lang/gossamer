@@ -80,7 +80,6 @@ register_module!(
     }
 );
 
-pub fn __bindings_force_link() { __gos_ecosystem::force_link(); }
 "#,
     )
     .expect("write external binding source");
@@ -178,9 +177,6 @@ gossamer_binding::register_module!(
     }
 );
 
-pub fn __bindings_force_link() {
-    __gos_calls::force_link();
-}
 "#;
 
 const SCAFFOLD_MAIN: &str = r#"use probe
@@ -295,4 +291,71 @@ fn scaffolded_binding_runs_and_builds() {
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The live-allocation counts `GOS_LEAK_LEDGER` reports when `run` exits.
+#[cfg(target_os = "linux")]
+fn ledger_of(out: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "run failed:\n{stderr}\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    stderr
+        .lines()
+        .find(|line| line.starts_with("LEAK LEDGER"))
+        .unwrap_or_else(|| panic!("no ledger line:\n{stderr}"))
+        .to_string()
+}
+
+/// A compiled binding call frees every wire value it builds and takes every
+/// part of what the binding answers, so a program's live allocations at exit
+/// do not grow with how many calls it made, on the JIT or natively.
+#[cfg(target_os = "linux")]
+#[test]
+fn compiled_binding_calls_leave_nothing_live_per_call() {
+    let root = workspace_root();
+    let project = root.join("feature-testing-examples/binding_wire_shapes");
+    let entry = project.join("src/main.gos");
+    let ledger = |args: &[&str], rounds: &str| {
+        let out = Command::new(gos_bin())
+            .args(args)
+            .arg(&entry)
+            .arg(rounds)
+            .env("GOS_LEAK_LEDGER", "1")
+            .output()
+            .expect("spawn gos");
+        ledger_of(&out)
+    };
+    assert_eq!(
+        ledger(&["run"], "2"),
+        ledger(&["run"], "20"),
+        "the JIT run grew"
+    );
+
+    let out_dir = std::env::temp_dir().join(format!("gos-wire-leaks-{}", std::process::id()));
+    let build = Command::new(gos_bin())
+        .args(["build", "--release"])
+        .arg(&project)
+        .arg("--out-dir")
+        .arg(&out_dir)
+        .output()
+        .expect("spawn gos build");
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = out_dir.join("binding_wire_shapes");
+    let native = |rounds: &str| {
+        let out = Command::new(&binary)
+            .arg(rounds)
+            .env("GOS_LEAK_LEDGER", "1")
+            .output()
+            .expect("run the native build");
+        ledger_of(&out)
+    };
+    assert_eq!(native("2"), native("20"), "the native build grew");
+    let _ = std::fs::remove_dir_all(&out_dir);
 }

@@ -111,6 +111,7 @@ version. This page is auto-generated from the catalogue in
 | [`GT0044`](#gt0044) | Types | generic return type not inferred |
 | [`GT0045`](#gt0045) | Types | question mark not supported here |
 | [`GT0121`](#gt0121) | Types | `&mut` passed where a value is taken |
+| [`GT0122`](#gt0122) | Types | a binding answers an undeclared struct |
 
 ## `GP0001` <a id="gp0001"></a>
 
@@ -705,4 +706,10 @@ The `?` operator can only unwrap `Result` inside a `Result`-returning function o
 **Types** - `&mut` passed where a value is taken
 
 A parameter that is not `&mut` holds a value of its own, and a `mut` parameter writes only that copy, so nothing the callee writes would reach the place the argument names. Declare the parameter `&mut T`, or pass the value.
+
+## `GT0122` <a id="gt0122"></a>
+
+**Types** - a binding answers an undeclared struct
+
+A `[rust-bindings]` item answers a `#[derive(GosStruct)]` struct, which crosses field by field into the program's struct of the same name. Declare that struct with the Rust struct's fields, in the same order and with the same types.
 

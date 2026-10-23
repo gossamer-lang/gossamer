@@ -243,12 +243,12 @@ fn parallel_benchmark_rc_calls_are_pinned() {
         "benchmarks/parallel/stats.gos",
         &[
             ("value", none()),
-            ("__closure_0", none()),
-            ("__closure_1", none()),
-            ("__closure_2", none()),
-            ("__closure_3", none()),
-            ("__closure_4", none()),
-            ("__closure_5", none()),
+            ("__closure_0.main", none()),
+            ("__closure_1.main", none()),
+            ("__closure_2.main", none()),
+            ("__closure_3.main", none()),
+            ("__closure_4.main", none()),
+            ("__closure_5.main", none()),
         ],
     );
     expect(
@@ -256,8 +256,8 @@ fn parallel_benchmark_rc_calls_are_pinned() {
         &[
             ("escape", none()),
             ("row", none()),
-            ("__closure_0", none()),
-            ("__closure_1", none()),
+            ("__closure_0.main", none()),
+            ("__closure_1.main", none()),
         ],
     );
     let stats = rc_call_counts("benchmarks/parallel/stats.gos", &["main"]);

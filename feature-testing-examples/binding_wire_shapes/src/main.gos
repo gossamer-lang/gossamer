@@ -1,0 +1,88 @@
+// Every shape a binding takes or answers crosses alike on every tier, and a
+// callable a binding keeps from one call answers a later one. Each round
+// prints the same lines, so a tier that leaks a shape per call grows with the
+// round count the first argument names while its output stays the same.
+use std::env
+use wire_probe
+
+struct Probe { name: String, score: f64, on: bool, count: i64 }
+
+// The arms `wire_probe::shape` declares, spelled as the ordinary enum they are.
+enum Shape { Pair(i64, bool), Label(String) }
+
+fn describe(shape: Shape) -> String {
+    match shape {
+        Shape::Pair(n, b) => f"pair {n} {b}"
+        Shape::Label(s) => f"label {s}"
+    }
+}
+
+fn round(i: i64) {
+    println(wire_probe::scalars(i, 1.5, true, 'z'))
+    println(wire_probe::text("hi"))
+    println(f"{wire_probe::ints(#[1, 2, 3]):?}")
+    println(f"{wire_probe::floats(#[1.0, 3.0]):?}")
+    println(f"{wire_probe::flags(#[true, false]):?}")
+    println(f"{wire_probe::words(#["a", "bc"]):?}")
+    println(f"{wire_probe::grid(3):?}")
+    println(f"{wire_probe::maybe_int(i)} {wire_probe::maybe_int(0)}")
+    println(f"{wire_probe::maybe_text(i):?} {wire_probe::maybe_text(0):?}")
+    println(f"{wire_probe::maybe_float(i)}")
+    println(f"{wire_probe::maybe_words(2):?}")
+    println(f"{wire_probe::parse("42")} {wire_probe::parse("x").is_err()}")
+    println(f"{wire_probe::parse_float("2.5")}")
+    match wire_probe::split("") {
+        Ok(parts) => println(f"parts {parts:?}")
+        Err(e) => println(f"error {e}")
+    }
+    println(f"{wire_probe::split("a,b"):?}")
+    println(f"{wire_probe::checked(true).is_ok()} {wire_probe::checked(false).is_err()}")
+    println(f"{wire_probe::chunk("abc".as_bytes()):?}")
+    let counts = wire_probe::tally(#["x", "y", "x"])
+    println(f"{counts["x"]} {counts["y"]} {counts.len()}")
+    let renamed = wire_probe::rename({ "k": "v" })
+    println(f"{renamed["v"]}")
+    let labels = wire_probe::labels(2)
+    println(f"{labels[0]} {labels[1]}")
+    let p = wire_probe::pair(i)
+    println(f"{p.0} {p.1}")
+    println(f"{wire_probe::triple((1, "ab", true)):?}")
+    let probe = wire_probe::probe(Probe { name: "n", score: 1.25, on: false, count: 7 })
+    println(f"{probe.name} {probe.score} {probe.on} {probe.count}")
+    println(f"{wire_probe::dynamic(0):?} {wire_probe::dynamic(1):?} {wire_probe::dynamic(2):?}")
+    println(describe(wire_probe::shape(0)))
+    println(describe(wire_probe::shape(1)))
+    println(f"{wire_probe::apply(|x: i64| x * 3, 5)}")
+    let base = 100
+    println(f"{wire_probe::keep(|x: i64| x + base)} {wire_probe::keep(|x: i64| x * 2)}")
+    println(f"{wire_probe::fire(10)}")
+    println(f"{wire_probe::forget()}")
+    nested(i)
+}
+
+// Shapes that nest composites cross as text the generated walk writes and
+// reads, alike on every tier.
+fn nested(i: i64) {
+    println(f"{wire_probe::maybe_pair(i):?} {wire_probe::maybe_pair(0):?}")
+    let parsed = wire_probe::parse_maybe(f"{i}")
+    println(f"{parsed:?} {wire_probe::parse_maybe(""):?} {wire_probe::parse_maybe("x").is_err()}")
+    println(f"{wire_probe::span("ab-cde"):?} {wire_probe::span("x"):?}")
+    println(f"{wire_probe::blobs(i + 1):?}")
+    println(f"{wire_probe::blob_sizes(#["ab".as_bytes(), "c".as_bytes()]):?}")
+    let ps = wire_probe::probes(i + 2)
+    println(f"{ps.len()} {ps[2].name} {ps[1].score} {ps[0].on} {ps[2].count}")
+    println(f"{wire_probe::total_count(ps)}")
+    let named = wire_probe::maybe_probe(i).map(|p| p.name)
+    println(f"{named:?} {wire_probe::maybe_probe(0).is_none()}")
+    println(f"{wire_probe::pairs(i):?}")
+    println(f"{wire_probe::pair_sum(#[(2, 3), (4, i)])}")
+    println(f"{wire_probe::maybe_ints(#[i, 0, 3]):?}")
+    println(f"{wire_probe::deep(0):?} {wire_probe::deep(1):?} {wire_probe::deep(i + 1):?}")
+}
+
+fn main() {
+    let rounds = env::args().get(1).and_then(|n| n.to_i64()).unwrap_or(2)
+    for i in 1..rounds + 1 {
+        round(i)
+    }
+}

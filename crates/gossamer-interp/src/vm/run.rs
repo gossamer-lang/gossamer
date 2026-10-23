@@ -1095,7 +1095,7 @@ impl Vm {
                                 // `Arc<BuiltinInner>` allocation just to thread it
                                 // through `apply`.
                                 type BuiltinFn = fn(&[Value]) -> RuntimeResult<Value>;
-                                type NativeFn = (crate::value::NativeCall, &'static str);
+                                type NativeFn = (crate::value::NativeEntry, &'static str);
                                 let (cached_builtin, cached_native, cached): (
                                     Option<BuiltinFn>,
                                     Option<NativeFn>,
@@ -1143,13 +1143,13 @@ impl Vm {
                                     let r = call_fn(&call_args)?;
                                     self.pool.borrow_mut().give_args(call_args);
                                     r
-                                } else if let Some((call_fn, name)) = cached_native {
+                                } else if let Some((entry, name)) = cached_native {
                                     let call_args = crate::value::unwrap_mut_cells_unless_writer(
                                         name, arg_values,
                                     );
                                     let mut dispatch =
                                         super::native_dispatch::VmDispatch::new(self);
-                                    let r = call_fn(&mut dispatch, &call_args)?;
+                                    let r = entry.invoke(&mut dispatch, &call_args)?;
                                     self.pool.borrow_mut().give_args(call_args);
                                     r
                                 } else if let Some(g) = cached {

@@ -1,0 +1,8 @@
+[project]
+id = "example.com/binding_wire_shapes"
+version = "0.1.0"
+
+[dependencies]
+
+[rust-bindings]
+wire_probe = { path = "../../example-external-libraries/wire_probe" }

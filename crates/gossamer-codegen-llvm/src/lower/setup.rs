@@ -385,7 +385,8 @@ impl<'a> Lowerer<'a> {
             return;
         };
         declare_rt(&mut self.runtime_refs, "gos_rt_stack_push");
-        let (name_global, _) = self.strings.borrow_mut().intern(&self.body.name);
+        let display = frame_name(&self.body.name, self.tcx);
+        let (name_global, _) = self.strings.borrow_mut().intern(display);
         let (file_global, _) = self.strings.borrow_mut().intern(&file);
         writeln!(
             self.out,
@@ -894,4 +895,19 @@ fn param_only_read(body: &gossamer_mir::Body, param: Local) -> bool {
         }
     }
     true
+}
+
+/// The name a panic report gives the body `name`: a specialisation reports
+/// the generic it was made from, as the VM does, and the report reads the
+/// same in every program.
+fn frame_name<'a>(name: &'a str, tcx: &'a gossamer_types::TyCtxt) -> &'a str {
+    let template = name
+        .strip_prefix("fn#")
+        .and_then(|rest| rest.split_once("__mono__"))
+        .and_then(|(def, _)| def.parse().ok())
+        .and_then(|def| tcx.generic_fn_name(def))
+        .unwrap_or(name);
+    template
+        .split_once("$mono$")
+        .map_or(template, |(base, _)| base)
 }

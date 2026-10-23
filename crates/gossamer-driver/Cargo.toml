@@ -23,6 +23,7 @@ musl = []
 anyhow = { workspace = true }
 gossamer-abi = { workspace = true }
 gossamer-ast = { workspace = true }
+gossamer-binding-abi = { workspace = true }
 gossamer-codegen-cranelift = { workspace = true }
 gossamer-codegen-llvm = { workspace = true }
 gossamer-diagnostics = { workspace = true }
@@ -32,7 +33,6 @@ gossamer-mir = { workspace = true }
 gossamer-parse = { workspace = true }
 gossamer-pkg = { workspace = true }
 gossamer-resolve = { workspace = true }
-gossamer-runner-template = { workspace = true }
 gossamer-types = { workspace = true }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 parking_lot = { workspace = true }
@@ -42,15 +42,11 @@ thiserror = { workspace = true }
 toml = { workspace = true }
 which = { workspace = true }
 
-# Liveness probe for the advisory build-lock holder, so a stale lock from a
-# crashed `gos` is reclaimed promptly instead of waiting out the deadline.
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
+# A build lock checks that its path still names the file it locked, which
+# Windows answers only through the file's handle information.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
-    "Win32_System_Threading",
 ] }
 

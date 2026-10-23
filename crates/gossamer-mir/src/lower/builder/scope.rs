@@ -424,7 +424,10 @@ impl<'a> Builder<'a> {
                 args,
                 ..
             } = &terminator
-                && matches!(name.as_str(), "gos_rt_chan_send" | "gos_rt_chan_try_send")
+                && matches!(
+                    name.as_str(),
+                    "gos_rt_chan_send" | "gos_rt_chan_try_send" | "gos_rt_chan_send_select_arm"
+                )
                 && let Some(Operand::Copy(value)) = args.get(1)
                 && value.projection.is_empty()
             {

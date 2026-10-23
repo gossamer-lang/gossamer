@@ -516,18 +516,18 @@ fn main() {
 
 #[test]
 fn unary_prefix_at_line_start_breaks_statement() {
-    // `&s`, `*p`, `-n` at the start of a line after a
+    // `&mut lines`, `*p`, `-n` at the start of a line after a
     // semicolonless statement must parse as a new statement, not
-    // as a binary continuation of the prior expression. Before the
-    // fix, `let s = "hi"\n&s |> ...` was glued into `let s = "hi" &
-    // s |> ...` and resolution failed with "cannot find `s` in
-    // this scope".
+    // as a binary continuation of the prior expression.
     let src = r#"
-use std::{iter, strings}
+use std::iter
+
+fn push_line(lines: &mut Vec<String>) { lines.push("beta") }
 
 fn main() {
-    let s = "alpha\nbeta"
-    &s |> strings::lines |> |v| iter::for_each(v, |l| println("{}", l))
+    let mut lines = #["alpha"]
+    &mut lines |> push_line
+    iter::for_each(lines, |l| println("{}", l))
 
     let n = 5
     -n
@@ -543,9 +543,12 @@ fn main() {
     let dir = fresh_dir("unary_line_start");
     let path = write_source(&dir, "unary_line_start", src);
     let run = run_vm(&path);
-    let _ = fs::remove_dir_all(&dir);
     assert_eq!(run.2, Some(0), "vm stderr: {}", run.1);
     assert_eq!(run.0, expected, "vm: got {:?}", run.0);
+    let bin = build_native(&path, &dir).expect("native build");
+    let native = run_native(&bin);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(native.0, expected, "native: got {:?}", native.0);
 }
 
 #[test]
@@ -1320,7 +1323,12 @@ fn main() {
     let bin = build_native(&path, &native_dir).expect("native build");
     let native = run_native(&bin);
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(native.2, Some(0), "native did not exit: stderr={}", native.1);
+    assert_eq!(
+        native.2,
+        Some(0),
+        "native did not exit: stderr={}",
+        native.1
+    );
     assert!(
         native.1.contains("had not finished"),
         "native drain report: {:?}",
@@ -1399,7 +1407,11 @@ fn main() {
 "#;
     let dir = fresh_dir("error_display_struct_result");
     let path = write_source(&dir, "error_display_struct_result", src);
-    let expected = ["display Err(boom)", "debug Err(boom)", "chain Err(outer: root)"];
+    let expected = [
+        "display Err(boom)",
+        "debug Err(boom)",
+        "chain Err(outer: root)",
+    ];
 
     let run = run_vm(&path);
     assert_eq!(run.2, Some(0), "vm stderr: {}", run.1);
@@ -1670,12 +1682,11 @@ fn main() {
         .expect("spawn gos");
     let vm = run_with_timeout(vm);
     assert_eq!(vm.2, Some(101), "vm stderr: {}", vm.1);
-    let frames: Vec<&str> = vm
-        .1
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("at "))
-        .map(|frame| frame.split(' ').next().unwrap_or(frame))
-        .collect();
+    let frames: Vec<&str> =
+        vm.1.lines()
+            .filter_map(|line| line.trim().strip_prefix("at "))
+            .map(|frame| frame.split(' ').next().unwrap_or(frame))
+            .collect();
     assert_eq!(frames, ["main", "run", "poke"], "vm stderr: {}", vm.1);
 }
 
@@ -1912,8 +1923,10 @@ fn main() {
     assert_eq!(status, Some(0), "stderr: {stderr}");
     assert_eq!(stdout, expected);
     assert!(
-        stderr.lines().any(|line| line.starts_with("gos-jit-stats: compiled=")
-            && !line.ends_with("compiled=0")),
+        stderr
+            .lines()
+            .any(|line| line.starts_with("gos-jit-stats: compiled=")
+                && !line.ends_with("compiled=0")),
         "the hot loop compiles: {stderr}"
     );
     let _ = fs::remove_dir_all(&dir);

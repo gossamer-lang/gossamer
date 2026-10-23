@@ -371,7 +371,7 @@ fn a_capture_reached_through_an_aggregate_keeps_its_own_type() {
         // Range.
         "fn main() { let y = 5\n let f = |x: i64| { let r = x..y\n if x == 1 { \"#\" } else { \" \" } }\n let _ = f(1) }\n",
     ] {
-        let (tys, mut tcx) = capture_slot_tys(source, "__closure_0");
+        let (tys, mut tcx) = capture_slot_tys(source, "__closure_0.main");
         let i64_ty = tcx.int_ty(gossamer_types::IntTy::I64);
         assert_eq!(tys, vec![i64_ty], "{source}");
     }
@@ -383,7 +383,7 @@ fn a_capture_reached_through_an_aggregate_keeps_its_own_type() {
 fn captures_of_mixed_types_each_keep_their_own() {
     let source = "fn main() { let scale = 3\n let bias = 0.5\n let label = \"n\"\n \
                   let f = |x: i64| { let t = (x, scale, bias, label)\n t.1 }\n let _ = f(1) }\n";
-    let (tys, mut tcx) = capture_slot_tys(source, "__closure_0");
+    let (tys, mut tcx) = capture_slot_tys(source, "__closure_0.main");
     let expected = vec![
         tcx.int_ty(gossamer_types::IntTy::I64),
         tcx.float_ty(gossamer_types::FloatTy::F64),

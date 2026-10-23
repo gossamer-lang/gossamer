@@ -44,6 +44,6 @@ pub use native::{
     compile_to_object_at_path_with_options, compile_to_object_with_options,
 };
 pub use native_symbols::{
-    NATIVE_SYMBOLS, NativeSymbol, NativeSymbolEntry, native_symbols_snapshot,
-    register_native_symbol,
+    BindingSymbolResolver, lazy_binding_symbol_names, register_lazy_binding_symbols,
+    resolve_lazy_binding_symbol,
 };

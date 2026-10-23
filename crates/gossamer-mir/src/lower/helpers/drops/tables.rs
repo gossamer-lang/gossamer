@@ -824,14 +824,17 @@ pub(crate) fn insert_drops_at_returns(
                 && !program_value
             {
                 if let Some(free) = ctor_to_free(name.as_str()) {
-                    if owner_ctor[idx].is_none() {
+                    if owner_ctor[idx].is_none_or(|held| held == free) {
                         owner_ctor[idx] = Some(free);
                         continue;
                     }
                 }
             }
+            // A local each call fills with a container of its own, of the
+            // one kind, owns every one of them: the per-site reclaim below
+            // gives back the one a call replaces.
             if let Some(free) = inferred_free {
-                if owner_ctor[idx].is_none() {
+                if owner_ctor[idx].is_none_or(|held| held == free) {
                     owner_ctor[idx] = Some(free);
                     continue;
                 }
@@ -2023,7 +2026,10 @@ pub(crate) fn insert_drops_at_returns(
             args,
             ..
         } = &block.terminator
-            && matches!(name.as_str(), "gos_rt_chan_send" | "gos_rt_chan_try_send")
+            && matches!(
+                name.as_str(),
+                "gos_rt_chan_send" | "gos_rt_chan_try_send" | "gos_rt_chan_send_select_arm"
+            )
             && let Some(Operand::Copy(value)) = args.get(1)
             && value.projection.is_empty()
             && (value.local.0 as usize) < sent_away.len()

@@ -274,7 +274,7 @@ impl<'a> Lowerer<'a> {
                     && let Some(bytes) = aggregate_storage_bytes(self.tcx, target.ty)
                 {
                     let src = self.lower_operand(value)?;
-                    let base = format!("@{}", target.symbol);
+                    let base = format!("@{}", super::rvalue::quoted_static(target));
                     self.static_aggregate_children(target.ty, &base, false, true);
                     writeln!(self.out,
                         "  call void @llvm.memcpy.p0.p0.i64(ptr {base}, ptr {src}, i64 {bytes}, i1 false)").unwrap();
@@ -291,7 +291,7 @@ impl<'a> Lowerer<'a> {
                 writeln!(
                     self.out,
                     "  store {llvm_ty} {val}, ptr @{sym}",
-                    sym = target.symbol,
+                    sym = super::rvalue::quoted_static(target),
                 )
                 .unwrap();
             }
@@ -500,7 +500,7 @@ impl<'a> Lowerer<'a> {
                 writeln!(
                     self.out,
                     "  call void @llvm.memcpy.p0.p0.i64(ptr {dst}, ptr @{}, i64 {bytes}, i1 false)",
-                    sref.symbol
+                    super::rvalue::quoted_static(sref)
                 )
                 .unwrap();
                 self.static_aggregate_children(leaf_ty, &dst, true, false);

@@ -82,7 +82,7 @@ pub mod wire_tag {
     pub const BOOL: i32 = 2;
     /// `char`.
     pub const CHAR: i32 = 3;
-    /// A NUL-terminated C string the binding owns.
+    /// A runtime string; a value a binding answers hands it over.
     pub const STRING: i32 = 4;
 }
 
@@ -92,6 +92,109 @@ const WIRE_TAG_VEC: i32 = 5;
 const WIRE_TAG_VARIANT: i32 = 6;
 /// A tuple field, which a list and a map both ride on the wire.
 const WIRE_TAG_TUPLE: i32 = 7;
+
+/// Binding-side `Option` / `Result`: a tag, then a tagged field array.
+#[repr(C)]
+pub struct GosVariant {
+    /// `1` for `Some` / `Ok`, `0` for `None` / `Err`.
+    pub tag: i32,
+    /// Field count.
+    pub payload_len: i32,
+    /// Field array.
+    pub payload: *mut GosVariantValue,
+}
+
+/// Frees a field array a binding answered, laid out as the `Box<[T]>` the
+/// binding's host allocator made, without freeing what its fields hold.
+///
+/// # Safety
+/// `fields` is null or a field array of `len` values a binding answered,
+/// handed back once.
+pub(crate) unsafe fn free_wire_fields(fields: *mut GosVariantValue, len: usize) {
+    if !fields.is_null() && len > 0 {
+        // SAFETY: the caller's contract.
+        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(fields, len)) });
+    }
+}
+
+/// Frees what one field of a dynamic value a binding answered owns: a
+/// string, a vector, a nested arm, or a tuple, all the way down.
+///
+/// # Safety
+/// `field` is a field of a value a binding answered that nothing else owns.
+unsafe fn free_wire_field(field: &GosVariantValue) {
+    let word = field.data as usize;
+    if word == 0 {
+        return;
+    }
+    // SAFETY: each pointer kind is the allocation the binding made for it,
+    // owned by this field alone.
+    unsafe {
+        match field.tag {
+            wire_tag::STRING => {
+                super::string::gos_rt_str_free(std::ptr::with_exposed_provenance_mut(word));
+            }
+            WIRE_TAG_VEC => {
+                super::map::gos_rt_vec_free(std::ptr::with_exposed_provenance_mut(word));
+            }
+            WIRE_TAG_VARIANT => free_wire_dyn(std::ptr::with_exposed_provenance_mut(word)),
+            WIRE_TAG_TUPLE => free_wire_tuple(std::ptr::with_exposed_provenance_mut(word)),
+            _ => {}
+        }
+    }
+}
+
+/// Frees every field of `fields[..len]`, then the array.
+///
+/// # Safety
+/// As for [`free_wire_fields`], for fields nothing else owns.
+unsafe fn free_wire_fields_deep(fields: *mut GosVariantValue, len: usize) {
+    if fields.is_null() {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    for field in unsafe { std::slice::from_raw_parts(fields, len) } {
+        // SAFETY: as above.
+        unsafe { free_wire_field(field) };
+    }
+    // SAFETY: as above.
+    unsafe { free_wire_fields(fields, len) };
+}
+
+/// Frees a tuple a binding answered and everything it holds.
+///
+/// # Safety
+/// `t` is null or a tuple a binding answered, handed back once.
+unsafe fn free_wire_tuple(t: *mut GosTuple) {
+    if t.is_null() {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    let tuple = unsafe { Box::from_raw(t) };
+    // SAFETY: the tuple's fields are its own.
+    unsafe { free_wire_fields_deep(tuple.fields, usize::try_from(tuple.len.max(0)).unwrap_or(0)) };
+}
+
+/// Frees a dynamic arm a binding answered: its name and everything its
+/// payload holds.
+///
+/// # Safety
+/// `v` is null or an arm a binding answered, handed back once.
+unsafe fn free_wire_dyn(v: *mut GosDynVariant) {
+    if v.is_null() {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    let wire = unsafe { Box::from_raw(v) };
+    // SAFETY: the name and the payload are the arm's own.
+    unsafe {
+        super::string::gos_rt_str_free(wire.name.cast_mut());
+        free_wire_fields_deep(
+            wire.payload,
+            usize::try_from(wire.payload_len.max(0)).unwrap_or(0),
+        );
+    }
+}
 
 /// Element kinds a map's keys and values are converted through.
 mod map_kind {
@@ -113,6 +216,61 @@ pub unsafe extern "C" fn gos_rt_binding_bytes_from_vec(v: *mut GosVec) -> *mut G
         std::mem::forget(boxed);
         Box::into_raw(Box::new(GosBytes { len, cap: len, ptr }))
     })
+}
+
+/// Frees a `Bytes` argument [`gos_rt_binding_bytes_from_vec`] built, once
+/// the binding call that read it returns; the binding copies what it keeps.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_binding_bytes_free(b: *mut GosBytes) {
+    ffi_entry!({
+        if b.is_null() {
+            return;
+        }
+        // SAFETY: `b` is the header `gos_rt_binding_bytes_from_vec` boxed, handed back once.
+        let header = unsafe { Box::from_raw(b) };
+        let len = usize::try_from(header.len.max(0)).unwrap_or(0);
+        if !header.ptr.is_null() {
+            // SAFETY: the buffer is the boxed slice of `len` bytes built beside the header.
+            drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(header.ptr, len)) });
+        }
+    });
+}
+
+/// Frees a tuple argument [`gos_rt_binding_tuple_from_slots`] built, once
+/// the binding call that read it returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_binding_tuple_free(t: *mut GosTuple) {
+    ffi_entry!({
+        if t.is_null() {
+            return;
+        }
+        // SAFETY: `t` is the tuple `gos_rt_binding_tuple_from_slots` boxed, handed back once.
+        let tuple = unsafe { Box::from_raw(t) };
+        let len = usize::try_from(tuple.len.max(0)).unwrap_or(0);
+        if !tuple.fields.is_null() {
+            // SAFETY: the fields are the boxed slice of `len` values built beside the tuple.
+            drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(tuple.fields, len)) });
+        }
+    });
+}
+
+/// Frees a struct argument [`gos_rt_binding_struct_from_slots`] built, once
+/// the binding call that read it returns. The name it borrows stays the
+/// caller's.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_binding_struct_free(v: *mut GosDynVariant) {
+    ffi_entry!({
+        if v.is_null() {
+            return;
+        }
+        // SAFETY: `v` is the variant `gos_rt_binding_struct_from_slots` boxed, handed back once.
+        let wire = unsafe { Box::from_raw(v) };
+        let len = usize::try_from(wire.payload_len.max(0)).unwrap_or(0);
+        if !wire.payload.is_null() {
+            // SAFETY: the payload is the boxed slice of `len` fields `wire_fields_from_slots` built.
+            drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(wire.payload, len)) });
+        }
+    });
 }
 
 /// Materialises a runtime `Vec<i64>` from a `Bytes` a binding
@@ -191,9 +349,9 @@ pub unsafe extern "C" fn gos_rt_binding_map_to_map(
         if bm.is_null() {
             return out;
         }
-        // SAFETY: `bm` is non-null (checked above), a wire map the binding boxed and hands back,
-        // which this call consumes (C-ABI contract).
-        let wire = unsafe { Box::from_raw(bm) };
+        // SAFETY: `bm` is non-null (checked above), a wire map the binding answered, which this
+        // call reads and then frees (C-ABI contract).
+        let wire = unsafe { &*bm };
         // SAFETY: the wire map's key vector is null or live, which `gos_rt_vec_len` accepts.
         let count = unsafe { super::vec::gos_rt_vec_len(wire.keys) }
             // SAFETY: the wire map's value vector is null or live, which `gos_rt_vec_len`
@@ -231,6 +389,10 @@ pub unsafe extern "C" fn gos_rt_binding_map_to_map(
                 }
             }
         }
+        // The map copied every key and value, so the wire map and the strings
+        // its halves own go.
+        // SAFETY: `bm` is the wire map read above, not read again.
+        unsafe { super::map::gos_rt_binding_map_free(bm.cast()) };
         out
     })
 }
@@ -284,35 +446,108 @@ pub unsafe extern "C" fn gos_rt_binding_tuple_from_slots(
     })
 }
 
-/// Writes a tuple a binding returned into a run of 8-byte slots, and
-/// reclaims the wire value. `tags` packs one [`wire_tag`] byte per
-/// element, least-significant byte first.
+/// The tuple (`shape` 0) or struct (`shape` 1) a binding answered, as its
+/// field array and field count.
+///
+/// # Safety
+/// `wire` is null or a value of `shape` a binding answered, not yet freed.
+unsafe fn wire_fields(wire: *mut u8, shape: i64) -> (*mut GosVariantValue, usize) {
+    if wire.is_null() {
+        return (std::ptr::null_mut(), 0);
+    }
+    // SAFETY: the caller's contract names the layout.
+    let (fields, len) = unsafe {
+        if shape == 0 {
+            let tuple = &*wire.cast::<GosTuple>();
+            (tuple.fields, tuple.len)
+        } else {
+            let arm = &*wire.cast::<GosDynVariant>();
+            (arm.payload, arm.payload_len)
+        }
+    };
+    (fields, usize::try_from(len.max(0)).unwrap_or(0))
+}
+
+/// The word of field `index`, or `None` past the fields.
+///
+/// # Safety
+/// As for [`wire_fields`].
+unsafe fn wire_field_word(wire: *mut u8, shape: i64, index: i64) -> Option<u64> {
+    // SAFETY: the caller's contract.
+    let (fields, len) = unsafe { wire_fields(wire, shape) };
+    let index = usize::try_from(index).ok().filter(|i| *i < len)?;
+    // SAFETY: `index` is below the field count.
+    Some(unsafe { (*fields.add(index)).data })
+}
+
+/// The word field `index` of the tuple (`shape` 0) or struct (`shape` 1) a
+/// binding answered holds: an integer or a `char`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_binding_tuple_to_slots(
-    t: *mut GosTuple,
-    out: *mut i64,
-    n: i64,
-    tags: i64,
-) {
+pub unsafe extern "C" fn gos_rt_binding_field_word(wire: *mut u8, shape: i64, index: i64) -> i64 {
+    // SAFETY: `wire` is a value of `shape` a binding answered (C-ABI contract).
+    ffi_entry!({ unsafe { wire_field_word(wire, shape, index) }.map_or(0, |w| w as i64) })
+}
+
+/// [`gos_rt_binding_field_word`] for a `String` field: the runtime string the
+/// binding answered, whose share the caller takes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_binding_field_str(
+    wire: *mut u8,
+    shape: i64,
+    index: i64,
+) -> *mut c_char {
     ffi_entry!({
-        let count = usize::try_from(n.max(0)).unwrap_or(0);
-        if out.is_null() || count == 0 {
+        // SAFETY: as for `gos_rt_binding_field_word`.
+        unsafe { wire_field_word(wire, shape, index) }.map_or(std::ptr::null_mut(), |w| {
+            std::ptr::with_exposed_provenance_mut(w as usize)
+        })
+    })
+}
+
+/// [`gos_rt_binding_field_word`] for an `f64` field.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_binding_field_f64(wire: *mut u8, shape: i64, index: i64) -> f64 {
+    // SAFETY: as for `gos_rt_binding_field_word`.
+    ffi_entry!({ unsafe { wire_field_word(wire, shape, index) }.map_or(0.0, f64::from_bits) })
+}
+
+/// [`gos_rt_binding_field_word`] for a `bool` field, `1` for true. The wire
+/// writes one byte for a boolean, and the rest of the word is undefined.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_binding_field_bool(wire: *mut u8, shape: i64, index: i64) -> i8 {
+    ffi_entry!({
+        // SAFETY: as for `gos_rt_binding_field_word`.
+        i8::from(unsafe { wire_field_word(wire, shape, index) }.is_some_and(|w| w & 0xff != 0))
+    })
+}
+
+/// Frees the tuple (`shape` 0) or struct (`shape` 1) a binding answered once
+/// the caller took its first `taken` fields: what any later field owns, the
+/// field array, the struct's name, and the value itself.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_binding_fields_free(wire: *mut u8, shape: i64, taken: i64) {
+    ffi_entry!({
+        if wire.is_null() {
             return;
         }
-        // SAFETY: `out` is non-null (checked above) and addresses `count` words (C-ABI contract).
-        let slots = unsafe { std::slice::from_raw_parts_mut(out, count) };
-        for slot in slots.iter_mut() {
-            *slot = 0;
+        // SAFETY: `wire` is a value of `shape` a binding answered, handed back once (C-ABI
+        // contract); the caller owns the fields it took, and the rest are the value's own.
+        unsafe {
+            let (fields, len) = wire_fields(wire, shape);
+            let taken = usize::try_from(taken.max(0)).unwrap_or(0).min(len);
+            if !fields.is_null() {
+                for field in std::slice::from_raw_parts(fields.add(taken), len - taken) {
+                    free_wire_field(field);
+                }
+            }
+            free_wire_fields(fields, len);
+            if shape == 0 {
+                drop(Box::from_raw(wire.cast::<GosTuple>()));
+            } else {
+                let arm = Box::from_raw(wire.cast::<GosDynVariant>());
+                super::string::gos_rt_str_free(arm.name.cast_mut());
+            }
         }
-        if t.is_null() {
-            return;
-        }
-        // SAFETY: `t` is non-null (checked above), a tuple the binding boxed and hands back,
-        // which this call consumes (C-ABI contract).
-        let tuple = unsafe { Box::from_raw(t) };
-        let available = usize::try_from(tuple.len.max(0)).unwrap_or(0);
-        // SAFETY: `tuple.fields` holds `available` fields, and `out` addresses `count` words.
-        unsafe { wire_fields_to_slots(tuple.fields, available, out, count, tags) };
     });
 }
 
@@ -347,42 +582,6 @@ unsafe fn wire_fields_from_slots(
     ptr
 }
 
-/// Writes a tagged field array into a run of 8-byte slots, giving each
-/// string field a runtime `String` of its own.
-unsafe fn wire_fields_to_slots(
-    fields: *const GosVariantValue,
-    available: usize,
-    out: *mut i64,
-    count: usize,
-    tags: i64,
-) {
-    if fields.is_null() || out.is_null() {
-        return;
-    }
-    // SAFETY: `out` is non-null (checked above), and this `unsafe fn`'s caller passes it
-    // addressing `count` words.
-    let slots = unsafe { std::slice::from_raw_parts_mut(out, count) };
-    // SAFETY: `fields` is non-null (checked above), and this `unsafe fn`'s caller passes it
-    // holding `available` fields; the read stays within both counts.
-    let read = unsafe { std::slice::from_raw_parts(fields, available.min(count)) };
-    let kinds = packed_tags(tags, count);
-    for (index, field) in read.iter().enumerate() {
-        let word = field.data as i64;
-        slots[index] = if kinds[index] == wire_tag::STRING && word != 0 {
-            // HOST-CSTRING: a native Rust binding owns this pointer and
-            // publishes it as a NUL-terminated C string, not a Gossamer
-            // `String`, so it carries no length header. The slot needs a
-            // runtime String of its own.
-            // SAFETY: a non-null `STRING` field is a NUL-terminated C string the binding owns for
-            // the call.
-            let text = unsafe { CStr::from_ptr(word as *const c_char) };
-            super::string::alloc_cstring(text.to_bytes()) as i64
-        } else {
-            word
-        };
-    }
-}
-
 /// Builds the wire value a `#[derive(GosStruct)]` parameter reads from
 /// a struct's run of 8-byte slots. `name` is the struct's own name, as
 /// a runtime `String`.
@@ -407,37 +606,6 @@ pub unsafe extern "C" fn gos_rt_binding_struct_from_slots(
     })
 }
 
-/// Writes a struct a binding returned into a run of 8-byte slots, and
-/// reclaims the wire value.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_binding_struct_to_slots(
-    v: *mut GosDynVariant,
-    out: *mut i64,
-    n: i64,
-    tags: i64,
-) {
-    ffi_entry!({
-        let count = usize::try_from(n.max(0)).unwrap_or(0);
-        if out.is_null() || count == 0 {
-            return;
-        }
-        // SAFETY: `out` is non-null (checked above) and addresses `count` words (C-ABI contract).
-        let slots = unsafe { std::slice::from_raw_parts_mut(out, count) };
-        for slot in slots.iter_mut() {
-            *slot = 0;
-        }
-        if v.is_null() {
-            return;
-        }
-        // SAFETY: `v` is non-null (checked above), a variant the binding boxed and hands back,
-        // which this call consumes (C-ABI contract).
-        let wire = unsafe { Box::from_raw(v) };
-        let available = usize::try_from(wire.payload_len.max(0)).unwrap_or(0);
-        // SAFETY: `wire.payload` holds `available` fields, and `out` addresses `count` words.
-        unsafe { wire_fields_to_slots(wire.payload, available, out, count, tags) };
-    });
-}
-
 /// Reads one binding-side payload field as the dynamic value it stands for,
 /// mirroring the reader the interpreter uses so both tiers rebuild the same
 /// value from the same wire bytes.
@@ -454,10 +622,9 @@ unsafe fn dyn_from_wire_field(field: &GosVariantValue) -> DynNode {
             if word == 0 {
                 return DynNode::Str(String::new());
             }
-            // HOST-CSTRING: the binding owns this pointer and publishes it as
-            // a NUL-terminated C string with no length header.
-            // SAFETY: a non-null `STRING` field is a NUL-terminated C string the binding owns for
-            // the call.
+            // HOST-CSTRING: the native Rust binding owns this NUL-terminated
+            // text; the node takes a copy and the string goes with the wire value.
+            // SAFETY: a non-null `STRING` field is a NUL-terminated C string.
             let text = unsafe { CStr::from_ptr(word as *const c_char) };
             DynNode::Str(text.to_string_lossy().into_owned())
         }
@@ -527,11 +694,10 @@ unsafe fn dyn_from_wire_variant(v: *const GosDynVariant) -> DynNode {
     // SAFETY: `v` is non-null (checked above), and this `unsafe fn`'s caller passes a live
     // `GosDynVariant`.
     let wire = unsafe { &*v };
-    // HOST-CSTRING: the binding arena-allocates an arm name as a plain C
-    // string, which carries no length header.
     let name = if wire.name.is_null() {
         String::new()
     } else {
+        // HOST-CSTRING: the binding arena-allocates the arm name.
         // SAFETY: a non-null arm name is a NUL-terminated C string the binding owns.
         unsafe { CStr::from_ptr(wire.name) }
             .to_string_lossy()
@@ -581,10 +747,14 @@ fn unbare_wire_arm(name: &str, mut payload: Vec<Arc<DynNode>>) -> DynNode {
 /// compiled build reads the value the interpreter reads rather than the
 /// pointer that reaches it.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_dyn_from_binding_variant(v: *const GosDynVariant) -> *mut GosDyn {
+pub unsafe extern "C" fn gos_rt_dyn_from_binding_variant(v: *mut GosDynVariant) -> *mut GosDyn {
     ffi_entry!({
-        // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
-        // `dyn_from_wire_variant` accepts.
-        GosDyn::into_raw(unsafe { dyn_from_wire_variant(v) })
+        // SAFETY: `v` is this shim's argument, a value the binding answered or null, which
+        // `dyn_from_wire_variant` reads; the value read is a copy, so the wire value goes.
+        unsafe {
+            let read = dyn_from_wire_variant(v);
+            free_wire_dyn(v);
+            GosDyn::into_raw(read)
+        }
     })
 }

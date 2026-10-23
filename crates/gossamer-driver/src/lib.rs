@@ -6,13 +6,10 @@
 //! deterministic [`link::Artifact`]; package management and
 //! cross-compilation hang new options off [`link::LinkerOptions`].
 
-// `deny` rather than `forbid` so the FFI liveness probe in
-// `binding_runner::pid_alive` (`libc::kill` / Win32 `OpenProcess`) can opt
-// in via a scoped, documented `#[allow(unsafe_code)]`. Every other site stays
-// unsafe-free.
 #![deny(unsafe_code)]
 
-pub mod binding_runner;
+pub mod binding_build;
+pub mod binding_library;
 pub mod cache_maintenance;
 pub mod foreign_policy;
 pub mod frontend;
@@ -23,11 +20,11 @@ pub mod macos_deployment;
 pub mod pipeline;
 pub mod target;
 
-pub use binding_runner::{
-    BindingRunner, BindingRunnerError, DumpedItem, DumpedModule, DumpedType,
-    Profile as RunnerProfile, RenderedBinding, SignatureDump, StaticBindingsArchive,
-    StaticBindingsLib, parse_signature_dump,
+pub use binding_build::{
+    BindingBuildError, Profile as BindingProfile, RenderedBinding, StaticBindingsArchive,
+    StaticBindingsLib,
 };
+pub use binding_library::{BindingLibrary, ensure_bindings_library};
 
 pub use foreign_policy::{foreign_policy, set_foreign_policy};
 pub use frontend::{
@@ -45,7 +42,7 @@ pub use link::{
     link,
 };
 pub use pipeline::{
-    CheckedFrontend, ForeignLinks, MirPhaseTimes, ReleaseBuild, ReleaseBuildPaths,
+    CheckedFrontend, ForeignLinks, GENERATED_FILE, MirPhaseTimes, ReleaseBuild, ReleaseBuildPaths,
     compile_at_paths_from_frontend, compile_release_at_paths_from_frontend, compile_source,
     compile_source_native, compile_source_native_from_frontend,
     compile_source_native_from_frontend_at_path, compile_source_native_release,

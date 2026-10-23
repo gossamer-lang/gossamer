@@ -109,6 +109,8 @@ struct SliceCopy {
 /// A function a callback argument names.
 struct CallbackTarget {
     name: String,
+    /// The function's module path and name, which its adapter is named by.
+    path: String,
     params: Vec<Ty>,
     ret: Option<Ty>,
 }
@@ -161,6 +163,13 @@ pub(crate) fn desugar_foreign_boundaries(
                     def,
                     CallbackTarget {
                         name: decl.name.name.clone(),
+                        path: item
+                            .module_path
+                            .iter()
+                            .map(String::as_str)
+                            .chain([decl.name.name.as_str()])
+                            .collect::<Vec<_>>()
+                            .join("."),
                         params: decl.params.iter().map(|p| p.ty).collect(),
                         ret: decl.ret,
                     },
@@ -861,7 +870,9 @@ impl Boundary<'_> {
         let adapter = if let Some(adapter) = self.adapters.get(def) {
             adapter.clone()
         } else {
-            let adapter = format!("__gos_ffi_cb_{}", def.local);
+            // Named for the function it calls, so the adapter and every shim
+            // named after it read alike in each program compiling it.
+            let adapter = format!("__gos_ffi_cb.{}", target.path);
             let item = self.adapter(&adapter, arg, *def, span)?;
             self.generated.push(item);
             self.adapters.insert(*def, adapter.clone());

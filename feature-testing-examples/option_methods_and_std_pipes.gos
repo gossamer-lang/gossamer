@@ -1,0 +1,36 @@
+// `Option`'s `flatten` and `iter` methods answer what their `option::` free
+// forms do, a loop over `opt.iter()` walks the zero- or one-element vector it
+// answers, and a pipe into a standard function takes that function's answer.
+
+use std::{iter, strings}
+
+fn total(xs: [Option<i64>]) -> i64 {
+    let mut sum = 0
+    for x in xs {
+        for v in x.iter() {
+            sum += v
+        }
+    }
+    sum
+}
+
+fn main() {
+    let present: Option<i64> = Some(12)
+    let absent: Option<i64> = None
+    println(Some(present).flatten())
+    let nested: Option<Option<String>> = Some(Some("deep"))
+    println(nested.flatten())
+    println(present.iter())
+    println(absent.iter())
+    let named: Option<String> = Some("kiwi")
+    for name in named.iter() {
+        println(f"name {name}")
+    }
+    println(total([Some(1), None, Some(5), Some(7)]))
+
+    let text = "alpha\nbeta\ngamma"
+    let lines = text |> strings::lines
+    println(lines.len())
+    text |> strings::lines |> |v| iter::for_each(v, |line| println(f"line {line}"))
+    println(text |> strings::to_uppercase |> strings::trim)
+}

@@ -1,0 +1,37 @@
+// A module's own import names what it means there, ahead of a same-named
+// item of an enclosing module.
+mod sample {
+    pub mod commands {
+        pub struct Command { pub label: String }
+    }
+
+    pub mod retained {
+        pub struct Command { pub bounds: i64 }
+    }
+
+    pub mod canvas {
+        use crate::sample::retained::Command
+
+        pub struct Canvas { pub commands: Vec<Command> }
+
+        pub fn bounds_total(n: i64) -> i64 {
+            let mut sum = 0
+            for i in 0..n {
+                let command = Command { bounds: i }
+                sum += command.bounds
+            }
+            sum
+        }
+
+        pub fn make() -> Canvas {
+            Canvas { commands: #[Command { bounds: 42 }] }
+        }
+    }
+
+    pub type Command = commands::Command
+}
+
+fn main() {
+    println(sample::canvas::make().commands.len())
+    println(sample::canvas::bounds_total(5))
+}

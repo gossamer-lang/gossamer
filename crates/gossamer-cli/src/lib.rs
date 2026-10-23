@@ -1,10 +1,8 @@
 //! Library entry point for the `gos` toolchain.
 //!
-//! `main.rs` is a tiny shim that calls [`run_main`]. The library
-//! form exists so the per-project Rust-binding runner generated
-//! from `gossamer-runner-template` can pull `gossamer-cli` in as
-//! a dependency, statically link every binding, and dispatch the
-//! same subcommand surface as the on-PATH `gos` binary.
+//! `main.rs` is a tiny shim that installs the project's
+//! `[rust-bindings]` and calls [`run_main_with_args`]; the integration
+//! tests drive the same surface through the library.
 
 #![forbid(unsafe_code)]
 
@@ -43,7 +41,7 @@ pub mod repl_helper;
 pub mod style;
 mod unit_cache;
 
-pub use binding_dispatch::{DispatchOutcome, dispatch_runner_if_needed, needs_runner_dispatch};
+pub use binding_dispatch::install_for_args as install_bindings_for_args;
 
 /// Process-wide setup a `gos` executable performs first thing on its main
 /// thread: the allocator settings compiled programs get from their runtime,

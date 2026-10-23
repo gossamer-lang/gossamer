@@ -40,6 +40,21 @@ pub fn format_float(f: f64) -> String {
     String::from_utf8_lossy(f64_display(f, &mut text)).into_owned()
 }
 
+/// A float as a `json::Value` tree writes it: its `{}` spelling, with `.0`
+/// after an integral value so the number reads back as a float, or `null`
+/// for NaN or an infinity.
+#[must_use]
+pub fn format_json_tree_float(f: f64) -> String {
+    if !f.is_finite() {
+        return String::from("null");
+    }
+    let mut text = format_float(f);
+    if f.fract() == 0.0 {
+        text.push_str(".0");
+    }
+    text
+}
+
 /// Buffer for [`f64_display`]: a fixed slot for the usual rendering and a
 /// heap spill, left unallocated, for the long ones.
 pub struct FloatText {

@@ -1,0 +1,39 @@
+// A function answering a `static mut` vector, map, or string by value hands
+// the caller a value of its own, and the static keeps its storage.
+static mut TABLES: Vec<u64> = #[]
+static mut NAMES: Map<String, i64> = {}
+static mut WORD: String = ""
+
+fn tables() -> Vec<u64> {
+    if TABLES.is_empty() { TABLES = #[11, 22, 33, 44, 55, 66, 77, 88, 99] }
+    TABLES
+}
+
+fn names() -> Map<String, i64> {
+    if NAMES.is_empty() { NAMES = { "a": 1, "b": 2 } }
+    NAMES
+}
+
+fn word() -> String {
+    if WORD.is_empty() { WORD = "static text" + "!" }
+    WORD
+}
+
+fn churn() -> i64 {
+    let mut total = 0
+    for i in 0..50 {
+        let other: Vec<u64> = #[i as u64, 1, 2, 3, 4, 5, 6, 7, 8]
+        let m = { "x": i }
+        let s = f"temp {i}"
+        total += other.len() + m.len() + s.len()
+    }
+    total
+}
+
+fn main() {
+    let a = tables().len() + names().len() + word().len()
+    println(f"first {a} churn {churn()}")
+    let mut n = names()
+    n["c"] = 3
+    println(f"second {tables()} {names()} {n.len()} {word()}")
+}

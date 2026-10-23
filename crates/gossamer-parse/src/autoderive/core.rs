@@ -40,6 +40,8 @@ enum FieldKind {
     /// `f64` / `f32`, stored as its spelling. JSON reads it as `f64`.
     Float(&'static str),
     Bool,
+    /// `char`, a one-character JSON string.
+    Char,
     String,
     /// `[T]` / `Vec<T>` of any supported kind.
     Vec(Box<FieldKind>),
@@ -92,6 +94,7 @@ impl FieldKind {
             "f64" => Self::Float("f64"),
             "f32" => Self::Float("f32"),
             "bool" => Self::Bool,
+            "char" => Self::Char,
             "String" => Self::String,
             _ => return None,
         })
@@ -146,7 +149,10 @@ impl FieldKind {
         let mut anchored = false;
         for (i, seg) in prefix.iter().enumerate() {
             match seg.name.name.as_str() {
-                "crate" if i == 0 => anchored = true,
+                "crate" if i == 0 => {
+                    path.extend(structs.crate_root(module).split("::").filter(|m| !m.is_empty()));
+                    anchored = true;
+                }
                 "self" if i == 0 => {
                     path.extend(module.split("::").filter(|m| !m.is_empty()));
                     anchored = true;
@@ -264,6 +270,7 @@ impl FieldKind {
             Self::I64 | Self::Int(_) | Self::U64(_) => "0".to_string(),
             Self::Float(_) => "0.0".to_string(),
             Self::Bool => "false".to_string(),
+            Self::Char => "'\\0'".to_string(),
             Self::String => "\"\"".to_string(),
             Self::Vec(_) => "Vec::from([])".to_string(),
             Self::Struct(ty) | Self::Enum(ty) => format!("{}::default()", ty.path),
@@ -292,6 +299,7 @@ impl FieldKind {
             | Self::U64(_)
             | Self::Float(_)
             | Self::Bool
+            | Self::Char
             | Self::String
             | Self::Json => Vec::new(),
         }
@@ -394,9 +402,18 @@ pub(crate) struct StructIdentities {
     first_newtype: HashMap<String, gossamer_ast::Type>,
     newtypes_in: HashMap<String, HashMap<String, gossamer_ast::Type>>,
     first_alias: HashMap<String, (String, gossamer_ast::Type)>,
+    // The top-level modules the bundler wraps a dependency's source in.
+    packages: std::collections::HashSet<String>,
 }
 
 impl StructIdentities {
+    /// The module `crate` names inside `module`: the dependency package
+    /// `module` belongs to, or the program's root.
+    pub(crate) fn crate_root<'m>(&self, module: &'m str) -> &'m str {
+        let first = module.split("::").next().unwrap_or_default();
+        if self.packages.contains(first) { first } else { "" }
+    }
+
     /// What `module` itself declares under `name`. A module's own declaration
     /// shadows a same-named type declared elsewhere, as it does for the
     /// resolver, whatever kind of type either one is.
@@ -439,7 +456,10 @@ impl StructIdentities {
 /// Indexes every type-namespace item in the tree by its declaring module and
 /// declared name.
 pub(crate) fn struct_identities(items: &[Item]) -> StructIdentities {
-    let mut out = StructIdentities::default();
+    let mut out = StructIdentities {
+        packages: dependency_packages(items),
+        ..StructIdentities::default()
+    };
     for (module, item) in flatten_items_with_modules(items) {
         let (name, declared) = match &item.kind {
             ItemKind::Struct(decl)
@@ -487,6 +507,22 @@ pub(crate) fn struct_identities(items: &[Item]) -> StructIdentities {
             .or_insert(declared);
     }
     out
+}
+
+/// The top-level modules the bundler wrapped a dependency's source in, each
+/// marked `#[dependency("id")]`.
+pub(crate) fn dependency_packages(items: &[Item]) -> std::collections::HashSet<String> {
+    items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ItemKind::Mod(decl)
+                if item.attrs.outer.iter().any(|a| a.string_argument("dependency").is_some()) =>
+            {
+                Some(decl.name.name.clone())
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Right-hand side of every non-generic `type X = T` alias, transparent

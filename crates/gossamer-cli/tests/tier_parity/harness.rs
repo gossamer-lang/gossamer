@@ -1208,8 +1208,16 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/borrowed_option_result.gos"),
     spec("feature-testing-examples/aggregate_binding.gos"),
     // A `[rust-bindings]` call answers the same on every tier. The fixture is
-    // a project, so each tier builds the binding runner from its manifest.
+    // a project, so each tier loads or links the binding its manifest names.
     spec("feature-testing-examples/binding_all_tiers/src/main.gos"),
+    // Every wire shape a binding takes or answers, and callables a binding
+    // keeps from one call and calls from a later one, alike on every tier.
+    spec("feature-testing-examples/binding_wire_shapes/src/main.gos"),
+    // Two bindings depending on one Rust crate share one copy of its state.
+    spec("feature-testing-examples/binding_shared_state/src/main.gos"),
+    // A type sharing its bare name with a sibling module's renders through
+    // its own synthesized methods.
+    spec("feature-testing-examples/same_named_types_render/src/main.gos"),
     // A value whose last use hands it to a new holder keeps its contents:
     // constructor fields, a dead copy, a pushed element view, and an aggregate
     // copy returned after its source field is set to null.
@@ -1607,7 +1615,22 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/closure_captured_handles_escape.gos"),
     spec("feature-testing-examples/jit_enum_struct_payloads.gos"),
     spec("feature-testing-examples/jit_struct_boundary_shapes.gos"),
+    spec("feature-testing-examples/jit_nested_packed_struct_fields.gos"),
+    spec("feature-testing-examples/static_vec_pop.gos"),
+    // A `Result` holding a `Result` of a struct with heap fields keeps them.
+    spec("feature-testing-examples/nested_result_struct_payload.gos"),
     spec("feature-testing-examples/jit_byte_fields_and_unit_enums.gos"),
+    spec("feature-testing-examples/static_values_answered.gos"),
+    spec("feature-testing-examples/shared_exit_releases.gos"),
+    spec("feature-testing-examples/select_send_values.gos"),
+    spec("feature-testing-examples/serde_numeric_vector_fields.gos"),
+    spec("feature-testing-examples/anchored_paths_skip_local_names.gos"),
+    spec("feature-testing-examples/nearer_import_over_enclosing_item.gos"),
+    spec("feature-testing-examples/option_methods_and_std_pipes.gos"),
+    spec("feature-testing-examples/std_type_beside_same_named_user_type.gos"),
+    spec("feature-testing-examples/container_assignment_copies.gos"),
+    spec("feature-testing-examples/enum_json_encode_tagged.gos"),
+    spec("feature-testing-examples/send_completes_before_close.gos"),
     spec("feature-testing-examples/assoc_fn_closure_param_types.gos"),
     spec("feature-testing-examples/stdlib_struct_rendering.gos"),
     spec("feature-testing-examples/aggregate_field_share_transfer.gos"),
@@ -2137,6 +2160,8 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/operator_rhs_types.gos"),
     // Typed serde over enums, and `#[rename]` / `#[skip]` / `#[default]`.
     spec("feature-testing-examples/serde_enums_and_field_attrs.gos"),
+    // Typed serde of `char`, a newtype, and a user enum as the encoded value.
+    spec("feature-testing-examples/serde_chars_and_top_level_enums.gos"),
     // `time::Time`: an instant with its UTC offset, parsed, formatted,
     // shifted by durations, and compared.
     spec("feature-testing-examples/time_time.gos"),
@@ -2561,6 +2586,8 @@ fn tier_report_handles_crash_and_timeout() {
 fn run_vm(src: &Path, args: &[&str], stdin: &[u8]) -> Run {
     let gos = gos_bin();
     let mut cmd = Command::new(&gos);
+    // `gos run` starts a native build unless asked for the VM, and this
+    // tier is the VM with its JIT.
     cmd.arg("run").arg(src);
     let mut parts: Vec<String> = vec![gos.display().to_string()];
     parts.push("run".to_string());
@@ -2766,14 +2793,13 @@ fn run_native(bin: &Path, args: &[&str], stdin: &[u8]) -> Run {
     )
 }
 
-/// Builds the binding runner a `[rust-bindings]` fixture's project needs,
+/// Builds the binding libraries a `[rust-bindings]` fixture's project needs,
 /// once per project and outside any tier's deadline.
 ///
-/// The runner is a cargo build of the whole toolchain plus the bindings; the
-/// first `gos` command against the project pays for it and every later one
-/// reuses it. Charging it to whichever tier happens to run first would time
-/// a toolchain build against a program's run.
-fn prepare_binding_runner(src: &Path) -> Result<(), String> {
+/// The first `gos` command against the project builds each binding with
+/// Cargo and every later one reuses the build. Charging it to whichever tier
+/// happens to run first would time a Cargo build against a program's run.
+fn prepare_bindings(src: &Path) -> Result<(), String> {
     static PREPARED: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<PathBuf>>> =
         std::sync::OnceLock::new();
     let Some(project) = src
@@ -2797,7 +2823,7 @@ fn prepare_binding_runner(src: &Path) -> Result<(), String> {
         .expect("spawn gos check");
     if !out.status.success() {
         return Err(format!(
-            "preparing the binding runner for {} failed:\n  stderr: {}",
+            "building the bindings of {} failed:\n  stderr: {}",
             project.display(),
             String::from_utf8_lossy(&out.stderr)
         ));
@@ -2808,7 +2834,7 @@ fn prepare_binding_runner(src: &Path) -> Result<(), String> {
 
 fn run_tier(spec: &Spec, tier: Tier) -> Result<Run, String> {
     let src = workspace_root().join(spec.path);
-    prepare_binding_runner(&src)?;
+    prepare_bindings(&src)?;
     match tier {
         Tier::Vm => Ok(run_vm(&src, spec.args, spec.stdin)),
         Tier::Bytecode => Ok(run_bytecode(&src, spec.args, spec.stdin)),

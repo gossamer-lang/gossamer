@@ -1281,8 +1281,18 @@ pub fn rewrite_serde_generic_calls(sf: &mut SourceFile) {
 
     struct Rewriter<'a> {
         symbols: &'a std::collections::HashMap<String, String>,
+        module: Vec<String>,
     }
     impl VisitorMut for Rewriter<'_> {
+        fn visit_item(&mut self, item: &mut gossamer_ast::Item) {
+            let name = inline_module_name(item);
+            self.module.extend(name.clone());
+            gossamer_ast::visitor::walk_item_mut(self, item);
+            if name.is_some() {
+                self.module.pop();
+            }
+        }
+
         fn visit_expr(&mut self, expr: &mut Expr) {
             // Rewrite inner expressions first so nested serde calls
             // (e.g. an argument that is itself `to_json::<U>(x)`) are
@@ -1336,22 +1346,11 @@ pub fn rewrite_serde_generic_calls(sf: &mut SourceFile) {
             let TypeKind::Path(tp) = &ty.kind else {
                 return;
             };
-            let written: Vec<&str> = tp
-                .segments
-                .iter()
-                .map(|segment| segment.name.name.as_str())
-                .filter(|segment| !matches!(*segment, "crate" | "self" | "super" | "root"))
-                .collect();
-            let Some(bare) = written.last().copied() else {
+            let written: Vec<&str> = tp.segments.iter().map(|segment| segment.name.name.as_str()).collect();
+            if written.is_empty() {
                 return;
-            };
-            // Prefer the spelling as written; fall back to the leaf name,
-            // which is unambiguous when only one module declares it.
-            let symbol = self
-                .symbols
-                .get(&written.join("::"))
-                .or_else(|| self.symbols.get(bare))
-                .map_or_else(|| bare.to_string(), Clone::clone);
+            }
+            let symbol = serde_symbol_for(self.symbols, &self.module.join("::"), &written.join("::"));
             seg.name.name = serde_fn(seg.name.name.as_str(), &symbol);
             seg.generics.clear();
         }
@@ -1361,7 +1360,34 @@ pub fn rewrite_serde_generic_calls(sf: &mut SourceFile) {
     // (`a::Point`), the bare name when exactly one module declares it, and
     // any name a `use` brought into scope.
     let symbols = serde_symbol_index(sf);
-    Rewriter { symbols: &symbols }.visit_source_file(sf);
+    Rewriter {
+        symbols: &symbols,
+        module: Vec::new(),
+    }
+    .visit_source_file(sf);
+}
+
+/// The codec symbol of the type a turbofish written in `module` names:
+/// for a single name, the type the module imports or declares under it;
+/// then the path as written; then a bare name only one module declares.
+pub(crate) fn serde_symbol_for(
+    symbols: &std::collections::HashMap<String, String>,
+    module: &str,
+    written: &str,
+) -> String {
+    let written: Vec<&str> = written
+        .split("::")
+        .filter(|segment| !matches!(*segment, "crate" | "self" | "super" | "root"))
+        .collect();
+    let bare = written.last().copied().unwrap_or_default();
+    let here = TyId::new(module, bare).path;
+    let local = (written.len() == 1)
+        .then(|| symbols.get(&format!("{IMPORTED}{here}")).or_else(|| symbols.get(&here)))
+        .flatten();
+    local
+        .or_else(|| symbols.get(&written.join("::")))
+        .or_else(|| symbols.get(bare))
+        .map_or_else(|| bare.to_string(), Clone::clone)
 }
 
 /// Maps every spelling a turbofish may use for a user type onto the symbol
@@ -1413,16 +1439,28 @@ fn serde_symbol_index(sf: &SourceFile) -> std::collections::HashMap<String, Stri
         }
     }
     // A `use a::Point` (or `use a::{Point as P}`) makes the imported name
-    // stand for that module's type at every turbofish in this file.
+    // stand for that module's type at the turbofishes of the module that
+    // wrote it. Its path resolves from that module outward, which covers
+    // `self`, `super`, and a dependency package's `crate`.
+    let mut imported = Vec::new();
     for decl in &sf.uses {
+        let scope = decl.module.join("::");
         for (bound, target) in imported_type_paths(decl) {
-            if let Some(symbol) = out.get(&target) {
-                out.insert(bound, symbol.clone());
+            let found = (0..=decl.module.len()).rev().find_map(|depth| {
+                let prefix = decl.module[..depth].join("::");
+                out.get(&TyId::new(&prefix, &target).path)
+            });
+            if let Some(symbol) = found {
+                imported.push((format!("{IMPORTED}{}", TyId::new(&scope, &bound).path), symbol.clone()));
             }
         }
     }
+    out.extend(imported);
     out
 }
+
+// Keys an import under the module that wrote it, apart from type paths.
+const IMPORTED: &str = "use:";
 
 /// `(bound name, `::`-joined target path)` for each name a `use` brings in.
 fn imported_type_paths(decl: &gossamer_ast::UseDecl) -> Vec<(String, String)> {

@@ -70,15 +70,24 @@ impl<'a> Builder<'a> {
         // `Bytes`, `Map`, and a tuple arrive as a wire pointer the
         // runtime converts after the call, so the call's own
         // destination is that pointer rather than the value's type.
-        let ret_ty = if Self::binding_ret_needs_wire(&item.ret) {
+        // A position that crosses as JSON text is a `String` here: the HIR
+        // walk wrote the argument's text and reads the answer's.
+        let ret_ty = if item.json_ret() {
+            self.tcx.string_ty()
+        } else if Self::binding_ret_needs_wire(&item.ret) {
             self.tcx.int_ty(gossamer_types::IntTy::I64)
         } else {
             self.binding_type_to_mir(&item.ret)
         };
         let mut arg_locals: Vec<Local> = Vec::with_capacity(args.len());
         let mut callbacks: Vec<Local> = Vec::new();
+        let mut wire_args: Vec<(&'static str, Local)> = Vec::new();
         for (idx, arg) in args.iter().enumerate() {
             let raw = self.lower_expr(arg)?;
+            if item.json_param(idx) {
+                arg_locals.push(raw);
+                continue;
+            }
             let param_ty = item.params.get(idx);
             if matches!(param_ty, Some(gossamer_resolve::BindingType::Callback(..))) {
                 let handle = self.register_binding_callback(raw, arg.ty, span);
@@ -87,6 +96,11 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let coerced = self.coerce_arg_for_binding(raw, param_ty, span);
+            if coerced != raw
+                && let Some(free) = param_ty.and_then(Self::binding_arg_free)
+            {
+                wire_args.push((free, coerced));
+            }
             arg_locals.push(coerced);
         }
         let dest = self.fresh(ret_ty);
@@ -101,7 +115,8 @@ impl<'a> Builder<'a> {
             target: Some(next),
         });
         self.set_current(next);
-        // A callback is valid for the binding call that received it.
+        // The call's share of each callback ends with the call; a binding
+        // that keeps one took a share of its own.
         let unit_ty = self.tcx.unit();
         for handle in callbacks {
             let _ = self.emit_runtime_call(
@@ -110,6 +125,22 @@ impl<'a> Builder<'a> {
                 unit_ty,
                 span,
             );
+        }
+        // The binding copies what it keeps of an argument it read through a
+        // wire value, so the wire value the call built ends with the call.
+        for (free, wire) in wire_args {
+            let _ = self.emit_runtime_call(
+                free,
+                vec![Operand::Copy(Place::local(wire))],
+                unit_ty,
+                span,
+            );
+        }
+        // A panic in the binding is raised here, in the calling frame, once
+        // the thunk has returned through its own C frame.
+        let _ = self.emit_runtime_call("gos_rt_binding_raise_pending", Vec::new(), unit_ty, span);
+        if item.json_ret() {
+            return Some(dest);
         }
         // Result / Option returns arrive as a binding-ABI
         // `*mut GosVariant`; convert to the runtime's packed i128
@@ -184,6 +215,79 @@ impl<'a> Builder<'a> {
             handle_ty,
             span,
         )
+    }
+
+    /// Builds a value of `ty` from the tuple (`shape` 0) or struct (`shape` 1)
+    /// a binding answered at `raw`: each field is read by its own call,
+    /// which hands the caller what it owns, the value is assembled from those
+    /// reads as any literal is, and the emptied wire value is freed.
+    fn aggregate_from_wire_fields(
+        &mut self,
+        raw: Local,
+        shape: i128,
+        field_tys: &[gossamer_types::Ty],
+        ty: gossamer_types::Ty,
+        span: Span,
+    ) -> Local {
+        use gossamer_types::TyKind;
+        let shape_local = self.const_i64_local(shape, span);
+        let mut operands = Vec::with_capacity(field_tys.len());
+        for (index, field_ty) in field_tys.iter().enumerate() {
+            let reader = match self.tcx.kind_of(*field_ty) {
+                TyKind::Float(_) => "gos_rt_binding_field_f64",
+                TyKind::Bool => "gos_rt_binding_field_bool",
+                TyKind::String => "gos_rt_binding_field_str",
+                _ => "gos_rt_binding_field_word",
+            };
+            let index_local = self.const_i64_local(index as i128, span);
+            let field = self.emit_runtime_call(
+                reader,
+                vec![
+                    Operand::Copy(Place::local(raw)),
+                    Operand::Copy(Place::local(shape_local)),
+                    Operand::Copy(Place::local(index_local)),
+                ],
+                *field_ty,
+                span,
+            );
+            operands.push(Operand::Copy(Place::local(field)));
+        }
+        let taken = self.const_i64_local(field_tys.len() as i128, span);
+        let unit_ty = self.tcx.unit();
+        let _ = self.emit_runtime_call(
+            "gos_rt_binding_fields_free",
+            vec![
+                Operand::Copy(Place::local(raw)),
+                Operand::Copy(Place::local(shape_local)),
+                Operand::Copy(Place::local(taken)),
+            ],
+            unit_ty,
+            span,
+        );
+        let dest = self.fresh(ty);
+        let _ = self.ensure_aggr_copy_meta(ty);
+        self.emit_assign(
+            Place::local(dest),
+            Rvalue::Aggregate {
+                kind: crate::ir::AggregateKind::Tuple,
+                operands,
+            },
+            span,
+        );
+        dest
+    }
+
+    /// The runtime function that frees the wire value an argument of `ty`
+    /// crosses as, when it crosses as one.
+    fn binding_arg_free(ty: &gossamer_resolve::BindingType) -> Option<&'static str> {
+        use gossamer_resolve::BindingType as B;
+        match ty {
+            B::Bytes => Some("gos_rt_binding_bytes_free"),
+            B::Map(..) => Some("gos_rt_binding_map_free"),
+            B::Tuple(..) => Some("gos_rt_binding_tuple_free"),
+            B::Opaque(_) => Some("gos_rt_binding_struct_free"),
+            _ => None,
+        }
     }
 
     /// Whether a binding return crosses as a wire pointer the runtime
@@ -303,16 +407,11 @@ impl<'a> Builder<'a> {
         use gossamer_types::TyKind;
         match ret {
             B::Bytes => {
-                // `Bytes` is `[u8]` at the source level, so the converted
-                // value carries the slice type the caller wrote - the same
-                // runtime object a `Vec` carries, under the spelling the
-                // declared type is written in.
-                let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
-                let slice_ty = self.tcx.intern(TyKind::Slice(i64_ty));
+                let byte_vec = self.binding_type_to_mir(ret);
                 self.emit_runtime_call(
                     "gos_rt_binding_bytes_to_vec",
                     vec![Operand::Copy(Place::local(raw))],
-                    slice_ty,
+                    byte_vec,
                     span,
                 )
             }
@@ -360,69 +459,22 @@ impl<'a> Builder<'a> {
                 let Some((struct_ty, field_tys)) = self.binding_struct_shape(name) else {
                     return raw;
                 };
-                let Some(tags) = self.packed_slot_tags(&field_tys) else {
+                // Only fields that fit one tagged word cross this way.
+                if self.packed_slot_tags(&field_tys).is_none() {
                     return raw;
-                };
-                let dest = self.fresh(struct_ty);
-                let ptr_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
-                let slots = self.fresh(ptr_ty);
-                self.emit_assign(
-                    Place::local(slots),
-                    Rvalue::Ref {
-                        mutable: true,
-                        place: Place::local(dest),
-                    },
-                    span,
-                );
-                let count = self.const_i64_local(field_tys.len() as i128, span);
-                let tags_local = self.const_i64_local(tags, span);
-                let unit_ty = self.tcx.unit();
-                let _ = self.emit_runtime_call(
-                    "gos_rt_binding_struct_to_slots",
-                    vec![
-                        Operand::Copy(Place::local(raw)),
-                        Operand::Copy(Place::local(slots)),
-                        Operand::Copy(Place::local(count)),
-                        Operand::Copy(Place::local(tags_local)),
-                    ],
-                    unit_ty,
-                    span,
-                );
+                }
+                let dest = self.aggregate_from_wire_fields(raw, 1, &field_tys, struct_ty, span);
+                self.local_struct.insert(dest, name.clone());
                 dest
             }
             B::Tuple(elems) => {
-                let Some(tags) = Self::packed_wire_tags(elems) else {
+                if Self::packed_wire_tags(elems).is_none() {
                     return raw;
-                };
+                }
                 let elem_tys: Vec<gossamer_types::Ty> =
                     elems.iter().map(|e| self.binding_type_to_mir(e)).collect();
-                let tuple_ty = self.tcx.intern(TyKind::Tuple(elem_tys));
-                let dest = self.fresh(tuple_ty);
-                let ptr_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
-                let slots = self.fresh(ptr_ty);
-                self.emit_assign(
-                    Place::local(slots),
-                    Rvalue::Ref {
-                        mutable: true,
-                        place: Place::local(dest),
-                    },
-                    span,
-                );
-                let count = self.const_i64_local(elems.len() as i128, span);
-                let tags_local = self.const_i64_local(tags, span);
-                let unit_ty = self.tcx.unit();
-                let _ = self.emit_runtime_call(
-                    "gos_rt_binding_tuple_to_slots",
-                    vec![
-                        Operand::Copy(Place::local(raw)),
-                        Operand::Copy(Place::local(slots)),
-                        Operand::Copy(Place::local(count)),
-                        Operand::Copy(Place::local(tags_local)),
-                    ],
-                    unit_ty,
-                    span,
-                );
-                dest
+                let tuple_ty = self.tcx.intern(TyKind::Tuple(elem_tys.clone()));
+                self.aggregate_from_wire_fields(raw, 0, &elem_tys, tuple_ty, span)
             }
             _ => raw,
         }

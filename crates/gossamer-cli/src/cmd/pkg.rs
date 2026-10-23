@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use gossamer_driver::binding_runner::toml_path_kv;
+use gossamer_driver::binding_build::toml_path_kv;
 
 use crate::paths::friendly_io_error;
 
@@ -356,8 +356,9 @@ fn scaffold_wrapper_if_needed(
         std::fs::canonicalize(&crate_root).unwrap_or_else(|_| crate_root.clone())
     };
     // `gossamer-binding` is stated by version, not by a path into a
-    // toolchain checkout: the runner redirects it to the `gos` that
-    // builds the project, so the wrapper resolves wherever it is written.
+    // toolchain checkout: the project `gos` generates to build the binding
+    // patches it to this toolchain's copy, so the wrapper resolves wherever
+    // it is written.
     let wrapper_cargo_toml = format!(
         "[package]\nname = \"gos-{name}\"\nversion = \"0.0.1\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n\n[lib]\ncrate-type = [\"rlib\"]\n\n[dependencies]\n{name} = {{ {} }}\ngossamer-binding = \"{binding_version}\"\n",
         toml_path_kv("path", &dep_abs),
@@ -627,6 +628,14 @@ pub(crate) fn publish(
     let registry_url = registry
         .or_else(|| self::registry_url(&m))
         .ok_or_else(no_registry_error)?;
+    // The package carries its path bindings' library for this target, so a
+    // program whose bindings are this set needs no Rust toolchain here. The
+    // archive's signature covers the library with the sources.
+    let staged = gossamer_driver::binding_library::stage_prebuilt(&m.rust_bindings, &project_root)
+        .context("building the package's Rust bindings")?;
+    if let Some(library) = staged {
+        outln!("publish: staged prebuilt bindings at {}", library.display());
+    }
     let artifact = gossamer_pkg::pack_crate_streaming(&project_root)
         .map_err(|e| anyhow!("pack failed: {e}"))?;
     outln!(

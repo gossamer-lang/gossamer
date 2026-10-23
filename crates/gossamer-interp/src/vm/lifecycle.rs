@@ -498,6 +498,31 @@ impl Vm {
         // call resolves to on every other tier. Depth decides, so the order
         // the modules are walked in does not.
         let mut bare_fn_depth: HashMap<String, usize> = HashMap::new();
+        // A struct variant is built by `__struct` under its own name, so it
+        // takes its declared field order as a struct does; every literal then
+        // keeps one layout whatever order it names the fields in. A name two
+        // enums declare with different fields has no one layout to take.
+        let mut variant_layouts: HashMap<String, Option<Vec<String>>> = HashMap::new();
+        for item in &program.items {
+            if let HirItemKind::Adt(adt) = &item.kind
+                && let gossamer_hir::HirAdtKind::Enum(variants) = &adt.kind
+            {
+                for variant in variants {
+                    let Some(fields) = &variant.struct_fields else {
+                        continue;
+                    };
+                    let names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
+                    variant_layouts
+                        .entry(variant.name.name.clone())
+                        .and_modify(|held| {
+                            if held.as_ref() != Some(&names) {
+                                *held = None;
+                            }
+                        })
+                        .or_insert(Some(names));
+                }
+            }
+        }
         for item in &program.items {
             let module_prefix = if item.module_path.is_empty() {
                 None
@@ -604,6 +629,11 @@ impl Vm {
                     }
                 }
                 _ => {}
+            }
+        }
+        for (name, layout) in variant_layouts {
+            if let Some(names) = layout {
+                name_layouts.entry(name).or_insert(names);
             }
         }
         crate::builtins::set_struct_layouts(name_layouts);
@@ -2381,15 +2411,18 @@ impl Vm {
                         // from the receiver's own type name. Register the
                         // bare spelling too, so `a < b` on a type a library
                         // declares reaches the `cmp` that library wrote
-                        // instead of reporting it unbound.
+                        // instead of reporting it unbound. A type whose own
+                        // identity is that spelling keeps it: the insert
+                        // above always wins over this fallback.
                         if let Some((_, bare)) = type_name.name.rsplit_once("::") {
                             let bare_qualified = format!("{bare}::{}", method.name.name);
-                            globals.insert(intern(&bare_qualified), Global::Fn(shared.clone()));
+                            globals
+                                .entry(intern(&bare_qualified))
+                                .or_insert_with(|| Global::Fn(shared.clone()));
                             if let Some(prefix) = &module_prefix {
-                                globals.insert(
-                                    intern(&format!("{prefix}::{bare_qualified}")),
-                                    Global::Fn(shared.clone()),
-                                );
+                                globals
+                                    .entry(intern(&format!("{prefix}::{bare_qualified}")))
+                                    .or_insert_with(|| Global::Fn(shared.clone()));
                             }
                         }
                     }
@@ -2590,13 +2623,22 @@ fn prepare_jit(
             gossamer_mir::inline_small_callees(&mut bodies, &jit_tcx);
             gossamer_mir::inline_general(&mut bodies, &jit_tcx);
         }
+        // Only a body admitted before inlining can be compiled, so only those
+        // are optimised. The others stay in hand, inlined but otherwise as
+        // lowered, for the passes that read every caller in the program.
+        let (mut candidates, others): (Vec<Body>, Vec<Body>) = bodies
+            .into_iter()
+            .partition(|body| pre_inline_names.contains(body.name.as_str()));
         // Same post-inline cleanup the AOT pipeline runs: the
         // cranelift lowering is shared with `gos build`, so the
         // JIT must hand it the same MIR shape or the tiers can
         // diverge on constructs only one shape exercises.
-        for body in &mut bodies {
+        for body in &mut candidates {
             gossamer_mir::optimise_for_jit_with_effects(body, &jit_tcx, &effects);
         }
+        let candidate_count = candidates.len();
+        bodies = candidates;
+        bodies.extend(others);
         gossamer_mir::propagate_entry_bounds(&mut bodies, &jit_tcx, &effects);
         let mut compile_names =
             jit_backend::jit_compile_body_names(&bodies, &jit_tcx, &shapes, &struct_shapes);
@@ -2613,6 +2655,7 @@ fn prepare_jit(
                 );
             }
         }
+        bodies.truncate(candidate_count);
         bodies.retain(|body| compile_names.contains(body.name.as_str()));
         if bodies.is_empty() {
             return PreparedJit::Nothing { collect: true };
@@ -3405,8 +3448,9 @@ fn build_native_struct_shapes(
                 (placements, (layout.size as usize).div_ceil(8))
             }
             None => {
-                // Word-per-leaf layout: a nested struct takes as many words
-                // as it has fields.
+                // Word-per-leaf layout. A nested struct spans the words the
+                // compiled tier gives it: its packed size when it packs, else
+                // a word per (scalar) field.
                 let mut at = 0u32;
                 let mut placements = Vec::with_capacity(fields.len());
                 for (_, field) in &fields {
@@ -3414,7 +3458,11 @@ fn build_native_struct_shapes(
                         Field::Nested(inner) => structs
                             .iter()
                             .find(|(_, local, _)| local == inner)
-                            .map_or(1, |(_, _, names)| names.len() as u32),
+                            .map_or(1, |(item, _, names)| {
+                                item.def
+                                    .and_then(|d| tcx.packed_struct_layout(d))
+                                    .map_or(names.len() as u32, |layout| layout.size / 8)
+                            }),
                         Field::Kind(_) => 1,
                     };
                     placements.push(NativeFieldPlacement {

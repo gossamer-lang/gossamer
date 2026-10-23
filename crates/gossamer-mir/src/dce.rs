@@ -30,6 +30,27 @@ pub struct PruneReport {
     pub pruned: usize,
 }
 
+/// The names of the concrete bodies declared under one of the module paths in
+/// `modules` (`gui` takes `gui::draw` and `gui::widgets::Button::new`), which
+/// a build that compiles those modules whole keeps whatever its entry
+/// reaches. Generic templates are left out: only their instantiations
+/// compile.
+#[must_use]
+pub fn concrete_bodies_under(bodies: &[Body], modules: &[String], tcx: &TyCtxt) -> Vec<String> {
+    bodies
+        .iter()
+        .filter(|body| {
+            modules.iter().any(|module| {
+                body.name
+                    .strip_prefix(module.as_str())
+                    .is_some_and(|rest| rest.starts_with("::"))
+            })
+        })
+        .filter(|body| !crate::monomorph::body_has_param(body, tcx))
+        .map(|body| body.name.clone())
+        .collect()
+}
+
 /// Removes every body no root reaches, in place.
 ///
 /// `roots` names the bodies that are reachable by definition - the entry

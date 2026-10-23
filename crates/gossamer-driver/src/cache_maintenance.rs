@@ -16,8 +16,8 @@ pub enum CacheClass {
     Frontend,
     /// LLVM incremental object files.
     Ir,
-    /// Rust-binding runner and staticlib Cargo builds.
-    Runners,
+    /// `[rust-bindings]` libraries and staticlibs Cargo built.
+    Bindings,
     /// Downloaded package source trees.
     Packages,
     /// Artifacts left behind by the retired build-graph cache.
@@ -26,6 +26,8 @@ pub enum CacheClass {
     LinkStamps,
     /// Objects and libraries compiled from packages' `[native]` sources.
     Native,
+    /// Executables `gos run` builds and starts.
+    Run,
 }
 
 impl CacheClass {
@@ -35,11 +37,12 @@ impl CacheClass {
         match self {
             Self::Frontend => "frontend",
             Self::Ir => "ir",
-            Self::Runners => "runners",
+            Self::Bindings => "bindings",
             Self::Packages => "packages",
             Self::Build => "build",
             Self::LinkStamps => "link-stamps",
             Self::Native => "native",
+            Self::Run => "run",
         }
     }
 
@@ -49,11 +52,12 @@ impl CacheClass {
         &[
             Self::Frontend,
             Self::Ir,
-            Self::Runners,
+            Self::Bindings,
             Self::Packages,
             Self::Build,
             Self::LinkStamps,
             Self::Native,
+            Self::Run,
         ]
     }
 
@@ -66,7 +70,8 @@ impl CacheClass {
             Self::Ir => Some("ir-cache"),
             Self::LinkStamps => Some("link-stamps"),
             Self::Native => Some("native"),
-            Self::Runners | Self::Packages | Self::Build => None,
+            Self::Run => Some("run"),
+            Self::Bindings | Self::Packages | Self::Build => None,
         }
     }
 
@@ -174,10 +179,12 @@ impl CachePolicy {
     #[must_use]
     pub fn class_max_bytes(self, class: CacheClass) -> u64 {
         let default = match class {
-            CacheClass::Runners => 10 * 1024 * 1024 * 1024,
+            CacheClass::Bindings => 10 * 1024 * 1024 * 1024,
             CacheClass::Ir => 5 * 1024 * 1024 * 1024,
             CacheClass::Frontend => 1024 * 1024 * 1024,
-            CacheClass::Packages | CacheClass::Build | CacheClass::Native => 2 * 1024 * 1024 * 1024,
+            CacheClass::Packages | CacheClass::Build | CacheClass::Native | CacheClass::Run => {
+                2 * 1024 * 1024 * 1024
+            }
             CacheClass::LinkStamps => 64 * 1024 * 1024,
         };
         let name = format!(
@@ -213,8 +220,9 @@ pub fn paths(cwd: &Path) -> Vec<(CacheClass, PathBuf)> {
     }
     out.extend([
         (CacheClass::Ir, shared.join("ir-cache")),
-        (CacheClass::Runners, binding_root.join("runners")),
+        (CacheClass::Bindings, binding_root.join("bindings")),
         (CacheClass::Native, shared.join("native")),
+        (CacheClass::Run, shared.join("run")),
     ]);
     // Each project anchors its `.gos-cache/` at its own `project.toml`, so a
     // workspace, an examples directory, and an integration-test tree each
@@ -355,8 +363,9 @@ pub fn remove(
 }
 
 /// Prunes expired units first, then oldest units until the aggregate budget is
-/// met. A runner workdir is one unit: it is reclaimed whole or not at all, so a
-/// surviving workdir always holds the complete artifact set its stamp records.
+/// met. A binding build directory is one unit: it is reclaimed whole or not at
+/// all, so a surviving directory always holds the complete artifact set its
+/// stamp records.
 /// Workdirs with a build lock are skipped so an active build is never
 /// disrupted. Returns reclaimed bytes and files.
 pub fn prune(
@@ -390,13 +399,13 @@ pub fn prune(
         if !expired && total <= policy.max_bytes && !class_over {
             continue;
         }
-        if runner_locked(&unit.path) {
+        if build_locked(&unit.path) {
             continue;
         }
         if !dry_run {
             let root = &roots[root_index].1;
-            if class == CacheClass::Runners && unit.whole_dir {
-                if !reclaim_runner_workdir(&unit.path, root) {
+            if class == CacheClass::Bindings && unit.whole_dir {
+                if !reclaim_binding_dir(&unit.path, root) {
                     continue;
                 }
             } else if class == CacheClass::Native && unit.whole_dir {
@@ -416,24 +425,24 @@ pub fn prune(
     Ok((reclaimed, count))
 }
 
-/// Applies the runner-class age and byte limits directly to one resolved
-/// runner root. Binding startup uses this once per process so the documented
-/// 10 GiB class cap is enforced without requiring a manual cache command.
+/// Applies the bindings-class age and byte limits directly to the bindings
+/// root. A binding build runs this once it finishes, so the documented
+/// 10 GiB class cap holds without a manual cache command.
 ///
-/// `in_use` names the workdir the calling process resolved. It is never
+/// `in_use` names the directory the calling process built into. It is never
 /// reclaimed: its artifacts are read for the rest of that process's run,
 /// past the build lock that only spans their production.
-pub fn prune_runner_root(
+pub fn prune_binding_root(
     root: &Path,
     policy: CachePolicy,
     dry_run: bool,
     in_use: Option<&Path>,
 ) -> std::io::Result<(u64, u64)> {
     let now = SystemTime::now();
-    let mut units = collect_units(CacheClass::Runners, root);
+    let mut units = collect_units(CacheClass::Bindings, root);
     units.sort_by_key(|unit| unit.modified);
     let mut total: u64 = units.iter().map(|unit| unit.bytes).sum();
-    let cap = policy.class_max_bytes(CacheClass::Runners);
+    let cap = policy.class_max_bytes(CacheClass::Bindings);
     let mut reclaimed = 0u64;
     let mut count = 0u64;
     for unit in units {
@@ -446,10 +455,10 @@ pub fn prune_runner_root(
         if in_use.is_some_and(|dir| dir.starts_with(&unit.path)) {
             continue;
         }
-        if runner_locked(&unit.path) {
+        if build_locked(&unit.path) {
             continue;
         }
-        if !dry_run && !reclaim_runner_workdir(&unit.path, root) {
+        if !dry_run && !reclaim_binding_dir(&unit.path, root) {
             continue;
         }
         total = total.saturating_sub(unit.bytes);
@@ -459,8 +468,8 @@ pub fn prune_runner_root(
     Ok((reclaimed, count))
 }
 
-/// One reclaimable cache unit: a single file, or - for the runner and native
-/// classes - a whole directory: a runner workdir, whose artifacts and
+/// One reclaimable cache unit: a single file, or - for the bindings and native
+/// classes - a whole directory: a binding build, whose artifacts and
 /// freshness stamp only mean anything together, or a native build tree, whose
 /// configuration names the files its generators wrote.
 #[derive(Debug)]
@@ -472,10 +481,10 @@ struct CacheUnit {
     whole_dir: bool,
 }
 
-/// Enumerates what the class reclaims in one piece: a runner or native root
+/// Enumerates what the class reclaims in one piece: a bindings or native root
 /// hands back one unit per directory, every other root one unit per file.
 fn collect_units(class: CacheClass, root: &Path) -> Vec<CacheUnit> {
-    if !matches!(class, CacheClass::Runners | CacheClass::Native) {
+    if !matches!(class, CacheClass::Bindings | CacheClass::Native) {
         let mut files = Vec::new();
         collect_files(root, &mut files);
         return files
@@ -531,7 +540,7 @@ fn collect_units(class: CacheClass, root: &Path) -> Vec<CacheUnit> {
 ///
 /// A build holds that lock from configuring the tree to installing what it
 /// built, so a build in progress keeps its directory. The lock file goes last,
-/// as a runner workdir's does.
+/// as a binding build's does.
 fn reclaim_native_build(path: &Path, root: &Path) -> bool {
     let lock_path = path.join("lock");
     let lock = match fs::File::open(&lock_path) {
@@ -563,8 +572,7 @@ fn reclaim_native_build(path: &Path, root: &Path) -> bool {
     true
 }
 
-/// Reclaims one unit and the empty cache directories it leaves behind.
-/// Removes one runner workdir while holding the build lock that guards it,
+/// Removes one binding build directory while holding the build lock that guards it,
 /// and answers whether the removal happened.
 ///
 /// A build takes that lock before it creates anything, so holding it here is
@@ -572,17 +580,12 @@ fn reclaim_native_build(path: &Path, root: &Path) -> bool {
 /// unlikely to overlap. The lock file itself outlives the tree around it and
 /// goes last: a `gos` waiting on it starts writing only once the directory it
 /// would have written into is gone.
-fn reclaim_runner_workdir(path: &Path, root: &Path) -> bool {
-    let Some(lock) = crate::binding_runner::AdvisoryLock::try_acquire(
-        &crate::binding_runner::build_lock_path(path),
+fn reclaim_binding_dir(path: &Path, root: &Path) -> bool {
+    let Some(lock) = crate::binding_build::AdvisoryLock::try_acquire(
+        &crate::binding_build::build_lock_path(path),
     ) else {
         return false;
     };
-    // A process running the runner, or reading what it produced, holds a
-    // lease; the workdir stays until the last one is given back.
-    if crate::binding_runner::has_live_lease(path) {
-        return false;
-    }
     if let Ok(entries) = fs::read_dir(path) {
         for entry in entries.flatten() {
             let child = entry.path();
@@ -648,7 +651,7 @@ fn dir_size(root: &Path) -> (u64, u64) {
     )
 }
 
-fn runner_locked(path: &Path) -> bool {
+fn build_locked(path: &Path) -> bool {
     path.ancestors()
         .any(|ancestor| ancestor.join(".gos-build.lock").is_file())
 }
@@ -695,30 +698,30 @@ mod tests {
     }
 
     #[test]
-    fn runner_lock_marks_descendant_files_ineligible() {
+    fn binding_lock_marks_descendant_files_ineligible() {
         let root = scratch("lock");
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("runner").join("target")).unwrap();
-        fs::write(root.join("runner").join(".gos-build.lock"), b"lock").unwrap();
-        let artifact = root.join("runner").join("target").join("artifact");
+        fs::create_dir_all(root.join("build").join("target")).unwrap();
+        fs::write(root.join("build").join(".gos-build.lock"), b"lock").unwrap();
+        let artifact = root.join("build").join("target").join("artifact");
         fs::write(&artifact, b"x").unwrap();
-        assert!(runner_locked(&artifact));
+        assert!(build_locked(&artifact));
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn runner_fingerprint_lock_marks_sibling_artifacts_ineligible() {
+    fn binding_fingerprint_lock_marks_sibling_artifacts_ineligible() {
         let root = scratch("fingerprint-lock");
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("runner")).unwrap();
+        fs::create_dir_all(root.join("build")).unwrap();
         fs::create_dir_all(root.join("sigs")).unwrap();
         fs::write(root.join(".gos-build.lock"), b"lock").unwrap();
         let sigs = root.join("sigs").join("signatures.json");
-        let runner = root.join("runner").join("gos-runner");
+        let library = root.join("build").join("libgos_binding_x.so");
         fs::write(&sigs, b"{}").unwrap();
-        fs::write(&runner, b"x").unwrap();
-        assert!(runner_locked(&sigs));
-        assert!(runner_locked(&runner));
+        fs::write(&library, b"x").unwrap();
+        assert!(build_locked(&sigs));
+        assert!(build_locked(&library));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -786,17 +789,17 @@ mod tests {
     }
 
     #[test]
-    fn default_policy_has_a_smaller_frontend_cap_than_runner_cap() {
+    fn default_policy_has_a_smaller_frontend_cap_than_bindings_cap() {
         let policy = CachePolicy::default();
         assert!(
             policy.class_max_bytes(CacheClass::Frontend)
-                < policy.class_max_bytes(CacheClass::Runners)
+                < policy.class_max_bytes(CacheClass::Bindings)
         );
     }
 
     #[test]
-    fn runner_root_prunes_oldest_files_to_class_cap() {
-        let root = scratch("runner-prune");
+    fn binding_root_prunes_oldest_files_to_class_cap() {
+        let root = scratch("binding-prune");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("old"), vec![0u8; 8]).unwrap();
@@ -809,26 +812,26 @@ mod tests {
         // traversal without deleting. Byte-limit behavior is covered by the
         // shared prune path; this regression protects the direct-root API.
         assert_eq!(
-            prune_runner_root(&root, policy, true, None).unwrap(),
+            prune_binding_root(&root, policy, true, None).unwrap(),
             (0, 0)
         );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn runner_workdir_is_reclaimed_whole_or_not_at_all() {
-        let root = scratch("runner-workdir");
+    fn binding_workdir_is_reclaimed_whole_or_not_at_all() {
+        let root = scratch("binding-workdir");
         let _ = fs::remove_dir_all(&root);
-        let workdir = root.join("deadbeef").join("runner").join("target");
+        let workdir = root.join("deadbeef").join("build").join("target");
         fs::create_dir_all(&workdir).unwrap();
         fs::write(workdir.join("libgossamer_runtime.a"), vec![0u8; 4096]).unwrap();
-        fs::write(workdir.join("gos-runner"), vec![0u8; 4096]).unwrap();
+        fs::write(workdir.join("libgos_binding_x.so"), vec![0u8; 4096]).unwrap();
         fs::write(root.join("deadbeef").join("stamp.json"), b"{}").unwrap();
         let policy = CachePolicy {
             max_bytes: u64::MAX,
             max_age: Duration::ZERO,
         };
-        let (bytes, files) = prune_runner_root(&root, policy, false, None).unwrap();
+        let (bytes, files) = prune_binding_root(&root, policy, false, None).unwrap();
         assert_eq!(files, 3);
         assert_eq!(bytes, 8194);
         assert!(!root.join("deadbeef").exists());
@@ -839,36 +842,36 @@ mod tests {
     /// build lock, so the removal must leave the lock free for the next build
     /// rather than a file nothing owns.
     #[test]
-    fn reclaiming_a_runner_workdir_leaves_no_lock_behind() {
-        let root = scratch("runner-workdir-reclaim");
+    fn reclaiming_a_binding_build_leaves_no_lock_behind() {
+        let root = scratch("binding-workdir-reclaim");
         let _ = fs::remove_dir_all(&root);
         let workdir = root.join("cafed00d");
-        fs::create_dir_all(workdir.join("runner").join("target")).unwrap();
-        fs::write(workdir.join("runner").join("main.rs"), b"fn main() {}").unwrap();
+        fs::create_dir_all(workdir.join("build").join("target")).unwrap();
+        fs::write(workdir.join("build").join("main.rs"), b"fn main() {}").unwrap();
 
-        assert!(reclaim_runner_workdir(&workdir, &root));
+        assert!(reclaim_binding_dir(&workdir, &root));
 
         assert!(!workdir.exists(), "the workdir must be gone");
-        assert!(!crate::binding_runner::build_lock_path(&workdir).exists());
+        assert!(!crate::binding_build::build_lock_path(&workdir).exists());
         let _ = fs::remove_dir_all(&root);
     }
 
     /// A lock whose owner died must not pin a workdir in the cache forever.
     #[test]
-    fn a_stale_lock_does_not_pin_a_runner_workdir() {
-        let root = scratch("runner-workdir-stale-lock");
+    fn a_stale_lock_does_not_pin_a_binding_build() {
+        let root = scratch("binding-workdir-stale-lock");
         let _ = fs::remove_dir_all(&root);
         let workdir = root.join("d15ea5e0");
-        fs::create_dir_all(workdir.join("runner")).unwrap();
-        fs::write(workdir.join("runner").join("main.rs"), b"fn main() {}").unwrap();
+        fs::create_dir_all(workdir.join("build")).unwrap();
+        fs::write(workdir.join("build").join("main.rs"), b"fn main() {}").unwrap();
         // No process can hold this pid: it is past every platform's pid_max.
         fs::write(
-            crate::binding_runner::build_lock_path(&workdir),
+            crate::binding_build::build_lock_path(&workdir),
             format!("{}\n", u32::MAX),
         )
         .unwrap();
 
-        assert!(reclaim_runner_workdir(&workdir, &root));
+        assert!(reclaim_binding_dir(&workdir, &root));
 
         assert!(!workdir.exists());
         let _ = fs::remove_dir_all(&root);
@@ -878,81 +881,46 @@ mod tests {
     /// that it did nothing rather than removing files out from under it.
     #[test]
     fn reclaiming_a_workdir_a_build_holds_removes_nothing() {
-        let root = scratch("runner-workdir-held");
+        let root = scratch("binding-workdir-held");
         let _ = fs::remove_dir_all(&root);
         let workdir = root.join("feedface");
-        fs::create_dir_all(workdir.join("runner")).unwrap();
-        let source = workdir.join("runner").join("main.rs");
+        fs::create_dir_all(workdir.join("build")).unwrap();
+        let source = workdir.join("build").join("main.rs");
         fs::write(&source, b"fn main() {}").unwrap();
-        let held = crate::binding_runner::AdvisoryLock::try_acquire(
-            &crate::binding_runner::build_lock_path(&workdir),
+        let held = crate::binding_build::AdvisoryLock::try_acquire(
+            &crate::binding_build::build_lock_path(&workdir),
         )
         .expect("a free lock is takeable");
 
-        assert!(!reclaim_runner_workdir(&workdir, &root));
+        assert!(!reclaim_binding_dir(&workdir, &root));
         assert!(source.exists(), "a held workdir keeps its files");
 
         drop(held);
-        assert!(reclaim_runner_workdir(&workdir, &root));
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    /// A process that re-executed into a runner links and runs out of its
-    /// workdir after the build lock is released, so its lease alone keeps the
-    /// workdir in place.
-    #[test]
-    fn a_leased_runner_workdir_is_not_reclaimed() {
-        let root = scratch("runner-workdir-leased");
-        let _ = fs::remove_dir_all(&root);
-        let workdir = root.join("0ddba11");
-        fs::create_dir_all(workdir.join("runner")).unwrap();
-        let archive = workdir.join("runner").join("libgossamer_runtime.a");
-        fs::write(&archive, b"x").unwrap();
-        fs::write(
-            workdir.join(format!(".gos-lease-{}-0", std::process::id())),
-            b"",
-        )
-        .unwrap();
-
-        assert!(!reclaim_runner_workdir(&workdir, &root));
-        assert!(archive.exists(), "a leased workdir keeps its files");
-
-        fs::remove_file(workdir.join(format!(".gos-lease-{}-0", std::process::id()))).unwrap();
-        assert!(reclaim_runner_workdir(&workdir, &root));
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    /// A lease whose process exited must not pin a workdir forever.
-    #[test]
-    fn a_stale_lease_does_not_pin_a_runner_workdir() {
-        let root = scratch("runner-workdir-stale-lease");
-        let _ = fs::remove_dir_all(&root);
-        let workdir = root.join("5ca1ab1e");
-        fs::create_dir_all(workdir.join("runner")).unwrap();
-        fs::write(workdir.join(format!(".gos-lease-{}-0", u32::MAX)), b"").unwrap();
-
-        assert!(reclaim_runner_workdir(&workdir, &root));
-        assert!(!workdir.exists());
+        assert!(reclaim_binding_dir(&workdir, &root));
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_locked_runner_workdir_survives_the_prune() {
-        let root = scratch("runner-workdir-locked");
+        let root = scratch("binding-workdir-locked");
         let _ = fs::remove_dir_all(&root);
         let workdir = root.join("cafebabe");
-        fs::create_dir_all(workdir.join("runner")).unwrap();
+        fs::create_dir_all(workdir.join("build")).unwrap();
         fs::write(workdir.join(".gos-build.lock"), b"1").unwrap();
-        fs::write(workdir.join("runner").join("gos-runner"), vec![0u8; 4096]).unwrap();
+        fs::write(
+            workdir.join("build").join("libgos_binding_x.so"),
+            vec![0u8; 4096],
+        )
+        .unwrap();
         let policy = CachePolicy {
             max_bytes: u64::MAX,
             max_age: Duration::ZERO,
         };
         assert_eq!(
-            prune_runner_root(&root, policy, false, None).unwrap(),
+            prune_binding_root(&root, policy, false, None).unwrap(),
             (0, 0)
         );
-        assert!(workdir.join("runner").join("gos-runner").exists());
+        assert!(workdir.join("build").join("libgos_binding_x.so").exists());
         let _ = fs::remove_dir_all(&root);
     }
 

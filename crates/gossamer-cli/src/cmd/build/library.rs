@@ -96,6 +96,7 @@ pub(super) fn build(file: &Path, request: &BuildRequest<'_>, target: &LibraryTar
         unit.source,
         &mut timings,
         (unit.entry.as_path(), unit.origins.as_slice()),
+        super::Purpose::Build,
     )?;
     let exports = library_exports(&sf, file, &target.name)?;
     let host = target.runtime == LibRuntime::Host;

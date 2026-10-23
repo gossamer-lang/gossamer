@@ -63,6 +63,12 @@ const KNOWN_UNUSED_RUNTIME_SYMBOLS: &[&str] = &[
     // `debug_payload_string`; codegen emits only the kind, never
     // this symbol's name.
     "gos_rt_json_debug",
+    // The global allocator of a native build's binding archive
+    // (`gossamer_binding::RuntimeAllocator`) calls these, not codegen.
+    "gos_rt_binding_heap_alloc",
+    "gos_rt_binding_heap_alloc_zeroed",
+    "gos_rt_binding_heap_dealloc",
+    "gos_rt_binding_heap_realloc",
     // ABI 0.4 compiled-tier callback dispatcher fallback. Referenced
     // directly from `gossamer-binding::native::NativeCallback::invoke_raw`
     // (Rust binding code), not from generated Gossamer programs. The
@@ -118,7 +124,7 @@ fn main() {
     // runtime build inherits (panic strategy, LTO); a profile edit
     // must regenerate the archive.
     println!("cargo:rerun-if-changed=../../Cargo.toml");
-    println!("cargo:rerun-if-changed=../gossamer-codegen-cranelift/src/native.rs");
+    println!("cargo:rerun-if-changed=../gossamer-codegen-cranelift/src/native");
     println!("cargo:rerun-if-changed=../gossamer-codegen-cranelift/src/jit.rs");
     println!("cargo:rerun-if-changed=../gossamer-codegen-llvm/src/emit.rs");
     println!("cargo:rerun-if-changed=../gossamer-codegen-llvm/src/lower");
@@ -436,27 +442,20 @@ fn check_dispatch_parity(workspace_root: &Path) {
             c_abi.push('\n');
         }
     }
-    // native.rs was split into a `native/` directory of submodules.
-    // Concatenate every .rs under it.
+    // The native codegen is a `native/` directory of submodules; concatenate
+    // every .rs under it.
     let mut cl_native = String::new();
     let cl_native_dir = workspace_root.join("crates/gossamer-codegen-cranelift/src/native");
-    if cl_native_dir.is_dir() {
-        let mut entries: Vec<_> = std::fs::read_dir(&cl_native_dir)
-            .unwrap_or_else(|e| {
-                panic!("dispatch-parity: read_dir {}: {e}", cl_native_dir.display())
-            })
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("rs"))
-            .collect();
-        entries.sort();
-        for path in entries {
-            cl_native.push_str(&read_text(path));
-            cl_native.push('\n');
-        }
-    } else {
-        cl_native =
-            read_text(workspace_root.join("crates/gossamer-codegen-cranelift/src/native.rs"));
+    let mut entries: Vec<_> = std::fs::read_dir(&cl_native_dir)
+        .unwrap_or_else(|e| panic!("dispatch-parity: read_dir {}: {e}", cl_native_dir.display()))
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("rs"))
+        .collect();
+    entries.sort();
+    for path in entries {
+        cl_native.push_str(&read_text(path));
+        cl_native.push('\n');
     }
     let cl_jit = read_text(workspace_root.join("crates/gossamer-codegen-cranelift/src/jit.rs"));
     let llvm_emit = read_text(workspace_root.join("crates/gossamer-codegen-llvm/src/emit.rs"));

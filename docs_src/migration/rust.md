@@ -222,7 +222,8 @@ Do not port Rust derives mechanically. `Clone`, `Copy`, `Hash`,
 writing them reports GT0025. `#[derive(Default)]` needs every field to
 have a default (GP0062). Typed serde is a pair of functions named by a
 turbofish; `#[rename("key")]`, `#[skip]`, and `#[default]` play the part
-of the `#[serde(..)]` field attributes, and enums are externally tagged:
+of the `#[serde(..)]` field attributes, enums are externally tagged, and
+a `char` is a one-character string, as `serde_json` writes them:
 
 ```rust
 #[derive(Serialize, Deserialize)]

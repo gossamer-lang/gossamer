@@ -37,8 +37,8 @@ uses the normal `gossamer-binding` vocabulary:
 | testing and CLI parsing | `Result`, strings, tuples, vectors, and maps |
 
 The complete boundary contract, ownership rules, and tier limits are
-in [`crates/gossamer-binding/ABI_0_4.md`](../crates/gossamer-binding/ABI_0_4.md).
-The runner-backed regression
+in [`crates/gossamer-binding/ABI.md`](../crates/gossamer-binding/ABI.md).
+The regression
 `external_binding_supports_ecosystem_library_shapes_without_builtins`
 in `crates/gossamer-cli/tests/ecosystem_bindings.rs` creates an ordinary
 out-of-tree binding package and exercises the database, telemetry,

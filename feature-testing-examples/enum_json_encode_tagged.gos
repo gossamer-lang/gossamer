@@ -1,0 +1,47 @@
+// `json::encode` writes a user enum externally tagged, as `json::decode`
+// reads it back: inside structs, vectors, and options, for a recursive enum,
+// and beside maps keyed by integers. Struct members keep byte order of their
+// names and floats keep their fraction, as for any other value.
+use std::encoding::json
+
+enum Layout {
+    Empty
+    Group { title: String, weight: f64 }
+    Pair(i64, i64)
+    One(String)
+    Split { second: Layout, first: Layout }
+}
+
+struct Saved {
+    root: Layout
+    history: Vec<Layout>
+    pinned: Option<Layout>
+}
+
+struct Sized {
+    layout: Layout
+    sizes: Map<i64, i64>
+}
+
+fn weigh(n: i64) -> f64 {
+    let mut total = 0.0
+    for i in 0..n {
+        total += 0.5 * i as f64
+    }
+    total
+}
+
+fn main() {
+    let group = Layout::Group { title: "main", weight: weigh(3) }
+    let saved = Saved {
+        root: Layout::Split { first: group, second: Layout::Pair(1, 2) }
+        history: #[Layout::Empty, Layout::One("x"), group]
+        pinned: Some(Layout::Empty)
+    }
+    let encoded = json::encode(saved)
+    println(encoded)
+    let decoded = json::decode::<Saved>(encoded).unwrap()
+    println(decoded.root == saved.root && decoded.history == saved.history)
+    println(json::encode(Saved { root: Layout::Empty, history: #[], pinned: None }))
+    println(json::encode(Sized { layout: Layout::One("y"), sizes: { 10: 1, 2: 3 } }))
+}

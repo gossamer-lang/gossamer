@@ -58,6 +58,40 @@ pub(crate) struct BuildRequest<'a> {
     pub(crate) explain_profile: bool,
     /// Name each function uniqueness inference removed RC traffic from.
     pub(crate) uniqueness_report: bool,
+    /// What the build is for.
+    pub(crate) purpose: Purpose,
+}
+
+/// What a build is for, which decides what it says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Purpose {
+    /// `gos build`, which names the executable it made.
+    Build,
+    /// A build `gos run` starts: stdout belongs to the program, and a
+    /// program that does not check is refused a run.
+    Run,
+}
+
+/// Set on a build `gos run` starts, which builds for the run.
+pub(crate) const RUN_BUILD: &str = "GOS_RUN_BUILD";
+
+impl Purpose {
+    /// The purpose of the build this process makes.
+    pub(crate) fn of_this_build() -> Self {
+        if std::env::var_os(RUN_BUILD).is_some() {
+            Self::Run
+        } else {
+            Self::Build
+        }
+    }
+
+    /// What a build refuses when the program does not check.
+    fn refusal(self) -> &'static str {
+        match self {
+            Self::Build => "refusing to build",
+            Self::Run => "refusing to execute",
+        }
+    }
 }
 
 /// `gos build` dispatcher: walks the project root for a default
@@ -67,8 +101,7 @@ pub(crate) fn dispatch(mut request: BuildRequest<'_>) -> Result<()> {
         gossamer_mir::enable_uniqueness_report();
     }
     let resolved = resolve_entry_arg(request.path.take())?;
-    crate::binding_dispatch::ensure_external_signatures_for_entry(&resolved)
-        .map_err(|err| anyhow!("failed to load rust-binding signatures: {err}"))?;
+    crate::binding_dispatch::install_for_entry(&resolved)?;
     run(&resolved, &request)
 }
 
@@ -105,6 +138,14 @@ impl LinkOptions {
     fn want_strip(self) -> bool {
         !self.debug_info
     }
+}
+
+/// Whether the program at `input` links Rust bindings, its own or a
+/// dependency's.
+fn links_rust_bindings(input: &Path) -> bool {
+    crate::paths::project_context_for_entry(input)
+        .binding_manifest()
+        .is_some_and(|manifest| manifest.is_ok_and(|m| !m.rust_bindings.is_empty()))
 }
 
 /// Explicit Apple linker optimization level for a profile. Kept pure so Linux
@@ -198,19 +239,24 @@ fn musl_runtime_available() -> bool {
         });
         let runtime_present =
             find_runtime_lib_for_target(musl_triple_for_arch(std::env::consts::ARCH)).is_ok();
-        let present = crt_present && runtime_present;
-        if !present {
-            eprintln!(
-                "warning: the static-musl release link is unavailable \
-                 (the musl target or matching Gossamer runtime is not installed); \
-                 linking dynamically against the host libc instead. Run \
-                 `rustup target add {target}` and reinstall Gossamer to restore \
-                 self-contained release binaries.",
-                target = musl_triple_for_arch(std::env::consts::ARCH),
-            );
-        }
-        present
+        crt_present && runtime_present
     })
+}
+
+/// Says, once, that a release link which would be static musl links against
+/// the host libc instead. Only a link says it: deciding what a build would
+/// produce, as `gos run` does before starting one, is silent.
+fn warn_if_static_musl_unavailable(opts: LinkOptions) {
+    if opts.release && !opts.dynamic && cfg!(target_os = "linux") && !musl_runtime_available() {
+        eprintln!(
+            "warning: the static-musl release link is unavailable \
+             (the musl target or matching Gossamer runtime is not installed); \
+             linking dynamically against the host libc instead. Run \
+             `rustup target add {target}` and reinstall Gossamer to restore \
+             self-contained release binaries.",
+            target = musl_triple_for_arch(std::env::consts::ARCH),
+        );
+    }
 }
 
 /// Resolve where the linked binary should land. `--out-dir` wins
@@ -264,6 +310,54 @@ fn cross_target(target: Option<&str>) -> Result<Option<&str>> {
 }
 
 fn run(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
+    let Some(lock_path) = std::env::var_os(BACKGROUND_BUILD_LOCK).map(PathBuf::from) else {
+        return build_entry(file, request);
+    };
+    // The lock is held for the whole build and released when the process
+    // ends, however it ends; a build already holding it is producing the
+    // same executable, so this one has nothing to add. A run that started
+    // this build may have handed over the lock it took already.
+    let lock = if std::env::var_os(BACKGROUND_BUILD_LOCK_HELD).is_some() {
+        None
+    } else {
+        let Ok(lock) = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+        else {
+            return build_entry(file, request);
+        };
+        if lock.try_lock().is_err() {
+            return Ok(());
+        }
+        Some(lock)
+    };
+    // A build a run started works below the program it is for, and the
+    // compiler tools it starts inherit that.
+    gossamer_runtime::safe_priority::lower_own_priority();
+    let result = build_entry(file, request);
+    if result.is_err()
+        && let Some(key) = std::env::var_os(BACKGROUND_BUILD_KEY)
+    {
+        let _ = fs::write(
+            failed_build_record(&lock_path),
+            key.to_string_lossy().as_bytes(),
+        );
+    }
+    drop(lock);
+    result
+}
+
+/// Set on a background build that already holds its lock, handed over by the
+/// run that started it.
+pub(crate) const BACKGROUND_BUILD_LOCK_HELD: &str = "GOS_RUN_BUILD_LOCK_HELD";
+
+/// The key `gos run` computed for the inputs a background build is for,
+/// which the build records when those inputs fail to build.
+pub(crate) const BACKGROUND_BUILD_KEY: &str = "GOS_RUN_BUILD_KEY";
+
+fn build_entry(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
     let target = request.target;
     let opts = request.link;
     let release = opts.release;
@@ -272,12 +366,7 @@ fn run(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
     let explain_profile = request.explain_profile;
     let started = Instant::now();
     let mut build_timings = BuildTimings::default();
-    warn_if_pgo_profile_is_stale(file);
-    let cross_target = cross_target(target)?;
-
-    if explain_profile {
-        print_profile_plan(cross_target, opts);
-    }
+    let cross_target = prepare_target(file, target, explain_profile, opts)?;
 
     if let Some(library) = library::target_for(file)? {
         return library::build(file, request, &library);
@@ -300,7 +389,9 @@ fn run(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
     if let Some(outcome) = unchanged.flatten() {
         build_timings.stamp = phase_started.elapsed();
         build_timings.total = started.elapsed();
-        report_artifact(&outcome, &out_path);
+        if request.purpose == Purpose::Build {
+            report_artifact(&outcome, &out_path);
+        }
         if timings {
             build_timings.print(true);
         }
@@ -322,6 +413,7 @@ fn run(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
         source,
         &mut build_timings,
         (unit.entry.as_path(), unit.origins.as_slice()),
+        request.purpose,
     )?;
     build_timings.frontend = phase_started.elapsed();
     profile_rss_stage("build_frontend_released");
@@ -363,12 +455,76 @@ fn run(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
         &outcome,
         &recorded_inputs,
     );
-    report_artifact(&outcome, &out_path);
+    if request.purpose == Purpose::Build {
+        report_artifact(&outcome, &out_path);
+    }
     if timings {
         build_timings.total = started.elapsed();
         build_timings.print(false);
     }
     Ok(())
+}
+
+/// Resolves the `--target` a build of `file` is for, after the notes and
+/// plan a build prints before it starts.
+fn prepare_target<'t>(
+    file: &Path,
+    target: Option<&'t str>,
+    explain_profile: bool,
+    opts: LinkOptions,
+) -> Result<Option<&'t str>> {
+    warn_if_pgo_profile_is_stale(file);
+    let cross_target = cross_target(target)?;
+    if explain_profile {
+        print_profile_plan(cross_target, opts, file);
+    }
+    Ok(cross_target)
+}
+
+/// The executable a `gos build [--release] --out-dir out_dir` of `file` would
+/// leave, with the key its inputs hash to today; `current` says the
+/// executable on disk was built from exactly those inputs.
+pub(crate) struct RunArtifact {
+    pub(crate) path: PathBuf,
+    pub(crate) key: String,
+    pub(crate) current: bool,
+}
+
+/// What a build of `file`, bundled as `source`, into `out_dir` stands at,
+/// without building. `None` for a library.
+pub(crate) fn run_artifact(
+    file: &Path,
+    source: &str,
+    out_dir: &Path,
+    release: bool,
+) -> Option<RunArtifact> {
+    if library::target_for(file).ok()?.is_some() {
+        return None;
+    }
+    let opts = run_link_options(release);
+    let path = out_dir.join(platform_exe_name(&default_unit_name(file), cfg!(windows)));
+    let key = build_artifact_key(file, source, None, opts, &path);
+    let current = load_unchanged_build(&build_stamp_path(file, &path), &path, &key).is_some();
+    Some(RunArtifact { path, key, current })
+}
+
+/// The link options of a build `gos run` starts.
+fn run_link_options(release: bool) -> LinkOptions {
+    LinkOptions {
+        release,
+        debug_info: false,
+        dynamic: false,
+    }
+}
+
+/// Set on a build `gos run` starts in the background: the lock it holds while
+/// it builds, so a second run does not start the same build again.
+pub(crate) const BACKGROUND_BUILD_LOCK: &str = "GOS_RUN_BUILD_LOCK";
+
+/// The file a background build that failed records its key in, beside its
+/// lock, so runs do not retry inputs that cannot build until they change.
+pub(crate) fn failed_build_record(lock: &Path) -> PathBuf {
+    lock.with_file_name("failed-key")
 }
 
 /// Whether this build reports on or dumps its compile, which a current build
@@ -395,10 +551,11 @@ fn report_artifact(outcome: &NativeBuildOutcome, out_path: &Path) {
 /// Emits a stable, machine-readable summary of the selected optimization
 /// policy. This is deliberately available before the artifact-cache return so
 /// a reporter can prove profile selection even when no codegen reruns.
-fn print_profile_plan(cross_target: Option<&str>, opts: LinkOptions) {
+fn print_profile_plan(cross_target: Option<&str>, opts: LinkOptions, input: &Path) {
     let planned_target = resolve_link_target(cross_target);
     let target = &planned_target;
-    let static_musl = target.env == TargetEnv::Musl || opts.want_static_musl();
+    let static_musl =
+        target.env == TargetEnv::Musl || (opts.want_static_musl() && !links_rust_bindings(input));
     let profile = if opts.release { "release" } else { "debug" };
     let (mir, llvm) = if opts.release {
         ("release-inline+optimise", "O3")
@@ -515,6 +672,25 @@ const BUILD_STAMP_VERSION: &str = "gossamer-linked-artifact-v2";
 /// Variables that ask a compile to write its intermediate forms out.
 const COMPILE_DUMP_VARS: [&str; 3] = ["GOS_LLVM_DUMP", "GOS_LLVM_DUMP_MIR", "GOS_DUMP_MIR_RC"];
 
+/// Variables that ask a compile to trace what it does as it goes.
+const COMPILE_TRACE_VARS: [&str; 4] = [
+    "GOS_DUMP_MIR",
+    "GOS_LLVM_TRACE",
+    "GOS_LINK_VERBOSE",
+    "GOS_PIPELINE_TRACE",
+];
+
+/// Whether the environment asks a compile to dump, trace, or remark on what
+/// it does: output its reader wants to see, and which only a compile that
+/// actually runs produces.
+pub(crate) fn compile_reports_requested() -> bool {
+    gossamer_mir::remarks::any_enabled()
+        || COMPILE_DUMP_VARS
+            .iter()
+            .chain(&COMPILE_TRACE_VARS)
+            .any(|name| std::env::var_os(name).is_some())
+}
+
 /// Fingerprints everything available before the frontend that can affect the
 /// linked artifact. The bundled source covers sibling modules, while project
 /// metadata, tool/runtime identity, target flags, PGO inputs, and linker
@@ -532,7 +708,8 @@ fn build_artifact_key(
     // installing or removing the musl target between builds must invalidate a
     // cached dynamic/static artifact rather than reusing the wrong binary.
     let resolved_target = resolve_link_target(target);
-    let static_musl = resolved_target.env == TargetEnv::Musl || opts.want_static_musl();
+    let static_musl = resolved_target.env == TargetEnv::Musl
+        || (opts.want_static_musl() && !links_rust_bindings(file));
     let mut hash = gossamer_pkg::sha256::Hasher::new();
     let mut add = |label: &str, bytes: &[u8]| {
         hash.update(label.as_bytes());
@@ -646,7 +823,7 @@ fn file_stamp_identity(path: &Path) -> String {
 fn build_stamp_path(entry: &Path, out_path: &Path) -> PathBuf {
     let root = find_ancestor_file(entry, "project.toml")
         .and_then(|path| path.parent().map(Path::to_path_buf))
-        .or_else(|| entry.parent().map(Path::to_path_buf))
+        .or_else(|| out_path.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("."));
     let output_key = gossamer_pkg::sha256::hex(out_path.to_string_lossy().as_bytes());
     root.join(".gos-cache")
@@ -729,6 +906,7 @@ fn validate_source(
     source: String,
     timings: &mut BuildTimings,
     origins: (&Path, &[gossamer_pkg::bundle::BundledSpan]),
+    purpose: Purpose,
 ) -> Result<ValidatedSource> {
     // Autoderive generates from_json/to_json (and friends), and the comptime
     // fold evaluates `comptime` regions and splices in their result literals
@@ -776,8 +954,9 @@ fn validate_source(
             eprintln!("{}", gossamer_diagnostics::render(diag, &map, render_opts));
         }
         return Err(anyhow!(
-            "{} front-end error(s); refusing to build",
-            outcome.diagnostics.len()
+            "{} front-end error(s); {}",
+            outcome.diagnostics.len(),
+            purpose.refusal()
         ));
     }
     profile_rss_stage("build_frontend_checked");
@@ -1163,6 +1342,105 @@ fn ensure_output_dir(out_path: &Path) -> std::result::Result<(), NativeBuildErro
     })
 }
 
+/// What a link combines into the executable.
+struct LinkInputs<'a> {
+    objects: &'a [PathBuf],
+    runtime_lib: &'a Path,
+    extra_archives: &'a [PathBuf],
+    libraries: &'a NativeLinks,
+}
+
+/// Links the executable at `out_path`: written beside it under a name of its
+/// own, then moved into place.
+fn link_executable(
+    lt: &LinkTarget,
+    inputs: &LinkInputs<'_>,
+    out_path: &Path,
+    opts: LinkOptions,
+    static_musl: bool,
+) -> std::result::Result<(), NativeBuildError> {
+    let LinkInputs {
+        objects,
+        runtime_lib,
+        extra_archives,
+        libraries,
+    } = *inputs;
+    let staged = staged_output_path(out_path);
+    let staging = staged.parent().unwrap_or(out_path).to_path_buf();
+    fs::create_dir_all(&staging)
+        .map_err(|err| NativeBuildError::Io(anyhow!("creating {}: {err}", staging.display())))?;
+    let linked = if !lt.is_cross && cfg!(all(windows, target_env = "msvc")) {
+        link_windows_msvc(
+            objects,
+            runtime_lib,
+            extra_archives,
+            libraries,
+            &staged,
+            opts,
+        )
+    } else if static_musl {
+        link_posix_static_musl(
+            lt,
+            objects,
+            runtime_lib,
+            extra_archives,
+            libraries,
+            &staged,
+            opts,
+        )
+    } else {
+        link_posix(
+            lt,
+            objects,
+            runtime_lib,
+            extra_archives,
+            libraries,
+            &staged,
+            opts,
+        )
+    }
+    .and_then(|()| publish_artifact(&staged, out_path));
+    let _ = fs::remove_dir_all(&staging);
+    linked
+}
+
+/// Where a link writes the executable before it takes `out_path`'s place:
+/// a directory of this process's own beside `out_path`, under `out_path`'s
+/// own name. The rename that publishes it stays on one filesystem, two builds
+/// of one output never write the same file, and the file keeps the name a
+/// linker may record in it (an Apple ad-hoc signature's identifier).
+fn staged_output_path(out_path: &Path) -> PathBuf {
+    let name = out_path
+        .file_name()
+        .map_or_else(|| "out".into(), |name| name.to_string_lossy().into_owned());
+    out_path
+        .with_file_name(format!(".{name}.{}.partial", std::process::id()))
+        .join(name)
+}
+
+/// Moves a linked executable into place in one step: a program already
+/// running from `out_path` keeps its old file, and anything starting it sees
+/// either the old executable or the new one, never a partial one.
+fn publish_artifact(staged: &Path, out_path: &Path) -> std::result::Result<(), NativeBuildError> {
+    let published = fs::rename(staged, out_path).or_else(|err| {
+        // Windows refuses to replace an executable that is running, but lets
+        // it be renamed, so the running one steps aside first.
+        if cfg!(windows) && out_path.exists() {
+            let aside = staged.with_extension("previous");
+            fs::rename(out_path, &aside).and_then(|()| {
+                let moved = fs::rename(staged, out_path);
+                let _ = fs::remove_file(&aside);
+                moved
+            })
+        } else {
+            Err(err)
+        }
+    });
+    published.map_err(|err| {
+        NativeBuildError::Io(anyhow!("moving {} into place: {err}", out_path.display()))
+    })
+}
+
 /// The native libraries a build links beyond the runtime, and the
 /// directories it searches for them.
 struct NativeLinks {
@@ -1336,7 +1614,9 @@ fn try_native_build(
 ) -> std::result::Result<NativeBuildOutcome, NativeBuildError> {
     let lt = resolve_link_target(target);
     let links = gossamer_driver::foreign_link_libraries(&checked.sf, program_end);
-    let links_declares_foreign = links.declares_foreign;
+    // Rust bindings are native code built for the C library `gos run` calls
+    // into, as the program's own foreign declarations are.
+    let links_declares_foreign = links.declares_foreign || links_rust_bindings(paths.input);
     let mut libraries = NativeLinks::foreign(paths.input, links);
     let tmp_dir = std::env::temp_dir().join(format!(
         "gos-build-{}-{}",
@@ -1352,6 +1632,9 @@ fn try_native_build(
     // `gos run` calls into (`target_env`), the platform's shared one, which a
     // static musl link would replace; such a host release takes the dynamic
     // link. A musl target asked for by name stays static.
+    if lt.env != TargetEnv::Musl {
+        warn_if_static_musl_unavailable(opts);
+    }
     let static_musl =
         lt.env == TargetEnv::Musl || (opts.want_static_musl() && !links_declares_foreign);
     let phase_started = Instant::now();
@@ -1398,36 +1681,13 @@ fn try_native_build(
     // path it uses today.
     ensure_output_dir(paths.out)?;
     let phase_started = Instant::now();
-    let link_result = if !lt.is_cross && cfg!(all(windows, target_env = "msvc")) {
-        link_windows_msvc(
-            &object_paths,
-            &runtime_lib,
-            &extra_archives,
-            &libraries,
-            paths.out,
-            opts,
-        )
-    } else if static_musl {
-        link_posix_static_musl(
-            &lt,
-            &object_paths,
-            &runtime_lib,
-            &extra_archives,
-            &libraries,
-            paths.out,
-            opts,
-        )
-    } else {
-        link_posix(
-            &lt,
-            &object_paths,
-            &runtime_lib,
-            &extra_archives,
-            &libraries,
-            paths.out,
-            opts,
-        )
+    let inputs = LinkInputs {
+        objects: &object_paths,
+        runtime_lib: &runtime_lib,
+        extra_archives: &extra_archives,
+        libraries: &libraries,
     };
+    let link_result = link_executable(&lt, &inputs, paths.out, opts, static_musl);
     timings.link = phase_started.elapsed();
     // Keep the per-build temp dir (objects + IR) when dumping IR or when
     // explicitly preserving artifacts for post-mortem inspection on a
@@ -1637,38 +1897,33 @@ fn build_static_bindings_lib(
     release: bool,
     cargo_target: Option<&str>,
     libraries: &mut NativeLinks,
-) -> std::result::Result<Option<PathBuf>, gossamer_driver::binding_runner::BindingRunnerError> {
-    use gossamer_driver::binding_runner::{Profile as RunnerProfile, StaticBindingsLib};
+) -> std::result::Result<Option<PathBuf>, gossamer_driver::BindingBuildError> {
+    use gossamer_driver::{BindingProfile, StaticBindingsLib};
 
     let project = crate::paths::project_context_for_entry(entry);
-    // Mirror `dispatch_runner_if_needed`: a malformed manifest must
-    // not silently degrade to "no bindings".
-    let Some(manifest_result) = project.manifest_result() else {
+    // A malformed manifest must not silently degrade to "no bindings".
+    let Some(manifest_result) = project.binding_manifest() else {
         return Ok(None);
     };
     let manifest = match manifest_result {
         Ok(m) => m,
         Err(err) => {
-            return Err(
-                gossamer_driver::binding_runner::BindingRunnerError::Manifest(err.to_string()),
-            );
+            return Err(gossamer_driver::BindingBuildError::Manifest(
+                err.to_string(),
+            ));
         }
     };
     if manifest.rust_bindings.is_empty() {
         return Ok(None);
     }
     let manifest_dir = project.manifest_dir().unwrap_or_else(|| PathBuf::from("."));
-    let Some(gossamer_root) = crate::binding_dispatch::locate_gossamer_root() else {
-        return Ok(None);
-    };
     let profile = if release {
-        RunnerProfile::Release
+        BindingProfile::Release
     } else {
-        RunnerProfile::Debug
+        BindingProfile::Debug
     };
-    let Some(lib) =
-        StaticBindingsLib::from_manifest(manifest, &manifest_dir, &gossamer_root, profile)
-            .map_err(gossamer_driver::binding_runner::BindingRunnerError::Io)?
+    let Some(lib) = StaticBindingsLib::from_manifest(&manifest, &manifest_dir, profile)
+        .map_err(gossamer_driver::BindingBuildError::Io)?
     else {
         return Ok(None);
     };
@@ -1857,6 +2112,7 @@ fn link_posix(
         && lt.env == TargetEnv::Gnu
         && !lt.is_cross
         && host_glibc_reads_relr()
+        && (links_with_mold(lt, libraries) || linker_packs_relative_relocs(&cc))
     {
         // Packed relative relocations keep the binary position independent
         // at a fraction of the relocation size. The linker records a
@@ -1886,6 +2142,23 @@ fn link_posix(
 /// Whether this host's glibc loads packed relative relocations (`DT_RELR`),
 /// which it does from 2.36 on. Read from `ldd --version`, whose first line
 /// ends in the glibc version; any other answer reads as no.
+/// Whether the linker `cc` drives packs relative relocations for this
+/// host's architecture. GNU ld lists `-z pack-relative-relocs` among its
+/// options only for targets it implements it for, and elsewhere warns that it
+/// ignores the option on every link.
+fn linker_packs_relative_relocs(cc: &str) -> bool {
+    static PACKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PACKS.get_or_init(|| {
+        std::process::Command::new(cc)
+            .arg("-Wl,--help")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .is_ok_and(|output| {
+                String::from_utf8_lossy(&output.stdout).contains("pack-relative-relocs")
+            })
+    })
+}
+
 fn host_glibc_reads_relr() -> bool {
     static READS_RELR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *READS_RELR.get_or_init(|| {
@@ -2285,14 +2558,9 @@ fn emit_native_objects(
         gossamer_codegen_llvm::OptProfile::Debug
     });
     gossamer_codegen_llvm::set_static_musl_link(static_musl);
-    // Anchor the incremental cache next to the project when possible
-    // so repeated `gos build` invocations share a warm cache.
-    let cache_dir = std::env::current_dir()
-        .ok()
-        .map(|d| d.join(".gos-cache").join("ir-cache"));
-    if let Some(ref cd) = cache_dir {
-        gossamer_codegen_llvm::set_cache_dir(cd.clone());
-    }
+    // The object cache is the user's, shared by every project: an object is
+    // keyed by the exact IR it was compiled from, so a dependency's modules
+    // compiled for one program serve every other program using them.
     let llvm_obj_dir = tmp_dir.join("llvm");
     fs::create_dir_all(&llvm_obj_dir)
         .map_err(|e| NativeBuildError::Io(anyhow!("creating {}: {e}", llvm_obj_dir.display())))?;
