@@ -5184,8 +5184,16 @@ fn dependency_fields_through_aliases_crate_paths_and_imports_render_on_every_tie
         "use crate::geom::Rect\n\npub mod ops\npub mod geom\n\npub type Op = ops::Op\n\n\
          pub enum Event {\n    Moved(Rect)\n    Dropped(Option<crate::ops::Op>)\n}\n",
     );
-    fs::write(dep.join("ops.gos"), "pub enum Op {\n    Copy\n    Move\n}\n").unwrap();
-    fs::write(dep.join("geom.gos"), "pub struct Rect {\n    pub w: i64\n}\n").unwrap();
+    fs::write(
+        dep.join("ops.gos"),
+        "pub enum Op {\n    Copy\n    Move\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dep.join("geom.gos"),
+        "pub struct Rect {\n    pub w: i64\n}\n",
+    )
+    .unwrap();
     let app = write_app_project(
         &root,
         "\"example.com/drag\" = { path = \"../drag\" }\n",
