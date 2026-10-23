@@ -366,6 +366,9 @@ impl TypeChecker<'_> {
             }
             return None;
         }
+        if let Some(params) = self.assoc_fn_param_tys(callee, n_args) {
+            return Some(params.into_iter().map(Expectation::HasType).collect());
+        }
         let ExprKind::Path(path) = &callee.kind else {
             return None;
         };
@@ -985,6 +988,43 @@ impl TypeChecker<'_> {
             .or_else(|| self.check_tuple_struct_ctor_call(callee, args, arg_tys))
             .or_else(|| self.check_named_struct_ctor_call(callee, args))
             .or_else(|| self.check_enum_variant_ctor_call(callee, args, arg_tys))
+    }
+
+    /// The declared parameter types of the user associated function a
+    /// `Type::assoc(..)` callee names, when it takes `n_args` and has no type
+    /// parameters, so its closure arguments take their parameter types from
+    /// the signature before their bodies are checked.
+    pub(super) fn assoc_fn_param_tys(&self, callee: &Expr, n_args: usize) -> Option<Vec<Ty>> {
+        let ExprKind::Path(path) = &callee.kind else {
+            return None;
+        };
+        let segments: Vec<&str> = path
+            .segments
+            .iter()
+            .map(|seg| seg.name.name.as_str())
+            .collect();
+        let [owner @ .., fn_name] = segments.as_slice() else {
+            return None;
+        };
+        if owner.is_empty() {
+            return None;
+        }
+        let type_name = self
+            .owner_identity_candidates(owner)
+            .into_iter()
+            .find(|candidate| self.user_type_decls.contains(candidate))?;
+        let key = (type_name, (*fn_name).to_string());
+        self.method_ret_types
+            .get(&(key.0.clone(), key.1.clone(), n_args))?;
+        self.method_param_types
+            .get(&key)
+            .filter(|params| {
+                params.len() == n_args
+                    && params
+                        .iter()
+                        .all(|param| !self.ty_mentions_generic_param(*param))
+            })
+            .cloned()
     }
 
     /// Return type of `Type::assoc(..)` for a user `impl`'s associated

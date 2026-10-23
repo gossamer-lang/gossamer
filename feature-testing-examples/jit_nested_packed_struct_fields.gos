@@ -1,0 +1,76 @@
+// A struct that nests a packed struct of narrow fields among word fields
+// crosses the JIT boundary with every field where the compiled code reads it:
+// read through `&self`, written back through `&mut self`, and answered.
+
+struct Options {
+    match_case: bool
+    whole_word: bool
+}
+
+struct Bar {
+    query: String
+    options: Options
+    count: i64
+    current: i64
+}
+
+struct Pair {
+    left: Options
+    right: Options
+    tag: i64
+}
+
+// `marks` copies of `mark` after `text`.
+fn marked(text: String, mark: String, marks: i64) -> String {
+    let mut out = text
+    for _ in 0..marks {
+        out += mark
+    }
+    out
+}
+
+impl Bar {
+    fn summary(&self) -> String {
+        if self.query.is_empty() {
+            return ""
+        }
+        if self.count == 0 {
+            return "none"
+        }
+        let base = f"{self.current + 1} of {self.count}"
+        marked(base, if self.options.whole_word { "w" } else { "-" }, self.count)
+    }
+
+    // Counts the matches at `positions` and selects the one at `caret`.
+    fn found(&mut self, positions: [i64], caret: i64) {
+        self.count = 0
+        self.current = -1
+        for p in positions {
+            if p == caret {
+                self.current = self.count
+            }
+            self.count += 1
+        }
+    }
+}
+
+fn widen(p: Pair, rounds: i64) -> Pair {
+    let mut q = p
+    for _ in 0..rounds {
+        q.right.match_case = !q.right.match_case
+        q.tag = q.tag * 10
+    }
+    q
+}
+
+fn main() {
+    let mut bar = Bar { query: "count", options: Options { match_case: false, whole_word: true }, count: 0, current: -1 }
+    let searches = [(#[4, 9], 9), (#[1, 2, 3], 2), (#[1, 2, 3], 7), (#[], 0)]
+    for search in searches {
+        let positions, caret = search
+        bar.found(positions, caret)
+        println(f"{positions} {caret} -> {bar.count} {bar.current} [{bar.summary()}]")
+    }
+    let p = widen(Pair { left: Options { match_case: true, whole_word: false }, right: Options { match_case: true, whole_word: true }, tag: 4 }, 3)
+    println(f"{p.left.match_case} {p.right.match_case} {p.right.whole_word} {p.tag}")
+}

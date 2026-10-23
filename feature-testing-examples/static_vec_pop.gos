@@ -1,0 +1,20 @@
+// Popping a `static mut` vector shortens the shared vector, wherever the pop
+// is written.
+
+static mut STACK: Vec<String> = #[]
+
+fn enter(key: String) {
+    STACK.push(key)
+}
+
+fn leave() -> Option<String> {
+    STACK.pop()
+}
+
+fn main() {
+    enter("main")
+    enter("dialog")
+    println(f"{STACK.len()} {leave()} {STACK.len()}")
+    let _ = STACK.pop()
+    println(f"{STACK.len()} {STACK.pop()}")
+}

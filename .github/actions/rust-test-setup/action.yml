@@ -150,10 +150,15 @@ runs:
         set -euxo pipefail
         which cargo || true
         which rustup || true
+        # The toolchain action installs rustup into ~/.cargo/bin unless the
+        # image already carries one on $PATH (Homebrew's on some macOS
+        # images), which it then uses to install the toolchain.
         rustup_bin="$HOME/.cargo/bin/rustup"
         if [ ! -x "$rustup_bin" ]; then
-          echo "::error::$rustup_bin missing - rust-toolchain action did not install rustup at the expected path"
-          ls -la "$HOME/.cargo/bin/" || true
+          rustup_bin="$(command -v rustup || true)"
+        fi
+        if [ -z "$rustup_bin" ]; then
+          echo "::error::no rustup in ~/.cargo/bin or on PATH - the rust-toolchain action installed none"
           exit 1
         fi
         "$rustup_bin" --version

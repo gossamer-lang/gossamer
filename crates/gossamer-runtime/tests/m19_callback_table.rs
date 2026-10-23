@@ -205,3 +205,54 @@ fn callback_can_unregister_itself_without_deadlocking() {
         -1
     );
 }
+
+extern "C" fn unused_callback(
+    _ctx: *const u8,
+    _args: *const u8,
+    _len: u32,
+    _result: *mut u8,
+) -> i32 {
+    0
+}
+
+// Unregisters its handle when its thread's locals are torn down.
+struct ReleasedAtThreadExit(u64);
+
+impl Drop for ReleasedAtThreadExit {
+    fn drop(&mut self) {
+        gossamer_runtime::c_abi::gos_rt_callback_unregister(self.0);
+    }
+}
+
+thread_local! {
+    static HELD: std::cell::RefCell<Option<ReleasedAtThreadExit>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[test]
+fn a_handle_released_while_its_thread_tears_down_unregisters() {
+    let released = std::thread::spawn(|| {
+        let held =
+            gossamer_runtime::c_abi::gos_rt_callback_register(std::ptr::null(), unused_callback);
+        HELD.with(|slot| *slot.borrow_mut() = Some(ReleasedAtThreadExit(held)));
+        // The runtime's own locals start after `HELD`, so the thread tears
+        // them down first and `HELD`'s release runs without them.
+        let other =
+            gossamer_runtime::c_abi::gos_rt_callback_register(std::ptr::null(), unused_callback);
+        gossamer_runtime::c_abi::gos_rt_callback_unregister(other);
+        held
+    })
+    .join()
+    .expect("the thread ends cleanly");
+    let mut result = [0u8; 16];
+    // SAFETY: no argument bytes, and a result slot of the callback's width.
+    let status = unsafe {
+        gossamer_runtime::c_abi::gos_rt_callback_invoke(
+            released,
+            std::ptr::null(),
+            0,
+            result.as_mut_ptr(),
+        )
+    };
+    assert_eq!(status, -1, "the handle is unregistered");
+}

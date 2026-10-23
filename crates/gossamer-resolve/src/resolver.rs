@@ -2401,20 +2401,12 @@ impl Resolver {
             Some(first) if effective.len() == 1 => *first,
             _ => head.name.name.as_str(),
         };
-        let resolution = if is_self_type(name) {
-            Resolution::Err
-        } else {
-            self.lookup_anchored_item(&written, false)
-                .or_else(|| {
-                    self.lookup_type_here(name)
-                        .map(|binding| binding.resolution)
-                })
-                .or_else(|| self.synthesized_lookup(name))
-                .or_else(|| self.const_generic_in_type_position(name, path))
-                .unwrap_or(Resolution::Err)
-        };
+        let (resolution, missing_member) =
+            self.type_path_fallback(&written, &effective, name, path);
         if let Some(span) = span {
-            if matches!(resolution, Resolution::Err) && !is_self_type(name) {
+            if missing_member {
+                self.emit_unresolved_or_rename(&effective.join("::"), span);
+            } else if matches!(resolution, Resolution::Err) && !is_self_type(name) {
                 self.emit_unresolved_or_rename(name, span);
             }
             self.check_visibility(resolution, Some(name), span);
@@ -2425,6 +2417,44 @@ impl Resolver {
         }
         for segment in &path.segments {
             self.resolve_generic_args(&segment.generics);
+        }
+    }
+
+    // The resolution of a type path the qualified lookups did not reach, and
+    // whether it names a member its module lacks: past those lookups, a path
+    // of several segments whose head is a module names no type, since the
+    // head alone is not the type.
+    fn type_path_fallback(
+        &mut self,
+        written: &[&str],
+        effective: &[&str],
+        name: &str,
+        path: &TypePath,
+    ) -> (Resolution, bool) {
+        let resolution = if is_self_type(name) {
+            Resolution::Err
+        } else {
+            self.lookup_anchored_item(written, false)
+                .or_else(|| {
+                    self.lookup_type_here(name)
+                        .map(|binding| binding.resolution)
+                })
+                .or_else(|| self.synthesized_lookup(name))
+                .or_else(|| self.const_generic_in_type_position(name, path))
+                .unwrap_or(Resolution::Err)
+        };
+        let missing_member = effective.len() > 1
+            && matches!(
+                resolution,
+                Resolution::Def {
+                    kind: DefKind::Mod,
+                    ..
+                }
+            );
+        if missing_member {
+            (Resolution::Err, true)
+        } else {
+            (resolution, false)
         }
     }
 

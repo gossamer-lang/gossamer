@@ -2123,6 +2123,15 @@ impl<'a> Builder<'a> {
         let carrier_entries =
             crate::lower::helpers::carrier_heap_child_entries(self.tcx, ty, base_word);
         if !carrier_entries.is_empty() {
+            // A box of the carrier owns its copy-blob arm too, as a carrier
+            // field's entries do: the heap entries name only the other arms.
+            if let Some(gate) = self.carrier_blob_gate(ty) {
+                out.push(
+                    (gossamer_abi::rc::rc_child_blob_kind(gate)
+                        << gossamer_abi::rc::RC_CHILD_KIND_SHIFT)
+                        | (base_word + 1),
+                );
+            }
             out.extend(carrier_entries);
             return;
         }

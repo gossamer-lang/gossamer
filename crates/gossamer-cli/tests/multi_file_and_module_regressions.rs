@@ -5173,3 +5173,52 @@ fn a_project_type_named_like_a_dependency_type_leaves_its_derives_intact() {
     assert_eq!(native.2, Some(0), "native stderr: {}", native.1);
     assert_eq!(native.0.trim(), expected, "native stdout: {:?}", native.0);
 }
+
+#[test]
+fn dependency_fields_through_aliases_crate_paths_and_imports_render_on_every_tier() {
+    let root = fresh_dir("dep-alias-render");
+    let dep = write_dep_project(
+        &root,
+        "drag",
+        "example.com/drag",
+        "use crate::geom::Rect\n\npub mod ops\npub mod geom\n\npub type Op = ops::Op\n\n\
+         pub enum Event {\n    Moved(Rect)\n    Dropped(Option<crate::ops::Op>)\n}\n",
+    );
+    fs::write(dep.join("ops.gos"), "pub enum Op {\n    Copy\n    Move\n}\n").unwrap();
+    fs::write(dep.join("geom.gos"), "pub struct Rect {\n    pub w: i64\n}\n").unwrap();
+    let app = write_app_project(
+        &root,
+        "\"example.com/drag\" = { path = \"../drag\" }\n",
+        "use \"example.com/drag\" as drag\n\n\
+         struct Rect {\n    h: i64\n}\n\n\
+         enum Msg {\n    Done(String, Option<drag::Op>)\n    Idle\n}\n\n\
+         fn main() {\n\
+         \x20   let done = Msg::Done(\"d\", Some(drag::Op::Move))\n\
+         \x20   println(f\"{done} {Msg::Idle} {done == Msg::Idle}\")\n\
+         \x20   let moved = drag::Event::Moved(drag::geom::Rect { w: 3 })\n\
+         \x20   let dropped = drag::Event::Dropped(None)\n\
+         \x20   println(f\"{moved} {dropped} {moved == dropped} {Rect { h: 1 }}\")\n\
+         }\n",
+    );
+    let expected = "Done(\"d\", Some(Move)) Idle false\nMoved(Rect { w: 3 }) Dropped(None) false Rect { h: 1 }";
+    let vm = project_run_vm(&app);
+    assert_eq!(vm.2, Some(0), "stderr: {}", vm.1);
+    assert_eq!(vm.0.trim(), expected);
+    let jit = Command::new(gos_bin())
+        .args(["run", "."])
+        .current_dir(&app)
+        .env("GOSSAMER_JIT_THRESHOLD", "1")
+        .env("GOSSAMER_JIT_MIN_WORK", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn gos");
+    let jit = run_with_timeout(jit);
+    assert_eq!(jit.2, Some(0), "stderr: {}", jit.1);
+    assert_eq!(jit.0.trim(), expected);
+    let native = project_build_run(&app, "app");
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(native.2, Some(0), "stderr: {}", native.1);
+    assert_eq!(native.0.trim(), expected);
+}

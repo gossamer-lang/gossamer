@@ -324,6 +324,7 @@ feature-testing-examples/regex_unicode_categories.gos	no hot body
 feature-testing-examples/result_default.gos	no hot body
 feature-testing-examples/router_closure_route.gos	no hot body
 feature-testing-examples/runtime_handles_typed.gos	bytecode-only local
+feature-testing-examples/same_named_types_render/src/main.gos	no hot body
 feature-testing-examples/same_scope_shadow_assignment.gos	no hot body
 feature-testing-examples/scheduler_drain.gos	cross-goroutine
 feature-testing-examples/select_closed_chan_ready.gos	no hot body

@@ -1128,7 +1128,7 @@ fn suppress_zsh_run_arg_file_completion(script: &mut String) {
         .find("\n;;")
         .map_or(script.len(), |offset| start + 1 + offset);
     let mut block = script[start..end].to_string();
-    if let Some(args) = block.find("*::args -- Arguments forwarded to the interpreted program") {
+    if let Some(args) = block.find("*::args -- Arguments forwarded to the program") {
         if let Some(default) = block[args..].find(":_default") {
             let default = args + default;
             block.replace_range(default..default + ":_default".len(), ":_nothing");
@@ -1841,11 +1841,11 @@ mod tests {
             "{zsh}"
         );
         assert!(
-            zsh.contains("Arguments forwarded to the interpreted program:_nothing"),
+            zsh.contains("Arguments forwarded to the program:_nothing"),
             "{zsh}"
         );
         assert!(
-            !zsh.contains("Arguments forwarded to the interpreted program:_default"),
+            !zsh.contains("Arguments forwarded to the program:_default"),
             "{zsh}"
         );
     }

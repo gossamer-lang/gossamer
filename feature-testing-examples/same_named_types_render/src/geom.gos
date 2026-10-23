@@ -1,0 +1,8 @@
+pub struct Rect {
+    pub w: i64
+}
+
+pub enum Shape {
+    Square(i64)
+    Empty
+}

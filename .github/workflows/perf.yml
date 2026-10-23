@@ -326,7 +326,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          resolved_cargo="$("$HOME/.cargo/bin/rustup" which cargo)"
+          # Homebrew's rustup on $PATH stands in when ~/.cargo/bin has none.
+          rustup_bin="$HOME/.cargo/bin/rustup"
+          [ -x "$rustup_bin" ] || rustup_bin="$(command -v rustup)"
+          resolved_cargo="$("$rustup_bin" which cargo)"
           echo "CARGO_BIN=$resolved_cargo" >> "$GITHUB_ENV"
 
       - name: Build release `gos`

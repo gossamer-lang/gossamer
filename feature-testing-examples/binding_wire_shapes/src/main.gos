@@ -32,8 +32,8 @@ fn round(i: i64) {
     println(f"{wire_probe::parse("42")} {wire_probe::parse("x").is_err()}")
     println(f"{wire_probe::parse_float("2.5")}")
     match wire_probe::split("") {
-        Ok(parts) => println(f"parts {parts:?}"),
-        Err(e) => println(f"error {e}"),
+        Ok(parts) => println(f"parts {parts:?}")
+        Err(e) => println(f"error {e}")
     }
     println(f"{wire_probe::split("a,b"):?}")
     println(f"{wire_probe::checked(true).is_ok()} {wire_probe::checked(false).is_err()}")

@@ -1,0 +1,21 @@
+// A type sharing its bare name with one a sibling module declares renders
+// and compares through its own synthesized methods, called or interpolated.
+
+use geom
+
+struct Rect {
+    h: i64
+}
+
+enum Shape {
+    Circle(f64)
+}
+
+fn main() {
+    let r = Rect { h: 1 }
+    let g = geom::Rect { w: 3 }
+    println(f"{r} {g} {r.to_string()} {g.to_string()}")
+    println(f"{r == Rect { h: 1 }} {g == geom::Rect { w: 4 }} {r:?} {g:?}")
+    let shapes = #[geom::Shape::Square(2), geom::Shape::Empty]
+    println(f"{Shape::Circle(1.5)} {shapes}")
+}

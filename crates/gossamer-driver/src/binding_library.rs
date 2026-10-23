@@ -335,9 +335,11 @@ fn path_dependencies(manifest: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// The name a build of these sources lands under.
+/// The name a build of these sources, under the manifest that builds them,
+/// lands under.
 fn build_stem(dir: &Path, members: &[Member]) -> io::Result<String> {
     let mut hash = signature_hash(SIGNATURE_HASH_SEED, dir.to_string_lossy().as_bytes());
+    hash = signature_hash(hash, wrapper_manifest(members).as_bytes());
     for root in members.iter().filter_map(|m| m.local_root.as_deref()) {
         fingerprint_tree(root, &mut hash, &mut Vec::new())?;
     }
@@ -487,7 +489,7 @@ opt-level = 3
 lto = "thin"
 panic = "unwind"
 incremental = false
-
+{release_strip}
 # Build scripts and proc-macros run only on the build machine, and rustc loads
 # a proc-macro through the crate metadata in its dylib. They stay unstripped:
 # the Xcode 27 linker lays out a stripped macOS dylib built for a deployment
@@ -497,8 +499,16 @@ strip = false
 
 {patch}"#,
         patch = binding_crates_patch(),
+        release_strip = RELEASE_STRIP,
     )
 }
+
+// rustc's strip of a macOS dylib leaves a LINKEDIT string pool the macOS 27
+// dyld refuses to load as mis-aligned, so the library keeps its symbols there.
+#[cfg(target_os = "macos")]
+const RELEASE_STRIP: &str = "strip = false\n";
+#[cfg(not(target_os = "macos"))]
+const RELEASE_STRIP: &str = "";
 
 #[cfg(test)]
 mod tests {

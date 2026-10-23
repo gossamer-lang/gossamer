@@ -47,6 +47,24 @@ fn undefined_name_produces_unresolved_diagnostic() {
 }
 
 #[test]
+fn a_type_path_to_a_missing_member_of_a_module_is_unresolved() {
+    let source = "mod render {\n    pub struct Path { n: i64 }\n}\n\
+                  type Canvas = render::Canvas\n\
+                  struct Painter { canvas: render::Canvas }\n\
+                  fn main() {}\n";
+    let sf = parse(source);
+    let (_resolutions, diags) = resolve_source_file(&sf);
+    let missing: Vec<&str> = diags
+        .iter()
+        .filter_map(|d| match &d.error {
+            ResolveError::UnresolvedName { name } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(missing, ["render::Canvas", "render::Canvas"], "{diags:?}");
+}
+
+#[test]
 fn misspelled_stdlib_member_suggests_the_module_own_export() {
     let source = "use std::iter\n\nfn main() { let _ = iter::fliter(|x: i64| x > 1, #[1, 2]) }\n";
     let sf = parse(source);

@@ -3,8 +3,15 @@
 use bump_probe
 use read_probe
 
+fn bump_times(n: i64) {
+    for _ in 0..n {
+        bump_probe::bump()
+    }
+}
+
 fn main() {
-    bump_probe::bump()
-    bump_probe::bump()
+    bump_times(2)
+    println(read_probe::count())
+    bump_times(3)
     println(read_probe::count())
 }

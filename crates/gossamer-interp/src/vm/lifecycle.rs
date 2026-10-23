@@ -2411,15 +2411,18 @@ impl Vm {
                         // from the receiver's own type name. Register the
                         // bare spelling too, so `a < b` on a type a library
                         // declares reaches the `cmp` that library wrote
-                        // instead of reporting it unbound.
+                        // instead of reporting it unbound. A type whose own
+                        // identity is that spelling keeps it: the insert
+                        // above always wins over this fallback.
                         if let Some((_, bare)) = type_name.name.rsplit_once("::") {
                             let bare_qualified = format!("{bare}::{}", method.name.name);
-                            globals.insert(intern(&bare_qualified), Global::Fn(shared.clone()));
+                            globals
+                                .entry(intern(&bare_qualified))
+                                .or_insert_with(|| Global::Fn(shared.clone()));
                             if let Some(prefix) = &module_prefix {
-                                globals.insert(
-                                    intern(&format!("{prefix}::{bare_qualified}")),
-                                    Global::Fn(shared.clone()),
-                                );
+                                globals
+                                    .entry(intern(&format!("{prefix}::{bare_qualified}")))
+                                    .or_insert_with(|| Global::Fn(shared.clone()));
                             }
                         }
                     }
@@ -3445,8 +3448,9 @@ fn build_native_struct_shapes(
                 (placements, (layout.size as usize).div_ceil(8))
             }
             None => {
-                // Word-per-leaf layout: a nested struct takes as many words
-                // as it has fields.
+                // Word-per-leaf layout. A nested struct spans the words the
+                // compiled tier gives it: its packed size when it packs, else
+                // a word per (scalar) field.
                 let mut at = 0u32;
                 let mut placements = Vec::with_capacity(fields.len());
                 for (_, field) in &fields {
@@ -3454,7 +3458,11 @@ fn build_native_struct_shapes(
                         Field::Nested(inner) => structs
                             .iter()
                             .find(|(_, local, _)| local == inner)
-                            .map_or(1, |(_, _, names)| names.len() as u32),
+                            .map_or(1, |(item, _, names)| {
+                                item.def
+                                    .and_then(|d| tcx.packed_struct_layout(d))
+                                    .map_or(names.len() as u32, |layout| layout.size / 8)
+                            }),
                         Field::Kind(_) => 1,
                     };
                     placements.push(NativeFieldPlacement {

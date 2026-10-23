@@ -5341,3 +5341,32 @@ fn associated_function_arguments_meet_their_parameter_types() {
         .count();
     assert_eq!(mismatches, 3, "{:?}", checked.diagnostics);
 }
+
+/// A closure handed to another module's associated function takes its
+/// parameter types from that function's signature before its body is
+/// checked, so a method chain on a parameter types fully.
+#[test]
+fn a_closure_argument_of_another_modules_assoc_fn_takes_its_parameter_types() {
+    let checked = run(
+        "use crate::widgets::Custom\n\nmod style {\n    pub struct Theme { pub scale: i64 }\n\n    \
+         impl Theme {\n        pub fn px(&self, units: i64) -> i64 { units * self.scale }\n    }\n}\n\
+         mod widgets {\n    use crate::style::Theme\n\n    \
+         pub struct Custom { pub draw: Fn(i64, Theme) -> i64 }\n\n    \
+         impl Custom {\n        pub fn new(draw: Fn(i64, Theme) -> i64) -> Custom { Custom { draw: draw } }\n    }\n}\n\
+         fn checker() {\n    let made = Custom::new(|size, theme| theme.px(8).max(size))\n}\n",
+    );
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let closure = find_closure(let_init(&checked, "checker", 0)).expect("closure");
+    let ExprKind::Closure { body, .. } = &closure.kind else {
+        panic!("expected closure");
+    };
+    let ExprKind::MethodCall { receiver, .. } = &body.kind else {
+        panic!("expected the `max` call");
+    };
+    let ty = checked.table.get(receiver.id).expect("receiver typed");
+    assert!(
+        matches!(checked.tcx.kind(ty), Some(TyKind::Int(IntTy::I64))),
+        "`theme.px(8)` is {:?}",
+        checked.tcx.kind(ty)
+    );
+}

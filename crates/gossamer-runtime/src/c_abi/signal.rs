@@ -892,7 +892,12 @@ pub extern "C" fn gos_rt_callback_unregister(handle: u64) {
         };
         let mut state = entry.state.lock();
         state.closing = true;
-        if ACTIVE_CALLBACKS.with(|active| active.borrow().contains(&handle)) {
+        // A thread tearing down its locals runs no callback, so none it
+        // entered is still active.
+        if ACTIVE_CALLBACKS
+            .try_with(|active| active.borrow().contains(&handle))
+            .unwrap_or(false)
+        {
             return;
         }
         while state.active != 0 {

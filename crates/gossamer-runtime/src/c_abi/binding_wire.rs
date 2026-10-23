@@ -622,8 +622,9 @@ unsafe fn dyn_from_wire_field(field: &GosVariantValue) -> DynNode {
             if word == 0 {
                 return DynNode::Str(String::new());
             }
-            // The node takes a copy; the string goes with the wire value.
-            // SAFETY: a non-null `STRING` field is a NUL-terminated runtime string.
+            // HOST-CSTRING: the native Rust binding owns this NUL-terminated
+            // text; the node takes a copy and the string goes with the wire value.
+            // SAFETY: a non-null `STRING` field is a NUL-terminated C string.
             let text = unsafe { CStr::from_ptr(word as *const c_char) };
             DynNode::Str(text.to_string_lossy().into_owned())
         }
@@ -693,10 +694,10 @@ unsafe fn dyn_from_wire_variant(v: *const GosDynVariant) -> DynNode {
     // SAFETY: `v` is non-null (checked above), and this `unsafe fn`'s caller passes a live
     // `GosDynVariant`.
     let wire = unsafe { &*v };
-    // The arm name is a runtime string, NUL-terminated.
     let name = if wire.name.is_null() {
         String::new()
     } else {
+        // HOST-CSTRING: the binding arena-allocates the arm name.
         // SAFETY: a non-null arm name is a NUL-terminated C string the binding owns.
         unsafe { CStr::from_ptr(wire.name) }
             .to_string_lossy()

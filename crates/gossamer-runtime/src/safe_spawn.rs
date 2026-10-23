@@ -125,6 +125,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // starts processes, which Miri does not model
     fn a_process_started_apart_leaves_its_parents_output_to_close() {
         assert!(
             pipe_outlives_the_middle_process("plain"),
@@ -137,6 +138,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // starts processes, which Miri does not model
     fn middle() {
         let Ok(mode) = std::env::var(ROLE) else {
             return;

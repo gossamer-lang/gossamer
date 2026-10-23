@@ -1215,6 +1215,9 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/binding_wire_shapes/src/main.gos"),
     // Two bindings depending on one Rust crate share one copy of its state.
     spec("feature-testing-examples/binding_shared_state/src/main.gos"),
+    // A type sharing its bare name with a sibling module's renders through
+    // its own synthesized methods.
+    spec("feature-testing-examples/same_named_types_render/src/main.gos"),
     // A value whose last use hands it to a new holder keeps its contents:
     // constructor fields, a dead copy, a pushed element view, and an aggregate
     // copy returned after its source field is set to null.
@@ -1612,6 +1615,10 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/closure_captured_handles_escape.gos"),
     spec("feature-testing-examples/jit_enum_struct_payloads.gos"),
     spec("feature-testing-examples/jit_struct_boundary_shapes.gos"),
+    spec("feature-testing-examples/jit_nested_packed_struct_fields.gos"),
+    spec("feature-testing-examples/static_vec_pop.gos"),
+    // A `Result` holding a `Result` of a struct with heap fields keeps them.
+    spec("feature-testing-examples/nested_result_struct_payload.gos"),
     spec("feature-testing-examples/jit_byte_fields_and_unit_enums.gos"),
     spec("feature-testing-examples/static_values_answered.gos"),
     spec("feature-testing-examples/shared_exit_releases.gos"),

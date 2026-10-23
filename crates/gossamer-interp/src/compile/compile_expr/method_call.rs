@@ -403,7 +403,11 @@ impl<'tcx> FnBuilder<'tcx> {
             // vector is spliced back through the place-store protocol -
             // the same contract `remove` / `insert` / `swap` follow, and
             // what the compiled tiers do by mutating in place.
-            if !matches!(receiver.kind, HirExprKind::Path { .. }) {
+            // A `static mut` receiver was loaded from its shared cell, so it
+            // is stored back the same way.
+            if !matches!(receiver.kind, HirExprKind::Path { .. })
+                || self.place_root_is_mut_static(receiver)
+            {
                 self.compile_place_store(receiver, receiver_reg)?;
             }
             return Ok(opt_dst);
