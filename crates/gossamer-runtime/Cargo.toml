@@ -168,7 +168,7 @@ zstd = "0.13"
 # `libgossamer_runtime.a` self-contained on every platform.
 bzip2 = { version = "0.5", features = ["static"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "fast", "pkcs8", "pem"] }
-p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std", "pem"] }
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std", "pem"] }
 # RSA signature verification for the RS256 / RS384 / RS512 JWT family -
 # what Auth0, Okta, Entra ID, Google, Cognito, and Keycloak mint. Same
 # version and provider `rustls` already links, and verification only, so

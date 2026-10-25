@@ -129,6 +129,27 @@ pub mod rand {
 
     impl rand_core::CryptoRng for OsRng {}
 
+    // P-256 uses rand_core 0.10; Ed25519 still uses 0.6. Keep both on
+    // the same entropy source and preserve the abort-on-failure contract.
+    impl p256::elliptic_curve::rand_core::TryCryptoRng for OsRng {}
+
+    impl p256::elliptic_curve::rand_core::TryRng for OsRng {
+        type Error = core::convert::Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            Ok(rand_core::RngCore::next_u32(self))
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            Ok(rand_core::RngCore::next_u64(self))
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+            fill_or_abort(dest);
+            Ok(())
+        }
+    }
+
     impl rand_core::RngCore for OsRng {
         fn next_u32(&mut self) -> u32 {
             let mut buf = [0u8; 4];
@@ -468,6 +489,7 @@ pub mod ecdsa {
 
     use p256::ecdsa::signature::{Signer, Verifier};
     use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
+    use p256::elliptic_curve::Generate;
     use p256::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey};
 
     use crate::errors::Error;
@@ -476,7 +498,7 @@ pub mod ecdsa {
     /// `(secret_pkcs8_pem, public_spki_pem)`.
     pub fn keypair_pem() -> Result<(String, String), Error> {
         let mut rng = super::rand::OsRng;
-        let signing = SigningKey::random(&mut rng);
+        let signing = SigningKey::generate_from_rng(&mut rng);
         let secret_pem = signing
             .to_pkcs8_pem(p256::pkcs8::LineEnding::LF)
             .map_err(|e| Error::new(format!("ecdsa: encode secret: {e}")))?

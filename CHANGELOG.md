@@ -1,7 +1,8 @@
 # Changelog
 
-## 0.75.1 - Miri compatibility fixes
+## 0.75.1 - Miri compatibility and dependency security fixes
 
+- Updated P-256 and its cryptographic arithmetic dependencies, plus Tokio, to resolve RustSec timing-side-channel and I/O-safety advisories.
 - The compiler Miri shard uses Tree Borrows so Rayon's Crossbeam dependency can recover enclosing allocations from field pointers while retaining aliasing checks.
 - Directory scanning uses the portable implementation under Miri, avoiding unsupported Unix directory APIs while keeping directory listing, symlink metadata, and C-ABI tests enabled.
 
