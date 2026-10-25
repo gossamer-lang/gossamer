@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.75.1 - Miri compatibility and dependency security fixes
+
+- Updated P-256 and its cryptographic arithmetic dependencies, plus Tokio, to resolve RustSec timing-side-channel and I/O-safety advisories.
+- The compiler Miri shard uses Tree Borrows so Rayon's Crossbeam dependency can recover enclosing allocations from field pointers while retaining aliasing checks.
+- Directory scanning uses the portable implementation under Miri, avoiding unsupported Unix directory APIs while keeping directory listing, symlink metadata, and C-ABI tests enabled.
+
 ## 0.75.0 - Rust bindings loaded into `gos run`, `gos run --native`, faster native builds, and select, serde, and path fixes
 
 - `gos run`, `gos test`, `gos check`, and the REPL load `[rust-bindings]` as optimized shared libraries into the running `gos` instead of building and running a per-project copy of the toolchain: a program's bindings build once with Cargo into the user cache as one library, shared by every project that names the same set, so a Rust crate two bindings depend on is one copy as in a native build, and a project using one starts about as fast as one that does not. Building a binding no longer needs the toolchain's source tree or `GOSSAMER_ROOT`, and `gos clean --runners` is now `gos clean --bindings`.

@@ -68,7 +68,7 @@ fn modified_ms(secs: i64, nanos: i64) -> i64 {
 
 /// Stats each entry relative to the open directory, so the kernel resolves
 /// one name per entry instead of walking the full path again.
-#[cfg(unix)]
+#[cfg(all(unix, not(miri)))]
 fn scan_unsorted(dir: &Path) -> io::Result<Vec<ScannedEntry>> {
     use std::ffi::{CString, OsStr};
     use std::os::unix::ffi::OsStrExt;
@@ -131,7 +131,9 @@ fn scan_unsorted(dir: &Path) -> io::Result<Vec<ScannedEntry>> {
         .collect())
 }
 
-#[cfg(not(unix))]
+// Miri does not support the directory-relative Unix APIs above. Keep the
+// directory and C-ABI tests running through the portable implementation.
+#[cfg(any(not(unix), miri))]
 fn scan_unsorted(dir: &Path) -> io::Result<Vec<ScannedEntry>> {
     std::fs::read_dir(dir)?
         .map(|entry| {

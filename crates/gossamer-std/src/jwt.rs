@@ -1525,10 +1525,8 @@ mod tests {
 
     #[test]
     fn eddsa_round_trip() {
-        // Both ed25519_dalek and p256 depend on `pkcs8 = 0.10`, so
-        // `p256::pkcs8::LineEnding` is the same type ed25519_dalek's
-        // `to_pkcs8_pem` / `to_public_key_pem` accept. Saves pulling
-        // a direct dep on `pkcs8` just for the test.
+        // Both encoders share the PEM line-ending type, so use P-256's
+        // re-export rather than a direct dependency just for this test.
         use ed25519_dalek::SigningKey;
         use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
         let mut rng = crate::crypto::rand::OsRng;

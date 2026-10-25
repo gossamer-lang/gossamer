@@ -143,7 +143,7 @@ scrypt = { version = "0.11", default-features = false, features = ["std"] }
 argon2 = { version = "0.5", default-features = false, features = ["std", "alloc", "password-hash"] }
 aes-gcm = "0.10"
 chacha20poly1305 = "0.10"
-p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std", "pem"] }
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std", "pem"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "fast", "pkcs8", "pem", "rand_core"] }
 rand_core = "0.6"
 uuid = { version = "1", features = ["v4", "v7"] }

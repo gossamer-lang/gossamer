@@ -51,6 +51,10 @@ jobs:
         include:
           - shard: compiler
             crates: gossamer-mir gossamer-types gossamer-resolve
+            # Rayon's Crossbeam epoch list recovers an enclosing allocation
+            # from a field pointer, which Stacked Borrows rejects. Tree
+            # Borrows supports this pattern while retaining aliasing checks.
+            extra-miri-flags: -Zmiri-tree-borrows
           - shard: runtime
             crates: gossamer-runtime gossamer-coro gossamer-sched
             integration: >-
@@ -77,7 +81,7 @@ jobs:
           #   roundtrips used by the runtime's flat-slot ABI.
           # - `-Zmiri-ignore-leaks`: the GC heap leaks by design
           #   under tests that don't run a full collection cycle.
-          MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-permissive-provenance -Zmiri-ignore-leaks
+          MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-permissive-provenance -Zmiri-ignore-leaks ${{ matrix.extra-miri-flags }}
           RUST_BACKTRACE: "full"
         run: |
           # Every crate in the shard runs even when an earlier one fails, so

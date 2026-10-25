@@ -27,48 +27,9 @@
 
 use std::os::raw::c_char;
 
-use p256::elliptic_curve::rand_core::{CryptoRng, RngCore};
-
 use super::encoding::bytes_to_gosvec;
 use super::result::gos_rt_result_new;
 use super::vec::GosVec;
-
-/// OS-CSPRNG adapter for `p256::ecdsa::SigningKey::random`. Mirrors
-/// `gossamer_std::crypto::rand::OsRng` - backed by `getrandom`. On the
-/// (essentially never) failure of the OS RNG, `fill_bytes` zero-fills;
-/// the entry point probes the RNG up front and refuses on failure, so
-/// a zero-filled scalar is never reached in practice.
-struct OsRng;
-
-impl RngCore for OsRng {
-    fn next_u32(&mut self) -> u32 {
-        let mut b = [0u8; 4];
-        self.fill_bytes(&mut b);
-        u32::from_le_bytes(b)
-    }
-    fn next_u64(&mut self) -> u64 {
-        let mut b = [0u8; 8];
-        self.fill_bytes(&mut b);
-        u64::from_le_bytes(b)
-    }
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        if getrandom::fill(dest).is_err() {
-            dest.fill(0);
-        }
-    }
-    fn try_fill_bytes(
-        &mut self,
-        dest: &mut [u8],
-    ) -> Result<(), p256::elliptic_curve::rand_core::Error> {
-        getrandom::fill(dest).map_err(|_| {
-            p256::elliptic_curve::rand_core::Error::from(
-                core::num::NonZeroU32::new(1).expect("static"),
-            )
-        })
-    }
-}
-
-impl CryptoRng for OsRng {}
 
 /// Packs an `Err(errors::Error)` result (disc 1).
 fn ecdsa_err(msg: &str) -> i128 {
@@ -100,15 +61,12 @@ static KEYPAIR_STRINGS_META: [i64; 6] = [
 pub extern "C" fn gos_rt_crypto_ecdsa_keypair_pem() -> i128 {
     ffi_entry!({
         use p256::ecdsa::SigningKey;
+        use p256::elliptic_curve::Generate;
         use p256::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 
-        // Probe the OS RNG before generating, so an entropy failure is
-        // a clean Err rather than an invalid all-zero key.
-        let mut probe = [0u8; 1];
-        if getrandom::fill(&mut probe).is_err() {
+        let Ok(signing) = SigningKey::try_generate() else {
             return ecdsa_err("ecdsa: rng failure");
-        }
-        let signing = SigningKey::random(&mut OsRng);
+        };
         let secret_pem = match signing.to_pkcs8_pem(LineEnding::LF) {
             Ok(p) => p.to_string(),
             Err(e) => return ecdsa_err(&format!("ecdsa: encode secret: {e}")),
