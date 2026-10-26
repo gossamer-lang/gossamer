@@ -2202,6 +2202,7 @@ const SPECS: &[Spec] = &[
     // Typed serde over enums, and `#[rename]` / `#[skip]` / `#[default]`.
     spec("feature-testing-examples/serde_enums_and_field_attrs.gos"),
     spec("feature-testing-examples/json_encode_field_attributes.gos"),
+    spec("feature-testing-examples/vec_rebound_from_branch_local.gos"),
     // Typed serde of `char`, a newtype, and a user enum as the encoded value.
     spec("feature-testing-examples/serde_chars_and_top_level_enums.gos"),
     // `time::Time`: an instant with its UTC offset, parsed, formatted,

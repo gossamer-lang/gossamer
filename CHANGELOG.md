@@ -12,6 +12,9 @@
 - A newline separates the positional entries of a struct literal as it does named fields, so a multi-line literal mixing them reports the named-struct error (GT0034) instead of a cascade of parse errors.
 - `json::encode` and `json::encode_pretty` write a struct field under its `#[rename]`d key and leave a `#[skip]`ped field out, as `json::decode` reads them, where the attributes were ignored.
 - A `gos` process waiting for another to compile the same Rust bindings names the bindings and the cache directory, and says it will use the library that process builds.
+- `gos build` rebuilds a native executable after a source of its `[rust-bindings]`, or of a crate they name by path, changes, where it reported the old executable unchanged and kept the bindings it was linked with.
+- A `Vec` binding built by a call and later rebound to another binding's value inside a branch (`let mut argv = f(); if c { let w = #[..]; argv = w }`) releases the value it held once on native builds, where it released it twice and read freed memory.
+- Returning such a binding hands the caller the only remaining share of its first value, where that value stayed allocated after the caller released it.
 - Updated zstd to 0.14.3 (zstd-safe 8.2.0, zstd-sys 2.1.2) to resolve RustSec advisories for stream context reuse, seekable decompression and legacy-frame error handling.
 - `gos test --tier-parity` runs `--parallel` fixtures at a time, one per core by default, keeping the files of one project, and fixtures that name the same fixed port, in turn; `--serial` walks them one at a time.
 - CI runs the server, bytecode and debug-native tier-parity tests on every host, which it had skipped, and finishes sooner: each runner image builds its native test binaries once for all of its shards, the tier-parity walks spread fixtures over every core, test builds carry line tables only, and build caches are saved from `main` and restored by every branch.

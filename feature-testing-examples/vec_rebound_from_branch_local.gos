@@ -1,0 +1,38 @@
+// A `Vec` binding built by a call and rebound inside a branch to another
+// local's value releases each value it held exactly once, on every path.
+fn make(n: i64) -> Vec<String> {
+    let mut out = #[]
+    for i in 0..n { out.push(f"value {i}") }
+    out
+}
+
+fn pick(n: i64, wrap: bool) -> Vec<String> {
+    let mut argv = make(n)
+    if argv.is_empty() { return #[] }
+    if wrap {
+        let mut wrapped = #["run", "-e"]
+        for a in argv { wrapped.push(a) }
+        argv = wrapped
+    }
+    argv
+}
+
+fn count(n: i64, wrap: bool) -> i64 {
+    let mut argv = make(n)
+    if wrap {
+        let wrapped = #["x"]
+        argv = wrapped
+    }
+    argv.len()
+}
+
+fn main() {
+    println(f"{pick(2, false)}")
+    println(f"{pick(2, true)}")
+    println(f"{pick(0, true)}")
+    let mut total = 0
+    for round in 0..1000 {
+        total += count(3, round % 2 == 0)
+    }
+    println(f"total {total}")
+}

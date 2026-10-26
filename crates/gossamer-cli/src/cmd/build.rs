@@ -36,7 +36,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 
 use crate::loaders::profile_rss_stage;
 
@@ -382,7 +382,7 @@ fn build_entry(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
     let source = unit.source;
     build_timings.bundle = phase_started.elapsed();
     let phase_started = Instant::now();
-    let build_key = build_artifact_key(file, &source, cross_target, opts, &out_path);
+    let build_key = build_artifact_key(file, &source, cross_target, opts, &out_path)?;
     let stamp_path = build_stamp_path(file, &out_path);
     let unchanged = (!reports_on_compile(request))
         .then(|| load_unchanged_build(&stamp_path, &out_path, &build_key));
@@ -497,15 +497,15 @@ pub(crate) fn run_artifact(
     source: &str,
     out_dir: &Path,
     release: bool,
-) -> Option<RunArtifact> {
-    if library::target_for(file).ok()?.is_some() {
-        return None;
+) -> Result<Option<RunArtifact>> {
+    if library::target_for(file)?.is_some() {
+        return Ok(None);
     }
     let opts = run_link_options(release);
     let path = out_dir.join(platform_exe_name(&default_unit_name(file), cfg!(windows)));
-    let key = build_artifact_key(file, source, None, opts, &path);
+    let key = build_artifact_key(file, source, None, opts, &path)?;
     let current = load_unchanged_build(&build_stamp_path(file, &path), &path, &key).is_some();
-    Some(RunArtifact { path, key, current })
+    Ok(Some(RunArtifact { path, key, current }))
 }
 
 /// The link options of a build `gos run` starts.
@@ -702,7 +702,7 @@ fn build_artifact_key(
     target: Option<&str>,
     opts: LinkOptions,
     out_path: &Path,
-) -> String {
+) -> Result<String> {
     // The object code and final linker invocation differ between static musl
     // and dynamic links. Include the resolved policy, not just the user flag:
     // installing or removing the musl target between builds must invalidate a
@@ -746,8 +746,7 @@ fn build_artifact_key(
         }
     }
     // The executable links the bindings' Rust code, so an edit to any of
-    // their sources is a different build. A fingerprint that cannot be read
-    // keys a build no stamp can match.
+    // their sources is a different build.
     let context = crate::paths::project_context_for_entry(file);
     if let Some(Ok(manifest)) = context.binding_manifest()
         && !manifest.rust_bindings.is_empty()
@@ -757,7 +756,7 @@ fn build_artifact_key(
             &manifest.rust_bindings,
             &dir,
         )
-        .unwrap_or_else(|error| format!("unreadable: {error} at {}", std::process::id()));
+        .with_context(|| format!("reading the Rust bindings of {}", dir.display()))?;
         add("rust-bindings", fingerprint.as_bytes());
     }
     for path in [
@@ -811,7 +810,7 @@ fn build_artifact_key(
         }
         None => {}
     }
-    hash.finalize_hex()
+    Ok(hash.finalize_hex())
 }
 
 fn find_ancestor_file(entry: &Path, name: &str) -> Option<PathBuf> {
@@ -2904,6 +2903,49 @@ mod tests {
     }
 
     #[test]
+    fn linked_artifact_key_changes_with_the_rust_sources_of_its_bindings() {
+        let root = scratch("binding-key");
+        let core = root.join("core");
+        let binding = root.join("binding");
+        for dir in [root.join("src"), core.join("src"), binding.join("src")] {
+            std::fs::create_dir_all(dir).expect("create scratch");
+        }
+        std::fs::write(
+            root.join("project.toml"),
+            "[project]\nid = \"example.com/app\"\nversion = \"0.1.0\"\n\n\
+             [rust-bindings]\nprobe-binding = { path = \"binding\" }\n",
+        )
+        .expect("write manifest");
+        let entry = root.join("src/main.gos");
+        std::fs::write(&entry, b"fn main() {}\n").expect("write entry");
+        std::fs::write(
+            binding.join("Cargo.toml"),
+            "[package]\nname = \"probe-binding\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\ncore = { path = \"../core\" }\n",
+        )
+        .expect("write binding manifest");
+        std::fs::write(binding.join("src/lib.rs"), "pub fn f() {}\n").expect("write binding");
+        std::fs::write(core.join("Cargo.toml"), "[package]\nname = \"core\"\n")
+            .expect("write core manifest");
+        let core_source = core.join("src/lib.rs");
+        std::fs::write(&core_source, "pub fn g() {}\n").expect("write core");
+        let output = root.join("app");
+        let options = super::LinkOptions {
+            release: false,
+            debug_info: false,
+            dynamic: true,
+        };
+        let key =
+            || super::build_artifact_key(&entry, "fn main() {}\n", None, options, &output).unwrap();
+        let before = key();
+        assert_eq!(before, key());
+        // A crate the binding names by path is part of what the build links.
+        std::fs::write(&core_source, "pub fn g() { let _ = 1; }\n").expect("edit core");
+        assert_ne!(before, key());
+        std::fs::remove_dir_all(root).expect("remove scratch");
+    }
+
+    #[test]
     fn linked_artifact_key_changes_with_source_and_profile() {
         let root = scratch("key");
         std::fs::create_dir_all(&root).expect("create scratch");
@@ -2920,16 +2962,18 @@ mod tests {
             debug_info: false,
             dynamic: true,
         };
-        let first = super::build_artifact_key(&entry, "fn main() {}\n", None, debug, &output);
+        let first =
+            super::build_artifact_key(&entry, "fn main() {}\n", None, debug, &output).unwrap();
         let source_changed = super::build_artifact_key(
             &entry,
             "fn main() { println(\"changed\") }\n",
             None,
             debug,
             &output,
-        );
+        )
+        .unwrap();
         let profile_changed =
-            super::build_artifact_key(&entry, "fn main() {}\n", None, release, &output);
+            super::build_artifact_key(&entry, "fn main() {}\n", None, release, &output).unwrap();
         assert_ne!(first, source_changed);
         assert_ne!(first, profile_changed);
         std::fs::remove_dir_all(root).expect("remove scratch");
