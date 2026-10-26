@@ -147,11 +147,28 @@ pub fn resolve_project_entry(root: &Path) -> Result<PathBuf, EntryError> {
 /// The compilation root `file` belongs to: the entry of the nearest project
 /// above it, when `file` is one of that project's own modules.
 ///
-/// An integration test under `tests/` is its own program rather than a
-/// module of the package, so it stays its own root, as does a file under no
-/// project at all.
+/// A file the package's layout does not reach - a script under `tools/`, a
+/// `_`-prefixed scratch file, a `*_test.gos`, a directory with no `mod.gos` -
+/// is its own root, as are an integration test under `tests/` and a file
+/// under no project at all.
 #[must_use]
 pub fn enclosing_project_entry(file: &Path) -> Option<PathBuf> {
+    let entry = nearest_project_entry(file)?;
+    if crate::bundle::same_file(&entry, file) {
+        return Some(entry);
+    }
+    let source = fs::read_to_string(&entry).ok()?;
+    let (_, origins) = crate::bundle::bundle_sibling_modules_traced(&entry, source);
+    origins
+        .iter()
+        .any(|span| crate::bundle::same_file(&span.origin, file))
+        .then_some(entry)
+}
+
+/// The entry of the nearest project above `file`, whether or not the
+/// package's layout reaches `file`. An integration test under `tests/` and a
+/// file under no project have none.
+pub(crate) fn nearest_project_entry(file: &Path) -> Option<PathBuf> {
     let mut dir = file.parent()?;
     loop {
         if dir.join("project.toml").is_file() {
@@ -209,4 +226,49 @@ fn entry_candidates(dir: &Path) -> Vec<PathBuf> {
     }
     out.sort();
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_files_the_package_reaches_belong_to_its_entry() {
+        let root = std::env::temp_dir().join(format!("gos-entry-members-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for dir in ["src/net", "tools", "tests"] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        fs::write(
+            root.join("project.toml"),
+            "[project]\nid = \"example.com/app\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        for (file, text) in [
+            ("src/main.gos", "fn main() { }\n"),
+            ("src/util.gos", "pub fn one() -> i64 { 1 }\n"),
+            ("src/net/mod.gos", "pub fn two() -> i64 { 2 }\n"),
+            ("src/_scratch.gos", "fn main() { }\n"),
+            ("tools/gen.gos", "fn main() { }\n"),
+            ("tests/flow.gos", "fn main() { }\n"),
+        ] {
+            fs::write(root.join(file), text).unwrap();
+        }
+        let entry = root.join("src/main.gos");
+        for member in ["src/main.gos", "src/util.gos", "src/net/mod.gos"] {
+            assert_eq!(
+                enclosing_project_entry(&root.join(member)),
+                Some(entry.clone()),
+                "{member}"
+            );
+        }
+        for own_root in ["src/_scratch.gos", "tools/gen.gos", "tests/flow.gos"] {
+            assert_eq!(
+                enclosing_project_entry(&root.join(own_root)),
+                None,
+                "{own_root}"
+            );
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
 }

@@ -19,6 +19,7 @@ default = []
 synthetic-source = []
 
 [dependencies]
+gossamer-lex = { workspace = true }
 gossamer-resolve = { workspace = true }
 thiserror = { workspace = true }
 

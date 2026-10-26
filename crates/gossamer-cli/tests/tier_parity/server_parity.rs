@@ -1040,43 +1040,19 @@ fn probe_once(
 /// `llvm_strict_lower_group_N` tests). Builds only (to fresh per-spec
 /// dirs), so groups can run concurrently without the parity lock.
 fn strict_lowering_group(group: usize) {
+    let specs: Vec<&Spec> = SPECS
+        .iter()
+        .enumerate()
+        .filter(|&(idx, spec)| idx % PARITY_GROUPS == group && spec.skip_all.is_none())
+        .map(|(_, spec)| spec)
+        .collect();
     let mut lowering_gaps: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
-    for (idx, spec) in SPECS.iter().enumerate() {
-        if idx % PARITY_GROUPS != group {
-            continue;
-        }
-        if spec.skip_all.is_some() {
-            continue;
-        }
-        let src = workspace_root().join(spec.path);
-        let scratch = fresh_dir(&format!("strict-{}", file_tag(spec.path)));
-        let out = Command::new(gos_bin())
-            .arg("build")
-            .arg("--release")
-            .arg("--out-dir")
-            .arg(&scratch)
-            .arg(&src)
-            .output()
-            .expect("spawn gos build --release");
-        let _ = fs::remove_dir_all(&scratch);
-        if out.status.success() {
-            continue;
-        }
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        if stderr.contains("llvm backend internal lowering bug") {
-            let summary = stderr
-                .lines()
-                .find(|l| l.contains("llvm backend internal lowering bug"))
-                .unwrap_or(&stderr)
-                .trim()
-                .to_string();
-            lowering_gaps.push(format!("{}: {summary}", spec.path));
-        } else {
-            errors.push(format!(
-                "{}: gos build --release failed: {stderr}",
-                spec.path
-            ));
+    for outcome in par_map_ordered(&specs, |spec| strict_lowering_outcome(spec)) {
+        match outcome {
+            StrictLowering::Built => {}
+            StrictLowering::Gap(summary) => lowering_gaps.push(summary),
+            StrictLowering::Failed(error) => errors.push(error),
         }
     }
     if !lowering_gaps.is_empty() || !errors.is_empty() {
@@ -1098,6 +1074,47 @@ fn strict_lowering_group(group: usize) {
             }
         }
         panic!("{report}");
+    }
+}
+
+/// How one fixture's `gos build --release` ended.
+enum StrictLowering {
+    Built,
+    /// The LLVM backend reported an internal lowering bug.
+    Gap(String),
+    /// The build failed for any other reason.
+    Failed(String),
+}
+
+fn strict_lowering_outcome(spec: &Spec) -> StrictLowering {
+    let src = workspace_root().join(spec.path);
+    let scratch = fresh_dir(&format!("strict-{}", file_tag(spec.path)));
+    let out = Command::new(gos_bin())
+        .arg("build")
+        .arg("--release")
+        .arg("--out-dir")
+        .arg(&scratch)
+        .arg(&src)
+        .output()
+        .expect("spawn gos build --release");
+    let _ = fs::remove_dir_all(&scratch);
+    if out.status.success() {
+        return StrictLowering::Built;
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains("llvm backend internal lowering bug") {
+        let summary = stderr
+            .lines()
+            .find(|l| l.contains("llvm backend internal lowering bug"))
+            .unwrap_or(&stderr)
+            .trim()
+            .to_string();
+        StrictLowering::Gap(format!("{}: {summary}", spec.path))
+    } else {
+        StrictLowering::Failed(format!(
+            "{}: gos build --release failed: {stderr}",
+            spec.path
+        ))
     }
 }
 

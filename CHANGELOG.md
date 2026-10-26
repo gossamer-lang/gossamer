@@ -1,11 +1,20 @@
 # Changelog
 
-## 0.75.2 - Prelude variant names beside user enums
+## 0.75.2 - Prelude variant names beside user enums, CI efficiency
 
 - A bare `None`, `Some`, `Ok` or `Err` names the prelude variant even where two or more enums in the program, its dependencies or the standard library declare a variant of that spelling, where it was refused as ambiguous (GR0009). An enum's own variant of that spelling is reached through the enum or an explicit `use`.
 - A variant imported with `use` and named bare (`let l: Level = None` after `use Level::None`) builds that enum's variant on the JIT and native tiers, where it built `Option::None`.
 - A user enum variant named `Some`, `Ok` or `Err` with a payload is built as that enum's variant on the native tier, where constructing it crashed.
 - `Option::Some`, `Option::None`, `Result::Ok` and `Result::Err` written through their enum run on the VM, where they failed with an unbound-name error.
+- A method call that leaves parameters to their defaults fills them even when another type declares a method of the same name taking exactly the arguments written, where the call was refused for its argument count.
+- `gos check FILE` and `gos test FILE` check and test a script that sits inside a package without being one of its modules (a file under `tools/`, a `_`-prefixed scratch file, a `*_test.gos`), where they checked the package instead and reported success without reading the file.
+- A source file named after a reserved word, such as `package.gos`, is no longer bundled as a sibling module, where every other file in its directory failed to parse.
+- A newline separates the positional entries of a struct literal as it does named fields, so a multi-line literal mixing them reports the named-struct error (GT0034) instead of a cascade of parse errors.
+- `json::encode` and `json::encode_pretty` write a struct field under its `#[rename]`d key and leave a `#[skip]`ped field out, as `json::decode` reads them, where the attributes were ignored.
+- A `gos` process waiting for another to compile the same Rust bindings names the bindings and the cache directory, and says it will use the library that process builds.
+- Updated zstd to 0.14.3 (zstd-safe 8.2.0, zstd-sys 2.1.2) to resolve RustSec advisories for stream context reuse, seekable decompression and legacy-frame error handling.
+- `gos test --tier-parity` runs `--parallel` fixtures at a time, one per core by default, keeping the files of one project, and fixtures that name the same fixed port, in turn; `--serial` walks them one at a time.
+- CI runs the server, bytecode and debug-native tier-parity tests on every host, which it had skipped, and finishes sooner: each runner image builds its native test binaries once for all of its shards, the tier-parity walks spread fixtures over every core, test builds carry line tables only, and build caches are saved from `main` and restored by every branch.
 
 ## 0.75.1 - Miri compatibility and dependency security fixes
 

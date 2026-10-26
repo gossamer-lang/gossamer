@@ -320,6 +320,7 @@ jobs:
       - run: rustup set profile minimal
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           prefix-key: v1-perf-native
 
       - name: Resolve cargo binary (shim guard)

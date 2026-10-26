@@ -381,7 +381,11 @@ pub fn ensure_bindings_library_in(
         return Ok(built);
     }
     fs::create_dir_all(dir.join("lib"))?;
-    let _lock = AdvisoryLock::acquire(&build_lock_path(&dir))?;
+    let crates: Vec<&str> = set.iter().map(|member| member.name.as_str()).collect();
+    let _lock = AdvisoryLock::acquire(
+        &build_lock_path(&dir),
+        &format!("the shared library of Rust bindings {}", crates.join(", ")),
+    )?;
     // Another process may have built these sources while this one waited.
     if built.library.is_file() {
         return Ok(built);
@@ -402,7 +406,6 @@ pub fn ensure_bindings_library_in(
     write_if_different(&project.join("lib.rs"), &lib_rs)?;
     seed_lockfile(&project, TOOLCHAIN_LOCK)?;
     let target_dir = dir.join("target");
-    let label: Vec<&str> = set.iter().map(|member| member.name.as_str()).collect();
     run_cargo_build(
         &CargoBuild {
             manifest_path: &project.join("Cargo.toml"),
@@ -410,7 +413,7 @@ pub fn ensure_bindings_library_in(
             profile: Profile::Release,
             cargo_target: None,
             target_args: &["--lib"],
-            crate_label: &label.join(", "),
+            crate_label: &crates.join(", "),
             rustc_args: &[],
         },
         None,

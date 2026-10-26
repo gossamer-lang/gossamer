@@ -219,7 +219,7 @@ impl std::fmt::Display for Denied {
             return write!(
                 out,
                 "\n  re-run with --comptime-io=full to permit it, or embed a \
-                 file from inside the project"
+                 file from under the directory of the source that reads it"
             );
         }
         write!(

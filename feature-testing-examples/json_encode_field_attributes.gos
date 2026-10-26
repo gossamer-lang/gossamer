@@ -1,0 +1,32 @@
+// `json::encode` writes a field under its `#[rename]`d key and leaves a
+// `#[skip]`ped one out, so `json::decode` reads the text back.
+use std::encoding::json
+
+struct Entry {
+    #[rename("full-name")]
+    name: String
+    #[skip]
+    scratch: i64
+    tags: Vec<String>
+}
+
+struct Report {
+    #[rename("package")]
+    artifact: String
+    entries: Vec<Entry>
+    total: i64
+}
+
+fn main() {
+    let report = Report {
+        artifact: "app.tar.gz"
+        entries: #[Entry { name: "one", scratch: 7, tags: #["a"] }, Entry { name: "two", scratch: 9, tags: #[] }]
+        total: 2
+    }
+    let text = json::encode(report)
+    println(text)
+    println(json::encode_pretty(report))
+    let back = json::decode::<Report>(text).unwrap()
+    println(f"{back.artifact} {back.entries.len()} {back.entries[0].name} {back.entries[1].scratch}")
+    println(json::encode(Entry { name: "solo", scratch: 1, tags: #["x", "y"] }))
+}

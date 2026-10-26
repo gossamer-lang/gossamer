@@ -560,7 +560,8 @@ enum Command {
         /// Run the cross-tier parity walk instead of `#[test]`
         /// discovery. Targets every `.gos` source under `path`
         /// (defaults to `examples/` + `feature-testing-examples/`),
-        /// running each through the VM and the LLVM-compiled binary.
+        /// running each through the VM and the LLVM-compiled binary,
+        /// `--parallel` fixtures at a time.
         #[arg(long = "tier-parity")]
         tier_parity: bool,
         /// Fuzz every `#[fuzz]` function instead of running `#[test]`

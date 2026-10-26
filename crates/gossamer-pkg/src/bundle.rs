@@ -426,7 +426,7 @@ impl<'a> Overlay<'a> {
 /// entry with `Path::join`, so the paths it builds share the entry's
 /// spelling; an editor's URI may spell the same file with a different
 /// prefix, which `canonicalize` reconciles.
-fn same_file(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
     }
@@ -694,7 +694,12 @@ fn is_inside_project(dir: &Path) -> bool {
     false
 }
 
+/// True when `name` can name a module in source: an identifier that is not a
+/// reserved word, since a file called `package.gos` could never be reached.
 fn is_valid_module_ident(name: &str) -> bool {
+    if gossamer_lex::Keyword::from_ident(name).is_some() {
+        return false;
+    }
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -788,7 +793,7 @@ pub fn bundle_document_unit_with(
     buffers: &[(PathBuf, String)],
 ) -> DocumentUnit {
     let overlay = Overlay::new(buffers);
-    if let Some(entry) = crate::entry::enclosing_project_entry(path)
+    if let Some(entry) = crate::entry::nearest_project_entry(path)
         && !same_file(&entry, path)
         && let Some(entry_source) = overlay.read(&entry)
     {

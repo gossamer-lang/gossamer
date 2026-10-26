@@ -160,7 +160,7 @@ libmimalloc-sys = { version = "0.1", features = ["extended", "arena"] }
 # std has no API for. A panic trace walks the stack through
 # `std::backtrace`, whose symbolizer every binary already links.
 backtrace = "0.3"
-zstd = "0.13"
+zstd = "0.14"
 # `static` bundles the libbz2 C source into the archive rather than
 # dynamically linking the system `-lbz2`. macOS otherwise resolves bzip2 to
 # the SDK's libbz2 via pkg-config, and a `gos build` link (no `-lbz2` on the

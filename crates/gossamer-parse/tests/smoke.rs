@@ -1357,6 +1357,27 @@ fn a_line_leading_range_in_a_multiline_struct_literal_is_its_base() {
 }
 
 #[test]
+fn positional_and_named_struct_literal_entries_both_end_at_a_newline() {
+    let source = "fn f() -> P {\n    P {\n        a\n        b: 2\n    }\n}\n";
+    let mut map = SourceMap::new();
+    let file = map.add_file("struct_lines.gos", source.to_string());
+    let (sf, diags) = parse_source_file(source, file);
+    assert!(diags.is_empty(), "{diags:?}");
+    let ItemKind::Fn(decl) = &sf.items[0].kind else {
+        panic!("expected a function item");
+    };
+    let ExprKind::Block(block) = &decl.body.as_ref().expect("a body").kind else {
+        panic!("expected a block body");
+    };
+    let tail = block.tail.as_ref().expect("a tail expression");
+    let ExprKind::Struct { fields, .. } = &tail.kind else {
+        panic!("expected a struct literal, got {:?}", tail.kind);
+    };
+    let names: Vec<&str> = fields.iter().map(|f| f.name.name.as_str()).collect();
+    assert_eq!(names, ["0", "b"]);
+}
+
+#[test]
 fn a_cfg_bang_points_at_the_item_attribute_not_a_call() {
     let source = "fn main() { let mac = cfg!(target_os = \"macos\") }";
     let mut map = SourceMap::new();

@@ -2529,7 +2529,7 @@ impl Parser<'_> {
                     name,
                     value: Some(value),
                 });
-                if !self.eat_punct(Punct::Comma) {
+                if !self.eat_list_separator() {
                     break;
                 }
                 continue;

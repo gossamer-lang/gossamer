@@ -79,6 +79,7 @@ jobs:
           echo "GOS_LLC=$prefix/bin/llc"      >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           prefix-key: v1-asan-${{ matrix.os }}
       # ASan catches the heap-corruption / use-after-free / double-free class
       # the RC migration can regress. Running it on macOS as well as Linux
@@ -132,6 +133,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           prefix-key: v1-tsan
       - name: cargo test under TSan
         env:

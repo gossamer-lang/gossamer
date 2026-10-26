@@ -489,23 +489,26 @@ impl Gen<'_> {
     ) {
         out.raw("{");
         let mut first = true;
-        // A rendering keeps every field under its own name, in byte order of
-        // the names, as a `json::Value` object holds its members.
-        let mut order: Vec<usize> = (0..fields.len().min(field_tys.len())).collect();
+        // Every field is written under its `#[rename]`d key unless `#[skip]`
+        // leaves it out, so a decode of the text reads the value back. A
+        // rendering orders the members by key bytes, as a `json::Value`
+        // object holds them.
+        let mut written: Vec<(usize, String)> = (0..fields.len().min(field_tys.len()))
+            .filter_map(|index| {
+                let options = info.serde.get(index).cloned().unwrap_or_default();
+                (!options.skip).then(|| {
+                    (
+                        index,
+                        options.key.unwrap_or_else(|| fields[index].name.clone()),
+                    )
+                })
+            })
+            .collect();
         if self.rendering {
-            order.sort_by(|&a, &b| fields[a].name.as_bytes().cmp(fields[b].name.as_bytes()));
+            written.sort_by(|(_, a), (_, b)| a.as_bytes().cmp(b.as_bytes()));
         }
-        for index in order {
+        for (index, key) in written {
             let (field, field_ty) = (&fields[index], &field_tys[index]);
-            let options = if self.rendering {
-                HirSerdeField::default()
-            } else {
-                info.serde.get(index).cloned().unwrap_or_default()
-            };
-            if options.skip {
-                continue;
-            }
-            let key = options.key.unwrap_or_else(|| field.name.clone());
             if !first {
                 out.raw(",");
             }
