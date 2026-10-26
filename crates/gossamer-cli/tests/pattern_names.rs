@@ -44,6 +44,23 @@ fn names_match_or_bind_by_what_they_resolve_to() {
 }
 
 #[test]
+fn prelude_variants_stay_distinct_from_user_variants_of_their_spelling() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../feature-testing-examples/prelude_variants_beside_user_variants.gos");
+    let expected = "none\nlow\ntrue\nNone Some(3)\nreply-none\nreply-some 4\nreply-ok\n\
+                    reply-err x\nOk(12) Err(\"not a number: q\")\n5 10\n";
+    for tier in [&["run"][..], &["run", "--native"][..]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_gos"))
+            .args(tier)
+            .arg(&fixture)
+            .output()
+            .expect("run gos");
+        assert!(out.status.success(), "{tier:?}: {}", stderr(&out));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{tier:?}");
+    }
+}
+
+#[test]
 fn patterns_that_may_not_match_are_refused_where_every_value_must() {
     let source = "enum Shape { Circle(i64), Square(i64) }\n\
                   const LIMIT: i64 = 5\n\

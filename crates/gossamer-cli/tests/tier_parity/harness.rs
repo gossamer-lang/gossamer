@@ -748,6 +748,7 @@ const SPECS: &[Spec] = &[
     // `Key::S` stays a variant pattern beside a module's `const S`; a const
     // named in a pattern still matches by value.
     spec("feature-testing-examples/variant_named_like_a_const.gos"),
+    spec("feature-testing-examples/prelude_variants_beside_user_variants.gos"),
     // A module's `static mut` is reached by its path beside a parameter
     // named like the module.
     spec("feature-testing-examples/module_static_beside_same_named_local.gos"),

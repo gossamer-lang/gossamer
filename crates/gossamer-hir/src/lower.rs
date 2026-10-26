@@ -359,6 +359,18 @@ fn collect_module_fn_paths(
 /// registers as the type's name.
 /// The name an item is identified by below HIR: bare at the unit root,
 /// prefixed by its containing modules otherwise.
+/// True for `Option::Some` / `Option::None` / `Result::Ok` / `Result::Err`,
+/// the prelude variants spelled through their enum.
+fn is_prelude_variant_path(segments: &[Ident]) -> bool {
+    matches!(
+        segments,
+        [ty, variant] if matches!(
+            (ty.name.as_str(), variant.name.as_str()),
+            ("Option", "Some" | "None") | ("Result", "Ok" | "Err")
+        )
+    )
+}
+
 fn qualified_item_name(module_path: &[String], name: &str) -> String {
     if module_path.is_empty() {
         return name.to_string();
@@ -2608,6 +2620,11 @@ impl Lowerer<'_> {
         self.anchor_impl_fn_path(&target, self.current_module.len())
     }
 
+    /// True when the resolver bound `node` to an item the program declares.
+    fn names_program_item(&self, node: NodeId) -> bool {
+        matches!(self.resolutions.get(node), Some(Resolution::Def { .. }))
+    }
+
     fn lower_path_expr(&mut self, node: NodeId, path: &gossamer_ast::PathExpr) -> HirExprKind {
         // A numeric limit constant folds to its literal, so every tier
         // compiles the same value.
@@ -2622,6 +2639,9 @@ impl Lowerer<'_> {
             });
         }
         let mut segments: Vec<Ident> = path.segments.iter().map(|s| s.name.clone()).collect();
+        if is_prelude_variant_path(&segments) && !self.names_program_item(node) {
+            segments.remove(0);
+        }
         // A single-segment name bound by `use` and targeting a
         // `[rust-bindings]` item or stdlib free function expands to its full
         // qualified path.

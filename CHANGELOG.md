@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.75.2 - Prelude variant names beside user enums
+
+- A bare `None`, `Some`, `Ok` or `Err` names the prelude variant even where two or more enums in the program, its dependencies or the standard library declare a variant of that spelling, where it was refused as ambiguous (GR0009). An enum's own variant of that spelling is reached through the enum or an explicit `use`.
+- A variant imported with `use` and named bare (`let l: Level = None` after `use Level::None`) builds that enum's variant on the JIT and native tiers, where it built `Option::None`.
+- A user enum variant named `Some`, `Ok` or `Err` with a payload is built as that enum's variant on the native tier, where constructing it crashed.
+- `Option::Some`, `Option::None`, `Result::Ok` and `Result::Err` written through their enum run on the VM, where they failed with an unbound-name error.
+
 ## 0.75.1 - Miri compatibility and dependency security fixes
 
 - Updated P-256 and its cryptographic arithmetic dependencies, plus Tokio, to resolve RustSec timing-side-channel and I/O-safety advisories.

@@ -1,0 +1,73 @@
+// A bare `None`, `Some`, `Ok` or `Err` names the prelude variant even where
+// several enums declare a variant of that spelling, and an imported variant
+// of that spelling is its enum's own wherever the value's type is that enum.
+
+use Level::{Low, None}
+
+#[derive(PartialEq)]
+enum Level { None, Low, High }
+
+enum Reply { None, Some(i64), Ok, Err(String) }
+
+fn level(l: Level) -> String {
+    match l {
+        None => "none"
+        Low => "low"
+        Level::High => "high"
+    }
+}
+
+fn reply(r: Reply) -> String {
+    match r {
+        Reply::None => "reply-none"
+        Reply::Some(n) => f"reply-some {n}"
+        Reply::Ok => "reply-ok"
+        Reply::Err(why) => f"reply-err {why}"
+    }
+}
+
+fn parse(text: String) -> Result<i64, String> {
+    match text.to_i64() {
+        Some(n) => Ok(n)
+        Option::None => Err(f"not a number: {text}")
+    }
+}
+
+// Loops give the JIT bodies to compile: an imported `None` built and
+// matched as its enum's variant, and a user `Some` with a payload.
+fn imported_nones(n: i64) -> i64 {
+    let mut count = 0
+    for i in 0..n {
+        let l: Level = if i % 2 == 0 { None } else { Low }
+        if l == Level::None {
+            count += 1
+        }
+    }
+    count
+}
+
+fn user_somes(n: i64) -> i64 {
+    let mut total = 0
+    for i in 0..n {
+        match Reply::Some(i) {
+            Reply::Some(v) => total += v
+            _ => ()
+        }
+    }
+    total
+}
+
+fn main() {
+    let l: Level = None
+    println(level(l))
+    println(level(Low))
+    println(l == Level::None)
+    let missing: Option<i64> = Option::None
+    println(f"{missing} {Some(3)}")
+    println(reply(Reply::None))
+    println(reply(Reply::Some(4)))
+    println(reply(Reply::Ok))
+    println(reply(Reply::Err("x")))
+    println(f"{parse("12")} {parse("q")}")
+    println(f"{imported_nones(10)} {user_somes(5)}")
+}
