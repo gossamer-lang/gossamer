@@ -58,6 +58,8 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Resolve wasm-bindgen-cli version from Cargo.lock
         # The CLI version must match the wasm-bindgen crate version exactly
         # (a mismatch is a hard "schema version" error), so pin it to whatever

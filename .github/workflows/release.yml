@@ -40,6 +40,8 @@ jobs:
 
       - run: rustup set profile minimal
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build
         run: cargo build --release --bin gos
@@ -153,6 +155,7 @@ jobs:
       - run: rustup set profile minimal
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: aarch64
 
       - name: Install cross-compiler
@@ -293,6 +296,7 @@ jobs:
       - run: rustup set profile minimal
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: macos-${{ matrix.arch }}
 
       - name: Build
@@ -343,6 +347,8 @@ jobs:
 
       - run: rustup set profile minimal
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build
         run: cargo build --release --bin gos

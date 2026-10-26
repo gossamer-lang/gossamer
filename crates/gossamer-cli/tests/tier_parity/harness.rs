@@ -23,7 +23,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 // Ceiling for a single fixture's tier run, sized to catch a genuine hang
@@ -57,6 +57,45 @@ fn fresh_dir(tag: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create scratch dir");
     dir
+}
+
+/// Runs `task` over `items` on one worker per available core and answers the
+/// results in `items` order, so a walk reports exactly what a serial one would.
+///
+/// Fixtures run as separate processes with their own scratch directories,
+/// ports, and temp-file names, so two different fixtures never share state;
+/// a crashing fixture takes down only its own child process.
+fn par_map_ordered<T: Sync, R: Send>(items: &[T], task: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let slots: Vec<parking_lot::Mutex<Option<R>>> = items
+        .iter()
+        .map(|_| parking_lot::Mutex::new(None))
+        .collect();
+    let next = AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .min(items.len())
+        .max(1);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let idx = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(item) = items.get(idx) else {
+                        return;
+                    };
+                    let result = task(item);
+                    *slots[idx].lock() = Some(result);
+                }
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .map(|slot| {
+            slot.into_inner()
+                .expect("every worker returned, so every slot was filled")
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -748,6 +787,8 @@ const SPECS: &[Spec] = &[
     // `Key::S` stays a variant pattern beside a module's `const S`; a const
     // named in a pattern still matches by value.
     spec("feature-testing-examples/variant_named_like_a_const.gos"),
+    spec("feature-testing-examples/prelude_variants_beside_user_variants.gos"),
+    spec("feature-testing-examples/method_defaults_beside_same_named_methods.gos"),
     // A module's `static mut` is reached by its path beside a parameter
     // named like the module.
     spec("feature-testing-examples/module_static_beside_same_named_local.gos"),
@@ -2160,6 +2201,8 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/operator_rhs_types.gos"),
     // Typed serde over enums, and `#[rename]` / `#[skip]` / `#[default]`.
     spec("feature-testing-examples/serde_enums_and_field_attrs.gos"),
+    spec("feature-testing-examples/json_encode_field_attributes.gos"),
+    spec("feature-testing-examples/vec_rebound_from_branch_local.gos"),
     // Typed serde of `char`, a newtype, and a user enum as the encoded value.
     spec("feature-testing-examples/serde_chars_and_top_level_enums.gos"),
     // `time::Time`: an instant with its UTC offset, parsed, formatted,
@@ -2316,6 +2359,43 @@ const DEDICATED_FEATURE_TESTING_EXAMPLES: &[&str] = &[
     "preempt_tight_loop.gos",
 ];
 
+/// The walks run different fixtures at once, which is sound only while no two
+/// walked fixtures name the same fixed port.
+#[test]
+fn walked_specs_name_distinct_fixed_ports() {
+    let mut owners: std::collections::BTreeMap<u16, &str> = std::collections::BTreeMap::new();
+    let mut clashes = Vec::new();
+    for spec in SPECS
+        .iter()
+        .filter(|spec| spec.skip_all.is_none() && spec.server.is_none())
+    {
+        let source = fs::read_to_string(workspace_root().join(spec.path)).unwrap_or_default();
+        for host in ["127.0.0.1:", "0.0.0.0:", "localhost:", "[::1]:"] {
+            for (at, _) in source.match_indices(host) {
+                let digits: String = source[at + host.len()..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                let Ok(port) = digits.parse::<u16>() else {
+                    continue;
+                };
+                if port == 0 {
+                    continue;
+                }
+                let owner = *owners.entry(port).or_insert(spec.path);
+                if owner != spec.path {
+                    clashes.push(format!("{}: port {port} is also {owner}'s", spec.path));
+                }
+            }
+        }
+    }
+    assert!(
+        clashes.is_empty(),
+        "walked fixtures share fixed ports; give each its own:\n  {}",
+        clashes.join("\n  "),
+    );
+}
+
 #[test]
 fn specs_cover_every_feature_testing_example() {
     use std::collections::BTreeSet;
@@ -2397,6 +2477,10 @@ fn run_with_timeout(
     cmdline: String,
     workdir: PathBuf,
 ) -> Run {
+    // Both pipes drain while the child runs: a child that fills a pipe buffer
+    // blocks on its next write until something reads.
+    let stdout_reader = child.stdout.take().map(drain_pipe);
+    let stderr_reader = child.stderr.take().map(drain_pipe);
     if let Some(mut sin) = child.stdin.take() {
         let _ = sin.write_all(stdin);
         drop(sin);
@@ -2427,17 +2511,33 @@ fn run_with_timeout(
             Err(_) => break,
         }
     }
-    let out = child.wait_with_output().expect("wait_with_output");
+    let status = child.wait().expect("wait for child");
+    let collect = |reader: Option<std::thread::JoinHandle<Vec<u8>>>| {
+        reader.map_or_else(String::new, |handle| {
+            normalize_newlines(&String::from_utf8_lossy(
+                &handle.join().expect("pipe reader thread"),
+            ))
+        })
+    };
     Run {
-        stdout: normalize_newlines(&String::from_utf8_lossy(&out.stdout)),
-        stderr: normalize_newlines(&String::from_utf8_lossy(&out.stderr)),
-        code: out.status.code(),
-        exit_text: render_status(out.status),
+        stdout: collect(stdout_reader),
+        stderr: collect(stderr_reader),
+        code: status.code(),
+        exit_text: render_status(status),
         timed_out,
         exe,
         cmdline,
         workdir,
     }
+}
+
+/// Reads `pipe` to its end on a thread of its own and answers the bytes.
+fn drain_pipe(mut pipe: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = pipe.read_to_end(&mut bytes);
+        bytes
+    })
 }
 
 /// Dumps per-thread scheduler state of a child that outlived the run
@@ -2902,35 +3002,42 @@ fn divergence(spec: &Spec, lhs: (Tier, &Run), rhs: (Tier, &Run)) -> Option<Strin
 
 #[test]
 fn vm_runs_every_example_without_crashing() {
-    let mut failures = Vec::new();
-    for spec in SPECS {
-        if let Some(reason) = spec.skip_all {
-            eprintln!("skip vm: {} ({reason})", spec.path);
-            continue;
-        }
-        if spec.server.is_some() {
+    let _guard = PARITY_WALK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let specs: Vec<&Spec> = SPECS
+        .iter()
+        .filter(|spec| {
+            if let Some(reason) = spec.skip_all {
+                eprintln!("skip vm: {} ({reason})", spec.path);
+                return false;
+            }
             // Server VM coverage lives in `web_server_smoke_vm`.
-            continue;
-        }
+            spec.server.is_none()
+        })
+        .collect();
+    let failures: Vec<String> = par_map_ordered(&specs, |spec| {
         let run = match run_tier(spec, Tier::Vm) {
             Ok(r) => r,
             Err(e) => {
-                failures.push(format!(
+                return Some(format!(
                     "{path}: vm error (no Run produced - tier failed before execution):\n  {e}",
                     path = spec.path,
                 ));
-                continue;
             }
         };
-        if !spec.allow_nonzero && run.code != Some(0) {
-            failures.push(format!(
+        (!spec.allow_nonzero && run.code != Some(0)).then(|| {
+            format!(
                 "{path}: vm exit={code:?}\n\n--- per-tier execution report ---\n{report}",
                 path = spec.path,
                 code = run.code,
                 report = tier_report(Tier::Vm.label(), &run),
-            ));
-        }
-    }
+            )
+        })
+    })
+    .into_iter()
+    .flatten()
+    .collect();
     assert!(
         failures.is_empty(),
         "{} VM run failures:\n{}",
@@ -3061,11 +3168,11 @@ fn jit_stats_line_is_parsed_from_stderr() {
     assert_eq!(jit_installed_entries("no stats here\n"), None);
 }
 
-/// Serialises every parity walk so concurrent test functions can't
-/// race on examples whose fixtures share `/tmp/gossamer_test_*`
-/// paths (notably `fs_temp_file_lifecycle.gos`). The grouped tests run
-/// sequentially under this lock - the round-robin split shrinks the
-/// failing unit without reintroducing the cross-test fixture race.
+/// Serialises every walk over `SPECS` so concurrent test functions never run
+/// one fixture twice at once: a fixture's scratch paths and port are fixed by
+/// its own source (notably `fs_temp_file_lifecycle.gos`'s
+/// `/tmp/gossamer_test_*`). Within a walk each fixture runs once, so the walk
+/// spreads its fixtures over every core.
 static PARITY_WALK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn parity_walk(compiled: Tier, group: usize) {
@@ -3073,17 +3180,19 @@ fn parity_walk(compiled: Tier, group: usize) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let trace = env::var_os("GOS_PARITY_TRACE").is_some();
-    let mut failures = Vec::new();
-    for (idx, spec) in SPECS.iter().enumerate() {
-        if idx % PARITY_GROUPS != group {
-            continue;
-        }
-        if spec.skip_all.is_some() || spec.skip_parity.is_some() || spec.server.is_some() {
-            continue;
-        }
-        if compiled == Tier::LlvmDebug && spec.skip_debug_aot.is_some() {
-            continue;
-        }
+    let specs: Vec<&Spec> = SPECS
+        .iter()
+        .enumerate()
+        .filter(|&(idx, spec)| {
+            idx % PARITY_GROUPS == group
+                && spec.skip_all.is_none()
+                && spec.skip_parity.is_none()
+                && spec.server.is_none()
+                && !(compiled == Tier::LlvmDebug && spec.skip_debug_aot.is_some())
+        })
+        .map(|(_, spec)| spec)
+        .collect();
+    let failures: Vec<String> = par_map_ordered(&specs, |spec| {
         if trace {
             eprintln!(
                 "tier-parity: {} group {group}: {}",
@@ -3091,55 +3200,11 @@ fn parity_walk(compiled: Tier, group: usize) {
                 spec.path
             );
         }
-        let vm = match run_tier(spec, Tier::Vm) {
-            Ok(r) => r,
-            Err(e) => {
-                failures.push(format!(
-                    "{path}: vm error (no Run produced - tier failed before execution):\n  {e}",
-                    path = spec.path,
-                ));
-                continue;
-            }
-        };
-        let other = match run_tier(spec, compiled) {
-            Ok(r) => r,
-            Err(e) => {
-                failures.push(format!(
-                    "{path}: {tier} error (no Run produced - tier failed before execution):\n  {e}",
-                    path = spec.path,
-                    tier = compiled.label(),
-                ));
-                continue;
-            }
-        };
-        if let Some(d) = divergence(spec, (Tier::Vm, &vm), (compiled, &other)) {
-            failures.push(d);
-        }
-        if compiled == Tier::Cranelift {
-            let allowlisted = jit_compiles_nothing()
-                .iter()
-                .any(|(path, _)| path == spec.path);
-            let installed = jit_installed_entries(&other.stderr).unwrap_or(0);
-            if !allowlisted && installed == 0 {
-                failures.push(format!(
-                    "{path}: the cranelift tier installed no native entry, so this row \
-                     compared the bytecode VM against itself. Run `GOS_JIT_TRACE=1 \
-                     GOSSAMER_JIT_THRESHOLD=1 gos run {path}` to see which admission \
-                     rule excluded every body, then either restore JIT coverage or add \
-                     the fixture to jit_no_compile.tsv with the reason.",
-                    path = spec.path,
-                ));
-            }
-            if allowlisted && installed > 0 {
-                failures.push(format!(
-                    "{path}: listed in jit_no_compile.tsv but the cranelift tier \
-                     installed {installed} native entries. Delete the row - this \
-                     fixture now exercises the JIT.",
-                    path = spec.path,
-                ));
-            }
-        }
-    }
+        spec_parity_failures(spec, compiled)
+    })
+    .into_iter()
+    .flatten()
+    .collect();
     assert!(
         failures.is_empty(),
         "{} {} parity failures:\n{}",
@@ -3147,6 +3212,60 @@ fn parity_walk(compiled: Tier, group: usize) {
         compiled.label(),
         failures.join("\n\n"),
     );
+}
+
+/// Every way one fixture's `compiled` run disagrees with its VM run.
+fn spec_parity_failures(spec: &Spec, compiled: Tier) -> Vec<String> {
+    let mut failures = Vec::new();
+    let vm = match run_tier(spec, Tier::Vm) {
+        Ok(r) => r,
+        Err(e) => {
+            failures.push(format!(
+                "{path}: vm error (no Run produced - tier failed before execution):\n  {e}",
+                path = spec.path,
+            ));
+            return failures;
+        }
+    };
+    let other = match run_tier(spec, compiled) {
+        Ok(r) => r,
+        Err(e) => {
+            failures.push(format!(
+                "{path}: {tier} error (no Run produced - tier failed before execution):\n  {e}",
+                path = spec.path,
+                tier = compiled.label(),
+            ));
+            return failures;
+        }
+    };
+    if let Some(d) = divergence(spec, (Tier::Vm, &vm), (compiled, &other)) {
+        failures.push(d);
+    }
+    if compiled == Tier::Cranelift {
+        let allowlisted = jit_compiles_nothing()
+            .iter()
+            .any(|(path, _)| path == spec.path);
+        let installed = jit_installed_entries(&other.stderr).unwrap_or(0);
+        if !allowlisted && installed == 0 {
+            failures.push(format!(
+                "{path}: the cranelift tier installed no native entry, so this row \
+                 compared the bytecode VM against itself. Run `GOS_JIT_TRACE=1 \
+                 GOSSAMER_JIT_THRESHOLD=1 gos run {path}` to see which admission \
+                 rule excluded every body, then either restore JIT coverage or add \
+                 the fixture to jit_no_compile.tsv with the reason.",
+                path = spec.path,
+            ));
+        }
+        if allowlisted && installed > 0 {
+            failures.push(format!(
+                "{path}: listed in jit_no_compile.tsv but the cranelift tier \
+                 installed {installed} native entries. Delete the row - this \
+                 fixture now exercises the JIT.",
+                path = spec.path,
+            ));
+        }
+    }
+    failures
 }
 
 #[cfg(test)]

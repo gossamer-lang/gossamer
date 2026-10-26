@@ -431,10 +431,18 @@ impl Rewrite<'_> {
                 // that happen to share a method name appear here, and
                 // matching only the first would reject `c.get(2)` because
                 // some other type's `get` takes two.
+                // A declaration whose trailing defaults this call would fill
+                // makes the rewrite depend on the receiver, even when another
+                // type's method of the name takes exactly these arguments.
+                let fills_defaults = |sig: &Signature| {
+                    args.len() < sig.names.len()
+                        && sig.defaults[args.len()..].iter().all(Option::is_some)
+                };
                 if written.is_empty()
                     && candidates
                         .iter()
                         .any(|(_, sig)| args.len() == sig.names.len())
+                    && !candidates.iter().any(|(_, sig)| fills_defaults(sig))
                 {
                     return None;
                 }

@@ -704,20 +704,31 @@ impl<'a> Builder<'a> {
             self.emit_assign(Place::local(local), Rvalue::StaticLoad(sref), span);
             return Some(local);
         }
+        // A bare variant name the value's own enum declares (an imported
+        // `Level::None`) belongs to that enum, not to the program-wide
+        // first declaration of the name or to the prelude.
+        let typed = match segments {
+            [single] => self.enum_index_name_of(ty).and_then(|enum_name| {
+                let idx = self.enums.variant_of_enum(&enum_name, &single.name)?;
+                Some((enum_name, idx))
+            }),
+            _ => None,
+        };
         // `None` as a value (no payload) lowers to a heap-allocated
         // `gos_rt_result_new(1, 0)` so the match disc check can
         // distinguish it from `Some(_)`.
-        if let Some(last) = segments.last() {
-            if last.name.as_str() == "None" && segments.len() == 1 {
-                return self.lower_result_no_payload(1, ty, span);
-            }
+        if typed.is_none()
+            && let [single] = segments
+            && single.name.as_str() == "None"
+        {
+            return self.lower_result_no_payload(1, ty, span);
         }
         // Enum variant constructor (no-payload form): `Color::Green`
         // / `List::Nil`. When the enum has any payload-bearing
         // sibling, allocate a one-word `[disc]` heap aggregate so
         // match dispatch can uniformly load disc from offset 0.
         // Otherwise emit the variant index directly as i64.
-        if let Some((enum_name, idx)) = self.enums.lookup(segments) {
+        if let Some((enum_name, idx)) = typed.or_else(|| self.enums.lookup(segments)) {
             if self.enums.enum_has_any_payload(&enum_name) {
                 let result = self.lower_user_enum_ctor(
                     &enum_name,

@@ -1947,6 +1947,7 @@ pub(crate) mod tier_parity {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use anyhow::{Result, anyhow};
@@ -1979,29 +1980,36 @@ pub(crate) mod tier_parity {
             ));
         }
         let root = workspace_root_or_cwd().unwrap_or_else(|| PathBuf::from("."));
-        let mut fixtures: BTreeMap<String, TierStatus> = BTreeMap::new();
-        for file in &files {
-            let name = file
-                .strip_prefix(&root)
-                .unwrap_or(file)
-                .display()
-                .to_string();
-            let [vm, cranelift, llvm] = evaluate_fixture(file, budget);
-            outln!(
-                "{name}: vm={} cranelift={} llvm={}",
-                vm.as_deref().unwrap_or("-"),
-                cranelift.as_deref().unwrap_or("-"),
-                llvm.as_deref().unwrap_or("-"),
-            );
-            fixtures.insert(
-                name,
-                TierStatus {
-                    vm,
-                    cranelift,
-                    llvm,
-                },
-            );
-        }
+        let units = walk_units(&files);
+        let fixtures: BTreeMap<String, TierStatus> = map_units(&units, opts.parallel, |unit| {
+            unit.iter()
+                .map(|file| {
+                    let name = file
+                        .strip_prefix(&root)
+                        .unwrap_or(file)
+                        .display()
+                        .to_string();
+                    let [vm, cranelift, llvm] = evaluate_fixture(file, budget);
+                    outln!(
+                        "{name}: vm={} cranelift={} llvm={}",
+                        vm.as_deref().unwrap_or("-"),
+                        cranelift.as_deref().unwrap_or("-"),
+                        llvm.as_deref().unwrap_or("-"),
+                    );
+                    (
+                        name,
+                        TierStatus {
+                            vm,
+                            cranelift,
+                            llvm,
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .into_iter()
+        .flatten()
+        .collect();
         if opts.report.as_deref() == Some("status") {
             let out_path = sidecar_path();
             let mut reported = if opts.path.is_some() {
@@ -2058,6 +2066,115 @@ pub(crate) mod tier_parity {
         vec![root.join("examples"), root.join("feature-testing-examples")]
             .into_iter()
             .filter(|p| p.is_dir())
+            .collect()
+    }
+
+    /// Groups `files` into units that may run concurrently, each in path
+    /// order. Builds of one project share its `target/` directory and binding
+    /// libraries, so a project's files form one unit. Fixtures that name the
+    /// same fixed port - a demo server and the client written against it -
+    /// see each other when they overlap, so they share a unit too. Every
+    /// other file is a unit of its own.
+    fn walk_units(files: &[PathBuf]) -> Vec<Vec<PathBuf>> {
+        let mut projects: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
+        for file in files {
+            let key = file
+                .ancestors()
+                .skip(1)
+                .find(|dir| dir.join("project.toml").is_file())
+                .map_or_else(|| file.clone(), Path::to_path_buf);
+            projects.entry(key).or_default().push(file.clone());
+        }
+        let units: Vec<Vec<PathBuf>> = projects.into_values().collect();
+        let mut parent: Vec<usize> = (0..units.len()).collect();
+        let mut port_unit: BTreeMap<u16, usize> = BTreeMap::new();
+        for (idx, unit) in units.iter().enumerate() {
+            for port in unit.iter().flat_map(|file| fixed_ports(file)) {
+                match port_unit.get(&port) {
+                    Some(&other) => {
+                        let (a, b) = (unit_root(&mut parent, idx), unit_root(&mut parent, other));
+                        parent[a.max(b)] = a.min(b);
+                    }
+                    None => {
+                        port_unit.insert(port, idx);
+                    }
+                }
+            }
+        }
+        // Units are in path order, so appending each one to its group's
+        // first unit keeps every group in path order.
+        let mut groups: BTreeMap<usize, Vec<PathBuf>> = BTreeMap::new();
+        for (idx, unit) in units.into_iter().enumerate() {
+            groups
+                .entry(unit_root(&mut parent, idx))
+                .or_default()
+                .extend(unit);
+        }
+        groups.into_values().collect()
+    }
+
+    fn unit_root(parent: &mut [usize], mut idx: usize) -> usize {
+        while parent[idx] != idx {
+            parent[idx] = parent[parent[idx]];
+            idx = parent[idx];
+        }
+        idx
+    }
+
+    /// The TCP ports `file` names in a loopback or wildcard address literal.
+    /// Port 0 asks the system for a free port, so it is never shared.
+    fn fixed_ports(file: &Path) -> Vec<u16> {
+        let Ok(source) = fs::read_to_string(file) else {
+            return Vec::new();
+        };
+        let mut ports = Vec::new();
+        for host in ["127.0.0.1:", "0.0.0.0:", "localhost:", "[::1]:"] {
+            for (at, _) in source.match_indices(host) {
+                let digits: String = source[at + host.len()..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                if let Ok(port) = digits.parse::<u16>()
+                    && port != 0
+                {
+                    ports.push(port);
+                }
+            }
+        }
+        ports
+    }
+
+    /// Runs `task` over `units` on up to `workers` threads and answers the
+    /// results in `units` order.
+    fn map_units<R: Send>(
+        units: &[Vec<PathBuf>],
+        workers: usize,
+        task: impl Fn(&[PathBuf]) -> R + Sync,
+    ) -> Vec<R> {
+        let slots: Vec<parking_lot::Mutex<Option<R>>> = units
+            .iter()
+            .map(|_| parking_lot::Mutex::new(None))
+            .collect();
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..workers.clamp(1, units.len().max(1)) {
+                scope.spawn(|| {
+                    loop {
+                        let idx = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(unit) = units.get(idx) else {
+                            return;
+                        };
+                        let result = task(unit);
+                        *slots[idx].lock() = Some(result);
+                    }
+                });
+            }
+        });
+        // `scope` joins every worker, and the workers drain `next` past the
+        // last unit, so every slot holds a result here.
+        slots
+            .into_iter()
+            .filter_map(parking_lot::Mutex::into_inner)
             .collect()
     }
 
@@ -2415,9 +2532,14 @@ pub(crate) mod tier_parity {
     }
 
     fn run_llvm(file: &Path, budget: Duration) -> Outcome {
+        // Fixtures in different directories share stems (every project's
+        // `main.gos`) and run concurrently, so the counter keeps each
+        // build's scratch directory its own.
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
         let scratch = std::env::temp_dir().join(format!(
-            "gos-tier-parity-{}-{}",
+            "gos-tier-parity-{}-{}-{}",
             std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
             file.file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown"),
@@ -2661,6 +2783,48 @@ pub(crate) mod tier_parity {
             assert_eq!(
                 strings_row.and_then(|status| status.vm).as_deref(),
                 Some("fail")
+            );
+        }
+    }
+
+    #[cfg(test)]
+    mod walk_unit_tests {
+        use std::fs;
+
+        use super::walk_units;
+
+        #[test]
+        fn fixtures_naming_one_port_share_a_unit_in_path_order() {
+            let dir = std::env::temp_dir().join(format!("gos-walk-units-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(dir.join("app/src")).unwrap();
+            fs::write(dir.join("app/project.toml"), "").unwrap();
+            let files = [
+                (
+                    "a_client.gos",
+                    "http::get(\"http://127.0.0.1:8080/health\")",
+                ),
+                ("app/src/lib.gos", ""),
+                ("app/src/main.gos", ""),
+                ("b_free.gos", "net::listen(\"127.0.0.1:0\")"),
+                ("c_server.gos", "http::serve(\"0.0.0.0:8080\", h)"),
+                ("d_alone.gos", "println(1)"),
+            ]
+            .map(|(name, body)| {
+                let path = dir.join(name);
+                fs::write(&path, body).unwrap();
+                path
+            });
+            let units = walk_units(&files);
+            let _ = fs::remove_dir_all(&dir);
+            assert_eq!(
+                units,
+                vec![
+                    vec![files[0].clone(), files[4].clone()],
+                    vec![files[1].clone(), files[2].clone()],
+                    vec![files[3].clone()],
+                    vec![files[5].clone()],
+                ]
             );
         }
     }

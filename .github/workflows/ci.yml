@@ -31,6 +31,11 @@ env:
   # download, and the race. Documented behavior:
   # https://rust-lang.github.io/rustup/overrides.html
   RUSTUP_TOOLCHAIN: 1.95.0
+  # Backtraces and panics keep file:line and function names; the variable and
+  # type debuginfo nothing in CI reads would otherwise make every test binary,
+  # `gos`, and the runtime archive each fixture links several times larger.
+  # native-tests.yml repeats this block, so the two hash to one build cache.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   fmt:
@@ -51,6 +56,10 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v4
+          shared-key: debug
+          save-if: false
       # Adversarial programs a strongly-typed language must reject, each
       # pinned to the diagnostic that rejects it, with accepted controls so
       # the gate cannot pass by rejecting everything. Runs in milliseconds
@@ -68,7 +77,9 @@ jobs:
       - run: rustup set profile minimal
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v2-clippy-stdio
+          prefix-key: v4
+          shared-key: clippy
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   macos-deployment-target:
@@ -79,17 +90,17 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust-test-setup
         with:
-          cache-prefix: v3-macos-27-deployment-target
+          cache-key: debug
       - name: Verify final Mach-O deployment target
         run: |
           "$CARGO_BIN" test -p gossamer-cli --test cli \
             macos_build_records_15_0_deployment_target -- \
             --exact --nocapture
 
+  # Each runner image builds its native test binaries once and runs them in
+  # shards; see native-tests.yml.
   test-native:
-    name: Test native (${{ matrix.os }}, ${{ matrix.suite }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    name: Test native (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -104,348 +115,9 @@ jobs:
         # `xcode-27`, the macOS 27 image, whose SDK is the one a macOS
         # user's `gos build` links against.
         os: [ubuntu-latest, xcode-27, windows-latest, ubuntu-24.04-arm]
-        suite: [general-0, general-1, general-2, parity-0-1, parity-2-3, parity-4-5]
-    steps:
-      - uses: actions/checkout@v6
-      - uses: ./.github/actions/rust-test-setup
-        with:
-          cache-prefix: v3-test-native-${{ matrix.suite }}
-      # The FFI acceptance tests bind SQLite, zlib, and Expat. macOS ships
-      # them in its SDK and Windows ships SQLite as `winsqlite3`; a Linux
-      # runner needs the development packages that provide `lib*.so`. The
-      # leak gate measures peak RSS with GNU `time`.
-      - name: Install the C libraries the FFI acceptance tests bind
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev zlib1g-dev libexpat1-dev time
-      # `crates/gossamer-cli/build.rs` ensures the runtime
-      # staticlib is emitted into `target/<profile>/` for both
-      # debug and release; no explicit pre-build step needed.
-      # Native build/run crates (`gos build` + `gos run FILE`) run FIRST, serially,
-      # with live output and full diagnostics - ALWAYS, not only on failure.
-      # These crates fork llc/linkers and execute freshly-built native
-      # binaries, so a miscompile manifests as a test process killed by a
-      # signal (SIGSEGV/SIGBUS on Unix; an access violation that drops the
-      # whole runner on Windows). A parallel, captured run reports only
-      # "N targets failed" - the process dies before libtest names the test -
-      # and the previous design parked the live re-run behind `if: failure()`,
-      # which never executes when the crash takes the runner down with it.
-      # `--test-threads=1 --nocapture` makes the culprit test the last
-      # streamed line even in that case. Full LLVM IR dumps and preserved
-      # build temps are opt-in via GOSSAMER_NATIVE_CI_DIAGNOSTICS=1 because
-      # keeping them for every passing native build can exhaust hosted runner
-      # storage before failure artifacts can upload.
-      - name: Test native build/run crates (one process per test binary)
-        shell: bash
-        env:
-          RUST_BACKTRACE: "full"
-        run: |
-          set -uo pipefail
-          # Create the artifact dir, THEN redirect the harness scratch dirs
-          # (and gos's own build temp) at it. TMPDIR/TEMP/TMP are exported
-          # here, not in `env:`, on purpose: a step-level `env:` is applied
-          # before the shell starts, so git-bash on Windows would see a
-          # not-yet-created temp dir and warn "could not find /tmp, please
-          # create!". Exporting after `mkdir` leaves bash's own startup temp
-          # valid while still pointing the `cargo test` child (and gos) at the
-          # collectable path.
-          mkdir -p "${{ github.workspace }}/native-build-artifacts"
-          export TMPDIR="${{ github.workspace }}/native-build-artifacts"
-          export TEMP="${{ github.workspace }}/native-build-artifacts"
-          export TMP="${{ github.workspace }}/native-build-artifacts"
-          logdir="$TMPDIR/test-logs"
-          mkdir -p "$logdir"
-          if [ "${GOSSAMER_NATIVE_CI_DIAGNOSTICS:-}" = "1" ]; then
-            export GOS_LLVM_DUMP=1
-            export GOS_LINK_VERBOSE=1
-            export GOS_KEEP_BUILD_ARTIFACTS=1
-            echo "::notice::native CI diagnostics enabled; preserving LLVM IR and build temps"
-          fi
-          df -h "$TMPDIR" || true
-          rc=0
-          suite="${{ matrix.suite }}"
-          # Run each test binary in its OWN process, serially, streamed live AND
-          # teed to a per-binary file. These crates fork llc/linkers and execute
-          # freshly built native binaries, so a miscompile manifests as the test
-          # process dying by a signal (SIGSEGV/SIGBUS on Unix; a Windows access
-          # violation that can drop the whole runner). A single combined
-          # `cargo test` runs the binaries concurrently, so their output
-          # interleaves and a crash reports only "N targets failed" - the
-          # culprit is lost. Build the selected binaries in one Cargo pass,
-          # then invoke those executables directly one by one. That keeps every
-          # failure attributed to a named target and avoids repeatedly asking
-          # Cargo to re-walk the graph and re-run build scripts for each test.
-          # The passing output streams inside a collapsed `::group::` so the
-          # log stays tidy. On failure the group is NOT enough - GitHub does
-          # not auto-expand it, so the previous design forced you to open
-          # every section by hand to find the error. Instead, on failure we
-          # emit a top-level `::error::` annotation (shown at the top of the
-          # run and inline) and re-print the failing test names + panic /
-          # assertion lines FLAT, outside the group, so the failure is
-          # visible at a glance. The full streamed log stays in the group and
-          # in the uploaded artifacts.
-          package_dir() {
-            case "$1" in
-              gossamer-cli) echo "crates/gossamer-cli" ;;
-              gossamer-codegen-cranelift) echo "crates/gossamer-codegen-cranelift" ;;
-              *) echo "::error::unknown native-test crate: $1" >&2; return 1 ;;
-            esac
-          }
-          normalize_executable() {
-            local exe="$1"
-            if command -v cygpath >/dev/null 2>&1 && [[ "$exe" =~ ^[A-Za-z]:\\ ]]; then
-              cygpath -u "$exe"
-            else
-              printf '%s\n' "$exe"
-            fi
-          }
-          native_pwd() {
-            if pwd -W >/dev/null 2>&1; then
-              pwd -W
-            else
-              pwd
-            fi
-          }
-          run_executable() {
-            local crate="$1" label="$2" exe="$3"; shift 3
-            local log="$logdir/${crate}-${label}.log"
-            local ok=1
-            local dir
-            dir="$(package_dir "$crate")" || return 1
-            exe="$(normalize_executable "$exe")"
-            echo "::group::test ${crate} :: ${label}"
-            (
-              cd "$dir"
-              export CARGO_MANIFEST_DIR="$(native_pwd)"
-              if [ -n "${gos_exe:-}" ]; then
-                export CARGO_BIN_EXE_gos="$gos_exe"
-              fi
-              "$exe" "$@" --test-threads=1 --nocapture
-            ) 2>&1 | tee "$log" || ok=0
-            echo "::endgroup::"
-            if [ "$ok" -ne 1 ]; then
-              rc=1
-              echo "::error::test ${crate} :: ${label} FAILED - see flat detail below / uploaded artifacts"
-              echo "===================== FAILED: ${crate} :: ${label} ====================="
-              grep -nE "panicked at|^test .* \.\.\. FAILED|^error(\[|:)|^failures:|assertion .*failed|left ==|right ==|diverged|Undefined symbols|linker command failed" \
-                "$log" | head -n 80 || true
-              echo "============ end ${crate} :: ${label} (full log above is collapsed) ============"
-            fi
-          }
-          build_args=(test --no-run --message-format=json)
-          selected_targets="$logdir/selected-targets.tsv"
-          executable_artifacts="$logdir/executable-artifacts.tsv"
-          : > "$selected_targets"
-          packages=()
-          add_package_arg() {
-            local crate="$1" seen=0 item
-            for item in "${packages[@]:-}"; do
-              [ "$item" = "$crate" ] && seen=1 && break
-            done
-            if [ "$seen" -eq 0 ]; then
-              packages+=("$crate")
-              build_args+=(-p "$crate")
-            fi
-          }
-          select_target() {
-            local crate="$1" label="$2" kind="$3" target="$4"
-            add_package_arg "$crate"
-            case "$kind" in
-              lib) build_args+=(--lib) ;;
-              test) build_args+=(--test "$target") ;;
-              *) echo "::error::unknown native-test target kind: $kind" >&2; rc=1; return 1 ;;
-            esac
-            printf '%s\t%s\t%s\t%s\n' "$crate" "$label" "$kind" "$target" >> "$selected_targets"
-          }
-          build_selected_targets() {
-            local json_log="$logdir/00-build.jsonl"
-            local human_log="$logdir/00-build.log"
-            echo "::group::build selected native targets"
-            if "$CARGO_BIN" "${build_args[@]}" > "$json_log" 2> >(tee "$human_log" >&2); then
-              :
-            else
-              rc=1
-              echo "::error::selected native target build failed - see build log"
-            fi
-            echo "::endgroup::"
-            jq -r '
-              select(.reason == "compiler-artifact"
-                and .executable != null)
-              | [.package_id, (.target.kind | join(",")), .target.name, .executable]
-              | @tsv
-            ' "$json_log" > "$executable_artifacts" || {
-              rc=1
-              echo "::error::failed to parse Cargo JSON build output"
-            }
-            gos_exe="$(
-              awk -F '\t' '$2 ~ /bin/ && $3 == "gos" { print $4; found = 1; exit }
-                END { if (!found) exit 0 }' "$executable_artifacts"
-            )"
-          }
-          executable_for_target() {
-            local crate="$1" kind="$2" target="$3"
-            awk -F '\t' -v crate="$crate" -v kind="$kind" -v target="$target" '
-              $1 ~ "/crates/" crate "#" && $2 ~ kind && $3 == target {
-                print $4
-                found = 1
-                exit
-              }
-              END { if (!found) exit 1 }
-            ' "$executable_artifacts"
-          }
-          run_selected_targets() {
-            local crate label kind target exe
-            while IFS=$'\t' read -r crate label kind target; do
-              [ -n "$crate" ] || continue
-              exe="$(executable_for_target "$crate" "$kind" "$target")" || {
-                rc=1
-                echo "::error::missing built executable for ${crate} :: ${label}"
-                continue
-              }
-              run_executable "$crate" "$label" "$exe"
-            done < "$selected_targets"
-          }
-          # The macOS and Windows runners exist to catch failures that appear
-          # ONLY off Linux - platform ABI / calling convention, object format,
-          # linking, OS syscalls, and the Cranelift JIT / LLVM codegen. A test
-          # therefore earns its cross-platform run only if its outcome can
-          # differ by OS. The binaries below cannot: they either execute no
-          # generated code at all (front-end check / parse / typecheck, the
-          # `gos fmt` / `gos doc` / feature-status tooling text, static source
-          # and symbol-registry scans, a pure-Rust unit test) or they construct
-          # a target object in memory deterministically. Those tests run once
-          # in the non-native Ubuntu job below, instead of consuming four
-          # serial native lanes. Anything not in the lists below remains
-          # cross-platform by default, so new tests cannot silently lose
-          # native coverage. `codegen_correct` is a platform-independent
-          # language corpus and runs once on Linux; the tier-parity shards
-          # retain generated-code coverage on every OS. `rc_soundness` is
-          # Linux-only because it self-skips elsewhere.
-          non_native_cli="
-            client_error_display dispatch_consistency doc_emit_stdlib docs_assets
-            deque_drain_is_linear ecosystem_bindings feature_status fmt_faithful
-            goroutine_worker_reuse
-            http_h2_alpn http_h2_conformance mcp runtime_archive_parity
-            stdlib_compiled_coverage stdlib_export_drift
-          "
-          non_native_cranelift="
-            coff_pic_reloc dispatch_parity emit macho_dead_strip
-          "
-          linux_only="
-            codegen_correct rc_soundness
-          "
-          in_list() {
-            local list="$1" name="$2" item
-            for item in $list; do [ "$item" = "$name" ] && return 0; done
-            return 1
-          }
-          skip_off_linux() {
-            case "${RUNNER_OS:-Linux}" in Linux) return 1 ;; esac
-            local name
-            for name in $linux_only; do [ "$name" = "$1" ] && return 0; done
-            return 1
-          }
-          if [[ "$suite" = general-* ]]; then
-            general_shard="${suite#general-}"
-            general_index=0
-            target_in_general_shard() {
-              local crate="$1" name="$2" assigned
-              case "$crate:$name" in
-                gossamer-cli:cli)
-                  # The two dominant targets are pinned to shards of their
-                  # own so the round-robin below cannot land them together.
-                  # Off Linux codegen_correct is covered by the tier parity
-                  # lanes, so put cli on the otherwise lighter shard.
-                  case "${RUNNER_OS:-Linux}" in
-                    Linux) assigned=0 ;;
-                    *) assigned=1 ;;
-                  esac
-                  ;;
-                gossamer-codegen-cranelift:codegen_correct)
-                  assigned=1
-                  ;;
-                gossamer-codegen-cranelift:lib)
-                  assigned=0
-                  ;;
-                *)
-                  assigned=$((general_index % 3))
-                  ;;
-              esac
-              general_index=$((general_index + 1))
-              [ "$assigned" = "$general_shard" ]
-            }
-            for crate in gossamer-cli gossamer-codegen-cranelift; do
-              if [ "$crate" != gossamer-cli ] && target_in_general_shard "$crate" lib; then
-                select_target "$crate" lib lib gossamer_codegen_cranelift
-              fi
-              for f in crates/"$crate"/tests/*.rs; do
-                [ -e "$f" ] || continue
-                name="$(basename "$f" .rs)"
-                # Tier parity has its own parallel shards below.
-                [ "$name" = tier_parity ] && continue
-                if [ "$crate" = gossamer-cli ] && [ "$name" = repl ]; then
-                  echo "::notice::skip ${crate}::${name}; covered by Test non-native CLI and codegen"
-                  continue
-                fi
-                # Typing is a property of the language, not of a target, so the
-                # gate runs once in its own job rather than once per OS shard.
-                if [ "$crate" = gossamer-cli ] && [ "$name" = type_system_gate ]; then
-                  echo "::notice::skip ${crate}::${name}; covered by the Type system gate job"
-                  continue
-                fi
-                if [ "$crate" = gossamer-cli ] && in_list "$non_native_cli" "$name"; then
-                  echo "::notice::skip ${crate}::${name}; covered by Test non-native CLI and codegen"
-                  continue
-                fi
-                if [ "$crate" = gossamer-codegen-cranelift ] && in_list "$non_native_cranelift" "$name"; then
-                  echo "::notice::skip ${crate}::${name}; covered by Test non-native CLI and codegen"
-                  continue
-                fi
-                if skip_off_linux "$name"; then
-                  echo "::notice::skip ${crate}::${name} on ${RUNNER_OS} (covered on Linux and by cross-platform tier parity)"
-                  continue
-                fi
-                if ! target_in_general_shard "$crate" "$name"; then
-                  echo "::notice::skip ${crate}::${name}; assigned to the other general shard"
-                  continue
-                fi
-                select_target "$crate" "$name" test "$name"
-              done
-            done
-            build_selected_targets
-            run_selected_targets
-          else
-            select_target gossamer-cli tier_parity test tier_parity
-            build_selected_targets
-            tier_parity_exe="$(executable_for_target gossamer-cli test tier_parity)" || {
-              rc=1
-              echo "::error::missing built executable for gossamer-cli :: tier_parity"
-              exit "$rc"
-            }
-            groups="${suite#parity-}"
-            first="${groups%-*}"
-            last="${groups#*-}"
-            if [ "$first" = 0 ]; then
-              run_executable gossamer-cli tier_parity_vm "$tier_parity_exe" \
-                vm_runs_every_example_without_crashing
-            fi
-            for group in $(seq "$first" "$last"); do
-              run_executable gossamer-cli "tier_parity_cranelift_${group}" \
-                "$tier_parity_exe" "cranelift_parity_group_${group}"
-              run_executable gossamer-cli "tier_parity_llvm_${group}" \
-                "$tier_parity_exe" "llvm_parity_group_${group}"
-              run_executable gossamer-cli "tier_parity_strict_${group}" \
-                "$tier_parity_exe" "llvm_strict_lower_group_${group}"
-            done
-          fi
-          exit "$rc"
-      - name: Upload native build artifacts
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: native-build-artifacts-${{ matrix.os }}-${{ matrix.suite }}
-          path: ${{ github.workspace }}/native-build-artifacts
-          retention-days: 7
-          if-no-files-found: ignore
+    uses: ./.github/workflows/native-tests.yml
+    with:
+      os: ${{ matrix.os }}
 
   test-cli-general:
     name: Test non-native (${{ matrix.suite }})
@@ -485,7 +157,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust-test-setup
         with:
-          cache-prefix: v1-test-cli-general
+          cache-key: debug
       - name: Test non-native behavior
         shell: bash
         env:
@@ -530,7 +202,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust-test-setup
         with:
-          cache-prefix: v3-test-workspace-${{ matrix.suite }}
+          cache-key: debug
       - name: Test ${{ matrix.suite }}
         shell: bash
         env:
@@ -547,7 +219,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust-test-setup
         with:
-          cache-prefix: v3-release-workspace
+          cache-key: release
+          cache-save: true
       - name: Build release
         shell: bash
         run: |
@@ -565,7 +238,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust-test-setup
         with:
-          cache-prefix: v2-test-platform-libraries
+          cache-key: debug
       - name: Test OS-sensitive libraries
         shell: bash
         env:
@@ -587,7 +260,9 @@ jobs:
       - run: rustup set profile minimal
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v2-musl-stdio
+          prefix-key: v4
+          shared-key: musl
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo check --workspace --features musl --target x86_64-unknown-linux-musl
 
@@ -608,7 +283,9 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v2-cross-${{ matrix.target }}
+          prefix-key: v4
+          shared-key: cross-${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Some transitive C-bound deps (blake3, ring) invoke cc-rs from
       # their build scripts and need a target-prefixed cross compiler.
       # wasm32-* don't need a C toolchain.
@@ -687,7 +364,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v2-cargo-doc
+          prefix-key: v4
+          shared-key: doc
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo doc --workspace (deny broken intra-doc links)
         run: cargo doc --workspace --no-deps --document-private-items
         env:
@@ -696,23 +375,6 @@ jobs:
         env:
           RUST_BACKTRACE: "full"
         run: cargo test --doc --workspace --no-fail-fast -- --nocapture
-
-  stdlib-docs-drift:
-    name: gos doc --emit-stdlib --check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - run: rustup set profile minimal
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: v2-stdlib-docs-drift
-      - name: Build gos
-        run: cargo build --bin gos
-      - name: Verify docs_src/stdlib/ matches manifest::ALL_MODULES
-        run: ./target/debug/gos doc --emit-stdlib docs_src/stdlib --check
-      - name: Verify generated LLM documentation is byte-clean
-        run: cargo xtask docs-llm --check
 
   # Regenerates the tier-parity evidence `gos feature-status` reports and
   # fails when the committed copy is stale. The evidence is compiled into
@@ -728,7 +390,9 @@ jobs:
       - run: rustup set profile minimal
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v2-feature-status-evidence
+          prefix-key: v4
+          shared-key: debug
+          save-if: false
       - name: Build gos
         run: cargo build --bin gos
       - name: Walk every fixture across the VM, the JIT, and the native build
@@ -740,43 +404,24 @@ jobs:
       - name: The reported status may not exceed its evidence
         run: ./target/debug/gos feature-status --check
 
-  # A reference-counted value the compiled tiers never release is invisible to
-  # tier parity: a leaking program prints exactly what a correct one prints.
-  # Each probe holds nothing across iterations, so running it at two loop
-  # counts and comparing peak RSS is what catches the class.
-  leak-oracle:
-    name: Compiled-tier leak oracle
+  # Checks that each run a `gos` script against a debug `gos`, built once.
+  # Every check after the build runs whatever an earlier one reported, so one
+  # failure never hides another.
+  gos-script-checks:
+    name: gos script checks
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - run: rustup set profile minimal
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: v2-leak-oracle
-      - name: Build gos
-        run: cargo build --bin gos
-      - name: Peak RSS may not grow with the loop count
-        run: ./target/debug/gos run scripts/leak_oracle.gos
-
-  # The browser build is the one tier nothing else in CI executes: the docs
-  # workflow compiles it and the portability job type-checks it, and neither
-  # runs a program. wasm32-unknown-unknown has no unwinder, so a Rust panic
-  # under the playground's `run` aborts the module and the page gets a bare
-  # `RuntimeError: unreachable` - a failure shape no native suite can see.
-  playground-smoke:
-    name: Playground wasm smoke
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: wasm32-unknown-unknown
+      - run: rustup set profile minimal
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v2-playground-smoke
+          prefix-key: v4
+          shared-key: gos-scripts
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Resolve wasm-bindgen-cli version from Cargo.lock
         # The CLI and the crate must be the same version; a mismatch is a
         # hard "schema version" error at bindgen time.
@@ -787,8 +432,30 @@ jobs:
         with:
           tool: wasm-bindgen-cli@${{ env.WBVER }}
       - name: Build gos
+        id: build
         run: cargo build --bin gos
-      - name: Every fixture must answer rather than end the module
+      - name: Verify docs_src/stdlib/ matches manifest::ALL_MODULES
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: ./target/debug/gos doc --emit-stdlib docs_src/stdlib --check
+      - name: Verify generated LLM documentation is byte-clean
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: cargo xtask docs-llm --check
+      # A reference-counted value the compiled tiers never release is
+      # invisible to tier parity: a leaking program prints exactly what a
+      # correct one prints. Each probe holds nothing across iterations, so
+      # running it at two loop counts and comparing peak RSS is what catches
+      # the class.
+      - name: Peak RSS may not grow with the loop count
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: ./target/debug/gos run scripts/leak_oracle.gos
+      # The browser build is the one tier nothing else in CI executes: the
+      # docs workflow compiles it and the portability job type-checks it,
+      # and neither runs a program. wasm32-unknown-unknown has no unwinder,
+      # so a Rust panic under the playground's `run` aborts the module and
+      # the page gets a bare `RuntimeError: unreachable` - a failure shape
+      # no native suite can see.
+      - name: Every playground fixture must answer rather than end the module
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: ./target/debug/gos run scripts/playground_smoke.gos
 
   # Cross-compilation correctness: `gos build --target aarch64-linux-*`
@@ -801,7 +468,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust-test-setup
         with:
-          cache-prefix: v2-cross-from-linux
+          cache-key: cross-from-linux
+          cache-save: true
       - name: Install zig
         # A direct download instead of `mlugg/setup-zig`: that action
         # still declares a Node 20 runtime (triggering the deprecation
@@ -926,7 +594,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust-test-setup
         with:
-          cache-prefix: v2-cross-from-macos
+          cache-key: cross-from-macos
+          cache-save: true
       - name: Install zig
         # See the cross-from-linux job for why this replaces
         # `mlugg/setup-zig`: it still runs on a deprecated Node 20
@@ -991,7 +660,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust-test-setup
         with:
-          cache-prefix: v2-cross-from-windows
+          cache-key: cross-from-windows
+          cache-save: true
       - name: Install zig
         # See the cross-from-linux job for why this replaces
         # `mlugg/setup-zig`: it still runs on a deprecated Node 20
@@ -1054,7 +724,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust-test-setup
         with:
-          cache-prefix: v2-cross-run-qemu
+          cache-key: debug
       - run: sudo apt-get update && sudo apt-get install -y qemu-user
       - uses: actions/download-artifact@v8
         with:

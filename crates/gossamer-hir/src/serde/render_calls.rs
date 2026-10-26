@@ -2,8 +2,9 @@
 //! itself, writes through a generated render walk.
 //!
 //! The walk writes what the `json::Value` tree of the value would: a struct's
-//! members in byte order of their names, `Option` and `Result` as the value
-//! they hold, every float with its fraction. A user enum is externally tagged
+//! members in byte order of their keys, `Option` and `Result` as the value
+//! they hold, every float with its fraction. A field takes its `#[rename]`d
+//! key and a `#[skip]`ped one is left out, as `json::decode` reads them. A user enum is externally tagged
 //! there, as `json::decode` reads it back, and a type that holds itself is
 //! written by one function per type rather than unrolled at the call. Every
 //! tier runs the same generated walk, so they write the same text.
@@ -227,6 +228,15 @@ impl Gen<'_> {
                         self.render_reach(*payload, on_walk, reach);
                     }
                 } else if let Some(fields) = self.tcx.struct_field_tys(def) {
+                    // The tree writes every field under its own name, so a
+                    // `#[rename]`d or `#[skip]`ped field needs the walk.
+                    if self.adts[&def]
+                        .serde
+                        .iter()
+                        .any(|field| field.key.is_some() || field.skip)
+                    {
+                        reach.needs_walk = true;
+                    }
                     for field in fields {
                         self.render_reach(*field, on_walk, reach);
                     }

@@ -118,7 +118,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring"]
 
 # C-backed compression codecs (`std::compress::{bzip2,zstd}`).
 bzip2 = { version = "0.5", features = ["static"] }
-zstd = "0.13"
+zstd = "0.14"
 
 # File-system watching (`std::fs::watch`), memory mapping
 # (`std::fs::mmap`), and advisory file locks (`std::fs::lock`).

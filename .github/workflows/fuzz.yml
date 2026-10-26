@@ -44,6 +44,7 @@ jobs:
       - run: rustup set profile minimal
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           prefix-key: v1-fuzz
           workspaces: fuzz
       # Install cargo-fuzz as a prebuilt binary (GitHub Releases via

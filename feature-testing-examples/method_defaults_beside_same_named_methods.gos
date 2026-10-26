@@ -1,0 +1,38 @@
+// A method's parameter defaults fill a call even where another type
+// declares a method of the same name that takes exactly the arguments the
+// call wrote.
+
+struct Canvas { items: Vec<String> }
+struct Tray { names: Vec<String> }
+
+impl Canvas {
+    fn add(&mut self, item: String, layer: String = "base", index: i64 = -1) -> String {
+        self.items.push(item)
+        f"{item} on {layer} at {index}"
+    }
+}
+
+impl Tray {
+    fn add(&mut self, name: String) -> String {
+        self.names.push(name)
+        f"tray {name}"
+    }
+}
+
+fn total(n: i64) -> i64 {
+    let mut canvas = Canvas { items: #[] }
+    for i in 0..n {
+        let _ = canvas.add(f"item {i}")
+    }
+    canvas.items.len()
+}
+
+fn main() {
+    let mut canvas = Canvas { items: #[] }
+    let mut tray = Tray { names: #[] }
+    println(canvas.add("circle"))
+    println(canvas.add("square", "top"))
+    println(canvas.add("line", "top", 2))
+    println(tray.add("icon"))
+    println(total(10))
+}

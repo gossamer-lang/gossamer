@@ -107,6 +107,9 @@ fn is_synthesized_item(attrs: &gossamer_ast::Attrs) -> bool {
     })
 }
 
+/// The prelude's `Option` and `Result` variants, which bare names always mean.
+const PRELUDE_VARIANTS: &[&str] = &["None", "Some", "Ok", "Err"];
+
 struct Resolver {
     resolutions: Resolutions,
     diagnostics: Vec<ResolveDiagnostic>,
@@ -1598,6 +1601,12 @@ impl Resolver {
                 .or_default()
                 .push((decl.name.name.clone(), module_path.to_vec()));
             let name = variant.name.name.as_str();
+            // A bare `None`, `Some`, `Ok` or `Err` always names the prelude
+            // variant; this enum's variant of that spelling is reached through
+            // the enum or an explicit `use` of it.
+            if PRELUDE_VARIANTS.contains(&name) {
+                continue;
+            }
             // A variant is reached through its enum, so its bare name is a
             // convenience: variants of different enums may share it (a bare
             // reference more than one answers is reported where it is
@@ -3699,7 +3708,7 @@ impl Resolver {
                 matches!(kind, DefKind::Variant | DefKind::Struct | DefKind::Const)
             }
             Resolution::Import { use_id } if use_id == crate::scope::PRELUDE_SENTINEL => {
-                matches!(name, "None" | "Some" | "Ok" | "Err")
+                PRELUDE_VARIANTS.contains(&name)
             }
             Resolution::Import { .. } => self.imported_definition(name).is_some_and(|def| {
                 matches!(

@@ -9,15 +9,22 @@
 
 use std::{errors, http, time}
 
+// The deadline runs from the request's arrival, a little before the handler
+// starts, and a sleep may run past its 50 ms, so the handler reports the
+// window it stopped in rather than a count of sleeps; the exact time shows
+// only when it falls outside that window.
 fn slow(r: http::Request) -> Result<http::Response, errors::Error> {
     let ctx = r.context
-    let mut waited = 0
-    while waited < 2000 {
+    let started = time::Instant::now()
+    while started.elapsed_ms() < 2000 {
         if ctx.is_cancelled() {
-            return Ok(http::Response::text(200, format("cancelled after {}ms", waited)))
+            let at = started.elapsed_ms()
+            if at >= 150 && at < 1000 {
+                return Ok(http::Response::text(200, "cancelled by the 300ms deadline"))
+            }
+            return Ok(http::Response::text(200, f"cancelled after {at}ms"))
         }
         time::sleep(50)
-        waited += 50
     }
     Ok(http::Response::text(200, "ran to completion"))
 }

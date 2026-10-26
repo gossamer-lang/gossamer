@@ -723,7 +723,13 @@ impl<'a> Builder<'a> {
         // present at runtime.
         if let HirExprKind::Path { segments, .. } = &callee.kind {
             let last = segments.last().map(|s| s.name.as_str());
+            // A user enum's own `Some` / `Ok` / `Err` is built as that enum.
+            let user_variant = last.is_some_and(|variant| {
+                self.enum_index_name_of(ty)
+                    .is_some_and(|en| self.enums.variant_of_enum(&en, variant).is_some())
+            });
             let disc = match last {
+                _ if user_variant => None,
                 Some("Ok" | "Some") => Some(0),
                 Some("Err") => Some(1),
                 _ => None,

@@ -43,7 +43,7 @@ pub(crate) fn run(
     forwarded: &[String],
 ) -> Result<NotNative> {
     let dir = build_dir(entry);
-    let Some(release) = crate::cmd::build::run_artifact(entry, source, &dir, true) else {
+    let Some(release) = crate::cmd::build::run_artifact(entry, source, &dir, true)? else {
         return Ok(NotNative::Library);
     };
     // A dump or trace the environment asks for comes from a compile, which
@@ -53,7 +53,7 @@ pub(crate) fn run(
         return Ok(start(&release.path, label, forwarded));
     }
     let debug_dir = dir.join("debug");
-    let Some(debug) = crate::cmd::build::run_artifact(entry, source, &debug_dir, false) else {
+    let Some(debug) = crate::cmd::build::run_artifact(entry, source, &debug_dir, false)? else {
         return Ok(NotNative::Library);
     };
     if !debug.current || reports {

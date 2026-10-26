@@ -864,6 +864,14 @@ pub(crate) fn insert_drops_at_returns(
             owner_ctor[idx] = None;
         }
     }
+    // A rebound owner gives back every value it holds itself, through
+    // `insert_rc_releases`, whichever of its definitions the walk above met
+    // first.
+    for (idx, rebound) in super::rebound_vec_owners(body, tcx).into_iter().enumerate() {
+        if rebound {
+            owner_ctor[idx] = None;
+        }
+    }
 
     // A response the frame hands to anything but a reader may be the value
     // that call answers, so the frame can no longer see where the box ends up
@@ -1573,11 +1581,14 @@ pub(crate) fn insert_drops_at_returns(
             }
         }
     }
+    // A rebound owner took a share of its own of each value copied into it,
+    // so returning it moves that share and its sources keep theirs.
+    let rebound = super::rebound_vec_owners(body, tcx);
     let mut stack = vec![Local::RETURN];
     moved_into_return[Local::RETURN.0 as usize] = true;
     while let Some(cur) = stack.pop() {
         let cur_idx = cur.0 as usize;
-        if cur_idx >= copy_edges_to.len() {
+        if cur_idx >= copy_edges_to.len() || rebound.get(cur_idx).copied() == Some(true) {
             continue;
         }
         for src in copy_edges_to[cur_idx].clone() {

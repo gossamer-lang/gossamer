@@ -337,6 +337,24 @@ fn path_dependencies(manifest: &Path) -> Vec<PathBuf> {
 
 /// The name a build of these sources, under the manifest that builds them,
 /// lands under.
+/// A fingerprint of the Rust sources behind `bindings`: every file of each
+/// local binding crate and of the crates those name by path, by relative
+/// path, size and modification time. It changes whenever an edit to any of
+/// them changes what a build links.
+pub fn bindings_source_fingerprint(
+    bindings: &BTreeMap<String, RustBindingSpec>,
+    manifest_dir: &Path,
+) -> io::Result<String> {
+    let manifest_dir = std::path::absolute(manifest_dir)?;
+    let set = members(bindings, &manifest_dir);
+    let mut hash = signature_hash(SIGNATURE_HASH_SEED, wrapper_manifest(&set).as_bytes());
+    let mut seen = Vec::new();
+    for root in set.iter().filter_map(|m| m.local_root.as_deref()) {
+        fingerprint_tree(root, &mut hash, &mut seen)?;
+    }
+    Ok(hex(hash))
+}
+
 fn build_stem(dir: &Path, members: &[Member]) -> io::Result<String> {
     let mut hash = signature_hash(SIGNATURE_HASH_SEED, dir.to_string_lossy().as_bytes());
     hash = signature_hash(hash, wrapper_manifest(members).as_bytes());
@@ -381,7 +399,11 @@ pub fn ensure_bindings_library_in(
         return Ok(built);
     }
     fs::create_dir_all(dir.join("lib"))?;
-    let _lock = AdvisoryLock::acquire(&build_lock_path(&dir))?;
+    let crates: Vec<&str> = set.iter().map(|member| member.name.as_str()).collect();
+    let _lock = AdvisoryLock::acquire(
+        &build_lock_path(&dir),
+        &format!("the shared library of Rust bindings {}", crates.join(", ")),
+    )?;
     // Another process may have built these sources while this one waited.
     if built.library.is_file() {
         return Ok(built);
@@ -402,7 +424,6 @@ pub fn ensure_bindings_library_in(
     write_if_different(&project.join("lib.rs"), &lib_rs)?;
     seed_lockfile(&project, TOOLCHAIN_LOCK)?;
     let target_dir = dir.join("target");
-    let label: Vec<&str> = set.iter().map(|member| member.name.as_str()).collect();
     run_cargo_build(
         &CargoBuild {
             manifest_path: &project.join("Cargo.toml"),
@@ -410,7 +431,7 @@ pub fn ensure_bindings_library_in(
             profile: Profile::Release,
             cargo_target: None,
             target_args: &["--lib"],
-            crate_label: &label.join(", "),
+            crate_label: &crates.join(", "),
             rustc_args: &[],
         },
         None,

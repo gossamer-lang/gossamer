@@ -1,0 +1,91 @@
+name: Native tests
+
+# One runner image's native test lanes: a single job compiles every shard's
+# test binaries, and the shards run them from its artifact. CI calls this once
+# per image, so each image's shards wait only for that image's build.
+on:
+  workflow_call:
+    inputs:
+      os:
+        description: Runner image the build and its shards run on.
+        type: string
+        required: true
+
+# A called workflow does not inherit its caller's `env:`. These match ci.yml
+# exactly: the build cache key hashes them, so the shared `debug` cache this
+# build saves is the one ci.yml's jobs restore. See ci.yml for each reason.
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  RUSTUP_TOOLCHAIN: 1.95.0
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  build:
+    name: Build
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/rust-test-setup
+        with:
+          cache-key: debug
+          cache-save: true
+      - name: Build every shard's native test targets once
+        shell: bash
+        run: bash .github/scripts/native-tests.sh build
+      # The pack is already compressed and carries the executables' modes,
+      # which an artifact of loose files would drop.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-tests-${{ inputs.os }}
+          path: native-tests.tar.*
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-build-logs-${{ inputs.os }}
+          path: ${{ github.workspace }}/native-build-artifacts
+          retention-days: 7
+          if-no-files-found: ignore
+
+  test:
+    name: ${{ matrix.suite }}
+    needs: build
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [general-0, general-1, general-2, parity-0-1, parity-2-3, parity-4-5]
+    steps:
+      - uses: actions/checkout@v6
+      # The shards compile nothing of the workspace, but the binding fixtures
+      # build their crates with Cargo and `gos build` drives opt / llc.
+      - uses: ./.github/actions/rust-test-setup
+      # The FFI acceptance tests bind SQLite, zlib, and Expat. macOS ships
+      # them in its SDK and Windows ships SQLite as `winsqlite3`; a Linux
+      # runner needs the development packages that provide `lib*.so`. The
+      # leak gate measures peak RSS with GNU `time`.
+      - name: Install the C libraries the FFI acceptance tests bind
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev zlib1g-dev libexpat1-dev time
+      - uses: actions/download-artifact@v8
+        with:
+          name: native-tests-${{ inputs.os }}
+      - name: Test native build/run crates (one process per test binary)
+        shell: bash
+        env:
+          RUST_BACKTRACE: "full"
+        run: bash .github/scripts/native-tests.sh run ${{ matrix.suite }}
+      - name: Upload native build artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-build-artifacts-${{ inputs.os }}-${{ matrix.suite }}
+          path: ${{ github.workspace }}/native-build-artifacts
+          retention-days: 7
+          if-no-files-found: ignore

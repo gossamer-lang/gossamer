@@ -294,7 +294,15 @@ strip = false
     /// libraries a link that takes it must also name.
     pub fn ensure_built(&self) -> Result<StaticBindingsArchive, BindingBuildError> {
         fs::create_dir_all(&self.workdir)?;
-        let _lock = AdvisoryLock::acquire(&build_lock_path(&self.workdir))?;
+        let crates: Vec<&str> = self
+            .bindings
+            .iter()
+            .map(|b| b.crate_name.as_str())
+            .collect();
+        let _lock = AdvisoryLock::acquire(
+            &build_lock_path(&self.workdir),
+            &format!("the static library of Rust bindings {}", crates.join(", ")),
+        )?;
         let cargo_toml = self.workdir.join("Cargo.toml");
         write_if_different(&cargo_toml, &self.cargo_toml())?;
         write_if_different(&self.workdir.join("lib.rs"), &self.lib_rs())?;
@@ -980,7 +988,9 @@ pub(crate) struct AdvisoryLock {
 }
 
 impl AdvisoryLock {
-    pub(crate) fn acquire(path: &Path) -> io::Result<Self> {
+    /// Takes the lock, waiting while another process holds it. `build` names
+    /// what the holder is compiling, for the message a wait prints.
+    pub(crate) fn acquire(path: &Path, build: &str) -> io::Result<Self> {
         let mut announced = false;
         loop {
             let file = open_lock_file(path)?;
@@ -990,7 +1000,8 @@ impl AdvisoryLock {
                     if !announced {
                         let _ = writeln!(
                             io::stderr(),
-                            "gos: waiting for another `gos` process to finish with {}",
+                            "gos: waiting for another `gos` process to finish compiling {build} \
+                             in {}; this process then uses the library it built",
                             path.parent().unwrap_or(path).display()
                         );
                         announced = true;
@@ -1238,7 +1249,7 @@ mod tests {
         let writable = fs::OpenOptions::new().write(true).open(&path).is_ok();
         if !writable {
             assert!(AdvisoryLock::take(&path).is_err());
-            assert!(AdvisoryLock::acquire(&path).is_err());
+            assert!(AdvisoryLock::acquire(&path, "test bindings").is_err());
             assert!(AdvisoryLock::try_acquire(&path).is_none());
         }
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
@@ -1279,7 +1290,7 @@ mod tests {
                 let taken = Arc::clone(&taken);
                 std::thread::spawn(move || {
                     for _ in 0..25 {
-                        let lock = AdvisoryLock::acquire(&path).expect("acquire");
+                        let lock = AdvisoryLock::acquire(&path, "test bindings").expect("acquire");
                         assert_eq!(holders.fetch_add(1, Ordering::SeqCst), 0);
                         std::thread::yield_now();
                         assert_eq!(holders.fetch_sub(1, Ordering::SeqCst), 1);
@@ -1307,7 +1318,9 @@ mod tests {
         let first = AdvisoryLock::take(&path).unwrap().expect("free");
         let waiter = {
             let path = path.clone();
-            std::thread::spawn(move || AdvisoryLock::acquire(&path).expect("acquire"))
+            std::thread::spawn(move || {
+                AdvisoryLock::acquire(&path, "test bindings").expect("acquire")
+            })
         };
         std::thread::yield_now();
         // The file goes, then the directory if nothing has been created in
