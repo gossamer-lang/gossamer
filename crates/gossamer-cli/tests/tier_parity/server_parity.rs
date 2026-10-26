@@ -329,7 +329,7 @@ fn http_server_object_parity_across_tiers() {
 fn http_request_context_parity_across_tiers() {
     self_terminating_server_parity(
         "feature-testing-examples/http_request_context.gos",
-        &["cancelled after 300ms"],
+        &["cancelled by the 300ms deadline"],
     );
 }
 

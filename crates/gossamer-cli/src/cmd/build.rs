@@ -745,6 +745,21 @@ fn build_artifact_key(
             add(name, &contents);
         }
     }
+    // The executable links the bindings' Rust code, so an edit to any of
+    // their sources is a different build. A fingerprint that cannot be read
+    // keys a build no stamp can match.
+    let context = crate::paths::project_context_for_entry(file);
+    if let Some(Ok(manifest)) = context.binding_manifest()
+        && !manifest.rust_bindings.is_empty()
+    {
+        let dir = context.manifest_dir().unwrap_or_else(|| PathBuf::from("."));
+        let fingerprint = gossamer_driver::binding_library::bindings_source_fingerprint(
+            &manifest.rust_bindings,
+            &dir,
+        )
+        .unwrap_or_else(|error| format!("unreadable: {error} at {}", std::process::id()));
+        add("rust-bindings", fingerprint.as_bytes());
+    }
     for path in [
         option_env!("GOSSAMER_RUNTIME_LIB_PATH").map(PathBuf::from),
         MUSL_RUNTIME_LIB.map(PathBuf::from),
