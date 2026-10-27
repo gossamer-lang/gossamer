@@ -4,7 +4,7 @@ How `gos` and a Rust binding library talk. The C types live in the
 `gossamer-binding-abi` crate (`crates/gossamer-binding-abi/src/lib.rs`);
 `gossamer-binding` implements the library side, `gossamer-binding-host` the
 `gos run` side, and `gossamer-runtime` the native-build side. Binding authors
-write against the Rust source API (`docs_src/rust_bindings.md`); this document
+write against the Rust source API ([Calling Rust](https://gossamer-lang.org/docs/rust_bindings/)); this document
 is for changing the ABI itself or writing a `BindingAbi` impl by hand.
 
 ## Entry points

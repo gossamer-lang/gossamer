@@ -779,8 +779,9 @@ enum Command {
         /// `target/debug/.feature-status.json`.
         #[arg(long)]
         sidecar: Option<PathBuf>,
-        /// Override the docs root used by `--check`. Defaults to
-        /// `docs_src/` next to the workspace root.
+        /// The docs tree to look doc pages up in (the `docs/` directory of
+        /// a gossamer-docs checkout). With `--check`, every documented
+        /// item must have its page there.
         #[arg(long = "docs-root")]
         docs_root: Option<PathBuf>,
         /// Report one row per exported item instead of one per module.

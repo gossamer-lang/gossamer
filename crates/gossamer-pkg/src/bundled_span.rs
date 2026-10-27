@@ -17,3 +17,19 @@ pub struct BundledSpan {
     /// Byte offset of `start` within `origin`.
     pub origin_start: u32,
 }
+
+/// The `(start, end, file)` ranges of an assembled unit a compile-time fold
+/// anchors each region's relative reads at, outermost first.
+#[must_use]
+pub fn comptime_origins(spans: &[BundledSpan]) -> Vec<(u32, u32, String)> {
+    spans
+        .iter()
+        .map(|span| {
+            (
+                span.start,
+                span.end,
+                span.origin.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
+}

@@ -205,7 +205,7 @@ further. `pub` makes it part of the package's public API. Methods and struct
 fields carry their own visibility, so a `pub` type can keep private helpers and
 a private representation.
 
-Full rules: [visibility](docs_src/language/visibility.md) and SPEC §6.3a.
+Full rules: [visibility](https://gossamer-lang.org/docs/language/visibility/) and SPEC §6.3a.
 
 ### On Mutability and Ownership
 
@@ -485,7 +485,7 @@ context-switch implementation. The current support matrix:
 
 The supported target contract is the executable matrix in
 [`conformance/target_matrix.tsv`](conformance/target_matrix.tsv) and the
-matching [supported-targets documentation](docs_src/supported_targets.md).
+matching [supported-targets documentation](https://gossamer-lang.org/docs/supported_targets/).
 Tier 1 executes the bytecode VM, JIT-enabled VM, and LLVM AOT binaries on
 native CI for Linux x86_64/aarch64, Apple Silicon macOS, and Windows x86_64.
 Linux x86_64/aarch64 musl AOT output is Tier 2: it is built from supported

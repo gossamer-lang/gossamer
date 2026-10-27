@@ -108,9 +108,9 @@ pub use publish::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use resolver::{
-    CacheBackedLoader, CatalogueEntry, FnLoader, NoopLoader, Requirement, RequirementSpec,
-    ResolveError, Resolved, ResolvedSource, Resolver, TransitiveLoader, VersionCatalogue,
-    dependency_identity, resolve_transitive,
+    CacheBackedLoader, CatalogueEntry, FnLoader, GraphSource, NoopLoader, Requirement,
+    RequirementSpec, ResolveError, Resolved, ResolvedSource, Resolver, TransitiveLoader,
+    VersionCatalogue, dependency_identity, resolve_graph, resolve_transitive,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use scaffold::{render_initial_manifest, render_main_source};

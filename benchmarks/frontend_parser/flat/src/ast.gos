@@ -1759,6 +1759,7 @@ pub struct UseDecl {
     pub list: Option<Vec<UseListEntry>>
     pub module: Vec<String>
     pub cfg: Option<String>
+    pub glob: bool
 }
 
 pub fn encode_use_decl(out: &mut Vec<u8>, v: UseDecl) {
@@ -1793,6 +1794,7 @@ pub fn encode_use_decl(out: &mut Vec<u8>, v: UseDecl) {
         }
         None => out.push(0)
     }
+    out.push(if v.glob { 1 } else { 0 })
 }
 
 pub struct UseListEntry {

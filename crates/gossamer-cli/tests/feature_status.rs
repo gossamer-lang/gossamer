@@ -124,7 +124,7 @@ fn status_filter_narrows_to_one_lifecycle_stage() {
 #[test]
 fn check_mode_passes_when_shipped_item_has_docs_without_tier_evidence() {
     let tmp = scratch("ok");
-    let docs = tmp.join("docs_src");
+    let docs = tmp.join("docs");
     fs::create_dir_all(docs.join("language")).unwrap();
     fs::create_dir_all(docs.join("stdlib")).unwrap();
 
@@ -161,7 +161,7 @@ fn check_mode_passes_when_shipped_item_has_docs_without_tier_evidence() {
 #[test]
 fn check_mode_passes_when_shipped_lacks_tier_evidence() {
     let tmp = scratch("shipped-no-tier-evidence");
-    let docs = tmp.join("docs_src");
+    let docs = tmp.join("docs");
     fs::create_dir_all(docs.join("language")).unwrap();
     fs::write(docs.join("language/match.md"), "Status: shipped\n").unwrap();
 
@@ -191,7 +191,7 @@ fn check_mode_passes_when_shipped_lacks_tier_evidence() {
 #[test]
 fn check_mode_fails_when_shipped_lacks_doc_page() {
     let tmp = scratch("missing-doc");
-    let docs = tmp.join("docs_src");
+    let docs = tmp.join("docs");
     fs::create_dir_all(docs.join("language")).unwrap();
     // Sidecar has a record but no docs page on disk.
     let sidecar = tmp.join("sidecar.json");
@@ -214,6 +214,30 @@ fn check_mode_fails_when_shipped_lacks_doc_page() {
     assert!(
         stderr.contains("missing doc page") || stderr.contains("check failed"),
         "expected missing-doc failure, got {stderr}",
+    );
+}
+
+#[test]
+fn check_mode_without_a_docs_root_does_not_require_doc_pages() {
+    let tmp = scratch("no-docs-root");
+    let sidecar = tmp.join("sidecar.json");
+    fs::write(
+        &sidecar,
+        r#"[{"name":"lang::if","tiers":{"vm":"pass","cranelift":"pass","llvm":"pass"}}]"#,
+    )
+    .unwrap();
+    let (code, stdout, stderr) = run(&[
+        "feature-status",
+        "--check",
+        "--filter",
+        "lang::if",
+        "--sidecar",
+        sidecar.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        code, 0,
+        "the docs live in their own repository, so only --docs-root asks for pages: \
+         stdout={stdout} stderr={stderr}"
     );
 }
 

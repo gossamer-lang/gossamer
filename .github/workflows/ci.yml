@@ -135,7 +135,7 @@ jobs:
               "$CARGO_BIN" test -p gossamer-cli
               --test client_error_display --test deque_drain_is_linear
               --test dispatch_consistency
-              --test doc_emit_stdlib --test docs_assets --test feature_status
+              --test doc_emit_stdlib --test feature_status
               --test fmt_faithful --test mcp --test runtime_archive_parity
               --test stdlib_compiled_coverage
               --test stdlib_export_drift -- --nocapture
@@ -314,8 +314,8 @@ jobs:
       # scheduler shim; rustls / corosensei / mio are still not
       # wasm-portable, so sched / binding / pkg cannot be asked to
       # compile there. Without the runtime here, a change to it that
-      # misses the wasm shim only fails later, in the docs workflow,
-      # which no runtime path triggers.
+      # misses the wasm shim only fails later, in gossamer-docs' publish
+      # workflow, which no runtime path here triggers.
       - name: cargo check (target-appropriate crate set)
         run: |
           case "${{ matrix.target }}" in
@@ -344,17 +344,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: EmbarkStudios/cargo-deny-action@v2
-
-  docs:
-    name: mkdocs build (--strict)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - run: pip install mkdocs mkdocs-material
-      - run: mkdocs build --strict
 
   cargo-doc:
     name: cargo doc + doctests
@@ -434,9 +423,6 @@ jobs:
       - name: Build gos
         id: build
         run: cargo build --bin gos
-      - name: Verify docs_src/stdlib/ matches manifest::ALL_MODULES
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: ./target/debug/gos doc --emit-stdlib docs_src/stdlib --check
       - name: Verify generated LLM documentation is byte-clean
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cargo xtask docs-llm --check
@@ -448,12 +434,12 @@ jobs:
       - name: Peak RSS may not grow with the loop count
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: ./target/debug/gos run scripts/leak_oracle.gos
-      # The browser build is the one tier nothing else in CI executes: the
-      # docs workflow compiles it and the portability job type-checks it,
-      # and neither runs a program. wasm32-unknown-unknown has no unwinder,
-      # so a Rust panic under the playground's `run` aborts the module and
-      # the page gets a bare `RuntimeError: unreachable` - a failure shape
-      # no native suite can see.
+      # The browser build is the one tier nothing else in CI executes:
+      # gossamer-docs compiles it for the site and the portability job
+      # type-checks it, and neither runs a program. wasm32-unknown-unknown
+      # has no unwinder, so a Rust panic under the playground's `run`
+      # aborts the module and the page gets a bare `RuntimeError:
+      # unreachable` - a failure shape no native suite can see.
       - name: Every playground fixture must answer rather than end the module
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: ./target/debug/gos run scripts/playground_smoke.gos

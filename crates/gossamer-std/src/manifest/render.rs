@@ -94,7 +94,7 @@ pub fn render_module_markdown(module: &StdModule) -> String {
     out
 }
 
-/// Renders the `docs_src/stdlib/index.md` landing page listing
+/// Renders the docs' `stdlib/index.md` landing page listing
 /// every module with its one-line summary.
 #[must_use]
 pub fn render_index_markdown() -> String {
@@ -162,7 +162,7 @@ pub fn render_language_markdown(entry: &super::feature_status::FeatureStatus) ->
     out
 }
 
-/// Renders the `docs_src/language/index.md` landing page listing
+/// Renders the docs' `language/index.md` landing page listing
 /// every documented language feature and its one-line summary. Mirrors
 /// `render_index_markdown` for the language surface.
 #[must_use]
@@ -198,7 +198,7 @@ is regenerated from `manifest::FEATURE_STATUS` by \
 }
 
 /// Returns every `(slug, markdown)` pair for the language-feature
-/// docs site under `docs_src/language/`. Mirrors `render_all_docs`
+/// docs site under `language/`. Mirrors `render_all_docs`
 /// for the language surface: the `index` page plus one page per
 /// documented feature.
 #[must_use]

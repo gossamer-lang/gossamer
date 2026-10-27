@@ -45,9 +45,11 @@ pub(crate) fn run() {
         })
         .collect();
     let native_cc = crate::native_sources::compiler_description();
+    let binding_sdk = gossamer_driver::binding_build::binding_sdk_location();
     let mut pairs: Vec<(&str, &str)> = vec![
         ("gos_version", env!("CARGO_PKG_VERSION")),
         ("runtime_lib", &runtime),
+        ("binding_sdk", &binding_sdk),
         ("cc", &cc),
         ("native_cc", &native_cc),
     ];

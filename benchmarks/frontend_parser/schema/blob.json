@@ -1090,6 +1090,33 @@
     "FileId": {
       "NEWTYPESTRUCT": "U32"
     },
+    "FlatEnumLayout": {
+      "STRUCT": [
+        {
+          "regions": {
+            "SEQ": {
+              "TYPENAME": "Ty"
+            }
+          }
+        },
+        {
+          "variant_regions": {
+            "SEQ": {
+              "SEQ": "U32"
+            }
+          }
+        },
+        {
+          "variant_field_tys": {
+            "SEQ": {
+              "SEQ": {
+                "TYPENAME": "Ty"
+              }
+            }
+          }
+        }
+      ]
+    },
     "FloatTy": {
       "ENUM": {
         "0": {
@@ -2285,6 +2312,25 @@
               }
             }
           }
+        },
+        {
+          "paths": {
+            "MAP": {
+              "KEY": {
+                "TYPENAME": "DefId"
+              },
+              "VALUE": {
+                "SEQ": "STR"
+              }
+            }
+          }
+        },
+        {
+          "from_root": {
+            "SEQ": {
+              "TYPENAME": "NodeId"
+            }
+          }
         }
       ]
     },
@@ -2923,6 +2969,14 @@
           }
         },
         {
+          "generic_fn_names": {
+            "MAP": {
+              "KEY": "U32",
+              "VALUE": "STR"
+            }
+          }
+        },
+        {
           "type_param_defs": {
             "MAP": {
               "KEY": {
@@ -2981,6 +3035,31 @@
         {
           "inline_enum_defs": {
             "SEQ": "U32"
+          }
+        },
+        {
+          "flat_enums": {
+            "MAP": {
+              "KEY": "U32",
+              "VALUE": {
+                "TYPENAME": "FlatEnumLayout"
+              }
+            }
+          }
+        },
+        {
+          "enums_on_heap": "BOOL"
+        },
+        {
+          "flat_carriers": {
+            "MAP": {
+              "KEY": {
+                "TYPENAME": "Ty"
+              },
+              "VALUE": {
+                "TYPENAME": "Ty"
+              }
+            }
           }
         }
       ]
@@ -3600,6 +3679,9 @@
           "cfg": {
             "OPTION": "STR"
           }
+        },
+        {
+          "glob": "BOOL"
         }
       ]
     },

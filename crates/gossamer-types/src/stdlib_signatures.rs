@@ -4286,7 +4286,7 @@ pub fn split_top_level(s: &str, needle: char) -> Vec<&str> {
 mod tests {
     use super::{STD_FUNCTION_SIGNATURES, function_shape_for_path, parse_signature};
 
-    /// The mechanical rules of `docs_src/design/stdlib_api.md`, checked over
+    /// The mechanical rules of the docs' `design/stdlib_api.md`, checked over
     /// every signature row.
     #[test]
     fn signatures_follow_the_stdlib_api_guideline() {

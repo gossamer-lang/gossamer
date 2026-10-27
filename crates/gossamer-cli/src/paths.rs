@@ -64,12 +64,48 @@ pub(crate) fn read_entry_unit(file: &Path) -> Result<EntryUnit> {
         std::path::absolute(resolve_gos_source(file)).unwrap_or_else(|_| resolve_gos_source(file));
     let entry = fs::read_to_string(&resolved).map_err(|err| friendly_io_error(err, &resolved))?;
     install_features(&resolved)?;
+    require_prepared_dependencies(&resolved)?;
     let (source, origins) = gossamer_pkg::bundle::bundle_entry_source_traced(&resolved, entry);
     Ok(EntryUnit {
         source,
         entry: resolved,
         origins,
     })
+}
+
+/// Refuses a program whose declared dependencies are not all on disk,
+/// naming each and how to get it, rather than letting its imports fail as
+/// modules that do not exist.
+fn require_prepared_dependencies(entry: &Path) -> Result<()> {
+    use gossamer_pkg::bundle::Unprepared;
+    let missing = gossamer_pkg::bundle::unprepared_dependencies(entry);
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let lines: Vec<String> = missing
+        .iter()
+        .map(|gap| match gap {
+            Unprepared::Unfetched(id) => format!("  {id} is not fetched"),
+            Unprepared::MissingPath(dir) => {
+                format!(
+                    "  the path dependency {} holds no project.toml",
+                    dir.display()
+                )
+            }
+        })
+        .collect();
+    let fetch = if missing
+        .iter()
+        .any(|gap| matches!(gap, Unprepared::Unfetched(_)))
+    {
+        "\nrun `gos fetch` in the project to fetch them"
+    } else {
+        ""
+    };
+    Err(anyhow!(
+        "dependencies are missing:\n{}{fetch}",
+        lines.join("\n")
+    ))
 }
 
 static FEATURE_REQUEST: parking_lot::Mutex<Option<gossamer_pkg::features::FeatureRequest>> =
@@ -391,9 +427,10 @@ pub(crate) fn project_root_for_entry(entry: &Path) -> Option<PathBuf> {
 pub(crate) fn local_path_dependency_roots(entry: &Path) -> Vec<PathBuf> {
     let mut visited = Vec::new();
     let mut worklist = Vec::new();
-    gossamer_pkg::bundle::collect_path_deps(entry, &mut visited, &mut worklist);
+    let root = gossamer_pkg::bundle::project_root_of(entry);
+    gossamer_pkg::bundle::collect_path_deps(entry, &root, &mut visited, &mut worklist);
     while let Some((_, dep_entry)) = worklist.pop() {
-        gossamer_pkg::bundle::collect_path_deps(&dep_entry, &mut visited, &mut worklist);
+        gossamer_pkg::bundle::collect_path_deps(&dep_entry, &root, &mut visited, &mut worklist);
     }
     visited
 }

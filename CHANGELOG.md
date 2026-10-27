@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.75.3 - Transitive package dependencies, shared binding crates, docs repository
+
+- `gos fetch` and `gos vendor` fetch the dependencies each fetched package declares, and theirs, recording the whole graph in `project.lock`, where only the project's own dependencies were fetched and a library's own dependencies were missing. `--locked` checks the whole graph.
+- A project's own declaration of a package wins over a dependency's declaration of it, which points a dependency's dependency at a local checkout; two dependencies pinning one package differently is an error.
+- A fetched package's own dependencies compile against the sources prepared for the program, through its `project.lock` and `vendor/`, where they were not found.
+- A Rust crate one package's binding carries in its tree stands in for that crate wherever another package's binding asks for it by version, so a library's Rust core shared by the bindings of the packages built on it links once.
+- `gos env` reports `binding_sdk`: the binding SDK generated projects build against.
+- The documentation and website moved to [gossamer-docs](https://github.com/gossamer-lang/gossamer-docs). `gos feature-status --check` requires doc pages only when `--docs-root` names a docs tree, and its JSON `doc_path` is relative to the documentation root.
+
 ## 0.75.2 - Prelude variant names beside user enums, CI efficiency
 
 - A bare `None`, `Some`, `Ok` or `Err` names the prelude variant even where two or more enums in the program, its dependencies or the standard library declare a variant of that spelling, where it was refused as ambiguous (GR0009). An enum's own variant of that spelling is reached through the enum or an explicit `use`.

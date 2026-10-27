@@ -184,7 +184,7 @@ fn stable_fixture_manifest_runs_on_every_execution_tier() {
 }
 
 #[test]
-fn target_matrix_is_registered_and_documented_without_overclaiming() {
+fn target_matrix_is_registered_without_overclaiming() {
     let root = workspace_root();
     let matrix =
         fs::read_to_string(root.join("conformance/target_matrix.tsv")).expect("read target matrix");
@@ -239,22 +239,6 @@ fn target_matrix_is_registered_and_documented_without_overclaiming() {
         ]),
         "changing supported targets requires an explicit matrix-contract review"
     );
-
-    let docs = fs::read_to_string(root.join("docs_src/supported_targets.md"))
-        .expect("read supported-target documentation");
-    for (tier, triple, _, _) in &rows {
-        let marker = match *tier {
-            "tier1" => "Tier 1",
-            "tier2" => "Tier 2",
-            "artifact" => "Artifact-only",
-            "registered" => "Registered, unsupported",
-            _ => unreachable!("tier was validated above"),
-        };
-        assert!(
-            docs.contains(triple) && docs.contains(marker),
-            "docs_src/supported_targets.md must classify {triple} as {marker}"
-        );
-    }
 
     let spec = fs::read_to_string(root.join("SPEC.md")).expect("read spec");
     assert!(

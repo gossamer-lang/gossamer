@@ -1,10 +1,11 @@
-//! Every Gossamer code fence in `docs_src` and the README is a program
-//! `gos check` accepts, unless the line before it says otherwise:
+//! Every Gossamer code fence in the README is a program `gos check`
+//! accepts, unless the line before it says otherwise:
 //! `<!-- fragment -->` marks a piece of a larger program the prose
 //! describes, `<!-- compile_fail CODE -->` marks an example that must be
 //! rejected with that diagnostic, and `<!-- output: TEXT -->` marks one
 //! `gos run` must print `TEXT` from (`\n` separates lines), which pins what
-//! the prose says about the values it builds.
+//! the prose says about the values it builds. The documentation site's
+//! fences are held to the same rule by gossamer-docs' own checks.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,20 +31,6 @@ struct Fence {
     line: usize,
     expect: Expect,
     code: String,
-}
-
-fn markdown_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            markdown_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "md") {
-            out.push(path);
-        }
-    }
 }
 
 fn fences_in(file: &Path) -> Vec<Fence> {
@@ -94,12 +81,9 @@ fn fences_in(file: &Path) -> Vec<Fence> {
 }
 
 #[test]
-fn every_docs_fence_checks_or_says_why_not() {
+fn every_readme_fence_checks_or_says_why_not() {
     let root = workspace_root();
-    let mut files = Vec::new();
-    markdown_files(&root.join("docs_src"), &mut files);
-    files.push(root.join("README.md"));
-    files.sort();
+    let files = [root.join("README.md")];
     let scratch = std::env::temp_dir().join(format!("gos-doc-fences-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).expect("scratch dir");
     let mut failures = Vec::new();
@@ -156,6 +140,6 @@ fn every_docs_fence_checks_or_says_why_not() {
         }
     }
     let _ = std::fs::remove_dir_all(&scratch);
-    assert!(checked > 0, "no fences found under docs_src");
+    assert!(checked > 0, "no fences found in the README");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

@@ -1,3 +1,0 @@
-# `lang::let`
-
-Immutable binding.

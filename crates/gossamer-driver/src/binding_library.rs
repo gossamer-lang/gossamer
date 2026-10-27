@@ -23,8 +23,8 @@ use gossamer_pkg::RustBindingSpec;
 
 use crate::binding_build::{
     AdvisoryLock, BindingBuildError, CargoBuild, Profile, TOOLCHAIN_LOCK, binding_crates_patch,
-    build_lock_path, cache_root, render_one, run_cargo_build, seed_lockfile, toml_path_kv,
-    write_if_different,
+    build_lock_path, cache_root, path_dependencies, render_one, run_cargo_build, seed_lockfile,
+    toml_path_kv, write_if_different,
 };
 
 /// The directory, inside a path binding's crate, that `gos publish` stages
@@ -302,39 +302,6 @@ fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
     Ok(())
 }
 
-/// The directories a `Cargo.toml` names as path dependencies, in any of its
-/// dependency tables.
-fn path_dependencies(manifest: &Path) -> Vec<PathBuf> {
-    let Ok(text) = fs::read_to_string(manifest) else {
-        return Vec::new();
-    };
-    let Ok(doc) = text.parse::<toml::Table>() else {
-        return Vec::new();
-    };
-    let base = manifest.parent().unwrap_or(Path::new("."));
-    let mut tables: Vec<&toml::Table> = Vec::new();
-    for key in ["dependencies", "build-dependencies"] {
-        if let Some(table) = doc.get(key).and_then(toml::Value::as_table) {
-            tables.push(table);
-        }
-    }
-    if let Some(targets) = doc.get("target").and_then(toml::Value::as_table) {
-        for target in targets.values().filter_map(toml::Value::as_table) {
-            for key in ["dependencies", "build-dependencies"] {
-                if let Some(table) = target.get(key).and_then(toml::Value::as_table) {
-                    tables.push(table);
-                }
-            }
-        }
-    }
-    tables
-        .into_iter()
-        .flat_map(|table| table.values())
-        .filter_map(|dep| dep.get("path").and_then(toml::Value::as_str))
-        .map(|path| base.join(path))
-        .collect()
-}
-
 /// The name a build of these sources, under the manifest that builds them,
 /// lands under.
 /// A fingerprint of the Rust sources behind `bindings`: every file of each
@@ -519,7 +486,7 @@ incremental = false
 strip = false
 
 {patch}"#,
-        patch = binding_crates_patch(),
+        patch = binding_crates_patch(members.iter().filter_map(|m| m.local_root.as_deref())),
         release_strip = RELEASE_STRIP,
     )
 }

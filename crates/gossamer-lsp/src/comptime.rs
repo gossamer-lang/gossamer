@@ -53,7 +53,7 @@ const FALLBACK_CODE: Code = Code("GX0007");
 /// that resolved and typechecked.
 pub(crate) fn fold_diagnostic(
     uri: &str,
-    (augmented, origins): (&str, &[gossamer_pkg::bundle::BundledSpan]),
+    (augmented, origins): (&str, &[gossamer_pkg::bundled_span::BundledSpan]),
     sf: &SourceFile,
     resolutions: &Resolutions,
     types: &TypeTable,
@@ -69,7 +69,7 @@ pub(crate) fn fold_diagnostic(
         |path| path.to_string_lossy().into_owned(),
     );
     let program = gossamer_hir::lower_source_file(sf, resolutions, types, tcx);
-    let origins = gossamer_pkg::bundle::comptime_origins(origins);
+    let origins = gossamer_pkg::bundled_span::comptime_origins(origins);
     let message =
         fold_on_vm_stack(program, tcx.clone(), augmented.to_string(), anchor, origins).err()?;
     Some(to_diagnostic(&message, augmented, file))

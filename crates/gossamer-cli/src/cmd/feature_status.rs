@@ -12,11 +12,12 @@
 //! binary so an installed `gos` with no repository behind it still
 //! reports what the walk proved.
 //!
-//! `--check` enforces the CI gate: every `Stable` item must have a
-//! doc page on disk (`docs_src/stdlib/<slug>.md` or
-//! `docs_src/language/<slug>.md`) plus an all-tiers-pass record in
-//! the JSON sidecar. `Shipped` and `Experimental` items need the
-//! doc page; `Planned` and `Removed` items aren't gated.
+//! `--check` enforces the CI gate: every `Stable` item must have an
+//! all-tiers-pass record in the JSON sidecar. Given `--docs-root` (the
+//! `docs/` directory of a gossamer-docs checkout), it also requires a
+//! doc page on disk (`<root>/stdlib/<slug>.md` or
+//! `<root>/language/<slug>.md`) for every `Stable`, `Shipped` and
+//! `Experimental` item; `Planned` and `Removed` items aren't gated.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -113,8 +114,8 @@ pub struct FeatureStatusOpts {
     /// Override for the JSON sidecar path (defaults to
     /// `target/debug/.feature-status.json`).
     pub sidecar: Option<PathBuf>,
-    /// Override for the docs root used by `--check` (defaults to
-    /// `docs_src/`).
+    /// The docs tree doc pages are looked up in; without one, no item
+    /// reports a page and `--check` does not require them.
     pub docs_root: Option<PathBuf>,
     /// Report one row per exported item rather than per module.
     pub items: bool,
@@ -128,10 +129,10 @@ pub fn run(opts: FeatureStatusOpts) -> Result<()> {
         collect_entries(&opts)
     };
     let tiers = load_tier_status(opts.sidecar.as_deref())?;
-    let docs_root = opts.docs_root.clone().unwrap_or_else(default_docs_root);
+    let docs_root = opts.docs_root.as_deref();
 
     if opts.check {
-        return check_mode(&entries, &tiers, &docs_root);
+        return check_mode(&entries, &tiers, docs_root);
     }
 
     let rows: Vec<Row> = entries
@@ -141,7 +142,7 @@ pub fn run(opts: FeatureStatusOpts) -> Result<()> {
             // An item inherits its module's record: the walk observes a
             // module, which is the granularity a fixture's imports name.
             tiers: tier_record(&tiers, e.path).cloned().unwrap_or_default(),
-            doc: doc_page_for(e.path, &docs_root),
+            doc: docs_root.and_then(|root| doc_page_for(e.path, root)),
         })
         .collect();
 
@@ -280,12 +281,6 @@ fn default_sidecar_path() -> PathBuf {
         PathBuf::from,
     );
     base.join("debug").join(".feature-status.json")
-}
-
-/// Default docs root - `docs_src/` next to the workspace root,
-/// falling back to a `docs_src` directory beside the cwd.
-fn default_docs_root() -> PathBuf {
-    workspace_root_or_cwd().map_or_else(|| PathBuf::from("docs_src"), |r| r.join("docs_src"))
 }
 
 fn workspace_root_or_cwd() -> Option<PathBuf> {
@@ -500,17 +495,18 @@ fn tier_record<'a>(tiers: &'a BTreeMap<String, TierStatus>, path: &str) -> Optio
 fn check_mode(
     entries: &[FeatureStatus],
     tiers: &BTreeMap<String, TierStatus>,
-    docs_root: &Path,
+    docs_root: Option<&Path>,
 ) -> Result<()> {
     let mut failures: Vec<String> = Vec::new();
+    let missing_page = |path: &str| docs_root.filter(|root| doc_page_for(path, root).is_none());
     for entry in entries {
         match entry.status {
             Status::Stable => {
-                if doc_page_for(entry.path, docs_root).is_none() {
+                if let Some(root) = missing_page(entry.path) {
                     failures.push(format!(
                         "{}: stable item missing doc page under {}",
                         entry.path,
-                        docs_root.display(),
+                        root.display(),
                     ));
                 }
                 match tier_record(tiers, entry.path) {
@@ -530,12 +526,12 @@ fn check_mode(
             // `Unproven` is a documented surface too - it is only the
             // evidence that is missing, not the description.
             Status::Shipped | Status::Experimental | Status::Declined | Status::Unproven => {
-                if doc_page_for(entry.path, docs_root).is_none() {
+                if let Some(root) = missing_page(entry.path) {
                     failures.push(format!(
                         "{}: {} item missing doc page under {}",
                         entry.path,
                         entry.status.tag(),
-                        docs_root.display(),
+                        root.display(),
                     ));
                 }
             }
@@ -931,10 +927,7 @@ mod tests {
             evidence.supported_tiers.iter().map(|tier| tier.tag()),
         );
         assert_eq!(output, "\"shipped\"[\"vm\",\"cranelift\",\"llvm\"]");
-        assert_eq!(
-            evidence.doc_path.as_deref(),
-            Some("docs_src/language/if.md")
-        );
+        assert_eq!(evidence.doc_path.as_deref(), Some("language/if.md"));
         assert!(!evidence.positive_tests.is_empty());
 
         // A construct no line scan can name uniquely earns its tiers from the
@@ -979,7 +972,7 @@ mod tests {
     #[test]
     fn check_mode_passes_when_shipped_have_tests_and_docs() {
         let tmp = tempdir();
-        let docs = tmp.join("docs_src");
+        let docs = tmp.join("docs");
         fs::create_dir_all(docs.join("language")).unwrap();
         fs::create_dir_all(docs.join("stdlib")).unwrap();
         let entry = FeatureStatus {
@@ -997,13 +990,13 @@ mod tests {
                 llvm: Some("pass".into()),
             },
         );
-        check_mode(&[entry], &tiers, &docs).expect("ok");
+        check_mode(&[entry], &tiers, Some(&docs)).expect("ok");
     }
 
     #[test]
     fn check_mode_fails_when_shipped_missing_doc() {
         let tmp = tempdir();
-        let docs = tmp.join("docs_src");
+        let docs = tmp.join("docs");
         fs::create_dir_all(docs.join("language")).unwrap();
         let entry = FeatureStatus {
             path: "lang::zzz_undocumented",
@@ -1019,14 +1012,14 @@ mod tests {
                 llvm: Some("pass".into()),
             },
         );
-        let err = check_mode(&[entry], &tiers, &docs).unwrap_err();
+        let err = check_mode(&[entry], &tiers, Some(&docs)).unwrap_err();
         assert!(err.to_string().contains("feature-status check failed"));
     }
 
     #[test]
     fn check_mode_fails_when_shipped_missing_test() {
         let tmp = tempdir();
-        let docs = tmp.join("docs_src");
+        let docs = tmp.join("docs");
         fs::create_dir_all(docs.join("language")).unwrap();
         fs::write(docs.join("language/match.md"), "Status: shipped\n").unwrap();
         let entry = FeatureStatus {
@@ -1035,14 +1028,14 @@ mod tests {
             doc: "",
         };
         let tiers = BTreeMap::new();
-        let err = check_mode(&[entry], &tiers, &docs).unwrap_err();
+        let err = check_mode(&[entry], &tiers, Some(&docs)).unwrap_err();
         assert!(err.to_string().contains("feature-status check failed"));
     }
 
     #[test]
     fn check_mode_skips_planned_items() {
         let tmp = tempdir();
-        let docs = tmp.join("docs_src");
+        let docs = tmp.join("docs");
         fs::create_dir_all(docs.join("language")).unwrap();
         let entry = FeatureStatus {
             path: "lang::async_await",
@@ -1050,7 +1043,7 @@ mod tests {
             doc: "",
         };
         let tiers = BTreeMap::new();
-        check_mode(&[entry], &tiers, &docs).expect("planned items skipped");
+        check_mode(&[entry], &tiers, Some(&docs)).expect("planned items skipped");
     }
 
     #[test]
