@@ -3558,6 +3558,36 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                 }
             }
         }
+        // The same holds when the lent `Vec` leaves as the payload of a
+        // carrier built for the return (`Ok(v)`, `Some(v)`): the carrier
+        // hands the caller a share it must own, while the caller still gives
+        // back the one it lent.
+        for (block_idx, block) in body.blocks.iter().enumerate() {
+            for (stmt_idx, stmt) in block.stmts.iter().enumerate() {
+                let StatementKind::Assign {
+                    place,
+                    rvalue: Rvalue::CallIntrinsic { name, args },
+                } = &stmt.kind
+                else {
+                    continue;
+                };
+                if *name != "gos_rt_result_new"
+                    || !place.projection.is_empty()
+                    || (place.local.0 as usize) >= n_locals
+                    || !flows_to_return[place.local.0 as usize]
+                {
+                    continue;
+                }
+                if let Some(Operand::Copy(src)) = args.get(1)
+                    && src.projection.is_empty()
+                    && (src.local.0 as usize) < n_locals
+                    && is_vec(src.local.0 as usize)
+                    && lent[src.local.0 as usize]
+                {
+                    retain_sites.push((block_idx, stmt_idx, src.local, 1));
+                }
+            }
+        }
     }
     // A Vec/Slice local that was extracted from an aggregate field is an
     // owner too (the field pass retained its share), but is not `is_rc` (a
