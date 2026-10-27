@@ -1135,6 +1135,7 @@ pub(crate) use call_dispatch::with_active_vm;
 pub(crate) mod goroutine;
 mod lifecycle;
 mod native_dispatch;
+pub use native_dispatch::call_value_on_running_vm;
 mod resolve;
 pub(crate) mod run;
 mod static_cell;

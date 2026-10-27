@@ -352,6 +352,17 @@ pub struct VmDispatch {
     ctx: *mut CallCtx,
 }
 
+impl VmDispatch {
+    /// The dispatch of a call compiled code made, which has no VM call
+    /// context of its own: the host runs its callables on the VM active on
+    /// the calling thread.
+    pub(crate) fn for_compiled_call() -> Self {
+        Self {
+            ctx: std::ptr::null_mut(),
+        }
+    }
+}
+
 impl NativeDispatch for VmDispatch {
     fn invoke_callback(&mut self, callback: CallbackRef, args: Vec<Value>) -> RuntimeResult<Value> {
         if callback.origin == CallbackOrigin::Compiled {

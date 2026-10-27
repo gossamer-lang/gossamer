@@ -325,7 +325,13 @@ impl Vm {
                         };
                     let mut native_fault: Option<RuntimeError> = None;
                     if let Some(prepared) = jit_opt {
-                        match jit_call::invoke_prepared(&prepared, &args, &self.jit_graph_cache) {
+                        // A binding the compiled code calls reaches this VM
+                        // through the active slot to run a VM callable back.
+                        let active = ActiveVm::enter(self);
+                        let dispatched =
+                            jit_call::invoke_prepared(&prepared, &args, &self.jit_graph_cache);
+                        drop(active);
+                        match dispatched {
                             jit_call::Dispatch::Ok(value) => {
                                 prepared.record_hit();
                                 // This is an intentionally conservative
@@ -1109,8 +1115,9 @@ pub(crate) fn with_active_vm<R>(body: impl FnOnce(&Vm) -> R) -> Option<R> {
     if ptr.is_null() {
         return None;
     }
-    // SAFETY: the slot holds a borrow of a VM live for the whole of
-    // `with_active_trace`, and is cleared before that borrow ends.
+    // SAFETY: the slot holds a borrow of a VM live for the whole of the
+    // `ActiveVm` guard that set it, which restores the slot before that
+    // borrow ends.
     Some(body(unsafe { &*ptr }))
 }
 
@@ -1133,8 +1140,8 @@ extern "C" fn render_active_vm_trace() -> *mut std::ffi::c_char {
     if ptr.is_null() {
         return std::ptr::null_mut();
     }
-    // SAFETY: the slot holds a borrow of a VM live for the whole of
-    // `with_active_trace`, which is the only window this hook runs in.
+    // SAFETY: the slot holds a borrow of a VM live for the whole of the
+    // `ActiveVm` guard that set it, the only window the slot is non-null.
     let vm = unsafe { &*ptr };
     let mut frames = vm.call_stack_frames();
     // A JIT-compiled body runs on the machine stack beneath the bytecode frame

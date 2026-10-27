@@ -143,6 +143,30 @@ pub struct ArmSignature {
 }
 
 impl SigType {
+    /// Whether a callable appears anywhere in this type.
+    #[must_use]
+    pub fn holds_callable(&self) -> bool {
+        match self {
+            Self::Callback { .. } => true,
+            Self::Tuple { items } => items.iter().any(Self::holds_callable),
+            Self::Vec { of } | Self::Option { of } => of.holds_callable(),
+            Self::Result { ok, err } => ok.holds_callable() || err.holds_callable(),
+            Self::Map { key, value } => key.holds_callable() || value.holds_callable(),
+            Self::Variant { arms } => arms
+                .iter()
+                .any(|arm| arm.payload.iter().any(Self::holds_callable)),
+            Self::Unit
+            | Self::Bool
+            | Self::I64
+            | Self::F64
+            | Self::Char
+            | Self::String
+            | Self::Bytes
+            | Self::Opaque { .. }
+            | Self::Any => false,
+        }
+    }
+
     /// The resolver's spelling of this type.
     #[must_use]
     pub fn to_binding_type(&self) -> BindingType {

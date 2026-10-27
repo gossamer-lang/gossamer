@@ -1,0 +1,55 @@
+// A `Vec` taken out of a carrier the caller lent and handed back inside a
+// new one (`Ok(v)`, `Some(v)`), then stored in a struct field the caller
+// returns: the answer owns a share of its own, so the caller giving back the
+// one it lent leaves the vector alive.
+
+use std::errors
+
+struct Frame {
+    pixels: Vec<u8>
+    width: i64
+}
+
+fn grab(n: i64) -> Result<Vec<u8>, String> {
+    if n < 0 {
+        return Err("negative")
+    }
+    Ok(#[7u8; n])
+}
+
+fn ok<T>(result: Result<T, String>) -> Result<T, errors::Error> {
+    match result {
+        Ok(value) => Ok(value)
+        Err(message) => Err(errors::new(message))
+    }
+}
+
+fn some_of(result: Result<Vec<u8>, String>) -> Option<Vec<u8>> {
+    match result {
+        Ok(v) => Some(v)
+        Err(_) => None
+    }
+}
+
+fn capture(n: i64) -> Result<Frame, errors::Error> {
+    let mut frame = Frame { pixels: #[0u8; 4], width: 2 }
+    frame.pixels = ok(grab(n))?
+    Ok(frame)
+}
+
+fn main() {
+    let mut total = 0
+    for i in 0..200 {
+        let frame = capture(i % 9).unwrap()
+        total += frame.pixels.len() * frame.width
+        total += some_of(grab(i % 5)).unwrap().len()
+    }
+    let frame = capture(6).unwrap()
+    let copy = frame.pixels.clone()
+    println(f"{total} {copy.len()} {copy[5]}")
+    match capture(-1) {
+        Ok(_) => println("unexpected")
+        Err(e) => println(f"err {e}")
+    }
+    println(f"none {some_of(grab(-1)).is_none()}")
+}

@@ -1,0 +1,52 @@
+// A struct with no fields carried in an `Option` or a `Result`, taken out by
+// `unwrap`, `?`, `match`, and `if let`, in a body hot enough to compile. A
+// carrier boxes no words for such a payload, so taking it out copies none.
+
+use std::errors
+
+struct Session {}
+
+impl Session {
+    fn name(&self) -> String {
+        "session"
+    }
+}
+
+fn start(ok: bool) -> Result<Session, errors::Error> {
+    if !ok {
+        return Err(errors::new("refused"))
+    }
+    Ok(Session {})
+}
+
+fn find(present: bool) -> Option<Session> {
+    if present { Some(Session {}) } else { None }
+}
+
+fn started() -> Result<String, errors::Error> {
+    let s = start(true)?
+    Ok(s.name())
+}
+
+fn main() {
+    let session = start(true).unwrap()
+    let found = find(true).unwrap()
+    let mut total = 0
+    for i in 0..5000 {
+        total += i % 7
+    }
+    println(f"{session.name()} {found.name()} {total}")
+    match find(true) {
+        Some(s) => println(f"match {s.name()}")
+        None => println("match none")
+    }
+    if let Some(s) = find(true) {
+        println(f"if let {s.name()}")
+    }
+    match start(false) {
+        Ok(s) => println(f"ok {s.name()}")
+        Err(e) => println(f"err {e}")
+    }
+    println(f"? {started().unwrap()}")
+    println(f"none {find(false).is_none()}")
+}

@@ -168,7 +168,7 @@ pub use value::{
 };
 pub use vm::VM_THREAD_STACK_BYTES;
 pub use vm::goroutine::join_outstanding_goroutines;
-pub use vm::{CallStackFrame, JitMetrics, Vm};
+pub use vm::{CallStackFrame, JitMetrics, Vm, call_value_on_running_vm};
 
 /// Process-wide panic hook value registered by
 /// `runtime::set_panic_hook` on the interpreter tier. The report

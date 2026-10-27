@@ -89,14 +89,16 @@ pub fn install(libraries: &[(PathBuf, Signatures)]) -> usize {
     for (path, signatures) in libraries {
         let library = Arc::new(library::LazyLibrary::new(path.clone(), signatures));
         leaves.extend(vm::register(Arc::clone(&library), signatures));
-        // An item that calls Gossamer callables back keeps the body calling
-        // it on the VM, whose call can run a callable the VM or the JIT
-        // registered: JIT-compiled code cannot call into the VM.
+        // Compiled code calls an item through its wire thunk, where a
+        // callable it calls back runs on the VM active on this thread. An
+        // item taking a callable keeps the body calling it on the VM, which
+        // passes the callable as the handle the item calls back through.
         let names: Vec<String> = signatures
             .modules
             .iter()
             .flat_map(|module| module.items.iter())
-            .filter(|item| !item.wire_symbol.is_empty() && !item.calls_back)
+            .filter(|item| !item.wire_symbol.is_empty())
+            .filter(|item| !(item.calls_back && item.params.iter().any(SigType::holds_callable)))
             .map(|item| item.wire_symbol.clone())
             .collect();
         for name in &names {

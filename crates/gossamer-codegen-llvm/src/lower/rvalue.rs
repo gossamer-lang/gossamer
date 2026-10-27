@@ -636,17 +636,21 @@ impl<'a> Lowerer<'a> {
             let as_ptr = self.fresh();
             writeln!(self.out, "  {as_ptr} = inttoptr i64 {word} to ptr").unwrap();
             if let Some(slots) = slot_count(self.tcx, dest_ty_mir) {
-                let slot = if destination.projection.is_empty() {
-                    local_slot(destination.local)
-                } else {
-                    self.lower_place_address(destination)
-                };
-                let bytes = u64::from(slots.max(1)) * 8;
-                writeln!(
-                    self.out,
-                    "  call void @llvm.memcpy.p0.p0.i64(ptr {slot}, ptr {as_ptr}, i64 {bytes}, i1 false)"
-                )
-                .unwrap();
+                // A payload of no words (an empty struct) has no box behind
+                // its word, and nothing to copy.
+                if slots > 0 {
+                    let slot = if destination.projection.is_empty() {
+                        local_slot(destination.local)
+                    } else {
+                        self.lower_place_address(destination)
+                    };
+                    let bytes = u64::from(slots) * 8;
+                    writeln!(
+                        self.out,
+                        "  call void @llvm.memcpy.p0.p0.i64(ptr {slot}, ptr {as_ptr}, i64 {bytes}, i1 false)"
+                    )
+                    .unwrap();
+                }
             } else {
                 self.store_value_to_place(destination, "ptr", &as_ptr);
             }
