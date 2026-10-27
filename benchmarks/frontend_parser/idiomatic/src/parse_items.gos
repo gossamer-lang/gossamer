@@ -1002,12 +1002,17 @@ pub fn parse_use_decl(p: &mut Parser) -> UseDecl {
     if parse::at(p, parse::P_COLON_COLON) && parse::kind_at(p, 1) == parse::P_LBRACE {
         parse::bump(p)
     }
+    let glob = parse::at(p, parse::P_COLON_COLON) && parse::kind_at(p, 1) == parse::P_STAR
+    if glob {
+        parse::bump(p)
+        parse::bump(p)
+    }
     let list = if parse::at(p, parse::P_LBRACE) { Some(parse_use_list(p)) } else { None }
     parse::eat(p, parse::P_SEMI)
     let end_span = parse::last_span(p)
     let span = parse::join(p, start_span, end_span)
     let id = parse::alloc(p)
-    UseDecl { id: id, span: span, target: target, alias: alias, list: list, module: p.mod_stack, cfg: None }
+    UseDecl { id: id, span: span, target: target, alias: alias, list: list, module: p.mod_stack, cfg: None, glob: glob }
 }
 
 pub fn at_attributed_use(p: &mut Parser) -> bool {

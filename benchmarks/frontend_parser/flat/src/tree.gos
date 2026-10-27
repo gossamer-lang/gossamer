@@ -1098,6 +1098,7 @@ fn enc_use_decl(out: &mut Vec<u8>, t: Tree, r: i64) {
     }
     enc_strings(out, t, t.w[r + 6])
     put_opt_string(out, t, t.w[r + 7])
+    out.push(t.w[r + 8] as u8)
 }
 
 /// A named argument: its position, its name, and the span of `name:`.

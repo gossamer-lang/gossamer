@@ -1114,7 +1114,7 @@ pub fn parse_ident_required(p: &mut Parser) -> i64 {
 // ---- use declarations ----------------------------------------------------
 
 /// A use declaration record: `[id, start, end, target, alias, list,
-/// module, cfg]`.
+/// module, cfg, glob]`.
 pub fn parse_use_decl(p: &mut Parser) -> i64 {
     let start_span = parse::peek_span(p)
     parse::bump(p)
@@ -1129,6 +1129,11 @@ pub fn parse_use_decl(p: &mut Parser) -> i64 {
     if parse::at(p, parse::P_COLON_COLON) && parse::kind_at(p, 1) == parse::P_LBRACE {
         parse::bump(p)
     }
+    let glob = parse::at(p, parse::P_COLON_COLON) && parse::kind_at(p, 1) == parse::P_STAR
+    if glob {
+        parse::bump(p)
+        parse::bump(p)
+    }
     let list = if parse::at(p, parse::P_LBRACE) { parse_use_list(p) } else { -1 }
     parse::eat(p, parse::P_SEMI)
     let end_span = parse::last_span(p)
@@ -1139,7 +1144,7 @@ pub fn parse_use_decl(p: &mut Parser) -> i64 {
         module.push(p.t.str_of(m))
     }
     let module_list = p.t.list(module)
-    p.t.rec(#[id, span.start as i64, span.end as i64, target, alias, list, module_list, -1])
+    p.t.rec(#[id, span.start as i64, span.end as i64, target, alias, list, module_list, -1, if glob { 1 } else { 0 }])
 }
 
 pub fn at_attributed_use(p: &mut Parser) -> bool {
