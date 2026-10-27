@@ -158,9 +158,30 @@ impl Counter {
     }
 }
 
+thread_local! {
+    // Never dropped with the thread: by its teardown the runtime a release
+    // hands the callback back to is gone.
+    static KEPT: std::mem::ManuallyDrop<std::cell::RefCell<Option<gossamer_binding::PersistentCallback>>> =
+        std::mem::ManuallyDrop::new(std::cell::RefCell::new(None));
+}
+
 gossamer_binding::register_module!(
     name: calls,
     doc: "Callbacks into Gossamer.",
+
+    cb_fn keep(d, f: gossamer_binding::PersistentCallback) -> i64 {
+        let _ = d;
+        KEPT.with(|k| *k.borrow_mut() = Some(f));
+        0
+    }
+
+    cb_fn fire(d, x: i64) -> i64 {
+        let f = KEPT.with(|k| k.borrow().clone()).expect("a kept callback");
+        match f.invoke(d, vec![gossamer_binding::Value::Int(x)]) {
+            Ok(gossamer_binding::Value::Int(n)) => n,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
 
     cb_fn apply(d, f: gossamer_binding::PersistentCallback, x: i64) -> i64 {
         match f.invoke(d, vec![gossamer_binding::Value::Int(x)]) {
@@ -188,6 +209,14 @@ fn double(x: i64) -> i64 {
     x * 2
 }
 
+fn sum_fires(n: i64) -> i64 {
+    let mut total = 0
+    for i in 0..n {
+        total += calls::fire(i)
+    }
+    total
+}
+
 fn main() {
     println("{}", probe::greet("gossamer"))
     println("{:?}", probe::parse_int("12"))
@@ -201,10 +230,12 @@ fn main() {
     println("{}", calls::apply(|x: i64| x + 1, 14))
     println("{}", calls::apply(double, 5))
     println("{}", calls::shout(|s: String| s.to_uppercase() + "!", "hey"))
+    calls::keep(|x: i64| x * 3)
+    println("{}", sum_fires(2000))
 }
 "#;
 
-const SCAFFOLD_EXPECTED: &str = "hello, gossamer\nOk(12)\n()\n2\n42\n15\n10\nHEY!\n";
+const SCAFFOLD_EXPECTED: &str = "hello, gossamer\nOk(12)\n()\n2\n42\n15\n10\nHEY!\n5997000\n";
 
 /// The crate `gos new --template binding` writes builds as written, and a
 /// project calling it - a unit function, an opaque type sharing a standard
@@ -263,6 +294,32 @@ fn scaffolded_binding_runs_and_builds() {
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(run.status.success(), "gos run failed:\n{stderr}");
     assert_eq!(String::from_utf8_lossy(&run.stdout), SCAFFOLD_EXPECTED);
+
+    // A loop calling an item that calls a VM-registered callable back runs
+    // JIT-compiled, the callable running on the VM that entered it.
+    let jit = Command::new(gos_bin())
+        .args(["run", "."])
+        .current_dir(&app)
+        .env("GOSSAMER_ROOT", &root)
+        .env("GOSSAMER_CACHE", dir.join("cache"))
+        .env("GOSSAMER_CACHE_DIR", dir.join("cache"))
+        .env("GOS_JIT", "1")
+        .env("GOSSAMER_JIT_THRESHOLD", "1")
+        .env("GOS_JIT_TRACE", "1")
+        .output()
+        .expect("spawn gos");
+    let trace = String::from_utf8_lossy(&jit.stderr);
+    assert!(jit.status.success(), "gos run on the JIT failed:\n{trace}");
+    assert_eq!(String::from_utf8_lossy(&jit.stdout), SCAFFOLD_EXPECTED);
+    assert!(
+        trace.contains("decision body=sum_fires admitted=true"),
+        "sum_fires stayed on the VM:\n{}",
+        trace
+            .lines()
+            .filter(|line| line.contains("sum_fires"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 
     for (profile, flags) in [("debug", &[][..]), ("release", &["--release"][..])] {
         let mut args = vec!["build"];

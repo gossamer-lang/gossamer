@@ -1831,6 +1831,7 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
             "feature-testing-examples/yaml_autoderive.gos",
             "feature-testing-examples/yaml_parse_json_accessors.gos",
             "feature-testing-examples/yaml_wide_integers.gos",
+            "feature-testing-examples/zero_sized_payloads.gos",
             "feature-testing-examples/zip_pair_elements.gos",
         ],
     ),
@@ -3609,6 +3610,7 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
             "feature-testing-examples/yaml_autoderive.gos",
             "feature-testing-examples/yaml_parse_json_accessors.gos",
             "feature-testing-examples/yaml_wide_integers.gos",
+            "feature-testing-examples/zero_sized_payloads.gos",
             "feature-testing-examples/zip_pair_elements.gos",
         ],
     ),
@@ -4247,6 +4249,7 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
             "feature-testing-examples/wrapping_arithmetic_operators.gos",
             "feature-testing-examples/yaml_parse_json_accessors.gos",
             "feature-testing-examples/yaml_wide_integers.gos",
+            "feature-testing-examples/zero_sized_payloads.gos",
             "feature-testing-examples/zip_pair_elements.gos",
         ],
     ),
@@ -4713,6 +4716,7 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
             "feature-testing-examples/winb_coll_iter.gos",
             "feature-testing-examples/winb_coll_optres.gos",
             "feature-testing-examples/word_tuple_equality.gos",
+            "feature-testing-examples/zero_sized_payloads.gos",
         ],
     ),
     (
@@ -4831,6 +4835,7 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
             "feature-testing-examples/weak_value_referent.gos",
             "feature-testing-examples/websocket_echo.gos",
             "feature-testing-examples/winb_coll_optres.gos",
+            "feature-testing-examples/zero_sized_payloads.gos",
         ],
     ),
     (
@@ -4983,6 +4988,7 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
             "feature-testing-examples/value_enums.gos",
             "feature-testing-examples/vec_literal_rendering.gos",
             "feature-testing-examples/websocket_echo.gos",
+            "feature-testing-examples/zero_sized_payloads.gos",
         ],
     ),
     (
@@ -5195,6 +5201,7 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
             "feature-testing-examples/vec_rebound_from_branch_local.gos",
             "feature-testing-examples/weak_references_in_containers.gos",
             "feature-testing-examples/xml_internal_entities.gos",
+            "feature-testing-examples/zero_sized_payloads.gos",
         ],
     ),
     (
@@ -6257,6 +6264,7 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
             "feature-testing-examples/yaml_autoderive.gos",
             "feature-testing-examples/yaml_parse_json_accessors.gos",
             "feature-testing-examples/yaml_wide_integers.gos",
+            "feature-testing-examples/zero_sized_payloads.gos",
             "feature-testing-examples/zip_pair_elements.gos",
         ],
     ),
@@ -7011,6 +7019,7 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
             "feature-testing-examples/wrapping_arithmetic_operators.gos",
             "feature-testing-examples/yaml_parse_json_accessors.gos",
             "feature-testing-examples/yaml_wide_integers.gos",
+            "feature-testing-examples/zero_sized_payloads.gos",
         ],
     ),
     (
@@ -7422,6 +7431,7 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
             "feature-testing-examples/winb_text_strings.gos",
             "feature-testing-examples/xml_internal_entities.gos",
             "feature-testing-examples/yaml_parse_json_accessors.gos",
+            "feature-testing-examples/zero_sized_payloads.gos",
         ],
     ),
     (
@@ -7686,6 +7696,7 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
             "feature-testing-examples/yaml_autoderive.gos",
             "feature-testing-examples/yaml_parse_json_accessors.gos",
             "feature-testing-examples/yaml_wide_integers.gos",
+            "feature-testing-examples/zero_sized_payloads.gos",
         ],
     ),
     (
@@ -7825,6 +7836,7 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
             "feature-testing-examples/vec_range_copies.gos",
             "feature-testing-examples/vec_rebound_from_branch_local.gos",
             "feature-testing-examples/websocket_echo.gos",
+            "feature-testing-examples/zero_sized_payloads.gos",
         ],
     ),
     (
@@ -8458,6 +8470,7 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
             "feature-testing-examples/wrapping_arithmetic_operators.gos",
             "feature-testing-examples/yaml_autoderive.gos",
             "feature-testing-examples/yaml_wide_integers.gos",
+            "feature-testing-examples/zero_sized_payloads.gos",
             "feature-testing-examples/zip_pair_elements.gos",
         ],
     ),
@@ -9247,6 +9260,7 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
             "feature-testing-examples/yaml_autoderive.gos",
             "feature-testing-examples/yaml_parse_json_accessors.gos",
             "feature-testing-examples/yaml_wide_integers.gos",
+            "feature-testing-examples/zero_sized_payloads.gos",
         ],
     ),
     (

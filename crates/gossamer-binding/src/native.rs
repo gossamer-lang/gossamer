@@ -1276,7 +1276,9 @@ pub fn raise_wire_panic(payload: &(dyn std::any::Any + Send)) {
 const WIRE_TAG_UNIT: i32 = 9;
 
 /// The dispatch a `cb_fn` binding receives on the compiled tiers: callables
-/// arrive as runtime handles, which it calls through the runtime's registry.
+/// arrive as runtime handles, which it calls through the runtime's registry,
+/// and a callable the VM registered runs on the VM active on the thread, the
+/// one whose call entered the JIT-compiled caller.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CompiledDispatch;
 
@@ -1284,9 +1286,9 @@ impl NativeDispatch for CompiledDispatch {
     fn invoke_callback(&mut self, callback: CallbackRef, args: Vec<Value>) -> RuntimeResult<Value> {
         match callback.origin {
             CallbackOrigin::Compiled => invoke_compiled_callback(callback.handle, &args),
-            CallbackOrigin::Vm => Err(RuntimeError::Unsupported(
-                "a VM callable called from compiled code",
-            )),
+            CallbackOrigin::Vm => {
+                crate::abi::VmDispatch::for_compiled_call().invoke_callback(callback, args)
+            }
         }
     }
 }
@@ -1469,15 +1471,6 @@ unsafe fn variant_value_string_owned(s: String) -> GosVariantValue {
         data: GosVariantPayload {
             string: s.to_output(),
         },
-    }
-}
-
-unsafe fn variant_value_unit() -> GosVariantValue {
-    // `()` packs as an i64 zero; the consumer is expected to ignore
-    // the payload anyway (tag 0 with no semantic content).
-    GosVariantValue {
-        tag: VAR_TAG_I64,
-        data: GosVariantPayload { i64_: 0 },
     }
 }
 
@@ -1692,22 +1685,23 @@ impl<E: WireError> BindingAbi for Result<(), E> {
     const TYPE: Type = Type::Result(&Type::Unit, &E::TYPE);
 
     unsafe fn from_input(input: *const GosVariant) -> Self {
-        let (tag, payload) = match unsafe { read_single_payload(input) } {
-            Some(x) => x,
-            None => return Err(E::from_wire(String::new())),
-        };
-        if tag == 1 {
-            Ok(())
-        } else {
-            Err(E::from_wire(unsafe {
+        // `Ok(())` carries nothing, so its tag alone says it, with or
+        // without a unit field after it.
+        if !input.is_null() && unsafe { (*input).tag } == 1 {
+            return Ok(());
+        }
+        match unsafe { read_single_payload(input) } {
+            Some((_, payload)) => Err(E::from_wire(unsafe {
                 String::from_input(payload.data.string)
-            }))
+            })),
+            None => Err(E::from_wire(String::new())),
         }
     }
 
     fn to_output(self) -> *mut GosVariant {
         match self {
-            Ok(()) => make_variant(1, vec![unsafe { variant_value_unit() }]),
+            // No fields: the runtime reads an absent payload as the unit.
+            Ok(()) => make_variant(1, Vec::new()),
             Err(s) => make_variant(
                 0,
                 vec![unsafe { variant_value_string_owned(s.into_wire()) }],

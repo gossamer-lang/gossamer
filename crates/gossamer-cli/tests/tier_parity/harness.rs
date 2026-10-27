@@ -220,6 +220,9 @@ const SPECS: &[Spec] = &[
     // block answers one it does not, so which body a call reaches follows from
     // the receiver's type rather than from which spelling was written last.
     spec("feature-testing-examples/builtin_impl_precedence.gos"),
+    // A field-less struct carried in an `Option` or a `Result` and taken out
+    // by `unwrap`, `?`, `match`, and `if let` in a compiled body.
+    spec("feature-testing-examples/zero_sized_payloads.gos"),
     // A `&self` method reads its receiver the same way whichever spelling the
     // body uses: `*self` is the explicit load and a bare `self` is the same
     // read written shorter, so an operator, a comparison, and a method call on

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.75.4 - JIT callers of calling-back bindings, empty-struct payloads
+
+- A function calling a Rust binding item that calls Gossamer code back, and takes no callable itself, runs JIT-compiled, with the callable running on the VM that entered the compiled code, where every such caller and its callers stayed on the bytecode VM.
+- A Rust binding item answering `Result<(), E>` hands back `Ok(())` without an allocation, which halves what a successful call costs a compiled caller.
+- A struct with no fields carried in an `Option` or a `Result` and taken out with `unwrap` runs on the JIT and in a debug native build, where it faulted reading a payload that holds no words.
+- A typed serde call (`json::decode::<T>`, `to_json::<T>`, and the TOML and YAML forms) inside an item `#[cfg]` leaves out of the build is not reported, where a dependency's `#[cfg(test)]` module decoding one of its own types failed every consumer's `gos run` and `gos build` with GP0039.
+
 ## 0.75.3 - Transitive package dependencies, shared binding crates, docs repository
 
 - `gos fetch` and `gos vendor` fetch the dependencies each fetched package declares, and theirs, recording the whole graph in `project.lock`, where only the project's own dependencies were fetched and a library's own dependencies were missing. `--locked` checks the whole graph.

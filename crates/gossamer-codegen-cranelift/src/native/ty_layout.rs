@@ -198,6 +198,27 @@ pub(super) fn boxed_payload_slots(tcx: &TyCtxt, ty: Ty) -> Option<u32> {
     (slots > 1 || tcx.is_boxed_enum_payload(ty)).then_some(slots)
 }
 
+/// Whether a value of `ty` holds no words (an empty struct or tuple): its
+/// storage keeps the one slot [`type_slot_count`] gives it, but a carrier
+/// boxes nothing for it, so there is nothing to copy out of one.
+pub(super) fn type_is_zero_sized(tcx: &TyCtxt, ty: Ty) -> bool {
+    match tcx.kind_of(ty).clone() {
+        TyKind::Tuple(elems) => elems.iter().all(|t| type_is_zero_sized(tcx, *t)),
+        TyKind::Array { elem, len } => len.to_usize() == 0 || type_is_zero_sized(tcx, elem),
+        TyKind::Adt { def, substs } => {
+            if def.local == u32::MAX || def.local == u32::MAX - 1 || tcx.is_inline_enum_ty(ty) {
+                return false;
+            }
+            if let Some(layout) = tcx.packed_layout(ty) {
+                return layout.size == 0;
+            }
+            tcx.adt_field_tys(def, &substs)
+                .is_some_and(|tys| tys.iter().all(|t| type_is_zero_sized(tcx, *t)))
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn type_slot_count(tcx: &TyCtxt, ty: Ty) -> u32 {
     match tcx.kind_of(ty).clone() {
         TyKind::Tuple(elems) => elems

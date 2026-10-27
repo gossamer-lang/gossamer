@@ -684,6 +684,9 @@ fn lower_inline_result_carrier_call(
                     destination.local,
                 )
             {
+                if super::ty_layout::type_is_zero_sized(tcx, body.local_ty(destination.local)) {
+                    return Ok(true);
+                }
                 let ptr_ty = module.target_config().pointer_type();
                 let slots =
                     super::ty_layout::type_slot_count(tcx, body.local_ty(destination.local)).max(1);
@@ -972,6 +975,9 @@ pub(super) fn lower_generic_rt_call(
         )
         && super::lowering_stmt_term::payload_takes_own_storage(tcx, body, destination.local)
     {
+        if super::ty_layout::type_is_zero_sized(tcx, body.local_ty(destination.local)) {
+            return Ok(());
+        }
         let slots = super::ty_layout::type_slot_count(tcx, body.local_ty(destination.local)).max(1);
         let dst_var = locals
             .get(&destination.local)

@@ -453,6 +453,11 @@ fn collect_serde_turbofish_calls(sf: &SourceFile) -> Vec<(String, String, Span, 
     }
     impl Visitor for Collector {
         fn visit_item(&mut self, item: &gossamer_ast::Item) {
+            // Synthesis reads only the items this build compiles, so a call
+            // inside an inactive `#[cfg]` item has no codec to be missing.
+            if !gossamer_ast::cfg::item_is_active(&item.attrs) {
+                return;
+            }
             let name = match &item.kind {
                 ItemKind::Mod(decl) if matches!(decl.body, gossamer_ast::ModBody::Inline(_)) => {
                     Some(decl.name.name.clone())

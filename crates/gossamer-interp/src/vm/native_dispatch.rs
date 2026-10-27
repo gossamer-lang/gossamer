@@ -22,6 +22,13 @@ impl<'a> VmDispatch<'a> {
     }
 }
 
+/// Calls `callee` with `args` on the VM active on this thread, as a binding
+/// that compiled code calls runs a VM callable back; `None` when no VM is
+/// active here.
+pub fn call_value_on_running_vm(callee: &Value, args: Vec<Value>) -> Option<RuntimeResult<Value>> {
+    super::with_active_vm(|vm| VmDispatch::new(vm).call_value(callee, args))
+}
+
 impl NativeDispatch for VmDispatch<'_> {
     fn call_fn(&mut self, name: &str, args: Vec<Value>) -> RuntimeResult<Value> {
         // Resolve and invoke without clearing the call stack: this

@@ -248,14 +248,6 @@ unsafe extern "C" fn vm_invoke(
 ) -> u32 {
     let outcome =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> RuntimeResult<Value> {
-            if ctx.is_null() {
-                return Err(RuntimeError::Type(
-                    "a VM callable was called with no VM call running".to_string(),
-                ));
-            }
-            // SAFETY: a non-null `ctx` is the `Ctx` of the VM call running on
-            // this thread, which the binding passes back while that call runs.
-            let ctx = unsafe { &mut *ctx.cast::<Ctx<'_>>() };
             let callable = crate::marshal::callable(handle).ok_or_else(|| {
                 RuntimeError::Type(format!("callback {handle} is no longer held"))
             })?;
@@ -270,6 +262,19 @@ unsafe extern "C" fn vm_invoke(
                 .iter()
                 .map(|v| unsafe { decode(v) })
                 .collect::<RuntimeResult<Vec<_>>>()?;
+            if ctx.is_null() {
+                // A null context comes from a binding compiled code called,
+                // which the VM active on this thread entered.
+                return gossamer_interp::call_value_on_running_vm(&callable, decoded)
+                    .unwrap_or_else(|| {
+                        Err(RuntimeError::Type(
+                            "a VM callable was called with no VM call running".to_string(),
+                        ))
+                    });
+            }
+            // SAFETY: a non-null `ctx` is the `Ctx` of the VM call running on
+            // this thread, which the binding passes back while that call runs.
+            let ctx = unsafe { &mut *ctx.cast::<Ctx<'_>>() };
             ctx.dispatch.call_value(&callable, decoded)
         }));
     let (status, value) = match outcome {

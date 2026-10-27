@@ -148,6 +148,18 @@ mod autoderive_tests {
         assert!(augmented.contains("__gos_serde_from_json_b__Names"), "{augmented}");
     }
 
+    /// A serde call inside an item `#[cfg]` leaves out of the build, such as
+    /// a dependency's `#[cfg(test)]` module in its consumer's build, names no
+    /// codec the build needs.
+    #[test]
+    fn a_turbofish_inside_an_inactive_item_is_not_reported() {
+        let source = "mod shapes {\n    pub struct P { a: i64 }\n}\n\
+                      #[cfg(feature = \"never\")]\nmod tests {\n    use std::encoding::json\n    \
+                      use crate::shapes::P\n    fn read() -> bool {\n        \
+                      json::decode::<P>(\"{}\").is_ok()\n    }\n}\nfn main() {}\n";
+        assert!(serde_target_refusals(source).is_empty(), "{:?}", serde_target_refusals(source));
+    }
+
     /// An imported name stands for the type the importing module brings in,
     /// even when another module imports a different type under that name.
     #[test]
