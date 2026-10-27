@@ -186,15 +186,15 @@ fi
 phase "core Rust gates"
 run_step "cargo clippy --workspace --all-targets"          cargo clippy --workspace --all-targets -- -D warnings
 
-# The generated tables and pages that track the stdlib manifest and the
-# CLI surface. Each check itself runs in seconds - what an ordinary edit
-# (a new stdlib module, a reworded argument, a moved doc line) makes
-# stale - but they need the `gos` binary, so the phase carries a full
-# workspace build.
+# The generated tables that track the stdlib manifest and the CLI surface.
+# Each check itself runs in seconds - what an ordinary edit (a new stdlib
+# module, a reworded argument) makes stale - but they need the `gos`
+# binary, so the phase carries a full workspace build. The generated
+# documentation pages live in gossamer-docs, whose own checks compare
+# them with this tree.
 phase "generated-artifact gates"
 run_step "cargo build --bin gos"                           cargo build --bin gos
 built_gos="${CARGO_TARGET_DIR:-./target}/debug/gos"
-run_step "gos doc --emit-stdlib --check"                   "$built_gos" doc --emit-stdlib docs_src/stdlib --check
 run_step "cargo xtask docs-llm --check"                    cargo xtask docs-llm --check
 run_step "cargo xtask item-fixtures --check"               cargo xtask item-fixtures --check
 run_step "cargo xtask schema --check"                      cargo xtask schema --check

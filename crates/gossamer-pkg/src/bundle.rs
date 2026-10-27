@@ -23,7 +23,7 @@ use crate::lockfile::Lockfile;
 use crate::resolver::dependency_identity;
 use crate::{DependencySpec, InlineDependency, Manifest, RustBindingSpec};
 
-pub use crate::bundled_span::BundledSpan;
+pub use crate::bundled_span::{BundledSpan, comptime_origins};
 
 /// Returns `spans` with every range moved `by` bytes further into the
 /// text they are being embedded in.
@@ -80,7 +80,8 @@ pub fn bundle_path_dependencies_traced(
     let mut spans = Vec::new();
     let mut worklist: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut dep_modules: BTreeMap<String, String> = BTreeMap::new();
-    collect_path_deps_with_modules(entry, visited, &mut worklist, &mut dep_modules);
+    let root = project_root_of(entry);
+    collect_path_deps_with_modules(entry, &root, visited, &mut worklist, &mut dep_modules);
     let mut i = 0;
     while i < worklist.len() {
         let (dep_root, dep_entry) = worklist[i].clone();
@@ -97,7 +98,7 @@ pub fn bundle_path_dependencies_traced(
             continue;
         };
         let (dep_bundled, dep_spans) = bundle_sibling_modules_traced(&dep_entry, dep_source);
-        collect_path_deps_with_modules(&dep_entry, visited, &mut worklist, &mut dep_modules);
+        collect_path_deps_with_modules(&dep_entry, &root, visited, &mut worklist, &mut dep_modules);
         // A `module = "..."` override in the manifest that declares the
         // dependency names the module its source is reached under; without
         // one the dependency's own `[lib] name`, then its id, does.
@@ -126,7 +127,8 @@ pub fn bundle_path_dependencies_traced(
 pub fn path_dependency_roots(entry: &Path) -> Vec<(String, PathBuf)> {
     let mut visited = Vec::new();
     let mut worklist: Vec<(PathBuf, PathBuf)> = Vec::new();
-    collect_path_deps(entry, &mut visited, &mut worklist);
+    let root = project_root_of(entry);
+    collect_path_deps(entry, &root, &mut visited, &mut worklist);
     let mut roots = Vec::new();
     let mut i = 0;
     while i < worklist.len() {
@@ -135,7 +137,7 @@ pub fn path_dependency_roots(entry: &Path) -> Vec<(String, PathBuf)> {
         if let Some(dependency) = path_dep_entry(&dep_root) {
             roots.push((dependency.id, dep_root));
         }
-        collect_path_deps(&dep_entry, &mut visited, &mut worklist);
+        collect_path_deps(&dep_entry, &root, &mut visited, &mut worklist);
     }
     roots
 }
@@ -190,25 +192,110 @@ fn rebased_binding(spec: RustBindingSpec, root: &Path) -> RustBindingSpec {
     }
 }
 
-/// Appends the (root, entry) of each not-yet-visited path dependency
-/// of `entry`'s project to `worklist`.
+/// A dependency a program declares whose source is not on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unprepared {
+    /// A git, registry or tarball dependency neither `gos fetch` nor
+    /// `gos vendor` has prepared, by project id.
+    Unfetched(String),
+    /// A `path` dependency whose directory holds no project.
+    MissingPath(PathBuf),
+}
+
+/// The dependencies `entry`'s program declares, at any depth, whose source
+/// is not on disk, each named once.
+#[must_use]
+pub fn unprepared_dependencies(entry: &Path) -> Vec<Unprepared> {
+    let root = project_root_of(entry);
+    let mut dirs = vec![root.clone()];
+    dirs.extend(path_dependency_roots(entry).into_iter().map(|(_, dir)| dir));
+    let mut missing = Vec::new();
+    for dir in dirs {
+        let Ok(text) = fs::read_to_string(dir.join("project.toml")) else {
+            continue;
+        };
+        let Ok(manifest) = Manifest::parse(&text) else {
+            continue;
+        };
+        for (key, spec) in &manifest.dependencies {
+            let optional = manifest
+                .dependency_features
+                .get(key)
+                .is_some_and(|chosen| chosen.optional);
+            if optional && !crate::features::optional_dependency_included(key) {
+                continue;
+            }
+            let gap = match dependency_path(spec) {
+                Some(rel) => {
+                    let target = dir.join(rel);
+                    (!target.join("project.toml").is_file())
+                        .then(|| Unprepared::MissingPath(lexically_normalized(&target)))
+                }
+                None => prepared_dependency_root(&root, &dir, key, spec)
+                    .is_none()
+                    .then(|| {
+                        Unprepared::Unfetched(
+                            dependency_identity(key, spec, Some(&dir))
+                                .map_or_else(|_| key.clone(), |id| id.as_str().to_string()),
+                        )
+                    }),
+            };
+            if let Some(gap) = gap
+                && !missing.contains(&gap)
+            {
+                missing.push(gap);
+            }
+        }
+    }
+    missing
+}
+
+/// The directory of the project `entry` belongs to: the one holding the
+/// `project.toml` beside `entry` or one level up, else `entry`'s own
+/// directory.
+#[must_use]
+pub fn project_root_of(entry: &Path) -> PathBuf {
+    entry
+        .parent()
+        .map(|dir| {
+            manifest_beside(dir)
+                .and_then(|manifest| manifest.parent().map(Path::to_path_buf))
+                .unwrap_or_else(|| dir.to_path_buf())
+        })
+        .unwrap_or_default()
+}
+
+/// The `project.toml` in `dir` or its parent.
+fn manifest_beside(dir: &Path) -> Option<PathBuf> {
+    [dir.join("project.toml")]
+        .into_iter()
+        .chain(dir.parent().map(|p| p.join("project.toml")))
+        .find(|p| p.is_file())
+}
+
+/// Appends the (root, entry) of each not-yet-visited dependency of
+/// `entry`'s project to `worklist`.
 ///
-/// `visited` holds canonical roots, so two spellings of one directory
-/// are the same dependency. The root handed to `worklist` keeps the
-/// spelling the manifest used, which is the form that reaches the user
-/// in diagnostics and bundle comments.
+/// `root` is the program's own project: its lockfile and `vendor/` name
+/// where every fetched dependency is prepared, however deep, as a fetched
+/// package carries no lockfile of its own. `visited` holds canonical
+/// roots, so two spellings of one directory are the same dependency. The
+/// root handed to `worklist` keeps the spelling the manifest used, which
+/// is the form that reaches the user in diagnostics and bundle comments.
 pub fn collect_path_deps(
     entry: &Path,
+    root: &Path,
     visited: &mut Vec<PathBuf>,
     worklist: &mut Vec<(PathBuf, PathBuf)>,
 ) {
-    collect_path_deps_with_modules(entry, visited, worklist, &mut BTreeMap::new());
+    collect_path_deps_with_modules(entry, root, visited, worklist, &mut BTreeMap::new());
 }
 
 /// As [`collect_path_deps`], also recording each dependency's
 /// `module = "..."` override from the manifest that declares it.
 pub fn collect_path_deps_with_modules(
     entry: &Path,
+    root: &Path,
     visited: &mut Vec<PathBuf>,
     worklist: &mut Vec<(PathBuf, PathBuf)>,
     modules: &mut BTreeMap<String, String>,
@@ -216,11 +303,7 @@ pub fn collect_path_deps_with_modules(
     let Some(dir) = entry.parent() else {
         return;
     };
-    let manifest_path = [dir.join("project.toml")]
-        .into_iter()
-        .chain(dir.parent().map(|p| p.join("project.toml")))
-        .find(|p| p.is_file());
-    let Some(manifest_path) = manifest_path else {
+    let Some(manifest_path) = manifest_beside(dir) else {
         return;
     };
     let Ok(manifest_text) = fs::read_to_string(&manifest_path) else {
@@ -244,7 +327,7 @@ pub fn collect_path_deps_with_modules(
             continue;
         }
         let Some(spelled) = dependency_path(spec).map_or_else(
-            || prepared_dependency_root(manifest_dir, key, spec),
+            || prepared_dependency_root(root, manifest_dir, key, spec),
             |rel| Some(manifest_dir.join(rel)),
         ) else {
             continue;
@@ -297,7 +380,7 @@ pub fn dependency_module_name(manifest: &Manifest, manifest_dir: &Path, key: &st
         .get(key)
         .and_then(|spec| {
             dependency_path(spec).map_or_else(
-                || prepared_dependency_root(manifest_dir, key, spec),
+                || prepared_dependency_root(manifest_dir, manifest_dir, key, spec),
                 |rel| Some(manifest_dir.join(rel)),
             )
         })
@@ -311,22 +394,25 @@ pub fn dependency_module_name(manifest: &Manifest, manifest_dir: &Path, key: &st
 
 /// The directory holding a fetched dependency's source, for the sources
 /// that are not read live from a local path. `gos vendor` writes one under
-/// the project's own `vendor/`, and `gos fetch` writes one into the shared
-/// package cache, keyed by the digest the lockfile pins. A dependency with
-/// neither prepared yet has no source to compile against.
+/// the root project's `vendor/`, and `gos fetch` writes one into the shared
+/// package cache, keyed by the digest the root's lockfile pins. A
+/// dependency with neither prepared yet has no source to compile against.
+/// `manifest_dir` is where the manifest declaring the dependency sits.
 fn prepared_dependency_root(
+    root: &Path,
     manifest_dir: &Path,
     key: &str,
     spec: &DependencySpec,
 ) -> Option<PathBuf> {
     let id = dependency_identity(key, spec, Some(manifest_dir)).ok()?;
-    let vendored = manifest_dir
-        .join("vendor")
-        .join(id.as_str().replace('/', "__"));
+    if let Some(local) = root_path_override(root, &id) {
+        return Some(local);
+    }
+    let vendored = root.join("vendor").join(id.as_str().replace('/', "__"));
     if vendored.join("project.toml").is_file() {
         return Some(vendored);
     }
-    let lock = Lockfile::load(manifest_dir).ok().flatten()?;
+    let lock = Lockfile::load(root).ok().flatten()?;
     let digest = lock
         .entries
         .iter()
@@ -335,6 +421,19 @@ fn prepared_dependency_root(
         .as_deref()?;
     let cached = cached_source_dir(&default_cache_root()?, digest)?;
     cached.join("project.toml").is_file().then_some(cached)
+}
+
+/// The directory the root project's own `path` declaration of `id` names:
+/// the root's declaration of a package wins over a dependency's, as it
+/// does when `gos fetch` resolves the graph.
+fn root_path_override(root: &Path, id: &crate::ProjectId) -> Option<PathBuf> {
+    let text = fs::read_to_string(root.join("project.toml")).ok()?;
+    let manifest = Manifest::parse(&text).ok()?;
+    manifest.dependencies.iter().find_map(|(key, spec)| {
+        let rel = dependency_path(spec)?;
+        let declared = dependency_identity(key, spec, Some(root)).ok()?;
+        (declared == *id).then(|| root.join(rel))
+    })
 }
 
 /// The `path` field of a dependency spec, when it is a local-path
@@ -715,22 +814,6 @@ fn is_valid_module_ident(name: &str) -> bool {
     true
 }
 
-/// The `(start, end, file)` ranges of an assembled unit a compile-time fold
-/// anchors each region's relative reads at, outermost first.
-#[must_use]
-pub fn comptime_origins(spans: &[BundledSpan]) -> Vec<(u32, u32, String)> {
-    spans
-        .iter()
-        .map(|span| {
-            (
-                span.start,
-                span.end,
-                span.origin.to_string_lossy().into_owned(),
-            )
-        })
-        .collect()
-}
-
 /// Assembles the compilation unit for `entry` from `source`: its
 /// sibling / subdirectory modules first, then every `path = "..."`
 /// dependency. `source` is the entry's text, which lets an editor pass
@@ -982,6 +1065,84 @@ mod bundle_tests {
         assert!(
             bundled.contains("mod pgsql_gos {") && bundled.contains("pub fn connect"),
             "vendored dependency body missing:\n{bundled}"
+        );
+        let _ = fs::remove_dir_all(entry.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn a_fetched_dependency_reaches_its_own_dependencies_through_the_root() {
+        // The app names only the GUI library; the windowing library it is
+        // built on is prepared beside it, under the app's own vendor/.
+        let entry = project_with_dependency(
+            "transitive",
+            "gui = { git = \"https://github.com/example/gui\", tag = \"v0.1.0\" }",
+            "vendor/github.com__gossamer-lang__pgsql-gos",
+        );
+        let root = entry.parent().unwrap().parent().unwrap().to_path_buf();
+        let gui = root.join("vendor").join("github.com__example__gui");
+        fs::create_dir_all(gui.join("src")).unwrap();
+        fs::write(
+            gui.join("project.toml"),
+            "[project]\nid = \"github.com/example/gui\"\nversion = \"0.1.0\"\n\n[dependencies]\n\
+             \"github.com/gossamer-lang/pgsql-gos\" = { git = \"https://github.com/gossamer-lang/pgsql-gos\", tag = \"v0.1.0\" }\n",
+        )
+        .unwrap();
+        fs::write(gui.join("src").join("lib.gos"), "pub fn window() { }\n").unwrap();
+        let bundled =
+            bundle_path_dependencies(&entry, fs::read_to_string(&entry).unwrap(), &mut Vec::new());
+        assert!(
+            bundled.contains("#[dependency(\"github.com/example/gui\")]"),
+            "the direct dependency was not bundled:\n{bundled}"
+        );
+        assert!(
+            bundled.contains("#[dependency(\"github.com/gossamer-lang/pgsql-gos\")]")
+                && bundled.contains("pub fn connect"),
+            "the dependency's own dependency was not found through the root:\n{bundled}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_root_points_a_dependency_of_a_dependency_at_a_local_checkout() {
+        let entry = project_with_dependency(
+            "override",
+            "gui = { git = \"https://github.com/example/gui\", tag = \"v0.1.0\" }\n\
+             \"github.com/gossamer-lang/pgsql-gos\" = { path = \"local/pgsql\" }",
+            "local/pgsql",
+        );
+        let root = entry.parent().unwrap().parent().unwrap().to_path_buf();
+        let gui = root.join("vendor").join("github.com__example__gui");
+        fs::create_dir_all(gui.join("src")).unwrap();
+        fs::write(
+            gui.join("project.toml"),
+            "[project]\nid = \"github.com/example/gui\"\nversion = \"0.1.0\"\n\n[dependencies]\n\
+             \"github.com/gossamer-lang/pgsql-gos\" = { git = \"https://github.com/gossamer-lang/pgsql-gos\", tag = \"v0.1.0\" }\n",
+        )
+        .unwrap();
+        fs::write(gui.join("src").join("lib.gos"), "pub fn window() { }\n").unwrap();
+        assert_eq!(unprepared_dependencies(&entry), Vec::new());
+        let bundled =
+            bundle_path_dependencies(&entry, fs::read_to_string(&entry).unwrap(), &mut Vec::new());
+        assert_eq!(
+            bundled
+                .matches("#[dependency(\"github.com/gossamer-lang/pgsql-gos\")]")
+                .count(),
+            1,
+            "the local checkout stands in once:\n{bundled}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_dependency_nothing_prepared_is_reported_as_unfetched() {
+        let entry = project_with_dependency(
+            "never-fetched",
+            "gui = { git = \"https://github.com/example/gui\", tag = \"v0.1.0\" }",
+            "elsewhere",
+        );
+        assert_eq!(
+            unprepared_dependencies(&entry),
+            vec![Unprepared::Unfetched("github.com/example/gui".to_string())]
         );
         let _ = fs::remove_dir_all(entry.parent().unwrap().parent().unwrap());
     }

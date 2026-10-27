@@ -375,6 +375,15 @@ pub enum ResolveError {
         /// Human-readable summary of the conflict.
         detail: String,
     },
+    /// A dependency's source could not be made available to read the
+    /// dependencies it declares.
+    #[error("{id}: {reason}")]
+    Unavailable {
+        /// Project being resolved.
+        id: String,
+        /// Why its source is not available.
+        reason: String,
+    },
 }
 
 /// Resolver entry point.
@@ -556,6 +565,90 @@ fn git_url_identity(url: &str) -> Option<ProjectId> {
     let rest = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
     let rest = rest.strip_suffix(".git").unwrap_or(rest);
     ProjectId::parse(rest).ok()
+}
+
+/// What [`resolve_graph`] needs from whatever makes dependencies available:
+/// a fetcher that downloads them, or a lockfile and cache that already hold
+/// them.
+pub trait GraphSource {
+    /// The versions a registry offers for the registry dependencies
+    /// `manifest` declares, for resolving its requirements.
+    fn catalogue(&mut self, manifest: &Manifest) -> Result<VersionCatalogue, ResolveError>;
+
+    /// Makes `resolved` available, answering its manifest and the directory
+    /// its relative paths are written against, or `None` when it has no
+    /// manifest to read further dependencies from.
+    fn prepare(&mut self, resolved: &Resolved)
+    -> Result<Option<(Manifest, PathBuf)>, ResolveError>;
+}
+
+/// The whole dependency graph below `root`, whose manifest sits in
+/// `root_dir`: its own dependencies, then each dependency's, breadth first,
+/// so a program that depends on a library also gets the libraries that
+/// library depends on. The root's own declaration of a package wins over
+/// any dependency's, which is how a project points a dependency's
+/// dependency at a local checkout; two dependencies pinning one package
+/// differently is an error.
+pub fn resolve_graph(
+    root: &Manifest,
+    root_dir: &Path,
+    source: &mut impl GraphSource,
+) -> Result<Vec<Resolved>, ResolveError> {
+    let mut chosen: BTreeMap<String, (Resolved, bool)> = BTreeMap::new();
+    let mut order: Vec<Resolved> = Vec::new();
+    let mut queue: std::collections::VecDeque<Resolved> = std::collections::VecDeque::new();
+    let catalogue = source.catalogue(root)?;
+    for entry in Resolver::new(catalogue).with_root(root_dir).resolve(root)? {
+        chosen.insert(entry.id.as_str().to_string(), (entry.clone(), true));
+        queue.push_back(entry.clone());
+        order.push(entry);
+    }
+    while let Some(entry) = queue.pop_front() {
+        let Some((manifest, dir)) = source.prepare(&entry)? else {
+            continue;
+        };
+        let catalogue = source.catalogue(&manifest)?;
+        for mut found in Resolver::new(catalogue)
+            .with_root(&dir)
+            .resolve(&manifest)?
+        {
+            // A path below the root is written against its own package.
+            if let ResolvedSource::Path(path) = &found.pin {
+                found.pin = ResolvedSource::Path(dir.join(path).to_string_lossy().into_owned());
+            }
+            match chosen.get(found.id.as_str()) {
+                Some((_, true)) => {}
+                Some((existing, false)) => {
+                    if !same_source(&existing.pin, &found.pin) {
+                        return Err(ResolveError::ConflictingPins {
+                            id: found.id.as_str().to_string(),
+                        });
+                    }
+                }
+                None => {
+                    chosen.insert(found.id.as_str().to_string(), (found.clone(), false));
+                    queue.push_back(found.clone());
+                    order.push(found);
+                }
+            }
+        }
+    }
+    Ok(order)
+}
+
+/// Whether two pins name one source: equal, or two spellings of one
+/// directory.
+fn same_source(a: &ResolvedSource, b: &ResolvedSource) -> bool {
+    match (a, b) {
+        (ResolvedSource::Path(a), ResolvedSource::Path(b)) => {
+            a == b
+                || matches!(
+                    (Path::new(a).canonicalize(), Path::new(b).canonicalize()),
+                    (Ok(a), Ok(b)) if a == b
+                )
+        }
+        _ => a == b,
+    }
 }
 
 /// Tooling to resolve a dependency graph transitively.
@@ -863,5 +956,124 @@ mod identity_tests {
         });
         let id = dependency_identity("pgsql_gos", &spec, None).unwrap();
         assert_eq!(id.as_str(), "github.com/gossamer-lang/pgsql-gos");
+    }
+}
+
+#[cfg(test)]
+mod graph_tests {
+    use super::*;
+
+    /// Packages by git URL: each answers the manifest a fetch would find.
+    struct Packages(BTreeMap<String, String>);
+
+    impl GraphSource for Packages {
+        fn catalogue(&mut self, _: &Manifest) -> Result<VersionCatalogue, ResolveError> {
+            Ok(VersionCatalogue::new())
+        }
+
+        fn prepare(
+            &mut self,
+            resolved: &Resolved,
+        ) -> Result<Option<(Manifest, PathBuf)>, ResolveError> {
+            let ResolvedSource::Git { url, .. } = &resolved.pin else {
+                return Ok(None);
+            };
+            Ok(self.0.get(url).map(|text| {
+                (
+                    Manifest::parse(text).expect("valid manifest"),
+                    PathBuf::new(),
+                )
+            }))
+        }
+    }
+
+    fn manifest(id: &str, deps: &[(&str, &str)]) -> String {
+        let mut text = format!("[project]\nid = \"{id}\"\nversion = \"0.1.0\"\n\n[dependencies]\n");
+        for (dep, tag) in deps {
+            text.push_str(&format!(
+                "\"{dep}\" = {{ git = \"https://{dep}\", tag = \"{tag}\" }}\n"
+            ));
+        }
+        text
+    }
+
+    fn pins(plan: &[Resolved]) -> Vec<(String, String)> {
+        plan.iter()
+            .map(|r| match &r.pin {
+                ResolvedSource::Git { reference, .. } => {
+                    (r.id.as_str().to_string(), reference.clone())
+                }
+                other => (r.id.as_str().to_string(), format!("{other:?}")),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_dependency_brings_the_dependencies_it_declares() {
+        let mut packages = Packages(BTreeMap::from([
+            (
+                "https://example.com/gui".to_string(),
+                manifest(
+                    "example.com/gui",
+                    &[("example.com/engine", "v1"), ("example.com/windows", "v1")],
+                ),
+            ),
+            (
+                "https://example.com/engine".to_string(),
+                manifest("example.com/engine", &[("example.com/windows", "v1")]),
+            ),
+        ]));
+        let root =
+            Manifest::parse(&manifest("example.com/app", &[("example.com/gui", "v1")])).unwrap();
+        let plan = resolve_graph(&root, Path::new("."), &mut packages).unwrap();
+        assert_eq!(
+            pins(&plan),
+            vec![
+                ("example.com/gui".to_string(), "v1".to_string()),
+                ("example.com/engine".to_string(), "v1".to_string()),
+                ("example.com/windows".to_string(), "v1".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_root_pins_a_dependency_of_a_dependency() {
+        let mut packages = Packages(BTreeMap::from([(
+            "https://example.com/gui".to_string(),
+            manifest("example.com/gui", &[("example.com/windows", "v1")]),
+        )]));
+        let root = Manifest::parse(&manifest(
+            "example.com/app",
+            &[("example.com/gui", "v1"), ("example.com/windows", "v2")],
+        ))
+        .unwrap();
+        let plan = resolve_graph(&root, Path::new("."), &mut packages).unwrap();
+        assert!(pins(&plan).contains(&("example.com/windows".to_string(), "v2".to_string())));
+        assert_eq!(plan.len(), 2);
+    }
+
+    #[test]
+    fn two_dependencies_pinning_one_package_differently_conflict() {
+        let mut packages = Packages(BTreeMap::from([
+            (
+                "https://example.com/gui".to_string(),
+                manifest("example.com/gui", &[("example.com/windows", "v1")]),
+            ),
+            (
+                "https://example.com/charts".to_string(),
+                manifest("example.com/charts", &[("example.com/windows", "v2")]),
+            ),
+        ]));
+        let root = Manifest::parse(&manifest(
+            "example.com/app",
+            &[("example.com/gui", "v1"), ("example.com/charts", "v1")],
+        ))
+        .unwrap();
+        assert_eq!(
+            resolve_graph(&root, Path::new("."), &mut packages),
+            Err(ResolveError::ConflictingPins {
+                id: "example.com/windows".to_string()
+            })
+        );
     }
 }

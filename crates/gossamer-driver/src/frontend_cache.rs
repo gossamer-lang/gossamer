@@ -23,7 +23,7 @@
 //! length-capped and magic-checked, and a decode failure is a miss rather
 //! than an error: cache contents are advisory and disposable.
 //!
-//! `docs_src/design/incremental.md` documents the key recipe and the
+//! The docs' `design/incremental.md` (gossamer-docs) documents the key recipe and the
 //! retention story in full.
 
 #![forbid(unsafe_code)]

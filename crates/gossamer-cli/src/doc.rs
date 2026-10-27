@@ -201,7 +201,7 @@ pub(crate) fn cmd_emit_stdlib(out_dir: &Path, check: bool) -> Result<()> {
         gossamer_types::render_builtin_traits_markdown(),
     ));
     let language_dir = out_dir.parent().map_or_else(
-        || Path::new("docs_src/language").to_path_buf(),
+        || Path::new("language").to_path_buf(),
         |p| p.join("language"),
     );
     if check {

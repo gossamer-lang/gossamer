@@ -1,6 +1,6 @@
 # Gossamer LLM Reference
 
-Generated from `SKILL.md` and `docs_src/api/stdlib.json`. This is deliberately scoped: only catalog entries with a standalone executable example and explicit verified status may appear as API recommendations.
+Generated from `SKILL.md` and the stdlib API catalog (https://gossamer-lang.org/docs/api/stdlib.json). This is deliberately scoped: only catalog entries with a standalone executable example and explicit verified status may appear as API recommendations.
 
 ## Language primer
 
@@ -472,4 +472,4 @@ Run it (section 2). Spec: `SPEC.md`. Examples: `examples/`, starting with
 
 ## Verified API reference
 
-No stdlib entry is eligible for this section yet. Consult the structured [`docs_src/api/stdlib.json`](docs_src/api/stdlib.json) catalog with `gos check`/`gos`; its entries are deliberately quarantined until their fixtures and tier evidence land.
+No stdlib entry is eligible for this section yet. Consult the structured [stdlib API catalog](https://gossamer-lang.org/docs/api/stdlib.json) with `gos check`/`gos`; its entries are deliberately quarantined until their fixtures and tier evidence land.

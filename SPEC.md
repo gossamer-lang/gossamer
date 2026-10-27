@@ -3135,7 +3135,7 @@ Language `for` loops and range iteration remain single-pass. They do not imply
 that `std::iter` adapter chains are lazy. The accepted staged protocol specifies
 ownership, invalidation, closure state, early termination, typed MIR operations,
 tier parity, and edition migration in
-[`docs_src/design/lazy_iterators.md`](docs_src/design/lazy_iterators.md). The
+[Lazy iterators](https://gossamer-lang.org/docs/design/lazy_iterators/). The
 current eager signatures remain Experimental until that protocol is implemented.
 
 Current eager example:
@@ -3784,7 +3784,7 @@ Rust code. A Rust crate registers its entry points with
 shared library and loads it, and `gos build` links it into the binary. Types crossing that boundary use the `gossamer-binding` ABI
 (`Unit`, `Bool`, `I64`, `F64`, `Char`, `String`, `Tuple`, `Vec`,
 `Option`, `Result`, `Opaque`, `Any`, `Bytes`, `Map`, `Variant`,
-`Callback`); see `docs_src/libraries.md` and
+`Callback`); see [Writing libraries](https://gossamer-lang.org/docs/libraries/) and
 `crates/gossamer-binding/ABI.md`.
 
 ---
@@ -3885,7 +3885,7 @@ the program is parsed, failing the build on a pattern that does not compile
 a `regex::Pattern` or the statement `String`. Either one handed anything but
 a literal is `GP0052`; `regex::new(pattern)` compiles a pattern built at run
 time and answers `Result<regex::Pattern, errors::Error>`. See the
-[`comptime` language page](docs_src/language/comptime.md).
+[`comptime` language page](https://gossamer-lang.org/docs/language/comptime/).
 
 Gossamer does not provide runtime reflection. Programs that require dynamic
 type inspection must use an explicit generated schema, tagged representation,

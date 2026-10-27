@@ -261,7 +261,8 @@ strip = false
             project = self.project_id,
             fp = self.fingerprint_hex,
             deps = deps.join("\n"),
-            patch = binding_crates_patch(),
+            patch =
+                binding_crates_patch(self.bindings.iter().filter_map(|b| b.local_root.as_deref())),
         )
     }
 
@@ -577,6 +578,24 @@ fn binding_crate_source(krate: &str) -> String {
     }
 }
 
+/// Where generated projects take the binding SDK from: this checkout's
+/// `crates/gossamer-binding` when one is reachable, else the repository at
+/// this toolchain's release tag, as `URL@TAG`.
+#[must_use]
+pub fn binding_sdk_location() -> String {
+    match toolchain_source_root() {
+        Some(root) => root
+            .join("crates")
+            .join("gossamer-binding")
+            .display()
+            .to_string(),
+        None => format!(
+            "https://github.com/gossamer-lang/gossamer@v{}",
+            env!("CARGO_PKG_VERSION")
+        ),
+    }
+}
+
 /// The `gossamer-binding` dependency a generated binding crate names.
 #[must_use]
 pub fn gossamer_binding_dependency() -> String {
@@ -586,11 +605,17 @@ pub fn gossamer_binding_dependency() -> String {
     )
 }
 
-/// The `[patch.crates-io]` table a generated root project carries, so a
-/// binding that depends on `gossamer-binding = "<version>"`, as `gos new
-/// --template binding` writes it, resolves to this toolchain's copy.
+/// The `[patch.crates-io]` table a generated root project carries.
+///
+/// A binding that depends on `gossamer-binding = "<version>"`, as `gos new
+/// --template binding` writes it, resolves to this toolchain's copy. A crate
+/// the set carries on disk - one of `local_roots`, the binding crates whose
+/// sources are local, or a crate they reach by path - also stands in for
+/// that crate wherever a crate of the set asks for it by version. A
+/// library's Rust core, shared by the bindings of the packages built on it,
+/// then links once, whichever package's tree each binding was fetched into.
 #[must_use]
-pub fn binding_crates_patch() -> String {
+pub fn binding_crates_patch<'a>(local_roots: impl IntoIterator<Item = &'a Path>) -> String {
     let mut out = String::from("[patch.crates-io]\n");
     for krate in BINDING_CRATES {
         out.push_str(&format!(
@@ -598,7 +623,92 @@ pub fn binding_crates_patch() -> String {
             binding_crate_source(krate)
         ));
     }
+    for (name, dir) in shared_crates(local_roots) {
+        out.push_str(&format!("{name} = {{ {} }}\n", toml_path_kv("path", &dir)));
+    }
     out
+}
+
+/// Each crate the set carries on disk that a crate of the set asks for by
+/// version, by name.
+fn shared_crates<'a>(local_roots: impl IntoIterator<Item = &'a Path>) -> BTreeMap<String, PathBuf> {
+    let mut provided: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let mut requested: Vec<String> = Vec::new();
+    let mut pending: Vec<PathBuf> = local_roots.into_iter().map(Path::to_path_buf).collect();
+    let mut seen: Vec<PathBuf> = Vec::new();
+    while let Some(dir) = pending.pop() {
+        let identity = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+        if seen.contains(&identity) {
+            continue;
+        }
+        seen.push(identity);
+        let Some(doc) = cargo_manifest(&dir.join("Cargo.toml")) else {
+            continue;
+        };
+        if let Some(name) = doc
+            .get("package")
+            .and_then(|package| package.get("name"))
+            .and_then(toml::Value::as_str)
+        {
+            provided.entry(name.to_string()).or_insert(dir.clone());
+        }
+        for (key, dep) in dependency_entries(&doc) {
+            match dep.get("path").and_then(toml::Value::as_str) {
+                Some(path) => pending.push(dir.join(path)),
+                None if dep.get("git").is_none() => requested.push(
+                    dep.get("package")
+                        .and_then(toml::Value::as_str)
+                        .unwrap_or(key)
+                        .to_string(),
+                ),
+                None => {}
+            }
+        }
+    }
+    provided.retain(|name, _| requested.contains(name) && !BINDING_CRATES.contains(&name.as_str()));
+    provided
+}
+
+fn cargo_manifest(path: &Path) -> Option<toml::Table> {
+    fs::read_to_string(path).ok()?.parse::<toml::Table>().ok()
+}
+
+/// Every `(key, spec)` of a `Cargo.toml`'s dependency tables, the
+/// per-target ones included.
+fn dependency_entries(doc: &toml::Table) -> Vec<(&str, &toml::Value)> {
+    let mut tables: Vec<&toml::Table> = Vec::new();
+    for key in ["dependencies", "build-dependencies"] {
+        if let Some(table) = doc.get(key).and_then(toml::Value::as_table) {
+            tables.push(table);
+        }
+    }
+    if let Some(targets) = doc.get("target").and_then(toml::Value::as_table) {
+        for target in targets.values().filter_map(toml::Value::as_table) {
+            for key in ["dependencies", "build-dependencies"] {
+                if let Some(table) = target.get(key).and_then(toml::Value::as_table) {
+                    tables.push(table);
+                }
+            }
+        }
+    }
+    tables
+        .into_iter()
+        .flat_map(|table| table.iter().map(|(key, dep)| (key.as_str(), dep)))
+        .collect()
+}
+
+/// The directories a `Cargo.toml` names as path dependencies, in any of its
+/// dependency tables.
+pub(crate) fn path_dependencies(manifest: &Path) -> Vec<PathBuf> {
+    let Some(doc) = cargo_manifest(manifest) else {
+        return Vec::new();
+    };
+    let base = manifest.parent().unwrap_or(Path::new("."));
+    dependency_entries(&doc)
+        .into_iter()
+        .filter_map(|(_, dep)| dep.get("path").and_then(toml::Value::as_str))
+        .map(|path| base.join(path))
+        .collect()
 }
 
 /// Renders a `key = '...'` TOML pair using a single-quoted literal
@@ -1615,8 +1725,44 @@ mod tests {
     }
 
     #[test]
+    fn a_crate_one_binding_carries_stands_in_where_another_asks_for_it_by_version() {
+        let dir = std::env::temp_dir().join(format!("gos-shared-crates-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let write = |path: &str, text: &str| {
+            let file = dir.join(path).join("Cargo.toml");
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, text).unwrap();
+        };
+        // One package's binding carries the core crate beside it.
+        write("lower/core", "[package]\nname = \"lower-core\"\n");
+        write(
+            "lower/binding",
+            "[package]\nname = \"lower-binding\"\n[dependencies]\nlower-core = { path = \"../core\" }\n",
+        );
+        // Another package's engine asks for it by version, under its own key.
+        write(
+            "upper/engine",
+            "[package]\nname = \"upper-engine\"\n[dependencies]\nlower = { package = \"lower-core\", version = \"0.1.0\" }\nserde = \"1\"\n",
+        );
+        write(
+            "upper/binding",
+            "[package]\nname = \"upper-binding\"\n[dependencies]\nupper-engine = { path = \"../engine\" }\n",
+        );
+        let roots = [dir.join("lower/binding"), dir.join("upper/binding")];
+        let shared = shared_crates(roots.iter().map(PathBuf::as_path));
+        assert_eq!(
+            shared.keys().collect::<Vec<_>>(),
+            vec!["lower-core"],
+            "only a crate the set carries and also asks for by version is patched"
+        );
+        let patch = binding_crates_patch(roots.iter().map(PathBuf::as_path));
+        assert!(patch.contains("lower-core = { path = "), "{patch}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn generated_projects_patch_every_unpublished_binding_crate() {
-        let patch = binding_crates_patch();
+        let patch = binding_crates_patch([]);
         assert!(patch.starts_with("[patch.crates-io]\n"), "{patch}");
         for krate in BINDING_CRATES {
             assert!(patch.contains(&format!("\n{krate} = {{ ")), "{patch}");

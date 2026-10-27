@@ -16,15 +16,3 @@ target-*
 
 # Gossamer
 .gos-cache/
-
-## mkdocs
-__pycache__/
-site/
-
-## Generated wasm playground modules (CI regenerates from gossamer-playground;
-## the hand-written component files playground.js/.css, runtime-stub.js and
-## gossamer-lang.js are tracked).
-crates/gossamer-playground/pkg/
-landing/playground/gossamer_playground.js
-landing/playground/gossamer_playground_bg.wasm
-landing/playground/gossamer_playground*.d.ts

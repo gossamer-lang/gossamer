@@ -1,18 +1,24 @@
 //! Workspace automation entry point.
 //! Invoked via `cargo xtask <command>`. Current subcommands:
-//! - `docs-stdlib` - regenerate `docs_src/stdlib.md` from the
-//!   `gossamer_std` manifest so the rendered reference page tracks
-//!   the single source of truth.
-//! - `docs-lints` - regenerate `docs_src/toolchain/lints.md` from the
+//!
+//! The documentation lives in its own repository (gossamer-docs). The page
+//! generators write into the docs tree named by `--docs DIR` (that
+//! repository's `docs/`), and `--check` compares instead of writing:
+//! - `docs-stdlib` - regenerate `stdlib.md` from the `gossamer_std`
+//!   manifest so the rendered reference page tracks the single source
+//!   of truth.
+//! - `docs-lints` - regenerate `toolchain/lints.md` from the
 //!   `gossamer-lint` crate's `DAY_ONE_LINTS` + `lint_explanation`.
-//! - `docs-diagnostics` - regenerate `docs_src/toolchain/diagnostics.md`
-//!   from the curated catalogue in this file.
-//! - `stdlib-coverage` - regenerate `docs_src/stdlib_coverage.md`
-//!   from the per-module support state recorded in
-//!   `STDLIB_SUPPORT`.
-//! - `docs-llm` - regenerate the checked-in, machine-readable
-//!   public-stdlib catalogue for LLM and MCP consumers.
-//! - `docs-all` - run every generator above in one invocation.
+//! - `docs-diagnostics` - regenerate `toolchain/diagnostics.md` from
+//!   the curated catalogue in this file.
+//! - `stdlib-coverage` - regenerate `stdlib_coverage.md` from the
+//!   per-module support state recorded in `STDLIB_SUPPORT`.
+//! - `docs-llm` - regenerate `llms.txt` and `llms-full.txt` at the
+//!   workspace root and, given `--docs`, the machine-readable
+//!   public-stdlib catalogue under `api/` for LLM and MCP consumers.
+//! - `docs-all` - run every page generator above in one invocation:
+//!   all but `llms.txt` and `llms-full.txt`, which belong to this
+//!   repository and `docs-llm` keeps.
 //! - `schema` - regenerate `benchmarks/frontend_parser/schema/blob.json`,
 //!   the frontend blob's schema, and the parser benchmarks' generated AST,
 //!   from the serde types the cache encodes.
@@ -37,29 +43,50 @@ fn main() -> Result<()> {
         None => {
             println!("usage: cargo xtask <subcommand>");
             println!("subcommands:");
-            println!("  docs-stdlib         regenerate docs_src/stdlib.md");
-            println!("  docs-lints          regenerate docs_src/toolchain/lints.md");
-            println!("  docs-diagnostics    regenerate docs_src/toolchain/diagnostics.md");
-            println!("  stdlib-coverage     regenerate docs_src/stdlib_coverage.md");
-            println!("  docs-llm [--check]  regenerate or check docs_src/api/stdlib.json");
-            println!("  docs-all            run every docs generator");
+            println!("  docs-stdlib --docs DIR [--check]       regenerate DIR/stdlib.md");
+            println!("  docs-lints --docs DIR [--check]        regenerate DIR/toolchain/lints.md");
+            println!(
+                "  docs-diagnostics --docs DIR [--check]  regenerate DIR/toolchain/diagnostics.md"
+            );
+            println!("  stdlib-coverage --docs DIR [--check]   regenerate DIR/stdlib_coverage.md");
+            println!(
+                "  docs-llm [--docs DIR] [--check]        regenerate llms.txt, llms-full.txt and DIR/api/"
+            );
+            println!("  docs-all --docs DIR [--check]          run every page generator under DIR");
             println!("  item-fixtures [--check]  regenerate the ITEM_FIXTURES ledger");
             println!("  lint-budget         tally #[allow(...)] sites per crate");
             println!("  audit-allows        list every #[allow(...)] with surrounding context");
             println!("  migrate-struct-constructors <PATH>  rewrite braced struct constructors");
             Ok(())
         }
-        Some("docs-stdlib") => regenerate_stdlib_docs(),
-        Some("docs-lints") => regenerate_lint_docs(),
-        Some("docs-diagnostics") => regenerate_diagnostic_docs(),
-        Some("stdlib-coverage") => regenerate_stdlib_coverage(),
-        Some("docs-llm") => regenerate_llm_docs(args.get(1).map(String::as_str) == Some("--check")),
+        Some(command @ ("docs-stdlib" | "docs-lints" | "docs-diagnostics" | "stdlib-coverage")) => {
+            let options = DocsOptions::parse(&args[1..])?;
+            let docs = options.docs_dir(command)?;
+            let outputs = match command {
+                "docs-stdlib" => stdlib_docs(docs),
+                "docs-lints" => lint_docs(docs),
+                "docs-diagnostics" => diagnostic_docs(docs),
+                _ => stdlib_coverage(docs),
+            };
+            sync_outputs(&outputs, options.check, command)
+        }
+        Some("docs-llm") => {
+            let options = DocsOptions::parse(&args[1..])?;
+            let mut outputs = llm_files(&locate_workspace_root()?)?;
+            if let Some(docs) = &options.docs {
+                outputs.extend(api_catalogs(docs)?);
+            }
+            sync_outputs(&outputs, options.check, "docs-llm")
+        }
         Some("docs-all") => {
-            regenerate_stdlib_docs()?;
-            regenerate_lint_docs()?;
-            regenerate_diagnostic_docs()?;
-            regenerate_stdlib_coverage()?;
-            regenerate_llm_docs(false)
+            let options = DocsOptions::parse(&args[1..])?;
+            let docs = options.docs_dir("docs-all")?;
+            let mut outputs = stdlib_docs(docs);
+            outputs.extend(lint_docs(docs));
+            outputs.extend(diagnostic_docs(docs));
+            outputs.extend(stdlib_coverage(docs));
+            outputs.extend(api_catalogs(docs)?);
+            sync_outputs(&outputs, options.check, "docs-all")
         }
         Some("schema") => schema::export(args.get(1).map(String::as_str) == Some("--check")),
         Some("item-fixtures") => {
@@ -115,17 +142,76 @@ fn collect_gos_files(path: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Rewrites `docs_src/stdlib.md` using the data in
-/// [`gossamer_std::modules`]. The generated page starts with a
-/// marker line so the regeneration is idempotent and consumers can
-/// diff against the previous version.
-fn regenerate_stdlib_docs() -> Result<()> {
-    let workspace_root = locate_workspace_root()?;
-    let out_path = workspace_root.join("docs_src/stdlib.md");
-    let page = render_stdlib_page(modules());
-    fs::write(&out_path, page).with_context(|| format!("writing {}", out_path.display()))?;
-    println!("xtask: wrote {}", out_path.display());
+/// Each generated file with the text its generator writes there.
+type Outputs = Vec<(PathBuf, String)>;
+
+/// The flags the docs generators take.
+#[derive(Debug, Default)]
+struct DocsOptions {
+    /// The documentation tree the pages are written into.
+    docs: Option<PathBuf>,
+    /// Compare with the files on disk instead of writing them.
+    check: bool,
+}
+
+impl DocsOptions {
+    fn parse(args: &[String]) -> Result<Self> {
+        let mut options = Self::default();
+        let mut rest = args.iter();
+        while let Some(arg) = rest.next() {
+            match arg.as_str() {
+                "--check" => options.check = true,
+                "--docs" => {
+                    let dir = rest.next().context("--docs needs a directory")?;
+                    options.docs = Some(PathBuf::from(dir));
+                }
+                other => anyhow::bail!("unknown argument {other:?}"),
+            }
+        }
+        Ok(options)
+    }
+
+    fn docs_dir(&self, command: &str) -> Result<&Path> {
+        self.docs.as_deref().with_context(|| {
+            format!("{command} needs --docs DIR, the docs/ directory of a gossamer-docs checkout")
+        })
+    }
+}
+
+/// Writes each output, or with `check` fails naming every file whose
+/// contents differ from what `command` would write.
+fn sync_outputs(outputs: &Outputs, check: bool, command: &str) -> Result<()> {
+    if check {
+        let drift: Vec<String> = outputs
+            .iter()
+            .filter(|(path, generated)| {
+                fs::read_to_string(path).map_or(true, |on_disk| on_disk != *generated)
+            })
+            .map(|(path, _)| path.display().to_string())
+            .collect();
+        if drift.is_empty() {
+            println!("xtask: {command} is in sync ({} files)", outputs.len());
+            return Ok(());
+        }
+        anyhow::bail!(
+            "generated documentation drift: {} (run `cargo xtask {command}` with the same --docs)",
+            drift.join(", ")
+        );
+    }
+    for (path, generated) in outputs {
+        let parent = path.parent().context("generated file has a parent")?;
+        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+        fs::write(path, generated).with_context(|| format!("writing {}", path.display()))?;
+        println!("xtask: wrote {}", path.display());
+    }
     Ok(())
+}
+
+/// `stdlib.md`, rendered from [`gossamer_std::modules`]. The page starts
+/// with a marker line so the regeneration is idempotent and consumers can
+/// diff against the previous version.
+fn stdlib_docs(docs: &Path) -> Outputs {
+    vec![(docs.join("stdlib.md"), render_stdlib_page(modules()))]
 }
 
 /// Walks parent directories from `CARGO_MANIFEST_DIR` until it finds
@@ -193,25 +279,16 @@ struct PublicApiEntry {
     reference_status: &'static str,
 }
 
-/// Regenerates, or byte-checks, the deterministic public stdlib catalogue.
-fn regenerate_llm_docs(check: bool) -> Result<()> {
-    let workspace_root = locate_workspace_root()?;
+/// Where the documentation site is published; the LLM index links into it.
+const DOCS_URL: &str = "https://gossamer-lang.org/docs/";
+
+/// `llms.txt` and `llms-full.txt` at the workspace root: the index and the
+/// compact reference agents reading this repository start from.
+fn llm_files(workspace_root: &Path) -> Result<Outputs> {
     let catalogue = build_public_api_catalog()?;
     let skill_card = fs::read_to_string(workspace_root.join("SKILL.md"))
         .context("reading checked LLM primer SKILL.md")?;
-    // The catalogue lives under the mkdocs `docs_dir` (`docs_src`), not the
-    // rendered `site_dir` (`docs`): mkdocs clears `site_dir` on every build and
-    // only restores what it renders itself. Being a docs source keeps these
-    // files published at `docs/api/*.json` while mkdocs copies them forward.
-    let outputs = vec![
-        (
-            workspace_root.join("docs_src/api/stdlib.json"),
-            serialize_public_api_catalog(&catalogue)?,
-        ),
-        (
-            workspace_root.join("docs_src/api/cookbook.json"),
-            render_empty_cookbook_catalog(),
-        ),
+    Ok(vec![
         (
             workspace_root.join("llms.txt"),
             render_llms_index(&catalogue),
@@ -220,38 +297,23 @@ fn regenerate_llm_docs(check: bool) -> Result<()> {
             workspace_root.join("llms-full.txt"),
             render_llms_full(&catalogue, &skill_card)?,
         ),
-    ];
-    if check {
-        let drift: Vec<String> = outputs
-            .iter()
-            .filter(|(path, generated)| {
-                fs::read_to_string(path).map_or(true, |on_disk| on_disk != *generated)
-            })
-            .map(|(path, _)| path.display().to_string())
-            .collect();
-        if drift.is_empty() {
-            println!("xtask: docs-llm is in sync ({} files)", outputs.len());
-            return Ok(());
-        }
-        anyhow::bail!(
-            "LLM documentation drift detected: {} (run `cargo xtask docs-llm`)",
-            drift.join(", ")
-        );
-    }
-    for (path, generated) in &outputs {
-        let parent = path.parent().expect("generated file has a parent");
-        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
-        fs::write(path, generated).with_context(|| format!("writing {}", path.display()))?;
-        println!("xtask: wrote {}", path.display());
-    }
-    let full_bytes = outputs[3].1.len();
-    println!(
-        "xtask: docs-llm catalogue={} entries, full-reference={} bytes (~{} tokens)",
-        catalogue.entries.len(),
-        full_bytes,
-        full_bytes.div_ceil(4)
-    );
-    Ok(())
+    ])
+}
+
+/// The machine-readable stdlib and cookbook catalogues under the docs tree's
+/// `api/`, which the site publishes at `api/*.json`.
+fn api_catalogs(docs: &Path) -> Result<Outputs> {
+    let catalogue = build_public_api_catalog()?;
+    Ok(vec![
+        (
+            docs.join("api/stdlib.json"),
+            serialize_public_api_catalog(&catalogue)?,
+        ),
+        (
+            docs.join("api/cookbook.json"),
+            render_empty_cookbook_catalog(),
+        ),
+    ])
 }
 
 /// Joins canonical manifest records to checker signatures without scraping Rust
@@ -296,7 +358,7 @@ fn build_public_api_catalog() -> Result<PublicApiCatalog> {
             platform_support: "not_audited",
             limits: Vec::new(),
             cookbook_tags: Vec::new(),
-            doc_anchor: format!("docs_src/stdlib.md#{}", module_anchor(item.module_path)),
+            doc_anchor: format!("stdlib.md#{}", module_anchor(item.module_path)),
             example_id: None,
             reference_status: "catalog_only",
         });
@@ -335,7 +397,7 @@ fn render_empty_cookbook_catalog() -> String {
 /// Generates the small root LLM discovery index rather than a second primer.
 fn render_llms_index(catalogue: &PublicApiCatalog) -> String {
     format!(
-        "# Gossamer\n\nGossamer is a Rust-flavoured language with goroutines and deterministic memory management; use `gos` to check, execute, build, test, format, and query programs. This generated index points models and agents at the reviewed primer and canonical API data.\n\n- [Compact LLM reference](llms-full.txt)\n- [Reviewed skill card](SKILL.md)\n- [Machine-readable stdlib API catalog](docs_src/api/stdlib.json) ({entries} entries)\n- [Cookbook registry](docs_src/api/cookbook.json) (recipes appear only after fixture verification)\n- [Language specification](SPEC.md)\n- [Examples](examples/)\n- [Examples guide](docs_src/examples.md)\n\n## Tooling\n\nUse `gos check FILE` before `gos run FILE`; validate compiled behavior with `gos build FILE`. For agent integration, run `gos mcp` over stdio, then use its `check`, `execute`, `build`, `doc`, `explain`, and semantic-navigation tools.\n",
+        "# Gossamer\n\nGossamer is a Rust-flavoured language with goroutines and deterministic memory management; use `gos` to check, execute, build, test, format, and query programs. This generated index points models and agents at the reviewed primer and canonical API data.\n\n- [Compact LLM reference](llms-full.txt)\n- [Reviewed skill card](SKILL.md)\n- [Machine-readable stdlib API catalog]({DOCS_URL}api/stdlib.json) ({entries} entries)\n- [Cookbook registry]({DOCS_URL}api/cookbook.json) (recipes appear only after fixture verification)\n- [Language specification](SPEC.md)\n- [Examples](examples/)\n- [Examples guide]({DOCS_URL}examples/)\n\n## Tooling\n\nUse `gos check FILE` before `gos run FILE`; validate compiled behavior with `gos build FILE`. For agent integration, run `gos mcp` over stdio, then use its `check`, `execute`, `build`, `doc`, `explain`, and semantic-navigation tools.\n",
         entries = catalogue.entries.len()
     )
 }
@@ -354,12 +416,12 @@ fn render_llms_full(catalogue: &PublicApiCatalog, skill_card: &str) -> Result<St
         .filter(|entry| entry.example_id.is_some() && entry.reference_status == "verified")
         .count();
     let mut out = format!(
-        "# Gossamer LLM Reference\n\nGenerated from `SKILL.md` and `docs_src/api/stdlib.json`. This is deliberately scoped: only catalog entries with a standalone executable example and explicit verified status may appear as API recommendations.\n\n## Language primer\n\n{skill_card}\n\n## Verified API reference\n\n"
+        "# Gossamer LLM Reference\n\nGenerated from `SKILL.md` and the stdlib API catalog ({DOCS_URL}api/stdlib.json). This is deliberately scoped: only catalog entries with a standalone executable example and explicit verified status may appear as API recommendations.\n\n## Language primer\n\n{skill_card}\n\n## Verified API reference\n\n"
     );
     if verified_entries == 0 {
         out.push_str(
             "No stdlib entry is eligible for this section yet. Consult the structured \
-             [`docs_src/api/stdlib.json`](docs_src/api/stdlib.json) catalog with `gos check`/`gos`; \
+             [stdlib API catalog](https://gossamer-lang.org/docs/api/stdlib.json) with `gos check`/`gos`; \
              its entries are deliberately quarantined until their fixtures and tier evidence land.\n",
         );
     }
@@ -407,8 +469,8 @@ mod llm_catalog_tests {
         for link in [
             "llms-full.txt",
             "SKILL.md",
-            "docs_src/api/stdlib.json",
-            "docs_src/api/cookbook.json",
+            "https://gossamer-lang.org/docs/api/stdlib.json",
+            "https://gossamer-lang.org/docs/api/cookbook.json",
             "SPEC.md",
             "examples/",
         ] {
@@ -707,17 +769,13 @@ fn kind_rank(kind: StdItemKind) -> u8 {
     }
 }
 
-/// Rewrites `docs_src/toolchain/lints.md` from the lint crate's
-/// day-one ID list and `lint_explanation` entries.
-fn regenerate_lint_docs() -> Result<()> {
-    let workspace_root = locate_workspace_root()?;
-    let out_dir = workspace_root.join("docs_src/toolchain");
-    fs::create_dir_all(&out_dir).with_context(|| format!("mkdir {}", out_dir.display()))?;
-    let out_path = out_dir.join("lints.md");
-    let page = render_lints_page(gossamer_lint::DAY_ONE_LINTS);
-    fs::write(&out_path, page).with_context(|| format!("writing {}", out_path.display()))?;
-    println!("xtask: wrote {}", out_path.display());
-    Ok(())
+/// `toolchain/lints.md`, from the lint crate's day-one ID list and
+/// `lint_explanation` entries.
+fn lint_docs(docs: &Path) -> Outputs {
+    vec![(
+        docs.join("toolchain/lints.md"),
+        render_lints_page(gossamer_lint::DAY_ONE_LINTS),
+    )]
 }
 
 fn render_lints_page(ids: &[&str]) -> String {
@@ -771,17 +829,13 @@ fn default_level_for(id: &str) -> &'static str {
     }
 }
 
-/// Rewrites `docs_src/toolchain/diagnostics.md` from the catalogue
-/// of diagnostic codes emitted by the compiler phases.
-fn regenerate_diagnostic_docs() -> Result<()> {
-    let workspace_root = locate_workspace_root()?;
-    let out_dir = workspace_root.join("docs_src/toolchain");
-    fs::create_dir_all(&out_dir).with_context(|| format!("mkdir {}", out_dir.display()))?;
-    let out_path = out_dir.join("diagnostics.md");
-    let page = render_diagnostics_page(DIAGNOSTIC_CATALOGUE);
-    fs::write(&out_path, page).with_context(|| format!("writing {}", out_path.display()))?;
-    println!("xtask: wrote {}", out_path.display());
-    Ok(())
+/// `toolchain/diagnostics.md`, from the catalogue of diagnostic codes
+/// emitted by the compiler phases.
+fn diagnostic_docs(docs: &Path) -> Outputs {
+    vec![(
+        docs.join("toolchain/diagnostics.md"),
+        render_diagnostics_page(DIAGNOSTIC_CATALOGUE),
+    )]
 }
 
 /// Catalogue of diagnostic codes emitted by the compiler. Each entry
@@ -1745,15 +1799,13 @@ const fn item(
     }
 }
 
-/// Rewrites `docs_src/stdlib_coverage.md` from the complete manifest,
-/// augmented with the legacy module-level evidence table.
-fn regenerate_stdlib_coverage() -> Result<()> {
-    let workspace_root = locate_workspace_root()?;
-    let out_path = workspace_root.join("docs_src/stdlib_coverage.md");
-    let page = render_stdlib_coverage_page(STDLIB_SUPPORT);
-    fs::write(&out_path, page).with_context(|| format!("writing {}", out_path.display()))?;
-    println!("xtask: wrote {}", out_path.display());
-    Ok(())
+/// `stdlib_coverage.md`, from the complete manifest augmented with the
+/// legacy module-level evidence table.
+fn stdlib_coverage(docs: &Path) -> Outputs {
+    vec![(
+        docs.join("stdlib_coverage.md"),
+        render_stdlib_coverage_page(STDLIB_SUPPORT),
+    )]
 }
 
 fn render_stdlib_coverage_page(items: &[StdlibSupport]) -> String {

@@ -179,7 +179,7 @@ mod tests {
         assert_eq!(process_run.evidence.status, process_run.status);
         assert_eq!(
             process_run.evidence.doc_path.as_deref(),
-            Some("docs_src/stdlib/process_run.md")
+            Some("stdlib/process_run.md")
         );
     }
 }

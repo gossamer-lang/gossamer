@@ -138,16 +138,207 @@ pub(crate) fn enforce_lockfile_if_requested(locked: bool) -> Result<()> {
         ..gossamer_pkg::FetchOptions::default()
     };
     options.auth_token = options.registry_url.as_deref().and_then(credential_for);
-    let fetcher = build_fetcher(&manifest, options)?;
-    let plan = gossamer_pkg::Resolver::new(fetcher.catalogue().clone())
-        .with_root(&project_root)
-        .resolve(&manifest)
-        .map_err(|e| anyhow!("resolve: {e}"))?;
+    let fetcher = build_fetcher(&manifest, options.clone())?;
     let lock = gossamer_pkg::Lockfile::load_required(&project_root)
         .map_err(|e| anyhow!("lockfile: {e}"))?;
+    let mut source = LockedSource {
+        lock: &lock,
+        catalogue: fetcher.catalogue().clone(),
+        registry_url: options.registry_url,
+        project_root: project_root.clone(),
+    };
+    let plan = gossamer_pkg::resolve_graph(&manifest, &project_root, &mut source)
+        .map_err(|e| anyhow!("resolve: {e}"))?;
     lock.verify_against(&plan)
         .map_err(|e| anyhow!("lockfile drift: {e}"))?;
     Ok(())
+}
+
+/// Adds the versions the configured registry offers for each registry
+/// dependency `manifest` declares that `catalogue` does not know yet.
+fn load_registry_versions(
+    catalogue: &mut gossamer_pkg::VersionCatalogue,
+    manifest: &gossamer_pkg::Manifest,
+    registry_url: Option<&str>,
+) -> std::result::Result<(), gossamer_pkg::ResolveError> {
+    let transport = registry_transport();
+    for (raw_id, spec) in &manifest.dependencies {
+        if !matches!(spec, gossamer_pkg::DependencySpec::Registry(_)) {
+            continue;
+        }
+        let id = gossamer_pkg::dependency_identity(raw_id, spec, None)?;
+        if !catalogue.versions(&id).is_empty() {
+            continue;
+        }
+        let Some(registry) = registry_url else {
+            return Err(gossamer_pkg::ResolveError::Unavailable {
+                id: raw_id.clone(),
+                reason: no_registry_error().to_string(),
+            });
+        };
+        if let Err(err) = catalogue.load_from_registry(transport.as_ref(), registry, &id) {
+            eprintln!(
+                "warning: registry index for {raw_id} unavailable: {err}; \
+                 resolution will fail unless a cached / vendored copy exists"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The manifest at the root of a fetched source tree.
+fn fetched_manifest(
+    fetched: &gossamer_pkg::Fetched,
+) -> std::result::Result<Option<gossamer_pkg::Manifest>, gossamer_pkg::ResolveError> {
+    let Some(text) = fetched.source.files.get("project.toml") else {
+        return Ok(None);
+    };
+    let unavailable = |reason: String| gossamer_pkg::ResolveError::Unavailable {
+        id: fetched.resolved.id.as_str().to_string(),
+        reason,
+    };
+    let text = std::str::from_utf8(text).map_err(|e| unavailable(format!("project.toml: {e}")))?;
+    gossamer_pkg::Manifest::parse(text)
+        .map(Some)
+        .map_err(|e| unavailable(format!("project.toml: {e}")))
+}
+
+/// Where a dependency's relative paths are written against: a path
+/// dependency's own directory, else the cache entry it was unpacked into.
+fn source_dir(
+    resolved: &gossamer_pkg::Resolved,
+    digest: Option<&str>,
+    project_root: &Path,
+) -> PathBuf {
+    match &resolved.pin {
+        gossamer_pkg::ResolvedSource::Path(path) => project_root.join(path),
+        _ => digest
+            .zip(gossamer_pkg::default_cache_root())
+            .and_then(|(digest, root)| gossamer_pkg::cache::cached_source_dir(&root, digest))
+            .unwrap_or_default(),
+    }
+}
+
+/// Fetches each dependency as the graph walk reaches it, keeping what it
+/// fetched for the lockfile or the vendor directory. A path dependency is
+/// read where it is, as every build reads it, and only recorded.
+struct FetchingSource<'a> {
+    fetcher: gossamer_pkg::Fetcher,
+    cache: &'a mut gossamer_pkg::Cache,
+    registry_url: Option<String>,
+    project_root: PathBuf,
+    fetched: Vec<gossamer_pkg::Fetched>,
+    local: Vec<gossamer_pkg::Resolved>,
+}
+
+impl FetchingSource<'_> {
+    /// The lockfile pinning everything the walk reached.
+    fn lockfile(&self) -> gossamer_pkg::Lockfile {
+        let mut lock = gossamer_pkg::Lockfile::from_fetched(&self.fetched);
+        lock.entries.extend(self.local.iter().map(|resolved| {
+            gossamer_pkg::lockfile::LockedEntry {
+                resolved: resolved.clone(),
+                sha256: None,
+                owner_pubkey: None,
+            }
+        }));
+        lock.entries
+            .sort_by(|a, b| a.resolved.id.as_str().cmp(b.resolved.id.as_str()));
+        lock
+    }
+}
+
+impl gossamer_pkg::GraphSource for FetchingSource<'_> {
+    fn catalogue(
+        &mut self,
+        manifest: &gossamer_pkg::Manifest,
+    ) -> std::result::Result<gossamer_pkg::VersionCatalogue, gossamer_pkg::ResolveError> {
+        load_registry_versions(
+            self.fetcher.catalogue_mut(),
+            manifest,
+            self.registry_url.as_deref(),
+        )?;
+        Ok(self.fetcher.catalogue().clone())
+    }
+
+    fn prepare(
+        &mut self,
+        resolved: &gossamer_pkg::Resolved,
+    ) -> std::result::Result<Option<(gossamer_pkg::Manifest, PathBuf)>, gossamer_pkg::ResolveError>
+    {
+        if matches!(resolved.pin, gossamer_pkg::ResolvedSource::Path(_)) {
+            let dir = source_dir(resolved, None, &self.project_root);
+            self.local.push(resolved.clone());
+            let Ok(text) = fs::read_to_string(dir.join("project.toml")) else {
+                return Ok(None);
+            };
+            let manifest = gossamer_pkg::Manifest::parse(&text).map_err(|e| {
+                gossamer_pkg::ResolveError::Unavailable {
+                    id: resolved.id.as_str().to_string(),
+                    reason: format!("{}: {e}", dir.join("project.toml").display()),
+                }
+            })?;
+            return Ok(Some((manifest, dir)));
+        }
+        let mut fetched = self
+            .fetcher
+            .fetch_all(std::slice::from_ref(resolved), self.cache)
+            .map_err(|e| gossamer_pkg::ResolveError::Unavailable {
+                id: resolved.id.as_str().to_string(),
+                reason: e.to_string(),
+            })?;
+        let fetched = fetched.remove(0);
+        let manifest = fetched_manifest(&fetched)?;
+        let dir = source_dir(resolved, Some(&fetched.source.digest), &self.project_root);
+        self.fetched.push(fetched);
+        Ok(manifest.map(|m| (m, dir)))
+    }
+}
+
+/// Reads each dependency from the source a lockfile pins it to, without
+/// fetching: what `--locked` checks the manifests against.
+struct LockedSource<'a> {
+    lock: &'a gossamer_pkg::Lockfile,
+    catalogue: gossamer_pkg::VersionCatalogue,
+    registry_url: Option<String>,
+    project_root: PathBuf,
+}
+
+impl gossamer_pkg::GraphSource for LockedSource<'_> {
+    fn catalogue(
+        &mut self,
+        manifest: &gossamer_pkg::Manifest,
+    ) -> std::result::Result<gossamer_pkg::VersionCatalogue, gossamer_pkg::ResolveError> {
+        load_registry_versions(&mut self.catalogue, manifest, self.registry_url.as_deref())?;
+        Ok(self.catalogue.clone())
+    }
+
+    fn prepare(
+        &mut self,
+        resolved: &gossamer_pkg::Resolved,
+    ) -> std::result::Result<Option<(gossamer_pkg::Manifest, PathBuf)>, gossamer_pkg::ResolveError>
+    {
+        let unavailable = |reason: &str| gossamer_pkg::ResolveError::Unavailable {
+            id: resolved.id.as_str().to_string(),
+            reason: reason.to_string(),
+        };
+        let digest = self
+            .lock
+            .entries
+            .iter()
+            .find(|entry| entry.resolved.id == resolved.id)
+            .and_then(|entry| entry.sha256.clone());
+        if digest.is_none() && !matches!(resolved.pin, gossamer_pkg::ResolvedSource::Path(_)) {
+            return Err(unavailable("not in project.lock; run `gos fetch`"));
+        }
+        let dir = source_dir(resolved, digest.as_deref(), &self.project_root);
+        let Ok(text) = fs::read_to_string(dir.join("project.toml")) else {
+            return Err(unavailable("not fetched; run `gos fetch`"));
+        };
+        let manifest = gossamer_pkg::Manifest::parse(&text)
+            .map_err(|e| unavailable(&format!("project.toml: {e}")))?;
+        Ok(Some((manifest, dir)))
+    }
 }
 
 /// Returns a `Cache` anchored on the per-user cache directory.
@@ -520,20 +711,24 @@ pub(crate) fn fetch(manifest: Option<PathBuf>, offline: bool, update: bool) -> R
         .map(gossamer_pkg::Lockfile::pinned_keys)
         .unwrap_or_default();
     let fetcher = build_fetcher(&m, options.clone())?.with_pinned_keys(pinned_keys);
-    let plan = gossamer_pkg::Resolver::new(fetcher.catalogue().clone())
-        .with_root(&project_root)
-        .resolve(&m)
-        .map_err(|e| anyhow!("resolve failed: {e}"))?;
+    let mut cache = build_cache();
+    let mut source = FetchingSource {
+        fetcher,
+        cache: &mut cache,
+        registry_url: options.registry_url.clone(),
+        project_root: project_root.clone(),
+        fetched: Vec::new(),
+        local: Vec::new(),
+    };
+    let plan = gossamer_pkg::resolve_graph(&m, &project_root, &mut source)
+        .map_err(|e| anyhow!("fetch failed: {e}"))?;
     if !update && let Some(existing) = &existing_lock {
         existing
             .verify_against(&plan)
             .map_err(|e| anyhow!("lockfile check: {e}"))?;
     }
-    let mut cache = build_cache();
-    let pkgs = fetcher
-        .fetch_all(&plan, &mut cache)
-        .map_err(|e| anyhow!("fetch failed: {e}"))?;
-    let lock = gossamer_pkg::Lockfile::from_fetched(&pkgs);
+    let lock = source.lockfile();
+    let pkgs = source.fetched;
     lock.write(&project_root)
         .with_context(|| format!("writing {}", project_root.join("project.lock").display()))?;
     outln!("fetch: {} project(s) cached", pkgs.len());
@@ -562,15 +757,20 @@ pub(crate) fn vendor(manifest: Option<PathBuf>, out: Option<PathBuf>) -> Result<
         .map_err(|e| anyhow!("loading lockfile: {e}"))?
         .map(|l| l.pinned_keys())
         .unwrap_or_default();
+    let registry_url = options.registry_url.clone();
     let fetcher = build_fetcher(&m, options)?.with_pinned_keys(pinned_keys);
-    let plan = gossamer_pkg::Resolver::new(fetcher.catalogue().clone())
-        .with_root(&project_root)
-        .resolve(&m)
-        .map_err(|e| anyhow!("resolve failed: {e}"))?;
     let mut cache = build_cache();
-    let pkgs = fetcher
-        .fetch_all(&plan, &mut cache)
+    let mut source = FetchingSource {
+        fetcher,
+        cache: &mut cache,
+        registry_url,
+        project_root: project_root.clone(),
+        fetched: Vec::new(),
+        local: Vec::new(),
+    };
+    gossamer_pkg::resolve_graph(&m, &project_root, &mut source)
         .map_err(|e| anyhow!("fetch failed: {e}"))?;
+    let pkgs = source.fetched;
     let dest = out.unwrap_or_else(|| PathBuf::from("vendor"));
     let written = gossamer_pkg::vendor(&pkgs, &dest)
         .with_context(|| format!("writing vendor dir {}", dest.display()))?;

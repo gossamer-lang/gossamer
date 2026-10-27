@@ -4,14 +4,15 @@
 // playground's `run` aborts the module: the page gets a bare
 // `RuntimeError: unreachable` instead of output, and every later run in
 // that tab is against a module that already trapped. Nothing else in CI
-// executes the wasm build - the docs workflow compiles it and the
+// executes the wasm build - gossamer-docs compiles it for the site and the
 // portability job type-checks it - so this walks every fixture through
 // the real module and fails on a throw. A front-end rejection, a runtime
 // error, and an exit status all come back inside the result and are not
-// failures here. The programs the site itself runs in the browser - every
-// tour lesson and every home-page listing - must also finish without one.
+// failures here. With `--site`, the programs the site itself runs in the
+// browser - every tour lesson and every home-page listing of the
+// gossamer-docs checkout at DIR - must also finish without one.
 //
-// Usage: gos run scripts/playground_smoke.gos [bindgen-dir]
+// Usage: gos run scripts/playground_smoke.gos [--site DIR] [bindgen-dir]
 //
 // With no argument the wasm is built and `wasm-bindgen`'d into a scratch
 // directory first, which needs the wasm32-unknown-unknown target and a
@@ -95,19 +96,20 @@ fn read_site_source(file: String) -> String {
     }
 }
 
-/// Writes every program the site runs in the browser into `dir`, answering
-/// their paths: the tour's lessons, then the home page's listings.
-fn site_programs(dir: String) -> Vec<String> {
+/// Writes every program the site at `site` runs in the browser into `dir`,
+/// answering their paths: the tour's lessons, then the home page's listings.
+fn site_programs(site: String, dir: String) -> Vec<String> {
     if let Err(e) = fs::create_dir_all(dir) {
         eprintln("playground_smoke: creating {}: {}", dir, e)
         process::exit(1)
     }
     let mut written = #[]
     let mut programs = #[]
-    for (slug, code) in tour_lessons(read_site_source("landing/tour/tour.js")) {
+    for (slug, code) in tour_lessons(read_site_source(path::join(site, "landing/tour/tour.js"))) {
         programs.push((f"tour-{slug}.gos", code))
     }
-    for (index, code) in landing_listings(read_site_source("landing/index.html")).iter().enumerate() {
+    let page = read_site_source(path::join(site, "landing/index.html"))
+    for (index, code) in landing_listings(page).iter().enumerate() {
         programs.push((f"listing-{index}.gos", code))
     }
     for (name, code) in programs {
@@ -160,7 +162,19 @@ fn build_runtime(dir: String) -> bool {
 }
 
 fn main() {
-    let mut dir = env::args().first().unwrap_or("")
+    let mut site = ""
+    let mut dir = ""
+    let args = env::args()
+    let mut i = 0
+    while i < args.len() {
+        if args[i] == "--site" && i + 1 < args.len() {
+            site = args[i + 1]
+            i += 2
+        } else {
+            dir = args[i]
+            i += 1
+        }
+    }
     if dir == "" {
         dir = path::join(env::temp_dir(), "gos-playground-smoke")
         let _ = fs::remove_dir_all(dir)
@@ -181,10 +195,12 @@ fn main() {
             count += 1
         }
     }
-    argv.push("--must-run")
-    for file in site_programs(path::join(dir, "site")) {
-        argv.push(file)
-        count += 1
+    if site != "" {
+        argv.push("--must-run")
+        for file in site_programs(site, path::join(dir, "site")) {
+            argv.push(file)
+            count += 1
+        }
     }
     println("playground_smoke: {} program(s) through the wasm runtime", count)
 
