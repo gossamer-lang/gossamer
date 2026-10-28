@@ -529,6 +529,72 @@ fn jit_compiled_binding_call_resolves_predeclared_symbol() {
 }
 
 #[test]
+fn binding_build_ignores_cargo_config_of_the_invoking_directory() {
+    // A library checkout keeps a `.cargo/config.toml` for its own crates, such
+    // as a `[patch]` to a sibling checkout. The project gos generates for the
+    // bindings is built under its own configuration, wherever gos was started.
+    let addlib = examples_dir()
+        .join("projects")
+        .join("rust_binding_add")
+        .join("addlib");
+    let workspace_root = examples_dir()
+        .parent()
+        .expect("workspace root")
+        .to_path_buf();
+
+    let tmp = env::temp_dir().join(format!("gos-binding-cargo-config-{}", std::process::id()));
+    // The cache sits beside the project, as the user cache does, so only the
+    // working directory reaches the project's cargo config.
+    let cache = env::temp_dir().join(format!(
+        "gos-binding-cargo-config-cache-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_dir_all(&cache);
+    std::fs::create_dir_all(tmp.join("src")).expect("create src");
+    std::fs::create_dir_all(tmp.join(".cargo")).expect("create .cargo");
+    std::fs::write(
+        tmp.join(".cargo").join("config.toml"),
+        format!(
+            "[patch.crates-io]\ngossamer-binding = {{ path = {:?} }}\n",
+            tmp.join("no-such-checkout")
+        ),
+    )
+    .expect("write .cargo/config.toml");
+    std::fs::write(
+        tmp.join("project.toml"),
+        format!(
+            "[project]\nid = \"example.com/cargoconfig\"\nversion = \"0.1.0\"\n\n\
+             [rust-bindings]\naddlib = {{ path = {addlib:?} }}\n"
+        ),
+    )
+    .expect("write project.toml");
+    std::fs::write(
+        tmp.join("src").join("main.gos"),
+        "use addlib::add\nfn main() { println(\"sum = {}\", add(2, 3)) }\n",
+    )
+    .expect("write main.gos");
+
+    let out = Command::new(gos_bin())
+        .arg("run")
+        .arg("src/main.gos")
+        .current_dir(&tmp)
+        .env("GOSSAMER_ROOT", &workspace_root)
+        .env("GOSSAMER_CACHE", &cache)
+        .output()
+        .expect("spawn run");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_dir_all(&cache);
+    assert!(
+        out.status.success(),
+        "the binding build read the invoking directory's cargo config\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(stdout.contains("sum = 5"), "stdout: {stdout}\nstderr: {stderr}");
+}
+
+#[test]
 fn run_main_thread_flag_executes_program() {
     // `gos run --main-thread` runs the VM on the process main thread
     // (for native libraries that require it) instead of the spawned

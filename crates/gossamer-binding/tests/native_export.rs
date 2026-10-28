@@ -45,6 +45,10 @@ gossamer_binding::register_module! {
             Ok(a / b)
         }
     }
+
+    fn check(pass: bool) -> Result<(), String> {
+        if pass { Ok(()) } else { Err("refused".to_string()) }
+    }
 }
 
 unsafe extern "C" {
@@ -59,6 +63,9 @@ unsafe extern "C" {
     fn gos_binding_test__nativeexport__divide(
         a: i64,
         b: i64,
+    ) -> *mut gossamer_binding::native::GosVariant;
+    fn gos_binding_test__nativeexport__check(
+        pass: bool,
     ) -> *mut gossamer_binding::native::GosVariant;
 }
 
@@ -129,6 +136,23 @@ fn result_export_round_trip() {
     let err_raw = unsafe { gos_binding_test__nativeexport__divide(10, 0) };
     let err = unsafe { <Result<i64, String> as BindingAbi>::from_input(err_raw) };
     assert_eq!(err, Err("divide by zero".to_string()));
+}
+
+#[test]
+fn a_unit_ok_answers_the_unit_word_and_an_err_its_message() {
+    gossamer_binding::testing::install_host();
+    let ok_raw = unsafe { gos_binding_test__nativeexport__check(true) };
+    assert_eq!(
+        ok_raw.addr(),
+        gossamer_binding::__abi::UNIT_OK_WORD,
+        "Ok(()) allocates nothing"
+    );
+    let ok = unsafe { <Result<(), String> as BindingAbi>::from_input(ok_raw) };
+    assert_eq!(ok, Ok(()));
+
+    let err_raw = unsafe { gos_binding_test__nativeexport__check(false) };
+    let err = unsafe { <Result<(), String> as BindingAbi>::from_input(err_raw) };
+    assert_eq!(err, Err("refused".to_string()));
 }
 
 #[test]

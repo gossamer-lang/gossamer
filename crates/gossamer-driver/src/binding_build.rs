@@ -882,9 +882,17 @@ pub(crate) fn run_cargo_build(
         cmd.arg("--target").arg(t);
     }
     configure_macos_cargo_build(&mut cmd, cargo_target);
-    cmd.arg("--manifest-path").arg(manifest_path);
+    // Cargo reads `.cargo/config.toml` from its working directory upward, so
+    // the generated project builds from its own directory: a configuration
+    // above where gos was started (a checkout's `[patch]`) stays out of it.
+    // Both paths resolve against where gos was started before that move.
+    let manifest_path = std::path::absolute(manifest_path)?;
+    if let Some(dir) = manifest_path.parent() {
+        cmd.current_dir(dir);
+    }
+    cmd.arg("--manifest-path").arg(&manifest_path);
     cmd.args(target_args);
-    cmd.env("CARGO_TARGET_DIR", target_dir);
+    cmd.env("CARGO_TARGET_DIR", std::path::absolute(target_dir)?);
     // Both streams pass through to the terminal while cargo runs, so a long
     // build shows its progress and a failing one its diagnostics as they
     // happen. Cargo colours them only when told to, its stderr being a pipe.

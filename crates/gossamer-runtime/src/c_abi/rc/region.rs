@@ -446,6 +446,8 @@ pub(super) unsafe fn arena_retire(p: *mut u8, slab_size: usize) {
 type Finalizer = unsafe fn(*mut u8);
 
 struct RegionSlabs {
+    /// The nesting depth at which this region is the innermost one.
+    depth: usize,
     /// `(base, layout_size)` for each slab, freed at pop.
     slabs: Vec<(*mut u8, usize)>,
     /// Saved bump state (base, cur offset, slab end) for this region while it
@@ -469,6 +471,20 @@ struct RegionSlabs {
     /// [`region_alloc_handle`], each with the function that releases what it
     /// holds. Run at pop, last created first, before the slabs go.
     finalizers: Vec<(*mut u8, Finalizer)>,
+}
+
+impl RegionSlabs {
+    const fn new(depth: usize) -> Self {
+        Self {
+            depth,
+            slabs: Vec::new(),
+            saved: BumpState::EMPTY,
+            objs: 0,
+            promoted: Vec::new(),
+            buffers: Vec::new(),
+            finalizers: Vec::new(),
+        }
+    }
 }
 
 /// Arena state owned by one running goroutine.
@@ -667,6 +683,20 @@ pub(crate) fn region_depth() -> usize {
     REGION_DEPTH.with(std::cell::Cell::get)
 }
 
+/// The storage of the innermost open region, recorded on the region's first
+/// use: a region that never allocates or owns anything is only a depth count,
+/// so opening and closing one costs no more than moving that count. A region
+/// must be open.
+fn innermost(regions: &mut Vec<RegionSlabs>) -> &mut RegionSlabs {
+    let depth = region_depth();
+    debug_assert!(depth > 0, "no region is open");
+    if regions.last().is_none_or(|top| top.depth != depth) {
+        regions.push(RegionSlabs::new(depth));
+    }
+    let last = regions.len() - 1;
+    &mut regions[last]
+}
+
 /// Closes every region opened on this thread above `depth`, for a unit of
 /// work that unwound out of regions it never reached the close of.
 pub(crate) fn close_regions_above(depth: usize) {
@@ -762,11 +792,7 @@ fn region_alloc_slow(need: usize) -> *mut u8 {
     if base.is_null() {
         return std::ptr::null_mut();
     }
-    REGIONS.with(|r| {
-        let mut regions = r.borrow_mut();
-        let region = regions.last_mut().expect("region_alloc with no region");
-        region.slabs.push((base, slab_size));
-    });
+    REGIONS.with(|r| innermost(&mut r.borrow_mut()).slabs.push((base, slab_size)));
     BUMP.with(|b| {
         b.set(BumpState {
             base,
@@ -793,36 +819,30 @@ pub extern "C" fn gos_rt_arena_push() {
         return;
     }
     // Suspend the current innermost region's live bump into its `RegionSlabs`
-    // entry, then open a fresh region with an empty bump.
-    let saved = BUMP.with(std::cell::Cell::get);
+    // entry, then open a fresh region with an empty bump. The new region's
+    // entry waits for its first use, and the suspended one needs an entry
+    // only when it has a bump or objects to keep.
+    let depth = region_depth();
+    let saved = BUMP.with(|b| b.replace(BumpState::EMPTY));
     let pending_objs = BUMP_OBJS.with(|o| o.replace(0));
+    let live = !saved.base.is_null() || pending_objs != 0;
     REGIONS.with(|r| {
         let mut regions = r.borrow_mut();
-        if let Some(top) = regions.last_mut() {
+        if live || regions.last().is_some_and(|top| top.depth == depth) {
+            let top = innermost(&mut regions);
             top.saved = saved;
             top.objs += pending_objs;
         }
-        regions.push(RegionSlabs {
-            slabs: Vec::new(),
-            saved: BumpState::EMPTY,
-            objs: 0,
-            promoted: Vec::new(),
-            buffers: Vec::new(),
-            finalizers: Vec::new(),
-        });
     });
-    BUMP.with(|b| b.set(BumpState::EMPTY));
-    REGION_DEPTH.with(|d| d.set(d.get() + 1));
+    REGION_DEPTH.with(|d| d.set(depth + 1));
 }
 
 /// Records `body` as a heap allocation the innermost region owns and frees at
 /// pop. A promotion made with no region open is an ordinary heap string.
 pub(crate) fn region_track_promoted(body: *mut std::ffi::c_char) {
-    REGIONS.with(|r| {
-        if let Some(top) = r.borrow_mut().last_mut() {
-            top.promoted.push(body);
-        }
-    });
+    if region_active() {
+        REGIONS.with(|r| innermost(&mut r.borrow_mut()).promoted.push(body));
+    }
 }
 
 /// Places `value`, a runtime handle such as a map or set, in the innermost
@@ -845,10 +865,11 @@ pub(crate) fn region_alloc_handle<T>(value: T, finalize: Finalizer) -> Result<*m
     // SAFETY: `p` is fresh region storage of `T`'s size at `RC_ALIGN`, which
     // covers `T`'s alignment (checked above).
     unsafe { handle.write(value) };
+    // `p` came from a region, so one is open.
     REGIONS.with(|r| {
-        if let Some(top) = r.borrow_mut().last_mut() {
-            top.finalizers.push((p, finalize));
-        }
+        innermost(&mut r.borrow_mut())
+            .finalizers
+            .push((p, finalize));
     });
     Ok(handle)
 }
@@ -870,13 +891,13 @@ pub(crate) fn region_release_at_pop(node: *mut u8) {
 /// when no region is open: the share it returns is one a region object holds
 /// without a count of its own.
 fn region_give_back_at_pop(value: *mut u8, give_back: Finalizer) {
-    let queued = REGIONS.with(|r| {
-        r.borrow_mut()
-            .last_mut()
-            .map(|top| top.finalizers.push((value, give_back)))
-            .is_some()
-    });
-    if !queued {
+    if region_active() {
+        REGIONS.with(|r| {
+            innermost(&mut r.borrow_mut())
+                .finalizers
+                .push((value, give_back));
+        });
+    } else {
         // SAFETY: `give_back` returns the one share of `value` its caller handed over.
         unsafe { give_back(value) };
     }
@@ -939,11 +960,9 @@ pub(crate) fn region_owns_buffers_of(bytes: usize) -> bool {
 /// Records `buf`, an allocator buffer of `bytes`, as owned by the innermost
 /// region, to be freed at its pop.
 pub(crate) fn region_own_buffer(buf: *mut u8, bytes: usize) {
-    REGIONS.with(|r| {
-        if let Some(top) = r.borrow_mut().last_mut() {
-            top.buffers.push((buf, bytes));
-        }
-    });
+    if region_active() {
+        REGIONS.with(|r| innermost(&mut r.borrow_mut()).buffers.push((buf, bytes)));
+    }
 }
 
 /// Replaces `old`, a buffer an open region owns, with `new` of `bytes` in
@@ -990,22 +1009,41 @@ fn arena_poison() -> bool {
 /// the region is referenced after pop.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_arena_pop() {
+    let depth = region_depth();
+    if depth == 0 {
+        return;
+    }
     let pending_objs = BUMP_OBJS.with(|o| o.replace(0));
     // Take the region out in one borrow. Everything the pop then does -
     // freeing the strings it owns, recycling or retiring its slabs - can
     // re-enter the allocator and open a region of its own, so none of it may
-    // run while `REGIONS` is borrowed.
-    let Some(region) = REGIONS.with(|r| r.borrow_mut().pop()) else {
-        REGION_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
-        return;
-    };
+    // run while `REGIONS` is borrowed. A region without an entry was never used.
+    let region = REGIONS.with(|r| {
+        let mut regions = r.borrow_mut();
+        if regions.last().is_some_and(|top| top.depth == depth) {
+            regions.pop()
+        } else {
+            None
+        }
+    });
     // Hand the allocator back to the parent before anything is freed, so an
     // allocation made during this teardown lands on a region that outlives it
     // rather than on a slab this pop is about to retire. The depth moves with
-    // the bump so `region_active` and `REGIONS` agree throughout.
-    let bump = REGIONS.with(|r| r.borrow().last().map_or(BumpState::EMPTY, |top| top.saved));
+    // the bump so `region_active` and `REGIONS` agree throughout. A parent
+    // without an entry has no bump yet.
+    let bump = REGIONS.with(|r| {
+        r.borrow()
+            .last()
+            .filter(|top| top.depth == depth - 1)
+            .map_or(BumpState::EMPTY, |top| top.saved)
+    });
     BUMP.with(|b| b.set(bump));
-    REGION_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    REGION_DEPTH.with(|d| d.set(depth - 1));
+    let Some(region) = region else {
+        // Every bump allocation records the region's entry first.
+        debug_assert_eq!(pending_objs, 0);
+        return;
+    };
     // A finalizer may release values the region owns, so it runs while all of
     // the region's storage, promoted strings included, is still in place.
     for (handle, finalize) in region.finalizers.into_iter().rev() {

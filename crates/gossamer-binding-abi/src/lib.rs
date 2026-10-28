@@ -23,7 +23,13 @@ use std::os::raw::c_char;
 ///
 /// A host refuses a library whose major differs from its own, and one whose
 /// minor is newer than its own: a minor bump only adds to the tables.
-pub const ABI_VERSION: u32 = 3 << 16;
+pub const ABI_VERSION: u32 = (3 << 16) | 1;
+
+/// The word a compiled call's wire thunk answers for `Ok(())` in place of a
+/// result variant's address, so a successful unit call allocates nothing. A
+/// variant is pointer-aligned and never sits at this address. Minor 1 of
+/// [`ABI_VERSION`] adds it.
+pub const UNIT_OK_WORD: usize = 1;
 
 /// The exported `extern "C" fn() -> u32` answering a library's [`ABI_VERSION`].
 pub const ABI_VERSION_SYMBOL: &str = "gos_binding_abi_version";

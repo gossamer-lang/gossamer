@@ -69,7 +69,8 @@ pub extern "C" fn gos_rt_result_new_f64(disc: i64, payload: f64) -> i128 {
 
 /// Converts a `[rust-bindings]` `*mut GosVariant` (the binding ABI's
 /// `Result` / `Option` wire shape, tag `1` = Ok/Some) into the
-/// runtime's packed i128 result (disc `0` = Ok/Some). The payload word
+/// runtime's packed i128 result (disc `0` = Ok/Some), or the unallocated
+/// `UNIT_OK_WORD` a binding answers for `Ok(())`. The payload word
 /// passes through bit-exact - an i64/bool/char value, f64 bits, a runtime
 /// string, or a runtime vector - and the result owns it.
 #[unsafe(no_mangle)]
@@ -78,6 +79,9 @@ pub unsafe extern "C" fn gos_rt_binding_variant_to_result(p: *mut u8) -> i128 {
     ffi_entry!({
         if p.is_null() {
             return pack_result(1, 0);
+        }
+        if p.addr() == gossamer_binding_abi::UNIT_OK_WORD {
+            return pack_result(0, 0);
         }
         // SAFETY: `p` is the variant a binding answered, handed to this call once (C-ABI
         // contract); its header and field array come from the allocator the runtime frees with.
@@ -942,4 +946,24 @@ pub extern "C" fn gos_rt_result_is_ok(r: i128) -> i64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_result_is_err(r: i128) -> i64 {
     i64::from(result_disc_of(r) != 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_unit_ok_word_is_an_ok_without_a_payload() {
+        let word = std::ptr::without_provenance_mut(gossamer_binding_abi::UNIT_OK_WORD);
+        // SAFETY: the unit word is read by its address alone.
+        let r = unsafe { gos_rt_binding_variant_to_result(word) };
+        assert_eq!((result_disc_of(r), result_payload_of(r)), (0, 0));
+    }
+
+    #[test]
+    fn a_null_answer_is_an_err_without_a_payload() {
+        // SAFETY: a null answer is read by its address alone.
+        let r = unsafe { gos_rt_binding_variant_to_result(std::ptr::null_mut()) };
+        assert_eq!((result_disc_of(r), result_payload_of(r)), (1, 0));
+    }
 }

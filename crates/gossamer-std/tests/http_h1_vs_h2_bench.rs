@@ -21,12 +21,12 @@ fn curl_has_http2() -> bool {
 }
 
 fn boot_h1() -> u16 {
-    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
+    // The server takes the bound listener, so no other process can take the port.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
-        let _ = server::bind_and_run(
-            &format!("127.0.0.1:{port}"),
+        let _ = server::run(
+            listener,
             &HConfig::default(),
             |_req: http::Request| -> http::Response {
                 let mut headers = Headers::new();
@@ -41,17 +41,16 @@ fn boot_h1() -> u16 {
             },
         );
     });
-    std::thread::sleep(Duration::from_millis(150));
     port
 }
 
 fn boot_h2() -> u16 {
-    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
+    // The server takes the bound listener, so no other process can take the port.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
-        let _ = h2::bind_and_run_h2c(
-            &format!("127.0.0.1:{port}"),
+        let _ = h2::run_h2c(
+            listener,
             |_req: Request| -> Response {
                 let mut headers = Headers::new();
                 headers.insert("content-type", "text/plain");
@@ -66,7 +65,6 @@ fn boot_h2() -> u16 {
             h2::Config::default(),
         );
     });
-    std::thread::sleep(Duration::from_millis(150));
     port
 }
 

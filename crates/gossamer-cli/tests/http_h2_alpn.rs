@@ -26,11 +26,14 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 const HANDSHAKE_DEADLINE_MS: u64 = 5_000;
 
-fn pick_port() -> u16 {
-    let probe = StdListener::bind("127.0.0.1:0").expect("bind probe");
-    let port = probe.local_addr().expect("local_addr").port();
-    drop(probe);
-    port
+/// A loopback listener on a port the system picked, and its address. The
+/// server accepts on the bound listener itself, so no other process can take
+/// the port first, and the client may connect before the server accepts.
+fn loopback_listener() -> (StdListener, SocketAddr) {
+    let listener = StdListener::bind("127.0.0.1:0").expect("bind");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let addr = listener.local_addr().expect("local_addr");
+    (listener, addr)
 }
 
 /// Generates a fresh self-signed certificate + private key for
@@ -57,13 +60,13 @@ fn build_client_config(
     Arc::new(cfg)
 }
 
-/// Helper: bind, accept one TLS connection, complete the
+/// Helper: accept one TLS connection on `listener`, complete the
 /// handshake, return the negotiated ALPN protocol bytes.
 async fn server_accept_one_alpn(
     server_cfg: Arc<ServerConfig>,
-    addr: SocketAddr,
+    listener: StdListener,
 ) -> Option<Vec<u8>> {
-    let listener = tokio::net::TcpListener::bind(addr).await.expect("tcp bind");
+    let listener = tokio::net::TcpListener::from_std(listener).expect("tcp listener");
     let acceptor = TlsAcceptor::from(server_cfg);
     let (sock, _peer) = listener.accept().await.expect("tcp accept");
     let tls = acceptor.accept(sock).await.expect("tls accept");
@@ -112,8 +115,7 @@ where
 #[test]
 fn alpn_selects_h2_when_both_advertised() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let port = pick_port();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
+    let (listener, addr) = loopback_listener();
 
     // Generate the cert once and feed it to both server config and
     // client root store. `build_server_config` would re-roll a
@@ -134,11 +136,9 @@ fn alpn_selects_h2_when_both_advertised() {
 
     run(async move {
         let server_task = tokio::spawn(async move {
-            let n = server_accept_one_alpn(server_cfg, addr).await;
+            let n = server_accept_one_alpn(server_cfg, listener).await;
             *server_alpn_clone.lock().expect("lock") = n;
         });
-        // small delay so the listener is up
-        tokio::time::sleep(Duration::from_millis(100)).await;
         let n = client_handshake_alpn(
             addr,
             cert_for_client,
@@ -158,8 +158,7 @@ fn alpn_selects_h2_when_both_advertised() {
 #[test]
 fn alpn_falls_back_to_http11_when_h2_not_offered() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let port = pick_port();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
+    let (listener, addr) = loopback_listener();
 
     let (chain, key) = gen_cert_chain();
     let cert_for_client = chain[0].clone();
@@ -178,10 +177,9 @@ fn alpn_falls_back_to_http11_when_h2_not_offered() {
 
     run(async move {
         let server_task = tokio::spawn(async move {
-            let n = server_accept_one_alpn(server_cfg, addr).await;
+            let n = server_accept_one_alpn(server_cfg, listener).await;
             *server_alpn_clone.lock().expect("lock") = n;
         });
-        tokio::time::sleep(Duration::from_millis(100)).await;
         // Client offers both - server should pick http/1.1.
         let n = client_handshake_alpn(
             addr,

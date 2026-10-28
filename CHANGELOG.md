@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.75.5 - Binding builds independent of the working directory, cheaper binding calls and loop regions
+
+- A project's Rust bindings build under the configuration of the project gos generates for them, wherever `gos` was started, where a `.cargo/config.toml` at or above the working directory reached that build, so a library checkout's `[patch]` of a crate its bindings share failed `gos check`, `gos run` and `gos build` there with a lockfile collision.
+- A Rust binding item answering `Result<(), E>` hands back `Ok(())` as a word with nothing allocated, where a successful call still allocated the result's header and the caller freed it.
+- The binding ABI is 3.1: a binding built against this release's `gossamer-binding` is refused by an older gos, whose error now names the `binding_sdk` that `gos env` reports to rebuild against.
+- A compiled call to a Rust binding item checks for a panic the item recorded with one thread-local load, where every call took and dropped the recorded message's slot.
+- An arena region that allocates nothing opens and closes without setting up storage, which a region now takes on its first allocation, so a loop whose body runs in a region and allocates nothing in an iteration pays a depth count for it.
+
 ## 0.75.4 - JIT callers of calling-back bindings, empty-struct payloads
 
 - A function calling a Rust binding item that calls Gossamer code back, and takes no callable itself, runs JIT-compiled, with the callable running on the VM that entered the compiled code, where every such caller and its callers stayed on the bytecode VM.

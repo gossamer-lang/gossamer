@@ -5,7 +5,7 @@
 //! [`compiled_host_table`] and adds the VM's callback entries.
 
 use std::alloc::Layout;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::os::raw::c_char;
 
@@ -122,12 +122,16 @@ unsafe extern "C" fn callback_release(handle: u64) {
 thread_local! {
     /// The panic a wire thunk on this thread caught, until its caller raises it.
     static PENDING_PANIC: RefCell<Option<String>> = const { RefCell::new(None) };
+    // Whether `PENDING_PANIC` holds a message. Every binding call's return
+    // reads it, and a flag without a destructor is one thread-local load.
+    static PANIC_RECORDED: Cell<bool> = const { Cell::new(false) };
 }
 
 unsafe extern "C" fn raise_panic(message: StrRef) {
     // SAFETY: the binding's message lives for this call, which copies it.
     let text = unsafe { message.to_string_lossy() };
     PENDING_PANIC.with(|pending| *pending.borrow_mut() = Some(text));
+    PANIC_RECORDED.set(true);
 }
 
 unsafe extern "C" fn blocking_enter() -> u64 {
@@ -183,6 +187,15 @@ pub unsafe extern "C" fn gos_rt_binding_init(
 /// one. A compiled caller calls this right after each binding call returns.
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn gos_rt_binding_raise_pending() {
+    if PANIC_RECORDED.get() {
+        raise_recorded();
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn raise_recorded() {
+    PANIC_RECORDED.set(false);
     if let Some(message) = PENDING_PANIC.with(|pending| pending.borrow_mut().take()) {
         super::panic::panic_text(&message);
     }
@@ -202,6 +215,7 @@ mod tests {
     fn a_recorded_panic_is_taken_once() {
         // SAFETY: the message is a live local.
         unsafe { raise_panic(StrRef::new("no such window")) };
+        assert!(PANIC_RECORDED.get(), "a recorded panic raises on return");
         let taken = PENDING_PANIC.with(|pending| pending.borrow_mut().take());
         assert_eq!(taken.as_deref(), Some("no such window"));
         assert!(PENDING_PANIC.with(|pending| pending.borrow().is_none()));

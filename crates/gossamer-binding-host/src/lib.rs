@@ -37,7 +37,7 @@ pub enum HostError {
     },
     /// The library speaks another version of the binding ABI.
     #[error(
-        "the binding library at {path} was built for binding ABI {}.{}, and this gos speaks {}.{}; rebuild the binding against a gossamer-binding of the same major version",
+        "the binding library at {path} was built for binding ABI {}.{}, and this gos speaks {}.{}; rebuild the binding against the gossamer-binding this gos ships, which `gos env` reports as binding_sdk",
         gossamer_binding_abi::abi_major(*library),
         gossamer_binding_abi::abi_minor(*library),
         gossamer_binding_abi::abi_major(*host),
