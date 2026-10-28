@@ -312,6 +312,9 @@ pub fn collect_process_allocator(force: bool) {
     }
 }
 
+/// The Gossamer release this runtime belongs to, as `runtime::version()` answers it.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod accept;
 pub mod builtins;
 pub mod c_abi;

@@ -1,0 +1,31 @@
+// A one-field struct copied out of a `&mut` reference reads its field, as a
+// wider struct does.
+
+struct Session { id: i64 }
+
+struct Label { text: String }
+
+fn read(s: Session, w: i64) -> i64 {
+    s.id + w
+}
+
+fn width(l: Label) -> i64 {
+    l.text.byte_len()
+}
+
+fn hot(s: &mut Session, l: &mut Label) -> i64 {
+    let mut n = 0
+    let mut i = 0
+    while i < 4000 {
+        n += read(*s, i % 3) + width(*l)
+        if i % 1000 == 0 { s.id += 1 }
+        i += 1
+    }
+    n
+}
+
+fn main() {
+    let mut s = Session { id: 7 }
+    let mut l = Label { text: "label" }
+    println(f"{hot(&mut s, &mut l)} {s.id}")
+}

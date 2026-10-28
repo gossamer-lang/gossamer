@@ -5158,7 +5158,11 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
         let orig: Vec<Statement> = std::mem::take(&mut body.blocks[bi].stmts);
         let block_gaps = std::mem::take(&mut gaps[bi]);
         let block_field_gaps = std::mem::take(&mut field_gaps[bi]);
-        let mut new_stmts: Vec<Statement> = Vec::with_capacity(orig.len() + total_calls);
+        // This block's own insertions, not the body's: reserving the body's
+        // total in every block grows with blocks times calls.
+        let inserted = block_gaps.iter().map(Vec::len).sum::<usize>()
+            + block_field_gaps.iter().map(Vec::len).sum::<usize>();
+        let mut new_stmts: Vec<Statement> = Vec::with_capacity(orig.len() + inserted);
         // Entry block: zero-init releasable owners so every release is
         // null-safe regardless of the path taken to it.
         if bi == 0 {

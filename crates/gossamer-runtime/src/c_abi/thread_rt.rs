@@ -47,6 +47,12 @@ pub extern "C" fn gos_rt_runtime_scheduler_stats_json() -> *mut std::os::raw::c_
     ffi_entry!({ crate::c_abi::alloc_cstring(scheduler_stats_json().as_bytes()) })
 }
 
+/// `runtime::version() -> String` - the Gossamer release of this runtime.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_runtime_version() -> *mut std::os::raw::c_char {
+    crate::c_abi::alloc_cstring(crate::VERSION.as_bytes())
+}
+
 /// `runtime::is_main_thread() -> bool` - whether the caller runs on the
 /// thread the program's `main` runs on.
 #[unsafe(no_mangle)]

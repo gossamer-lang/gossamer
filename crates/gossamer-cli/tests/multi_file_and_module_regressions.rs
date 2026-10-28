@@ -369,6 +369,141 @@ fn module_relative_paths_reach_child_and_sibling_modules() {
 }
 
 #[test]
+fn an_imported_type_name_reaches_its_own_associated_functions() {
+    // Two modules each declare a `Settings`. `use b::Settings` makes the bare
+    // name mean `b`'s type, so its associated functions and its `Default`
+    // are the ones `Settings::` reaches, whichever was declared first.
+    let dir = write_project(
+        "imported-assoc-owner",
+        "example.com/assocowner",
+        &[
+            (
+                "src/main.gos",
+                "use a\nuse b::Settings\n\nfn label(s: Settings) -> String { s.s }\n\nfn main() {\n    \
+                 println(f\"{label(Settings::fresh())} {label(Settings::default())} {a::Settings::fresh().n}\")\n}\n",
+            ),
+            (
+                "src/a.gos",
+                "pub struct Settings { pub n: i64 }\n\
+                 impl Settings { pub fn fresh() -> Settings { Settings { n: 1 } } }\n\
+                 impl Default for Settings { fn default() -> Settings { Settings { n: 2 } } }\n",
+            ),
+            (
+                "src/b.gos",
+                "pub struct Settings { pub s: String }\n\
+                 impl Settings { pub fn fresh() -> Settings { Settings { s: \"fresh\" } } }\n\
+                 impl Default for Settings { fn default() -> Settings { Settings { s: \"default\" } } }\n",
+            ),
+        ],
+    );
+    let expected = "fresh default 1\n";
+    let vm = project_run_vm(&dir);
+    assert_eq!(vm.2, Some(0), "vm stderr: {}", vm.1);
+    assert_eq!(vm.0, expected, "vm stdout");
+    let native = project_build_run(&dir, "assocowner");
+    assert_eq!(native.2, Some(0), "native stderr: {}", native.1);
+    assert_eq!(native.0, expected, "native stdout");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_module_imported_by_its_own_name_ignores_a_dependency_module_of_that_name() {
+    // The dependency's `use crate::commands` and the program's `use commands`
+    // name two modules; the program's constants read its own.
+    let dir = write_project(
+        "own-module-beside-dependency",
+        "example.com/ownmodule",
+        &[
+            (
+                "project.toml",
+                "[project]\nid = \"example.com/ownmodule\"\nversion = \"0.1.0\"\n\n\
+                 [dependencies]\n\"example.com/samedep\" = { path = \"dep\" }\n",
+            ),
+            (
+                "dep/project.toml",
+                "[project]\nid = \"example.com/samedep\"\nversion = \"0.1.0\"\n\n[lib]\nname = \"samedep\"\n",
+            ),
+            (
+                "dep/src/lib.gos",
+                "use crate::commands\npub fn hello() -> String { commands::GREETING }\n",
+            ),
+            (
+                "dep/src/commands.gos",
+                "pub const GREETING: String = \"dep\"\n",
+            ),
+            ("src/commands.gos", "pub const MOVE: String = \"move\"\n"),
+            (
+                "src/update.gos",
+                "use commands\npub fn run(id: String) -> String { if id == commands::MOVE { \"own\" } else { \"other\" } }\n",
+            ),
+            (
+                "src/main.gos",
+                "use samedep\nuse update\nfn main() { println(f\"{update::run(\"move\")} {samedep::hello()}\") }\n",
+            ),
+        ],
+    );
+    let expected = "own dep\n";
+    let vm = project_run_vm(&dir);
+    assert_eq!(vm.2, Some(0), "vm stderr: {}", vm.1);
+    assert_eq!(vm.0, expected, "vm stdout");
+    let native = project_build_run(&dir, "ownmodule");
+    assert_eq!(native.2, Some(0), "native stderr: {}", native.1);
+    assert_eq!(native.0, expected, "native stdout");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_module_names_its_own_enum_beside_a_dependency_module_of_its_name() {
+    // The dependency imports its own `editing::search`; inside the program's
+    // `search` module, `Step::Next` is that module's own variant.
+    let dir = write_project(
+        "own-enum-beside-dependency-module",
+        "example.com/ownenum",
+        &[
+            (
+                "project.toml",
+                "[project]\nid = \"example.com/ownenum\"\nversion = \"0.1.0\"\n\n\
+                 [dependencies]\n\"example.com/searchdep\" = { path = \"dep\" }\n",
+            ),
+            (
+                "dep/project.toml",
+                "[project]\nid = \"example.com/searchdep\"\nversion = \"0.1.0\"\n\n[lib]\nname = \"searchdep\"\n",
+            ),
+            (
+                "dep/src/lib.gos",
+                "use crate::editing::search\npub fn hello() -> i64 { search::count() }\n",
+            ),
+            ("dep/src/editing/mod.gos", "pub fn ok() -> i64 { 0 }\n"),
+            (
+                "dep/src/editing/search.gos",
+                "pub fn count() -> i64 { 1 }\n",
+            ),
+            (
+                "src/search.gos",
+                "#[derive(PartialEq)]\npub enum Step { Search, Next }\n\
+                 pub fn pick(step: Step) -> String { if step == Step::Next { \"next\" } else { \"search\" } }\n",
+            ),
+            (
+                "src/update.gos",
+                "use search\npub fn run() -> String { search::pick(search::Step::Next) }\n",
+            ),
+            (
+                "src/main.gos",
+                "use searchdep\nuse update\nfn main() { println(f\"{update::run()} {searchdep::hello()}\") }\n",
+            ),
+        ],
+    );
+    let expected = "next 1\n";
+    let vm = project_run_vm(&dir);
+    assert_eq!(vm.2, Some(0), "vm stderr: {}", vm.1);
+    assert_eq!(vm.0, expected, "vm stdout");
+    let native = project_build_run(&dir, "ownenum");
+    assert_eq!(native.2, Some(0), "native stderr: {}", native.1);
+    assert_eq!(native.0, expected, "native stdout");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn sibling_modules_each_import_their_own_same_named_module() {
     // `use super::scan` in `kv/compact.gos` and in `engine/stmt.gos` name two
     // different modules. Each file's paths, constants, and variants read the

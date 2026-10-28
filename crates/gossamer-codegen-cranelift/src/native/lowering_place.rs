@@ -306,10 +306,14 @@ pub(super) fn lower_place_address(
                     TyKind::Ref { inner, .. } => *inner,
                     _ => current_ty,
                 };
+                // A struct of any width is reached through the address of its
+                // words, which is what `&x` of one hands out, so a one-field
+                // struct is no more a pointer cell than a wider one.
                 let inline_aggregate =
                     matches!(tcx.kind_of(peeled), TyKind::Tuple(_) | TyKind::Array { .. })
                         || (matches!(tcx.kind_of(peeled), TyKind::Adt { .. })
-                            && type_slot_count(tcx, peeled) > 1);
+                            && type_slot_count(tcx, peeled) > 1)
+                        || is_inline_aggregate(tcx, peeled);
                 // A TERMINAL `Deref` whose pointee is a one-word value (scalar
                 // or `String`, the `&mut x`-on-place shapes the MIR lowers to a
                 // slot-address `Rvalue::Ref`) keeps `current` as the slot

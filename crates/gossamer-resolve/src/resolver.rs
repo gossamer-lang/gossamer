@@ -708,7 +708,7 @@ impl Resolver {
         let named = self
             .anchored_local_module(&use_decl.module, &target)
             .unwrap_or_else(|| target.clone());
-        if self.local_module_paths.contains(&named) && name != named {
+        if self.local_module_paths.contains(&named) {
             self.resolutions
                 .insert_module_alias(&use_decl.module, name.clone(), named.clone());
         }
@@ -843,7 +843,7 @@ impl Resolver {
             let named = self
                 .anchored_local_module(&use_decl.module, &target)
                 .unwrap_or_else(|| target.clone());
-            if self.local_module_paths.contains(&named) && imported != named {
+            if self.local_module_paths.contains(&named) {
                 self.resolutions.insert_module_alias(
                     &use_decl.module,
                     imported.clone(),

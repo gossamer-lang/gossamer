@@ -1815,12 +1815,22 @@ pub(super) fn lower_terminator(
             // lowering used for block-entry/block-exit cleanup. Recomputing a
             // summary-less plan here can disagree with block cleanup and
             // produce either leaks or duplicate frees.
+            // Blocks are lowered in MIR order, so a local first assigned in a
+            // block after this one has no variable yet; declaring it here lets
+            // the SSA builder read the value each path reaching the return
+            // gave it.
             if !cleanup_plan.is_empty() {
                 let ptr_ty = module.target_config().pointer_type();
                 for entry in cleanup_plan.at_return() {
-                    let Some(&var) = locals.get(&entry.local) else {
-                        continue;
-                    };
+                    let var = ensure_var(
+                        builder,
+                        locals,
+                        body,
+                        tcx,
+                        module,
+                        &intrinsics.body_cl_types,
+                        entry.local,
+                    );
                     let raw = builder.use_var(var);
                     let ptr = coerce_arg_to(builder, raw, ptr_ty).unwrap_or(raw);
                     let free_fn = intrinsics.extern_fn(module, entry.free_fn, &[ptr_ty], &[])?;
@@ -1828,10 +1838,16 @@ pub(super) fn lower_terminator(
                     builder.ins().call(free_ref, &[ptr]);
                 }
             }
-            let retval = match locals.get(&Local(0)).copied() {
-                Some(var) => builder.use_var(var),
-                None => builder.ins().iconst(types::I64, 0),
-            };
+            let ret_var = ensure_var(
+                builder,
+                locals,
+                body,
+                tcx,
+                module,
+                &intrinsics.body_cl_types,
+                Local(0),
+            );
+            let retval = builder.use_var(ret_var);
             // Aggregate returns: the local-0 variable holds a pointer
             // into a stack slot owned by the current frame. Returning
             // it directly hands the caller a dangling pointer the
