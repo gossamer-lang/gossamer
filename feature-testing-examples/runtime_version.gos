@@ -6,7 +6,11 @@ use std::runtime
 fn main() {
     let version = runtime::version()
     let parts = version.split(".")
+    let mut numeric = 0
+    for part in parts {
+        if part.to_i64().is_some() { numeric += 1 }
+    }
     println(f"parts {parts.len()}")
-    println(f"numeric {parts.all(|p| p.to_i64().is_some())}")
+    println(f"numeric {numeric == parts.len()}")
     println(f"version {version}")
 }
