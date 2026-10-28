@@ -9,6 +9,7 @@
 - A constant reached through a module the program imports under its own name (`use commands`, then `commands::MOVE`) reads that module's constant on the VM, where a dependency's module of the same name was searched instead and the program failed with GX0002.
 - A module's own enum variants and associated functions written without a module path (`Step::Next` inside `search`) run on the VM and build natively when a dependency imports a module of the same name, where the VM failed with GX0002 and `gos build` stopped with an internal lowering error.
 - The error `regex::new` refuses a pattern with is an `errors::Error` on every tier, so `e.message()` and `{e}` read the reason, where the VM's `message()` was empty and a native build faulted reading it.
+- `gos run` with the JIT peaks far lower on a large program, 483 MB instead of 700 MB for a GUI application, and prepares its MIR faster: each block lowered for the JIT reserved room for every retain and release inserted across its whole function rather than its own.
 
 ## 0.75.5 - Binding builds independent of the working directory, cheaper binding calls and loop regions
 

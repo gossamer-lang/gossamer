@@ -1078,9 +1078,10 @@ impl Vm {
             self.jit_droppable
                 .set(!program_has_spawn_sites(&self.globals));
             let program = program.clone();
-            let jit_tcx = tcx.clone();
             let source_map = self.source_map.clone();
-            let prepared = prepare_jit(program, jit_tcx, &roots, source_map);
+            // Every chunk is compiled by now, so the JIT takes the type
+            // context itself rather than a copy of it.
+            let prepared = prepare_jit(program, tcx, &roots, source_map);
             self.adopt_prepared_jit(&prepared);
         } else {
             self.jit.write().compiled = JitCompileState::Failed;
