@@ -8,6 +8,7 @@
 - `Type::function()` on a type a `use` imported (`use b::Settings`, then `Settings::default()`) reaches that type's associated functions and its `Default`, where another type of the same name, declared earlier in the program or in a dependency, answered instead and the call was refused as the wrong type.
 - A constant reached through a module the program imports under its own name (`use commands`, then `commands::MOVE`) reads that module's constant on the VM, where a dependency's module of the same name was searched instead and the program failed with GX0002.
 - A module's own enum variants and associated functions written without a module path (`Step::Next` inside `search`) run on the VM and build natively when a dependency imports a module of the same name, where the VM failed with GX0002 and `gos build` stopped with an internal lowering error.
+- The error `regex::new` refuses a pattern with is an `errors::Error` on every tier, so `e.message()` and `{e}` read the reason, where the VM's `message()` was empty and a native build faulted reading it.
 
 ## 0.75.5 - Binding builds independent of the working directory, cheaper binding calls and loop regions
 

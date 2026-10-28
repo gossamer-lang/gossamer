@@ -1377,7 +1377,7 @@ impl<'a> Builder<'a> {
             // the type-qualified spelling of the same call.
             "regex::new" | "regex::Pattern::new" | "Pattern::new" => {
                 let handle = self.tcx.int_ty(gossamer_types::IntTy::I64);
-                let ty = self.result_payload_string_error_ty(handle);
+                let ty = self.result_payload_error_ty(handle);
                 ("gos_rt_regex_compile_result", ty)
             }
             "regex::is_match" => ("gos_rt_regex_is_match", self.tcx.bool_ty()),

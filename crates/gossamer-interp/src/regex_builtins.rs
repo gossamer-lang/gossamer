@@ -156,7 +156,13 @@ fn builtin_regex_compile(args: &[Value]) -> RuntimeResult<Value> {
     let pattern = arg_string(args, 0, "regex::new")?;
     Ok(match compile_pattern(pattern) {
         Ok(handle) => Value::variant("Ok", vec![handle]),
-        Err(reason) => Value::variant("Err", vec![Value::String(SmolStr::from(reason))]),
+        Err(reason) => Value::variant(
+            "Err",
+            vec![crate::builtins::errors_struct(
+                reason,
+                Value::variant("None", vec![]),
+            )],
+        ),
     })
 }
 

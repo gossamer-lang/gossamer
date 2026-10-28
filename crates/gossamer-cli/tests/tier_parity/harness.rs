@@ -1803,6 +1803,7 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/enum_keys.gos"),
     spec("feature-testing-examples/main_thread.gos"),
     spec("feature-testing-examples/runtime_version.gos"),
+    spec("feature-testing-examples/regex_new_error_is_an_error.gos"),
     spec("feature-testing-examples/jit_aggregate_return_set_after_return_block.gos"),
     spec("feature-testing-examples/jit_single_field_struct_through_mut_ref.gos"),
     spec("feature-testing-examples/store_through_mut_ref.gos"),

@@ -76,8 +76,10 @@ pub unsafe extern "C" fn gos_rt_regex_compile(pat: *const c_char) -> *mut GosReg
 pub unsafe extern "C" fn gos_rt_regex_compile_result(pat: *const c_char) -> i128 {
     ffi_entry!({
         if pat.is_null() {
-            let msg = alloc_cstring(b"regex: invalid pattern ``: null pattern");
-            return gos_rt_result_new(1, msg as i64);
+            let err = crate::c_abi::errors::error_new_from_bytes(
+                b"regex: invalid pattern ``: null pattern",
+            );
+            return gos_rt_result_new(1, err as i64);
         }
         // SAFETY: `pat` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { crate::c_abi::gos_str_arg_text(pat) };
@@ -88,7 +90,8 @@ pub unsafe extern "C" fn gos_rt_regex_compile_result(pat: *const c_char) -> i128
             }
             Err(e) => {
                 let msg = format!("regex: invalid pattern `{s}`: {e}");
-                gos_rt_result_new(1, alloc_cstring(msg.as_bytes()) as i64)
+                let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
+                gos_rt_result_new(1, err as i64)
             }
         }
     })

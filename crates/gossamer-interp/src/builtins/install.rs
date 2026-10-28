@@ -1652,7 +1652,7 @@ pub(crate) fn make_error_value(message: &str) -> Value {
     errors_struct(message.to_string(), Value::variant("None", vec![]))
 }
 
-fn errors_struct(message: String, cause: Value) -> Value {
+pub(crate) fn errors_struct(message: String, cause: Value) -> Value {
     errors_struct_with(message, cause, Value::Array(Arc::new(Vec::new())))
 }
 

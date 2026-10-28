@@ -1,0 +1,23 @@
+// `regex::new` refuses a pattern with an `errors::Error`, whose message and
+// rendering read the same on every tier.
+
+use std::regex
+
+fn describe(pattern: String) -> String {
+    match regex::new(pattern) {
+        Ok(p) => f"ok {regex::count(p, "a1 b22 c333")}"
+        Err(e) => {
+            let message = e.message()
+            f"refused {message.starts_with("regex: invalid pattern")} {message.contains("unclosed")}"
+        }
+    }
+}
+
+fn main() {
+    for pattern in #["[a-z]\\d+", "(", "\\d+"] {
+        println(describe(pattern))
+    }
+    if let Err(e) = regex::new("[") {
+        println(f"{e}".contains("unclosed character class"))
+    }
+}
