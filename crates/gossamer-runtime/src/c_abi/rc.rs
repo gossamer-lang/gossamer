@@ -3338,6 +3338,69 @@ mod tests {
         unsafe { arena_retire(oversized, REGION_SLAB_BYTES + os_page_size()) };
     }
 
+    /// A region that has allocated nothing holds no storage, so one opened
+    /// between two that allocate takes its own the first time it allocates:
+    /// its objects are counted and released with it, not with the region it
+    /// nests in.
+    #[test]
+    #[cfg_attr(miri, ignore)] // arena uses mmap with non-RW protections; Miri can't model it
+    fn a_region_first_used_after_a_nested_pop_owns_its_objects() {
+        let _guard = count_guard();
+        let before = rc_live_count();
+        gos_rt_arena_push();
+        if !region_is_active() {
+            return;
+        }
+        // SAFETY: counted objects with no metadata, released with their regions.
+        let counted = || unsafe { gos_rt_rc_alloc(16, std::ptr::null()) };
+        let outer = counted();
+        gos_rt_arena_push();
+        gos_rt_arena_push();
+        let inner = counted();
+        assert!(in_region_arena(inner));
+        gos_rt_arena_pop();
+
+        let middle = counted();
+        assert!(in_region_arena(middle));
+        gos_rt_arena_pop();
+        let resumed = counted();
+        assert!(in_region_arena(resumed) && in_region_arena(outer));
+        gos_rt_arena_pop();
+
+        assert!(!region_is_active());
+        assert_eq!(
+            rc_live_count(),
+            before,
+            "every region object is released with its own region"
+        );
+    }
+
+    /// Opening and closing regions that allocate nothing leaves an enclosing
+    /// region's allocation where it was: the next object follows the last.
+    #[test]
+    #[cfg_attr(miri, ignore)] // arena uses mmap with non-RW protections; Miri can't model it
+    fn unused_regions_keep_the_enclosing_bump() {
+        let _guard = count_guard();
+        gos_rt_arena_push();
+        if !region_is_active() {
+            return;
+        }
+        let first = crate::c_abi::gc::gos_rt_gc_alloc(64) as usize;
+        let second = crate::c_abi::gc::gos_rt_gc_alloc(64) as usize;
+        for _ in 0..3 {
+            gos_rt_arena_push();
+            gos_rt_arena_pop();
+        }
+        let third = crate::c_abi::gc::gos_rt_gc_alloc(64) as usize;
+        assert_eq!(
+            third - second,
+            second - first,
+            "the enclosing region's bump continues after the unused ones"
+        );
+        gos_rt_arena_pop();
+        assert!(!region_is_active());
+    }
+
     /// A pop with no region open still balances the depth it was called at.
     #[test]
     #[cfg_attr(miri, ignore)] // arena uses mmap with non-RW protections; Miri can't model it

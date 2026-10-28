@@ -39,44 +39,41 @@ use gossamer_std::http::{Headers, Request, Response, StatusCode};
 use gossamer_std::http_h2 as h2srv;
 use http::{HeaderMap, Method as HttpMethod, Request as HttpRequest};
 
-const SERVER_BOOT_DELAY_MS: u64 = 250;
 const CLIENT_TIMEOUT_MS: u64 = 5_000;
 
-/// Returns the next available free loopback port. Binds momentarily
-/// to claim it, then drops the listener so the server-under-test
-/// can re-bind. There is a small TOCTOU window - acceptable for
-/// in-process tests; the alternative (passing the live listener
-/// to the server entry point) requires an API the h2c shim does
-/// not currently expose.
-fn pick_port() -> u16 {
-    let probe = StdListener::bind("127.0.0.1:0").expect("bind probe");
-    let port = probe.local_addr().expect("local_addr").port();
-    drop(probe);
-    port
+/// A loopback listener on a port the system picked, and its address. The
+/// server takes the bound listener itself, so no other process can take the
+/// port between the choice and the bind, and a connection made before the
+/// server's first accept waits in the listen backlog.
+fn loopback_listener() -> (StdListener, SocketAddr) {
+    let listener = StdListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    (listener, addr)
 }
 
-/// Spawns a bounded-handler h2c server on `addr` in a dedicated
-/// thread. Returns a join handle that callers can use to confirm
-/// the server didn't crash (best-effort - h2c serves forever).
-fn spawn_bounded_server<H>(addr: String, handler: H, config: h2srv::Config)
+/// Serves `handler` over h2c on a fresh loopback port in a dedicated
+/// thread, answering the address to connect to.
+fn spawn_bounded_server<H>(handler: H, config: h2srv::Config) -> SocketAddr
 where
-    H: h2srv::Handler + Clone,
+    H: h2srv::Handler + Clone + Send + 'static,
 {
+    let (listener, addr) = loopback_listener();
     thread::spawn(move || {
-        let _ = h2srv::bind_and_run_h2c(&addr, handler, config);
+        let _ = h2srv::run_h2c(listener, handler, config);
     });
-    thread::sleep(Duration::from_millis(SERVER_BOOT_DELAY_MS));
+    addr
 }
 
 /// Same shape but for the streaming handler.
-fn spawn_streaming_server<H>(addr: String, handler: H, config: h2srv::Config)
+fn spawn_streaming_server<H>(handler: H, config: h2srv::Config) -> SocketAddr
 where
-    H: h2srv::StreamingHandler + Clone,
+    H: h2srv::StreamingHandler + Clone + Send + 'static,
 {
+    let (listener, addr) = loopback_listener();
     thread::spawn(move || {
-        let _ = h2srv::bind_and_run_h2c_streaming(&addr, handler, config);
+        let _ = h2srv::run_h2c_streaming(listener, handler, config);
     });
-    thread::sleep(Duration::from_millis(SERVER_BOOT_DELAY_MS));
+    addr
 }
 
 /// Drives a futures-based closure under a fresh multi-threaded
@@ -123,10 +120,7 @@ async fn connect(
 
 #[test]
 fn preface_handshake_completes() {
-    let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
-    spawn_bounded_server(addr.clone(), ok_handler, h2srv::Config::default());
-    let sock: SocketAddr = addr.parse().expect("parse");
+    let sock = spawn_bounded_server(ok_handler, h2srv::Config::default());
 
     run_client(async move {
         let (send_req, conn) = connect(sock).await;
@@ -143,10 +137,7 @@ fn preface_handshake_completes() {
 
 #[test]
 fn settings_exchange_completes() {
-    let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
-    spawn_bounded_server(addr.clone(), ok_handler, h2srv::Config::default());
-    let sock: SocketAddr = addr.parse().expect("parse");
+    let sock = spawn_bounded_server(ok_handler, h2srv::Config::default());
 
     run_client(async move {
         // Successful client handshake implies SETTINGS round-trip
@@ -161,11 +152,8 @@ fn settings_exchange_completes() {
 
 #[test]
 fn settings_advertise_max_concurrent_streams() {
-    let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
     let config = h2srv::Config::default().with_max_concurrent_streams(7);
-    spawn_bounded_server(addr.clone(), ok_handler, config);
-    let sock: SocketAddr = addr.parse().expect("parse");
+    let sock = spawn_bounded_server(ok_handler, config);
 
     run_client(async move {
         let (mut send_req, conn) = connect(sock).await;
@@ -189,11 +177,8 @@ fn settings_advertise_max_concurrent_streams() {
 
 #[test]
 fn settings_advertise_initial_window_size() {
-    let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
     let config = h2srv::Config::default().with_initial_window_size(65_535);
-    spawn_bounded_server(addr.clone(), ok_handler, config);
-    let sock: SocketAddr = addr.parse().expect("parse");
+    let sock = spawn_bounded_server(ok_handler, config);
 
     run_client(async move {
         let (_send_req, conn) = connect(sock).await;
@@ -210,10 +195,7 @@ fn settings_advertise_initial_window_size() {
 
 #[test]
 fn headers_end_stream_get_returns_200() {
-    let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
-    spawn_bounded_server(addr.clone(), ok_handler, h2srv::Config::default());
-    let sock: SocketAddr = addr.parse().expect("parse");
+    let sock = spawn_bounded_server(ok_handler, h2srv::Config::default());
 
     run_client(async move {
         let (mut send_req, conn) = connect(sock).await;
@@ -233,10 +215,7 @@ fn headers_end_stream_get_returns_200() {
 
 #[test]
 fn data_end_stream_post_echoes_body() {
-    let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
-    spawn_bounded_server(addr.clone(), echo_handler, h2srv::Config::default());
-    let sock: SocketAddr = addr.parse().expect("parse");
+    let sock = spawn_bounded_server(echo_handler, h2srv::Config::default());
 
     run_client(async move {
         let (mut send_req, conn) = connect(sock).await;
@@ -265,10 +244,7 @@ fn data_end_stream_post_echoes_body() {
 
 #[test]
 fn request_carries_required_pseudo_headers() {
-    let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
-    spawn_bounded_server(addr.clone(), header_dump_handler, h2srv::Config::default());
-    let sock: SocketAddr = addr.parse().expect("parse");
+    let sock = spawn_bounded_server(header_dump_handler, h2srv::Config::default());
 
     let body = run_client(async move {
         let (mut send_req, conn) = connect(sock).await;
@@ -302,10 +278,7 @@ fn request_carries_required_pseudo_headers() {
 
 #[test]
 fn ping_round_trips() {
-    let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
-    spawn_bounded_server(addr.clone(), ok_handler, h2srv::Config::default());
-    let sock: SocketAddr = addr.parse().expect("parse");
+    let sock = spawn_bounded_server(ok_handler, h2srv::Config::default());
 
     run_client(async move {
         let (mut send_req, mut conn) = connect(sock).await;
@@ -335,10 +308,7 @@ fn ping_round_trips() {
 
 #[test]
 fn window_update_releases_capacity() {
-    let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
-    spawn_bounded_server(addr.clone(), echo_handler, h2srv::Config::default());
-    let sock: SocketAddr = addr.parse().expect("parse");
+    let sock = spawn_bounded_server(echo_handler, h2srv::Config::default());
 
     run_client(async move {
         let (mut send_req, conn) = connect(sock).await;
@@ -378,10 +348,7 @@ fn window_update_releases_capacity() {
 
 #[test]
 fn goaway_on_graceful_shutdown() {
-    let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
-    spawn_bounded_server(addr.clone(), ok_handler, h2srv::Config::default());
-    let sock: SocketAddr = addr.parse().expect("parse");
+    let sock = spawn_bounded_server(ok_handler, h2srv::Config::default());
 
     // The Gossamer h2c server has no in-process shutdown handle
     // exposed; we observe GOAWAY indirectly by closing the
@@ -412,14 +379,7 @@ fn goaway_on_graceful_shutdown() {
 
 #[test]
 fn rst_stream_mid_stream_aborts() {
-    let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
-    spawn_streaming_server(
-        addr.clone(),
-        slow_streaming_handler,
-        h2srv::Config::default(),
-    );
-    let sock: SocketAddr = addr.parse().expect("parse");
+    let sock = spawn_streaming_server(slow_streaming_handler, h2srv::Config::default());
 
     run_client(async move {
         let (mut send_req, conn) = connect(sock).await;
@@ -449,10 +409,7 @@ fn rst_stream_mid_stream_aborts() {
 
 #[test]
 fn malformed_pseudo_header_rejected() {
-    let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
-    spawn_bounded_server(addr.clone(), ok_handler, h2srv::Config::default());
-    let sock: SocketAddr = addr.parse().expect("parse");
+    let sock = spawn_bounded_server(ok_handler, h2srv::Config::default());
 
     run_client(async move {
         let (mut send_req, conn) = connect(sock).await;
@@ -495,11 +452,8 @@ fn malformed_pseudo_header_rejected() {
 
 #[test]
 fn oversized_headers_rejected() {
-    let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
     let config = h2srv::Config::default().with_max_header_list_size(1024);
-    spawn_bounded_server(addr.clone(), ok_handler, config);
-    let sock: SocketAddr = addr.parse().expect("parse");
+    let sock = spawn_bounded_server(ok_handler, config);
 
     run_client(async move {
         let (mut send_req, conn) = connect(sock).await;
@@ -530,14 +484,7 @@ fn oversized_headers_rejected() {
 
 #[test]
 fn push_promise_delivered_to_client() {
-    let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
-    spawn_streaming_server(
-        addr.clone(),
-        push_streaming_handler,
-        h2srv::Config::default(),
-    );
-    let sock: SocketAddr = addr.parse().expect("parse");
+    let sock = spawn_streaming_server(push_streaming_handler, h2srv::Config::default());
 
     let pushed_count = run_client(async move {
         let tcp = tokio::net::TcpStream::connect(sock).await.expect("connect");
@@ -591,14 +538,7 @@ fn push_promise_delivered_to_client() {
 
 #[test]
 fn trailers_round_trip() {
-    let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
-    spawn_streaming_server(
-        addr.clone(),
-        trailers_streaming_handler,
-        h2srv::Config::default(),
-    );
-    let sock: SocketAddr = addr.parse().expect("parse");
+    let sock = spawn_streaming_server(trailers_streaming_handler, h2srv::Config::default());
 
     let trailers = run_client(async move {
         let (mut send_req, conn) = connect(sock).await;
@@ -630,14 +570,7 @@ fn trailers_round_trip() {
 
 #[test]
 fn request_trailers_observable() {
-    let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
-    spawn_bounded_server(
-        addr.clone(),
-        request_trailer_observer,
-        h2srv::Config::default(),
-    );
-    let sock: SocketAddr = addr.parse().expect("parse");
+    let sock = spawn_bounded_server(request_trailer_observer, h2srv::Config::default());
 
     let body_text = run_client(async move {
         let (mut send_req, conn) = connect(sock).await;
@@ -675,10 +608,7 @@ fn request_trailers_observable() {
 
 #[test]
 fn multiple_concurrent_streams_complete() {
-    let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
-    spawn_bounded_server(addr.clone(), ok_handler, h2srv::Config::default());
-    let sock: SocketAddr = addr.parse().expect("parse");
+    let sock = spawn_bounded_server(ok_handler, h2srv::Config::default());
 
     run_client(async move {
         let (mut send_req, conn) = connect(sock).await;
@@ -713,10 +643,7 @@ fn in_flight_counter_drops_after_drain() {
     // A focused unit-style test using the in-process ServerHandle
     // counters: spawn a tiny server, fire one request, observe
     // the counter returns to 0 after the response drains.
-    let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
-    spawn_bounded_server(addr.clone(), ok_handler, h2srv::Config::default());
-    let sock: SocketAddr = addr.parse().expect("parse");
+    let sock = spawn_bounded_server(ok_handler, h2srv::Config::default());
 
     run_client(async move {
         let (mut send_req, conn) = connect(sock).await;

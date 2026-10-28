@@ -1509,6 +1509,19 @@ where
     H: StreamingHandler + Clone,
 {
     let listener = gossamer_runtime::listen::bind_tcp(addr).map_err(Error::Io)?;
+    run_h2c_streaming(listener, handler, config)
+}
+
+/// Runs the streaming h2c accept loop over an already-bound listener, the
+/// streaming counterpart of [`run_h2c`].
+pub fn run_h2c_streaming<H>(
+    listener: std::net::TcpListener,
+    handler: H,
+    config: Config,
+) -> Result<(), Error>
+where
+    H: StreamingHandler + Clone,
+{
     listener.set_nonblocking(false).map_err(Error::Io)?;
     loop {
         let (stream, _peer) = listener.accept().map_err(Error::Io)?;

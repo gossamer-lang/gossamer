@@ -4,7 +4,6 @@
 //! installed can skip cleanly.
 
 use std::process::Command;
-use std::time::Duration;
 
 use gossamer_std::http::{Headers, Request, Response, StatusCode};
 use gossamer_std::http_h2 as h2;
@@ -44,16 +43,15 @@ fn bounded_handler_responds_over_h2c() {
     }
 
     // Find a free port.
-    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
+    // The server takes the bound listener, so no other process can take the port.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
     let addr = format!("127.0.0.1:{port}");
 
     // Boot the server in a thread; will run forever until process exit.
-    let server_addr = addr.clone();
     std::thread::spawn(move || {
-        let _ = h2::bind_and_run_h2c(
-            &server_addr,
+        let _ = h2::run_h2c(
+            listener,
             |req: Request| -> Response {
                 Response {
                     status: StatusCode(200),
@@ -70,9 +68,6 @@ fn bounded_handler_responds_over_h2c() {
             h2::Config::default(),
         );
     });
-
-    // Give the listener a beat to come up.
-    std::thread::sleep(Duration::from_millis(150));
 
     let out = Command::new("curl")
         .arg("--http2-prior-knowledge")
@@ -99,17 +94,14 @@ fn streaming_handler_emits_multiple_chunks_over_h2c() {
         return;
     }
 
-    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
+    // The server takes the bound listener, so no other process can take the port.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
     let addr = format!("127.0.0.1:{port}");
 
-    let server_addr = addr.clone();
     std::thread::spawn(move || {
-        let _ = h2::bind_and_run_h2c_streaming(&server_addr, STREAM_HANDLER, h2::Config::default());
+        let _ = h2::run_h2c_streaming(listener, STREAM_HANDLER, h2::Config::default());
     });
-
-    std::thread::sleep(Duration::from_millis(150));
 
     let out = Command::new("curl")
         .arg("--http2-prior-knowledge")

@@ -1686,8 +1686,10 @@ impl<E: WireError> BindingAbi for Result<(), E> {
 
     unsafe fn from_input(input: *const GosVariant) -> Self {
         // `Ok(())` carries nothing, so its tag alone says it, with or
-        // without a unit field after it.
-        if !input.is_null() && unsafe { (*input).tag } == 1 {
+        // without a unit field after it, as does the word that stands for it.
+        if input.addr() == gossamer_binding_abi::UNIT_OK_WORD
+            || !input.is_null() && unsafe { (*input).tag } == 1
+        {
             return Ok(());
         }
         match unsafe { read_single_payload(input) } {
@@ -1700,8 +1702,7 @@ impl<E: WireError> BindingAbi for Result<(), E> {
 
     fn to_output(self) -> *mut GosVariant {
         match self {
-            // No fields: the runtime reads an absent payload as the unit.
-            Ok(()) => make_variant(1, Vec::new()),
+            Ok(()) => std::ptr::without_provenance_mut(gossamer_binding_abi::UNIT_OK_WORD),
             Err(s) => make_variant(
                 0,
                 vec![unsafe { variant_value_string_owned(s.into_wire()) }],

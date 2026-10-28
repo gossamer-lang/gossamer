@@ -14,15 +14,14 @@ fn single_h2c_request_completes_quickly() {
         eprintln!("skipping: set GOS_H2_BENCH=1");
         return;
     }
-    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
+    // The server takes the bound listener, so no other process can take the port.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
     let addr = format!("127.0.0.1:{port}");
 
-    let server_addr = addr.clone();
     std::thread::spawn(move || {
-        let _ = h2::bind_and_run_h2c(
-            &server_addr,
+        let _ = h2::run_h2c(
+            listener,
             |_req: Request| -> Response {
                 Response {
                     status: StatusCode(200),
@@ -39,7 +38,6 @@ fn single_h2c_request_completes_quickly() {
             h2::Config::default(),
         );
     });
-    std::thread::sleep(Duration::from_millis(300));
 
     // Warmup + 10 timed requests.
     for _ in 0..2 {
