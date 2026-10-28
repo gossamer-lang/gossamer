@@ -2134,6 +2134,7 @@ impl<'a> Builder<'a> {
                 ("gos_rt_runtime_scheduler_stats_json", self.tcx.string_ty())
             }
             "runtime::is_main_thread" => ("gos_rt_runtime_is_main_thread", self.tcx.bool_ty()),
+            "runtime::version" => ("gos_rt_runtime_version", self.tcx.string_ty()),
             "pprof::goroutine_profile" => ("gos_rt_pprof_goroutine_profile", self.tcx.string_ty()),
             "pprof::mutex_profile" => ("gos_rt_pprof_mutex_profile", self.tcx.string_ty()),
             "pprof::block_profile" => ("gos_rt_pprof_block_profile", self.tcx.string_ty()),

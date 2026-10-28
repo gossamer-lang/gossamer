@@ -216,10 +216,7 @@ impl TypeChecker<'_> {
         if owner.is_empty() {
             return None;
         }
-        let type_name = self
-            .owner_identity_candidates(owner)
-            .into_iter()
-            .find(|candidate| self.user_type_decls.contains(candidate))?;
+        let type_name = self.assoc_owner_identity(callee, owner)?;
         let def = self.user_type_defs.get(&type_name).copied()?;
         let method = (*fn_name).to_string();
         let params = match self
@@ -1009,10 +1006,7 @@ impl TypeChecker<'_> {
         if owner.is_empty() {
             return None;
         }
-        let type_name = self
-            .owner_identity_candidates(owner)
-            .into_iter()
-            .find(|candidate| self.user_type_decls.contains(candidate))?;
+        let type_name = self.assoc_owner_identity(callee, owner)?;
         let key = (type_name, (*fn_name).to_string());
         self.method_ret_types
             .get(&(key.0.clone(), key.1.clone(), n_args))?;
@@ -1074,10 +1068,7 @@ impl TypeChecker<'_> {
         // A type reached through its module (`lib::Point::new`) is keyed
         // by the identity it registers under, so try the written path
         // before the bare name two modules could share.
-        let type_name = self
-            .owner_identity_candidates(owner)
-            .into_iter()
-            .find(|candidate| self.user_type_decls.contains(candidate))?;
+        let type_name = self.assoc_owner_identity(callee, owner)?;
         // An associated function carries its own visibility, the same as a
         // method: `Type::helper()` reached from outside the module the
         // `impl` was written in is private unless it says `pub`.

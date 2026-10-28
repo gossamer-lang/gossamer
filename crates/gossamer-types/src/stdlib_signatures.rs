@@ -3220,6 +3220,11 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::runtime",
+        name: "version",
+        signature: "fn version() -> String",
+    },
+    StdFunctionSignature {
+        module_path: "std::runtime",
         name: "at_exit",
         signature: "fn at_exit(hook: Fn() -> ()) -> ()",
     },

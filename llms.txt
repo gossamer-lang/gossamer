@@ -4,7 +4,7 @@ Gossamer is a Rust-flavoured language with goroutines and deterministic memory m
 
 - [Compact LLM reference](llms-full.txt)
 - [Reviewed skill card](SKILL.md)
-- [Machine-readable stdlib API catalog](https://gossamer-lang.org/docs/api/stdlib.json) (1020 entries)
+- [Machine-readable stdlib API catalog](https://gossamer-lang.org/docs/api/stdlib.json) (1021 entries)
 - [Cookbook registry](https://gossamer-lang.org/docs/api/cookbook.json) (recipes appear only after fixture verification)
 - [Language specification](SPEC.md)
 - [Examples](examples/)

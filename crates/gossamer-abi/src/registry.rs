@@ -1718,6 +1718,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_runtime_cycle_collection_supported", () -> I8, Cranelift, "Report whether this tier collects unreachable reference cycles."),
     rt!("gos_rt_runtime_is_main_thread", () -> I64, Both, "Whether the caller runs on the thread the program's `main` runs on, the process main thread."),
     rt_str!("gos_rt_runtime_scheduler_stats_json", () -> Ptr, Cranelift, "Return a compact JSON snapshot of goroutine scheduler counters."),
+    rt_str!("gos_rt_runtime_version", () -> Ptr, Both, "Return the Gossamer release the program runs on as a String (e.g. \"0.75.6\")."),
     rt!("gos_rt_rwlock_get", (Ptr) -> I64, Cranelift, "sync::RwLock::read(lock) -> the guarded i64 value."),
     rt!("gos_rt_rwlock_new", (I64) -> Ptr, Cranelift, "sync::RwLock::new(value) -> a reader-writer lock guarding an i64."),
     rt!("gos_rt_rwlock_set", (Ptr, I64) -> Void, Cranelift, "sync::RwLock::write(lock, value): replace the guarded i64 under a write lock."),

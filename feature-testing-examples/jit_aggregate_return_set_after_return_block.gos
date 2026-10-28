@@ -1,0 +1,42 @@
+// A struct answered from a match arm that calls a function, beside an arm
+// that panics: the return block comes first in the body, ahead of the call
+// that sets the answer, and still returns the struct the call built.
+
+use std::errors
+
+struct Node {
+    id: String
+    name: String
+    checked: i64
+}
+
+fn answer(decoded: Result<Node, errors::Error>) -> Node {
+    match decoded {
+        Ok(v) => v
+        Err(e) => panic(f"bad answer: {e}")
+    }
+}
+
+fn fetch(n: i64) -> Result<i64, errors::Error> {
+    if n < 0 { Err(errors::new("negative")) } else { Ok(n) }
+}
+
+fn get(w: i64) -> Node {
+    match fetch(w) {
+        Ok(a) => answer(Ok(Node { id: f"id{a}", name: f"n{a % 7}", checked: a }))
+        Err(e) => panic(f"get: {e}")
+    }
+}
+
+fn main() {
+    let mut total = 0
+    let mut names = 0
+    let mut i = 0
+    while i < 4000 {
+        let node = get(i)
+        total += node.checked
+        names += node.name.byte_len() + node.id.byte_len()
+        i += 1
+    }
+    println(f"{total} {names}")
+}

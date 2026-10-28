@@ -164,19 +164,23 @@ impl Resolutions {
         self.project_aliases.get(alias).map(String::as_str)
     }
 
-    /// Records that a `use path::to::module [as alias]` binds `alias` to
-    /// the module at `module`.
+    /// Records that a `use path::to::module [as alias]` in module `scope`
+    /// binds `alias` to the module at `module`.
     ///
     /// Kept apart from the project aliases because those also say which
     /// module roots are inlined packages, which is what `pub(package)`
     /// reachability is defined against; a module import says nothing
-    /// about packages.
+    /// about packages. A module imported under its own path is recorded for
+    /// its scope only: it needs no respelling, and the record keeps another
+    /// module's same-named import from applying there.
     pub fn insert_module_alias(&mut self, scope: &[String], alias: String, module: String) {
         self.scoped_module_aliases
             .entry(scope.join("::"))
             .or_default()
             .insert(alias.clone(), module.clone());
-        self.module_aliases.insert(alias, module);
+        if alias != module {
+            self.module_aliases.insert(alias, module);
+        }
     }
 
     /// The module a `use`-imported name was bound to, if any. Its items

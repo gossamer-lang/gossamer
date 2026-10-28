@@ -2714,13 +2714,15 @@ impl Lowerer<'_> {
         // that module's own item, whose body is keyed by the qualified
         // spelling. Walk outward from the anchor so an inner module's item
         // wins over a same-named one further out, matching name resolution.
+        let mut anchored = false;
         if let Some(depth) = anchor_depth
             && segments.len() >= 2
             && depth > 0
         {
             let tail: Vec<&str> = segments.iter().map(|s| s.name.as_str()).collect();
-            if let Some(anchored) = self.anchor_impl_fn_path(&tail, depth) {
-                segments = anchored;
+            if let Some(path) = self.anchor_impl_fn_path(&tail, depth) {
+                segments = path;
+                anchored = true;
             }
         }
         // A `Type::assoc` whose `Type` came from a `use` names an impl
@@ -2736,8 +2738,11 @@ impl Lowerer<'_> {
         }
         // A path headed by a `use "id" as alias` binding names items
         // registered under the dependency module's real name, so the
-        // head is respelled before any name-keyed dispatch sees it.
-        if segments.len() > 1
+        // head is respelled before any name-keyed dispatch sees it. An
+        // anchored path already spells its module from the unit root, so
+        // its head is that module, not a name an import bound.
+        if !anchored
+            && segments.len() > 1
             && let Some(real) = self
                 .resolutions
                 .project_alias(&segments[0].name)

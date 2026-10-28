@@ -94,6 +94,11 @@ pub const RUNTIME: StdModule = StdModule {
             doc: "Returns a compact JSON snapshot of goroutine scheduler counters.",
         },
         StdItem {
+            name: "version",
+            kind: StdItemKind::Function,
+            doc: "`version() -> String`: the Gossamer release that built and runs the program, such as \"0.75.6\". Go's `runtime.Version`.",
+        },
+        StdItem {
             name: "arena_push",
             kind: StdItemKind::Function,
             doc: "Opens an arena region for bump allocation.",

@@ -859,14 +859,9 @@ impl TypeChecker<'_> {
         let lowered = self.type_from_ast(self_ty);
         let settled = self.deep_resolve(lowered);
         if let Some(TyKind::Adt { def, .. }) = self.tcx.kind(settled).cloned()
-            && let Some(identity) = self
-                .adt_def_by_name
-                .iter()
-                .filter(|(_, declared)| **declared == def)
-                .map(|(name, _)| name)
-                .max_by_key(|name| name.len())
+            && let Some(identity) = self.adt_identity(def)
         {
-            candidates.push(identity.clone());
+            candidates.push(identity);
         }
         // A path written with its module (`impl lib::Point`) already
         // spells the identity; a bare one names a type the enclosing
@@ -891,6 +886,34 @@ impl TypeChecker<'_> {
             return Some(vec![identity]);
         }
         Some(vec![identity, bare])
+    }
+
+    /// The module-qualified identity user struct or enum `def` registers
+    /// under: its longest registered name.
+    pub(super) fn adt_identity(&self, def: gossamer_resolve::DefId) -> Option<String> {
+        self.adt_def_by_name
+            .iter()
+            .filter(|(_, declared)| **declared == def)
+            .map(|(name, _)| name)
+            .max_by_key(|name| name.len())
+            .cloned()
+    }
+
+    /// The user type the owner path of associated call `callee` names. An
+    /// imported head (`use a::Point`, then `Point::new()`) is the type the
+    /// `use` reaches, ahead of another type that shares its bare name.
+    pub(super) fn assoc_owner_identity(&self, callee: &Expr, owner: &[&str]) -> Option<String> {
+        let imported = match self.resolutions.get(callee.id) {
+            Some(Resolution::Import { .. }) => self
+                .resolutions
+                .import_def(callee.id)
+                .and_then(|def| self.adt_identity(def)),
+            _ => None,
+        };
+        imported
+            .into_iter()
+            .chain(self.owner_identity_candidates(owner))
+            .find(|candidate| self.user_type_decls.contains(candidate))
     }
 
     /// Identities the owner path of an associated call could name, most

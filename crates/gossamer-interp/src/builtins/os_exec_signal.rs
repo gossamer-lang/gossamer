@@ -525,6 +525,11 @@ fn builtin_runtime_is_main_thread(_args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Bool(gossamer_runtime::sched_global::on_main_thread()))
 }
 
+/// `runtime::version()`.
+fn builtin_runtime_version(_args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::String(gossamer_runtime::VERSION.into()))
+}
+
 /// `runtime::scheduler_stats_json()`. The counters describe the scheduler
 /// the caller's goroutines are actually running on, which under the
 /// interpreter is its own worker pool rather than the `MultiScheduler` the

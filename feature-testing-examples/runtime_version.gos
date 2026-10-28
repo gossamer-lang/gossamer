@@ -1,0 +1,12 @@
+// `runtime::version` answers the Gossamer release the program runs on, the
+// same text on every tier.
+
+use std::runtime
+
+fn main() {
+    let version = runtime::version()
+    let parts = version.split(".")
+    println(f"parts {parts.len()}")
+    println(f"numeric {parts.all(|p| p.to_i64().is_some())}")
+    println(f"version {version}")
+}
