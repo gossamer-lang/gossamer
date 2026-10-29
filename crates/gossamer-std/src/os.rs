@@ -169,7 +169,7 @@ pub fn copy(src: &str, dst: &str) -> Result<u64, IoError> {
 /// Returns the canonical absolute form of `path`.
 pub fn canonicalize(path: &str) -> Result<String, IoError> {
     std::fs::canonicalize(path)
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(|p| gossamer_runtime::canonical_path::display(&p))
         .map_err(|e| IoError::from_std(e, path))
 }
 

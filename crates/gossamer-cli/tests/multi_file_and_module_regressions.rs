@@ -5365,3 +5365,40 @@ fn dependency_fields_through_aliases_crate_paths_and_imports_render_on_every_tie
     assert_eq!(native.2, Some(0), "stderr: {}", native.1);
     assert_eq!(native.0.trim(), expected);
 }
+
+/// A dependency's `use crate::editing::search` binds `search` to its own
+/// module even when the application has a root module of the same name.
+#[test]
+fn a_dependency_import_shadows_a_root_module_of_the_same_name() {
+    let root = fresh_dir("dep-import-shadows-root-module");
+    let dep = write_dep_project(
+        &root,
+        "lib",
+        "example.com/lib",
+        "pub mod editing\npub mod term\n",
+    );
+    fs::create_dir_all(dep.join("editing")).unwrap();
+    fs::write(dep.join("editing/mod.gos"), "pub mod search\n").unwrap();
+    fs::write(
+        dep.join("editing/search.gos"),
+        "pub struct Searcher { n: i64 }\n\
+         impl Searcher {\n    pub fn new(n: i64) -> Searcher { Searcher { n: n } }\n    \
+         pub fn get(&self) -> i64 { self.n }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dep.join("term.gos"),
+        "use crate::editing::search\n\npub fn run() -> i64 { search::Searcher::new(4).get() }\n",
+    )
+    .unwrap();
+    let app = write_app_project(
+        &root,
+        "lib = { path = \"../lib\" }\n",
+        "use search\nuse lib::term\n\nfn main() { println(f\"{search::find()} {term::run()}\") }\n",
+    );
+    fs::write(app.join("search.gos"), "pub fn find() -> i64 { 1 }\n").unwrap();
+    let out = project_run_vm(&app);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(out.2, Some(0), "stderr: {}", out.1);
+    assert_eq!(out.0.trim(), "1 4", "stdout: {:?}", out.0);
+}

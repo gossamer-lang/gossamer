@@ -1,0 +1,33 @@
+// A `Result` over a by-value enum keeps its own share of the counted fields
+// inside the enum, so the `Some(Cell)` it hands back stays live after the
+// function that built it returns: the decoys must not reuse its storage.
+use std::errors
+
+struct Cell { row: i64, col: i64 }
+struct Snap {
+    history: i64
+    selection: Option<Cell>
+}
+enum Answer { Snapshot(Snap), Done }
+
+fn call(i: i64) -> Result<Answer, errors::Error> {
+    Ok(Answer::Snapshot(Snap { history: 100 + i, selection: Some(Cell { row: 3, col: i }) }))
+}
+
+fn snapshot(i: i64) -> Result<Snap, errors::Error> {
+    match call(i)? {
+        Answer::Snapshot(shown) => Ok(shown)
+        Answer::Done => Err(errors::new("not a snapshot"))
+    }
+}
+
+fn main() {
+    let mut rows = 0
+    let mut decoys = #[]
+    for i in 0..50 {
+        let shown = snapshot(i).unwrap()
+        decoys.push(Some(Cell { row: 999, col: 999 }))
+        if let Some(cell) = shown.selection { rows += cell.row }
+    }
+    println(f"rows {rows} decoys {decoys.len()}")
+}

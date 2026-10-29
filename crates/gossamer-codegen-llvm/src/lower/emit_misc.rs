@@ -763,6 +763,19 @@ impl<'a> Lowerer<'a> {
                     continue;
                 }
             }
+            // A program function's word parameter takes the word type its
+            // definition declares: a closure body binds its environment as
+            // an `i64` while the caller's environment local is a `ptr`.
+            if let Some(want) = want {
+                let want_ty = render_ty(self.tcx, want);
+                if a_ty != want_ty
+                    && matches!(a_ty.as_str(), "i64" | "ptr")
+                    && matches!(want_ty.as_str(), "i64" | "ptr")
+                {
+                    a_v = self.coerce_llvm_value(&a_v, &a_ty, &want_ty);
+                    a_ty = want_ty;
+                }
+            }
             arg_tys_for_decl.push(a_ty.clone());
             let _ = write!(arg_text, "{a_ty} {a_v}");
         }

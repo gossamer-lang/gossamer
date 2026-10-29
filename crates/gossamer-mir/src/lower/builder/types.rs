@@ -1330,6 +1330,16 @@ impl<'a> Builder<'a> {
     }
 
     /// `Result<ok, errors::Error>`.
+    /// `regex::Pattern`, the counted handle a compiled pattern travels as.
+    pub(crate) fn regex_pattern_ty(&mut self) -> Ty {
+        let def = gossamer_resolve::DefId::local(u32::MAX - 26);
+        self.tcx.register_def_name(def, "regex::Pattern");
+        self.tcx.intern(gossamer_types::TyKind::Adt {
+            def,
+            substs: gossamer_types::Substs::new(),
+        })
+    }
+
     pub(crate) fn result_payload_error_ty(&mut self, ok: Ty) -> Ty {
         let e = self.tcx.dyn_error_ty();
         let substs = gossamer_types::Substs::from_types([ok, e]);

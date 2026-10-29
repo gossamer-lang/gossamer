@@ -917,30 +917,8 @@ pub unsafe extern "C" fn gos_rt_path_join(a: *const c_char, b: *const c_char) ->
             // SAFETY: `b` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(b) }
         };
-        alloc_cstring(path_join(a, b).as_bytes())
+        alloc_cstring(crate::path_grammar::join(a, b).as_bytes())
     })
-}
-
-/// Final path component helper for `path::file_name`.
-/// Inlined here so the runtime
-/// crate stays free of a dep on `gossamer-std`.
-/// `true` when `c` separates path components on `windows` hosts. Windows
-/// accepts both forms and its APIs hand back `\\`, so parsing splits on
-/// either there; elsewhere `\\` is an ordinary filename byte and stays
-/// literal. Mirrors `gossamer_std::path::is_separator_on`.
-pub(crate) const fn path_is_separator_on(c: char, windows: bool) -> bool {
-    c == '/' || (windows && c == '\\')
-}
-
-/// [`path_is_separator_on`] for the host this build targets.
-pub(crate) const fn path_is_separator(c: char) -> bool {
-    path_is_separator_on(c, cfg!(windows))
-}
-
-/// Index of the last separator in `path` under `windows` rules. Exposed
-/// separately so the Windows grammar is exercised from any host.
-pub(crate) fn path_last_separator_on(path: &str, windows: bool) -> Option<usize> {
-    path.rfind(|c| path_is_separator_on(c, windows))
 }
 
 #[unsafe(no_mangle)]
@@ -952,11 +930,7 @@ pub unsafe extern "C" fn gos_rt_path_base(p: *const c_char) -> *mut c_char {
             // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
-        let basename: &str = match path_last_separator_on(s, cfg!(windows)) {
-            None => s,
-            Some(idx) => &s[idx + 1..],
-        };
-        alloc_cstring(basename.as_bytes())
+        alloc_cstring(crate::path_grammar::base(s).as_bytes())
     })
 }
 
@@ -971,12 +945,7 @@ pub unsafe extern "C" fn gos_rt_path_dir(p: *const c_char) -> *mut c_char {
             // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
-        let dirname: &str = match path_last_separator_on(s, cfg!(windows)) {
-            None => ".",
-            Some(0) => "/",
-            Some(idx) => &s[..idx],
-        };
-        alloc_cstring(dirname.as_bytes())
+        alloc_cstring(crate::path_grammar::dir(s).as_bytes())
     })
 }
 
@@ -995,11 +964,7 @@ pub unsafe extern "C" fn gos_rt_path_split(p: *const c_char) -> *mut i64 {
             // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
-        let (dir, file): (&str, &str) = match path_last_separator_on(s, cfg!(windows)) {
-            None => ("", s),
-            Some(0) => ("/", &s[1..]),
-            Some(idx) => (&s[..idx], &s[idx + 1..]),
-        };
+        let (dir, file) = crate::path_grammar::split(s);
         #[repr(C)]
         struct StrPair {
             a: i64,
@@ -1023,7 +988,7 @@ pub unsafe extern "C" fn gos_rt_path_components(p: *const c_char) -> *mut GosVec
             // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
-        alloc_plain_str_vec(&path_components(s))
+        alloc_plain_str_vec(&crate::path_grammar::components(s))
     })
 }
 
@@ -1037,7 +1002,7 @@ pub unsafe extern "C" fn gos_rt_path_prefixes(p: *const c_char) -> *mut GosVec {
             // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
-        alloc_plain_str_vec(&path_prefixes(s))
+        alloc_plain_str_vec(&crate::path_grammar::prefixes(s))
     })
 }
 
@@ -1052,7 +1017,7 @@ pub unsafe extern "C" fn gos_rt_path_unique_prefixes(p: *const c_char) -> *mut G
             // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
-        alloc_plain_str_vec(&path_unique_prefixes(s))
+        alloc_plain_str_vec(&crate::path_grammar::unique_prefixes(s))
     })
 }
 
@@ -1069,14 +1034,7 @@ pub unsafe extern "C" fn gos_rt_path_ext(p: *const c_char) -> i128 {
             // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
-        let basename: &str = match path_last_separator_on(s, cfg!(windows)) {
-            None => s,
-            Some(idx) => &s[idx + 1..],
-        };
-        let ext_str: &str = match basename.rfind('.') {
-            None | Some(0) => "",
-            Some(idx) => &basename[idx..],
-        };
+        let ext_str = crate::path_grammar::ext(s);
         if ext_str.is_empty() {
             gos_rt_result_new(1, 0)
         } else {
@@ -1098,15 +1056,10 @@ pub unsafe extern "C" fn gos_rt_path_parent(p: *const c_char) -> i128 {
             // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
-        let trimmed = s.trim_end_matches(path_is_separator);
-        match path_last_separator_on(trimmed, cfg!(windows)) {
+        match crate::path_grammar::parent(s) {
             None => gos_rt_result_new(1, 0),
-            Some(0) => {
-                let cstr = alloc_cstring(b"/") as i64;
-                gos_rt_result_new(0, cstr)
-            }
-            Some(idx) => {
-                let cstr = alloc_cstring(&trimmed.as_bytes()[..idx]) as i64;
+            Some(parent) => {
+                let cstr = alloc_cstring(parent.as_bytes()) as i64;
                 gos_rt_result_new(0, cstr)
             }
         }
@@ -1124,19 +1077,13 @@ pub unsafe extern "C" fn gos_rt_path_stem(p: *const c_char) -> i128 {
             // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
-        let basename = match path_last_separator_on(s, cfg!(windows)) {
-            None => s,
-            Some(idx) => &s[idx + 1..],
-        };
-        if basename.is_empty() {
-            return gos_rt_result_new(1, 0);
+        match crate::path_grammar::stem(s) {
+            None => gos_rt_result_new(1, 0),
+            Some(stem) => {
+                let cstr = alloc_cstring(stem.as_bytes()) as i64;
+                gos_rt_result_new(0, cstr)
+            }
         }
-        let stem = match basename.rfind('.') {
-            None | Some(0) => basename,
-            Some(idx) => &basename[..idx],
-        };
-        let cstr = alloc_cstring(stem.as_bytes()) as i64;
-        gos_rt_result_new(0, cstr)
     })
 }
 
@@ -1151,10 +1098,7 @@ pub unsafe extern "C" fn gos_rt_path_file_name(p: *const c_char) -> i128 {
             // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
-        let basename = match path_last_separator_on(s, cfg!(windows)) {
-            None => s,
-            Some(idx) => &s[idx + 1..],
-        };
+        let basename = crate::path_grammar::base(s);
         if basename.is_empty() {
             gos_rt_result_new(1, 0)
         } else {
@@ -1176,7 +1120,7 @@ pub unsafe extern "C" fn gos_rt_path_clean(p: *const c_char) -> *mut c_char {
             // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
-        alloc_cstring(path_clean(path).as_bytes())
+        alloc_cstring(crate::path_grammar::clean(path).as_bytes())
     })
 }
 
@@ -1190,7 +1134,7 @@ pub unsafe extern "C" fn gos_rt_path_is_absolute(p: *const c_char) -> i32 {
             // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
-        i32::from(path.starts_with(path_is_separator))
+        i32::from(crate::path_grammar::is_absolute(path))
     })
 }
 
@@ -1199,28 +1143,18 @@ pub unsafe extern "C" fn gos_rt_path_is_absolute(p: *const c_char) -> i32 {
 pub unsafe extern "C" fn gos_rt_path_has_prefix(p: *const c_char, prefix: *const c_char) -> i32 {
     ffi_entry!({
         let path = if p.is_null() {
-            String::new()
+            ""
         } else {
             // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
-            path_clean(unsafe { crate::c_abi::gos_str_arg_text(p) })
+            unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
         let prefix = if prefix.is_null() {
-            String::new()
+            ""
         } else {
             // SAFETY: `prefix` is a String argument from compiled code, null or a live string body for the whole call.
-            path_clean(unsafe { crate::c_abi::gos_str_arg_text(prefix) })
+            unsafe { crate::c_abi::gos_str_arg_text(prefix) }
         };
-        if path == prefix {
-            return 1;
-        }
-        let matched = if prefix.ends_with('/') {
-            path.starts_with(&prefix)
-        } else {
-            let mut candidate = prefix.clone();
-            candidate.push('/');
-            path.starts_with(&candidate)
-        };
-        i32::from(matched)
+        i32::from(crate::path_grammar::has_prefix(path, prefix))
     })
 }
 
@@ -1268,7 +1202,7 @@ pub unsafe extern "C" fn gos_rt_fs_canonicalize(path: *const c_char) -> i128 {
         match crate::sched_global::run_blocking("fs-canonicalize", move || std::fs::canonicalize(p))
         {
             Ok(Ok(abs)) => {
-                let s = abs.to_string_lossy().into_owned();
+                let s = crate::canonical_path::display(&abs);
                 let ptr = alloc_cstring(s.as_bytes()) as i64;
                 gos_rt_result_new(0, ptr)
             }
@@ -1378,124 +1312,6 @@ pub unsafe extern "C" fn gos_rt_net_resolve(host: *const c_char) -> i128 {
             Err(e) => fs_err(&e),
         }
     })
-}
-
-/// Posix path join mirroring `gossamer_std::path::join`: collapses a
-/// trailing separator on `base` and a leading separator on `segment`
-/// to a single `/`, absorbs an absolute `segment`, and is independent
-/// of the host separator so the compiled tier matches the VM on every
-/// platform.
-fn path_join(base: &str, segment: &str) -> String {
-    if segment.starts_with(path_is_separator) {
-        return segment.to_string();
-    }
-    if base.is_empty() {
-        return segment.to_string();
-    }
-    let mut out = base.trim_end_matches(path_is_separator).to_string();
-    out.push('/');
-    out.push_str(segment.trim_start_matches(path_is_separator));
-    out
-}
-
-fn path_components(path: &str) -> Vec<String> {
-    let absolute = path.starts_with(path_is_separator);
-    let mut out = Vec::new();
-    if absolute {
-        out.push("/".to_string());
-    }
-    let mut saw_normal = absolute;
-    for segment in path.split(path_is_separator) {
-        match segment {
-            "" => {}
-            "." if !saw_normal && !absolute => {
-                out.push(".".to_string());
-                saw_normal = true;
-            }
-            "." => {}
-            other => {
-                out.push(other.to_string());
-                saw_normal = true;
-            }
-        }
-    }
-    out
-}
-
-fn path_prefixes(path: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    extend_path_prefixes(path, &mut out);
-    out
-}
-
-fn path_unique_prefixes(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in text.lines().filter(|line| !line.is_empty()) {
-        extend_path_prefixes(line, &mut out);
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
-fn extend_path_prefixes(path: &str, out: &mut Vec<String>) {
-    let absolute = path.starts_with(path_is_separator);
-    let mut prefix = String::with_capacity(path.len());
-    if absolute {
-        prefix.push('/');
-        out.push(prefix.clone());
-    }
-    let mut saw_normal = absolute;
-    for segment in path.split(path_is_separator) {
-        match segment {
-            "" => {}
-            "." if !saw_normal && !absolute => {
-                prefix.push('.');
-                out.push(prefix.clone());
-                saw_normal = true;
-            }
-            "." => {}
-            other => {
-                if prefix.is_empty() || prefix == "/" {
-                    prefix.push_str(other);
-                } else {
-                    prefix.push('/');
-                    prefix.push_str(other);
-                }
-                out.push(prefix.clone());
-                saw_normal = true;
-            }
-        }
-    }
-}
-
-/// Lexical path normalization shared by `gos_rt_path_clean` /
-/// `gos_rt_path_has_prefix`. Mirrors `gossamer_std::path::normalize`.
-fn path_clean(path: &str) -> String {
-    if path.is_empty() {
-        return ".".to_string();
-    }
-    let absolute = path.starts_with(path_is_separator);
-    let mut parts: Vec<&str> = Vec::new();
-    for segment in path.split(path_is_separator) {
-        match segment {
-            "" | "." => {}
-            ".." => {
-                if parts.last().is_some_and(|s: &&str| *s != "..") {
-                    parts.pop();
-                } else if !absolute {
-                    parts.push("..");
-                }
-            }
-            other => parts.push(other),
-        }
-    }
-    let mut out = String::new();
-    if absolute {
-        out.push('/');
-    }
-    out.push_str(&parts.join("/"));
-    if out.is_empty() { ".".to_string() } else { out }
 }
 
 // --- 0.7.0 scalar cmp helpers ---
@@ -2565,26 +2381,4 @@ pub unsafe extern "C" fn gos_rt_fs_write_mode(
             Err(e) => fs_err(&e),
         }
     })
-}
-
-#[cfg(test)]
-mod path_separator_tests {
-    use super::{path_is_separator_on, path_last_separator_on};
-
-    #[test]
-    fn windows_paths_end_at_either_separator() {
-        let mixed = "C:\\tmp/gos-glob-1\\alpha.gos";
-        let idx = path_last_separator_on(mixed, true).expect("separator present");
-        assert_eq!(&mixed[idx + 1..], "alpha.gos");
-        assert_eq!(&mixed[..idx], "C:\\tmp/gos-glob-1");
-    }
-
-    #[test]
-    fn backslash_is_an_ordinary_byte_off_windows() {
-        let unix = "/tmp/odd\\name.gos";
-        let idx = path_last_separator_on(unix, false).expect("separator present");
-        assert_eq!(&unix[idx + 1..], "odd\\name.gos");
-        assert!(!path_is_separator_on('\\', false));
-        assert!(path_is_separator_on('\\', true));
-    }
 }

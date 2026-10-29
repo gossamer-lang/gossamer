@@ -1206,13 +1206,17 @@ impl Resolver {
     /// resolved in: the innermost enclosing module that imported the name
     /// decides, and otherwise the unit-wide binding does.
     fn import_target(&self, name: &str) -> Option<&String> {
-        (0..=self.current_module.len())
-            .rev()
-            .find_map(|depth| {
-                self.module_imports
-                    .get(&(self.current_module[..depth].join("::"), name.to_string()))
-            })
+        self.scoped_import_target(name)
             .or_else(|| self.imported_targets.get(name))
+    }
+
+    /// The path the module being resolved, or the nearest enclosing module,
+    /// imported `name` as; the unit-wide binding is not consulted.
+    fn scoped_import_target(&self, name: &str) -> Option<&String> {
+        (0..=self.current_module.len()).rev().find_map(|depth| {
+            self.module_imports
+                .get(&(self.current_module[..depth].join("::"), name.to_string()))
+        })
     }
 
     /// The `use` that binds `name` for the module being resolved: its own,
@@ -2845,20 +2849,23 @@ impl Resolver {
     /// until run time.
     fn local_module_path_for(&self, prefix: &[&str]) -> Option<String> {
         let written = prefix.join("::");
-        if self.local_module_paths.contains(&written) {
-            return Some(written);
-        }
-        if let Some(target) = self.import_target(prefix[0]) {
+        let through = |target: &String| {
             let mut rejoined = target.clone();
             for seg in &prefix[1..] {
                 rejoined.push_str("::");
                 rejoined.push_str(seg);
             }
-            if self.local_module_paths.contains(&rejoined) {
-                return Some(rejoined);
-            }
+            self.local_module_paths
+                .contains(&rejoined)
+                .then_some(rejoined)
+        };
+        // A name the module itself imported shadows a unit-root module of the
+        // same name, as does a module nested nearer to it: a bundled
+        // dependency's `use crate::editing::search` must not read as the
+        // root package's own `search`.
+        if let Some(found) = self.scoped_import_target(prefix[0]).and_then(through) {
+            return Some(found);
         }
-        // Innermost enclosing module first, since a nearer one shadows.
         for depth in (1..=self.current_module.len()).rev() {
             let mut anchored = self.current_module[..depth].join("::");
             anchored.push_str("::");
@@ -2867,7 +2874,10 @@ impl Resolver {
                 return Some(anchored);
             }
         }
-        None
+        if self.local_module_paths.contains(&written) {
+            return Some(written);
+        }
+        self.imported_targets.get(prefix[0]).and_then(through)
     }
 
     /// True when the path's head names a local module and its next segment

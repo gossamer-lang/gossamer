@@ -1460,3 +1460,92 @@ fn main() {
     assert!(body.contains("@gos_rt_aggr_retain_children"), "{body}");
     assert!(!body.contains("@gos_rt_rc_retain_children"), "{body}");
 }
+
+/// A program function's word parameter keeps the type its definition
+/// declares: a closure body binds its environment as an `i64`, and the
+/// caller's environment local is pointer-shaped.
+#[test]
+fn direct_call_passes_a_pointer_local_as_the_callees_word_parameter() {
+    let mut tcx = TyCtxt::new();
+    let i64_ty = tcx.intern(TyKind::Int(IntTy::I64));
+    let ptr_ty = tcx.intern(TyKind::String);
+    let decl = |ty| LocalDecl {
+        ty,
+        debug_name: None,
+        mutable: false,
+        region: false,
+    };
+    let block = |stmts, terminator| BasicBlock {
+        id: BlockId(0),
+        stmts,
+        terminator,
+        span: dummy_span(),
+        terminator_span: None,
+        terminator_inlined: None,
+    };
+    let body = |name: &str, arity, locals, blocks| Body {
+        name: name.to_string(),
+        def: None,
+        arity,
+        locals,
+        blocks,
+        span: dummy_span(),
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
+    };
+    let callee = body(
+        "__closure_0.main",
+        1,
+        vec![decl(i64_ty), decl(i64_ty)],
+        vec![block(
+            vec![Statement {
+                span: dummy_span(),
+                inlined: None,
+                kind: StatementKind::Assign {
+                    place: place(0),
+                    rvalue: Rvalue::Use(Operand::Copy(place(1))),
+                },
+            }],
+            Terminator::Return,
+        )],
+    );
+    let env = Statement {
+        span: dummy_span(),
+        inlined: None,
+        kind: StatementKind::Assign {
+            place: place(1),
+            rvalue: Rvalue::CallIntrinsic {
+                name: "gos_alloc",
+                args: vec![Operand::Const(ConstValue::Int(16))],
+            },
+        },
+    };
+    let mut call = block(
+        vec![env],
+        Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("__closure_0.main".to_string())),
+            args: vec![Operand::Copy(place(1))],
+            destination: place(2),
+            target: Some(BlockId(1)),
+        },
+    );
+    call.id = BlockId(0);
+    let mut done = block(vec![], Terminator::Return);
+    done.id = BlockId(1);
+    let main = body(
+        "main",
+        0,
+        vec![decl(i64_ty), decl(ptr_ty), decl(i64_ty)],
+        vec![call, done],
+    );
+    let ir = render_ir_to_string(&[main, callee], &tcx, false).unwrap();
+    assert!(
+        ir.contains("@\"__closure_0.main\"(i64 "),
+        "the call must pass the callee's i64 parameter type:\n{ir}"
+    );
+    assert!(
+        !ir.contains("@\"__closure_0.main\"(ptr "),
+        "a ptr argument disagrees with the callee's definition:\n{ir}"
+    );
+}

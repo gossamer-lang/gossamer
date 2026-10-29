@@ -1,0 +1,14 @@
+use std::path
+
+fn main() {
+    let cases = #["D:\\a\\gui-gos", "//host/share/x", "/tmp/odd\\name.gos", "C:/a/../b/./c", "rel/dir/", "\\\\host\\share"]
+    for p in cases {
+        println(f"{p} absolute {path::is_absolute(p)}")
+        println(f"  join {path::join(p, "packaging.toml")}")
+        println(f"  normalize {path::normalize(p)}")
+        println(f"  parent {path::parent(p)}")
+        println(f"  file_name {path::file_name(p)}")
+        println(f"  components {path::components(p)}")
+    }
+    println(f"replace {path::join("examples", "C:\\x")}")
+}
