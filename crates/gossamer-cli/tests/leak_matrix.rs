@@ -1138,6 +1138,48 @@ fn main() {
 }
 "#,
     ),
+    (
+        "owner_answered_at_two_returns_leaves_by_question",
+        r#"
+use std::errors
+
+fn fails(bad: bool) -> Result<i64, errors::Error> {
+    if bad { Err(errors::new("no")) } else { Ok(7) }
+}
+
+fn collect(skip: bool, bad: bool) -> Result<Vec<String>, errors::Error> {
+    let mut out = #[f"first {skip}"]
+    if skip {
+        return Ok(out)
+    }
+    let n = fails(bad)?
+    out.push(f"pushed {n}")
+    Ok(out)
+}
+
+fn index(skip: bool, bad: bool) -> Result<Map<String, i64>, errors::Error> {
+    let mut out = Map::new()
+    out["start"] = 1
+    if skip {
+        return Ok(out)
+    }
+    let n = fails(bad)?
+    out["n"] = n
+    Ok(out)
+}
+
+fn main() {
+    let mut total = 0
+    for i in 0..20000 {
+        let skip = i % 3 == 0
+        let bad = i % 3 == 1
+        if let Ok(v) = collect(skip, bad) { total += v.len() }
+        if let Ok(m) = index(skip, bad) { total += m.len() }
+    }
+    println(total)
+}
+"#,
+    ),
 ];
 
 fn gnu_time_ok() -> bool {

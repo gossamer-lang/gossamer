@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.75.8 - Owners answered at more than one return
+
+- A native build frees a `Vec`, `Map`, `Set` or `Deque` that two or more returns answer inside `Ok` / `Some` on a path that answers none of them, such as a `?` that propagates an error, where the value leaked once per such exit.
+
 ## 0.75.7 - One path grammar on every platform, plain canonical paths on Windows, enum payloads in `Result`, released regex patterns
 
 - `std::path` reads one grammar on every platform and tier: `/` and `\` both separate components, and a path is absolute when it begins with `/`, a drive (`C:\`, `C:/`) or a UNC share (`\\host\share`), so `path::is_absolute("D:\\a")` is true and `path::join("dir", "C:\\x")` is `C:\x`.
