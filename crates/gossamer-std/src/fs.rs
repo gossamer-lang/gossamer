@@ -1220,7 +1220,7 @@ pub fn file_size(path: impl AsRef<Path>) -> u64 {
 
 /// Resolves `path` to an absolute, symlink-free form.
 pub fn canonicalize(path: impl AsRef<Path>) -> io::Result<String> {
-    stdfs::canonicalize(path).map(|p| p.to_string_lossy().into_owned())
+    stdfs::canonicalize(path).map(|p| gossamer_runtime::canonical_path::display(&p))
 }
 
 /// Creates a single directory at `path`. Fails if a parent is

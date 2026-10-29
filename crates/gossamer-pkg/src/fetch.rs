@@ -762,25 +762,35 @@ fn hardened_git() -> Command {
     cmd
 }
 
+/// Brings the bare clone at `bare_dir` level with its remote through
+/// `git`. A bare clone carries no fetch refspec, so both namespaces are
+/// named, and forced: a tag or branch the remote moved moves here too.
+/// What a build uses stays pinned by the lockfile's commit.
+fn refresh_git_clone(mut git: Command, bare_dir: &Path) -> std::io::Result<()> {
+    let out = git
+        .arg("--git-dir")
+        .arg(bare_dir)
+        .arg("fetch")
+        .arg("--prune")
+        .arg("origin")
+        .arg("+refs/heads/*:refs/heads/*")
+        .arg("+refs/tags/*:refs/tags/*")
+        .output()?;
+    if !out.status.success() {
+        return Err(std::io::Error::other(format!(
+            "git fetch in {}: {}",
+            bare_dir.display(),
+            String::from_utf8_lossy(&out.stderr)
+        )));
+    }
+    Ok(())
+}
+
 /// Ensures `bare_dir` contains a bare clone of `url`, creating it
 /// (or refreshing) as needed.
 fn ensure_git_clone(url: &str, bare_dir: &Path) -> std::io::Result<()> {
     if bare_dir.join("HEAD").is_file() {
-        let out = hardened_git()
-            .arg("--git-dir")
-            .arg(bare_dir)
-            .arg("fetch")
-            .arg("--all")
-            .arg("--tags")
-            .output()?;
-        if !out.status.success() {
-            return Err(std::io::Error::other(format!(
-                "git fetch in {}: {}",
-                bare_dir.display(),
-                String::from_utf8_lossy(&out.stderr)
-            )));
-        }
-        return Ok(());
+        return refresh_git_clone(hardened_git(), bare_dir);
     }
     if let Some(parent) = bare_dir.parent() {
         std::fs::create_dir_all(parent)?;
@@ -887,6 +897,49 @@ mod git_source_tests {
     #[cfg(unix)]
     use super::create_tarball_spool;
     use super::validate_git_source;
+
+    // The remote here is a local repository, which the hardened command
+    // refuses by design, so the refresh runs through plain `git`.
+    #[test]
+    fn a_refreshed_clone_follows_a_moved_tag_and_branch() {
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("gos-git-refresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let upstream = dir.join("upstream");
+        let cache = dir.join("cache.git");
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "init.defaultBranch=main",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let up = upstream.to_str().unwrap();
+        git(&["init", "-q", up]);
+        git(&["-C", up, "commit", "-q", "--allow-empty", "-m", "first"]);
+        git(&["-C", up, "tag", "v0.1.0"]);
+        git(&["clone", "-q", "--bare", up, cache.to_str().unwrap()]);
+        git(&["-C", up, "commit", "-q", "--allow-empty", "-m", "second"]);
+        git(&["-C", up, "tag", "-f", "v0.1.0"]);
+        let moved = git(&["-C", up, "rev-parse", "HEAD"]);
+        super::refresh_git_clone(Command::new("git"), &cache).unwrap();
+        assert_eq!(super::resolve_git_ref(&cache, "v0.1.0").unwrap(), moved);
+        assert_eq!(super::resolve_git_ref(&cache, "main").unwrap(), moved);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 

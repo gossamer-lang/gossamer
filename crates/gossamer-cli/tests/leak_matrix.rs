@@ -59,6 +59,23 @@ fn allowance(name: &str) -> Allowance {
 /// (name, source). N is baked into each source, sized so a leak clears the cap.
 const SHAPES: &[(&str, &str)] = &[
     (
+        "compiled_regex_released_with_its_last_share",
+        r#"
+use std::regex
+
+fn compiles(i: i64) -> i64 {
+    let re = regex::new(f"line {i}: [a-z]+ (\\d+)")
+    if re.is_ok() { 1 } else { 0 }
+}
+
+fn main() {
+    let mut total = 0
+    for i in 0..4000 { total += compiles(i) }
+    println(f"{total}")
+}
+"#,
+    ),
+    (
         "closure_captured_map_escapes_through_call",
         r#"
 struct Lookup { find: Fn(String) -> i64 }

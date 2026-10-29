@@ -318,6 +318,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub mod accept;
 pub mod builtins;
 pub mod c_abi;
+pub mod canonical_path;
 pub mod clock;
 pub mod codec;
 pub mod comptime_inputs;
@@ -331,6 +332,7 @@ pub mod http_status;
 pub mod listen;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod netpoll;
+pub mod path_grammar;
 // musl's own routines are replaced there; the tests run on every x86_64
 // host. Inline assembly is not something Miri interprets.
 #[cfg(all(target_arch = "x86_64", not(miri), any(target_env = "musl", test)))]

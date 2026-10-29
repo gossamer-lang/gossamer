@@ -1717,7 +1717,7 @@ impl TyCtxt {
     /// the sockets `net::TcpStream` through `net::UnixListener` (12 to 16),
     /// `bytes::Builder` (27), `sync::Map` (34),
     /// `sync::RwLock` (35), `rand::Rng` (42), `fs::File` (44),
-    /// `fs::OpenOptions` (45), `sync::Shared` (46), the band from
+    /// `fs::OpenOptions` (45), `sync::Shared` (46), `regex::Pattern` (26), the band from
     /// `sync::Mutex` (50) through `sync::AtomicBool` (57), and
     /// `http::websocket::Conn` (62), `bytes::Buffer` (63), and
     /// `io::MemoryStream` (64).
@@ -1728,7 +1728,7 @@ impl TyCtxt {
             Some(TyKind::Adt { def, .. }) => {
                 matches!(
                     u32::MAX - def.local,
-                    11..=16 | 27 | 34 | 35 | 42 | 44..=46 | 50..=57 | 62..=64
+                    11..=16 | 26 | 27 | 34 | 35 | 42 | 44..=46 | 50..=57 | 62..=64
                 )
             }
             _ => false,

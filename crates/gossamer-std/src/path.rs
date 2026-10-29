@@ -87,252 +87,100 @@ impl From<&str> for Path {
     }
 }
 
-/// Joins `base` with `segment`, collapsing duplicate separators and
-/// absorbing a leading `/` in `segment`.
+use gossamer_runtime::path_grammar as grammar;
+
+/// Joins `base` with `segment` by one `/`; an absolute `segment` (a
+/// separator, drive or UNC root) replaces `base`.
 #[must_use]
 pub fn join(base: &str, segment: &str) -> String {
-    if segment.starts_with(is_separator) {
-        return segment.to_string();
-    }
-    if base.is_empty() {
-        return segment.to_string();
-    }
-    let mut out = base.trim_end_matches(is_separator).to_string();
-    out.push('/');
-    out.push_str(segment.trim_start_matches(is_separator));
-    out
+    grammar::join(base, segment)
 }
 
-/// `true` when `c` separates path components on `windows` hosts. Windows
-/// accepts both forms and its APIs hand back `\\`, so parsing splits on
-/// either there; on every other platform `\\` is an ordinary filename byte and
-/// stays literal.
-const fn is_separator_on(c: char, windows: bool) -> bool {
-    c == '/' || (windows && c == '\\')
-}
-
-/// [`is_separator_on`] for the host this build targets.
-const fn is_separator(c: char) -> bool {
-    is_separator_on(c, cfg!(windows))
-}
-
-/// Splits `path` into a `(directory, file)` pair using `windows` separator
-/// rules. Exposed separately from [`split`] so the Windows grammar is
-/// exercised from any host.
-fn split_on(path: &str, windows: bool) -> (String, String) {
-    match path.rfind(|c| is_separator_on(c, windows)) {
-        None => (String::new(), path.to_string()),
-        Some(0) => ("/".to_string(), path[1..].to_string()),
-        Some(idx) => (path[..idx].to_string(), path[idx + 1..].to_string()),
-    }
-}
-
-/// Splits `path` into a `(directory, file)` pair. The directory never
-/// carries a trailing separator unless the path is `/`.
+/// Splits `path` into a `(directory, file)` pair. The directory keeps a
+/// root whole and carries no other trailing separator.
 #[must_use]
 pub fn split(path: &str) -> (String, String) {
-    split_on(path, cfg!(windows))
+    let (dir, file) = grammar::split(path);
+    (dir.to_string(), file.to_string())
 }
 
 /// Returns Rust-like lexical path components.
 ///
-/// Repeated separators and non-leading `.` components are skipped, `/` is
-/// preserved as its own root component, and `..` is retained instead of
-/// normalizing across parent directories.
+/// The root (`/`, `C:/`, `//host/share/`) is its own component, repeated
+/// separators and non-leading `.` components are skipped, and `..` is
+/// retained instead of normalizing across parent directories.
 #[must_use]
 pub fn components(path: &str) -> Vec<String> {
-    let absolute = path.starts_with(is_separator);
-    let mut out = Vec::new();
-    if absolute {
-        out.push("/".to_string());
-    }
-    let mut saw_normal = absolute;
-    for segment in path.split(is_separator) {
-        match segment {
-            "" => {}
-            "." if !saw_normal && !absolute => {
-                out.push(".".to_string());
-                saw_normal = true;
-            }
-            "." => {}
-            other => {
-                out.push(other.to_string());
-                saw_normal = true;
-            }
-        }
-    }
-    out
+    grammar::components(path)
 }
 
-/// Returns every cumulative Rust-like lexical path prefix.
-///
-/// Repeated separators and non-leading `.` components are skipped in the same
-/// way as [`components`]. This is useful for tree/index builders that need
-/// `["a", "a/b", "a/b/c"]` without first materializing components and then
-/// rebuilding each prefix in source code.
+/// Returns every cumulative Rust-like lexical path prefix, by the rules of
+/// [`components`]: `["a", "a/b", "a/b/c"]` for `a/b/c`.
 #[must_use]
 pub fn prefixes(path: &str) -> Vec<String> {
-    let absolute = path.starts_with(is_separator);
-    let mut out = Vec::new();
-    let mut prefix = String::with_capacity(path.len());
-    if absolute {
-        prefix.push('/');
-        out.push(prefix.clone());
-    }
-    let mut saw_normal = absolute;
-    for segment in path.split(is_separator) {
-        match segment {
-            "" => {}
-            "." if !saw_normal && !absolute => {
-                prefix.push('.');
-                out.push(prefix.clone());
-                saw_normal = true;
-            }
-            "." => {}
-            other => {
-                if prefix.is_empty() || prefix == "/" {
-                    prefix.push_str(other);
-                } else {
-                    prefix.push('/');
-                    prefix.push_str(other);
-                }
-                out.push(prefix.clone());
-                saw_normal = true;
-            }
-        }
-    }
-    out
+    grammar::prefixes(path)
 }
 
 /// Returns sorted unique cumulative prefixes for newline-delimited paths.
-///
-/// Each non-empty line is interpreted with the same lexical rules as
-/// [`prefixes`]. The result is sorted and deduplicated, making it useful for
-/// tree and index builders that need one canonical prefix list for many paths.
 #[must_use]
 pub fn unique_prefixes(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in text.lines().filter(|line| !line.is_empty()) {
-        extend_prefixes(line, &mut out);
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
-fn extend_prefixes(path: &str, out: &mut Vec<String>) {
-    let absolute = path.starts_with(is_separator);
-    let mut prefix = String::with_capacity(path.len());
-    if absolute {
-        prefix.push('/');
-        out.push(prefix.clone());
-    }
-    let mut saw_normal = absolute;
-    for segment in path.split(is_separator) {
-        match segment {
-            "" => {}
-            "." if !saw_normal && !absolute => {
-                prefix.push('.');
-                out.push(prefix.clone());
-                saw_normal = true;
-            }
-            "." => {}
-            other => {
-                if prefix.is_empty() || prefix == "/" {
-                    prefix.push_str(other);
-                } else {
-                    prefix.push('/');
-                    prefix.push_str(other);
-                }
-                out.push(prefix.clone());
-                saw_normal = true;
-            }
-        }
-    }
+    grammar::unique_prefixes(text)
 }
 
 /// Returns the final component of `path` (the file name).
 #[must_use]
 pub fn base(path: &str) -> String {
-    split(path).1
+    grammar::base(path).to_string()
 }
 
 /// Returns the directory portion of `path`.
 #[must_use]
 pub fn dir(path: &str) -> String {
-    let (d, _) = split(path);
-    if d.is_empty() { ".".to_string() } else { d }
+    grammar::dir(path).to_string()
 }
 
 /// Returns the extension (including the leading `.`) of `path`, or
 /// an empty string when none is present.
 #[must_use]
 pub fn ext(path: &str) -> String {
-    let name = base(path);
-    match name.rfind('.') {
-        Some(0) | None => String::new(),
-        Some(idx) => name[idx..].to_string(),
-    }
+    grammar::ext(path).to_string()
 }
 
 /// Cleans `path` in the same sense as Go's `filepath.Clean`:
-/// collapses `..` and `.`, strips duplicate slashes, preserves
-/// absolute-ness.
+/// collapses `..` and `.`, strips duplicate separators, preserves the
+/// root, and writes `/`.
 #[must_use]
 pub fn clean(path: &str) -> String {
-    if path.is_empty() {
-        return ".".to_string();
-    }
-    let absolute = path.starts_with(is_separator);
-    let mut parts: Vec<&str> = Vec::new();
-    for segment in path.split(is_separator) {
-        match segment {
-            "" | "." => {}
-            ".." => {
-                if parts.last().is_some_and(|s: &&str| *s != "..") {
-                    parts.pop();
-                } else if !absolute {
-                    parts.push("..");
-                }
-            }
-            other => parts.push(other),
-        }
-    }
-    let mut out = String::new();
-    if absolute {
-        out.push('/');
-    }
-    out.push_str(&parts.join("/"));
-    if out.is_empty() { ".".to_string() } else { out }
+    grammar::clean(path)
 }
 
-/// Returns `true` when `path` starts with `/`.
+/// Returns `true` when `path` begins with a root: a separator, a drive
+/// (`C:\`), or a UNC share (`\\host\share`).
 #[must_use]
 pub fn is_absolute(path: &str) -> bool {
-    path.starts_with(is_separator)
+    grammar::is_absolute(path)
 }
 
 /// Returns the parent directory of `path`, or `None` when `path`
-/// has no parent directory (the root `/`, the empty string, or a
-/// bare single component such as `"file.txt"`). A trailing separator
-/// is ignored, so `parent("dir/")` is the same as `parent("dir")`.
+/// has no parent directory (a root, the empty string, or a bare single
+/// component such as `"file.txt"`). A trailing separator is ignored, so
+/// `parent("dir/")` is the same as `parent("dir")`.
 #[must_use]
 pub fn parent(path: &str) -> Option<String> {
-    let trimmed = path.trim_end_matches(is_separator);
-    match trimmed.rfind(is_separator) {
-        None => None,
-        Some(0) => Some("/".to_string()),
-        Some(idx) => Some(trimmed[..idx].to_string()),
-    }
+    grammar::parent(path).map(str::to_string)
 }
 
 /// Returns the final component of `path`, or `None` when there is
-/// none (the empty string, the root `/`, or a trailing-separator
-/// directory such as `"dir/"`).
+/// none (the empty string, a root, or a trailing-separator directory
+/// such as `"dir/"`).
 #[must_use]
 pub fn file_name(path: &str) -> Option<String> {
-    let name = base(path);
-    if name.is_empty() { None } else { Some(name) }
+    let name = grammar::base(path);
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 /// Returns the final component of `path` without its extension, or
@@ -340,32 +188,13 @@ pub fn file_name(path: &str) -> Option<String> {
 /// file such as `".config"`) is not treated as an extension.
 #[must_use]
 pub fn stem(path: &str) -> Option<String> {
-    let name = base(path);
-    if name.is_empty() {
-        return None;
-    }
-    let stem = match name.rfind('.') {
-        None | Some(0) => name.clone(),
-        Some(idx) => name[..idx].to_string(),
-    };
-    Some(stem)
+    grammar::stem(path).map(str::to_string)
 }
 
 /// Returns `true` when `path` references a file inside `prefix`.
 #[must_use]
 pub fn has_prefix(path: &str, prefix: &str) -> bool {
-    let path = clean(path);
-    let prefix = clean(prefix);
-    if path == prefix {
-        return true;
-    }
-    if prefix.ends_with('/') {
-        path.starts_with(&prefix)
-    } else {
-        let mut candidate = prefix.clone();
-        candidate.push('/');
-        path.starts_with(&candidate)
-    }
+    grammar::has_prefix(path, prefix)
 }
 
 pub mod native {
@@ -1063,30 +892,33 @@ mod glob_walk_tests {
 
 #[cfg(test)]
 mod separator_grammar_tests {
-    use super::{is_separator_on, split_on};
+    use super::{is_absolute, join, split};
 
     #[test]
-    fn windows_paths_split_on_either_separator() {
+    fn paths_split_on_either_separator_on_every_platform() {
         assert_eq!(
-            split_on("C:\\tmp\\gos-glob-1\\alpha.gos", true),
+            split("C:\\tmp\\gos-glob-1\\alpha.gos"),
             ("C:\\tmp\\gos-glob-1".to_string(), "alpha.gos".to_string())
         );
         // A path that mixes both forms - what an OS call joined with `/`
         // hands back - splits at the last component either way.
         assert_eq!(
-            split_on("C:\\tmp/gos-glob-1\\alpha.gos", true),
+            split("C:\\tmp/gos-glob-1\\alpha.gos"),
             ("C:\\tmp/gos-glob-1".to_string(), "alpha.gos".to_string())
+        );
+        assert_eq!(
+            split("/tmp/odd\\name.gos"),
+            ("/tmp/odd".to_string(), "name.gos".to_string())
         );
     }
 
     #[test]
-    fn backslash_is_an_ordinary_byte_off_windows() {
+    fn a_drive_path_is_absolute_and_replaces_a_base() {
+        assert!(is_absolute("D:\\a\\gui-gos"));
+        assert_eq!(join("examples", "D:\\a"), "D:\\a");
         assert_eq!(
-            split_on("/tmp/odd\\name.gos", false),
-            ("/tmp".to_string(), "odd\\name.gos".to_string())
+            join("D:\\a\\examples\\hello-world", "packaging.toml"),
+            "D:\\a\\examples\\hello-world/packaging.toml"
         );
-        assert!(!is_separator_on('\\', false));
-        assert!(is_separator_on('\\', true));
-        assert!(is_separator_on('/', false));
     }
 }

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.75.7 - One path grammar on every platform, plain canonical paths on Windows, enum payloads in `Result`, released regex patterns
+
+- `std::path` reads one grammar on every platform and tier: `/` and `\` both separate components, and a path is absolute when it begins with `/`, a drive (`C:\`, `C:/`) or a UNC share (`\\host\share`), so `path::is_absolute("D:\\a")` is true and `path::join("dir", "C:\\x")` is `C:\x`.
+- `path::normalize`, `components`, `prefixes` and `parent` keep a drive or share root whole and write `/` between components (`C:\a\..\b` normalizes to `C:/b`, `\\host\share\a` to `//host/share/a`).
+- A `\` in a file name on Linux or macOS now separates components, as it does on Windows.
+- `fs::canonicalize` on Windows answers `D:\dir` (or `\\host\share\dir`) instead of the verbatim `\\?\D:\dir`, so `path::join` on its result opens, where Windows refused it with "The filename, directory name, or volume label syntax is incorrect".
+- `gos fetch` follows a dependency's tag or branch that its remote moved, where a cached clone refused a moved tag with "would clobber existing tag" and kept a branch at the commit it first fetched.
+- A native build keeps the counted fields of a by-value enum returned inside a `Result` or `Option` (`Ok(Answer::Snapshot(snap))` whose `Snap` holds an `Option`) alive after the function that built it returns, where it freed them on return and the caller read freed memory or freed it twice.
+- A compiled `regex::Pattern` is released with its last use on the native tiers, where every `regex::new` and `regex::compile` kept its compiled program, about 120 KB, until the process exited.
+- A dependency's `use crate::editing::search` names its own `search` module when the application has a root module of the same name, where `search::Searcher::new` was looked up in the application's module and refused with GR0001.
+- A native build passes a capturing closure's environment to a direct call with the type the closure body declares, where the call disagreed with the function it called, which LLVM may treat as undefined.
+
 ## 0.75.6 - `runtime::version`, imported types and modules that share a name, JIT struct returns
 
 - `runtime::version()` answers the Gossamer release a program runs on, such as `"0.75.6"`, the same on the VM, the JIT and native builds.

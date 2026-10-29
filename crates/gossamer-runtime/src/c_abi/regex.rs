@@ -24,10 +24,14 @@ use super::*;
 // returned to user code as opaque `*mut GosRegex`.
 // ---------------------------------------------------------------
 
+/// A compiled pattern, held in a counted node: compiled code shares it like
+/// any value, and its last release drops the compiled program.
 #[repr(transparent)]
 pub struct GosRegex {
     inner: ::regex::Regex,
 }
+
+super::rc::managed_handle!(GosRegex);
 
 /// Slot layout of `gos_rt_regex_find_all` elements: 24-byte
 /// `(start i64, end i64, text String)` tuples - the owned match text
@@ -61,7 +65,7 @@ pub unsafe extern "C" fn gos_rt_regex_compile(pat: *const c_char) -> *mut GosReg
         // SAFETY: `pat` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { crate::c_abi::gos_str_arg_text(pat) };
         match ::regex::Regex::new(s) {
-            Ok(re) => Box::into_raw(Box::new(GosRegex { inner: re })),
+            Ok(re) => super::rc::alloc_managed(GosRegex { inner: re }),
             Err(_) => std::ptr::null_mut(),
         }
     })
@@ -85,7 +89,7 @@ pub unsafe extern "C" fn gos_rt_regex_compile_result(pat: *const c_char) -> i128
         let s = unsafe { crate::c_abi::gos_str_arg_text(pat) };
         match ::regex::Regex::new(s) {
             Ok(re) => {
-                let handle = Box::into_raw(Box::new(GosRegex { inner: re }));
+                let handle = super::rc::alloc_managed(GosRegex { inner: re });
                 gos_rt_result_new(0, handle as i64)
             }
             Err(e) => {

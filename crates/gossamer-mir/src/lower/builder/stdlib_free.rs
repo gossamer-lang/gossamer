@@ -1368,16 +1368,13 @@ impl<'a> Builder<'a> {
             }
             // A `regex::compile` literal was validated while parsing with the
             // engine the shim compiles it with, so the handle is the answer.
-            "regex::compile" => (
-                "gos_rt_regex_compile",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
+            "regex::compile" => ("gos_rt_regex_compile", self.regex_pattern_ty()),
             // A pattern built at run time can be refused: the Err arm carries
             // the engine's reason on every tier. `regex::Pattern::new(p)` is
             // the type-qualified spelling of the same call.
             "regex::new" | "regex::Pattern::new" | "Pattern::new" => {
-                let handle = self.tcx.int_ty(gossamer_types::IntTy::I64);
-                let ty = self.result_payload_error_ty(handle);
+                let pattern = self.regex_pattern_ty();
+                let ty = self.result_payload_error_ty(pattern);
                 ("gos_rt_regex_compile_result", ty)
             }
             "regex::is_match" => ("gos_rt_regex_is_match", self.tcx.bool_ty()),

@@ -546,12 +546,12 @@ pub const TERM: StdModule = StdModule {
 
 pub const PATH: StdModule = StdModule {
     path: "std::path",
-    summary: "Lexical filesystem-path operations; platform path grammar, no URL parsing.",
+    summary: "Lexical filesystem-path operations; one grammar on every platform (`/` and `\\` separate, roots `/`, `C:/`, `//host/share`), no URL parsing.",
     items: &[
         StdItem {
             name: "join",
             kind: StdItemKind::Function,
-            doc: "Joins two path fragments.",
+            doc: "Joins two path fragments with `/`; an absolute second fragment replaces the first.",
         },
         StdItem {
             name: "walk",
@@ -601,7 +601,7 @@ pub const PATH: StdModule = StdModule {
         StdItem {
             name: "is_absolute",
             kind: StdItemKind::Function,
-            doc: "Reports whether the path is absolute.",
+            doc: "Reports whether the path begins with a root: `/`, a drive (`C:/`), or a UNC share (`//host/share`).",
         },
         StdItem {
             name: "normalize",

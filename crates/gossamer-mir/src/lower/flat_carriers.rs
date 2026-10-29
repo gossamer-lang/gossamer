@@ -148,6 +148,45 @@ struct Flat {
     tuple: Ty,
 }
 
+/// Registers the guarded copy meta of the flattened carrier `tuple`: the
+/// gated children of each payload's own meta, at the words the payload
+/// occupies in the tuple. The ownership passes walk a tuple's children
+/// through its meta, so without one a by-value enum payload's counted
+/// fields would have no owner in the carrier. The arm a value does not hold
+/// is zeroes, which the runtime walk skips.
+fn register_tuple_copy_meta(tcx: &mut TyCtxt, tuple: Ty) {
+    use gossamer_abi::rc::RC_KIND_STRUCT_GUARDED;
+    if tcx.aggr_copy_meta(tuple).is_some() {
+        return;
+    }
+    let TyKind::Tuple(fields) = tcx.kind_of(tuple).clone() else {
+        return;
+    };
+    let mut triples = Vec::new();
+    let mut word = 0_i64;
+    for field in fields {
+        if let Some(meta) = tcx.aggr_copy_meta(field).and_then(|sym| tcx.rc_meta(sym))
+            && let [RC_KIND_STRUCT_GUARDED, count, rest @ ..] = meta
+        {
+            for triple in rest
+                .chunks_exact(3)
+                .take(usize::try_from(*count).unwrap_or(0))
+            {
+                triples.extend([triple[0], triple[1] + word, triple[2] + word]);
+            }
+        }
+        word += i64::from(tcx.slot_bytes(field).max(8) / 8);
+    }
+    if triples.is_empty() {
+        return;
+    }
+    let symbol = format!("gos_rc_meta_copyblob_{}", tuple.as_u32());
+    let mut blob = vec![RC_KIND_STRUCT_GUARDED, (triples.len() / 3) as i64];
+    blob.extend(triples);
+    tcx.register_rc_meta(symbol.clone(), blob);
+    tcx.register_aggr_copy_meta(tuple, symbol);
+}
+
 /// Rewrites the carriers of `body` over a by-value enum into tuples.
 pub(crate) fn flatten_carriers(body: &mut Body, abi: &CarrierAbi, tcx: &mut TyCtxt) {
     let n = body.locals.len();
@@ -156,6 +195,7 @@ pub(crate) fn flatten_carriers(body: &mut Body, abi: &CarrierAbi, tcx: &mut TyCt
     for (index, slot) in flat.iter_mut().enumerate() {
         let carrier = body.locals[index].ty;
         if let Some(tuple) = tcx.flat_carrier_ty(carrier) {
+            register_tuple_copy_meta(tcx, tuple);
             *slot = Some(Flat { carrier, tuple });
             any = true;
         }
