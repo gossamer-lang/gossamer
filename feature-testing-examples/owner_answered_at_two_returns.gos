@@ -1,0 +1,42 @@
+// A vector or map that two returns answer inside `Ok` stays this frame's on
+// a path that answers neither, such as a `?` exit, and is freed there; each
+// answered path hands its own share to the caller.
+use std::errors
+
+fn fails(bad: bool) -> Result<i64, errors::Error> {
+    if bad { Err(errors::new("no")) } else { Ok(7) }
+}
+
+fn collect(skip: bool, bad: bool) -> Result<Vec<String>, errors::Error> {
+    let mut out = #[f"first {skip}"]
+    if skip {
+        return Ok(out)
+    }
+    let n = fails(bad)?
+    out.push(f"pushed {n}")
+    Ok(out)
+}
+
+fn index(skip: bool, bad: bool) -> Result<Map<String, i64>, errors::Error> {
+    let mut out = Map::new()
+    out["start"] = 1
+    if skip {
+        return Ok(out)
+    }
+    let n = fails(bad)?
+    out["n"] = n
+    Ok(out)
+}
+
+fn main() {
+    for (skip, bad) in [(true, false), (false, false), (false, true)] {
+        match collect(skip, bad) {
+            Ok(v) => println(f"collect {v}")
+            Err(e) => println(f"collect failed: {e}")
+        }
+        match index(skip, bad) {
+            Ok(m) => println(f"index {m.len()} {m.get("n")}")
+            Err(e) => println(f"index failed: {e}")
+        }
+    }
+}

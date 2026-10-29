@@ -1904,6 +1904,11 @@ pub(crate) fn insert_drops_at_returns(
                 }
             }
         }
+        // Each return may wrap the same owner (`if done { return Ok(out) }` and
+        // a final `Ok(out)`). The rule holds when those wraps are every place
+        // the owner goes, so a path that wraps nothing (a `?` exit) still
+        // reclaims it.
+        let mut wraps: Vec<Vec<(usize, Local)>> = vec![Vec::new(); body.locals.len()];
         for (bi, block) in body.blocks.iter().enumerate() {
             for (si, stmt) in block.stmts.iter().enumerate() {
                 let StatementKind::Assign {
@@ -1926,8 +1931,6 @@ pub(crate) fn insert_drops_at_returns(
                     || payload <= arity
                     || payload >= owner_ctor.len()
                     || !moved_into_return[place.local.0 as usize]
-                    || edge_count[payload] != 1
-                    || held_in[payload] != 1
                     || aliased[payload]
                     || !owner_ctor[payload].is_some_and(|free| {
                         matches!(
@@ -1942,13 +1945,23 @@ pub(crate) fn insert_drops_at_returns(
                 {
                     continue;
                 }
-                moved_into_return[payload] = false;
-                // A sequence is counted, and the wrap mints the answer's share
-                // of it, so the frame's reclaim stays on every path. A table
-                // has no count, so the one the answer takes is emptied here.
-                if owner_ctor[payload] != Some("gos_rt_vec_free") {
-                    wrapped_tables.push((bi, place.local, p.local));
-                }
+                wraps[payload].push((bi, place.local));
+            }
+        }
+        for (payload, sites) in wraps.iter().enumerate() {
+            if sites.is_empty()
+                || edge_count[payload] != sites.len()
+                || held_in[payload] != sites.len()
+            {
+                continue;
+            }
+            moved_into_return[payload] = false;
+            // A sequence is counted, and the wrap mints the answer's share
+            // of it, so the frame's reclaim stays on every path. A table
+            // has no count, so the one the answer takes is emptied here.
+            if owner_ctor[payload] != Some("gos_rt_vec_free") {
+                let local = Local(u32::try_from(payload).expect("local overflow"));
+                wrapped_tables.extend(sites.iter().map(|&(bi, answer)| (bi, answer, local)));
             }
         }
     }
