@@ -370,7 +370,11 @@ fn walk<'a>(expr: &'a HirExpr, info: &ComptimeInfo, out: &mut Vec<Region<'a>>) {
                 walk(&arm.body, info, out);
             }
         }
-        HirExprKind::Loop { body, .. } | HirExprKind::While { body, .. } => {
+        HirExprKind::Loop { body, .. } => walk(body, info, out),
+        HirExprKind::While {
+            condition, body, ..
+        } => {
+            walk(condition, info, out);
             walk(body, info, out);
         }
         HirExprKind::Block(block) => {

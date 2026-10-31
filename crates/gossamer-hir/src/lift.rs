@@ -531,7 +531,11 @@ impl Lifter<'_> {
                     self.scopes.pop();
                 }
             }
-            HirExprKind::Loop { body, .. } | HirExprKind::While { body, .. } => {
+            HirExprKind::Loop { body, .. } => self.visit_expr(body),
+            HirExprKind::While {
+                condition, body, ..
+            } => {
+                self.visit_expr(condition);
                 self.visit_expr(body);
             }
             HirExprKind::Block(block) => self.visit_block(block),

@@ -23,7 +23,7 @@ use std::os::raw::c_char;
 ///
 /// A host refuses a library whose major differs from its own, and one whose
 /// minor is newer than its own: a minor bump only adds to the tables.
-pub const ABI_VERSION: u32 = (3 << 16) | 1;
+pub const ABI_VERSION: u32 = (3 << 16) | 2;
 
 /// The word a compiled call's wire thunk answers for `Ok(())` in place of a
 /// result variant's address, so a successful unit call allocates nothing. A
@@ -315,6 +315,10 @@ pub struct HostTable {
     pub vm_callback_retain: Option<unsafe extern "C" fn(handle: u64)>,
     /// Gives back a share [`Self::vm_callback_retain`] took.
     pub vm_callback_release: Option<unsafe extern "C" fn(handle: u64)>,
+    /// Hands the calling thread's freed allocator memory back before it
+    /// waits; answers the microseconds until it may when a recent call
+    /// deferred it, or 0 once it has. Since ABI 3.2.
+    pub thread_idle: unsafe extern "C" fn() -> u64,
 }
 
 /// What the elements of a runtime vector own, for

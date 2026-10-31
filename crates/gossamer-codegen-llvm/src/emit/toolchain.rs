@@ -231,6 +231,10 @@ pub(super) fn invoke_llc_pipeline(
     llc_cmd
         .arg(llc_level)
         .arg("-filetype=obj")
+        // A section per function lets the linker drop the ones nothing calls
+        // and lay out the rest in any order it is given.
+        .arg("-function-sections")
+        .arg("-data-sections")
         .arg(format!("-mtriple={triple}"))
         // COFF (Windows) has no GOT: `-relocation-model=pic` makes llc
         // emit GOT-relative relocations for external data symbols that
@@ -317,6 +321,7 @@ fn invoke_clang_pipeline(
     if !triple.contains("windows") {
         cmd.arg("-fPIC");
     }
+    cmd.arg("-ffunction-sections").arg("-fdata-sections");
     for option in llvm_pass_options(triple, profile) {
         cmd.arg("-mllvm").arg(option);
     }

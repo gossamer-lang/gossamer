@@ -38,6 +38,7 @@ pub use crate::abi::VmDispatch;
 pub use crate::conv::{BindingCallback, Bytes, DynValue, FromGos, PersistentCallback, ToGos};
 pub use crate::error::GosError;
 pub use crate::heap::RuntimeAllocator;
+pub use crate::host::mark_thread_idle;
 pub use crate::opaque::Registry;
 pub use crate::registry::{ItemFn, Module, REGISTRY, Signature, TextConversion, WireText};
 pub use crate::sig::SigType;

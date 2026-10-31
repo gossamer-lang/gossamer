@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.75.9 - Idle threads give memory back, closures in `while` conditions, symbol order files
+
+- A closure written in a `while` condition (`while names.any(|n| n == wanted)`) runs on every tier, where it was never compiled and the condition answered false on the VM, the JIT and native builds.
+- A program that waits gives back memory its threads freed: a scheduler worker that parks and an HTTP server waiting for a connection return their freed pages to the system once per purge window, where they kept them until their next allocation; an idle GUI terminal holds 4.7 MB instead of 5.8 MB.
+- A binding thread about to wait calls `gossamer_binding::mark_thread_idle()` to return the memory it freed, and the answer says when to call it again; the binding ABI is 3.2.
+- `GOS_SYMBOL_ORDER` names a file of function names, one a line, that a native Linux or macOS build lays out first and together, so the code a program runs at start fills fewer pages; native objects give each function and datum its own section.
+
 ## 0.75.8 - Owners answered at more than one return
 
 - A native build frees a `Vec`, `Map`, `Set` or `Deque` that two or more returns answer inside `Ok` / `Some` on a path that answers none of them, such as a `?` that propagates an error, where the value leaked once per such exit.

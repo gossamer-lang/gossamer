@@ -143,6 +143,12 @@ unsafe extern "C" fn blocking_leave(_token: u64) {
     crate::sched_global::syscall_unmark();
 }
 
+unsafe extern "C" fn thread_idle() -> u64 {
+    crate::mark_thread_idle().map_or(0, |due| {
+        u64::try_from(due.as_micros()).unwrap_or(u64::MAX).max(1)
+    })
+}
+
 /// The table every tier shares; the VM entries are absent.
 #[must_use]
 pub const fn compiled_host_table() -> HostTable {
@@ -164,6 +170,7 @@ pub const fn compiled_host_table() -> HostTable {
         vm_free_out: None,
         vm_callback_retain: None,
         vm_callback_release: None,
+        thread_idle,
     }
 }
 
