@@ -23,8 +23,8 @@ use gossamer_pkg::RustBindingSpec;
 
 use crate::binding_build::{
     AdvisoryLock, BindingBuildError, CargoBuild, Profile, TOOLCHAIN_LOCK, binding_crates_patch,
-    build_lock_path, cache_root, path_dependencies, render_one, run_cargo_build, seed_lockfile,
-    toml_path_kv, write_if_different,
+    binding_locks, build_lock_path, cache_root, path_dependencies, render_one, run_cargo_build,
+    seed_lockfile, toml_path_kv, write_if_different,
 };
 
 /// The directory, inside a path binding's crate, that `gos publish` stages
@@ -389,7 +389,8 @@ pub fn ensure_bindings_library_in(
         let _ = writeln!(lib_rs, "extern crate {};", crate_ident(&member.name));
     }
     write_if_different(&project.join("lib.rs"), &lib_rs)?;
-    seed_lockfile(&project, TOOLCHAIN_LOCK)?;
+    let locks = binding_locks(set.iter().filter_map(|m| m.local_root.as_deref()));
+    seed_lockfile(&project, TOOLCHAIN_LOCK, &locks)?;
     let target_dir = dir.join("target");
     run_cargo_build(
         &CargoBuild {

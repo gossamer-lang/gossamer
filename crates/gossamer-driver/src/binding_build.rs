@@ -307,7 +307,8 @@ strip = false
         let cargo_toml = self.workdir.join("Cargo.toml");
         write_if_different(&cargo_toml, &self.cargo_toml())?;
         write_if_different(&self.workdir.join("lib.rs"), &self.lib_rs())?;
-        seed_lockfile(&self.workdir, TOOLCHAIN_LOCK)?;
+        let locks = binding_locks(self.bindings.iter().filter_map(|b| b.local_root.as_deref()));
+        seed_lockfile(&self.workdir, TOOLCHAIN_LOCK, &locks)?;
 
         let archive = self.archive_path();
         let native_libs_path = self.native_libs_path();
@@ -802,15 +803,31 @@ pub(crate) fn build_lock_path(workdir: &Path) -> PathBuf {
 /// resolved. Bindings still reach their own dependencies; those are the
 /// user's tree to pin, and a binding that names none adds nothing to
 /// resolve.
-pub(crate) fn seed_lockfile(project_dir: &Path, seed: &str) -> io::Result<()> {
+///
+/// The resolution is kept while the seed and `binding_locks` stay as they
+/// were. A binding that re-pins its dependencies, such as a git tag that
+/// moved to another commit, changes `binding_locks`, and the project then
+/// resolves again from the seed, which cargo cannot be asked to do for a
+/// git dependency it has already pinned.
+pub(crate) fn seed_lockfile(project_dir: &Path, seed: &str, binding_locks: &str) -> io::Result<()> {
     let lock = project_dir.join(CARGO_LOCK);
     let stamp = project_dir.join(LOCK_SEED_STAMP);
-    if lock.exists() && fs::read(&stamp).is_ok_and(|previous| previous == seed.as_bytes()) {
+    let recorded = format!("{seed}\n{binding_locks}");
+    if lock.exists() && fs::read(&stamp).is_ok_and(|previous| previous == recorded.as_bytes()) {
         return Ok(());
     }
     fs::write(&lock, seed)?;
-    fs::write(&stamp, seed)?;
+    fs::write(&stamp, recorded)?;
     Ok(())
+}
+
+/// The lockfiles the bindings with sources under `roots` carry.
+pub(crate) fn binding_locks<'a>(roots: impl IntoIterator<Item = &'a Path>) -> String {
+    roots
+        .into_iter()
+        .filter_map(|root| fs::read_to_string(root.join(CARGO_LOCK)).ok())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub(crate) fn write_if_different(path: &Path, contents: &str) -> io::Result<()> {
@@ -1623,7 +1640,7 @@ mod tests {
         let project = tempdir();
         let pins = "version = 4\n\n[[package]]\nname = \"arrayref\"\nversion = \"0.3.9\"\n";
 
-        seed_lockfile(&project, pins).unwrap();
+        seed_lockfile(&project, pins, "").unwrap();
 
         assert_eq!(
             fs::read_to_string(project.join(CARGO_LOCK)).unwrap(),
@@ -1635,12 +1652,12 @@ mod tests {
     #[test]
     fn seeding_keeps_a_resolution_the_project_already_has() {
         let project = tempdir();
-        seed_lockfile(&project, "version = 4\n").unwrap();
+        seed_lockfile(&project, "version = 4\n", "").unwrap();
 
         // What cargo resolved on top of the seed - the bindings' own tree.
         let resolved = "version = 4\n\n[[package]]\nname = \"user-binding\"\n";
         fs::write(project.join(CARGO_LOCK), resolved).unwrap();
-        seed_lockfile(&project, "version = 4\n").unwrap();
+        seed_lockfile(&project, "version = 4\n", "").unwrap();
 
         assert_eq!(
             fs::read_to_string(project.join(CARGO_LOCK)).unwrap(),
@@ -1650,9 +1667,26 @@ mod tests {
     }
 
     #[test]
+    fn a_binding_that_repins_its_dependencies_restarts_the_resolution() {
+        let project = tempdir();
+        let pinned = "[[package]]\nname = \"dep\"\nsource = \"git+https://x/dep?tag=v1#aaa\"\n";
+        seed_lockfile(&project, "version = 4\n", pinned).unwrap();
+        fs::write(project.join(CARGO_LOCK), format!("version = 4\n\n{pinned}")).unwrap();
+
+        let moved = "[[package]]\nname = \"dep\"\nsource = \"git+https://x/dep?tag=v1#bbb\"\n";
+        seed_lockfile(&project, "version = 4\n", moved).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(project.join(CARGO_LOCK)).unwrap(),
+            "version = 4\n",
+            "a tag a binding re-pinned must be resolved again, not kept at its old commit"
+        );
+    }
+
+    #[test]
     fn moved_toolchain_pins_replace_an_older_seed() {
         let project = tempdir();
-        seed_lockfile(&project, "version = 4\n\n[[package]]\nname = \"a\"\n").unwrap();
+        seed_lockfile(&project, "version = 4\n\n[[package]]\nname = \"a\"\n", "").unwrap();
         fs::write(
             project.join(CARGO_LOCK),
             "version = 4\n\n[[package]]\nname = \"stale\"\n",
@@ -1660,7 +1694,7 @@ mod tests {
         .unwrap();
 
         let moved = "version = 4\n\n[[package]]\nname = \"a\"\nversion = \"2\"\n";
-        seed_lockfile(&project, moved).unwrap();
+        seed_lockfile(&project, moved, "").unwrap();
 
         assert_eq!(
             fs::read_to_string(project.join(CARGO_LOCK)).unwrap(),
