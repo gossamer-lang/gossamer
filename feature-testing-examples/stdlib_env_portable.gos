@@ -24,6 +24,13 @@ fn main() -> Result<(), errors::Error> {
     let program = env::program_name()
     assert(program.byte_len() > 0, "program_name is not empty")
 
+    // The VM answers its own executable and a native build the program's;
+    // either way the answer is a file beside which an install keeps data.
+    let exe = env::current_exe()?
+    assert(fs::is_file(exe), "current_exe names a file")
+    let exe_dir = path::parent(exe).unwrap_or("")
+    assert(fs::is_dir(exe_dir), "current_exe's directory is a directory")
+
     // A variable this program sets is readable, overwritable, and removable.
     // The name is uppercase ASCII so it means the same thing on a
     // case-insensitive environment block as on a case-sensitive one.

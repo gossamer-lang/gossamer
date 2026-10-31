@@ -643,6 +643,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_enum_box_aggr_take", (I64, Ptr, Ptr) -> Ptr, Both, "Heap-box a multi-slot enum variant payload like `gos_rt_enum_box_aggr`, taking the source's share of every child instead of retaining them; the caller zeroes the source's child words. Inside a region the shares are given back at pop."),
     rt!("gos_rt_enum_struct_eq", (Ptr, Ptr, Ptr) -> I64, Cranelift, "Structural equality of two heap (recursive/Box) enum nodes, driven by a per-enum descriptor blob (disc + per-field kinds, self-enum children recursed); returns 1 if equal. Routed to by the compiled tiers for heap-enum ==/!= so distinct allocations of an equal value compare true."),
     rt!("gos_rt_enum_unit", (I64) -> Ptr, Both, "Shared pinned singleton for a payload-less enum variant (tag-only); avoids per-construction allocation."),
+    rt!("gos_rt_env_current_exe", () -> I128, Both, "Return the running program's executable path as a Result<String, errors::Error>."),
     rt!("gos_rt_env_home_dir", () -> I128, Both, "Return the user's home directory as a Result<String, errors::Error>."),
     rt!("gos_rt_env_set_current_dir", (Ptr) -> I128, Both, "Set the process working directory; returns Result<(), errors::Error>."),
     rt_str!("gos_rt_env_temp_dir", () -> Ptr, Both, "Return the OS temporary directory as a cstring."),

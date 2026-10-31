@@ -310,6 +310,7 @@ const NAME_CAPABILITIES: &[(&str, Capability)] = &[
     // the working directory is denied at both.
     ("env::args", Capability::Read),
     ("env::current_dir", Capability::Read),
+    ("env::current_exe", Capability::Read),
     ("env::home_dir", Capability::Read),
     ("env::vars", Capability::Read),
     ("env::program_name", Capability::Read),
