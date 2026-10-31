@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.75.10 - Bindings follow the dependencies they re-pin
+
+- A Rust binding whose own `Cargo.lock` re-pins a dependency, such as a git tag moved to another commit, builds against the new pin, where the shared build in the user cache kept the commit it first resolved until the cache was deleted.
+
 ## 0.75.9 - Idle threads give memory back, closures in `while` conditions, symbol order files
 
 - A closure written in a `while` condition (`while names.any(|n| n == wanted)`) runs on every tier, where it was never compiled and the condition answered false on the VM, the JIT and native builds.
