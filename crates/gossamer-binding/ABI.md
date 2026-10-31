@@ -104,6 +104,15 @@ call; a `PersistentCallback` holds one of its own.
 `blocking_leave`, which mark the worker as inside a blocking call so the
 scheduler runs other goroutines meanwhile.
 
+## Idle threads
+
+A thread the library starts holds the memory it freed until it allocates
+again. `HostTable::thread_idle` (since 3.2), reached as
+`gossamer_binding::mark_thread_idle()`, hands it back before the thread waits.
+It answers 0 once it has, or the microseconds until it may when a recent call
+deferred it; a thread that bounds its wait by that answer and calls again
+releases what it freed since.
+
 ## Versioning
 
 Within a major, a minor only appends: new fields at the end of `HostTable`

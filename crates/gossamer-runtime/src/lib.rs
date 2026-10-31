@@ -115,9 +115,8 @@ unsafe impl std::alloc::GlobalAlloc for SamplingAllocator {
     }
 }
 
-// mimalloc's `mi_option_purge_delay` (15),
-// `mi_option_deprecated_max_segment_reclaim` (21), and
-// `mi_option_allow_thp` (43) enum indices. The `libmimalloc-sys` binding
+// mimalloc's `mi_option_arena_eager_commit` (4), `mi_option_purge_delay`
+// (15), and `mi_option_allow_thp` (43) enum indices. The `libmimalloc-sys` binding
 // exposes only a curated subset of the option enum that omits these on the
 // v3 build, so they are pinned by value and guarded against a future mimalloc
 // enum shift by `allocator_tests` below.
@@ -125,8 +124,6 @@ unsafe impl std::alloc::GlobalAlloc for SamplingAllocator {
 const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
 #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
-#[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
-const MI_OPTION_MAX_SEGMENT_RECLAIM: libmimalloc_sys::mi_option_t = 21;
 #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
 const MI_OPTION_ALLOW_THP: libmimalloc_sys::mi_option_t = 43;
 
@@ -139,22 +136,18 @@ const MI_OPTION_ALLOW_THP: libmimalloc_sys::mi_option_t = 43;
 // before the first set makes the guard observe the true defaults regardless
 // of ordering.
 #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
-static MIMALLOC_OPTION_DEFAULTS: std::sync::OnceLock<(i64, i64, i64, i64)> =
-    std::sync::OnceLock::new();
+static MIMALLOC_OPTION_DEFAULTS: std::sync::OnceLock<(i64, i64, i64)> = std::sync::OnceLock::new();
 
-/// Pristine defaults of the two pinned mimalloc options, snapshotted once
+/// Pristine defaults of the pinned mimalloc options, snapshotted once
 /// before the first `init_process_allocator` call mutates them.
 #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
-fn mimalloc_option_defaults() -> (i64, i64, i64, i64) {
+fn mimalloc_option_defaults() -> (i64, i64, i64) {
     *MIMALLOC_OPTION_DEFAULTS.get_or_init(|| {
         // SAFETY: option get is thread-safe; the global allocator is mimalloc
         // in this build, initialised before any code reaches here.
         unsafe {
             (
                 widen(libmimalloc_sys::mi_option_get(MI_OPTION_PURGE_DELAY)),
-                widen(libmimalloc_sys::mi_option_get(
-                    MI_OPTION_MAX_SEGMENT_RECLAIM,
-                )),
                 widen(libmimalloc_sys::mi_option_get(MI_OPTION_ALLOW_THP)),
                 widen(libmimalloc_sys::mi_option_get(MI_OPTION_ARENA_EAGER_COMMIT)),
             )
@@ -202,9 +195,7 @@ fn configured_purge_delay() -> std::os::raw::c_long {
 /// it. No-op under `ThreadSanitizer` and Miri, where the system
 /// allocator is used.
 ///
-/// Raises mimalloc's abandoned-segment reclaim ceiling so short-lived
-/// worker heaps do not leave reclaimable segments behind after a collection
-/// pass, and disables mimalloc's transparent-huge-page request. By default
+/// Disables mimalloc's transparent-huge-page request. By default
 /// mimalloc `madvise(MADV_HUGEPAGE)`s its arena memory, so on Linux with
 /// THP in `madvise` mode the kernel backs even a tiny live set with
 /// 2 MiB pages - a process whose heap fits in tens of KiB stays several
@@ -212,8 +203,8 @@ fn configured_purge_delay() -> std::os::raw::c_long {
 /// match. Disabling it costs no measurable wall-clock on our workloads and
 /// keeps RSS proportional to the live set.
 ///
-/// `15`, `21`, and `43` are mimalloc's `mi_option_purge_delay`,
-/// `mi_option_deprecated_max_segment_reclaim`, and `mi_option_allow_thp`.
+/// `4`, `15`, and `43` are mimalloc's `mi_option_arena_eager_commit`,
+/// `mi_option_purge_delay`, and `mi_option_allow_thp`.
 /// The `libmimalloc-sys` binding exposes only a curated subset of the option
 /// enum on v3, so they are pinned by value and guarded against a future
 /// mimalloc enum shift by the `allocator_tests` unit tests below, which assert
@@ -233,7 +224,6 @@ pub fn init_process_allocator() {
         // the allocator initialised, which it has by the time `main` runs.
         unsafe {
             libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, configured_purge_delay());
-            libmimalloc_sys::mi_option_set(MI_OPTION_MAX_SEGMENT_RECLAIM, 100);
             libmimalloc_sys::mi_option_set(MI_OPTION_ALLOW_THP, 0);
             // Commit arena memory as pages are first used rather than all at
             // once. Eager commit on an overcommitting kernel leaves every
@@ -274,28 +264,37 @@ pub fn purge_expired_allocator_memory() {
     c_abi::vec::purge_mapped_buffers();
 }
 
-/// Hands the calling thread's freed allocator pages back to the arena before
-/// the thread blocks on a wait of unbounded length, at most once per purge
-/// window: `TCMalloc`'s `MarkThreadIdle`. Pages a thread's heap holds are
-/// released only by that thread, so one that did its allocating and then
-/// waits - a server's accept loop after startup, a worker between requests -
-/// would otherwise hold them for as long as it waits. The arena returns them
-/// to the kernel once their purge delay expires.
-pub fn mark_thread_idle() {
+/// Hands the calling thread's freed allocator pages back to the kernel before
+/// the thread blocks: `TCMalloc`'s `MarkThreadIdle`. Pages a thread's heap
+/// holds are released only by that thread, so one that did its allocating and
+/// then waits - a server's accept loop after startup, a worker between
+/// requests, a window's event loop - would otherwise hold them for as long as
+/// it waits.
+///
+/// Collects at most once per purge window. Answers `None` once this thread
+/// has collected, or how long until it may when its last collect is more
+/// recent: a wait bounded by that answer and followed by another call
+/// releases what the work since the last collect freed.
+#[must_use]
+pub fn mark_thread_idle() -> Option<std::time::Duration> {
     let window = allocator_purge_delay();
     if window.is_zero() {
-        return;
+        return None;
     }
     thread_local! {
         static LAST_IDLE_COLLECT: std::cell::Cell<Option<std::time::Instant>> =
             const { std::cell::Cell::new(None) };
     }
     LAST_IDLE_COLLECT.with(|last| {
-        if last.get().is_none_or(|at| at.elapsed() >= window) {
-            collect_process_allocator(true);
-            last.set(Some(std::time::Instant::now()));
+        if let Some(left) = last.get().and_then(|at| window.checked_sub(at.elapsed()))
+            && !left.is_zero()
+        {
+            return Some(left);
         }
-    });
+        collect_process_allocator(true);
+        last.set(Some(std::time::Instant::now()));
+        None
+    })
 }
 
 /// Forces the process allocator to collect abandoned heaps and purge eligible
@@ -410,19 +409,12 @@ mod allocator_tests {
     /// allocator.
     #[test]
     fn allocator_option_indices_are_pinned_and_settable() {
-        let (purge_default, reclaim_default, thp_default, eager_default) =
-            super::mimalloc_option_defaults();
+        let (purge_default, thp_default, eager_default) = super::mimalloc_option_defaults();
         assert_eq!(
             purge_default, 1000,
             "mimalloc option 15 default is {purge_default}, expected the 1000 ms \
              purge_delay default - the enum likely shifted; re-verify the \
              mi_option_purge_delay index for the current mimalloc version",
-        );
-        assert_eq!(
-            reclaim_default, 10,
-            "mimalloc option 21 default is {reclaim_default}, expected the abandoned-segment \
-             reclaim default - the enum likely shifted; re-verify the \
-             mi_option_deprecated_max_segment_reclaim index for the current mimalloc version",
         );
         assert_eq!(
             thp_default, 1,
@@ -447,15 +439,33 @@ mod allocator_tests {
         );
         // SAFETY: option get is thread-safe; the global allocator is mimalloc
         // in a non-tsan build, so it is initialised here.
-        let reclaim =
-            unsafe { libmimalloc_sys::mi_option_get(super::MI_OPTION_MAX_SEGMENT_RECLAIM) };
-        assert_eq!(
-            reclaim, 100,
-            "init_process_allocator must set max_segment_reclaim to 100"
-        );
-        // SAFETY: option get is thread-safe; the global allocator is mimalloc
-        // in a non-tsan build, so it is initialised here.
         let thp = unsafe { libmimalloc_sys::mi_option_get(super::MI_OPTION_ALLOW_THP) };
         assert_eq!(thp, 0, "init_process_allocator must set allow_thp to 0");
+    }
+
+    #[test]
+    fn a_thread_marked_idle_again_within_the_window_learns_when_to_call_back() {
+        let window = super::allocator_purge_delay();
+        let marking = std::thread::spawn(move || {
+            let first = super::mark_thread_idle();
+            let second = super::mark_thread_idle();
+            (first, second)
+        });
+        let Ok((first, second)) = marking.join() else {
+            panic!("the marking thread panicked");
+        };
+        assert_eq!(first, None, "a thread's first idle mark collects at once");
+        if window.is_zero() {
+            assert_eq!(
+                second, None,
+                "with no purge delay there is nothing to defer"
+            );
+        } else {
+            assert!(
+                second.is_some_and(|due| !due.is_zero() && due <= window),
+                "a second mark inside the window answers when the deferred collect is due, \
+                 got {second:?} for a window of {window:?}"
+            );
+        }
     }
 }

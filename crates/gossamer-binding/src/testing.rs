@@ -72,6 +72,10 @@ unsafe extern "C" fn blocking_enter() -> u64 {
 
 unsafe extern "C" fn blocking_leave(_token: u64) {}
 
+unsafe extern "C" fn thread_idle() -> u64 {
+    0
+}
+
 static TABLE: HostTable = HostTable {
     abi_version: ABI_VERSION,
     size: std::mem::size_of::<HostTable>() as u32,
@@ -90,6 +94,7 @@ static TABLE: HostTable = HostTable {
     vm_free_out: None,
     vm_callback_retain: None,
     vm_callback_release: None,
+    thread_idle,
 };
 
 /// Installs a host table over the global allocator, so a binding crate's

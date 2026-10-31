@@ -691,6 +691,47 @@ pub(crate) fn compile_reports_requested() -> bool {
             .any(|name| std::env::var_os(name).is_some())
 }
 
+/// Hashes the environment that changes what a build produces: LLVM selection
+/// and tuning, link-driver changes, PGO, deployment targeting, and externally
+/// supplied runtime, bindings and link order, with the identity of each file
+/// such a variable names.
+fn add_build_environment(add: &mut impl FnMut(&str, &[u8])) {
+    for name in [
+        "AR",
+        "CC",
+        "CFLAGS",
+        "GOS_CC",
+        "GOS_BUILD_CACHE",
+        "GOS_LLC",
+        "GOS_LLVM_CLANG",
+        "GOS_LLVM_JOBS",
+        "GOS_LLVM_MCPU",
+        "GOS_LLVM_OPT",
+        "GOS_LLVM_SPLIT_TOOLS",
+        "GOS_LLVM_UNWIND",
+        "GOS_PGO_COLLECT",
+        "GOS_PGO_PROFILE",
+        "GOS_RUNTIME_LIB",
+        "GOS_SYMBOL_ORDER",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "RUSTFLAGS",
+        "RUSTUP_TOOLCHAIN",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            add(name, value.to_string_lossy().as_bytes());
+            if matches!(
+                name,
+                "GOS_PGO_PROFILE" | "GOS_RUNTIME_LIB" | "GOS_SYMBOL_ORDER"
+            ) {
+                add(
+                    "env-file",
+                    file_stamp_identity(Path::new(&value)).as_bytes(),
+                );
+            }
+        }
+    }
+}
+
 /// Fingerprints everything available before the frontend that can affect the
 /// linked artifact. The bundled source covers sibling modules, while project
 /// metadata, tool/runtime identity, target flags, PGO inputs, and linker
@@ -769,38 +810,7 @@ fn build_artifact_key(
     {
         add("runtime", file_stamp_identity(&path).as_bytes());
     }
-    // These variables cover LLVM selection and tuning, link-driver changes,
-    // PGO, deployment targeting, and externally supplied runtime/bindings.
-    for name in [
-        "AR",
-        "CC",
-        "CFLAGS",
-        "GOS_CC",
-        "GOS_BUILD_CACHE",
-        "GOS_LLC",
-        "GOS_LLVM_CLANG",
-        "GOS_LLVM_JOBS",
-        "GOS_LLVM_MCPU",
-        "GOS_LLVM_OPT",
-        "GOS_LLVM_SPLIT_TOOLS",
-        "GOS_LLVM_UNWIND",
-        "GOS_PGO_COLLECT",
-        "GOS_PGO_PROFILE",
-        "GOS_RUNTIME_LIB",
-        "MACOSX_DEPLOYMENT_TARGET",
-        "RUSTFLAGS",
-        "RUSTUP_TOOLCHAIN",
-    ] {
-        if let Some(value) = std::env::var_os(name) {
-            add(name, value.to_string_lossy().as_bytes());
-            if matches!(name, "GOS_PGO_PROFILE" | "GOS_RUNTIME_LIB") {
-                add(
-                    "env-file",
-                    file_stamp_identity(Path::new(&value)).as_bytes(),
-                );
-            }
-        }
-    }
+    add_build_environment(&mut add);
     match gossamer_codegen_llvm::pgo_mode() {
         Some(gossamer_codegen_llvm::PgoMode::Collect(path)) => {
             add("pgo-collect", path.to_string_lossy().as_bytes());
@@ -1528,6 +1538,33 @@ fn framework_args(
 
 /// Whether a native Linux host link uses mold, when it is installed and
 /// resolves the link's libraries where the platform linker would.
+/// The symbol order file `GOS_SYMBOL_ORDER` names, as the native linker
+/// reads it, for a native Linux or macOS link: one symbol name a line, as an
+/// ELF object spells it. Apple's ld spells each with a leading underscore, so
+/// a copy beside the output carries that spelling.
+fn symbol_order(lt: &LinkTarget, out_path: &Path) -> Result<Option<PathBuf>> {
+    let Some(path) = std::env::var_os("GOS_SYMBOL_ORDER").map(PathBuf::from) else {
+        return Ok(None);
+    };
+    if lt.is_cross || !matches!(lt.os, TargetOs::Linux | TargetOs::MacOs) {
+        return Ok(None);
+    }
+    if lt.os == TargetOs::Linux {
+        return Ok(Some(path));
+    }
+    let names = fs::read_to_string(&path)
+        .with_context(|| format!("reading the symbol order {}", path.display()))?;
+    let mut spelled = String::with_capacity(names.len() + names.len() / 16);
+    for name in names.lines().filter(|l| !l.trim().is_empty()) {
+        spelled.push('_');
+        spelled.push_str(name.trim());
+        spelled.push('\n');
+    }
+    let copy = out_path.with_extension("order");
+    fs::write(&copy, spelled).with_context(|| format!("writing {}", copy.display()))?;
+    Ok(Some(copy))
+}
+
 fn links_with_mold(lt: &LinkTarget, libraries: &NativeLinks) -> bool {
     !lt.is_cross
         && lt.os == TargetOs::Linux
@@ -2058,7 +2095,20 @@ fn link_posix(
     // macOS keeps Apple's `ld`: it ships with the SDK and reads that SDK's
     // `.tbd` library stubs, whose target list moves with each release
     // faster than another linker's stub reader follows.
-    if links_with_mold(lt, libraries) {
+    let order = symbol_order(lt, out_path).map_err(NativeBuildError::Io)?;
+    if let Some(order) = &order {
+        // An order file lays the functions it names out first and together,
+        // so the code a program runs fills few pages. lld and Apple's ld read
+        // one; mold does not.
+        if lt.os == TargetOs::MacOs {
+            cmd.arg(format!("-Wl,-order_file,{}", order.display()));
+        } else {
+            cmd.arg("-fuse-ld=lld");
+            cmd.arg(format!("-Wl,--symbol-ordering-file={}", order.display()));
+            // Names the code no longer has are left out, not an error.
+            cmd.arg("-Wl,--no-warn-symbol-ordering");
+        }
+    } else if links_with_mold(lt, libraries) {
         cmd.arg("-fuse-ld=mold");
     }
     for p in object_paths {
@@ -2126,7 +2176,7 @@ fn link_posix(
         && lt.env == TargetEnv::Gnu
         && !lt.is_cross
         && host_glibc_reads_relr()
-        && (links_with_mold(lt, libraries) || linker_packs_relative_relocs(&cc))
+        && (order.is_some() || links_with_mold(lt, libraries) || linker_packs_relative_relocs(&cc))
     {
         // Packed relative relocations keep the binary position independent
         // at a fraction of the relocation size. The linker records a

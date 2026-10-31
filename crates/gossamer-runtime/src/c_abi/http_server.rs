@@ -376,35 +376,40 @@ fn start_connection(home: ConnHome, task: Box<dyn FnOnce() + Send + 'static>) ->
 ///
 /// A goroutine is pinned to its worker for life, so one held in `accept` would
 /// strand every goroutine placed behind it on the same worker. On a goroutine
-/// the listener is non-blocking and registered with the netpoller, and a wait
-/// parks the goroutine instead; off the scheduler the accept blocks as usual.
+/// the listener is registered with the netpoller, and a wait parks the
+/// goroutine instead; off the scheduler the thread waits in a poll of its own,
+/// bounded so that it hands back the memory its last connections freed.
 struct ConnAcceptor {
     listener: mio::net::TcpListener,
     registration: Option<crate::netpoll::Registration>,
+    own: Option<(mio::Poll, mio::Events)>,
 }
 
 impl ConnAcceptor {
     fn new(listener: TcpListener) -> std::io::Result<Self> {
-        let on_goroutine = crate::sched_global::current_gid().is_some();
-        listener.set_nonblocking(on_goroutine)?;
+        listener.set_nonblocking(true)?;
         let mut listener = mio::net::TcpListener::from_std(listener);
-        let registration = if on_goroutine {
-            Some(crate::netpoll::Registration::new(&mut listener)?)
-        } else {
-            None
-        };
+        if crate::sched_global::current_gid().is_some() {
+            let registration = crate::netpoll::Registration::new(&mut listener)?;
+            return Ok(Self {
+                listener,
+                registration: Some(registration),
+                own: None,
+            });
+        }
+        let poll = mio::Poll::new()?;
+        poll.registry()
+            .register(&mut listener, mio::Token(0), mio::Interest::READABLE)?;
         Ok(Self {
             listener,
-            registration,
+            registration: None,
+            own: Some((poll, mio::Events::with_capacity(1))),
         })
     }
 
     /// The next connection, in blocking mode whatever the listener's mode.
     fn accept(&mut self) -> std::io::Result<TcpStream> {
         loop {
-            if self.registration.is_none() {
-                crate::mark_thread_idle();
-            }
             match self.listener.accept() {
                 Ok((stream, _)) => {
                     let stream = TcpStream::from(stream);
@@ -415,12 +420,17 @@ impl ConnAcceptor {
                     return Ok(stream);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    let Some(registration) = self.registration.as_mut() else {
-                        return Err(e);
-                    };
-                    registration.follow(&mut self.listener);
-                    // No deadline, so the wait answers only on readiness.
-                    let _ = registration.wait(crate::netpoll::Direction::Read, None);
+                    if let Some(registration) = self.registration.as_mut() {
+                        registration.follow(&mut self.listener);
+                        // No deadline, so the wait answers only on readiness.
+                        let _ = registration.wait(crate::netpoll::Direction::Read, None);
+                    } else if let Some((poll, events)) = self.own.as_mut() {
+                        match poll.poll(events, crate::mark_thread_idle()) {
+                            Ok(()) => (),
+                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => (),
+                            Err(e) => return Err(e),
+                        }
+                    }
                 }
                 Err(e) => return Err(e),
             }

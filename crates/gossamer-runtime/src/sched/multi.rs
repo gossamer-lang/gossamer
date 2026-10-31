@@ -1638,7 +1638,9 @@ fn next_task(
 }
 
 fn park_worker(slot: &Arc<WorkerSlot>, shared: &Arc<Shared>) -> Park {
-    crate::mark_thread_idle();
+    // A park lasts at most 50 ms, so a collect the window deferred runs at a
+    // later one.
+    let _ = crate::mark_thread_idle();
     if let Some(poller) = crate::netpoll::worker_poller(slot.index) {
         return park_worker_in_poller(slot, shared, poller);
     }

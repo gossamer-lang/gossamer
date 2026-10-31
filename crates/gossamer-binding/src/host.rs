@@ -172,6 +172,22 @@ pub(crate) fn blocking<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
+/// Hands the calling thread's freed allocator memory back to the system
+/// before the thread waits, as the runtime's own threads do. Answers `None`
+/// once it has, or how long until it may when a recent call deferred it: a
+/// thread that bounds its wait by that answer and then calls again releases
+/// what it freed since. `None` before a host is installed.
+pub fn mark_thread_idle() -> Option<std::time::Duration> {
+    let host = HOST.load(Ordering::Acquire);
+    if host.is_null() {
+        return None;
+    }
+    // SAFETY: `install` stored a table that lives as long as the process, and
+    // its size check covers every field, this one included.
+    let due = unsafe { ((*host).thread_idle)() };
+    (due > 0).then(|| std::time::Duration::from_micros(due))
+}
+
 /// Calls a VM callback handle through the running VM call `ctx`, answering
 /// the status and the host-owned answer.
 ///

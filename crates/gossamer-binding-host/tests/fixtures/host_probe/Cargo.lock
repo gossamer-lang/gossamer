@@ -16,7 +16,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "gossamer-binding"
-version = "0.75.8"
+version = "0.75.9"
 dependencies = [
  "gossamer-binding-abi",
  "gossamer-binding-macros",
@@ -28,11 +28,11 @@ dependencies = [
 
 [[package]]
 name = "gossamer-binding-abi"
-version = "0.75.8"
+version = "0.75.9"
 
 [[package]]
 name = "gossamer-binding-macros"
-version = "0.75.8"
+version = "0.75.9"
 dependencies = [
  "proc-macro2",
  "quote",

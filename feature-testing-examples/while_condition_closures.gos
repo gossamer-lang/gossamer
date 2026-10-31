@@ -1,0 +1,32 @@
+// A closure written in a `while` condition runs each time the condition is
+// tested, over collections of every element type, as it does anywhere else.
+
+fn rows() -> Vec<String> {
+    #["197", "200"]
+}
+
+fn main() {
+    let names = rows()
+    let mut n = 0
+    while names.any(|row| row == "200") && n < 3 { n += 1 }
+    assert_eq(n, 3)
+    println(f"any over strings held {n} times")
+
+    n = 0
+    while !rows().any(|row| row.len() > 3) && n < 2 { n += 1 }
+    assert_eq(n, 2)
+    println(f"a negated any over strings held {n} times")
+
+    let mut left = #["a", "bb", "ccc"]
+    while left.iter().any(|s| s.len() > 1) {
+        let _ = left.pop()
+    }
+    assert_eq(left, #["a"])
+    println(f"the strings left are {left}")
+
+    let mut total = 0
+    let wanted = 2
+    while #[1, 2, 3].iter().position(|x| x == wanted) == Some(1) && total < 4 { total += 1 }
+    assert_eq(total, 4)
+    println(f"a capturing closure in the condition held {total} times")
+}
