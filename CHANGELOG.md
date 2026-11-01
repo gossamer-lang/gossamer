@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.75.12 - Symbol order files on Windows and without a system lld
+
+- A Linux build with `GOS_SYMBOL_ORDER` links with the lld a Rust toolchain ships when no `ld.lld` is on the PATH, and with no lld at all warns and links without the order, where it failed with "cannot find 'ld'".
+- A Windows build lays out the functions `GOS_SYMBOL_ORDER` names first and together, as Linux and macOS builds do.
+
 ## 0.75.11 - A program knows where its executable is
 
 - `env::current_exe()` answers the path of the running program's executable on every tier, so an install can keep its data beside it, as a portable app keeps its settings folder.

@@ -1394,12 +1394,14 @@ fn link_executable(
     fs::create_dir_all(&staging)
         .map_err(|err| NativeBuildError::Io(anyhow!("creating {}: {err}", staging.display())))?;
     let linked = if !lt.is_cross && cfg!(all(windows, target_env = "msvc")) {
+        let order = symbol_order(lt, &staged).map_err(NativeBuildError::Io)?;
         link_windows_msvc(
             objects,
             runtime_lib,
             extra_archives,
             libraries,
             &staged,
+            order.as_deref(),
             opts,
         )
     } else if static_musl {
@@ -1536,20 +1538,19 @@ fn framework_args(
         .collect())
 }
 
-/// Whether a native Linux host link uses mold, when it is installed and
-/// resolves the link's libraries where the platform linker would.
 /// The symbol order file `GOS_SYMBOL_ORDER` names, as the native linker
-/// reads it, for a native Linux or macOS link: one symbol name a line, as an
-/// ELF object spells it. Apple's ld spells each with a leading underscore, so
-/// a copy beside the output carries that spelling.
+/// reads it, for a native Linux, macOS or Windows link: one symbol name a
+/// line, as an ELF or x86-64 COFF object spells it. Apple's ld spells each
+/// with a leading underscore, so a copy beside the output carries that
+/// spelling.
 fn symbol_order(lt: &LinkTarget, out_path: &Path) -> Result<Option<PathBuf>> {
     let Some(path) = std::env::var_os("GOS_SYMBOL_ORDER").map(PathBuf::from) else {
         return Ok(None);
     };
-    if lt.is_cross || !matches!(lt.os, TargetOs::Linux | TargetOs::MacOs) {
+    if lt.is_cross || !matches!(lt.os, TargetOs::Linux | TargetOs::MacOs | TargetOs::Windows) {
         return Ok(None);
     }
-    if lt.os == TargetOs::Linux {
+    if lt.os != TargetOs::MacOs {
         return Ok(Some(path));
     }
     let names = fs::read_to_string(&path)
@@ -1565,6 +1566,62 @@ fn symbol_order(lt: &LinkTarget, out_path: &Path) -> Result<Option<PathBuf>> {
     Ok(Some(copy))
 }
 
+/// Hands a POSIX link the symbol order file, if any, and tells whether the
+/// linker takes it. An order file lays the functions it names out first and
+/// together, so the code a program runs fills few pages. lld and Apple's ld
+/// read one; mold and GNU ld do not.
+fn pass_symbol_order(
+    cmd: &mut std::process::Command,
+    lt: &LinkTarget,
+    out_path: &Path,
+) -> std::result::Result<bool, NativeBuildError> {
+    let Some(order) = symbol_order(lt, out_path).map_err(NativeBuildError::Io)? else {
+        return Ok(false);
+    };
+    if lt.os == TargetOs::MacOs {
+        cmd.arg(format!("-Wl,-order_file,{}", order.display()));
+        return Ok(true);
+    }
+    let Some(args) = lld_driver_args() else {
+        return Ok(false);
+    };
+    cmd.args(args);
+    cmd.arg(format!("-Wl,--symbol-ordering-file={}", order.display()));
+    // Names the code no longer has are left out, not an error.
+    cmd.arg("-Wl,--no-warn-symbol-ordering");
+    Ok(true)
+}
+
+/// The `cc` arguments that link with lld, which reads a symbol order file:
+/// the `ld.lld` on the PATH, or else the one a Rust toolchain ships in its
+/// `gcc-ld` directory, selected as rustc selects it. Without either, warns
+/// and answers `None`: the program links unordered.
+fn lld_driver_args() -> Option<Vec<String>> {
+    let use_lld = "-fuse-ld=lld".to_string();
+    if which::which("ld.lld").is_ok() {
+        return Some(vec![use_lld]);
+    }
+    let gcc_ld = rustc_sysroot().ok().map(|sysroot| {
+        sysroot
+            .join("lib")
+            .join("rustlib")
+            .join(gossamer_driver::TargetTriple::host().as_str())
+            .join("bin")
+            .join("gcc-ld")
+    });
+    if let Some(dir) = gcc_ld.filter(|dir| dir.join("ld.lld").exists()) {
+        return Some(vec![format!("-B{}", dir.display()), use_lld]);
+    }
+    eprintln!(
+        "warning: GOS_SYMBOL_ORDER needs lld, and there is no ld.lld on the PATH or in a \
+         Rust toolchain; linking without the order file, so the code the program runs is \
+         spread over more pages. Install lld to lay it out."
+    );
+    None
+}
+
+/// Whether a native Linux host link uses mold, when it is installed and
+/// resolves the link's libraries where the platform linker would.
 fn links_with_mold(lt: &LinkTarget, libraries: &NativeLinks) -> bool {
     !lt.is_cross
         && lt.os == TargetOs::Linux
@@ -2095,20 +2152,8 @@ fn link_posix(
     // macOS keeps Apple's `ld`: it ships with the SDK and reads that SDK's
     // `.tbd` library stubs, whose target list moves with each release
     // faster than another linker's stub reader follows.
-    let order = symbol_order(lt, out_path).map_err(NativeBuildError::Io)?;
-    if let Some(order) = &order {
-        // An order file lays the functions it names out first and together,
-        // so the code a program runs fills few pages. lld and Apple's ld read
-        // one; mold does not.
-        if lt.os == TargetOs::MacOs {
-            cmd.arg(format!("-Wl,-order_file,{}", order.display()));
-        } else {
-            cmd.arg("-fuse-ld=lld");
-            cmd.arg(format!("-Wl,--symbol-ordering-file={}", order.display()));
-            // Names the code no longer has are left out, not an error.
-            cmd.arg("-Wl,--no-warn-symbol-ordering");
-        }
-    } else if links_with_mold(lt, libraries) {
+    let ordered = pass_symbol_order(&mut cmd, lt, out_path)?;
+    if !ordered && links_with_mold(lt, libraries) {
         cmd.arg("-fuse-ld=mold");
     }
     for p in object_paths {
@@ -2176,7 +2221,7 @@ fn link_posix(
         && lt.env == TargetEnv::Gnu
         && !lt.is_cross
         && host_glibc_reads_relr()
-        && (order.is_some() || links_with_mold(lt, libraries) || linker_packs_relative_relocs(&cc))
+        && (ordered || links_with_mold(lt, libraries) || linker_packs_relative_relocs(&cc))
     {
         // Packed relative relocations keep the binary position independent
         // at a fraction of the relocation size. The linker records a
@@ -2496,6 +2541,7 @@ fn link_windows_msvc(
     extra_archives: &[PathBuf],
     libraries: &NativeLinks,
     out_path: &Path,
+    order: Option<&Path>,
     opts: LinkOptions,
 ) -> std::result::Result<(), NativeBuildError> {
     let linker = locate_rust_lld()?;
@@ -2508,6 +2554,14 @@ fn link_windows_msvc(
         gossamer_codegen_llvm::reproducible_enabled(),
     ));
     cmd.arg(windows_stack_reserve_flag());
+    if let Some(order) = order {
+        // The functions the order file names come first and together, as
+        // on Linux and macOS; LNK4037 is a name the code no longer has.
+        let mut order_arg = std::ffi::OsString::from("/ORDER:@");
+        order_arg.push(order);
+        cmd.arg(order_arg);
+        cmd.arg("/IGNORE:4037");
+    }
     let mut out_arg = std::ffi::OsString::from("/OUT:");
     out_arg.push(out_path);
     cmd.arg(out_arg);
@@ -2576,6 +2630,7 @@ fn link_windows_msvc(
     _extra_archives: &[PathBuf],
     _libraries: &NativeLinks,
     _out_path: &Path,
+    _order: Option<&Path>,
     _opts: LinkOptions,
 ) -> std::result::Result<(), NativeBuildError> {
     Err(NativeBuildError::LinkerMissing(

@@ -2059,3 +2059,96 @@ fn tidy_does_not_edit_manifest_when_a_source_file_has_parse_errors() {
     assert_eq!(std::fs::read_to_string(&manifest).unwrap(), original);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// Builds `fn main` printing "ordered" with a symbol order file, on a PATH
+// holding only the C driver, assembler and GNU ld; `rustc` overrides RUSTC.
+// Answers the build's stderr and whether lld linked the program.
+#[cfg(target_os = "linux")]
+fn ordered_build_without_a_system_lld(name: &str, rustc: Option<&str>) -> (String, bool) {
+    let dir = env::temp_dir().join(format!("gos-symbol-order-{name}-{}", std::process::id()));
+    let tools = dir.join("bin");
+    std::fs::create_dir_all(&tools).unwrap();
+    let search = env::var_os("PATH").unwrap_or_default();
+    for tool in ["cc", "as", "ld"] {
+        let found = env::split_paths(&search)
+            .map(|d| d.join(tool))
+            .find(|p| p.is_file())
+            .unwrap_or_else(|| panic!("{tool} is not on the PATH"));
+        std::os::unix::fs::symlink(found, tools.join(tool)).unwrap();
+    }
+    let source_path = dir.join("ordered.gos");
+    std::fs::write(&source_path, "fn main() { println(\"ordered\") }\n").unwrap();
+    let order = dir.join("order.txt");
+    std::fs::write(&order, "main\n").unwrap();
+
+    let mut build = Command::new(gos_bin());
+    build
+        .arg("build")
+        .arg("--release")
+        .arg("--dynamic")
+        .arg(&source_path)
+        .env("PATH", &tools)
+        .env("GOS_SYMBOL_ORDER", &order);
+    if let Some(rustc) = rustc {
+        build.env("RUSTC", rustc);
+    }
+    let build = build.output().expect("spawn gos build");
+    let stderr = String::from_utf8_lossy(&build.stderr).into_owned();
+    assert!(build.status.success(), "build failed: {stderr}");
+    let binary = dir.join("target").join("release").join("ordered");
+    let run = Command::new(&binary).output().expect("run the build");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "ordered\n");
+    let bytes = std::fs::read(&binary).unwrap();
+    let by_lld = bytes.windows(b"Linker: LLD".len()).any(|w| w == b"Linker: LLD");
+    let _ = std::fs::remove_dir_all(&dir);
+    (stderr, by_lld)
+}
+
+// Without the system ld.lld, a symbol order file links with the lld a Rust
+// toolchain ships.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_symbol_order_links_without_a_system_lld() {
+    let (stderr, by_lld) = ordered_build_without_a_system_lld("toolchain-lld", None);
+    assert!(by_lld, "the binary was not linked by lld: {stderr}");
+    assert!(!stderr.contains("warning: GOS_SYMBOL_ORDER"), "{stderr}");
+}
+
+// With no lld at all, the program still links, unordered, and the build
+// says why.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_symbol_order_without_any_lld_warns_and_links_unordered() {
+    let (stderr, by_lld) =
+        ordered_build_without_a_system_lld("no-lld", Some("/nonexistent/rustc"));
+    assert!(!by_lld, "the binary was linked by lld");
+    assert!(stderr.contains("warning: GOS_SYMBOL_ORDER needs lld"), "{stderr}");
+}
+
+// lld-link takes the order file, including names the program does not have.
+#[cfg(all(windows, target_env = "msvc"))]
+#[test]
+fn a_symbol_order_links_on_windows() {
+    let dir = env::temp_dir().join(format!("gos-symbol-order-windows-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source_path = dir.join("ordered.gos");
+    std::fs::write(&source_path, "fn main() { println(\"ordered\") }\n").unwrap();
+    let order = dir.join("order.txt");
+    std::fs::write(&order, "main\nno_such_function\n").unwrap();
+    let build = Command::new(gos_bin())
+        .arg("build")
+        .arg("--release")
+        .arg(&source_path)
+        .env("GOS_SYMBOL_ORDER", &order)
+        .output()
+        .expect("spawn gos build");
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = dir.join("target").join("release").join("ordered.exe");
+    let run = Command::new(&binary).output().expect("run the build");
+    assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), "ordered\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
