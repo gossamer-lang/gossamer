@@ -2184,9 +2184,11 @@ Every other key is optional.
 
 Optional keys include `project.output` (binary name override),
 `project.entry` (path to the entry source, relative to the manifest
-directory), which overrides convention-based entry resolution, and
+directory), which overrides convention-based entry resolution,
 `project.ffi` (a boolean, default `true`), which with `false` refuses
-native code reached through `unsafe extern` declarations (§12).
+native code reached through `unsafe extern` declarations (§12), and
+`project.windows-subsystem` (`console`, the default, or `windows`), the
+subsystem a Windows executable of the project declares (§11.2).
 
 `[lib] kind = ["staticlib", "cdylib"]` builds the project as a C library
 (§12.1), and `[native]` lists C sources the package compiles (§12.2).
@@ -3362,6 +3364,15 @@ default when the host-architecture musl rustup target
 (`x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`) is
 installed; pass `--dynamic` to force the dynamic-glibc link path. The
 `--target` flag selects a cross-compilation triple (see §11.4).
+
+A Windows executable is a console program unless its project declares
+`windows-subsystem = "windows"`. Windows opens a console window for a
+console program started outside one, from a shortcut or Explorer; a
+windowed program, such as a GUI application, never gets a console of its
+own. Its `main` is the entry either way, and the standard streams it
+is started with, a pipe or a file, work as before. A windowed program
+started from a console prints there only once it attaches to that
+console (`AttachConsole` in `kernel32`).
 
 On a Raspberry Pi (any `aarch64` Linux), `gos` is fully
 self-contained - the bytecode VM and its in-process Cranelift JIT need

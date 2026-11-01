@@ -1719,6 +1719,7 @@ fn dispatch_build(
             release: flags.mode == BuildMode::Release,
             debug_info: flags.debug_info,
             dynamic: flags.link == LinkMode::Dynamic,
+            windows_subsystem: gossamer_pkg::manifest::WindowsSubsystem::Console,
         },
         out_dir,
         timings: reports.timings,

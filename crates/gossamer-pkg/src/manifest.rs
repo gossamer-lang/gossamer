@@ -236,6 +236,20 @@ pub struct ProjectTable {
     /// Absent reads as `true`; `ffi = false` refuses native code the
     /// project does not see.
     pub ffi: bool,
+    /// `project.windows-subsystem` - the PE subsystem a Windows executable
+    /// of the project declares. Absent reads as `console`.
+    pub windows_subsystem: WindowsSubsystem,
+}
+
+/// The PE subsystem of a Windows executable, which decides whether
+/// starting it opens a console window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WindowsSubsystem {
+    /// A console program: started outside a console, Windows opens one.
+    #[default]
+    Console,
+    /// A windowed program: it never gets a console of its own.
+    Windows,
 }
 
 /// One entry in `[dependencies]`.
@@ -588,6 +602,24 @@ impl Manifest {
                 });
             }
         };
+        let windows_subsystem = match optional_toml_str(
+            project,
+            "windows-subsystem",
+            "project.windows-subsystem",
+        )?
+        .as_deref()
+        {
+            None | Some("console") => WindowsSubsystem::Console,
+            Some("windows") => WindowsSubsystem::Windows,
+            Some(other) => {
+                return Err(ManifestError::Malformed {
+                    line_no: 0,
+                    line: format!(
+                        "project.windows-subsystem must be `console` or `windows`; found `{other}`"
+                    ),
+                });
+            }
+        };
         let mut deps: BTreeMap<String, DependencySpec> = BTreeMap::new();
         let mut dep_modules: BTreeMap<String, String> = BTreeMap::new();
         let mut dep_features: BTreeMap<String, DependencyFeatures> = BTreeMap::new();
@@ -689,6 +721,7 @@ impl Manifest {
                 enforce_format,
                 comptime_io,
                 ffi,
+                windows_subsystem,
             },
             dependencies: deps,
             dependency_modules: dep_modules,
@@ -777,6 +810,9 @@ impl Manifest {
         }
         if !self.project.ffi {
             out.push_str("ffi = false\n");
+        }
+        if self.project.windows_subsystem == WindowsSubsystem::Windows {
+            out.push_str("windows-subsystem = \"windows\"\n");
         }
         self.render_source_tables(&mut out);
         self.render_targets(&mut out);
@@ -1752,6 +1788,7 @@ entry = "src/app.gos"
 enforce-format = true
 comptime-io = "confined"
 ffi = true
+windows-subsystem = "windows"
 
 [dependencies]
 "example.com/near" = { path = "..\\near", module = "near_lib" }
@@ -1790,6 +1827,25 @@ path = "src/lib.gos"
         assert!(Manifest::parse(&allowed).unwrap().project.ffi);
         let denied = format!("{base}ffi = false\n");
         assert!(!Manifest::parse(&denied).unwrap().project.ffi);
+    }
+
+    #[test]
+    fn windows_subsystem_reads_as_console_unless_stated() {
+        let base = "[project]\nid = \"example.com/app\"\nversion = \"0.1.0\"\n";
+        let subsystem = |text: &str| Manifest::parse(text).unwrap().project.windows_subsystem;
+        assert_eq!(subsystem(base), WindowsSubsystem::Console);
+        let console = format!("{base}windows-subsystem = \"console\"\n");
+        assert_eq!(subsystem(&console), WindowsSubsystem::Console);
+        let windowed = format!("{base}windows-subsystem = \"windows\"\n");
+        assert_eq!(subsystem(&windowed), WindowsSubsystem::Windows);
+    }
+
+    #[test]
+    fn windows_subsystem_must_name_one() {
+        let text = "[project]\nid = \"example.com/app\"\nversion = \"0.1.0\"\n\
+                    windows-subsystem = \"gui\"\n";
+        let err = Manifest::parse(text).unwrap_err().to_string();
+        assert!(err.contains("`console` or `windows`"), "{err}");
     }
 
     #[test]
