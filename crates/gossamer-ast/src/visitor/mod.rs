@@ -151,6 +151,34 @@ pub trait VisitorMut {
     }
 }
 
+/// Whether `expr` names `name` anywhere: as a value path, as a type, or as a
+/// generic argument. A const generic parameter a body never names needs no
+/// value at run time.
+#[must_use]
+pub fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
+    struct Finder<'a> {
+        name: &'a str,
+        found: bool,
+    }
+    impl Visitor for Finder<'_> {
+        fn visit_path_expr(&mut self, path: &PathExpr) {
+            if path.segments.iter().any(|s| s.name.name == self.name) {
+                self.found = true;
+            }
+            walk_path_expr(self, path);
+        }
+        fn visit_type_path(&mut self, path: &TypePath) {
+            if path.segments.iter().any(|s| s.name.name == self.name) {
+                self.found = true;
+            }
+            walk_type_path(self, path);
+        }
+    }
+    let mut finder = Finder { name, found: false };
+    finder.visit_expr(expr);
+    finder.found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1577,6 +1577,26 @@ fn rc_alloc_heap(size: usize, meta_id: u16) -> *mut u8 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_rc_alloc(size: u64, meta: *const i64) -> *mut u8 {
+    // SAFETY: no source is passed, so the payload starts zeroed.
+    unsafe { rc_alloc_payload(size, meta, std::ptr::null()) }
+}
+
+/// Allocates a counted object of `size` payload bytes laid out by `meta`:
+/// zeroed when `src` is null, else a copy of the `size` bytes at `src`.
+///
+/// This is the allocation path of every escaped aggregate, so it stays small
+/// enough to need no stack frame: tracing and the allocation ledger run out of
+/// line, and only when one of them is armed.
+///
+/// # Safety
+/// `meta` is null or a live layout blob, and a non-null `src` addresses `size`
+/// readable bytes.
+#[allow(
+    clippy::inline_always,
+    reason = "both allocation entry points read this body; out of line it costs every escaped aggregate a second call"
+)]
+#[inline(always)]
+pub(crate) unsafe fn rc_alloc_payload(size: u64, meta: *const i64, src: *const u8) -> *mut u8 {
     // Exact-size request: mimalloc's bins serve it without padding and
     // `mi_free` recovers everything from the pointer, so neither a size
     // field nor class rounding is needed.
@@ -1586,12 +1606,13 @@ pub unsafe extern "C" fn gos_rt_rc_alloc(size: u64, meta: *const i64) -> *mut u8
     };
     // Inside a `region { … }` the object is bump-allocated and freed
     // wholesale at pop - tag it so retain/release stay no-ops and the
-    // teardown walk never touches it.
+    // teardown walk never touches it. A payload copied in whole needs no
+    // zeroing first.
     let in_region = region_active();
-    let base = if in_region {
-        region_alloc(total)
-    } else {
-        rc_block_alloc_zeroed(total)
+    let base = match (in_region, src.is_null()) {
+        (true, true) => region_alloc(total),
+        (true, false) => region_alloc_inner_unzeroed(total, true),
+        (false, _) => rc_block_alloc_zeroed(total),
     };
     if base.is_null() {
         return std::ptr::null_mut();
@@ -1604,7 +1625,26 @@ pub unsafe extern "C" fn gos_rt_rc_alloc(size: u64, meta: *const i64) -> *mut u8
         (*h).disc = 0;
         (*h).meta_id = meta_id;
     }
+    // SAFETY: the block holds the header followed by the payload.
+    let payload = unsafe { base.add(RC_HEADER_SIZE) };
+    if !src.is_null() {
+        // SAFETY: `payload` is `size` fresh bytes and `src` holds `size` bytes (this `unsafe
+        // fn`'s caller).
+        unsafe { copy_blob::copy_payload(src, payload, size as usize) };
+    }
     rc_live_inc();
+    if crate::c_abi::vec::rc_trace_enabled() || crate::c_abi::ledger::instrumentation_armed() {
+        rc_alloc_observed(size, base, in_region);
+    }
+    payload
+}
+
+/// The tracing and ledger accounting of one allocation, kept out of the
+/// allocation path.
+#[cold]
+#[inline(never)]
+fn rc_alloc_observed(size: u64, base: *mut u8, in_region: bool) {
+    let total = (size as usize).saturating_add(RC_HEADER_SIZE);
     if crate::c_abi::vec::rc_trace_enabled() {
         // SAFETY: the fresh block holds the header followed by the payload.
         let payload = unsafe { base.add(RC_HEADER_SIZE) };
@@ -1619,8 +1659,6 @@ pub unsafe extern "C" fn gos_rt_rc_alloc(size: u64, meta: *const i64) -> *mut u8
         0
     };
     crate::c_abi::ledger::rc_alloc(size as usize, usable, in_region, false);
-    // SAFETY: the block holds the header followed by the payload.
-    unsafe { base.add(RC_HEADER_SIZE) }
 }
 
 /// The discriminants [`gos_rt_enum_unit`] caches a singleton for: every one an

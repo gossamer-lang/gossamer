@@ -159,7 +159,7 @@ impl Lowerer<'_> {
                 }
             }
         }
-        params.extend(self.const_generic_params(impl_generics, &decl.generics, span));
+        params.extend(self.const_generic_params(impl_generics, decl, span));
         let generic_names = impl_generics
             .into_iter()
             .flat_map(|generics| generics.params.iter())
@@ -205,18 +205,28 @@ impl Lowerer<'_> {
     /// The trailing parameters a function's const generic parameters arrive
     /// as. A const generic parameter is a value the body reads, so each is a
     /// parameter of its own name, in declaration order (the impl's first),
-    /// which is the order a call hands the values over in.
+    /// which is the order a call hands the values over in. An `impl` block's
+    /// parameter is one only for a method whose body names it, which is the
+    /// rule the checker records call sites' values by.
     fn const_generic_params(
         &mut self,
         impl_generics: Option<&gossamer_ast::Generics>,
-        generics: &gossamer_ast::Generics,
+        decl: &gossamer_ast::FnDecl,
         span: Span,
     ) -> Vec<HirParam> {
         let mut params = Vec::new();
-        let const_params = impl_generics
+        let impl_params = impl_generics
             .into_iter()
             .flat_map(|generics| generics.params.iter())
-            .chain(generics.params.iter());
+            .filter(|param| match param {
+                gossamer_ast::GenericParam::Const { name, .. } => {
+                    decl.body.as_deref().is_some_and(|body| {
+                        gossamer_ast::visitor::expr_mentions_name(body, &name.name)
+                    })
+                }
+                _ => false,
+            });
+        let const_params = impl_params.chain(decl.generics.params.iter());
         for param in const_params {
             if let gossamer_ast::GenericParam::Const { name, ty, .. } = param {
                 let ty = self.ty_of(ty.id);

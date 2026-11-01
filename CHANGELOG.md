@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.75.14 - Const generic structs laid out per length, faster arenas
+
+- A const generic struct's `[T; N]` field is stored inline in the struct with each instantiation's own length, and every method and function that names the type is specialised for the value, where the array was a heap sequence shared by every length.
+- `let r: Ring<3> = Ring::new()` takes an associated function's const arguments from the type the context expects, where it reported `GT0088` and asked for a turbofish.
+- A const generic type that implements `Index`, `Display`, `Debug`, or `PartialEq` can be indexed, formatted, and compared: those calls passed none of the const values the method expected and failed with "wrong number of arguments" or faulted. A method now receives a const parameter only when its body names it.
+- On the bytecode VM, `x[i]` on a user type whose `index` answers an integer or a float calls that method; it read the struct as a built-in sequence and failed with "not indexable" or answered a wrong element.
+- Reading an element of an array field (`self.items[i]`) reads it in place in compiled code, where it copied the whole array first.
+- Allocating a reference-counted value inside an `arena` costs about a third fewer instructions: the allocation path no longer zeroes a payload it copies in whole, zeroes small blocks without a library call, and keeps its tracing and accounting out of line. A program that builds a tree in an arena runs about 15% faster.
+- An x86-64 release build starts every function of the program on a 64-byte boundary, so a hot loop's speed no longer depends on how much unrelated code the linker placed before it; the same function could run 30% slower in one build than in another.
+
 ## 0.75.13 - Windowed Windows programs
 
 - A project with `windows-subsystem = "windows"` builds a Windows executable that opens no console window when started from a shortcut or Explorer, as a GUI application needs; without the key, programs stay console programs.

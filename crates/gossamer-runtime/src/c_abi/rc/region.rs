@@ -774,13 +774,44 @@ fn region_alloc_inner_impl(total: usize, count_obj: bool, zero: bool) -> *mut u8
     // allocated, and codegen relies on every allocation starting zeroed -
     // except for callers that provably overwrite every byte.
     if zero {
-        // SAFETY: `ptr` addresses the `need` bytes just handed out.
-        unsafe { std::ptr::write_bytes(ptr, 0, need) };
+        // SAFETY: `ptr` addresses the `need` bytes just handed out, a whole number of words.
+        unsafe { zero_words(ptr, need) };
     }
     if count_obj {
         BUMP_OBJS.with(|o| o.set(o.get() + 1));
     }
     ptr
+}
+
+/// Zeroes the `bytes` at `ptr`. A region object is a few words wide, and a
+/// fixed-width store of those is a handful of instructions where the general
+/// fill is a library call.
+///
+/// # Safety
+/// `ptr` addresses `bytes` writable bytes, `bytes` a multiple of 8 and `ptr`
+/// 8-aligned.
+#[inline]
+unsafe fn zero_words(ptr: *mut u8, bytes: usize) {
+    #[inline]
+    unsafe fn words<const N: usize>(ptr: *mut u8) {
+        // SAFETY: this `unsafe fn`'s caller passes `ptr` addressing `N` aligned words.
+        unsafe { ptr.cast::<[u64; N]>().write([0; N]) };
+    }
+    // SAFETY: `ptr` addresses `bytes` aligned bytes (this `unsafe fn`'s caller), which the arms
+    // write in whole words.
+    unsafe {
+        match bytes {
+            8 => words::<1>(ptr),
+            16 => words::<2>(ptr),
+            24 => words::<3>(ptr),
+            32 => words::<4>(ptr),
+            40 => words::<5>(ptr),
+            48 => words::<6>(ptr),
+            56 => words::<7>(ptr),
+            64 => words::<8>(ptr),
+            _ => std::ptr::write_bytes(ptr, 0, bytes),
+        }
+    }
 }
 
 /// Cold path: the current slab can't fit `need`. Acquire a fresh slab, record

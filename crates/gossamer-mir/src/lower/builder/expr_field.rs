@@ -361,8 +361,10 @@ impl<'a> Builder<'a> {
     ) -> Option<Ty> {
         let declared = self.tcx.struct_field_tys(def)?.get(index).copied()?;
         let subst_tys = crate::monomorph::subst_type_arguments(substs);
-        Some(crate::monomorph::subst_param_ty(
-            self.tcx, declared, &subst_tys,
+        let consts = crate::monomorph::subst_const_arguments(substs);
+        let field = crate::monomorph::subst_param_ty(self.tcx, declared, &subst_tys);
+        Some(crate::monomorph::subst_const_params(
+            self.tcx, field, &consts,
         ))
     }
 

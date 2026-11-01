@@ -2121,6 +2121,9 @@ impl<'a> Builder<'a> {
     /// function `mangled`, whose declared const generic array result the body
     /// hands back as a runtime-length sequence.
     pub(crate) fn const_array_method_result(&self, mangled: &str, ty: Ty) -> Option<(Ty, usize)> {
+        if self.tcx.is_const_layout_callable(mangled) {
+            return None;
+        }
         let mut ret = self.impl_methods.get(mangled).copied().flatten()?;
         while let TyKind::Ref { inner, .. } = self.tcx.kind_of(ret) {
             ret = *inner;

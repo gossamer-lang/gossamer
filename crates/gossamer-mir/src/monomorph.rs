@@ -174,6 +174,7 @@ impl<'p> Instantiator<'p> {
         template: &str,
         name: String,
         subst_tys: &[Option<Ty>],
+        consts: &[Option<i128>],
         tcx: &mut TyCtxt,
     ) -> Body {
         let Some(&(decl, span)) = self.decls.get(template) else {
@@ -189,6 +190,7 @@ impl<'p> Instantiator<'p> {
             &mut Substitution {
                 tcx,
                 subst_tys,
+                consts,
                 tables,
             },
         );
@@ -204,12 +206,14 @@ impl<'p> Instantiator<'p> {
 struct Substitution<'a> {
     tcx: &'a mut TyCtxt,
     subst_tys: &'a [Option<Ty>],
+    consts: &'a [Option<i128>],
     tables: &'a ProgramTables,
 }
 
 impl Instantiation for Substitution<'_> {
     fn ty(&mut self, ty: Ty) -> Ty {
-        subst_param_ty(self.tcx, ty, self.subst_tys)
+        let ty = subst_param_ty(self.tcx, ty, self.subst_tys);
+        subst_const_params(self.tcx, ty, self.consts)
     }
 
     fn method_owner(
@@ -427,7 +431,9 @@ fn specialise_functions_step(
             continue;
         };
         for substs in subst_list {
-            if substs.is_empty() || substs_are_const_only(substs) {
+            if substs.is_empty()
+                || (substs_are_const_only(substs) && !body_has_param(&bodies[*src_idx], tcx))
+            {
                 continue;
             }
             let name = mangled_name(*def, substs);
@@ -442,9 +448,10 @@ fn specialise_functions_step(
                 trait_specialised_defs.insert(def.local);
             }
             let subst_tys = subst_type_arguments(substs);
+            let consts = subst_const_arguments(substs);
             let mut copy = state
                 .instantiator
-                .lower(&template.name, name, &subst_tys, tcx);
+                .lower(&template.name, name, &subst_tys, &consts, tcx);
             rewrite_trait_method_calls(&mut copy, substs, receivers, tcx);
             let mut closures = Vec::new();
             specialise_lifted_closures(&mut copy, substs, ctx, state, tcx, &mut closures);
@@ -492,11 +499,14 @@ fn specialise_lifted_closures(
         }
     });
     let subst_tys = subst_type_arguments(substs);
+    let consts = subst_const_arguments(substs);
     for (from, to) in renames {
         if !state.emitted.insert(to.clone()) {
             continue;
         }
-        let mut closure = state.instantiator.lower(&from, to, &subst_tys, tcx);
+        let mut closure = state
+            .instantiator
+            .lower(&from, to, &subst_tys, &consts, tcx);
         rewrite_trait_method_calls(&mut closure, substs, ctx.receivers, tcx);
         specialise_lifted_closures(&mut closure, substs, ctx, state, tcx, out);
         out.push(closure);
@@ -596,7 +606,8 @@ fn borrow_scalar_receivers_for_ref_methods(
 
 fn substs_are_const_only(substs: &Substs) -> bool {
     // A const-generic array parameter is lowered to a runtime-length sequence,
-    // so one body serves every const value and a specialised copy is wasted.
+    // so one body serves every const value and a specialised copy is wasted,
+    // unless the body names a generic type laid out per value.
     substs
         .as_slice()
         .iter()
@@ -654,8 +665,7 @@ fn method_call_instantiations(
                 })
                 .and_then(|decl| match tcx.kind_of(peel_ref(tcx, decl.ty)) {
                     TyKind::Adt { substs, .. }
-                        if !substs.is_empty()
-                            && !substs.types().iter().any(|t| ty_contains_param(tcx, *t)) =>
+                        if !substs.is_empty() && !substs_contain_param(tcx, substs) =>
                     {
                         Some(substs.clone())
                     }
@@ -664,9 +674,18 @@ fn method_call_instantiations(
             let substs = match receiver_substs {
                 Some(base) => complete_method_substs(template, body, args, destination, &base, tcx)
                     .or_else(|| {
-                        call_site_method_substs(template, body, args, destination, &[], tcx)
+                        call_site_method_substs(
+                            template,
+                            body,
+                            args,
+                            destination,
+                            &Substs::new(),
+                            tcx,
+                        )
                     }),
-                None => call_site_method_substs(template, body, args, destination, &[], tcx),
+                None => {
+                    call_site_method_substs(template, body, args, destination, &Substs::new(), tcx)
+                }
             };
             if let Some(substs) = substs {
                 found.push((bi, blk, base_idx, substs, name.clone()));
@@ -735,9 +754,10 @@ fn specialise_methods_step(
             trait_specialised_methods.insert(base_name.clone());
         }
         let subst_tys = subst_type_arguments(&substs);
+        let consts = subst_const_arguments(&substs);
         let mut copy = state
             .instantiator
-            .lower(&base_name, spec_name, &subst_tys, tcx);
+            .lower(&base_name, spec_name, &subst_tys, &consts, tcx);
         rewrite_trait_method_calls(&mut copy, &substs, receivers, tcx);
         let mut closures = Vec::new();
         specialise_lifted_closures(&mut copy, &substs, ctx, state, tcx, &mut closures);
@@ -758,7 +778,7 @@ fn specialise_methods_step(
 /// builds one rather than after the body that names it is lowered; a
 /// template's own `substs` answer the declaration.
 pub(crate) fn instance_field_tys(tcx: &mut TyCtxt, def: DefId, substs: &Substs) -> Option<Vec<Ty>> {
-    if substs.is_empty() || substs.types().iter().any(|t| ty_contains_param(tcx, *t)) {
+    if substs.is_empty() || substs_contain_param(tcx, substs) {
         return tcx.adt_field_tys(def, substs).map(<[Ty]>::to_vec);
     }
     if let Some(fields) = tcx.struct_fields_instance(def, substs) {
@@ -778,9 +798,13 @@ pub(crate) fn instance_field_tys(tcx: &mut TyCtxt, def: DefId, substs: &Substs) 
             GenericArg::Const(_) | GenericArg::ConstParam(_) => None,
         })
         .collect();
+    let consts = subst_const_arguments(substs);
     let inst: Vec<Ty> = decl
         .iter()
-        .map(|&f| subst_param_ty(tcx, f, &subst_tys))
+        .map(|&f| {
+            let f = subst_param_ty(tcx, f, &subst_tys);
+            subst_const_params(tcx, f, &consts)
+        })
         .collect();
     tcx.register_struct_fields_inst(def, substs.clone(), inst.clone());
     Some(inst)
@@ -809,7 +833,7 @@ pub(crate) fn register_type_instantiations(tcx: &mut TyCtxt, roots: impl IntoIte
                 for t in substs.types() {
                     stack.push(t);
                 }
-                if substs.types().iter().any(|t| ty_contains_param(tcx, *t)) {
+                if substs_contain_param(tcx, &substs) {
                     continue;
                 }
                 // A recorded instantiation's fields were walked when it was
@@ -844,6 +868,18 @@ pub(crate) fn register_type_instantiations(tcx: &mut TyCtxt, roots: impl IntoIte
     }
 }
 
+/// `true` when `substs` names a type parameter or a symbolic const
+/// parameter: a generic type whose layout depends on a const (`Ring<N>`
+/// holding `[i64; N]`) is laid out per value, so a body naming it is a
+/// template like one naming `T`.
+fn substs_contain_param(tcx: &TyCtxt, substs: &Substs) -> bool {
+    substs.as_slice().iter().any(|arg| match arg {
+        GenericArg::Type(t) => ty_contains_param(tcx, *t),
+        GenericArg::ConstParam(_) => true,
+        GenericArg::Const(_) => false,
+    })
+}
+
 /// `true` if `ty` mentions a generic `Param` anywhere in its structure.
 fn ty_contains_param(tcx: &TyCtxt, ty: Ty) -> bool {
     match tcx.kind_of(ty) {
@@ -860,7 +896,7 @@ fn ty_contains_param(tcx: &TyCtxt, ty: Ty) -> bool {
             ty_contains_param(tcx, *key) || ty_contains_param(tcx, *value)
         }
         TyKind::Adt { substs, .. } | TyKind::Alias { substs, .. } => {
-            substs.types().iter().any(|t| ty_contains_param(tcx, *t))
+            substs_contain_param(tcx, substs)
         }
         TyKind::Iterator(inner) => ty_contains_param(tcx, *inner),
         TyKind::FnPtr(sig) | TyKind::FnTrait(sig) => {
@@ -964,6 +1000,154 @@ pub fn bind_template_params(
     }
 }
 
+/// Binds every const parameter `template` names to the value `actual` holds
+/// in the same position: an array length `N` against a concrete length, and a
+/// const argument `N` of a generic type against a concrete one.
+fn bind_template_consts(tcx: &TyCtxt, template: Ty, actual: Ty, resolved: &mut Vec<Option<i128>>) {
+    fn bind(resolved: &mut Vec<Option<i128>>, idx: gossamer_types::ParamIdx, value: i128) {
+        let slot = idx.0 as usize;
+        if resolved.len() <= slot {
+            resolved.resize(slot + 1, None);
+        }
+        resolved[slot].get_or_insert(value);
+    }
+    match (tcx.kind_of(template), tcx.kind_of(actual)) {
+        (TyKind::Ref { inner: t, .. }, TyKind::Ref { inner: a, .. }) => {
+            bind_template_consts(tcx, *t, *a, resolved);
+        }
+        (TyKind::Ref { inner: t, .. }, _) => bind_template_consts(tcx, *t, actual, resolved),
+        (_, TyKind::Ref { inner: a, .. }) => bind_template_consts(tcx, template, *a, resolved),
+        (TyKind::Array { elem: t, len: tlen }, TyKind::Array { elem: a, len: alen })
+        | (
+            TyKind::Simd {
+                elem: t,
+                lanes: tlen,
+            },
+            TyKind::Simd {
+                elem: a,
+                lanes: alen,
+            },
+        ) => {
+            if let (gossamer_types::ArrayLen::Param(idx), gossamer_types::ArrayLen::Concrete(n)) =
+                (tlen, alen)
+                && let Ok(n) = i128::try_from(*n)
+            {
+                bind(resolved, *idx, n);
+            }
+            bind_template_consts(tcx, *t, *a, resolved);
+        }
+        (
+            TyKind::Vec(t)
+            | TyKind::Slice(t)
+            | TyKind::Iterator(t)
+            | TyKind::Sender(t)
+            | TyKind::Receiver(t)
+            | TyKind::JoinHandle(t),
+            TyKind::Vec(a)
+            | TyKind::Slice(a)
+            | TyKind::Iterator(a)
+            | TyKind::Sender(a)
+            | TyKind::Receiver(a)
+            | TyKind::JoinHandle(a),
+        ) => bind_template_consts(tcx, *t, *a, resolved),
+        (TyKind::Tuple(ts), TyKind::Tuple(actuals)) if ts.len() == actuals.len() => {
+            for (t, a) in ts.iter().zip(actuals.iter()) {
+                bind_template_consts(tcx, *t, *a, resolved);
+            }
+        }
+        (
+            TyKind::HashMap {
+                key: tk, value: tv, ..
+            },
+            TyKind::HashMap {
+                key: ak, value: av, ..
+            },
+        ) => {
+            bind_template_consts(tcx, *tk, *ak, resolved);
+            bind_template_consts(tcx, *tv, *av, resolved);
+        }
+        (
+            TyKind::Adt {
+                def: td,
+                substs: ts,
+            },
+            TyKind::Adt {
+                def: ad,
+                substs: actuals,
+            },
+        ) if td == ad => {
+            for (t, a) in ts.as_slice().iter().zip(actuals.as_slice().iter()) {
+                match (t, a) {
+                    (GenericArg::ConstParam(idx), GenericArg::Const(value)) => {
+                        bind(resolved, *idx, *value);
+                    }
+                    (GenericArg::Type(t), GenericArg::Type(a)) => {
+                        bind_template_consts(tcx, *t, *a, resolved);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        (
+            TyKind::FnPtr(ts) | TyKind::FnTrait(ts),
+            TyKind::FnPtr(actuals) | TyKind::FnTrait(actuals),
+        ) if ts.inputs.len() == actuals.inputs.len() => {
+            for (t, a) in ts.inputs.iter().zip(actuals.inputs.iter()) {
+                bind_template_consts(tcx, *t, *a, resolved);
+            }
+            bind_template_consts(tcx, ts.output, actuals.output, resolved);
+        }
+        _ => {}
+    }
+}
+
+/// One past the highest const-parameter position any local of `body` names.
+fn const_param_count(tcx: &TyCtxt, body: &Body) -> usize {
+    fn visit(tcx: &TyCtxt, ty: Ty, highest: &mut usize) {
+        match tcx.kind_of(ty) {
+            TyKind::Array { elem, len } | TyKind::Simd { elem, lanes: len } => {
+                if let gossamer_types::ArrayLen::Param(idx) = len {
+                    *highest = (*highest).max(idx.0 as usize + 1);
+                }
+                visit(tcx, *elem, highest);
+            }
+            TyKind::Ref { inner, .. }
+            | TyKind::Vec(inner)
+            | TyKind::Slice(inner)
+            | TyKind::Iterator(inner)
+            | TyKind::Sender(inner)
+            | TyKind::Receiver(inner)
+            | TyKind::JoinHandle(inner) => visit(tcx, *inner, highest),
+            TyKind::Tuple(elems) => elems.iter().for_each(|t| visit(tcx, *t, highest)),
+            TyKind::HashMap { key, value, .. } => {
+                visit(tcx, *key, highest);
+                visit(tcx, *value, highest);
+            }
+            TyKind::Adt { substs, .. } | TyKind::Alias { substs, .. } => {
+                for arg in substs.as_slice() {
+                    match arg {
+                        GenericArg::Type(t) => visit(tcx, *t, highest),
+                        GenericArg::ConstParam(idx) => {
+                            *highest = (*highest).max(idx.0 as usize + 1);
+                        }
+                        GenericArg::Const(_) => {}
+                    }
+                }
+            }
+            TyKind::FnPtr(sig) | TyKind::FnTrait(sig) => {
+                sig.inputs.iter().for_each(|t| visit(tcx, *t, highest));
+                visit(tcx, sig.output, highest);
+            }
+            _ => {}
+        }
+    }
+    let mut highest = 0;
+    for local in &body.locals {
+        visit(tcx, local.ty, &mut highest);
+    }
+    highest
+}
+
 /// One past the highest type-parameter index any local of `body` names.
 fn param_count(tcx: &TyCtxt, body: &Body) -> usize {
     fn visit(tcx: &TyCtxt, ty: Ty, highest: &mut usize) {
@@ -1009,16 +1193,33 @@ fn call_site_method_substs(
     caller: &Body,
     args: &[Operand],
     destination: &Place,
-    base: &[Ty],
+    base: &Substs,
     tcx: &TyCtxt,
 ) -> Option<Substs> {
-    let mut resolved: Vec<Option<Ty>> = base.iter().map(|t| Some(*t)).collect();
+    let mut resolved: Vec<Option<Ty>> = Vec::new();
+    let mut consts: Vec<Option<i128>> = Vec::new();
+    for arg in base.as_slice() {
+        match arg {
+            GenericArg::Type(t) => {
+                resolved.push(Some(*t));
+                consts.push(None);
+            }
+            GenericArg::Const(value) => {
+                resolved.push(None);
+                consts.push(Some(*value));
+            }
+            GenericArg::ConstParam(_) => {
+                resolved.push(None);
+                consts.push(None);
+            }
+        }
+    }
     let caller_tys: Vec<Ty> = caller.locals.iter().map(|l| l.ty).collect();
     for (index, arg) in args.iter().enumerate() {
         let Some(decl) = template.locals.get(index + 1) else {
             break;
         };
-        if !ty_contains_param(tcx, decl.ty) {
+        if !ty_contains_param(tcx, decl.ty) && !ty_names_const_param(tcx, decl.ty) {
             continue;
         }
         // A constant or a function item carries no local type to read; the
@@ -1030,20 +1231,79 @@ fn call_site_method_substs(
             continue;
         };
         bind_template_params(tcx, decl.ty, actual, &mut resolved);
+        bind_template_consts(tcx, decl.ty, actual, &mut consts);
     }
     if let (Some(ret), Some(dest_ty)) = (
         template.locals.first(),
         place_ty(tcx, &caller_tys, destination),
     ) {
         bind_template_params(tcx, ret.ty, dest_ty, &mut resolved);
+        bind_template_consts(tcx, ret.ty, dest_ty, &mut consts);
     }
-    let count = param_count(tcx, template).max(base.len());
+    let count = param_count(tcx, template)
+        .max(const_param_count(tcx, template))
+        .max(base.len());
     if count == 0 {
         return None;
     }
     resolved.resize(count, None);
-    let types: Option<Vec<Ty>> = resolved.into_iter().collect();
-    Some(Substs::from_types(types?))
+    consts.resize(count, None);
+    // Every position up to `count` is one the body names; one the call site
+    // left unbound keeps the call on the template.
+    let out: Option<Vec<GenericArg>> = resolved
+        .into_iter()
+        .zip(consts)
+        .map(|(ty, value)| match (ty, value) {
+            (Some(ty), _) => Some(GenericArg::Type(ty)),
+            (None, Some(value)) => Some(GenericArg::Const(value)),
+            (None, None) => None,
+        })
+        .collect();
+    Some(Substs::from_args(out?))
+}
+
+/// `true` if `ty` names a symbolic const parameter: an array length `N`, or a
+/// generic type's const argument `N`.
+fn ty_names_const_param(tcx: &TyCtxt, ty: Ty) -> bool {
+    fn visit(tcx: &TyCtxt, ty: Ty, found: &mut bool) {
+        match tcx.kind_of(ty) {
+            TyKind::Array { elem, len } | TyKind::Simd { elem, lanes: len } => {
+                if matches!(len, gossamer_types::ArrayLen::Param(_)) {
+                    *found = true;
+                }
+                visit(tcx, *elem, found);
+            }
+            TyKind::Ref { inner, .. }
+            | TyKind::Vec(inner)
+            | TyKind::Slice(inner)
+            | TyKind::Iterator(inner)
+            | TyKind::Sender(inner)
+            | TyKind::Receiver(inner)
+            | TyKind::JoinHandle(inner) => visit(tcx, *inner, found),
+            TyKind::Tuple(elems) => elems.iter().for_each(|t| visit(tcx, *t, found)),
+            TyKind::HashMap { key, value, .. } => {
+                visit(tcx, *key, found);
+                visit(tcx, *value, found);
+            }
+            TyKind::Adt { substs, .. } | TyKind::Alias { substs, .. } => {
+                for arg in substs.as_slice() {
+                    match arg {
+                        GenericArg::Type(t) => visit(tcx, *t, found),
+                        GenericArg::ConstParam(_) => *found = true,
+                        GenericArg::Const(_) => {}
+                    }
+                }
+            }
+            TyKind::FnPtr(sig) | TyKind::FnTrait(sig) => {
+                sig.inputs.iter().for_each(|t| visit(tcx, *t, found));
+                visit(tcx, sig.output, found);
+            }
+            _ => {}
+        }
+    }
+    let mut found = false;
+    visit(tcx, ty, &mut found);
+    found
 }
 
 /// `true` if any of `body`'s locals carry a generic `Param`, marking it a
@@ -1080,7 +1340,7 @@ fn complete_method_substs(
     if param_count(tcx, template) <= base.len() {
         return Some(base.clone());
     }
-    call_site_method_substs(template, caller, args, destination, &base.types(), tcx)
+    call_site_method_substs(template, caller, args, destination, base, tcx)
 }
 
 /// The generic a specialised body was instantiated from.
@@ -1334,9 +1594,7 @@ fn rendering_instantiations(
                 for arg in substs.types() {
                     visit(tcx, arg, method_bases, seen, out);
                 }
-                if substs.types().is_empty()
-                    || substs.types().iter().any(|t| ty_contains_param(tcx, *t))
-                {
+                if substs.is_empty() || substs_contain_param(tcx, substs) {
                     return;
                 }
                 let Some(owner) = adt_name(tcx, ty) else {
@@ -1497,10 +1755,11 @@ fn collect_from_operand(operand: &Operand, tcx: &TyCtxt, out: &mut HashMap<DefId
         // itself, reached from another template's body, and is no
         // instantiation of it.
         if substs.is_empty()
-            || substs.types().iter().any(|t| {
-                matches!(tcx.kind_of(*t), TyKind::Var(_) | TyKind::Error)
-                    || ty_contains_param(tcx, *t)
-            })
+            || substs
+                .types()
+                .iter()
+                .any(|t| matches!(tcx.kind_of(*t), TyKind::Var(_) | TyKind::Error))
+            || substs_contain_param(tcx, substs)
         {
             return;
         }
@@ -1714,6 +1973,161 @@ pub fn subst_param_ty(tcx: &mut TyCtxt, ty: Ty, subst_tys: &[Option<Ty>]) -> Ty 
             tcx.intern(TyKind::FnDef { def, substs })
         }
         _ => ty,
+    }
+}
+
+/// The const value each position of `substs` carries, `None` where the
+/// position holds a type or a still-symbolic const parameter.
+pub(crate) fn subst_const_arguments(substs: &Substs) -> Vec<Option<i128>> {
+    substs
+        .as_slice()
+        .iter()
+        .map(|arg| match arg {
+            GenericArg::Const(value) => Some(*value),
+            GenericArg::Type(_) | GenericArg::ConstParam(_) => None,
+        })
+        .collect()
+}
+
+/// Replaces every const generic parameter `ty` names with the value
+/// `consts` holds at its position: a `[T; N]` length becomes concrete and a
+/// type argument `N` of a nested generic type becomes its value, so an
+/// instantiation's layout is the concrete one its callers build.
+pub(crate) fn subst_const_params(tcx: &mut TyCtxt, ty: Ty, consts: &[Option<i128>]) -> Ty {
+    if consts.iter().all(Option::is_none) {
+        return ty;
+    }
+    let kind = tcx.kind_of(ty).clone();
+    match kind {
+        TyKind::Array { elem, len } => {
+            let elem = subst_const_params(tcx, elem, consts);
+            let len = subst_const_len(len, consts);
+            tcx.intern(TyKind::Array { elem, len })
+        }
+        TyKind::Simd { elem, lanes } => {
+            let elem = subst_const_params(tcx, elem, consts);
+            let lanes = subst_const_len(lanes, consts);
+            tcx.intern(TyKind::Simd { elem, lanes })
+        }
+        TyKind::Ref { inner, mutability } => {
+            let inner = subst_const_params(tcx, inner, consts);
+            tcx.intern(TyKind::Ref { inner, mutability })
+        }
+        TyKind::Vec(elem) => {
+            let elem = subst_const_params(tcx, elem, consts);
+            tcx.intern(TyKind::Vec(elem))
+        }
+        TyKind::Slice(elem) => {
+            let elem = subst_const_params(tcx, elem, consts);
+            tcx.intern(TyKind::Slice(elem))
+        }
+        TyKind::Iterator(elem) => {
+            let elem = subst_const_params(tcx, elem, consts);
+            tcx.intern(TyKind::Iterator(elem))
+        }
+        TyKind::Range(elem) => {
+            let elem = subst_const_params(tcx, elem, consts);
+            tcx.intern(TyKind::Range(elem))
+        }
+        TyKind::Sender(elem) => {
+            let elem = subst_const_params(tcx, elem, consts);
+            tcx.intern(TyKind::Sender(elem))
+        }
+        TyKind::Receiver(elem) => {
+            let elem = subst_const_params(tcx, elem, consts);
+            tcx.intern(TyKind::Receiver(elem))
+        }
+        TyKind::JoinHandle(elem) => {
+            let elem = subst_const_params(tcx, elem, consts);
+            tcx.intern(TyKind::JoinHandle(elem))
+        }
+        TyKind::Tuple(elems) => {
+            let elems = elems
+                .iter()
+                .map(|&e| subst_const_params(tcx, e, consts))
+                .collect();
+            tcx.intern(TyKind::Tuple(elems))
+        }
+        TyKind::HashMap {
+            key,
+            value,
+            ordered,
+        } => {
+            let key = subst_const_params(tcx, key, consts);
+            let value = subst_const_params(tcx, value, consts);
+            tcx.intern(TyKind::HashMap {
+                key,
+                value,
+                ordered,
+            })
+        }
+        TyKind::FnPtr(sig) => {
+            let sig = subst_const_sig(tcx, &sig, consts);
+            tcx.intern(TyKind::FnPtr(sig))
+        }
+        TyKind::FnTrait(sig) => {
+            let sig = subst_const_sig(tcx, &sig, consts);
+            tcx.intern(TyKind::FnTrait(sig))
+        }
+        TyKind::Adt { def, substs } => {
+            let substs = subst_const_substs(tcx, &substs, consts);
+            tcx.intern(TyKind::Adt { def, substs })
+        }
+        TyKind::Alias { def, substs } => {
+            let substs = subst_const_substs(tcx, &substs, consts);
+            tcx.intern(TyKind::Alias { def, substs })
+        }
+        TyKind::FnDef { def, substs } => {
+            let substs = subst_const_substs(tcx, &substs, consts);
+            tcx.intern(TyKind::FnDef { def, substs })
+        }
+        _ => ty,
+    }
+}
+
+fn subst_const_len(
+    len: gossamer_types::ArrayLen,
+    consts: &[Option<i128>],
+) -> gossamer_types::ArrayLen {
+    let gossamer_types::ArrayLen::Param(idx) = len else {
+        return len;
+    };
+    consts
+        .get(idx.0 as usize)
+        .copied()
+        .flatten()
+        .and_then(|value| usize::try_from(value).ok())
+        .map_or(len, gossamer_types::ArrayLen::Concrete)
+}
+
+fn subst_const_substs(tcx: &mut TyCtxt, substs: &Substs, consts: &[Option<i128>]) -> Substs {
+    let new_args = substs
+        .as_slice()
+        .iter()
+        .map(|arg| match arg {
+            GenericArg::Type(t) => GenericArg::Type(subst_const_params(tcx, *t, consts)),
+            GenericArg::ConstParam(idx) => match consts.get(idx.0 as usize).copied().flatten() {
+                Some(value) => GenericArg::Const(value),
+                None => arg.clone(),
+            },
+            GenericArg::Const(_) => arg.clone(),
+        })
+        .collect();
+    Substs::from_args(new_args)
+}
+
+fn subst_const_sig(
+    tcx: &mut TyCtxt,
+    sig: &gossamer_types::FnSig,
+    consts: &[Option<i128>],
+) -> gossamer_types::FnSig {
+    gossamer_types::FnSig {
+        inputs: sig
+            .inputs
+            .iter()
+            .map(|input| subst_const_params(tcx, *input, consts))
+            .collect(),
+        output: subst_const_params(tcx, sig.output, consts),
     }
 }
 

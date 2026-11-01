@@ -264,6 +264,7 @@ pub(super) fn invoke_llc_pipeline(
     if want_dwarf() {
         llc_cmd.arg("-dwarf-version=4");
     }
+    llc_cmd.args(codegen_layout_options(triple, profile));
     let output = run_with_timeout(llc_cmd, opt_timeout(), "llc")
         .with_context(|| format!("spawn {}", llc.display()))?;
     if !output.status.success() {
@@ -285,6 +286,23 @@ pub(super) fn invoke_llc_pipeline(
 /// `opt` then `llc` sequence for non-PGO builds while avoiding a second child
 /// launch and the intermediate bitcode file. The split-tool path remains the
 /// compatibility route for PGO and installations without Clang.
+/// Code layout options both pipelines hand LLVM's backend, `llc` directly and
+/// `clang` through `-mllvm`.
+///
+/// An x86-64 core fetches and caches decoded instructions by 64-byte line, so
+/// how a hot loop falls across those lines changes its speed. At the default
+/// 16-byte function alignment a loop's offset within its line follows from the
+/// size of whatever code the linker placed before the function, which differs
+/// from one build to the next. Starting every function on a line makes the
+/// layout of its loops a property of the function alone.
+pub(super) fn codegen_layout_options(triple: &str, profile: OptProfile) -> Vec<&'static str> {
+    if matches!(profile, OptProfile::Release) && target_arch_from_triple(triple) == "x86_64" {
+        vec!["-align-all-functions=6"]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Optimiser options both pipelines hand LLVM, `opt` directly and `clang`
 /// through `-mllvm`.
 pub(super) fn llvm_pass_options(triple: &str, profile: OptProfile) -> Vec<&'static str> {
@@ -322,7 +340,10 @@ fn invoke_clang_pipeline(
         cmd.arg("-fPIC");
     }
     cmd.arg("-ffunction-sections").arg("-fdata-sections");
-    for option in llvm_pass_options(triple, profile) {
+    for option in llvm_pass_options(triple, profile)
+        .into_iter()
+        .chain(codegen_layout_options(triple, profile))
+    {
         cmd.arg("-mllvm").arg(option);
     }
     if want_dwarf() {

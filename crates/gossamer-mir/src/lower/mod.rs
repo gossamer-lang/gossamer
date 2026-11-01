@@ -159,6 +159,11 @@ fn field_fits_inline(tcx: &TyCtxt, ty: gossamer_types::Ty) -> bool {
 
 /// Lower an entire HIR program to MIR `Body`s, one per top-level function.
 pub fn lower_program(program: &HirProgram, tcx: &mut TyCtxt) -> Vec<Body> {
+    // A struct holding a generic instantiation (`n: InlineVec<i64, 8>`) is
+    // laid out from that instantiation's fields, so each one a declaration
+    // names is recorded before any layout is read.
+    let roots = tcx.declared_field_tys();
+    crate::monomorph::register_type_instantiations(tcx, roots);
     crate::opt::intern_row_table_types(tcx);
     let tables = ProgramTables::collect(program, tcx);
     let mut bodies = Vec::new();
@@ -292,6 +297,51 @@ fn push_opaque_binding_names(
         }
         B::Unit | B::Bool | B::I64 | B::F64 | B::Char | B::String | B::Bytes | B::Any => {}
     }
+}
+
+/// Marks every function and method whose signature or body names a generic
+/// type with a const parameter: the monomorphiser specialises each per value,
+/// so its callers hand over and receive concrete `[T; N]` arrays.
+fn mark_const_layout_callables(program: &HirProgram, tcx: &mut TyCtxt) {
+    let names_const_layout = |func: &HirFn, tcx: &TyCtxt| {
+        let mut found = func.params.iter().any(|p| tcx.names_const_param_adt(p.ty))
+            || func.ret.is_some_and(|ret| tcx.names_const_param_adt(ret));
+        if !found && let Some(body) = &func.body {
+            walk_block_exprs(&body.block, &mut |expr| {
+                found |= tcx.names_const_param_adt(expr.ty);
+            });
+        }
+        found
+    };
+    let mut marked = Vec::new();
+    for item in &program.items {
+        match &item.kind {
+            HirItemKind::Fn(func) if names_const_layout(func, tcx) => {
+                if let Some(def) = item.def {
+                    marked.push(const_layout_fn_key(def));
+                }
+            }
+            HirItemKind::Impl(decl) => {
+                let Some(prefix) = decl.self_name.as_ref() else {
+                    continue;
+                };
+                for method in &decl.methods {
+                    if names_const_layout(method, tcx) {
+                        marked.push(format!("{}::{}", prefix.name, method.name.name));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for name in marked {
+        tcx.mark_const_layout_callable(name);
+    }
+}
+
+/// The key a free function is marked under in the const-layout set.
+pub(crate) fn const_layout_fn_key(def: gossamer_resolve::DefId) -> String {
+    format!("{def:?}")
 }
 
 fn walk_item_exprs(item: &HirItem, visit: &mut dyn FnMut(&HirExpr)) {
@@ -469,6 +519,7 @@ pub(crate) struct ProgramTables {
 impl ProgramTables {
     /// Reads every table off `program`, registering its inline enums in `tcx`.
     pub(crate) fn collect(program: &HirProgram, tcx: &mut TyCtxt) -> Self {
+        mark_const_layout_callables(program, tcx);
         let (structs, struct_defs) = collect_struct_fields(program);
         keep_word_fields_where_required(program, &struct_defs, tcx);
         let enums = collect_enum_variants(program, tcx);

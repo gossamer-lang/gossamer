@@ -377,8 +377,11 @@ impl<'tcx> FnBuilder<'tcx> {
             // and the parent expects an i64, we emit
             // `Op::IntArrayGetI64` which feeds the typed `i64`
             // register file directly - no `Value::Int` box/unbox.
+            // A user type's `[]` is its `index` method, which the general
+            // path below calls; only a built-in sequence takes the fast path.
             HirExprKind::Index { base, index }
-                if matches!(self.tcx.kind(expr.ty), Some(TyKind::Int(_))) =>
+                if matches!(self.tcx.kind(expr.ty), Some(TyKind::Int(_)))
+                    && self.adt_type_name(base.ty).is_none() =>
             {
                 let base_reg = self.compile_expr(base)?;
                 if self.flat_int_locals.contains(&base_reg) {
@@ -414,7 +417,8 @@ impl<'tcx> FnBuilder<'tcx> {
             // the inner-loop scratch arrays in nbody-style code
             // ride this branch.
             HirExprKind::Index { base, index }
-                if matches!(self.tcx.kind(expr.ty), Some(TyKind::Float(FloatTy::F64))) =>
+                if matches!(self.tcx.kind(expr.ty), Some(TyKind::Float(FloatTy::F64)))
+                    && self.adt_type_name(base.ty).is_none() =>
             {
                 let base_reg = self.compile_expr(base)?;
                 if self.flat_float_locals.contains(&base_reg) {

@@ -352,6 +352,18 @@ fn build_runtime_into(
     // forcing frame pointers costs double digits on tight loops - keep the
     // register.
     flags.push("-C force-frame-pointers=yes".to_string());
+    // A hot loop's speed on x86-64 follows how it falls across 64-byte fetch
+    // lines, and at the default 16-byte function alignment that depends on how
+    // much code the program links ahead of the runtime. Starting every runtime
+    // function on a line keeps its loops' layout the same in every program, as
+    // the compiled program's own functions are.
+    let archive_arch = triple
+        .map(|t| t.split('-').next().unwrap_or(t).to_string())
+        .or_else(|| env::var("CARGO_CFG_TARGET_ARCH").ok())
+        .unwrap_or_default();
+    if profile == "release" && archive_arch == "x86_64" {
+        flags.push("-C llvm-args=-align-all-functions=6".to_string());
+    }
     if let Ok(extra) = env::var("GOSSAMERFLAGS") {
         if !extra.trim().is_empty() {
             flags.push(extra);

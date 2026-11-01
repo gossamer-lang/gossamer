@@ -158,10 +158,10 @@ impl<'a> Builder<'a> {
                         Some(field) => *field,
                         None => return ty,
                     },
-                    TyKind::Adt { def, .. } => {
+                    TyKind::Adt { def, substs } => {
                         match self
                             .tcx
-                            .struct_field_tys(*def)
+                            .adt_field_tys(*def, substs)
                             .and_then(|fields| fields.get(*index as usize))
                         {
                             Some(field) => *field,

@@ -684,14 +684,10 @@ impl TypeChecker<'_> {
         // A unit struct is the zero-field shape `Unit {}` also spells, so it
         // carries the same registered (empty) layout: the tiers read its
         // fields, its slots, and its key content through one description.
-        // A field whose length is a const parameter has no length until an
-        // instantiation supplies one, so its storage is the runtime-length
-        // sequence a const generic body holds. The checker keeps the declared
-        // `[T; N]` for typing; the layout reads the carrier.
-        let tys: Vec<Ty> = list
-            .iter()
-            .map(|(_, t)| self.const_length_carrier(*t))
-            .collect();
+        // A field whose length is a const parameter keeps its declared
+        // `[T; N]`: every instantiation is laid out with its own length, so
+        // the array is stored inline in the struct.
+        let tys: Vec<Ty> = list.iter().map(|(_, t)| *t).collect();
         self.tcx.register_struct_fields(def, tys);
         self.struct_fields.insert(def, list);
         if matches!(decl.body, StructBody::Tuple(_)) {
@@ -1048,6 +1044,27 @@ impl TypeChecker<'_> {
         self.current_self_ty = prev_self_ty;
     }
 
+    /// The positions and types of the `impl` block's const parameters a
+    /// method receives: those its body names, which is the rule the lowering
+    /// builds the method's parameter list by.
+    fn impl_consts_named_by(&mut self, decl: &ImplDecl, fn_decl: &FnDecl) -> Vec<(usize, Ty)> {
+        decl.generics
+            .params
+            .iter()
+            .enumerate()
+            .filter_map(|(position, param)| match param {
+                gossamer_ast::GenericParam::Const { name, ty, .. }
+                    if fn_decl.body.as_deref().is_some_and(|body| {
+                        gossamer_ast::visitor::expr_mentions_name(body, &name.name)
+                    }) =>
+                {
+                    Some((position, self.type_from_ast(ty)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Records one `impl` method's signature under the owner names it is
     /// reached by. `self_names` is set for a non-generic block, whose
     /// signatures are concrete; `owner_names` for every block, so a generic
@@ -1140,18 +1157,7 @@ impl TypeChecker<'_> {
                 Some(ty) => self.type_from_ast(ty),
                 None => self.tcx.unit(),
             };
-            let impl_consts: Vec<(usize, Ty)> = decl
-                .generics
-                .params
-                .iter()
-                .enumerate()
-                .filter_map(|(position, param)| match param {
-                    gossamer_ast::GenericParam::Const { ty, .. } => {
-                        Some((position, self.type_from_ast(ty)))
-                    }
-                    _ => None,
-                })
-                .collect();
+            let impl_consts = self.impl_consts_named_by(decl, fn_decl);
             self.leave_generic_scope(scope);
             for name in names {
                 if !impl_consts.is_empty() {
