@@ -1114,6 +1114,26 @@ impl<'a> Builder<'a> {
             HirExprKind::Path { def: Some(def), .. } => self.region_effects.of_fn(*def),
             _ => None,
         };
+        // A callee specialised per const value takes and answers concrete
+        // `[T; N]` arrays, so none of the runtime-length carrier coercions
+        // below apply to it.
+        let callee_const_layout = match &callee.kind {
+            HirExprKind::Path { def: Some(def), .. }
+                if self
+                    .tcx
+                    .is_const_layout_callable(&crate::lower::const_layout_fn_key(*def)) =>
+            {
+                true
+            }
+            // A call inside a dependency module names the method with the
+            // module prefix; the set is keyed the way the impl declares it.
+            _ => joined_path.as_deref().is_some_and(|name| {
+                let segments: Vec<&str> = name.split("::").collect();
+                let declared = segments[segments.len().saturating_sub(2)..].join("::");
+                self.tcx.is_const_layout_callable(name)
+                    || self.tcx.is_const_layout_callable(&declared)
+            }),
+        };
         let callee_param_tys: Option<Vec<Ty>> = match &callee.kind {
             HirExprKind::Path { def: Some(def), .. } => self.fn_inputs.get(def).cloned(),
             _ => None,
@@ -1309,7 +1329,7 @@ impl<'a> Builder<'a> {
                         if matches!(
                             self.tcx.kind_of(expected_inner),
                             TyKind::Vec(_) | TyKind::Slice(_)
-                        ) || expected_is_const_array
+                        ) || (expected_is_const_array && !callee_const_layout)
                         {
                             // A `&[T]` parameter borrows: the caller's array
                             // outlives the call and reclaims its element
@@ -1459,6 +1479,7 @@ impl<'a> Builder<'a> {
         // sequence its body holds. The call site knows `N`, so the fixed
         // array the caller's type names is rebuilt from that sequence.
         let carrier_array = match (&callee.kind, self.tcx.kind_of(ty)) {
+            _ if callee_const_layout => None,
             (
                 HirExprKind::Path { def: Some(def), .. },
                 TyKind::Array {

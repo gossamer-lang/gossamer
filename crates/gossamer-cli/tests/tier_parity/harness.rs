@@ -1224,6 +1224,8 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/wrapping_arithmetic_operators.gos"),
     spec("feature-testing-examples/const_generic_values.gos"),
     spec("feature-testing-examples/const_generic_struct.gos"),
+    spec("feature-testing-examples/const_generic_layout.gos"),
+    spec("feature-testing-examples/user_index_scalar_result.gos"),
     spec("feature-testing-examples/generic_method_fn_only_param.gos"),
     spec("feature-testing-examples/generic_fn_value_callback.gos"),
     spec("feature-testing-examples/generic_body_closure.gos"),

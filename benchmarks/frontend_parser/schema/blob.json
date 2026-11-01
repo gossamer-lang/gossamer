@@ -3016,6 +3016,11 @@
           }
         },
         {
+          "const_layout_callables": {
+            "SEQ": "STR"
+          }
+        },
+        {
           "rc_managed_tys": {
             "SEQ": {
               "TYPENAME": "Ty"

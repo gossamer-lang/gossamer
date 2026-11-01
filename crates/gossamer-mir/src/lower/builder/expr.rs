@@ -4957,6 +4957,26 @@ impl<'a> Builder<'a> {
             self.set_current(next);
             return Some(dest);
         }
+        // An inline array reached through a field (`self.items[i]`) is read
+        // where it lies: copying the array to a temporary first would cost its
+        // whole width on every element read.
+        if matches!(base.kind, HirExprKind::Field { .. })
+            && let Some(mut place) = self.lower_place_expr(base)
+            && !place.projection.is_empty()
+            && matches!(
+                self.tcx.kind_of(self.place_ty(&place)),
+                TyKind::Array { .. }
+            )
+            && !matches!(self.tcx.kind_of(ty), TyKind::Var(_) | TyKind::Error)
+        {
+            let index_local = self.lower_expr(index)?;
+            place
+                .projection
+                .push(crate::ir::Projection::Index(index_local));
+            let dest = self.fresh(ty);
+            self.emit_assign(Place::local(dest), Rvalue::Use(Operand::Copy(place)), span);
+            return Some(dest);
+        }
         let base_local = self.lower_expr(base)?;
         let index_local = self.lower_expr(index)?;
         // For Vec / Slice receivers (whose runtime layout is a

@@ -421,7 +421,7 @@ pub unsafe extern "C" fn gos_rt_rc_alloc_move(
 /// fixed-width move of those is a handful of instructions where the general
 /// copy is a library call.
 #[inline]
-unsafe fn copy_payload(src: *const u8, dst: *mut u8, size: usize) {
+pub(crate) unsafe fn copy_payload(src: *const u8, dst: *mut u8, size: usize) {
     #[inline]
     unsafe fn words<const N: usize>(src: *const u8, dst: *mut u8) {
         // SAFETY: this `unsafe fn`'s caller passes `src` and `dst` each addressing `N` words.
@@ -461,14 +461,9 @@ unsafe fn rc_alloc_from(
     // SAFETY: this `unsafe fn`'s caller passes `meta` live or null, which `meta_names_map_child`
     // accepts.
     if in_region && !unsafe { meta_names_map_child(meta) } {
-        // SAFETY: `meta` is not passed, so the allocation carries no children.
-        let payload = unsafe { gos_rt_rc_alloc(size, std::ptr::null()) };
-        if !payload.is_null() && !src.is_null() {
-            // SAFETY: `payload` is a fresh block of `size` bytes, and `src` holds `size` bytes
-            // (this `unsafe fn`'s caller).
-            unsafe { std::ptr::copy_nonoverlapping(src, payload, size as usize) };
-        }
-        return payload;
+        // SAFETY: `meta` is not passed, so the allocation carries no children; `src` is null or
+        // holds `size` bytes (this `unsafe fn`'s caller).
+        return unsafe { rc_alloc_payload(size, std::ptr::null(), src) };
     }
     // SAFETY: this `unsafe fn`'s caller passes `meta` and `src` null or live, `src` holding
     // `size` bytes.

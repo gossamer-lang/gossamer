@@ -979,8 +979,9 @@ impl TypeChecker<'_> {
         callee: &Expr,
         args: &[Expr],
         arg_tys: &[Ty],
+        expected: Expectation,
     ) -> Option<Ty> {
-        self.check_user_assoc_fn_call(callee, args, arg_tys)
+        self.check_user_assoc_fn_call(callee, args, arg_tys, expected)
             .or_else(|| self.check_reverse_ctor_call(callee, args, arg_tys))
             .or_else(|| self.check_tuple_struct_ctor_call(callee, args, arg_tys))
             .or_else(|| self.check_named_struct_ctor_call(callee, args))
@@ -1030,6 +1031,7 @@ impl TypeChecker<'_> {
         callee: &Expr,
         args: &[Expr],
         arg_tys: &[Ty],
+        expected: Expectation,
     ) -> Option<Ty> {
         let ExprKind::Path(path) = &callee.kind else {
             return None;
@@ -1092,9 +1094,14 @@ impl TypeChecker<'_> {
             }
             return Some(ret);
         }
-        if let Some(ret) =
-            self.check_generic_assoc_fn_call(callee, path, &type_name, fn_name, args, arg_tys)
-        {
+        if let Some(ret) = self.check_generic_assoc_fn_call(
+            callee,
+            path,
+            (&type_name, fn_name),
+            args,
+            arg_tys,
+            expected,
+        ) {
             return Some(ret);
         }
         // A method with type parameters of its own on a concrete type,
@@ -1227,10 +1234,10 @@ impl TypeChecker<'_> {
         &mut self,
         callee: &Expr,
         path: &gossamer_ast::PathExpr,
-        type_name: &str,
-        fn_name: &str,
+        (type_name, fn_name): (&str, &str),
         args: &[Expr],
         arg_tys: &[Ty],
+        expected: Expectation,
     ) -> Option<Ty> {
         let key = (type_name.to_string(), fn_name.to_string());
         // A method reached as `Type::method(value, ..)` carries its receiver
@@ -1299,7 +1306,8 @@ impl TypeChecker<'_> {
                 }
             })
             .collect();
-        let const_values = self.assoc_call_const_values(path, def, arg_tys.first(), receiver_form);
+        let const_values =
+            self.assoc_call_const_values(path, def, arg_tys.first(), receiver_form, expected);
         // A call that names no value for a const parameter has been reported,
         // and its result has no type to check against what it meets.
         if !receiver_form
@@ -1340,6 +1348,7 @@ impl TypeChecker<'_> {
         def: gossamer_resolve::DefId,
         receiver: Option<&Ty>,
         receiver_form: bool,
+        expected: Expectation,
     ) -> Vec<Option<crate::GenericArg>> {
         let mask = self.fn_generic_const_mask_of(def);
         if receiver_form {
@@ -1370,20 +1379,46 @@ impl TypeChecker<'_> {
             [.., owner, _] => owner.generics.clone(),
             _ => Vec::new(),
         };
+        // A call the turbofish leaves open takes the block's const arguments
+        // from the instantiation its context expects: `let v: InlineVec<i64,
+        // 4> = InlineVec::new()`.
+        let expected_args: Vec<crate::GenericArg> = self
+            .expectation_target(expected)
+            .map(|target| self.infer.resolve(self.tcx, target))
+            .and_then(|target| match self.tcx.kind(target) {
+                Some(TyKind::Adt {
+                    def: expected_def,
+                    substs,
+                }) if *expected_def == def => Some(substs.as_slice().to_vec()),
+                _ => None,
+            })
+            .unwrap_or_default();
         mask.iter()
             .enumerate()
             .map(|(position, is_const)| {
                 if !*is_const {
                     return None;
                 }
-                match owner_generics.get(position)? {
-                    AstGenericArg::Const(expr) => Some(crate::GenericArg::Const(
+                let named = match owner_generics.get(position) {
+                    Some(AstGenericArg::Const(expr)) => Some(crate::GenericArg::Const(
                         self.evaluate_generic_const_arg(expr),
                     )),
-                    AstGenericArg::Type(ast_ty) => self
+                    Some(AstGenericArg::Type(ast_ty)) => self
                         .const_generic_type_arg(ast_ty)
                         .map(crate::GenericArg::ConstParam),
-                }
+                    None => None,
+                };
+                named.or_else(|| {
+                    expected_args
+                        .get(position)
+                        .filter(|arg| {
+                            matches!(
+                                arg,
+                                crate::GenericArg::Const(_) | crate::GenericArg::ConstParam(_)
+                            )
+                        })
+                        .cloned()
+                })
             })
             .collect()
     }
@@ -1472,7 +1507,7 @@ impl TypeChecker<'_> {
         {
             return ty;
         }
-        if let Some(ty) = self.check_constructor_like_call(callee, args, arg_tys) {
+        if let Some(ty) = self.check_constructor_like_call(callee, args, arg_tys, expected) {
             return ty;
         }
         // Fallback: known stdlib free functions whose signatures are

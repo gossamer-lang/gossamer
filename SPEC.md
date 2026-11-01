@@ -1105,7 +1105,10 @@ fixed `[T; k]` array at the call site.
 A struct, a tuple struct, or an enum may declare const generic parameters,
 and a field or variant payload may name one as an array length
 (`struct Ring<const N: usize> { items: [i64; N], head: i64 }`,
-`enum Grid<const N: usize> { Filled([i64; N]), Empty }`). A variant
+`enum Grid<const N: usize> { Filled([i64; N]), Empty }`). Each instantiation
+of such a struct is laid out with its own length, so `Ring<3>`'s array is
+stored inline in the struct, and every method and function that names the
+type is specialised for the value. A variant
 constructor takes each const argument from its payload the way a literal
 takes it from its fields.
 A struct literal takes each const argument from the length of the array field
@@ -1119,7 +1122,10 @@ it from the receiver's type, whether written `r.capacity()` or
 (`fn snapshot(&self) -> [i64; N]`), and its array result is a fixed `[T; k]` at
 the call. An associated function with no receiver takes the block's const
 arguments from the turbofish on the type it is called through
-(`Ring::<3>::blank()`), and a call that names none reports `GT0088`. All of this
+(`Ring::<3>::blank()`) or from the instantiation the context expects
+(`let r: Ring<3> = Ring::new()`), and a call that names neither reports
+`GT0088`. A method receives a const parameter as a value only when its body
+names it. All of this
 runs identically on the bytecode VM, the Cranelift JIT, and the LLVM AOT
 tiers.
 

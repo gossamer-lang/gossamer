@@ -153,6 +153,14 @@ pub struct TyCtxt {
     /// payload read has to materialise the binding through the box.
     #[serde(serialize_with = "gossamer_ast::ordered::set")]
     boxed_enum_payload_tys: std::collections::HashSet<Ty>,
+    /// Callables laid out per const value: a function or method whose
+    /// signature or body names a generic type with a const parameter
+    /// (`Ring<N>`). Each instantiation is specialised with that value, so
+    /// its `[T; N]` parameters and result are the concrete inline arrays,
+    /// never the runtime-length carrier a const-only body shares. Keyed by
+    /// body name (`f`, `Type::method`).
+    #[serde(serialize_with = "gossamer_ast::ordered::set")]
+    const_layout_callables: std::collections::HashSet<String>,
     /// Interned self-types of every heap-allocated (RC-managed) user
     /// enum. Populated by MIR lowering from the enum index; consulted by
     /// the drop pass to recognise locals holding RC pointers that need a
@@ -250,7 +258,7 @@ impl TyCtxt {
 
         write!(
             output,
-            "kinds={:?};primitives={:?};struct_fields={:?};enum_variant_tys={:?};enum_variant_names={:?};enum_repr_bits={:?};enum_ty_by_name={:?};struct_fields_inst={:?};def_names={:?};type_param_defs={:?};rc_metas={:?};aggr_copy_metas={:?};rc_managed_tys={:?};rc_managed_enum_defs={:?};tuple_struct_defs={:?};inline_enum_defs={:?};flat_enums={:?};flat_carriers={:?};boxed_enum_payload_tys={:?}",
+            "kinds={:?};primitives={:?};struct_fields={:?};enum_variant_tys={:?};enum_variant_names={:?};enum_repr_bits={:?};enum_ty_by_name={:?};struct_fields_inst={:?};def_names={:?};type_param_defs={:?};rc_metas={:?};aggr_copy_metas={:?};rc_managed_tys={:?};rc_managed_enum_defs={:?};tuple_struct_defs={:?};inline_enum_defs={:?};flat_enums={:?};flat_carriers={:?};boxed_enum_payload_tys={:?};const_layout_callables={:?}",
             self.kinds,
             self.primitives,
             sorted(
@@ -306,6 +314,7 @@ impl TyCtxt {
                     .map(|(k, v)| format!("{k:?}:{v:?}"))
             ),
             sorted(self.boxed_enum_payload_tys.iter().map(|v| format!("{v:?}"))),
+            sorted(self.const_layout_callables.iter().cloned()),
         )
     }
 
@@ -526,6 +535,65 @@ impl TyCtxt {
     /// Interns a floating-point primitive.
     pub fn float_ty(&mut self, float: FloatTy) -> Ty {
         self.intern(TyKind::Float(float))
+    }
+
+    /// Records that the callable named `name` is specialised per const value.
+    pub fn mark_const_layout_callable(&mut self, name: String) {
+        self.const_layout_callables.insert(name);
+    }
+
+    /// Whether the callable named `name` is specialised per const value, so
+    /// its `[T; N]` parameters and result are concrete inline arrays.
+    #[must_use]
+    pub fn is_const_layout_callable(&self, name: &str) -> bool {
+        self.const_layout_callables.contains(name)
+    }
+
+    /// `true` when `ty` names a generic type one of whose arguments is a
+    /// symbolic const parameter (`Ring<N>`), at any depth.
+    #[must_use]
+    pub fn names_const_param_adt(&self, ty: Ty) -> bool {
+        match self.kind_of(ty) {
+            TyKind::Adt { substs, .. } | TyKind::Alias { substs, .. } => {
+                substs.as_slice().iter().any(|arg| match arg {
+                    crate::GenericArg::ConstParam(_) => true,
+                    crate::GenericArg::Type(t) => self.names_const_param_adt(*t),
+                    crate::GenericArg::Const(_) => false,
+                })
+            }
+            TyKind::Ref { inner, .. }
+            | TyKind::Vec(inner)
+            | TyKind::Slice(inner)
+            | TyKind::Iterator(inner)
+            | TyKind::Range(inner)
+            | TyKind::Sender(inner)
+            | TyKind::Receiver(inner)
+            | TyKind::JoinHandle(inner)
+            | TyKind::Array { elem: inner, .. }
+            | TyKind::Simd { elem: inner, .. } => self.names_const_param_adt(*inner),
+            TyKind::Tuple(elems) => elems.iter().any(|t| self.names_const_param_adt(*t)),
+            TyKind::HashMap { key, value, .. } => {
+                self.names_const_param_adt(*key) || self.names_const_param_adt(*value)
+            }
+            TyKind::FnPtr(sig) | TyKind::FnTrait(sig) => {
+                sig.inputs.iter().any(|t| self.names_const_param_adt(*t))
+                    || self.names_const_param_adt(sig.output)
+            }
+            _ => false,
+        }
+    }
+
+    /// Every field type a struct or enum declaration names, in no particular
+    /// order: the roots from which each generic instantiation a declaration
+    /// holds can be reached.
+    #[must_use]
+    pub fn declared_field_tys(&self) -> Vec<Ty> {
+        self.struct_fields
+            .values()
+            .flatten()
+            .chain(self.enum_variant_tys.values().flatten().flatten())
+            .copied()
+            .collect()
     }
 
     /// Records the field types of a named struct in source order.

@@ -1,0 +1,96 @@
+// A const generic struct is laid out with each instantiation's own length:
+// `Ring<3>`'s array sits inline in the struct and inside a `Vec` of them. Its
+// methods, operator impls, and rendering are specialised per length, an
+// associated function takes the length from the type the context expects,
+// and a copy is a value of its own. Output must match on every tier.
+
+struct Ring<const N: usize> {
+    items: [i64; N]
+    head: i64
+}
+
+impl<const N: usize> Ring<N> {
+    fn new() -> Ring<N> {
+        Ring { items: [0; N], head: 0 }
+    }
+
+    fn capacity(&self) -> i64 {
+        N as i64
+    }
+
+    fn put(&mut self, value: i64) {
+        self.items[self.head] = value
+        self.head = (self.head + 1) % self.items.len()
+    }
+
+    fn total(&self) -> i64 {
+        let mut acc = 0
+        for i in 0..self.items.len() {
+            acc += self.items[i]
+        }
+        acc
+    }
+}
+
+impl<const N: usize> Index for Ring<N> {
+    fn index(self, i: i64) -> i64 {
+        self.items[i]
+    }
+}
+
+impl<const N: usize> Display for Ring<N> {
+    fn fmt(&self) -> String {
+        f"Ring{self.items:?}@{self.head}"
+    }
+}
+
+impl<const N: usize> PartialEq for Ring<N> {
+    fn eq(&self, other: Ring<N>) -> bool {
+        self.total() == other.total()
+    }
+}
+
+struct Labeled<T, const N: usize> {
+    label: T
+    slots: [T; N]
+}
+
+impl<T, const N: usize> Labeled<T, N> {
+    fn fill(label: T) -> Labeled<T, N> {
+        Labeled { label: label, slots: [label; N] }
+    }
+
+    fn width(&self) -> i64 {
+        self.slots.len()
+    }
+}
+
+fn main() {
+    let mut r: Ring<3> = Ring::new()
+    r.put(4)
+    r.put(5)
+    r.put(6)
+    r.put(7)
+    println(f"{r} cap={r.capacity()} total={r.total()} r[1]={r[1]}")
+
+    let mut rings: Vec<Ring<4>> = #[]
+    for i in 0..3 {
+        let mut ring: Ring<4> = Ring::new()
+        ring.put(i)
+        ring.put(i * 10)
+        rings.push(ring)
+    }
+    let mut sum = 0
+    for ring in rings {
+        sum += ring.total() + ring[1]
+    }
+    println(f"rings {sum} {rings[2]}")
+
+    let copy = r
+    r.put(100)
+    println(f"{copy} {r} same={copy == r}")
+
+    let a: Labeled<String, 2> = Labeled::fill("x")
+    let b: Labeled<i64, 5> = Labeled::fill(9)
+    println(f"{a.label} {a.slots:?} {a.width()} {b.slots:?} {b.width()}")
+}
