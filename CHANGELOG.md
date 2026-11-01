@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.75.13 - Windowed Windows programs
+
+- A project with `windows-subsystem = "windows"` builds a Windows executable that opens no console window when started from a shortcut or Explorer, as a GUI application needs; without the key, programs stay console programs.
+
 ## 0.75.12 - Symbol order files on Windows and without a system lld
 
 - A Linux build with `GOS_SYMBOL_ORDER` links with the lld a Rust toolchain ships when no `ld.lld` is on the PATH, and with no lld at all warns and links without the order, where it failed with "cannot find 'ld'".

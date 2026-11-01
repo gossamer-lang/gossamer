@@ -37,6 +37,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
+use gossamer_pkg::manifest::WindowsSubsystem;
 
 use crate::loaders::profile_rss_stage;
 
@@ -102,6 +103,7 @@ pub(crate) fn dispatch(mut request: BuildRequest<'_>) -> Result<()> {
     }
     let resolved = resolve_entry_arg(request.path.take())?;
     crate::binding_dispatch::install_for_entry(&resolved)?;
+    request.link.windows_subsystem = windows_subsystem(&resolved);
     run(&resolved, &request)
 }
 
@@ -120,6 +122,9 @@ pub(crate) struct LinkOptions {
     /// True when the user passed `--dynamic`. Forces the legacy
     /// dynamic-glibc link path even on Linux release builds.
     pub(crate) dynamic: bool,
+    /// The PE subsystem a Windows executable declares, from the
+    /// project's `windows-subsystem`.
+    pub(crate) windows_subsystem: WindowsSubsystem,
 }
 
 impl LinkOptions {
@@ -152,6 +157,35 @@ fn links_rust_bindings(input: &Path) -> bool {
 /// tests cover the macOS plan without requiring an Apple linker.
 fn macos_link_optimisation_flag(opts: LinkOptions) -> &'static str {
     if opts.release { "-Wl,-O1" } else { "-Wl,-O0" }
+}
+
+/// The PE subsystem the project around `entry` declares; `console` outside
+/// a project.
+fn windows_subsystem(entry: &Path) -> WindowsSubsystem {
+    crate::paths::project_context_for_entry(entry)
+        .manifest_result()
+        .and_then(std::result::Result::ok)
+        .map_or(WindowsSubsystem::Console, |m| m.project.windows_subsystem)
+}
+
+/// The lld-link flags that declare the PE subsystem. A windowed program
+/// keeps `main` as its entry, which `/SUBSYSTEM:WINDOWS` alone would
+/// replace with `WinMain`.
+#[cfg(any(windows, test))]
+fn windows_subsystem_flags(subsystem: WindowsSubsystem) -> &'static [&'static str] {
+    match subsystem {
+        WindowsSubsystem::Console => &["/SUBSYSTEM:CONSOLE"],
+        WindowsSubsystem::Windows => &["/SUBSYSTEM:WINDOWS", "/ENTRY:mainCRTStartup"],
+    }
+}
+
+/// The mingw `cc` flags that declare the PE subsystem; mingw-w64's
+/// windowed startup still calls `main`.
+fn mingw_subsystem_flags(subsystem: WindowsSubsystem) -> &'static [&'static str] {
+    match subsystem {
+        WindowsSubsystem::Console => &[],
+        WindowsSubsystem::Windows => &["-Wl,--subsystem,windows"],
+    }
 }
 
 /// The mingw `cc` spelling of [`WINDOWS_MAIN_STACK_RESERVE`].
@@ -501,19 +535,20 @@ pub(crate) fn run_artifact(
     if library::target_for(file)?.is_some() {
         return Ok(None);
     }
-    let opts = run_link_options(release);
+    let opts = run_link_options(release, file);
     let path = out_dir.join(platform_exe_name(&default_unit_name(file), cfg!(windows)));
     let key = build_artifact_key(file, source, None, opts, &path)?;
     let current = load_unchanged_build(&build_stamp_path(file, &path), &path, &key).is_some();
     Ok(Some(RunArtifact { path, key, current }))
 }
 
-/// The link options of a build `gos run` starts.
-fn run_link_options(release: bool) -> LinkOptions {
+/// The link options of a build of `file` that `gos run` starts.
+fn run_link_options(release: bool, file: &Path) -> LinkOptions {
     LinkOptions {
         release,
         debug_info: false,
         dynamic: false,
+        windows_subsystem: windows_subsystem(file),
     }
 }
 
@@ -767,12 +802,13 @@ fn build_artifact_key(
     add(
         "options",
         format!(
-            "target={}|release={}|debug={}|dynamic={}|static_musl={static_musl}|reproducible={}",
+            "target={}|release={}|debug={}|dynamic={}|static_musl={static_musl}|reproducible={}|subsystem={:?}",
             target.unwrap_or("host"),
             opts.release,
             opts.debug_info,
             opts.dynamic,
             gossamer_codegen_llvm::reproducible_enabled(),
+            opts.windows_subsystem,
         )
         .as_bytes(),
     );
@@ -2067,7 +2103,7 @@ fn trace_link_command(cmd: &std::process::Command) {
 /// Appends the system libraries a target's executable links against after
 /// the program's own archives, so a single-pass linker resolves the runtime's
 /// references to them.
-fn push_system_libraries(cmd: &mut std::process::Command, lt: &LinkTarget) {
+fn push_system_libraries(cmd: &mut std::process::Command, lt: &LinkTarget, opts: LinkOptions) {
     // `-ldl` only exists on Linux (libdl). macOS folds `dl*` into
     // `libSystem` and Windows/mingw has no `libdl` at all - passing
     // it on either fails the link ("cannot find -ldl"). `libpthread`
@@ -2099,6 +2135,7 @@ fn push_system_libraries(cmd: &mut std::process::Command, lt: &LinkTarget) {
             gossamer_codegen_llvm::reproducible_enabled(),
         ));
         cmd.arg(mingw_stack_reserve_flag());
+        cmd.args(mingw_subsystem_flags(opts.windows_subsystem));
     }
 }
 
@@ -2172,7 +2209,7 @@ fn link_posix(
     cmd.args(framework_args(lt, libraries)?);
     cmd.args(&libraries.staticlib_args);
     cmd.arg("-o").arg(out_path);
-    push_system_libraries(&mut cmd, lt);
+    push_system_libraries(&mut cmd, lt, opts);
     if !extra_archives.is_empty() {
         // The rust-bindings staticlib pulls in `gossamer-runtime`
         // as a transitive Cargo dep, which produces a second copy
@@ -2554,6 +2591,7 @@ fn link_windows_msvc(
         gossamer_codegen_llvm::reproducible_enabled(),
     ));
     cmd.arg(windows_stack_reserve_flag());
+    cmd.args(windows_subsystem_flags(opts.windows_subsystem));
     if let Some(order) = order {
         // The functions the order file names come first and together, as
         // on Linux and macOS; LNK4037 is a name the code no longer has.
@@ -3039,6 +3077,7 @@ mod tests {
             release: false,
             debug_info: false,
             dynamic: true,
+            windows_subsystem: super::WindowsSubsystem::Console,
         };
         let key =
             || super::build_artifact_key(&entry, "fn main() {}\n", None, options, &output).unwrap();
@@ -3061,11 +3100,13 @@ mod tests {
             release: false,
             debug_info: false,
             dynamic: true,
+            windows_subsystem: super::WindowsSubsystem::Console,
         };
         let release = super::LinkOptions {
             release: true,
             debug_info: false,
             dynamic: true,
+            windows_subsystem: super::WindowsSubsystem::Console,
         };
         let first =
             super::build_artifact_key(&entry, "fn main() {}\n", None, debug, &output).unwrap();
@@ -3090,11 +3131,13 @@ mod tests {
             release: false,
             debug_info: false,
             dynamic: true,
+            windows_subsystem: super::WindowsSubsystem::Console,
         };
         let release = super::LinkOptions {
             release: true,
             debug_info: false,
             dynamic: true,
+            windows_subsystem: super::WindowsSubsystem::Console,
         };
         assert_eq!(super::macos_link_optimisation_flag(debug), "-Wl,-O0");
         assert_eq!(super::macos_link_optimisation_flag(release), "-Wl,-O1");
@@ -3117,6 +3160,24 @@ mod tests {
             ["-Wl,--no-insert-timestamp"]
         );
         assert!(super::mingw_reproducible_link_flags(false).is_empty());
+    }
+
+    #[test]
+    fn a_windowed_program_keeps_main_as_its_entry() {
+        use gossamer_pkg::manifest::WindowsSubsystem;
+        assert_eq!(
+            super::windows_subsystem_flags(WindowsSubsystem::Console),
+            ["/SUBSYSTEM:CONSOLE"]
+        );
+        assert_eq!(
+            super::windows_subsystem_flags(WindowsSubsystem::Windows),
+            ["/SUBSYSTEM:WINDOWS", "/ENTRY:mainCRTStartup"]
+        );
+        assert!(super::mingw_subsystem_flags(WindowsSubsystem::Console).is_empty());
+        assert_eq!(
+            super::mingw_subsystem_flags(WindowsSubsystem::Windows),
+            ["-Wl,--subsystem,windows"]
+        );
     }
 
     #[test]

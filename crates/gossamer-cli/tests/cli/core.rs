@@ -2152,3 +2152,58 @@ fn a_symbol_order_links_on_windows() {
     assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), "ordered\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// A project's `windows-subsystem` reaches the PE header, and a windowed
+// program still writes to the handles it is started with.
+#[cfg(windows)]
+#[test]
+fn windows_subsystem_decides_the_pe_subsystem() {
+    let root = env::temp_dir().join(format!("gos-windows-subsystem-{}", std::process::id()));
+    let build = |name: &str, key: &str| {
+        let dir = root.join(name);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("project.toml"),
+            format!("[project]\nid = \"example.com/{name}\"\nversion = \"0.1.0\"\n{key}"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src").join("main.gos"),
+            format!("fn main() {{ println(\"{name}\") }}\n"),
+        )
+        .unwrap();
+        let build = Command::new(gos_bin())
+            .arg("build")
+            .arg("--release")
+            .arg(&dir)
+            .output()
+            .expect("spawn gos build");
+        assert!(
+            build.status.success(),
+            "build failed: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let binary = std::fs::read_dir(dir.join("target").join("release"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "exe"))
+            .expect("the build's executable");
+        let image = std::fs::read(&binary).unwrap();
+        let pe = u32::from_le_bytes(image[0x3c..0x40].try_into().unwrap()) as usize;
+        // The optional header follows the 4-byte signature and the 20-byte
+        // file header; its Subsystem field is at offset 68 in PE32 and PE32+.
+        let field = pe + 24 + 68;
+        let subsystem = u16::from_le_bytes(image[field..field + 2].try_into().unwrap());
+        let run = Command::new(&binary).output().expect("run the build");
+        let printed = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
+        (subsystem, printed)
+    };
+    // IMAGE_SUBSYSTEM_WINDOWS_GUI is 2, IMAGE_SUBSYSTEM_WINDOWS_CUI 3.
+    assert_eq!(build("console", ""), (3, "console\n".to_string()));
+    assert_eq!(
+        build("windowed", "windows-subsystem = \"windows\"\n"),
+        (2, "windowed\n".to_string())
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
