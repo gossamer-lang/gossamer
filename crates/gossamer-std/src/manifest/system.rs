@@ -1158,6 +1158,11 @@ pub const ENV: StdModule = StdModule {
             doc: "Returns the current working directory.",
         },
         StdItem {
+            name: "current_exe",
+            kind: StdItemKind::Function,
+            doc: "Returns the path of the running program's executable.",
+        },
+        StdItem {
             name: "set_current_dir",
             kind: StdItemKind::Function,
             doc: "Changes the current working directory.",

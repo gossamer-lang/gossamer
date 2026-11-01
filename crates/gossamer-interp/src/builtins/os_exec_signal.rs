@@ -90,6 +90,13 @@ fn builtin_env_home_dir(_args: &[Value]) -> RuntimeResult<Value> {
     }
 }
 
+fn builtin_env_current_exe(_args: &[Value]) -> RuntimeResult<Value> {
+    match env_std::current_exe() {
+        Ok(p) => Ok(ok_variant(Value::String(p.into()))),
+        Err(e) => Ok(err_variant(format!("{e}"))),
+    }
+}
+
 fn builtin_env_temp_dir(_args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::String(env_std::temp_dir().into()))
 }

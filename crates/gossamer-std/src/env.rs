@@ -48,6 +48,14 @@ pub fn current_dir() -> Result<String, IoError> {
         .map_err(|e| IoError::from_std(e, ""))
 }
 
+/// The path of the running program's executable, with symbolic links resolved where the
+/// platform reports them.
+pub fn current_exe() -> Result<String, IoError> {
+    std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .map_err(|e| IoError::from_std(e, ""))
+}
+
 /// Changes the current working directory.
 pub fn set_current_dir(path: &str) -> Result<(), IoError> {
     std::env::set_current_dir(path).map_err(|e| IoError::from_std(e, path))

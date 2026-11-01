@@ -1040,6 +1040,11 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::env",
+        name: "current_exe",
+        signature: "fn current_exe() -> Result<String, io::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::env",
         name: "home_dir",
         signature: "fn home_dir() -> Option<String>",
     },

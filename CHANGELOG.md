@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.75.11 - A program knows where its executable is
+
+- `env::current_exe()` answers the path of the running program's executable on every tier, so an install can keep its data beside it, as a portable app keeps its settings folder.
+
 ## 0.75.10 - Bindings follow the dependencies they re-pin
 
 - A Rust binding whose own `Cargo.lock` re-pins a dependency, such as a git tag moved to another commit, builds against the new pin, where the shared build in the user cache kept the commit it first resolved until the cache was deleted.

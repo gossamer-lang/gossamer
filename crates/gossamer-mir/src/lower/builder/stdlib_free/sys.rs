@@ -175,6 +175,7 @@ impl<'a> Builder<'a> {
                 self.tcx.int_ty(gossamer_types::IntTy::I64),
             ),
             "env::current_dir" => ("gos_rt_os_cwd", self.result_string_error_adt_ty()),
+            "env::current_exe" => ("gos_rt_env_current_exe", self.result_string_error_adt_ty()),
             _ => return None,
         })
     }

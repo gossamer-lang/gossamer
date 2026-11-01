@@ -402,6 +402,25 @@ pub extern "C" fn gos_rt_env_home_dir() -> i128 {
     })
 }
 
+/// `env::current_exe() -> Result<String, errors::Error>`, shaped as
+/// `gos_rt_os_cwd` (disc 0 = Ok, 1 = Err).
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_env_current_exe() -> i128 {
+    ffi_entry!({
+        match std::env::current_exe() {
+            Ok(path) => {
+                let cs = alloc_cstring(path.to_string_lossy().as_bytes());
+                gos_rt_result_new(0, cs as i64)
+            }
+            Err(e) => {
+                let msg = format!("current_exe: {e}");
+                let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
+                gos_rt_result_new(1, err as i64)
+            }
+        }
+    })
+}
+
 /// `os::env(name) -> Option<String>`. Compiled tier returns a
 /// `*mut GosResult` shaped as Option (disc 0 = Some, 1 = None).
 #[unsafe(no_mangle)]

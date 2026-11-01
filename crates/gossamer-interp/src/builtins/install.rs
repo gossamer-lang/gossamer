@@ -496,6 +496,7 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
             ("set_var", builtin_env_set_var),
             ("unset_var", builtin_env_unset_var),
             ("current_dir", builtin_os_cwd),
+            ("current_exe", builtin_env_current_exe),
             ("set_current_dir", builtin_env_set_current_dir),
             ("home_dir", builtin_env_home_dir),
             ("temp_dir", builtin_env_temp_dir),
