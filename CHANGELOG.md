@@ -8,6 +8,9 @@
 - A nested pattern on a recursive enum inside a loop (`if let V::Variant(V::Entry(_, _)) = v`) matches on every tier. The value was released at its last direct mention while the pattern still read its payload, so the match failed and the freed node was written to.
 - `xs.first().map(f)` and `xs.first().and_then(f)` leave the element with the container. The payload was released after the call as if the `Option` owned it, freeing the element the container still held.
 - An `if` or `match` used as a statement discards a value its branch computes (`if c { f()? }`) without corrupting the heap. The value was stored into the unit result and released as a reference-counted object, which a `Vec` is not.
+- `brew install gossamer-lang/tap/gossamer` installs `gos` on macOS and Linux with LLVM 22, which its native builds always use, and `brew upgrade` moves it to each new release.
+- A `--pgo-collect` build writes its profile to the path given when the program exits. On Linux it wrote no profile at all, and on other systems it wrote `default.profraw` in the working directory instead.
+- An instrumented Linux build links against glibc, which the compiler-rt profile runtime is built for, and uses the profile runtime of the LLVM that `gos` builds with (LLVM 21 and 22 included), instead of the first LLVM 17-20 it found.
 
 ## 0.75.14 - Const generic structs laid out per length, faster arenas
 
@@ -18,9 +21,6 @@
 - Reading an element of an array field (`self.items[i]`) reads it in place in compiled code, where it copied the whole array first.
 - Allocating a reference-counted value inside an `arena` costs about a third fewer instructions: the allocation path no longer zeroes a payload it copies in whole, zeroes small blocks without a library call, and keeps its tracing and accounting out of line. A program that builds a tree in an arena runs about 15% faster.
 - An x86-64 release build starts every function of the program on a 64-byte boundary, so a hot loop's speed no longer depends on how much unrelated code the linker placed before it; the same function could run 30% slower in one build than in another.
-- `brew install gossamer-lang/tap/gossamer` installs `gos` on macOS and Linux with LLVM 22, which its native builds always use, and `brew upgrade` moves it to each new release.
-- A `--pgo-collect` build writes its profile to the path given when the program exits. On Linux it wrote no profile at all, and on other systems it wrote `default.profraw` in the working directory instead.
-- An instrumented Linux build links against glibc, which the compiler-rt profile runtime is built for, and uses the profile runtime of the LLVM that `gos` builds with (LLVM 21 and 22 included), instead of the first LLVM 17-20 it found.
 
 ## 0.75.13 - Windowed Windows programs
 
