@@ -2,6 +2,73 @@
 
 use super::*;
 
+/// Whether the intrinsic `name` reads a payload out of its first argument
+/// without a retain: a by-value `Result`/`Option` slot read, an unwrap that
+/// answers the payload word, or an enum-box payload load. The answer borrows
+/// the value's children, so the value must stay alive while it is used.
+#[must_use]
+pub(crate) fn lends_payload(name: &str) -> bool {
+    matches!(
+        name,
+        "gos_rt_result_payload"
+            | "gos_rt_result_payload_f64"
+            | "gos_rt_result_payload_i128"
+            | "gos_rt_result_unwrap"
+            | "gos_rt_result_unwrap_carrier"
+            | "gos_rt_result_unwrap_or"
+            | "gos_rt_result_unwrap_or_carrier"
+            | "gos_rt_result_unwrap_or_str"
+            | "gos_rt_result_unwrap_or_node"
+            | "gos_rt_result_unwrap_or_vec"
+            | "gos_rt_result_unwrap_or_map"
+            | "gos_rt_result_ok"
+            | "gos_rt_result_err"
+            | "gos_rt_option_unwrap"
+            | "gos_rt_option_unwrap_carrier"
+            | "gos_enum_load"
+            | "gos_enum_slot_ptr"
+            | "gos_enum_word_addr"
+    )
+}
+
+/// Per local of `body`, whether some payload read anywhere in it lends out
+/// of that local (see [`lends_payload`]). Moving such a local's release up to
+/// its last direct mention would free the children a borrower still reads.
+#[must_use]
+pub(crate) fn payload_lenders(body: &Body) -> Vec<bool> {
+    let mut lenders = vec![false; body.locals.len()];
+    let mut mark = |args: &[Operand]| {
+        if let Some(Operand::Copy(p)) = args.first()
+            && p.projection.is_empty()
+            && let Some(slot) = lenders.get_mut(p.local.0 as usize)
+        {
+            *slot = true;
+        }
+    };
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if let StatementKind::Assign {
+                rvalue: Rvalue::CallIntrinsic { name, args },
+                ..
+            } = &stmt.kind
+                && lends_payload(name)
+            {
+                mark(args);
+            }
+        }
+        if let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            args,
+            ..
+        } = &block.terminator
+            && lends_payload(name)
+        {
+            mark(args);
+        }
+    }
+    lenders
+}
+
 /// Whether a `gos_enum_load` carries the view marker
 /// `borrow_lent_payload_reads` adds.
 #[must_use]

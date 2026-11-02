@@ -350,6 +350,7 @@ pub(crate) fn release_mapped_payloads(body: &mut Body, tcx: &gossamer_types::TyC
             counted_answer_dest[destination.local.0 as usize] = true;
         }
     }
+    let borrowed = borrowed_carriers(body);
     let mut sites: Vec<(usize, Local, i64, usize)> = Vec::new();
     let mut passthrough_shares: Vec<(usize, Local, i64)> = Vec::new();
     for (block_index, block) in body.blocks.iter().enumerate() {
@@ -395,6 +396,11 @@ pub(crate) fn release_mapped_payloads(body: &mut Body, tcx: &gossamer_types::TyC
         // An option holder's walk gives back its payloads itself.
         let recv_ty = body.locals[recv.local.0 as usize].ty;
         if holds_counted_blob_arm(tcx, recv_ty) || counted_answer_dest[recv.local.0 as usize] {
+            continue;
+        }
+        // A carrier viewing a container's element (`xs.first()`) holds no
+        // share of its payload: the container gives that back.
+        if borrowed[recv.local.0 as usize] {
             continue;
         }
         // A receiver read again after the call still holds its payloads for

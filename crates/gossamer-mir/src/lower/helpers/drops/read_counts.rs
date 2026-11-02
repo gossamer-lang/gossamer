@@ -816,9 +816,10 @@ pub(crate) fn hoist_loop_carried_releases(body: &mut Body, tcx: &gossamer_types:
     }
     // A borrowed local is pinned: the reference names its slot and outlives
     // the statement that took it, so the local's last direct mention is not
-    // where its value stops being read. The same rule
-    // [`insert_early_releases`] applies for the same reason.
-    let mut borrowed: Vec<bool> = vec![false; n_locals];
+    // where its value stops being read. A local a payload read lends out of
+    // is pinned too: the borrower reads the local's children after that
+    // last mention. [`insert_early_releases`] applies the same rules.
+    let mut borrowed: Vec<bool> = payload_lenders(body);
     for block in &body.blocks {
         for stmt in &block.stmts {
             if let StatementKind::Assign {

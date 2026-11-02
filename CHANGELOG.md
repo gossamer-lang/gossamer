@@ -5,6 +5,9 @@
 - Two modules may each declare an enum of the same name with a variant of the same name: a unit `Event::Pressed` in one no longer turns into the constructor closure of a tuple `Event::Pressed(String)` in the other, which failed with a type mismatch naming `fn(_) -> Event`.
 - `char::from_u32(n)?` checks: the call is typed as the `Option<char>` it answers, where `?` on it failed with GT0045.
 - `gos lint` reads a hex literal whose last digits are letters by its value: `n - 0xffbe` is no longer reported as an arithmetic identity (GL0023), and `n * 0x1e` no longer as multiplying by one.
+- A nested pattern on a recursive enum inside a loop (`if let V::Variant(V::Entry(_, _)) = v`) matches on every tier. The value was released at its last direct mention while the pattern still read its payload, so the match failed and the freed node was written to.
+- `xs.first().map(f)` and `xs.first().and_then(f)` leave the element with the container. The payload was released after the call as if the `Option` owned it, freeing the element the container still held.
+- An `if` or `match` used as a statement discards a value its branch computes (`if c { f()? }`) without corrupting the heap. The value was stored into the unit result and released as a reference-counted object, which a `Vec` is not.
 
 ## 0.75.14 - Const generic structs laid out per length, faster arenas
 

@@ -2000,3 +2000,121 @@ fn scalar_bounds_reject_non_numeric_operands() {
         "names what it expected: {stderr}"
     );
 }
+
+/// Runs a project of `files` (`src/<name>`, `main.gos` the entry) on the VM
+/// and as debug and release native builds, and checks each tier exits
+/// cleanly with `expected` on stdout.
+fn assert_all_tiers(tag: &str, files: &[(&str, &str)], expected: &str) {
+    let dir = fresh_dir(tag);
+    let project = dir.join("project");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("project.toml"),
+        format!("[project]\nid = \"example.com/{tag}\"\nversion = \"0.1.0\"\nentry = \"src/main.gos\"\n"),
+    )
+    .unwrap();
+    for (name, source) in files {
+        fs::write(project.join("src").join(name), source).unwrap();
+    }
+    let scratch = dir.join("bin");
+    fs::create_dir_all(&scratch).unwrap();
+    let release_scratch = dir.join("bin-release");
+    fs::create_dir_all(&release_scratch).unwrap();
+    let vm = run_vm(&project);
+    let native = run_native(&build_native(&project, &scratch).expect("native build"));
+    let release =
+        run_native(&build_native_release(&project, &release_scratch).expect("release build"));
+    let _ = fs::remove_dir_all(&dir);
+    for (tier, out) in [("vm", &vm), ("native", &native), ("release native", &release)] {
+        assert_eq!(out.2, Some(0), "{tier} stderr: {}", out.1);
+        assert_eq!(out.0, expected, "{tier} output");
+    }
+}
+
+#[test]
+fn a_nested_enum_pattern_in_a_loop_reads_a_live_value() {
+    let enum_module = r"
+pub enum V {
+    Str(String)
+    Path(String)
+    Array(String, Vec<V>)
+    Entry(V, V)
+    Variant(V)
+}
+";
+    let main = r#"
+use val::V
+
+fn main() {
+    for i in 0..3 {
+        let v = V::Variant(V::Entry(V::Str("k"), V::Str(f"x{i}")))
+        if let V::Variant(V::Entry(_, _)) = v { println("match") } else { println("nomatch") }
+    }
+}
+"#;
+    assert_all_tiers(
+        "loop_nested_pattern",
+        &[("val.gos", enum_module), ("main.gos", main)],
+        "match\nmatch\nmatch\n",
+    );
+}
+
+#[test]
+fn and_then_on_a_borrowed_element_leaves_it_with_the_container() {
+    let main = r#"
+enum Value {
+    Str(String)
+    Path(String)
+    Variant(Value)
+}
+
+fn text(v: Value) -> Option<String> {
+    match v {
+        Value::Str(s) | Value::Path(s) => Some(s)
+        Value::Variant(inner) => text(inner)
+    }
+}
+
+fn main() {
+    for i in 0..50 {
+        let mut r = #[]
+        r.push(Value::Path(f"/request/{i}"))
+        let t = r.first().and_then(|v| text(v))
+        let again = text(r[0]).unwrap_or("gone")
+        if t != Some(again) { println(f"{i}: {t} vs {again}") }
+    }
+    println("done")
+}
+"#;
+    assert_all_tiers("borrowed_and_then", &[("main.gos", main)], "done\n");
+}
+
+#[test]
+fn a_statement_if_discards_its_branch_value() {
+    let main = r#"
+use std::errors
+
+fn call(i: i64) -> Result<Vec<String>, errors::Error> {
+    let mut out = #[]
+    out.push(f"v{i}")
+    if i < 0 { return Err(errors::new("neg")) }
+    Ok(out)
+}
+
+fn close(i: i64) -> Result<(), errors::Error> {
+    if i >= 0 { call(i)? }
+    match i % 2 {
+        0 => call(i)?
+        _ => call(i + 1)?
+    }
+    Ok(())
+}
+
+fn main() -> Result<(), errors::Error> {
+    for i in 0..20 { close(i)? }
+    println("done")
+    Ok(())
+}
+"#;
+    assert_all_tiers("discarded_branch_value", &[("main.gos", main)], "done\n");
+}
