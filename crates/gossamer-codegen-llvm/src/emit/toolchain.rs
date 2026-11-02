@@ -176,12 +176,7 @@ pub(super) fn invoke_llc_pipeline(
     // with `llvm-profdata merge -output=...`. The environment variables are
     // retained only for embedding callers that predate the CLI options.
     let selected_pgo = pgo_mode();
-    let pgo_collect = match selected_pgo.as_ref() {
-        Some(PgoMode::Collect(path)) => Some(path.display().to_string()),
-        Some(PgoMode::Profile(_)) => None,
-        None => std::env::var("GOS_PGO_COLLECT").ok(),
-    };
-    if let Some(profraw) = pgo_collect {
+    if let Some(profraw) = super::settings::pgo_collect_path() {
         opt_cmd
             .arg("--pgo-kind=pgo-instr-gen-pipeline")
             .arg(format!("--profile-file={profraw}"));

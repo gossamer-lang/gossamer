@@ -1811,6 +1811,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_set_new", () -> Ptr, Cranelift, "Allocate an empty HashSet."),
     rt!("gos_rt_set_ordered_by", (Ptr, I64, I64) -> Void, Both, "Make a set a BTreeSet ordered by its element type's own cmp at the given address, which takes its elements by address when the flag is set."),
     rt!("gos_rt_set_panic_hook", (Ptr) -> Void, Both, "Register a non-capturing fn(String) called with the rendered message instead of the default panic report; null clears."),
+    rt!("gos_rt_set_profile_writer", (Ptr, Ptr) -> Void, Llvm, "Record an instrumented (`--pgo-collect`) build's `__llvm_profile_write_file` and `__llvm_profile_reset_counters`, so every exit path writes the profile once."),
     rt!("gos_rt_set_range_ekey", (Ptr, Ptr, Ptr, Ptr, I64) -> Ptr, Both, "A new BTreeSet of the enum elements between two bounds (lo, descriptor, hi), under the same mode word."),
     rt!("gos_rt_set_range_i64", (Ptr, I64, I64, I64) -> Ptr, Both, "A new BTreeSet of the integer elements between two bounds; the mode word says which bounds are present and whether the upper one is inclusive."),
     rt!("gos_rt_set_range_skey", (Ptr, Ptr, Ptr, Ptr, I64) -> Ptr, Both, "A new BTreeSet of the struct elements between two bounds (lo, descriptor, hi), under the same mode word."),

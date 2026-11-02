@@ -88,6 +88,11 @@ enum MainReturn {
 /// runtime's table before anything else runs.
 fn render_main_entry(kind: MainReturn, init_bindings: bool) -> String {
     let mut out = String::new();
+    if settings::pgo_collect_path().is_some() {
+        writeln!(out, "declare i32 @__llvm_profile_write_file()").unwrap();
+        writeln!(out, "declare void @__llvm_profile_reset_counters()").unwrap();
+        writeln!(out, "declare void @gos_rt_set_profile_writer(ptr, ptr)").unwrap();
+    }
     if init_bindings {
         writeln!(out, "declare ptr @gos_binding_init(ptr)").unwrap();
         writeln!(out, "declare void @gos_rt_binding_init(ptr)").unwrap();
@@ -111,6 +116,16 @@ fn render_main_entry(kind: MainReturn, init_bindings: bool) -> String {
     writeln!(out, "entry:").unwrap();
     writeln!(out, "  %slot = alloca i128, align 16").unwrap();
     writeln!(out, "  call void @gos_rt_program_start()").unwrap();
+    // An instrumented build hands the runtime its profile writer, which every
+    // exit path calls, rather than leaving the write to the profile runtime's
+    // own `atexit` handler.
+    if settings::pgo_collect_path().is_some() {
+        writeln!(
+            out,
+            "  call void @gos_rt_set_profile_writer(ptr @__llvm_profile_write_file, ptr @__llvm_profile_reset_counters)"
+        )
+        .unwrap();
+    }
     if init_bindings {
         writeln!(
             out,

@@ -60,7 +60,8 @@ fn build(dir: &Path, flag: &str, value: &Path) -> std::process::Output {
         .expect("spawn gos build")
 }
 
-fn run_binary(dir: &Path) -> String {
+/// Runs the built binary, answering its stdout and stderr.
+fn run_binary(dir: &Path) -> (String, String) {
     let out = Command::new(common::native_executable(
         &dir.join("target/release"),
         "main",
@@ -69,7 +70,10 @@ fn run_binary(dir: &Path) -> String {
     .output()
     .expect("run the built binary");
     assert!(out.status.success(), "binary failed: {out:?}");
-    String::from_utf8(out.stdout).expect("utf-8 stdout")
+    (
+        String::from_utf8(out.stdout).expect("utf-8 stdout"),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
 }
 
 #[test]
@@ -95,12 +99,17 @@ fn collected_profile_lands_at_the_requested_path_and_guides_a_rebuild() {
         return;
     }
     assert!(collect.status.success(), "collect build failed: {stderr}");
-    assert_eq!(run_binary(dir), "total 166833\n");
+    let (stdout, run_stderr) = run_binary(dir);
+    assert_eq!(stdout, "total 166833\n");
 
-    let bytes = std::fs::read(&raw).expect("the instrumented binary writes the requested profile");
+    let bytes = std::fs::read(&raw).unwrap_or_else(|e| {
+        panic!(
+            "the instrumented binary writes the requested profile: {e}; its stderr: {run_stderr}"
+        )
+    });
     assert!(
         bytes.starts_with(&RAW_PROFILE_MAGIC),
-        "not an LLVM raw profile: {:02x?}",
+        "not an LLVM raw profile: {:02x?}; the instrumented binary's stderr: {run_stderr}",
         &bytes[..bytes.len().min(8)]
     );
     assert!(
@@ -126,6 +135,6 @@ fn collected_profile_lands_at_the_requested_path_and_guides_a_rebuild() {
         "guided build failed: {}",
         String::from_utf8_lossy(&guided.stderr)
     );
-    assert_eq!(run_binary(dir), "total 166833\n");
+    assert_eq!(run_binary(dir).0, "total 166833\n");
     let _ = std::fs::remove_dir_all(dir);
 }
