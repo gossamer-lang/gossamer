@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.75.15 - Same-named enum variants across modules
+
+- Two modules may each declare an enum of the same name with a variant of the same name: a unit `Event::Pressed` in one no longer turns into the constructor closure of a tuple `Event::Pressed(String)` in the other, which failed with a type mismatch naming `fn(_) -> Event`.
+- `char::from_u32(n)?` checks: the call is typed as the `Option<char>` it answers, where `?` on it failed with GT0045.
+- `gos lint` reads a hex literal whose last digits are letters by its value: `n - 0xffbe` is no longer reported as an arithmetic identity (GL0023), and `n * 0x1e` no longer as multiplying by one.
+
 ## 0.75.14 - Const generic structs laid out per length, faster arenas
 
 - A const generic struct's `[T; N]` field is stored inline in the struct with each instantiation's own length, and every method and function that names the type is specialised for the value, where the array was a heap sequence shared by every length.
@@ -9,6 +15,9 @@
 - Reading an element of an array field (`self.items[i]`) reads it in place in compiled code, where it copied the whole array first.
 - Allocating a reference-counted value inside an `arena` costs about a third fewer instructions: the allocation path no longer zeroes a payload it copies in whole, zeroes small blocks without a library call, and keeps its tracing and accounting out of line. A program that builds a tree in an arena runs about 15% faster.
 - An x86-64 release build starts every function of the program on a 64-byte boundary, so a hot loop's speed no longer depends on how much unrelated code the linker placed before it; the same function could run 30% slower in one build than in another.
+- `brew install gossamer-lang/tap/gossamer` installs `gos` on macOS and Linux with LLVM 22, which its native builds always use, and `brew upgrade` moves it to each new release.
+- A `--pgo-collect` build writes its profile to the path given when the program exits. On Linux it wrote no profile at all, and on other systems it wrote `default.profraw` in the working directory instead.
+- An instrumented Linux build links against glibc, which the compiler-rt profile runtime is built for, and uses the profile runtime of the LLVM that `gos` builds with (LLVM 21 and 22 included), instead of the first LLVM 17-20 it found.
 
 ## 0.75.13 - Windowed Windows programs
 

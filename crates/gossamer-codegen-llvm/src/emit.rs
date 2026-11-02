@@ -42,8 +42,8 @@ use thunks::{
 mod stable_symbols;
 mod toolchain;
 pub use toolchain::{
-    LlvmToolStatus, MINIMUM_LLVM_MAJOR, PREFERRED_LLVM_MAJOR, debug_toolchain_problem,
-    llvm_toolchain_status,
+    LlvmToolStatus, MINIMUM_LLVM_MAJOR, PREFERRED_LLVM_MAJOR, clang_runtime_dirs,
+    debug_toolchain_problem, llvm_toolchain_status,
 };
 use toolchain::{
     find_llc, find_opt, host_triple, integrated_clang_path, invoke_llc_pipeline, llvm_pass_options,

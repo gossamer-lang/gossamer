@@ -323,6 +323,18 @@ fn the_file_constructors_answer_a_result() {
     assert!(d.is_empty(), "{d:?}");
 }
 
+#[test]
+fn char_from_u32_answers_an_option() {
+    let d = diagnostics_for(
+        "fn name(n: u32) -> Option<String> { Some(char::from_u32(n)?.to_string()) }\n\
+         fn main() { let c: Option<char> = char::from_u32(65)\n\
+         println(f\"{name(116)} {c}\") }\n",
+    );
+    assert!(d.is_empty(), "{d:?}");
+    let d = diagnostics_for("fn main() { let c: char = char::from_u32(65) }\n");
+    assert!(!d.is_empty(), "a bare char binding accepted an Option");
+}
+
 /// Each `std::sync` handle answers its own method table: a read typed
 /// against the wrong annotation, an argument of the wrong type, and a name
 /// the handle lacks are all reported where they are written.

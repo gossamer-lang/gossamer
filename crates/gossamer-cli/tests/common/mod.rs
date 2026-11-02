@@ -282,7 +282,7 @@ fn gos_bin() -> std::path::PathBuf {
 }
 
 /// A fresh directory holding `src` as `main.gos`, answering the file.
-fn source_file(src: &str) -> std::path::PathBuf {
+pub fn source_file(src: &str) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!(

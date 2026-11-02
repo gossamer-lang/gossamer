@@ -23,10 +23,10 @@ use gossamer_ast::visitor::{VisitorMut, walk_expr_mut};
 use std::collections::HashMap;
 
 use gossamer_ast::{
-    BinaryOp, ClosureParam, Expr, ExprKind, Ident, Item, ItemKind, ModBody, Mutability,
+    BinaryOp, ClosureParam, Expr, ExprKind, Ident, Item, ItemKind, ModBody, Mutability, NodeId,
     NodeIdGenerator, PathExpr, Pattern, PatternKind, SourceFile, StructBody,
 };
-use gossamer_resolve::{Resolution, Resolutions};
+use gossamer_resolve::{DefKind, Resolution, Resolutions};
 
 /// Prefix of the parameter names this pass introduces. Not writable as
 /// a source identifier the author could collide with.
@@ -40,7 +40,7 @@ pub fn expand_std_fn_values(sf: &mut SourceFile, resolutions: &mut Resolutions) 
         let _ = ids.next();
     }
     let mut tuple_variants = HashMap::new();
-    collect_tuple_variants(&sf.items, &mut tuple_variants);
+    collect_tuple_variants(&sf.items, resolutions, &mut tuple_variants);
     let mut pass = Expand {
         ids: &mut ids,
         resolutions,
@@ -57,31 +57,40 @@ struct Expand<'a> {
     ids: &'a mut NodeIdGenerator,
     resolutions: &'a mut Resolutions,
     /// Payload arity of every tuple variant this unit declares, keyed by
-    /// `(enum, variant)`.
+    /// the enum's declared path (`ui::Event`) and the variant's name, so
+    /// same-named enums in different modules stay apart.
     tuple_variants: HashMap<(String, String), usize>,
     rewritten: usize,
 }
 
 /// Records the payload arity of each tuple variant `items` declare, at any
 /// module depth.
-fn collect_tuple_variants(items: &[Item], out: &mut HashMap<(String, String), usize>) {
+fn collect_tuple_variants(
+    items: &[Item],
+    resolutions: &Resolutions,
+    out: &mut HashMap<(String, String), usize>,
+) {
     for item in items {
         match &item.kind {
             ItemKind::Enum(decl) => {
+                let Some(owner) = resolutions
+                    .definition_of(item.id)
+                    .and_then(|def| resolutions.path_of(def))
+                    .map(|path| path.join("::"))
+                else {
+                    continue;
+                };
                 for variant in &decl.variants {
                     if let StructBody::Tuple(fields) = &variant.body
                         && !fields.is_empty()
                     {
-                        out.insert(
-                            (decl.name.name.clone(), variant.name.name.clone()),
-                            fields.len(),
-                        );
+                        out.insert((owner.clone(), variant.name.name.clone()), fields.len());
                     }
                 }
             }
             ItemKind::Mod(decl) => {
                 if let ModBody::Inline(inner) = &decl.body {
-                    collect_tuple_variants(inner, out);
+                    collect_tuple_variants(inner, resolutions, out);
                 }
             }
             _ => {}
@@ -123,13 +132,43 @@ impl Expand<'_> {
 
     /// Payload arity of the tuple variant `path` names as `Enum::Variant`,
     /// which is a function of its payload wherever a callable is taken.
-    fn tuple_variant_arity(&self, path: &PathExpr) -> Option<usize> {
-        let [.., enum_name, variant] = path.segments.as_slice() else {
+    fn tuple_variant_arity(&self, node: NodeId, path: &PathExpr) -> Option<usize> {
+        let [.., _, variant] = path.segments.as_slice() else {
             return None;
         };
+        let owner = self.enum_identity(node, path)?;
         self.tuple_variants
-            .get(&(enum_name.name.name.clone(), variant.name.name.clone()))
+            .get(&(owner, variant.name.name.clone()))
             .copied()
+    }
+
+    /// Declared path of the enum `path` names a variant of, from what the
+    /// resolver bound its head to: the enum itself, a variant imported
+    /// bare, or a module the remaining segments descend through.
+    fn enum_identity(&self, node: NodeId, path: &PathExpr) -> Option<String> {
+        let (def, kind) = match self.resolutions.get(node)? {
+            Resolution::Def { def, kind } => (def, kind),
+            Resolution::Import { .. } => {
+                let def = self.resolutions.import_def(node)?;
+                (def, self.resolutions.kind_of(def)?)
+            }
+            _ => return None,
+        };
+        let declared = self.resolutions.path_of(def)?;
+        match kind {
+            DefKind::Enum => Some(declared.join("::")),
+            DefKind::Variant => declared.split_last().map(|(_, owner)| owner.join("::")),
+            DefKind::Mod => {
+                let inner = &path.segments[1..path.segments.len() - 1];
+                let segments: Vec<String> = declared
+                    .iter()
+                    .cloned()
+                    .chain(inner.iter().map(|s| s.name.name.clone()))
+                    .collect();
+                Some(segments.join("::"))
+            }
+            _ => None,
+        }
     }
 
     /// Whether `expr` names something this compilation unit declares,
@@ -217,7 +256,7 @@ impl VisitorMut for Expand<'_> {
         }
         walk_expr_mut(self, expr);
         let variant_arity = match &expr.kind {
-            ExprKind::Path(path) => self.tuple_variant_arity(path),
+            ExprKind::Path(path) => self.tuple_variant_arity(expr.id, path),
             _ => None,
         };
         if variant_arity.is_none() && self.resolves_locally(expr) {
@@ -268,6 +307,22 @@ mod tests {
     fn a_tuple_variant_in_value_position_becomes_a_closure() {
         let (_sf, count) = expand(
             "enum Shape { Circle(i64) }\nfn main() { let v = #[1].map(Shape::Circle)\n let c = Shape::Circle(2) }",
+        );
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn a_unit_variant_is_not_mistaken_for_a_same_named_enums_tuple_variant() {
+        let (_sf, count) = expand(
+            "mod a { pub enum Event { Pressed(String) } }\nmod b { pub enum Event { Pressed }\nfn f() { let e = Event::Pressed } }",
+        );
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn a_module_qualified_tuple_variant_in_value_position_becomes_a_closure() {
+        let (_sf, count) = expand(
+            "mod ui { pub enum Event { Key(i64) } }\nfn main() { let v = #[1].map(ui::Event::Key) }",
         );
         assert_eq!(count, 1);
     }
