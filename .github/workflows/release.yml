@@ -516,20 +516,3 @@ jobs:
           push: true
           provenance: true
           sbom: true
-
-  homebrew:
-    name: Update the Homebrew tap
-    needs: publish
-    runs-on: ubuntu-latest
-    if: github.repository == 'gossamer-lang/gossamer' && startsWith(github.ref, 'refs/tags/v')
-    permissions: {}
-    steps:
-      # The tap's Bump workflow sets the gossamer formula to this release and checks it.
-      - name: Send the release to gossamer-lang/homebrew-tap
-        env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: |
-          gh api repos/gossamer-lang/homebrew-tap/dispatches \
-            -f event_type=release \
-            -f "client_payload[package]=gossamer" \
-            -f "client_payload[version]=${GITHUB_REF_NAME#v}"
