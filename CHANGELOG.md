@@ -17,7 +17,6 @@
 - A nested pattern on a recursive enum inside a loop (`if let V::Variant(V::Entry(_, _)) = v`) matches on every tier. The value was released at its last direct mention while the pattern still read its payload, so the match failed and the freed node was written to.
 - `xs.first().map(f)` and `xs.first().and_then(f)` leave the element with the container. The payload was released after the call as if the `Option` owned it, freeing the element the container still held.
 - An `if` or `match` used as a statement discards a value its branch computes (`if c { f()? }`) without corrupting the heap. The value was stored into the unit result and released as a reference-counted object, which a `Vec` is not.
-- `brew install gossamer-lang/tap/gossamer` installs `gos` on macOS and Linux with LLVM 22, which its native builds always use, and `brew upgrade` moves it to each new release.
 - A `--pgo-collect` build writes its profile to the path given when the program exits. On Linux it wrote no profile at all, and on other systems it wrote `default.profraw` in the working directory instead.
 - An instrumented Linux build links against glibc, which the compiler-rt profile runtime is built for, and uses the profile runtime of the LLVM that `gos` builds with (LLVM 21 and 22 included), instead of the first LLVM 17-20 it found.
 
