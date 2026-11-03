@@ -233,7 +233,8 @@ fn link_inputs(
         .collect();
     let bindings_target = lt.is_cross.then_some(lt.triple.as_str());
     let bindings = build_static_bindings_lib(file, release, bindings_target, libraries)
-        .map_err(|err| NativeBuildError::LinkerMissing(format!("rust-bindings: {err}")))?;
+        .map_err(|err| NativeBuildError::LinkerMissing(format!("rust-bindings: {err}")))?
+        .map(|built| built.archive);
     if host && bindings.is_some() {
         return Err(NativeBuildError::BackendFailed(
             "a host-runtime library cannot carry `[rust-bindings]`: their archive bundles \

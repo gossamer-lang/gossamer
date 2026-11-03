@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.75.17 - Rust bindings rebuilt from what Cargo read
+
+- `gos build` relinks a program when its Rust bindings' Cargo configuration changes (a `[patch]` in a `.cargo/config.toml` above the bindings cache, `[build] rustflags`, or a `CARGO_BUILD_`, `CARGO_PROFILE_` or `CARGO_TARGET_` variable), and when a file the bindings were built from outside their own crates changes, such as a crate a `[patch]` points at. It reported the old executable as unchanged, even when the bindings no longer built.
+
 ## 0.75.16 - JSON values compare by content
 
 - `==` on `json::Value` compares the documents on every tier, object entries in any order, also inside a `Vec`, an `Option`, a tuple, or a struct field. It compared handles: the VM answered `false` even for one value against itself, compiled code compared addresses, and a struct with a `json::Value` field failed with "`Holder::eq` is not bound" or faulted.
