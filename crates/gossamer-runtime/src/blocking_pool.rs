@@ -151,12 +151,16 @@ impl Pool {
         }
         state.threads += 1;
         drop(state);
+        // The handle is recorded under the lock the worker's `retire` takes,
+        // so a worker that finishes before `spawn` returns still finds it.
+        let mut threads = self.threads.lock();
         let spawned = std::thread::Builder::new()
             .name("gos-blocking".to_string())
             .spawn(move || self.worker());
         match spawned {
-            Ok(thread) => self.threads.lock().push(thread),
+            Ok(thread) => threads.push(thread),
             Err(e) => {
+                drop(threads);
                 let mut state = self.state.lock();
                 state.threads -= 1;
                 if state.threads == 0 {

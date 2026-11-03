@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.75.18 - Blocking threads leave no handles behind
+
+- A blocking-operation thread that finishes before the runtime records it leaves no thread handle behind. Each such handle stayed in the pool until the program exited.
+
 ## 0.75.17 - Rust bindings rebuilt from what Cargo read
 
 - `gos build` relinks a program when its Rust bindings' Cargo configuration changes (a `[patch]` in a `.cargo/config.toml` above the bindings cache, `[build] rustflags`, or a `CARGO_BUILD_`, `CARGO_PROFILE_` or `CARGO_TARGET_` variable), and when a file the bindings were built from outside their own crates changes, such as a crate a `[patch]` points at. It reported the old executable as unchanged, even when the bindings no longer built.
