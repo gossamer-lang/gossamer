@@ -8,6 +8,7 @@
 - A `Map` literal whose values are `json::Value` builds natively, where it stopped with an internal lowering error.
 - A `Vec`, `Option`, tuple, or struct holding a `json::Value` formats natively, where the build stopped with an internal lowering error; a struct shows a `json::Value` field as its JSON text on every tier.
 - `{}` of a parsed JSON string shows the string, `s`, on the VM as in compiled code and as a string read out of a document always did, where the VM showed `"s"`.
+- A Rust binding is built again when the Rust compiler or `RUSTFLAGS` changes, instead of linking the library the previous compiler built.
 
 ## 0.75.15 - Same-named enum variants across modules
 

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::SystemTime;
 
+use gossamer_binding_abi::{SIGNATURE_HASH_SEED, signature_hash};
 use gossamer_pkg::{GitRef, Manifest, RustBindingSpec};
 use thiserror::Error;
 
@@ -316,7 +317,8 @@ strip = false
         let stamp = self
             .workdir
             .join(format!("stamp-{}.json", self.profile.dir()));
-        if self.is_fresh(&archive, &stamp)?
+        let compiler = compiler_identity(&self.workdir);
+        if self.is_fresh(&archive, &stamp, &compiler)?
             && let Ok(recorded) = fs::read_to_string(&native_libs_path)
             && let Ok(searched) = fs::read_to_string(&search_path)
         {
@@ -351,6 +353,7 @@ strip = false
             &self.fingerprint_hex,
             self.profile,
             &self.stamp_kind(),
+            &compiler,
         )?;
         if let Some(root) = self.workdir.parent() {
             let _ = crate::cache_maintenance::prune_binding_root(
@@ -374,11 +377,19 @@ strip = false
         }
     }
 
-    fn is_fresh(&self, artifact: &Path, stamp: &Path) -> Result<bool, BindingBuildError> {
+    fn is_fresh(
+        &self,
+        artifact: &Path,
+        stamp: &Path,
+        compiler: &str,
+    ) -> Result<bool, BindingBuildError> {
         let Ok(stamp_text) = fs::read_to_string(stamp) else {
             return Ok(false);
         };
-        if !stamp_text.contains(&self.fingerprint_hex) || !stamp_text.contains(&self.stamp_kind()) {
+        if !stamp_text.contains(&self.fingerprint_hex)
+            || !stamp_text.contains(&self.stamp_kind())
+            || !stamp_text.contains(&format!("\"compiler\":\"{compiler}\""))
+        {
             return Ok(false);
         }
         let Ok(artifact_meta) = artifact.metadata() else {
@@ -845,16 +856,41 @@ pub(crate) fn write_if_different(path: &Path, contents: &str) -> io::Result<()> 
     Ok(())
 }
 
-fn write_stamp(path: &Path, fingerprint_hex: &str, profile: Profile, kind: &str) -> io::Result<()> {
+fn write_stamp(
+    path: &Path,
+    fingerprint_hex: &str,
+    profile: Profile,
+    kind: &str,
+    compiler: &str,
+) -> io::Result<()> {
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let body = format!(
-        "{{\"fingerprint\":\"{fingerprint_hex}\",\"built_at\":{now},\"profile\":\"{}\",\"kind\":\"{kind}\"}}",
+        "{{\"fingerprint\":\"{fingerprint_hex}\",\"built_at\":{now},\"profile\":\"{}\",\"kind\":\"{kind}\",\"compiler\":\"{compiler}\"}}",
         profile.dir()
     );
     write_if_different(path, &body)
+}
+
+/// A digest of what decides the code cargo writes besides the sources: the
+/// rustc that runs from `dir` (which rustup resolves there) and the Rust flags
+/// in the environment. An archive built under another answers stale.
+fn compiler_identity(dir: &Path) -> String {
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let mut command = Command::new(rustc);
+    command.arg("-vV");
+    if dir.is_dir() {
+        command.current_dir(dir);
+    }
+    let version = command.output().map(|out| out.stdout).unwrap_or_default();
+    let mut hash = signature_hash(SIGNATURE_HASH_SEED, &version);
+    for name in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
+        let value = std::env::var(name).unwrap_or_default();
+        hash = signature_hash(hash, format!("{name}={value}").as_bytes());
+    }
+    format!("{hash:016x}")
 }
 
 /// One `cargo` build of a generated project.

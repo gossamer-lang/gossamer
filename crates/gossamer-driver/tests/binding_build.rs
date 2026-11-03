@@ -133,6 +133,34 @@ fn two_projects_naming_one_binding_share_its_library() {
 }
 
 #[test]
+fn staticlib_built_by_another_compiler_is_built_again() {
+    let cache = fresh_dir();
+    let manifest_dir = fresh_dir();
+    let manifest = manifest_with_binding(&manifest_dir, &fixture_path());
+    let staticlib =
+        StaticBindingsLib::from_manifest_in(&manifest, &manifest_dir, Profile::Debug, &cache)
+            .unwrap()
+            .expect("staticlib");
+    staticlib.ensure_built().expect("first build");
+    let stamp = staticlib.workdir.join("stamp-debug.json");
+    let built = fs::read_to_string(&stamp).unwrap();
+    let start = built
+        .find("\"compiler\":\"")
+        .expect("the stamp names its compiler")
+        + 12;
+    let end = start + built[start..].find('"').unwrap();
+    fs::write(
+        &stamp,
+        format!("{}0000000000000000{}", &built[..start], &built[end..]),
+    )
+    .unwrap();
+
+    staticlib.ensure_built().expect("second build");
+    let again = fs::read_to_string(&stamp).unwrap();
+    assert_eq!(again[start..end], built[start..end], "{again}");
+}
+
+#[test]
 fn staticlib_builds_and_exports_the_binding_init() {
     let cache = fresh_dir();
     let manifest_dir = fresh_dir();
