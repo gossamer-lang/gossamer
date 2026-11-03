@@ -1391,6 +1391,30 @@ impl<'a> Lowerer<'a> {
                     .unwrap();
                 }
             }
+            // The array releases the JSON handles it holds, so the map is
+            // handed a handle of its own onto the same document.
+            let val = if matches!(
+                self.tcx.kind(self.unwrap_ref(*val_ty)),
+                Some(TyKind::JsonValue)
+            ) {
+                declare_rt(&mut self.runtime_refs, "gos_rt_json_clone");
+                let handle = self.fresh();
+                writeln!(self.out, "  {handle} = inttoptr i64 {} to ptr", val.value).unwrap();
+                let copy = self.fresh();
+                writeln!(
+                    self.out,
+                    "  {copy} = call ptr @gos_rt_json_clone(ptr {handle})"
+                )
+                .unwrap();
+                let word = self.fresh();
+                writeln!(self.out, "  {word} = ptrtoint ptr {copy} to i64").unwrap();
+                LoweredMapSlot {
+                    llvm_ty: "i64",
+                    value: word,
+                }
+            } else {
+                val
+            };
             declare_rt(&mut self.runtime_refs, helper);
             writeln!(
                 self.out,
@@ -1443,9 +1467,11 @@ impl<'a> Lowerer<'a> {
             {
                 Some(2)
             }
-            // Any other container rides as the handle word its
-            // constructor answered, the way `insert` stores one.
-            Some(TyKind::Vec(_) | TyKind::Slice(_) | TyKind::HashMap { .. }) => Some(0),
+            // Any other container, and a JSON value, rides as the handle word
+            // its constructor answered, the way `insert` stores one.
+            Some(
+                TyKind::Vec(_) | TyKind::Slice(_) | TyKind::HashMap { .. } | TyKind::JsonValue,
+            ) => Some(0),
             // An enum whose variants carry no payload is its variant index,
             // one word keyed and stored as an integer is.
             Some(TyKind::Adt { .. }) if self.is_unit_only_enum(ty) => Some(0),
@@ -1492,7 +1518,9 @@ impl<'a> Lowerer<'a> {
                     value,
                 })
             }
-            Some(TyKind::Vec(_) | TyKind::Slice(_) | TyKind::HashMap { .. }) => {
+            Some(
+                TyKind::Vec(_) | TyKind::Slice(_) | TyKind::HashMap { .. } | TyKind::JsonValue,
+            ) => {
                 let value = self.fresh();
                 writeln!(self.out, "  {value} = load i64, ptr {slot}").unwrap();
                 Ok(LoweredMapSlot {

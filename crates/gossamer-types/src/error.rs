@@ -1152,6 +1152,16 @@ pub enum TypeError {
         /// The struct name the binding's signature carries.
         name: String,
     },
+    /// An ordering comparison or an ordering method named a value whose type
+    /// has no order: a `Map`, a hash `Set`, a `json::Value`, or an aggregate
+    /// holding one.
+    #[error("`{ty}` has no order, so `{op}` cannot order it")]
+    Unordered {
+        /// The operator or method, as written.
+        op: String,
+        /// The operand or element type.
+        ty: String,
+    },
 }
 
 /// The cast that brings two integer operands to one type, for
@@ -1295,6 +1305,7 @@ impl TypeError {
             Self::MutableArgumentRequiresReference { .. } => "mutable-argument-requires-reference",
             Self::MutReferenceToValueParameter { .. } => "mut-reference-to-value-parameter",
             Self::BindingStructUndeclared { .. } => "binding-struct-undeclared",
+            Self::Unordered { .. } => "unordered",
         }
     }
 
@@ -1424,6 +1435,7 @@ impl TypeError {
             Self::MutableArgumentRequiresReference { .. } => "GT0046",
             Self::MutReferenceToValueParameter { .. } => "GT0121",
             Self::BindingStructUndeclared { .. } => "GT0122",
+            Self::Unordered { .. } => "GT0123",
         }
     }
 }
@@ -2558,6 +2570,15 @@ impl TypeDiagnostic {
                     ))
                     .with_note(
                         "a binding struct crosses field by field into the program's struct of the same name",
+                    );
+            }
+            TypeError::Unordered { .. } => {
+                out = out
+                    .with_help(
+                        "compare with `==` / `!=`, or order by a key the language orders, as `sort_by_key(|v| ..)` does",
+                    )
+                    .with_note(
+                        "a `Map`, a hash `Set`, and a `json::Value` hold no order between two of their values",
                     );
             }
         }

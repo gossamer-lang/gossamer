@@ -2333,6 +2333,27 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::FloatArray(xa), Value::FloatArray(xb)) => {
             xa.stride == xb.stride && xa.data == xb.data
         }
+        // A JSON value is equal to one holding the same document, object
+        // entries in any order, whichever handle carries it.
+        (Value::Json(xa), Value::Json(xb)) => xa.as_value() == xb.as_value(),
+        // A scalar read out of a JSON document travels as the plain value, so
+        // it is equal to a JSON value that holds the same scalar.
+        (
+            Value::Json(x),
+            other @ (Value::Bool(_)
+            | Value::Int(_)
+            | Value::Uint(_)
+            | Value::Float(_)
+            | Value::String(_)),
+        )
+        | (
+            other @ (Value::Bool(_)
+            | Value::Int(_)
+            | Value::Uint(_)
+            | Value::Float(_)
+            | Value::String(_)),
+            Value::Json(x),
+        ) => *x.as_value() == crate::builtins::gossamer_to_json_value(other),
         // A map is equal to a map holding the same entries, whatever order
         // they went in and whichever of the typed representations each side
         // happens to carry - the same contract Rust's `HashMap` has.

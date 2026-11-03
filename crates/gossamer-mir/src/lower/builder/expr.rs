@@ -1963,6 +1963,20 @@ impl<'a> Builder<'a> {
                     span,
                 ));
             }
+            // A JSON value compares by the document it holds, not its handle.
+            if self.is_json_value_ty(lhs.ty)
+                || self.is_json_value_ty(self.locals[lhs_local.0 as usize].ty)
+            {
+                return Some(self.lower_container_eq(
+                    op,
+                    "gos_rt_json_eq",
+                    vec![
+                        Operand::Copy(Place::local(lhs_local)),
+                        Operand::Copy(Place::local(rhs_local)),
+                    ],
+                    span,
+                ));
+            }
         }
         // When the HIR type is still an inference variable, ground the
         // result type from the operands so the LLVM backend uses the
@@ -2694,6 +2708,7 @@ impl<'a> Builder<'a> {
             TyKind::Char => Some(vec![4]),
             TyKind::String => Some(vec![5]),
             TyKind::Unit => Some(vec![gossamer_abi::TUPLE_TAG_UNIT]),
+            TyKind::JsonValue => Some(vec![gossamer_abi::DESC_JSON]),
             TyKind::Array {
                 elem,
                 len: ArrayLen::Concrete(n),
@@ -2998,6 +3013,17 @@ impl<'a> Builder<'a> {
             return self.lower_container_eq(
                 HirBinaryOp::Eq,
                 "gos_rt_dyn_eq",
+                vec![
+                    Operand::Copy(Place::local(lhs_local)),
+                    Operand::Copy(Place::local(rhs_local)),
+                ],
+                span,
+            );
+        }
+        if self.is_json_value_ty(ty) || self.is_json_value_ty(lhs_ty) {
+            return self.lower_container_eq(
+                HirBinaryOp::Eq,
+                "gos_rt_json_eq",
                 vec![
                     Operand::Copy(Place::local(lhs_local)),
                     Operand::Copy(Place::local(rhs_local)),

@@ -189,6 +189,21 @@ unsafe fn desc_slot_span_walk(tags: DescStream, cursor: &mut usize) -> usize {
 }
 
 /// Advances `cursor` past one descriptor without rendering it.
+/// Appends the text of `rendered`, a fresh string a runtime renderer
+/// answered, then frees it. A null rendering appends nothing.
+///
+/// # Safety
+/// `rendered` is null or a fresh runtime string this call takes ownership of.
+unsafe fn push_fresh_text(out: &mut String, rendered: *mut c_char) {
+    if rendered.is_null() {
+        return;
+    }
+    // SAFETY: `rendered` is a non-null runtime string (this `unsafe fn`'s contract).
+    out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
+    // SAFETY: the bytes are copied, and `rendered` is owned here.
+    unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
+}
+
 unsafe fn skip_desc(tags: DescStream, cursor: &mut usize) {
     let tag = tags.byte(*cursor);
     *cursor += 1;
@@ -471,6 +486,21 @@ pub(crate) unsafe fn render_desc_storage(
             // SAFETY: `cursor` addresses the element descriptor that follows.
             unsafe { skip_desc(tags, cursor) };
         }
+        gossamer_abi::DESC_JSON => {
+            *cursor += 1;
+            // SAFETY: `slot` holds one word, the value's handle.
+            let word = unsafe { (slot as *const i64).read_unaligned() };
+            // SAFETY: a JSON word is null or a live `json::Value` handle, which the renderer
+            // accepts, and the renderer answers a fresh string.
+            unsafe {
+                push_fresh_text(
+                    out,
+                    crate::c_abi::json::gos_rt_json_debug(std::ptr::with_exposed_provenance(
+                        word as usize,
+                    )),
+                );
+            }
+        }
         gossamer_abi::DESC_ERROR => {
             *cursor += 1;
             // SAFETY: `slot` holds one word, the error's handle.
@@ -478,16 +508,15 @@ pub(crate) unsafe fn render_desc_storage(
             if word == 0 {
                 return;
             }
-            // SAFETY: a non-zero error word is a live error cell.
-            let rendered = unsafe {
-                crate::c_abi::gos_rt_error_display(std::ptr::with_exposed_provenance(word as usize))
-            };
-            if !rendered.is_null() {
-                // SAFETY: `rendered` is the fresh non-null string the display answered.
-                out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
-                // The formatter answered a fresh rendering whose bytes are now copied.
-                // SAFETY: `rendered` is the fresh string the display answered, owned here.
-                unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
+            // SAFETY: a non-zero error word is a live error cell, and the display answers a
+            // fresh string.
+            unsafe {
+                push_fresh_text(
+                    out,
+                    crate::c_abi::gos_rt_error_display(std::ptr::with_exposed_provenance(
+                        word as usize,
+                    )),
+                );
             }
         }
         gossamer_abi::DESC_RESULT | gossamer_abi::DESC_OPTION => {

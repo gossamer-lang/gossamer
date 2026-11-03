@@ -3,8 +3,24 @@ fn builtin_json_parse(args: &[Value]) -> RuntimeResult<Value> {
         return Ok(err_variant("json::parse: argument must be a string"));
     };
     match json_std::parse(source) {
-        Ok(value) => Ok(ok_variant(Value::Json(Arc::new(JsonInner::new(value))))),
+        Ok(value) => Ok(ok_variant(json_root_to_lazy_value(value))),
         Err(e) => Ok(err_variant(format!("{e}"))),
+    }
+}
+
+/// A parsed document as the VM carries it: a scalar as the plain value, the
+/// way a scalar read out of a document travels, and anything else as a JSON
+/// handle.
+fn json_root_to_lazy_value(value: json_std::Value) -> Value {
+    match value {
+        json_std::Value::Bool(b) => Value::Bool(b),
+        json_std::Value::Int(n) => Value::Int(n),
+        json_std::Value::Uint(n) => Value::Uint(n),
+        json_std::Value::Number(n) => Value::Float(n),
+        json_std::Value::String(text) => Value::String(SmolStr::from(text)),
+        json_std::Value::Null | json_std::Value::Array(_) | json_std::Value::Object(_) => {
+            Value::Json(Arc::new(JsonInner::new(value)))
+        }
     }
 }
 

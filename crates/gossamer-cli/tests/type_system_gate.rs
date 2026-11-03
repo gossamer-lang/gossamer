@@ -204,6 +204,58 @@ fn a_written_cmp_reaches_the_sites_that_can_read_it() {
     );
 }
 
+/// A `Map`, a hash `Set`, and a `json::Value` hold no order between two of
+/// their values, so ordering one is rejected while comparing for equality is
+/// accepted.
+#[test]
+fn a_value_with_no_order_is_never_ordered() {
+    gate(
+        "unordered values",
+        &[
+            (
+                "two maps have no order",
+                "fn main() { let a = {\"a\": 1}\n let b = {\"b\": 2}\n println(\"{}\", a < b) }\n",
+                Expect::Reject("GT0123"),
+            ),
+            (
+                "two sets have no order",
+                "fn main() { let a = #{1}\n let b = #{2}\n println(\"{}\", a >= b) }\n",
+                Expect::Reject("GT0123"),
+            ),
+            (
+                "two JSON values have no order",
+                "use std::encoding::json\nfn main() { let a = json::parse(\"1\").unwrap()\n let b = json::parse(\"2\").unwrap()\n println(\"{}\", a < b) }\n",
+                Expect::Reject("GT0123"),
+            ),
+            (
+                "a sequence of maps cannot be sorted",
+                "fn main() { let mut v = #[{\"b\": 2}, {\"a\": 1}]\n v.sort()\n println(\"{}\", v.len()) }\n",
+                Expect::Reject("GT0123"),
+            ),
+            (
+                "the least of a sequence of JSON values is not defined",
+                "use std::encoding::json\nfn main() { let v = #[json::parse(\"2\").unwrap()]\n println(\"{}\", v.min()) }\n",
+                Expect::Reject("GT0123"),
+            ),
+            (
+                "an option of a JSON value has no order",
+                "use std::encoding::json\nfn main() { let a = json::parse(\"1\").ok()\n println(\"{}\", a < a) }\n",
+                Expect::Reject("GT0123"),
+            ),
+            (
+                "maps and JSON values still compare for equality",
+                "use std::encoding::json\nfn main() { let a = json::parse(\"1\").unwrap()\n println(\"{} {}\", a == a, {\"a\": 1} != {\"a\": 2}) }\n",
+                Expect::Accept,
+            ),
+            (
+                "a sorted map's keys still order",
+                "fn main() { let mut v = #[(2, \"b\"), (1, \"a\")]\n v.sort()\n println(\"{}\", v[0] < v[1]) }\n",
+                Expect::Accept,
+            ),
+        ],
+    );
+}
+
 /// A `spawn` attaches its child to the cohort the goroutine is inside at that
 /// moment. A function is not a cohort, so one that spawns without opening a
 /// `cohort { }` hands its children to whatever cohort its caller happens to be

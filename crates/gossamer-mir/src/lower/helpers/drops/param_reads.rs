@@ -358,14 +358,16 @@ pub(super) fn stores_table_value_copy(
     table_value && matches!(args.last(), Some(Operand::Copy(p)) if p.local == local)
 }
 
-/// Gives a container stored into another container a value of its own.
+/// Gives a container or a `json::Value` stored into a container a value of
+/// its own.
 ///
 /// `v.push(x)`, `xs[i] = x`, `m.insert(k, x)`, and their kin keep what they
 /// are handed, but a container a binding names is still the binding's: a
 /// write through the binding afterwards must not reach the stored element.
 /// A `Vec` store takes a share and a `Map`, `Set`, or deque store the handle
 /// itself, and neither survives an in-place write, so the stored value is a
-/// copy. A copy of a binding the store is the last use of is handed over
+/// copy. A `Vec` frees the JSON handles it holds, so a `json::Value` stored
+/// into one is a handle of its own onto the same document. A copy of a binding the store is the last use of is handed over
 /// instead by the uniqueness pass, so a value built and stored in one go pays
 /// nothing. A map that owns its table values copies them itself.
 pub(crate) fn copy_stored_containers(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
@@ -437,6 +439,13 @@ pub(crate) fn copy_stored_containers(body: &mut Body, tcx: &gossamer_types::TyCt
         let symbol = match tcx.kind_of(elem) {
             TyKind::Vec(_) | TyKind::Slice(_) => "gos_rt_vec_clone",
             TyKind::HashMap { .. } => "gos_rt_map_clone",
+            // A `Vec` frees the JSON handles it holds, so it keeps a handle
+            // of its own onto the shared document.
+            TyKind::JsonValue
+                if matches!(tcx.kind_of(container), TyKind::Vec(_) | TyKind::Slice(_)) =>
+            {
+                "gos_rt_json_clone"
+            }
             _ => match handle_container(tcx, elem) {
                 Some(HandleContainer::Set) => "gos_rt_set_clone",
                 Some(HandleContainer::Deque) => "gos_rt_deque_clone",

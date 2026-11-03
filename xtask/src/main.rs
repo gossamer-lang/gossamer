@@ -1443,6 +1443,12 @@ const DIAGNOSTIC_CATALOGUE: &[(&str, &str, &str, &str)] = &[
         "a binding answers an undeclared struct",
         "A `[rust-bindings]` item answers a `#[derive(GosStruct)]` struct, which crosses field by field into the program's struct of the same name. Declare that struct with the Rust struct's fields, in the same order and with the same types.",
     ),
+    (
+        "GT0123",
+        "Types",
+        "ordering a value that has no order",
+        "An ordering comparison (`<`, `<=`, `>`, `>=`) or an ordering method (`sort`, `binary_search`, `min`, `max`) named a value whose type has no order: a `Map`, a hash `Set`, a `json::Value`, or a sequence, tuple, or `Option` / `Result` holding one. Compare with `==` / `!=`, or order by a key the language orders (`sort_by_key`).",
+    ),
 ];
 
 fn render_diagnostics_page(entries: &[(&str, &str, &str, &str)]) -> String {

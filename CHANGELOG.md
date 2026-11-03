@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.75.16 - JSON values compare by content
+
+- `==` on `json::Value` compares the documents on every tier, object entries in any order, also inside a `Vec`, an `Option`, a tuple, or a struct field. It compared handles: the VM answered `false` even for one value against itself, compiled code compared addresses, and a struct with a `json::Value` field failed with "`Holder::eq` is not bound" or faulted.
+- Ordering a `Map`, a hash `Set`, or a `json::Value` with `<`, `<=`, `>`, `>=`, `sort`, `binary_search`, `min`, or `max` is `GT0123`. It type-checked, then failed on the VM with "comparison on unsupported kinds" and answered by address in compiled code.
+- A `json::Value` stored into more than one `Vec` (`#[a]` twice, `v.push(a)` twice) keeps working in compiled code, where each `Vec` freed the same handle and the program faulted.
+- A `Map` literal whose values are `json::Value` builds natively, where it stopped with an internal lowering error.
+- A `Vec`, `Option`, tuple, or struct holding a `json::Value` formats natively, where the build stopped with an internal lowering error; a struct shows a `json::Value` field as its JSON text on every tier.
+- `{}` of a parsed JSON string shows the string, `s`, on the VM as in compiled code and as a string read out of a document always did, where the VM showed `"s"`.
+
 ## 0.75.15 - Same-named enum variants across modules
 
 - Two modules may each declare an enum of the same name with a variant of the same name: a unit `Event::Pressed` in one no longer turns into the constructor closure of a tuple `Event::Pressed(String)` in the other, which failed with a type mismatch naming `fn(_) -> Event`.

@@ -1851,6 +1851,14 @@ pub const REGISTRY: &[(&str, &str)] = &[
             and with the same types.",
     ),
     (
+        "GT0123",
+        "An ordering comparison (`<`, `<=`, `>`, `>=`) or an ordering method\n\
+            (`sort`, `binary_search`, `min`, `max`) named a value whose type has no order: a\n\
+            `Map`, a hash `Set`, a `json::Value`, or a sequence, tuple, or\n\
+            `Option` / `Result` holding one. Compare with `==` / `!=`, or order\n\
+            by a key the language orders (`sort_by_key`).",
+    ),
+    (
         "GX0001",
         "An operation received a value of an incompatible type. The\n\
                      diagnostic names the type that was required and the type\n\

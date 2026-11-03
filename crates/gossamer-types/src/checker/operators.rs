@@ -594,7 +594,10 @@ impl TypeChecker<'_> {
                             _ => i64_ty,
                         }
                     }
-                    "min" | "max" => self.option_adt_ty(elem),
+                    "min" | "max" => {
+                        self.require_order(elem, name, span);
+                        self.option_adt_ty(elem)
+                    }
                     "take" | "skip" | "step_by" => {
                         self.unify(i64_ty, lead_tys[0], span);
                         self.iter_adapter_result_ty(elem, lazy_result)
@@ -1309,6 +1312,12 @@ impl TypeChecker<'_> {
         // lets the comparison flow unchanged.
         if !self.coerce_byte_literal_cmp(lhs, lhs_ty, rhs, rhs_ty) {
             self.unify_operands(op, lhs, lhs_ty, rhs, rhs_ty, span);
+        }
+        if matches!(
+            op,
+            BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+        ) {
+            self.require_order(lhs_ty, op.as_str(), span);
         }
         self.tcx.bool_ty()
     }

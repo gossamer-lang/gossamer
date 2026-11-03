@@ -218,6 +218,19 @@ pub(crate) unsafe fn json_value_ref<'a>(p: *const GosJson) -> Option<Cow<'a, ser
     unsafe { json_borrow(p) }.map(JsonRef::as_value)
 }
 
+/// Structural equality of two `json::Value` handles, a null handle reading
+/// as JSON `null`: objects compare by their entries in any order.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_eq(a: *const GosJson, b: *const GosJson) -> i64 {
+    ffi_entry!({
+        // SAFETY: `a` and `b` are this shim's arguments, live for the call or null (C-ABI
+        // contract), which `json_value_ref` accepts.
+        let (a, b) = unsafe { (json_value_ref(a), json_value_ref(b)) };
+        let null = serde_json::Value::Null;
+        i64::from(a.as_deref().unwrap_or(&null) == b.as_deref().unwrap_or(&null))
+    })
+}
+
 /// Resolves `p` and returns the GosJson struct itself so the
 /// caller can construct child handles via `Self::child`. Returns
 /// `None` only for null inputs.
