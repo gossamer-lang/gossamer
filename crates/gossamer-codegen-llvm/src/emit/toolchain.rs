@@ -1082,16 +1082,32 @@ fn resolve_executable(path: &str) -> Option<PathBuf> {
 }
 
 /// The `lib/clang/<major>/lib` directory of each LLVM installation the
-/// resolved `opt`, `llc`, and `clang` belong to, the tool's own major
-/// naming it. Symlinks are followed to the real installation, so a distro's
-/// `/usr/bin/opt-22` answers `/usr/lib/llvm-22/lib/clang/22/lib`.
+/// resolved `opt`, `llc`, and `clang` belong to, kept to the installations of
+/// `opt`'s own major: `opt` emits the instrumentation, and a compiler-rt
+/// runtime of another major rejects it and writes no profile. Symlinks are
+/// followed to the real installation, so a distro's `/usr/bin/opt-22` answers
+/// `/usr/lib/llvm-22/lib/clang/22/lib`.
 #[must_use]
 pub fn clang_runtime_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
-    for status in llvm_toolchain_status() {
+    let statuses = llvm_toolchain_status();
+    let opt_major = statuses
+        .iter()
+        .find(|s| s.tool == "opt")
+        .and_then(|s| match &s.resolved {
+            Ok((_, major)) => *major,
+            Err(_) => None,
+        });
+    let Some(opt_major) = opt_major else {
+        return dirs;
+    };
+    for status in statuses {
         let Ok((tool, Some(major))) = status.resolved else {
             continue;
         };
+        if major != opt_major {
+            continue;
+        }
         let Some(tool) = resolve_executable(&tool.to_string_lossy()) else {
             continue;
         };

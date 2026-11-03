@@ -126,9 +126,10 @@ pub extern "C" fn gos_rt_set_profile_writer(write: *const u8, reset: *const u8) 
     );
 }
 
-/// Writes the instrumented build's profile once, then zeroes its counters:
-/// the profile runtime appends every write after the first to the same file,
-/// so its own exit handler, where it also runs, adds nothing to the counts.
+/// Writes the instrumented build's profile once, then zeroes its counters
+/// after a successful write: the profile runtime appends every write after the
+/// first to the same file, so its own exit handler, where it also runs, adds
+/// nothing to the counts.
 fn write_profile() {
     let write = PROFILE_WRITER.swap(std::ptr::null_mut(), std::sync::atomic::Ordering::AcqRel);
     if write.is_null() {
@@ -141,8 +142,11 @@ fn write_profile() {
     unsafe {
         let write: unsafe extern "C" fn() -> i32 = std::mem::transmute(write);
         let reset: unsafe extern "C" fn() = std::mem::transmute(reset);
-        write();
-        reset();
+        // A failed write leaves the counters to the profile runtime's own
+        // retry at exit, which reports its error the same way.
+        if write() == 0 {
+            reset();
+        }
     }
 }
 
