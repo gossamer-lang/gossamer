@@ -830,7 +830,9 @@ fn build_artifact_key(
         }
     }
     // The executable links the bindings' Rust code, so an edit to any of
-    // their sources is a different build.
+    // their sources, or a change to what Cargo builds them with, is a
+    // different build. The files beyond the bindings' own trees that the
+    // archive was built from are recorded inputs of the stamp instead.
     let context = crate::paths::project_context_for_entry(file);
     if let Some(Ok(manifest)) = context.binding_manifest()
         && !manifest.rust_bindings.is_empty()
@@ -842,6 +844,10 @@ fn build_artifact_key(
         )
         .with_context(|| format!("reading the Rust bindings of {}", dir.display()))?;
         add("rust-bindings", fingerprint.as_bytes());
+        let identity =
+            gossamer_driver::binding_build::static_bindings_build_identity(&manifest, &dir)
+                .context("locating the Rust bindings cache")?;
+        add("rust-bindings-build", identity.as_bytes());
     }
     for path in [
         option_env!("GOSSAMER_RUNTIME_LIB_PATH").map(PathBuf::from),
@@ -1691,7 +1697,7 @@ fn extra_link_archives(
     lt: &LinkTarget,
     pgo: &PgoLinkConfig,
     libraries: &mut NativeLinks,
-) -> std::result::Result<Vec<PathBuf>, NativeBuildError> {
+) -> std::result::Result<LinkArchives, NativeBuildError> {
     // The bindings staticlib must match the main link's libc and arch:
     // a static-musl link cannot take a glibc-built archive (undefined
     // __res_init / open64 / gnu_get_libc_version), and a cross link
@@ -1703,16 +1709,17 @@ fn extra_link_archives(
     } else {
         None
     };
-    let bindings_archive = build_static_bindings_lib(
+    let bindings = build_static_bindings_lib(
         input_path,
         opts.release,
         bindings_target.as_deref(),
         libraries,
     )
     .map_err(|err| NativeBuildError::LinkerMissing(format!("rust-bindings staticlib: {err}")))?;
-    let mut extra_archives: Vec<PathBuf> = Vec::new();
-    if let Some(p) = bindings_archive {
-        extra_archives.push(p);
+    let mut extra = LinkArchives::default();
+    if let Some(bindings) = bindings {
+        extra.archives.push(bindings.archive);
+        extra.inputs = bindings.inputs;
     }
     // PGO collect mode: the LLVM mid-end emits instrumented IR that
     // calls `__llvm_profile_write_file()` on exit. That symbol lives
@@ -1721,10 +1728,24 @@ fn extra_link_archives(
     // LLVM toolchain and splice it into the link as an extra archive.
     if pgo.collect_path.is_some() && opts.release {
         if let Some(proflib) = find_clang_rt_profile() {
-            extra_archives.push(proflib);
+            extra.archives.push(proflib);
         }
     }
-    Ok(extra_archives)
+    Ok(extra)
+}
+
+/// The archives a native link takes beyond the runtime, with the files the
+/// `[rust-bindings]` archive was built from.
+#[derive(Default)]
+struct LinkArchives {
+    archives: Vec<PathBuf>,
+    inputs: Vec<PathBuf>,
+}
+
+/// A built `[rust-bindings]` staticlib and the files it was built from.
+pub(crate) struct BuiltBindings {
+    pub(crate) archive: PathBuf,
+    pub(crate) inputs: Vec<PathBuf>,
 }
 
 /// Compiles the `[native]` sources of the program at `input_path` for
@@ -1809,9 +1830,11 @@ fn try_native_build(
         find_runtime_lib()?
     };
     let pgo = pgo_link_config();
-    let extra_archives =
-        extra_link_archives(paths.input, opts, static_musl, &lt, &pgo, &mut libraries)?;
-    let native_inputs = if links_declares_foreign {
+    let LinkArchives {
+        archives: extra_archives,
+        inputs: bindings_inputs,
+    } = extra_link_archives(paths.input, opts, static_musl, &lt, &pgo, &mut libraries)?;
+    let mut native_inputs = if links_declares_foreign {
         let native_target = if static_musl {
             Some(musl_triple_for_arch(lt.arch))
         } else {
@@ -1821,6 +1844,7 @@ fn try_native_build(
     } else {
         Vec::new()
     };
+    native_inputs.extend(bindings_inputs);
     if std::env::var_os("GOS_LINK_VERBOSE").is_some() {
         eprintln!("gos build: runtime lib: {}", runtime_lib.display());
         eprintln!("gos build: objects: {object_paths:?}");
@@ -2026,14 +2050,13 @@ fn linux_forced_symbols(opts: LinkOptions) -> &'static [&'static str] {
 
 /// Builds the per-project `libgos_static_bindings.a` if the
 /// project declares `[rust-bindings]`, recording the native libraries it
-/// needs in `libraries`. Returns the archive path or `None` when bindings
-/// are absent.
+/// needs in `libraries`. `None` when bindings are absent.
 fn build_static_bindings_lib(
     entry: &Path,
     release: bool,
     cargo_target: Option<&str>,
     libraries: &mut NativeLinks,
-) -> std::result::Result<Option<PathBuf>, gossamer_driver::BindingBuildError> {
+) -> std::result::Result<Option<BuiltBindings>, gossamer_driver::BindingBuildError> {
     use gossamer_driver::{BindingProfile, StaticBindingsLib};
 
     let project = crate::paths::project_context_for_entry(entry);
@@ -2067,7 +2090,10 @@ fn build_static_bindings_lib(
     let built = lib.ensure_built()?;
     libraries.staticlib_args = built.native_libs;
     libraries.search.extend(built.search);
-    Ok(Some(built.archive))
+    Ok(Some(BuiltBindings {
+        archive: built.archive,
+        inputs: built.inputs,
+    }))
 }
 
 /// Renders a `Command` as a single readable line (program + args) for

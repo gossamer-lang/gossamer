@@ -72,6 +72,10 @@ pub enum BindingBuildError {
     /// needs, so a link that takes the archive cannot name them.
     #[error("rustc did not report the native libraries `{0}` needs")]
     MissingNativeLibs(String),
+    /// Cargo built the staticlib without the dep-info file that names what it
+    /// read, so nothing can tell when the archive goes stale.
+    #[error("cargo did not record the files `{0}` was built from")]
+    MissingDepInfo(String),
 }
 
 /// A built `[rust-bindings]` staticlib and what linking it requires.
@@ -87,6 +91,9 @@ pub struct StaticBindingsArchive {
     /// such as the import libraries of the `windows-targets` crates, which
     /// the link searches for `native_libs`.
     pub search: Vec<PathBuf>,
+    /// The local files Cargo read to build the archive, with the manifest of
+    /// each package they belong to: an edit to one leaves the archive stale.
+    pub inputs: Vec<PathBuf>,
 }
 
 /// Profile (debug / release) of a binding build.
@@ -164,11 +171,8 @@ impl StaticBindingsLib {
         if manifest.rust_bindings.is_empty() {
             return Ok(None);
         }
-        let fingerprint = manifest.rust_binding_fingerprint(manifest_dir);
-        let fingerprint_hex = hex_prefix(&fingerprint, 6);
-        let workdir = cache_root
-            .join("bindings")
-            .join(format!("static-{fingerprint_hex}"));
+        let fingerprint_hex = static_fingerprint_hex(manifest, manifest_dir);
+        let workdir = static_workdir(cache_root, &fingerprint_hex);
         Ok(Some(Self {
             fingerprint_hex,
             workdir,
@@ -318,7 +322,8 @@ strip = false
             .workdir
             .join(format!("stamp-{}.json", self.profile.dir()));
         let compiler = compiler_identity(&self.workdir);
-        if self.is_fresh(&archive, &stamp, &compiler)?
+        if let Some(inputs) = archive_inputs(&archive)
+            && self.is_fresh(&archive, &stamp, &compiler, &inputs)?
             && let Ok(recorded) = fs::read_to_string(&native_libs_path)
             && let Ok(searched) = fs::read_to_string(&search_path)
         {
@@ -326,6 +331,7 @@ strip = false
                 archive,
                 native_libs: recorded.split_whitespace().map(str::to_string).collect(),
                 search: searched.lines().map(PathBuf::from).collect(),
+                inputs,
             });
         }
         let mut messages = Vec::new();
@@ -348,6 +354,8 @@ strip = false
         let search_lines: Vec<String> = search.iter().map(|d| d.display().to_string()).collect();
         fs::write(&search_path, search_lines.join("\n"))?;
         link_archive_exception_tables(&archive)?;
+        let inputs = archive_inputs(&archive)
+            .ok_or_else(|| BindingBuildError::MissingDepInfo(archive.display().to_string()))?;
         write_stamp(
             &stamp,
             &self.fingerprint_hex,
@@ -367,6 +375,7 @@ strip = false
             archive,
             native_libs,
             search,
+            inputs,
         })
     }
 
@@ -382,6 +391,7 @@ strip = false
         artifact: &Path,
         stamp: &Path,
         compiler: &str,
+        inputs: &[PathBuf],
     ) -> Result<bool, BindingBuildError> {
         let Ok(stamp_text) = fs::read_to_string(stamp) else {
             return Ok(false);
@@ -396,9 +406,103 @@ strip = false
             return Ok(false);
         };
         let artifact_mtime = artifact_meta.modified()?;
-        let newest = newest_source(&self.bindings)?;
-        Ok(newest.is_none_or(|source| source <= artifact_mtime))
+        if newest_source(&self.bindings)?.is_some_and(|source| source > artifact_mtime) {
+            return Ok(false);
+        }
+        Ok(inputs.iter().all(|input| {
+            fs::metadata(input)
+                .and_then(|meta| meta.modified())
+                .is_ok_and(|modified| modified <= artifact_mtime)
+        }))
     }
+}
+
+/// The 12-hex-digit prefix of the manifest's binding fingerprint, which names
+/// the project's static build directory.
+fn static_fingerprint_hex(manifest: &Manifest, manifest_dir: &Path) -> String {
+    hex_prefix(&manifest.rust_binding_fingerprint(manifest_dir), 6)
+}
+
+fn static_workdir(cache_root: &Path, fingerprint_hex: &str) -> PathBuf {
+    cache_root
+        .join("bindings")
+        .join(format!("static-{fingerprint_hex}"))
+}
+
+/// The identity of what builds the project's `[rust-bindings]` staticlib
+/// besides the files it reads: the toolchain, Rust flags and Cargo
+/// configuration its build directory sees. A program linking the archive is
+/// stale when this changes.
+pub fn static_bindings_build_identity(
+    manifest: &Manifest,
+    manifest_dir: &Path,
+) -> io::Result<String> {
+    let fingerprint_hex = static_fingerprint_hex(manifest, manifest_dir);
+    Ok(compiler_identity(&static_workdir(
+        &cache_root()?,
+        &fingerprint_hex,
+    )))
+}
+
+/// The files Cargo's dep-info beside `archive` says its build read, minus the
+/// sources of packages Cargo fetched (a registry or git checkout never changes
+/// in place), with the manifest of each package they belong to. `None` when
+/// the dep-info is missing or unreadable.
+fn archive_inputs(archive: &Path) -> Option<Vec<PathBuf>> {
+    let dep_info = fs::read_to_string(archive.with_extension("d")).ok()?;
+    let fetched: Vec<PathBuf> = cargo_home()
+        .map(|home| vec![home.join("registry"), home.join("git")])
+        .unwrap_or_default();
+    let mut inputs = Vec::new();
+    let mut manifests = Vec::new();
+    for path in dep_info_dependencies(dep_info.lines().next()?)? {
+        if fetched.iter().any(|root| path.starts_with(root)) {
+            continue;
+        }
+        if let Some(manifest) = path
+            .ancestors()
+            .skip(1)
+            .map(|dir| dir.join("Cargo.toml"))
+            .find(|manifest| manifest.is_file())
+            && !manifests.contains(&manifest)
+        {
+            manifests.push(manifest);
+        }
+        inputs.push(path);
+    }
+    inputs.extend(manifests);
+    Some(inputs)
+}
+
+/// The dependencies a Makefile-style dep-info rule names, as Cargo writes it:
+/// `target: dep dep ...`, with a space inside a path escaped as `\ `.
+fn dep_info_dependencies(rule: &str) -> Option<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    let mut current = String::new();
+    let mut chars = rule.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek() == Some(&' ') => {
+                current.push(' ');
+                chars.next();
+            }
+            ' ' => {
+                if !current.is_empty() {
+                    paths.push(PathBuf::from(std::mem::take(&mut current)));
+                }
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        paths.push(PathBuf::from(current));
+    }
+    let mut paths = paths.into_iter();
+    let target = paths.next()?;
+    target
+        .to_string_lossy()
+        .ends_with(':')
+        .then(|| paths.collect())
 }
 
 fn hex_prefix(bytes: &[u8], n: usize) -> String {
@@ -874,15 +978,20 @@ fn write_stamp(
     write_if_different(path, &body)
 }
 
-/// A digest of what decides the code cargo writes besides the sources: the
-/// rustc that runs from `dir` (which rustup resolves there) and the Rust flags
-/// in the environment. An archive built under another answers stale.
+/// A digest of what decides the code cargo writes besides the files it reads:
+/// the rustc that runs from `dir` (which rustup resolves there), the Rust
+/// flags and Cargo settings in the environment, and the Cargo configuration
+/// files a build from `dir` reads (a `[patch]` there swaps dependencies). An
+/// archive built under another answers stale.
 fn compiler_identity(dir: &Path) -> String {
+    let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let mut command = Command::new(rustc);
     command.arg("-vV");
-    if dir.is_dir() {
-        command.current_dir(dir);
+    // rustup resolves the toolchain from the directory rustc starts in; the
+    // nearest existing ancestor resolves as `dir` will once it is created.
+    if let Some(existing) = dir.ancestors().find(|ancestor| ancestor.is_dir()) {
+        command.current_dir(existing);
     }
     let version = command.output().map(|out| out.stdout).unwrap_or_default();
     let mut hash = signature_hash(SIGNATURE_HASH_SEED, &version);
@@ -890,7 +999,50 @@ fn compiler_identity(dir: &Path) -> String {
         let value = std::env::var(name).unwrap_or_default();
         hash = signature_hash(hash, format!("{name}={value}").as_bytes());
     }
+    let mut settings: Vec<(String, String)> = std::env::vars()
+        .filter(|(name, _)| cargo_setting(name))
+        .collect();
+    settings.sort();
+    for (name, value) in settings {
+        hash = signature_hash(hash, format!("{name}={value}").as_bytes());
+    }
+    for config in cargo_configs(&dir) {
+        if let Ok(contents) = fs::read(&config) {
+            hash = signature_hash(hash, config.to_string_lossy().as_bytes());
+            hash = signature_hash(hash, &contents);
+        }
+    }
     format!("{hash:016x}")
+}
+
+/// Whether environment variable `name` is a Cargo setting that changes the
+/// code a build writes. `CARGO_TARGET_DIR` is not: each build names its own.
+fn cargo_setting(name: &str) -> bool {
+    matches!(name, "RUSTC_WRAPPER" | "RUSTC_WORKSPACE_WRAPPER")
+        || name.starts_with("CARGO_BUILD_")
+        || name.starts_with("CARGO_PROFILE_")
+        || (name.starts_with("CARGO_TARGET_") && name != "CARGO_TARGET_DIR")
+}
+
+/// Cargo's home: `CARGO_HOME`, else `.cargo` in the user's home directory.
+fn cargo_home() -> Option<PathBuf> {
+    std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|home| PathBuf::from(home).join(".cargo"))
+        })
+}
+
+/// The Cargo configuration files a build started in `dir` can read: each
+/// ancestor's `.cargo` directory, then Cargo's home.
+fn cargo_configs(dir: &Path) -> Vec<PathBuf> {
+    dir.ancestors()
+        .map(|ancestor| ancestor.join(".cargo"))
+        .chain(cargo_home())
+        .flat_map(|cargo| [cargo.join("config.toml"), cargo.join("config")])
+        .collect()
 }
 
 /// One `cargo` build of a generated project.
@@ -1333,6 +1485,79 @@ fn link_archive_exception_tables(archive: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dep_info_dependencies_unescape_spaces_and_skip_the_target() {
+        let rule = "/t/lib\\ gos.a: /src/a\\ b/lib.rs /src/c.rs  /src/d.rs";
+        assert_eq!(
+            dep_info_dependencies(rule),
+            Some(vec![
+                PathBuf::from("/src/a b/lib.rs"),
+                PathBuf::from("/src/c.rs"),
+                PathBuf::from("/src/d.rs"),
+            ])
+        );
+        assert_eq!(dep_info_dependencies("not a rule"), None);
+    }
+
+    #[test]
+    fn archive_inputs_name_local_files_and_their_manifests() {
+        let root = std::env::temp_dir().join(format!("gos-dep-info-{}", std::process::id()));
+        let krate = root.join("patched crate");
+        fs::create_dir_all(krate.join("src")).unwrap();
+        fs::write(krate.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        fs::write(krate.join("src").join("lib.rs"), "").unwrap();
+        let fetched = cargo_home()
+            .unwrap()
+            .join("registry")
+            .join("src")
+            .join("lib.rs");
+        let archive = root.join("libgos_static_bindings.a");
+        let source = krate.join("src").join("lib.rs");
+        fs::write(
+            archive.with_extension("d"),
+            format!(
+                "{}: {} {}\n",
+                archive.display(),
+                source.display().to_string().replace(' ', "\\ "),
+                fetched.display(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            archive_inputs(&archive),
+            Some(vec![source, krate.join("Cargo.toml")])
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_missing_dep_info_has_no_inputs() {
+        let archive = std::env::temp_dir()
+            .join(format!("gos-no-dep-info-{}", std::process::id()))
+            .join("libgos_static_bindings.a");
+        assert_eq!(archive_inputs(&archive), None);
+    }
+
+    #[test]
+    fn a_cargo_configuration_above_the_build_changes_its_identity() {
+        let root = std::env::temp_dir().join(format!("gos-identity-{}", std::process::id()));
+        let build = root.join("bindings").join("static-x");
+        fs::create_dir_all(&build).unwrap();
+        let before = compiler_identity(&build);
+        assert_eq!(compiler_identity(&build), before);
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo").join("config.toml"),
+            "[patch.\"https://example.invalid/x\"]\nx = { path = \"/x\" }\n",
+        )
+        .unwrap();
+        let patched = compiler_identity(&build);
+        assert_ne!(patched, before);
+        fs::write(root.join(".cargo").join("config.toml"), "").unwrap();
+        assert_ne!(compiler_identity(&build), patched);
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn native_static_libs_parse_from_coloured_cargo_output() {
