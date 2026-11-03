@@ -1682,6 +1682,8 @@ impl<'a> Lowerer<'a> {
             // `errors::Error` is the Err arm of nearly every fallible
             // signature, so a descriptor walk has to be able to name it.
             Some(TyKind::DynError) => Some(vec![gossamer_abi::DESC_ERROR]),
+            // A JSON value renders as the document it holds.
+            Some(TyKind::JsonValue) => Some(vec![gossamer_abi::DESC_JSON]),
             // A user struct or enum renders through the same derived `fmt`
             // the top-level path calls, reached by index through the
             // formatter table that travels with the descriptor.

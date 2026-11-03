@@ -336,6 +336,17 @@ pub(crate) unsafe fn compare_flat_in(mode: CmpMode, tag: u8, a: *const u8, b: *c
         4 => ord_code((wa as u32).cmp(&(wb as u32))),
         // Every unit value is the same value.
         gossamer_abi::TUPLE_TAG_UNIT => 0,
+        gossamer_abi::DESC_JSON => {
+            let ja: *const crate::c_abi::json::GosJson =
+                std::ptr::with_exposed_provenance(wa as usize);
+            let jb: *const crate::c_abi::json::GosJson =
+                std::ptr::with_exposed_provenance(wb as usize);
+            // SAFETY: words of this tag are null or live `json::Value` handles, which the
+            // comparison accepts.
+            // The checker rejects ordering a `json::Value` (GT0123), so either
+            // mode answers equality alone.
+            i64::from(unsafe { crate::c_abi::json::gos_rt_json_eq(ja, jb) } == 0)
+        }
         5 => {
             let sa: *const c_char = std::ptr::with_exposed_provenance(wa as usize);
             let sb: *const c_char = std::ptr::with_exposed_provenance(wb as usize);

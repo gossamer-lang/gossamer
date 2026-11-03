@@ -2118,3 +2118,82 @@ fn main() -> Result<(), errors::Error> {
 "#;
     assert_all_tiers("discarded_branch_value", &[("main.gos", main)], "done\n");
 }
+
+#[test]
+fn json_values_compare_by_the_document_they_hold() {
+    let main = r#"
+use std::encoding::json
+
+struct Holder {
+    value: json::Value
+}
+
+fn main() {
+    let a = json::parse("[1, {\"x\": 2, \"y\": [true, null]}]").unwrap()
+    let b = json::parse("[1,{\"y\":[true,null],\"x\":2}]").unwrap()
+    let c = json::parse("[1, {\"x\": 3}]").unwrap()
+    println(f"{a == b} {a == a} {a != c} {a == c}")
+    println(f"{json::at(a, 0) == json::parse("1").unwrap()} {json::at(a, 0) == json::parse("1.0").unwrap()}")
+    println(f"{#[a] == #[b]} {#[a] == #[c]} {Some(a) == Some(b)} {(a, 1) == (b, 1)}")
+    println(f"{Holder { value: a } == Holder { value: b }} {Holder { value: a } == Holder { value: c }}")
+}
+"#;
+    assert_all_tiers(
+        "json_equality",
+        &[("main.gos", main)],
+        "true true true false\ntrue false\ntrue false true true\ntrue false\n",
+    );
+}
+
+#[test]
+fn a_json_value_stored_in_several_containers_keeps_each_its_own_handle() {
+    let main = r#"
+use std::encoding::json
+
+fn main() {
+    let a = json::parse("{\"k\": [1, 2]}").unwrap()
+    let r = #[a]
+    let s = #[a]
+    let mut v = #[]
+    v.push(a)
+    v.push(a)
+    let mut w = #[a, a]
+    w[0] = a
+    let m = {"x": a, "z": json::parse("[3]").unwrap()}
+    println(f"{r.len()} {s.len()} {v.len()} {w.len()} {m.len()} {json::render(a)}")
+    println(f"{v[1] == m["x"]} {w[0] == a} {json::render(m["z"])}")
+}
+"#;
+    assert_all_tiers(
+        "json_shared_handles",
+        &[("main.gos", main)],
+        "1 1 2 2 2 {\"k\":[1,2]}\ntrue true [3]\n",
+    );
+}
+
+#[test]
+fn a_json_value_renders_as_its_json_text_wherever_it_sits() {
+    let main = r#"
+use std::encoding::json
+
+struct Holder {
+    value: json::Value
+    n: i64
+}
+
+fn main() {
+    let a = json::parse("{\"k\": [1, 2]}").unwrap()
+    let s = json::parse("\"s\"").unwrap()
+    println(f"{a} {s} {s:?} {s.to_string()}")
+    let v = #[a, json::parse("3").unwrap(), s]
+    println(f"{v} {v:?}")
+    println(f"{Some(a)} {(a, 1)} {Some(s)}")
+    println(f"{Holder { value: a, n: 1 }} {Holder { value: s, n: 2 }:?}")
+}
+"#;
+    assert_all_tiers(
+        "json_rendering",
+        &[("main.gos", main)],
+        "{\"k\":[1,2]} s s s\n#[{\"k\":[1,2]}, 3, \"s\"] #[{\"k\":[1,2]}, 3, \"s\"]\nSome({\"k\":[1,2]}) ({\"k\":[1,2]}, 1) Some(\"s\")\nHolder { value: {\"k\":[1,2]}, n: 1 } Holder { value: \"s\", n: 2 }\n",
+    );
+}

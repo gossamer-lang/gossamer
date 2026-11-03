@@ -1126,6 +1126,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_json_clone", (Ptr) -> Ptr, Both, "Clone a JSON handle onto its shared document."),
     rt_str!("gos_rt_json_debug", (Ptr) -> Ptr, Cranelift, "Debug-render a GosJson value to a string (strings keep their JSON quotes); caller frees. Selected inside the runtime by debug payload kind, never emitted as a direct call."),
     rt_str!("gos_rt_json_display", (Ptr) -> Ptr, Cranelift, "Render a JSON value to a compact display string."),
+    rt!("gos_rt_json_eq", (Ptr, Ptr) -> I64, Both, "Structural equality of two json::Values: the same kind and scalar, the same elements in order, the same object entries in any order."),
     rt!("gos_rt_json_field_clone", (Ptr) -> Void, Both, "Replace a copied aggregate JSON field with its own handle; takes the field address."),
     rt!("gos_rt_json_field_release", (Ptr) -> Void, Both, "Release and clear an aggregate JSON field; takes the field address."),
     rt_release!("gos_rt_json_free", (Ptr) -> Void, Cranelift, "Free a GosJson handle (drop its tree share)."),

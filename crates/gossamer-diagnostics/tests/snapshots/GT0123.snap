@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0123]: An ordering comparison (`<`, `<=`, `>`, `>=`) or an ordering method - here
+--- framed ---
+error[GT0123]: An ordering comparison (`<`, `<=`, `>`, `>=`) or an ordering method
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

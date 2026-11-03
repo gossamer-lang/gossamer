@@ -3609,6 +3609,55 @@ impl TypeChecker<'_> {
     /// every aggregate whose parts are themselves ordered. A `u64` / `usize`
     /// spans past the signed comparison a heap slot orders by, and a `Map` or
     /// `Set` has no element order at all.
+    /// Whether values of `ty` have no order at all: a `Map`, a hash `Set`, a
+    /// `json::Value`, or a sequence, tuple, or `Option` / `Result` holding
+    /// one. A user type may order itself through its own `cmp`, so it is
+    /// left to that.
+    pub(super) fn lacks_order(&mut self, ty: Ty) -> bool {
+        let resolved = self.infer.resolve(self.tcx, ty);
+        match self.tcx.kind(resolved) {
+            Some(TyKind::HashMap { ordered: false, .. } | TyKind::JsonValue) => true,
+            Some(
+                TyKind::Ref { inner, .. }
+                | TyKind::Vec(inner)
+                | TyKind::Slice(inner)
+                | TyKind::Array { elem: inner, .. },
+            ) => {
+                let inner = *inner;
+                self.lacks_order(inner)
+            }
+            Some(TyKind::Tuple(elems)) => {
+                let elems = elems.clone();
+                elems.into_iter().any(|e| self.lacks_order(e))
+            }
+            Some(TyKind::Adt { def, substs }) => {
+                let (def, substs) = (*def, substs.clone());
+                if def.local == HASH_SET_DEF_LOCAL {
+                    return true;
+                }
+                (def.local == u32::MAX || def.local == u32::MAX - 1)
+                    && substs.types().iter().any(|t| self.lacks_order(*t))
+            }
+            _ => false,
+        }
+    }
+
+    /// Reports `op` ordering a value of `ty`, which has no order.
+    pub(super) fn require_order(&mut self, ty: Ty, op: &str, span: Span) {
+        if !self.lacks_order(ty) {
+            return;
+        }
+        let resolved = self.infer.resolve(self.tcx, ty);
+        let ty = self.render_public_ty(resolved);
+        self.emit(
+            TypeError::Unordered {
+                op: op.to_string(),
+                ty,
+            },
+            span,
+        );
+    }
+
     pub(super) fn is_orderable_elem(&mut self, ty: Ty) -> bool {
         let resolved = self.infer.resolve(self.tcx, ty);
         match self.tcx.kind(resolved) {

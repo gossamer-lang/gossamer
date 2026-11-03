@@ -3096,6 +3096,7 @@ impl TypeChecker<'_> {
             ("sum" | "product", 0) => self.sequence_elem_ty(resolved, span),
             ("min" | "max", 0) => {
                 let elem = self.sequence_elem_ty(resolved, span)?;
+                self.require_order(elem, method, span);
                 Some(self.option_adt_ty(elem))
             }
             ("count", 0) => Some(self.tcx.int_ty(IntTy::I64)),
@@ -3299,6 +3300,9 @@ impl TypeChecker<'_> {
                 span,
             );
             return Some(self.tcx.error_ty());
+        }
+        if matches!(method, "sort" | "binary_search") {
+            self.require_order(elem, method, span);
         }
         // References are layout-transparent (the runtime owns memory), so
         // peel them before comparing the pushed element to the slot type.

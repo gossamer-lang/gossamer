@@ -528,6 +528,8 @@ fn ty_is_renderable_within(
         {
             true
         }
+        // A JSON value renders as the document it holds on every tier.
+        TypeKind::Path(path) if is_json_value_path(path) => true,
         TypeKind::Path(path) if path.segments.len() > 1 => {
             path.segments.iter().all(|segment| segment.generics.is_empty())
                 && formattable.contains(&type_path_spelling(path))
@@ -751,6 +753,9 @@ fn ty_is_comparable(
             if path.segments.len() > 1 && comparable.contains(&type_path_spelling(path)) {
                 return true;
             }
+            if is_json_value_path(path) {
+                return true;
+            }
             let name = seg.name.name.as_str();
             if !seg.generics.is_empty() {
                 return is_equatable_container_head(name) && generic_args_all(seg, inner);
@@ -806,6 +811,31 @@ fn ty_is_orderable(
         }
         _ => false,
     }
+}
+
+/// Whether `ty` spells `json::Value`.
+fn is_json_value_ty(ty: &gossamer_ast::Type) -> bool {
+    json_module_spelling(ty).is_some()
+}
+
+/// The module path a `json::Value` type is spelled through (`json`, or
+/// `std::encoding::json`), which the declaring module has in scope.
+fn json_module_spelling(ty: &gossamer_ast::Type) -> Option<String> {
+    let TypeKind::Path(path) = &ty.kind else {
+        return None;
+    };
+    if !is_json_value_path(path) {
+        return None;
+    }
+    let names: Vec<&str> = path.segments.iter().map(|segment| segment.name.name.as_str()).collect();
+    Some(names[..names.len() - 1].join("::"))
+}
+
+/// Whether `path` spells `json::Value`, which compares by the document it
+/// holds on every tier.
+fn is_json_value_path(path: &gossamer_ast::TypePath) -> bool {
+    let names: Vec<&str> = path.segments.iter().map(|segment| segment.name.name.as_str()).collect();
+    names.ends_with(&["json", "Value"])
 }
 
 fn type_path_spelling(path: &gossamer_ast::TypePath) -> String {
@@ -1147,6 +1177,9 @@ fn field_placeholder(
     ty: &gossamer_ast::Type,
     aliases: &HashMap<String, gossamer_ast::Type>,
 ) -> &'static str {
+    if is_json_value_ty(ty) {
+        return "{}";
+    }
     if method == "fmt" || ty_head_is_scalar(ty, aliases, 0) {
         "{:?}"
     } else {
@@ -2018,10 +2051,14 @@ fn emit_named_struct_fmt_impl(
         }));
     }
     tmpl.push_str(" }}");
-    // A `String` field's `{:?}` placeholder quotes it.
+    // A `String` field's `{:?}` placeholder quotes it, and a JSON field reads
+    // as its JSON text, a string in quotes, as it does nested anywhere else.
     let argvals: Vec<String> = fields
         .iter()
-        .map(|f| format!("self.{}", f.name.name))
+        .map(|f| match json_module_spelling(&f.ty) {
+            Some(module) => format!("{module}::render(self.{})", f.name.name),
+            None => format!("self.{}", f.name.name),
+        })
         .collect();
     if field_names.is_empty() {
         out.push_str(&format!(

@@ -120,6 +120,11 @@ pub const DESC_FLAT_ENUM: u8 = 27;
 /// `u16` byte count from this tag, that enum's [`DESC_ENUM`] entry begins.
 pub const DESC_ENUM_REF: u8 = 28;
 
+/// Ordering-descriptor tag for a `json::Value`: the slot holds its handle,
+/// and two values are equal when they hold the same JSON, object entries in
+/// any order.
+pub const DESC_JSON: u8 = 29;
+
 /// Rendering tag for an `f32` leaf: the slot holds the value at double width,
 /// and it renders with the shortest digits that read back as the
 /// single-precision value. Only rendering streams carry it; an `f32` orders,
