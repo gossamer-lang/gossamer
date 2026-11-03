@@ -134,8 +134,15 @@ impl LinkOptions {
     /// time; [`musl_runtime_available`] re-checks at link time so a
     /// removed-since-build musl target degrades to the gnu link instead
     /// of failing.
+    ///
+    /// An instrumented build (`GOS_PGO_COLLECT`) links against glibc: the
+    /// compiler-rt profile runtime LLVM ships is built for it.
     fn want_static_musl(self) -> bool {
-        self.release && !self.dynamic && cfg!(target_os = "linux") && musl_runtime_available()
+        self.release
+            && !self.dynamic
+            && cfg!(target_os = "linux")
+            && pgo_link_config().collect_path.is_none()
+            && musl_runtime_available()
     }
 
     /// Whether to strip symbols from the linked binary. Enabled
@@ -1933,11 +1940,14 @@ fn pgo_profile_is_stale(
     profile_time < source_time
 }
 
-/// Locates `libclang_rt.profile-*.a` alongside the active LLVM
-/// toolchain. Needed when building an instrumented PGO binary
-/// (`GOS_PGO_COLLECT`): the runtime exports `__llvm_profile_write_file`
-/// which the instrumented IR calls on exit to flush raw profile data.
+/// Locates the compiler-rt profile runtime of the LLVM that emits the
+/// instrumented IR (`GOS_PGO_COLLECT`). The runtime exports
+/// `__llvm_profile_write_file`, which that IR calls on exit, and its raw
+/// profile format must match that LLVM's major.
 fn find_clang_rt_profile() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("GOS_LLVM_PROFILE_RT") {
+        return Some(PathBuf::from(path));
+    }
     let arch = if cfg!(target_arch = "x86_64") {
         "x86_64"
     } else if cfg!(target_arch = "aarch64") {
@@ -1945,91 +1955,73 @@ fn find_clang_rt_profile() -> Option<PathBuf> {
     } else {
         return None;
     };
-    let (lib_name, os_subdir) = if cfg!(target_os = "linux") {
-        (format!("libclang_rt.profile-{arch}.a"), "linux")
+    // Apple's compiler-rt names one universal archive per OS; Linux and
+    // Windows name one per arch in the OS directory, or a plain name in a
+    // per-target-triple directory when LLVM is built with per-target runtimes.
+    let (os_subdir, os_name, triple_os, triple_name) = if cfg!(target_os = "linux") {
+        (
+            "linux",
+            format!("libclang_rt.profile-{arch}.a"),
+            "linux",
+            "libclang_rt.profile.a",
+        )
     } else if cfg!(target_os = "macos") {
-        // Apple's clang_rt drops the `-arch` suffix and uses an
-        // `_osx` flavour name; macOS ships only one slice per
-        // archive so the same file covers x86_64 and aarch64.
-        ("libclang_rt.profile_osx.a".to_string(), "darwin")
+        (
+            "darwin",
+            "libclang_rt.profile_osx.a".to_string(),
+            "darwin",
+            "",
+        )
     } else if cfg!(target_os = "windows") {
-        (format!("clang_rt.profile-{arch}.lib"), "windows")
+        (
+            "windows",
+            format!("clang_rt.profile-{arch}.lib"),
+            "windows",
+            "clang_rt.profile.lib",
+        )
     } else {
         return None;
     };
 
-    let mut candidates: Vec<PathBuf> = Vec::new();
-
-    // Explicit user override: any caller can pin the archive
-    // directly without us guessing.
-    if let Ok(path) = std::env::var("GOS_LLVM_PROFILE_RT") {
-        candidates.push(PathBuf::from(path));
+    let runtime_dirs = gossamer_codegen_llvm::clang_runtime_dirs();
+    let found = runtime_dirs.iter().find_map(|dir| {
+        let in_os_dir = dir.join(os_subdir).join(&os_name);
+        if in_os_dir.is_file() {
+            return Some(in_os_dir);
+        }
+        if triple_name.is_empty() {
+            return None;
+        }
+        std::fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let candidate = entry.path().join(triple_name);
+            (name.starts_with(&format!("{arch}-"))
+                && name.contains(triple_os)
+                && candidate.is_file())
+            .then_some(candidate)
+        })
+    });
+    if found.is_none() {
+        eprintln!(
+            "pgo: warning: {os_name} not found under the LLVM that gos uses - the instrumented \
+             binary may fail to link.\n\
+             Install that LLVM's compiler-rt profile component, or point GOS_LLVM_PROFILE_RT \
+             at the archive."
+        );
     }
+    found
+}
 
-    // Probe relative to the configured `opt` / `llc`, since the
-    // profile archive ships in the same toolchain layout. Walks
-    // up to the LLVM prefix and joins `lib/clang/<ver>/lib/<os>`.
-    if let Some(prefix) = std::env::var_os("GOS_LLVM_OPT").map(PathBuf::from)
-        && let Some(bin_dir) = prefix.parent()
-        && let Some(llvm_prefix) = bin_dir.parent()
-    {
-        for ver in ["18", "19", "20", "17"] {
-            candidates.push(
-                llvm_prefix
-                    .join("lib")
-                    .join("clang")
-                    .join(ver)
-                    .join("lib")
-                    .join(os_subdir)
-                    .join(&lib_name),
-            );
-        }
+/// Symbols a Linux link must pull from its archives though no object names
+/// them. LLVM leaves the profile runtime's exit hook to the linker on Linux,
+/// the way clang's driver passes `-u __llvm_profile_runtime`.
+fn linux_forced_symbols(opts: LinkOptions) -> &'static [&'static str] {
+    if opts.release && pgo_link_config().collect_path.is_some() {
+        &["__llvm_profile_runtime"]
+    } else {
+        &[]
     }
-
-    // Platform-default install paths.
-    if cfg!(target_os = "linux") {
-        for ver in ["18", "19", "20", "17"] {
-            candidates.push(PathBuf::from(format!(
-                "/usr/lib/llvm-{ver}/lib/clang/{ver}/lib/linux/{lib_name}"
-            )));
-        }
-    } else if cfg!(target_os = "macos") {
-        for ver in ["18", "19", "20", "17"] {
-            candidates.push(PathBuf::from(format!(
-                "/opt/homebrew/opt/llvm@{ver}/lib/clang/{ver}/lib/darwin/{lib_name}"
-            )));
-            candidates.push(PathBuf::from(format!(
-                "/usr/local/opt/llvm@{ver}/lib/clang/{ver}/lib/darwin/{lib_name}"
-            )));
-        }
-        candidates.push(PathBuf::from(format!(
-            "/opt/homebrew/opt/llvm/lib/clang/lib/darwin/{lib_name}"
-        )));
-    } else if cfg!(target_os = "windows") {
-        for ver in ["18", "19", "20", "17"] {
-            candidates.push(PathBuf::from(format!(
-                "C:\\msys64\\mingw64\\lib\\clang\\{ver}\\lib\\windows\\{lib_name}"
-            )));
-            candidates.push(PathBuf::from(format!(
-                "C:\\msys64\\clang64\\lib\\clang\\{ver}\\lib\\windows\\{lib_name}"
-            )));
-            candidates.push(PathBuf::from(format!(
-                "C:\\Program Files\\LLVM\\lib\\clang\\{ver}\\lib\\windows\\{lib_name}"
-            )));
-        }
-    }
-
-    for p in &candidates {
-        if p.exists() {
-            return Some(p.clone());
-        }
-    }
-    eprintln!(
-        "pgo: warning: {lib_name} not found - instrumented binary may fail to link.\n\
-         Point GOS_LLVM_PROFILE_RT at the archive, or install LLVM 17-20 \
-         with the compiler-rt profile component."
-    );
-    None
 }
 
 /// Builds the per-project `libgos_static_bindings.a` if the
@@ -2199,6 +2191,11 @@ fn link_posix(
     cmd.arg(runtime_lib);
     for archive in extra_archives {
         cmd.arg(archive);
+    }
+    if lt.os == TargetOs::Linux {
+        for symbol in linux_forced_symbols(opts) {
+            cmd.arg(format!("-Wl,-u,{symbol}"));
+        }
     }
     for dir in &libraries.search {
         cmd.arg(format!("-L{}", dir.display()));
@@ -2389,6 +2386,9 @@ fn link_cross_gnu_lld(
     for archive in extra_archives {
         cmd.arg(archive);
     }
+    for symbol in linux_forced_symbols(opts) {
+        cmd.arg("-u").arg(symbol);
+    }
     for dir in &libraries.search {
         cmd.arg(format!("-L{}", dir.display()));
     }
@@ -2475,6 +2475,9 @@ fn link_posix_static_musl(
     cmd.arg(runtime_lib);
     for archive in extra_archives {
         cmd.arg(archive);
+    }
+    for symbol in linux_forced_symbols(opts) {
+        cmd.arg("-u").arg(symbol);
     }
     // A static link reads `lib<name>.a`; the linker names any it cannot find.
     // musl's `libc.a` holds what glibc splits into these libraries, and the

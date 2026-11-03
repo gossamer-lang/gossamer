@@ -67,6 +67,17 @@ pub fn pgo_mode() -> Option<PgoMode> {
     PGO_MODE.read().expect("PGO mode lock poisoned").clone()
 }
 
+/// The raw-profile path an instrumented build writes, from the selected mode
+/// or, for embedding callers that predate it, `GOS_PGO_COLLECT`.
+#[must_use]
+pub(crate) fn pgo_collect_path() -> Option<String> {
+    match pgo_mode() {
+        Some(PgoMode::Collect(path)) => Some(path.display().to_string()),
+        Some(PgoMode::Profile(_)) => None,
+        None => std::env::var("GOS_PGO_COLLECT").ok(),
+    }
+}
+
 /// Enables (or disables) DWARF emission for subsequent
 /// [`compile_to_object`](super::compile_to_object) /
 /// [`compile_with_fallback`](super::compile_with_fallback) calls.

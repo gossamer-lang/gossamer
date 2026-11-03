@@ -3362,8 +3362,8 @@ Static linking by default. The produced binary embeds the runtime. On
 Linux, `musl` target produces a zero-libc static binary identical in
 deployment experience to `CGO_ENABLED=0` Go.
 
-Dynamic linking for FFI is **not** available through a source-level
-syntax. See §12 for the supported FFI mechanism (`[rust-bindings]`).
+A program links a native library of its own through `#[link]` on an
+`unsafe extern "C"` block, and Rust code through `[rust-bindings]` (§12).
 
 On Linux, `gos build --release` produces a fully-static musl binary by
 default when the host-architecture musl rustup target

@@ -840,6 +840,12 @@ impl TypeChecker<'_> {
             let err = self.tcx.dyn_error_ty();
             return Some(self.result_adt_ty(string_ty, err));
         }
+        // `char::from_u32` likewise: it answers `None` for a value that is
+        // not a Unicode scalar.
+        if module == ["char"] && last == "from_u32" {
+            let char_ty = self.tcx.char_ty();
+            return Some(self.option_adt_ty(char_ty));
+        }
         // Built-in intrinsics emitted by the parser's macro
         // expansion (`format!` only - `println!` / `print!` /
         // `eprintln!` / `eprint!` etc. expand to a call to the

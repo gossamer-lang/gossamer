@@ -1468,11 +1468,20 @@ fn lint_identity_op(sf: &SourceFile) -> Vec<Finding> {
     out
 }
 
+/// The integer type suffixes a literal may carry.
+const INT_SUFFIXES: &[&str] = &[
+    "i128", "u128", "isize", "usize", "i64", "u64", "i32", "u32", "i16", "u16", "i8", "u8",
+];
+
 fn is_int_literal(expr: &Expr, target: i128) -> bool {
     let ExprKind::Literal(Literal::Int(src)) = &expr.kind else {
         return false;
     };
-    let stripped = src.trim_end_matches(|c: char| c.is_ascii_alphabetic() || c == '_');
+    // Only a type suffix is stripped: a hex literal's own digits are letters.
+    let stripped = INT_SUFFIXES
+        .iter()
+        .find_map(|suffix| src.strip_suffix(suffix))
+        .unwrap_or(src);
     let clean: String = stripped.chars().filter(|c| *c != '_').collect();
     if let Ok(n) = clean.parse::<i128>() {
         return n == target;

@@ -67,6 +67,13 @@ impl<'a> Builder<'a> {
     /// function's name wraps it into the environment every callable slot holds.
     fn branch_result_value(&mut self, value: Local, result: Local, span: Span) -> Local {
         let result_ty = self.locals[result.0 as usize].ty;
+        let unit = self.tcx.unit();
+        // A unit-typed `if` or `match` discards what a branch's tail computes
+        // (`if c { f()? }`). The branch answers unit, and the value stays in
+        // its own local, which is released by its own type.
+        if result_ty == unit && self.locals[value.0 as usize].ty != unit {
+            return self.lower_unit(span);
+        }
         if matches!(
             self.tcx.kind_of(result_ty),
             gossamer_types::TyKind::FnTrait(_) | gossamer_types::TyKind::FnPtr(_)

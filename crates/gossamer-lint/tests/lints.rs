@@ -594,3 +594,25 @@ fn no_effect_statement_silent_on_in_place_writers() {
     );
     assert!(!has_code(&diags, "GL0056"), "{diags:?}");
 }
+
+#[test]
+fn identity_op_fires_on_adding_zero_and_multiplying_by_one() {
+    for source in [
+        "fn f(n: i64) -> i64 { n + 0 }\n",
+        "fn f(n: i64) -> i64 { n * 0x1 }\n",
+        "fn f(n: i64) -> i64 { n - 0i64 }\n",
+    ] {
+        assert!(has_code(&lint(source), "GL0023"), "{source}");
+    }
+}
+
+#[test]
+fn identity_op_reads_hex_digits_that_are_letters() {
+    for source in [
+        "fn f(n: u64) -> u64 { n - 0xffbe }\n",
+        "fn f(n: u64) -> u64 { n * 0x1e }\n",
+        "fn f(n: u64) -> u64 { n + 0xb }\n",
+    ] {
+        assert!(!has_code(&lint(source), "GL0023"), "{source}");
+    }
+}

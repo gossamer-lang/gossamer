@@ -101,12 +101,63 @@ pub unsafe extern "C" fn gos_rt_at_exit(env: *mut u8) {
     HOOKS.lock().push(Hook::Native(env as usize));
 }
 
-/// Runs every registered hook, last registered first, each at most once. A
-/// hook is taken off the list before it runs, so one that exits or panics
-/// leaves the rest to the exit path it starts.
+/// The compiler-rt entry points an instrumented (`--pgo-collect`) binary
+/// writes and then zeroes its profile counters through, or null in every
+/// other build.
+static PROFILE_WRITER: std::sync::atomic::AtomicPtr<()> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+static PROFILE_RESET: std::sync::atomic::AtomicPtr<()> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// Records `__llvm_profile_write_file` and `__llvm_profile_reset_counters` for
+/// an instrumented build, so every exit path writes the profile itself rather
+/// than relying on the profile runtime's own `atexit` handler, which a Windows
+/// `ExitProcess` or a second C runtime instance never runs.
+/// `write` and `reset` are the addresses of those two functions.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_set_profile_writer(write: *const u8, reset: *const u8) {
+    PROFILE_RESET.store(
+        reset.cast_mut().cast(),
+        std::sync::atomic::Ordering::Release,
+    );
+    PROFILE_WRITER.store(
+        write.cast_mut().cast(),
+        std::sync::atomic::Ordering::Release,
+    );
+}
+
+/// Writes the instrumented build's profile once, then zeroes its counters
+/// after a successful write: the profile runtime appends every write after the
+/// first to the same file, so its own exit handler, where it also runs, adds
+/// nothing to the counts.
+fn write_profile() {
+    let write = PROFILE_WRITER.swap(std::ptr::null_mut(), std::sync::atomic::Ordering::AcqRel);
+    if write.is_null() {
+        return;
+    }
+    let reset = PROFILE_RESET.load(std::sync::atomic::Ordering::Acquire);
+    // SAFETY: only `gos_rt_set_profile_writer` stores these, the addresses of
+    // `__llvm_profile_write_file` and `__llvm_profile_reset_counters`, whose
+    // signatures are the ones named here; the swap makes this run once.
+    unsafe {
+        let write: unsafe extern "C" fn() -> i32 = std::mem::transmute(write);
+        let reset: unsafe extern "C" fn() = std::mem::transmute(reset);
+        // A failed write leaves the counters to the profile runtime's own
+        // retry at exit, which reports its error the same way.
+        if write() == 0 {
+            reset();
+        }
+    }
+}
+
+/// Runs every registered hook, last registered first, each at most once, then
+/// writes an instrumented build's profile. A hook is taken off the list before
+/// it runs, so one that exits or panics leaves the rest to the exit path it
+/// starts.
 pub fn run_exit_hooks() {
     loop {
         let Some(hook) = HOOKS.lock().pop() else {
+            write_profile();
             return;
         };
         match hook {

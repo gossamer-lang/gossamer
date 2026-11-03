@@ -201,63 +201,12 @@ struct BlockMention {
 }
 
 pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
-    // Locals whose payload is extracted anywhere in the body - a
-    // by-value Result/Option slot read (`gos_rt_result_payload`), an
-    // unwrap that answers the payload word (`gos_rt_result_unwrap_or`),
-    // or an enum-box payload load (`gos_enum_load`). The extraction
-    // BORROWS the value's children (shared field pointers, no retains),
-    // and that borrow's lifetime is invisible to the mention analysis,
-    // so these locals' releases must stay at the return sweep (see the
+    // Locals a payload read lends out of: the read borrows the value's
+    // children, and that borrow's lifetime is invisible to the mention
+    // analysis, so these locals' releases stay at the return sweep (see the
     // candidate match below).
-    let extracts_payload = |name: &str| {
-        matches!(
-            name,
-            "gos_rt_result_payload"
-                | "gos_rt_result_payload_f64"
-                | "gos_rt_result_payload_i128"
-                | "gos_rt_result_unwrap"
-                | "gos_rt_result_unwrap_carrier"
-                | "gos_rt_result_unwrap_or"
-                | "gos_rt_result_unwrap_or_carrier"
-                | "gos_rt_result_unwrap_or_str"
-                | "gos_rt_result_unwrap_or_node"
-                | "gos_rt_result_unwrap_or_vec"
-                | "gos_rt_result_unwrap_or_map"
-                | "gos_rt_result_ok"
-                | "gos_rt_result_err"
-                | "gos_rt_option_unwrap"
-                | "gos_rt_option_unwrap_carrier"
-                | "gos_enum_load"
-                | "gos_enum_slot_ptr"
-                | "gos_enum_word_addr"
-        )
-    };
-    let receiver_local = |args: &[Operand]| match args.first() {
-        Some(Operand::Copy(p)) if p.projection.is_empty() => Some(p.local.0),
-        _ => None,
-    };
-    let extracted_from: std::collections::HashSet<u32> = body
-        .blocks
-        .iter()
-        .flat_map(|b| {
-            let from_stmts = b.stmts.iter().filter_map(|stmt| match &stmt.kind {
-                StatementKind::Assign {
-                    rvalue: Rvalue::CallIntrinsic { name, args },
-                    ..
-                } if extracts_payload(name) => receiver_local(args),
-                _ => None,
-            });
-            let from_call = match &b.terminator {
-                Terminator::Call {
-                    callee: Operand::Const(ConstValue::Str(name)),
-                    args,
-                    ..
-                } if extracts_payload(name) => receiver_local(args),
-                _ => None,
-            };
-            from_stmts.chain(from_call)
-        })
-        .collect();
+    let lenders = payload_lenders(body);
+    let lends = |local: Local| lenders.get(local.0 as usize).copied().unwrap_or(false);
 
     let n_locals = body.locals.len();
     let n_blocks = body.blocks.len();
@@ -310,7 +259,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                 // borrows the box's children (string / vec payloads freed
                 // at box teardown), and an early release would free them
                 // under the borrower.
-                "gos_rt_rc_release" if !extracted_from.contains(&p.local.0) => "gos_rt_rc_release",
+                "gos_rt_rc_release" if !lends(p.local) => "gos_rt_rc_release",
                 "gos_rt_rc_weak_release" => "gos_rt_rc_weak_release",
                 "gos_rt_aggr_release_children" => "gos_rt_aggr_release_children",
                 // Early-relocating an option-slot release is unsound
@@ -323,9 +272,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                 // Results that are never extracted-from keep early
                 // placement (Option-chain workloads rely on it to keep
                 // RAM flat).
-                "gos_rt_option_slot_release" if !extracted_from.contains(&p.local.0) => {
-                    "gos_rt_option_slot_release"
-                }
+                "gos_rt_option_slot_release" if !lends(p.local) => "gos_rt_option_slot_release",
                 _ => continue,
             };
             if !seen.insert(p.local.0) {

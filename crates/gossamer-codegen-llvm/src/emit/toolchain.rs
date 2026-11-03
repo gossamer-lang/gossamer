@@ -176,15 +176,10 @@ pub(super) fn invoke_llc_pipeline(
     // with `llvm-profdata merge -output=...`. The environment variables are
     // retained only for embedding callers that predate the CLI options.
     let selected_pgo = pgo_mode();
-    let pgo_collect = match selected_pgo.as_ref() {
-        Some(PgoMode::Collect(path)) => Some(path.display().to_string()),
-        Some(PgoMode::Profile(_)) => None,
-        None => std::env::var("GOS_PGO_COLLECT").ok(),
-    };
-    if let Some(profraw) = pgo_collect {
+    if let Some(profraw) = super::settings::pgo_collect_path() {
         opt_cmd
             .arg("--pgo-kind=pgo-instr-gen-pipeline")
-            .arg(format!("--pgo-test-profile-file={profraw}"));
+            .arg(format!("--profile-file={profraw}"));
     }
     // PGO optimisation feeds a previously collected and merged profile into
     // the `opt` mid-end so branch weights, inlining thresholds, and the loop
@@ -1060,34 +1055,76 @@ fn missing_llvm_tool_message(tool: &str, env_var: &str) -> String {
 }
 
 fn is_executable(path: &str) -> bool {
-    if let Ok(meta) = std::fs::metadata(path) {
-        return meta.is_file();
+    resolve_executable(path).is_some()
+}
+
+/// The file `path` names: itself when it exists, or for a bare name the
+/// first match on `PATH` (with `.exe` tried on Windows).
+fn resolve_executable(path: &str) -> Option<PathBuf> {
+    if std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
+        return Some(PathBuf::from(path));
     }
-    // Bare name (no path separator)? Walk `PATH` looking for it.
-    // Use `std::env::split_paths` so the separator is correct on
-    // every platform (`:` on Unix, `;` on Windows), and try the
-    // `.exe` suffix on Windows when the caller passed a bare stem.
-    let has_separator = path.contains('/') || path.contains('\\');
-    if has_separator {
-        return false;
+    if path.contains('/') || path.contains('\\') {
+        return None;
     }
-    let Ok(paths) = std::env::var("PATH") else {
-        return false;
-    };
+    let paths = std::env::var_os("PATH")?;
     let suffixes: &[&str] = if cfg!(windows) && !path.to_ascii_lowercase().ends_with(".exe") {
         &["", ".exe"]
     } else {
         &[""]
     };
-    for dir in std::env::split_paths(&paths) {
-        for suffix in suffixes {
-            let candidate = dir.join(format!("{path}{suffix}"));
-            if std::fs::metadata(&candidate).is_ok_and(|m| m.is_file()) {
-                return true;
-            }
+    std::env::split_paths(&paths).find_map(|dir| {
+        suffixes
+            .iter()
+            .map(|suffix| dir.join(format!("{path}{suffix}")))
+            .find(|candidate| std::fs::metadata(candidate).is_ok_and(|m| m.is_file()))
+    })
+}
+
+/// The `lib/clang/<major>/lib` directory of each LLVM installation the
+/// resolved `opt`, `llc`, and `clang` belong to, kept to the installations of
+/// `opt`'s own major: `opt` emits the instrumentation, and a compiler-rt
+/// runtime of another major rejects it and writes no profile. Symlinks are
+/// followed to the real installation, so a distro's `/usr/bin/opt-22` answers
+/// `/usr/lib/llvm-22/lib/clang/22/lib`.
+#[must_use]
+pub fn clang_runtime_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let statuses = llvm_toolchain_status();
+    let opt_major = statuses
+        .iter()
+        .find(|s| s.tool == "opt")
+        .and_then(|s| match &s.resolved {
+            Ok((_, major)) => *major,
+            Err(_) => None,
+        });
+    let Some(opt_major) = opt_major else {
+        return dirs;
+    };
+    for status in statuses {
+        let Ok((tool, Some(major))) = status.resolved else {
+            continue;
+        };
+        if major != opt_major {
+            continue;
+        }
+        let Some(tool) = resolve_executable(&tool.to_string_lossy()) else {
+            continue;
+        };
+        let tool = std::fs::canonicalize(&tool).unwrap_or(tool);
+        let Some(prefix) = tool.parent().and_then(Path::parent) else {
+            continue;
+        };
+        let dir = prefix
+            .join("lib")
+            .join("clang")
+            .join(major.to_string())
+            .join("lib");
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
         }
     }
-    false
+    dirs
 }
 
 pub(super) fn host_triple() -> String {
