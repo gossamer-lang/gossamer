@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.76.0 - Libraries compose into applications
+## 0.76.0 - Goroutines and channels carry any value; reflection across modules
 
 - A value sent on a channel is the receiver's own on every tier: writing to the sender's `Vec`, `Set`, deque, or a struct holding a `Vec` after `send` no longer changes what the receiver reads in compiled code.
 - A goroutine may capture, and a spawned call may be passed, a struct, enum, tuple, or array holding a `Vec`, `Map`, or other collection, nested to any depth, as may a parallel adapter's callback. Each crosses as a value of its own, where `gos check` refused it with GT0076 or GT0055.
