@@ -2271,15 +2271,23 @@ impl Resolver {
                 return;
             }
         }
-        let resolution = self
-            .lookup_value_here(name)
-            .or_else(|| self.lookup_type_here(name))
-            .map_or(Resolution::Err, |b| b.resolution);
+        // The head of `Head::Variant` names a type, so the module's own type
+        // stands ahead of a value an enclosing scope declares under the name
+        // (a root `struct Head`, whose constructor is also a value).
+        let qualified = path.segments.len() > 1;
+        let resolution = if qualified {
+            self.lookup_type_here(name)
+                .or_else(|| self.lookup_value_here(name))
+        } else {
+            self.lookup_value_here(name)
+                .or_else(|| self.lookup_type_here(name))
+        }
+        .map_or(Resolution::Err, |b| b.resolution);
         if matches!(resolution, Resolution::Err) {
             self.emit_unresolved_or_rename(name, span);
         }
         self.check_visibility(resolution, Some(name), span);
-        if path.segments.len() == 1 {
+        if !qualified {
             self.reject_ambiguous_variant(resolution, name, span);
         }
         self.resolutions.insert(anchor, resolution);

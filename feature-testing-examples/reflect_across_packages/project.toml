@@ -1,0 +1,6 @@
+[project]
+id = "example.com/reflect-across-packages"
+version = "0.1.0"
+
+[dependencies]
+"example.com/reflib" = { path = "reflib" }

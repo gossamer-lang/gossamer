@@ -1,0 +1,10 @@
+// Two modules may each declare a type of the same name; each reflects its own.
+
+pub struct Item { pub a: i64 }
+
+pub mod inner {
+    pub struct Item { pub a: i64, pub b: i64, pub c: String }
+
+    /// A reflecting generic in a nested module, reaching its caller's type.
+    pub fn width<T>() -> i64 { typeInfo::<T>().len() }
+}

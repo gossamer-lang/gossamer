@@ -1,0 +1,27 @@
+// Reflecting helpers a package exports for types its consumers declare.
+
+/// `name:type` for each field of `T`, in declaration order.
+pub fn field_names<T>() -> String {
+    let mut out = ""
+    for (name, ty) in typeInfo::<T>() {
+        out += f"{name}:{ty} "
+    }
+    out.trim()
+}
+
+/// How many fields or variants `T` declares.
+pub fn field_count<T>() -> i64 { typeInfo::<T>().len() }
+
+/// `field=value;` for each field of `v`.
+pub fn render<T>(v: T) -> String {
+    let mut out = ""
+    for (name, _ty) in typeInfo::<T>() {
+        out += f"{name}={field_of(v, name)};"
+    }
+    out
+}
+
+struct Person { secret: i64 }
+
+/// A type of the package's own that shares a consumer type's name.
+pub fn own_person_fields() -> i64 { typeInfo::<Person>().len() }

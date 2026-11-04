@@ -1,0 +1,6 @@
+[project]
+id = "example.com/reflib"
+version = "0.1.0"
+
+[lib]
+name = "reflib"

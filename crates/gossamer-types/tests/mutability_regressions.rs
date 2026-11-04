@@ -19,7 +19,6 @@ enum ExpectedError {
     MutableReferenceConflict,
     ReferenceEscape,
     BorrowedPlaceConflict,
-    ConcurrentInlineAggregate,
     RangeBorrow,
     SequenceResize,
 }
@@ -46,9 +45,6 @@ impl ExpectedError {
             Self::BorrowedPlaceConflict => {
                 matches!(error, TypeError::BorrowedPlaceConflict { .. })
             }
-            Self::ConcurrentInlineAggregate => {
-                matches!(error, TypeError::ConcurrentAggregateUnsupported { .. })
-            }
             Self::RangeBorrow => matches!(error, TypeError::RangeBorrow { .. }),
             Self::SequenceResize => {
                 matches!(error, TypeError::SequenceResizeRequiresVec { .. })
@@ -65,7 +61,6 @@ impl ExpectedError {
             Self::MutableReferenceConflict => "GT0043",
             Self::ReferenceEscape => "GT0052",
             Self::BorrowedPlaceConflict => "GT0053",
-            Self::ConcurrentInlineAggregate => "GT0055",
             Self::RangeBorrow => "GT0075",
             Self::SequenceResize => "GT0050",
         }
@@ -934,18 +929,18 @@ fn reference_cursor_cannot_rebind_to_a_shorter_lived_alias() {
 }
 
 #[test]
-fn concurrency_rejects_unmarshalable_inline_aggregates() {
+fn concurrency_takes_aggregates_with_growable_storage() {
     for (name, source) in [
         (
             "struct argument",
-            "struct Wrapped { values: Vec<i64> }\nfn work(value: Wrapped) {}\nfn main() { let value = Wrapped { values: Vec::from([1, 2]) }\n spawn(|| work(value)) }",
+            "struct Wrapped { values: Vec<i64> }\nfn work(value: Wrapped) {}\nfn main() { let value = Wrapped { values: Vec::from([1, 2]) }\n let _ = spawn(|| work(value)) }",
         ),
         (
             "tuple containing Vec argument",
-            "fn work(value: (Vec<i64>, i64)) {}\nfn main() { let value = (Vec::from([1, 2]), 2)\n spawn(|| work(value)) }",
+            "fn work(value: (Vec<i64>, i64)) {}\nfn main() { let value = (Vec::from([1, 2]), 2)\n let _ = spawn(|| work(value)) }",
         ),
     ] {
-        assert_rejected(name, source, ExpectedError::ConcurrentInlineAggregate);
+        assert_accepted(name, source);
     }
 }
 

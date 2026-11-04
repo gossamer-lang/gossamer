@@ -659,27 +659,3 @@ fn ty_to_string(ty: &gossamer_ast::ty::Type) -> String {
     }
 }
 
-/// Every item in `items`, descending into inline module bodies so a
-/// declaration nested in a `mod name { ... }` is visible to the
-/// whole-program synthesis passes. A multi-file package is auto-bundled
-/// into one source by wrapping each sibling file in `mod <stem> { ... }`
-/// (see `gossamer-cli`'s sibling auto-bundle), so a struct declared in
-/// another file lives one module level deep; the synthesizers must reach
-/// it exactly as the resolver does when it flattens the inline module
-/// tree for name resolution.
-fn flatten_items(items: &[Item]) -> Vec<&Item> {
-    let mut out = Vec::new();
-    collect_flat_items(items, &mut out);
-    out
-}
-
-fn collect_flat_items<'a>(items: &'a [Item], out: &mut Vec<&'a Item>) {
-    for item in items {
-        out.push(item);
-        if let ItemKind::Mod(decl) = &item.kind
-            && let ModBody::Inline(inner) = &decl.body
-        {
-            collect_flat_items(inner, out);
-        }
-    }
-}

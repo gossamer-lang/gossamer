@@ -3,13 +3,13 @@
 use super::{
     AUTOMATIC_METHODS, AstGenericArg, BINARY_HEAP_DEF_LOCAL, BTREE_MAP_ONLY_METHODS,
     BTREE_SET_DEF_LOCAL, BTREE_SET_ONLY_METHODS, COLLECTION_TRAVERSAL_METHODS, DEQUE_METHODS,
-    DURATION_METHODS, DataPosition, DefId, DeferredMutatingReceiver, DeferredStructuralKind,
-    Expectation, Expr, ExprKind, FloatTy, FnSig, HANDLE_SENTINEL_SPAN, HASH_SET_DEF_LOCAL, HashSet,
-    INSTANT_METHODS, IntTy, MIN_HEAP_DEF_LOCAL, MethodCallSite, Mutbl, NodeId, OPTION_DEF_LOCAL,
-    OPTION_METHODS, OwnGenericMethodSig, PUSH_POP_METHODS, PlaceMut, RESULT_DEF_LOCAL,
-    RESULT_METHODS, Resolution, SET_METHODS, Span, Ty, TyKind, TypeChecker, TypeError,
-    VEC_DEQUE_DEF_LOCAL, VEC_QUEUE_DEF_LOCAL, VEC_STACK_DEF_LOCAL, Visibility,
-    builtin_trait_methods, core_type_own_method_names, is_array_sequence_method,
+    DURATION_METHODS, DataPosition, DefId, DeferredMutatingReceiver, DeferredProjection,
+    DeferredStructuralKind, Expectation, Expr, ExprKind, FloatTy, FnSig, HANDLE_SENTINEL_SPAN,
+    HASH_SET_DEF_LOCAL, HashSet, INSTANT_METHODS, IntTy, MIN_HEAP_DEF_LOCAL, MethodCallSite, Mutbl,
+    NodeId, OPTION_DEF_LOCAL, OPTION_METHODS, OwnGenericMethodSig, PUSH_POP_METHODS, PlaceMut,
+    ProjectionKind, RESULT_DEF_LOCAL, RESULT_METHODS, Resolution, SET_METHODS, Span, Ty, TyKind,
+    TypeChecker, TypeError, VEC_DEQUE_DEF_LOCAL, VEC_QUEUE_DEF_LOCAL, VEC_STACK_DEF_LOCAL,
+    Visibility, builtin_trait_methods, core_type_own_method_names, is_array_sequence_method,
     is_btree_map_method, is_definitely_not_callable_value, is_free_call_only_traversal,
     is_map_method, is_slice_sequence_method, is_soft_for_structural_use, is_string_method,
     is_tuple_rejected_method, is_vec_only_sequence_method, iterator_receiver_accepts_method,
@@ -390,24 +390,6 @@ impl TypeChecker<'_> {
             return Some(self.tcx.error_ty());
         }
         let answer = self.parallel_adapter_answer(method, elem, args, span);
-        // Every worker reads the callback's captures and a fixed-array
-        // receiver's elements at once, so they obey the rule a goroutine's
-        // captures do.
-        for arg in args {
-            self.reject_unshareable_goroutine_captures(arg);
-        }
-        if matches!(self.tcx.kind(resolved), Some(TyKind::Array { .. }))
-            && self.ty_is_unshareable_across_goroutines(resolved)
-        {
-            let rendered = self.render_public_ty(resolved);
-            self.emit(
-                TypeError::ConcurrentCaptureUnsupported {
-                    name: "the receiver".to_string(),
-                    ty: rendered,
-                },
-                span,
-            );
-        }
         Some(answer)
     }
 
@@ -859,7 +841,125 @@ impl TypeChecker<'_> {
         if self.reject_unknown_stdlib_handle_method(resolved, method, span) {
             return self.tcx.error_ty();
         }
-        self.fresh()
+        let result = self.fresh();
+        self.defer_projection(
+            resolved,
+            result,
+            span,
+            ProjectionKind::Method {
+                call_id,
+                name: method.to_string(),
+                arg_tys: arg_tys.to_vec(),
+            },
+        );
+        result
+    }
+
+    /// Queues a use of `receiver` for [`Self::settle_deferred_projections`]
+    /// when the receiver is still an unconstrained inference variable. A
+    /// variable constrained to a numeric family is a scalar, whose uses the
+    /// scalar paths already judge.
+    pub(super) fn defer_projection(
+        &mut self,
+        receiver: Ty,
+        result: Ty,
+        span: Span,
+        kind: ProjectionKind,
+    ) {
+        let peeled = self.peel_refs(receiver);
+        let peeled = self.infer.resolve(self.tcx, peeled);
+        if self.synthesized_depth > 0
+            || !matches!(self.tcx.kind(peeled), Some(TyKind::Var(_)))
+            || self.infer.is_float_literal_var(self.tcx, peeled)
+            || self.infer.is_integer_constrained_var(self.tcx, peeled)
+        {
+            return;
+        }
+        self.deferred_projections.push(DeferredProjection {
+            receiver,
+            result,
+            span,
+            kind,
+        });
+    }
+
+    /// Types each deferred field read and method call once its receiver is
+    /// known, until a round settles nothing more: settling `m.data` names the
+    /// receiver of `m.data.len()`.
+    pub(super) fn settle_deferred_projections(&mut self) {
+        loop {
+            let pending = std::mem::take(&mut self.deferred_projections);
+            let before = pending.len();
+            let mut waiting = Vec::new();
+            for projection in pending {
+                let receiver = self.peel_refs(projection.receiver);
+                let resolved = self.infer.resolve(self.tcx, receiver);
+                if matches!(self.tcx.kind(resolved), Some(TyKind::Var(_))) {
+                    waiting.push(projection);
+                    continue;
+                }
+                let DeferredProjection {
+                    result, span, kind, ..
+                } = projection;
+                match kind {
+                    ProjectionKind::Field(field) => {
+                        match self.lookup_field_ty_diagnosed(resolved, &field) {
+                            Ok(ty) => self.unify(result, ty, span),
+                            Err(err) => self.emit(err, span),
+                        }
+                    }
+                    ProjectionKind::Method {
+                        call_id,
+                        name,
+                        arg_tys,
+                    } => {
+                        self.record_method_owner(call_id, resolved, &name);
+                        if let Some(ty) = self.projected_method_ret(resolved, &name, &arg_tys, span)
+                        {
+                            self.unify(result, ty, span);
+                        }
+                    }
+                }
+            }
+            let settled = waiting.len() < before;
+            waiting.append(&mut self.deferred_projections);
+            self.deferred_projections = waiting;
+            if !settled {
+                self.deferred_projections.clear();
+                return;
+            }
+        }
+    }
+
+    /// The return type of `method` on a receiver resolved after the call was
+    /// checked, from the surfaces whose answer the argument types decide.
+    fn projected_method_ret(
+        &mut self,
+        resolved: Ty,
+        method: &str,
+        arg_tys: &[Ty],
+        span: Span,
+    ) -> Option<Ty> {
+        let arity = arg_tys.len();
+        if let Some(TyKind::Adt { def, substs }) = self.tcx.kind(resolved)
+            && substs.types().is_empty()
+            && let Some(name) = self.tcx.def_name(*def)
+            && let Some(&ret) =
+                self.method_ret_types
+                    .get(&(name.to_string(), method.to_string(), arity))
+        {
+            return Some(ret);
+        }
+        if matches!(self.tcx.kind(resolved), Some(TyKind::String)) {
+            return Some(self.string_method_ret(method, &[], Expectation::None, span));
+        }
+        self.generic_recv_method_ret(resolved, method, arity, &[])
+            .or_else(|| self.vec_method_ret(method, arg_tys, resolved, span))
+            .or_else(|| self.seq_combinator_method_ret(method, arg_tys, resolved, span))
+            .or_else(|| self.set_method_ret(method, arg_tys, resolved, span))
+            .or_else(|| self.map_method_ret(method, arg_tys, resolved, span))
+            .or_else(|| self.opaque_value_method(resolved, method, arity, span))
+            .or_else(|| self.check_numeric_receiver_method(method, resolved, arity))
     }
 
     /// Rejects `req.nowhere()` on a handle whose method surface the checker

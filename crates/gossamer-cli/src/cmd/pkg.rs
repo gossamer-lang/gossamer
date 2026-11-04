@@ -553,7 +553,7 @@ fn scaffold_wrapper_if_needed(
     let wrapper_cargo_toml = format!(
         "[package]\nname = \"gos-{name}\"\nversion = \"0.0.1\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n\n[lib]\ncrate-type = [\"rlib\"]\n\n[dependencies]\n{name} = {{ {} }}\ngossamer-binding = \"{binding_version}\"\n",
         toml_path_kv("path", &dep_abs),
-        binding_version = gossamer_pkg::toolchain_version(),
+        binding_version = gossamer_binding_abi::SDK_VERSION,
     );
     fs::write(wrapper_dir.join("Cargo.toml"), wrapper_cargo_toml)?;
     let module_name = name.replace('-', "_");

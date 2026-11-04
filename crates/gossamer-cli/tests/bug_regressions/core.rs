@@ -2197,3 +2197,43 @@ fn main() {
         "{\"k\":[1,2]} s s s\n#[{\"k\":[1,2]}, 3, \"s\"] #[{\"k\":[1,2]}, 3, \"s\"]\nSome({\"k\":[1,2]}) ({\"k\":[1,2]}, 1) Some(\"s\")\nHolder { value: {\"k\":[1,2]}, n: 1 } Holder { value: \"s\", n: 2 }\n",
     );
 }
+
+/// A qualified pattern inside a module names that module's enum, though an
+/// enclosing scope declares a struct of the same name, whose constructor is
+/// also a value.
+#[test]
+fn a_module_enum_pattern_ignores_a_root_struct_of_its_name() {
+    let main = r#"mod dep {
+    pub struct Listener { pub id: i64 }
+
+    pub enum Launch {
+        Primary(Listener)
+        Alone
+    }
+
+    pub fn launch() -> Launch { Launch::Primary(Listener { id: 7 }) }
+
+    pub fn read() -> i64 {
+        match launch() {
+            Launch::Primary(l) => l.id
+            Launch::Alone => -1
+        }
+    }
+}
+
+struct Launch {
+    title: String
+    hold: bool
+}
+
+fn main() {
+    let mine = Launch { title: "t", hold: true }
+    println(f"{mine.title} {mine.hold} {dep::read()}")
+}
+"#;
+    assert_all_tiers(
+        "module_enum_beside_root_struct",
+        &[("main.gos", main)],
+        "t true 7\n",
+    );
+}

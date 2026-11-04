@@ -9,10 +9,9 @@ use super::{
     NodeId, OPTION_DEF_LOCAL, Pattern, PatternKind, PlainLetPatternProblem, PrimitiveTy,
     RESULT_DEF_LOCAL, REVERSE_DEF_LOCAL, Resolution, Span, Stmt, StmtKind, Ty, TyKind, TypeChecker,
     TypeError, UnaryOp, VEC_DEQUE_DEF_LOCAL, VEC_QUEUE_DEF_LOCAL, VEC_STACK_DEF_LOCAL,
-    closure_bound_names, default_value_spelling, expr_display, expr_mentions_any_name,
-    goroutine_bodies, int_assoc_const, int_literal_fits, int_ty_from_width, is_opaque_handle_def,
-    is_stable_borrow_place, json_value_variant_of, parse_int_magnitude, pattern_binding_names,
-    stmt_diverges,
+    default_value_spelling, expr_display, expr_mentions_any_name, int_assoc_const,
+    int_literal_fits, int_ty_from_width, is_opaque_handle_def, is_stable_borrow_place,
+    json_value_variant_of, parse_int_magnitude, pattern_binding_names, stmt_diverges,
 };
 
 impl TypeChecker<'_> {
@@ -983,136 +982,6 @@ impl TypeChecker<'_> {
             }
             let rendered = self.render_public_ty(elem);
             self.emit(TypeError::SharedPayloadUnsupported { ty: rendered }, span);
-        }
-    }
-
-    pub(super) fn reject_unshareable_goroutine_captures(&mut self, expr: &Expr) {
-        let unshareable: Vec<(String, Ty)> = self
-            .scopes
-            .iter()
-            .flat_map(|scope| scope.iter())
-            .filter_map(|(name, ty)| {
-                let resolved = self.infer.resolve(self.tcx, *ty);
-                self.ty_is_unshareable_across_goroutines(resolved)
-                    .then(|| (name.to_string(), resolved))
-            })
-            .collect();
-        if unshareable.is_empty() {
-            return;
-        }
-        for body in goroutine_bodies(expr) {
-            let bound = closure_bound_names(body.params);
-            for (name, ty) in &unshareable {
-                if bound.contains(name) {
-                    continue;
-                }
-                let mut one = HashSet::new();
-                one.insert(name.clone());
-                if expr_mentions_any_name(body.body, &one) {
-                    let rendered = self.render_public_ty(*ty);
-                    self.emit(
-                        TypeError::ConcurrentCaptureUnsupported {
-                            name: name.clone(),
-                            ty: rendered,
-                        },
-                        body.body.span,
-                    );
-                }
-            }
-        }
-    }
-
-    /// Whether a value of `ty` reaches a goroutine only as shared nested
-    /// storage. A bare sequence or map is published as one owned container,
-    /// and a scalar, a `String`, or a runtime handle carries its own
-    /// representation; an aggregate *holding* growable storage does not.
-    pub(super) fn ty_is_unshareable_across_goroutines(&self, ty: Ty) -> bool {
-        let mut peeled = ty;
-        while let TyKind::Ref { inner, .. } = self.tcx.kind_of(peeled) {
-            peeled = *inner;
-        }
-        if matches!(
-            self.tcx.kind_of(peeled),
-            TyKind::Vec(_) | TyKind::Slice(_) | TyKind::HashMap { .. }
-        ) {
-            return false;
-        }
-        if self.ty_is_shareable_handle(peeled) {
-            return false;
-        }
-        self.ty_contains_nested_vec(peeled)
-    }
-
-    /// A stdlib handle built to be reached from several goroutines: the
-    /// synchronisation types, the channel ends, and `sync::Shared`.
-    pub(super) fn ty_is_shareable_handle(&self, ty: Ty) -> bool {
-        if matches!(
-            self.tcx.kind_of(ty),
-            TyKind::Sender(_) | TyKind::Receiver(_) | TyKind::JoinHandle(_)
-        ) {
-            return true;
-        }
-        let TyKind::Adt { def, .. } = self.tcx.kind_of(ty) else {
-            return false;
-        };
-        self.tcx.def_name(*def).is_some_and(|name| {
-            let bare = name.rsplit("::").next().unwrap_or(name);
-            matches!(
-                bare,
-                "Shared"
-                    | "Mutex"
-                    | "RwLock"
-                    | "Once"
-                    | "WaitGroup"
-                    | "Barrier"
-                    | "AtomicI64"
-                    | "AtomicI32"
-                    | "AtomicU64"
-                    | "AtomicBool"
-            )
-        })
-    }
-
-    /// Rejects an aggregate argument at a spawned call that holds nested
-    /// growable storage, the one layout the spawn boundary cannot copy with
-    /// a single ownership descriptor. Scalars, strings, and runtime handles
-    /// inside an aggregate cross as the captured snapshot they already are.
-    ///
-    /// The argument is a closure, so the call it wraps is one level in: a
-    /// `spawn(|| f(Pair { .. }))` puts the aggregate where the boundary is.
-    pub(super) fn reject_spawn_inline_aggregate_args(&mut self, arg: &Expr) {
-        let ExprKind::Closure { body, .. } = &arg.kind else {
-            return self.reject_go_inline_aggregate_args(arg);
-        };
-        self.reject_go_inline_aggregate_args(body);
-    }
-
-    pub(super) fn reject_go_inline_aggregate_args(&mut self, expr: &Expr) {
-        let ExprKind::Call { args, .. } = &expr.kind else {
-            return;
-        };
-        for arg in args {
-            let Some(ty) = self.table.get(arg.id) else {
-                continue;
-            };
-            let resolved = self.infer.resolve(self.tcx, ty);
-            let inline = match self.tcx.kind_of(resolved) {
-                TyKind::Tuple(_) | TyKind::Array { .. } => true,
-                TyKind::Adt { def, .. } => {
-                    def.local < u32::MAX - 32 && self.tcx.struct_field_tys(*def).is_some()
-                }
-                _ => false,
-            };
-            if inline && self.ty_is_unshareable_across_goroutines(resolved) {
-                let ty = self.render_public_ty(resolved);
-                self.emit(
-                    TypeError::ConcurrentAggregateUnsupported {
-                        ty,
-                        boundary: "cross a goroutine boundary",
-                    },
-                    arg.span,
-                );
-            }
         }
     }
 

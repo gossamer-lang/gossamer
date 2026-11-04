@@ -1557,6 +1557,16 @@ const SPECS: &[Spec] = &[
     // A path through a module imported with `crate::`, `self::`, or `super::`
     // reaches the item that module declares.
     spec("feature-testing-examples/crate_import_module_paths/src/main.gos"),
+    // A reflecting generic specializes on its caller's type from a sibling
+    // module, a nested module, and a dependency package, and same-named types
+    // in two modules reflect their own fields.
+    spec("feature-testing-examples/reflect_across_packages/src/main.gos"),
+    // A value sent on a channel is the receiver's own: the sender's later
+    // writes never reach it, whatever storage it carries.
+    spec("feature-testing-examples/chan_send_value_semantics.gos"),
+    // A goroutine captures an aggregate holding growable storage as a value
+    // of its own, as a parallel callback and a spawned call's argument do.
+    spec("feature-testing-examples/spawn_aggregate_captures.gos"),
     // Values passed through tuples, `Result`s, enum payloads, and rebound
     // bindings keep their contents, and every holder gives back its share.
     spec("feature-testing-examples/tuple_vec_of_aggregates_drop.gos"),

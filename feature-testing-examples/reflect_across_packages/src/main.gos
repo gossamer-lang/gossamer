@@ -1,0 +1,26 @@
+// A reflecting generic keeps working when it moves into a module, a nested
+// module, or another package: each call specializes on the caller's type,
+// and same-named types in different modules reflect their own fields.
+
+use reflib
+use reflib::field_count as count
+use crate::helper
+use crate::shapes
+use crate::shapes::inner
+
+struct Person { id: i64, name: String }
+enum Signal { Start, Stop(i64), Rename(String, String) }
+
+fn local_count<T>() -> i64 { typeInfo::<T>().len() }
+
+fn main() {
+    println(f"{helper::fields::<Person>()} {helper::fields::<shapes::Item>()}")
+    println(f"{inner::width::<inner::Item>()} {inner::width::<Person>()}")
+    println(f"{typeInfo::<shapes::Item>().len()} {typeInfo::<inner::Item>().len()}")
+    println(f"{local_count::<Person>()} {local_count::<Signal>()}")
+    println(reflib::field_names::<Person>())
+    println(reflib::field_names::<inner::Item>())
+    println(f"{count::<Person>()} {count::<Signal>()} {reflib::own_person_fields()}")
+    println(reflib::render::<Person>(Person { id: 3, name: "ada" }))
+    println(reflib::render::<shapes::Item>(shapes::Item { a: 9 }))
+}

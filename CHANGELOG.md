@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.76.0 - Goroutines and channels carry any value; reflection across modules
+
+- A value sent on a channel is the receiver's own on every tier: writing to the sender's `Vec`, `Set`, deque, or a struct holding a `Vec` after `send` no longer changes what the receiver reads in compiled code.
+- A goroutine may capture, and a spawned call may be passed, a struct, enum, tuple, or array holding a `Vec`, `Map`, or other collection, nested to any depth, as may a parallel adapter's callback. Each crosses as a value of its own, where `gos check` refused it with GT0076 or GT0055.
+- `channel::<T>(n)` gives the channel elements of type `T`, so sending another type is GT0001; the turbofish was ignored, and `tx.send("s")` on a `channel::<i64>()` type-checked. A second type argument is GT0018.
+- A field or method used on a value whose type a later statement decides, such as a value received before the channel's first `send`, is typed once that type is known: a wrong annotation on its result is GT0001 where it was accepted, and a spawned closure over it is no longer refused with GT0118.
+- A reflecting generic (`fn f<T>() { .. typeInfo::<T>() .. }`) works from a sibling module, a nested module, or a dependency package, called on a type the caller declares, and also when it uses `typeInfo::<T>()` as a value rather than in a field loop. Each failed with GR0012.
+- Two modules may each declare a type of the same name and reflect it: `typeInfo` of each answers its own fields, where the build failed with GR0003.
+- A qualified pattern such as `Launch::Primary` inside a module matches that module's enum when the program also declares a struct of the same name at its root, where the match panicked as non-exhaustive on the VM and read a wrong value in compiled code.
+- Rust bindings that require `gossamer-binding = "0.75.x"` keep building with this toolchain. The binding SDK crates are versioned by their own API, here 0.75.19, and `gos new --template binding`, `gos bindgen`, and `gos add` of a Rust crate write that version.
+- A receive that a timer will release, such as on a timed context's `done_chan()` or a cohort with a `timeout:`, is no longer reported as a deadlock when the timer fires at the moment the check runs, on the VM and in compiled code.
+- GT0077's help no longer suggests a `Mutex`, which guards no value, and GT0114's help says `sync::Shared` holds an integer.
+- The spec's buffered channel reads `channel::<T>(16)`; its `channel::<T>(cap: 16)` failed with GR0013.
+
 ## 0.75.18 - Blocking threads leave no handles behind
 
 - A blocking-operation thread that finishes before the runtime records it leaves no thread handle behind. Each such handle stayed in the pool until the program exited.

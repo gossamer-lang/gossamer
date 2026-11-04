@@ -223,11 +223,39 @@ pub fn wake_poller() {
     let _ = globals().poller_interrupt.wake();
 }
 
+/// Wakers taken off the registry whose call has not returned. Raised under
+/// the registry lock before a waker leaves it, so an actor outside the
+/// goroutine set counts from its registration until what it wakes has run.
+static WAKERS_RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Lowers [`WAKERS_RUNNING`] once a delivered waker returns or unwinds.
+struct RunningWaker;
+
+impl Drop for RunningWaker {
+    fn drop(&mut self) {
+        WAKERS_RUNNING.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 fn deliver_event(ev: Readiness) {
-    let waker = globals().wakers.lock().remove(&ev.gid);
-    if let Some(w) = waker {
+    let waker = {
+        let mut wakers = globals().wakers.lock();
+        let waker = wakers.remove(&ev.gid);
+        waker.map(|w| {
+            WAKERS_RUNNING.fetch_add(1, Ordering::AcqRel);
+            (w, RunningWaker)
+        })
+    };
+    if let Some((w, _running)) = waker {
         w();
     }
+}
+
+/// Whether no waker is registered or running: no timer, readiness
+/// registration, or blocking-pool completion is left to act.
+fn wakers_idle(globals: &Globals) -> bool {
+    let wakers = globals.wakers.lock();
+    wakers.is_empty() && WAKERS_RUNNING.load(Ordering::Acquire) == 0
 }
 
 /// Allocates a fresh [`Gid`] for use as a runtime-internal wait
@@ -692,7 +720,7 @@ fn report_channel_wait_if_stuck(
     // can close or fill the channel this caller waits on.
     if globals.scheduler.live_goroutines() == 0
         && CHANNEL_WAITERS.load(Ordering::Acquire) == 1
-        && globals.wakers.lock().is_empty()
+        && wakers_idle(globals)
         && still_waiting.as_ref().is_none_or(|still| still())
     {
         report_fatal_deadlock(op);
@@ -795,7 +823,7 @@ pub fn check_program_blocked() {
     let Some(globals) = GLOBALS.get() else {
         return;
     };
-    if !globals.wakers.lock().is_empty() {
+    if !wakers_idle(globals) {
         return;
     }
     let Some(on_channels) = globals.scheduler.blocked_on_program() else {

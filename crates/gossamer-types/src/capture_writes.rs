@@ -90,7 +90,7 @@ impl CaptureWriteDiagnostic {
                 format!("a spawned closure takes a snapshot of `{name}` at the spawn"),
             )
             .with_help(
-                "return the value and read it with `join()`, send it on a channel, or share it through a `sync::Shared`",
+                "return the value and read it with `join()`, send it on a channel, or share an integer through a `sync::Shared`",
             ),
             CaptureWriteKind::SharedCapture { callable, shared } => Diagnostic::error(
                 Code(Self::SHARED_CODE),

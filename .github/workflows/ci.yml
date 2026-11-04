@@ -443,6 +443,22 @@ jobs:
       - name: Every playground fixture must answer rather than end the module
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: ./target/debug/gos run scripts/playground_smoke.gos
+      # A compiler that builds is not a release its users can install: the
+      # published packages pinned in scripts/consumers.txt have to check,
+      # test, and build from a fresh clone with empty caches. pgsql-gos's
+      # integration suite reaches a server on the default socket
+      # (`host=/var/run/postgresql dbname=gos_pgsql_test`), which the
+      # runner's own PostgreSQL provides.
+      - name: Start the runner's PostgreSQL for the pgsql-gos suite
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          sudo systemctl start postgresql
+          sudo -u postgres createuser --superuser "$USER"
+          sudo -u postgres createdb -O "$USER" gos_pgsql_test
+          pg_isready -h /var/run/postgresql
+      - name: Published consumer packages build against this toolchain
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: ./target/debug/gos run scripts/consumer_check.gos ./target/debug/gos
 
   # Cross-compilation correctness: `gos build --target aarch64-linux-*`
   # from a Linux host, run under QEMU, must match the bytecode VM. This is

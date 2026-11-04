@@ -1,0 +1,141 @@
+// A sent value is the receiver's own: the sender's later writes to the binding
+// it sent, through a container method or a field, never reach what the
+// receiver reads, whatever storage the value carries.
+
+use std::sync::channel
+
+struct WithVec { data: Vec<i64> }
+struct WithMap { tags: Map<String, i64> }
+struct Nested { inner: WithVec, label: String }
+enum Payload { Items(Vec<i64>), Empty }
+
+fn vec_case() -> i64 {
+    let tx, rx = channel::<Vec<i64>>(2)
+    let mut v = #[1, 2]
+    tx.send(v)
+    v.push(9)
+    rx.recv().unwrap().len() * 10 + v.len()
+}
+
+fn map_case() -> i64 {
+    let tx, rx = channel::<Map<String, i64>>(2)
+    let mut m = { "a": 1 }
+    tx.send(m)
+    m["b"] = 2
+    rx.recv().unwrap().len() * 10 + m.len()
+}
+
+fn set_case() -> i64 {
+    let tx, rx = channel::<Set<i64>>(2)
+    let mut s = #{ 1 }
+    tx.send(s)
+    s.insert(2)
+    rx.recv().unwrap().len() * 10 + s.len()
+}
+
+fn deque_case() -> i64 {
+    let tx, rx = channel::<Deque<i64>>(2)
+    let mut d = Deque::new()
+    d.push_back(1)
+    tx.send(d)
+    d.push_back(2)
+    rx.recv().unwrap().len() * 10 + d.len()
+}
+
+fn string_case() -> i64 {
+    let tx, rx = channel::<String>(2)
+    let mut s = "ab"
+    tx.send(s)
+    s += "c"
+    rx.recv().unwrap().len() * 10 + s.len()
+}
+
+fn struct_vec_case() -> i64 {
+    let tx, rx = channel::<WithVec>(2)
+    let mut m = WithVec { data: #[1, 2] }
+    tx.send(m)
+    m.data.push(9)
+    rx.recv().unwrap().data.len() * 10 + m.data.len()
+}
+
+fn struct_map_case() -> i64 {
+    let tx, rx = channel::<WithMap>(2)
+    let mut m = WithMap { tags: { "a": 1 } }
+    tx.send(m)
+    m.tags["b"] = 2
+    rx.recv().unwrap().tags.len() * 10 + m.tags.len()
+}
+
+fn nested_case() -> i64 {
+    let tx, rx = channel::<Nested>(2)
+    let mut n = Nested { inner: WithVec { data: #[1, 2] }, label: "x" }
+    tx.send(n)
+    n.inner.data.push(9)
+    rx.recv().unwrap().inner.data.len() * 10 + n.inner.data.len()
+}
+
+fn enum_case() -> i64 {
+    let tx, rx = channel::<Payload>(2)
+    let mut xs = #[1, 2]
+    let p = Payload::Items(xs)
+    tx.send(p)
+    xs.push(9)
+    let got = match rx.recv().unwrap() {
+        Payload::Items(items) => items.len()
+        Payload::Empty => 0
+    }
+    got * 10 + xs.len()
+}
+
+fn send_twice_case() -> i64 {
+    let tx, rx = channel::<Vec<i64>>(2)
+    let mut v = #[1]
+    tx.send(v)
+    v.push(2)
+    tx.send(v)
+    v.push(3)
+    rx.recv().unwrap().len() * 100 + rx.recv().unwrap().len() * 10 + v.len()
+}
+
+fn last_use_case() -> i64 {
+    let tx, rx = channel::<Vec<i64>>(2)
+    let v = #[1, 2, 3]
+    tx.send(v)
+    rx.recv().unwrap().len()
+}
+
+fn across_goroutines() -> i64 {
+    let tx, rx = channel::<WithVec>(4)
+    let rtx, rrx = channel::<i64>(4)
+    let mut total = 0
+    let joined = cohort {
+        spawn(|| {
+            while let Some(m) = rx.recv() { rtx.send(m.data.len()) }
+            rtx.close()
+        })
+        let mut m = WithVec { data: #[1, 2] }
+        tx.send(m)
+        m.data.push(9)
+        tx.send(m)
+        tx.close()
+        while let Some(n) = rrx.recv() { total = total * 10 + n }
+    }
+    assert(joined.is_ok())
+    total
+}
+
+fn main() {
+    assert_eq(vec_case(), 23)
+    assert_eq(map_case(), 12)
+    assert_eq(set_case(), 12)
+    assert_eq(deque_case(), 12)
+    assert_eq(string_case(), 23)
+    assert_eq(struct_vec_case(), 23)
+    assert_eq(struct_map_case(), 12)
+    assert_eq(nested_case(), 23)
+    assert_eq(enum_case(), 23)
+    assert_eq(send_twice_case(), 123)
+    assert_eq(last_use_case(), 3)
+    assert_eq(across_goroutines(), 23)
+    println("sent values stay the receiver's own")
+}

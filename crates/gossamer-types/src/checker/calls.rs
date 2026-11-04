@@ -857,7 +857,7 @@ impl TypeChecker<'_> {
         // names the parser injects and no user code can
         // shadow them.
         if module.is_empty()
-            && let Some(ty) = self.check_bare_intrinsic_call(last, arg_tys, callee.span)
+            && let Some(ty) = self.check_bare_intrinsic_call(last, arg_tys, callee)
         {
             return Some(ty);
         }

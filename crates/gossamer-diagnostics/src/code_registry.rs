@@ -1263,15 +1263,6 @@ pub const REGISTRY: &[(&str, &str)] = &[
                      without a reference pattern.",
     ),
     (
-        "GT0055",
-        "A by-value aggregate holding nested Vec storage would cross a\n\
-                     concurrency boundary whose compiled publication ABI cannot preserve\n\
-                     all of its nested child ownership. A struct, tuple, or array of\n\
-                     scalars, strings, and runtime handles crosses as a snapshot; one\n\
-                     carrying a Vec does not. Publish the Vec separately and reconstruct\n\
-                     the aggregate in the receiver.",
-    ),
-    (
         "GT0056",
         "A method was called on a generic parameter that none of its trait\n\
                      bounds declares. A parameter stands for every type a caller\n\
@@ -1440,23 +1431,12 @@ pub const REGISTRY: &[(&str, &str)] = &[
             `&mut seq[a..b]` to a `&mut [T]` parameter to write through it.",
     ),
     (
-        "GT0076",
-        "A goroutine's closure reads a binding whose type holds nested\n\
-            growable storage - a struct or tuple carrying a Vec, Map, or Set.\n\
-            Both goroutines would reach that storage through the same handle\n\
-            with nothing serialising the access, and no compiled concurrency\n\
-            ABI has an ownership descriptor for it. Build the value inside the\n\
-            goroutine, send it over a channel, or guard it with\n\
-            `sync::Shared` and reach it through `with`, which takes the lock\n\
-            for the duration of the access.",
-    ),
-    (
         "GT0077",
-        "`sync::Shared` guards one word, and only a scalar or a `String` is\n\
-            read the same way from that word by the bytecode VM and by\n\
-            compiled code. A collection or a struct would need a shape both\n\
-            sides agree on before it can be guarded; publish one through a\n\
-            channel instead, or keep a `Shared` per scalar field.",
+        "`sync::Shared` guards one word, and only an integer is read the\n\
+            same way from that word by the bytecode VM and by compiled code.\n\
+            Keep one `Shared` per integer field, hand a goroutine any other\n\
+            value as a spawned closure's capture, and send values back and\n\
+            forth on a channel.",
     ),
     (
         "GT0078",
@@ -1783,7 +1763,7 @@ pub const REGISTRY: &[(&str, &str)] = &[
             runs on another goroutine, so it takes a snapshot of each capture\n\
             where the `spawn` is written, and the write changes only the\n\
             goroutine's snapshot. Answer the value through `join()`, send it on a\n\
-            channel, or share it through a `sync::Shared`.",
+            channel, or share an integer through a `sync::Shared`.",
     ),
     (
         "GT0115",
