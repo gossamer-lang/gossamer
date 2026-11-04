@@ -4,7 +4,6 @@
 // This covers the "mutex or atomic for shared state" pattern.
 
 use std::sync::channel
-use std::time
 
 fn increment_via_channel(tx: channel::Sender<i64>, count: i64) {
     for _ in 0..count {
@@ -33,9 +32,10 @@ fn parallel_histogram(data: Vec<Vec<i64>>, tx: channel::Sender<i64>) {
 fn main() {
     // Channel-based counter: no shared mutable state
     let tx, rx = channel::unbounded()
-    spawn(|| increment_via_channel(tx, 50))
-    spawn(|| increment_via_channel(tx, 50))
-    time::sleep(40)
+    let _ = cohort {
+        spawn(|| increment_via_channel(tx, 50))
+        spawn(|| increment_via_channel(tx, 50))
+    }
     tx.close()
 
     let mut total = 0
@@ -48,8 +48,9 @@ fn main() {
     // Histogram via channel fan-out
     let htx, hrx = channel::unbounded()
     let __spawn_arg_0 = Vec::from([Vec::from([1, 2, 3]), Vec::from([4, 5, 6]), Vec::from([7, 8, 9])])
-    spawn(|| parallel_histogram(__spawn_arg_0, htx))
-    time::sleep(80)
+    let _ = cohort {
+        spawn(|| parallel_histogram(__spawn_arg_0, htx))
+    }
     htx.close()
 
     let mut sums: Vec<i64> = Vec::from([])

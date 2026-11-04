@@ -10224,7 +10224,6 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
         &[
             "examples/sleep_demo.gos",
             "examples/structured_concurrency.gos",
-            "feature-testing-examples/channel_close_drain.gos",
             "feature-testing-examples/channel_fan_in.gos",
             "feature-testing-examples/channel_timers.gos",
             "feature-testing-examples/clock_arithmetic.gos",
@@ -10275,7 +10274,6 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
             "feature-testing-examples/instant_methods.gos",
             "feature-testing-examples/lifecycle_readiness_shutdown.gos",
             "feature-testing-examples/mut_ref_container_params.gos",
-            "feature-testing-examples/mutex_poison_recovery.gos",
             "feature-testing-examples/net_tcp_read_deadline.gos",
             "feature-testing-examples/os_signal_handler.gos",
             "feature-testing-examples/panic_hook.gos",

@@ -4,7 +4,6 @@
 // the drain terminates and all values arrive in correct order.
 
 use std::sync::channel
-use std::time
 
 fn count_producer(tx: channel::Sender<i64>, n: i64) {
     for i in 0..n {
@@ -45,7 +44,6 @@ fn main() {
     // Basic drain: 0..10
     let tx, rx = channel()
     spawn(|| count_producer(tx, 10))
-    time::sleep(30)
     let mut collected: Vec<i64> = Vec::from([])
     while let Some(v) = rx.recv() {
         collected.push(v)
@@ -56,7 +54,6 @@ fn main() {
     // Fibonacci drain
     let ftx, frx = channel()
     spawn(|| fibonacci_producer(ftx, 50))
-    time::sleep(30)
     let mut fibs: Vec<i64> = Vec::from([])
     while let Some(v) = frx.recv() {
         fibs.push(v)
@@ -66,19 +63,18 @@ fn main() {
     println("fibs[1] = {}", fibs[1])
     println("fibs[5] = {}", fibs[5])
 
-    // Multiple producers, single consumer. Each producer closes
-    // its own send handle after pushing - but with two senders
-    // sharing one channel the first close would terminate the
-    // recv loop before the second producer finishes, so we
-    // collect via `try_recv` after a sleep instead. The
-    // close+drain pattern requires a single owner of the close
-    // step (typically the last sender to finish).
+    // Multiple producers, single consumer. A close ends every
+    // receiver's drain, so with two senders on one channel the
+    // close belongs to the side that knows both have finished:
+    // the cohort joins them, then the channel is closed.
     let mtx, mrx = channel::unbounded()
-    spawn(|| count_sender(mtx, 5))
-    spawn(|| count_sender(mtx, 5))
-    time::sleep(40)
+    let _ = cohort {
+        spawn(|| count_sender(mtx, 5))
+        spawn(|| count_sender(mtx, 5))
+    }
+    mtx.close()
     let mut all: Vec<i64> = Vec::from([])
-    while let Some(v) = mrx.try_recv() {
+    while let Some(v) = mrx.recv() {
         all.push(v)
     }
     println("two-producer count = {}", all.len())
