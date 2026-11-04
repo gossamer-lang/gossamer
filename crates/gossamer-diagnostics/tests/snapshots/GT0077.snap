@@ -1,12 +1,11 @@
 ---
 source: crates/gossamer-diagnostics/tests/snapshots.rs
-assertion_line: 86
 expression: rendered
 ---
 --- plain ---
-error[GT0077]: `sync::Shared` guards one word, and only a scalar or a `String` is - here
+error[GT0077]: `sync::Shared` guards one word, and only an integer is read the - here
 --- framed ---
-error[GT0077]: `sync::Shared` guards one word, and only a scalar or a `String` is
+error[GT0077]: `sync::Shared` guards one word, and only an integer is read the
   --> snap.gos:2:5
      2 |     let x = 1
        |     ^^^^^

@@ -443,6 +443,12 @@ jobs:
       - name: Every playground fixture must answer rather than end the module
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: ./target/debug/gos run scripts/playground_smoke.gos
+      # A compiler that builds is not a release its users can install: the
+      # published packages pinned in scripts/consumers.txt have to check,
+      # test, and build from a fresh clone with empty caches.
+      - name: Published consumer packages build against this toolchain
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: ./target/debug/gos run scripts/consumer_check.gos ./target/debug/gos
 
   # Cross-compilation correctness: `gos build --target aarch64-linux-*`
   # from a Linux host, run under QEMU, must match the bytecode VM. This is

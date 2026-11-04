@@ -1,0 +1,8 @@
+// A reflecting generic in a sibling module of the program.
+
+/// How many fields `T` declares, counted by a field loop.
+pub fn fields<T>() -> i64 {
+    let mut n = 0
+    for (_name, _ty) in typeInfo::<T>() { n += 1 }
+    n
+}

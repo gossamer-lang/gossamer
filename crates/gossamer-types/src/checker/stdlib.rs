@@ -2221,7 +2221,7 @@ impl TypeChecker<'_> {
             return Some(ty);
         }
         if is_channel_constructor_path(module, last) {
-            return Some(self.channel_tuple_ty());
+            return Some(self.channel_tuple_ty(callee));
         }
         if let Some(ty) = self.sort_stable_ret_ty(module, last, arg_tys) {
             return Some(ty);
@@ -2622,8 +2622,9 @@ impl TypeChecker<'_> {
         &mut self,
         name: &str,
         arg_tys: &[Ty],
-        span: Span,
+        callee: &Expr,
     ) -> Option<Ty> {
+        let span = callee.span;
         let constructor_arity = match name {
             "Some" | "Ok" | "Err" => Some(1),
             "None" => Some(0),
@@ -2692,7 +2693,7 @@ impl TypeChecker<'_> {
             | "std::sync::channel"
             | "std::sync::channel_unbounded"
             | "std::sync::channel::new"
-            | "std::sync::channel::unbounded" => self.channel_tuple_ty(),
+            | "std::sync::channel::unbounded" => self.channel_tuple_ty(callee),
             // `spawn(f) -> JoinHandle<T>`, T being the callable's return
             // type. Typing the call itself is what lets `spawn(f).join()`
             // resolve without binding the handle first: the method arm
@@ -2805,8 +2806,33 @@ impl TypeChecker<'_> {
         Some(bound)
     }
 
-    pub(super) fn channel_tuple_ty(&mut self) -> Ty {
-        let elem = self.fresh();
+    /// `(Sender<T>, Receiver<T>)` for a channel constructor call, `T` being
+    /// the type its turbofish names (`channel::<i64>(4)`) or a variable the
+    /// first send or receive settles.
+    pub(super) fn channel_tuple_ty(&mut self, callee: &Expr) -> Ty {
+        let generics = match &callee.kind {
+            ExprKind::Path(path) => path
+                .segments
+                .last()
+                .map(|seg| seg.generics.as_slice())
+                .unwrap_or_default(),
+            _ => &[],
+        };
+        let named = self.turbofish_types(generics);
+        if named.len() > 1 {
+            self.emit(
+                TypeError::CallArityMismatch {
+                    callee: "channel generic arguments".to_string(),
+                    expected: 1,
+                    found: named.len(),
+                },
+                callee.span,
+            );
+        }
+        let elem = match named.first() {
+            Some(elem) => *elem,
+            None => self.fresh(),
+        };
         let sender = self.tcx.intern(TyKind::Sender(elem));
         let receiver = self.tcx.intern(TyKind::Receiver(elem));
         self.tcx.intern(TyKind::Tuple(vec![sender, receiver]))

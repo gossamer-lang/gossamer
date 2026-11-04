@@ -1,0 +1,219 @@
+// Builds the ecosystem packages pinned in `scripts/consumers.txt` with the
+// toolchain under test, each from a fresh clone of its tag with empty
+// Gossamer caches, so a release candidate is judged by what a user who
+// installs it and fetches a published package would see.
+//
+// Usage: gos run scripts/consumer_check.gos [--all] [GOS]
+//
+// `GOS` is the toolchain under test, `<root>/target/release/gos` by default.
+// Without `--all` only the packages scoped `ci` run. A package whose check
+// fails is also copied and run through `gos check --fix`, and the report says
+// whether that migration repairs it and which files it edits; the package
+// still fails the run, because a release that needs a migration has to ship
+// one its users are told about.
+
+use std::{env, fs, path, process}
+
+/// One pinned package from `consumers.txt`.
+struct Consumer {
+    name: String
+    url: String
+    tag: String
+    steps: Vec<String>
+    scope: String
+}
+
+/// The checkout the script lives in.
+fn repo_root() -> String {
+    if let Some(root) = env::var("GOSSAMER_ROOT") {
+        return root
+    }
+    let mut directory = env::current_dir().unwrap_or(".")
+    loop {
+        if fs::is_file(path::join(directory, "scripts/consumers.txt")) {
+            return directory
+        }
+        match path::parent(directory) {
+            Some(parent) => directory = parent
+            None => return "."
+        }
+    }
+}
+
+/// Every package line of `consumers.txt`.
+fn read_consumers(text: String) -> Result<Vec<Consumer>, String> {
+    let mut out = #[]
+    for line in text.lines() {
+        let line = line.trim()
+        if line.is_empty() || line.starts_with("#") {
+            continue
+        }
+        let fields = line.split_whitespace()
+        if fields.len() != 5 {
+            return Err(f"expected 5 columns, found {fields.len()}: {line}")
+        }
+        out.push(Consumer {
+            name: fields[0]
+            url: fields[1]
+            tag: fields[2]
+            steps: fields[3].split(",")
+            scope: fields[4]
+        })
+    }
+    Ok(out)
+}
+
+/// The `gos` arguments one step runs.
+fn step_args(step: String) -> Result<Vec<String>, String> {
+    match step {
+        "check" => Ok(#["check", "."])
+        "test" => Ok(#["test", "."])
+        "build" => Ok(#["build", "--release", "."])
+        _ => Err(f"unknown step `{step}`")
+    }
+}
+
+/// Runs `program args` in `dir` with `environment`, answering whether it
+/// succeeded and what it printed.
+fn run(program: String, args: Vec<String>, dir: String, environment: Vec<(String, String)>) -> (bool, String) {
+    match process::run_in(program, args, dir, environment) {
+        Ok(out) => (out.code == 0, f"{out.stdout}{out.stderr}")
+        Err(e) => (false, f"{e}")
+    }
+}
+
+/// The last `count` lines of `text`, for a failure report.
+fn tail(text: String, count: i64) -> String {
+    let lines = text.lines()
+    let start = if lines.len() > count { lines.len() - count } else { 0 }
+    lines[start..].join("\n")
+}
+
+/// Copies `source` to `target` and runs `gos check --fix` there, answering a
+/// line that says whether the migration repairs the package.
+fn try_migration(gos: String, source: String, target: String, environment: Vec<(String, String)>) -> String {
+    let copied, _ = run("cp", #["-R", source, target], "", #[])
+    if !copied {
+        return "could not copy the package to try `gos check --fix`"
+    }
+    let _ = run(gos, #["check", "--fix", "."], target, environment)
+    let _, changed = run("git", #["diff", "--name-only"], target, #[])
+    let files = changed.lines().filter(|l| !l.trim().is_empty())
+    let fixed, _ = run(gos, #["check", "."], target, environment)
+    let edits = if files.is_empty() { "no files" } else { files.join(", ") }
+    if fixed {
+        f"`gos check --fix` repairs it, editing {edits}"
+    } else {
+        f"`gos check --fix` does not repair it (it edits {edits})"
+    }
+}
+
+/// Checks one package, answering `None` when every step passed and the
+/// failure report otherwise.
+fn check_consumer(gos: String, consumer: Consumer, scratch: String) -> Option<String> {
+    let home = path::join(scratch, consumer.name)
+    let dir = path::join(home, "src")
+    let environment = #[
+        ("GOS_CACHE_DIR", path::join(home, "gos-cache"))
+        ("XDG_CACHE_HOME", path::join(home, "xdg-cache"))
+    ]
+    let cloned, clone_out = run(
+        "git"
+        #["clone", "--quiet", "--depth", "1", "--branch", consumer.tag, consumer.url, dir]
+        ""
+        #[]
+    )
+    if !cloned {
+        return Some(f"cloning {consumer.url} at {consumer.tag} failed:\n{tail(clone_out, 20)}")
+    }
+    // A user's first command in a fresh clone fetches what it depends on.
+    let fetched, fetch_out = run(gos, #["fetch"], dir, environment)
+    if !fetched {
+        return Some(f"`gos fetch` failed:\n{tail(fetch_out, 40)}")
+    }
+    for step in consumer.steps {
+        let args = match step_args(step) {
+            Ok(args) => args
+            Err(e) => return Some(e)
+        }
+        println(f"   {consumer.name}: gos {args.join(" ")}")
+        let passed, output = run(gos, args, dir, environment)
+        if !passed {
+            let mut report = f"`gos {args.join(" ")}` failed:\n{tail(output, 40)}"
+            if step == "check" {
+                let migration = try_migration(gos, dir, path::join(home, "migrated"), environment)
+                report += f"\n{migration}"
+            }
+            return Some(report)
+        }
+    }
+    None
+}
+
+fn main() {
+    let root = repo_root()
+    let mut all = false
+    let mut gos = path::join(root, "target/release/gos")
+    for arg in env::args() {
+        if arg == "--all" {
+            all = true
+        } else {
+            gos = arg
+        }
+    }
+    // Each step runs inside its clone, so the toolchain is named from the
+    // root rather than from wherever the script was started.
+    if !path::is_absolute(gos) {
+        gos = path::join(env::current_dir().unwrap_or("."), gos)
+    }
+    if !fs::is_file(gos) {
+        eprintln(f"consumer_check: no toolchain at {gos}")
+        process::exit(2)
+    }
+    let text = match fs::read_to_string(path::join(root, "scripts/consumers.txt")) {
+        Ok(text) => text
+        Err(e) => {
+            eprintln(f"consumer_check: reading scripts/consumers.txt: {e}")
+            process::exit(2)
+            return
+        }
+    }
+    let consumers = match read_consumers(text) {
+        Ok(consumers) => consumers
+        Err(e) => {
+            eprintln(f"consumer_check: scripts/consumers.txt: {e}")
+            process::exit(2)
+            return
+        }
+    }
+    let scratch = match fs::temp_dir("gos-consumers-") {
+        Ok(dir) => dir
+        Err(e) => {
+            eprintln(f"consumer_check: creating a scratch directory: {e}")
+            process::exit(2)
+            return
+        }
+    }
+    let mut failures = #[]
+    for consumer in consumers {
+        if !all && consumer.scope != "ci" {
+            continue
+        }
+        println(f"=> {consumer.name} {consumer.tag}")
+        match check_consumer(gos, consumer, scratch) {
+            None => println(f"   {consumer.name}: ok")
+            Some(report) => {
+                println(f"   {consumer.name}: FAILED")
+                failures.push(f"{consumer.name} {consumer.tag}: {report}")
+            }
+        }
+    }
+    let _ = fs::remove_dir_all(scratch)
+    if !failures.is_empty() {
+        for failure in failures {
+            eprintln(f"\n{failure}")
+        }
+        process::exit(1)
+    }
+    println("every pinned consumer builds")
+}

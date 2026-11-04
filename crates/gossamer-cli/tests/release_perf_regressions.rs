@@ -1098,8 +1098,11 @@ fn main() {
             .and_then(|ms| ms.parse::<i64>().ok())
             .expect("fixture must report the milliseconds its loop took")
     };
-    let small = run_ms("10000");
-    let large = run_ms("40000");
+    // Preemption only ever adds time, so the fastest of a few runs is the
+    // cost of the work itself, under whatever else the machine is running.
+    let fastest = |n: &str| (0..3).map(|_| run_ms(n)).min().unwrap_or(i64::MAX);
+    let small = fastest("10000");
+    let large = fastest("40000");
     let _ = fs::remove_dir_all(&dir);
     // Four times the rows: linear work takes about four times as long, and a
     // copy of the growing Vec per row would take sixteen.

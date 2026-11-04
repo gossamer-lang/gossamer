@@ -3,10 +3,11 @@
 use super::{
     BinaryOp, CATALOG_TYPE_PARAM_SLOTS, DeferredStructural, DeferredStructuralKind, Expectation,
     Expr, ExprKind, FnDecl, FnParam, FnSig, HashMap, HashSet, INT_SUFFIXES, IntTy, Literal,
-    LiteralConsts, MethodCallSite, Mutbl, Resolution, Span, SpawnScopeScan, Ty, TyKind,
-    TypeChecker, TypeError, UnaryOp, WriteArgPathCollector, body_value_span, builtin_trait_methods,
-    combinator_module_name, field_name_span, int_literal_fits, is_compiler_generated,
-    is_soft_for_structural_use, op_trait_name, struct_literal_positional_index, with_field_span,
+    LiteralConsts, MethodCallSite, Mutbl, ProjectionKind, Resolution, Span, SpawnScopeScan, Ty,
+    TyKind, TypeChecker, TypeError, UnaryOp, WriteArgPathCollector, body_value_span,
+    builtin_trait_methods, combinator_module_name, field_name_span, int_literal_fits,
+    is_compiler_generated, is_soft_for_structural_use, op_trait_name,
+    struct_literal_positional_index, with_field_span,
 };
 
 impl TypeChecker<'_> {
@@ -190,27 +191,6 @@ impl TypeChecker<'_> {
             }
             _ => false,
         }
-    }
-
-    pub(super) fn ty_contains_nested_vec(&self, ty: Ty) -> bool {
-        fn walk(checker: &TypeChecker<'_>, ty: Ty, seen: &mut HashSet<Ty>) -> bool {
-            let ty = checker.infer.resolve(checker.tcx, ty);
-            if !seen.insert(ty) {
-                return false;
-            }
-            match checker.tcx.kind_of(ty) {
-                TyKind::Vec(_) => true,
-                TyKind::Array { elem, .. } | TyKind::Slice(elem) => walk(checker, *elem, seen),
-                TyKind::Tuple(items) => items.iter().any(|item| walk(checker, *item, seen)),
-                TyKind::Adt { def, substs } => checker
-                    .tcx
-                    .adt_field_tys(*def, substs)
-                    .is_some_and(|fields| fields.iter().any(|field| walk(checker, *field, seen))),
-                _ => false,
-            }
-        }
-
-        walk(self, ty, &mut HashSet::new())
     }
 
     pub(super) fn reject_stored_reference_type(&mut self, ty: Ty, span: Span, context: &str) {
@@ -679,19 +659,6 @@ impl TypeChecker<'_> {
                 if let ExprKind::Path(path) = &callee.kind
                     && let Some(last) = path.segments.last()
                 {
-                    // The prelude `spawn`, not a module's own (`exec::spawn`).
-                    if last.name.name == "spawn"
-                        && path.segments.len() == 1
-                        && let Some(arg) = args.first()
-                    {
-                        // An aggregate written inline at the spawned call has
-                        // no owner on either side of the boundary. A reference
-                        // the closure body creates and consumes never crosses
-                        // it, so only a captured one is rejected, which
-                        // `reject_unshareable_goroutine_captures` covers.
-                        self.reject_spawn_inline_aggregate_args(arg);
-                        self.reject_unshareable_goroutine_captures(arg);
-                    }
                     // The guarded slot is one word that every tier reads
                     // back as an integer. A payload without that agreement
                     // is refused here rather than compiling on one tier and
@@ -758,7 +725,15 @@ impl TypeChecker<'_> {
                     gossamer_ast::FieldSelector::Named(name) => {
                         self.reject_private_field(receiver_ty, &name.name, expr.span);
                         match self.lookup_field_ty_diagnosed(receiver_ty, &name.name) {
-                            Ok(ty) => ty,
+                            Ok(ty) => {
+                                self.defer_projection(
+                                    receiver_ty,
+                                    ty,
+                                    expr.span,
+                                    ProjectionKind::Field(name.name.clone()),
+                                );
+                                ty
+                            }
                             Err(err) => {
                                 self.emit(
                                     with_field_span(err, field_name_span(expr, &name.name)),

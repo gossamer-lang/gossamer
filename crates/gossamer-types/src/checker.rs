@@ -113,6 +113,7 @@ impl TypeChecker<'_> {
         for item in &source.items {
             self.check_item(item);
         }
+        self.settle_deferred_projections();
         self.infer.default_unresolved_int_vars(self.tcx);
         self.infer.default_unresolved_float_vars(self.tcx);
         self.check_deferred_reference_storage();
@@ -670,6 +671,25 @@ struct DeferredStructural {
     result: Option<Ty>,
 }
 
+/// A field read or method call checked while its receiver was still an
+/// inference variable. `result` stands in for the use's type until the
+/// receiver resolves; settling unifies it with the type the use names.
+struct DeferredProjection {
+    receiver: Ty,
+    result: Ty,
+    span: Span,
+    kind: ProjectionKind,
+}
+
+enum ProjectionKind {
+    Field(String),
+    Method {
+        call_id: NodeId,
+        name: String,
+        arg_tys: Vec<Ty>,
+    },
+}
+
 struct DeferredMutatingReceiver {
     receiver: NodeId,
     ty: Ty,
@@ -901,6 +921,9 @@ struct TypeChecker<'a> {
     /// Structural uses whose operand was an unresolved inference var at
     /// first check; re-validated after integer/float defaulting.
     deferred_structural: Vec<DeferredStructural>,
+    /// Field reads and method calls whose receiver a later statement types,
+    /// such as a channel element only a later `send` names.
+    deferred_projections: Vec<DeferredProjection>,
     /// Method receivers whose concrete type is established only by numeric
     /// defaulting. Their place capability is stable and can be checked once
     /// the receiver type selects the actual method.
@@ -1355,6 +1378,7 @@ impl<'a> TypeChecker<'a> {
             inherent_method_requires_mut: HashMap::new(),
             trait_impl_method_requires_mut: HashMap::new(),
             deferred_structural: Vec::new(),
+            deferred_projections: Vec::new(),
             deferred_mutating_receivers: Vec::new(),
             deferred_private_fields: Vec::new(),
             deferred_field_receivers: Vec::new(),
@@ -4381,33 +4405,6 @@ fn pattern_binding_names(pattern: &Pattern, out: &mut Vec<String>) {
         | PatternKind::Range { .. }
         | PatternKind::Rest
         | PatternKind::Error => {}
-    }
-}
-
-/// A closure that a goroutine will run: its parameters and its body.
-struct GoroutineBody<'a> {
-    params: &'a [ClosureParam],
-    body: &'a Expr,
-}
-
-/// Every closure whose body a `spawn` / `go` expression will run.
-///
-/// `spawn(|| work())` names the closure directly;
-/// `go f(closure)` hands one to a call, whose own body runs in the spawning
-/// goroutine, so only the closure arguments are collected.
-fn goroutine_bodies(expr: &Expr) -> Vec<GoroutineBody<'_>> {
-    match &expr.kind {
-        ExprKind::Closure { params, body, .. } => vec![GoroutineBody { params, body }],
-        ExprKind::Call { callee, args } => {
-            let mut out = goroutine_bodies(callee);
-            for arg in args {
-                if matches!(arg.kind, ExprKind::Closure { .. }) {
-                    out.extend(goroutine_bodies(arg));
-                }
-            }
-            out
-        }
-        _ => Vec::new(),
     }
 }
 

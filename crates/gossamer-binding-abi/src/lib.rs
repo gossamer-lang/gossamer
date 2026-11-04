@@ -19,6 +19,10 @@
 use std::ffi::c_void;
 use std::os::raw::c_char;
 
+/// The binding SDK's crate version, which a binding's `gossamer-binding`
+/// requirement names. It follows the SDK's own API, not the toolchain's.
+pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Major and minor version of this ABI, as `major << 16 | minor`.
 ///
 /// A host refuses a library whose major differs from its own, and one whose

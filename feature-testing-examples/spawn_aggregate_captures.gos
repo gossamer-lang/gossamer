@@ -1,0 +1,135 @@
+// A spawned closure captures an aggregate holding growable storage as a value
+// of its own: a struct, enum, tuple, or array carrying a Vec, Map, or String,
+// nested to any depth, read from many goroutines at once, by a parallel
+// adapter's callback, or passed by value to a spawned call. A `mut` binding's
+// capture is a snapshot taken at the spawn.
+
+struct WithVec { id: i64, data: Vec<i64> }
+struct WithMap { tags: Map<String, i64>, label: String }
+struct Nested { inner: WithVec, names: Vec<String> }
+
+fn read_capture() -> i64 {
+    let m = WithVec { id: 7, data: #[1, 2, 3] }
+    let mut got = 0
+    let r = cohort {
+        let h = spawn(|| m.data.len() + m.id)
+        got = h.join().unwrap()
+    }
+    assert(r.is_ok())
+    got * 10 + m.data.len()
+}
+
+fn mut_capture_snapshot() -> i64 {
+    let mut m = WithVec { id: 1, data: #[1, 2] }
+    let mut got = 0
+    let r = cohort {
+        let h = spawn(|| m.data.len())
+        m.data.push(9)
+        got = h.join().unwrap()
+    }
+    assert(r.is_ok())
+    got * 10 + m.data.len()
+}
+
+fn map_capture() -> i64 {
+    let w = WithMap { tags: { "a": 1, "b": 2 }, label: "x" }
+    let mut got = 0
+    let r = cohort {
+        let h = spawn(|| w.tags.len() + w.label.len())
+        got = h.join().unwrap()
+    }
+    assert(r.is_ok())
+    got
+}
+
+fn nested_capture() -> i64 {
+    let n = Nested { inner: WithVec { id: 2, data: #[5, 6] }, names: #["p", "q", "r"] }
+    let mut got = 0
+    let r = cohort {
+        let a = spawn(|| n.inner.data.len() + n.names.len())
+        let b = spawn(|| n.inner.data[0] + n.names.len())
+        got = a.join().unwrap() * 100 + b.join().unwrap()
+    }
+    assert(r.is_ok())
+    got
+}
+
+fn many_spawns() -> i64 {
+    let m = WithVec { id: 1, data: #[1, 2, 3, 4] }
+    let mut total = 0
+    let r = cohort {
+        let mut hs = #[]
+        for i in 0..64 {
+            hs.push(spawn(|| m.data.iter().sum() + i))
+        }
+        for h in hs { total += h.join().unwrap() }
+    }
+    assert(r.is_ok())
+    total
+}
+
+fn total(w: WithVec) -> i64 { w.data.iter().sum() + w.id }
+
+fn inline_arg() -> i64 {
+    let mut got = 0
+    let r = cohort {
+        let h = spawn(|| total(WithVec { id: 5, data: #[1, 2] }))
+        got = h.join().unwrap()
+    }
+    assert(r.is_ok())
+    got
+}
+
+fn par_capture() -> i64 {
+    let w = WithVec { id: 3, data: #[10, 20, 30] }
+    let xs = #[1, 2, 3, 4, 5, 6, 7, 8]
+    xs.par_map(|x| x * w.data.len() + w.id).iter().sum()
+}
+
+enum Payload { Items(Vec<i64>), Named { tags: Vec<String> }, Empty }
+enum Tree { Node(Vec<Tree>), Leaf(i64) }
+
+fn count(t: Tree) -> i64 {
+    match t {
+        Tree::Node(kids) => kids.iter().map(|k| count(k)).sum()
+        Tree::Leaf(n) => n
+    }
+}
+
+fn shapes() -> String {
+    let p = Payload::Items(#[1, 2, 3])
+    let q = Payload::Named { tags: #["a", "b"] }
+    let e = Payload::Empty
+    let o = Some(WithVec { id: 4, data: #[9] })
+    let t = (#[1, 2], 5)
+    let a = [WithVec { id: 1, data: #[1] }, WithVec { id: 2, data: #[2, 2] }]
+    let tree = Tree::Node(#[Tree::Leaf(1), Tree::Node(#[Tree::Leaf(2), Tree::Leaf(3)])])
+    let mut out = ""
+    let r = cohort {
+        let h = spawn(|| {
+            let pn = match p { Payload::Items(xs) => xs.len(), Payload::Named { tags } => tags.len(), Payload::Empty => 0 }
+            let qn = match q { Payload::Items(xs) => xs.len(), Payload::Named { tags } => tags.len(), Payload::Empty => 0 }
+            let en = match e { Payload::Empty => 1, _ => 0 }
+            let on = match o { Some(w) => w.data.len() + w.id, None => 0 }
+            f"{pn} {qn} {en} {on} {t.0.len() + t.1} {a[1].data.len() + a[0].id} {count(tree)}"
+        })
+        out = h.join().unwrap()
+    }
+    assert(r.is_ok())
+    out
+}
+
+fn main() {
+    for _ in 0..50 {
+        assert_eq(read_capture(), 103)
+        assert_eq(mut_capture_snapshot(), 23)
+        assert_eq(map_capture(), 3)
+        assert_eq(nested_capture(), 508)
+        assert_eq(many_spawns(), 2656)
+        assert_eq(inline_arg(), 8)
+        assert_eq(par_capture(), 132)
+        assert_eq(shapes(), "3 2 1 5 7 3 6")
+    }
+    println(f"{read_capture()} {mut_capture_snapshot()} {map_capture()} {nested_capture()}")
+    println(f"{many_spawns()} {inline_arg()} {par_capture()} {shapes()}")
+}

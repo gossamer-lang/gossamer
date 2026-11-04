@@ -284,7 +284,7 @@ fn render_cargo_toml(crate_name: &str) -> String {
          [dependencies]\n\
          {crate_name} = \"*\"  # pin to the version you intend\n\
          gossamer-binding = \"{binding_version}\"\n",
-        binding_version = gossamer_pkg::toolchain_version(),
+        binding_version = gossamer_binding_abi::SDK_VERSION,
     )
 }
 

@@ -318,6 +318,9 @@ fn copy_shape(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -> Option<Co
 }
 
 fn container_store_value(name: &str, args: &[Operand]) -> Option<usize> {
+    if super::param_reads::is_channel_send(name) {
+        return (args.len() >= 2).then_some(1);
+    }
     let stores = name.starts_with("gos_rt_vec_push")
         || name.starts_with("gos_rt_deque_push")
         || matches!(

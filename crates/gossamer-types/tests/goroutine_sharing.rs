@@ -1,11 +1,10 @@
 //! Regression matrix for what may cross a goroutine boundary.
 //!
-//! These are soundness tests, not diagnostic snapshots. A rejected program
-//! is one that would otherwise reach the same nested growable storage from
-//! two goroutines with nothing serialising the access - the shape that
-//! compiled cleanly, ran on the bytecode VM, and hard-faulted in a native
-//! build. The accepted cases pin what stays legal: a value built inside the
-//! goroutine, and `sync::Shared`, which exists to be reached from several.
+//! These are soundness tests, not diagnostic snapshots. A spawned closure
+//! takes a snapshot of each capture, so an aggregate holding growable storage
+//! crosses as a value of its own; what stays rejected is a write that would
+//! reach the spawning goroutine's storage, and a `sync::Shared` payload the
+//! guarded slot cannot carry.
 
 use gossamer_lex::SourceMap;
 use gossamer_parse::parse_source_file;
@@ -27,6 +26,22 @@ fn diagnostics(source: &str) -> Vec<TypeDiagnostic> {
     diagnostics
 }
 
+/// The codes the goroutine-capture analysis gives `source`, which runs on the
+/// checked program after type checking.
+fn capture_codes(source: &str) -> Vec<String> {
+    let mut map = SourceMap::new();
+    let file = map.add_file("goroutine-sharing.gos".to_string(), source.to_string());
+    let (mut parsed, _) = parse_source_file(source, file);
+    let (mut resolutions, _) = resolve_source_file(&parsed);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut parsed, &mut resolutions);
+    let mut tcx = TyCtxt::new();
+    let (table, _) = typecheck_source_file(&parsed, &resolutions, &mut tcx);
+    gossamer_types::check_capture_writes(&parsed, &resolutions, &table, &tcx)
+        .iter()
+        .map(|d| d.to_diagnostic().code.0.to_string())
+        .collect()
+}
+
 fn codes(source: &str) -> Vec<String> {
     diagnostics(source)
         .iter()
@@ -34,11 +49,10 @@ fn codes(source: &str) -> Vec<String> {
         .collect()
 }
 
-/// The shape that used to pass `gos check`, run on the VM, and fault in a
-/// native build: a goroutine reading an outer binding whose type carries
-/// nested growable storage.
+/// Lending a captured aggregate to a callee as `&mut` from goroutines spawned
+/// in a loop writes each goroutine's snapshot, never the spawning binding.
 #[test]
-fn capturing_an_aggregate_with_nested_storage_is_rejected() {
+fn lending_a_captured_aggregate_mutably_is_rejected() {
     let source = r"
 struct Pool {
     connections: Vec<i64>
@@ -57,16 +71,17 @@ fn main() {
     }
 }
 ";
-    let codes = codes(source);
+    let codes = capture_codes(source);
     assert!(
-        codes.iter().any(|c| c == "GT0076"),
-        "expected GT0076, got {codes:?}"
+        codes.iter().any(|c| c == "GT0114"),
+        "expected GT0114, got {codes:?}"
     );
 }
 
-/// The `go` spelling of the same hazard.
+/// A goroutine reads its own snapshot of an aggregate holding growable
+/// storage.
 #[test]
-fn a_detached_goroutine_capture_is_rejected_too() {
+fn reading_a_captured_aggregate_with_nested_storage_is_accepted() {
     let source = r#"
 struct Registry {
     names: Vec<String>
@@ -81,15 +96,15 @@ fn main() {
     spawn(|| { let _ = count(registry) })
 }
 "#;
-    let codes = codes(source);
+    let mut codes = codes(source);
+    codes.extend(capture_codes(source));
     assert!(
-        codes.iter().any(|c| c == "GT0076"),
-        "expected GT0076, got {codes:?}"
+        !codes.iter().any(|c| c.starts_with("GT")),
+        "expected no type errors, got {codes:?}"
     );
 }
 
-/// A goroutine that builds its own value keeps working - the rejection is
-/// about reaching the spawning goroutine's storage, not about aggregates.
+/// A goroutine that builds its own value keeps working.
 #[test]
 fn a_goroutine_that_builds_its_own_aggregate_is_accepted() {
     let source = r"

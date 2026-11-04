@@ -1,0 +1,16 @@
+# Ecosystem packages every release candidate must keep building, each pinned
+# to a published tag. `scripts/consumer_check.gos` clones each into a fresh
+# directory with empty Gossamer caches and runs its steps with the toolchain
+# under test.
+#
+# Columns, separated by whitespace:
+#   name    a label for the report
+#   url     the repository to clone
+#   tag     the published tag to check out
+#   steps   comma-separated `gos` commands: check, test, build (`build --release`)
+#   scope   `ci` runs in CI; `native` needs native libraries (SDL3 and its
+#           system headers) and runs with `--all`
+pgsql-gos         https://github.com/danpozmanter/pgsql-gos         v0.1.3  check,test,build  ci
+windowing-gos     https://github.com/gossamer-lang/windowing-gos    v0.1.3  check             native
+gui-gos           https://github.com/gossamer-lang/gui-gos          v0.1.5  check             native
+feather-launcher  https://github.com/danpozmanter/feather-launcher  v0.1.1  check,build       native

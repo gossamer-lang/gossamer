@@ -239,7 +239,7 @@ fn binding_template_cargo_toml(crate_name: &str) -> String {
          # resolves it to the `gos` that builds the project, so it\n\
          # tracks the version stated in `project.toml`.\n\
          gossamer-binding = \"{binding_version}\"\n",
-        binding_version = gossamer_pkg::toolchain_version(),
+        binding_version = gossamer_binding_abi::SDK_VERSION,
     )
 }
 

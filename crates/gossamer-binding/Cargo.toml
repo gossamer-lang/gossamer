@@ -1,6 +1,10 @@
 [package]
 name = "gossamer-binding"
-version.workspace = true
+# The binding SDK is versioned by its own API, not by the compiler: a
+# binding's `gossamer-binding = "0.75.x"` requirement matches every toolchain
+# whose SDK keeps that API. Bump the minor version only on a breaking change
+# to the binding API.
+version = "0.75.19"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

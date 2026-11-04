@@ -369,11 +369,14 @@ pub(super) fn stores_table_value_copy(
 /// copy. A `Vec` frees the JSON handles it holds, so a `json::Value` stored
 /// into one is a handle of its own onto the same document. A copy of a binding the store is the last use of is handed over
 /// instead by the uniqueness pass, so a value built and stored in one go pays
-/// nothing. A map that owns its table values copies them itself.
+/// nothing. A map that owns its table values copies them itself. A channel
+/// send stores its value the same way: the receiver reads what was sent, not
+/// what the sender later writes.
 pub(crate) fn copy_stored_containers(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
     use gossamer_types::TyKind;
     let stores_value = |name: &str| {
-        name.starts_with("gos_rt_vec_push")
+        is_channel_send(name)
+            || name.starts_with("gos_rt_vec_push")
             || name.starts_with("gos_rt_deque_push")
             || matches!(
                 name,
@@ -396,7 +399,8 @@ pub(crate) fn copy_stored_containers(body: &mut Body, tcx: &gossamer_types::TyCt
         if !stores_value(name) || args.len() < 2 {
             continue;
         }
-        let value_index = args.len() - 1;
+        let channel = is_channel_send(name);
+        let value_index = if channel { 1 } else { args.len() - 1 };
         let (Some(Operand::Copy(receiver)), Some(Operand::Copy(value))) =
             (args.first(), args.get(value_index))
         else {
@@ -426,6 +430,7 @@ pub(crate) fn copy_stored_containers(body: &mut Body, tcx: &gossamer_types::TyCt
             container = *inner;
         }
         let elem = match tcx.kind_of(container) {
+            TyKind::Sender(elem) if channel => *elem,
             TyKind::Vec(elem) | TyKind::Slice(elem) => *elem,
             TyKind::HashMap { value, .. } => *value,
             TyKind::Adt { substs, .. } if handle_container(tcx, container).is_some() => {
@@ -503,6 +508,15 @@ pub(crate) fn copy_stored_containers(body: &mut Body, tcx: &gossamer_types::TyCt
             terminator_inlined,
         });
     }
+}
+
+/// `true` for the runtime entries that enqueue a value on a channel, whose
+/// value is always their second argument.
+pub(super) fn is_channel_send(name: &str) -> bool {
+    matches!(
+        name,
+        "gos_rt_chan_send" | "gos_rt_chan_try_send" | "gos_rt_chan_send_select_arm"
+    )
 }
 
 /// One definition of a local, as `copy_returned_lent_tables` reads it.

@@ -2618,17 +2618,14 @@ A byte-budget guard reports `GX0008` before the hardware guard page; the stack
 does not grow or shrink.
 
 **Argument discipline.** After `spawn(|| f(x))` returns, the caller may continue to
-use `x`; Gossamer has no source-level ownership transfer. Primitive values
-copy directly. A named Vec argument is cloned before the goroutine is
-published, including nested Vec storage, so later growth occurs on independent
-buffers. Every managed child reachable from that Vec is marked shared before
-publication. Runtime synchronization handles keep their documented
-shared-handle semantics. A struct, tuple, or fixed-array argument crosses as
-the captured snapshot it is when it holds scalars, strings, and runtime
-handles (`Sender`, `Shared`, `Mutex`, ...). GT0055 rejects one that holds
-nested Vec storage, which the spawn boundary cannot yet copy with a single
-ownership descriptor; publish that Vec separately and reconstruct the
-aggregate in the receiving goroutine.
+use `x`; Gossamer has no source-level ownership transfer. Every value a
+spawned closure captures or passes crosses as a value of its own: scalars,
+strings, `Vec`, `Map`, `Set`, and the other collections, and structs, enums,
+tuples, and fixed arrays holding any of them, nested to any depth. Every
+managed child reachable from the value is marked shared before the goroutine
+is published, and the spawning code's later writes never reach it. Runtime
+synchronization handles (`Sender`, `Receiver`, `Shared`, `Mutex`, ...) keep
+their documented shared-handle semantics.
 
 A spawned call may not capture or pass a `&T` or `&mut T`. The tracked
 `&`/`&mut` access markers are lexical write-intent markers (§7.5) and cannot be
@@ -2662,8 +2659,12 @@ builtin effect audit confirms that they cannot pin a scheduler worker.
 
 ```
 let tx, rx = channel::<T>()             // unbuffered
-let tx, rx = channel::<T>(cap: 16)      // buffered
+let tx, rx = channel::<T>(16)           // buffered, capacity 16
 ```
+
+The turbofish names the element type; without one, the first send or
+receive that fixes it does. A use of a received value before that point is
+typed once the element type is known.
 
 Channel operations (non-`select`):
 
@@ -2706,12 +2707,10 @@ to arrive, and that pair is progress. Nor is a goroutine waiting on a timer,
 a socket, or a blocking call - each waits on something outside the goroutine
 graph.
 
-`Sender::send` copies primitive values and clones a named Vec value, including
-nested Vec storage, and marks all managed children shared. Scalar-only inline
-aggregates are copied. GT0055 rejects channel values whose inline aggregate
-contains nested Vec storage until that ABI has a complete child-ownership
-descriptor. No ownership transfer is implied; the sender retains access to its
-binding. Sending a `&T` or `&mut T` on a channel is a compile error because a
+`Sender::send` gives the receiver a value of its own, of any type a spawned
+closure may capture, and marks all its managed children shared. No ownership
+transfer is implied: the sender keeps its binding, and its later writes to it,
+through a method or a field, never reach the value the receiver reads. Sending a `&T` or `&mut T` on a channel is a compile error because a
 lexical view cannot cross a goroutine boundary.
 
 ### 8.3 Select

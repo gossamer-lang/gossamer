@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use gossamer_runtime::platform::Instant;
 use parking_lot::{Condvar, Mutex};
@@ -14,6 +14,10 @@ pub(crate) struct DeadlineQueue {
     thread_name: &'static str,
     fire: fn(i64),
     entries: Mutex<BTreeSet<(Instant, i64)>>,
+    /// Deadlines taken off `entries` whose `fire` has not returned. Raised
+    /// under the `entries` lock before an entry leaves it, so a deadline is
+    /// pending from its insert until what it fires has happened.
+    firing: AtomicUsize,
     wake: Condvar,
     started: OnceLock<Result<(), String>>,
 }
@@ -26,6 +30,7 @@ impl DeadlineQueue {
             thread_name,
             fire,
             entries: Mutex::new(BTreeSet::new()),
+            firing: AtomicUsize::new(0),
             wake: Condvar::new(),
             started: OnceLock::new(),
         }
@@ -70,9 +75,10 @@ impl DeadlineQueue {
         self.entries.lock().remove(&(deadline, id));
     }
 
-    /// Whether any deadline is still waiting to fire.
+    /// Whether any deadline is still waiting to fire or firing now.
     pub(crate) fn pending(&self) -> bool {
-        !self.entries.lock().is_empty()
+        let entries = self.entries.lock();
+        !entries.is_empty() || self.firing.load(Ordering::Acquire) > 0
     }
 
     fn run(&self) {
@@ -87,9 +93,11 @@ impl DeadlineQueue {
                 self.wake.wait_for(&mut entries, earliest - now);
                 continue;
             }
+            self.firing.fetch_add(1, Ordering::AcqRel);
             entries.pop_first();
             drop(entries);
             (self.fire)(id);
+            self.firing.fetch_sub(1, Ordering::AcqRel);
         }
     }
 }
