@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.76.1 - Struct-variant literals name their declared fields
+
+- A struct-variant literal such as `Request::Input { id: "a", validator: None }` names each field its variant declares and no other, as a struct literal does: an unknown field is GT0006 and a missing one GT0035. It type-checked, and the field left out read a wrong value, `()` on the VM and `Some(0)` in compiled code.
+
 ## 0.76.0 - Goroutines and channels carry any value; reflection across modules
 
 - A value sent on a channel is the receiver's own on every tier: writing to the sender's `Vec`, `Set`, deque, or a struct holding a `Vec` after `send` no longer changes what the receiver reads in compiled code.

@@ -1115,6 +1115,21 @@ impl TypeChecker<'_> {
                     }
                     _ => None,
                 };
+                // A struct-variant literal names its fields as a struct
+                // literal does: each must be declared and each declared one
+                // given.
+                if declared.is_none()
+                    && let Some(variant_declared) = variant_fields.as_ref()
+                {
+                    self.resolve_struct_literal_fields(
+                        path,
+                        fields,
+                        base.is_some(),
+                        variant_declared,
+                        true,
+                        expr.span,
+                    );
+                }
                 let mut literal_consts =
                     LiteralConsts::new(self.fn_generic_const_mask_of_ty(struct_ty));
                 for (field_idx, field) in fields.iter().enumerate() {
