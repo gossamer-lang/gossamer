@@ -140,6 +140,8 @@ mod tests {
         }
         assert_eq!(*fired, vec![42]);
         drop(fired);
-        assert!(!QUEUE.pending());
+        // A deadline leaves the set before `fire` runs, and stays pending
+        // until `fire` returns, which can be after its effect is seen here.
+        assert!(QUEUE.entries.lock().is_empty());
     }
 }
