@@ -262,6 +262,34 @@ fn basic_expression_error_cases() -> &'static [BasicErrorCase] {
 }
 
 #[test]
+fn a_struct_variant_literal_names_only_and_all_its_declared_fields() {
+    let source = "enum Request { Input { id: String, validator: Option<i64> }, Other }\n\
+                  fn main() {\n\
+                      let unknown = Request::Input { id: \"a\", validate: None }\n\
+                      let missing = Request::Input { id: \"b\" }\n\
+                      let whole = Request::Input { id: \"c\", validator: None }\n\
+                  }\n";
+    let checked = run(source);
+    let unknown: Vec<_> = checked
+        .diagnostics
+        .iter()
+        .filter_map(|diag| match &diag.error {
+            TypeError::UnknownField { field, .. } => Some(field.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(unknown, ["validate"], "{:?}", checked.diagnostics);
+    let missing = checked
+        .diagnostics
+        .iter()
+        .filter(|diag| {
+            matches!(&diag.error, TypeError::MissingStructField { field, .. } if field == "validator")
+        })
+        .count();
+    assert_eq!(missing, 2, "{:?}", checked.diagnostics);
+}
+
+#[test]
 fn integer_comparisons_require_one_integer_type() {
     let checked = run("fn main() {\n\
          let i: usize = 0usize\n\
