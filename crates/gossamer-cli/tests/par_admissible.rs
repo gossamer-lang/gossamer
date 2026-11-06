@@ -134,3 +134,33 @@ fn a_chunk_callback_with_another_effect_reports_gt0090() {
         common::stderr(&out)
     );
 }
+
+#[test]
+fn a_pure_function_of_another_module_is_accepted() {
+    // A function reached through `use` (as a sibling file is) has a known
+    // body: it is as pure as that body, not an unknown library call.
+    let out = common::gos_check_str(
+        "use util::double\n\
+         mod util { pub(package) fn double(x: i64) -> i64 { x * 2 } }\n\
+         fn main() { let mut xs = #[1, 2, 3, 4]\n \
+         xs.par_chunks_mut(2, |i, c| { c[0] = double(i) })\n \
+         xs.par_chunks_mut(2, |i, c| { c[1] = util::double(i) })\n \
+         println(\"{}\", xs.par_map(|v| double(v))) }",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", common::stderr(&out));
+}
+
+#[test]
+fn an_effectful_function_of_another_module_reports_gt0090() {
+    let out = common::gos_check_str(
+        "use util::noisy\n\
+         mod util { pub(package) fn noisy(x: i64) -> i64 { println(\"{}\", x)\n x } }\n\
+         fn main() { let xs = #[1, 2]\n println(\"{}\", xs.par_map(|v| noisy(v))) }",
+    );
+    let stderr = common::stderr(&out);
+    assert!(stderr.contains("GT0090"), "{stderr}");
+    assert!(
+        stderr.contains("noisy"),
+        "the path must name the function: {stderr}"
+    );
+}

@@ -166,6 +166,9 @@ pub struct PurityFacts {
     units: Vec<Unit>,
     by_def: HashMap<DefId, usize>,
     by_name: HashMap<String, usize>,
+    /// Free functions by module path and name (`util::dbl`), for calls that
+    /// reach them through a `use` import instead of a resolved definition.
+    by_path: HashMap<Vec<String>, usize>,
     /// Impl methods by `(type name, method)`; one type may have several
     /// blocks declaring the same name through different traits.
     by_method: HashMap<(String, String), Vec<usize>>,
@@ -270,7 +273,13 @@ pub fn analyze(
     let imports = ImportMap::new(sf);
     let mut facts = PurityFacts::default();
     let mut decls: Vec<(&FnDecl, Option<String>)> = Vec::new();
-    collect_units(&sf.items, resolutions, &mut facts, &mut decls);
+    collect_units(
+        &sf.items,
+        resolutions,
+        &mut facts,
+        &mut decls,
+        &mut Vec::new(),
+    );
     let context = Context {
         resolutions,
         table,
@@ -365,11 +374,15 @@ fn collect_units<'a>(
     resolutions: &Resolutions,
     facts: &mut PurityFacts,
     decls: &mut Vec<(&'a FnDecl, Option<String>)>,
+    module: &mut Vec<String>,
 ) {
     for item in items {
         match &item.kind {
             ItemKind::Fn(decl) if decl.body.is_some() => {
                 let index = push_unit(facts, decls, decl, None);
+                let mut path = module.clone();
+                path.push(decl.name.name.clone());
+                facts.by_path.insert(path, index);
                 if let Some(def) = resolutions.definition_of(item.id) {
                     facts.by_def.insert(def, index);
                 }
@@ -397,9 +410,11 @@ fn collect_units<'a>(
                     facts.by_method.entry(key).or_default().push(index);
                 }
             }
-            ItemKind::Mod(module) => {
-                if let ModBody::Inline(inner) = &module.body {
-                    collect_units(inner, resolutions, facts, decls);
+            ItemKind::Mod(decl_mod) => {
+                if let ModBody::Inline(inner) = &decl_mod.body {
+                    module.push(decl_mod.name.name.clone());
+                    collect_units(inner, resolutions, facts, decls, module);
+                    module.pop();
                 }
             }
             ItemKind::Static(decl) if decl.mutability == Mutability::Mutable => {
@@ -911,6 +926,17 @@ impl<'a> Scan<'a> {
                 if self.call_method_path(&segments) {
                     return;
                 }
+                // A free function of the program reached through a `use`
+                // (`use util::dbl` then `dbl(..)`, or `util::dbl(..)`): its
+                // body is known, so it is as pure as that body.
+                let expanded =
+                    self.context
+                        .imports
+                        .expand(self.context.resolutions, callee.id, &segments);
+                if let Some(&index) = self.facts.by_path.get(&expanded) {
+                    self.call_unit(index);
+                    return;
+                }
                 let canonical =
                     self.context
                         .imports
@@ -1267,6 +1293,15 @@ impl ImportMap {
         node: NodeId,
         segments: &[String],
     ) -> Vec<String> {
+        let mut out = self.expand(resolutions, node, segments);
+        if out.first().is_some_and(|seg| seg == "std") {
+            out.remove(0);
+        }
+        out
+    }
+
+    /// The full path `segments` names, expanding an imported first segment.
+    fn expand(&self, resolutions: &Resolutions, node: NodeId, segments: &[String]) -> Vec<String> {
         let mut out: Vec<String> = segments.to_vec();
         if let (Some(Resolution::Import { use_id }), Some(first)) =
             (resolutions.get(node), segments.first())
@@ -1274,9 +1309,6 @@ impl ImportMap {
         {
             out.clone_from(target);
             out.extend(segments.iter().skip(1).cloned());
-        }
-        if out.first().is_some_and(|seg| seg == "std") {
-            out.remove(0);
         }
         out
     }
