@@ -718,7 +718,26 @@ impl<'a> Lowerer<'a> {
                 ));
             }
         };
-        if !checked_integer {
+        // `f32` rides in a `double`, and both operands hold exact `f32`
+        // values (the HIR's `f32_round` pass rounds every producer and every
+        // literal). The `float` operation answers the same bits as the
+        // `double` one rounded to `f32`, and LLVM folds the `fpext` /
+        // `fptrunc` pairs between such operations away, so a chain of `f32`
+        // arithmetic stays in single precision instead of paying two
+        // conversions per operation.
+        let f32_op = matches!(kind, NumericKind::Float(FloatTy::F32))
+            && operand_llvm == "double"
+            && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div);
+        if f32_op {
+            let lhs_f = self.fresh();
+            writeln!(self.out, "  {lhs_f} = fptrunc double {lhs_v} to float").unwrap();
+            let rhs_f = self.fresh();
+            writeln!(self.out, "  {rhs_f} = fptrunc double {rhs_v} to float").unwrap();
+            let narrow_instr = instr.replacen("double", "float", 1);
+            let narrow = self.fresh();
+            writeln!(self.out, "  {narrow} = {narrow_instr} {lhs_f}, {rhs_f}").unwrap();
+            writeln!(self.out, "  {tmp} = fpext float {narrow} to double").unwrap();
+        } else if !checked_integer {
             writeln!(self.out, "  {tmp} = {instr} {lhs_v}, {rhs_v}").unwrap();
         }
         // Unchecked arithmetic wraps at the declared width. The op ran at
