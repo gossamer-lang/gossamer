@@ -301,13 +301,24 @@ jobs:
 
       - name: Build
         env:
-          MACOSX_DEPLOYMENT_TARGET: "15.0"
+          MACOSX_DEPLOYMENT_TARGET: "12.0"
         run: |
           cargo build --release --target ${{ matrix.target }} --bin gos
           # `gos build` needs the runtime archive matching the binary's arch;
           # the x86_64 leg cross-compiles from the arm64 runner, so build the
           # runtime for the target explicitly.
           cargo build --release --target ${{ matrix.target }} -p gossamer-runtime
+
+      # The release runs on macOS 12 and later: neither `gos` nor any object
+      # in the runtime archive programs link may ask for a newer macOS.
+      - name: Check the artifacts run on macOS 12
+        run: |
+          dir=target/${{ matrix.target }}/release
+          newest=$( { otool -l "$dir/gos"; otool -l "$dir/libgossamer_runtime.a"; } |
+            awk '$1 == "minos" { print $2 }' | sort -V | tail -1)
+          echo "newest minimum macOS: $newest"
+          [ -n "$newest" ]
+          [ "$(printf '%s\n12.0\n' "$newest" | sort -V | tail -1)" = 12.0 ]
 
       - name: Package zip
         run: |

@@ -505,8 +505,8 @@ LLVM 18 and newer are supported. Most distributions package one of those;
 LLVM 22 usually comes from [apt.llvm.org](https://apt.llvm.org) on Linux,
 `brew install llvm@22` on macOS, or `pkg install llvm22` on FreeBSD.
 
-macOS releases target macOS 15. On an older Mac, a `gos` built from source
-targets the macOS it runs on instead; such builds are not supported.
+macOS releases, and the programs `gos build` makes, run on macOS 12 and later.
+`gos` also finds MacPorts' LLVM (`sudo port install llvm-22`).
 
 ### Raspberry Pi
 

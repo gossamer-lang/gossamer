@@ -1501,14 +1501,14 @@ fn build_rss_profile_reports_frontend_release_and_backend_peak() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_build_records_15_0_deployment_target() {
+fn macos_build_records_12_0_deployment_target() {
     let dir = env::temp_dir().join(format!(
         "gos-macos-deployment-target-{}",
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let source_path = dir.join("deployment_target.gos");
-    std::fs::write(&source_path, "fn main() { println(\"macos-15\") }\n").unwrap();
+    std::fs::write(&source_path, "fn main() { println(\"macos-12\") }\n").unwrap();
 
     let build = Command::new(gos_bin())
         .arg("build")
@@ -1520,6 +1520,13 @@ fn macos_build_records_15_0_deployment_target() {
         build.status.success(),
         "build failed: {}",
         String::from_utf8_lossy(&build.stderr)
+    );
+    // An object built for a newer macOS (a C dependency of the runtime that
+    // missed the target) would make the program ask for that macOS.
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        !stderr.contains("built for newer"),
+        "an object in the link targets a newer macOS than 12.0:\n{stderr}"
     );
 
     let binary = dir.join("target").join("debug").join("deployment_target");
@@ -1535,8 +1542,8 @@ fn macos_build_records_15_0_deployment_target() {
     );
     let metadata = String::from_utf8(metadata.stdout).expect("otool output is UTF-8");
     assert!(
-        metadata.lines().any(|line| line.trim() == "minos 15.0"),
-        "Mach-O does not record macOS 15.0 as LC_BUILD_VERSION minos:\n{metadata}"
+        metadata.lines().any(|line| line.trim() == "minos 12.0"),
+        "Mach-O does not record macOS 12.0 as LC_BUILD_VERSION minos:\n{metadata}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -440,7 +440,7 @@ fn mcpu_for(triple: &str, is_cross: bool, reproducible: bool) -> String {
     if !is_cross {
         return if reproducible {
             match target_arch_from_triple(triple) {
-                "x86_64" => "x86-64-v3".to_string(),
+                "x86_64" => portable_x86_64_cpu(triple, deployment_env().as_deref()).to_string(),
                 "aarch64" => "generic".to_string(),
                 "riscv64" => "generic-rv64".to_string(),
                 _ => "generic".to_string(),
@@ -450,14 +450,39 @@ fn mcpu_for(triple: &str, is_cross: bool, reproducible: bool) -> String {
         };
     }
     match target_arch_from_triple(triple) {
-        // Reproducible x86-64 baseline (AVX2 + BMI2 + FMA, ~2013+).
-        "x86_64" => "x86-64-v3".to_string(),
+        "x86_64" => portable_x86_64_cpu(triple, deployment_env().as_deref()).to_string(),
         // Generic ARMv8-A: portable across every aarch64 device;
         // `GOS_LLVM_MCPU=cortex-a76` opts into Pi 5 tuning.
         "aarch64" => "generic".to_string(),
         // LLVM names RISC-V's portable CPU per register width.
         "riscv64" => "generic-rv64".to_string(),
         _ => "generic".to_string(),
+    }
+}
+
+fn deployment_env() -> Option<String> {
+    std::env::var(gossamer_abi::macos_deployment::MACOSX_DEPLOYMENT_TARGET_ENV).ok()
+}
+
+/// The portable x86-64 CPU for `triple`: `x86-64-v3` (AVX2, BMI2, FMA), or
+/// `x86-64-v2` for a Mac target older than macOS 13, which still runs on the
+/// 2013 Mac Pro and its CPU without AVX2. A Darwin triple's own version
+/// (`x86_64-apple-macosx12.0.0`) wins over `configured`.
+fn portable_x86_64_cpu(triple: &str, configured: Option<&str>) -> &'static str {
+    let deployment = if let Some((_, version)) = triple.split_once("-apple-macosx") {
+        version.to_string()
+    } else if triple.ends_with("-apple-darwin") {
+        gossamer_abi::macos_deployment::resolve_deployment_target(configured)
+    } else {
+        return "x86-64-v3";
+    };
+    let major = deployment
+        .split('.')
+        .next()
+        .and_then(|major| major.parse::<u32>().ok());
+    match major {
+        Some(major) if major >= 13 => "x86-64-v3",
+        _ => "x86-64-v2",
     }
 }
 
@@ -1252,7 +1277,7 @@ pub(crate) fn target_c_abi() -> Option<gossamer_abi::c_aggregate::CAbi> {
 mod host_triple_tests {
     use super::{
         detect_host_triple, integrated_clang_path, llvm_target_triple_for_with_deployment,
-        mcpu_for, normalized_macos_deployment_target, target_arch_from_triple,
+        mcpu_for, normalized_macos_deployment_target, portable_x86_64_cpu, target_arch_from_triple,
     };
     use crate::emit::module_datalayout;
     use crate::emit::settings::disable_loop_idiom_for_target_with_static_musl;
@@ -1335,6 +1360,26 @@ mod host_triple_tests {
             "generic-rv64"
         );
         assert_eq!(mcpu_for("x86_64-unknown-linux-gnu", false, false), "native");
+        assert_eq!(
+            portable_x86_64_cpu("x86_64-unknown-linux-gnu", Some("12.0")),
+            "x86-64-v3"
+        );
+        assert_eq!(
+            portable_x86_64_cpu("x86_64-apple-macosx12.0.0", None),
+            "x86-64-v2"
+        );
+        assert_eq!(
+            portable_x86_64_cpu("x86_64-apple-macosx13.0.0", None),
+            "x86-64-v3"
+        );
+        assert_eq!(
+            portable_x86_64_cpu("x86_64-apple-darwin", Some("12.0")),
+            "x86-64-v2"
+        );
+        assert_eq!(
+            portable_x86_64_cpu("x86_64-apple-darwin", Some("14.0")),
+            "x86-64-v3"
+        );
         assert_eq!(
             mcpu_for("x86_64-unknown-linux-gnu", false, true),
             "x86-64-v3"

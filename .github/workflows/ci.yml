@@ -83,7 +83,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   macos-deployment-target:
-    name: macOS 15 deployment target
+    name: macOS 12 deployment target
     runs-on: xcode-27
     timeout-minutes: 60
     steps:
@@ -94,7 +94,7 @@ jobs:
       - name: Verify final Mach-O deployment target
         run: |
           "$CARGO_BIN" test -p gossamer-cli --test cli \
-            macos_build_records_15_0_deployment_target -- \
+            macos_build_records_12_0_deployment_target -- \
             --exact --nocapture
 
   # Each runner image builds its native test binaries once and runs them in

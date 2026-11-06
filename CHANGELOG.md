@@ -11,7 +11,7 @@
 - Runaway recursion on a FreeBSD program's main thread reports GX0008, CPU and heap profiles taken there carry stacks, and the JIT's memory cap reads the process's resident size there.
 - `gos build --target riscv64gc-unknown-linux-gnu` produces RISC-V objects; LLVM refused the triple and the CPU name it was given.
 - A `--release` build for another Linux triple links against that triple's own C library, where it took the host's static musl runtime and failed to link.
-- On a Mac older than macOS 15, a `gos` built from source targets that Mac's macOS when `MACOSX_DEPLOYMENT_TARGET` is unset; macOS 15 stays the default and the supported baseline.
+- The macOS releases, and the programs `gos build` makes on macOS, run on macOS 12 and later; they required macOS 15. Portable Intel Mac builds (`--reproducible` or `--target`) for a macOS older than 13 assume no AVX2, which the 2013 Mac Pro lacks.
 - A `par_*` callback that calls a pure function of the program through a `use` import, a `crate::`, `self::` or `super::` path, or by name (`xs.par_map(double)`) is accepted; it was refused with GT0090 as an unknown library call.
 - `f32` `+ - * /` compiles to single-precision arithmetic, so a chain of `f32` operations runs as fast as `f64`; it converted through double precision at every step, with the same results.
 - A closure that captures a `std::flag` cell or set, directly or through closures it nests in, reads it as the cell's value or the set on the JIT and native tiers; it read the cell's address, a `bool` flag one bit of it, and a captured set failed to parse.

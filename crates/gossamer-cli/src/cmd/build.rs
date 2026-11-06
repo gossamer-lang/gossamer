@@ -2902,8 +2902,8 @@ mod tests {
         );
 
         assert!(
-            cmd.get_args().any(|arg| arg == "-mmacosx-version-min=15.0"),
-            "link command missing macOS 15 deployment flag: {}",
+            cmd.get_args().any(|arg| arg == "-mmacosx-version-min=12.0"),
+            "link command missing macOS 12 deployment flag: {}",
             super::render_command(&cmd)
         );
         let deployment_target = cmd
@@ -2913,7 +2913,7 @@ mod tests {
             })
             .and_then(|(_, value)| value)
             .expect("link command deployment target environment");
-        assert_eq!(deployment_target, "15.0");
+        assert_eq!(deployment_target, "12.0");
     }
 
     #[test]
