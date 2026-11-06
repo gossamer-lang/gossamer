@@ -505,8 +505,10 @@ LLVM 18 and newer are supported. Most distributions package one of those;
 LLVM 22 usually comes from [apt.llvm.org](https://apt.llvm.org) on Linux,
 `brew install llvm@22` on macOS, or `pkg install llvm22` on FreeBSD.
 
-macOS releases, and the programs `gos build` makes, run on macOS 12 and later.
-`gos` also finds MacPorts' LLVM (`sudo port install llvm-22`).
+macOS releases (`macos-<arch>`), and the programs they build, run on macOS 15
+and later; the `macos12-<arch>` archives run, and build programs that run, on
+macOS 12 and later. `scripts/install.sh` picks the macOS 12 archive on macOS 12
+to 14. `gos` also finds MacPorts' LLVM (`sudo port install llvm-22`).
 
 ### Raspberry Pi
 

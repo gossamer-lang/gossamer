@@ -2,9 +2,21 @@
 
 use std::process::Command;
 
-/// The oldest supported macOS: release artifacts and the programs `gos`
-/// builds run there and later, wherever they are built.
-pub const DEFAULT_MACOSX_DEPLOYMENT_TARGET: &str = "12.0";
+/// The macOS a toolchain targets unless told otherwise: the one it was itself
+/// built for (`MACOSX_DEPLOYMENT_TARGET` when it was compiled), else macOS 15.
+/// A toolchain built for macOS 12 so builds programs that run there.
+pub const DEFAULT_MACOSX_DEPLOYMENT_TARGET: &str =
+    default_from_build(option_env!("MACOSX_DEPLOYMENT_TARGET"));
+
+/// The macOS release toolchains target unless built for an older one.
+pub const RELEASE_MACOSX_DEPLOYMENT_TARGET: &str = "15.0";
+
+const fn default_from_build(built_for: Option<&'static str>) -> &'static str {
+    match built_for {
+        Some(version) if !version.is_empty() => version,
+        _ => RELEASE_MACOSX_DEPLOYMENT_TARGET,
+    }
+}
 
 /// Environment variable understood by Cargo, rustc, clang, and Apple ld.
 pub const MACOSX_DEPLOYMENT_TARGET_ENV: &str = "MACOSX_DEPLOYMENT_TARGET";
@@ -93,17 +105,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_is_macos_12() {
-        assert_eq!(default_for_host(None), "12.0");
-        assert_eq!(default_for_host(Some("12.0")), "12.0");
-        assert_eq!(default_for_host(Some("26.1")), "12.0");
+    fn a_toolchain_defaults_to_the_macos_it_was_built_for() {
+        assert_eq!(default_from_build(None), "15.0");
+        assert_eq!(default_from_build(Some("")), "15.0");
+        assert_eq!(default_from_build(Some("12.0")), "12.0");
+    }
+
+    #[test]
+    fn a_newer_host_keeps_the_default() {
+        assert_eq!(default_for_host(None), DEFAULT_MACOSX_DEPLOYMENT_TARGET);
+        assert_eq!(
+            default_for_host(Some("26.1")),
+            DEFAULT_MACOSX_DEPLOYMENT_TARGET
+        );
+        assert_eq!(
+            default_for_host(Some("not a version")),
+            DEFAULT_MACOSX_DEPLOYMENT_TARGET
+        );
     }
 
     #[test]
     fn an_older_host_lowers_the_default_to_itself() {
-        assert_eq!(default_for_host(Some("11.7.10")), "11.7");
-        assert_eq!(default_for_host(Some("12.7.6")), "12.0");
-        assert_eq!(default_for_host(Some("not a version")), "12.0");
+        assert_eq!(default_for_host(Some("10.15.7")), "10.15");
     }
 
     #[test]
@@ -135,6 +158,6 @@ mod tests {
             .find(|(name, _)| *name == MACOSX_DEPLOYMENT_TARGET_ENV)
             .and_then(|(_, value)| value)
             .expect("deployment target environment");
-        assert_eq!(configured, "12.0");
+        assert_eq!(configured, DEFAULT_MACOSX_DEPLOYMENT_TARGET);
     }
 }

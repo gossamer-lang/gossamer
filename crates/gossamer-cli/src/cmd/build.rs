@@ -2901,9 +2901,13 @@ mod tests {
             gossamer_driver::macos_deployment::DEFAULT_MACOSX_DEPLOYMENT_TARGET,
         );
 
+        let flag = format!(
+            "-mmacosx-version-min={}",
+            gossamer_driver::macos_deployment::DEFAULT_MACOSX_DEPLOYMENT_TARGET
+        );
         assert!(
-            cmd.get_args().any(|arg| arg == "-mmacosx-version-min=12.0"),
-            "link command missing macOS 12 deployment flag: {}",
+            cmd.get_args().any(|arg| arg == std::ffi::OsStr::new(&flag)),
+            "link command missing the default deployment flag: {}",
             super::render_command(&cmd)
         );
         let deployment_target = cmd
@@ -2913,7 +2917,10 @@ mod tests {
             })
             .and_then(|(_, value)| value)
             .expect("link command deployment target environment");
-        assert_eq!(deployment_target, "12.0");
+        assert_eq!(
+            deployment_target,
+            gossamer_driver::macos_deployment::DEFAULT_MACOSX_DEPLOYMENT_TARGET
+        );
     }
 
     #[test]

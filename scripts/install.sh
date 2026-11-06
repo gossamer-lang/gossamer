@@ -195,7 +195,14 @@ VER_NUM=$(printf '%s' "$TAG" | sed 's/^v//')
 case "$os" in
     linux) ASSET="gos-${VER_NUM}-linux-${arch}.tar.gz" ;;
     freebsd) ASSET="gos-${VER_NUM}-freebsd-${arch}.tar.gz" ;;
-    macos) ASSET="gos-${VER_NUM}-macos-${arch}.zip" ;;
+    macos)
+        # A Mac older than macOS 15 takes the archive built for macOS 12.
+        variant=macos
+        case "$(sw_vers -productVersion 2>/dev/null)" in
+            12.* | 13.* | 14.*) variant=macos12 ;;
+        esac
+        ASSET="gos-${VER_NUM}-${variant}-${arch}.zip"
+        ;;
 esac
 URL="https://github.com/$REPO/releases/download/$TAG/$ASSET"
 
