@@ -183,13 +183,7 @@ fn release_tier_is_at_least_as_fast_as_debug_on_numeric_loop() {
 }
 
 fn which_llc_missing() -> bool {
-    if std::env::var("GOS_LLC").is_ok() {
-        return false;
-    }
-    for cand in ["llc-18", "llc"] {
-        if Command::new(cand).arg("--version").output().is_ok() {
-            return false;
-        }
-    }
-    true
+    gossamer_codegen_llvm::llvm_toolchain_status()
+        .iter()
+        .any(|status| status.tool == "llc" && status.resolved.is_err())
 }

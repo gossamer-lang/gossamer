@@ -244,13 +244,20 @@ pub(super) fn region_arena_base() -> usize {
 
 #[cfg(unix)]
 fn arena_reserve(len: usize) -> *mut u8 {
+    // Linux charges a private mapping against the commit limit when it is
+    // later made writable unless it was reserved `MAP_NORESERVE`; other
+    // systems charge pages only as they are touched and take no such flag.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let reserve = libc::MAP_NORESERVE;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let reserve = 0;
     // SAFETY: anonymous PROT_NONE reservation; no file, no aliasing.
     let p = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
             len,
             libc::PROT_NONE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | reserve,
             -1,
             0,
         )

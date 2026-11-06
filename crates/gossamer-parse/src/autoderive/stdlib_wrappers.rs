@@ -602,9 +602,9 @@ const FS_DIR_MARKERS: &[&str] = &["fs::read_dir", "fs::walk_dir", "fs::DirInfo",
 /// `std::ffi`: the C type names, chosen per target, and the C string
 /// conversions, written in Gossamer so every tier runs the same code.
 const FFI_WRAPPERS: &str = r#"
-#[cfg(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "riscv64")))]
+#[cfg(all(any(target_os = "linux", target_os = "android", target_os = "freebsd", target_os = "netbsd"), any(target_arch = "aarch64", target_arch = "riscv64")))]
 type __gos_ffi_c_char = u8
-#[cfg(not(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "riscv64"))))]
+#[cfg(not(all(any(target_os = "linux", target_os = "android", target_os = "freebsd", target_os = "netbsd"), any(target_arch = "aarch64", target_arch = "riscv64"))))]
 type __gos_ffi_c_char = i8
 type __gos_ffi_c_schar = i8
 type __gos_ffi_c_uchar = u8
@@ -999,28 +999,29 @@ fn __gos_fd_wait_writable<D: __gos_fd_Descriptor>(fd: D, timeout_ms: i64) -> Res
 }
 "#;
 
-/// `std::os::signal` signal numbers, per target, for `signal::on`.
+/// `std::os::signal` signal numbers, per target, for `signal::on`. Apple and the BSDs
+/// share one numbering; Linux and Android share the other.
 const SIGNAL_WRAPPERS: &str = r#"
 const __gos_signal_SIGHUP: i64 = 1
 const __gos_signal_SIGINT: i64 = 2
 const __gos_signal_SIGQUIT: i64 = 3
 const __gos_signal_SIGTERM: i64 = 15
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
 const __gos_signal_SIGUSR1: i64 = 30
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd")))]
 const __gos_signal_SIGUSR1: i64 = 10
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
 const __gos_signal_SIGUSR2: i64 = 31
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd")))]
 const __gos_signal_SIGUSR2: i64 = 12
 const __gos_signal_SIGWINCH: i64 = 28
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
 const __gos_signal_SIGTSTP: i64 = 18
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd")))]
 const __gos_signal_SIGTSTP: i64 = 20
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
 const __gos_signal_SIGCONT: i64 = 19
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd")))]
 const __gos_signal_SIGCONT: i64 = 18
 "#;
 
@@ -1087,7 +1088,7 @@ fn __gos_term_resized<D: __gos_fd_Descriptor>(fd: D = __gos_term_STDOUT) -> bool
     changed
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 type __gos_term_Flag = u32
 #[cfg(target_os = "macos")]
 type __gos_term_Flag = u64
@@ -1127,6 +1128,23 @@ fn __gos_term_blank_termios() -> __gos_term_Termios {
     __gos_term_Termios { iflag: 0, oflag: 0, cflag: 0, lflag: 0, cc: [0u8; 20], ispeed: 0, ospeed: 0 }
 }
 
+#[repr(C)]
+#[cfg(target_os = "freebsd")]
+struct __gos_term_Termios {
+    iflag: u32
+    oflag: u32
+    cflag: u32
+    lflag: u32
+    cc: [u8; 20]
+    ispeed: u32
+    ospeed: u32
+}
+
+#[cfg(target_os = "freebsd")]
+fn __gos_term_blank_termios() -> __gos_term_Termios {
+    __gos_term_Termios { iflag: 0, oflag: 0, cflag: 0, lflag: 0, cc: [0u8; 20], ispeed: 0, ospeed: 0 }
+}
+
 #[cfg(target_os = "linux")]
 const __gos_term_INPUT_RAW_OFF: u32 = 0x5eb
 #[cfg(target_os = "linux")]
@@ -1142,28 +1160,29 @@ const __gos_term_VTIME: i64 = 5
 #[cfg(target_os = "linux")]
 const __gos_term_TIOCGWINSZ: u64 = 0x5413
 
-#[cfg(target_os = "macos")]
-const __gos_term_INPUT_RAW_OFF: u64 = 0x3eb
-#[cfg(target_os = "macos")]
-const __gos_term_LOCAL_RAW_OFF: u64 = 0x598
-#[cfg(target_os = "macos")]
-const __gos_term_CSIZE_PARENB: u64 = 0x1300
-#[cfg(target_os = "macos")]
-const __gos_term_CS8: u64 = 0x300
-#[cfg(target_os = "macos")]
+// macOS and FreeBSD share the BSD termios flag values; only the flag width differs.
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+const __gos_term_INPUT_RAW_OFF: __gos_term_Flag = 0x3eb
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+const __gos_term_LOCAL_RAW_OFF: __gos_term_Flag = 0x598
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+const __gos_term_CSIZE_PARENB: __gos_term_Flag = 0x1300
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+const __gos_term_CS8: __gos_term_Flag = 0x300
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 const __gos_term_VMIN: i64 = 16
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 const __gos_term_VTIME: i64 = 17
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 const __gos_term_TIOCGWINSZ: u64 = 0x40087468
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 const __gos_term_OPOST: __gos_term_Flag = 1
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 const __gos_term_TCSAFLUSH: i32 = 2
 
 #[repr(C)]
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 struct __gos_term_Winsize {
     rows: u16
     cols: u16
@@ -1171,7 +1190,7 @@ struct __gos_term_Winsize {
     ypixel: u16
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 unsafe extern "C" {
     #[link_name = "isatty"]
     fn __gos_term_isatty(fd: i32) -> i32
@@ -1185,14 +1204,14 @@ unsafe extern "C" {
     fn __gos_term_tcsetattr(fd: i32, action: i32, attrs: &mut __gos_term_Termios) -> i32
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 struct __gos_term_RawMode {
     fd: i32
     saved: __gos_term_Termios
     held: Fn() -> ()
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 impl __gos_term_RawMode {
     fn restore(&self) {
         let mut saved = self.saved
@@ -1200,19 +1219,19 @@ impl __gos_term_RawMode {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 fn __gos_term_handle(fd: i64) -> i64 {
     fd
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 fn __gos_term_is_terminal_raw(stream: i64) -> bool {
     unsafe { __gos_term_isatty(stream as i32) } == 1
 }
 
 // A standard stream asked for its size falls back to the other two, so a
 // program whose output is redirected still reads the terminal's size.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 fn __gos_term_size_raw(fd: i64) -> Result<(i64, i64), errors::Error> {
     let candidates = if fd < 3 { #[fd, 1, 0, 2] } else { #[fd] }
     for candidate in candidates {
@@ -1224,7 +1243,7 @@ fn __gos_term_size_raw(fd: i64) -> Result<(i64, i64), errors::Error> {
     Err(__gos_term_os_error("size"))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 fn __gos_term_enter_raw_on(fd: i64, held: Fn() -> ()) -> Result<__gos_term_RawMode, errors::Error> {
     let fd = fd as i32
     let mut saved = __gos_term_blank_termios()
@@ -1246,7 +1265,7 @@ fn __gos_term_enter_raw_on(fd: i64, held: Fn() -> ()) -> Result<__gos_term_RawMo
     Ok(mode)
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 fn __gos_term_read_ready(fd: i64) -> Result<Vec<u8>, errors::Error> {
     let mut buf = #[0u8; 4096]
     let n = unsafe { __gos_term_read(fd as i32, &mut buf, 4096) }
@@ -1384,37 +1403,37 @@ fn __gos_term_read_ready(fd: i64) -> Result<Vec<u8>, errors::Error> {
     Ok(buf[0..read[0] as i64])
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", windows)))]
 struct __gos_term_RawMode {}
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", windows)))]
 impl __gos_term_RawMode {
     fn restore(&self) {
         ()
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", windows)))]
 fn __gos_term_is_terminal_raw(stream: i64) -> bool {
     false
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", windows)))]
 fn __gos_term_size_raw(fd: i64) -> Result<(i64, i64), errors::Error> {
     Err(errors::new("term::size: this target has no terminal"))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", windows)))]
 fn __gos_term_enter_raw_on(fd: i64, held: Fn() -> ()) -> Result<__gos_term_RawMode, errors::Error> {
     Err(errors::new("term::enter_raw: this target has no terminal"))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", windows)))]
 fn __gos_term_handle(fd: i64) -> i64 {
     fd
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", windows)))]
 fn __gos_term_read_ready(fd: i64) -> Result<Vec<u8>, errors::Error> {
     Err(errors::new("term::read_input: this target has no terminal"))
 }

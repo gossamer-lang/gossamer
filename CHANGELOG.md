@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.77.0 - FreeBSD support and fixes
+
+- FreeBSD x86_64 is a Tier 1 target: `gos run`, the JIT, and `gos build` run there, CI runs the native test suite in a FreeBSD VM, releases ship `gos-<version>-freebsd-x86_64.tar.gz`, and `scripts/install.sh` installs it.
+- `gos build` links the system libraries the runtime archive needs, as rustc reported them when it compiled the archive, where it named a fixed list per OS that fell short on FreeBSD.
+- `gos build` on FreeBSD searches `$LOCALBASE/lib` (`/usr/local/lib`) for the C libraries a program names, where ports and packages install them.
+- `gos` finds LLVM where FreeBSD and OpenBSD ports (`/usr/local/llvm22/bin`, `llc22` on `PATH`), MacPorts (`/opt/local/libexec/llvm-22/bin`), and NetBSD pkgsrc (`/usr/pkg/bin`) install it.
+- `signal::SIGUSR1`, `SIGUSR2`, `SIGTSTP`, and `SIGCONT` carry the BSD numbers on FreeBSD, NetBSD, OpenBSD, and iOS, as they do on macOS; they carried Linux's, so `signal::on(signal::SIGUSR1)` waited on another signal there.
+- `#[cfg(target_os = ...)]` answers `"android"` for an Android triple, `"ios"` for an iOS one, and `"wasi"` for `wasm32-wasip1`, as rustc does; they answered `"linux"`, `"macos"`, and `"unknown"`.
+- Runaway recursion on a FreeBSD program's main thread reports GX0008, CPU and heap profiles taken there carry stacks, and the JIT's memory cap reads the process's resident size there.
+- `gos build --target riscv64gc-unknown-linux-gnu` produces RISC-V objects; LLVM refused the triple and the CPU name it was given.
+- A `--release` build for another Linux triple links against that triple's own C library, where it took the host's static musl runtime and failed to link.
+- On a Mac older than macOS 15, a `gos` built from source targets that Mac's macOS when `MACOSX_DEPLOYMENT_TARGET` is unset; macOS 15 stays the default and the supported baseline.
+- A `par_*` callback that calls a pure function of the program through a `use` import, a `crate::`, `self::` or `super::` path, or by name (`xs.par_map(double)`) is accepted; it was refused with GT0090 as an unknown library call.
+- `f32` `+ - * /` compiles to single-precision arithmetic, so a chain of `f32` operations runs as fast as `f64`; it converted through double precision at every step, with the same results.
+- A closure that captures a `std::flag` cell or set, directly or through closures it nests in, reads it as the cell's value or the set on the JIT and native tiers; it read the cell's address, a `bool` flag one bit of it, and a captured set failed to parse.
+
 ## 0.76.1 - Struct-variant literals name their declared fields
 
 - A struct-variant literal such as `Request::Input { id: "a", validator: None }` names each field its variant declares and no other, as a struct literal does: an unknown field is GT0006 and a missing one GT0035. It type-checked, and the field left out read a wrong value, `()` on the VM and `Some(0)` in compiled code.

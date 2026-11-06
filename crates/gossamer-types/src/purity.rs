@@ -146,6 +146,9 @@ impl Impurity {
 #[derive(Debug, Clone)]
 struct Unit {
     name: String,
+    /// The module that declares it (`[]` at the root), which a relative path
+    /// in its body is read from.
+    module: Vec<String>,
     /// Effects its own body has, not counting writes through its own `&mut`
     /// parameters or `&mut self`.
     direct: Option<Effect>,
@@ -221,6 +224,52 @@ impl PurityFacts {
         self.units[i].reason.clone()
     }
 
+    /// For a path written in `module` that names a free function of the
+    /// program through a `use` import or a `crate::`, `self::` or `super::`
+    /// path: why that function is not pure, `Some(None)` when it is. `None`
+    /// when the path names no function of the program.
+    #[must_use]
+    pub fn program_fn_impurity(
+        &self,
+        sf: &SourceFile,
+        resolutions: &Resolutions,
+        node: NodeId,
+        segments: &[String],
+        module: &[String],
+    ) -> Option<Option<Impurity>> {
+        let imports = ImportMap::new(sf);
+        let index = self.program_fn(&imports, resolutions, node, segments, module)?;
+        Some(self.unit_impurity(index))
+    }
+
+    /// The free function of the program a path written in `module` names.
+    fn program_fn(
+        &self,
+        imports: &ImportMap,
+        resolutions: &Resolutions,
+        node: NodeId,
+        segments: &[String],
+        module: &[String],
+    ) -> Option<usize> {
+        let path = imports.expand(resolutions, node, segments);
+        let (first, rest) = path.split_first()?;
+        let candidates = match first.as_str() {
+            "crate" => vec![rest.to_vec()],
+            "self" => vec![[module, rest].concat()],
+            "super" => {
+                let ups = path.iter().take_while(|seg| *seg == "super").count();
+                let base = module.len().checked_sub(ups)?;
+                vec![[&module[..base], &path[ups..]].concat()]
+            }
+            // A plain path names an item of the module it is written in,
+            // or else one at the root.
+            _ => vec![[module, &path[..]].concat(), path.clone()],
+        };
+        candidates
+            .iter()
+            .find_map(|candidate| self.by_path.get(candidate).copied())
+    }
+
     /// Why the method `method` a user impl block declares for `ty` is not
     /// pure, or `None` when every such block's is, or none declares it.
     #[must_use]
@@ -287,7 +336,8 @@ pub fn analyze(
         imports: &imports,
     };
     for (index, (decl, owner)) in decls.iter().enumerate() {
-        let scan = scan_fn(&context, &facts, decl, owner.as_deref());
+        let module = facts.units[index].module.clone();
+        let scan = scan_fn(&context, &facts, decl, owner.as_deref(), module);
         let unit = &mut facts.units[index];
         unit.direct = scan.direct;
         unit.param_write = scan.param_write;
@@ -304,6 +354,7 @@ pub fn analyze(
 pub fn closure_impurity(
     facts: &PurityFacts,
     closure: &Expr,
+    module: &[String],
     sf: &SourceFile,
     resolutions: &Resolutions,
     table: &TypeTable,
@@ -324,7 +375,14 @@ pub fn closure_impurity(
         collect_bindings(&param.pattern, &mut locals);
     }
     collect_body_bindings(body, &mut locals);
-    let mut scan = Scan::new(&context, facts, locals, HashMap::new(), None);
+    let mut scan = Scan::new(
+        &context,
+        facts,
+        locals,
+        HashMap::new(),
+        None,
+        module.to_vec(),
+    );
     scan.captures_are_callers = true;
     scan.expr(body);
     if let Some(effect) = scan.direct {
@@ -379,7 +437,7 @@ fn collect_units<'a>(
     for item in items {
         match &item.kind {
             ItemKind::Fn(decl) if decl.body.is_some() => {
-                let index = push_unit(facts, decls, decl, None);
+                let index = push_unit(facts, decls, decl, None, module);
                 let mut path = module.clone();
                 path.push(decl.name.name.clone());
                 facts.by_path.insert(path, index);
@@ -406,7 +464,7 @@ fn collect_units<'a>(
                     if decl.body.is_none() {
                         continue;
                     }
-                    let index = push_unit(facts, decls, decl, Some(owner.clone()));
+                    let index = push_unit(facts, decls, decl, Some(owner.clone()), module);
                     facts.by_method.entry(key).or_default().push(index);
                 }
             }
@@ -432,6 +490,7 @@ fn push_unit<'a>(
     decls: &mut Vec<(&'a FnDecl, Option<String>)>,
     decl: &'a FnDecl,
     owner: Option<String>,
+    module: &[String],
 ) -> usize {
     let index = facts.units.len();
     let name = match &owner {
@@ -441,6 +500,7 @@ fn push_unit<'a>(
     facts.by_name.entry(name.clone()).or_insert(index);
     facts.units.push(Unit {
         name,
+        module: module.to_vec(),
         direct: None,
         param_write: None,
         callees: Vec::new(),
@@ -520,6 +580,7 @@ fn scan_fn(
     facts: &PurityFacts,
     decl: &FnDecl,
     owner: Option<&str>,
+    module: Vec<String>,
 ) -> FnScan {
     let mut locals = HashSet::new();
     let mut params = HashMap::new();
@@ -552,7 +613,7 @@ fn scan_fn(
         };
     };
     collect_body_bindings(body, &mut locals);
-    let mut scan = Scan::new(context, facts, locals, params, receiver);
+    let mut scan = Scan::new(context, facts, locals, params, receiver, module);
     scan.expr(body);
     FnScan {
         direct: scan.direct,
@@ -591,6 +652,8 @@ struct Scan<'a> {
     locals: HashSet<NodeId>,
     params: HashMap<NodeId, ParamKind>,
     receiver: Option<(Receiver, Option<String>)>,
+    /// The module the body is declared in, which a relative path names from.
+    module: Vec<String>,
     /// Locals bound to a closure literal or a named function, which the
     /// body may call without leaving what the analysis can see.
     known_callables: HashSet<NodeId>,
@@ -608,12 +671,14 @@ impl<'a> Scan<'a> {
         locals: HashSet<NodeId>,
         params: HashMap<NodeId, ParamKind>,
         receiver: Option<(Receiver, Option<String>)>,
+        module: Vec<String>,
     ) -> Self {
         Self {
             context,
             facts,
             locals,
             params,
+            module,
             receiver,
             known_callables: HashSet::new(),
             captures_are_callers: false,
@@ -929,11 +994,13 @@ impl<'a> Scan<'a> {
                 // A free function of the program reached through a `use`
                 // (`use util::dbl` then `dbl(..)`, or `util::dbl(..)`): its
                 // body is known, so it is as pure as that body.
-                let expanded =
-                    self.context
-                        .imports
-                        .expand(self.context.resolutions, callee.id, &segments);
-                if let Some(&index) = self.facts.by_path.get(&expanded) {
+                if let Some(index) = self.facts.program_fn(
+                    self.context.imports,
+                    self.context.resolutions,
+                    callee.id,
+                    &segments,
+                    &self.module,
+                ) {
                     self.call_unit(index);
                     return;
                 }

@@ -2968,6 +2968,39 @@ fn current_process_rss_bytes() -> Option<u64> {
     u64::try_from(rss).ok()
 }
 
+#[cfg(target_os = "freebsd")]
+fn current_process_rss_bytes() -> Option<u64> {
+    let mut info = std::mem::MaybeUninit::<libc::kinfo_proc>::zeroed();
+    let mut len = std::mem::size_of::<libc::kinfo_proc>();
+    // SAFETY: `getpid` takes no arguments and cannot fail.
+    let pid = unsafe { libc::getpid() };
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
+    // SAFETY: `mib` names this process's `kinfo_proc`, and `info` / `len`
+    // describe writable storage of exactly that record's size.
+    let read = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            info.as_mut_ptr().cast(),
+            &raw mut len,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if read != 0 || len != std::mem::size_of::<libc::kinfo_proc>() {
+        return None;
+    }
+    // SAFETY: a successful read of the full record initializes it.
+    let pages = unsafe { info.assume_init() }.ki_rssize;
+    // SAFETY: `sysconf` reads a constant system parameter.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    Some(
+        u64::try_from(pages)
+            .ok()?
+            .saturating_mul(u64::try_from(page).ok()?),
+    )
+}
+
 #[cfg(windows)]
 fn current_process_rss_bytes() -> Option<u64> {
     use windows_sys::Win32::System::ProcessStatus::{
@@ -2988,7 +3021,12 @@ fn current_process_rss_bytes() -> Option<u64> {
     u64::try_from(counters.WorkingSetSize).ok()
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    windows
+)))]
 fn current_process_rss_bytes() -> Option<u64> {
     None
 }

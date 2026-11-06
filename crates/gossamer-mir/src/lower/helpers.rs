@@ -47,7 +47,7 @@ use crate::ir::{
     Statement, StatementKind, Terminator, UnOp,
 };
 
-use super::*;
+use super::Builder;
 
 mod collect;
 mod drops;

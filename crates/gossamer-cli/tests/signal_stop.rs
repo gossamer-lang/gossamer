@@ -105,3 +105,42 @@ fn stopping_the_last_notifier_restores_the_default_disposition_as_a_native_binar
         assert_ended_by_default_disposition("native", &out);
     }
 }
+
+#[test]
+fn signal_constants_match_the_host_c_library() {
+    let dir = std::env::temp_dir().join(format!("gos-signal-numbers-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let src = dir.join("numbers.gos");
+    std::fs::write(
+        &src,
+        "use std::os::signal\n\nfn main() {\n    println(f\"{signal::SIGHUP} {signal::SIGINT} \
+         {signal::SIGQUIT} {signal::SIGTERM} {signal::SIGUSR1} {signal::SIGUSR2} \
+         {signal::SIGWINCH} {signal::SIGTSTP} {signal::SIGCONT}\")\n}\n",
+    )
+    .expect("write the program");
+    let out = Command::new(gos())
+        .arg("run")
+        .arg(&src)
+        .output()
+        .expect("spawn gos run");
+    let expected = [
+        libc::SIGHUP,
+        libc::SIGINT,
+        libc::SIGQUIT,
+        libc::SIGTERM,
+        libc::SIGUSR1,
+        libc::SIGUSR2,
+        libc::SIGWINCH,
+        libc::SIGTSTP,
+        libc::SIGCONT,
+    ]
+    .map(|n| n.to_string())
+    .join(" ");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        expected,
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

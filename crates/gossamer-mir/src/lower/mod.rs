@@ -167,11 +167,69 @@ pub fn lower_program(program: &HirProgram, tcx: &mut TyCtxt) -> Vec<Body> {
     crate::opt::intern_row_table_types(tcx);
     let tables = ProgramTables::collect(program, tcx);
     let mut bodies = Vec::new();
-    for item in &program.items {
+    for item in creation_order(&program.items) {
         tables.collect_item(item, tcx, &mut bodies);
     }
     finish_lowered_bodies(&mut bodies, 0, tcx);
     bodies
+}
+
+/// `items` in an order where each lifted closure follows the item whose body
+/// creates it, however deeply closures nest: lowering a creation records the
+/// runtime kind of each handle the closure captures, which lowering the
+/// closure's body reads.
+fn creation_order(items: &[HirItem]) -> Vec<&HirItem> {
+    let lifted = |item: &HirItem| match &item.kind {
+        HirItemKind::Fn(func)
+            if func
+                .name
+                .name
+                .starts_with(gossamer_hir::LIFTED_CLOSURE_PREFIX) =>
+        {
+            Some(func.name.name.clone())
+        }
+        _ => None,
+    };
+    let by_name: HashMap<String, usize> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| lifted(item).map(|name| (name, index)))
+        .collect();
+    let created: Vec<Vec<usize>> = items
+        .iter()
+        .map(|item| {
+            let mut found = Vec::new();
+            walk_item_exprs(item, &mut |expr| {
+                if let HirExprKind::LiftedClosure { name, .. } = &expr.kind
+                    && let Some(&index) = by_name.get(&name.name)
+                {
+                    found.push(index);
+                }
+            });
+            found
+        })
+        .collect();
+    let mut queue: std::collections::VecDeque<usize> = (0..items.len())
+        .filter(|&index| lifted(&items[index]).is_none())
+        .collect();
+    let mut placed = vec![false; items.len()];
+    let mut order = Vec::with_capacity(items.len());
+    while let Some(index) = queue.pop_front() {
+        if std::mem::replace(&mut placed[index], true) {
+            continue;
+        }
+        order.push(&items[index]);
+        queue.extend(&created[index]);
+    }
+    // A lifted closure no item creates keeps its place after the rest.
+    order.extend(
+        items
+            .iter()
+            .zip(&placed)
+            .filter(|&(_, &done)| !done)
+            .map(|(item, _)| item),
+    );
+    order
 }
 
 /// Keeps one word per field for every struct whose layout a narrow-field

@@ -18,10 +18,10 @@ use gossamer_pkg::{LibKind, LibRuntime};
 
 use super::c_header::{self, Export};
 use super::{
-    BuildRequest, BuildTimings, LinkTarget, NativeBuildError, NativeLinks, TargetEnv, TargetOs,
+    BuildRequest, BuildTimings, Env, LinkTarget, NativeBuildError, NativeLinks, Os,
     ValidatedSource, build_static_bindings_lib, emit_native_objects, ensure_output_dir,
-    find_runtime_lib, find_runtime_lib_for_target, framework_args, host_os, resolve_link_target,
-    trace_link_command, validate_source,
+    find_runtime_lib, find_runtime_lib_for_target, framework_args, host_os, package_library_dir,
+    resolve_link_target, system_libraries, trace_link_command, validate_source,
 };
 use crate::paths::read_entry_unit;
 
@@ -182,7 +182,7 @@ pub(super) fn compile(
     timings: &mut BuildTimings,
 ) -> Result<()> {
     let lt = resolve_link_target(request.target);
-    let static_musl = lt.env == TargetEnv::Musl || request.link.want_static_musl();
+    let static_musl = lt.env == Env::Musl || (!lt.is_cross && request.link.want_static_musl());
     let tmp_dir =
         std::env::temp_dir().join(format!("gos-build-{}-check{unit_name}", std::process::id()));
     fs::create_dir_all(&tmp_dir).map_err(|err| anyhow!("creating {}: {err}", tmp_dir.display()))?;
@@ -255,10 +255,10 @@ fn check_host_runtime_target(target: &LibraryTarget, lt: &LinkTarget) -> Result<
              library carries a runtime of its own"
         ));
     }
-    if !matches!(lt.os, TargetOs::Linux | TargetOs::MacOs) {
+    if !(lt.os.is_elf_unix() || lt.os == Os::MacOs) {
         return Err(anyhow!(
-            "build: a `runtime = \"host\"` library is built for Linux and macOS hosts; `{}` is \
-             neither",
+            "build: a `runtime = \"host\"` library is built for Linux, BSD, and macOS hosts; \
+             `{}` is none of them",
             lt.triple
         ));
     }
@@ -273,7 +273,7 @@ fn check_library_target(lt: &LinkTarget) -> Result<()> {
             lt.triple
         ));
     }
-    if lt.env == TargetEnv::Musl {
+    if lt.env == Env::Musl {
         return Err(anyhow!(
             "build: a library links against its host's C library; `{}` is a static musl target",
             lt.triple
@@ -350,14 +350,14 @@ fn output_dir(file: &Path, release: bool) -> Result<PathBuf> {
 }
 
 /// The file an artifact of `kind` is written to on `os`.
-fn artifact_file_name(name: &str, kind: LibKind, os: TargetOs) -> String {
+fn artifact_file_name(name: &str, kind: LibKind, os: Os) -> String {
     match (kind, os) {
-        (LibKind::Staticlib, TargetOs::Windows) if cfg!(target_env = "msvc") => {
+        (LibKind::Staticlib, Os::Windows) if cfg!(target_env = "msvc") => {
             format!("{name}.lib")
         }
         (LibKind::Staticlib, _) => format!("lib{name}.a"),
-        (LibKind::Cdylib, TargetOs::Windows) => format!("{name}.dll"),
-        (LibKind::Cdylib, TargetOs::MacOs) => format!("lib{name}.dylib"),
+        (LibKind::Cdylib, Os::Windows) => format!("{name}.dll"),
+        (LibKind::Cdylib, Os::MacOs) => format!("lib{name}.dylib"),
         (LibKind::Cdylib, _) => format!("lib{name}.so"),
     }
 }
@@ -365,7 +365,7 @@ fn artifact_file_name(name: &str, kind: LibKind, os: TargetOs) -> String {
 /// The system libraries a C program linking the static archive names after
 /// it: the runtime's, then the library's own foreign ones.
 fn static_link_libraries(lt: &LinkTarget, libraries: &NativeLinks) -> Vec<String> {
-    let msvc = lt.os == TargetOs::Windows && cfg!(target_env = "msvc");
+    let msvc = lt.os == Os::Windows && cfg!(target_env = "msvc");
     let mut flags: Vec<String> = Vec::new();
     for dir in &libraries.search {
         flags.push(if msvc {
@@ -374,6 +374,9 @@ fn static_link_libraries(lt: &LinkTarget, libraries: &NativeLinks) -> Vec<String
             format!("-L{}", dir.display())
         });
     }
+    if let Some(dir) = package_library_dir(lt) {
+        flags.push(format!("-L{}", dir.display()));
+    }
     for library in &libraries.libraries {
         flags.push(if msvc {
             format!("{library}.lib")
@@ -381,31 +384,30 @@ fn static_link_libraries(lt: &LinkTarget, libraries: &NativeLinks) -> Vec<String
             format!("-l{library}")
         });
     }
-    if lt.os == TargetOs::MacOs {
+    if lt.os == Os::MacOs {
         for framework in &libraries.frameworks {
             flags.push("-framework".to_string());
             flags.push(framework.clone());
         }
     }
     flags.extend(libraries.staticlib_args.iter().cloned());
-    let system: &[&str] = match lt.os {
-        TargetOs::Linux => &["-lpthread", "-ldl", "-lm"],
-        TargetOs::Windows if cfg!(target_env = "msvc") => &[
-            "advapi32.lib",
-            "bcrypt.lib",
-            "kernel32.lib",
-            "ntdll.lib",
-            "userenv.lib",
-            "ws2_32.lib",
-            "synchronization.lib",
-            "dbghelp.lib",
-        ],
-        TargetOs::Windows => &["-lws2_32", "-lbcrypt", "-ladvapi32", "-luserenv", "-lntdll"],
-        // The runtime reads the local time zone through CoreFoundation.
-        TargetOs::MacOs => &["-lpthread", "-lm", "-framework", "CoreFoundation"],
-        TargetOs::Other => &["-lpthread", "-lm"],
-    };
-    flags.extend(system.iter().map(ToString::to_string));
+    if msvc {
+        flags.extend(
+            [
+                "advapi32.lib",
+                "bcrypt.lib",
+                "kernel32.lib",
+                "ntdll.lib",
+                "userenv.lib",
+                "ws2_32.lib",
+                "synchronization.lib",
+                "dbghelp.lib",
+            ]
+            .map(ToString::to_string),
+        );
+    } else {
+        flags.extend(system_libraries(lt));
+    }
     flags
 }
 
@@ -455,14 +457,14 @@ fn run_tool(mut cmd: std::process::Command) -> std::result::Result<(), NativeBui
 fn archive(parts: &Parts<'_>, out: &Path) -> std::result::Result<(), NativeBuildError> {
     let _ = fs::remove_file(out);
     match parts.lt.os {
-        TargetOs::MacOs => {
+        Os::MacOs => {
             let mut cmd = std::process::Command::new("libtool");
             cmd.arg("-static").arg("-o").arg(out);
             cmd.args(parts.objects);
             cmd.args(parts.archives());
             run_tool(cmd)
         }
-        TargetOs::Windows if cfg!(target_env = "msvc") => {
+        Os::Windows if cfg!(target_env = "msvc") => {
             let mut cmd = std::process::Command::new(rust_lld()?);
             // `/lib` as the first argument makes lld-link act as lib.exe,
             // which merges the members of the archives it is given.
@@ -502,7 +504,7 @@ fn host_archive(
     let mut link = std::process::Command::new(&cc);
     link.arg("-r").arg("-nostdlib").arg("-o").arg(&merged);
     link.args(parts.objects);
-    if parts.lt.os == TargetOs::MacOs {
+    if parts.lt.os == Os::MacOs {
         // ld64 keeps only the listed symbols global in a relocatable link.
         let list = staged.join("entries.txt");
         let names: Vec<String> = entries.iter().map(|s| format!("_{s}")).collect();
@@ -542,7 +544,7 @@ fn host_archive(
         run_tool(hide)?;
     }
     let _ = fs::remove_file(out);
-    let mut pack = if parts.lt.os == TargetOs::MacOs {
+    let mut pack = if parts.lt.os == Os::MacOs {
         let mut cmd = std::process::Command::new("libtool");
         cmd.arg("-static").arg("-o").arg(out);
         cmd
@@ -630,7 +632,7 @@ fn shared(parts: &Parts<'_>, name: &str, out: &Path) -> std::result::Result<(), 
         .map(|e| e.symbol.as_str())
         .chain(std::iter::once(shutdown.as_str()))
         .collect();
-    if parts.lt.os == TargetOs::Windows && cfg!(target_env = "msvc") {
+    if parts.lt.os == Os::Windows && cfg!(target_env = "msvc") {
         return shared_msvc(parts, name, out, &symbols);
     }
     let cc = if parts.lt.is_cross {
@@ -640,7 +642,7 @@ fn shared(parts: &Parts<'_>, name: &str, out: &Path) -> std::result::Result<(), 
     };
     let mut cmd = std::process::Command::new(&cc);
     match parts.lt.os {
-        TargetOs::MacOs => {
+        Os::MacOs => {
             super::configure_macos_link_command(&mut cmd);
             let list = parts.tmp_dir.join("exports.list");
             let mut text = String::new();
@@ -655,7 +657,7 @@ fn shared(parts: &Parts<'_>, name: &str, out: &Path) -> std::result::Result<(), 
             cmd.arg(format!("-Wl,-exported_symbols_list,{}", list.display()));
             cmd.arg("-Wl,-dead_strip");
         }
-        TargetOs::Windows => {
+        Os::Windows => {
             let def = parts.tmp_dir.join(format!("{name}.def"));
             fs::write(&def, module_definition(name, &symbols)).map_err(|e| io(&def, e))?;
             cmd.arg("-shared");
@@ -663,7 +665,13 @@ fn shared(parts: &Parts<'_>, name: &str, out: &Path) -> std::result::Result<(), 
             let implib = out.with_file_name(format!("lib{name}.dll.a"));
             cmd.arg(format!("-Wl,--out-implib,{}", implib.display()));
         }
-        TargetOs::Linux | TargetOs::Other => {
+        Os::Ios | Os::Wasi | Os::Unknown => {
+            return Err(NativeBuildError::LinkerFailed(format!(
+                "a shared library cannot be linked for `{}`",
+                parts.lt.triple
+            )));
+        }
+        Os::Linux | Os::Android | Os::FreeBsd | Os::NetBsd | Os::OpenBsd => {
             let script = parts.tmp_dir.join("exports.map");
             let mut globals = String::new();
             for symbol in &symbols {
@@ -690,25 +698,16 @@ fn shared(parts: &Parts<'_>, name: &str, out: &Path) -> std::result::Result<(), 
     for dir in &parts.libraries.search {
         cmd.arg(format!("-L{}", dir.display()));
     }
+    if let Some(dir) = package_library_dir(parts.lt) {
+        cmd.arg(format!("-L{}", dir.display()));
+    }
     for library in &parts.libraries.libraries {
         cmd.arg(format!("-l{library}"));
     }
     cmd.args(framework_args(parts.lt, parts.libraries)?);
     cmd.args(&parts.libraries.staticlib_args);
     cmd.arg("-o").arg(out);
-    cmd.arg("-lpthread");
-    if parts.lt.os == TargetOs::Linux {
-        cmd.arg("-ldl");
-    }
-    cmd.arg("-lm");
-    if parts.lt.os == TargetOs::MacOs {
-        cmd.args(["-framework", "CoreFoundation"]);
-    }
-    if parts.lt.os == TargetOs::Windows {
-        for lib in ["ws2_32", "bcrypt", "advapi32", "userenv", "ntdll"] {
-            cmd.arg(format!("-l{lib}"));
-        }
-    }
+    cmd.args(system_libraries(parts.lt));
     run_tool(cmd)
 }
 

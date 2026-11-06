@@ -164,3 +164,29 @@ fn an_effectful_function_of_another_module_reports_gt0090() {
         "the path must name the function: {stderr}"
     );
 }
+
+#[test]
+fn a_function_named_by_import_crate_self_or_super_path_is_judged_by_its_body() {
+    // A callback passed by name, and paths spelled from the crate root, the
+    // current module, or its parent, reach a known body as an import does.
+    let out = common::gos_check_str(
+        "use util::double\n\
+         mod util { pub fn double(x: i64) -> i64 { x * 2 }\n \
+         pub mod inner {\n \
+         pub fn quad(xs: Vec<i64>) -> Vec<i64> { xs.par_map(|v| super::double(v) + crate::util::double(v)) }\n \
+         pub fn own(xs: Vec<i64>) -> Vec<i64> { xs.par_map(|v| self::twice(v)) }\n \
+         pub fn twice(x: i64) -> i64 { x + x } } }\n\
+         fn main() { let xs = #[1, 2]\n \
+         println(\"{} {} {}\", xs.par_map(double), util::inner::quad(xs), util::inner::own(xs)) }",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", common::stderr(&out));
+    let out = common::gos_check_str(
+        "mod util { pub fn noisy(x: i64) -> i64 { println(\"{}\", x)\n x } }\n\
+         fn main() { let xs = #[1, 2]\n println(\"{}\", xs.par_map(|v| crate::util::noisy(v))) }",
+    );
+    let stderr = common::stderr(&out);
+    assert!(
+        stderr.contains("GT0090") && stderr.contains("noisy"),
+        "{stderr}"
+    );
+}

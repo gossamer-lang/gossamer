@@ -450,10 +450,35 @@ mod unix {
         STACK_HI.with(|c| c.set(hi));
     }
 
+    /// Fills `attr` with the calling thread's attributes, stack included.
+    ///
+    /// # Safety
+    ///
+    /// `attr` is zero-initialised storage the caller destroys afterwards.
     #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe fn current_thread_attr(attr: *mut libc::pthread_attr_t) -> bool {
+        // SAFETY: the caller hands over writable attribute storage.
+        unsafe { libc::pthread_getattr_np(libc::pthread_self(), attr) == 0 }
+    }
+
+    /// Fills `attr` with the calling thread's attributes, stack included.
+    ///
+    /// # Safety
+    ///
+    /// `attr` is zero-initialised storage the caller destroys afterwards.
+    #[cfg(target_os = "freebsd")]
+    unsafe fn current_thread_attr(attr: *mut libc::pthread_attr_t) -> bool {
+        // SAFETY: FreeBSD's `pthread_attr_get_np` fills an initialised
+        // attribute object, which `pthread_attr_init` makes of the storage.
+        unsafe {
+            libc::pthread_attr_init(attr) == 0
+                && libc::pthread_attr_get_np(libc::pthread_self(), attr) == 0
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
     fn discover_stack_bounds() -> (usize, usize) {
-        // SAFETY: pthread_getattr_np / pthread_attr_getstack /
-        // pthread_attr_destroy are documented async-signal-safe
+        // SAFETY: the attribute calls are documented async-signal-safe
         // wrappers over the current thread's stack metadata. The
         // attr is zero-initialised before the get call; the get
         // call populates sp/size; destroy releases attr resources.
@@ -461,7 +486,7 @@ mod unix {
         // stack-locals owned by this fn.
         unsafe {
             let mut attr: libc::pthread_attr_t = MaybeUninit::zeroed().assume_init();
-            if libc::pthread_getattr_np(libc::pthread_self(), &raw mut attr) != 0 {
+            if !current_thread_attr(&raw mut attr) {
                 return (0, 0);
             }
             let mut sp: *mut libc::c_void = std::ptr::null_mut();
@@ -509,9 +534,16 @@ mod unix {
         unsafe { libc::gettid() == libc::getpid() }
     }
 
+    /// Whether the calling thread is the process main thread.
+    #[cfg(target_os = "freebsd")]
+    fn is_main_thread() -> bool {
+        // SAFETY: `pthread_main_np` takes no arguments and reads libthr state.
+        unsafe { libc::pthread_main_np() == 1 }
+    }
+
     /// The soft `RLIMIT_STACK` in bytes, or `None` when it is unlimited or
     /// unreadable - in which case no rlimit-derived bound can be computed.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
     fn stack_rlimit() -> Option<usize> {
         // SAFETY: `getrlimit` fills the caller-owned `rlim` with the current
         // limits; the struct is zero-initialised before the call.
@@ -545,9 +577,14 @@ mod unix {
         }
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "macos"
+    )))]
     fn discover_stack_bounds() -> (usize, usize) {
-        // Other Unix (FreeBSD, illumos, etc.): no portable bounds
+        // Other Unix (NetBSD, OpenBSD, illumos, etc.): no bounds
         // discovery. The handler still installs but every fault is
         // forwarded unmodified - equivalent to the pre-guard
         // behaviour but with the alt stack in place so the kernel

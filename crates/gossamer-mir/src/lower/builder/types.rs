@@ -50,7 +50,7 @@ use super::Builder;
 
 impl<'a> Builder<'a> {
     pub(crate) fn new(
-        _name: String,
+        name: String,
         span: Span,
         tcx: &'a mut TyCtxt,
         structs: &'a HashMap<String, Vec<String>>,
@@ -69,6 +69,7 @@ impl<'a> Builder<'a> {
         region_effects: &'a crate::lower::helpers::effects::ProgramEffects,
         effect_free_pair_keys: &'a HashMap<String, bool>,
     ) -> Self {
+        let capture_kinds = tcx.lifted_capture_kinds(&name);
         Self {
             tcx,
             locals: Vec::new(),
@@ -103,6 +104,7 @@ impl<'a> Builder<'a> {
             local_closure: HashMap::new(),
             local_fn_name: HashMap::new(),
             local_runtime_kind: HashMap::new(),
+            capture_kinds,
             local_binary_heap_min_i64: std::collections::HashSet::new(),
             local_aggr_iter: std::collections::HashSet::new(),
             fresh_results: std::collections::HashSet::new(),

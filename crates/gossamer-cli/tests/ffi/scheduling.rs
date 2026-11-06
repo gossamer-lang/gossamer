@@ -123,12 +123,12 @@ fn on_main_thread() -> bool {
     unsafe { gettid() == getpid() }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 unsafe extern "C" {
     fn pthread_main_np() -> i32
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 fn on_main_thread() -> bool {
     unsafe { pthread_main_np() == 1 }
 }

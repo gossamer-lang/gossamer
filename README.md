@@ -487,8 +487,8 @@ The supported target contract is the executable matrix in
 [`conformance/target_matrix.tsv`](conformance/target_matrix.tsv) and the
 matching [supported-targets documentation](https://gossamer-lang.org/docs/supported_targets/).
 Tier 1 executes the bytecode VM, JIT-enabled VM, and LLVM AOT binaries on
-native CI for Linux x86_64/aarch64, Apple Silicon macOS, and Windows x86_64.
-Linux x86_64/aarch64 musl AOT output is Tier 2: it is built from supported
+native CI for Linux x86_64/aarch64, Apple Silicon macOS, Windows x86_64, and
+FreeBSD x86_64. Linux x86_64/aarch64 musl AOT output is Tier 2: it is built from supported
 hosts, executed natively or under QEMU, and compared with the pure bytecode
 VM. Intel macOS is artifact-only pending execution evidence; armv7, riscv64,
 and wasm are not supported execution targets.
@@ -502,8 +502,11 @@ program; what it is not is comparable, so the toolchain says which one
 answered.
 
 LLVM 18 and newer are supported. Most distributions package one of those;
-LLVM 22 usually comes from [apt.llvm.org](https://apt.llvm.org) on Linux or
-`brew install llvm@22` on macOS.
+LLVM 22 usually comes from [apt.llvm.org](https://apt.llvm.org) on Linux,
+`brew install llvm@22` on macOS, or `pkg install llvm22` on FreeBSD.
+
+macOS releases target macOS 15. On an older Mac, a `gos` built from source
+targets the macOS it runs on instead; such builds are not supported.
 
 ### Raspberry Pi
 

@@ -673,6 +673,26 @@ impl<'a> Builder<'a> {
                         return;
                     }
                     if let Some(mut value) = self.lower_expr(init) {
+                        // A captured handle carries the runtime kind its
+                        // creator recorded, as the binding it captures does.
+                        // The handle is a full word, whatever contents the
+                        // checker typed it as.
+                        if let Some(kind) = gossamer_hir::capture_env_offset(init)
+                            .and_then(|offset| self.capture_kinds.get(&offset).copied())
+                        {
+                            self.local_runtime_kind.insert(value, kind);
+                            if matches!(
+                                self.tcx.kind_of(self.locals[value.0 as usize].ty),
+                                gossamer_types::TyKind::Bool
+                                    | gossamer_types::TyKind::Char
+                                    | gossamer_types::TyKind::Int(_)
+                                    | gossamer_types::TyKind::Float(_)
+                                    | gossamer_types::TyKind::String
+                            ) {
+                                self.locals[value.0 as usize].ty =
+                                    self.tcx.int_ty(gossamer_types::IntTy::I64);
+                            }
+                        }
                         // Coerce a `json::Value`-typed initialiser
                         // when the binding has an explicit primitive
                         // / String annotation. `let low: i64 =
@@ -764,21 +784,15 @@ impl<'a> Builder<'a> {
                             // garbage. This is the cli_args / flag
                             // bool reproducer the test suite caught.
                             let init_rk = self.local_runtime_kind.get(&value).copied();
-                            let promote_handle = init_rk.is_some_and(|rk| {
-                                rk.starts_with("flag::Cell::")
-                                    || rk.starts_with("http::")
-                                    || rk.starts_with("regex::")
-                                    || rk.starts_with("bufio::")
-                                    || rk == "errors::Error"
-                                    || rk == "flag::Set"
-                            }) && matches!(
-                                binding_kind,
-                                TyKind::Bool
-                                    | TyKind::Char
-                                    | TyKind::Int(_)
-                                    | TyKind::Float(_)
-                                    | TyKind::String
-                            );
+                            let promote_handle = init_rk.is_some_and(is_collapsed_handle_kind)
+                                && matches!(
+                                    binding_kind,
+                                    TyKind::Bool
+                                        | TyKind::Char
+                                        | TyKind::Int(_)
+                                        | TyKind::Float(_)
+                                        | TyKind::String
+                                );
                             // Promote `Array { elem: Var/Error, len }`
                             // bindings to the init's resolved Array
                             // type so {:?} dispatch can classify the
@@ -1179,4 +1193,16 @@ fn rename_local_in_block(block: &mut crate::ir::BasicBlock, from: Local, to: Loc
         | Terminator::Resume
         | Terminator::Panic { .. } => {}
     }
+}
+
+/// Whether a value of runtime kind `kind` is a handle the checker types as
+/// the primitive it holds or answers (a flag cell, an HTTP response, a regex
+/// pattern, ...), so only the runtime kind says the word is a handle.
+pub(crate) fn is_collapsed_handle_kind(kind: &str) -> bool {
+    kind.starts_with("flag::Cell::")
+        || kind.starts_with("http::")
+        || kind.starts_with("regex::")
+        || kind.starts_with("bufio::")
+        || kind == "errors::Error"
+        || kind == "flag::Set"
 }

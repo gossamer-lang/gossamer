@@ -7,8 +7,7 @@
 //!
 //! Each test runs the same program through `gos` (interp) and
 //! `gos build && ./bin` (native - Cranelift / LLVM depending on the
-//! build), asserting byte-identical stdout. Skips silently when the
-//! `gos` binary, `cc`, or the LLVM toolchain isn't available.
+//! build), asserting byte-identical stdout.
 
 #![allow(missing_docs)]
 
@@ -53,49 +52,41 @@ fn run_interp(source: &Path) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-fn run_native(source: &Path) -> Option<String> {
+fn run_native(source: &Path) -> String {
+    let out_dir = source.with_extension("out");
     let build = Command::new(gos_bin())
         .arg("build")
+        .arg("--out-dir")
+        .arg(&out_dir)
         .arg(source)
         .output()
         .expect("spawn gos build");
-    if !build.status.success() {
-        eprintln!(
-            "skipping native parity: gos build failed\n{}\n{}",
-            String::from_utf8_lossy(&build.stdout),
-            String::from_utf8_lossy(&build.stderr),
-        );
-        return None;
-    }
-    let stem = source.file_stem()?.to_string_lossy().into_owned();
-    let bin = workspace_target()
-        .join("debug")
-        .join(format!("{stem}{}", std::env::consts::EXE_SUFFIX));
-    if !bin.exists() {
-        eprintln!(
-            "skipping native parity: produced binary not found at {}",
-            bin.display()
-        );
-        return None;
-    }
+    assert!(
+        build.status.success(),
+        "gos build failed\n{}\n{}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr),
+    );
+    let stem = source
+        .file_stem()
+        .expect("source has a stem")
+        .to_string_lossy()
+        .into_owned();
+    let bin = out_dir.join(format!("{stem}{}", std::env::consts::EXE_SUFFIX));
     let run = Command::new(&bin).output().expect("invoke produced binary");
-    let _ = std::fs::remove_file(&bin);
-    if !run.status.success() {
-        eprintln!(
-            "skipping native parity: produced binary exited non-zero\n{}",
-            String::from_utf8_lossy(&run.stderr),
-        );
-        return None;
-    }
-    Some(String::from_utf8_lossy(&run.stdout).into_owned())
+    let _ = std::fs::remove_dir_all(&out_dir);
+    assert!(
+        run.status.success(),
+        "produced binary exited non-zero\n{}",
+        String::from_utf8_lossy(&run.stderr),
+    );
+    String::from_utf8_lossy(&run.stdout).into_owned()
 }
 
 fn assert_parity(name: &str, body: &str) {
     let source = write_source(name, body);
     let interp = run_interp(&source);
-    let Some(native) = run_native(&source) else {
-        return;
-    };
+    let native = run_native(&source);
     assert_eq!(
         interp, native,
         "interp / native diverged for {name}\ninterp:\n{interp}\nnative:\n{native}",

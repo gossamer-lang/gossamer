@@ -390,9 +390,52 @@ jobs:
             gos-*-windows-x86_64.zip
             gos-*-setup.exe
 
+  # FreeBSD has no hosted runner, so the release builds in a FreeBSD VM on a
+  # Linux runner; the archive is copied back to the runner for upload.
+  build-freebsd:
+    name: FreeBSD x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Read workspace version
+        shell: bash
+        run: |
+          VERSION="$(awk -F'"' '
+            /^\[workspace\.package\]$/ { in_section = 1; next }
+            /^\[/ { in_section = 0 }
+            in_section && $1 ~ /^version = / { print $2; exit }
+          ' Cargo.toml)"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build and package in FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          mem: 14336
+          envs: VERSION RUSTUP_TOOLCHAIN
+          prepare: |
+            pkg install -y bash git cmake gmake pkgconf curl
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUSTUP_TOOLCHAIN"
+          run: |
+            . "$HOME/.cargo/env"
+            cargo build --release --bin gos
+            BASE="gos-${VERSION}-freebsd-x86_64"
+            mkdir "$BASE"
+            cp target/release/gos target/release/libgossamer_runtime.a "$BASE/"
+            cp README.md LICENSE scripts/install.sh "$BASE/"
+            chmod +x "$BASE/install.sh"
+            tar -czf "${BASE}.tar.gz" "$BASE"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: gos-freebsd-x86_64
+          path: gos-*-freebsd-x86_64.tar.gz
+
   publish:
     name: Publish release
-    needs: [build-linux-x86_64, build-linux-aarch64, build-macos, build-windows]
+    needs: [build-linux-x86_64, build-linux-aarch64, build-macos, build-windows, build-freebsd]
     runs-on: ubuntu-latest
     permissions:
       contents: write
