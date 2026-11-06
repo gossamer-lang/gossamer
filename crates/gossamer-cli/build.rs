@@ -378,7 +378,10 @@ fn build_runtime_into(
     }
 
     // The system libraries the archive needs are what rustc reports for it, so
-    // `gos build` links exactly those rather than a per-OS guess.
+    // `gos build` links exactly those rather than a per-OS guess. The report
+    // is parsed, so it is asked for without color codes, whatever the
+    // environment's `CARGO_TERM_COLOR`.
+    cmd.arg("--color").arg("never");
     cmd.arg("--").arg("--print=native-static-libs");
     let output = cmd.output().expect("invoke cargo for runtime build");
     let stderr = String::from_utf8_lossy(&output.stderr);
