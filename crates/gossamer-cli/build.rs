@@ -285,10 +285,18 @@ fn build_runtime_into(
     } else {
         triple
     };
-    let inner_target = match triple {
-        Some(t) => target_dir.join(format!("runtime-staticlib-{t}")),
-        None => target_dir.join("runtime-staticlib"),
+    // Cargo does not count the macOS deployment target among what makes a
+    // compiled object current, so each one gets a directory of its own: an
+    // object built for one macOS is never reused for another.
+    let deployment_target = macos_deployment::is_macos_target(triple, cfg!(target_os = "macos"))
+        .then(macos_deployment::effective_deployment_target);
+    let inner_name = match (triple, &deployment_target) {
+        (Some(t), Some(macos)) => format!("runtime-staticlib-{t}-macos{macos}"),
+        (Some(t), None) => format!("runtime-staticlib-{t}"),
+        (None, Some(macos)) => format!("runtime-staticlib-macos{macos}"),
+        (None, None) => "runtime-staticlib".to_string(),
     };
+    let inner_target = target_dir.join(inner_name);
 
     let mut cmd = Command::new(&cargo);
     // Only the staticlib is asked for: with an rlib in the unit's
@@ -302,9 +310,8 @@ fn build_runtime_into(
         .arg("--target-dir")
         .arg(&inner_target)
         .current_dir(workspace_root);
-    if macos_deployment::is_macos_target(triple, cfg!(target_os = "macos")) {
-        let deployment_target = macos_deployment::effective_deployment_target();
-        macos_deployment::set_command_deployment_target(&mut cmd, &deployment_target);
+    if let Some(deployment_target) = &deployment_target {
+        macos_deployment::set_command_deployment_target(&mut cmd, deployment_target);
     }
     // Keep the static archive used by `gos build` in step with the runtime
     // linked into the CLI itself.
