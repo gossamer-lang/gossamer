@@ -894,6 +894,22 @@ impl<'a> Builder<'a> {
                             let init_ty = self.locals[value.0 as usize].ty;
                             let binding_ty = self.locals[local.0 as usize].ty;
                             if gossamer_hir::is_capture_env_load(init) {
+                                if let Some(kind) =
+                                    gossamer_hir::capture_env_offset(init).and_then(|offset| {
+                                        self.tcx.lifted_capture_kind(&self.body_name, offset)
+                                    })
+                                {
+                                    // The capture is the cell's address. Its
+                                    // HIR type is the cell's element (`*cell`
+                                    // fixed it), which for a `bool` cell would
+                                    // load one bit of the address; the slot is
+                                    // a full word.
+                                    let word = self.tcx.int_ty(gossamer_types::IntTy::I64);
+                                    self.locals[value.0 as usize].ty = word;
+                                    self.locals[local.0 as usize].ty = word;
+                                    self.local_runtime_kind.insert(value, kind);
+                                    self.local_runtime_kind.insert(local, kind);
+                                }
                                 // A closure capture aliases the enclosing
                                 // scope's value, so a heap type mutated
                                 // through it reaches the original.

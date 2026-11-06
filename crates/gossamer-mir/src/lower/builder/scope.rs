@@ -534,6 +534,14 @@ impl<'a> Builder<'a> {
             let mut value_local = self.lower_expr(cap)?;
             let value_ty = self.locals[value_local.0 as usize].ty;
             let word = next_word;
+            // A flag cell reads as its value only where the lowering knows
+            // it is one; tell the lifted body, which reads it back by offset.
+            if let Some(kind) = self.local_runtime_kind.get(&value_local).copied()
+                && kind.starts_with("flag::Cell::")
+            {
+                self.tcx
+                    .record_lifted_capture_kind(&name.name, word * 8, kind);
+            }
             let wide = self.tcx.is_two_word_value(value_ty);
             next_word += if wide { 2 } else { 1 };
             capture_words.push(word);

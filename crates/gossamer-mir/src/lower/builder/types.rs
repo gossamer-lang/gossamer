@@ -50,7 +50,7 @@ use super::Builder;
 
 impl<'a> Builder<'a> {
     pub(crate) fn new(
-        _name: String,
+        name: String,
         span: Span,
         tcx: &'a mut TyCtxt,
         structs: &'a HashMap<String, Vec<String>>,
@@ -71,6 +71,7 @@ impl<'a> Builder<'a> {
     ) -> Self {
         Self {
             tcx,
+            body_name: name,
             locals: Vec::new(),
             blocks: Vec::new(),
             current: None,

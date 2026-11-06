@@ -81,6 +81,13 @@ impl FlatEnumLayout {
 /// Interner that maps [`TyKind`]s to stable [`Ty`] handles.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TyCtxt {
+    /// The runtime kind (`flag::Cell::Int`, ...) of a value a lifted closure
+    /// captures, by closure name and environment byte offset. The closure's
+    /// body reads the capture back from its environment, where nothing else
+    /// says the word is a flag cell, so `*cell` there would yield the cell's
+    /// address instead of its value.
+    #[serde(skip)]
+    lifted_capture_kinds: HashMap<(String, i64), &'static str>,
     kinds: Vec<TyKind>,
     #[serde(serialize_with = "gossamer_ast::ordered::map_by_value")]
     index: HashMap<TyKind, Ty>,
@@ -1468,6 +1475,21 @@ impl TyCtxt {
     /// a pure function of the type, so duplicates are identical).
     pub fn register_rc_meta(&mut self, symbol: impl Into<String>, blob: Vec<i64>) {
         self.rc_metas.entry(symbol.into()).or_insert(blob);
+    }
+
+    /// Records that the lifted closure `closure` captures, at environment
+    /// byte `offset`, a value of runtime kind `kind`.
+    pub fn record_lifted_capture_kind(&mut self, closure: &str, offset: i64, kind: &'static str) {
+        self.lifted_capture_kinds
+            .insert((closure.to_string(), offset), kind);
+    }
+
+    /// The runtime kind [`Self::record_lifted_capture_kind`] recorded.
+    #[must_use]
+    pub fn lifted_capture_kind(&self, closure: &str, offset: i64) -> Option<&'static str> {
+        self.lifted_capture_kinds
+            .get(&(closure.to_string(), offset))
+            .copied()
     }
 
     /// Records the guarded copy-blob meta symbol for an aggregate type

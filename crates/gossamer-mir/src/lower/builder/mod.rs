@@ -48,6 +48,8 @@ use super::*;
 
 pub(crate) struct Builder<'a> {
     pub(crate) tcx: &'a mut TyCtxt,
+    /// The name of the function this builder lowers.
+    pub(crate) body_name: String,
     pub(crate) locals: Vec<LocalDecl>,
     pub(crate) blocks: Vec<BasicBlock>,
     pub(crate) current: Option<BlockId>,
