@@ -55,6 +55,22 @@ pub fn is_capture_env_load(init: &HirExpr) -> bool {
     )
 }
 
+/// The environment byte offset a capture load (see [`is_capture_env_load`])
+/// reads.
+#[must_use]
+pub fn capture_env_offset(init: &HirExpr) -> Option<i64> {
+    if !is_capture_env_load(init) {
+        return None;
+    }
+    let HirExprKind::Call { args, .. } = &init.kind else {
+        return None;
+    };
+    match args.get(1).map(|a| &a.kind) {
+        Some(HirExprKind::Literal(crate::tree::HirLiteral::Int(text))) => text.parse().ok(),
+        _ => None,
+    }
+}
+
 /// Walks `program` and lifts every closure with no free variables
 /// into a top-level [`HirItemKind::Fn`] item with a synthetic name,
 /// replacing the original closure expression with a

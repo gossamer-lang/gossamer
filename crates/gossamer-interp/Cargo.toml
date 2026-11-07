@@ -39,8 +39,8 @@ thiserror = { workspace = true }
 gossamer-codegen-cranelift = { workspace = true }
 
 # The JIT admission policy samples the process RSS before compiling native
-# code. Linux reads procfs; macOS and Windows need their platform APIs.
-[target.'cfg(target_os = "macos")'.dependencies]
+# code. Linux reads procfs; macOS, FreeBSD, and Windows need their platform APIs.
+[target.'cfg(any(target_os = "macos", target_os = "freebsd"))'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]

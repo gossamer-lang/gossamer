@@ -37,6 +37,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
+use gossamer_abi::target::{Env, Os, Target};
 use gossamer_pkg::manifest::WindowsSubsystem;
 
 use crate::loaders::profile_rss_stage;
@@ -335,7 +336,7 @@ fn cross_target(target: Option<&str>) -> Result<Option<&str>> {
             // The cross output is always a Linux ELF; producing a macOS
             // Mach-O or Windows PE from another host needs an external
             // SDK this toolchain does not bundle.
-            if resolve_link_target(Some(triple)).os != TargetOs::Linux {
+            if resolve_link_target(Some(triple)).os != Os::Linux {
                 return Err(anyhow!(
                     "cross-compiling to `{triple}` is not supported; only \
                      `*-linux-*` targets can be cross-built (the produced \
@@ -596,8 +597,8 @@ fn report_artifact(outcome: &NativeBuildOutcome, out_path: &Path) {
 fn print_profile_plan(cross_target: Option<&str>, opts: LinkOptions, input: &Path) {
     let planned_target = resolve_link_target(cross_target);
     let target = &planned_target;
-    let static_musl =
-        target.env == TargetEnv::Musl || (opts.want_static_musl() && !links_rust_bindings(input));
+    let static_musl = target.env == Env::Musl
+        || (!target.is_cross && opts.want_static_musl() && !links_rust_bindings(input));
     let profile = if opts.release { "release" } else { "debug" };
     let (mir, llvm) = if opts.release {
         ("release-inline+optimise", "O3")
@@ -605,23 +606,23 @@ fn print_profile_plan(cross_target: Option<&str>, opts: LinkOptions, input: &Pat
         ("debug-checked", "O1")
     };
     let linker = match target.os {
-        TargetOs::MacOs => {
+        Os::MacOs => {
             if opts.release {
                 "macos:O1+dead-strip"
             } else {
                 "macos:O0"
             }
         }
-        TargetOs::Windows => {
+        Os::Windows => {
             if opts.release {
                 "windows:OPT-REF+ICF"
             } else {
                 "windows:NOREF+NOICF"
             }
         }
-        TargetOs::Linux if static_musl => "linux:static-musl",
-        TargetOs::Linux => "linux:dynamic",
-        TargetOs::Other => "other",
+        Os::Linux if static_musl => "linux:static-musl",
+        Os::Linux => "linux:dynamic",
+        os => os.name(),
     };
     let triple = linked_triple(&target.triple, static_musl);
     let loop_idiom_disabled =
@@ -791,8 +792,8 @@ fn build_artifact_key(
     // installing or removing the musl target between builds must invalidate a
     // cached dynamic/static artifact rather than reusing the wrong binary.
     let resolved_target = resolve_link_target(target);
-    let static_musl = resolved_target.env == TargetEnv::Musl
-        || (opts.want_static_musl() && !links_rust_bindings(file));
+    let static_musl = resolved_target.env == Env::Musl
+        || (!resolved_target.is_cross && opts.want_static_musl() && !links_rust_bindings(file));
     let mut hash = gossamer_pkg::sha256::Hasher::new();
     let mut add = |label: &str, bytes: &[u8]| {
         hash.update(label.as_bytes());
@@ -1168,46 +1169,20 @@ pub(crate) fn find_runtime_lib() -> std::result::Result<PathBuf, NativeBuildErro
     )))
 }
 
-/// The produced binary's OS family, resolved from the target triple
-/// rather than the host `cfg!` so every link decision follows the
-/// target.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TargetOs {
-    Linux,
-    MacOs,
-    Windows,
-    Other,
-}
-
-/// The produced binary's C runtime / environment, resolved from the
-/// target triple.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TargetEnv {
-    Gnu,
-    Musl,
-    Msvc,
-    Other,
-}
-
 /// Resolved link context for a build: the target triple decomposed
 /// into the OS / arch / env that drive linker and runtime-archive
 /// selection, plus whether this is a cross build (target != host).
 struct LinkTarget {
     triple: String,
-    os: TargetOs,
+    os: Os,
     arch: &'static str,
-    env: TargetEnv,
+    env: Env,
     is_cross: bool,
 }
 
 /// The host build machine's OS family.
-fn host_os() -> TargetOs {
-    match std::env::consts::OS {
-        "linux" => TargetOs::Linux,
-        "macos" => TargetOs::MacOs,
-        "windows" => TargetOs::Windows,
-        _ => TargetOs::Other,
-    }
+fn host_os() -> Os {
+    Os::host()
 }
 
 /// Resolves the link context for `target` (the host triple when
@@ -1217,35 +1192,18 @@ fn resolve_link_target(target: Option<&str>) -> LinkTarget {
     let host = gossamer_driver::TargetTriple::host().as_str().to_string();
     let triple = target.map_or_else(|| host.clone(), str::to_string);
     let is_cross = triple != host;
-    let os = if triple.contains("linux") {
-        TargetOs::Linux
-    } else if triple.contains("darwin") || triple.contains("apple") {
-        TargetOs::MacOs
-    } else if triple.contains("windows") {
-        TargetOs::Windows
-    } else {
-        TargetOs::Other
-    };
-    let env = if triple.contains("musl") {
-        TargetEnv::Musl
-    } else if triple.contains("msvc") {
-        TargetEnv::Msvc
-    } else if triple.contains("gnu") {
-        TargetEnv::Gnu
-    } else {
-        TargetEnv::Other
-    };
-    let arch = match triple.split('-').next().unwrap_or("") {
+    let parsed = Target::parse(&triple);
+    let arch = match parsed.arch() {
         "x86_64" => "x86_64",
-        "aarch64" | "arm64" => "aarch64",
-        "riscv64" | "riscv64gc" => "riscv64",
+        "aarch64" => "aarch64",
+        "riscv64" => "riscv64",
         _ => "unknown",
     };
     LinkTarget {
+        os: parsed.os(),
+        env: parsed.env(),
         triple,
-        os,
         arch,
-        env,
         is_cross,
     }
 }
@@ -1573,7 +1531,7 @@ fn framework_args(
     if libraries.frameworks.is_empty() {
         return Ok(Vec::new());
     }
-    if lt.os != TargetOs::MacOs {
+    if lt.os != Os::MacOs {
         return Err(NativeBuildError::BackendFailed(format!(
             "framework `{}` links only on macOS; gate its declarations with \
              #[cfg(target_os = \"macos\")]",
@@ -1596,10 +1554,10 @@ fn symbol_order(lt: &LinkTarget, out_path: &Path) -> Result<Option<PathBuf>> {
     let Some(path) = std::env::var_os("GOS_SYMBOL_ORDER").map(PathBuf::from) else {
         return Ok(None);
     };
-    if lt.is_cross || !matches!(lt.os, TargetOs::Linux | TargetOs::MacOs | TargetOs::Windows) {
+    if lt.is_cross || !matches!(lt.os, Os::Linux | Os::MacOs | Os::Windows) {
         return Ok(None);
     }
-    if lt.os != TargetOs::MacOs {
+    if lt.os != Os::MacOs {
         return Ok(Some(path));
     }
     let names = fs::read_to_string(&path)
@@ -1627,7 +1585,7 @@ fn pass_symbol_order(
     let Some(order) = symbol_order(lt, out_path).map_err(NativeBuildError::Io)? else {
         return Ok(false);
     };
-    if lt.os == TargetOs::MacOs {
+    if lt.os == Os::MacOs {
         cmd.arg(format!("-Wl,-order_file,{}", order.display()));
         return Ok(true);
     }
@@ -1673,7 +1631,7 @@ fn lld_driver_args() -> Option<Vec<String>> {
 /// resolves the link's libraries where the platform linker would.
 fn links_with_mold(lt: &LinkTarget, libraries: &NativeLinks) -> bool {
     !lt.is_cross
-        && lt.os == TargetOs::Linux
+        && lt.os == Os::Linux
         && mold_resolves_like_the_platform_linker(libraries)
         && which::which("mold").is_ok()
 }
@@ -1804,11 +1762,11 @@ fn try_native_build(
     // `gos run` calls into (`target_env`), the platform's shared one, which a
     // static musl link would replace; such a host release takes the dynamic
     // link. A musl target asked for by name stays static.
-    if lt.env != TargetEnv::Musl {
+    if lt.env != Env::Musl && !lt.is_cross {
         warn_if_static_musl_unavailable(opts);
     }
     let static_musl =
-        lt.env == TargetEnv::Musl || (opts.want_static_musl() && !links_declares_foreign);
+        lt.env == Env::Musl || (!lt.is_cross && opts.want_static_musl() && !links_declares_foreign);
     let phase_started = Instant::now();
     let (object_paths, object_triple) = emit_native_objects(
         paths.unit_name,
@@ -1979,9 +1937,10 @@ fn find_clang_rt_profile() -> Option<PathBuf> {
     } else {
         return None;
     };
-    // Apple's compiler-rt names one universal archive per OS; Linux and
-    // Windows name one per arch in the OS directory, or a plain name in a
-    // per-target-triple directory when LLVM is built with per-target runtimes.
+    // Apple's compiler-rt names one universal archive per OS; Linux, FreeBSD,
+    // and Windows name one per arch in the OS directory, or a plain name in a
+    // per-target-triple directory when LLVM is built with per-target runtimes
+    // (FreeBSD's packages name that directory `x86_64-portbld-freebsd<release>`).
     let (os_subdir, os_name, triple_os, triple_name) = if cfg!(target_os = "linux") {
         (
             "linux",
@@ -2002,6 +1961,13 @@ fn find_clang_rt_profile() -> Option<PathBuf> {
             format!("clang_rt.profile-{arch}.lib"),
             "windows",
             "clang_rt.profile.lib",
+        )
+    } else if cfg!(target_os = "freebsd") {
+        (
+            "freebsd",
+            format!("libclang_rt.profile-{arch}.a"),
+            "freebsd",
+            "libclang_rt.profile.a",
         )
     } else {
         return None;
@@ -2037,10 +2003,10 @@ fn find_clang_rt_profile() -> Option<PathBuf> {
     found
 }
 
-/// Symbols a Linux link must pull from its archives though no object names
-/// them. LLVM leaves the profile runtime's exit hook to the linker on Linux,
+/// Symbols an ELF link must pull from its archives though no object names
+/// them. LLVM leaves the profile runtime's exit hook to the linker on ELF targets,
 /// the way clang's driver passes `-u __llvm_profile_runtime`.
-fn linux_forced_symbols(opts: LinkOptions) -> &'static [&'static str] {
+fn elf_forced_symbols(opts: LinkOptions) -> &'static [&'static str] {
     if opts.release && pgo_link_config().collect_path.is_some() {
         &["__llvm_profile_runtime"]
     } else {
@@ -2122,39 +2088,77 @@ fn trace_link_command(cmd: &std::process::Command) {
 /// the program's own archives, so a single-pass linker resolves the runtime's
 /// references to them.
 fn push_system_libraries(cmd: &mut std::process::Command, lt: &LinkTarget, opts: LinkOptions) {
-    // `-ldl` only exists on Linux (libdl). macOS folds `dl*` into
-    // `libSystem` and Windows/mingw has no `libdl` at all - passing
-    // it on either fails the link ("cannot find -ldl"). `libpthread`
-    // / `libm` resolve as real libs (winpthreads on mingw) or stub-
-    // forwarders on every target, so we keep those.
-    cmd.arg("-lpthread");
-    if lt.os == TargetOs::Linux {
-        cmd.arg("-ldl");
-    }
-    cmd.arg("-lm");
-    // The runtime reads the local time zone through CoreFoundation.
-    if lt.os == TargetOs::MacOs {
-        cmd.args(["-framework", "CoreFoundation"]);
-    }
-    if lt.os == TargetOs::Windows {
-        // Windows-GNU `gos` drives mingw's `cc` directly, so unlike a
-        // rustc-driven link it must name the Win32 import libraries the
-        // Rust runtime staticlib references but mingw's default specs
-        // don't auto-link: ws2_32 (mio sockets), bcrypt/advapi32
-        // (getrandom / std RNG), userenv (env home dir), ntdll (std
-        // internals). All are core mingw-w64 import libs. Listed after
-        // the archives so the single-pass GNU linker resolves their
-        // symbols. The Windows-MSVC path links via `link.exe`
-        // (`link_windows_msvc`) and never reaches here.
-        for lib in ["ws2_32", "bcrypt", "advapi32", "userenv", "ntdll"] {
-            cmd.arg(format!("-l{lib}"));
-        }
+    cmd.args(system_libraries(lt));
+    // The Windows-MSVC path links via `link.exe` (`link_windows_msvc`) and
+    // never reaches here.
+    if lt.os == Os::Windows {
         cmd.args(mingw_reproducible_link_flags(
             gossamer_codegen_llvm::reproducible_enabled(),
         ));
         cmd.arg(mingw_stack_reserve_flag());
         cmd.args(mingw_subsystem_flags(opts.windows_subsystem));
     }
+}
+
+/// Where the host's package manager installs libraries the system `cc` does
+/// not search: FreeBSD ports and packages install under `$LOCALBASE`
+/// (`/usr/local`), which the runtime loader reads but the linker does not.
+fn package_library_dir(lt: &LinkTarget) -> Option<PathBuf> {
+    if lt.os != Os::FreeBsd || lt.is_cross {
+        return None;
+    }
+    let base =
+        std::env::var_os("LOCALBASE").map_or_else(|| PathBuf::from("/usr/local"), PathBuf::from);
+    Some(base.join("lib"))
+}
+
+/// The system libraries a native link names after the program's archives, as
+/// `cc` driver arguments.
+///
+/// A link for the toolchain's own OS names what rustc reported the runtime
+/// archive needs when the build script compiled it; another OS's link names
+/// that OS's known set.
+fn system_libraries(lt: &LinkTarget) -> Vec<String> {
+    if lt.os == host_os() && lt.os != Os::Windows {
+        let recorded: Vec<String> = option_env!("GOSSAMER_RUNTIME_NATIVE_LIBS")
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        if !recorded.is_empty() {
+            return recorded;
+        }
+    }
+    let known: &[&str] = match lt.os {
+        // Windows-GNU `gos` drives mingw's `cc` directly, so it names the Win32
+        // import libraries the Rust runtime references but mingw's default specs
+        // do not link: ws2_32 (mio sockets), bcrypt/advapi32 (getrandom), userenv
+        // (home directory), ntdll (std internals).
+        Os::Windows => &[
+            "-lpthread",
+            "-lm",
+            "-lws2_32",
+            "-lbcrypt",
+            "-ladvapi32",
+            "-luserenv",
+            "-lntdll",
+        ],
+        // `-ldl` exists only on glibc; macOS folds `dl*` into libSystem.
+        Os::Linux => &["-lpthread", "-ldl", "-lm"],
+        // The runtime reads the local time zone through CoreFoundation.
+        Os::MacOs | Os::Ios => &["-lpthread", "-lm", "-framework", "CoreFoundation"],
+        Os::FreeBsd => &[
+            "-lexecinfo",
+            "-lpthread",
+            "-lgcc_s",
+            "-lc",
+            "-lm",
+            "-lrt",
+            "-lutil",
+        ],
+        Os::Android | Os::NetBsd | Os::OpenBsd | Os::Wasi | Os::Unknown => &["-lpthread", "-lm"],
+    };
+    known.iter().map(ToString::to_string).collect()
 }
 
 /// POSIX/macOS link path. On Linux release builds with the rustup
@@ -2195,7 +2199,7 @@ fn link_posix(
         std::env::var("CC").unwrap_or_else(|_| "cc".to_string())
     };
     let mut cmd = std::process::Command::new(&cc);
-    if lt.os == TargetOs::MacOs {
+    if lt.os == Os::MacOs {
         configure_macos_link_command(&mut cmd);
         // Apple ld keeps a small default optimization set when no `-O` is
         // supplied. Make the profile contract explicit independently of
@@ -2218,12 +2222,15 @@ fn link_posix(
     for archive in extra_archives {
         cmd.arg(archive);
     }
-    if lt.os == TargetOs::Linux {
-        for symbol in linux_forced_symbols(opts) {
+    if lt.os.is_elf_unix() {
+        for symbol in elf_forced_symbols(opts) {
             cmd.arg(format!("-Wl,-u,{symbol}"));
         }
     }
     for dir in &libraries.search {
+        cmd.arg(format!("-L{}", dir.display()));
+    }
+    if let Some(dir) = package_library_dir(lt) {
         cmd.arg(format!("-L{}", dir.display()));
     }
     for library in &libraries.libraries {
@@ -2242,7 +2249,7 @@ fn link_posix(
         // definition rather than failing the link. macOS `ld64`
         // doesn't accept the GNU-ld spelling - the equivalent
         // there is `-Wl,-multiply_defined,suppress`.
-        if lt.os == TargetOs::MacOs {
+        if lt.os == Os::MacOs {
             cmd.arg("-Wl,-multiply_defined,suppress");
         } else {
             cmd.arg("-Wl,--allow-multiple-definition");
@@ -2254,12 +2261,12 @@ fn link_posix(
     // `-dead_strip` is atom-based: it removes unreachable code AND data
     // atoms, so every local rodata atom the codegen relies on must carry
     // `N_NO_DEAD_STRIP` (see `IntrinsicContext::intern_string`).
-    if lt.os == TargetOs::MacOs {
+    if lt.os == Os::MacOs {
         cmd.arg("-Wl,-dead_strip");
     } else {
         cmd.arg("-Wl,--gc-sections");
     }
-    if opts.want_strip() && lt.os != TargetOs::MacOs {
+    if opts.want_strip() && lt.os != Os::MacOs {
         // Drop DWARF debug sections but KEEP the symbol table.
         // Compiled-tier panic traces and SIGQUIT dumps unwind the real
         // machine stack and symbolicate through `.symtab`; `--strip-all`
@@ -2267,7 +2274,7 @@ fn link_posix(
         // functions are global) via the post-link `strip -x`.
         cmd.arg("-Wl,--strip-debug");
     }
-    if lt.os == TargetOs::Linux {
+    if lt.os.is_elf_unix() {
         // Assembler temporaries (`.L*`) and the CRT's local labels name no
         // function, so no trace or profile reads them; named local
         // functions, which traces do read, are kept.
@@ -2277,8 +2284,8 @@ fn link_posix(
             cmd.arg("-Wl,--compress-debug-sections=zlib");
         }
     }
-    if lt.os == TargetOs::Linux
-        && lt.env == TargetEnv::Gnu
+    if lt.os == Os::Linux
+        && lt.env == Env::Gnu
         && !lt.is_cross
         && host_glibc_reads_relr()
         && (ordered || links_with_mold(lt, libraries) || linker_packs_relative_relocs(&cc))
@@ -2292,7 +2299,7 @@ fn link_posix(
     trace_link_command(&cmd);
     match cmd.status() {
         Ok(s) if s.success() => {
-            if opts.want_strip() && lt.os == TargetOs::MacOs {
+            if opts.want_strip() && lt.os == Os::MacOs {
                 let _ = std::process::Command::new("strip")
                     .arg("-x")
                     .arg(out_path)
@@ -2412,7 +2419,7 @@ fn link_cross_gnu_lld(
     for archive in extra_archives {
         cmd.arg(archive);
     }
-    for symbol in linux_forced_symbols(opts) {
+    for symbol in elf_forced_symbols(opts) {
         cmd.arg("-u").arg(symbol);
     }
     for dir in &libraries.search {
@@ -2502,7 +2509,7 @@ fn link_posix_static_musl(
     for archive in extra_archives {
         cmd.arg(archive);
     }
-    for symbol in linux_forced_symbols(opts) {
+    for symbol in elf_forced_symbols(opts) {
         cmd.arg("-u").arg(symbol);
     }
     // A static link reads `lib<name>.a`; the linker names any it cannot find.
@@ -2796,7 +2803,7 @@ mod tests {
             triple: String::new(),
             os,
             arch: "aarch64",
-            env: super::TargetEnv::Other,
+            env: super::Env::None,
             is_cross: false,
         };
         let links = super::NativeLinks {
@@ -2806,7 +2813,7 @@ mod tests {
             staticlib_args: Vec::new(),
         };
         assert_eq!(
-            super::framework_args(&target(super::TargetOs::MacOs), &links).ok(),
+            super::framework_args(&target(super::Os::MacOs), &links).ok(),
             Some(vec![
                 "-framework".to_string(),
                 "Cocoa".to_string(),
@@ -2814,7 +2821,7 @@ mod tests {
                 "Metal".to_string(),
             ])
         );
-        assert!(super::framework_args(&target(super::TargetOs::Linux), &links).is_err());
+        assert!(super::framework_args(&target(super::Os::Linux), &links).is_err());
     }
 
     #[test]
@@ -2894,9 +2901,13 @@ mod tests {
             gossamer_driver::macos_deployment::DEFAULT_MACOSX_DEPLOYMENT_TARGET,
         );
 
+        let flag = format!(
+            "-mmacosx-version-min={}",
+            gossamer_driver::macos_deployment::DEFAULT_MACOSX_DEPLOYMENT_TARGET
+        );
         assert!(
-            cmd.get_args().any(|arg| arg == "-mmacosx-version-min=15.0"),
-            "link command missing macOS 15 deployment flag: {}",
+            cmd.get_args().any(|arg| arg == std::ffi::OsStr::new(&flag)),
+            "link command missing the default deployment flag: {}",
             super::render_command(&cmd)
         );
         let deployment_target = cmd
@@ -2906,7 +2917,10 @@ mod tests {
             })
             .and_then(|(_, value)| value)
             .expect("link command deployment target environment");
-        assert_eq!(deployment_target, "15.0");
+        assert_eq!(
+            deployment_target,
+            gossamer_driver::macos_deployment::DEFAULT_MACOSX_DEPLOYMENT_TARGET
+        );
     }
 
     #[test]
@@ -2925,8 +2939,8 @@ mod tests {
     fn cross_link_target_decodes_aarch64_musl() {
         let lt = super::resolve_link_target(Some("aarch64-unknown-linux-musl"));
         assert_eq!(lt.arch, "aarch64");
-        assert!(matches!(lt.os, super::TargetOs::Linux));
-        assert!(matches!(lt.env, super::TargetEnv::Musl));
+        assert!(matches!(lt.os, super::Os::Linux));
+        assert!(matches!(lt.env, super::Env::Musl));
         // A non-host triple is always a cross build, on any host.
         assert!(lt.is_cross);
     }
@@ -2935,8 +2949,8 @@ mod tests {
     fn cross_link_target_decodes_x86_64_musl() {
         let lt = super::resolve_link_target(Some("x86_64-unknown-linux-musl"));
         assert_eq!(lt.arch, "x86_64");
-        assert!(matches!(lt.os, super::TargetOs::Linux));
-        assert!(matches!(lt.env, super::TargetEnv::Musl));
+        assert!(matches!(lt.os, super::Os::Linux));
+        assert!(matches!(lt.env, super::Env::Musl));
     }
 
     #[test]

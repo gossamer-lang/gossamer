@@ -774,9 +774,9 @@ pub unsafe extern "C" fn gos_rt_ffi_strlen(src: u64) -> u64 {
 #[cfg(not(target_arch = "wasm32"))]
 unsafe extern "C" {
     #[link_name = "calloc"]
-    fn c_calloc(count: usize, size: usize) -> *mut u8;
+    fn c_calloc(count: usize, size: usize) -> *mut std::ffi::c_void;
     #[link_name = "free"]
-    fn c_free(ptr: *mut u8);
+    fn c_free(ptr: *mut std::ffi::c_void);
 }
 
 /// `len` zeroed bytes from the platform C allocator, so a library's own
@@ -798,7 +798,7 @@ pub extern "C" fn gos_rt_ffi_alloc(len: u64) -> u64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_ffi_free(addr: u64) {
     // SAFETY: an allocation of the platform C allocator (contract).
-    unsafe { c_free(addr as *mut u8) };
+    unsafe { c_free(addr as *mut std::ffi::c_void) };
 }
 
 /// Raises `GX0013` for a foreign function that answered null where its

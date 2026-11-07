@@ -263,8 +263,13 @@ jobs:
             *.deb
             *.rpm
 
+  # The default archives (`macos-<arch>`) run on macOS 15 and later; the
+  # `macos12-<arch>` ones on macOS 12 and later. Each is compiled for the
+  # oldest CPU its macOS runs on: every Intel Mac macOS 15 supports has AVX2
+  # (x86-64-v3), while macOS 12 still runs on the 2013 Mac Pro (x86-64-v2).
+  # A `gos` targets, by default, the macOS it was built for.
   build-macos:
-    name: macOS ${{ matrix.arch }}
+    name: macOS ${{ matrix.macos }} ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -273,9 +278,27 @@ jobs:
           - arch: aarch64
             runner: xcode-27
             target: aarch64-apple-darwin
+            macos: "15.0"
+            cpu: apple-m1
+            asset: macos
           - arch: x86_64
             runner: xcode-27
             target: x86_64-apple-darwin
+            macos: "15.0"
+            cpu: x86-64-v3
+            asset: macos
+          - arch: aarch64
+            runner: xcode-27
+            target: aarch64-apple-darwin
+            macos: "12.0"
+            cpu: apple-m1
+            asset: macos12
+          - arch: x86_64
+            runner: xcode-27
+            target: x86_64-apple-darwin
+            macos: "12.0"
+            cpu: x86-64-v2
+            asset: macos12
     steps:
       - uses: actions/checkout@v6
 
@@ -297,11 +320,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: macos-${{ matrix.arch }}
+          key: ${{ matrix.asset }}-${{ matrix.arch }}
 
       - name: Build
         env:
-          MACOSX_DEPLOYMENT_TARGET: "15.0"
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos }}
+          RUSTFLAGS: -C target-cpu=${{ matrix.cpu }}
         run: |
           cargo build --release --target ${{ matrix.target }} --bin gos
           # `gos build` needs the runtime archive matching the binary's arch;
@@ -309,9 +333,22 @@ jobs:
           # runtime for the target explicitly.
           cargo build --release --target ${{ matrix.target }} -p gossamer-runtime
 
+      # Neither `gos` nor any object in the runtime archive programs link may
+      # ask for a macOS newer than the one this archive is for.
+      - name: Check the artifacts run on macOS ${{ matrix.macos }}
+        env:
+          MACOS: ${{ matrix.macos }}
+        run: |
+          dir=target/${{ matrix.target }}/release
+          newest=$( { otool -l "$dir/gos"; otool -l "$dir/libgossamer_runtime.a"; } |
+            awk '$1 == "minos" { print $2 }' | sort -V | tail -1)
+          echo "newest minimum macOS: $newest"
+          [ -n "$newest" ]
+          [ "$(printf '%s\n%s\n' "$newest" "$MACOS" | sort -V | tail -1)" = "$MACOS" ]
+
       - name: Package zip
         run: |
-          BASE="gos-${VERSION}-macos-${{ matrix.arch }}"
+          BASE="gos-${VERSION}-${{ matrix.asset }}-${{ matrix.arch }}"
           mkdir "$BASE"
           cp target/${{ matrix.target }}/release/gos "$BASE/"
           cp target/${{ matrix.target }}/release/libgossamer_runtime.a "$BASE/"
@@ -324,8 +361,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: gos-macos-${{ matrix.arch }}
-          path: gos-*-macos-${{ matrix.arch }}.zip
+          name: gos-${{ matrix.asset }}-${{ matrix.arch }}
+          path: gos-*-${{ matrix.asset }}-${{ matrix.arch }}.zip
 
   build-windows:
     name: Windows x86_64
@@ -390,9 +427,52 @@ jobs:
             gos-*-windows-x86_64.zip
             gos-*-setup.exe
 
+  # FreeBSD has no hosted runner, so the release builds in a FreeBSD VM on a
+  # Linux runner; the archive is copied back to the runner for upload.
+  build-freebsd:
+    name: FreeBSD x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Read workspace version
+        shell: bash
+        run: |
+          VERSION="$(awk -F'"' '
+            /^\[workspace\.package\]$/ { in_section = 1; next }
+            /^\[/ { in_section = 0 }
+            in_section && $1 ~ /^version = / { print $2; exit }
+          ' Cargo.toml)"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build and package in FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          mem: 14336
+          envs: VERSION RUSTUP_TOOLCHAIN
+          prepare: |
+            pkg install -y bash git cmake gmake pkgconf curl
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUSTUP_TOOLCHAIN"
+          run: |
+            . "$HOME/.cargo/env"
+            cargo build --release --bin gos
+            BASE="gos-${VERSION}-freebsd-x86_64"
+            mkdir "$BASE"
+            cp target/release/gos target/release/libgossamer_runtime.a "$BASE/"
+            cp README.md LICENSE scripts/install.sh "$BASE/"
+            chmod +x "$BASE/install.sh"
+            tar -czf "${BASE}.tar.gz" "$BASE"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: gos-freebsd-x86_64
+          path: gos-*-freebsd-x86_64.tar.gz
+
   publish:
     name: Publish release
-    needs: [build-linux-x86_64, build-linux-aarch64, build-macos, build-windows]
+    needs: [build-linux-x86_64, build-linux-aarch64, build-macos, build-windows, build-freebsd]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -17,6 +17,7 @@ fn registry_covers_every_primary_target() {
         "x86_64-apple-darwin",
         "aarch64-apple-darwin",
         "x86_64-pc-windows-msvc",
+        "x86_64-unknown-freebsd",
         "wasm32-unknown-unknown",
     ] {
         assert!(names.iter().any(|n| n == expected), "missing {expected}");

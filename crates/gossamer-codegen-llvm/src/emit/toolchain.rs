@@ -397,6 +397,10 @@ pub(super) fn llvm_target_triple_for(triple: &str) -> String {
 }
 
 fn llvm_target_triple_for_with_deployment(triple: &str, configured: Option<&str>) -> String {
+    // Rust spells the RISC-V base ISA into the architecture; LLVM names only `riscv64`.
+    if let Some(rest) = triple.strip_prefix("riscv64gc-") {
+        return format!("riscv64-{rest}");
+    }
     if !triple.ends_with("-apple-darwin") {
         return triple.to_string();
     }
@@ -409,15 +413,10 @@ fn llvm_target_triple_for_with_deployment(triple: &str, configured: Option<&str>
 }
 
 fn normalized_macos_deployment_target(configured: Option<&str>) -> String {
-    const DEFAULT: &str = "15.0";
-
-    let value = configured
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(DEFAULT);
+    let value = gossamer_abi::macos_deployment::resolve_deployment_target(configured);
     let mut parts = value.split('.');
     let Some(major) = parts.next().filter(|part| is_decimal_component(part)) else {
-        return value.to_string();
+        return value;
     };
     let minor = parts
         .next()
@@ -441,8 +440,9 @@ fn mcpu_for(triple: &str, is_cross: bool, reproducible: bool) -> String {
     if !is_cross {
         return if reproducible {
             match target_arch_from_triple(triple) {
-                "x86_64" => "x86-64-v3".to_string(),
+                "x86_64" => portable_x86_64_cpu(triple, deployment_env().as_deref()).to_string(),
                 "aarch64" => "generic".to_string(),
+                "riscv64" => "generic-rv64".to_string(),
                 _ => "generic".to_string(),
             }
         } else {
@@ -450,12 +450,39 @@ fn mcpu_for(triple: &str, is_cross: bool, reproducible: bool) -> String {
         };
     }
     match target_arch_from_triple(triple) {
-        // Reproducible x86-64 baseline (AVX2 + BMI2 + FMA, ~2013+).
-        "x86_64" => "x86-64-v3".to_string(),
+        "x86_64" => portable_x86_64_cpu(triple, deployment_env().as_deref()).to_string(),
         // Generic ARMv8-A: portable across every aarch64 device;
         // `GOS_LLVM_MCPU=cortex-a76` opts into Pi 5 tuning.
         "aarch64" => "generic".to_string(),
+        // LLVM names RISC-V's portable CPU per register width.
+        "riscv64" => "generic-rv64".to_string(),
         _ => "generic".to_string(),
+    }
+}
+
+fn deployment_env() -> Option<String> {
+    std::env::var(gossamer_abi::macos_deployment::MACOSX_DEPLOYMENT_TARGET_ENV).ok()
+}
+
+/// The portable x86-64 CPU for `triple`: `x86-64-v3` (AVX2, BMI2, FMA), or
+/// `x86-64-v2` for a Mac target older than macOS 13, which still runs on the
+/// 2013 Mac Pro and its CPU without AVX2. A Darwin triple's own version
+/// (`x86_64-apple-macosx12.0.0`) wins over `configured`.
+fn portable_x86_64_cpu(triple: &str, configured: Option<&str>) -> &'static str {
+    let deployment = if let Some((_, version)) = triple.split_once("-apple-macosx") {
+        version.to_string()
+    } else if triple.ends_with("-apple-darwin") {
+        gossamer_abi::macos_deployment::resolve_deployment_target(configured)
+    } else {
+        return "x86-64-v3";
+    };
+    let major = deployment
+        .split('.')
+        .next()
+        .and_then(|major| major.parse::<u32>().ok());
+    match major {
+        Some(major) if major >= 13 => "x86-64-v3",
+        _ => "x86-64-v2",
     }
 }
 
@@ -845,7 +872,9 @@ fn find_llvm_tool(
 /// Cross-platform candidate list for the LLVM `opt` driver. Order
 /// matters: PATH-resolvable bare names first (cheap), then well-known
 /// system locations on Linux (apt), macOS (Homebrew, both Apple Silicon
-/// and Intel prefixes), and Windows (MSYS2 mingw - which is the only
+/// and Intel prefixes, then MacPorts), the BSDs (FreeBSD and OpenBSD ports,
+/// whose PATH names carry the major without a hyphen, and NetBSD pkgsrc),
+/// and Windows (MSYS2 mingw - which is the only
 /// commonly-installed source that actually ships `opt.exe` / `llc.exe`
 /// on Windows, since the upstream LLVM installer ships only the clang
 /// front-end).
@@ -865,6 +894,11 @@ const OPT_CANDIDATES: &[&str] = &[
     "opt-20",
     "opt-19",
     "opt-18",
+    "opt22",
+    "opt21",
+    "opt20",
+    "opt19",
+    "opt18",
     "opt",
     // Linux (apt-installed)
     "/usr/lib/llvm-22/bin/opt",
@@ -888,6 +922,20 @@ const OPT_CANDIDATES: &[&str] = &[
     "/usr/local/opt/llvm@18/bin/opt",
     "/usr/local/opt/llvm/bin/opt",
     "/usr/local/bin/opt",
+    // FreeBSD and OpenBSD ports
+    "/usr/local/llvm22/bin/opt",
+    "/usr/local/llvm21/bin/opt",
+    "/usr/local/llvm20/bin/opt",
+    "/usr/local/llvm19/bin/opt",
+    "/usr/local/llvm18/bin/opt",
+    // MacPorts
+    "/opt/local/libexec/llvm-22/bin/opt",
+    "/opt/local/libexec/llvm-21/bin/opt",
+    "/opt/local/libexec/llvm-20/bin/opt",
+    "/opt/local/libexec/llvm-19/bin/opt",
+    "/opt/local/libexec/llvm-18/bin/opt",
+    // NetBSD pkgsrc
+    "/usr/pkg/bin/opt",
     // Windows (MSYS2 mingw - full LLVM via `pacman -S
     // mingw-w64-x86_64-llvm`; also `mingw-w64-clang-x86_64-llvm`
     // under `clang64/`).
@@ -909,6 +957,11 @@ const LLC_CANDIDATES: &[&str] = &[
     "llc-20",
     "llc-19",
     "llc-18",
+    "llc22",
+    "llc21",
+    "llc20",
+    "llc19",
+    "llc18",
     "llc",
     "/usr/lib/llvm-22/bin/llc",
     "/usr/lib/llvm-21/bin/llc",
@@ -929,6 +982,20 @@ const LLC_CANDIDATES: &[&str] = &[
     "/usr/local/opt/llvm@18/bin/llc",
     "/usr/local/opt/llvm/bin/llc",
     "/usr/local/bin/llc",
+    // FreeBSD and OpenBSD ports
+    "/usr/local/llvm22/bin/llc",
+    "/usr/local/llvm21/bin/llc",
+    "/usr/local/llvm20/bin/llc",
+    "/usr/local/llvm19/bin/llc",
+    "/usr/local/llvm18/bin/llc",
+    // MacPorts
+    "/opt/local/libexec/llvm-22/bin/llc",
+    "/opt/local/libexec/llvm-21/bin/llc",
+    "/opt/local/libexec/llvm-20/bin/llc",
+    "/opt/local/libexec/llvm-19/bin/llc",
+    "/opt/local/libexec/llvm-18/bin/llc",
+    // NetBSD pkgsrc
+    "/usr/pkg/bin/llc",
     "C:\\msys64\\mingw64\\bin\\llc.exe",
     "C:\\msys64\\clang64\\bin\\llc.exe",
     "C:\\msys64\\ucrt64\\bin\\llc.exe",
@@ -944,6 +1011,11 @@ const CLANG_CANDIDATES: &[&str] = &[
     "clang-20",
     "clang-19",
     "clang-18",
+    "clang22",
+    "clang21",
+    "clang20",
+    "clang19",
+    "clang18",
     "clang",
     "/usr/lib/llvm-22/bin/clang",
     "/usr/lib/llvm-21/bin/clang",
@@ -962,6 +1034,20 @@ const CLANG_CANDIDATES: &[&str] = &[
     "/usr/local/opt/llvm@19/bin/clang",
     "/usr/local/opt/llvm@18/bin/clang",
     "/usr/local/opt/llvm/bin/clang",
+    // FreeBSD and OpenBSD ports
+    "/usr/local/llvm22/bin/clang",
+    "/usr/local/llvm21/bin/clang",
+    "/usr/local/llvm20/bin/clang",
+    "/usr/local/llvm19/bin/clang",
+    "/usr/local/llvm18/bin/clang",
+    // MacPorts
+    "/opt/local/libexec/llvm-22/bin/clang",
+    "/opt/local/libexec/llvm-21/bin/clang",
+    "/opt/local/libexec/llvm-20/bin/clang",
+    "/opt/local/libexec/llvm-19/bin/clang",
+    "/opt/local/libexec/llvm-18/bin/clang",
+    // NetBSD pkgsrc
+    "/usr/pkg/bin/clang",
     "C:\\msys64\\mingw64\\bin\\clang.exe",
     "C:\\msys64\\clang64\\bin\\clang.exe",
     "C:\\msys64\\ucrt64\\bin\\clang.exe",
@@ -1047,6 +1133,7 @@ fn missing_llvm_tool_message(tool: &str, env_var: &str) -> String {
                   (for LLVM {PREFERRED_LLVM_MAJOR}, which most distros do not\n           \
                   package yet, add the apt.llvm.org repository)\n  \
          macOS:   brew install llvm@{PREFERRED_LLVM_MAJOR}\n  \
+         FreeBSD: pkg install llvm{PREFERRED_LLVM_MAJOR}\n  \
          Windows: pacman -S mingw-w64-x86_64-llvm       (from MSYS2; the upstream LLVM\n           \
                                                          Windows installer ships clang\n           \
                                                          but not `opt`/`llc`)\n\
@@ -1148,19 +1235,7 @@ fn detect_host_triple() -> String {
     if let Ok(triple) = std::env::var("TARGET") {
         return triple;
     }
-    let arch = std::env::consts::ARCH;
-    let os = match std::env::consts::OS {
-        "linux" => "unknown-linux-gnu",
-        "macos" => "apple-darwin",
-        "windows" => "pc-windows-msvc",
-        "freebsd" => "unknown-freebsd",
-        "ios" => "apple-ios",
-        // Conservative default - Linux is the dev host. Any
-        // unrecognised target will produce a clear `llc` error
-        // rather than a silently mis-formatted object.
-        _ => "unknown-linux-gnu",
-    };
-    format!("{arch}-{os}")
+    gossamer_abi::target::Target::host().triple().to_string()
 }
 
 /// Whether the build target's LLVM backend implements `preserve_mostcc`, the
@@ -1202,7 +1277,7 @@ pub(crate) fn target_c_abi() -> Option<gossamer_abi::c_aggregate::CAbi> {
 mod host_triple_tests {
     use super::{
         detect_host_triple, integrated_clang_path, llvm_target_triple_for_with_deployment,
-        mcpu_for, normalized_macos_deployment_target, target_arch_from_triple,
+        mcpu_for, normalized_macos_deployment_target, portable_x86_64_cpu, target_arch_from_triple,
     };
     use crate::emit::module_datalayout;
     use crate::emit::settings::disable_loop_idiom_for_target_with_static_musl;
@@ -1239,8 +1314,11 @@ mod host_triple_tests {
             "macos" => "apple-darwin",
             "windows" => "pc-windows-msvc",
             "freebsd" => "unknown-freebsd",
+            "netbsd" => "unknown-netbsd",
+            "openbsd" => "unknown-openbsd",
+            "android" => "linux-android",
             "ios" => "apple-ios",
-            _ => "unknown-linux-gnu",
+            os => os,
         };
         assert!(
             triple.ends_with(expected_os_part),
@@ -1277,7 +1355,31 @@ mod host_triple_tests {
 
     #[test]
     fn mcpu_native_host_uses_host_cpu_unless_reproducible() {
+        assert_eq!(
+            mcpu_for("riscv64gc-unknown-linux-gnu", true, false),
+            "generic-rv64"
+        );
         assert_eq!(mcpu_for("x86_64-unknown-linux-gnu", false, false), "native");
+        assert_eq!(
+            portable_x86_64_cpu("x86_64-unknown-linux-gnu", Some("12.0")),
+            "x86-64-v3"
+        );
+        assert_eq!(
+            portable_x86_64_cpu("x86_64-apple-macosx12.0.0", None),
+            "x86-64-v2"
+        );
+        assert_eq!(
+            portable_x86_64_cpu("x86_64-apple-macosx13.0.0", None),
+            "x86-64-v3"
+        );
+        assert_eq!(
+            portable_x86_64_cpu("x86_64-apple-darwin", Some("12.0")),
+            "x86-64-v2"
+        );
+        assert_eq!(
+            portable_x86_64_cpu("x86_64-apple-darwin", Some("14.0")),
+            "x86-64-v3"
+        );
         assert_eq!(
             mcpu_for("x86_64-unknown-linux-gnu", false, true),
             "x86-64-v3"
@@ -1334,8 +1436,12 @@ mod host_triple_tests {
     #[test]
     fn darwin_llvm_triple_pins_deployment_target() {
         assert_eq!(
-            llvm_target_triple_for_with_deployment("aarch64-apple-darwin", None),
+            llvm_target_triple_for_with_deployment("aarch64-apple-darwin", Some("15.0")),
             "aarch64-apple-macosx15.0.0"
+        );
+        assert_eq!(
+            llvm_target_triple_for_with_deployment("riscv64gc-unknown-linux-gnu", None),
+            "riscv64-unknown-linux-gnu"
         );
         assert_eq!(
             llvm_target_triple_for_with_deployment("x86_64-apple-darwin", Some("14.2")),
@@ -1349,7 +1455,11 @@ mod host_triple_tests {
 
     #[test]
     fn macos_deployment_target_normalizes_for_llvm() {
-        assert_eq!(normalized_macos_deployment_target(None), "15.0.0");
+        let default = gossamer_abi::macos_deployment::default_deployment_target();
+        assert_eq!(
+            normalized_macos_deployment_target(None),
+            normalized_macos_deployment_target(Some(&default))
+        );
         assert_eq!(normalized_macos_deployment_target(Some("15")), "15.0.0");
         assert_eq!(normalized_macos_deployment_target(Some("15.1")), "15.1.0");
         assert_eq!(normalized_macos_deployment_target(Some("15.1.2")), "15.1.2");

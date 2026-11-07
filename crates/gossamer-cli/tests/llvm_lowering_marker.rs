@@ -478,16 +478,7 @@ fn llvm_lowers_each_shape_to_a_real_define() {
 }
 
 fn which_llc_missing() -> bool {
-    // The build pipeline already searches `GOS_LLC` then `llc-18`
-    // / `llc`. Mirror that here cheaply: if any of those resolves
-    // we run; otherwise skip.
-    if std::env::var("GOS_LLC").is_ok() {
-        return false;
-    }
-    for cand in ["llc-18", "llc"] {
-        if Command::new(cand).arg("--version").output().is_ok() {
-            return false;
-        }
-    }
-    true
+    gossamer_codegen_llvm::llvm_toolchain_status()
+        .iter()
+        .any(|status| status.tool == "llc" && status.resolved.is_err())
 }

@@ -20,6 +20,8 @@
 
 #![forbid(unsafe_code)]
 
+use gossamer_abi::target::Target;
+
 use crate::Attrs;
 
 /// Returns `true` when every `#[cfg(…)]` on `attrs` evaluates to
@@ -75,9 +77,10 @@ struct CfgTarget {
 impl CfgTarget {
     /// The platform running the toolchain.
     fn host() -> Self {
+        let mut target = Self::from_target(&Target::host());
         // The C library the toolchain itself runs on is the one the bytecode
         // VM's foreign calls reach.
-        let env = if cfg!(target_env = "gnu") {
+        target.env = if cfg!(target_env = "gnu") {
             "gnu"
         } else if cfg!(target_env = "musl") {
             "musl"
@@ -85,88 +88,30 @@ impl CfgTarget {
             "msvc"
         } else {
             ""
-        };
-        Self {
-            os: std::env::consts::OS.to_string(),
-            family: std::env::consts::FAMILY.to_string(),
-            arch: std::env::consts::ARCH.to_string(),
-            env: env.to_string(),
-            pointer_width: (usize::BITS).to_string(),
-            endian: if cfg!(target_endian = "big") {
-                "big"
-            } else {
-                "little"
-            }
-            .to_string(),
         }
+        .to_string();
+        target
     }
 
     /// The platform a target triple names (`aarch64-unknown-linux-musl`,
     /// `x86_64-pc-windows-msvc`, `aarch64-apple-darwin`).
     fn from_triple(triple: &str) -> Self {
-        let mut parts = triple.split('-');
-        let arch = match parts.next().unwrap_or_default() {
-            "arm64" => "aarch64",
-            a if a.starts_with("riscv64") => "riscv64",
-            a if a.starts_with("riscv32") => "riscv32",
-            a if a.starts_with("armv7") || a.starts_with("thumbv7") => "arm",
-            a if a == "i686" || a == "i586" => "x86",
-            a => a,
-        }
-        .to_string();
-        let rest: Vec<&str> = parts.collect();
-        let os = if rest.contains(&"windows") {
-            "windows"
-        } else if rest.contains(&"darwin") || rest.contains(&"apple") || rest.contains(&"macos") {
-            "macos"
-        } else if rest.contains(&"linux") {
-            "linux"
-        } else if rest.contains(&"freebsd") {
-            "freebsd"
-        } else if rest.contains(&"wasi") || triple.starts_with("wasm") {
-            "unknown"
-        } else {
-            rest.get(1).copied().unwrap_or("unknown")
-        }
-        .to_string();
-        let family = match os.as_str() {
-            "windows" => "windows",
-            "unknown" if triple.starts_with("wasm") => "wasm",
-            _ => "unix",
-        }
-        .to_string();
-        let env = rest
-            .last()
-            .map(|last| {
-                if last.starts_with("musl") {
-                    "musl"
-                } else if last.starts_with("gnu") {
-                    "gnu"
-                } else if *last == "msvc" {
-                    "msvc"
-                } else {
-                    ""
-                }
-            })
-            .unwrap_or_default()
-            .to_string();
-        let pointer_width = match arch.as_str() {
-            "x86" | "arm" | "riscv32" | "wasm32" => "32",
-            _ => "64",
-        }
-        .to_string();
-        let endian = match arch.as_str() {
-            "powerpc" | "powerpc64" | "s390x" | "sparc64" | "mips" | "mips64" => "big",
-            _ => "little",
-        }
-        .to_string();
+        Self::from_target(&Target::parse(triple))
+    }
+
+    fn from_target(target: &Target) -> Self {
         Self {
-            os,
-            family,
-            arch,
-            env,
-            pointer_width,
-            endian,
+            os: target.os().name().to_string(),
+            family: target.family().to_string(),
+            arch: target.arch().to_string(),
+            env: target.env().name().to_string(),
+            pointer_width: target.pointer_width().to_string(),
+            endian: if target.is_big_endian() {
+                "big"
+            } else {
+                "little"
+            }
+            .to_string(),
         }
     }
 }
@@ -721,6 +666,26 @@ mod tests {
         assert_eq!(
             CfgTarget::from_triple("arm64-apple-darwin"),
             target("macos", "unix", "aarch64", "")
+        );
+        assert_eq!(
+            CfgTarget::from_triple("x86_64-unknown-freebsd"),
+            target("freebsd", "unix", "x86_64", "")
+        );
+        assert_eq!(
+            CfgTarget::from_triple("x86_64-unknown-netbsd"),
+            target("netbsd", "unix", "x86_64", "")
+        );
+        assert_eq!(
+            CfgTarget::from_triple("aarch64-unknown-openbsd"),
+            target("openbsd", "unix", "aarch64", "")
+        );
+        assert_eq!(
+            CfgTarget::from_triple("aarch64-linux-android"),
+            target("android", "unix", "aarch64", "")
+        );
+        assert_eq!(
+            CfgTarget::from_triple("aarch64-apple-ios"),
+            target("ios", "unix", "aarch64", "")
         );
     }
 

@@ -3348,6 +3348,7 @@ registered rows are not supported execution targets.
 | Tier 1 | `aarch64-unknown-linux-gnu` | native VM/JIT/AOT |
 | Tier 1 | `aarch64-apple-darwin` | native VM/JIT/AOT |
 | Tier 1 | `x86_64-pc-windows-msvc` | native VM/JIT/AOT |
+| Tier 1 | `x86_64-unknown-freebsd` | native VM/JIT/AOT |
 | Tier 2 | `x86_64-unknown-linux-musl` | release AOT with VM differential |
 | Tier 2 | `aarch64-unknown-linux-musl` | release AOT under QEMU with VM differential |
 | Artifact only | `x86_64-apple-darwin` | release artifact build only |
@@ -3443,8 +3444,8 @@ binary when:
 The executable supported-target contract is
 [`conformance/target_matrix.tsv`](conformance/target_matrix.tsv). Tier 1
 executes the bytecode VM, forced-JIT VM, and LLVM AOT fixture suite natively
-on Linux x86_64/aarch64, Apple Silicon macOS, and Windows x86_64. Tier 2 is
-the Linux-musl AOT path for x86_64/aarch64: CI executes its output natively or
+on Linux x86_64/aarch64, Apple Silicon macOS, Windows x86_64, and FreeBSD
+x86_64. Tier 2 is the Linux-musl AOT path for x86_64/aarch64: CI executes its output natively or
 under QEMU and compares it with the pure bytecode VM. The musl-static target
 is host-agnostic when the required runtime archive and linker are installed.
 Cross-host glibc links require `GOS_CROSS_SYSROOT` and are not part of the

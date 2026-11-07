@@ -119,6 +119,35 @@ jobs:
     with:
       os: ${{ matrix.os }}
 
+  # FreeBSD has no hosted runner: the same native build and shards run in a
+  # FreeBSD VM on a Linux runner, with LLVM 22 from packages and the pinned
+  # Rust from rustup.
+  test-native-freebsd:
+    name: Test native (freebsd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build and run the native shards in FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          mem: 14336
+          copyback: false
+          envs: CARGO_TERM_COLOR RUSTFLAGS RUSTUP_TOOLCHAIN CARGO_PROFILE_DEV_DEBUG
+          prepare: |
+            pkg install -y bash git llvm22 cmake gmake pkgconf python3 curl jq zstd sqlite3 expat
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUSTUP_TOOLCHAIN"
+          run: |
+            . "$HOME/.cargo/env"
+            export CARGO_BIN="$(rustup which cargo)" RUNNER_OS=FreeBSD RUST_BACKTRACE=full
+            bash .github/scripts/native-tests.sh build
+            rc=0
+            for suite in general-0 general-1 general-2 parity-0-1 parity-2-3 parity-4-5; do
+              bash .github/scripts/native-tests.sh run "$suite" || rc=1
+            done
+            exit "$rc"
+
   test-cli-general:
     name: Test non-native (${{ matrix.suite }})
     runs-on: ubuntu-latest

@@ -134,6 +134,9 @@ pub(crate) struct Builder<'a> {
     /// this tag to pick the right runtime helper for `fs.string(...)`,
     /// `client.get(...)`, `req.send()`, etc.
     pub(crate) local_runtime_kind: HashMap<Local, &'static str>,
+    /// In a lifted closure, the runtime kind of each handle it captures, by
+    /// the environment byte offset its prologue loads the capture from.
+    pub(crate) capture_kinds: HashMap<i64, &'static str>,
     /// Erased heap handles that must dispatch to min-heap runtime helpers
     /// even though the handle ABI is still a `GosVec<i64>`.
     pub(crate) local_binary_heap_min_i64: std::collections::HashSet<Local>,

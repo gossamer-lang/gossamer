@@ -534,6 +534,15 @@ impl<'a> Builder<'a> {
             let mut value_local = self.lower_expr(cap)?;
             let value_ty = self.locals[value_local.0 as usize].ty;
             let word = next_word;
+            // The closure's body reads this capture back by offset, where
+            // nothing else says the word is a handle the checker typed as
+            // its contents.
+            if let Some(kind) = self.local_runtime_kind.get(&value_local).copied()
+                && super::stmt::is_collapsed_handle_kind(kind)
+            {
+                self.tcx
+                    .record_lifted_capture_kind(&name.name, word * 8, kind);
+            }
             let wide = self.tcx.is_two_word_value(value_ty);
             next_word += if wide { 2 } else { 1 };
             capture_words.push(word);

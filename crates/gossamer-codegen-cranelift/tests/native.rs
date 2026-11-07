@@ -229,38 +229,28 @@ impl Drop for Fixture {
     }
 }
 
-fn build_fixture(name: &str, source: &str) -> Option<Fixture> {
+fn build_fixture(name: &str, source: &str) -> Fixture {
     let dir = fresh_dir(name);
     let src = dir.join(format!("{name}.gos"));
     std::fs::write(&src, source).expect("write fixture source");
     let mut cmd = Command::new(gos_bin());
     cmd.arg("build").arg(&src).current_dir(workspace_root());
     let out = run_output(&mut cmd, &format!("gos build {name}"), BUILD_TIMEOUT);
-    if !out.status.success() {
-        eprintln!(
-            "skipping {name} - gos build failed:\nstdout={}\nstderr={}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    if stdout.contains("launcher") {
-        eprintln!("skipping {name} - gos build fell back to launcher: {stdout}");
-        let _ = std::fs::remove_dir_all(&dir);
-        return None;
-    }
-    Some(Fixture {
+    let fixture = Fixture {
         bin: debug_bin(&dir, name),
         dir,
-    })
+    };
+    assert!(
+        out.status.success(),
+        "{name}: gos build failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    fixture
 }
 
 fn assert_exit(name: &str, source: &str, code: i32) {
-    let Some(fixture) = build_fixture(name, source) else {
-        return;
-    };
+    let fixture = build_fixture(name, source);
     let mut cmd = Command::new(&fixture.bin);
     let out = run_output(&mut cmd, &format!("run {name}"), RUN_TIMEOUT);
     assert_eq!(
@@ -273,9 +263,7 @@ fn assert_exit(name: &str, source: &str, code: i32) {
 }
 
 fn assert_stdout_contains(name: &str, source: &str, needle: &str) {
-    let Some(fixture) = build_fixture(name, source) else {
-        return;
-    };
+    let fixture = build_fixture(name, source);
     let mut cmd = Command::new(&fixture.bin);
     let out = run_output(&mut cmd, &format!("run {name}"), RUN_TIMEOUT);
     assert!(
@@ -368,7 +356,7 @@ fn gos_build_handles_tuples_and_arrays() {
 fn gos_build_mut_reference_writes_through_to_fixed_array_source() {
     assert_exit(
         "mut_ref_array",
-        "fn main() -> i64 {\n    let mut xs = [1i64, 2i64]\n    let r = &mut xs\n    r[0i64] = 40i64\n    xs[0i64] + xs[1i64]\n}\n",
+        "fn main() -> i64 {\n    let mut xs = [1i64, 2i64]\n    {\n        let r = &mut xs\n        r[0i64] = 40i64\n    }\n    xs[0i64] + xs[1i64]\n}\n",
         42,
     );
 }
@@ -377,7 +365,7 @@ fn gos_build_mut_reference_writes_through_to_fixed_array_source() {
 fn gos_build_mut_reference_writes_through_to_scalar_source() {
     assert_exit(
         "mut_ref_scalar",
-        "fn main() -> i64 {\n    let mut value = 1i64\n    let r = &mut value\n    *r = 42i64\n    value\n}\n",
+        "fn main() -> i64 {\n    let mut value = 1i64\n    {\n        let r = &mut value\n        *r = 42i64\n    }\n    value\n}\n",
         42,
     );
 }
@@ -386,7 +374,7 @@ fn gos_build_mut_reference_writes_through_to_scalar_source() {
 fn gos_build_mut_reference_binding_rebinds_its_target() {
     assert_exit(
         "mut_ref_rebind",
-        "fn main() -> i64 {\n    let mut first = 1i64\n    let mut second = 2i64\n    let mut r = &mut first\n    r = &mut second\n    *r = 42i64\n    first + second\n}\n",
+        "fn main() -> i64 {\n    let mut first = 1i64\n    let mut second = 2i64\n    {\n        let mut r = &mut first\n        r = &mut second\n        *r = 42i64\n    }\n    first + second\n}\n",
         43,
     );
 }
@@ -395,7 +383,7 @@ fn gos_build_mut_reference_binding_rebinds_its_target() {
 fn gos_build_shared_reference_rebinding_does_not_overwrite_the_old_referent() {
     assert_exit(
         "shared_ref_rebind_literal",
-        "fn main() -> i64 {\n    let first = [1i64, 2i64]\n    let mut r = &first\n    r = &[2i64, 3i64]\n    first[0i64] * 10i64 + first[1i64]\n}\n",
+        "fn main() -> i64 {\n    let first = [1i64, 2i64]\n    let second = [2i64, 3i64]\n    let mut r = &first\n    r = &second\n    first[0i64] * 10i64 + first[1i64] + r[0i64] - 2i64\n}\n",
         12,
     );
 }

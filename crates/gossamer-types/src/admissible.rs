@@ -133,6 +133,7 @@ pub fn check_parallel_adapters(
         table,
         tcx,
         facts: &facts,
+        module: Vec::new(),
         out: Vec::new(),
     };
     gossamer_ast::visitor::Visitor::visit_source_file(&mut checker, sf);
@@ -172,10 +173,22 @@ struct Checker<'a> {
     table: &'a TypeTable,
     tcx: &'a TyCtxt,
     facts: &'a PurityFacts,
+    /// The module being walked, which a callback's relative path names from.
+    module: Vec<String>,
     out: Vec<AdmissibilityDiagnostic>,
 }
 
 impl gossamer_ast::visitor::Visitor for Checker<'_> {
+    fn visit_item(&mut self, item: &gossamer_ast::Item) {
+        if let gossamer_ast::ItemKind::Mod(decl) = &item.kind {
+            self.module.push(decl.name.name.clone());
+            gossamer_ast::visitor::walk_item(self, item);
+            self.module.pop();
+        } else {
+            gossamer_ast::visitor::walk_item(self, item);
+        }
+    }
+
     fn visit_expr(&mut self, expr: &Expr) {
         if is_adapter_call(expr)
             && let Some(diagnostic) = self.check(expr)
@@ -272,6 +285,7 @@ impl Checker<'_> {
             ExprKind::Closure { .. } => closure_impurity(
                 self.facts,
                 callback,
+                &self.module,
                 self.sf,
                 self.resolutions,
                 self.table,
@@ -299,6 +313,15 @@ impl Checker<'_> {
                     _ => {
                         if let Some(reason) = self.facts.path_method_impurity(&segments) {
                             return Some(Inadmissible::Impure(reason));
+                        }
+                        if let Some(reason) = self.facts.program_fn_impurity(
+                            self.sf,
+                            self.resolutions,
+                            callback.id,
+                            &segments,
+                            &self.module,
+                        ) {
+                            return reason.map(Inadmissible::Impure);
                         }
                         path_impurity(
                             callback.id,

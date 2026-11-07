@@ -36,31 +36,13 @@ impl TargetTriple {
     /// Canonical triple of the host build machine.
     #[must_use]
     pub fn host() -> Self {
-        Self(default_host_triple().to_string())
+        Self(gossamer_abi::target::Target::host().triple().to_string())
     }
 
     /// Returns the triple's textual representation.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-const fn default_host_triple() -> &'static str {
-    if cfg!(all(target_arch = "x86_64", target_os = "linux")) {
-        "x86_64-unknown-linux-gnu"
-    } else if cfg!(all(target_arch = "aarch64", target_os = "linux")) {
-        "aarch64-unknown-linux-gnu"
-    } else if cfg!(all(target_arch = "x86_64", target_os = "macos")) {
-        "x86_64-apple-darwin"
-    } else if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
-        "aarch64-apple-darwin"
-    } else if cfg!(all(target_arch = "x86_64", target_os = "windows")) {
-        "x86_64-pc-windows-msvc"
-    } else if cfg!(target_arch = "wasm32") {
-        "wasm32-unknown-unknown"
-    } else {
-        "unknown-unknown-unknown"
     }
 }
 

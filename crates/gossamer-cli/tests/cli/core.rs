@@ -1521,6 +1521,13 @@ fn macos_build_records_15_0_deployment_target() {
         "build failed: {}",
         String::from_utf8_lossy(&build.stderr)
     );
+    // An object built for a newer macOS (a C dependency of the runtime that
+    // missed the target) would make the program ask for that macOS.
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        !stderr.contains("built for newer"),
+        "an object in the link targets a newer macOS than 15.0:\n{stderr}"
+    );
 
     let binary = dir.join("target").join("debug").join("deployment_target");
     let metadata = Command::new("otool")

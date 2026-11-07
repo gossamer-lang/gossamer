@@ -16,7 +16,7 @@ pub mod frontend;
 pub mod frontend_cache;
 pub mod link;
 pub mod lsda_link_order;
-pub mod macos_deployment;
+pub use gossamer_abi::macos_deployment;
 pub mod pipeline;
 pub mod target;
 

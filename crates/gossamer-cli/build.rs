@@ -35,7 +35,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[path = "../gossamer-driver/src/macos_deployment.rs"]
+#[path = "../gossamer-abi/src/macos_deployment.rs"]
 #[allow(
     unreachable_pub,
     reason = "a build-script module the script alone consumes"
@@ -167,11 +167,15 @@ fn main() {
     // inner cargo so it picks up source edits and refreshes the
     // staticlib in-place. Cargo's own incremental layer keeps the
     // re-run cheap when nothing has changed.
-    build_runtime_into(&workspace_root, &target_dir, &profile, None);
+    let host_runtime = build_runtime_into(&workspace_root, &target_dir, &profile, None);
 
     println!(
         "cargo:rustc-env=GOSSAMER_RUNTIME_LIB_PATH={}",
         lib_path.display()
+    );
+    println!(
+        "cargo:rustc-env=GOSSAMER_RUNTIME_NATIVE_LIBS={}",
+        host_runtime.native_libs
     );
 
     // Linux + release: also build the runtime against musl when the
@@ -205,7 +209,7 @@ fn main() {
         let musl_triple = "x86_64-unknown-linux-musl";
         if rustup_target_installed(sysroot.as_deref(), musl_triple) {
             let musl_lib_path =
-                build_runtime_into(&workspace_root, &target_dir, &profile, Some(musl_triple));
+                build_runtime_into(&workspace_root, &target_dir, &profile, Some(musl_triple)).path;
             publish_archive(&musl_lib_path, &lib_dir.join("libgossamer_runtime-musl.a"));
             println!(
                 "cargo:rustc-env=GOSSAMER_RUNTIME_LIB_PATH_MUSL={}",
@@ -259,14 +263,14 @@ fn rustup_target_installed(sysroot: Option<&Path>, triple: &str) -> bool {
 /// isolated target directory, then copies the resulting staticlib into the outer
 /// `target/<profile>/` so downstream lookups find it. When `triple`
 /// is supplied, builds against that rustup target and the artifact
-/// is copied into `target/<triple>/<profile>/`. Returns the path to
-/// the resulting staticlib.
+/// is copied into `target/<triple>/<profile>/`. Returns the
+/// resulting staticlib and the system libraries it needs.
 fn build_runtime_into(
     workspace_root: &Path,
     target_dir: &Path,
     profile: &str,
     triple: Option<&str>,
-) -> PathBuf {
+) -> RuntimeArchive {
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     // `-Z` flags in `GOSSAMERFLAGS` are target-scoped (nightly
     // sanitizers): without an explicit `--target` the inner cargo would
@@ -281,10 +285,18 @@ fn build_runtime_into(
     } else {
         triple
     };
-    let inner_target = match triple {
-        Some(t) => target_dir.join(format!("runtime-staticlib-{t}")),
-        None => target_dir.join("runtime-staticlib"),
+    // Cargo does not count the macOS deployment target among what makes a
+    // compiled object current, so each one gets a directory of its own: an
+    // object built for one macOS is never reused for another.
+    let deployment_target = macos_deployment::is_macos_target(triple, cfg!(target_os = "macos"))
+        .then(macos_deployment::effective_deployment_target);
+    let inner_name = match (triple, &deployment_target) {
+        (Some(t), Some(macos)) => format!("runtime-staticlib-{t}-macos{macos}"),
+        (Some(t), None) => format!("runtime-staticlib-{t}"),
+        (None, Some(macos)) => format!("runtime-staticlib-macos{macos}"),
+        (None, None) => "runtime-staticlib".to_string(),
     };
+    let inner_target = target_dir.join(inner_name);
 
     let mut cmd = Command::new(&cargo);
     // Only the staticlib is asked for: with an rlib in the unit's
@@ -298,9 +310,8 @@ fn build_runtime_into(
         .arg("--target-dir")
         .arg(&inner_target)
         .current_dir(workspace_root);
-    if macos_deployment::is_macos_target(triple, cfg!(target_os = "macos")) {
-        let deployment_target = macos_deployment::effective_deployment_target();
-        macos_deployment::set_command_deployment_target(&mut cmd, &deployment_target);
+    if let Some(deployment_target) = &deployment_target {
+        macos_deployment::set_command_deployment_target(&mut cmd, deployment_target);
     }
     // Keep the static archive used by `gos build` in step with the runtime
     // linked into the CLI itself.
@@ -373,10 +384,17 @@ fn build_runtime_into(
         cmd.env("RUSTFLAGS", flags.join(" "));
     }
 
-    let status = cmd.status().expect("invoke cargo for runtime build");
+    // The system libraries the archive needs are what rustc reports for it, so
+    // `gos build` links exactly those rather than a per-OS guess. The report
+    // is parsed, so it is asked for without color codes, whatever the
+    // environment's `CARGO_TERM_COLOR`.
+    cmd.arg("--color").arg("never");
+    cmd.arg("--").arg("--print=native-static-libs");
+    let output = cmd.output().expect("invoke cargo for runtime build");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        status.success(),
-        "failed to build gossamer-runtime staticlib (triple={triple:?})"
+        output.status.success(),
+        "failed to build gossamer-runtime staticlib (triple={triple:?}):\n{stderr}"
     );
 
     let lib_name = if cfg!(target_env = "msvc") {
@@ -407,7 +425,40 @@ fn build_runtime_into(
     // filesystem, so a reader always sees either the old or the new
     // complete archive, never a half-written one.
     publish_archive(&inner_artifact, &outer_artifact);
-    outer_artifact
+    RuntimeArchive {
+        path: outer_artifact,
+        native_libs: recorded_native_libs(&inner_profile_dir, &stderr),
+    }
+}
+
+/// The system libraries the archive in `profile_dir` needs. rustc reports them
+/// only when it compiles the archive, so a fresh build reuses the list recorded
+/// beside it the last time it did.
+fn recorded_native_libs(profile_dir: &Path, stderr: &str) -> String {
+    let recorded = profile_dir.join(NATIVE_LIBS_FILE);
+    match native_static_libs(stderr) {
+        Some(libs) => {
+            std::fs::write(&recorded, &libs).expect("record runtime native libraries");
+            libs
+        }
+        None => std::fs::read_to_string(&recorded).unwrap_or_default(),
+    }
+}
+
+const NATIVE_LIBS_FILE: &str = "gossamer_runtime.native-libs";
+
+/// A built runtime staticlib and the system libraries a program linking it needs.
+struct RuntimeArchive {
+    path: PathBuf,
+    native_libs: String,
+}
+
+/// The library list from rustc's `note: native-static-libs: ...` line.
+fn native_static_libs(stderr: &str) -> Option<String> {
+    stderr.lines().find_map(|line| {
+        line.split_once("native-static-libs:")
+            .map(|(_, libs)| libs.trim().to_string())
+    })
 }
 
 /// Copies a runtime archive atomically so concurrent package/build readers

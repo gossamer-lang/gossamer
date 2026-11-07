@@ -336,6 +336,36 @@ unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
     }
 }
 
+/// FreeBSD keeps the register file inline in `mcontext_t`, named per
+/// architecture: `mc_rip` / `mc_rbp` on amd64, `gp_elr` / `x29` on arm64.
+#[cfg(all(
+    not(miri),
+    target_os = "freebsd",
+    any(target_arch = "aarch64", target_arch = "x86_64")
+))]
+/// # Safety
+///
+/// `context` is null or the `ucontext_t` the kernel passed to the signal
+/// handler running this.
+unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
+    if context.is_null() {
+        return (0, 0);
+    }
+    // SAFETY: the kernel hands a `ucontext_t` to an SA_SIGINFO handler.
+    let machine = unsafe { &(*context.cast::<libc::ucontext_t>()).uc_mcontext };
+    #[cfg(target_arch = "aarch64")]
+    {
+        (
+            machine.mc_gpregs.gp_elr as usize,
+            machine.mc_gpregs.gp_x[29] as usize,
+        )
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        (machine.mc_rip as usize, machine.mc_rbp as usize)
+    }
+}
+
 /// Other platforms record the frames the walk can reach without the
 /// interrupted register file.
 #[cfg(all(
@@ -344,7 +374,7 @@ unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
     not(target_arch = "wasm32"),
     not(all(
         any(target_arch = "x86_64", target_arch = "aarch64"),
-        any(target_os = "linux", target_os = "macos")
+        any(target_os = "linux", target_os = "macos", target_os = "freebsd")
     ))
 ))]
 /// # Safety

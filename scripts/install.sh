@@ -1,5 +1,5 @@
 #!/bin/sh
-# Gossamer installer for Linux and macOS.
+# Gossamer installer for Linux, macOS, and FreeBSD.
 #
 # Two modes:
 #   --user    install into ~/.local/bin (no sudo needed; default)
@@ -58,6 +58,7 @@ uname_m=$(uname -m 2>/dev/null || echo unknown)
 case "$uname_s" in
     Linux)   os="linux" ;;
     Darwin)  os="macos" ;;
+    FreeBSD) os="freebsd" ;;
     *)
         echo "gossamer-install: unsupported host OS: $uname_s" >&2
         echo "                  (Windows users: run the .exe installer)" >&2
@@ -193,7 +194,15 @@ VER_NUM=$(printf '%s' "$TAG" | sed 's/^v//')
 
 case "$os" in
     linux) ASSET="gos-${VER_NUM}-linux-${arch}.tar.gz" ;;
-    macos) ASSET="gos-${VER_NUM}-macos-${arch}.zip" ;;
+    freebsd) ASSET="gos-${VER_NUM}-freebsd-${arch}.tar.gz" ;;
+    macos)
+        # A Mac older than macOS 15 takes the archive built for macOS 12.
+        variant=macos
+        case "$(sw_vers -productVersion 2>/dev/null)" in
+            12.* | 13.* | 14.*) variant=macos12 ;;
+        esac
+        ASSET="gos-${VER_NUM}-${variant}-${arch}.zip"
+        ;;
 esac
 URL="https://github.com/$REPO/releases/download/$TAG/$ASSET"
 

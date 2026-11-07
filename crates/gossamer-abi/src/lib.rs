@@ -11,11 +11,14 @@ pub mod c_aggregate;
 pub mod format_pad;
 pub mod int_range;
 pub mod jit_carrier;
+pub mod macos_deployment;
 pub mod rc;
 /// ABI registry - the typed list of all `gos_rt_*` symbols.
 pub mod registry;
 pub mod static_storage;
 pub mod string_layout;
+/// Build targets parsed from their triples: OS, architecture, and C library.
+pub mod target;
 /// Core ABI types: [`AbiType`], [`AbiSig`], [`RuntimeEntry`].
 pub mod types;
 

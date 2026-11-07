@@ -8,6 +8,7 @@ tier1	x86_64-unknown-linux-gnu	native VM/JIT/AOT	ci:test-native-ubuntu-latest
 tier1	aarch64-unknown-linux-gnu	native VM/JIT/AOT	ci:test-native-ubuntu-24.04-arm
 tier1	aarch64-apple-darwin	native VM/JIT/AOT	ci:test-native-macos-latest
 tier1	x86_64-pc-windows-msvc	native VM/JIT/AOT	ci:test-native-windows-latest
+tier1	x86_64-unknown-freebsd	native VM/JIT/AOT	ci:test-native-freebsd
 tier2	x86_64-unknown-linux-musl	AOT under native/QEMU VM differential	ci:cross-from-macos-windows-and-qemu
 tier2	aarch64-unknown-linux-musl	AOT under QEMU VM differential	ci:cross-from-linux-macos-windows-and-qemu
 artifact	x86_64-apple-darwin	release artifact build only	ci:release-build-macos-x86_64
