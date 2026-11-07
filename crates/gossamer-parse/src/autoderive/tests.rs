@@ -15,6 +15,27 @@ mod autoderive_tests {
         super::parse_with_autoderive(&augmented, file).1
     }
 
+    /// Whether augmenting `source` defines the reflection function for
+    /// `Wrapper<arg>`.
+    fn reflects_wrapper_at(source: &str, arg: &str) -> bool {
+        let name = super::reflect_fn_name(&["Wrapper".to_string()], &[super::mangle_ty(arg)]);
+        super::augment_source(source).contains(&format!("fn {name}("))
+    }
+
+    #[test]
+    fn generic_type_info_in_top_level_statement_is_synthesized() {
+        let source = "struct Wrapper<T> { inner: T, count: i64 }\n\
+                      for (name, ty) in typeInfo::<Wrapper<String>>() { println(f\"{name}: {ty}\") }\n";
+        assert!(reflects_wrapper_at(source, "String"));
+    }
+
+    #[test]
+    fn generic_type_info_inside_main_is_synthesized() {
+        let source = "struct Wrapper<T> { inner: T, count: i64 }\n\
+                      fn main() { let _ = typeInfo::<Wrapper<i64>>() }\n";
+        assert!(reflects_wrapper_at(source, "i64"));
+    }
+
     /// The injected names a tree spells after the stdlib surface rewrite,
     /// read off the rewritten tree itself.
     fn names_after_rewrite(parsed: &gossamer_ast::SourceFile) -> std::collections::HashSet<String> {

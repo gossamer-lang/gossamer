@@ -18,11 +18,15 @@ env:
   # RUSTUP_TOOLCHAIN suppresses the override-file read entirely,
   # making the shim a pure pass-through to the named toolchain.
   RUSTUP_TOOLCHAIN: 1.95.0
+  # The oldest glibc the Linux glibc builds run on (Ubuntu 24.04). A binary
+  # needs the glibc of the system it was linked on, so these builds run on
+  # ubuntu-24.04 rather than ubuntu-latest, and check what they produced.
+  GLIBC_FLOOR: "2.39"
 
 jobs:
   build-linux-x86_64:
     name: Linux x86_64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
@@ -45,6 +49,9 @@ jobs:
 
       - name: Build
         run: cargo build --release --bin gos
+
+      - name: Check the glibc floor
+        run: scripts/check-glibc-floor.sh target/release/gos
 
       # Install packaging tools as prebuilt binaries (cargo-deb from
       # GitHub Releases, cargo-generate-rpm via cargo-binstall) - avoids
@@ -134,7 +141,7 @@ jobs:
 
   build-linux-aarch64:
     name: Linux aarch64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
@@ -220,6 +227,9 @@ jobs:
           cargo zigbuild --release --target aarch64-unknown-linux-musl -p gossamer-runtime
           cp target/aarch64-unknown-linux-musl/release/libgossamer_runtime.a \
              target/aarch64-unknown-linux-gnu/release/libgossamer_runtime-musl.a
+
+      - name: Check the glibc floor
+        run: scripts/check-glibc-floor.sh target/aarch64-unknown-linux-gnu/release/gos
 
       # Install packaging tools as prebuilt binaries (cargo-deb from
       # GitHub Releases, cargo-generate-rpm via cargo-binstall) - avoids

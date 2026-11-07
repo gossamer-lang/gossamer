@@ -242,6 +242,15 @@ fn generic_type_info_requests(sf: &SourceFile) -> Vec<(Vec<String>, Vec<String>,
         }
         .visit_item(item);
     });
+    // Synthesis reads the tree before entry-main synthesis, so an entry
+    // file's bare statements are still beside the items, at the root module.
+    let mut root = Collect {
+        module: &[],
+        found: &mut found,
+    };
+    for stmt in &sf.top_level_stmts {
+        root.visit_stmt(stmt);
+    }
     found
 }
 

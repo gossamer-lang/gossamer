@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.77.1 - Linux builds on glibc 2.39, generic typeInfo in top-level code
+
+- The Linux archives and packages, x86_64 and aarch64, run on glibc 2.39 (Ubuntu 24.04) and later again; 0.77.0's `gos` needed glibc 2.43 and failed to start on older systems. Releases now fail if a Linux build needs a glibc newer than 2.39.
+- `typeInfo::<Wrapper<String>>()` on a generic type reflects that instantiation in an entry file's top-level statements, as it does inside a function; it was GR0012, "nothing to reflect".
+
 ## 0.77.0 - FreeBSD support and fixes
 
 - FreeBSD x86_64 is a Tier 1 target: `gos run`, the JIT, and `gos build` run there, CI runs the native test suite in a FreeBSD VM, releases ship `gos-<version>-freebsd-x86_64.tar.gz`, and `scripts/install.sh` installs it.
