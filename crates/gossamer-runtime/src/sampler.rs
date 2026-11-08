@@ -466,12 +466,42 @@ fn copy_link(frame_pointer: usize) -> Option<(usize, usize)> {
         iov_base: frame_pointer as *mut libc::c_void,
         iov_len: size,
     };
+    // The interrupted code reads `errno` after the handler returns, so a
+    // refused copy must not leave its own there.
+    // SAFETY: the location is the calling thread's `errno`, valid for its life.
+    let errno = unsafe { errno_location() };
+    // SAFETY: `errno` points at this thread's errno, read before the copy.
+    let saved = unsafe { errno.read() };
     // SAFETY: both vectors describe `size` bytes; the kernel writes only into
     // `words` and reports an unreadable `remote` as an error.
     let copied = unsafe {
         libc::process_vm_readv(libc::getpid(), &raw const local, 1, &raw const remote, 1, 0)
     };
+    // SAFETY: as above; the write restores what the thread held.
+    unsafe { errno.write(saved) };
     (usize::try_from(copied).ok() == Some(size)).then_some((words[0], words[1]))
+}
+
+/// The calling thread's `errno`.
+///
+/// # Safety
+///
+/// The pointer is valid only on the calling thread, while it lives.
+#[cfg(all(not(miri), target_os = "linux"))]
+unsafe fn errno_location() -> *mut libc::c_int {
+    // SAFETY: glibc and musl answer the calling thread's errno location.
+    unsafe { libc::__errno_location() }
+}
+
+/// The calling thread's `errno`.
+///
+/// # Safety
+///
+/// The pointer is valid only on the calling thread, while it lives.
+#[cfg(all(not(miri), target_os = "android"))]
+unsafe fn errno_location() -> *mut libc::c_int {
+    // SAFETY: bionic answers the calling thread's errno location.
+    unsafe { libc::__errno() }
 }
 
 /// Other platforms have no copy the handler may make without bounds.
@@ -520,7 +550,7 @@ fn signal_links(stack_pointer: usize) -> Links {
 /// the coroutine guard rather than from the OS thread. That window changes
 /// as goroutines are scheduled onto a worker, so only the OS-thread bounds
 /// - fixed for the life of the thread - are worth caching.
-#[cfg(all(unix, not(miri), not(target_arch = "wasm32")))]
+#[cfg(all(unix, not(miri), any(target_arch = "x86_64", target_arch = "aarch64")))]
 fn stack_bounds() -> Option<(usize, usize)> {
     thread_local! {
         static THREAD_STACK: std::cell::Cell<Option<(usize, usize)>> =
@@ -796,7 +826,8 @@ mod tests {
     #[test]
     fn the_walk_refuses_an_implausible_chain() {
         for links in [
-            stack_bounds().map_or(Links::Unreadable, Links::Within),
+            crate::stack_guard::current_thread_stack_bounds()
+                .map_or(Links::Unreadable, Links::Within),
             Links::Copied { floor: 0 },
         ] {
             let mut sample = RawSample::EMPTY;
