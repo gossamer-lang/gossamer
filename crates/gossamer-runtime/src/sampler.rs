@@ -216,8 +216,9 @@ fn install_handler() -> std::io::Result<()> {
     result
 }
 
-/// SIGPROF handler. Async-signal-safe: no allocation, no locks, no
-/// library calls beyond reading memory it has bounds-checked.
+/// SIGPROF handler. Async-signal-safe: no allocation, no locks, no library
+/// calls; stack memory is read in place only inside known bounds, and
+/// otherwise through the kernel's checked copy.
 ///
 /// # Safety
 ///
@@ -235,12 +236,12 @@ unsafe extern "C" fn on_sigprof(
     let mut sample = RawSample::EMPTY;
     // SAFETY: this handler's contract makes `context` the kernel's `ucontext_t` or null, as
     // `interrupted_registers` requires.
-    let (pc, frame_pointer) = unsafe { interrupted_registers(context) };
+    let (pc, frame_pointer, stack_pointer) = unsafe { interrupted_registers(context) };
     if pc != 0 {
         sample.frames[0] = pc;
         sample.len = 1;
     }
-    walk_frames(frame_pointer, &mut sample);
+    walk_frames(frame_pointer, signal_links(stack_pointer), &mut sample);
     if sample.len == 0 {
         return;
     }
@@ -254,7 +255,8 @@ unsafe extern "C" fn on_sigprof(
     SAMPLES.write(slot, &sample);
 }
 
-/// Program counter and frame pointer of the interrupted context.
+/// Program counter, frame pointer and stack pointer of the interrupted
+/// context.
 #[cfg(all(
     unix,
     not(miri),
@@ -266,9 +268,9 @@ unsafe extern "C" fn on_sigprof(
 ///
 /// `context` is null or the `ucontext_t` the kernel passed to the signal
 /// handler running this.
-unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
+unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize, usize) {
     if context.is_null() {
-        return (0, 0);
+        return (0, 0, 0);
     }
     // SAFETY: the kernel hands a `ucontext_t` to an SA_SIGINFO handler.
     let ctx = unsafe { &*(context.cast::<libc::ucontext_t>()) };
@@ -276,6 +278,7 @@ unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
     (
         regs[libc::REG_RIP as usize] as usize,
         regs[libc::REG_RBP as usize] as usize,
+        regs[libc::REG_RSP as usize] as usize,
     )
 }
 
@@ -292,14 +295,18 @@ unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
 ///
 /// `context` is null or the `ucontext_t` the kernel passed to the signal
 /// handler running this.
-unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
+unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize, usize) {
     if context.is_null() {
-        return (0, 0);
+        return (0, 0, 0);
     }
     // SAFETY: the kernel hands a `ucontext_t` to an SA_SIGINFO handler.
     let ctx = unsafe { &*(context.cast::<libc::ucontext_t>()) };
     let machine = &ctx.uc_mcontext;
-    (machine.pc as usize, machine.regs[29] as usize)
+    (
+        machine.pc as usize,
+        machine.regs[29] as usize,
+        machine.sp as usize,
+    )
 }
 
 /// Darwin reaches the register file through a pointer rather than an
@@ -313,26 +320,34 @@ unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
 ///
 /// `context` is null or the `ucontext_t` the kernel passed to the signal
 /// handler running this.
-unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
+unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize, usize) {
     if context.is_null() {
-        return (0, 0);
+        return (0, 0, 0);
     }
     // SAFETY: the kernel hands a `ucontext_t` to an SA_SIGINFO handler;
     // `uc_mcontext` is checked before it is dereferenced.
     let ctx = unsafe { &*(context.cast::<libc::ucontext_t>()) };
     if ctx.uc_mcontext.is_null() {
-        return (0, 0);
+        return (0, 0, 0);
     }
     // SAFETY: the same handler contract makes `uc_mcontext` a live
     // `__darwin_mcontext64` for the duration of the handler.
     let state = unsafe { &(*ctx.uc_mcontext).__ss };
     #[cfg(target_arch = "aarch64")]
     {
-        (state.__pc as usize, state.__fp as usize)
+        (
+            state.__pc as usize,
+            state.__fp as usize,
+            state.__sp as usize,
+        )
     }
     #[cfg(target_arch = "x86_64")]
     {
-        (state.__rip as usize, state.__rbp as usize)
+        (
+            state.__rip as usize,
+            state.__rbp as usize,
+            state.__rsp as usize,
+        )
     }
 }
 
@@ -347,9 +362,9 @@ unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
 ///
 /// `context` is null or the `ucontext_t` the kernel passed to the signal
 /// handler running this.
-unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
+unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize, usize) {
     if context.is_null() {
-        return (0, 0);
+        return (0, 0, 0);
     }
     // SAFETY: the kernel hands a `ucontext_t` to an SA_SIGINFO handler.
     let machine = unsafe { &(*context.cast::<libc::ucontext_t>()).uc_mcontext };
@@ -358,11 +373,16 @@ unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
         (
             machine.mc_gpregs.gp_elr as usize,
             machine.mc_gpregs.gp_x[29] as usize,
+            machine.mc_gpregs.gp_sp as usize,
         )
     }
     #[cfg(target_arch = "x86_64")]
     {
-        (machine.mc_rip as usize, machine.mc_rbp as usize)
+        (
+            machine.mc_rip as usize,
+            machine.mc_rbp as usize,
+            machine.mc_rsp as usize,
+        )
     }
 }
 
@@ -381,24 +401,165 @@ unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
 ///
 /// `context` is null or the `ucontext_t` the kernel passed to the signal
 /// handler running this.
-unsafe fn interrupted_registers(_context: *mut libc::c_void) -> (usize, usize) {
-    (0, 0)
+unsafe fn interrupted_registers(_context: *mut libc::c_void) -> (usize, usize, usize) {
+    (0, 0, 0)
 }
 
-/// `(lo, hi)` bounds of the stack the calling code is running on, cached
-/// per thread.
+/// How a walk may read the frame records of the stack it runs on.
+#[cfg(all(unix, not(miri), not(target_arch = "wasm32")))]
+#[derive(Clone, Copy)]
+enum Links {
+    /// In place, inside the stack's `(lo, hi)` bounds.
+    Within((usize, usize)),
+    /// Through the kernel's checked copy, at or above the interrupted stack
+    /// pointer.
+    Copied { floor: usize },
+    /// Not at all: the sample keeps only the interrupted program counter.
+    Unreadable,
+}
+
+#[cfg(all(unix, not(miri), not(target_arch = "wasm32")))]
+impl Links {
+    /// The saved frame pointer and return address of the record at
+    /// `frame_pointer`, which may be anything the interrupted code left in
+    /// the register.
+    fn read(self, frame_pointer: usize) -> Option<(usize, usize)> {
+        if frame_pointer == 0 || !frame_pointer.is_multiple_of(std::mem::align_of::<usize>()) {
+            return None;
+        }
+        match self {
+            Self::Within((lo, hi)) => {
+                if frame_pointer < lo
+                    || frame_pointer.saturating_add(2 * std::mem::size_of::<usize>()) > hi
+                {
+                    return None;
+                }
+                // SAFETY: the address is aligned and both words it addresses lie
+                // inside the running stack's mapped bounds.
+                Some(unsafe {
+                    let base = frame_pointer as *const usize;
+                    (base.read_volatile(), base.add(1).read_volatile())
+                })
+            }
+            Self::Copied { floor } => {
+                if frame_pointer < floor {
+                    return None;
+                }
+                copy_link(frame_pointer)
+            }
+            Self::Unreadable => None,
+        }
+    }
+}
+
+/// The two words at `frame_pointer`, copied by the kernel, which refuses an
+/// address the process cannot read instead of faulting.
+#[cfg(all(not(miri), any(target_os = "linux", target_os = "android")))]
+fn copy_link(frame_pointer: usize) -> Option<(usize, usize)> {
+    let mut words = [0_usize; 2];
+    let size = std::mem::size_of_val(&words);
+    let local = libc::iovec {
+        iov_base: words.as_mut_ptr().cast(),
+        iov_len: size,
+    };
+    let remote = libc::iovec {
+        iov_base: frame_pointer as *mut libc::c_void,
+        iov_len: size,
+    };
+    // The interrupted code reads `errno` after the handler returns, so a
+    // refused copy must not leave its own there.
+    // SAFETY: the location is the calling thread's `errno`, valid for its life.
+    let errno = unsafe { errno_location() };
+    // SAFETY: `errno` points at this thread's errno, read before the copy.
+    let saved = unsafe { errno.read() };
+    // SAFETY: both vectors describe `size` bytes; the kernel writes only into
+    // `words` and reports an unreadable `remote` as an error.
+    let copied = unsafe {
+        libc::process_vm_readv(libc::getpid(), &raw const local, 1, &raw const remote, 1, 0)
+    };
+    // SAFETY: as above; the write restores what the thread held.
+    unsafe { errno.write(saved) };
+    (usize::try_from(copied).ok() == Some(size)).then_some((words[0], words[1]))
+}
+
+/// The calling thread's `errno`.
+///
+/// # Safety
+///
+/// The pointer is valid only on the calling thread, while it lives.
+#[cfg(all(not(miri), target_os = "linux"))]
+unsafe fn errno_location() -> *mut libc::c_int {
+    // SAFETY: glibc and musl answer the calling thread's errno location.
+    unsafe { libc::__errno_location() }
+}
+
+/// The calling thread's `errno`.
+///
+/// # Safety
+///
+/// The pointer is valid only on the calling thread, while it lives.
+#[cfg(all(not(miri), target_os = "android"))]
+unsafe fn errno_location() -> *mut libc::c_int {
+    // SAFETY: bionic answers the calling thread's errno location.
+    unsafe { libc::__errno() }
+}
+
+/// Other platforms have no copy the handler may make without bounds.
+#[cfg(all(
+    unix,
+    not(miri),
+    not(target_arch = "wasm32"),
+    not(any(target_os = "linux", target_os = "android"))
+))]
+fn copy_link(_frame_pointer: usize) -> Option<(usize, usize)> {
+    None
+}
+
+/// How the SIGPROF handler reads the interrupted thread's frame records,
+/// asking the C library nothing: a goroutine's stack and a thread the stack
+/// guard was installed on have known bounds, and any other thread is walked
+/// through the kernel's checked copy where there is one.
+#[cfg(all(unix, not(miri), not(target_arch = "wasm32")))]
+fn signal_links(stack_pointer: usize) -> Links {
+    if let Some(window) = gossamer_coro::goroutine_stack_bounds() {
+        return Links::Within(window);
+    }
+    if let Some(window) = crate::stack_guard::installed_thread_stack_bounds() {
+        return Links::Within(window);
+    }
+    // Darwin answers a thread asking about itself from its own thread record,
+    // without a lock.
+    #[cfg(target_os = "macos")]
+    if let Some(window) = crate::stack_guard::current_thread_stack_bounds() {
+        return Links::Within(window);
+    }
+    if cfg!(any(target_os = "linux", target_os = "android")) {
+        Links::Copied {
+            floor: stack_pointer,
+        }
+    } else {
+        Links::Unreadable
+    }
+}
+
+/// `(lo, hi)` bounds of the stack the calling code is running on, for a walk
+/// outside a signal handler, which may ask the C library; asked once per
+/// thread.
 ///
 /// A goroutine runs on its own allocated stack, so its window comes from
 /// the coroutine guard rather than from the OS thread. That window changes
 /// as goroutines are scheduled onto a worker, so only the OS-thread bounds
 /// - fixed for the life of the thread - are worth caching.
-#[cfg(all(unix, not(miri), not(target_arch = "wasm32")))]
-fn current_stack_bounds() -> Option<(usize, usize)> {
+#[cfg(all(unix, not(miri), any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn stack_bounds() -> Option<(usize, usize)> {
     thread_local! {
         static THREAD_STACK: std::cell::Cell<Option<(usize, usize)>> =
             const { std::cell::Cell::new(None) };
     }
     if let Some(window) = gossamer_coro::goroutine_stack_bounds() {
+        return Some(window);
+    }
+    if let Some(window) = crate::stack_guard::installed_thread_stack_bounds() {
         return Some(window);
     }
     // `Cell<Option<_>>` distinguishes "not yet asked" from "the platform
@@ -416,36 +577,17 @@ fn current_stack_bounds() -> Option<(usize, usize)> {
 
 /// Walks the frame-pointer chain, appending return addresses.
 ///
-/// Every step is validated against the stack the walk is running on: a
-/// frame pointer in a function compiled without one is whatever that
-/// function left in the register, so every link is untrusted input and
-/// must be proven to address readable stack memory before it is read.
-/// Without bounds the walk cannot be made safe, so it does not run.
+/// A frame pointer in a function compiled without one is whatever that
+/// function left in the register, so every link is untrusted input that
+/// `links` must prove readable before the walk uses it.
 #[cfg(all(unix, not(miri), not(target_arch = "wasm32")))]
-fn walk_frames(mut frame_pointer: usize, sample: &mut RawSample) {
+fn walk_frames(mut frame_pointer: usize, links: Links, sample: &mut RawSample) {
     /// A frame larger than this is a sign the chain is not a chain.
     const MAX_FRAME_BYTES: usize = 1 << 20;
 
-    let Some((lo, hi)) = current_stack_bounds() else {
-        return;
-    };
-    // Both words of the link must lie inside the window.
-    let readable = |fp: usize| {
-        fp != 0
-            && fp.is_multiple_of(std::mem::align_of::<usize>())
-            && fp >= lo
-            && fp.saturating_add(2 * std::mem::size_of::<usize>()) <= hi
-    };
-
     while (sample.len as usize) < MAX_FRAMES {
-        if !readable(frame_pointer) {
+        let Some((saved_fp, return_address)) = links.read(frame_pointer) else {
             return;
-        }
-        // SAFETY: `readable` proved the address is aligned and that both
-        // words it addresses lie inside the running stack's mapped bounds.
-        let (saved_fp, return_address) = unsafe {
-            let base = frame_pointer as *const usize;
-            (base.read_volatile(), base.add(1).read_volatile())
         };
         if return_address == 0 {
             return;
@@ -603,7 +745,8 @@ extern "C" fn capture_heap_sample() {
 #[cfg(all(unix, not(miri), any(target_arch = "x86_64", target_arch = "aarch64")))]
 extern "C" fn record_from_frame(frame_pointer: usize) {
     let mut sample = RawSample::EMPTY;
-    walk_frames(frame_pointer, &mut sample);
+    let links = stack_bounds().map_or(Links::Unreadable, Links::Within);
+    walk_frames(frame_pointer, links, &mut sample);
     publish_heap_sample(&sample);
 }
 
@@ -682,11 +825,69 @@ mod tests {
     #[cfg(all(unix, not(miri), not(target_arch = "wasm32")))]
     #[test]
     fn the_walk_refuses_an_implausible_chain() {
+        for links in [
+            crate::stack_guard::current_thread_stack_bounds()
+                .map_or(Links::Unreadable, Links::Within),
+            Links::Copied { floor: 0 },
+        ] {
+            let mut sample = RawSample::EMPTY;
+            walk_frames(0, links, &mut sample);
+            assert_eq!(sample.len, 0);
+            walk_frames(1, links, &mut sample);
+            assert_eq!(sample.len, 0, "a misaligned frame pointer is not walked");
+        }
+    }
+
+    /// A thread whose stack bounds are unknown is walked through the kernel's
+    /// copy: links that address readable memory are followed in order.
+    #[cfg(all(any(target_os = "linux", target_os = "android"), not(miri)))]
+    #[test]
+    fn a_copied_walk_follows_a_chain_without_bounds() {
+        let mut chain = [0_usize; 6];
+        let base = chain.as_ptr() as usize;
+        let word = std::mem::size_of::<usize>();
+        chain[0] = base + 2 * word;
+        chain[1] = 0x1111;
+        chain[2] = base + 4 * word;
+        chain[3] = 0x2222;
+        chain[5] = 0x3333;
+        // The kernel reads the chain, which the compiler cannot see.
+        let base = std::hint::black_box(chain.as_mut_ptr()) as usize;
         let mut sample = RawSample::EMPTY;
-        walk_frames(0, &mut sample);
+        walk_frames(base, Links::Copied { floor: base }, &mut sample);
+        assert_eq!(
+            &sample.frames[..sample.len as usize],
+            &[0x1111, 0x2222, 0x3333]
+        );
+        let mut below = RawSample::EMPTY;
+        walk_frames(base, Links::Copied { floor: base + word }, &mut below);
+        assert_eq!(below.len, 0, "a link below the stack pointer is not read");
+    }
+
+    /// A copied walk that meets an address the process cannot read stops
+    /// there instead of faulting.
+    #[cfg(all(any(target_os = "linux", target_os = "android"), not(miri)))]
+    #[test]
+    fn a_copied_walk_stops_at_unmapped_memory() {
+        let page = 4_096;
+        // SAFETY: a fresh anonymous mapping, unmapped again before its address
+        // is used, so nothing else can be using it.
+        let gone = unsafe {
+            let p = libc::mmap(
+                std::ptr::null_mut(),
+                page,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            );
+            assert_ne!(p, libc::MAP_FAILED);
+            assert_eq!(libc::munmap(p, page), 0);
+            p as usize
+        };
+        let mut sample = RawSample::EMPTY;
+        walk_frames(gone, Links::Copied { floor: 0 }, &mut sample);
         assert_eq!(sample.len, 0);
-        walk_frames(1, &mut sample);
-        assert_eq!(sample.len, 0, "a misaligned frame pointer is not walked");
     }
 
     /// Armed sampling records a stack once the accumulator crosses the
@@ -716,6 +917,38 @@ mod tests {
             samples.iter().all(|s| s.len > 0),
             "every recorded sample carries at least one frame"
         );
+    }
+
+    /// The handler runs on whichever thread the timer interrupts, often one
+    /// that just started or sits inside the C allocator holding its lock. It
+    /// must sample such threads without asking the C library anything, or the
+    /// thread waits on itself and the process stops.
+    #[cfg(all(target_os = "linux", not(miri)))]
+    #[test]
+    fn sampling_fresh_threads_inside_malloc_completes() {
+        let _guard = sampler_lock();
+        stop();
+        let _ = drain();
+        start(1_000).expect("the sampler starts");
+        for _ in 0..8 {
+            let workers: Vec<_> = (0..32)
+                .map(|_| {
+                    std::thread::spawn(|| {
+                        for i in 0..4_000_usize {
+                            // Above the thread cache's sizes, so every call takes
+                            // the arena lock.
+                            // SAFETY: a fresh allocation is freed once, unused.
+                            unsafe { libc::free(libc::malloc(4_096 + (i % 8) * 1_024)) };
+                        }
+                    })
+                })
+                .collect();
+            for worker in workers {
+                worker.join().expect("a worker finishes");
+            }
+        }
+        stop();
+        assert!(!drain().is_empty(), "the busy workers were sampled");
     }
 
     /// A disarmed sampler is the default and records nothing, so a program

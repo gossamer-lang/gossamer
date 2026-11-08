@@ -151,9 +151,28 @@ fn stack_low_limit() -> Option<usize> {
     }
 }
 
+/// `(lo, hi)` byte bounds of the calling OS thread's stack as the guard
+/// recorded them when it was installed on this thread, or `None` when it was
+/// not or the platform could not tell. Async-signal-safe: two thread-local
+/// reads.
+#[must_use]
+pub fn installed_thread_stack_bounds() -> Option<(usize, usize)> {
+    #[cfg(unix)]
+    {
+        let (lo, hi) = unix::installed_bounds();
+        (hi > lo).then_some((lo, hi))
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 /// `(lo, hi)` byte bounds of the calling OS thread's stack, or `None`
 /// when the platform cannot report them. A frame-pointer walk checks
-/// every link against this window before dereferencing it.
+/// every link against this window before dereferencing it. Not
+/// async-signal-safe: glibc and FreeBSD's libthr lock and allocate to
+/// answer, so a signal handler reads [`installed_thread_stack_bounds`].
 #[must_use]
 pub fn current_thread_stack_bounds() -> Option<(usize, usize)> {
     #[cfg(unix)]
@@ -440,6 +459,12 @@ mod unix {
         });
     }
 
+    // The [lo, hi) range `record_stack_bounds` stored for the calling
+    // thread, zero when none was.
+    pub(super) fn installed_bounds() -> (usize, usize) {
+        (STACK_LO.with(Cell::get), STACK_HI.with(Cell::get))
+    }
+
     // Records [lo, hi) byte range of the calling thread's stack
     // into thread-local storage. Best effort: if discovery fails
     // the handler simply propagates the signal instead of
@@ -478,12 +503,12 @@ mod unix {
 
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
     fn discover_stack_bounds() -> (usize, usize) {
-        // SAFETY: the attribute calls are documented async-signal-safe
-        // wrappers over the current thread's stack metadata. The
-        // attr is zero-initialised before the get call; the get
-        // call populates sp/size; destroy releases attr resources.
-        // All raw pointers we dereference (&attr, &sp, &size) are
-        // stack-locals owned by this fn.
+        // SAFETY: the attribute calls read the current thread's stack
+        // metadata into an attr zero-initialised here; the get call
+        // populates sp/size; destroy releases attr resources. All raw
+        // pointers we dereference (&attr, &sp, &size) are stack-locals
+        // owned by this fn. They lock and allocate, so no signal handler
+        // calls this.
         unsafe {
             let mut attr: libc::pthread_attr_t = MaybeUninit::zeroed().assume_init();
             if !current_thread_attr(&raw mut attr) {
