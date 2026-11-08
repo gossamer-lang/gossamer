@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.77.2 - CPU profiles of programs with threads of their own
+
+- `pprof::cpu_profile` no longer freezes a program whose foreign code runs threads of its own, such as a GUI that rasterizes on worker threads: the sampler asked the C library for a thread's stack bounds inside its signal handler, and a thread interrupted inside `malloc` waited on itself. It now reads those threads' frames through the kernel's checked copy on Linux, asks macOS only about the interrupted thread itself, and on FreeBSD walks only the threads the runtime started.
+
 ## 0.77.1 - Linux builds on glibc 2.39, generic typeInfo in top-level code
 
 - The Linux archives and packages, x86_64 and aarch64, run on glibc 2.39 (Ubuntu 24.04) and later again; 0.77.0's `gos` needed glibc 2.43 and failed to start on older systems. Releases now fail if a Linux build needs a glibc newer than 2.39.
