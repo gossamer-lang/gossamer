@@ -440,7 +440,8 @@ tests/          # integration tests
 - `#[export]` / `#[export("sym")]` on a free `fn` makes a C symbol;
   `[lib] kind = ["staticlib", "cdylib"]` builds the archive, shared library,
   and `include/<name>.h` (which also declares `<name>_shutdown()`).
-- `[features]` (`default`, `dep:x`, `x/feat`), `optional = true` and
+- `[features]` (`default`, `dep:x`, `x/feat`; `binding/feat` for a Cargo
+  feature of the package's own `[rust-bindings]` crate), `optional = true` and
   `features = [..]` on a dependency, `#[cfg(feature = "f")]` on items and
   `use`, `--features a,b` / `--no-default-features` on every command. `#[link(name = "z",
   search = "dir")]`, `#[link_name = "sym"]`, and `#[cfg]` per platform;

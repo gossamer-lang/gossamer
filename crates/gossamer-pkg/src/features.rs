@@ -6,7 +6,9 @@
 //! features its `[features]` entry lists, and each dependency in turn gets
 //! its default features unless the dependent says `default-features =
 //! false`, plus the ones the dependent names. A package reached along
-//! several paths builds with the union of what each asks for.
+//! several paths builds with the union of what each asks for. A member
+//! `<crate>/<feature>` naming one of the package's `[rust-bindings]` turns
+//! on that Cargo feature of the binding.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -33,6 +35,9 @@ pub struct ResolvedFeatures {
     pub per_package: BTreeMap<String, BTreeSet<String>>,
     /// The optional dependencies an enabled feature turns on.
     pub optional_enabled: BTreeSet<String>,
+    /// The Cargo features enabled features turn on, by `[rust-bindings]`
+    /// crate.
+    pub binding_features: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// Why features cannot be resolved.
@@ -211,7 +216,18 @@ impl Resolver {
                 self.resolved.optional_enabled.insert(dep.clone());
                 self.activate_dependency(&dep, &chosen);
             } else if let Some((dep, dep_feature)) = member.rsplit_once('/') {
-                let (dep, chosen) = self.dependency_of(id, &feature, dep)?;
+                let (dep, chosen) = match self.dependency_of(id, &feature, dep) {
+                    Ok(found) => found,
+                    Err(_) if self.packages[id].manifest.rust_bindings.contains_key(dep) => {
+                        self.resolved
+                            .binding_features
+                            .entry(dep.to_string())
+                            .or_default()
+                            .insert(dep_feature.to_string());
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 if chosen.optional {
                     self.resolved.optional_enabled.insert(dep.clone());
                 }
@@ -310,6 +326,20 @@ fn all_dependency_roots(entry: &Path) -> Vec<(String, PathBuf)> {
     roots
 }
 
+/// The Cargo features resolution turned on, by `[rust-bindings]` crate.
+static BINDING_FEATURES: RwLock<BTreeMap<String, BTreeSet<String>>> = RwLock::new(BTreeMap::new());
+
+/// The Cargo features the installed resolution turns on for the
+/// `[rust-bindings]` crate `name`, beside those its entry lists.
+#[must_use]
+pub fn binding_features(name: &str) -> BTreeSet<String> {
+    BINDING_FEATURES
+        .read()
+        .get(name)
+        .cloned()
+        .unwrap_or_default()
+}
+
 /// Which optional dependencies the bundler includes: `None` before any
 /// resolution, when every dependency is; `all` lifts the filter while
 /// resolution reads every manifest.
@@ -327,6 +357,9 @@ fn set_active(optional: Option<BTreeSet<String>>, all: bool) {
 /// bundler.
 pub fn install(resolved: &ResolvedFeatures) {
     set_active(Some(resolved.optional_enabled.clone()), false);
+    BINDING_FEATURES
+        .write()
+        .clone_from(&resolved.binding_features);
 }
 
 /// Whether the bundler includes the dependency `id`, which the manifest

@@ -416,3 +416,208 @@ fn compiled_binding_calls_leave_nothing_live_per_call() {
     assert_eq!(native("2"), native("20"), "the native build grew");
     let _ = std::fs::remove_dir_all(&out_dir);
 }
+
+/// A package feature naming `<binding>/<feature>` turns on that Cargo feature
+/// of its own `[rust-bindings]` crate, on the VM and in debug and release
+/// native builds, and `--no-default-features` leaves it off.
+#[test]
+fn a_package_feature_turns_on_a_binding_feature() {
+    let root = workspace_root();
+    let binding_api = root.join("crates/gossamer-binding");
+    let dir = std::env::temp_dir().join(format!("gos-binding-features-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("voice/src")).expect("create binding crate");
+    std::fs::create_dir_all(dir.join("src")).expect("create source directory");
+    std::fs::write(
+        dir.join("project.toml"),
+        "[project]\nid = \"example.com/voice\"\nversion = \"0.1.0\"\n\n\
+         [features]\ndefault = [\"loud\"]\nloud = [\"voice-binding/loud\"]\n\n\
+         [rust-bindings]\nvoice-binding = { path = \"voice\" }\n",
+    )
+    .expect("write project manifest");
+    std::fs::write(
+        dir.join("voice/Cargo.toml"),
+        format!(
+            "[package]\nname = \"voice-binding\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+             publish = false\n\n[workspace]\n\n[lib]\ncrate-type = [\"rlib\"]\n\n\
+             [features]\nloud = []\n\n\
+             [dependencies]\ngossamer-binding = {{ path = {binding_api:?} }}\n"
+        ),
+    )
+    .expect("write binding manifest");
+    std::fs::write(
+        dir.join("voice/src/lib.rs"),
+        r#"use gossamer_binding::register_module;
+
+register_module!(
+    name: voice,
+    doc: "Answers how it was built.",
+    fn speak() -> String {
+        if cfg!(feature = "loud") { "LOUD".to_string() } else { "quiet".to_string() }
+    }
+);
+"#,
+    )
+    .expect("write binding source");
+    std::fs::write(
+        dir.join("src/main.gos"),
+        "use voice\n\nfn main() {\n    println(voice::speak())\n}\n",
+    )
+    .expect("write Gossamer source");
+    let gos = |args: &[&str]| {
+        Command::new(gos_bin())
+            .args(args)
+            .current_dir(&dir)
+            .env("GOSSAMER_ROOT", &root)
+            .env("GOSSAMER_CACHE", dir.join("cache"))
+            .env("GOSSAMER_CACHE_DIR", dir.join("cache"))
+            .output()
+            .expect("spawn gos")
+    };
+    for (flags, expected) in [
+        (&[][..], "LOUD\n"),
+        (&["--no-default-features"][..], "quiet\n"),
+    ] {
+        let mut args = vec!["run"];
+        args.extend_from_slice(flags);
+        args.push(".");
+        let run = gos(&args);
+        assert!(
+            run.status.success(),
+            "gos run {flags:?} failed:\n{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout),
+            expected,
+            "gos run {flags:?}"
+        );
+        for (profile, release) in [("debug", &[][..]), ("release", &["--release"][..])] {
+            let mut args = vec!["build"];
+            args.extend_from_slice(release);
+            args.extend_from_slice(flags);
+            args.push(".");
+            let build = gos(&args);
+            assert!(
+                build.status.success(),
+                "{profile} build {flags:?} failed:\n{}",
+                String::from_utf8_lossy(&build.stderr)
+            );
+            let binary = dir.join("target").join(profile).join(if cfg!(windows) {
+                "voice.exe"
+            } else {
+                "voice"
+            });
+            let native = Command::new(&binary).output().expect("run the artifact");
+            assert_eq!(
+                String::from_utf8_lossy(&native.stdout),
+                expected,
+                "{profile} binary {flags:?}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A library's binding builds with the Cargo features its dependent chooses
+/// through the library's package features.
+#[test]
+fn a_dependent_chooses_a_library_binding_feature() {
+    let root = workspace_root();
+    let binding_api = root.join("crates/gossamer-binding");
+    let dir = std::env::temp_dir().join(format!("gos-binding-lib-features-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let lib = dir.join("voice-lib");
+    let app = dir.join("app");
+    for path in [lib.join("voice/src"), lib.join("src"), app.join("src")] {
+        std::fs::create_dir_all(path).expect("create a directory");
+    }
+    std::fs::write(
+        lib.join("project.toml"),
+        "[project]\nid = \"example.com/voice-lib\"\nversion = \"0.1.0\"\n\n[lib]\nname = \"voice_lib\"\n\n\
+         [features]\ndefault = [\"loud\"]\nloud = [\"voice-binding/loud\"]\n\n\
+         [rust-bindings]\nvoice-binding = { path = \"voice\", default-features = false }\n",
+    )
+    .expect("write library manifest");
+    std::fs::write(
+        lib.join("src/lib.gos"),
+        "use voice\n\npub fn speak() -> String {\n    voice::speak()\n}\n",
+    )
+    .expect("write library source");
+    std::fs::write(
+        lib.join("voice/Cargo.toml"),
+        format!(
+            "[package]\nname = \"voice-binding\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+             publish = false\n\n[workspace]\n\n[lib]\ncrate-type = [\"rlib\"]\n\n\
+             [features]\nloud = []\n\n\
+             [dependencies]\ngossamer-binding = {{ path = {binding_api:?} }}\n"
+        ),
+    )
+    .expect("write binding manifest");
+    std::fs::write(
+        lib.join("voice/src/lib.rs"),
+        r#"use gossamer_binding::register_module;
+
+register_module!(
+    name: voice,
+    doc: "Answers how it was built.",
+    fn speak() -> String {
+        if cfg!(feature = "loud") { "LOUD".to_string() } else { "quiet".to_string() }
+    }
+);
+"#,
+    )
+    .expect("write binding source");
+    std::fs::write(
+        app.join("src/main.gos"),
+        "use voice_lib\n\nfn main() {\n    println(voice_lib::speak())\n}\n",
+    )
+    .expect("write Gossamer source");
+    for (choice, expected) in [("", "LOUD\n"), (", default-features = false", "quiet\n")] {
+        std::fs::write(
+            app.join("project.toml"),
+            format!(
+                "[project]\nid = \"example.com/app\"\nversion = \"0.1.0\"\n\n[dependencies]\n\
+                 \"example.com/voice-lib\" = {{ path = \"../voice-lib\"{choice} }}\n"
+            ),
+        )
+        .expect("write project manifest");
+        let gos = |args: &[&str]| {
+            Command::new(gos_bin())
+                .args(args)
+                .current_dir(&app)
+                .env("GOSSAMER_ROOT", &root)
+                .env("GOSSAMER_CACHE", dir.join("cache"))
+                .env("GOSSAMER_CACHE_DIR", dir.join("cache"))
+                .output()
+                .expect("spawn gos")
+        };
+        let run = gos(&["run", "."]);
+        assert!(
+            run.status.success(),
+            "gos run{choice} failed:\n{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout),
+            expected,
+            "gos run{choice}"
+        );
+        let build = gos(&["build", "--release", "."]);
+        assert!(
+            build.status.success(),
+            "release build{choice} failed:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let binary = app
+            .join("target/release")
+            .join(if cfg!(windows) { "app.exe" } else { "app" });
+        let native = Command::new(&binary).output().expect("run the artifact");
+        assert_eq!(
+            String::from_utf8_lossy(&native.stdout),
+            expected,
+            "release binary{choice}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

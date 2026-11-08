@@ -2215,7 +2215,9 @@ fast = ["simd-kernels/avx", "dep:simd-kernels"]
 Each entry under `[features]` names the features it turns on: another of
 the project's own, `dep:<dependency>` for an optional dependency, or
 `<dependency>/<feature>` for a dependency's feature, a dependency named by
-its id or its module name. `default` lists the features on unless
+its id or its module name. `<crate>/<feature>`, where `<crate>` is one of
+the package's own `[rust-bindings]` and no dependency, turns on that Cargo
+feature of the binding, beside the `features` its entry lists. `default` lists the features on unless
 `--no-default-features` is given, and `--features a,b` turns more on; an
 unknown feature is an error. Features are additive across the graph: a
 dependency builds with every feature any dependent asks of it. An optional

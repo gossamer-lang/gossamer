@@ -18,22 +18,53 @@ use gossamer_binding_host::Signatures;
 const BINDING_SUBCOMMANDS: &[&str] = &["build", "check", "doc", "repl", "run", "test"];
 
 fn first_subcommand(args: &[OsString]) -> Option<String> {
-    args.iter()
-        .skip(1)
-        .map(|arg| arg.to_string_lossy())
-        .find(|arg| !arg.starts_with('-'))
-        .map(std::borrow::Cow::into_owned)
+    positionals(args).into_iter().next()
+}
+
+/// The arguments that are neither options nor the value `--features` takes.
+fn positionals(args: &[OsString]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut words = args.iter().skip(1).map(|arg| arg.to_string_lossy());
+    while let Some(word) = words.next() {
+        if word == "--features" {
+            words.next();
+        } else if !word.starts_with('-') {
+            out.push(word.into_owned());
+        }
+    }
+    out
+}
+
+/// The features the command line asks for, read as the parser will read them:
+/// the bindings build with the Cargo features they turn on, before the
+/// command itself runs.
+fn feature_request(args: &[OsString]) -> gossamer_pkg::features::FeatureRequest {
+    let mut request = gossamer_pkg::features::FeatureRequest::default();
+    let mut words = args.iter().skip(1).map(|arg| arg.to_string_lossy());
+    while let Some(word) = words.next() {
+        let listed = if word == "--features" {
+            words.next().map(std::borrow::Cow::into_owned)
+        } else {
+            word.strip_prefix("--features=").map(str::to_string)
+        };
+        if let Some(listed) = listed {
+            request.features.extend(
+                listed
+                    .split(',')
+                    .filter(|feature| !feature.is_empty())
+                    .map(str::to_string),
+            );
+        } else if word == "--no-default-features" {
+            request.no_default = true;
+        }
+    }
+    request
 }
 
 /// The path the subcommand names, when its first positional names something
 /// on disk; otherwise the subcommand works on the working directory.
 fn entry_arg(args: &[OsString]) -> Option<PathBuf> {
-    let mut positionals = args
-        .iter()
-        .skip(1)
-        .filter(|arg| !arg.to_string_lossy().starts_with('-'));
-    let _subcommand = positionals.next()?;
-    let candidate = PathBuf::from(positionals.next()?);
+    let candidate = PathBuf::from(positionals(args).into_iter().nth(1)?);
     candidate.exists().then_some(candidate)
 }
 
@@ -46,6 +77,7 @@ pub fn install_for_args(args: &[OsString]) -> Result<usize> {
     if !BINDING_SUBCOMMANDS.contains(&subcommand.as_str()) {
         return Ok(0);
     }
+    crate::paths::set_feature_request(feature_request(args));
     let project = match entry_arg(args) {
         Some(entry) => crate::paths::project_context_for_entry(&entry),
         None => crate::paths::project_context(),
@@ -61,6 +93,11 @@ pub fn install_for_entry(entry: &Path) -> Result<usize> {
 fn install_for_project(project: &crate::paths::ProjectContext) -> Result<usize> {
     if !gossamer_resolve::all_external_modules().is_empty() {
         return Ok(gossamer_resolve::all_external_modules().len());
+    }
+    // The bindings build with the Cargo features the package features turn
+    // on. Resolution starts from a file of the project, as a build's entry is.
+    if let Some(dir) = project.manifest_dir() {
+        crate::paths::install_features(&std::path::absolute(dir.join("project.toml"))?)?;
     }
     // A malformed manifest is an error, never a silent "no bindings". The
     // binding manifest carries the bindings the project's dependencies

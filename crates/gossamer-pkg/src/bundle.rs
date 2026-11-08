@@ -14,7 +14,7 @@
 //! source unchanged, so diagnostics map back to the file the user is
 //! editing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -167,7 +167,25 @@ pub fn with_dependency_bindings(manifest: &Manifest, manifest_dir: &Path) -> Man
                 .or_insert_with(|| rebased_binding(spec, &root));
         }
     }
+    for (name, spec) in &mut merged.rust_bindings {
+        add_binding_features(spec, crate::features::binding_features(name));
+    }
     merged
+}
+
+/// Adds the Cargo features the package features turn on to a binding's own.
+fn add_binding_features(spec: &mut RustBindingSpec, enabled: BTreeSet<String>) {
+    let (RustBindingSpec::Path { features, .. }
+    | RustBindingSpec::Git { features, .. }
+    | RustBindingSpec::Crates { features, .. }) = spec
+    else {
+        return;
+    };
+    for feature in enabled {
+        if !features.contains(&feature) {
+            features.push(feature);
+        }
+    }
 }
 
 fn rebased_binding(spec: RustBindingSpec, root: &Path) -> RustBindingSpec {

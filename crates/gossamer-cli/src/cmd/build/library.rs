@@ -232,7 +232,7 @@ fn link_inputs(
         .map(|archive| archive.path)
         .collect();
     let bindings_target = lt.is_cross.then_some(lt.triple.as_str());
-    let bindings = build_static_bindings_lib(file, release, bindings_target, libraries)
+    let bindings = build_static_bindings_lib(file, release, false, bindings_target, libraries)
         .map_err(|err| NativeBuildError::LinkerMissing(format!("rust-bindings: {err}")))?
         .map(|built| built.archive);
     if host && bindings.is_some() {
