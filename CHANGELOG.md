@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.78.0 - Leaner native builds of programs with Rust bindings
+
+- `gos build --release` of a program with `[rust-bindings]` compiles the runtime into the bindings' archive and links that one archive, so the program carries one Rust standard library and one copy of each crate the runtime and its bindings share (regex, serde_json, hashbrown, memchr and others) where it carried two.
+- A package feature can turn on a Cargo feature of the package's own `[rust-bindings]` crate: `markup = ["gui-engine-binding/markup"]`. Dependents choose those features as they choose any other, with `features = [..]` and `default-features = false`, on the VM, the JIT and native builds alike.
+
 ## 0.77.2 - CPU profiles of programs with threads of their own
 
 - `pprof::cpu_profile` no longer freezes a program whose foreign code runs threads of its own, such as a GUI that rasterizes on worker threads: the sampler asked the C library for a thread's stack bounds inside its signal handler, and a thread interrupted inside `malloc` waited on itself. It now reads those threads' frames through the kernel's checked copy on Linux, asks macOS only about the interrupted thread itself, and on FreeBSD walks only the threads the runtime started.

@@ -401,6 +401,7 @@ pub fn ensure_bindings_library_in(
             target_args: &["--lib"],
             crate_label: &crates.join(", "),
             rustc_args: &[],
+            rustflags: &[],
         },
         None,
     )?;

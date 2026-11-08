@@ -1667,8 +1667,10 @@ fn extra_link_archives(
     } else {
         None
     };
+    // A release program links its bindings and the runtime as one Rust unit.
     let bindings = build_static_bindings_lib(
         input_path,
+        opts.release,
         opts.release,
         bindings_target.as_deref(),
         libraries,
@@ -1676,7 +1678,11 @@ fn extra_link_archives(
     .map_err(|err| NativeBuildError::LinkerMissing(format!("rust-bindings staticlib: {err}")))?;
     let mut extra = LinkArchives::default();
     if let Some(bindings) = bindings {
-        extra.archives.push(bindings.archive);
+        if bindings.runtime {
+            extra.runtime = Some(bindings.archive);
+        } else {
+            extra.archives.push(bindings.archive);
+        }
         extra.inputs = bindings.inputs;
     }
     // PGO collect mode: the LLVM mid-end emits instrumented IR that
@@ -1698,12 +1704,17 @@ fn extra_link_archives(
 struct LinkArchives {
     archives: Vec<PathBuf>,
     inputs: Vec<PathBuf>,
+    /// The `[rust-bindings]` archive, when it holds the runtime the link
+    /// takes in place of the toolchain's.
+    runtime: Option<PathBuf>,
 }
 
 /// A built `[rust-bindings]` staticlib and the files it was built from.
 pub(crate) struct BuiltBindings {
     pub(crate) archive: PathBuf,
     pub(crate) inputs: Vec<PathBuf>,
+    /// The archive holds the Gossamer runtime too.
+    pub(crate) runtime: bool,
 }
 
 /// Compiles the `[native]` sources of the program at `input_path` for
@@ -1780,18 +1791,21 @@ fn try_native_build(
     profile_rss_stage("build_backend_emitted");
     // Static-musl is chosen for a cross musl target (musl links
     // statically by construction) or for a host release that opted in.
-    let runtime_lib = if static_musl {
+    let pgo = pgo_link_config();
+    let LinkArchives {
+        archives: extra_archives,
+        inputs: bindings_inputs,
+        runtime: bindings_runtime,
+    } = extra_link_archives(paths.input, opts, static_musl, &lt, &pgo, &mut libraries)?;
+    let runtime_lib = if let Some(archive) = bindings_runtime {
+        archive
+    } else if static_musl {
         find_runtime_lib_for_target(musl_triple_for_arch(lt.arch))?
     } else if lt.is_cross {
         find_runtime_lib_for_target(&lt.triple)?
     } else {
         find_runtime_lib()?
     };
-    let pgo = pgo_link_config();
-    let LinkArchives {
-        archives: extra_archives,
-        inputs: bindings_inputs,
-    } = extra_link_archives(paths.input, opts, static_musl, &lt, &pgo, &mut libraries)?;
     let mut native_inputs = if links_declares_foreign {
         let native_target = if static_musl {
             Some(musl_triple_for_arch(lt.arch))
@@ -2020,6 +2034,7 @@ fn elf_forced_symbols(opts: LinkOptions) -> &'static [&'static str] {
 fn build_static_bindings_lib(
     entry: &Path,
     release: bool,
+    runtime: bool,
     cargo_target: Option<&str>,
     libraries: &mut NativeLinks,
 ) -> std::result::Result<Option<BuiltBindings>, gossamer_driver::BindingBuildError> {
@@ -2052,13 +2067,16 @@ fn build_static_bindings_lib(
     else {
         return Ok(None);
     };
-    let lib = lib.with_cargo_target(cargo_target.map(str::to_string));
+    let lib = lib
+        .with_cargo_target(cargo_target.map(str::to_string))
+        .with_runtime(runtime);
     let built = lib.ensure_built()?;
     libraries.staticlib_args = built.native_libs;
     libraries.search.extend(built.search);
     Ok(Some(BuiltBindings {
         archive: built.archive,
         inputs: built.inputs,
+        runtime,
     }))
 }
 
@@ -2241,13 +2259,10 @@ fn link_posix(
     cmd.arg("-o").arg(out_path);
     push_system_libraries(&mut cmd, lt, opts);
     if !extra_archives.is_empty() {
-        // The rust-bindings staticlib pulls in `gossamer-runtime`
-        // as a transitive Cargo dep, which produces a second copy
-        // of every `gos_rt_*` symbol alongside `libgossamer_runtime.a`.
-        // Both copies come from the same source tree and are
-        // functionally identical, so let the linker keep the first
-        // definition rather than failing the link. macOS `ld64`
-        // doesn't accept the GNU-ld spelling - the equivalent
+        // A `[rust-bindings]` archive linked beside the runtime's carries a
+        // Rust standard library of its own, and the two define the same
+        // unmangled std symbols, so the linker keeps the first definition.
+        // macOS `ld64` doesn't accept the GNU-ld spelling - the equivalent
         // there is `-Wl,-multiply_defined,suppress`.
         if lt.os == Os::MacOs {
             cmd.arg("-Wl,-multiply_defined,suppress");
@@ -2647,14 +2662,10 @@ fn link_windows_msvc(
         cmd.arg(archive);
     }
     if !extra_archives.is_empty() {
-        // rust-bindings staticlibs pull in
-        // `gossamer-runtime` as a transitive Cargo dep, producing a
-        // second copy of every `gos_rt_*` symbol alongside the
-        // primary `gossamer_runtime.lib`. Both copies are
-        // functionally identical (same source tree). `/FORCE:MULTIPLE`
-        // is the MSVC linker's equivalent of GNU ld's
-        // `--allow-multiple-definition`; without it, `link.exe`
-        // exits with LNK4006 ("multiply defined").
+        // A `[rust-bindings]` archive linked beside the runtime's carries a
+        // Rust standard library of its own, and the two define the same
+        // unmangled std symbols. `/FORCE:MULTIPLE` is the MSVC linker's
+        // equivalent of GNU ld's `--allow-multiple-definition`.
         cmd.arg("/FORCE:MULTIPLE");
     }
     for dir in &libraries.search {
