@@ -180,7 +180,7 @@ fi
 
 if [ "$VERSION" = "latest" ]; then
     VERSION_URL="https://api.github.com/repos/$REPO/releases/latest"
-    TAG=$(curl -fsSL "$VERSION_URL" | sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+    TAG=$(curl -fsSL --retry 5 --retry-delay 3 "$VERSION_URL" | sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
     if [ -z "$TAG" ]; then
         echo "gossamer-install: could not read latest release tag from $VERSION_URL" >&2
         exit 1
@@ -210,7 +210,9 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 printf 'Downloading %s ...\n' "$URL"
-curl -fL -o "$tmp/$ASSET" "$URL"
+# GitHub's CDN answers 504 while an edge first fetches a large asset, and
+# serves it once the edge has it.
+curl -fL --retry 5 --retry-delay 3 -o "$tmp/$ASSET" "$URL"
 
 cd "$tmp"
 case "$ASSET" in
