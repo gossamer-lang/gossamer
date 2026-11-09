@@ -49,20 +49,34 @@ impl RawSample {
     };
 }
 
-/// Fixed sample storage shared between a recorder and a drainer.
-///
-/// Not a lock: the recorder can be a signal handler, which may interrupt
-/// code holding any lock in the process and so may not take one. Access
-/// is serialized by the paired index instead - a recorder writes only the
-/// slot its `fetch_add` claimed, and a drainer reads only slots below an
-/// index it has swapped to zero.
-struct SampleRing {
-    slots: UnsafeCell<[RawSample; CAPACITY]>,
+/// A ring slot and its turn: on the ring's lap `L` the slot is free for a
+/// recorder at turn `2L` and holds a sample for the drainer at `2L + 1`.
+struct Slot {
+    turn: AtomicUsize,
+    sample: UnsafeCell<RawSample>,
 }
 
-// SAFETY: the index protocol above gives every access a slot no other
-// thread is touching; the cell only removes the compiler's aliasing
-// assumption, it does not add sharing.
+/// Fixed sample storage shared between recorders and a drainer.
+///
+/// Not a lock: a recorder can be a signal handler, which may interrupt
+/// code holding any lock in the process and so may not take one. A slot's
+/// turn hands it over instead. A recorder claims a position, writes the
+/// slot, then publishes it; the drainer reads only published slots and
+/// frees each for the next lap. A slot still being written stops the drain
+/// there, and a full ring drops new samples rather than overwrite unread
+/// ones.
+struct SampleRing {
+    slots: [Slot; CAPACITY],
+    /// The next position a recorder claims; its slot is `pos % CAPACITY`.
+    head: AtomicUsize,
+    /// The next position the drainer reads.
+    tail: AtomicUsize,
+}
+
+// SAFETY: a slot's sample is written only by the recorder that claimed its
+// position while the turn says free, and read only by the drainer that
+// claimed it while the turn says published; the turn's release and acquire
+// order each hand-over.
 unsafe impl Sync for SampleRing {}
 
 impl SampleRing {
@@ -74,39 +88,81 @@ impl SampleRing {
     )]
     const fn new() -> Self {
         Self {
-            slots: UnsafeCell::new([RawSample::EMPTY; CAPACITY]),
+            slots: [const {
+                Slot {
+                    turn: AtomicUsize::new(0),
+                    sample: UnsafeCell::new(RawSample::EMPTY),
+                }
+            }; CAPACITY],
+            head: AtomicUsize::new(0),
+            tail: AtomicUsize::new(0),
         }
     }
 
-    /// Writes `sample` into `slot`, which the caller has claimed.
-    fn write(&self, slot: usize, sample: &RawSample) {
-        if slot >= CAPACITY {
-            return;
-        }
-        // SAFETY: `slot` was claimed by the caller's `fetch_add` and is
-        // in bounds, so no other writer addresses it.
-        unsafe {
-            self.slots
-                .get()
-                .cast::<RawSample>()
-                .add(slot)
-                .write(*sample);
+    /// Stores `sample`, or drops it while the ring holds `CAPACITY` samples
+    /// not yet drained; answers whether the ring took it.
+    fn push(&self, sample: &RawSample) -> bool {
+        let mut pos = self.head.load(Ordering::Relaxed);
+        loop {
+            let slot = &self.slots[pos % CAPACITY];
+            let free = 2 * (pos / CAPACITY);
+            match slot.turn.load(Ordering::Acquire).cmp(&free) {
+                std::cmp::Ordering::Equal => match self.head.compare_exchange_weak(
+                    pos,
+                    pos + 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        // SAFETY: claiming `pos` while the turn says free makes
+                        // this recorder the slot's only user until it publishes.
+                        unsafe { slot.sample.get().write(*sample) };
+                        slot.turn.store(free + 1, Ordering::Release);
+                        return true;
+                    }
+                    Err(now) => pos = now,
+                },
+                // The slot still holds the previous lap's sample.
+                std::cmp::Ordering::Less => return false,
+                std::cmp::Ordering::Greater => pos = self.head.load(Ordering::Relaxed),
+            }
         }
     }
 
-    /// Reads `slot`, which no recorder is writing.
-    fn read(&self, slot: usize) -> RawSample {
-        // SAFETY: the drainer reset the index before reading, so slots
-        // below `taken` are complete and unclaimed.
-        unsafe { self.slots.get().cast::<RawSample>().add(slot).read() }
+    /// Takes the published samples in order, up to the first slot a
+    /// recorder has claimed but not yet published.
+    fn drain(&self) -> Vec<RawSample> {
+        let mut out = Vec::new();
+        let mut pos = self.tail.load(Ordering::Relaxed);
+        loop {
+            let slot = &self.slots[pos % CAPACITY];
+            let published = 2 * (pos / CAPACITY) + 1;
+            match slot.turn.load(Ordering::Acquire).cmp(&published) {
+                std::cmp::Ordering::Equal => match self.tail.compare_exchange_weak(
+                    pos,
+                    pos + 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        // SAFETY: claiming `pos` while the turn says published
+                        // makes this drainer the slot's only user until it frees it.
+                        let sample = unsafe { slot.sample.get().read() };
+                        slot.turn.store(published + 1, Ordering::Release);
+                        out.push(sample);
+                        pos += 1;
+                    }
+                    Err(now) => pos = now,
+                },
+                std::cmp::Ordering::Less => return out,
+                std::cmp::Ordering::Greater => pos = self.tail.load(Ordering::Relaxed),
+            }
+        }
     }
 }
 
 /// The CPU sample ring.
 static SAMPLES: SampleRing = SampleRing::new();
-
-/// Next slot to write. Wraps; a drain reads up to the current index.
-static WRITE_INDEX: AtomicUsize = AtomicUsize::new(0);
 
 /// Whether the timer is armed. The handler returns immediately when it
 /// is not, so a signal delivered during teardown records nothing.
@@ -126,7 +182,6 @@ pub fn is_sampling() -> bool {
 #[cfg(all(unix, not(miri), not(target_arch = "wasm32")))]
 pub fn start(hz: u32) -> std::io::Result<()> {
     install_handler()?;
-    WRITE_INDEX.store(0, Ordering::SeqCst);
     SAMPLING.store(true, Ordering::SeqCst);
     set_timer(hz)
 }
@@ -151,15 +206,7 @@ pub fn stop() {}
 /// Takes everything recorded since the last drain.
 #[must_use]
 pub fn drain() -> Vec<RawSample> {
-    let taken = WRITE_INDEX.swap(0, Ordering::SeqCst).min(CAPACITY);
-    let mut out = Vec::with_capacity(taken);
-    for slot in 0..taken {
-        let sample = SAMPLES.read(slot);
-        if sample.len > 0 {
-            out.push(sample);
-        }
-    }
-    out
+    SAMPLES.drain()
 }
 
 /// `micros` as the platform's `tv_usec` type. Generic so one spelling holds
@@ -245,14 +292,7 @@ unsafe extern "C" fn on_sigprof(
     if sample.len == 0 {
         return;
     }
-    let slot = WRITE_INDEX.fetch_add(1, Ordering::SeqCst);
-    if slot >= CAPACITY {
-        // Buffer full until the next drain. Dropping is better than
-        // wrapping over samples the drainer is about to read.
-        WRITE_INDEX.store(CAPACITY, Ordering::SeqCst);
-        return;
-    }
-    SAMPLES.write(slot, &sample);
+    let _ = SAMPLES.push(&sample);
 }
 
 /// Program counter, frame pointer and stack pointer of the interrupted
@@ -616,13 +656,9 @@ static HEAP_ACCUMULATOR: AtomicUsize = AtomicUsize::new(0);
 /// The allocation sample ring.
 static HEAP_SAMPLES: SampleRing = SampleRing::new();
 
-/// Next heap slot to write.
-static HEAP_INDEX: AtomicUsize = AtomicUsize::new(0);
-
 /// Arms allocation sampling.
 pub fn start_heap() {
     crate::c_abi::ledger::arm_instrumentation();
-    HEAP_INDEX.store(0, Ordering::SeqCst);
     HEAP_ACCUMULATOR.store(0, Ordering::SeqCst);
     HEAP_SAMPLING.store(true, Ordering::SeqCst);
 }
@@ -635,15 +671,7 @@ pub fn stop_heap() {
 /// Takes every heap sample recorded since the last drain.
 #[must_use]
 pub fn drain_heap() -> Vec<RawSample> {
-    let taken = HEAP_INDEX.swap(0, Ordering::SeqCst).min(CAPACITY);
-    let mut out = Vec::with_capacity(taken);
-    for slot in 0..taken {
-        let sample = HEAP_SAMPLES.read(slot);
-        if sample.len > 0 {
-            out.push(sample);
-        }
-    }
-    out
+    HEAP_SAMPLES.drain()
 }
 
 /// Accounts `bytes` against the sample threshold, recording a stack when
@@ -692,12 +720,7 @@ fn publish_heap_sample(sample: &RawSample) {
     if sample.len == 0 {
         return;
     }
-    let slot = HEAP_INDEX.fetch_add(1, Ordering::SeqCst);
-    if slot >= CAPACITY {
-        HEAP_INDEX.store(CAPACITY, Ordering::SeqCst);
-        return;
-    }
-    HEAP_SAMPLES.write(slot, sample);
+    let _ = HEAP_SAMPLES.push(sample);
 }
 
 /// Establishes one frame record and records the stack above it.
@@ -797,6 +820,54 @@ fn capture_heap_sample() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Recorders on several threads and a drainer at once: every sample the
+    /// ring took comes out once and whole, and none it dropped does.
+    #[test]
+    fn concurrent_recorders_and_a_drainer_hand_over_whole_samples() {
+        static RING: SampleRing = SampleRing::new();
+        const THREADS: usize = 4;
+        const EACH: usize = 20_000;
+        let done = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut recorders = Vec::new();
+        for t in 0..THREADS {
+            let done = done.clone();
+            recorders.push(std::thread::spawn(move || {
+                let mut taken = Vec::new();
+                for i in 0..EACH {
+                    let id = t * EACH + i + 1;
+                    let mut sample = RawSample::EMPTY;
+                    sample.frames[0] = id;
+                    sample.frames[1] = !id;
+                    sample.len = 2;
+                    if RING.push(&sample) {
+                        taken.push(id);
+                    }
+                }
+                done.fetch_add(1, Ordering::SeqCst);
+                taken
+            }));
+        }
+        let mut drained = Vec::new();
+        loop {
+            let finished = done.load(Ordering::SeqCst) == THREADS;
+            for sample in RING.drain() {
+                assert_eq!(sample.frames[1], !sample.frames[0], "a torn sample");
+                drained.push(sample.frames[0]);
+            }
+            if finished {
+                break;
+            }
+        }
+        drained.extend(RING.drain().iter().map(|sample| sample.frames[0]));
+        let mut taken: Vec<usize> = recorders
+            .into_iter()
+            .flat_map(|r| r.join().expect("a recorder"))
+            .collect();
+        taken.sort_unstable();
+        drained.sort_unstable();
+        assert_eq!(drained, taken);
+    }
 
     /// The sampler is one process-wide ring, so a test that arms, records, or
     /// drains it observes every other test doing the same. Hold this while

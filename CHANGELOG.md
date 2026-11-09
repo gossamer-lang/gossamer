@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.78.1 - Features of files below a project's root
+
+- A CPU or heap profile no longer reads a sample another thread is still recording, or misses ones recorded while it is taken: a recorder publishes a sample only once it is written, and a profile takes only published samples, in order.
+- A program file in a folder below its project's root, such as `tools/repros/probe.gos`, resolves the features its package features turn on in its dependencies; 0.78.0 looked for the dependencies beside the file and refused such a feature as naming no dependency.
+
 ## 0.78.0 - Leaner native builds of programs with Rust bindings
 
 - `gos build --release` of a program with `[rust-bindings]` compiles the runtime into the bindings' archive and links that one archive, so the program carries one Rust standard library and one copy of each crate the runtime and its bindings share (regex, serde_json, hashbrown, memchr and others) where it carried two.

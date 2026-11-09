@@ -96,7 +96,9 @@ pub fn resolve(entry: &Path, request: &FeatureRequest) -> Result<ResolvedFeature
             manifest: read_manifest(&root_manifest)?,
         },
     );
-    for (id, root) in all_dependency_roots(entry) {
+    // Dependencies are those of the manifest found above, however deep below
+    // its directory the entry sits.
+    for (id, root) in all_dependency_roots(&root_manifest) {
         let manifest = read_manifest(&root.join("project.toml"))?;
         packages.insert(
             id.clone(),
@@ -368,4 +370,36 @@ pub fn install(resolved: &ResolvedFeatures) {
 pub fn optional_dependency_included(id: &str) -> bool {
     let slot = ACTIVE_OPTIONAL.read();
     slot.1 || slot.0.as_ref().is_none_or(|set| set.contains(id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(path: &Path, text: &str) {
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("create a directory");
+        std::fs::write(path, text).expect("write a file");
+    }
+
+    #[test]
+    fn an_entry_below_the_project_resolves_its_dependency_features() {
+        let dir = std::env::temp_dir().join(format!("gos-features-nested-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write(
+            &dir.join("project.toml"),
+            "[project]\nid = \"example.com/app\"\nversion = \"0.1.0\"\n\n\
+             [features]\ndefault = [\"shiny\"]\nshiny = [\"extra/shiny\"]\n\n\
+             [dependencies]\n\"example.com/extra\" = { path = \"deps/extra\" }\n",
+        );
+        write(
+            &dir.join("deps/extra/project.toml"),
+            "[project]\nid = \"example.com/extra\"\nversion = \"0.1.0\"\n\n[features]\nshiny = []\n",
+        );
+        write(&dir.join("deps/extra/src/lib.gos"), "pub fn look() {}\n");
+        let entry = dir.join("tools/repros/probe.gos");
+        write(&entry, "fn main() {}\n");
+        let resolved = resolve(&entry, &FeatureRequest::default()).expect("features resolve");
+        assert!(resolved.per_package["example.com/extra"].contains("shiny"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
