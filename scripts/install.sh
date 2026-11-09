@@ -210,9 +210,10 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 printf 'Downloading %s ...\n' "$URL"
-# GitHub's CDN answers 504 while an edge first fetches a large asset, and
-# serves it once the edge has it.
-curl -fL --retry 5 --retry-delay 3 -o "$tmp/$ASSET" "$URL"
+# A cold fetch of a release asset can exceed the time GitHub's CDN allows its
+# origin, and the CDN then repeats that 504 for up to two minutes. The retries
+# span several fresh fetches.
+curl -fL --retry 20 --retry-delay 30 -o "$tmp/$ASSET" "$URL"
 
 cd "$tmp"
 case "$ASSET" in
