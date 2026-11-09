@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.78.2 - Tests a platform turns off
+
+- `gos test` leaves out a `#[test]` that its `#[cfg]` turns off on the platform running it, where it used to fail with GX0002.
+- The install script waits out the 504s GitHub's CDN can answer for a release asset it has not cached, so an install or CI job no longer fails on one.
+
 ## 0.78.1 - Features of files below a project's root
 
 - A CPU or heap profile no longer reads a sample another thread is still recording, or misses ones recorded while it is taken: a recorder publishes a sample only once it is written, and a profile takes only published samples, in order.

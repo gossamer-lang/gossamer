@@ -862,7 +862,11 @@ fn foreign_regions(unit: &crate::paths::EntryUnit) -> Vec<(u32, u32)> {
 }
 
 fn collect_test_metadata(items: &[gossamer_ast::Item], output: &mut Vec<TestSpec>) -> Result<()> {
-    for item in items {
+    // An item its `#[cfg]` turns off is not in the program the tests run in.
+    for item in items
+        .iter()
+        .filter(|item| gossamer_resolve::item_is_active(&item.attrs))
+    {
         match &item.kind {
             gossamer_ast::ItemKind::Fn(decl) if item_has_attr(item, "test") => {
                 let cases: Vec<_> = item
@@ -1594,6 +1598,19 @@ fn xml_escape(s: &str) -> String {
 #[cfg(test)]
 mod focused_tests {
     use super::*;
+
+    #[test]
+    fn a_test_turned_off_by_cfg_is_not_collected() {
+        let source = "#[cfg(not(any(unix, windows)))]\n#[test]\nfn never() {}\n\n\
+                      #[test]\nfn always() {}\n";
+        let mut map = gossamer_lex::SourceMap::new();
+        let file = map.add_file("cfg.gos".to_string(), source.to_string());
+        let (parsed, _) = gossamer_parse::parse_source_file(source, file);
+        let mut tests = Vec::new();
+        collect_test_metadata(&parsed.items, &mut tests).expect("metadata");
+        let names: Vec<_> = tests.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["always"]);
+    }
 
     /// The scheduling classifier decides on the source, so its answer is
     /// the same on every run and on every machine.
