@@ -392,3 +392,52 @@ fn main() {
 "#,
     );
 }
+
+#[test]
+fn json_values_inside_aggregates_pushed_in_a_loop_keep_their_own_handles() {
+    // A pushed tuple or struct copies each JSON field into the vector's slot,
+    // which must hold a handle of its own: the local the element was built
+    // in releases its field on its next overwrite, and a cloned or
+    // overwritten vector releases what its slots held.
+    let src = r#"
+use std::encoding::json
+
+struct Entry { key: String, value: json::Value }
+
+fn main() {
+    let mut pairs: Vec<(String, json::Value)> = #[]
+    let mut entries: Vec<Entry> = #[]
+    for i in 0..6 {
+        pairs.push((f"p{i}", json::Value::Int(i)))
+        entries.push(Entry { key: f"e{i}", value: json::Value::object(#[("n", json::Value::Int(i * 10))]) })
+    }
+    let copy = pairs.clone()
+    pairs[0] = ("replaced", json::Value::String("new"))
+    println(json::Value::object(pairs).to_string())
+    println(json::Value::object(copy).to_string())
+    for e in entries { println(f"{e.key} {e.value.to_string()}") }
+}
+"#;
+    assert_vm_matches_native("json-aggregates", src);
+    let dir = env::temp_dir().join(format!("gos-rcnest-json-expect-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("json_expect.gos");
+    std::fs::write(&source, src).unwrap();
+    let out = Command::new(gos_bin())
+        .arg("run")
+        .arg(&source)
+        .output()
+        .expect("spawn gos");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        text.lines().take(3).collect::<Vec<_>>(),
+        vec![
+            r#"{"p1":1,"p2":2,"p3":3,"p4":4,"p5":5,"replaced":"new"}"#,
+            r#"{"p0":0,"p1":1,"p2":2,"p3":3,"p4":4,"p5":5}"#,
+            r#"e0 {"n":0}"#,
+        ],
+        "{text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
