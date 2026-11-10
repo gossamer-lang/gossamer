@@ -1087,6 +1087,10 @@ pub(crate) unsafe fn vec_retain_slot_children(v: *const GosVec, slot: *mut u8) {
                 let cloned = crate::c_abi::gos_rt_vec_clone(child.cast());
                 slot_write_word(word, cloned.cast::<u8>());
             }
+            vec_elem_kind::JSON => {
+                let cloned = crate::c_abi::json::gos_rt_json_clone(child.cast());
+                slot_write_word(word, cloned.cast::<u8>());
+            }
             vec_elem_kind::ITER => crate::c_abi::rc::lazy_children::retain(child.cast(), false),
             vec_elem_kind::ITER_PAIR => crate::c_abi::rc::lazy_children::retain(child.cast(), true),
             _ => {}
@@ -1199,6 +1203,7 @@ pub(crate) unsafe fn vec_release_slot_children(v: *const GosVec, slot: *const u8
             vec_elem_kind::SET => crate::c_abi::map::gos_rt_set_free(child.cast()),
             vec_elem_kind::DEQUE => crate::c_abi::deque::gos_rt_deque_free(child.cast()),
             vec_elem_kind::HEAP => crate::c_abi::map::gos_rt_vec_free(child.cast()),
+            vec_elem_kind::JSON => crate::c_abi::json::gos_rt_json_free(child.cast()),
             vec_elem_kind::ITER => crate::c_abi::rc::lazy_children::drop_share(child.cast(), false),
             vec_elem_kind::ITER_PAIR => {
                 crate::c_abi::rc::lazy_children::drop_share(child.cast(), true);
@@ -1299,6 +1304,7 @@ pub(crate) unsafe fn vec_release_owned_children(v: &GosVec) {
                 vec_elem_kind::SET => crate::c_abi::map::gos_rt_set_free(child.cast()),
                 vec_elem_kind::DEQUE => crate::c_abi::deque::gos_rt_deque_free(child.cast()),
                 vec_elem_kind::HEAP => crate::c_abi::map::gos_rt_vec_free(child.cast()),
+                vec_elem_kind::JSON => crate::c_abi::json::gos_rt_json_free(child.cast()),
                 vec_elem_kind::ITER => {
                     crate::c_abi::rc::lazy_children::drop_share(child.cast(), false);
                 }
@@ -1602,7 +1608,9 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
                     // the free. A `GosString` is immutable and a heap node is
                     // counted, so both are shared; a `GosVec`, a `GosMap`,
                     // and a `GosSet` are mutable and the copy takes storage
-                    // of its own, written back through the slot word.
+                    // of its own, written back through the slot word. A JSON
+                    // handle belongs to one holder, so the copy takes a
+                    // handle of its own onto the same document.
                     // SAFETY: `slot` is an element laid out as `children` describe.
                     unsafe {
                         visit_slot_child_words(slot, children, |word, child, kind| match kind {
@@ -1627,6 +1635,10 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
                             }
                             vec_elem_kind::HEAP => {
                                 let cloned = crate::c_abi::gos_rt_vec_clone(child.cast());
+                                slot_write_word(word, cloned.cast::<u8>());
+                            }
+                            vec_elem_kind::JSON => {
+                                let cloned = crate::c_abi::json::gos_rt_json_clone(child.cast());
                                 slot_write_word(word, cloned.cast::<u8>());
                             }
                             vec_elem_kind::ITER => {

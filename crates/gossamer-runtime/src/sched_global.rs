@@ -734,14 +734,43 @@ fn report_channel_wait_if_stuck(
 }
 
 /// Advances every time the set of runnable goroutines may have changed: a
-/// spawn, a wake, a finish, or `main` entering or leaving a wait. A
-/// deadlock check that reads the same value before and after its counts
-/// read one state.
+/// spawn, a wake, a finish, or `main` entering or leaving a wait.
 static SCHEDULER_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Records that the runnable set may have changed.
-pub fn note_scheduler_progress() {
-    SCHEDULER_EPOCH.fetch_add(1, Ordering::AcqRel);
+/// Changes to the runnable set under way. A deadlock check reads one state
+/// only when none is under way as it starts and as it ends and the epoch
+/// stayed the same between: a change that starts after the first reading
+/// either is still under way at the last or has advanced the epoch.
+static SCHEDULER_CHANGES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A change to the runnable set, under way until dropped.
+#[must_use]
+pub struct SchedulerChange(());
+
+/// Marks a change to the runnable set as under way: make the change while
+/// holding the answer, which counts it as done when dropped.
+pub fn begin_scheduler_change() -> SchedulerChange {
+    SCHEDULER_CHANGES.fetch_add(1, Ordering::SeqCst);
+    SchedulerChange(())
+}
+
+impl Drop for SchedulerChange {
+    fn drop(&mut self) {
+        SCHEDULER_EPOCH.fetch_add(1, Ordering::SeqCst);
+        SCHEDULER_CHANGES.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// The epoch, when no change to the runnable set is under way.
+fn settled_epoch() -> Option<u64> {
+    let epoch = SCHEDULER_EPOCH.load(Ordering::SeqCst);
+    (SCHEDULER_CHANGES.load(Ordering::SeqCst) == 0).then_some(epoch)
+}
+
+/// Whether the runnable set stayed as it was when `settled_epoch` answered
+/// `epoch`.
+fn settled_since(epoch: u64) -> bool {
+    SCHEDULER_CHANGES.load(Ordering::SeqCst) == 0 && SCHEDULER_EPOCH.load(Ordering::SeqCst) == epoch
 }
 
 fn is_main_thread() -> bool {
@@ -767,12 +796,12 @@ fn begin_main_wait(
     on_channel: bool,
     still_waiting: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 ) {
+    let _change = begin_scheduler_change();
     *MAIN_WAIT.lock() = Some(MainWait {
         op: op.to_string(),
         on_channel,
         still_waiting,
     });
-    note_scheduler_progress();
 }
 
 /// Records that `main` is about to wait for `op`, which completes only when
@@ -791,8 +820,8 @@ pub fn main_waits_on(op: &str, still_waiting: Arc<dyn Fn() -> bool + Send + Sync
 /// Records that `main` is no longer waiting.
 pub fn end_main_wait() {
     if is_main_thread() {
+        let _change = begin_scheduler_change();
         *MAIN_WAIT.lock() = None;
-        note_scheduler_progress();
     }
 }
 
@@ -809,7 +838,9 @@ pub fn check_program_blocked() {
     if !PROGRAM_ENTERED.load(Ordering::Acquire) {
         return;
     }
-    let epoch = SCHEDULER_EPOCH.load(Ordering::Acquire);
+    let Some(epoch) = settled_epoch() else {
+        return;
+    };
     let (op, on_channel, still_waiting) = {
         let wait = MAIN_WAIT.lock();
         let Some(wait) = wait.as_ref() else {
@@ -841,7 +872,7 @@ pub fn check_program_blocked() {
     {
         return;
     }
-    if SCHEDULER_EPOCH.load(Ordering::Acquire) != epoch {
+    if !settled_since(epoch) {
         return;
     }
     report_fatal_deadlock(&op);
@@ -1131,6 +1162,21 @@ mod tests {
     use std::os::unix::ffi::OsStrExt;
     #[cfg(unix)]
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn a_runnable_set_change_under_way_or_made_during_a_check_is_never_settled() {
+        // Other tests change the runnable set concurrently, so only what a
+        // change held here guarantees is asserted.
+        let change = begin_scheduler_change();
+        assert_eq!(settled_epoch(), None, "a change is under way");
+        let epoch = SCHEDULER_EPOCH.load(Ordering::SeqCst);
+        assert!(!settled_since(epoch), "a change is still under way");
+        drop(change);
+        assert!(
+            !settled_since(epoch),
+            "the finished change advanced the epoch"
+        );
+    }
 
     #[cfg(unix)]
     const BLOCKING_FS_CHILD_ENV: &str = "GOSSAMER_BLOCKING_FS_CHILD";

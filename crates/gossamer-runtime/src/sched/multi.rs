@@ -564,9 +564,12 @@ impl MultiScheduler {
 
     fn try_spawn_as<T: SchedTask + 'static>(&self, task: T, service: bool) -> Option<Gid> {
         let max = self.inner.max_live.load(Ordering::Relaxed);
-        let prev = self.inner.live_goroutines.fetch_add(1, Ordering::AcqRel);
-        crate::sched_global::note_scheduler_progress();
+        let prev = {
+            let _change = crate::sched_global::begin_scheduler_change();
+            self.inner.live_goroutines.fetch_add(1, Ordering::AcqRel)
+        };
         if prev >= max {
+            let _change = crate::sched_global::begin_scheduler_change();
             self.inner.live_goroutines.fetch_sub(1, Ordering::AcqRel);
             return None;
         }
@@ -809,7 +812,10 @@ impl MultiScheduler {
         reason = "called for its side effect; the bool (found-parked vs pre-unpark) is informational and most call sites are fire-and-forget"
     )]
     pub fn unpark(&self, gid: Gid) -> bool {
-        crate::sched_global::note_scheduler_progress();
+        // The wake is under way from before the parked entry goes until the
+        // task is queued to run, so a deadlock check that counted the entry
+        // as parked cannot also miss the wake.
+        let _change = crate::sched_global::begin_scheduler_change();
         // Hold the `parked` guard across the `pre_unpark.insert()`
         // below so the worker's symmetric "insert into parked, then
         // check pre_unpark" sequence (in `worker_loop`) cannot
@@ -1316,8 +1322,10 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
             }
             Step::Done => {
                 shared.stats.finished.fetch_add(1, Ordering::Relaxed);
-                shared.live_goroutines.fetch_sub(1, Ordering::AcqRel);
-                crate::sched_global::note_scheduler_progress();
+                {
+                    let _change = crate::sched_global::begin_scheduler_change();
+                    shared.live_goroutines.fetch_sub(1, Ordering::AcqRel);
+                }
                 crate::sched_global::check_program_blocked();
                 slot.last_yield_micros
                     .store(now_micros_since_start(), Ordering::Release);

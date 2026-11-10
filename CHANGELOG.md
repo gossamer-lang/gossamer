@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.78.3 - Heap named as heap on macOS
+## 0.78.4 - JSON values in vector elements no longer freed early, no false deadlock reports
+
+- A `json::Value` inside a tuple or struct stored in a `Vec` belongs to the vector's element: JIT and native programs that pushed such elements in a loop read `null`, or crashed, once the local the element was built in was reused. Cloning the vector copies the values and freeing it frees them.
+- A native program whose goroutines hand values along channels no longer stops, rarely, with "all goroutines are asleep - deadlock!" while one of them is being woken: the deadlock check now only trusts a reading no wake, spawn, or finish was in the middle of.
+
+## 0.78.3 - macOS heap tagged as application memory
 
 - macOS: the allocator tags the memory it maps as the program's own, so `vmmap` and `footprint` list the heap under an application tag instead of as IOAccelerator graphics memory.
 
