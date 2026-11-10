@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.78.3 - Heap named as heap on macOS
+
+- macOS: the allocator tags the memory it maps as the program's own, so `vmmap` and `footprint` list the heap under an application tag instead of as IOAccelerator graphics memory.
+
 ## 0.78.2 - Tests a platform turns off
 
 - `gos test` leaves out a `#[test]` that its `#[cfg]` turns off on the platform running it, where it used to fail with GX0002.
