@@ -7,6 +7,9 @@
 //!    on first allocation, and an uninstrumented allocator blinds `TSan` to
 //!    real heap races. `cfg(sanitize)` is nightly-only, so the flag is read
 //!    from the rustflags the sanitizer job sets.
+//!    It emits an `asan` cfg under `AddressSanitizer` for the same reason of
+//!    reading: `AddressSanitizer` pads every global with a redzone, which
+//!    the initializer list that tags the heap on macOS cannot hold.
 //! 2. Generates the name-to-address table for every `gos_rt_*` export
 //!    (`src/symbols.rs` includes it). The table is derived from the
 //!    definitions themselves, so a helper the runtime defines is reachable by
@@ -18,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(tsan)");
+    println!("cargo:rustc-check-cfg=cfg(asan)");
     // `cargo-fuzz` sets `--cfg fuzzing`; declare it so the allocator
     // gates in `lib.rs` / `rc.rs` (which fall back to the system
     // allocator under the fuzz harness) don't trip `unexpected_cfgs`.
@@ -33,6 +37,9 @@ fn main() {
 
     if flags.contains("sanitizer=thread") {
         println!("cargo:rustc-cfg=tsan");
+    }
+    if flags.contains("sanitizer=address") {
+        println!("cargo:rustc-cfg=asan");
     }
 
     generate_symbol_table();

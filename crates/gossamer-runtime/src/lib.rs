@@ -133,15 +133,17 @@ const MI_OPTION_OS_TAG: libmimalloc_sys::mi_option_t = 18;
 // `VM_MEMORY_APPLICATION_SPECIFIC_1`. mimalloc's default tag, 100, is
 // `VM_MEMORY_IOACCELERATOR`, so `vmmap` and `footprint` would file the heap
 // as graphics memory.
-#[cfg(all(target_os = "macos", not(any(tsan, miri, fuzzing))))]
+#[cfg(all(target_os = "macos", not(any(tsan, asan, miri, fuzzing))))]
 const HEAP_VM_TAG: std::os::raw::c_long = 240;
 
 // Tags the heap's mappings as the program's own. A region keeps the tag it
 // was mapped with, and the allocations of Rust's startup map mimalloc's
 // first arena before `main`, so this runs from the image's initializers,
 // before any of them. It reads the environment without allocating; a
-// deployment that set `MIMALLOC_OS_TAG` keeps its own tag.
-#[cfg(all(target_os = "macos", not(any(tsan, miri, fuzzing))))]
+// deployment that set `MIMALLOC_OS_TAG` keeps its own tag. AddressSanitizer
+// builds leave it out: the redzone it pads each global with cannot sit in
+// the initializer list.
+#[cfg(all(target_os = "macos", not(any(tsan, asan, miri, fuzzing))))]
 extern "C" fn tag_heap_before_main() {
     // SAFETY: getenv reads the environment the loader set up and answers
     // null or a NUL-terminated string; nothing writes it this early.
@@ -152,7 +154,7 @@ extern "C" fn tag_heap_before_main() {
     }
 }
 
-#[cfg(all(target_os = "macos", not(any(tsan, miri, fuzzing))))]
+#[cfg(all(target_os = "macos", not(any(tsan, asan, miri, fuzzing))))]
 #[used]
 #[unsafe(link_section = "__DATA,__mod_init_func")]
 static TAG_HEAP_BEFORE_MAIN: extern "C" fn() = tag_heap_before_main;
@@ -255,7 +257,7 @@ pub fn init_process_allocator() {
         let _ = mimalloc_option_defaults();
         // A program's static runtime archive brings in only the code it
         // reaches; this keeps the heap-tagging initializer in the link.
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", not(asan)))]
         std::hint::black_box(TAG_HEAP_BEFORE_MAIN);
         // SAFETY: `mi_option_set` is thread-safe and valid any time after
         // the allocator initialised, which it has by the time `main` runs.
@@ -468,14 +470,14 @@ mod allocator_tests {
         );
         // macOS tags the heap before `main`, so its first reading is already
         // the program's tag; elsewhere the option keeps mimalloc's default.
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(any(not(target_os = "macos"), asan))]
         assert_eq!(
             tag_default, 100,
             "mimalloc option 18 default is {tag_default}, expected the os_tag \
              default of 100 - the enum likely shifted; re-verify the \
              mi_option_os_tag index for the current mimalloc version",
         );
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", not(asan)))]
         if std::env::var_os("MIMALLOC_OS_TAG").is_none() {
             assert_eq!(
                 tag_default,
