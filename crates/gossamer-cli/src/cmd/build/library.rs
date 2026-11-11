@@ -500,7 +500,7 @@ fn host_archive(
     let mut entries: Vec<String> = parts.exports.iter().map(|e| e.symbol.clone()).collect();
     entries.push(format!("{name}_shutdown"));
     entries.push("gos_lib_abi_fingerprint".to_string());
-    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let cc = super::host_c_driver();
     let mut link = std::process::Command::new(&cc);
     link.arg("-r").arg("-nostdlib").arg("-o").arg(&merged);
     link.args(parts.objects);
@@ -638,7 +638,7 @@ fn shared(parts: &Parts<'_>, name: &str, out: &Path) -> std::result::Result<(), 
     let cc = if parts.lt.is_cross {
         super::cross_cc(parts.lt)
     } else {
-        std::env::var("CC").unwrap_or_else(|_| "cc".to_string())
+        super::host_c_driver()
     };
     let mut cmd = std::process::Command::new(&cc);
     match parts.lt.os {

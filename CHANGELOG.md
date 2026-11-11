@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.78.5 - Native builds with Xcode 14's linker
+
+- macOS: `gos build` links with the classic ld64 of Xcode 14 and earlier, which rejected the `-O1` (`-O0` for a debug build) that `gos` passed; only ld-prime, Xcode 15's linker, is given an optimization level.
+- `GOS_CC` names the C driver that links the program and its libraries, as it already did for a package's native sources; `CC` and then `cc` follow when it is not set, and `gos env` reports the driver it picks.
+
 ## 0.78.4 - JSON values in vector elements no longer freed early, no false deadlock reports
 
 - A `json::Value` inside a tuple or struct stored in a `Vec` belongs to the vector's element: JIT and native programs that pushed such elements in a loop read `null`, or crashed, once the local the element was built in was reused. Cloning the vector copies the values and freeing it frees them.

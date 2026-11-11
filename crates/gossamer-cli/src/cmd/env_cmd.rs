@@ -11,13 +11,12 @@ pub(crate) fn run() {
         Ok(p) => p.display().to_string(),
         Err(e) => format!("<not found: {}>", e.user_message()),
     };
-    let cc = std::env::var("CC").unwrap_or_else(|_| {
-        if cfg!(windows) {
-            "rust-lld.exe".to_string()
-        } else {
-            "cc".to_string()
-        }
-    });
+    // Windows links through lld unless `CC` names a driver.
+    let cc = if cfg!(windows) {
+        std::env::var("CC").unwrap_or_else(|_| "rust-lld.exe".to_string())
+    } else {
+        build::host_c_driver()
+    };
     let host = std::env::var("HOST").unwrap_or_else(|_| {
         format!(
             "{arch}-{os}",
