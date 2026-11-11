@@ -161,10 +161,79 @@ fn links_rust_bindings(input: &Path) -> bool {
         .is_some_and(|manifest| manifest.is_ok_and(|m| !m.rust_bindings.is_empty()))
 }
 
-/// Explicit Apple linker optimization level for a profile. Kept pure so Linux
-/// tests cover the macOS plan without requiring an Apple linker.
-fn macos_link_optimisation_flag(opts: LinkOptions) -> &'static str {
-    if opts.release { "-Wl,-O1" } else { "-Wl,-O0" }
+/// Explicit Apple linker optimization level for a profile, which only
+/// ld-prime takes. Kept pure so Linux tests cover the macOS plan without
+/// requiring an Apple linker.
+fn macos_link_optimisation_flag(opts: LinkOptions, linker: AppleLinker) -> Option<&'static str> {
+    match linker {
+        AppleLinker::Prime => Some(if opts.release { "-Wl,-O1" } else { "-Wl,-O0" }),
+        AppleLinker::Other => None,
+    }
+}
+
+/// The generation of Apple's linker, which decides the options it takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppleLinker {
+    /// ld-prime, Xcode 15's linker and later, which takes `-O0` / `-O1`.
+    Prime,
+    /// The classic ld64 of Xcode 14 and earlier, which rejects `-O`, or a
+    /// linker that does not say which it is.
+    Other,
+}
+
+impl AppleLinker {
+    /// The linker whose `ld -v` report is `version`: ld-prime names its
+    /// project `ld-<version>`, the classic linker `ld64-<version>`.
+    fn from_version(version: &str) -> Self {
+        let project = version
+            .split_whitespace()
+            .find_map(|word| word.strip_prefix("PROJECT:"));
+        match project {
+            Some(project) if project.starts_with("ld-") => Self::Prime,
+            _ => Self::Other,
+        }
+    }
+
+    /// The linker the C driver `cc` runs, asked once per process.
+    fn of(cc: &str) -> Self {
+        static FOUND: std::sync::OnceLock<AppleLinker> = std::sync::OnceLock::new();
+        *FOUND.get_or_init(|| {
+            let Ok(found) = std::process::Command::new(cc)
+                .arg("-print-prog-name=ld")
+                .stdin(std::process::Stdio::null())
+                .output()
+            else {
+                return Self::Other;
+            };
+            let ld = String::from_utf8_lossy(&found.stdout).trim().to_string();
+            let Ok(report) = std::process::Command::new(if ld.is_empty() { "ld" } else { &ld })
+                .arg("-v")
+                .stdin(std::process::Stdio::null())
+                .output()
+            else {
+                return Self::Other;
+            };
+            // ld64 writes its version to stderr; read both streams.
+            Self::from_version(&format!(
+                "{} {}",
+                String::from_utf8_lossy(&report.stdout),
+                String::from_utf8_lossy(&report.stderr)
+            ))
+        })
+    }
+}
+
+/// The C compiler driver that links a host program: `GOS_CC` when set, as
+/// for the native sources a package compiles, then `CC`, then `cc`.
+pub(crate) fn host_c_driver() -> String {
+    c_driver_from(std::env::var("GOS_CC").ok(), std::env::var("CC").ok())
+}
+
+fn c_driver_from(gos_cc: Option<String>, cc: Option<String>) -> String {
+    gos_cc
+        .filter(|cc| !cc.is_empty())
+        .or(cc.filter(|cc| !cc.is_empty()))
+        .unwrap_or_else(|| "cc".to_string())
 }
 
 /// The PE subsystem the project around `entry` declares; `console` outside
@@ -2214,15 +2283,15 @@ fn link_posix(
     let cc = if lt.is_cross {
         cross_cc(lt)
     } else {
-        std::env::var("CC").unwrap_or_else(|_| "cc".to_string())
+        host_c_driver()
     };
     let mut cmd = std::process::Command::new(&cc);
     if lt.os == Os::MacOs {
         configure_macos_link_command(&mut cmd);
-        // Apple ld keeps a small default optimization set when no `-O` is
+        // ld-prime keeps a small default optimization set when no `-O` is
         // supplied. Make the profile contract explicit independently of
         // symbol stripping, which `-g` may disable.
-        cmd.arg(macos_link_optimisation_flag(opts));
+        cmd.args(macos_link_optimisation_flag(opts, AppleLinker::of(&cc)));
     }
     // Prefer mold for a native Linux host link only; a cross gcc driver
     // selects its own target linker, so mold here would target the host.
@@ -2898,6 +2967,42 @@ mod tests {
     }
 
     #[test]
+    fn only_ld_prime_reads_as_taking_an_optimisation_level() {
+        let xcode15 = "@(#)PROGRAM:ld PROJECT:ld-1015.7\nBUILD 18:48:48 Aug 22 2023\n\
+                       configured to support archs: armv6 armv7 arm64 x86_64";
+        let xcode14 = "@(#)PROGRAM:ld  PROJECT:ld64-820.1\nBUILD 20:07:01 Nov  7 2022\n\
+                       configured to support archs: armv6 armv7 arm64 x86_64";
+        assert_eq!(
+            super::AppleLinker::from_version(xcode15),
+            super::AppleLinker::Prime
+        );
+        assert_eq!(
+            super::AppleLinker::from_version(xcode14),
+            super::AppleLinker::Other
+        );
+        assert_eq!(
+            super::AppleLinker::from_version("GNU ld 2.42"),
+            super::AppleLinker::Other
+        );
+        assert_eq!(
+            super::AppleLinker::from_version(""),
+            super::AppleLinker::Other
+        );
+    }
+
+    #[test]
+    fn the_host_link_driver_prefers_gos_cc_then_cc() {
+        let named = |s: &str| Some(s.to_string());
+        assert_eq!(
+            super::c_driver_from(named("clang-18"), named("gcc")),
+            "clang-18"
+        );
+        assert_eq!(super::c_driver_from(None, named("gcc")), "gcc");
+        assert_eq!(super::c_driver_from(named(""), named("gcc")), "gcc");
+        assert_eq!(super::c_driver_from(None, None), "cc");
+    }
+
+    #[test]
     fn render_command_joins_program_and_args() {
         let mut cmd = std::process::Command::new("cc");
         cmd.arg("a.o").arg("-o").arg("out").arg("-lpthread");
@@ -3193,8 +3298,18 @@ mod tests {
             dynamic: true,
             windows_subsystem: super::WindowsSubsystem::Console,
         };
-        assert_eq!(super::macos_link_optimisation_flag(debug), "-Wl,-O0");
-        assert_eq!(super::macos_link_optimisation_flag(release), "-Wl,-O1");
+        let prime = super::AppleLinker::Prime;
+        assert_eq!(
+            super::macos_link_optimisation_flag(debug, prime),
+            Some("-Wl,-O0")
+        );
+        assert_eq!(
+            super::macos_link_optimisation_flag(release, prime),
+            Some("-Wl,-O1")
+        );
+        let classic = super::AppleLinker::Other;
+        assert_eq!(super::macos_link_optimisation_flag(debug, classic), None);
+        assert_eq!(super::macos_link_optimisation_flag(release, classic), None);
         assert_eq!(
             super::windows_link_optimisation_flags(debug),
             ["/OPT:NOREF", "/OPT:NOICF"]
