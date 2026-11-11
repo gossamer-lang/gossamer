@@ -1,9 +1,13 @@
 # Changelog
 
+## 0.78.6 - Memory returned with no purge delay
+
+- With `GOS_ALLOC_PURGE_DELAY=0`, threads return their freed memory before they wait, as they do with a delay.
+
 ## 0.78.5 - Native builds with Xcode 14's linker
 
-- macOS: `gos build` links with the classic ld64 of Xcode 14 and earlier, which rejected the `-O1` (`-O0` for a debug build) that `gos` passed; only ld-prime, Xcode 15's linker, is given an optimization level.
-- `GOS_CC` names the C driver that links the program and its libraries, as it already did for a package's native sources; `CC` and then `cc` follow when it is not set, and `gos env` reports the driver it picks.
+- macOS: `gos build` links with Xcode 14's ld64, which rejected the `-O1` flag `gos` passed.
+- `GOS_CC` also names the C driver for the final link; `CC`, then `cc`, follow, and `gos env` shows the choice.
 
 ## 0.78.4 - JSON values in vector elements no longer freed early, no false deadlock reports
 
