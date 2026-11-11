@@ -310,30 +310,38 @@ pub fn purge_expired_allocator_memory() {
 /// requests, a window's event loop - would otherwise hold them for as long as
 /// it waits.
 ///
-/// Collects at most once per purge window. Answers `None` once this thread
-/// has collected, or how long until it may when its last collect is more
-/// recent: a wait bounded by that answer and followed by another call
-/// releases what the work since the last collect freed.
+/// Collects at most once per purge window, and on every call when the window
+/// is zero. Answers `None` once this thread has collected, or how long until
+/// it may when its last collect is more recent: a wait bounded by that answer
+/// and followed by another call releases what the work since the last collect
+/// freed.
 #[must_use]
 pub fn mark_thread_idle() -> Option<std::time::Duration> {
     let window = allocator_purge_delay();
-    if window.is_zero() {
-        return None;
-    }
     thread_local! {
         static LAST_IDLE_COLLECT: std::cell::Cell<Option<std::time::Instant>> =
             const { std::cell::Cell::new(None) };
     }
     LAST_IDLE_COLLECT.with(|last| {
-        if let Some(left) = last.get().and_then(|at| window.checked_sub(at.elapsed()))
-            && !left.is_zero()
-        {
-            return Some(left);
+        let now = std::time::Instant::now();
+        let left = idle_collect_deferral(last.get(), now, window);
+        if left.is_none() {
+            collect_process_allocator(true);
+            last.set(Some(now));
         }
-        collect_process_allocator(true);
-        last.set(Some(std::time::Instant::now()));
-        None
+        left
     })
+}
+
+/// How long a thread that last collected at `last` waits before it may
+/// collect again at `now`; `None` when it may collect at once.
+fn idle_collect_deferral(
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+    window: std::time::Duration,
+) -> Option<std::time::Duration> {
+    last.and_then(|at| window.checked_sub(now.saturating_duration_since(at)))
+        .filter(|left| !left.is_zero())
 }
 
 /// Forces the process allocator to collect abandoned heaps and purge eligible
@@ -515,7 +523,7 @@ mod allocator_tests {
         if window.is_zero() {
             assert_eq!(
                 second, None,
-                "with no purge delay there is nothing to defer"
+                "with no purge delay every mark collects at once"
             );
         } else {
             assert!(
@@ -524,5 +532,33 @@ mod allocator_tests {
                  got {second:?} for a window of {window:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_idle_collect_waits_out_the_window_and_never_waits_without_one() {
+        use std::time::{Duration, Instant};
+        let at = Instant::now();
+        let window = Duration::from_secs(1);
+        let deferral = super::idle_collect_deferral;
+        assert_eq!(
+            deferral(None, at, window),
+            None,
+            "a first collect runs at once"
+        );
+        assert_eq!(
+            deferral(Some(at), at + Duration::from_millis(400), window),
+            Some(Duration::from_millis(600)),
+            "a collect inside the window waits for the rest of it"
+        );
+        assert_eq!(
+            deferral(Some(at), at + window, window),
+            None,
+            "the window has passed"
+        );
+        assert_eq!(
+            deferral(Some(at), at, Duration::ZERO),
+            None,
+            "with no purge delay every mark collects"
+        );
     }
 }
