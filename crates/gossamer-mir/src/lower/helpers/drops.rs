@@ -560,6 +560,187 @@ fn reads_container_only(name: &str) -> bool {
     )
 }
 
+/// Per local, whether it is an element view in `borrow` that some path reads
+/// after a write to the storage of the vector it views.
+///
+/// The vector's family is the vector, every element address read out of it,
+/// and every local defined by a copy of a family member or of a part of one
+/// (a field's table handle). A write is a store into a projection of a family
+/// member, a reference taken to one, or a family member handed to a runtime
+/// helper that is not a reader or a count helper.
+pub(super) fn views_written_before_read(body: &Body, borrow: &[bool]) -> Vec<bool> {
+    let n_locals = body.locals.len();
+    let mut container: Vec<Option<usize>> = vec![None; n_locals];
+    for block in &body.blocks {
+        if let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            args,
+            destination,
+            ..
+        } = &block.terminator
+            && matches!(
+                name.as_str(),
+                "gos_rt_vec_get_ptr"
+                    | "gos_rt_vec_get_ptr_unchecked"
+                    | "gos_rt_vec_get_i128"
+                    | "gos_rt_vec_get_i64"
+                    | "gos_rt_vec_get_i64_unchecked"
+            )
+            && destination.projection.is_empty()
+            && let Some(Operand::Copy(vec)) = args.first()
+            && (vec.local.0 as usize) < n_locals
+            && (destination.local.0 as usize) < n_locals
+        {
+            container[destination.local.0 as usize] = Some(vec.local.0 as usize);
+            container[vec.local.0 as usize].get_or_insert(vec.local.0 as usize);
+        }
+    }
+    if container.iter().all(Option::is_none) {
+        return vec![false; n_locals];
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for stmt in body.blocks.iter().flat_map(|b| &b.stmts) {
+            let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                continue;
+            };
+            let src = match rvalue {
+                Rvalue::Use(Operand::Copy(src)) => src,
+                Rvalue::BinaryOp {
+                    op: BinOp::Add,
+                    lhs: Operand::Copy(src),
+                    rhs: Operand::Const(ConstValue::Int(_)),
+                } => src,
+                _ => continue,
+            };
+            let (d, s) = (place.local.0 as usize, src.local.0 as usize);
+            if place.projection.is_empty()
+                && d < n_locals
+                && s < n_locals
+                && container[d].is_none()
+                && let Some(c) = container[s]
+            {
+                container[d] = Some(c);
+                changed = true;
+            }
+        }
+    }
+    let family = |op: &Operand| match op {
+        Operand::Copy(p) => container.get(p.local.0 as usize).copied().flatten(),
+        _ => None,
+    };
+    let mut writes: Vec<(usize, usize, usize)> = Vec::new();
+    for (bi, block) in body.blocks.iter().enumerate() {
+        for (si, stmt) in block.stmts.iter().enumerate() {
+            let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                continue;
+            };
+            if !place.projection.is_empty()
+                && let Some(c) = family(&Operand::Copy(Place::local(place.local)))
+            {
+                writes.push((c, bi, si));
+            }
+            match rvalue {
+                Rvalue::Ref { place: r, .. } => {
+                    if let Some(c) = family(&Operand::Copy(r.clone())) {
+                        writes.push((c, bi, si));
+                    }
+                }
+                Rvalue::CallIntrinsic { name, args } if !helper_only_reads(name) => {
+                    for c in args.iter().filter_map(family) {
+                        writes.push((c, bi, si));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            args,
+            ..
+        } = &block.terminator
+            && !helper_only_reads(name)
+        {
+            for c in args.iter().filter_map(family) {
+                writes.push((c, bi, block.stmts.len()));
+            }
+        }
+    }
+    let mut out = vec![false; n_locals];
+    for (view, flag) in out.iter_mut().enumerate() {
+        let Some(c) = container[view] else { continue };
+        if !borrow.get(view).copied().unwrap_or(false) || view == c {
+            continue;
+        }
+        let local = Local(u32::try_from(view).expect("local index"));
+        *flag = writes
+            .iter()
+            .any(|&(wc, bi, si)| wc == c && holder_copies::read_after(body, local, bi, si));
+    }
+    out
+}
+
+/// Whether the runtime helper `name` only reads the storage its arguments
+/// name, or only counts a holder of it: a length, an element or entry read, a
+/// membership test, a comparison, a hash, rendering, or a copy of it.
+fn helper_only_reads(name: &str) -> bool {
+    if reads_container_only(name) || is_count_helper_name(name) {
+        return true;
+    }
+    const WRITE_PARTS: [&str; 14] = [
+        "insert",
+        "push",
+        "pop",
+        "remove",
+        "set_",
+        "clear",
+        "sort",
+        "retain",
+        "extend",
+        "append",
+        "field_clone",
+        "swap",
+        "truncate",
+        "_inc",
+    ];
+    const READ_PARTS: [&str; 16] = [
+        "_len",
+        "_get",
+        "_contains",
+        "_is_empty",
+        "_eq",
+        "_cmp",
+        "_hash",
+        "_fmt",
+        "_display",
+        "_debug",
+        "_to_string",
+        "_clone",
+        "_print",
+        "_first",
+        "_last",
+        "_keys",
+    ];
+    if WRITE_PARTS.iter().any(|part| name.contains(part)) {
+        return false;
+    }
+    name == "__concat"
+        || name.starts_with("__fmt")
+        || READ_PARTS.iter().any(|part| name.contains(part))
+}
+
+/// Whether `name` is a reference-count or teardown helper, which accounts for
+/// a holder rather than reading or writing what it holds.
+fn is_count_helper_name(name: &str) -> bool {
+    name.ends_with("_retain")
+        || name.ends_with("_release")
+        || name.ends_with("_free")
+        || name.contains("_retain_")
+        || name.contains("_release_")
+        || name.contains("_free_")
+}
+
 /// Locals a call terminator answers into.
 fn call_destinations(body: &Body) -> Vec<bool> {
     let mut out = vec![false; body.locals.len()];
@@ -842,7 +1023,7 @@ fn ownership_fields(tcx: &TyCtxt, ty: Ty, paths: AggFieldPaths) -> Vec<Aggregate
 
 /// The helper family for a field type, or `None` when the field owns no
 /// heap child this walk should free.
-fn value_field_kind(tcx: &TyCtxt, t: Ty) -> Option<FieldRcKind> {
+pub(crate) fn value_field_kind(tcx: &TyCtxt, t: Ty) -> Option<FieldRcKind> {
     use gossamer_types::TyKind;
     // A `Vec`/`[T]` field frees through the vec allocator's own
     // count at its owner's death; a projected reassignment
@@ -1153,7 +1334,9 @@ fn borrowed_carriers(body: &Body) -> Vec<bool> {
         while changed {
             changed = false;
             for &(dest, src) in &copy_edges {
-                if borrowed_enum_src[src] && !borrowed_enum_src[dest] {
+                // A `mut` binding is a value of its own, never a view.
+                if borrowed_enum_src[src] && !borrowed_enum_src[dest] && !body.locals[dest].mutable
+                {
                     borrowed_enum_src[dest] = true;
                     changed = true;
                 }
@@ -3685,10 +3868,14 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
             if !destination.projection.is_empty() || (destination.local.0 as usize) >= n_locals {
                 continue;
             }
+            // A map's remove hands over the entry it took out of the map as a
+            // channel receive does.
             let hands_over = match callee {
                 Operand::FnRef { .. } => true,
                 Operand::Const(ConstValue::Str(name)) => {
-                    name.starts_with("gos_rt_chan_recv") || name.starts_with("gos_rt_chan_try_recv")
+                    name.starts_with("gos_rt_chan_recv")
+                        || name.starts_with("gos_rt_chan_try_recv")
+                        || name.starts_with("gos_rt_map_pop")
                 }
                 _ => false,
             };
@@ -4054,6 +4241,13 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
         // own like any owned destination.
         let mut borrow = get_ptr_dest.clone();
         borrow[Local::RETURN.0 as usize] = false;
+        // A `mut` binding is a value of its own that the program writes, so
+        // it is never a view of the element it was read from.
+        for (i, decl) in body.locals.iter().enumerate() {
+            if decl.mutable {
+                disqualified[i] = true;
+            }
+        }
         let mut changed = true;
         while changed {
             changed = false;
@@ -4125,6 +4319,17 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                         }
                     }
                 }
+            }
+        }
+        // A view reads the element where it lies, so it holds the value the
+        // binding was given only while nothing writes the vector's storage:
+        // a view read after such a write takes a value of its own.
+        for (i, written) in views_written_before_read(body, &borrow)
+            .into_iter()
+            .enumerate()
+        {
+            if written {
+                escape_flags[i] = true;
             }
         }
         // An escaper seeded into `borrow` by the get_ptr scan stops being a

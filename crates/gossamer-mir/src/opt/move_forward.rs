@@ -81,8 +81,26 @@ struct ReturnForward {
     exits: Vec<(MirSite, Vec<usize>)>,
 }
 
+/// Whether a runtime call defines `local`. A runtime helper answers a wide
+/// value as the address of storage it already holds (an element slot, a
+/// payload, a closure's capture), so a move out of that local is a copy of
+/// the storage and its destination cannot be built in the storage itself.
+fn defined_by_runtime_call(body: &Body, local: Local) -> bool {
+    body.blocks.iter().any(|block| {
+        matches!(&block.terminator,
+            Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(name)),
+                destination,
+                ..
+            } if destination.local == local && name.starts_with("gos_"))
+    })
+}
+
 fn find_return_forward(body: &Body, wide: &[bool]) -> Option<ReturnForward> {
     let (moved, from, writes) = return_writes(body, wide)?;
+    if defined_by_runtime_call(body, from) {
+        return None;
+    }
     let returns = |block: usize| matches!(body.blocks[block].terminator, Terminator::Return);
     if !returns(moved.block) {
         return None;
@@ -488,6 +506,9 @@ fn whole_definitions(
         })
         .collect();
     if defs.is_empty() {
+        return None;
+    }
+    if defined_by_runtime_call(body, from) {
         return None;
     }
     if defs.len() > 1

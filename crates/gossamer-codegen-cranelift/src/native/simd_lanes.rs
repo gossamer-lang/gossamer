@@ -155,7 +155,7 @@ pub(super) fn find_lane_loops(body: &Body, tcx: &TyCtxt) -> LaneLoops {
     loops
 }
 
-fn successors(terminator: &Terminator) -> Vec<BlockId> {
+pub(super) fn successors(terminator: &Terminator) -> Vec<BlockId> {
     match terminator {
         Terminator::Goto { target }
         | Terminator::Assert { target, .. }

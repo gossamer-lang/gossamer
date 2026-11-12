@@ -411,7 +411,7 @@ impl<'a> Builder<'a> {
             || self.elem_bytes_of(elem_ty) > 8
             || matches!(self.tcx.kind_of(elem_ty), TyKind::Float(_))
         {
-            self.zip_read_element(source, index, elem_ty, span)
+            self.read_element_place(source, index, elem_ty, span)
         } else {
             self.emit_combinator_call(
                 "gos_rt_vec_get_i64",

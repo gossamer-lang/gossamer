@@ -1373,6 +1373,32 @@ impl<'a> Builder<'a> {
                 Some(&declared) if !self.adt_has_type_args(ty) => declared,
                 _ => self.locals[payload_local.0 as usize].ty,
             };
+            // A set, deque, or heap reaches its storage through a handle word
+            // its binding still names, so the node takes a table of its own;
+            // a clone of a temporary nothing reads again becomes a move.
+            let payload_local = match self.map_or_set_clone_symbol(payload_ty) {
+                Some(symbol)
+                    if matches!(
+                        self.tcx.kind_of(self.locals[payload_local.0 as usize].ty),
+                        gossamer_types::TyKind::Int(_)
+                    ) =>
+                {
+                    let copy = self.fresh(self.locals[payload_local.0 as usize].ty);
+                    if let Some(kind) = self.local_runtime_kind.get(&payload_local).copied() {
+                        self.local_runtime_kind.insert(copy, kind);
+                    }
+                    let next = self.new_block(span);
+                    self.terminate(Terminator::Call {
+                        callee: Operand::Const(ConstValue::Str(symbol.to_string())),
+                        args: vec![Operand::Copy(Place::local(payload_local))],
+                        destination: Place::local(copy),
+                        target: Some(next),
+                    });
+                    self.set_current(next);
+                    copy
+                }
+                _ => payload_local,
+            };
             // A child entry names the field's WORD within the slot slab, so
             // it follows the field's placement rather than its position.
             let child_word = payload_offsets.get(i).copied().unwrap_or((i * 8) as i64) / 8;

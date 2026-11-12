@@ -357,22 +357,27 @@ impl Facts<'_> {
 
     /// Whether a value of `ty` may hold a closure, and with it captures.
     fn may_hold_closure(&self, ty: Ty) -> bool {
-        self.holds_closure(ty, &mut HashSet::new())
+        self.holds_closure(ty, false, &mut HashSet::new())
     }
 
-    fn holds_closure(&self, ty: Ty, seen: &mut HashSet<Ty>) -> bool {
-        if !seen.insert(ty) {
+    /// Whether a value of `ty` may hold a callable. `in_declaration` walks an
+    /// ADT's declared field types, where a type parameter names the
+    /// instantiation's argument, which the ADT's own substitution answers.
+    fn holds_closure(&self, ty: Ty, in_declaration: bool, seen: &mut HashSet<(Ty, bool)>) -> bool {
+        if !seen.insert((ty, in_declaration)) {
             return false;
         }
         match self.tcx.kind_of(ty) {
+            TyKind::Param { .. } => !in_declaration,
             TyKind::FnPtr(_)
             | TyKind::FnTrait(_)
             | TyKind::Closure { .. }
-            | TyKind::Param { .. }
             | TyKind::Dyn(_)
             | TyKind::Var(_) => true,
-            TyKind::Tuple(parts) => parts.iter().any(|part| self.holds_closure(*part, seen)),
-            TyKind::Array { elem, .. } => self.holds_closure(*elem, seen),
+            TyKind::Tuple(parts) => parts
+                .iter()
+                .any(|part| self.holds_closure(*part, in_declaration, seen)),
+            TyKind::Array { elem, .. } => self.holds_closure(*elem, in_declaration, seen),
             TyKind::Slice(inner)
             | TyKind::Vec(inner)
             | TyKind::Iterator(inner)
@@ -380,25 +385,25 @@ impl Facts<'_> {
             | TyKind::Sender(inner)
             | TyKind::Receiver(inner)
             | TyKind::JoinHandle(inner)
-            | TyKind::Ref { inner, .. } => self.holds_closure(*inner, seen),
+            | TyKind::Ref { inner, .. } => self.holds_closure(*inner, in_declaration, seen),
             TyKind::HashMap { key, value, .. } => {
-                self.holds_closure(*key, seen) || self.holds_closure(*value, seen)
+                self.holds_closure(*key, in_declaration, seen)
+                    || self.holds_closure(*value, in_declaration, seen)
             }
-            TyKind::Nominal { repr, .. } => self.holds_closure(*repr, seen),
+            TyKind::Nominal { repr, .. } => self.holds_closure(*repr, in_declaration, seen),
             TyKind::Adt { def, substs } | TyKind::Alias { def, substs } => {
                 substs
                     .types()
                     .into_iter()
-                    .any(|part| self.holds_closure(part, seen))
-                    || self
-                        .tcx
-                        .struct_field_tys(*def)
-                        .is_some_and(|fields| fields.iter().any(|f| self.holds_closure(*f, seen)))
+                    .any(|part| self.holds_closure(part, in_declaration, seen))
+                    || self.tcx.struct_field_tys(*def).is_some_and(|fields| {
+                        fields.iter().any(|f| self.holds_closure(*f, true, seen))
+                    })
                     || self.tcx.enum_variant_tys(*def).is_some_and(|variants| {
                         variants
                             .iter()
                             .flatten()
-                            .any(|field| self.holds_closure(*field, seen))
+                            .any(|field| self.holds_closure(*field, true, seen))
                     })
             }
             _ => false,

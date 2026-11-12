@@ -86,6 +86,11 @@ fn require_prepared_dependencies(entry: &Path) -> Result<()> {
         .iter()
         .map(|gap| match gap {
             Unprepared::Unfetched(id) => format!("  {id} is not fetched"),
+            Unprepared::Drifted(id) => {
+                format!(
+                    "  {id} is pinned in project.lock to another source than project.toml declares"
+                )
+            }
             Unprepared::MissingPath(dir) => {
                 format!(
                     "  the path dependency {} holds no project.toml",
@@ -95,6 +100,11 @@ fn require_prepared_dependencies(entry: &Path) -> Result<()> {
         })
         .collect();
     let fetch = if missing
+        .iter()
+        .any(|gap| matches!(gap, Unprepared::Drifted(_)))
+    {
+        "\nrun `gos fetch --update` in the project to fetch them and update project.lock"
+    } else if missing
         .iter()
         .any(|gap| matches!(gap, Unprepared::Unfetched(_)))
     {

@@ -87,6 +87,9 @@ impl<'a> Builder<'a> {
                 // with one share, so a consuming callee given the clone
                 // took the caller's.
                 TyKind::String => Some("gos_rt_str_clone"),
+                // A table carries no count of its holders, so its clone is a
+                // table of its own.
+                TyKind::HashMap { .. } => Some("gos_rt_map_clone"),
                 _ => Some(""),
             },
             "extend" | "extend_from_slice" if args.len() == 1 => match &receiver_kind_flat {

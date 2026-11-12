@@ -50,7 +50,7 @@ pub fn lower_source_file(
         &mut module_type_names,
     );
     let alias_targets = collect_alias_targets(resolutions, &source.items, &module_type_names);
-    tcx.erase_nominal_field_tys();
+    tcx.normalize_field_tys_for_lowering();
     let mut lowerer = Lowerer {
         resolutions,
         table,

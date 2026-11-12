@@ -1390,10 +1390,31 @@ fn collect_read_only_vec_shares(
         let i = l.0 as usize;
         i < n_locals && !body.locals[i].region && !share.is_goroutine_shared(l)
     };
-    // A container is written through when any vector read out of it is.
+    // A container is written through when any vector or table read out of
+    // it is; a scalar element is a value of its own.
+    // Judged by the vector's element type: a table read out of one is a
+    // handle word whatever its local's type says.
+    let holds_storage = |i: usize| {
+        let Some(base) = defs.element_of[i] else {
+            return false;
+        };
+        let (gossamer_types::TyKind::Vec(elem) | gossamer_types::TyKind::Slice(elem)) =
+            tcx.kind_of(body.locals[base.0 as usize].ty)
+        else {
+            return true;
+        };
+        !matches!(
+            tcx.kind_of(*elem),
+            gossamer_types::TyKind::Int(_)
+                | gossamer_types::TyKind::Float(_)
+                | gossamer_types::TyKind::Bool
+                | gossamer_types::TyKind::Char
+                | gossamer_types::TyKind::Unit
+        )
+    };
     let mut family_written = vec![false; n_locals];
     for (i, element) in defs.element_of.iter().enumerate() {
-        if element.is_some() && !reads.only_read[i] {
+        if element.is_some() && !reads.only_read[i] && holds_storage(i) {
             let root = defs.root_of(Local(u32::try_from(i).unwrap_or(0)));
             family_written[root.0 as usize] = true;
         }
@@ -1425,7 +1446,10 @@ fn collect_read_only_vec_shares(
             && local_ok(dst)
             && !defs.other_def[di]
             && reads.clone_defs[di] > 0
-            && reads.only_read[di];
+            && reads.only_read[di]
+            // A write through an element read out of the binding (a table
+            // or vector it holds) changes the binding's own storage.
+            && !family_written[di];
         let container_untouched = defs.element_of[src.0 as usize].is_some()
             && local_ok(src)
             && local_ok(root)

@@ -2031,6 +2031,25 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Registers the metas a carrier sent on a channel is boxed under: the
+    /// channel carries a counted copy of its two words, which the receiver's
+    /// release gives back.
+    pub(crate) fn ensure_sent_carrier_metas(&mut self, value: Local) {
+        let ty = self.locals[value.0 as usize].ty;
+        if self.is_result_or_option_adt(ty) {
+            let _ = self.ensure_aggr_copy_meta(ty);
+            self.ensure_map_carrier_box_meta(ty);
+        }
+    }
+
+    /// Registers the box meta a carrier stored as a map value is boxed under,
+    /// so the box takes and gives back its share of a copy-blob payload.
+    pub(crate) fn ensure_map_carrier_box_meta(&mut self, value: Ty) {
+        if self.is_result_or_option_adt(value) {
+            let _ = self.ensure_carrier_box_meta(value);
+        }
+    }
+
     /// Registers (idempotently) the guarded meta for a counted box holding a
     /// carrier of type `ty` whose payload is a copy blob on some arm - a
     /// struct, a tuple, or another boxed carrier - and returns its symbol, or

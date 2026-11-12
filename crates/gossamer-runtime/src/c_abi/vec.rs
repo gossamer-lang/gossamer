@@ -1757,6 +1757,24 @@ pub unsafe extern "C" fn gos_rt_vec_mark_str_elems(v: *mut GosVec) {
     vec.elem_kind = vec_elem_kind::STRING;
 }
 
+/// Tags `v` as owning `Map` elements ([`vec_elem_kind::MAP`]): `gos_rt_vec_free`
+/// frees each table and storage duplication copies each one. Emitted by the
+/// MIR lowering after a runtime shim whose callback answered each element as a
+/// table of its own. Only a `PRIMITIVE` vec is re-tagged; no-op for null /
+/// region vecs.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_mark_map_elems(v: *mut GosVec) {
+    if v.is_null() {
+        return;
+    }
+    // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
+    let vec = unsafe { &mut *v };
+    if vec_is_region(vec) || vec.elem_kind != vec_elem_kind::PRIMITIVE || vec.elem_bytes != 8 {
+        return;
+    }
+    vec.elem_kind = vec_elem_kind::MAP;
+}
+
 /// Width of the header prefix every inline element access reads: length at
 /// offset 0, element width at 16, and the data pointer at 24.
 pub const VEC_HEADER_PREFIX_BYTES: usize = 32;
@@ -2402,6 +2420,36 @@ fn slot_children_blob_meta(children: &[VecSlotChild]) -> &'static [i64] {
 /// Writes `value` to element `idx` of `v`, truncating to the
 /// header's `elem_bytes`. Same preconditions as
 /// [`vec_elem_load_i64`].
+/// Stores the one-word element `value` at `idx`, which must be in
+/// `[0, v.len)`, with the vector's ownership of what its slots hold: the
+/// outgoing handle or slot children are given back and, for a vector whose
+/// slots own children (`AGGR_OWNED`), the incoming slot takes its own, as a
+/// push does.
+pub(crate) unsafe fn vec_store_owned_word(v: &GosVec, idx: i64, value: i64) {
+    let owns_slot_children =
+        v.elem_kind == vec_elem_kind::AGGR_OWNED && v.elem_bytes == 8 && !v.ptr.is_null();
+    if owns_slot_children {
+        // SAFETY: the caller passes `idx` in `[0, len)`, so the slot lies inside the buffer.
+        let slot = unsafe { v.ptr.as_ptr().add(idx as usize * 8) };
+        // SAFETY: `slot` addresses one 8-byte element.
+        let held = unsafe { slot.cast::<i64>().read_unaligned() };
+        if held == value {
+            return;
+        }
+        // SAFETY: `slot` is an element of `v`, laid out as its slot children describe.
+        unsafe { vec_release_slot_children(v, slot) };
+        // SAFETY: as above.
+        unsafe { slot.cast::<i64>().write_unaligned(value) };
+        // SAFETY: as above; the stored word's children now take the vector's own share.
+        unsafe { vec_retain_slot_children(v, slot) };
+        return;
+    }
+    // SAFETY: the caller passes `idx` in `[0, len)`.
+    unsafe { vec_release_owned_elem(v, idx, value) };
+    // SAFETY: the caller passes `idx` in `[0, len)`.
+    unsafe { vec_elem_store_i64(v, idx, value) };
+}
+
 /// Gives back the share the slot at `idx` holds, for an element kind whose
 /// word is a handle the vector owns.
 ///

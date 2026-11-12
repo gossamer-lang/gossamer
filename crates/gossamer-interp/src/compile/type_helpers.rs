@@ -4,6 +4,28 @@ use super::*;
 const HASH_SET_DEF_LOCAL: u32 = u32::MAX - 7;
 const BTREE_SET_DEF_LOCAL: u32 = u32::MAX - 18;
 
+/// Methods whose answer is, or wraps, a value read out of their receiver
+/// rather than a fresh one.
+const PROJECTING_METHODS: &[&str] = &[
+    "unwrap",
+    "expect",
+    "unwrap_or",
+    "unwrap_or_else",
+    "unwrap_or_default",
+    "get",
+    "get_or",
+    "first",
+    "last",
+    "peek",
+    "front",
+    "back",
+    "min",
+    "max",
+    "min_by_key",
+    "max_by_key",
+    "find",
+];
+
 impl<'tcx> FnBuilder<'tcx> {
     /// Classifies an expression's natural result kind from its
     /// HIR `Ty`. Unknown / aggregate / polymorphic types stay in
@@ -110,18 +132,90 @@ impl<'tcx> FnBuilder<'tcx> {
     /// one reaches that storage through a shared handle, so the stored value
     /// takes a copy and a later write through the binding leaves it alone.
     pub(crate) fn stored_value_reg(&mut self, expr: &gossamer_hir::HirExpr, reg: Reg) -> Reg {
-        if !super::is_path_expr(expr)
-            || matches!(self.tcx.kind(expr.ty), Some(TyKind::Ref { .. }))
-            || !(self.expr_is_map(expr)
-                || self.expr_is_hashset(expr)
-                || self.expr_is_slot_container(expr)
-                || self.expr_is_aggregate_with_container(expr))
-        {
+        if !self.value_needs_table_copy(expr) {
             return reg;
         }
         let dst = self.alloc_reg();
         self.emit(crate::bytecode::Op::CloneMapLike { dst, src: reg });
         dst
+    }
+
+    /// Whether a value of `expr`'s type reaches a table through a handle
+    /// that carries no count of its holders: a map, a set, a slot container,
+    /// or an aggregate holding one. Copying such a value copies the tables.
+    pub(crate) fn expr_holds_tables(&self, expr: &gossamer_hir::HirExpr) -> bool {
+        !matches!(self.tcx.kind(expr.ty), Some(TyKind::Ref { .. }))
+            && (self.expr_is_map(expr)
+                || self.expr_is_hashset(expr)
+                || self.expr_is_slot_container(expr)
+                || self.expr_is_aggregate_with_container(expr))
+    }
+
+    /// Whether the value `expr` answers may hold tables that storage the
+    /// program still reaches also holds: a binding, a field, an element, or
+    /// a payload read out of one. A call, a literal, or a `match` (whose
+    /// arms copy) answers tables of its own.
+    pub(crate) fn expr_may_share_tables(&self, expr: &gossamer_hir::HirExpr) -> bool {
+        use gossamer_hir::HirExprKind;
+        match &expr.kind {
+            HirExprKind::Path { .. }
+            | HirExprKind::Field { .. }
+            | HirExprKind::TupleIndex { .. }
+            | HirExprKind::Index { .. } => true,
+            HirExprKind::Unary {
+                op: gossamer_hir::HirUnaryOp::Deref,
+                ..
+            } => true,
+            HirExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.expr_may_share_tables(then_branch)
+                    || else_branch
+                        .as_deref()
+                        .is_some_and(|e| self.expr_may_share_tables(e))
+            }
+            HirExprKind::Block(block) => block
+                .tail
+                .as_deref()
+                .is_some_and(|tail| self.expr_may_share_tables(tail)),
+            // A library method on a sequence, a table, an iterator, or an
+            // `Option` (`iter`, `collect`, `to_vec`, `filter`, `rev`, ...)
+            // answers the receiver's elements, not copies of them.
+            HirExprKind::MethodCall { receiver, name, .. } => {
+                (PROJECTING_METHODS.contains(&name.name.as_str())
+                    || self.is_library_element_receiver(receiver.ty))
+                    && self.expr_may_share_tables(receiver)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `ty` is a library type whose methods hand back the elements
+    /// it holds: a sequence, a table, a set or slot container, an iterator,
+    /// or an `Option` / `Result`.
+    fn is_library_element_receiver(&self, ty: gossamer_types::Ty) -> bool {
+        match self.tcx.kind(self.unwrap_ref(ty)) {
+            Some(
+                TyKind::Vec(_)
+                | TyKind::Array { .. }
+                | TyKind::Slice(_)
+                | TyKind::Iterator(_)
+                | TyKind::Range(_)
+                | TyKind::HashMap { .. },
+            ) => true,
+            // Library ADTs (`Option`, `Result`, the sets, slot containers)
+            // take sentinel ids at the top of the local range.
+            Some(TyKind::Adt { def, .. }) => def.local >= u32::MAX - 40,
+            _ => false,
+        }
+    }
+
+    /// Whether storing `expr`'s value somewhere new has to copy its tables
+    /// so a later write through either side leaves the other alone.
+    pub(crate) fn value_needs_table_copy(&self, expr: &gossamer_hir::HirExpr) -> bool {
+        self.expr_holds_tables(expr) && self.expr_may_share_tables(expr)
     }
 
     /// The register a function answers with, cloned when the answer is a

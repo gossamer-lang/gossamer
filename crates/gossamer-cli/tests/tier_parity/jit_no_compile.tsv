@@ -202,6 +202,7 @@ feature-testing-examples/generic_channel_payload.gos	cross-goroutine
 feature-testing-examples/generic_enum_float_payload.gos	entry shape
 feature-testing-examples/generic_fn_value_callback.gos	entry shape
 feature-testing-examples/generic_impl_bound_dispatch.gos	entry shape
+feature-testing-examples/generic_iterator_arguments.gos	unlowerable local
 feature-testing-examples/generic_method_fn_only_param.gos	entry shape
 feature-testing-examples/generic_method_takes_named_fn.gos	no hot body
 feature-testing-examples/generic_static_trait_item.gos	entry shape

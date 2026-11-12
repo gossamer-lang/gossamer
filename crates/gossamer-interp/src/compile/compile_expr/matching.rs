@@ -62,11 +62,8 @@ impl<'tcx> FnBuilder<'tcx> {
             let body_reg = self.compile_expr(&arm.body)?;
             self.writeback_variant_payload(scrutinee, scrut, arm)?;
             // A match result is a value of its own even when its arm names a payload binding.
-            let body_reg = if self.reg_is_bound_local(body_reg)
-                && (self.expr_is_map(&arm.body)
-                    || self.expr_is_hashset(&arm.body)
-                    || self.expr_is_slot_container(&arm.body)
-                    || self.expr_is_aggregate_with_container(&arm.body))
+            let body_reg = if self.expr_holds_tables(&arm.body)
+                && (self.reg_is_bound_local(body_reg) || self.expr_may_share_tables(&arm.body))
             {
                 let copy = self.alloc_reg();
                 self.emit(Op::CloneMapLike {

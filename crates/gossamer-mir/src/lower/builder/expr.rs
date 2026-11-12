@@ -2485,6 +2485,14 @@ impl<'a> Builder<'a> {
         ) && !self.param_locals.contains(&value_local)
         {
             let value_ty = self.locals[value_local.0 as usize].ty;
+            // A set, deque, or heap read out of a tuple or struct field keeps
+            // no runtime tag of its own; the checker's type for the read says
+            // what it is.
+            if self.set_clone_symbol_for_local(value_local).is_none()
+                && let Some(kind) = self.handle_runtime_kind(value.ty)
+            {
+                self.local_runtime_kind.insert(value_local, kind);
+            }
             let table = matches!(
                 self.tcx.kind_of(value_ty),
                 gossamer_types::TyKind::HashMap { .. }

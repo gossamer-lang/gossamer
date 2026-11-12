@@ -219,7 +219,26 @@ impl<'tcx> FnBuilder<'tcx> {
     pub(crate) fn bind_recorded_local(&mut self, name: &str, typed: TypedReg) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.locals.insert(name.to_string(), typed);
+            scope.owned_tables.remove(name);
         }
+    }
+
+    /// Records that the innermost binding of `name` holds tables no other
+    /// storage shares.
+    pub(crate) fn mark_owned_tables(&mut self, name: &str) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.owned_tables.insert(name.to_string());
+        }
+    }
+
+    /// Whether the binding `name` resolves to holds tables of its own.
+    pub(crate) fn binding_owns_tables(&self, name: &str) -> bool {
+        for scope in self.scopes.iter().rev() {
+            if scope.locals.contains_key(name) {
+                return scope.owned_tables.contains(name);
+            }
+        }
+        false
     }
 
     pub(crate) fn bind_reference_local(&mut self, name: &str, typed: TypedReg) {

@@ -1,0 +1,106 @@
+// Every copy of a value is a value of its own: writing a copy leaves its
+// source as it was, whichever container holds the tables and however the
+// copy was made.
+use std::collections::BTreeMap
+
+struct Bag { tags: Set<i64>, q: Deque<i64> }
+enum Slot { Full(Set<i64>), Empty }
+struct Gen<T> { v: T, n: i64 }
+
+fn id<T>(x: T) -> T { x }
+
+fn grow(mut s: Set<i64>) -> i64 {
+    s.insert(99)
+    s.len()
+}
+
+fn maker() -> Fn() -> Vec<i64> {
+    let xs = #[1, 2, 3]
+    || xs
+}
+
+fn main() {
+    let m = { "a": 1 }
+    let mut c = m
+    c["b"] = 2
+    println(f"let copy: {m.len()} {c.len()}")
+
+    let nested = { "k": { "x": 1 } }
+    let mut e = nested["k"]
+    e["y"] = 2
+    println(f"map element: {nested["k"].len()} {e.len()}")
+
+    let rows = #[#[{ "a": 1 }]]
+    let mut g = rows[0]
+    g[0]["k"] = 1
+    println(f"row copy: {rows[0][0].len()} {g[0].len()}")
+
+    let s = #{ 1, 2 }
+    let mut t = id(s)
+    t.insert(3)
+    println(f"generic id: {s.len()} {t.len()}")
+    println(f"by value: {grow(s)} {s.len()}")
+
+    let opt = Some(#{ 1 })
+    let mut inner = opt.unwrap()
+    inner.insert(2)
+    println(f"option payload: {opt.unwrap().len()} {inner.len()}")
+
+    let slot = Slot::Full(#{ 5 })
+    let mut taken = match slot {
+        Slot::Full(x) => x
+        Slot::Empty => #{}
+    }
+    taken.insert(6)
+    let left = match slot {
+        Slot::Full(x) => x.len()
+        Slot::Empty => 0
+    }
+    println(f"variant payload: {left} {taken.len()}")
+
+    let bag = Bag { tags: #{ 1 }, q: Deque::new() }
+    let mut b2 = bag
+    b2.tags.insert(2)
+    b2.q.push_back(7)
+    println(f"struct tables: {bag.tags.len()} {bag.q.len()} {b2.tags.len()} {b2.q.len()}")
+
+    let mut x = #{ 1 }
+    let mut y = #{ 2, 3 }
+    x, y = y, x
+    x.insert(10)
+    println(f"swap: {x.len()} {y.len()}")
+
+    let mut tree = BTreeMap::new()
+    tree.insert(1, "one")
+    let mut tree2 = tree.clone()
+    tree2.insert(2, "two")
+    let mut mc = m.clone()
+    mc["z"] = 26
+    println(f"clone: {tree.len()} {tree2.len()} {m.len()} {mc.len()}")
+
+    let f = maker()
+    let mut got = f()
+    got.push(4)
+    println(f"closure answer: {f().len()} {got.len()}")
+
+    let pairs: Vec<[Vec<i64>; 2]> = #[[#[1], #[2]]]
+    let mut p2 = pairs
+    p2[0][0].push(9)
+    println(f"array of vectors: {pairs[0][0].len()} {p2[0][0].len()}")
+    let filled = #[[#[1], #[2, 3]]; 3]
+    println(f"repeat of arrays: {filled.len()} {filled[2][1].len()}")
+
+    let gens = #[Gen { v: #[1, 2], n: 0 }; 2]
+    let mut g2 = gens
+    g2[1].v.push(3)
+    println(f"repeat of generic: {gens[1].v.len()} {g2[1].v.len()} {g2[0].n}")
+
+    let heap_map = { "h": MaxHeap::from([3, 1]) }
+    let mut hm = heap_map
+    hm["h"].push(5)
+    println(f"heap in map: {heap_map["h"].len()} {hm["h"].len()}")
+
+    let tables = #[Bag { tags: #{ 1, 2 }, q: Deque::new() }]
+    let sets = tables.map(|b| b.tags)
+    println(f"projected tables: {sets[0].len()}")
+}

@@ -1180,6 +1180,215 @@ fn main() {
 }
 "#,
     ),
+    (
+        "option_sent_on_channel_and_map_value",
+        r#"
+use std::sync::channel
+
+fn main() {
+    let mut total = 0
+    for i in 0..20000 {
+        let tx, rx = channel()
+        spawn(|| {
+            tx.send(Some(#[i, i]))
+            tx.close()
+        })
+        while let Some(v) = rx.recv() {
+            if let Some(xs) = v { total += xs.len() }
+        }
+        let mut m: Map<i64, Option<String>> = Map::new()
+        m[i] = Some(f"v{i}")
+        m[i] = Some(f"w{i}")
+        if let Some(Some(s)) = m.get(i) { total += s.len() }
+    }
+    println(total)
+}
+"#,
+    ),
+    (
+        "option_popped_rebound_and_array_slot",
+        r#"
+fn main() {
+    let mut total = 0
+    for i in 0..20000 {
+        let mut xs: Vec<Option<Vec<i64>>> = #[Some(#[i]), Some(#[i, i])]
+        let mut last = xs.pop()
+        if let Some(Some(v)) = last { total += v.len() }
+        last = Some(Some(#[1, 2, 3]))
+        if let Some(Some(v)) = last { total += v.len() }
+        let mut arr: [Option<String>; 2] = [Some(f"a{i}"), None]
+        arr[0] = Some(f"b{i}")
+        arr[1] = Some(f"c{i}")
+        total += xs.len()
+    }
+    println(total)
+}
+"#,
+    ),
+    (
+        "map_entry_field_write_and_heap_push",
+        r#"
+struct Rec { name: String, n: i64 }
+
+fn main() {
+    let mut total = 0
+    for i in 0..20000 {
+        let mut m: Map<String, Rec> = Map::new()
+        m["a"] = Rec { name: f"x{i}", n: 0 }
+        m["a"].name = f"y{i}"
+        let mut hs: Map<i64, MinHeap<i64>> = Map::new()
+        hs[0] = MinHeap::new()
+        hs[0].push(i)
+        hs[0].push(i + 1)
+        total += hs[0].len() + m["a"].name.len()
+    }
+    println(total)
+}
+"#,
+    ),
+    (
+        "swapped_sets_deques_heaps",
+        r"
+fn main() {
+    let mut total = 0
+    for i in 0..20000 {
+        let mut a = #{i}
+        let mut b = #{i, i + 1}
+        a, b = b, a
+        let mut d = Deque::new()
+        d.push_back(i)
+        let mut e = Deque::new()
+        e.push_back(i)
+        e.push_back(i)
+        d, e = e, d
+        let mut h = MaxHeap::from([i])
+        let mut k = MaxHeap::from([i, i])
+        h, k = k, h
+        total += a.len() + d.len() + h.len() + b.len() + e.len() + k.len()
+    }
+    println(total)
+}
+",
+    ),
+    (
+        "option_replaced_through_mut_and_element",
+        r#"
+struct S { name: String }
+
+fn reset(slot: &mut Option<Vec<i64>>, i: i64) { *slot = Some(#[i, i]) }
+
+fn rename(mut s: Option<S>, i: i64) -> i64 {
+    s = Some(S { name: f"n{i}" })
+    match s {
+        Some(v) => v.name.len(),
+        None => 0,
+    }
+}
+
+fn main() {
+    let mut total = 0
+    for i in 0..20000 {
+        let mut v: Vec<Option<String>> = #[Some(f"s{i}")]
+        v[0] = Some(f"t{i}")
+        let mut o = Some(#[1])
+        reset(&mut o, i)
+        if let Some(xs) = o { total += xs.len() }
+        total += rename(Some(S { name: f"o{i}" }), i) + v.len()
+    }
+    println(total)
+}
+"#,
+    ),
+    (
+        "projected_tables_and_captured_option",
+        r#"
+struct Bag { tags: Set<i64> }
+
+fn main() {
+    let mut total = 0
+    for i in 0..20000 {
+        let bags = #[Bag { tags: #{i} }, Bag { tags: #{i, 2} }]
+        let sets = bags.map(|b| b.tags)
+        let opt = Some(f"c{i}")
+        let f = || opt.unwrap_or("").len()
+        total += f() + sets.len()
+    }
+    println(total)
+}
+"#,
+    ),
+    (
+        "option_child_of_a_recursive_enum",
+        r#"
+struct Pt { x: i64, label: String }
+
+enum Kind {
+    Let { name: Pt, init: Option<Pt> }
+    Child(Option<Kind>)
+}
+
+fn make_let(name: Pt, init: Pt) -> Kind { Kind::Let { name: name, init: Some(init) } }
+
+fn make_child(k: Kind) -> Kind { Kind::Child(Some(k)) }
+
+fn depth(k: Kind) -> i64 {
+    match k {
+        Kind::Let { name, init } => match init {
+            Some(pt) => pt.x + name.label.len()
+            None => 0
+        }
+        Kind::Child(c) => match c {
+            Some(inner) => 1 + depth(inner)
+            None => 0
+        }
+    }
+}
+
+fn main() {
+    let mut total = 0
+    for i in 0..20000 {
+        let k = make_child(make_let(Pt { x: i, label: f"n{i}" }, Pt { x: 1, label: f"i{i}" }))
+        total += depth(k) + depth(k)
+    }
+    println(total)
+}
+"#,
+    ),
+    (
+        "rebound_string_parameter",
+        r#"
+fn callee(mut x: String) -> String {
+    x += "z"
+    f"{x}"
+}
+fn main() {
+    let mut keep: Vec<String> = #[]
+    for i in 0..20000 {
+        let a = f"abc{i}"
+        keep.push(callee(a))
+        keep.push(a)
+    }
+    println(f"{keep[0]} {keep[1]} {keep.len()}")
+}
+"#,
+    ),
+    (
+        "enumerated_vector_rows",
+        r"
+fn form(i: i64) -> i64 {
+    let rows: Vec<Vec<i64>> = #[#[i], #[i, i], #[]]
+    let mut t = 0
+    for (j, row) in rows.iter().enumerate() { t += j + row.len() }
+    t
+}
+
+fn main() {
+    let mut total = 0
+    for i in 0..20000 { total += form(i) }
+    println(total)
+}
+",
+    ),
 ];
 
 fn gnu_time_ok() -> bool {

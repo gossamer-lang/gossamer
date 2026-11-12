@@ -932,6 +932,60 @@ pub(crate) fn pair_holder_err_arm_calls(body: &mut Body, tcx: &gossamer_types::T
     }
 }
 
+/// Gives a `String` parameter the body rebinds an owned local in its place.
+///
+/// A parameter is the caller's value, borrowed for the call, while a value the
+/// body assigns to it (`s = f"{s}!"`, `s += "z"`) is the frame's own. The body
+/// works on a local that takes a share of the argument at entry, so every
+/// owner rule applies to it: the value it holds when rebound or when the frame
+/// returns is released, and an in-place append never writes the caller's
+/// string, since the local's share keeps the count above one.
+pub(crate) fn shadow_rebound_string_parameters(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+    let arity = body.arity as usize;
+    if arity == 0 || body.blocks.is_empty() {
+        return;
+    }
+    let n_locals = body.locals.len();
+    let rebinds = |block: &crate::ir::BasicBlock, local: Local| {
+        let whole = |p: &Place| p.local == local && p.projection.is_empty();
+        block
+            .stmts
+            .iter()
+            .any(|stmt| matches!(&stmt.kind, StatementKind::Assign { place, .. } if whole(place)))
+            || matches!(&block.terminator, Terminator::Call { destination, .. } if whole(destination))
+    };
+    for i in 1..=arity.min(n_locals.saturating_sub(1)) {
+        let decl = &body.locals[i];
+        if decl.region || !matches!(tcx.kind_of(decl.ty), gossamer_types::TyKind::String) {
+            continue;
+        }
+        let param = Local(u32::try_from(i).expect("local index fits in u32"));
+        if !body.blocks.iter().any(|block| rebinds(block, param)) {
+            continue;
+        }
+        let shadow = Local(u32::try_from(body.locals.len()).expect("local index fits in u32"));
+        body.locals.push(LocalDecl {
+            mutable: true,
+            ..body.locals[i].clone()
+        });
+        for block in &mut body.blocks {
+            crate::lower::builder::rename_local_in_block(block, param, shadow);
+        }
+        let span = body.blocks[0].span;
+        body.blocks[0].stmts.insert(
+            0,
+            Statement {
+                kind: StatementKind::Assign {
+                    place: Place::local(shadow),
+                    rvalue: Rvalue::Use(Operand::Copy(Place::local(param))),
+                },
+                span,
+                inlined: None,
+            },
+        );
+    }
+}
+
 /// Gives a by-value payload-enum parameter a share of its own.
 ///
 /// A `mut` parameter is the callee's value, not the caller's variable, so a

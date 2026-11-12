@@ -80,8 +80,8 @@ pub(super) fn takes_element_out(name: &str) -> bool {
 }
 
 /// The `gos_rt_result_payload_release` kind of a table payload - `5` a `Map`,
-/// `6` a `Set`, `7` a `Deque` / `Queue` / `Stack` - or `None` for any other
-/// type. Tables are not counted: a carrier holding one owns it outright.
+/// `6` a `Set`, `7` a `Deque` / `Queue` / `Stack`, `9` a heap - or `None` for
+/// any other type. A carrier holding one owns it outright.
 pub(crate) fn table_payload_kind(
     tcx: &gossamer_types::TyCtxt,
     ty: gossamer_types::Ty,
@@ -91,14 +91,15 @@ pub(crate) fn table_payload_kind(
         _ => match handle_container(tcx, ty) {
             Some(HandleContainer::Set) => Some(6),
             Some(HandleContainer::Deque) => Some(7),
-            Some(HandleContainer::Heap) | None => None,
+            Some(HandleContainer::Heap) => Some(9),
+            None => None,
         },
     }
 }
 
 /// Whether a carrier payload kind names a table (see [`table_payload_kind`]).
 pub(super) const fn is_table_kind(kind: i64) -> bool {
-    matches!(kind, 5..=7)
+    matches!(kind, 5..=7 | 9)
 }
 
 /// The free for a `Set`, deque, or heap a Gossamer function or closure
@@ -135,6 +136,7 @@ pub(super) fn table_free(
     match table_payload_kind(tcx, ty)? {
         5 => Some("gos_rt_map_free"),
         6 => Some("gos_rt_set_free"),
+        9 => Some("gos_rt_vec_free"),
         _ => Some("gos_rt_deque_free"),
     }
 }
@@ -1797,10 +1799,17 @@ pub(crate) fn insert_drops_at_returns(
             // their independent drops - suppressing them unconditionally would
             // leak. Gate the copy-edge walk on the container being
             // moved-into-return.
+            // An element store (`xs[i] = x`) hands its value over the same
+            // way: the slot releases what it held and keeps the new word.
             if let Terminator::Call { callee, args, .. } = &block.terminator
                 && let Operand::Const(ConstValue::Str(name)) = callee
-                && is_element_push(name)
-                && let Some(elem_op @ Operand::Copy(p)) = args.get(1)
+                && let Some(elem_op @ Operand::Copy(p)) = if is_element_push(name) {
+                    args.get(1)
+                } else if name.starts_with("gos_rt_vec_set") && args.len() == 3 {
+                    args.last()
+                } else {
+                    None
+                }
                 && p.projection.is_empty()
                 && !is_container_local(elem_op)
                 // A store that copies the element leaves the frame its own.

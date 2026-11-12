@@ -607,6 +607,23 @@ impl<'a> Lowerer<'a> {
                     | TyKind::JsonValue
             )
         ) || self.tcx.is_rc_managed(elem)
+            || self.is_handle_container(elem)
+    }
+
+    /// Whether `ty` is a `Set` / `BTreeSet`, a deque, queue, or stack, or a
+    /// heap: a table whose slot word the holding vector owns and copies.
+    fn is_handle_container(&self, ty: gossamer_types::Ty) -> bool {
+        const HANDLE_CONTAINER_DEFS: [u32; 7] = [
+            u32::MAX - 7,
+            u32::MAX - 18,
+            u32::MAX - 19,
+            u32::MAX - 28,
+            u32::MAX - 30,
+            u32::MAX - 31,
+            u32::MAX - 32,
+        ];
+        matches!(self.tcx.kind(ty), Some(TyKind::Adt { def, .. })
+            if HANDLE_CONTAINER_DEFS.contains(&def.local))
     }
 
     /// True when the operand is a `Vec`/`[T]` whose element type is statically

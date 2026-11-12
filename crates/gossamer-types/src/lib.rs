@@ -165,31 +165,27 @@ pub fn is_mutating_method_name(name: &str) -> bool {
 /// sees one. The erasure is structural because a nominal alias can sit
 /// anywhere a type can - `Vec<UserId>`, `Map<UserId, String>`, a function
 /// signature - and every one of those positions must reach lowering as the
-/// representation.
+/// representation. Ranges are rewritten at every depth for the same reason,
+/// a generic function's type arguments included.
+///
+/// Returns `ty` untouched when it holds neither, so the common case interns
+/// nothing.
 #[must_use]
 pub fn normalize_for_lowering(tcx: &mut TyCtxt, ty: Ty) -> Ty {
-    let ty = match tcx.kind(ty) {
-        Some(TyKind::Range(item)) => {
-            let item = *item;
-            tcx.iterator_ty(item)
-        }
-        _ => ty,
-    };
-    erase_nominal(tcx, ty)
-}
-
-/// Replaces every [`TyKind::Nominal`] in `ty` with its representation,
-/// rebuilding the containers around it. Returns `ty` untouched when it
-/// holds no nominal alias, so the common case interns nothing.
-#[must_use]
-pub fn erase_nominal(tcx: &mut TyCtxt, ty: Ty) -> Ty {
     let Some(kind) = tcx.kind(ty).cloned() else {
         return ty;
     };
     match kind {
-        TyKind::Nominal { repr, .. } => erase_nominal(tcx, repr),
+        TyKind::Nominal { repr, .. } => normalize_for_lowering(tcx, repr),
+        TyKind::Range(item) => {
+            let item = normalize_for_lowering(tcx, item);
+            tcx.iterator_ty(item)
+        }
         TyKind::Tuple(elems) => {
-            let mapped: Vec<Ty> = elems.iter().map(|e| erase_nominal(tcx, *e)).collect();
+            let mapped: Vec<Ty> = elems
+                .iter()
+                .map(|e| normalize_for_lowering(tcx, *e))
+                .collect();
             if mapped == elems {
                 ty
             } else {
@@ -197,7 +193,7 @@ pub fn erase_nominal(tcx: &mut TyCtxt, ty: Ty) -> Ty {
             }
         }
         TyKind::Array { elem, len } => {
-            let mapped = erase_nominal(tcx, elem);
+            let mapped = normalize_for_lowering(tcx, elem);
             if mapped == elem {
                 ty
             } else {
@@ -206,15 +202,15 @@ pub fn erase_nominal(tcx: &mut TyCtxt, ty: Ty) -> Ty {
         }
         // A vector is laid out as the fixed array of its lanes.
         TyKind::Simd { elem, lanes } => {
-            let mapped = erase_nominal(tcx, elem);
+            let mapped = normalize_for_lowering(tcx, elem);
             tcx.intern(TyKind::Array {
                 elem: mapped,
                 len: lanes,
             })
         }
         TyKind::HashMap { key, value, .. } => {
-            let k = erase_nominal(tcx, key);
-            let v = erase_nominal(tcx, value);
+            let k = normalize_for_lowering(tcx, key);
+            let v = normalize_for_lowering(tcx, value);
             if k == key && v == value {
                 ty
             } else {
@@ -226,7 +222,7 @@ pub fn erase_nominal(tcx: &mut TyCtxt, ty: Ty) -> Ty {
             }
         }
         TyKind::Ref { mutability, inner } => {
-            let mapped = erase_nominal(tcx, inner);
+            let mapped = normalize_for_lowering(tcx, inner);
             if mapped == inner {
                 ty
             } else {
@@ -236,27 +232,18 @@ pub fn erase_nominal(tcx: &mut TyCtxt, ty: Ty) -> Ty {
                 })
             }
         }
-        TyKind::FnPtr(ref sig) | TyKind::FnTrait(ref sig) => {
-            let inputs: Vec<Ty> = sig.inputs.iter().map(|i| erase_nominal(tcx, *i)).collect();
-            let output = erase_nominal(tcx, sig.output);
-            if inputs == sig.inputs && output == sig.output {
-                return ty;
-            }
-            let mapped = FnSig { inputs, output };
-            tcx.intern(if matches!(kind, TyKind::FnPtr(_)) {
-                TyKind::FnPtr(mapped)
-            } else {
-                TyKind::FnTrait(mapped)
-            })
-        }
+        TyKind::FnPtr(ref sig) | TyKind::FnTrait(ref sig) => match normalize_sig(tcx, sig) {
+            Some(mapped) if matches!(kind, TyKind::FnPtr(_)) => tcx.intern(TyKind::FnPtr(mapped)),
+            Some(mapped) => tcx.intern(TyKind::FnTrait(mapped)),
+            None => ty,
+        },
         TyKind::Slice(inner)
         | TyKind::Vec(inner)
         | TyKind::Iterator(inner)
-        | TyKind::Range(inner)
         | TyKind::Sender(inner)
         | TyKind::Receiver(inner)
         | TyKind::JoinHandle(inner) => {
-            let mapped = erase_nominal(tcx, inner);
+            let mapped = normalize_for_lowering(tcx, inner);
             if mapped == inner {
                 return ty;
             }
@@ -264,33 +251,53 @@ pub fn erase_nominal(tcx: &mut TyCtxt, ty: Ty) -> Ty {
                 TyKind::Slice(_) => TyKind::Slice(mapped),
                 TyKind::Vec(_) => TyKind::Vec(mapped),
                 TyKind::Iterator(_) => TyKind::Iterator(mapped),
-                TyKind::Range(_) => TyKind::Range(mapped),
                 TyKind::Sender(_) => TyKind::Sender(mapped),
                 TyKind::Receiver(_) => TyKind::Receiver(mapped),
                 _ => TyKind::JoinHandle(mapped),
             })
         }
-        TyKind::Adt { def, substs } => match erase_nominal_substs(tcx, &substs) {
-            Some(mapped) => tcx.intern(TyKind::Adt {
-                def,
-                substs: mapped,
-            }),
+        TyKind::Adt { ref substs, .. }
+        | TyKind::FnDef { ref substs, .. }
+        | TyKind::Closure { ref substs, .. } => match normalize_substs(tcx, substs) {
+            Some(mapped) => tcx.intern(with_substs(kind, mapped)),
             None => ty,
         },
         _ => ty,
     }
 }
 
-/// Erases nominal aliases inside a substitution list, returning `None`
+/// Normalizes a function signature's types for lowering, returning `None`
 /// when nothing changed.
-fn erase_nominal_substs(tcx: &mut TyCtxt, substs: &Substs) -> Option<Substs> {
+fn normalize_sig(tcx: &mut TyCtxt, sig: &FnSig) -> Option<FnSig> {
+    let inputs: Vec<Ty> = sig
+        .inputs
+        .iter()
+        .map(|i| normalize_for_lowering(tcx, *i))
+        .collect();
+    let output = normalize_for_lowering(tcx, sig.output);
+    (inputs != sig.inputs || output != sig.output).then_some(FnSig { inputs, output })
+}
+
+/// `kind`, a type carrying a substitution list, with `substs` in its place.
+fn with_substs(kind: TyKind, substs: Substs) -> TyKind {
+    match kind {
+        TyKind::Adt { def, .. } => TyKind::Adt { def, substs },
+        TyKind::FnDef { def, .. } => TyKind::FnDef { def, substs },
+        TyKind::Closure { def, kind, .. } => TyKind::Closure { def, substs, kind },
+        other => other,
+    }
+}
+
+/// Normalizes the types of a substitution list for lowering, returning
+/// `None` when nothing changed.
+fn normalize_substs(tcx: &mut TyCtxt, substs: &Substs) -> Option<Substs> {
     let mut changed = false;
     let args: Vec<GenericArg> = substs
         .as_slice()
         .iter()
         .map(|arg| match arg {
             GenericArg::Type(t) => {
-                let mapped = erase_nominal(tcx, *t);
+                let mapped = normalize_for_lowering(tcx, *t);
                 changed |= mapped != *t;
                 GenericArg::Type(mapped)
             }

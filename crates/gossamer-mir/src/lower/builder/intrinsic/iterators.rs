@@ -721,12 +721,13 @@ impl<'a> Builder<'a> {
                     return Some(dest);
                 }
                 let vec_local = self.lower_iter_vec_arg(&args[0])?;
-                // A wide element does not fit the word slot the pair helper
-                // writes, and a counted one needs the pair to own a share of
-                // it, so both are built element by element, each pair
-                // carrying the element through the ordinary element path.
+                // The word-slot pair helper copies the slot verbatim, which is
+                // the element itself only for an integer-shaped scalar; a wide
+                // element does not fit the slot, and a vector, table, or other
+                // counted element needs the pair to own a share of it, so those
+                // are built element by element through the ordinary element path.
                 let (wide_elem, wide_abi) = self.iter_elem_abi(args[0].ty);
-                if wide_abi == ElemAbi::Ptr || self.tcx.is_rc_managed(wide_elem) {
+                if wide_abi == ElemAbi::Ptr || !self.zip_slot_is_the_element(wide_elem) {
                     return Some(self.lower_enumerate_wide_elem(vec_local, wide_elem, span));
                 }
                 let unit_ty = self.tcx.unit();
