@@ -170,16 +170,32 @@ impl<'tcx> FnBuilder<'tcx> {
                         // Move-on-last-use: a `let y = x` aliasing a
                         // consumable local hands the aggregate over
                         // instead of cloning it into the fresh slot.
+                        // A binding whose tables another value still holds
+                        // (a parameter, a pattern binding, a loop variable)
+                        // hands them over only to a binding nothing writes.
+                        let holds_tables = self.expr_holds_tables(init);
+                        let binding_mutable =
+                            matches!(pattern.kind, HirPatKind::Binding { mutable: true, .. });
+                        let consumed_source = self.consumable_path(init).filter(|source| {
+                            !holds_tables || !binding_mutable || self.binding_owns_tables(source)
+                        });
                         let consume_init = tr.kind == RegKind::Value
-                            && self
-                                .consumable_path(init)
+                            && consumed_source
                                 .and_then(|name| self.lookup_local(name))
                                 .is_some_and(|home| home.reg == tr.reg);
                         // A bare path aliases its source register, and so does
                         // any initializer the compiler folded down to one - an
-                        // inlined call that answers its own argument, say.
+                        // inlined call that answers its own argument, say, or
+                        // a payload unwrapped from a binding.
                         let aliases_live_binding = is_place_expr(init)
-                            || (tr.kind == RegKind::Value && self.reg_is_bound_local(tr.reg));
+                            || (tr.kind == RegKind::Value && self.reg_is_bound_local(tr.reg))
+                            || (holds_tables && self.expr_may_share_tables(init));
+                        let owns_tables = holds_tables
+                            && if consume_init {
+                                consumed_source.is_some_and(|s| self.binding_owns_tables(s))
+                            } else {
+                                true
+                            };
                         let typed = if consume_init {
                             let dst = self.alloc_reg();
                             self.emit(Op::MoveConsume { dst, src: tr.reg });
@@ -187,12 +203,7 @@ impl<'tcx> FnBuilder<'tcx> {
                                 reg: dst,
                                 kind: RegKind::Value,
                             }
-                        } else if aliases_live_binding
-                            && (self.expr_is_map(init)
-                                || self.expr_is_hashset(init)
-                                || self.expr_is_slot_container(init)
-                                || self.expr_is_aggregate_with_container(init))
-                        {
+                        } else if aliases_live_binding && holds_tables {
                             // `Map` / `Set` entries live behind `Arc<Mutex<_>>`,
                             // so the plain register copy `bind_to_fresh` uses for
                             // every other aliased binding would share the same
@@ -231,6 +242,9 @@ impl<'tcx> FnBuilder<'tcx> {
                         }
                         self.record_uint_display_init(init, typed.reg);
                         self.bind_recorded_local(&name.name, typed);
+                        if owns_tables {
+                            self.mark_owned_tables(&name.name);
+                        }
                         self.install_capture_cell(&name.name, typed, init.ty);
                     } else {
                         // Declared-only - default to Value; an
@@ -347,13 +361,7 @@ impl<'tcx> FnBuilder<'tcx> {
     /// other alone.
     fn compile_assigned_value(&mut self, value: &HirExpr) -> RuntimeResult<TypedReg> {
         let stored = self.compile_expr_ex(value)?;
-        if !is_place_expr(value)
-            || matches!(self.tcx.kind(value.ty), Some(TyKind::Ref { .. }))
-            || !(self.expr_is_map(value)
-                || self.expr_is_hashset(value)
-                || self.expr_is_slot_container(value)
-                || self.expr_is_aggregate_with_container(value))
-        {
+        if !self.value_needs_table_copy(value) {
             return Ok(stored);
         }
         let src = self.as_value(stored);

@@ -608,24 +608,23 @@ impl TyCtxt {
         self.struct_fields.insert(def, fields);
     }
 
-    /// Replaces every opaque alias in the registered struct and enum field
-    /// types with its representation. HIR types are erased the same way at
-    /// lowering, so a field read typed from these tables agrees with the
-    /// expression that reads it.
-    pub fn erase_nominal_field_tys(&mut self) {
+    /// Normalizes the registered struct and enum field types for lowering.
+    /// HIR types are normalized the same way, so a field read typed from
+    /// these tables agrees with the expression that reads it.
+    pub fn normalize_field_tys_for_lowering(&mut self) {
         let mut structs = std::mem::take(&mut self.struct_fields);
         for ty in structs.values_mut().flatten() {
-            *ty = crate::erase_nominal(self, *ty);
+            *ty = crate::normalize_for_lowering(self, *ty);
         }
         self.struct_fields = structs;
         let mut instances = std::mem::take(&mut self.struct_fields_inst);
         for ty in instances.values_mut().flatten() {
-            *ty = crate::erase_nominal(self, *ty);
+            *ty = crate::normalize_for_lowering(self, *ty);
         }
         self.struct_fields_inst = instances;
         let mut variants = std::mem::take(&mut self.enum_variant_tys);
         for ty in variants.values_mut().flatten().flatten() {
-            *ty = crate::erase_nominal(self, *ty);
+            *ty = crate::normalize_for_lowering(self, *ty);
         }
         self.enum_variant_tys = variants;
     }

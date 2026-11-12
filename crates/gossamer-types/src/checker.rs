@@ -1751,7 +1751,7 @@ impl<'a> TypeChecker<'a> {
     fn assoc_type_supplied(&mut self, ty: Ty, assoc: &str) -> Option<Ty> {
         let resolved = self.infer.resolve(self.tcx, ty);
         let (def, substs) = match self.tcx.kind(resolved)? {
-            TyKind::Iterator(item) if assoc == "Item" => return Some(*item),
+            TyKind::Iterator(item) | TyKind::Range(item) if assoc == "Item" => return Some(*item),
             TyKind::Adt { def, substs } => (*def, substs.clone()),
             _ => return None,
         };

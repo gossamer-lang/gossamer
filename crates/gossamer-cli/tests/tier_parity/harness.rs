@@ -2037,6 +2037,23 @@ const SPECS: &[Spec] = &[
     // field access lowers to a real Field projection instead of falling
     // through to the json accessor.
     spec("feature-testing-examples/cross_module_struct_fields.gos"),
+    // A `..base` update copies a map, a set, a vector and a map inside a
+    // sub-struct as values of their own: writes through the new struct
+    // leave the base as it was, and each is freed once.
+    spec("feature-testing-examples/struct_update_containers.gos"),
+    // Copies made by `let`, element reads, generic calls, option and
+    // variant payloads, swaps, `clone()`, closure answers, and repeat
+    // literals are values of their own: writing one leaves its source.
+    spec("feature-testing-examples/value_copies_independent.gos"),
+    // A generic function bounded by `Iterator<Item = T>` instantiates for a
+    // range argument, deciding `T` from it, and a struct field holds a range.
+    spec("feature-testing-examples/generic_iterator_arguments.gos"),
+    // Rebinding a `String` parameter leaves the caller's string as it was,
+    // even a builder with spare capacity, and frees the callee's value.
+    spec("feature-testing-examples/string_parameter_rebinding.gos"),
+    // `enumerate` and `zip` over vectors, tables, and strings: each pair owns
+    // its element, and a loop pulling the pairs gives each one back.
+    spec("feature-testing-examples/enumerate_counted_elements.gos"),
     // Struct-`self` method JIT (Lever 1a): an all-scalar user struct whose
     // `&mut self` mutator and `&self` reader run as in-process Cranelift JIT
     // code. The struct crosses the VM<->native boundary as a flat field-slot

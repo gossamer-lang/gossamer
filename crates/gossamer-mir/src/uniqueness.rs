@@ -1264,6 +1264,7 @@ pub(crate) fn runtime_arg_kept_no_handle(name: &str, index: usize) -> bool {
         // Tagging a vector's element kind writes its header and keeps nothing.
             | "gos_rt_vec_mark_rc_elems"
             | "gos_rt_vec_mark_str_elems"
+            | "gos_rt_vec_mark_map_elems"
             | "gos_rt_vec_mark_vec_elems"
             | "gos_rt_vec_mark_weak_elems"
             | "gos_rt_vec_set_elem_meta"

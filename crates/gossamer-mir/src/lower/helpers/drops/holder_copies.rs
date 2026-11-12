@@ -12,6 +12,9 @@ pub(super) enum StoredOrigin {
     Binding,
     /// Read out of a field, element, or referent of another place.
     Place,
+    /// Read out of the environment of the closure this body runs, which
+    /// outlives the call.
+    Captured,
 }
 
 /// The origin of the value `local` holds and every local on the chain of
@@ -45,6 +48,19 @@ pub(super) fn stored_origin(
             };
         }
         let i = current.0 as usize;
+        // An element address names a slot of the vector it was read from.
+        if writes == 0
+            && let Some(vec) = element_address_source(body, current)
+        {
+            return (StoredOrigin::Place, chain, Some(vec));
+        }
+        // A capture read names a slot of the closure's environment, which the
+        // closure value keeps past this call.
+        if writes == 0
+            && let Some(env) = capture_read_source(body, current)
+        {
+            return (StoredOrigin::Captured, chain, Some(env));
+        }
         // A reference parameter names the caller's place.
         if (1..=arity).contains(&i) && reference_ty(tcx, body.locals[i].ty) {
             return (StoredOrigin::Place, chain, Some(Place::local(current)));
@@ -64,6 +80,69 @@ pub(super) fn stored_origin(
         }
     }
     (StoredOrigin::Binding, chain, None)
+}
+
+/// The vector `local` holds an element of, or the address of one, when its one
+/// definition is an element read.
+fn element_address_source(body: &Body, local: Local) -> Option<Place> {
+    let mut source = None;
+    for block in &body.blocks {
+        if let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            args,
+            destination,
+            ..
+        } = &block.terminator
+            && destination.local == local
+            && destination.projection.is_empty()
+        {
+            let Some(Operand::Copy(vec)) = args.first() else {
+                return None;
+            };
+            if !matches!(
+                name.as_str(),
+                "gos_rt_vec_get_ptr"
+                    | "gos_rt_vec_get_ptr_unchecked"
+                    | "gos_rt_vec_get_i64"
+                    | "gos_rt_vec_get_i64_unchecked"
+            ) || source.is_some()
+            {
+                return None;
+            }
+            source = Some(Place::local(vec.local));
+        }
+    }
+    source
+}
+
+/// The environment parameter `local` reads a capture out of, when its one
+/// definition is a `gos_load` from a parameter.
+fn capture_read_source(body: &Body, local: Local) -> Option<Place> {
+    let mut source = None;
+    for block in &body.blocks {
+        if let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            args,
+            destination,
+            ..
+        } = &block.terminator
+            && destination.local == local
+            && destination.projection.is_empty()
+        {
+            let Some(Operand::Copy(env)) = args.first() else {
+                return None;
+            };
+            if name != "gos_load"
+                || !env.projection.is_empty()
+                || !(1..=body.arity as usize).contains(&(env.local.0 as usize))
+                || source.is_some()
+            {
+                return None;
+            }
+            source = Some(Place::local(env.local));
+        }
+    }
+    source
 }
 
 /// Whether `local` is a closure environment: allocated under a closure's
@@ -221,6 +300,7 @@ pub(super) fn source_outlives_store(
         // A value built for the store that the frame still reads afterwards
         // is named after all: a call result taken straight into a binding.
         StoredOrigin::Fresh | StoredOrigin::Binding => !ret && chain_read(),
+        StoredOrigin::Captured => true,
         StoredOrigin::Place => {
             let Some(place) = place else { return true };
             // A referent belongs to the caller, which outlives this frame.
@@ -288,7 +368,24 @@ pub(super) fn field_ty_at(
 /// no vector.
 enum CopyShape {
     Vector(gossamer_types::Ty),
+    /// A table, copied whole by its clone helper.
+    Table(gossamer_types::Ty, &'static str),
     Fields(gossamer_types::Ty, Vec<(Vec<u32>, gossamer_types::Ty)>),
+}
+
+/// The clone helper for a table of type `ty`, or `None` for anything else.
+fn table_clone_symbol(
+    tcx: &gossamer_types::TyCtxt,
+    ty: gossamer_types::Ty,
+) -> Option<&'static str> {
+    if matches!(tcx.kind_of(ty), gossamer_types::TyKind::HashMap { .. }) {
+        return Some("gos_rt_map_clone");
+    }
+    match handle_container(tcx, ty)? {
+        HandleContainer::Set => Some("gos_rt_set_clone"),
+        HandleContainer::Deque => Some("gos_rt_deque_clone"),
+        HandleContainer::Heap => Some("gos_rt_vec_clone"),
+    }
 }
 
 fn copy_shape(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -> Option<CopyShape> {
@@ -299,13 +396,22 @@ fn copy_shape(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -> Option<Co
     while let TyKind::Ref { inner, .. } = tcx.kind_of(peeled) {
         peeled = *inner;
     }
+    if peeled == ty
+        && let Some(symbol) = table_clone_symbol(tcx, ty)
+    {
+        return Some(CopyShape::Table(ty, symbol));
+    }
     match tcx.kind_of(peeled) {
         TyKind::Vec(_) | TyKind::Slice(_) => Some(CopyShape::Vector(peeled)),
         TyKind::Adt { .. } | TyKind::Tuple(_) | TyKind::Array { .. } if peeled == ty => {
             let fields: Vec<(Vec<u32>, gossamer_types::Ty)> = aggregate_rc_field_paths(tcx, ty)
                 .into_iter()
-                .filter(|(_, kind)| *kind == FieldRcKind::Vec)
-                .filter_map(|(path, _)| {
+                // A table field takes its own copy from the aggregate-copy
+                // retains, which clone it into the new storage.
+                .filter_map(|(path, kind)| {
+                    if kind != FieldRcKind::Vec {
+                        return None;
+                    }
                     let field = field_ty_at(tcx, ty, &path)?;
                     matches!(tcx.kind_of(field), TyKind::Vec(_) | TyKind::Slice(_))
                         .then_some((path, field))
@@ -315,6 +421,43 @@ fn copy_shape(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -> Option<Co
         }
         _ => None,
     }
+}
+
+/// The table copy a store at `(block, stmt)` owes when the stored local's MIR
+/// type is the handle word a set, deque, or heap constructor gives it: the
+/// slot it lands in, an `Option` / `Result` payload or an aggregate operand,
+/// names the table type.
+fn slot_table_shape(
+    body: &Body,
+    tcx: &gossamer_types::TyCtxt,
+    block: usize,
+    stmt: usize,
+    site: StoreSite,
+) -> Option<CopyShape> {
+    use gossamer_types::TyKind;
+    let StatementKind::Assign { place, rvalue } = &body.blocks[block].stmts.get(stmt)?.kind else {
+        return None;
+    };
+    if !place.projection.is_empty() {
+        return None;
+    }
+    let holder = body.locals[place.local.0 as usize].ty;
+    let slot = match (site, rvalue) {
+        (StoreSite::Intrinsic(1), Rvalue::CallIntrinsic { name, .. })
+            if matches!(*name, "gos_rt_result_new" | "gos_rt_result_new_owned") =>
+        {
+            match tcx.kind_of(holder) {
+                TyKind::Adt { substs, .. } => *substs.types().first()?,
+                _ => return None,
+            }
+        }
+        (StoreSite::Aggregate(k), Rvalue::Aggregate { .. }) => {
+            field_ty_at(tcx, holder, &[u32::try_from(k).ok()?])?
+        }
+        _ => return None,
+    };
+    let symbol = table_clone_symbol(tcx, slot)?;
+    Some(CopyShape::Table(slot, symbol))
 }
 
 fn container_store_value(name: &str, args: &[Operand]) -> Option<usize> {
@@ -329,7 +472,8 @@ fn container_store_value(name: &str, args: &[Operand]) -> Option<usize> {
         )
         || name.starts_with("gos_rt_vec_insert")
         || name.starts_with("gos_rt_map_insert")
-        || name.starts_with("gos_rt_map_or_insert");
+        || name.starts_with("gos_rt_map_or_insert")
+        || name == "gos_rt_vec_set_slots";
     (stores && args.len() >= 2).then(|| args.len() - 1)
 }
 
@@ -373,7 +517,7 @@ pub(crate) fn copy_values_into_holders(body: &mut Body, tcx: &gossamer_types::Ty
         }
         _ => None,
     };
-    let mut sites: Vec<(usize, usize, StoreSite, Local)> = Vec::new();
+    let mut sites: Vec<(usize, usize, StoreSite, Local, bool)> = Vec::new();
     for (bi, block) in body.blocks.iter().enumerate() {
         for (si, stmt) in block.stmts.iter().enumerate() {
             let StatementKind::Assign { place, rvalue } = &stmt.kind else {
@@ -394,7 +538,12 @@ pub(crate) fn copy_values_into_holders(body: &mut Body, tcx: &gossamer_types::Ty
                             continue;
                         }
                         if let Some(l) = bare(op) {
-                            sites.push((bi, si, StoreSite::Aggregate(k), l));
+                            // A local the literal stores again in a later
+                            // operand is read past this store: only its last
+                            // store may take the value over.
+                            let stored_again =
+                                operands[k + 1..].iter().any(|later| bare(later) == Some(l));
+                            sites.push((bi, si, StoreSite::Aggregate(k), l, stored_again));
                         }
                     }
                 }
@@ -413,15 +562,15 @@ pub(crate) fn copy_values_into_holders(body: &mut Body, tcx: &gossamer_types::Ty
                         continue;
                     }
                     if let Some(l) = args.get(index).and_then(bare) {
-                        sites.push((bi, si, StoreSite::Intrinsic(index), l));
+                        sites.push((bi, si, StoreSite::Intrinsic(index), l, false));
                     }
                 }
                 Rvalue::Use(op) => {
                     let Some(l) = bare(op) else { continue };
                     if place.local == Local::RETURN && place.projection.is_empty() {
-                        sites.push((bi, si, StoreSite::Return, l));
+                        sites.push((bi, si, StoreSite::Return, l, false));
                     } else if !place.projection.is_empty() {
-                        sites.push((bi, si, StoreSite::FieldStore, l));
+                        sites.push((bi, si, StoreSite::FieldStore, l, false));
                     }
                 }
                 _ => {}
@@ -441,16 +590,25 @@ pub(crate) fn copy_values_into_holders(body: &mut Body, tcx: &gossamer_types::Ty
                 Some(CopyShape::Fields(..))
             )
         {
-            sites.push((bi, block.stmts.len(), StoreSite::ContainerStore(index), l));
+            sites.push((
+                bi,
+                block.stmts.len(),
+                StoreSite::ContainerStore(index),
+                l,
+                false,
+            ));
         }
     }
     let mut copies: Vec<(usize, usize, StoreSite, Local, CopyShape)> = Vec::new();
-    for (bi, si, site, value) in sites {
-        let Some(shape) = copy_shape(tcx, body.locals[value.0 as usize].ty) else {
+    for (bi, si, site, value, stored_again) in sites {
+        let Some(shape) = copy_shape(tcx, body.locals[value.0 as usize].ty)
+            .or_else(|| slot_table_shape(body, tcx, bi, si, site))
+        else {
             continue;
         };
+
         let ret = matches!(site, StoreSite::Return);
-        if source_outlives_store(body, tcx, value, (bi, si), ret) {
+        if stored_again || source_outlives_store(body, tcx, value, (bi, si), ret) {
             copies.push((bi, si, site, value, shape));
         }
     }
@@ -472,7 +630,7 @@ pub(crate) fn copy_values_into_holders(body: &mut Body, tcx: &gossamer_types::Ty
             });
         let span = body.blocks[bi].span;
         let copy_ty = match &shape {
-            CopyShape::Vector(ty) | CopyShape::Fields(ty, _) => *ty,
+            CopyShape::Vector(ty) | CopyShape::Table(ty, _) | CopyShape::Fields(ty, _) => *ty,
         };
         let copy = new_local(body, copy_ty);
         // A copy made inside an arena region lives in that region too.
@@ -545,6 +703,14 @@ pub(crate) fn copy_values_into_holders(body: &mut Body, tcx: &gossamer_types::Ty
             CopyShape::Vector(_) => {
                 body.blocks[bi].terminator =
                     clone_call(Place::local(value), Place::local(copy), rest);
+            }
+            CopyShape::Table(_, symbol) => {
+                body.blocks[bi].terminator = Terminator::Call {
+                    callee: Operand::Const(ConstValue::Str(symbol.to_string())),
+                    args: vec![Operand::Copy(Place::local(value))],
+                    destination: Place::local(copy),
+                    target: Some(BlockId(u32::try_from(rest).expect("block overflow"))),
+                };
             }
             CopyShape::Fields(_, fields) => {
                 // The aggregate's words first, then each vector field swapped for

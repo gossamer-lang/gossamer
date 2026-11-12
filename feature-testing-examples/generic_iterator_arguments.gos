@@ -1,0 +1,25 @@
+// A generic function bounded by `Iterator<Item = T>` takes a range, a
+// lazy chain, or a walk over a vector, and a struct may hold a range.
+fn total<I: Iterator<Item = i64>>(it: I) -> i64 { it.sum() }
+
+fn drain<I: Iterator<Item = i64>>(mut it: I) -> i64 {
+    let mut acc = 0
+    while let Some(x) = it.next() { acc += x }
+    acc
+}
+
+fn first_two<T, I: Iterator<Item = T>>(it: I) -> Vec<T> { it.take(2).collect() }
+
+struct Window { span: Range<i64> }
+
+fn main() {
+    println(total(1..4))
+    println(total((0..10).step_by(3)))
+    println(drain(1..=4))
+    let xs = #[5, 6, 7]
+    println(total(xs.iter()))
+    println(drain(xs.iter().map(|x| x * 2)))
+    println(first_two(10..20))
+    let w = Window { span: 2..5 }
+    println(drain(w.span))
+}

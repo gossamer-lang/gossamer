@@ -257,6 +257,7 @@ mod misc;
 mod scope;
 mod stdlib;
 mod stmt;
+pub(crate) use stmt::rename_local_in_block;
 mod types;
 pub(crate) mod unwind;
 

@@ -165,6 +165,8 @@ pub(super) fn collect_slot_rc_children(
     }
     let field_tys: Vec<gossamer_types::Ty> = match tcx.kind_of(ty) {
         TyKind::Tuple(elems) => elems.clone(),
+        // A fixed array's elements sit inline, one after another.
+        TyKind::Array { elem, len } => vec![*elem; len.to_usize()],
         TyKind::Adt { def, substs } => {
             // Opaque stdlib handles / Weak / Option / Result sentinels have
             // their own teardown; never walk their declared field lists here.
@@ -310,7 +312,9 @@ pub(super) fn collect_field_rc(
                 collect_slot_rc_children(tcx, fty, word, depth + 1, out, has_direct);
             }
         }
-        TyKind::Tuple(_) => collect_slot_rc_children(tcx, fty, word, depth + 1, out, has_direct),
+        TyKind::Tuple(_) | TyKind::Array { .. } => {
+            collect_slot_rc_children(tcx, fty, word, depth + 1, out, has_direct);
+        }
         _ => {}
     }
 }

@@ -238,6 +238,7 @@ pub(super) const MAP_METHODS: &[&str] = &[
     "values",
     "iter",
     "clear",
+    "clone",
 ];
 
 /// Methods a `BTreeMap` has beyond the `Map` surface: its key order makes a

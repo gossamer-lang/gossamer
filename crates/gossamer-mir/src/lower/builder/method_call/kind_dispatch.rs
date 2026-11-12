@@ -257,6 +257,9 @@ impl<'a> Builder<'a> {
                     self.emit_owned_clone_binding(a, cloned, span);
                     a = cloned;
                 }
+                if rt.starts_with("gos_rt_chan_") {
+                    self.ensure_sent_carrier_metas(a);
+                }
                 arg_operands.push(Operand::Copy(Place::local(a)));
             }
         }
@@ -1390,6 +1393,9 @@ impl<'a> Builder<'a> {
                     self.emit_owned_clone_binding(a, cloned, span);
                     a = cloned;
                 }
+                if rt.starts_with("gos_rt_chan_") {
+                    self.ensure_sent_carrier_metas(a);
+                }
                 arg_operands.push(Operand::Copy(Place::local(a)));
             }
         }
@@ -1680,6 +1686,7 @@ impl<'a> Builder<'a> {
                 if self.is_inline_aggregate_ty(value) || self.map_value_is_carrier(recv) {
                     let _ = self.ensure_aggr_copy_meta(value);
                 }
+                self.ensure_map_carrier_box_meta(value);
             }
         }
 
@@ -2019,6 +2026,9 @@ impl<'a> Builder<'a> {
             } else {
                 a
             };
+            if runtime_symbol.is_some_and(|rt| rt.starts_with("gos_rt_chan_")) {
+                self.ensure_sent_carrier_metas(a);
+            }
             arg_operands.push(Operand::Copy(Place::local(a)));
         }
         Some((receiver_local, arg_operands))

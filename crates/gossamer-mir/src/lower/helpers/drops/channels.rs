@@ -484,6 +484,61 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
         }
     }
     let lent_param = |local: usize| is_param(local) && is_carrier(local) && !reassigned[local];
+    // Carriers a call answers as a view of an element a container keeps.
+    let mut borrowed_answer = vec![false; n_locals];
+    for block in &body.blocks {
+        if let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            destination,
+            ..
+        } = &block.terminator
+            && destination.projection.is_empty()
+            && (destination.local.0 as usize) < n_locals
+            && (answers_borrowed_element(name) || returns_borrowed_pointer(name))
+        {
+            borrowed_answer[destination.local.0 as usize] = true;
+        }
+    }
+    // Whether `local` reads such a view: the view itself, or a local whose one
+    // definition copies one.
+    let mut single_copy_src: Vec<Option<usize>> = vec![None; n_locals];
+    let mut whole_defs = vec![0usize; n_locals];
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if let StatementKind::Assign { place, rvalue } = &stmt.kind
+                && place.projection.is_empty()
+                && (place.local.0 as usize) < n_locals
+                && !matches!(rvalue, Rvalue::Use(Operand::Const(_)))
+            {
+                whole_defs[place.local.0 as usize] += 1;
+                single_copy_src[place.local.0 as usize] = match rvalue {
+                    Rvalue::Use(Operand::Copy(src)) if src.projection.is_empty() => {
+                        Some(src.local.0 as usize)
+                    }
+                    _ => None,
+                };
+            }
+        }
+        if let Terminator::Call { destination, .. } = &block.terminator
+            && destination.projection.is_empty()
+            && (destination.local.0 as usize) < n_locals
+        {
+            whole_defs[destination.local.0 as usize] += 1;
+        }
+    }
+    let reads_borrowed = |local: usize| {
+        let mut cur = local;
+        for _ in 0..n_locals {
+            if borrowed_answer.get(cur).copied().unwrap_or(false) {
+                return true;
+            }
+            match single_copy_src.get(cur).copied().flatten() {
+                Some(src) if whole_defs[cur] == 1 => cur = src,
+                _ => return false,
+            }
+        }
+        false
+    };
 
     /// Where a consuming mention sits, which decides where the emptying goes.
     #[derive(Clone, Copy)]
@@ -660,18 +715,45 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
             if is_carrier(dest) {
                 if place.projection.is_empty() {
                     let owned_def = match rvalue {
-                        // A carrier copied out of an aggregate's field leaves
-                        // the field holding its share, so the binding takes
-                        // one of its own and gives it back like any owner.
+                        // A carrier copied out of an aggregate's field, or
+                        // read through a reference, leaves that place holding
+                        // its share, so the binding takes one of its own and
+                        // gives it back like any owner.
                         Rvalue::Use(Operand::Copy(src))
                             if !src.projection.is_empty()
                                 && (src.local.0 as usize) < n_locals
-                                && src
-                                    .projection
-                                    .iter()
-                                    .all(|p| matches!(p, crate::ir::Projection::Field(_))) =>
+                                && src.projection.iter().all(|p| {
+                                    matches!(
+                                        p,
+                                        crate::ir::Projection::Field(_)
+                                            | crate::ir::Projection::Deref
+                                    )
+                                }) =>
                         {
                             views.push((dest, Site::Stmt(bi, si)));
+                            true
+                        }
+                        // A `mut` binding of an element a container still
+                        // holds, or a local also given values of its own, is
+                        // a value of its own: it takes its own share.
+                        Rvalue::Use(Operand::Copy(src))
+                            if src.projection.is_empty()
+                                && (body.locals[dest].mutable || whole_defs[dest] > 1)
+                                && (src.local.0 as usize) < n_locals
+                                && reads_borrowed(src.local.0 as usize) =>
+                        {
+                            views.push((dest, Site::Stmt(bi, si)));
+                            true
+                        }
+                        // A copy of a diverging value never runs.
+                        Rvalue::Use(Operand::Copy(src))
+                            if src.projection.is_empty()
+                                && (src.local.0 as usize) < n_locals
+                                && matches!(
+                                    tcx.kind_of(body.locals[src.local.0 as usize].ty),
+                                    gossamer_types::TyKind::Never
+                                ) =>
+                        {
                             true
                         }
                         Rvalue::Use(Operand::Copy(src)) => {
@@ -724,6 +806,8 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
                         if place.projection.is_empty()
                             && is_carrier(dest)
                             && kinds[s] == kinds[dest]
+                            && !((body.locals[dest].mutable || whole_defs[dest] > 1)
+                                && reads_borrowed(s))
                         {
                             copies.push((dest, s));
                         }
@@ -739,6 +823,19 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
                         // A carrier payload is copied into a box holding its
                         // own share, so the operand keeps the one it has.
                         if idx == 1 && *name == "gos_rt_result_new" && boxes_with_share(arg) {
+                            continue;
+                        }
+                        // A carrier stored into a closure's environment takes a
+                        // share of its own there, and a retain counts a holder
+                        // made elsewhere, so the operand keeps its own.
+                        if (idx == 2
+                            && *name == "gos_store_i128"
+                            && stores_into_closure_env(args, body, tcx))
+                            || matches!(
+                                *name,
+                                "gos_rt_result_payload_retain" | "gos_rt_option_slot_retain"
+                            )
+                        {
                             continue;
                         }
                         // The release pass takes no share out of the extraction
@@ -823,6 +920,14 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
                         }
                     }
                 }
+                // `&mut c` lends the carrier for the call it is passed to: a
+                // store through it gives back the slot's old payload and
+                // hands the new one to the slot, so `c` still owns whatever
+                // it holds afterwards.
+                Rvalue::Ref {
+                    mutable: true,
+                    place: p,
+                } if p.projection.is_empty() && is_carrier(p.local.0 as usize) => {}
                 _ => for_each_rvalue_place(rvalue, &mut |p| {
                     if (p.local.0 as usize) < n_locals {
                         withdrawn[p.local.0 as usize] = true;
@@ -938,9 +1043,23 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
                     && target.is_some()
                     && reads_boxed_carrier(name)
                 {
+                    // A box a pop, remove, or receive took out of its container
+                    // is the frame's own, so the words read out of it are too.
+                    let popped_box = matches!(args.first(), Some(Operand::Copy(src))
+                        if src.projection.is_empty()
+                            && body.blocks.iter().any(|b| matches!(&b.terminator,
+                                Terminator::Call {
+                                    callee: Operand::Const(ConstValue::Str(n)),
+                                    destination,
+                                    ..
+                                } if destination.local == src.local
+                                    && destination.projection.is_empty()
+                                    && (super::tables::takes_element_out(n)
+                                        || n.starts_with("gos_rt_chan_recv")
+                                        || n.starts_with("gos_rt_chan_try_recv")))));
                     if box_owns_payload(body.locals[dest].ty) {
                         views.push((dest, Site::Call(bi)));
-                    } else {
+                    } else if !popped_box {
                         withdrawn[dest] = true;
                     }
                 }
@@ -1100,6 +1219,19 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
             },
             Site::Call(_) => None,
         };
+        // A field store the source outlives takes a share of its own for the
+        // field (`insert_rc_releases`), so the source keeps the one it holds.
+        let field_store = matches!(site, Site::Stmt(bi, si)
+            if matches!(&body.blocks[bi].stmts[si].kind, StatementKind::Assign {
+                place,
+                rvalue: Rvalue::Use(Operand::Copy(src)),
+            } if !place.projection.is_empty()
+                && place.projection.iter().all(|p| matches!(p, crate::ir::Projection::Field(_)))
+                && src.projection.is_empty()
+                && src.local.0 as usize == local));
+        if field_store && !holds_table(local) {
+            continue;
+        }
         match shared_copy {
             Some(dest) if holds_table(local) => {
                 withdrawn[local] = true;
@@ -1156,11 +1288,25 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
     }
 
     let owner = |local: usize| is_carrier(local) && !withdrawn[local];
+    // Stores that replace a carrier in place, through a reference or into a
+    // vector element, give back what the slot held whoever owns the rest.
+    let replaces_slot = body.blocks.iter().any(|block| {
+        block.stmts.iter().any(|stmt| {
+            matches!(&stmt.kind, StatementKind::Assign { place, .. }
+                if place.projection.as_slice() == [crate::ir::Projection::Deref])
+        }) || block.stmts.iter().any(|stmt| {
+            matches!(&stmt.kind, StatementKind::Assign { place, .. }
+                if matches!(place.projection.as_slice(), [crate::ir::Projection::Index(_)]))
+        }) || matches!(&block.terminator, Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)), ..
+        } if name == "gos_rt_vec_set_i128")
+    });
     if (0..n_locals).all(|l| !owner(l))
         && aggregate_shares.is_empty()
         && views.is_empty()
         && escapes.is_empty()
         && handed_shares.is_empty()
+        && !replaces_slot
     {
         return;
     }
@@ -1224,12 +1370,15 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
     // down so each insertion leaves the positions below it valid. Statements
     // sharing a position run in rank order: an entry emptying or entry share
     // first (`ENTRY`), then the emptying of a value a mention just handed over
-    // (`EMPTY`), then releases (`RELEASE`), which so read either a share the
-    // local still holds or an empty arm, and shares taken last (`RETAIN`).
+    // (`EMPTY`), then the shares taken of what the statement before defined
+    // (`RETAIN`), and releases last (`RELEASE`), which so read either a share
+    // the local still holds or an empty arm. A release can name the payload a
+    // retain at the same position takes - the old value of a carrier being
+    // redefined from a read of its own slot - so the retain runs first.
     const ENTRY: u8 = 0;
     const EMPTY: u8 = 1;
-    const RELEASE: u8 = 2;
-    const RETAIN: u8 = 3;
+    const RETAIN: u8 = 2;
+    const RELEASE: u8 = 3;
     let mut inserts: Vec<(usize, usize, u8, Statement)> = Vec::new();
     // The aggregate's field walk gives back both arms' payloads, so the share
     // it takes covers both arms too.
@@ -1237,6 +1386,157 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
         let sink = new_local(body);
         let span = body.blocks[bi].span;
         inserts.push((bi, si + 1, RETAIN, retain_stmt(sink, local, span)));
+    }
+    // A store through `&mut Option<T>` replaces the caller's carrier, whose
+    // counted payload goes back first; the stored value's share is handed
+    // over with it.
+    let mut deref_stores: Vec<(usize, usize, Local, (i64, i64))> = Vec::new();
+    let mut element_stores: Vec<(usize, Place, (i64, i64))> = Vec::new();
+    for (bi, block) in body.blocks.iter().enumerate() {
+        for (si, stmt) in block.stmts.iter().enumerate() {
+            if let StatementKind::Assign {
+                place,
+                rvalue: Rvalue::Use(Operand::Copy(_)),
+            } = &stmt.kind
+                && place.projection.as_slice() == [crate::ir::Projection::Deref]
+                && (place.local.0 as usize) < n_locals
+                && let gossamer_types::TyKind::Ref { inner, .. } =
+                    tcx.kind_of(body.locals[place.local.0 as usize].ty)
+                && let Some((ok, err)) = payload_kind(*inner)
+                && !is_table_kind(ok)
+                && !is_table_kind(err)
+            {
+                deref_stores.push((bi, si, place.local, (ok, err)));
+            }
+        }
+    }
+    // A store into an element of a vector of carriers replaces the element,
+    // whose counted payload goes back first in the same way.
+    for (bi, block) in body.blocks.iter().enumerate() {
+        if let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            args,
+            ..
+        } = &block.terminator
+            && name == "gos_rt_vec_set_i128"
+            && let [Operand::Copy(vec), Operand::Copy(index), _] = args.as_slice()
+            && vec.projection.is_empty()
+            && index.projection.is_empty()
+            && (vec.local.0 as usize) < n_locals
+            && let gossamer_types::TyKind::Vec(elem) | gossamer_types::TyKind::Slice(elem) =
+                tcx.kind_of(body.locals[vec.local.0 as usize].ty)
+            && let Some((ok, err)) = payload_kind(*elem)
+            && !is_table_kind(ok)
+            && !is_table_kind(err)
+        {
+            let slot = Place {
+                local: vec.local,
+                projection: vec![crate::ir::Projection::Index(index.local)].into(),
+            };
+            element_stores.push((bi, slot, (ok, err)));
+        }
+    }
+    // Each element store is its block's call, so its release goes last.
+    for (bi, slot, (ok, err)) in element_stores {
+        let si = body.blocks[bi].stmts.len();
+        let sink = new_local(body);
+        let span = body.blocks[bi].span;
+        inserts.push((
+            bi,
+            si,
+            RELEASE,
+            Statement {
+                kind: StatementKind::Assign {
+                    place: Place::local(sink),
+                    rvalue: Rvalue::CallIntrinsic {
+                        name: "gos_rt_result_payload_release",
+                        args: vec![
+                            Operand::Copy(slot),
+                            Operand::Const(ConstValue::Int(i128::from(ok))),
+                            Operand::Const(ConstValue::Int(i128::from(err))),
+                        ],
+                    },
+                },
+                span,
+                inlined: None,
+            },
+        ));
+    }
+    // A store into an element of a fixed array of carriers replaces the
+    // element, whose counted payload goes back first.
+    let mut array_stores: Vec<(usize, usize, Place, (i64, i64))> = Vec::new();
+    for (bi, block) in body.blocks.iter().enumerate() {
+        for (si, stmt) in block.stmts.iter().enumerate() {
+            if let StatementKind::Assign {
+                place,
+                rvalue: Rvalue::Use(Operand::Copy(_)),
+            } = &stmt.kind
+                && matches!(
+                    place.projection.as_slice(),
+                    [crate::ir::Projection::Index(_)]
+                )
+                && (place.local.0 as usize) < n_locals
+                && let gossamer_types::TyKind::Array { elem, .. } =
+                    tcx.kind_of(body.locals[place.local.0 as usize].ty)
+                && let Some((ok, err)) = payload_kind(*elem)
+                && !is_table_kind(ok)
+                && !is_table_kind(err)
+            {
+                array_stores.push((bi, si, place.clone(), (ok, err)));
+            }
+        }
+    }
+    for (bi, si, slot, (ok, err)) in array_stores {
+        let sink = new_local(body);
+        let span = body.blocks[bi].span;
+        inserts.push((
+            bi,
+            si,
+            RELEASE,
+            Statement {
+                kind: StatementKind::Assign {
+                    place: Place::local(sink),
+                    rvalue: Rvalue::CallIntrinsic {
+                        name: "gos_rt_result_payload_release",
+                        args: vec![
+                            Operand::Copy(slot),
+                            Operand::Const(ConstValue::Int(i128::from(ok))),
+                            Operand::Const(ConstValue::Int(i128::from(err))),
+                        ],
+                    },
+                },
+                span,
+                inlined: None,
+            },
+        ));
+    }
+    for (bi, si, reference, (ok, err)) in deref_stores {
+        let sink = new_local(body);
+        let span = body.blocks[bi].span;
+        let slot = Place {
+            local: reference,
+            projection: vec![crate::ir::Projection::Deref].into(),
+        };
+        inserts.push((
+            bi,
+            si,
+            RELEASE,
+            Statement {
+                kind: StatementKind::Assign {
+                    place: Place::local(sink),
+                    rvalue: Rvalue::CallIntrinsic {
+                        name: "gos_rt_result_payload_release",
+                        args: vec![
+                            Operand::Copy(slot),
+                            Operand::Const(ConstValue::Int(i128::from(ok))),
+                            Operand::Const(ConstValue::Int(i128::from(err))),
+                        ],
+                    },
+                },
+                span,
+                inlined: None,
+            },
+        ));
     }
     for &(local, bi, si) in &redefinitions {
         if !owner(local) {
@@ -1353,4 +1653,25 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
         let position = position.min(stmts.len());
         stmts.insert(position, stmt);
     }
+}
+
+/// Whether a `gos_store_i128(object, offset, value)` writes into a closure's
+/// environment, which takes a share of the stored carrier's payload of its
+/// own; a store into any other object takes the operand's share with it.
+fn stores_into_closure_env(args: &[Operand], body: &Body, tcx: &gossamer_types::TyCtxt) -> bool {
+    let Some(Operand::Copy(object)) = args.first() else {
+        return false;
+    };
+    object.projection.is_empty()
+        && body
+            .locals
+            .get(object.local.0 as usize)
+            .is_some_and(|decl| {
+                matches!(
+                    tcx.kind_of(decl.ty),
+                    gossamer_types::TyKind::FnTrait(_)
+                        | gossamer_types::TyKind::FnPtr(_)
+                        | gossamer_types::TyKind::Closure { .. }
+                )
+            })
 }

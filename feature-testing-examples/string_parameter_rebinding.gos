@@ -1,0 +1,43 @@
+// A function that rebinds a `String` parameter (`s = ..`, `s += ..`, through
+// `&mut s`) writes a value of its own: the caller's string, even a builder
+// with room to grow in place, keeps what it held.
+fn ret(mut s: String) -> String {
+    s += "x"
+    s
+}
+fn looped(mut s: String, n: i64) -> String {
+    for i in 0..n { s += f"{i}" }
+    s
+}
+fn cond(mut s: String, flip: bool) -> i64 {
+    if flip { s = "replaced" }
+    s.len()
+}
+fn bump(s: &mut String) { s.push('!') }
+fn through_ref(mut s: String) -> String {
+    bump(&mut s)
+    s
+}
+fn captured(mut s: String) -> i64 {
+    s += "c"
+    let f = || s.len()
+    f()
+}
+fn early(mut s: String, stop: bool) -> String {
+    s += "e"
+    if stop { return s }
+    s += "f"
+    s
+}
+fn main() {
+    let mut b = String::with_capacity(64)
+    b += "ab"
+    let mut total = 0
+    for i in 0..200 {
+        let r = ret(b)
+        let l = looped(b, 3)
+        total += cond(b, i % 2 == 0) + captured(b) + r.len() + l.len()
+        total += through_ref(b).len() + early(b, i % 3 == 0).len()
+    }
+    println(f"{total} {b} {b.len()}")
+}

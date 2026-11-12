@@ -144,20 +144,20 @@ fn a_block_with_both_kinds_of_handoff_keeps_the_value_it_builds() {
 
 #[test]
 fn an_element_read_out_of_a_container_has_no_share_to_hand_over() {
-    // `row` reads an element `rows` still owns. The retain before the push is
-    // a new share for `c`, not one `row` could give up, so it must stay.
+    // `row` reads an element `rows` still owns, which the next iteration
+    // reads again. `c` takes a vector of its own, never the element itself.
     let (bodies, _) = lower(
         "fn f(rows: Vec<Vec<i64>>) -> i64 {\n let mut c: Vec<Vec<i64>> = #[]\n for row in rows { c.push(row) }\n c.len()\n}\n",
     );
-    assert!(count_calls(body(&bodies, "f"), "gos_rt_vec_retain") >= 1);
+    assert!(count_calls(body(&bodies, "f"), "gos_rt_vec_clone") >= 1);
 }
 
 #[test]
-fn a_local_read_out_of_a_container_keeps_its_retain() {
+fn a_local_read_out_of_a_container_is_copied_into_its_new_holder() {
     let (bodies, _) = lower(
         "fn f() -> i64 {\n let rows = #[#[1], #[2]]\n let mut c: Vec<Vec<i64>> = #[]\n for row in rows { c.push(row) }\n c.len()\n}\n",
     );
-    assert!(count_calls(body(&bodies, "f"), "gos_rt_vec_retain") >= 1);
+    assert!(count_calls(body(&bodies, "f"), "gos_rt_vec_clone") >= 1);
 }
 
 #[test]
@@ -216,7 +216,7 @@ fn a_carrier_of_a_vector_is_no_blob_holder_when_the_vector_type_has_a_copy_meta(
 }
 
 #[test]
-fn a_closure_answering_a_captured_vector_gives_the_caller_a_share() {
+fn a_closure_answering_a_captured_vector_gives_the_caller_a_copy() {
     let (bodies, _) = lower(
         "fn keeps(d: Vec<u8>) -> Vec<u8> {\n let f = || d\n f()\n}\nfn main() {\n let data = #[1u8, 2u8]\n let mut kept = keeps(data)\n kept[0] = 9u8\n println(kept.len() + data.len())\n}\n",
     );
@@ -225,8 +225,8 @@ fn a_closure_answering_a_captured_vector_gives_the_caller_a_share() {
         .find(|b| b.name.starts_with("__closure"))
         .expect("the lifted closure");
     assert_eq!(
-        count_calls(closure, "gos_rt_vec_retain"),
+        count_calls(closure, "gos_rt_vec_clone"),
         1,
-        "the capture stays the environment's, so the answer takes its own share"
+        "the capture stays the environment's, so the answer takes a vector of its own"
     );
 }

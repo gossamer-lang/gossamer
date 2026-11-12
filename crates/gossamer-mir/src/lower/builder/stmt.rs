@@ -453,6 +453,31 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The runtime kind tag a set, deque, queue, stack, or heap of type `ty`
+    /// carries, or `None` for any other type.
+    pub(crate) fn handle_runtime_kind(&self, ty: gossamer_types::Ty) -> Option<&'static str> {
+        const HASH_SET_DEF_LOCAL: u32 = u32::MAX - 7;
+        const BTREE_SET_DEF_LOCAL: u32 = u32::MAX - 18;
+        const VEC_DEQUE_DEF_LOCAL: u32 = u32::MAX - 19;
+        const BINARY_HEAP_DEF_LOCAL: u32 = u32::MAX - 28;
+        const MIN_HEAP_DEF_LOCAL: u32 = u32::MAX - 30;
+        const VEC_QUEUE_DEF_LOCAL: u32 = u32::MAX - 31;
+        const VEC_STACK_DEF_LOCAL: u32 = u32::MAX - 32;
+        let gossamer_types::TyKind::Adt { def, .. } = self.tcx.kind_of(ty) else {
+            return None;
+        };
+        match def.local {
+            HASH_SET_DEF_LOCAL => Some("collections::HashSet"),
+            BTREE_SET_DEF_LOCAL => Some("collections::BTreeSet"),
+            VEC_DEQUE_DEF_LOCAL => Some("collections::VecDeque"),
+            BINARY_HEAP_DEF_LOCAL => Some("collections::MaxHeap"),
+            MIN_HEAP_DEF_LOCAL => Some("collections::MinHeap"),
+            VEC_QUEUE_DEF_LOCAL => Some("collections::VecQueue"),
+            VEC_STACK_DEF_LOCAL => Some("collections::VecStack"),
+            _ => None,
+        }
+    }
+
     pub(crate) fn emit_vec_clone_binding(&mut self, value: Local, binding: Local, span: Span) {
         self.emit_clone_call_binding(value, binding, span, "gos_rt_vec_clone");
     }
@@ -1098,7 +1123,7 @@ fn is_container_ctor(name: &str) -> bool {
 }
 
 /// Replaces every mention of `from` in `block` with `to`.
-fn rename_local_in_block(block: &mut crate::ir::BasicBlock, from: Local, to: Local) {
+pub(crate) fn rename_local_in_block(block: &mut crate::ir::BasicBlock, from: Local, to: Local) {
     use crate::ir::{Projection, StatementKind as S};
     let place = |p: &mut Place| {
         if p.local == from {

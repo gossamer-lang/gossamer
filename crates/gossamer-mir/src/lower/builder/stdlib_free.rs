@@ -652,6 +652,7 @@ impl<'a> Builder<'a> {
             // shape `m.insert(k, v)` gives it.
             let _ = self.ensure_aggr_struct_meta(val_ty);
             let _ = self.ensure_aggr_copy_meta(val_ty);
+            self.ensure_map_carrier_box_meta(val_ty);
             (self.map_insert_helper(map_ty), None)
         } else {
             return None;
@@ -753,6 +754,7 @@ impl<'a> Builder<'a> {
             if self.is_inline_aggregate_ty(value_ty) || self.map_value_is_carrier(map_ty) {
                 let _ = self.ensure_aggr_copy_meta(value_ty);
             }
+            self.ensure_map_carrier_box_meta(value_ty);
         }
 
         let ctor = if ordered { "BTreeMap::new" } else { "Map::new" };

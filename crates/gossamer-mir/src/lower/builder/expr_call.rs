@@ -1367,7 +1367,17 @@ impl<'a> Builder<'a> {
             let local = {
                 use gossamer_types::TyKind;
                 let source_ty = self.locals[local.0 as usize].ty;
-                let expected_ty = callee_param_tys.as_ref().and_then(|p| p.get(idx).copied());
+                // A generic parameter takes the argument's own type.
+                let expected_ty = callee_param_tys
+                    .as_ref()
+                    .and_then(|p| p.get(idx).copied())
+                    .map(|expected| {
+                        if matches!(self.tcx.kind_of(expected), TyKind::Param { .. }) {
+                            source_ty
+                        } else {
+                            expected
+                        }
+                    });
                 let callee_shares_storage = callee_param_shareable
                     .as_ref()
                     .is_some_and(|flags| flags.get(idx).copied().unwrap_or(false));

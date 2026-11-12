@@ -3300,6 +3300,7 @@ impl TypeChecker<'_> {
             "contains" | "contains_key" | "is_empty" => Some(self.tcx.bool_ty()),
             "len" => Some(self.tcx.int_ty(IntTy::I64)),
             "clear" => Some(self.tcx.unit()),
+            "clone" => Some(resolved),
             _ => None,
         }
     }

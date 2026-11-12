@@ -1,0 +1,53 @@
+// A struct built with `..base` copies the base's fields: a map, a set, a
+// vector, strings, and a map inside a sub-struct. Each copy is a value of
+// its own, so writing the new struct's leaves the base's as it was, and
+// both are freed once, on every tier.
+
+struct Inner {
+    counts: Map<String, i64>
+}
+
+struct Window {
+    key: String
+    layouts: Map<String, i64>
+    seen: Set<String>
+    tabs: Vec<String>
+    inner: Inner
+    private: bool
+}
+
+fn window(key: String) -> Window {
+    let mut layouts = Map::new()
+    layouts["first"] = 1
+    Window { key: key, layouts: layouts, seen: #{ "a" }, tabs: #["t"], inner: Inner { counts: { "c": 3 } }, private: false }
+}
+
+fn main() {
+    let mut opened: Vec<Window> = #[]
+    let mut n = 0
+    while n < 200 {
+        opened.push(Window { private: true, ..window(f"w{n}") })
+        let at = opened.len() - 1
+        opened[at].layouts[f"k{n}"] = n
+        opened[at].seen.insert(f"s{n}")
+        opened[at].inner.counts["c"] += n
+        n += 1
+    }
+    let base = window("base")
+    let mut copy = Window { key: "copy", ..base }
+    copy.layouts["second"] = 2
+    copy.seen.insert("b")
+    copy.tabs.push("u")
+    copy.inner.counts["d"] = 4
+    println(f"base: {base.key} {base.layouts.len()} {base.seen.len()} {base.tabs.len()} {base.inner.counts.len()} {base.private}")
+    println(f"copy: {copy.key} {copy.layouts.len()} {copy.seen.len()} {copy.tabs.len()} {copy.inner.counts.len()} {copy.private}")
+    let mut layouts = 0
+    let mut seen = 0
+    let mut counts = 0
+    for w in opened {
+        layouts += w.layouts.len()
+        seen += w.seen.len()
+        counts += w.inner.counts["c"]
+    }
+    println(f"opened: {opened.len()} {layouts} {seen} {counts}")
+}

@@ -777,6 +777,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut Vec<Body>, start: usize, tcx: &
         record_channel_elem_kind(body, tcx);
     }
     for_each_body(rest, tcx, |body, tcx| {
+        shadow_rebound_string_parameters(body, tcx);
         clear_region_on_call_results(body);
         free_overwritten_ctor_values(body, tcx, &container_ctor_free);
         own_returned_map_payloads(body, tcx);

@@ -20,7 +20,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::cache::{cached_source_dir, default_cache_root};
 use crate::lockfile::Lockfile;
-use crate::resolver::dependency_identity;
+use crate::resolver::{ResolvedSource, dependency_identity};
 use crate::{DependencySpec, InlineDependency, Manifest, RustBindingSpec};
 
 pub use crate::bundled_span::{BundledSpan, comptime_origins};
@@ -218,6 +218,9 @@ pub enum Unprepared {
     Unfetched(String),
     /// A `path` dependency whose directory holds no project.
     MissingPath(PathBuf),
+    /// A git, registry or tarball dependency the lockfile pins to another
+    /// source than the manifest now declares, by project id.
+    Drifted(String),
 }
 
 /// The dependencies `entry`'s program declares, at any depth, whose source
@@ -252,10 +255,13 @@ pub fn unprepared_dependencies(entry: &Path) -> Vec<Unprepared> {
                 None => prepared_dependency_root(&root, &dir, key, spec)
                     .is_none()
                     .then(|| {
-                        Unprepared::Unfetched(
-                            dependency_identity(key, spec, Some(&dir))
-                                .map_or_else(|_| key.clone(), |id| id.as_str().to_string()),
-                        )
+                        let named = dependency_identity(key, spec, Some(&dir))
+                            .map_or_else(|_| key.clone(), |id| id.as_str().to_string());
+                        if drifted(&root, &dir, key, spec) {
+                            Unprepared::Drifted(named)
+                        } else {
+                            Unprepared::Unfetched(named)
+                        }
                     }),
             };
             if let Some(gap) = gap
@@ -431,14 +437,68 @@ fn prepared_dependency_root(
         return Some(vendored);
     }
     let lock = Lockfile::load(root).ok().flatten()?;
-    let digest = lock
-        .entries
-        .iter()
-        .find(|entry| entry.resolved.id == id)?
-        .sha256
-        .as_deref()?;
-    let cached = cached_source_dir(&default_cache_root()?, digest)?;
+    let entry = lock.entries.iter().find(|entry| entry.resolved.id == id)?;
+    if !pins(&declared_spec(root, &id, spec), &entry.resolved.pin) {
+        return None;
+    }
+    let cached = cached_source_dir(&default_cache_root()?, entry.sha256.as_deref()?)?;
     cached.join("project.toml").is_file().then_some(cached)
+}
+
+/// Whether the lockfile pins dependency `key` to another source than
+/// `spec`, its declaration in the manifest at `manifest_dir`, asks for.
+fn drifted(root: &Path, manifest_dir: &Path, key: &str, spec: &DependencySpec) -> bool {
+    let Ok(id) = dependency_identity(key, spec, Some(manifest_dir)) else {
+        return false;
+    };
+    let Some(lock) = Lockfile::load(root).ok().flatten() else {
+        return false;
+    };
+    lock.entries
+        .iter()
+        .find(|entry| entry.resolved.id == id)
+        .is_some_and(|entry| !pins(&declared_spec(root, &id, spec), &entry.resolved.pin))
+}
+
+/// The declaration of `id` the dependency graph follows: the root
+/// project's own, which wins over any dependency's, else `spec`.
+fn declared_spec(root: &Path, id: &crate::ProjectId, spec: &DependencySpec) -> DependencySpec {
+    fs::read_to_string(root.join("project.toml"))
+        .ok()
+        .and_then(|text| Manifest::parse(&text).ok())
+        .and_then(|manifest| {
+            manifest.dependencies.iter().find_map(|(key, declared)| {
+                (dependency_identity(key, declared, Some(root)).ok().as_ref() == Some(id))
+                    .then(|| declared.clone())
+            })
+        })
+        .unwrap_or_else(|| spec.clone())
+}
+
+/// Whether `pin`, the source a lockfile entry records, is one `spec`
+/// declares. A lock written before the declaration changed names another.
+fn pins(spec: &DependencySpec, pin: &ResolvedSource) -> bool {
+    match (spec, pin) {
+        (DependencySpec::Registry(range), ResolvedSource::Registry(version)) => {
+            range.matches(version)
+        }
+        (
+            DependencySpec::Inline(InlineDependency::Git { url, reference }),
+            ResolvedSource::Git {
+                url: locked_url,
+                reference: locked_reference,
+            },
+        ) => url == locked_url && reference == locked_reference,
+        (
+            DependencySpec::Inline(InlineDependency::Tarball { url, sha256 }),
+            ResolvedSource::Tarball {
+                url: locked_url,
+                sha256: locked_sha256,
+            },
+        ) => url == locked_url && sha256 == locked_sha256,
+        (DependencySpec::Inline(InlineDependency::Path { .. }), ResolvedSource::Path(_)) => true,
+        _ => false,
+    }
 }
 
 /// The directory the root project's own `path` declaration of `id` names:
@@ -1163,6 +1223,35 @@ mod bundle_tests {
             vec![Unprepared::Unfetched("github.com/example/gui".to_string())]
         );
         let _ = fs::remove_dir_all(entry.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn a_dependency_the_lock_pins_to_an_earlier_tag_is_reported_as_drifted() {
+        let entry = project_with_dependency(
+            "drifted",
+            "gui = { git = \"https://github.com/example/gui\", tag = \"v0.2.0\" }",
+            "elsewhere",
+        );
+        let root = entry.parent().unwrap().parent().unwrap().to_path_buf();
+        let lock = |reference: &str| {
+            format!(
+                "# gossamer project.lock v1\n\n[[project]]\nid = \"github.com/example/gui\"\n\
+                 source = \"git\"\nurl = \"https://github.com/example/gui\"\nref = \"{reference}\"\n\
+                 sha256 = \"{}\"\n",
+                "0".repeat(64)
+            )
+        };
+        fs::write(root.join("project.lock"), lock("v0.1.0")).unwrap();
+        assert_eq!(
+            unprepared_dependencies(&entry),
+            vec![Unprepared::Drifted("github.com/example/gui".to_string())]
+        );
+        fs::write(root.join("project.lock"), lock("v0.2.0")).unwrap();
+        assert_eq!(
+            unprepared_dependencies(&entry),
+            vec![Unprepared::Unfetched("github.com/example/gui".to_string())]
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

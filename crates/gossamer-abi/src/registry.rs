@@ -2318,6 +2318,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt_str!("gos_rt_vec_join_i64", (Ptr, Ptr) -> Ptr, Both, "xs.join(sep) for an integer-element Vec."),
     rt!("gos_rt_vec_last", (Ptr) -> I128, Cranelift, "Return Option<T> of the last element of a Vec."),
     rt!("gos_rt_vec_len", (Ptr) -> I64, Cranelift, "Return the number of elements in a GosVec."),
+    rt!("gos_rt_vec_mark_map_elems", (Ptr) -> Void, Both, "Tag a vec as owning Map elements: free releases each table and storage duplication copies each one."),
     rt!("gos_rt_vec_mark_rc_elems", (Ptr) -> Void, Both, "Tag a vec as owning reference-counted enum-node elements: push moves the frame's share in, free releases each element, and storage duplication (clone/slice) retains each copy."),
     rt!("gos_rt_vec_mark_shared", (Ptr) -> Void, Both, "Mark every String, RC node, nested Vec, and aggregate-owned child reachable from a Vec as shared before concurrency publication."),
     rt!("gos_rt_vec_mark_signed_elems", (Ptr) -> Void, Both, "Tag a vec of i8, i16, or i32 elements as signed, so a read of a narrow element sign-extends; any other vec is left alone."),

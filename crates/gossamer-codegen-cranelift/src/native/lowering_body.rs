@@ -627,6 +627,8 @@ pub(super) fn lower_body(
     let preempt =
         plan_preemption_polls(module, &mut builder, body, function_ids_by_name, intrinsics)?;
     let cleanup_plan = gossamer_mir::plan_cleanup_with_summary(body, capture_summary);
+    let carrier_refs = carrier_refs(body, tcx);
+    let carrier_reloads = carrier_ref_reloads(body, &carrier_refs);
     // A lane loop whose blocks carry cleanup keeps its scalar form, where the
     // cleanup is emitted.
     let mut lane_loops = super::simd_lanes::find_lane_loops(body, tcx);
@@ -690,6 +692,20 @@ pub(super) fn lower_body(
             emit_preempt_poll(module, &mut builder, intrinsics, polls)?;
         }
 
+        // A two-word carrier lent to a call by `&mut` was handed the address of
+        // a frame slot holding its words; the callee's writes land there, so
+        // the variable takes them back before anything reads it.
+        if let Some(reloads) = carrier_reloads.get(&block.id.as_u32()) {
+            for &(carrier, reference) in reloads {
+                if let (Some(&carrier_var), Some(&reference_var)) =
+                    (locals.get(&carrier), locals.get(&reference))
+                {
+                    let addr = builder.use_var(reference_var);
+                    super::intrinsic_io_math::reload_carrier_local(&mut builder, carrier_var, addr);
+                }
+            }
+        }
+
         if !cleanup_plan.is_empty() {
             for entry in cleanup_plan.at_block_entry(block.id) {
                 emit_cleanup_drop(module, &mut builder, &mut locals, intrinsics, entry)?;
@@ -728,6 +744,17 @@ pub(super) fn lower_body(
                 statement,
                 intrinsics,
             )?;
+            // A write through a `&mut` reference to a two-word carrier lands in
+            // the frame slot the reference names, so the carrier's variable
+            // takes the slot's words back before anything reads it.
+            for (reference, carrier) in written_carrier_refs(statement, &carrier_refs) {
+                if let (Some(&carrier_var), Some(&reference_var)) =
+                    (locals.get(&carrier), locals.get(&reference))
+                {
+                    let addr = builder.use_var(reference_var);
+                    super::intrinsic_io_math::reload_carrier_local(&mut builder, carrier_var, addr);
+                }
+            }
             if let Some(unwind) = &unwind {
                 unwind.spill(
                     &mut builder,
@@ -1076,4 +1103,123 @@ pub(super) fn define_var_to_with(
         }
     };
     builder.def_var(var, coerced);
+}
+
+/// `&mut` references to two-word carriers, by reference local, with every
+/// plain copy of one: this backend lowers each to the address of a frame slot
+/// holding a copy of the carrier's words.
+fn carrier_refs(body: &Body, tcx: &TyCtxt) -> HashMap<Local, Local> {
+    let mut refs: HashMap<Local, Local> = HashMap::new();
+    for stmt in body.blocks.iter().flat_map(|b| &b.stmts) {
+        if let StatementKind::Assign {
+            place,
+            rvalue:
+                Rvalue::Ref {
+                    mutable: true,
+                    place: borrowed,
+                },
+        } = &stmt.kind
+            && place.projection.is_empty()
+            && borrowed.projection.is_empty()
+            && super::compile::is_inline_two_word_ty(tcx, body.local_ty(borrowed.local))
+        {
+            refs.insert(place.local, borrowed.local);
+        }
+    }
+    loop {
+        let mut changed = false;
+        for stmt in body.blocks.iter().flat_map(|b| &b.stmts) {
+            if let StatementKind::Assign {
+                place,
+                rvalue: Rvalue::Use(Operand::Copy(src)),
+            } = &stmt.kind
+                && place.projection.is_empty()
+                && src.projection.is_empty()
+                && !refs.contains_key(&place.local)
+                && let Some(&carrier) = refs.get(&src.local)
+            {
+                refs.insert(place.local, carrier);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    refs
+}
+
+/// The `(reference, carrier)` pairs `statement` may write the carrier through:
+/// a store into the reference's target, or a runtime helper handed the
+/// reference.
+fn written_carrier_refs(
+    statement: &gossamer_mir::Statement,
+    refs: &HashMap<Local, Local>,
+) -> Vec<(Local, Local)> {
+    if refs.is_empty() {
+        return Vec::new();
+    }
+    let StatementKind::Assign { place, rvalue } = &statement.kind else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if place.projection.first() == Some(&gossamer_mir::Projection::Deref)
+        && let Some(&carrier) = refs.get(&place.local)
+    {
+        out.push((place.local, carrier));
+    }
+    if let Rvalue::CallIntrinsic { args, .. } = rvalue {
+        for arg in args {
+            if let Operand::Copy(p) = arg
+                && p.projection.is_empty()
+                && let Some(&carrier) = refs.get(&p.local)
+            {
+                out.push((p.local, carrier));
+            }
+        }
+    }
+    out
+}
+
+/// The two-word carriers each block must reload on entry: a call ending the
+/// block's only predecessor was handed a `&mut` reference to the carrier.
+/// Keyed by block id, as `(carrier, reference)` pairs.
+fn carrier_ref_reloads(
+    body: &Body,
+    refs: &HashMap<Local, Local>,
+) -> HashMap<u32, Vec<(Local, Local)>> {
+    let mut out: HashMap<u32, Vec<(Local, Local)>> = HashMap::new();
+    if refs.is_empty() {
+        return out;
+    }
+    let mut preds: HashMap<u32, usize> = HashMap::new();
+    for block in &body.blocks {
+        for succ in super::simd_lanes::successors(&block.terminator) {
+            *preds.entry(succ.as_u32()).or_default() += 1;
+        }
+    }
+    for block in &body.blocks {
+        let Terminator::Call {
+            args,
+            target: Some(target),
+            ..
+        } = &block.terminator
+        else {
+            continue;
+        };
+        if preds.get(&target.as_u32()).copied() != Some(1) {
+            continue;
+        }
+        for arg in args {
+            if let Operand::Copy(p) = arg
+                && p.projection.is_empty()
+                && let Some(&carrier) = refs.get(&p.local)
+            {
+                out.entry(target.as_u32())
+                    .or_default()
+                    .push((carrier, p.local));
+            }
+        }
+    }
+    out
 }

@@ -227,6 +227,21 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
         {
             lent_answer[destination.local.0 as usize] = true;
         }
+        // A capture read names the slot the closure's environment keeps.
+        if let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            args,
+            destination,
+            ..
+        } = &block.terminator
+            && name == "gos_load"
+            && destination.projection.is_empty()
+            && (destination.local.0 as usize) < n_locals
+            && matches!(args.first(), Some(Operand::Copy(env))
+                if env.projection.is_empty() && (1..=arity).contains(&(env.local.0 as usize)))
+        {
+            lent_answer[destination.local.0 as usize] = true;
+        }
     }
     let mut changed = true;
     while changed {
@@ -242,6 +257,8 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
                 && (src.local.0 as usize) < n_locals
                 && lent_answer[src.local.0 as usize]
                 && !lent_answer[place.local.0 as usize]
+                // A `mut` binding is a value of its own, never a view.
+                && !body.locals[place.local.0 as usize].mutable
                 && body.locals[place.local.0 as usize].ty == body.locals[src.local.0 as usize].ty
             {
                 lent_answer[place.local.0 as usize] = true;
@@ -249,9 +266,81 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
             }
         }
     }
+    // A view is a local every definition of which is a view: one also given
+    // a value of its own owns what it holds. The views a call answers are
+    // where every chain of copies starts.
+    let mut answered = vec![false; n_locals];
+    for block in &body.blocks {
+        if let Terminator::Call { destination, .. } = &block.terminator
+            && destination.projection.is_empty()
+            && (destination.local.0 as usize) < n_locals
+        {
+            answered[destination.local.0 as usize] = true;
+        }
+    }
+    loop {
+        let mut changed = false;
+        for stmt in body.blocks.iter().flat_map(|b| &b.stmts) {
+            let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                continue;
+            };
+            let i = place.local.0 as usize;
+            if !place.projection.is_empty() || i >= n_locals || !lent_answer[i] || answered[i] {
+                continue;
+            }
+            let from_view = matches!(rvalue, Rvalue::Use(Operand::Copy(src))
+                if src.projection.is_empty()
+                    && lent_answer.get(src.local.0 as usize).copied().unwrap_or(false));
+            let empties = matches!(rvalue, Rvalue::Use(Operand::Const(_)));
+            if !from_view && !empties {
+                lent_answer[i] = false;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    // A copy of an element view read after its vector is written holds the
+    // value it was given only with a share of its own.
+    let call_dests: Vec<bool> = {
+        let mut d = vec![false; n_locals];
+        for block in &body.blocks {
+            if let Terminator::Call { destination, .. } = &block.terminator
+                && destination.projection.is_empty()
+                && (destination.local.0 as usize) < n_locals
+            {
+                d[destination.local.0 as usize] = true;
+            }
+        }
+        d
+    };
+    for (i, written) in super::views_written_before_read(body, &lent_answer)
+        .into_iter()
+        .enumerate()
+    {
+        if written && !call_dests[i] {
+            lent_answer[i] = false;
+        }
+    }
+    // A by-value option parameter the body reassigns arrives holding the
+    // caller's blob: it takes a share of that at entry and is an owner from
+    // then on, so each overwrite and the return sweep give one back.
+    let mut reassigned_param = vec![false; n_locals];
+    for stmt in body.blocks.iter().flat_map(|b| &b.stmts) {
+        if let StatementKind::Assign { place, .. } = &stmt.kind
+            && place.projection.is_empty()
+            && (1..=arity).contains(&(place.local.0 as usize))
+            && place.local.0 as usize <= n_locals.saturating_sub(1)
+            && !body.locals[place.local.0 as usize].region
+            && is_guarded_option(body.locals[place.local.0 as usize].ty)
+        {
+            reassigned_param[place.local.0 as usize] = true;
+        }
+    }
     let option_holder = |l: Local| -> bool {
         let i = l.0 as usize;
-        i > arity
+        (i > arity || reassigned_param.get(i).copied().unwrap_or(false))
             && i < n_locals
             && !body.locals[i].region
             && !lent_answer[i]
@@ -310,9 +399,10 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
             }
         }
     }
-    let option_holders: Vec<Local> = ((arity + 1)..n_locals)
+    let option_holders: Vec<Local> = (1..n_locals)
         .filter(|&i| {
-            !body.locals[i].region
+            (i > arity || reassigned_param[i])
+                && !body.locals[i].region
                 && !lent_answer[i]
                 && !lent[i]
                 && (is_guarded_option(body.locals[i].ty) || mint_holders[i] || counted_answer[i])
@@ -628,6 +718,22 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
                             gossamer_types::TyKind::Vec(elem)
                                 if super::slots::owned_slot_children(tcx, *elem).is_some()))
         };
+        // A map whose values are blobs, or a channel, stores a boxed copy of
+        // the carrier, and the box takes its own share of the payload.
+        let boxes_its_values = |name: &str, args: &[Operand]| {
+            super::param_reads::is_channel_send(name)
+                || (name.starts_with("gos_rt_map_insert")
+                    || name.starts_with("gos_rt_map_or_insert"))
+                    && matches!(args.first(), Some(Operand::Copy(recv))
+                    if recv.projection.is_empty()
+                        && (recv.local.0 as usize) < n_locals
+                        && matches!(
+                            tcx.kind_of(body.locals[recv.local.0 as usize].ty),
+                            gossamer_types::TyKind::HashMap { value, .. }
+                                if super::slots::map_value_owner_marker(tcx, *value)
+                                    == Some("gos_rt_map_set_blob_values")
+                        ))
+        };
         if let Terminator::Call {
             callee: Operand::Const(ConstValue::Str(name)),
             args,
@@ -635,6 +741,7 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
         } = &block.terminator
             && is_consuming_call(name)
             && !push_takes_share(name, args)
+            && !boxes_its_values(name, args)
         {
             for arg in args.iter().skip(1) {
                 let Operand::Copy(p) = arg else { continue };
@@ -865,6 +972,16 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
             ));
         }
         for l in &option_holders {
+            if reassigned_param[l.0 as usize] {
+                entry_inits.push(call_stmt(
+                    "gos_rt_option_slot_retain",
+                    vec![Operand::Copy(Place::local(*l))],
+                    span,
+                    &mut next_unit,
+                    &mut extra_locals,
+                ));
+                continue;
+            }
             entry_inits.push(Statement {
                 kind: StatementKind::Assign {
                     place: Place::local(*l),

@@ -1,7 +1,20 @@
 # Changelog
 
-## 0.78.6 - Memory returned with no purge delay
+## 0.78.6 - Every copy is a value of its own, and compiled code frees what it leaked
 
+- Every copy of a value is a value of its own on every tier; these shared a `Map`, `Set`, deque, heap, or `Vec` with their source, so a write through one reached the other, and some crashed or leaked:
+  - On the VM: a binding taken from an `if` / `else`, a `match` or `for` binding, `unwrap` / `first` / `last` / `get` of a binding, a parameter rebound with `let mut`, and `iter().collect()` of a sequence of tables.
+  - In compiled code: a struct update `S { a: 1, ..base }`; a literal naming one binding twice (`[a, a]`); a table in `Some(..)` or a variant payload; `v[i] = x` of a table (a `Map` double-freed, a `Set`, deque, stack, or heap hung) or of a struct or tuple holding a vector; `let mut e = v[i]`, `let mut e = m["k"]`, and `let mut g = rows[0]; g[0]["k"] = 1`; an element binding kept past a later write to its vector; a value a generic `fn id<T>(x: T) -> T` answers back; a closure answering a vector or table it captures; and a vector of fixed arrays of vectors (`Vec<[Vec<i64>; 2]>`) cloned, sorted, or collected.
+- Compiled code frees what these leaked: an `Option` sent on a channel, stored as a map value, popped and rebound, replaced in a fixed array or vector element, replaced through `&mut`, or captured by a closure its caller still uses; a struct field written through `m[k].f = ..`; a heap grown through `m[k].push(x)`; the sets, deques, and heaps a swap `a, b = b, a` exchanges; and the tables `xs.map(|x| x.table)` answers.
+- `for (i, x) in xs.iter().enumerate()` over a vector of vectors, maps, or sets frees each pair in compiled code; it leaked one per element.
+- JIT: replacing an `Option` or `Result` through `&mut` (`*slot = Some(..)`) no longer frees the old value twice.
+- A function that rebinds a `String` parameter (`s += ..`, `s = ..`) no longer writes into the caller's string when it has room to grow in place, and compiled code frees the value it built; it leaked one per call.
+- A `mut` parameter of type `Option<S>`, for a struct `S`, reassigned in its function no longer reads freed memory in compiled code.
+- `#[[a, b]; n]` and `#[Gen { .. }; n]` of a generic struct compile natively; they crashed or stopped with an internal error.
+- A generic function bounded by `Iterator<Item = T>` and called with a range compiles natively and decides `T` from the range; the build stopped with an undefined symbol or an uninstantiated type parameter.
+- A `spawn` closure may capture a value of a generic struct (`Gen<Map<String, i64>>`); it was refused with GT0118.
+- `Map` and `BTreeMap` answer `clone()`, as every other value does; it was GT0002.
+- A dependency whose `project.lock` pin no longer matches `project.toml` is reported as drifted, with `gos fetch --update` as the fix, where it was reported as not fetched.
 - With `GOS_ALLOC_PURGE_DELAY=0`, threads return their freed memory before they wait, as they do with a delay.
 
 ## 0.78.5 - Native builds with Xcode 14's linker

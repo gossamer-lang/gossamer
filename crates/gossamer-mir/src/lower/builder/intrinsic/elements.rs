@@ -972,8 +972,8 @@ impl<'a> Builder<'a> {
         });
 
         self.set_current(body);
-        let left = self.zip_read_element(a, index, a_elem, span);
-        let right = self.zip_read_element(b, index, b_elem, span);
+        let left = self.read_element_place(a, index, a_elem, span);
+        let right = self.read_element_place(b, index, b_elem, span);
         let pair = self.fresh(pair_ty);
         self.emit_assign(
             Place::local(pair),
@@ -1023,31 +1023,6 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// Element `index` of `source`, read through its slot address so the copy
-    /// carries the element's declared type and ownership.
-    pub(crate) fn element_slot_ptr(
-        &mut self,
-        source: Local,
-        index: Local,
-        elem_ty: Ty,
-        span: Span,
-    ) -> Local {
-        use gossamer_types::TyKind;
-        let ref_ty = self.tcx.intern(TyKind::Ref {
-            mutability: gossamer_types::Mutbl::Not,
-            inner: elem_ty,
-        });
-        self.emit_combinator_call(
-            "gos_rt_vec_get_ptr",
-            vec![
-                Operand::Copy(Place::local(source)),
-                Operand::Copy(Place::local(index)),
-            ],
-            ref_ty,
-            span,
-        )
-    }
-
     /// Element `index` of `source` copied out of the sequence's own storage,
     /// the way `let x = xs[i]` reads one. An aggregate element is inline slot
     /// data, so the indexed place is what carries its width; reading it
@@ -1066,30 +1041,6 @@ impl<'a> Builder<'a> {
         self.emit_assign(
             Place::local(element),
             Rvalue::Use(Operand::Copy(place)),
-            span,
-        );
-        element
-    }
-
-    pub(crate) fn zip_read_element(
-        &mut self,
-        source: Local,
-        index: Local,
-        elem_ty: Ty,
-        span: Span,
-    ) -> Local {
-        // An aggregate is read from the indexed place, which carries its
-        // width; everything else is one slot the pointer path reads directly.
-        if self.elem_is_slot_addressed(elem_ty) {
-            return self.read_element_place(source, index, elem_ty, span);
-        }
-        let slot = self.element_slot_ptr(source, index, elem_ty, span);
-        let mut slot_place = Place::local(slot);
-        slot_place.projection.push(crate::ir::Projection::Deref);
-        let element = self.fresh(elem_ty);
-        self.emit_assign(
-            Place::local(element),
-            Rvalue::Use(Operand::Copy(slot_place)),
             span,
         );
         element
@@ -1159,27 +1110,7 @@ impl<'a> Builder<'a> {
         });
 
         self.set_current(body);
-        let ref_ty = self.tcx.intern(TyKind::Ref {
-            mutability: gossamer_types::Mutbl::Not,
-            inner: elem_ty,
-        });
-        let slot = self.emit_combinator_call(
-            "gos_rt_vec_get_ptr",
-            vec![
-                Operand::Copy(Place::local(source)),
-                Operand::Copy(Place::local(index)),
-            ],
-            ref_ty,
-            span,
-        );
-        let mut slot_place = Place::local(slot);
-        slot_place.projection.push(crate::ir::Projection::Deref);
-        let element = self.fresh(elem_ty);
-        self.emit_assign(
-            Place::local(element),
-            Rvalue::Use(Operand::Copy(slot_place)),
-            span,
-        );
+        let element = self.read_element_place(source, index, elem_ty, span);
         let pair = self.fresh(pair_ty);
         self.emit_assign(
             Place::local(pair),
@@ -1539,6 +1470,11 @@ impl<'a> Builder<'a> {
         use crate::lower::helpers::ElemOwnership;
         let (symbol, meta) = if matches!(self.tcx.kind_of(elem), gossamer_types::TyKind::String) {
             ("gos_rt_vec_mark_str_elems", None)
+        } else if matches!(
+            self.tcx.kind_of(elem),
+            gossamer_types::TyKind::HashMap { .. }
+        ) {
+            ("gos_rt_vec_mark_map_elems", None)
         } else {
             match crate::lower::helpers::elem_ownership(self.tcx, elem) {
                 Some(

@@ -804,6 +804,8 @@ pub unsafe extern "C" fn gos_rt_result_ok_payload_release(r: i128, kind: i64) {
         },
         // SAFETY: a payload of kind 8 is a `Weak` the carrier holds a weak share of.
         8 => unsafe { crate::c_abi::rc::gos_rt_rc_weak_release(payload as usize as *mut u8) },
+        // SAFETY: a payload of kind 9 is a heap the carrier owns outright.
+        9 => unsafe { crate::c_abi::gos_rt_vec_free(payload as usize as *mut GosVec) },
         _ => {}
     }
 }

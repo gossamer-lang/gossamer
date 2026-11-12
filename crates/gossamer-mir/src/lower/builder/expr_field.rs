@@ -215,6 +215,15 @@ impl<'a> Builder<'a> {
         };
         let mut operands = Vec::with_capacity(order.len());
         let mut shared_operands = Vec::new();
+        // Fields filled from `..base` whose container carries no count (a
+        // map, a set): the new struct's copy of each takes a store of its
+        // own once the struct is built, leaving the base its own.
+        let mut value_clones: Vec<(u32, Vec<u32>, &'static str)> = Vec::new();
+        // Vector fields filled from `..base`, by field and nested path, with
+        // the vector's type. The new struct takes a share of each, then swaps
+        // it for a clone once it is built, as a plain copy of a struct does,
+        // so a push through one never reaches the other's buffer.
+        let mut vec_clones: Vec<(u32, Vec<u32>, Ty)> = Vec::new();
         for (idx, field) in order.iter().enumerate() {
             if let Some(value_expr) = provided.get(field.as_str()) {
                 if written_at
@@ -266,6 +275,9 @@ impl<'a> Builder<'a> {
                     // retain through the vec count so the base's and the new
                     // struct's `gos_rt_vec_free` at their deaths each balance.
                     if is_vec_field || self.tcx.is_rc_managed(field_ty) {
+                        if is_vec_field {
+                            vec_clones.push((projection_idx, Vec::new(), field_ty));
+                        }
                         let retain = if is_vec_field {
                             "gos_rt_vec_retain"
                         } else if self.tcx.is_weak_ty(field_ty) {
@@ -283,15 +295,25 @@ impl<'a> Builder<'a> {
                             span,
                         );
                     } else {
-                        for (sub, kind) in
-                            crate::lower::aggregate_rc_field_paths(self.tcx, field_ty)
-                        {
+                        // A field that is itself a container with no count
+                        // of its own (a map, a set) takes a store of its
+                        // own, as one inside a sub-struct does.
+                        let paths = match crate::lower::value_field_kind(self.tcx, field_ty) {
+                            Some(kind) => vec![(Vec::new(), kind)],
+                            None => crate::lower::aggregate_rc_field_paths(self.tcx, field_ty),
+                        };
+                        for (sub, kind) in paths {
                             let mut nested = place.clone();
                             for s in &sub {
                                 nested.projection.push(crate::ir::Projection::Field(*s));
                             }
                             let retain = match kind {
-                                crate::lower::FieldRcKind::Vec => "gos_rt_vec_retain",
+                                crate::lower::FieldRcKind::Vec => {
+                                    if let Some(vec_ty) = self.nested_field_ty(field_ty, &sub) {
+                                        vec_clones.push((projection_idx, sub.clone(), vec_ty));
+                                    }
+                                    "gos_rt_vec_retain"
+                                }
                                 crate::lower::FieldRcKind::Weak => "gos_rt_rc_weak_retain",
                                 crate::lower::FieldRcKind::Rc => "gos_rt_rc_retain",
                                 crate::lower::FieldRcKind::Carrier { .. } => {
@@ -299,13 +321,15 @@ impl<'a> Builder<'a> {
                                 }
                                 crate::lower::FieldRcKind::Iter
                                 | crate::lower::FieldRcKind::IterPair => kind.helpers().0,
-                                // Takes the field's address and swaps in a
-                                // clone: a container with no reference count
-                                // cannot be co-owned.
-                                other => match other.value_container_helpers() {
-                                    Some((clone, _)) => clone,
-                                    None => continue,
-                                },
+                                // A container with no reference count cannot
+                                // be co-owned: the new struct's field is
+                                // swapped for a clone once it is built.
+                                other => {
+                                    if let Some((clone, _)) = other.value_container_helpers() {
+                                        value_clones.push((projection_idx, sub.clone(), clone));
+                                    }
+                                    continue;
+                                }
                             };
                             let mut args = vec![Operand::Copy(nested)];
                             if let crate::lower::FieldRcKind::Carrier { ok, err } = kind {
@@ -347,7 +371,65 @@ impl<'a> Builder<'a> {
             },
             span,
         );
+        for (field, sub, vec_ty) in vec_clones {
+            let mut place = Place::local(dest);
+            place.projection.push(crate::ir::Projection::Field(field));
+            for s in sub {
+                place.projection.push(crate::ir::Projection::Field(s));
+            }
+            let cloned = self.fresh(vec_ty);
+            let next = self.new_block(span);
+            self.terminate(crate::ir::Terminator::Call {
+                callee: Operand::Const(ConstValue::Str("gos_rt_vec_clone_field".to_string())),
+                args: vec![Operand::Copy(place.clone())],
+                destination: Place::local(cloned),
+                target: Some(next),
+            });
+            self.set_current(next);
+            self.emit_assign(
+                place,
+                Rvalue::Use(Operand::Copy(Place::local(cloned))),
+                span,
+            );
+        }
+        // The clones answer nothing; a unit destination is what tells the
+        // backends to pass the field by its address.
+        let unit_ty = self.tcx.unit();
+        for (field, sub, clone) in value_clones {
+            let mut place = Place::local(dest);
+            place.projection.push(crate::ir::Projection::Field(field));
+            for s in sub {
+                place.projection.push(crate::ir::Projection::Field(s));
+            }
+            let clone_dest = self.fresh(unit_ty);
+            self.emit_assign(
+                Place::local(clone_dest),
+                Rvalue::CallIntrinsic {
+                    name: clone,
+                    args: vec![Operand::Copy(place)],
+                },
+                span,
+            );
+        }
         Some(dest)
+    }
+
+    /// The type reached from `ty` through the nested field `path`: struct
+    /// fields, tuple elements and array elements; `None` off its shape.
+    fn nested_field_ty(&mut self, ty: Ty, path: &[u32]) -> Option<Ty> {
+        use gossamer_types::TyKind;
+        let mut at = ty;
+        for &index in path {
+            at = match self.tcx.kind_of(at).clone() {
+                TyKind::Adt { def, substs } => {
+                    self.instantiated_field_ty(def, &substs, index as usize)?
+                }
+                TyKind::Tuple(fields) => *fields.get(index as usize)?,
+                TyKind::Array { elem, len } if (index as usize) < len.to_usize() => elem,
+                _ => return None,
+            };
+        }
+        Some(at)
     }
 
     /// The type of field `index` of the struct `def` instantiated with
@@ -623,6 +705,19 @@ impl<'a> Builder<'a> {
                                 elems.get(pos).copied().unwrap_or(ty)
                             }
                             _ => ty,
+                        };
+                        // A receiver typed by its declaration leaves the
+                        // field naming a type parameter; the checker's type
+                        // for the read is the instantiation's.
+                        let pinned_ty = if self.ty_mentions_param(pinned_ty)
+                            && !self.ty_mentions_param(ty)
+                            && !matches!(
+                                self.tcx.kind_of(ty),
+                                gossamer_types::TyKind::Var(_) | gossamer_types::TyKind::Error
+                            ) {
+                            ty
+                        } else {
+                            pinned_ty
                         };
                         // A struct is address-is-value: its slot holds the field
                         // words inline, so a `Field(idx)` projection walks them,

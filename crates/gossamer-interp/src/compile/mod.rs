@@ -894,6 +894,11 @@ pub(crate) struct Scope {
     /// Local names whose storage is a direct reference alias rather than an
     /// independent value register.
     pub(crate) reference_bindings: std::collections::HashSet<String>,
+    /// Local names holding a map, set, or other table-backed value that no
+    /// other storage shares: a binding taken from a copy or a fresh value.
+    /// A parameter, pattern binding, or loop variable is not one, since its
+    /// tables are the ones its source still reaches.
+    pub(crate) owned_tables: std::collections::HashSet<String>,
     /// `FnBuilder::capture_cells` length when this scope opened. Cells
     /// installed inside the scope stop applying when it closes, which is
     /// also when their home register becomes reusable.

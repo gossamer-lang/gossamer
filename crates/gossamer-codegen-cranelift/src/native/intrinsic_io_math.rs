@@ -1266,16 +1266,9 @@ pub(super) fn lower_intrinsic_call_io_math(
                 }
                 return Ok(true);
             }
-            let addr = lower_place_address(module, builder, locals, body, tcx, place, intrinsics)?;
-            let slot = if place.projection.is_empty()
-                && matches!(
-                    tcx.kind_of(body.locals[place.local.0 as usize].ty),
-                    TyKind::Ref { .. }
-                ) {
-                builder.ins().load(ptr_ty, MemFlagsData::trusted(), addr, 0)
-            } else {
-                addr
-            };
+            // A reference local's variable holds the address it names, which
+            // is the field's slot; any other place's address is the slot.
+            let slot = lower_place_address(module, builder, locals, body, tcx, place, intrinsics)?;
             // The interner keeps the symbol for the module's lifetime, so the
             // name is re-spelled as a literal rather than borrowed from the MIR.
             let sym: &'static str = match name {
@@ -1426,7 +1419,6 @@ pub(super) fn lower_intrinsic_call_io_math(
             };
             let f = intrinsics.extern_fn(module, sym, &[ptr_ty], &[])?;
             let fref = module.declare_func_in_func(f, builder.func);
-            let local_ty = body.local_ty(place.local);
             if let Some((var, addr)) =
                 spill_carrier_local(module, builder, locals, body, tcx, place, intrinsics)
             {
@@ -1439,14 +1431,9 @@ pub(super) fn lower_intrinsic_call_io_math(
                 }
                 return Ok(true);
             }
-            let addr = lower_place_address(module, builder, locals, body, tcx, place, intrinsics)?;
-            let slot = if place.projection.is_empty()
-                && matches!(tcx.kind_of(local_ty), TyKind::Ref { .. })
-            {
-                builder.ins().load(ptr_ty, MemFlagsData::trusted(), addr, 0)
-            } else {
-                addr
-            };
+            // A reference local's variable holds the address it names, which
+            // is the carrier's slot; any other place's address is the slot.
+            let slot = lower_place_address(module, builder, locals, body, tcx, place, intrinsics)?;
             builder.ins().call(fref, &[slot]);
             Ok(true)
         }
@@ -2717,7 +2704,11 @@ fn spill_carrier_local(
 
 /// Reads the carrier words a runtime helper may have rewritten at `addr` back
 /// into the local's variable.
-fn reload_carrier_local(builder: &mut FunctionBuilder<'_>, var: Variable, addr: ir::Value) {
+pub(super) fn reload_carrier_local(
+    builder: &mut FunctionBuilder<'_>,
+    var: Variable,
+    addr: ir::Value,
+) {
     let lo = builder
         .ins()
         .load(types::I64, MemFlagsData::trusted(), addr, 0);

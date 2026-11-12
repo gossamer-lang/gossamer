@@ -1106,9 +1106,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_set_i64(v: *mut GosVec, idx: i64, val
             crate::c_abi::panic::panic_oob_text("vec index", idx, vec.len);
         }
         // SAFETY: `idx` is in `[0, len)` (the other cases panic above).
-        unsafe { crate::c_abi::vec::vec_release_owned_elem(vec, idx, value) };
-        // SAFETY: `idx` is in `[0, len)` (the other cases panic above).
-        unsafe { crate::c_abi::vec::vec_elem_store_i64(vec, idx, value) };
+        unsafe { crate::c_abi::vec::vec_store_owned_word(vec, idx, value) };
     });
 }
 
@@ -1127,9 +1125,7 @@ pub unsafe extern "C" fn gos_rt_vec_set_i64_unchecked(v: *mut GosVec, idx: i64, 
         // SAFETY: this `unsafe fn`'s contract makes `v` a non-null `GosVec`.
         let vec = unsafe { &mut *v };
         // SAFETY: this `unsafe fn`'s contract puts `idx` in `[0, v.len)`.
-        unsafe { crate::c_abi::vec::vec_release_owned_elem(vec, idx, value) };
-        // SAFETY: this `unsafe fn`'s contract puts `idx` in `[0, v.len)`.
-        unsafe { crate::c_abi::vec::vec_elem_store_i64(vec, idx, value) };
+        unsafe { crate::c_abi::vec::vec_store_owned_word(vec, idx, value) };
     });
 }
 

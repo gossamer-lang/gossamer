@@ -2269,7 +2269,8 @@ UseList    = Ident [ "as" Ident ] { "," Ident [ "as" Ident ] } [ "," ]
 ```
 
 A `use` target is either a string-literal project reference or an
-identifier-based module path within the current project.
+identifier-based module path within the current project. A file's `use`
+declarations come before its first item; a `use` after an item is GP0001.
 
 ```
 // Bring another project into scope. Bound name defaults to the last

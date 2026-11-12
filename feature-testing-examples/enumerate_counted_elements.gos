@@ -1,0 +1,21 @@
+// `enumerate` and `zip` over vectors, tables, and strings: each pair owns its
+// element, a loop pulling the pairs gives each one back, and the source keeps
+// its values.
+fn main() {
+    let rows: Vec<Vec<i64>> = #[#[1, 2, 3], #[4], #[]]
+    let mut total = 0
+    for (i, row) in rows.iter().enumerate() { total += i * 10 + row.len() }
+    println(total)
+    let maps = #[{ "a": 1 }, { "b": 2, "c": 3 }]
+    for (i, m) in maps.iter().enumerate() { println(f"{i} {m.len()}") }
+    let sets = #[#{ 1, 2 }, #{ 3 }]
+    let mut it = sets.iter().enumerate()
+    while let Some(p) = it.next() { println(f"{p.0} {p.1.len()}") }
+    let names = #["ann", "bo"]
+    let pairs: Vec<(i64, String)> = names.iter().enumerate().collect()
+    println(pairs)
+    let mut copied: Vec<(i64, Vec<i64>)> = rows.iter().enumerate().collect()
+    copied[0].1.push(9)
+    println(f"{rows[0]} {copied[0].1}")
+    for (row, name) in rows.iter().zip(names.iter()) { println(f"{name} {row}") }
+}
