@@ -543,6 +543,7 @@ const MANGLED_STDLIB_NAMES: &[(&str, &str, &str)] = &[
     ("x509", "CertInfo", "__gos_x509_CertInfo"),
     ("fs", "metadata", "__gos_fs_metadata"),
     ("fs", "Metadata", "__gos_fs_Metadata"),
+    ("fs", "temp_dir", "__gos_fs_temp_dir"),
     ("fs", "read_dir", "__gos_fs_read_dir"),
     ("fs", "DirInfo", "__gos_fs_DirInfo"),
     ("fs", "walk_dir", "__gos_fs_walk_dir"),
@@ -714,6 +715,7 @@ const MANGLED_STDLIB_NAMES: &[(&str, &str, &str)] = &[
     ("ffi", "fn_addr", "__gos_ffi_fn_addr"),
     // std::os::fd readiness waits.
     ("fd", "Descriptor", "__gos_fd_Descriptor"),
+    ("fd", "Borrowed", "__gos_fd_Borrowed"),
     ("fd", "wait_readable", "__gos_fd_wait_readable"),
     ("fd", "wait_writable", "__gos_fd_wait_writable"),
     // std::os::signal numbers, per target.

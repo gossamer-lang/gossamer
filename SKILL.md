@@ -351,9 +351,12 @@ Discover signatures with `hover` / `gos doc std::<module>`. Areas:
   bufio`. `process::run(prog, args)` executes without a shell;
   `Command::new(p).arg(a).stdout(Stdio::Piped).spawn()?` (after
   `use std::process::{Command, Stdio}`; also `env`, `dir`, `status`,
-  `output`) answers a `Child` that reads, writes, and waits. `time::Instant`,
-  `Duration`, `time::Time` (an instant with its UTC offset, RFC 3339).
-  `fs::read_dir` entries carry `is_file`, `size`, `path` - do not re-query.
+  `output`) answers a `Child` that reads, writes, and waits;
+  `process::look_path(name)` answers the `PATH` match or `None`.
+  `time::Instant`, `Duration`, `time::Time` (an instant with its UTC offset,
+  RFC 3339). `fs::read_dir` entries carry `is_file`, `size`, `path` -
+  do not re-query. `fs::temp_dir(prefix, parent: Some(dir))` makes a fresh
+  folder (in the system temp root without `parent`).
 - Text: `strings strconv utf8 unicode regex`.
 - Encoding: `json yaml toml xml csv base64 base32 hex pem binary`. Typed
   serde: `json::decode::<T>(text)?` / `json::encode(v)`, `from_json` /
@@ -366,7 +369,9 @@ Discover signatures with `hover` / `gos doc std::<module>`. Areas:
   `resized`; each takes an optional `os::fd::Descriptor`: the `fs::File` of
   an opened `/dev/tty` when stdin is piped, kept open while the call uses
   it, or `term::STDIN` / `STDOUT` / `STDERR`), `os::fd` (`wait_readable`,
-  same argument), `os::signal`
+  `wait_writable`, same argument; a descriptor a foreign call answered as an
+  integer is `fs::File::from_raw(n)?`, owned and closed with the file, or
+  `fd::Borrowed::from_raw(n)`, never closed), `os::signal`
   (`on(signal::SIGWINCH)`; `n.wait()` answers false once its cohort is
   cancelled or `n.stop()` runs), `process::run_inherit` (hand the terminal
   to a child), `unicode::char_width` / `str_width`. Restore state with

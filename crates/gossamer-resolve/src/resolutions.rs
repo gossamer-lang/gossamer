@@ -145,6 +145,12 @@ impl Resolutions {
         self.paths.get(&def).map(Vec::as_slice)
     }
 
+    /// Every recorded item and variant with the path from the unit root
+    /// that names it.
+    pub fn paths(&self) -> impl Iterator<Item = (DefId, &[String])> {
+        self.paths.iter().map(|(def, path)| (*def, path.as_slice()))
+    }
+
     /// Records that `path_node` resolves to `resolution`.
     pub fn insert(&mut self, path_node: NodeId, resolution: Resolution) {
         self.entries.insert(path_node, resolution);

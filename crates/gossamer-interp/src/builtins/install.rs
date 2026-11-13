@@ -594,6 +594,7 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
             ("exit", builtin_os_exit),
             ("id", builtin_process_id),
             ("abort", builtin_process_abort),
+            ("look_path", builtin_process_look_path),
         ],
         globals,
     );

@@ -117,6 +117,19 @@ fn builtin_process_id(_args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Int(i64::from(gossamer_runtime::platform::process_id())))
 }
 
+/// `process::look_path(name) -> Option<String>`.
+fn builtin_process_look_path(args: &[Value]) -> RuntimeResult<Value> {
+    let Some(Value::String(name)) = args.first() else {
+        return Ok(none_variant());
+    };
+    Ok(
+        match gossamer_runtime::c_abi::exec::look_path(name.as_ref()) {
+            Some(path) => some_variant(Value::String(path.to_string_lossy().into_owned().into())),
+            None => none_variant(),
+        },
+    )
+}
+
 fn builtin_process_abort(_args: &[Value]) -> RuntimeResult<Value> {
     std::process::abort();
 }

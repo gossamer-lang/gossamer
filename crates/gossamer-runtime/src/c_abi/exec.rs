@@ -329,6 +329,95 @@ pub unsafe extern "C" fn gos_rt_exec_run_inherit(prog: *const c_char, args: *mut
     })
 }
 
+/// The file `name` names as a program, searched for the way Go's
+/// `exec.LookPath` and Python's `shutil.which` search: a name holding a path
+/// separator is checked as written, any other is looked up in each `PATH`
+/// directory in order. Empty `PATH` entries are skipped, so the current
+/// directory is searched only when `PATH` names it. On Windows each candidate
+/// is tried as written when it has an extension, then with each `PATHEXT`
+/// extension appended.
+pub fn look_path(name: &str) -> Option<std::path::PathBuf> {
+    if name.is_empty() {
+        return None;
+    }
+    let separators: &[char] = if cfg!(windows) {
+        &['/', '\\', ':']
+    } else {
+        &['/']
+    };
+    if name.contains(separators) {
+        return program_file::executable(std::path::Path::new(name));
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .find_map(|dir| program_file::executable(&dir.join(name)))
+}
+
+mod program_file {
+    use std::path::{Path, PathBuf};
+
+    /// `path` when it names a file this process may execute.
+    #[cfg(unix)]
+    pub(super) fn executable(path: &Path) -> Option<PathBuf> {
+        use std::os::unix::ffi::OsStrExt as _;
+        if !std::fs::metadata(path).ok()?.is_file() {
+            return None;
+        }
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+        // SAFETY: `c_path` is a NUL-terminated string live for the call.
+        (unsafe { libc::access(c_path.as_ptr(), libc::X_OK) } == 0).then(|| path.to_path_buf())
+    }
+
+    /// `path`, or `path` with a `PATHEXT` extension appended, whichever names
+    /// a file first. Windows runs a file by its extension, so any file found
+    /// is executable.
+    #[cfg(windows)]
+    pub(super) fn executable(path: &Path) -> Option<PathBuf> {
+        let is_file = |p: &Path| std::fs::metadata(p).is_ok_and(|m| m.is_file());
+        if path.extension().is_some() && is_file(path) {
+            return Some(path.to_path_buf());
+        }
+        let exts = std::env::var("PATHEXT")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_string());
+        exts.split(';')
+            .filter(|ext| ext.starts_with('.') && ext.len() > 1)
+            .map(|ext| {
+                let mut with_ext = path.as_os_str().to_os_string();
+                with_ext.push(ext.to_ascii_lowercase());
+                PathBuf::from(with_ext)
+            })
+            .find(|candidate| is_file(candidate))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub(super) fn executable(_path: &Path) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// `process::look_path(name) -> Option<String>`: `Ok` (disc 0) carries the
+/// path, disc 1 answers `None`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_process_look_path(name: *const c_char) -> i128 {
+    ffi_entry!({
+        if name.is_null() {
+            return gos_rt_result_new(1, 0);
+        }
+        // SAFETY: `name` is a String argument from compiled code, non-null (checked above) and live for the whole call.
+        let name = unsafe { crate::c_abi::gos_str_arg_string(name) };
+        match look_path(&name) {
+            Some(path) => {
+                let path = alloc_cstring(path.to_string_lossy().as_bytes());
+                gos_rt_result_new(0, path as i64)
+            }
+            None => gos_rt_result_new(1, 0),
+        }
+    })
+}
+
 #[cfg(unix)]
 mod exit_wait {
     use std::time::Duration;

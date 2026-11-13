@@ -1206,6 +1206,51 @@ fn main() {
 "#,
     ),
     (
+        "enum_field_holding_a_struct_option_overwritten",
+        r#"
+struct Doc { id: i64 }
+struct Preview {
+    path: String
+    document: Option<Doc>
+}
+enum Content {
+    Plain(i64)
+    Preview(Preview)
+}
+struct Tab {
+    key: String
+    content: Content
+}
+
+fn retitle(t: &mut Tab, round: i64) {
+    t.content = Content::Preview(Preview { path: f"third {round}", document: Some(Doc { id: 3 }) })
+}
+
+fn main() {
+    let mut total = 0
+    let mut tabs: Vec<Tab> = #[]
+    for round in 0..20000 {
+        tabs.push(Tab { key: "t", content: Content::Preview(Preview { path: "first", document: Some(Doc { id: 1 }) }) })
+        tabs[0].content = Content::Preview(Preview { path: f"second {round}", document: Some(Doc { id: 2 }) })
+        retitle(&mut tabs[0], round)
+        if let Some(t) = tabs.pop() {
+            if let Content::Preview(p) = t.content {
+                if let Some(d) = p.document { total += d.id }
+            }
+        }
+        let mut own = Tab { key: "o", content: Content::Plain(0) }
+        own.content = Content::Preview(Preview { path: f"own {round}", document: Some(Doc { id: round }) })
+        own.content = Content::Preview(Preview { path: "again", document: Some(Doc { id: 4 }) })
+        if let Content::Preview(p) = own.content {
+            if let Some(d) = p.document { total += d.id }
+        }
+        own.content = Content::Plain(1)
+    }
+    println(total)
+}
+"#,
+    ),
+    (
         "option_popped_rebound_and_array_slot",
         r#"
 fn main() {

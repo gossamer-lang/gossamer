@@ -523,6 +523,35 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
         }
     };
 
+    // A store into a field (or element) of an aggregate whose own type
+    // carries guarded children: the meta naming them. A carrier slot is the
+    // option-slot store's, and a field of a region local is never counted.
+    let guarded_field_meta = |place: &Place| -> Option<String> {
+        let i = place.local.0 as usize;
+        if place.projection.is_empty() || i >= n_locals || body.locals[i].region {
+            return None;
+        }
+        let steps = match place.projection.first() {
+            Some(crate::ir::Projection::Deref) => &place.projection[1..],
+            _ => &place.projection[..],
+        };
+        if steps.is_empty()
+            || !steps.iter().all(|p| {
+                matches!(
+                    p,
+                    crate::ir::Projection::Field(_) | crate::ir::Projection::Index(_)
+                )
+            })
+        {
+            return None;
+        }
+        let slot_ty = projected_field_ty(body.locals[i].ty, steps)?;
+        if is_option_slot_ty(slot_ty) {
+            return None;
+        }
+        walk_meta(peel_ref(slot_ty))
+    };
+
     let mut gaps: Vec<Vec<Vec<Statement>>> = body
         .blocks
         .iter()
@@ -698,6 +727,36 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
                     &mut next_unit,
                     &mut extra_locals,
                 ));
+            } else if let Some(sym) = guarded_field_meta(place) {
+                // Overwriting an aggregate field whose layout holds guarded
+                // children (a carrier's payload blob below it): the field
+                // gives the old children back before the store and takes a
+                // share of the new ones after it, as a whole guarded local
+                // does. The source keeps its own shares for its own release.
+                gaps[bi][si].push(call_stmt(
+                    "gos_rt_aggr_release_children",
+                    vec![
+                        Operand::Copy(place.clone()),
+                        Operand::Const(ConstValue::Str(sym.clone())),
+                    ],
+                    span,
+                    &mut next_unit,
+                    &mut extra_locals,
+                ));
+                let payload_read = matches!(rvalue,
+                    Rvalue::CallIntrinsic { name, .. } if *name == "gos_enum_load");
+                if !matches!(rvalue, Rvalue::Use(Operand::Const(_))) && !payload_read {
+                    gaps[bi][si + 1].push(call_stmt(
+                        "gos_rt_aggr_retain_children",
+                        vec![
+                            Operand::Copy(place.clone()),
+                            Operand::Const(ConstValue::Str(sym)),
+                        ],
+                        span,
+                        &mut next_unit,
+                        &mut extra_locals,
+                    ));
+                }
             }
         }
         // A container store takes its own share of the carrier's payload:

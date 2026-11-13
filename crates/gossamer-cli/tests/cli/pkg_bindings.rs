@@ -477,11 +477,6 @@ fn jit_compiled_binding_call_resolves_predeclared_symbol() {
         "missing addlib crate at {}",
         addlib.display()
     );
-    let workspace_root = examples_dir()
-        .parent()
-        .expect("workspace root")
-        .to_path_buf();
-
     let tmp = env::temp_dir().join(format!("gos-jit-binding-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(tmp.join("src")).expect("create src");
@@ -509,7 +504,6 @@ fn jit_compiled_binding_call_resolves_predeclared_symbol() {
         .arg("run")
         .arg("src/main.gos")
         .current_dir(&tmp)
-        .env("GOSSAMER_ROOT", &workspace_root)
         .env("GOSSAMER_CACHE", tmp.join("cache"))
         .env("GOSSAMER_JIT_THRESHOLD", "1")
         .output()
@@ -537,11 +531,6 @@ fn binding_build_ignores_cargo_config_of_the_invoking_directory() {
         .join("projects")
         .join("rust_binding_add")
         .join("addlib");
-    let workspace_root = examples_dir()
-        .parent()
-        .expect("workspace root")
-        .to_path_buf();
-
     let tmp = env::temp_dir().join(format!("gos-binding-cargo-config-{}", std::process::id()));
     // The cache sits beside the project, as the user cache does, so only the
     // working directory reaches the project's cargo config.
@@ -579,7 +568,6 @@ fn binding_build_ignores_cargo_config_of_the_invoking_directory() {
         .arg("run")
         .arg("src/main.gos")
         .current_dir(&tmp)
-        .env("GOSSAMER_ROOT", &workspace_root)
         .env("GOSSAMER_CACHE", &cache)
         .output()
         .expect("spawn run");

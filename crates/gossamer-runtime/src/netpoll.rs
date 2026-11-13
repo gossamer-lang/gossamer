@@ -61,6 +61,10 @@ pub struct PollDesc {
     read_deadline: AtomicU64,
     /// Nanoseconds past [`epoch`] at which a parked writer is woken, or 0.
     write_deadline: AtomicU64,
+    /// Interrupts delivered by an [`Interrupter`], counted so a wait that
+    /// read the count before checking its condition sees one that landed
+    /// before it parked.
+    interrupts: AtomicU64,
 }
 
 impl PollDesc {
@@ -86,7 +90,7 @@ pub(crate) struct Poller {
     registry: mio::Registry,
     waker: mio::Waker,
     descs: Mutex<Slab>,
-    timers: Mutex<BinaryHeap<Reverse<Timer>>>,
+    timers: Mutex<Timers>,
     /// Deadline, in nanoseconds past [`epoch`], a blocked pass sleeps until,
     /// or 0 while no pass is blocked.
     sleeping_until: AtomicU64,
@@ -107,6 +111,36 @@ struct Timer {
     at: u64,
     gid: u32,
     claimed: Arc<AtomicBool>,
+    /// For the deadline of a [`Registration::park_until_ready`], the waiter
+    /// word the goroutine parked in. The deadline wakes it only by taking
+    /// that word, as readiness does, so exactly one of them unparks it.
+    slot: Option<SlotClaim>,
+}
+
+/// A poller's pending timers.
+#[derive(Default)]
+struct Timers {
+    heap: BinaryHeap<Reverse<Timer>>,
+    /// Entries in `heap` whose goroutine woke first and withdrew them.
+    cancelled: usize,
+}
+
+/// A parked waiter word: the descriptor, the direction, and the value the
+/// waiter stored.
+struct SlotClaim {
+    desc: Arc<PollDesc>,
+    direction: Direction,
+    waiter: u64,
+}
+
+impl SlotClaim {
+    /// Takes the word back from the waiter, answering whether it was still
+    /// there (and so whether the caller owes the unpark).
+    fn take(&self) -> bool {
+        let (slot, _) = self.desc.slots(self.direction);
+        slot.compare_exchange(self.waiter, EMPTY, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
 }
 
 impl PartialEq for Timer {
@@ -185,7 +219,7 @@ impl Poller {
             registry,
             waker,
             descs: Mutex::new(Slab::default()),
-            timers: Mutex::new(BinaryHeap::new()),
+            timers: Mutex::new(Timers::default()),
             sleeping_until: AtomicU64::new(0),
             armed_deadlines: AtomicUsize::new(0),
             next_sweep: AtomicU64::new(0),
@@ -259,6 +293,7 @@ impl Poller {
         let next_timer = self
             .timers
             .lock()
+            .heap
             .peek()
             .map_or(u64::MAX, |Reverse(t)| t.at);
         if self.armed_deadlines.load(Ordering::Acquire) > 0 {
@@ -271,11 +306,13 @@ impl Poller {
     fn fire_due(&self, now: u64, woken: &mut Vec<u32>) {
         {
             let mut timers = self.timers.lock();
-            while timers.peek().is_some_and(|Reverse(t)| t.at <= now) {
-                let Some(Reverse(timer)) = timers.pop() else {
+            while timers.heap.peek().is_some_and(|Reverse(t)| t.at <= now) {
+                let Some(Reverse(timer)) = timers.heap.pop() else {
                     break;
                 };
-                if !timer.claimed.swap(true, Ordering::AcqRel) {
+                if timer.claimed.swap(true, Ordering::AcqRel) {
+                    timers.cancelled = timers.cancelled.saturating_sub(1);
+                } else if timer.slot.as_ref().is_none_or(SlotClaim::take) {
                     woken.push(timer.gid);
                 }
             }
@@ -306,6 +343,37 @@ impl Poller {
                     woken.push(u32::try_from(waiter - WAITER).unwrap_or(u32::MAX));
                 }
             }
+        }
+    }
+
+    /// Adds `timer` to the heap, ending a blocked pass that would sleep past
+    /// it; a pass not blocked reads the heap before it next blocks.
+    fn push_timer(&self, timer: Timer) {
+        let at = timer.at;
+        self.timers.lock().heap.push(Reverse(timer));
+        let sleeping_until = self.sleeping_until.load(Ordering::Acquire);
+        if sleeping_until != 0 && at < sleeping_until {
+            self.wake();
+        }
+    }
+
+    /// Withdraws the timer whose flag is `claimed` when it has not fired, for
+    /// a goroutine that woke before its deadline.
+    ///
+    /// The entry stays in the heap, inert, and is counted; once withdrawn
+    /// entries are half the heap they are dropped together, so a wait that
+    /// often ends early holds no more memory than the waits still pending.
+    fn cancel_timer(&self, claimed: &AtomicBool) {
+        if claimed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let mut timers = self.timers.lock();
+        timers.cancelled += 1;
+        if timers.cancelled * 2 > timers.heap.len() {
+            timers
+                .heap
+                .retain(|Reverse(t)| !t.claimed.load(Ordering::Acquire));
+            timers.cancelled = 0;
         }
     }
 
@@ -511,6 +579,140 @@ impl Registration {
     }
 }
 
+/// How a [`Registration::park_until_ready`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wake {
+    /// Readiness arrived in the direction waited for. Edges can be shared
+    /// across registrations, so a caller that must not act on a false one
+    /// confirms it.
+    Ready,
+    /// The deadline passed first.
+    TimedOut,
+    /// An [`Interrupter`] woke the wait, or nothing did: re-check and wait
+    /// again.
+    Interrupted,
+}
+
+/// Wakes the goroutine parked in one direction of a registration, from any
+/// thread.
+#[derive(Clone)]
+pub struct Interrupter {
+    desc: Arc<PollDesc>,
+    direction: Direction,
+}
+
+impl Interrupter {
+    /// Counts an interrupt and unparks the waiter, if one is parked.
+    pub fn interrupt(&self) {
+        self.desc.interrupts.fetch_add(1, Ordering::SeqCst);
+        let (slot, _) = self.desc.slots(self.direction);
+        let waiter = slot.load(Ordering::Acquire);
+        if waiter >= WAITER
+            && slot
+                .compare_exchange(waiter, EMPTY, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            let gid = u32::try_from(waiter - WAITER).unwrap_or(u32::MAX);
+            crate::sched_global::scheduler().unpark(Gid(gid));
+        }
+    }
+}
+
+impl Registration {
+    /// An [`Interrupter`] for waits in `direction`.
+    #[must_use]
+    pub fn interrupter(&self, direction: Direction) -> Interrupter {
+        Interrupter {
+            desc: Arc::clone(&self.desc),
+            direction,
+        }
+    }
+
+    /// The interrupts delivered so far, read before the caller checks the
+    /// condition an interrupt reports and passed to
+    /// [`Self::park_until_ready`].
+    #[must_use]
+    pub fn interrupts(&self) -> u64 {
+        self.desc.interrupts.load(Ordering::SeqCst)
+    }
+
+    /// Parks the calling goroutine until the descriptor is ready in
+    /// `direction`, `deadline` passes, or an interrupt arrives after `seen`
+    /// was read. The deadline is kept to the poller's timer precision, not
+    /// the deadline sweep's.
+    #[must_use]
+    pub fn park_until_ready(
+        &self,
+        direction: Direction,
+        deadline: Option<Instant>,
+        seen: u64,
+    ) -> Wake {
+        let (slot, _) = self.desc.slots(direction);
+        if slot
+            .compare_exchange(READY, EMPTY, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return Wake::Ready;
+        }
+        if deadline.is_some_and(|at| Instant::now() >= at) {
+            return Wake::TimedOut;
+        }
+        // Set until a deadline timer is pushed, so a wait that pushed none has
+        // nothing to withdraw.
+        let claimed = Arc::new(AtomicBool::new(true));
+        crate::sched_global::park(ParkReason::Io, |parker| {
+            let me = u64::from(parker.gid.as_u32()) + WAITER;
+            if slot
+                .compare_exchange(EMPTY, me, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                // Readiness arrived since the check above: stay runnable.
+                crate::sched_global::scheduler().unpark(parker.gid);
+                return;
+            }
+            let claim = SlotClaim {
+                desc: Arc::clone(&self.desc),
+                direction,
+                waiter: me,
+            };
+            // An interrupt that read no waiter in the word was counted
+            // first, so it is seen here.
+            if self.desc.interrupts.load(Ordering::SeqCst) != seen {
+                if claim.take() {
+                    crate::sched_global::scheduler().unpark(parker.gid);
+                }
+                return;
+            }
+            if let Some(at) = deadline {
+                claimed.store(false, Ordering::Release);
+                self.poller.push_timer(Timer {
+                    at: nanos_at(at),
+                    gid: parker.gid.as_u32(),
+                    claimed: Arc::clone(&claimed),
+                    slot: Some(claim),
+                });
+            }
+        });
+        self.poller.cancel_timer(&claimed);
+        if slot.swap(EMPTY, Ordering::AcqRel) == READY {
+            Wake::Ready
+        } else if deadline.is_some_and(|at| Instant::now() >= at) {
+            Wake::TimedOut
+        } else {
+            Wake::Interrupted
+        }
+    }
+}
+
+// The descriptor-wait tests that read it run on Unix only.
+#[cfg(all(test, unix))]
+impl Registration {
+    /// The timer entries the registration's poller holds, fired or not.
+    pub(crate) fn pending_timers(&self) -> usize {
+        self.poller.timers.lock().heap.len()
+    }
+}
+
 /// Parks the calling goroutine until `deadline`, or until something else
 /// unparks it first (a cancellation).
 ///
@@ -523,20 +725,15 @@ pub fn sleep_until(deadline: Instant) -> bool {
     let at = nanos_at(deadline);
     let claimed = Arc::new(AtomicBool::new(false));
     crate::sched_global::park(ParkReason::Timer, |parker| {
-        poller.timers.lock().push(Reverse(Timer {
+        poller.push_timer(Timer {
             at,
             gid: parker.gid.as_u32(),
             claimed: Arc::clone(&claimed),
-        }));
-        // A pass blocked past this deadline is ended early; one not blocked
-        // reads the heap before it next blocks.
-        let sleeping_until = poller.sleeping_until.load(Ordering::Acquire);
-        if sleeping_until != 0 && at < sleeping_until {
-            poller.wake();
-        }
+            slot: None,
+        });
     });
     // Woken early, the entry still in the heap must not wake this goroutine
     // later; woken by the deadline, this finds it already taken.
-    claimed.store(true, Ordering::Release);
+    poller.cancel_timer(&claimed);
     true
 }

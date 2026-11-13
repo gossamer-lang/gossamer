@@ -187,3 +187,138 @@ fn which_llc_missing() -> bool {
         .iter()
         .any(|status| status.tool == "llc" && status.resolved.is_err())
 }
+
+/// A goroutine parked in `os::fd::wait_readable` on a pipe, and the main
+/// goroutine writing one byte to it every few milliseconds: each line of
+/// `samples` is how long the waiter took to resume after the write, in
+/// nanoseconds. The pipe comes from the C library as plain integers, the way
+/// a descriptor from any foreign call arrives.
+#[cfg(unix)]
+const FD_WAKE_SOURCE: &str = r#"
+use std::{fs, os, time}
+use std::sync::channel
+
+unsafe extern "C" {
+    fn pipe(fds: &mut [i32]) -> i32
+    fn write(fd: i32, buf: [u8], n: usize) -> isize
+    fn read(fd: i32, buf: &mut [u8], n: usize) -> isize
+}
+
+const ROUNDS: i64 = 300
+
+fn waiter(reader: fs::File, raw: i32, tx: Sender<i64>) {
+    let mut buf = #[0u8]
+    for _ in 0..ROUNDS {
+        let Ok(true) = os::fd::wait_readable(reader, -1) else {
+            tx.send(-1)
+            return
+        }
+        let woke = time::monotonic_nanos()
+        let _ = unsafe { read(raw, &mut buf, 1) }
+        tx.send(woke)
+    }
+}
+
+fn main() {
+    let mut ends = #[0i32, 0i32]
+    if unsafe { pipe(&mut ends) } != 0 {
+        panic("pipe failed")
+    }
+    let Ok(reader) = fs::File::from_raw(ends[0] as i64) else {
+        panic("from_raw failed")
+    }
+    let raw = ends[0]
+    let tx, rx = channel()
+    spawn(|| waiter(reader, raw, tx))
+    for _ in 0..ROUNDS {
+        time::sleep(time::Duration::from_millis(2))
+        let sent = time::monotonic_nanos()
+        let _ = unsafe { write(ends[1], "x".bytes(), 1) }
+        let Some(woke) = rx.recv() else {
+            panic("waiter ended")
+        }
+        if woke < 0 {
+            panic("wait failed")
+        }
+        println(f"{woke - sent}")
+    }
+}
+"#;
+
+/// The median of `samples`.
+#[cfg(unix)]
+fn median(mut samples: Vec<Duration>) -> Duration {
+    samples.sort_unstable();
+    samples[samples.len() / 2]
+}
+
+/// The same handoff between two OS threads, the reader blocked in the kernel
+/// on a socket: what the wait costs with no runtime in between.
+#[cfg(unix)]
+fn blocking_read_wake_latency(rounds: usize) -> Duration {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::net::UnixStream;
+
+    let (mut writer, mut reader) = UnixStream::pair().expect("socket pair");
+    let (woke_tx, woke_rx) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let mut byte = [0u8];
+        for _ in 0..rounds {
+            reader.read_exact(&mut byte).expect("read a byte");
+            woke_tx.send(Instant::now()).expect("report the wake");
+        }
+    });
+    let samples = (0..rounds)
+        .map(|_| {
+            std::thread::sleep(Duration::from_millis(2));
+            let sent = Instant::now();
+            writer.write_all(b"x").expect("write a byte");
+            let woke = woke_rx.recv().expect("the reader wakes");
+            woke.saturating_duration_since(sent)
+        })
+        .collect();
+    thread.join().expect("reader thread");
+    median(samples)
+}
+
+/// A goroutine waiting on a descriptor resumes about as promptly as a thread
+/// blocked in the kernel on one. A wait that only noticed readiness on a
+/// periodic tick, or that queued the goroutine behind a sweep, would add the
+/// tick to every wake; the bound is loose enough for a loaded host and far
+/// below any such tick.
+#[cfg(unix)]
+#[test]
+fn descriptor_wait_resumes_as_promptly_as_a_blocking_read() {
+    if which_llc_missing() {
+        eprintln!("skipping: LLVM tooling not on PATH");
+        return;
+    }
+    let dir = fresh_dir("fd_wake");
+    let src = dir.join("fd_wake.gos");
+    fs::write(&src, FD_WAKE_SOURCE).unwrap();
+    let bin = build(&src, true, &dir);
+    let out = Command::new(&bin).output().expect("run the wake bench");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "wake bench failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let samples: Vec<Duration> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|line| {
+            let nanos: u64 = line.trim().parse().expect("a sample in nanoseconds");
+            Duration::from_nanos(nanos)
+        })
+        .collect();
+    assert_eq!(samples.len(), 300, "one sample per round");
+    let goroutine = median(samples);
+    let thread = blocking_read_wake_latency(300);
+    eprintln!("fd wake median: goroutine {goroutine:?}, blocked thread {thread:?}");
+    let bound = thread * 4 + Duration::from_micros(250);
+    assert!(
+        goroutine <= bound,
+        "a goroutine's descriptor wait resumed in {goroutine:?} (median), past {bound:?}; \
+         a thread blocked in the kernel resumed in {thread:?}"
+    );
+}

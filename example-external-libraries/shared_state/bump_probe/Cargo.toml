@@ -10,5 +10,5 @@ publish = false
 crate-type = ["rlib"]
 
 [dependencies]
-gossamer-binding = { path = "../../../crates/gossamer-binding" }
+gossamer-binding = "0.75.19"
 shared_counter = { path = "../counter" }

@@ -338,6 +338,24 @@ fn collapse_expr(
     {
         return;
     }
+    // `fd::Borrowed::from_raw`: a member of any other injected stdlib type
+    // (an associated function or a variant) hangs off the mangled type.
+    if n >= 3
+        && let Some(mangled) = head3.and_then(|module| {
+            let owner = path.segments[n - 2].name.name.as_str();
+            mangled_stdlib_name(module, owner)
+                .filter(|_| owner.starts_with(|c: char| c.is_ascii_uppercase()))
+        })
+    {
+        let mut owner = gossamer_ast::PathSegment::new(mangled);
+        owner.generics = std::mem::take(&mut path.segments[n - 2].generics);
+        let member = std::mem::replace(
+            &mut path.segments[n - 1],
+            gossamer_ast::PathSegment::new(""),
+        );
+        path.segments = vec![owner, member];
+        return;
+    }
     if let Some(name) = head2
         .and_then(|parent| mangled_stdlib_name(parent, path.segments[n - 1].name.name.as_str()))
     {

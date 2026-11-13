@@ -27,12 +27,9 @@ pub extern "C" fn gos_rt_time_now() -> f64 {
     })
 }
 
-// Process-wide monotonic base, initialised on first use. Mirrors
-// the interpreter's per-thread `MONOTONIC_BASE` in
-// `gossamer-interp`; a single process-global base gives identical
-// `monotonic_ms` / `monotonic_nanos` deltas across the compiled
-// tiers without the thread-local indirection.
-fn monotonic_base() -> crate::platform::Instant {
+/// The instant `time::monotonic_ms` / `monotonic_nanos` count from, one per
+/// process, so readings taken on any thread compare.
+pub fn monotonic_base() -> crate::platform::Instant {
     static BASE: std::sync::OnceLock<crate::platform::Instant> = std::sync::OnceLock::new();
     *BASE.get_or_init(crate::platform::Instant::now)
 }

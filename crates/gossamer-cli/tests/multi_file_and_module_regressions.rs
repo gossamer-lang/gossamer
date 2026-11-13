@@ -2730,6 +2730,55 @@ fn write_app_project(root: &Path, deps: &str, main: &str) -> PathBuf {
     dir
 }
 
+/// A variant a dependency's enum does not declare is a check error however
+/// the enum is reached: imported, through a type alias, or by its full path.
+#[test]
+fn an_undeclared_variant_of_a_dependency_enum_fails_the_check() {
+    let root = fresh_dir("dep-enum-variant");
+    write_dep_project(
+        &root,
+        "dep",
+        "example.com/dep",
+        "pub enum Effect { Start(i64), Stop }\npub type Action = Effect\n\
+         pub fn show(e: Effect) -> String { match e { Effect::Start(n) => f\"start {n}\", Effect::Stop => \"stop\" } }\n",
+    );
+    for (label, main) in [
+        (
+            "imported",
+            "use dep\nuse dep::Effect\n\nfn main() { println(dep::show(Effect::Halt)) }\n",
+        ),
+        (
+            "alias",
+            "use dep\nuse dep::Action\n\nfn main() { println(dep::show(Action::Halt)) }\n",
+        ),
+        (
+            "full path",
+            "use dep\n\nfn main() { let e = dep::Effect::Halt\nprintln(dep::show(e)) }\n",
+        ),
+    ] {
+        let app = write_app_project(&root, "dep = { path = \"../dep\" }\n", main);
+        let (stdout, stderr, status) = project_check(&app);
+        assert_ne!(status, Some(0), "{label}: {stdout}{stderr}");
+        assert!(
+            stderr.contains("enum `") && stderr.contains("has no variant `Halt`"),
+            "{label}: {stderr}"
+        );
+        assert!(
+            stderr.contains("declared variants are `Start`, `Stop`"),
+            "{label}: {stderr}"
+        );
+    }
+    let app = write_app_project(
+        &root,
+        "dep = { path = \"../dep\" }\n",
+        "use dep\nuse dep::Action\n\nfn main() { println(dep::show(Action::Start(2))) }\n",
+    );
+    let out = project_run_vm(&app);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(out.2, Some(0), "stderr: {}", out.1);
+    assert_eq!(out.0.trim(), "start 2");
+}
+
 #[test]
 fn path_dependency_links_at_run() {
     let root = fresh_dir("path-dep-run");

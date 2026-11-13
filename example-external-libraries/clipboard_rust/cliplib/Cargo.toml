@@ -11,4 +11,4 @@ crate-type = ["rlib"]
 
 [dependencies]
 arboard = { version = "3", default-features = false }
-gossamer-binding = { path = "../../../crates/gossamer-binding" }
+gossamer-binding = "0.75.19"

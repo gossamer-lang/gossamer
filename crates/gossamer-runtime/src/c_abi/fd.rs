@@ -1,15 +1,20 @@
 //! `std::os::fd`: waiting for a descriptor (on Windows, a handle) to become
 //! readable or writable without holding a scheduler worker.
 //!
-//! The wait runs `poll(2)` (on Windows, `WaitForMultipleObjects`) on the
-//! blocking pool while the calling goroutine is parked. `poll` answers for
-//! every kind of descriptor a program holds, a terminal included, where the
-//! kernel event queues the netpoller uses reject some of them (kqueue refuses
-//! tty devices on macOS).
+//! On Unix a goroutine's wait registers the descriptor with its worker's
+//! netpoller and parks there, so the worker that sleeps in the kernel's event
+//! queue is the thread that resumes the goroutine: readiness reaches it with
+//! one wakeup, as it reaches a thread blocked in `poll`.
 //!
-//! Each wait also watches a wake object of its own (a pipe, or an event on
-//! Windows) that cohort cancellation signals through [`wake_waits`], so a
-//! wait under a cancelled cohort ends instead of holding its pool thread.
+//! A descriptor the event queue refuses (a regular file under epoll, a tty
+//! under kqueue on macOS), and any wait outside a goroutine or on Windows,
+//! runs `poll(2)` (on Windows, `WaitForMultipleObjects`) on the blocking pool
+//! instead, while the goroutine is parked. Each such wait also watches a wake
+//! object of its own (a pipe, or an event on Windows).
+//!
+//! Cohort cancellation reaches every wait through [`wake_waits`], so a wait
+//! under a cancelled cohort ends instead of holding its pool thread or its
+//! park.
 
 #![allow(unsafe_code)]
 
@@ -31,15 +36,31 @@ pub fn wait(
     timeout_ms: i64,
     cancelled: impl Fn() -> bool + Send + 'static,
 ) -> Result<bool, String> {
+    #[cfg(unix)]
+    if crate::sched_global::current_gid().is_some()
+        && let Some(answer) = poller::wait(fd, writable, timeout_ms, &cancelled)
+    {
+        return answer;
+    }
     crate::sched_global::run_blocking("fd::wait", move || {
         platform::wait(fd, writable, timeout_ms, &cancelled)
     })?
 }
 
-/// Wake objects of the descriptor waits in progress, by wait id: a pipe's
-/// write end on Unix, an event handle on Windows.
+/// What [`wake_waits`] signals for one wait in progress.
 #[cfg(any(unix, windows))]
-static WAKES: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashMap<u64, i64>>> =
+enum WakeTarget {
+    /// A pool wait's wake object: a pipe's write end on Unix, an event
+    /// handle on Windows.
+    Os(i64),
+    /// A goroutine parked in its worker's netpoller.
+    #[cfg(unix)]
+    Poller(crate::netpoll::Interrupter),
+}
+
+/// The descriptor waits in progress, by wait id.
+#[cfg(any(unix, windows))]
+static WAKES: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashMap<u64, WakeTarget>>> =
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
 
 #[cfg(any(unix, windows))]
@@ -50,7 +71,11 @@ static NEXT_WAKE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 pub fn wake_waits() {
     #[cfg(any(unix, windows))]
     for wake in WAKES.lock().values() {
-        platform::signal_wake(*wake);
+        match wake {
+            WakeTarget::Os(handle) => platform::signal_wake(*handle),
+            #[cfg(unix)]
+            WakeTarget::Poller(interrupter) => interrupter.interrupt(),
+        }
     }
 }
 
@@ -60,7 +85,7 @@ struct WakeEntry(u64);
 
 #[cfg(any(unix, windows))]
 impl WakeEntry {
-    fn register(wake: i64) -> Self {
+    fn register(wake: WakeTarget) -> Self {
         let id = NEXT_WAKE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         WAKES.lock().insert(id, wake);
         Self(id)
@@ -115,6 +140,118 @@ fn remaining_ms(deadline: Option<Instant>) -> Option<u64> {
         let left = at.saturating_duration_since(Instant::now());
         u64::try_from(left.as_millis()).unwrap_or(u64::MAX)
     })
+}
+
+/// Waits that park in the calling worker's netpoller.
+#[cfg(unix)]
+mod poller {
+    use crate::netpoll::{Direction, Registration, Wake};
+
+    /// Waits as [`super::wait`] does, parked in the worker's netpoller.
+    /// `None` when the descriptor is one the poller does not take, for the
+    /// blocking pool to wait on instead.
+    pub(super) fn wait(
+        fd: i64,
+        writable: bool,
+        timeout_ms: i64,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Option<Result<bool, String>> {
+        let deadline = super::deadline(timeout_ms);
+        let Ok(raw) = i32::try_from(fd) else {
+            return Some(Err(format!("fd::wait: {fd} is not a descriptor")));
+        };
+        if cancelled() {
+            return Some(Ok(false));
+        }
+        match ready_now(raw, writable) {
+            Err(error) => return Some(Err(error)),
+            Ok(true) => return Some(Ok(true)),
+            Ok(false) if timeout_ms == 0 => return Some(Ok(false)),
+            Ok(false) => {}
+        }
+        if !queue_takes(raw) {
+            return None;
+        }
+        let mut source = mio::unix::SourceFd(&raw);
+        let registration = Registration::new(&mut source).ok()?;
+        let direction = if writable {
+            Direction::Write
+        } else {
+            Direction::Read
+        };
+        let answer = {
+            // Registered before the first check, so a cancellation from
+            // here on either is seen by that check or interrupts the park.
+            let _entry = super::WakeEntry::register(super::WakeTarget::Poller(
+                registration.interrupter(direction),
+            ));
+            loop {
+                let seen = registration.interrupts();
+                if cancelled() {
+                    break Ok(false);
+                }
+                match registration.park_until_ready(direction, deadline, seen) {
+                    Wake::TimedOut => break Ok(false),
+                    Wake::Interrupted => {}
+                    Wake::Ready => match ready_now(raw, writable) {
+                        Ok(false) => {}
+                        answer => break answer,
+                    },
+                }
+            }
+        };
+        registration.deregister(&mut source);
+        Some(answer)
+    }
+
+    /// Whether `fd` is ready now, without waiting.
+    fn ready_now(fd: i32, writable: bool) -> Result<bool, String> {
+        let mut entry = libc::pollfd {
+            fd,
+            events: if writable {
+                libc::POLLOUT
+            } else {
+                libc::POLLIN
+            },
+            revents: 0,
+        };
+        loop {
+            // SAFETY: `entry` is one valid `pollfd` for the duration of the call.
+            let n = unsafe { libc::poll(&raw mut entry, 1, 0) };
+            if n >= 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(format!("fd::wait: {error}"));
+            }
+        }
+        if entry.revents & libc::POLLNVAL != 0 {
+            return Err(format!("fd::wait: descriptor {fd} is not open"));
+        }
+        // Readiness, a hang-up, and an error all end the wait: the next
+        // read or write reports which.
+        Ok(entry.revents != 0)
+    }
+
+    /// Whether the kernel event queue reports readiness for `fd` the way
+    /// `poll` does. A regular file or a directory is always ready to `poll`
+    /// and is answered before this is asked; kqueue on macOS refuses tty
+    /// devices.
+    fn queue_takes(fd: i32) -> bool {
+        // SAFETY: `fstat` writes one `stat` through the pointer and touches
+        // nothing else; a zeroed `stat` is a valid value of the type.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: as above; `stat` is live for the call.
+        if unsafe { libc::fstat(fd, &raw mut stat) } != 0 {
+            return false;
+        }
+        let kind = stat.st_mode & libc::S_IFMT;
+        if kind == libc::S_IFREG || kind == libc::S_IFDIR {
+            return false;
+        }
+        !(cfg!(target_vendor = "apple") && kind == libc::S_IFCHR)
+    }
 }
 
 #[cfg(unix)]
@@ -188,7 +325,7 @@ mod platform {
         let wake = WakePipe::new()?;
         // Registered before the first check, so a cancellation from here on
         // either is seen by that check or signals the pipe.
-        let _entry = super::WakeEntry::register(i64::from(wake.write));
+        let _entry = super::WakeEntry::register(super::WakeTarget::Os(i64::from(wake.write)));
         loop {
             if cancelled() {
                 return Ok(false);
@@ -237,6 +374,9 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
     use windows_sys::Win32::System::Threading::{
         CreateEventW, INFINITE, ResetEvent, SetEvent, WaitForMultipleObjects,
     };
@@ -269,6 +409,20 @@ mod platform {
         unsafe { SetEvent(event as isize as HANDLE) };
     }
 
+    /// The handle `raw` names: a standard stream's own for 0, 1, and 2, which
+    /// no kernel handle equals (handles are multiples of four, and 0 is
+    /// null), and `raw` itself otherwise.
+    fn std_stream_handle(raw: i64) -> HANDLE {
+        let which = match raw {
+            0 => STD_INPUT_HANDLE,
+            1 => STD_OUTPUT_HANDLE,
+            2 => STD_ERROR_HANDLE,
+            _ => return raw as isize as HANDLE,
+        };
+        // SAFETY: GetStdHandle reads the process's standard handle table.
+        unsafe { GetStdHandle(which) }
+    }
+
     pub(super) fn wait(
         handle: i64,
         writable: bool,
@@ -283,8 +437,8 @@ mod platform {
         let wake = WakeEvent::new()?;
         // Registered before the first check, so a cancellation from here on
         // either is seen by that check or signals the event.
-        let _entry = super::WakeEntry::register(wake.0 as isize as i64);
-        let handles = [handle as isize as HANDLE, wake.0];
+        let _entry = super::WakeEntry::register(super::WakeTarget::Os(wake.0 as isize as i64));
+        let handles = [std_stream_handle(handle), wake.0];
         loop {
             if cancelled() {
                 return Ok(false);
@@ -316,5 +470,185 @@ mod platform {
         _cancelled: &dyn Fn() -> bool,
     ) -> Result<bool, String> {
         Err("fd::wait: descriptors are not available on this target".to_string())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use super::wait;
+
+    const POLLER_ONLY_CHILD_ENV: &str = "GOSSAMER_FD_POLLER_ONLY_CHILD";
+
+    /// A pipe's read and write ends.
+    fn pipe() -> (i32, i32) {
+        let mut ends = [0i32; 2];
+        // SAFETY: `ends` has room for the two descriptors `pipe` writes.
+        assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0, "pipe");
+        (ends[0], ends[1])
+    }
+
+    fn close(fd: i32) {
+        // SAFETY: `fd` is a descriptor this test opened and closes once.
+        unsafe { libc::close(fd) };
+    }
+
+    /// Writes one byte to `fd` from another thread after `delay`.
+    fn write_later(fd: i32, delay: Duration) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            // SAFETY: the buffer is one readable byte.
+            unsafe { libc::write(fd, b"x".as_ptr().cast(), 1) };
+        })
+    }
+
+    /// Runs `body` as a goroutine on the scheduler and answers its result.
+    fn in_goroutine<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = crate::sched_global::spawn(Box::new(move || {
+            let _ = tx.send(body());
+        }));
+        rx.recv().expect("the goroutine answers")
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // parks goroutines in the kernel event queue
+    fn a_goroutine_resumes_when_its_pipe_turns_readable() {
+        let (read, write) = pipe();
+        let writer = write_later(write, Duration::from_millis(20));
+        let answer = in_goroutine(move || wait(i64::from(read), false, -1, || false));
+        writer.join().expect("writer");
+        assert_eq!(answer, Ok(true));
+        close(read);
+        close(write);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // parks goroutines in the kernel event queue
+    fn waits_that_end_before_their_deadline_leave_no_timers_behind() {
+        use crate::netpoll::{Direction, Registration, Wake};
+        let (read, write) = pipe();
+        let pending = in_goroutine(move || {
+            let mut source = mio::unix::SourceFd(&read);
+            let registration = Registration::new(&mut source).expect("register the pipe");
+            for _ in 0..400 {
+                // SAFETY: the buffer is one readable byte.
+                unsafe { libc::write(write, b"x".as_ptr().cast(), 1) };
+                let deadline = Instant::now() + Duration::from_mins(10);
+                while registration.park_until_ready(
+                    Direction::Read,
+                    Some(deadline),
+                    registration.interrupts(),
+                ) != Wake::Ready
+                {}
+                let mut byte = 0u8;
+                // SAFETY: `byte` has room for the one byte read.
+                unsafe { libc::read(read, (&raw mut byte).cast(), 1) };
+            }
+            let pending = registration.pending_timers();
+            registration.deregister(&mut source);
+            pending
+        });
+        assert!(pending < 8, "{pending} timers outlived their waits");
+        close(read);
+        close(write);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // parks goroutines in the kernel event queue
+    fn a_goroutine_wait_ends_at_its_timeout() {
+        let (read, write) = pipe();
+        let start = Instant::now();
+        let answer = in_goroutine(move || wait(i64::from(read), false, 30, || false));
+        assert_eq!(answer, Ok(false));
+        assert!(
+            start.elapsed() >= Duration::from_millis(25),
+            "woke before its timeout"
+        );
+        close(read);
+        close(write);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // parks goroutines in the kernel event queue
+    fn a_goroutine_wait_ends_when_its_cancellation_is_signalled() {
+        let (read, write) = pipe();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cancelled);
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            flag.store(true, Ordering::SeqCst);
+            super::wake_waits();
+        });
+        let answer = in_goroutine(move || {
+            wait(i64::from(read), false, -1, move || {
+                cancelled.load(Ordering::SeqCst)
+            })
+        });
+        canceller.join().expect("canceller");
+        assert_eq!(answer, Ok(false));
+        close(read);
+        close(write);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // parks goroutines in the kernel event queue
+    fn a_goroutine_wait_on_a_descriptor_that_is_not_open_is_an_error() {
+        // Above every kernel's ceiling on descriptor numbers, so never open,
+        // whatever the tests running beside this one open.
+        let never_open: i64 = 1 << 30;
+        let answer = in_goroutine(move || wait(never_open, false, 1000, || false));
+        assert!(answer.is_err(), "answered {answer:?}");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // starts a one-worker subprocess with mmap-stack coroutines
+    fn goroutine_descriptor_waits_hold_no_blocking_thread() {
+        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("c_abi::fd::tests::poller_only_child")
+            .arg("--nocapture")
+            .env(POLLER_ONLY_CHILD_ENV, "1")
+            .env("GOSSAMER_MAX_PROCS", "1")
+            .status()
+            .expect("start one-worker child");
+        assert!(status.success(), "one-worker child failed: {status}");
+    }
+
+    /// In a process of its own: goroutines wait on a pipe on the one worker
+    /// while another goroutine writes it, and the waits resume with no
+    /// thread of the blocking pool ever started.
+    #[test]
+    #[cfg_attr(miri, ignore)] // parks goroutines in the kernel event queue
+    fn poller_only_child() {
+        if std::env::var_os(POLLER_ONLY_CHILD_ENV).is_none() {
+            return;
+        }
+        let (read, write) = pipe();
+        for _ in 0..20 {
+            let _ = crate::sched_global::spawn(Box::new(move || {
+                crate::sched_global::sleep_until(Instant::now() + Duration::from_millis(2));
+                // SAFETY: the buffer is one readable byte.
+                unsafe { libc::write(write, b"x".as_ptr().cast(), 1) };
+            }));
+            let answer = in_goroutine(move || {
+                let ready = wait(i64::from(read), false, -1, || false);
+                let mut byte = [0u8];
+                // SAFETY: `byte` is one writable byte.
+                unsafe { libc::read(read, byte.as_mut_ptr().cast(), 1) };
+                ready
+            });
+            assert_eq!(answer, Ok(true));
+        }
+        assert_eq!(
+            crate::blocking_pool::blocking_threads(),
+            0,
+            "a goroutine's descriptor wait went through the blocking pool"
+        );
+        close(read);
+        close(write);
     }
 }

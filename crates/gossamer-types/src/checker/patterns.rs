@@ -1775,6 +1775,34 @@ impl TypeChecker<'_> {
         self.reject_unknown_variant(node, &names, span)
     }
 
+    /// The item `names` reaches below the module `module` its head resolved
+    /// to, leaving out the last segment: `m::E` of `m::E::Variant`.
+    fn module_member(&mut self, module: DefId, names: &[&str]) -> Option<DefId> {
+        let effective: Vec<&str> = names
+            .iter()
+            .copied()
+            .skip_while(|s| matches!(*s, "super" | "crate" | "self" | "root"))
+            .collect();
+        let [_, middle @ .., _] = effective.as_slice() else {
+            return None;
+        };
+        if middle.is_empty() {
+            return None;
+        }
+        let mut path = self.resolutions.path_of(module)?.to_vec();
+        path.extend(middle.iter().map(|s| (*s).to_string()));
+        let resolutions = &self.resolutions;
+        self.defs_by_path
+            .get_or_insert_with(|| {
+                resolutions
+                    .paths()
+                    .map(|(def, path)| (path.to_vec(), def))
+                    .collect()
+            })
+            .get(&path)
+            .copied()
+    }
+
     /// The resolver answers a path whose tail is not a variant with the
     /// enum it names; the enum is the one that definition declares, not
     /// another type that shares its name.
@@ -1782,16 +1810,35 @@ impl TypeChecker<'_> {
         let [.., enum_name, variant] = names else {
             return false;
         };
-        let def = match self.resolutions.get(node) {
+        // A `use` of an item of this unit, a dependency package's included,
+        // names its definition.
+        let (def, kind) = match self.resolutions.get(node) {
+            // `module::Enum::Variant`: the resolver answers the head module
+            // when the tail names nothing.
             Some(Resolution::Def {
                 def,
-                kind: DefKind::Enum,
-            }) => def,
+                kind: DefKind::Mod,
+            }) => match self.module_member(def, names) {
+                Some(def) => match self.resolutions.kind_of(def) {
+                    Some(kind) => (def, kind),
+                    None => return false,
+                },
+                None => return false,
+            },
+            Some(Resolution::Def { def, kind }) => (def, kind),
+            Some(Resolution::Import { .. }) => match self.resolutions.import_def(node) {
+                Some(def) => match self.resolutions.kind_of(def) {
+                    Some(kind) => (def, kind),
+                    None => return false,
+                },
+                None => return false,
+            },
+            _ => return false,
+        };
+        let def = match kind {
+            DefKind::Enum => def,
             // A `type` alias of an enum reaches that enum's variants.
-            Some(Resolution::Def {
-                def,
-                kind: DefKind::TypeAlias,
-            }) => match self.alias_enum_def(def) {
+            DefKind::TypeAlias => match self.alias_enum_def(def) {
                 Some(def) => def,
                 None => return false,
             },

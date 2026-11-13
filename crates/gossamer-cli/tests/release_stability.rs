@@ -1427,20 +1427,25 @@ fn main() {
 }
 
 #[test]
-fn release_rejects_process_command_builder_with_gr0001() {
-    // `process::Command` is Rust-internal surface; no `process::Type`
-    // path binds at runtime, so the builder spelling is rejected at
-    // check instead of GX0002 at run.
-    assert_release_build_rejects(
-        "reject_process_command_builder",
+fn release_builds_process_command_through_its_module_path() {
+    // `process::Command::new` and `process::Stdio::Null` spelled through
+    // the module reach the injected `Command` and `Stdio`, as the imported
+    // `Command::new` does.
+    assert_release_stdout_eq(
+        "process_command_module_path",
         r#"
 use std::process
 
 fn main() {
-    let c = process::Command::new("echo")
-    println("{:?}", c)
+    let started = process::Command::new("gos-no-such-program-0787")
+        .stdout(process::Stdio::Null)
+        .status()
+    match started {
+        Ok(_) => println("started")
+        Err(_) => println("not found")
+    }
 }
 "#,
-        "GR0001",
+        "not found\n",
     );
 }
