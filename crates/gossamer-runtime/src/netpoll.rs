@@ -704,7 +704,8 @@ impl Registration {
     }
 }
 
-#[cfg(test)]
+// The descriptor-wait tests that read it run on Unix only.
+#[cfg(all(test, unix))]
 impl Registration {
     /// The timer entries the registration's poller holds, fired or not.
     pub(crate) fn pending_timers(&self) -> usize {

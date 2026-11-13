@@ -7,6 +7,8 @@ fn gos_bin() -> PathBuf {
     PathBuf::from(std::env::var("CARGO_BIN_EXE_gos").expect("gos binary path"))
 }
 
+// Only the Linux leak-ledger test reads a project from the checkout.
+#[cfg(target_os = "linux")]
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
