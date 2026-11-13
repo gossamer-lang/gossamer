@@ -684,7 +684,7 @@ fn for_each_body(bodies: &mut [Body], tcx: &TyCtxt, pass: impl Fn(&mut Body, &Ty
     #[cfg(not(target_arch = "wasm32"))]
     {
         use rayon::prelude::*;
-        bodies.par_iter_mut().for_each(|body| pass(body, tcx));
+        crate::compile_threads::install(|| bodies.par_iter_mut().for_each(|body| pass(body, tcx)));
     }
     #[cfg(target_arch = "wasm32")]
     for body in bodies {
@@ -702,10 +702,12 @@ fn for_each_body_with<T: Send>(
     #[cfg(not(target_arch = "wasm32"))]
     {
         use rayon::prelude::*;
-        bodies
-            .par_iter_mut()
-            .zip(out.par_iter_mut())
-            .for_each(|(body, slot)| pass(body, slot, tcx));
+        crate::compile_threads::install(|| {
+            bodies
+                .par_iter_mut()
+                .zip(out.par_iter_mut())
+                .for_each(|(body, slot)| pass(body, slot, tcx));
+        });
     }
     #[cfg(target_arch = "wasm32")]
     for (body, slot) in bodies.iter_mut().zip(out) {

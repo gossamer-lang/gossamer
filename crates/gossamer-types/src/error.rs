@@ -1632,7 +1632,7 @@ impl TypeDiagnostic {
                 out = out.with_help(format!(
                     "only `{module}` and the modules under it can call `{name}` as it is \
                      declared; write `pub` on the method for callers anywhere, \
-                     `pub (package)` for the rest of this package, or reach it through a \
+                     `pub(package)` for the rest of this package, or reach it through a \
                      `pub` method of `{ty}`"
                 ));
             }

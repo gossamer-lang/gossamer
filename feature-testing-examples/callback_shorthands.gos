@@ -1,5 +1,6 @@
-// The one spelling that abbreviates a callback: a std free function
-// named in value position. Everything else is a written closure.
+// The one spelling that abbreviates a callback: a std free function or a
+// prelude printer named in value position. Everything else is a written
+// closure.
 use std::encoding::base64
 use std::{math, strings}
 
@@ -12,6 +13,19 @@ fn main() {
     println("{:?}", raw.map(math::abs))
     println("{:?}", #["  a  ", " b "].map(strings::trim))
     println("{:?}", #["ab".as_bytes(), "cd".as_bytes()].map(base64::encode))
+
+    // A printer renders the one value it is handed.
+    #["x", "y"].for_each(println)
+    #[1, 2].for_each(print)
+    println("")
+    #[true, false].for_each(println)
+    #[(1, "a")].for_each(println)
+    #['x'].for_each(println)
+    let greeting: Result<String, String> = Ok("hi\n")
+    let _ = greeting.map(print)
+    let _ = Some(2.5).map(println)
+    let failed: Result<i64, String> = Err("bad")
+    let _ = failed.map_err(eprintln)
 
     // Every other callback is a written closure.
     println("{:?}", raw.map(|v| v.abs()))

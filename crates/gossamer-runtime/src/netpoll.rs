@@ -232,6 +232,14 @@ impl Poller {
         let _ = self.waker.wake();
     }
 
+    /// Whether a live timer or a registered descriptor still waits here.
+    #[cfg(not(miri))]
+    pub(crate) fn holds_waiters(&self) -> bool {
+        let timers = self.timers.lock();
+        timers.heap.len() > timers.cancelled
+            || self.descs.lock().entries.iter().any(Option::is_some)
+    }
+
     /// Takes one pass: fires due timers and deadlines, then waits for socket
     /// readiness up to `max_wait` (`None` for as long as nothing is due),
     /// pushing the gids that became runnable onto `woken`.

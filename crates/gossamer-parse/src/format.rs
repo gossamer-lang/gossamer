@@ -461,7 +461,18 @@ fn render_code_line<'src>(
         } else {
             None
         };
+        // `pub(package)` is one visibility. A `pub` field of tuple type keeps
+        // its space: `pub (i64, i64)` is not a visibility.
+        let opens_visibility = tok.kind == TokenKind::Punct(Punct::LParen)
+            && prev
+                .as_ref()
+                .is_some_and(|p| p.kind == TokenKind::Keyword(Keyword::Pub))
+            && line
+                .toks
+                .get(tok_index + 1)
+                .is_some_and(|next| next.kind == TokenKind::Keyword(Keyword::Package));
         if !body.is_empty()
+            && !opens_visibility
             && space_before(file, prev.as_ref(), prev_was_comment, tok, class, cur_brace)
         {
             body.push(' ');

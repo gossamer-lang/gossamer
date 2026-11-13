@@ -29,9 +29,10 @@ struct SignalNotifier {
     sig: i32,
     flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     waiter: std::sync::Arc<SignalWaiter>,
-    /// Ends the relay thread's delivery loop, which unregisters its handler.
+    /// Whether the relay delivers this signal and counts this notifier among
+    /// its subscribers.
     #[cfg(unix)]
-    relay: Option<signal_hook::iterator::Handle>,
+    relayed: bool,
 }
 
 /// Where a notifier's waiters sleep: OS threads on `cv`, goroutines parked
@@ -84,8 +85,6 @@ fn signal_registry() -> &'static SignalRegistry {
     })
 }
 
-// One relay thread per watched signal: blocks in signal-hook,
-// then flips the flag and wakes the condvar for that notifier.
 /// Live notifiers per signal number. A signal with none takes its default
 /// disposition again, as it had before the first subscription.
 #[cfg(unix)]
@@ -122,29 +121,77 @@ fn install_default_fallback(sig_raw: i32) {
     };
 }
 
+/// The one relay every subscription shares: a thread blocked in signal-hook
+/// that, for each delivered signal, flags and wakes the notifiers subscribed
+/// to it. A signal joins the relay's set at its first subscription and stays
+/// in it; with no subscriber left, the fallback action takes its default
+/// disposition.
 #[cfg(unix)]
-fn install_signal_relay(
-    sig_raw: i32,
-    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    waiter: std::sync::Arc<SignalWaiter>,
-) -> Option<signal_hook::iterator::Handle> {
-    use signal_hook::iterator::Signals;
-    let mut signals = Signals::new([sig_raw]).ok()?;
-    let handle = signals.handle();
-    if let Some(count) = subscribers(sig_raw) {
-        count.fetch_add(1, Ordering::AcqRel);
-    }
-    install_default_fallback(sig_raw);
-    std::thread::Builder::new()
-        .name(format!("gos-sig-{sig_raw}"))
-        .spawn(move || {
-            for _ in signals.forever() {
-                flag.store(true, Ordering::Release);
-                waiter.wake_all();
-            }
+fn signal_relay() -> Option<&'static signal_hook::iterator::Handle> {
+    static RELAY: std::sync::OnceLock<Option<signal_hook::iterator::Handle>> =
+        std::sync::OnceLock::new();
+    RELAY
+        .get_or_init(|| {
+            let mut signals =
+                signal_hook::iterator::Signals::new(std::iter::empty::<i32>()).ok()?;
+            let handle = signals.handle();
+            std::thread::Builder::new()
+                .name("gos-sig".to_string())
+                .spawn(move || {
+                    for sig in signals.forever() {
+                        deliver(sig);
+                    }
+                })
+                .ok()?;
+            Some(handle)
         })
-        .ok()?;
-    Some(handle)
+        .as_ref()
+}
+
+/// Flags and wakes every notifier subscribed to `sig`.
+#[cfg(unix)]
+fn deliver(sig: i32) {
+    let waiters: Vec<std::sync::Arc<SignalWaiter>> = signal_registry()
+        .notifiers
+        .lock()
+        .iter()
+        .flatten()
+        .filter(|n| n.sig == sig)
+        .map(|n| {
+            n.flag.store(true, Ordering::Release);
+            std::sync::Arc::clone(&n.waiter)
+        })
+        .collect();
+    for waiter in waiters {
+        waiter.wake_all();
+    }
+}
+
+/// Counts one more subscriber to `sig_raw` and adds it to the shared relay.
+/// Answers whether the relay delivers it. The count rises first, so a signal
+/// arriving while the relay takes it on is not handed its default action.
+#[cfg(unix)]
+fn subscribe_signal(sig_raw: i32) -> bool {
+    static RELAYED: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<i32>>> =
+        std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+    let Some(relay) = signal_relay() else {
+        return false;
+    };
+    let Some(count) = subscribers(sig_raw) else {
+        return false;
+    };
+    count.fetch_add(1, Ordering::AcqRel);
+    let mut relayed = RELAYED.lock();
+    if !relayed.contains(&sig_raw) {
+        if relay.add_signal(sig_raw).is_err() {
+            count.fetch_sub(1, Ordering::AcqRel);
+            return false;
+        }
+        relayed.insert(sig_raw);
+    }
+    drop(relayed);
+    install_default_fallback(sig_raw);
+    true
 }
 
 // On Windows there is no POSIX signal delivery; the console
@@ -201,12 +248,6 @@ pub extern "C" fn gos_rt_signal_on(sig_raw: i32) -> i64 {
     ffi_entry!({
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let waiter = std::sync::Arc::new(SignalWaiter::default());
-        #[cfg(unix)]
-        let relay = install_signal_relay(
-            sig_raw,
-            std::sync::Arc::clone(&flag),
-            std::sync::Arc::clone(&waiter),
-        );
         // On Windows the console-control bridge maps Ctrl-C /
         // Ctrl-Break onto SIGINT / SIGTERM / SIGBREAK notifiers.
         #[cfg(windows)]
@@ -216,11 +257,26 @@ pub extern "C" fn gos_rt_signal_on(sig_raw: i32) -> i64 {
             flag,
             waiter,
             #[cfg(unix)]
-            relay,
+            relayed: false,
         };
-        let mut notifiers = signal_registry().notifiers.lock();
-        notifiers.push(Some(notifier));
-        i64::try_from(notifiers.len() - 1).unwrap_or(-1)
+        // The notifier is listed before its signal reaches the relay, so the
+        // first delivery finds it.
+        let index = {
+            let mut notifiers = signal_registry().notifiers.lock();
+            notifiers.push(Some(notifier));
+            notifiers.len() - 1
+        };
+        #[cfg(unix)]
+        {
+            let relayed = subscribe_signal(sig_raw);
+            if let Some(Some(n)) = signal_registry().notifiers.lock().get_mut(index) {
+                n.relayed = relayed;
+            } else if relayed && let Some(count) = subscribers(sig_raw) {
+                // Stopped before the subscription finished: give the count back.
+                count.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+        i64::try_from(index).unwrap_or(-1)
     })
 }
 
@@ -320,11 +376,10 @@ pub extern "C" fn gos_rt_signal_stop(handle: i64) {
             return;
         };
         #[cfg(unix)]
-        if let Some(relay) = &notifier.relay {
-            relay.close();
-            if let Some(count) = subscribers(notifier.sig) {
-                count.fetch_sub(1, Ordering::AcqRel);
-            }
+        if notifier.relayed
+            && let Some(count) = subscribers(notifier.sig)
+        {
+            count.fetch_sub(1, Ordering::AcqRel);
         }
         notifier.waiter.stopped.store(true, Ordering::Release);
         notifier.waiter.wake_all();

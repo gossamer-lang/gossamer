@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.79.0 - Threads start as goroutines call for them, idle programs sleep, struct values from map loops, range methods and printer callbacks compiled
+
+- Scheduler workers start as goroutines call for them, as Go's do: one at start, and another when a goroutine is placed while every started worker already has one, up to one per core (or `runtime::set_max_procs`). An idle daemon on a 24-core machine runs 7 threads instead of 29; a program with work for every core still gets a worker per core.
+- One thread relays every `os::signal::on` subscription; each subscription started a thread of its own.
+- `gos run` compiles JIT code on a thread pool that exists only while the compile runs; the compiler's pool of a thread per core stayed alive for the whole program.
+
+- `#[derive(Default)]` fills a fixed-array field (`name: [u8; 16]`, `grid: [[f64; 2]; N]`, `[Inner; 2]`) with its element's zero value repeated, as Rust does; it was refused with GP0062.
+- `print`, `println`, `eprint`, and `eprintln` passed as a callback (`r.map(print)`, `xs.for_each(println)`) build on the native tier and render the value as `println(x)` does; the build stopped with undefined `@print` / `@println` symbols, and a native `for_each(println)` printed a `bool` as `1` / `0`, a `char` as its code, and a tuple or struct as an address.
+- A method that reads a range of a sequence (`fields[1..3].map(f)`, `xs[0..3].filter(p)`) runs on the JIT and native tiers; `map` answered the range unchanged without calling its closure, so a struct or `String` result read garbage, and `filter` failed to link.
+- Native: a struct value bound by `for (k, v) in m` or `for v in m.values()` is a value of its own, so pushing it into a `Vec` or assigning it keeps its fields; the stored value read the map's internal pointer.
+- `gos fmt` keeps `pub(package)` together; it wrote `pub (package)`. A `pub` tuple-struct field whose type is a tuple (`struct P(pub (i64, i64))`) parses; it was read as a visibility.
+- An idle program makes no system calls: a parked worker sleeps until a wake or its next timer, and the scheduler's watchdog sleeps while no worker runs a goroutine. A program waiting on channels, timers, and signals woke every worker every 50 ms and the watchdog every 5 ms, about 4 ms of CPU a second on a 24-core machine.
+- SPEC §6.3 describes the module layout the toolchain builds: each file in `src/` is a module of its own, and a subdirectory is a module only when it holds a `mod.gos`.
+
 ## 0.78.7 - Descriptors from foreign code, temp folders under a parent, PATH lookup, prompt descriptor wakes
 
 - `fs::File::from_raw(raw)` takes ownership of a descriptor (a handle on Windows) that foreign code answered as an integer, such as an X connection or a pidfd, and closes it with the file; `os::fd::Borrowed::from_raw(raw)` lends one without closing it. Both reach `os::fd::wait_readable` / `wait_writable` and `term::*`.

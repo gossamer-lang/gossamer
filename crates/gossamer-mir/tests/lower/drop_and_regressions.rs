@@ -1099,10 +1099,11 @@ fn native_lowers_chunks_and_tuple_get_method_forms() {
         "min_by_key over enumerate tuples must use the aggregate runtime shim: {names:?}"
     );
     assert!(
-        gos_fn_addr_targets(main)
+        bodies
             .iter()
-            .any(|name| name == "gos_rt_println_fn_str_word"),
-        "println as a String callback must lower to a callable runtime shim: {names:?}"
+            .filter(|b| b.name.starts_with("__closure_"))
+            .any(|b| call_names(b).iter().any(|name| name == "println")),
+        "println as a callback must be the closure that calls it: {names:?}"
     );
     assert!(
         !names

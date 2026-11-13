@@ -87,6 +87,15 @@ mod autoderive_tests {
     }
 
     #[test]
+    fn a_derived_default_repeats_an_array_elements_zero_value() {
+        let source = "const N: i64 = 3\n#[derive(Default)]\nstruct R { name: [u8; 16], grid: [[f64; 2]; N] }\n";
+        let augmented = super::augment_source(source);
+        let generated = &augmented[source.len()..];
+        assert!(generated.contains("name: [0; 16]"), "{generated}");
+        assert!(generated.contains("grid: [[0.0; 2]; N]"), "{generated}");
+    }
+
+    #[test]
     fn implicit_derives_follow_qualified_field_types() {
         let source = "struct Model { requests: Sender<i64> }\nmod values { pub struct Model { value: i64 } }\nstruct Wrapper { value: values::Model }\n";
         let augmented = super::augment_source(source);

@@ -2078,7 +2078,7 @@ declarations (§6.6).
 
 ### 6.3 Modules (code organization)
 
-Modules are directory-based by default. Given a project layout:
+Modules follow the files under `src/`. Given a project layout:
 
 ```
 my-project/
@@ -2086,21 +2086,26 @@ my-project/
   src/
     main.gos
     math.gos
-    math/
-      vector.gos
-      matrix.gos
     net/
+      mod.gos
       http.gos
       tcp.gos
 ```
 
-- Every `.gos` file directly in `src/` contributes items to the
+- The entry file (`src/main.gos`, or `src/lib.gos` for a library) is the
   project's root module.
-- Each subdirectory of `src/` is a module named after the directory;
-  every `.gos` file inside it contributes items to that module.
-- Modules nest: `src/math/vector.gos` is `math::vector`.
-- An optional `mod.gos` file inside a module directory holds
-  module-level comments and re-exports.
+- Every other `.gos` file directly in `src/` is a module of its own,
+  named after the file: `src/math.gos` is `math`. Its items are reached
+  from the root and from other files through a path or a `use`, never by
+  bare name.
+- A subdirectory of `src/` that holds a `mod.gos` is a module named after
+  the directory. `mod.gos` holds that module's own items, and every other
+  `.gos` file in the directory is a module nested in it:
+  `src/net/http.gos` is `net::http`. Subdirectories nest the same way. A
+  directory without a `mod.gos` is not a module, and its files are not
+  part of the package.
+- A file whose name begins with `_` or ends in `_test`, or is not an
+  identifier, is not a module.
 
 Explicit inline modules are supported for cases where directory
 splitting is overkill:
@@ -2112,14 +2117,14 @@ mod vector {
 ```
 
 Items within the same module reference each other by bare name. Items
-in a sibling or nested module use a path: `math::vector::Vec3`, or are
+in a sibling or nested module use a path: `net::http::get`, or are
 brought into scope with a `use` (§6.6). A module's items are never in
 scope on their own; naming one without a path or import is `GR0011`. A
 module name is not a value, so a module and one of its items may share a
 name and a bare call still reports `GR0011` naming the import.
 
 A module nested inside another is a **module descendant**:
-`math::vector` is a descendant of `math`. Descendancy runs one way and
+`net::http` is a descendant of `net`. Descendancy runs one way and
 is what §6.3a's default visibility is written against.
 
 ### 6.3a Visibility
@@ -2644,8 +2649,11 @@ runtime with `gos test --race` (§7.4).
 
 The scheduler is an M:N work-stealing scheduler:
 
-- **M** = OS thread (one per core by default, configurable via
-  `GOSSAMER_MAX_PROCS` or `runtime::set_max_procs(n)`).
+- **M** = OS thread. Threads start as goroutines call for them: one at
+  start, and another when a goroutine is placed while every started thread
+  already runs one, up to one per core by default (configurable via
+  `GOSSAMER_MAX_PROCS` or `runtime::set_max_procs(n)`). An idle program's
+  threads sleep until a wake or their next timer.
 - **P** = processor (logical context, fixed count = max-procs).
 - **G** = goroutine.
 

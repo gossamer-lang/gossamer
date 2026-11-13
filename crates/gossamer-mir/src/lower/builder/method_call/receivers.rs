@@ -1329,7 +1329,11 @@ impl<'a> Builder<'a> {
             TyKind::Vec(_) | TyKind::Slice(_) | TyKind::Array { .. } | TyKind::Var(_)
         );
         if needs_index_fixup {
-            if let HirExprKind::Index { base, .. } = &receiver.kind {
+            // A range index answers a window of the collection, which keeps
+            // the collection's kind; only a single index reaches an element.
+            if let HirExprKind::Index { base, index } = &receiver.kind
+                && !matches!(index.kind, HirExprKind::Range { .. })
+            {
                 if let Some(base_ty) = self.peek_collection_type(base) {
                     let elem_ty = match self.tcx.kind_of(base_ty) {
                         TyKind::Vec(elem) | TyKind::Slice(elem) => Some(*elem),

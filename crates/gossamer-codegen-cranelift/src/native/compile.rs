@@ -963,20 +963,22 @@ pub(crate) fn lower_program_full(
     };
     let ir_pairs: Vec<(FuncId, String, Function, Option<UnwindRewrite>)> = match mode {
         // Each worker needs its own context, so the clone is per body here.
-        LoweringMode::Parallel => bodies
-            .par_iter()
-            .zip(body_type_vecs.par_iter())
-            .filter(|(body, _)| body_should_be_defined(&body.name))
-            .map(|(body, bct)| {
-                lower_one(
-                    &mut offline.clone(),
-                    &mut intrinsics.clone(),
-                    &mut FunctionBuilderContext::new(),
-                    body,
-                    bct,
-                )
-            })
-            .collect::<Result<Vec<_>>>()?,
+        LoweringMode::Parallel => gossamer_mir::compile_threads::install(|| {
+            bodies
+                .par_iter()
+                .zip(body_type_vecs.par_iter())
+                .filter(|(body, _)| body_should_be_defined(&body.name))
+                .map(|(body, bct)| {
+                    lower_one(
+                        &mut offline.clone(),
+                        &mut intrinsics.clone(),
+                        &mut FunctionBuilderContext::new(),
+                        body,
+                        bct,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()
+        })?,
         LoweringMode::Serial => {
             // `OfflineModule` is read-only during lowering, so one copy serves
             // every body, and the builder arena is designed to be reused. The

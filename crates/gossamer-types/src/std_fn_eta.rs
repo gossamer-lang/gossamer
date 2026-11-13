@@ -111,6 +111,14 @@ impl Expand<'_> {
         ) {
             return Some(1);
         }
+        // Taken as a value, a prelude printer renders the one value it is
+        // handed, as `|x| println(x)` does.
+        if matches!(
+            segments.as_slice(),
+            ["print" | "println" | "eprint" | "eprintln"]
+        ) {
+            return Some(1);
+        }
         let stripped: &[&str] = match segments.as_slice() {
             ["std", rest @ ..] => rest,
             other => other,
@@ -301,6 +309,13 @@ mod tests {
     fn a_prelude_constructor_in_value_position_becomes_a_closure() {
         let (_sf, count) = expand("fn main() { let v = Some(1).map(Some) }");
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn a_prelude_printer_in_value_position_becomes_a_closure() {
+        let (_sf, count) =
+            expand("fn main() { Some(1).map(println)\n #[1].for_each(print)\n println(2) }");
+        assert_eq!(count, 2);
     }
 
     #[test]
