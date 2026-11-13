@@ -1907,11 +1907,16 @@ pub fn file_from_raw(raw: i64) -> Result<std::fs::File, String> {
     {
         use std::os::windows::io::FromRawHandle as _;
         use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE};
+        // A kernel handle is positive; the negative values are pseudo-handles
+        // (-1 names the current process, -2 its thread) that no file owns.
+        if raw <= 0 {
+            return Err(format!("File::from_raw: {raw} is not a handle"));
+        }
         let handle = raw as isize as HANDLE;
         let mut flags = 0u32;
         // SAFETY: the call writes one u32 through `flags` and fails for a
         // value that is not an open handle.
-        if raw == 0 || unsafe { GetHandleInformation(handle, &raw mut flags) } == 0 {
+        if unsafe { GetHandleInformation(handle, &raw mut flags) } == 0 {
             return Err(format!(
                 "File::from_raw: handle {raw}: {}",
                 std::io::Error::last_os_error()
