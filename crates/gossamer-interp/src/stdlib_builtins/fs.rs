@@ -125,7 +125,6 @@ pub(crate) fn install_fs_extras(globals: &mut Vec<(&'static str, Value)>) {
             ("metadata", builtin_fs_metadata),
             ("copy", builtin_os_copy),
             ("canonicalize", builtin_os_canonicalize),
-            ("temp_dir", builtin_fs_temp_dir),
             ("temp_file", builtin_fs_temp_file),
             ("sync_dir", builtin_fs_sync_dir),
             ("permissions", builtin_fs_permissions),
@@ -142,6 +141,8 @@ pub(crate) fn install_fs_extras(globals: &mut Vec<(&'static str, Value)>) {
     {
         let q = "__gos_fs_metadata_raw";
         globals.push((q, crate::builtins::builtin_pub(q, builtin_fs_metadata_raw)));
+        let q = "__gos_fs_temp_dir_raw";
+        globals.push((q, crate::builtins::builtin_pub(q, builtin_fs_temp_dir_raw)));
     }
     // `whence` selectors for `File::seek`, bound as integer globals so
     // call sites name the position rather than a bare 0/1/2.
@@ -155,6 +156,7 @@ pub(crate) fn install_fs_extras(globals: &mut Vec<(&'static str, Value)>) {
     let methods: &[(&str, BuiltinFnPub)] = &[
         ("File::open", builtin_fs_file_open),
         ("File::create", builtin_fs_file_create),
+        ("File::from_raw", builtin_fs_file_from_raw),
         ("File::read", builtin_fs_file_read),
         ("File::read_to_string", builtin_fs_file_read_to_string),
         ("File::write", builtin_fs_file_write),
@@ -330,22 +332,44 @@ pub(crate) fn builtin_fs_file_create(args: &[Value]) -> RuntimeResult<Value> {
     }
 }
 
-/// Creates a unique directory beneath the system temporary root. The caller
-/// owns the returned directory and should remove it with `fs::remove_dir_all`.
-pub(crate) fn builtin_fs_temp_dir(args: &[Value]) -> RuntimeResult<Value> {
+/// `__gos_fs_temp_dir_raw(prefix, parent)`, the leaf under the injected
+/// `fs::temp_dir` wrapper: an empty `parent` names the system temporary root.
+pub(crate) fn builtin_fs_temp_dir_raw(args: &[Value]) -> RuntimeResult<Value> {
     let prefix = match arg_str_at(args, 0, "fs::temp_dir", "prefix") {
         Ok(s) => s,
         Err(v) => return Ok(v),
     };
-    let path_context = prefix.clone();
+    let parent = match arg_str_at(args, 1, "fs::temp_dir", "parent") {
+        Ok(s) => s,
+        Err(v) => return Ok(v),
+    };
+    let context = if parent.is_empty() {
+        prefix.clone()
+    } else {
+        parent.clone()
+    };
     match gossamer_runtime::sched_global::run_blocking("fs-temp-dir", move || {
-        gossamer_std::fs::temp_dir(&prefix)
+        let parent = (!parent.is_empty()).then(|| std::path::PathBuf::from(parent));
+        gossamer_runtime::c_abi::fs::create_temp_dir(parent.as_deref(), &prefix)
     }) {
         Ok(Ok(path)) => Ok(ok_variant(Value::String(
             path.to_string_lossy().into_owned().into(),
         ))),
-        Ok(Err(e)) => Ok(err_variant(classify_io_error(&e, &path_context))),
+        Ok(Err(e)) => Ok(err_variant(classify_io_error(&e, &context))),
         Err(e) => Ok(err_variant(e)),
+    }
+}
+
+/// `fs::File::from_raw(raw) -> Result<File, Error>`: a file owning the open
+/// descriptor (a handle on Windows) `raw`.
+pub(crate) fn builtin_fs_file_from_raw(args: &[Value]) -> RuntimeResult<Value> {
+    let raw = match args.first() {
+        Some(Value::Int(n)) => *n,
+        _ => return Ok(err_variant("File::from_raw: the descriptor must be an i64")),
+    };
+    match gossamer_runtime::c_abi::fs::file_from_raw(raw) {
+        Ok(file) => Ok(ok_variant(insert_file_handle(file))),
+        Err(message) => Ok(err_variant(message)),
     }
 }
 

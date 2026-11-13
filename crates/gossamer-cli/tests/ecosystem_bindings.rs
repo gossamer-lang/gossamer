@@ -26,8 +26,7 @@ fn assert_expected_output(stdout: &str) {
 
 #[test]
 fn external_binding_supports_ecosystem_library_shapes_without_builtins() {
-    let root = workspace_root();
-    let binding_api = root.join("crates/gossamer-binding");
+    let binding_version = gossamer_binding_abi::SDK_VERSION;
     let dir = std::env::temp_dir().join(format!(
         "gos-ecosystem-binding-{}-{}",
         std::process::id(),
@@ -47,7 +46,7 @@ fn external_binding_supports_ecosystem_library_shapes_without_builtins() {
         format!(
             "[package]\nname = \"ecosystem-binding\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
              publish = false\n\n[workspace]\n\n[lib]\ncrate-type = [\"rlib\"]\n\n\
-             [dependencies]\ngossamer-binding = {{ path = {binding_api:?} }}\n"
+             [dependencies]\ngossamer-binding = \"{binding_version}\"\n"
         ),
     )
     .expect("write binding manifest");
@@ -118,7 +117,6 @@ fn main() {
         .arg("run")
         .arg("src/main.gos")
         .current_dir(&dir)
-        .env("GOSSAMER_ROOT", &root)
         .env("GOSSAMER_CACHE", dir.join("cache"))
         .output()
         .expect("run ecosystem binding fixture");
@@ -243,7 +241,6 @@ const SCAFFOLD_EXPECTED: &str = "hello, gossamer\nOk(12)\n()\n2\n42\n15\n10\nHEY
 /// under `gos run` and from `gos build` binaries.
 #[test]
 fn scaffolded_binding_runs_and_builds() {
-    let root = workspace_root();
     let dir = std::env::temp_dir().join(format!("gos-binding-scaffold-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create scratch dir");
@@ -251,7 +248,6 @@ fn scaffolded_binding_runs_and_builds() {
         Command::new(gos_bin())
             .args(args)
             .current_dir(cwd)
-            .env("GOSSAMER_ROOT", &root)
             .env("GOSSAMER_CACHE", dir.join("cache"))
             .env("GOSSAMER_CACHE_DIR", dir.join("cache"))
             .output()
@@ -300,7 +296,6 @@ fn scaffolded_binding_runs_and_builds() {
     let jit = Command::new(gos_bin())
         .args(["run", "."])
         .current_dir(&app)
-        .env("GOSSAMER_ROOT", &root)
         .env("GOSSAMER_CACHE", dir.join("cache"))
         .env("GOSSAMER_CACHE_DIR", dir.join("cache"))
         .env("GOS_JIT", "1")
@@ -422,8 +417,7 @@ fn compiled_binding_calls_leave_nothing_live_per_call() {
 /// native builds, and `--no-default-features` leaves it off.
 #[test]
 fn a_package_feature_turns_on_a_binding_feature() {
-    let root = workspace_root();
-    let binding_api = root.join("crates/gossamer-binding");
+    let binding_version = gossamer_binding_abi::SDK_VERSION;
     let dir = std::env::temp_dir().join(format!("gos-binding-features-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("voice/src")).expect("create binding crate");
@@ -441,7 +435,7 @@ fn a_package_feature_turns_on_a_binding_feature() {
             "[package]\nname = \"voice-binding\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
              publish = false\n\n[workspace]\n\n[lib]\ncrate-type = [\"rlib\"]\n\n\
              [features]\nloud = []\n\n\
-             [dependencies]\ngossamer-binding = {{ path = {binding_api:?} }}\n"
+             [dependencies]\ngossamer-binding = \"{binding_version}\"\n"
         ),
     )
     .expect("write binding manifest");
@@ -468,7 +462,6 @@ register_module!(
         Command::new(gos_bin())
             .args(args)
             .current_dir(&dir)
-            .env("GOSSAMER_ROOT", &root)
             .env("GOSSAMER_CACHE", dir.join("cache"))
             .env("GOSSAMER_CACHE_DIR", dir.join("cache"))
             .output()
@@ -523,8 +516,7 @@ register_module!(
 /// through the library's package features.
 #[test]
 fn a_dependent_chooses_a_library_binding_feature() {
-    let root = workspace_root();
-    let binding_api = root.join("crates/gossamer-binding");
+    let binding_version = gossamer_binding_abi::SDK_VERSION;
     let dir = std::env::temp_dir().join(format!("gos-binding-lib-features-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let lib = dir.join("voice-lib");
@@ -550,7 +542,7 @@ fn a_dependent_chooses_a_library_binding_feature() {
             "[package]\nname = \"voice-binding\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
              publish = false\n\n[workspace]\n\n[lib]\ncrate-type = [\"rlib\"]\n\n\
              [features]\nloud = []\n\n\
-             [dependencies]\ngossamer-binding = {{ path = {binding_api:?} }}\n"
+             [dependencies]\ngossamer-binding = \"{binding_version}\"\n"
         ),
     )
     .expect("write binding manifest");
@@ -586,7 +578,6 @@ register_module!(
             Command::new(gos_bin())
                 .args(args)
                 .current_dir(&app)
-                .env("GOSSAMER_ROOT", &root)
                 .env("GOSSAMER_CACHE", dir.join("cache"))
                 .env("GOSSAMER_CACHE_DIR", dir.join("cache"))
                 .output()

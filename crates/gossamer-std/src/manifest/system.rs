@@ -223,14 +223,19 @@ pub const OS_FD: StdModule = StdModule {
     summary: "Waiting for a file descriptor (a handle on Windows) to be readable or writable without holding a scheduler worker.",
     items: &[
         StdItem {
+            name: "Borrowed",
+            kind: StdItemKind::Type,
+            doc: "A descriptor (a handle on Windows) foreign code keeps open and lends: `fd::Borrowed::from_raw(raw)` wraps the integer a foreign call answered, such as an X connection's `XConnectionNumber`, and `raw()` answers it back. Nothing closes it; its owner must keep it open while calls use it. A descriptor the program takes over is `fs::File::from_raw(raw)` instead, which closes it with the file.",
+        },
+        StdItem {
             name: "Descriptor",
             kind: StdItemKind::Trait,
-            doc: "What a call that needs an OS descriptor takes: an `fs::File`, which stays open while the call uses it, or `term::STDIN`, `term::STDOUT`, or `term::STDERR` for a standard stream. Any other integer is refused, since a descriptor read off a file names whatever the OS reuses it for once the file closes (GT0119).",
+            doc: "What a call that needs an OS descriptor takes: an `fs::File`, which stays open while the call uses it, `term::STDIN`, `term::STDOUT`, or `term::STDERR` for a standard stream, or an `fd::Borrowed` lent by foreign code. Any other integer is refused, since a descriptor read off a file names whatever the OS reuses it for once the file closes (GT0119).",
         },
         StdItem {
             name: "wait_readable",
             kind: StdItemKind::Function,
-            doc: "`wait_readable(fd, timeout_ms) -> Result<bool, errors::Error>`: true when `fd` has input (or reached end of input) within `timeout_ms` milliseconds; a negative timeout waits indefinitely. False at the timeout or when the goroutine's cohort is cancelled. The goroutine parks; other goroutines keep running.",
+            doc: "`wait_readable(fd, timeout_ms) -> Result<bool, errors::Error>`: true when `fd` has input (or reached end of input) within `timeout_ms` milliseconds; a negative timeout waits indefinitely. False at the timeout or when the goroutine's cohort is cancelled. The goroutine parks (on Unix in its worker's event queue, so it resumes as promptly as a thread blocked in `poll`); other goroutines keep running.",
         },
         StdItem {
             name: "wait_writable",
@@ -633,7 +638,7 @@ pub const FS: StdModule = StdModule {
         StdItem {
             name: "File",
             kind: StdItemKind::Type,
-            doc: "Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family. The file closes at `close()` or with its last handle. `std::term` and `os::fd` calls take the file itself, which keeps it open while they use it; `fd()` answers the OS descriptor (a handle on Windows) for a foreign call.",
+            doc: "Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family. The file closes at `close()` or with its last handle. `std::term` and `os::fd` calls take the file itself, which keeps it open while they use it; `fd()` answers the OS descriptor (a handle on Windows) for a foreign call, and `File::from_raw(raw)` takes ownership of one a foreign call answered, as Go's `os.NewFile` does.",
         },
         StdItem {
             name: "DirInfo",
@@ -663,7 +668,7 @@ pub const FS: StdModule = StdModule {
         StdItem {
             name: "temp_dir",
             kind: StdItemKind::Function,
-            doc: "Creates a unique temporary directory; the caller removes it explicitly.",
+            doc: "`temp_dir(prefix, parent: Option<String> = None) -> Result<String, io::Error>`: creates a fresh folder and answers its path; the caller removes it. Without `parent` it lands in the system temporary root as `gossamer-prefix-...`; with one it is made inside that folder as `prefix-...`, as Go's `os.MkdirTemp(dir, pattern)` does, so it can be renamed within that filesystem. `prefix` must be a single path component.",
         },
         StdItem {
             name: "temp_file",
@@ -1060,6 +1065,16 @@ pub const PROCESS: StdModule = StdModule {
                   inherits the caller's; the env pairs override the inherited \
                   environment rather than replacing it, so a caller sets the two \
                   variables it cares about without restating PATH.",
+        },
+        StdItem {
+            name: "look_path",
+            kind: StdItemKind::Function,
+            doc: "`look_path(name) -> Option<String>`: the file a program name resolves to, as Go's \
+                  `exec.LookPath` and Python's `shutil.which` answer it. A name holding a path \
+                  separator is checked as written; any other is searched for in each `PATH` \
+                  directory in order, skipping empty entries. Unix requires a file this process may \
+                  execute; Windows tries each `PATHEXT` extension (`.COM;.EXE;.BAT;.CMD` when unset), \
+                  after the name as written when it has an extension. `None` when nothing matches.",
         },
         StdItem {
             name: "run_inherit",

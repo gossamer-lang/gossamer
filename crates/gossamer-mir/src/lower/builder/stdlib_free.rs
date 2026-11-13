@@ -1565,6 +1565,9 @@ impl<'a> Builder<'a> {
                 ("gos_rt_time_add_date_raw", self.result_i64_error_adt_ty())
             }
             "__gos_fd_wait_raw" => ("gos_rt_fd_wait_raw", self.result_i64_error_adt_ty()),
+            "__gos_fs_temp_dir_raw" => {
+                ("gos_rt_fs_temp_dir_raw", self.result_string_error_adt_ty())
+            }
             "ffi::last_errno" | "std::ffi::last_errno" => (
                 "gos_rt_ffi_last_errno",
                 self.tcx.int_ty(gossamer_types::IntTy::I64),
@@ -2564,7 +2567,9 @@ impl<'a> Builder<'a> {
             "gos_rt_tcp_listener_bind" => Some("net::TcpListener"),
             "gos_rt_tcp_stream_connect" => Some("net::TcpStream"),
             "gos_rt_io_stdin" | "gos_rt_io_stdout" | "gos_rt_io_stderr" => Some("io::Stream"),
-            "gos_rt_fs_file_open" | "gos_rt_fs_file_create" => Some("fs::File"),
+            "gos_rt_fs_file_open" | "gos_rt_fs_file_create" | "gos_rt_fs_file_from_raw" => {
+                Some("fs::File")
+            }
             "gos_rt_fs_temp_file" => Some("fs::temp_file_pair"),
             "gos_rt_fs_open_options_new" => Some("fs::OpenOptions"),
             "gos_rt_unix_listener_bind" => Some("net::UnixListener"),

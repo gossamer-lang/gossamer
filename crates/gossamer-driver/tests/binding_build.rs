@@ -58,20 +58,7 @@ fn spec_of(manifest: &Manifest) -> RustBindingSpec {
 fn fixture_copy() -> PathBuf {
     let dir = fresh_dir().join("echo-binding");
     fs::create_dir_all(dir.join("src")).unwrap();
-    let cargo = fs::read_to_string(fixture_path().join("Cargo.toml"))
-        .unwrap()
-        .replace(
-            "path = \"../../../../gossamer-binding\"",
-            &format!(
-                "path = \"{}\"",
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../gossamer-binding")
-                    .display()
-                    .to_string()
-                    .replace('\\', "/")
-            ),
-        );
-    fs::write(dir.join("Cargo.toml"), cargo).unwrap();
+    fs::copy(fixture_path().join("Cargo.toml"), dir.join("Cargo.toml")).unwrap();
     fs::copy(fixture_path().join("src/lib.rs"), dir.join("src/lib.rs")).unwrap();
     dir
 }

@@ -1170,6 +1170,9 @@ struct TypeChecker<'a> {
     /// that own it. Lets [`Self::maybe_reject_unknown_adt_method`] reject
     /// `b.label()` when `label` belongs to a different type than `b`.
     user_method_owners: HashMap<String, std::collections::HashSet<String>>,
+    /// Each item of the unit by its path from the root, built the first time
+    /// a path through a module needs it.
+    defs_by_path: Option<HashMap<Vec<String>, DefId>>,
     /// Every free function this file declares, by name. A scalar has no
     /// method surface of its own, so `x.f()` on one is the free call
     /// `f(x)`; the name has to belong to something for that to mean
@@ -1434,6 +1437,7 @@ impl<'a> TypeChecker<'a> {
             user_type_decls: std::collections::HashSet::new(),
             root_type_names: std::collections::HashSet::new(),
             user_method_owners: HashMap::new(),
+            defs_by_path: None,
             user_fn_names: std::collections::HashSet::new(),
             deferred_shared_payloads: Vec::new(),
             method_homes: HashMap::new(),

@@ -258,6 +258,31 @@ fn basic_expression_error_cases() -> &'static [BasicErrorCase] {
             "mod inner { pub enum Tone { Muted, Accent } }\ntype Tone = inner::Tone\nfn f(t: Tone) -> i64 { match t { Tone::Loud => 1, _ => 0 } }\n",
             |error| matches!(error, TypeError::UnknownVariant { variant, .. } if variant == "Loud"),
         ),
+        (
+            "variant of an imported enum",
+            "use inner::Tone\nmod inner { pub enum Tone { Muted, Accent } }\nfn main() { let t = Tone::Default }\n",
+            |error| matches!(error, TypeError::UnknownVariant { variant, .. } if variant == "Default"),
+        ),
+        (
+            "variant pattern of an imported enum",
+            "use inner::Tone\nmod inner { pub enum Tone { Muted, Accent } }\nfn f(t: Tone) -> i64 { match t { Tone::Loud => 1, _ => 0 } }\n",
+            |error| matches!(error, TypeError::UnknownVariant { variant, .. } if variant == "Loud"),
+        ),
+        (
+            "variant of an imported type alias",
+            "use inner::Shade\nmod inner { pub enum Tone { Muted, Accent }\npub type Shade = Tone }\nfn main() { let t = Shade::Default }\n",
+            |error| matches!(error, TypeError::UnknownVariant { variant, .. } if variant == "Default"),
+        ),
+        (
+            "variant through its module path",
+            "mod inner { pub enum Tone { Muted, Accent } }\nfn main() { let t = inner::Tone::Default }\n",
+            |error| matches!(error, TypeError::UnknownVariant { variant, .. } if variant == "Default"),
+        ),
+        (
+            "variant through a crate-rooted module path",
+            "mod outer { pub mod inner { pub enum Tone { Muted, Accent } } }\nfn main() { let t = crate::outer::inner::Tone::Default }\n",
+            |error| matches!(error, TypeError::UnknownVariant { variant, .. } if variant == "Default"),
+        ),
     ]
 }
 

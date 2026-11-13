@@ -1,0 +1,36 @@
+// `process::look_path` finds a program the way a `Command` would start it:
+// through `PATH`, and on Windows through `PATHEXT` too. Each platform looks
+// up a program its CI hosts all carry.
+
+use std::{path, process}
+
+#[cfg(unix)]
+const PROGRAM: String = "sh"
+
+#[cfg(windows)]
+const PROGRAM: String = "cmd"
+
+// Lookups of `name` that find it, one per round: hot enough for the JIT.
+fn found_rounds(name: String, rounds: i64) -> i64 {
+    let mut found = 0
+    for _ in 0..rounds {
+        if process::look_path(name).is_some() {
+            found += 1
+        }
+    }
+    found
+}
+
+fn main() {
+    match process::look_path(PROGRAM) {
+        Some(found) => {
+            let stem = path::file_stem(found).unwrap_or("").to_lowercase()
+            println(f"found: {stem == PROGRAM}")
+            println(f"found path resolves to itself: {process::look_path(found) == Some(found)}")
+        }
+        None => println("found: none")
+    }
+    println(f"found in rounds: {found_rounds(PROGRAM, 20)}")
+    println(f"missing: {process::look_path("gos-no-such-program-0787")}")
+    println(f"empty: {process::look_path("")}")
+}

@@ -177,6 +177,9 @@ fn system_wrappers(
     if (source.contains("fs::metadata") && from_std("fs")) || item_imported(FS_METADATA_WRAPPERS) {
         out.push_str(FS_METADATA_WRAPPERS);
     }
+    if (source.contains("fs::temp_dir") && from_std("fs")) || item_imported(FS_TEMP_DIR_WRAPPERS) {
+        out.push_str(FS_TEMP_DIR_WRAPPERS);
+    }
     if item_imported(FS_DIR_WRAPPERS)
         || (FS_DIR_MARKERS.iter().any(|m| source.contains(m))
             && (from_std("fs") || from_std("path")))
@@ -567,6 +570,15 @@ fn __gos_fs_metadata(path: String) -> Result<__gos_fs_Metadata, errors::Error> {
 }
 ";
 
+/// `std::fs::temp_dir`, whose `parent` defaults to the system temporary
+/// root. The leaf reads an empty parent as that root, as Go's `os.MkdirTemp`
+/// reads an empty directory.
+const FS_TEMP_DIR_WRAPPERS: &str = r#"
+fn __gos_fs_temp_dir(prefix: String, parent: Option<String> = None) -> Result<String, errors::Error> {
+    __gos_fs_temp_dir_raw(prefix, parent.unwrap_or(""))
+}
+"#;
+
 /// Real-struct + wrapper source for `std::fs::read_dir`. The leaf answers
 /// each entry as a tuple its vec owns; the wrapper folds them into
 /// `DirInfo` structs, so every field reads through ordinary ownership on
@@ -939,6 +951,10 @@ impl<T> __gos_ffi_Handle<T> {
 /// `fs::File`, so the file stays open while the call uses it; a bare integer
 /// names only a standard stream. A descriptor read off a file and passed on
 /// its own would name whatever the OS reused it for once the file closed.
+///
+/// A descriptor foreign code answers as an integer is owned through
+/// `fs::File::from_raw`, which closes it with the file, or lent through
+/// `fd::Borrowed`, which never closes it: whoever answered it keeps it open.
 const FD_WRAPPERS: &str = r"
 trait __gos_fd_Descriptor {
     fn raw_descriptor(&self) -> i64
@@ -948,6 +964,30 @@ trait __gos_fd_Descriptor {
 impl __gos_fd_Descriptor for i64 {
     fn raw_descriptor(&self) -> i64 {
         if *self >= 0 && *self <= 2 { *self } else { -1 }
+    }
+
+    fn keep_open(&self) -> Fn() -> () {
+        || ()
+    }
+}
+
+struct __gos_fd_Borrowed {
+    __raw: i64
+}
+
+impl __gos_fd_Borrowed {
+    fn from_raw(raw: i64) -> __gos_fd_Borrowed {
+        __gos_fd_Borrowed { __raw: raw }
+    }
+
+    fn raw(&self) -> i64 {
+        self.__raw
+    }
+}
+
+impl __gos_fd_Descriptor for __gos_fd_Borrowed {
+    fn raw_descriptor(&self) -> i64 {
+        if self.__raw >= 0 { self.__raw } else { -1 }
     }
 
     fn keep_open(&self) -> Fn() -> () {
@@ -977,7 +1017,7 @@ impl __gos_fd_Descriptor for fs::File {
 
 const FD_WAIT_WRAPPERS: &str = r#"
 fn __gos_fd_no_descriptor(operation: String) -> errors::Error {
-    errors::new(f"{operation}: the value holds no open descriptor (an integer names only a standard stream, 0, 1, or 2; pass an opened file as its fs::File)")
+    errors::new(f"{operation}: the value holds no open descriptor (an integer names only a standard stream, 0, 1, or 2; pass an opened file as its fs::File, and a descriptor from foreign code as fs::File::from_raw or fd::Borrowed::from_raw)")
 }
 
 fn __gos_fd_wait_readable<D: __gos_fd_Descriptor>(fd: D, timeout_ms: i64) -> Result<bool, errors::Error> {

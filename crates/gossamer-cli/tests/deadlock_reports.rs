@@ -151,3 +151,42 @@ fn a_completed_unbuffered_send_leaves_no_pending_handoff() {
         "error[GX0005]: panic: all goroutines are asleep - deadlock! (send can never complete)\n",
     );
 }
+
+/// One round's child sends while the previous round's child finishes, so
+/// the finishing goroutine's deadlock check runs while the sender queues its
+/// value and parks. The check reads one consistent state, and the program
+/// completes on every tier.
+#[test]
+fn a_send_racing_a_finishing_goroutine_is_not_reported() {
+    const SOURCE: &str = "use std::sync::channel\n\nfn main() {\n    let mut total = 0\n    for i in 0..20000 {\n        let tx, rx = channel()\n        spawn(|| {\n            tx.send(Some(#[i, i]))\n            tx.close()\n        })\n        while let Some(v) = rx.recv() {\n            if let Some(xs) = v { total += xs.len() }\n        }\n        let mut m: Map<i64, Option<String>> = Map::new()\n        m[i] = Some(f\"v{i}\")\n        m[i] = Some(f\"w{i}\")\n        if let Some(Some(s)) = m.get(i) { total += s.len() }\n    }\n    println(total)\n}\n";
+    let dir = std::env::temp_dir().join(format!("gos-deadlock-race-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let check = |tier: &str, output: &Output| {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{tier} stderr:\n{stderr}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "148890\n",
+            "{tier}"
+        );
+    };
+    for (tier, output) in run_every_tier(&dir, "send_race", SOURCE) {
+        check(tier, &output);
+    }
+    // The window is narrow, so each native build runs several more times.
+    for label in ["debug", "release"] {
+        let binary = dir.join(format!("out-{label}")).join(if cfg!(windows) {
+            "send_race.exe"
+        } else {
+            "send_race"
+        });
+        for _ in 0..10 {
+            check(
+                label,
+                &Command::new(&binary).output().expect("run the artifact"),
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

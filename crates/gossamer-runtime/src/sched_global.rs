@@ -636,7 +636,12 @@ pub fn sleep_until(deadline: Instant) {
 static PENDING_HANDOFFS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Adds or removes one channel from the ready count.
+///
+/// A deadlock check reads this count and the parked set at different
+/// moments, so a change here is a scheduler change: a check that straddles
+/// it discards what it read.
 pub fn adjust_pending_handoffs(ready: bool) {
+    let _change = begin_scheduler_change();
     if ready {
         PENDING_HANDOFFS.fetch_add(1, Ordering::AcqRel);
     } else {
@@ -964,8 +969,10 @@ pub fn mark_program_entered() {
     PROGRAM_ENTERED.store(true, Ordering::Release);
 }
 
-/// Adds or removes the caller from the channel-waiter count.
+/// Adds or removes the caller from the channel-waiter count. Like
+/// [`adjust_pending_handoffs`], a scheduler change.
 pub fn adjust_channel_waiters(entering: bool) {
+    let _change = begin_scheduler_change();
     if entering {
         CHANNEL_WAITERS.fetch_add(1, Ordering::AcqRel);
     } else {

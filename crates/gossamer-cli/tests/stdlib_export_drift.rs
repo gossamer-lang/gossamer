@@ -56,6 +56,9 @@ const SOURCE_VISIBLE_VIA_REWRITE: &[&str] = &[
     "time::add_date",
     "time::format_in",
     "zip::read_limited",
+    // `FS_TEMP_DIR_WRAPPERS`: the `parent` default over the
+    // `__gos_fs_temp_dir_raw` leaf.
+    "fs::temp_dir",
 ];
 
 #[test]
@@ -227,6 +230,9 @@ const MANIFEST_IMPL_VIA_REWRITE: &[&str] = &[
     "database::sql::drivers",
     "database::sql::open",
     "database::sql::migrate_up",
+    // `FS_TEMP_DIR_WRAPPERS`: the `parent` default argument over the
+    // runtime's `__gos_fs_temp_dir_raw` leaf.
+    "fs::temp_dir",
     // Civil-time calls are rewritten to wrappers that pass Location's compact
     // source representation into the registered raw runtime leaves.
     "time::add_date",

@@ -1191,7 +1191,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::fs",
         name: "temp_dir",
-        signature: "fn temp_dir(prefix: String) -> Result<String, io::Error>",
+        signature: "fn temp_dir(prefix: String, parent: Option<String> = None) -> Result<String, io::Error>",
     },
     StdFunctionSignature {
         module_path: "std::fs",
@@ -2947,6 +2947,11 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         module_path: "std::process",
         name: "kill_group",
         signature: "fn kill_group(pid: i64) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::process",
+        name: "look_path",
+        signature: "fn look_path(name: String) -> Option<String>",
     },
     StdFunctionSignature {
         module_path: "std::process",

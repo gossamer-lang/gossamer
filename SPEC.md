@@ -2993,8 +2993,12 @@ one does not bring in its siblings.
 `create_dir`, `create_dir_all`, `remove_file`, `remove_dir`,
 `remove_dir_all`. Interrogation: `exists`, `is_file`, `is_dir`,
 `is_symlink`, `file_size`, `metadata`, `canonicalize`. Temporaries:
-`temp_dir(prefix)`, `temp_file(prefix)` create one; `env::temp_dir()` is
-the system directory they live in.
+`temp_dir(prefix)`, `temp_file(prefix)` create one in `env::temp_dir()`,
+the system directory; `temp_dir(prefix, parent: Some(dir))` creates the
+folder inside `dir` instead, named `prefix-...`, so it can be renamed
+within that filesystem. `File::from_raw(raw)` takes ownership of an open
+descriptor (a handle on Windows) a foreign call answered as an integer:
+the file closes it.
 
 An entry from `read_dir` / `walk_dir` already carries `is_file`,
 `is_dir`, `is_symlink`, `size`, `path`, and `name`. Read those fields
@@ -3027,7 +3031,9 @@ two goroutines drain stdout and stderr at once.
 `run_inherit(prog, args) -> Result<i64, errors::Error>` runs the child on
 this process's own standard streams, a terminal included, and answers its
 exit code once it ends (an editor a terminal program hands the screen
-to). Also `spawn`, `pipeline_run`, `wait_timeout`, `kill_group`,
+to). `look_path(name) -> Option<String>` answers the file a program name
+resolves to through `PATH` (and `PATHEXT` on Windows), as `exec.LookPath`
+does in Go. Also `spawn`, `pipeline_run`, `wait_timeout`, `kill_group`,
 `signal`, `id`, `exit`, and `abort`. Every wait for a child parks the
 goroutine rather than holding a worker.
 
@@ -3051,7 +3057,10 @@ arrives, `false` when its cohort is cancelled or the notifier is stopped;
 subscribes to any longer takes its default disposition again.
 `std::os::fd::wait_readable(fd, timeout_ms)` and `wait_writable` park the
 goroutine until a descriptor (on Windows, a handle) is ready, and answer
-`false` at the timeout or when the goroutine's cohort is cancelled.
+`false` at the timeout or when the goroutine's cohort is cancelled. The
+descriptor is any `fd::Descriptor`: an `fs::File`, a standard stream, or
+`fd::Borrowed::from_raw(raw)`, a descriptor foreign code keeps open and
+lends.
 
 **`std::term`** is the terminal a program runs in, written in Gossamer
 over §12: `is_terminal(fd)`, `size(fd)` (columns, rows), `enter_raw(fd)`

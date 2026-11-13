@@ -696,7 +696,10 @@ impl<'a> Builder<'a> {
             | "gos_rt_fs_file_flush"
             | "gos_rt_unix_stream_write"
             | "gos_rt_udp_send_to" => self.result_i64_error_adt_ty(),
-            "gos_rt_fs_file_create" | "gos_rt_fs_file_open" | "gos_rt_fs_open_options_open" => {
+            "gos_rt_fs_file_create"
+            | "gos_rt_fs_file_open"
+            | "gos_rt_fs_file_from_raw"
+            | "gos_rt_fs_open_options_open" => {
                 let file = self.sync_handle_ty(44);
                 self.result_of(file)
             }
@@ -823,9 +826,10 @@ impl<'a> Builder<'a> {
             | "gos_rt_set_symmetric_difference" => Some("collections::HashSet"),
             "gos_rt_tcp_listener_accept" => Some("net::accept_pair"),
             "gos_rt_unix_listener_accept" => Some("net::unix_accept_pair"),
-            "gos_rt_fs_file_create" | "gos_rt_fs_file_open" | "gos_rt_fs_open_options_open" => {
-                Some("fs::File")
-            }
+            "gos_rt_fs_file_create"
+            | "gos_rt_fs_file_open"
+            | "gos_rt_fs_file_from_raw"
+            | "gos_rt_fs_open_options_open" => Some("fs::File"),
             "gos_rt_fs_open_options_new"
             | "gos_rt_fs_open_options_read"
             | "gos_rt_fs_open_options_write"

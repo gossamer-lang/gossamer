@@ -151,23 +151,59 @@ unsafe fn temp_prefix(prefix: *const c_char, operation: &str) -> Result<String, 
     }
     // SAFETY: this `unsafe fn`'s caller passes `prefix` live; non-null, checked above.
     let prefix = unsafe { crate::c_abi::gos_str_arg_string(prefix) };
-    if prefix.contains(['/', '\\', '\0']) || matches!(prefix.as_str(), "." | "..") {
-        return Err(fs_err(
-            "temporary-resource prefix must be a single path component",
-        ));
+    if !is_temp_prefix(&prefix) {
+        return Err(fs_err(TEMP_PREFIX_ERROR));
     }
     Ok(prefix)
 }
 
+const TEMP_PREFIX_ERROR: &str = "temporary-resource prefix must be a single path component";
+
+/// Whether `prefix` stays one path component once the name is built from it,
+/// on every host: a `:` makes `C:x` a drive-relative path on Windows, which
+/// a join puts in place of the parent.
+fn is_temp_prefix(prefix: &str) -> bool {
+    !prefix.contains(['/', '\\', ':', '\0']) && !matches!(prefix, "." | "..")
+}
+
 fn temp_resource_path(prefix: &str) -> std::path::PathBuf {
+    crate::platform::temp_dir().join(format!("gossamer-{}", temp_resource_name(prefix)))
+}
+
+/// `prefix` followed by the process id, the time, and a counter, so names
+/// made by concurrent processes and calls never collide.
+fn temp_resource_name(prefix: &str) -> String {
     let n = NEXT_TEMP_RESOURCE.fetch_add(1, Ordering::Relaxed);
     let nanos = crate::platform::system_time_now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
-    crate::platform::temp_dir().join(format!(
-        "gossamer-{prefix}-{:x}-{nanos:x}-{n}",
-        crate::platform::process_id()
-    ))
+    format!("{prefix}-{:x}-{nanos:x}-{n}", crate::platform::process_id())
+}
+
+/// Creates a fresh directory for `fs::temp_dir` and answers its path. Under
+/// `parent` it is named `prefix-...`, as Go's `os.MkdirTemp` names it; with
+/// no parent it lands in the system temporary root as `gossamer-prefix-...`.
+///
+/// # Errors
+///
+/// `prefix` is not a single path component, or the directory could not be
+/// created.
+pub fn create_temp_dir(
+    parent: Option<&std::path::Path>,
+    prefix: &str,
+) -> std::io::Result<std::path::PathBuf> {
+    if !is_temp_prefix(prefix) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            TEMP_PREFIX_ERROR,
+        ));
+    }
+    let path = match parent {
+        Some(parent) => parent.join(temp_resource_name(prefix)),
+        None => temp_resource_path(prefix),
+    };
+    std::fs::create_dir(&path)?;
+    Ok(path)
 }
 
 // ---------------------------------------------------------------
@@ -336,20 +372,36 @@ pub unsafe extern "C" fn gos_rt_fs_file_create(path: *const c_char) -> i128 {
     })
 }
 
-/// `fs::temp_dir(prefix) -> Result<String, Error>`.
+/// `__gos_fs_temp_dir_raw(prefix, parent)`, the leaf under `fs::temp_dir`:
+/// an empty `parent` names the system temporary root, as Go's `os.MkdirTemp`
+/// reads an empty directory.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fs_temp_dir(prefix: *const c_char) -> i128 {
+pub unsafe extern "C" fn gos_rt_fs_temp_dir_raw(
+    prefix: *const c_char,
+    parent: *const c_char,
+) -> i128 {
     ffi_entry!({
-        // SAFETY: `prefix` is this shim's argument, null or a live string body (C-ABI contract).
-        let prefix = match unsafe { temp_prefix(prefix, "fs::temp_dir") } {
-            Ok(prefix) => prefix,
-            Err(error) => return error,
+        if prefix.is_null() || parent.is_null() {
+            return fs_err("fs::temp_dir: null argument");
+        }
+        // SAFETY: both are String arguments from compiled code, non-null (checked above) and live for the whole call.
+        let (prefix, parent) = unsafe {
+            (
+                crate::c_abi::gos_str_arg_string(prefix),
+                crate::c_abi::gos_str_arg_string(parent),
+            )
         };
-        let path = temp_resource_path(&prefix);
-        let context = path.to_string_lossy().into_owned();
-        match crate::sched_global::run_blocking("fs-temp-dir", move || std::fs::create_dir(&path)) {
-            Ok(Ok(())) => {
-                let path = alloc_cstring(context.as_bytes());
+        let context = if parent.is_empty() {
+            prefix.clone()
+        } else {
+            parent.clone()
+        };
+        match crate::sched_global::run_blocking("fs-temp-dir", move || {
+            let parent = (!parent.is_empty()).then(|| std::path::PathBuf::from(parent));
+            create_temp_dir(parent.as_deref(), &prefix)
+        }) {
+            Ok(Ok(path)) => {
+                let path = alloc_cstring(path.to_string_lossy().as_bytes());
                 gos_rt_result_new(0, path as i64)
             }
             Ok(Err(error)) => fs_io_err(&error, &context),
@@ -1826,6 +1878,68 @@ pub extern "C" fn gos_rt_fs_file_len(h: i64) -> i128 {
     })
 }
 
+/// Takes ownership of the open descriptor `raw` (a handle on Windows), as
+/// Go's `os.NewFile` does: the file answered closes it.
+///
+/// # Errors
+///
+/// `raw` does not name an open descriptor, or the target has none.
+pub fn file_from_raw(raw: i64) -> Result<std::fs::File, String> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::FromRawFd as _;
+        let fd = i32::try_from(raw)
+            .ok()
+            .filter(|fd| *fd >= 0)
+            .ok_or_else(|| format!("File::from_raw: {raw} is not a descriptor"))?;
+        // SAFETY: F_GETFD reads the descriptor's flags and touches no memory.
+        if unsafe { libc::fcntl(fd, libc::F_GETFD) } == -1 {
+            return Err(format!(
+                "File::from_raw: descriptor {fd}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: `fd` is open (checked above) and the caller hands over its
+        // ownership, so the file is its one owner and closes it once.
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::FromRawHandle as _;
+        use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE};
+        let handle = raw as isize as HANDLE;
+        let mut flags = 0u32;
+        // SAFETY: the call writes one u32 through `flags` and fails for a
+        // value that is not an open handle.
+        if raw == 0 || unsafe { GetHandleInformation(handle, &raw mut flags) } == 0 {
+            return Err(format!(
+                "File::from_raw: handle {raw}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: `handle` is open (checked above) and the caller hands over
+        // its ownership, so the file is its one owner and closes it once.
+        Ok(unsafe { std::fs::File::from_raw_handle(handle.cast()) })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(format!(
+            "File::from_raw({raw}): descriptors are not available on this target"
+        ))
+    }
+}
+
+/// `fs::File::from_raw(raw) -> Result<File, Error>`: a file owning `raw`.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_fs_file_from_raw(raw: i64) -> i128 {
+    ffi_entry!({
+        match file_from_raw(raw) {
+            Ok(file) => gos_rt_result_new(0, insert_file(file)),
+            Err(message) => fs_err(&message),
+        }
+    })
+}
+
 /// The OS descriptor (a handle on Windows) of an open file, as Go's
 /// `os.File.Fd` answers it: still owned by the file. `None` on a target
 /// without descriptors.
@@ -2381,4 +2495,24 @@ pub unsafe extern "C" fn gos_rt_fs_write_mode(
             Err(e) => fs_err(&e),
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_temp_dir;
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // creates folders
+    fn a_temp_folder_lands_inside_its_parent_and_a_prefix_cannot_leave_it() {
+        let parent = std::env::temp_dir().join(format!("gos-temp-parent-{}", std::process::id()));
+        std::fs::create_dir_all(&parent).unwrap();
+        let made = create_temp_dir(Some(&parent), "work").unwrap();
+        assert_eq!(made.parent(), Some(parent.as_path()));
+        assert!(made.is_dir());
+        for prefix in ["C:x", "a/b", "a\\b", "..", ".", "nul\0"] {
+            let err = create_temp_dir(Some(&parent), prefix).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{prefix:?}");
+        }
+        let _ = std::fs::remove_dir_all(&parent);
+    }
 }

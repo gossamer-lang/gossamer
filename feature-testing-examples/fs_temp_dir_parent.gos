@@ -1,0 +1,46 @@
+// `fs::temp_dir` creates a fresh folder in the system temporary root, or,
+// given `parent`, inside that folder and named by the prefix, the way Go's
+// `os.MkdirTemp(dir, pattern)` does. Only stable facts are printed.
+
+use std::{env, errors, fs, path}
+
+// Folders made under `parent`, one per round: hot enough for the JIT.
+fn make_folders(parent: String, rounds: i64) -> i64 {
+    let mut made = 0
+    for _ in 0..rounds {
+        if fs::temp_dir("round", parent: Some(parent)).is_ok() {
+            made += 1
+        }
+    }
+    made
+}
+
+fn run() -> Result<(), errors::Error> {
+    let cache = fs::temp_dir("bench-cache")?
+    println(f"cache under temp root: {cache.starts_with(env::temp_dir())}")
+    let first = fs::temp_dir("cfg-term", parent: Some(cache))?
+    let second = fs::temp_dir("cfg-term", parent: Some(cache))?
+    println(f"made under parent: {first.starts_with(cache) && second.starts_with(cache)}")
+    println(f"named by prefix: {path::file_name(first).unwrap_or("").starts_with("cfg-term-")}")
+    println(f"distinct: {first != second}")
+    println(f"both folders: {fs::is_dir(first) && fs::is_dir(second)}")
+    println(f"made in rounds: {make_folders(cache, 20)}")
+    let missing = path::join(cache, "absent")
+    match fs::temp_dir("cfg", parent: Some(missing)) {
+        Ok(_) => println("missing parent: created")
+        Err(_) => println("missing parent: refused")
+    }
+    match fs::temp_dir("a/b", parent: Some(cache)) {
+        Ok(_) => println("nested prefix: created")
+        Err(_) => println("nested prefix: refused")
+    }
+    fs::remove_dir_all(cache)?
+    println(f"cleaned: {!fs::exists(cache)}")
+    Ok(())
+}
+
+fn main() {
+    if let Err(e) = run() {
+        println(f"failed: {e}")
+    }
+}

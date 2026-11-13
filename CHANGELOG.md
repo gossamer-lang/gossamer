@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.78.7 - Descriptors from foreign code, temp folders under a parent, PATH lookup, prompt descriptor wakes
+
+- `fs::File::from_raw(raw)` takes ownership of a descriptor (a handle on Windows) that foreign code answered as an integer, such as an X connection or a pidfd, and closes it with the file; `os::fd::Borrowed::from_raw(raw)` lends one without closing it. Both reach `os::fd::wait_readable` / `wait_writable` and `term::*`.
+- `fs::temp_dir(prefix, parent: Some(dir))` creates the folder inside `dir`, named `prefix-...`, as Go's `os.MkdirTemp` does; without `parent` it still lands in the system temporary root. A prefix holding `:` is refused on every host, as `/` and `\` are, for `fs::temp_file` too: on Windows `C:x` named a path outside the parent.
+- `process::look_path(name)` answers the file a program name resolves to through `PATH` (and `PATHEXT` on Windows), or `None`, as Go's `exec.LookPath` and Python's `shutil.which` do.
+- A goroutine in `os::fd::wait_readable` / `wait_writable` parks in its worker's netpoller on Linux, macOS, and FreeBSD and resumes with the single wakeup a blocking `poll` takes; its wait went through a blocking-pool thread and then a second thread handoff.
+- Windows: `os::fd::wait_readable(term::STDIN, ..)` and the other standard streams wait on the stream's console handle; they waited on handle 0 and failed.
+- VM: `time::monotonic_ms`, `monotonic_nanos`, and `since_ms` read one clock across goroutines; each worker thread counted from its own start, so readings taken in two goroutines did not compare.
+- `gos` carries the runtime and binding crate sources it was built from and always builds `[rust-bindings]` against them, unpacked into the bindings cache; it took them from a Gossamer checkout when one was reachable, so an installed `gos` beside a checkout of another version linked that checkout's runtime and failed with undefined `gos_rt_*` symbols. `GOSSAMER_ROOT` no longer applies.
+- A binding crate that names `gossamer-binding`, `gossamer-binding-abi`, `gossamer-binding-macros`, or `gossamer-runtime` by path or git is refused with the version requirement to write instead; Cargo stopped with a package collision.
+- A project's cached `[rust-bindings]` archive is rebuilt when the runtime or binding crate sources it was built from change; it was reused.
+- Compiled code: storing a value into a field whose type holds an `Option` of a struct, at any depth (`tabs[i].content = Content::Preview(..)`, through `&mut`, or on a local), gives the old payload back and takes a share of the new one; the element shared the payload with a temporary, so removing it later freed the payload twice and corrupted the heap, and an overwritten local leaked it.
+- `gos check` refuses a variant an enum does not declare when the enum is imported with `use`, reached through a module path (`dep::Effect::Halt`), or comes from a dependency package, naming the declared variants (GT0019); it passed the check and the program stopped with GX0002 when the line ran.
+- A native program no longer stops, rarely, with "all goroutines are asleep - deadlock!" when one goroutine sends on a channel while another finishes: the deadlock check now discards a reading taken while a channel's waiters or pending handoffs changed.
+
 ## 0.78.6 - Every copy is a value of its own, and compiled code frees what it leaked
 
 - Every copy of a value is a value of its own on every tier; these shared a `Map`, `Set`, deque, heap, or `Vec` with their source, so a write through one reached the other, and some crashed or leaked:

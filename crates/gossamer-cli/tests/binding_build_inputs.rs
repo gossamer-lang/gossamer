@@ -10,14 +10,6 @@ fn gos_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_gos"))
 }
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root")
-        .to_path_buf()
-}
-
 struct Built {
     report: String,
     printed: String,
@@ -27,7 +19,6 @@ fn build_and_run(app: &Path, cache: &Path) -> Built {
     let build = Command::new(gos_bin())
         .args(["build", "."])
         .current_dir(app)
-        .env("GOSSAMER_ROOT", workspace_root())
         .env("GOSSAMER_CACHE", cache)
         .env("GOSSAMER_CACHE_DIR", cache)
         .env_remove("PROBE_SUFFIX")
@@ -70,13 +61,13 @@ fn what_cargo_builds_the_bindings_from_relinks_the_program() {
          [rust-bindings]\nprobe = { path = \"probe\" }\n",
     )
     .expect("write project manifest");
-    let binding_api = workspace_root().join("crates").join("gossamer-binding");
+    let binding_version = gossamer_binding_abi::SDK_VERSION;
     std::fs::write(
         app.join("probe").join("Cargo.toml"),
         format!(
             "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
              publish = false\n\n[workspace]\n\n[lib]\ncrate-type = [\"rlib\"]\n\n\
-             [dependencies]\ngossamer-binding = {{ path = {binding_api:?} }}\n"
+             [dependencies]\ngossamer-binding = \"{binding_version}\"\n"
         ),
     )
     .expect("write binding manifest");

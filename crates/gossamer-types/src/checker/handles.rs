@@ -356,13 +356,13 @@ pub(super) fn stdlib_fs_handle(tail: &str) -> Option<(u32, &'static str)> {
 /// carry its module (`net::TcpStream::connect`), so only the type segment
 /// the method hangs off is matched.
 /// Whether `module::last` is one of the constructors that answers an
-/// `fs::File` through a `Result`: the two `File` associated functions and
-/// the terminal `OpenOptions::open`.
+/// `fs::File` through a `Result`: the `File` associated functions and the
+/// terminal `OpenOptions::open`.
 pub(super) fn fs_file_ctor(module: &[&str], last: &str) -> bool {
     let module = module.strip_prefix(&["std"]).unwrap_or(module);
     matches!(
         (module, last),
-        (["fs", "File"] | ["File"], "open" | "create")
+        (["fs", "File"] | ["File"], "open" | "create" | "from_raw")
             | (["fs", "OpenOptions"] | ["OpenOptions"], "open")
     )
 }

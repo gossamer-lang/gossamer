@@ -1,0 +1,86 @@
+// A descriptor foreign code answers as a plain integer reaches `os::fd`
+// either owned, as `fs::File::from_raw` (closed with the file), or lent, as
+// `fd::Borrowed::from_raw` (never closed). Unix makes a pipe and Windows an
+// event, so each tier and platform prints the same transcript.
+
+use std::{errors, fs, os}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn pipe(fds: &mut [i32]) -> i32
+    fn write(fd: i32, buf: [u8], n: usize) -> isize
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "C" {
+    fn CreateEventW(attributes: usize, manual_reset: i32, initial: i32, name: usize) -> usize
+    fn SetEvent(event: usize) -> i32
+}
+
+// The descriptor to wait on and the one that makes it ready.
+#[cfg(unix)]
+fn foreign_pair() -> Result<(i64, i64), errors::Error> {
+    let mut ends = #[0i32, 0i32]
+    if unsafe { pipe(&mut ends) } != 0 {
+        return Err(errors::new("pipe failed"))
+    }
+    Ok((ends[0] as i64, ends[1] as i64))
+}
+
+#[cfg(unix)]
+fn make_ready(trigger: os::fd::Borrowed) {
+    let _ = unsafe { write(trigger.raw() as i32, "x".bytes(), 1) }
+}
+
+#[cfg(windows)]
+fn foreign_pair() -> Result<(i64, i64), errors::Error> {
+    let event = unsafe { CreateEventW(0, 1, 0, 0) }
+    if event == 0 {
+        return Err(errors::new("CreateEventW failed"))
+    }
+    Ok((event as i64, event as i64))
+}
+
+#[cfg(windows)]
+fn make_ready(trigger: os::fd::Borrowed) {
+    let _ = unsafe { SetEvent(trigger.raw() as usize) }
+}
+
+// Rounds in which a lent descriptor accepts a write: hot enough for the JIT.
+fn writable_rounds(raw: i64, rounds: i64) -> i64 {
+    let mut ready = 0
+    for _ in 0..rounds {
+        if os::fd::wait_writable(os::fd::Borrowed::from_raw(raw), 0).unwrap_or(false) {
+            ready += 1
+        }
+    }
+    ready
+}
+
+fn run() -> Result<(), errors::Error> {
+    let waited, trigger = foreign_pair()?
+    let owned = fs::File::from_raw(waited)?
+    let lent = os::fd::Borrowed::from_raw(trigger)
+    println(f"ready before: {os::fd::wait_readable(owned, 0)?}")
+    println(f"lent writable: {os::fd::wait_writable(lent, 0)?}")
+    make_ready(lent)
+    println(f"ready after: {os::fd::wait_readable(owned, 1000)?}")
+    println(f"lent raw kept: {lent.raw() == trigger}")
+    println(f"writable rounds: {writable_rounds(trigger, 50)}")
+    match os::fd::wait_readable(os::fd::Borrowed::from_raw(-1), 0) {
+        Ok(ready) => println(f"negative borrowed: answered {ready}")
+        Err(_) => println("negative borrowed: refused")
+    }
+    match fs::File::from_raw(-1) {
+        Ok(_) => println("negative owned: accepted")
+        Err(_) => println("negative owned: refused")
+    }
+    Ok(())
+}
+
+fn main() {
+    if let Err(e) = run() {
+        println(f"failed: {e}")
+    }
+}

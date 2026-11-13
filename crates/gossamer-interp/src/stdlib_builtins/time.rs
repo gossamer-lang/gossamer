@@ -159,13 +159,7 @@ pub(crate) fn builtin_time_now_nanos(_args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Int(i64::try_from(nanos).unwrap_or(i64::MAX)))
 }
 
-thread_local! {
-    pub(crate) static MONOTONIC_BASE: std::cell::OnceCell<gossamer_runtime::platform::Instant> = const { std::cell::OnceCell::new() };
-}
-
-pub(crate) fn monotonic_base() -> gossamer_runtime::platform::Instant {
-    MONOTONIC_BASE.with(|cell| *cell.get_or_init(gossamer_runtime::platform::Instant::now))
-}
+use gossamer_runtime::c_abi::time::monotonic_base;
 
 pub(crate) fn builtin_time_monotonic_ms(_args: &[Value]) -> RuntimeResult<Value> {
     let dur = monotonic_base().elapsed();

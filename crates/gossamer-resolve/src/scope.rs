@@ -341,6 +341,7 @@ const PRELUDE_VALUES: &[&str] = &[
     "__gos_x509_parse_pem_raw",
     "__gos_fd_wait_raw",
     "__gos_fs_metadata_raw",
+    "__gos_fs_temp_dir_raw",
     "__gos_fs_read_dir_raw",
     "__gos_fs_walk_dir_raw",
     "__gos_process_run_raw",

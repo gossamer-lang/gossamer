@@ -11,4 +11,4 @@ crate-type = ["rlib"]
 
 [dependencies]
 unic-segment = "0.9"
-gossamer-binding = { path = "../../../../crates/gossamer-binding" }
+gossamer-binding = "0.75.19"

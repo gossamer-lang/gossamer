@@ -105,7 +105,6 @@ impl<'a> Builder<'a> {
                 "gos_rt_os_remove_dir_all_result",
                 self.result_unit_error_adt_ty(),
             ),
-            "fs::temp_dir" => ("gos_rt_fs_temp_dir", self.result_string_error_adt_ty()),
             "fs::temp_file" => {
                 let file = self.sync_handle_ty(44);
                 let path = self.tcx.string_ty();
@@ -166,6 +165,7 @@ impl<'a> Builder<'a> {
                 ("gos_rt_env_set_current_dir", result_ty)
             }
             "env::var" => ("gos_rt_os_env", self.option_string_adt_ty()),
+            "process::look_path" => ("gos_rt_process_look_path", self.option_string_adt_ty()),
             "fs::exists" => ("gos_rt_os_exists", self.tcx.bool_ty()),
             "fs::is_file" => ("gos_rt_os_is_file", self.tcx.bool_ty()),
             "fs::is_dir" => ("gos_rt_os_is_dir", self.tcx.bool_ty()),
@@ -335,6 +335,10 @@ impl<'a> Builder<'a> {
             "fs::create" | "fs::File::create" => {
                 let file = self.sync_handle_ty(44);
                 ("gos_rt_fs_file_create", self.result_of(file))
+            }
+            "fs::File::from_raw" => {
+                let file = self.sync_handle_ty(44);
+                ("gos_rt_fs_file_from_raw", self.result_of(file))
             }
             "fs::OpenOptions::new" | "OpenOptions::new" => {
                 ("gos_rt_fs_open_options_new", self.sync_handle_ty(45))

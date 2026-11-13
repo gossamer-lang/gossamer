@@ -145,6 +145,9 @@ const COMPILED_VIA_SPECIAL_MECHANISM: &[&str] = &[
     "encoding::pem::decode_all",
     "encoding::pem::encode",
     "fs::metadata",
+    // `FS_TEMP_DIR_WRAPPERS` carries the `parent` default into the
+    // `__gos_fs_temp_dir_raw` leaf.
+    "fs::temp_dir",
     // Civil-time wrappers carry the source-visible Location struct's compact
     // specification string into the scalar runtime leaves below.
     "time::add_date",

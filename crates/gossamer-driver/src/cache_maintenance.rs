@@ -586,10 +586,17 @@ fn reclaim_binding_dir(path: &Path, root: &Path) -> bool {
     ) else {
         return false;
     };
+    // A toolchain source snapshot is read under this lock held shared by
+    // every process building from it.
+    let Some(readers) = crate::binding_build::AdvisoryLock::try_acquire(
+        &path.join(crate::binding_build::SOURCE_LOCK),
+    ) else {
+        return false;
+    };
     if let Ok(entries) = fs::read_dir(path) {
         for entry in entries.flatten() {
             let child = entry.path();
-            if child == lock.path() {
+            if child == lock.path() || child == readers.path() {
                 continue;
             }
             if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
@@ -599,6 +606,7 @@ fn reclaim_binding_dir(path: &Path, root: &Path) -> bool {
             }
         }
     }
+    drop(readers);
     drop(lock);
     let _ = fs::remove_dir(path);
     cleanup_empty_cache_dirs(path, root);
@@ -897,6 +905,28 @@ mod tests {
 
         drop(held);
         assert!(reclaim_binding_dir(&workdir, &root));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Every process building from a toolchain source snapshot holds its
+    /// source lock shared, and reclamation leaves the snapshot while any does.
+    #[test]
+    fn reclaiming_a_source_snapshot_a_build_reads_removes_nothing() {
+        let root = scratch("binding-source-read");
+        let _ = fs::remove_dir_all(&root);
+        let workdir = root.join("toolchain-src-0.0.0-0123456789abcdef");
+        let source = workdir.join("src").join("Cargo.toml");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"[workspace]\n").unwrap();
+        let reader = fs::File::create(workdir.join(crate::binding_build::SOURCE_LOCK)).unwrap();
+        reader.lock_shared().unwrap();
+
+        assert!(!reclaim_binding_dir(&workdir, &root));
+        assert!(source.exists(), "a snapshot being read keeps its files");
+
+        drop(reader);
+        assert!(reclaim_binding_dir(&workdir, &root));
+        assert!(!workdir.exists());
         let _ = fs::remove_dir_all(&root);
     }
 

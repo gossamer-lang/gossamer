@@ -1821,9 +1821,10 @@ pub fn temp_file(prefix: &str) -> io::Result<(File, PathBuf)> {
 /// Rejects a caller-controlled prefix that could turn a generated temporary
 /// name into a path outside the system temporary root. This is deliberately
 /// platform-independent: a prefix produced on one host must remain safe when
-/// the same test runs on another host with different path separators.
+/// the same test runs on another host with different path separators. A `:`
+/// would make `C:x` a drive-relative path on Windows.
 fn validate_temp_prefix(prefix: &str) -> io::Result<()> {
-    if prefix.contains(['/', '\\', '\0']) || matches!(prefix, "." | "..") {
+    if prefix.contains(['/', '\\', ':', '\0']) || matches!(prefix, "." | "..") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "temporary-resource prefix must be a single path component",

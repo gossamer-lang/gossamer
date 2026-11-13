@@ -269,6 +269,8 @@ const NAME_CAPABILITIES: &[(&str, Capability)] = &[
     // fs - writes. `OpenOptions::open` counts as a write because the
     // options it carries may create or truncate the target.
     ("fs::File::create", Capability::Write),
+    // Owning a descriptor of the compiling process can close or write it.
+    ("fs::File::from_raw", Capability::Write),
     ("fs::File::set_len", Capability::Write),
     ("fs::File::sync_all", Capability::Write),
     ("fs::File::sync_data", Capability::Write),

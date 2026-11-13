@@ -1804,7 +1804,10 @@ pub const REGISTRY: &[(&str, &str)] = &[
             stays open while the call uses it. A descriptor read off the file with\n\
             `fd()` names whatever the OS reuses it for once the file closes; pass\n\
             the file itself. A bare integer names only a standard stream (0, 1,\n\
-            or 2). `gos check --fix` rewrites the argument.",
+            or 2). A descriptor foreign code answered is `fs::File::from_raw(n)?`\n\
+            when the program takes it over (the file closes it) or\n\
+            `fd::Borrowed::from_raw(n)` when its owner keeps it open.\n\
+            `gos check --fix` rewrites the argument.",
     ),
     (
         "GT0120",
