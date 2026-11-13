@@ -446,3 +446,10 @@ fn a_triple_quoted_argument_keeps_its_value_when_the_call_moves() {
     assert_eq!(triple_body(source), triple_body(&formatted));
     assert_eq!(fmt(&formatted), formatted, "second pass moved the body");
 }
+
+#[test]
+fn package_visibility_keeps_its_paren_against_pub() {
+    let source = "pub(package) fn f() -> i64 {\n    1\n}\n\npub(package) struct S {\n    pub(package) a: i64\n}\n\nstruct P(pub (i64, i64))\n";
+    assert_eq!(fmt(source), source);
+    assert_eq!(fmt("pub (package) fn g() {}\n"), "pub(package) fn g() {}\n");
+}

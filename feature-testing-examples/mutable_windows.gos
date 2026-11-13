@@ -1,7 +1,8 @@
 // Mutable windows: `&mut seq[lo..hi]` is a `&mut [T]` aliasing part of a
 // Vec, fixed array, or slice, and a mutating method on `seq[lo..hi]` acts on
 // that part in place. A window or an element place can also be named for a
-// scope. Each helper runs in a loop so the JIT compiles it; the output must
+// scope. A method that only reads, called on `seq[lo..hi]`, answers from that
+// part. Each helper runs in a loop so the JIT compiles it; the output must
 // agree byte-for-byte on every tier.
 
 struct Pixel {
@@ -151,9 +152,20 @@ fn receiver_windows(round: i64) -> Vec<i64> {
     w
 }
 
+fn window_reads(round: i64) -> String {
+    let fields = f"B\t{round}\t8".split("\t")
+    let parsed = fields[1..3].map(|f| f.to_i64())
+    let px = #[Pixel { r: round, g: 1 }, Pixel { r: 2, g: 3 }, Pixel { r: 4, g: 5 }]
+    let labels = px[0..2].map(|p| f"p{p.r}")
+    let reds = px[1..].filter(|p| p.r > 2).map(|p| p.g)
+    f"{parsed} {labels} {reds} {fields[..2].len()} {px[0..3].map(|p| p.g).sum()}"
+}
+
 fn main() {
     let mut total = 0
+    let mut last = ""
     for round in 0..50 {
+        last = window_reads(round)
         total += vec_windows(round) % 1000
         total += array_windows(round) % 1000
         total += clamped_windows() % 1000
@@ -163,6 +175,7 @@ fn main() {
         total += zero_first_negative(&mut ys) + ys[1] + ys[3]
     }
     println(f"total {total}")
+    println(f"window reads {last}")
     println(f"receivers {receiver_windows(4)}")
 
     let mut bytes = #[0u8; 8]

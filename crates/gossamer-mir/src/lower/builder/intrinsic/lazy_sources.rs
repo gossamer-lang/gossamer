@@ -408,6 +408,10 @@ impl<'a> Builder<'a> {
             });
         }
         self.set_current(after_val);
+        if let Some((name, _)) = &val_binding {
+            let owned = self.owned_struct_binding(val_local, val_ty, elems[1].ty, span);
+            self.bind_local(&name.name, owned);
+        }
 
         // Auto-region the body, exactly as the `for x in vec` path does: the
         // key/value bindings are read from the snapshot above (outside the

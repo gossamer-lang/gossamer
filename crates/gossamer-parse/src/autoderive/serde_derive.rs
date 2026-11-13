@@ -1330,6 +1330,12 @@ fn field_default_literal(
                 .collect();
             return Some(format!("({})", parts?.join(", ")));
         }
+        gossamer_ast::TypeKind::Array { elem, len } => {
+            let elem = field_default_literal(elem, module, structs, aliases, with_default)?;
+            let mut printer = gossamer_ast::Printer::new();
+            printer.print_expr(len);
+            return Some(format!("[{elem}; {}]", printer.finish()));
+        }
         gossamer_ast::TypeKind::Path(path) if path.segments.len() == 1 => {
             let segment = &path.segments[0];
             match (segment.name.name.as_str(), segment.generics.len()) {

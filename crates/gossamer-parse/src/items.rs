@@ -55,13 +55,25 @@ impl Parser<'_> {
     /// Parses a visibility annotation: nothing, `pub`, or `pub(package)`.
     ///
     /// Rust's other restriction forms (`pub(crate)`, `pub(super)`,
-    /// `pub(in path)`) are reported against `pub(package)`, the one
-    /// restricted spelling the language has.
+    /// `pub(self)`, `pub(in path)`) are reported against `pub(package)`, the
+    /// one restricted spelling the language has. A parenthesis opening with
+    /// anything else begins the type of a `pub` tuple field, as in
+    /// `struct P(pub (i64, i64))`.
     fn parse_visibility(&mut self) -> Visibility {
         if !self.eat_keyword(Keyword::Pub) {
             return Visibility::Inherited;
         }
-        if !self.at_punct(Punct::LParen) {
+        let restriction = matches!(
+            self.peek_nth(1).kind,
+            TokenKind::Keyword(
+                Keyword::Package
+                    | Keyword::Crate
+                    | Keyword::Super
+                    | Keyword::SelfLower
+                    | Keyword::In
+            )
+        );
+        if !self.at_punct(Punct::LParen) || !restriction {
             return Visibility::Public;
         }
         let start = self.peek_span();

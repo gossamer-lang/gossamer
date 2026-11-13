@@ -423,10 +423,6 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
          value through `Display`",
     ),
     (
-        "gos_rt_println_fn_*",
-        "the VM passes `println` as a callback like any other builtin value",
-    ),
-    (
         "gos_rt_program_start",
         "the VM opens the root cohort and marks the program entered in its own \
          entry path (`open_root_cohort`)",

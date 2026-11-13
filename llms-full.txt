@@ -266,8 +266,9 @@ extend(&mut items)     // items is now #[1, 2, 1]
   `par_reduce(identity, combine)`, with pure callbacks (GT0090 otherwise);
   answers do not depend on the machine. `img.par_chunks_mut(w, |row, px| ..)`
   writes disjoint chunks in place on every core.
-- Callback shorthand: a std function names itself (`xs.map(math::abs)`);
-  anything else is a closure (`people.map(|p| p.name)`).
+- Callback shorthand: a std function names itself (`xs.map(math::abs)`),
+  and so does a printer (`xs.for_each(println)`); anything else is a
+  closure (`people.map(|p| p.name)`).
 - `DynValue` holds data whose shape arrives at run time (`kind()`,
   `at(i)`, `as_i64()`...). `Weak<T>` via `x.downgrade()` / `w.upgrade()`.
 
@@ -344,6 +345,9 @@ fn main() {
 - `std::sync` has `Mutex`, `RwLock`, atomics, `WaitGroup`, `Once`;
   `sync::with_timeout(f, ms)`, `sync::shield(f)`. There is no OS-thread
   spawn API.
+- Worker threads start as goroutines call for them, up to one per core,
+  and an idle program's threads sleep, so a daemon costs no CPU between
+  events.
 - Goroutines are cooperatively scheduled. They yield at channel, lock, and
   sleep operations, and compiled code also polls at the head of each loop
   nest; a nest that is counted all the way down and calls none of the

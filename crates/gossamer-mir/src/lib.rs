@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod cleanup;
+pub mod compile_threads;
 mod const_tables;
 mod dce;
 mod escape;

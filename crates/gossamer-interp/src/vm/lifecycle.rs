@@ -1081,7 +1081,10 @@ impl Vm {
             let source_map = self.source_map.clone();
             // Every chunk is compiled by now, so the JIT takes the type
             // context itself rather than a copy of it.
-            let prepared = prepare_jit(program, tcx, &roots, source_map);
+            let prepared = {
+                let _threads = gossamer_mir::compile_threads::hold();
+                prepare_jit(program, tcx, &roots, source_map)
+            };
             self.adopt_prepared_jit(&prepared);
         } else {
             self.jit.write().compiled = JitCompileState::Failed;
@@ -1260,6 +1263,7 @@ impl Vm {
         }
 
         self.jit_counters.compile_started();
+        let compile_threads = gossamer_mir::compile_threads::hold();
         let artifact_result = jit_backend::compile_to_jit_for_promotion_owned(
             bodies,
             &tcx,
@@ -1276,6 +1280,7 @@ impl Vm {
                     .map(|cell| cell.storage(default))
             },
         );
+        drop(compile_threads);
         let elapsed = started.elapsed();
         self.jit_counters.compile_finished(elapsed);
         if let Some(rss_bytes) = current_process_rss_bytes() {

@@ -245,7 +245,6 @@ impl<'a> Builder<'a> {
         let real_fn_operand = if instantiated_item {
             Operand::Copy(Place::local(source_local))
         } else if let Some(name) = self.local_fn_name.get(&source_local).cloned() {
-            let name = self.callable_fn_value_symbol(&name, &sig);
             let addr_local = self.fresh(i64_ty);
             self.emit_assign(
                 Place::local(addr_local),
@@ -273,24 +272,6 @@ impl<'a> Builder<'a> {
             span,
         );
         env_local
-    }
-
-    fn callable_fn_value_symbol(&self, name: &str, sig: &gossamer_types::FnSig) -> String {
-        let canonical = name.strip_prefix("std::").unwrap_or(name);
-        if matches!(canonical, "println" | "fmt::println")
-            && sig.inputs.len() == 1
-            && matches!(
-                self.tcx.kind_of(sig.output),
-                gossamer_types::TyKind::Int(_) | gossamer_types::TyKind::Unit
-            )
-        {
-            return match self.tcx.kind_of(sig.inputs[0]) {
-                gossamer_types::TyKind::Float(_) => "gos_rt_println_fn_f64".to_string(),
-                gossamer_types::TyKind::String => "gos_rt_println_fn_str_word".to_string(),
-                _ => "gos_rt_println_fn_i64".to_string(),
-            };
-        }
-        name.to_string()
     }
 
     /// Lowers `spawn(f) -> JoinHandle<T>`. The callable `f` is coerced

@@ -2,7 +2,9 @@
 // being its representation's converted in, and a tuple's being each
 // element's. The derived `default()` is reached by a bare `Type::default()`
 // written inside the module that declares the type as well as from outside
-// it, and a struct holding a tuple of newtypes renders like any other.
+// it, and a struct holding a tuple of newtypes renders like any other. A
+// fixed array's zero value repeats its element's, each element a value of
+// its own.
 
 newtype Id = i64
 newtype Tag = String
@@ -30,6 +32,22 @@ struct Shape {
     label: String
 }
 
+const SLOTS: i64 = 3
+
+#[repr(C)]
+#[derive(Default)]
+struct Record {
+    pid: i64
+    name: [u8; 16]
+}
+
+#[derive(Default)]
+struct Board {
+    cells: [[f64; 2]; 3]
+    labels: [String; SLOTS]
+    shapes: [Shape; 2]
+}
+
 fn main() {
     let a = style::make()
     let b = style::Style::default()
@@ -40,4 +58,12 @@ fn main() {
     c.pair = (4.into(), 2.5)
     println(c)
     println(f"{c:?}")
+    let r = Record::default()
+    println(f"{r.pid} {r.name.len()} {r.name[0]} {r.name[15]}")
+    let mut board = Board::default()
+    board.cells[1][1] = 2.5
+    board.labels[2] = "z"
+    board.shapes[0].label = "first"
+    println(f"{board.cells} {board.labels:?}")
+    println(f"[{board.shapes[0].label}] [{board.shapes[1].label}]")
 }

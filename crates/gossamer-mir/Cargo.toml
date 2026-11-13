@@ -22,6 +22,7 @@ gossamer-abi = { workspace = true }
 # Bodies are finished in parallel where threads exist.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rayon = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 gossamer-parse = { workspace = true }

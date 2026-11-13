@@ -445,9 +445,18 @@ struct Shared {
     /// Number of running worker threads. Used to coordinate dynamic
     /// resize.
     live_workers: AtomicUsize,
-    /// Most recent target P count. The active worker pool is grown to
-    /// match.
+    /// The most workers that may run goroutines at once: the core count, or
+    /// what `runtime::set_max_procs` asked for, plus a worker for each
+    /// system call that outstayed the watchdog.
     target_workers: AtomicUsize,
+    /// The workers the program has called for so far. The pool starts one
+    /// and grows by one each time a goroutine is placed while every started
+    /// worker already has goroutines of its own, so a program runs as many
+    /// threads as it has concurrent goroutines, up to `target_workers`.
+    demand: AtomicUsize,
+    /// Serialises resizing, so two growths never start a worker at the same
+    /// index.
+    resize: Mutex<()>,
     /// `true` once the watchdog thread has been spawned.
     #[cfg_attr(miri, allow(dead_code))]
     watchdog_started: AtomicBool,
@@ -466,6 +475,11 @@ struct Shared {
     /// CPU on the main thread while the workers are idle.
     idle_mu: Mutex<()>,
     idle_cv: Condvar,
+    /// Set while the watchdog sleeps because no worker runs a goroutine; a
+    /// worker leaving its park clears it and signals `watchdog_cv`.
+    watchdog_idle: AtomicBool,
+    watchdog_mu: Mutex<()>,
+    watchdog_cv: Condvar,
 }
 
 struct ParkedEntry {
@@ -537,10 +551,15 @@ impl MultiScheduler {
             stopping: AtomicBool::new(false),
             live_workers: AtomicUsize::new(0),
             target_workers: AtomicUsize::new(n),
+            demand: AtomicUsize::new(1),
+            resize: Mutex::new(()),
             watchdog_started: AtomicBool::new(false),
             request_safepoint: AtomicBool::new(false),
             idle_mu: Mutex::new(()),
             idle_cv: Condvar::new(),
+            watchdog_idle: AtomicBool::new(false),
+            watchdog_mu: Mutex::new(()),
+            watchdog_cv: Condvar::new(),
         });
         Self { inner: shared }
     }
@@ -595,6 +614,19 @@ impl MultiScheduler {
         // with the fewest goroutines of its own. Left to the shared injector,
         // a busy worker that polls it between steps would take every new
         // goroutine before an idle one woke to.
+        // A pool not started yet has no worker to be occupied; it starts its
+        // first one at `start`.
+        let all_occupied = {
+            let workers = self.inner.workers.lock();
+            let mut live = workers
+                .iter()
+                .filter(|slot| !slot.retired.load(Ordering::Acquire))
+                .peekable();
+            live.peek().is_some() && live.all(|slot| slot.homed.load(Ordering::Relaxed) > 0)
+        };
+        if all_occupied {
+            self.grow_pool();
+        }
         let workers = self.inner.workers.lock();
         let target = workers
             .iter()
@@ -650,9 +682,9 @@ impl MultiScheduler {
         self.inner.live_goroutines.load(Ordering::Relaxed)
     }
 
-    /// Resizes the worker pool to `n`. Honoured asynchronously: extra
-    /// workers are spawned immediately; surplus workers retire after
-    /// finishing their current task. A value of `0` is clamped to one.
+    /// Bounds the worker pool at `n`. Workers start as goroutines call for
+    /// them, up to the bound; surplus workers retire after finishing their
+    /// current task. A value of `0` is clamped to one.
     /// Values larger than the worker-count cap (see
     /// [`Self::worker_count_cap`]) are clamped down so a runaway
     /// caller cannot exhaust kernel-thread budget by asking for tens
@@ -745,12 +777,13 @@ impl MultiScheduler {
     /// Signals every worker to exit once their deques drain. Native program
     /// teardown subsequently joins idle workers before releasing storage.
     pub fn shutdown(&self) {
-        self.inner.stopping.store(true, Ordering::Release);
+        self.inner.stopping.store(true, Ordering::SeqCst);
         let workers = self.inner.workers.lock().clone();
         for slot in &workers {
-            slot.retired.store(true, Ordering::Release);
+            slot.retired.store(true, Ordering::SeqCst);
             slot.wake();
         }
+        self.inner.resume_watchdog();
     }
 
     /// Joins idle native-program workers so their thread-local owners finish
@@ -964,23 +997,43 @@ impl MultiScheduler {
     /// Gives back the worker the watchdog started for a system call that has
     /// now returned; the surplus worker retires on its next park.
     pub(crate) fn end_syscall_handoff(&self) {
-        let _ = self
-            .inner
-            .target_workers
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+        for count in [&self.inner.target_workers, &self.inner.demand] {
+            let _ = count.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 Some(n.saturating_sub(1).max(1))
             });
+        }
         self.reconcile_pool();
     }
 
+    /// Calls for one more worker, when the pool is under its bound, and
+    /// starts it.
+    fn grow_pool(&self) {
+        let target = self.inner.target_workers.load(Ordering::Acquire);
+        let grew = self
+            .inner
+            .demand
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < target).then_some(n + 1)
+            })
+            .is_ok();
+        if grew {
+            self.reconcile_pool();
+        }
+    }
+
     fn reconcile_pool(&self) {
-        let target = self.inner.target_workers.load(Ordering::Relaxed);
-        let current = self.inner.live_workers.load(Ordering::Relaxed);
+        let _resize = self.inner.resize.lock();
+        let target = self
+            .inner
+            .target_workers
+            .load(Ordering::Acquire)
+            .min(self.inner.demand.load(Ordering::Acquire));
+        let current = self.inner.live_workers.load(Ordering::Acquire);
         if current >= target {
             // Mark surplus slots retired; they exit on next park.
             let workers = self.inner.workers.lock();
             for slot in workers.iter().skip(target) {
-                slot.retired.store(true, Ordering::Release);
+                slot.retired.store(true, Ordering::SeqCst);
                 slot.wake();
             }
             return;
@@ -1066,6 +1119,9 @@ impl MultiScheduler {
     }
 
     fn wake_any(&self) {
+        // The work this wakes for is queued before the flags are read, and a
+        // parking worker publishes its flag before it looks for work.
+        std::sync::atomic::fence(Ordering::SeqCst);
         let workers = self.inner.workers.lock();
         for slot in workers.iter() {
             if slot.parked.load(Ordering::Acquire) {
@@ -1180,6 +1236,7 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
     ON_WORKER.with(|on| on.set(true));
     slot.last_yield_micros
         .store(now_micros_since_start(), Ordering::Release);
+    shared.resume_watchdog();
     // A worker that always has a goroutine to run never parks in its poller,
     // so it reads readiness on a fixed cadence of steps instead.
     let mut steps_since_poll = 0u32;
@@ -1217,6 +1274,7 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
                 handed_off = true;
             }
             if handed_off {
+                std::sync::atomic::fence(Ordering::SeqCst);
                 let workers = shared.workers.lock();
                 for peer in workers.iter() {
                     if peer.parked.load(Ordering::Acquire) {
@@ -1247,6 +1305,7 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
             // the step this worker took before it went idle.
             slot.last_yield_micros
                 .store(now_micros_since_start(), Ordering::Release);
+            shared.resume_watchdog();
             continue;
         };
         let step = task.step();
@@ -1370,6 +1429,44 @@ impl Shared {
             self.idle_cv.notify_all();
         }
     }
+
+    /// Wakes the watchdog if it sleeps for want of a running worker. The
+    /// caller has made its worker count as running first; the watchdog
+    /// publishes its sleep before it reads the workers, so with both fenced
+    /// one of them always sees the other.
+    fn resume_watchdog(&self) {
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if self.watchdog_idle.load(Ordering::SeqCst) {
+            let _g = self.watchdog_mu.lock();
+            self.watchdog_idle.store(false, Ordering::SeqCst);
+            self.watchdog_cv.notify_one();
+        }
+    }
+
+    /// Whether the watchdog has nothing to watch: no worker runs a goroutine
+    /// or sits in a system call, and no poller a retired worker left behind
+    /// still holds a timer or a descriptor for it to drive.
+    #[cfg(not(miri))]
+    fn nothing_to_watch(&self) -> bool {
+        if self.stopping.load(Ordering::SeqCst) || self.request_safepoint.load(Ordering::SeqCst) {
+            return false;
+        }
+        let workers = self.workers.lock();
+        let all_parked = workers.iter().all(|slot| {
+            slot.retired.load(Ordering::SeqCst)
+                || (slot.parked.load(Ordering::SeqCst)
+                    && slot.syscall_pass.load(Ordering::SeqCst) == 0)
+        });
+        if !all_parked {
+            return false;
+        }
+        crate::netpoll::worker_poller_indices().all(|(index, poller)| {
+            let vacant = workers
+                .get(index)
+                .is_none_or(|slot| slot.retired.load(Ordering::SeqCst));
+            !vacant || !poller.holds_waiters()
+        })
+    }
 }
 
 /// Counts a thread among `idle_cv`'s waiters for as long as it lives.
@@ -1454,11 +1551,11 @@ fn start_workers_for_blocked_syscalls(shared: &Arc<Shared>) {
     drop(workers);
     if added > 0 {
         let cap = MultiScheduler::worker_count_cap();
-        let _ = shared
-            .target_workers
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+        for count in [&shared.target_workers, &shared.demand] {
+            let _ = count.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 Some(n.saturating_add(added).min(cap))
             });
+        }
         crate::sched_global::scheduler().reconcile_workers();
     }
 }
@@ -1508,6 +1605,45 @@ fn drive_vacant_pollers(shared: &Arc<Shared>) {
     crate::netpoll::unpark_all(&mut woken);
 }
 
+/// How a watchdog rest ended.
+#[cfg(not(miri))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rest {
+    /// A worker was running, so the watchdog did not sleep.
+    Busy,
+    /// A worker left its park, or shutdown began.
+    Woken,
+    /// The bound passed with every worker still parked.
+    Elapsed,
+}
+
+/// Sleeps the watchdog while no worker runs a goroutine, until a worker
+/// leaves its park, shutdown begins, or `bound` passes. An idle program then
+/// costs no thread a wakeup.
+#[cfg(not(miri))]
+fn rest_while_nothing_to_watch(shared: &Shared, bound: Option<Duration>) -> Rest {
+    let mut g = shared.watchdog_mu.lock();
+    shared.watchdog_idle.store(true, Ordering::SeqCst);
+    std::sync::atomic::fence(Ordering::SeqCst);
+    if !shared.nothing_to_watch() {
+        shared.watchdog_idle.store(false, Ordering::SeqCst);
+        return Rest::Busy;
+    }
+    match bound {
+        Some(left) => {
+            let _ = shared.watchdog_cv.wait_for(&mut g, left);
+        }
+        None => shared.watchdog_cv.wait(&mut g),
+    }
+    // A waker clears the flag before it signals, so a flag still set means
+    // the bound ran out.
+    if shared.watchdog_idle.swap(false, Ordering::SeqCst) {
+        Rest::Elapsed
+    } else {
+        Rest::Woken
+    }
+}
+
 #[cfg(not(miri))]
 fn watchdog_loop(shared: Arc<Shared>) {
     let preempt_threshold = Duration::from_millis(10);
@@ -1516,12 +1652,22 @@ fn watchdog_loop(shared: Arc<Shared>) {
     // that have stopped allocating.
     let purge_every = crate::allocator_purge_delay();
     let mut last_purge = Instant::now();
+    // Whether workers have run since the last purge, so memory they freed
+    // may be waiting on the window. A purge taken while every worker stayed
+    // parked leaves nothing for the next one.
+    let mut purge_pending = true;
     loop {
         if shared.stopping.load(Ordering::Acquire) {
             // One last bump so any spinning thread observes the
             // shutdown and reaches a safepoint.
             crate::preempt::request_yield_all();
             return;
+        }
+        let purge_due = (!purge_every.is_zero() && purge_pending)
+            .then(|| purge_every.saturating_sub(last_purge.elapsed()));
+        let rest = rest_while_nothing_to_watch(&shared, purge_due);
+        if rest != Rest::Elapsed {
+            purge_pending = true;
         }
         crate::platform::sleep(WATCHDOG_INTERVAL);
         let now_micros = now_micros_since_start();
@@ -1562,6 +1708,7 @@ fn watchdog_loop(shared: Arc<Shared>) {
         if !purge_every.is_zero() && last_purge.elapsed() >= purge_every {
             crate::purge_expired_allocator_memory();
             last_purge = Instant::now();
+            purge_pending = rest != Rest::Elapsed;
         }
         if needs_preempt || shared.request_safepoint.load(Ordering::Acquire) {
             crate::preempt::request_yield_all();
@@ -1646,13 +1793,14 @@ fn next_task(
 }
 
 fn park_worker(slot: &Arc<WorkerSlot>, shared: &Arc<Shared>) -> Park {
-    // A park lasts at most 50 ms, so a collect the window deferred runs at a
-    // later one.
-    let _ = crate::mark_thread_idle();
+    // A collect the allocator's window deferred bounds the park, so it runs
+    // when the window closes; with nothing deferred the park waits for a wake.
+    let deferred = crate::mark_thread_idle();
     if let Some(poller) = crate::netpoll::worker_poller(slot.index) {
-        return park_worker_in_poller(slot, shared, poller);
+        return park_worker_in_poller(slot, shared, poller, deferred);
     }
-    slot.parked.store(true, Ordering::Release);
+    slot.parked.store(true, Ordering::SeqCst);
+    std::sync::atomic::fence(Ordering::SeqCst);
     // Wake any orchestrator waiting in `wait_until_idle`: now that
     // this worker is parked, the snapshot may show all-idle.
     {
@@ -1663,16 +1811,28 @@ fn park_worker(slot: &Arc<WorkerSlot>, shared: &Arc<Shared>) -> Park {
     // before taking `cv_mu` to notify. Read under the lock, a cleared flag
     // means the wake already happened; work queued before the flag was
     // published is picked up here rather than slept past.
-    if !slot.parked.load(Ordering::Acquire) || !slot.inbox.is_empty() || !shared.injector.is_empty()
-    {
-        slot.parked.store(false, Ordering::Release);
+    if !slot.parked.load(Ordering::SeqCst) || has_work_or_exit(slot, shared) {
+        slot.parked.store(false, Ordering::SeqCst);
         return Park::Skipped;
     }
-    // The timeout lets an idle worker notice retirement and shutdown; a wake
-    // never waits on it.
-    let _ = slot.cv.wait_for(&mut g, Duration::from_millis(50));
-    slot.parked.store(false, Ordering::Release);
+    match deferred {
+        Some(left) => {
+            let _ = slot.cv.wait_for(&mut g, left);
+        }
+        None => slot.cv.wait(&mut g),
+    }
+    slot.parked.store(false, Ordering::SeqCst);
     Park::Waited
+}
+
+/// Whether a worker about to park has queued work, or has been told to
+/// retire or stop. Read after the worker publishes `parked`: whoever queues
+/// work or sets either flag reads `parked` afterwards and wakes it.
+fn has_work_or_exit(slot: &WorkerSlot, shared: &Shared) -> bool {
+    !slot.inbox.is_empty()
+        || !shared.injector.is_empty()
+        || slot.retired.load(Ordering::SeqCst)
+        || shared.stopping.load(Ordering::SeqCst)
 }
 
 /// Whether [`park_worker`] waited for a wake or found work and returned.
@@ -1691,21 +1851,23 @@ fn park_worker_in_poller(
     slot: &Arc<WorkerSlot>,
     shared: &Arc<Shared>,
     poller: &crate::netpoll::Poller,
+    deferred: Option<Duration>,
 ) -> Park {
     slot.polling.store(true, Ordering::SeqCst);
     slot.parked.store(true, Ordering::SeqCst);
+    std::sync::atomic::fence(Ordering::SeqCst);
     {
         shared.notify_idle();
     }
     // A waker clears `parked` and then signals the poller. Work queued before
     // `parked` was published is found here; work queued after it comes with a
     // signal that ends the pass below.
-    if slot.parked.load(Ordering::SeqCst) && slot.inbox.is_empty() && shared.injector.is_empty() {
+    if slot.parked.load(Ordering::SeqCst) && !has_work_or_exit(slot, shared) {
         let mut woken = Vec::new();
-        // The bound lets an idle worker notice retirement and shutdown; a wake
-        // never waits on it. A pass another thread holds is waited out on the
-        // condition variable instead.
-        if !poller.turn(Some(Duration::from_millis(50)), &mut woken) {
+        // The pass sleeps until its next timer is due, or a deferred collect
+        // when one comes first. A pass another thread holds is waited out on
+        // the condition variable instead.
+        if !poller.turn(deferred, &mut woken) {
             let mut g = slot.cv_mu.lock();
             slot.polling.store(false, Ordering::SeqCst);
             if slot.parked.load(Ordering::SeqCst) {
@@ -2064,6 +2226,7 @@ mod tests {
     fn retiring_worker_does_not_strand_inbox_tasks() {
         let sched = MultiScheduler::new(2);
         sched.start();
+        sched.grow_pool();
         let counter = Arc::new(AtomicUsize::new(0));
         let task: SendTask = Box::new(CountTask {
             counter: Arc::clone(&counter),
@@ -2087,8 +2250,56 @@ mod tests {
         panic!("inbox task stranded on retired worker");
     }
 
+    /// Workers start as goroutines call for them: one at start, another for
+    /// each goroutine placed while every started worker has one, and never
+    /// past the bound.
     #[test]
     #[cfg_attr(miri, ignore)] // starts worker threads that sigaltstack; Miri has no signals
+    fn workers_start_as_goroutines_call_for_them() {
+        let sched = MultiScheduler::new(3);
+        sched.start();
+        assert_eq!(sched.inner.live_workers.load(Ordering::Acquire), 1);
+        let release = Arc::new(AtomicBool::new(false));
+        for _ in 0..5 {
+            let release = Arc::clone(&release);
+            sched.spawn(CoroTask(gossamer_coro::Goroutine::new(Box::new(
+                move || {
+                    while !release.load(Ordering::Acquire) {
+                        let _ = crate::preempt::gos_rt_preempt_check_and_yield();
+                        std::hint::spin_loop();
+                    }
+                },
+            ))));
+        }
+        assert_eq!(sched.inner.live_workers.load(Ordering::Acquire), 3);
+        release.store(true, Ordering::Release);
+        sched.wait_until_idle();
+        assert!(sched.shutdown_and_join_idle());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // starts worker threads that sigaltstack; Miri has no signals
+    fn a_parked_pool_leaves_the_watchdog_nothing_to_watch() {
+        let sched = MultiScheduler::new(2);
+        sched.start();
+        let counter = Arc::new(AtomicUsize::new(0));
+        sched.spawn(CountTask {
+            counter: Arc::clone(&counter),
+            budget: 4,
+        });
+        sched.wait_until_idle();
+        assert_eq!(counter.load(Ordering::Relaxed), 4);
+        assert!(sched.inner.nothing_to_watch());
+        // A worker that runs again is something to watch.
+        let slot = Arc::clone(&sched.inner.workers.lock()[0]);
+        slot.parked.store(false, Ordering::SeqCst);
+        assert!(!sched.inner.nothing_to_watch());
+        slot.parked.store(true, Ordering::SeqCst);
+        assert!(sched.shutdown_and_join_idle());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
     fn set_worker_count_grows_pool() {
         let sched = MultiScheduler::new(1);
         sched.start();

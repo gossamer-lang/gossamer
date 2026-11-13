@@ -1,6 +1,40 @@
 // Deterministic, cross-tier Map iteration: keys(), values(), and
 // iter() all traverse in key-sorted order (bit-identical on every tier).
+// A struct value a loop binds is a value of its own: storing it keeps it
+// whole, and the map still holds its own.
 use std::collections::Map
+
+struct Row {
+    name: String
+    n: i64
+}
+
+struct Cell {
+    x: i64
+    y: i64
+}
+
+fn rendered(rows: Vec<Row>) -> String {
+    let mut out = ""
+    for r in rows { out += f"{r.name}:{r.n} " }
+    out
+}
+
+fn collected(round: i64) -> String {
+    let m: Map<String, Row> = { "b": Row { name: "bee", n: 2 }, "a": Row { name: "ay", n: round } }
+    let mut rows: Vec<Row> = #[]
+    for (_, row) in m { rows.push(row) }
+    for row in m.values() { rows.push(row) }
+    let mut kept = Row { name: "none", n: 0 }
+    for (k, row) in m {
+        if k == "b" { kept = row }
+    }
+    rows.push(kept)
+    let mut cells: Map<Cell, Row> = Map::new()
+    cells[Cell { x: 1, y: round }] = Row { name: "cell", n: 5 }
+    for (_, row) in cells { rows.push(row) }
+    f"{rendered(rows)}{m["a"].name} {m.len()}"
+}
 
 fn main() {
     let mut m: Map<String, i64> = Map::new()
@@ -20,4 +54,7 @@ fn main() {
     n.insert(20, 200)
     for k in n.keys() { print("{} ", k) }
     println("")
+    let mut last = ""
+    for round in 0..50 { last = collected(round) }
+    println(last)
 }

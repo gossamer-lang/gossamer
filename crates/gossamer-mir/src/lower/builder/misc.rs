@@ -587,6 +587,7 @@ impl<'a> Builder<'a> {
             self.load_vec_element(iter_local, counter, elem_ty, yields_mut_refs, span);
         match &loop_pat.kind {
             HirPatKind::Binding { name, .. } => {
+                let elem_local = self.owned_struct_binding(elem_local, elem_ty, loop_pat.ty, span);
                 self.bind_local(&name.name, elem_local);
             }
             HirPatKind::Tuple(sub_pats) => {
@@ -738,6 +739,45 @@ impl<'a> Builder<'a> {
     /// by-value `Option`/`Result` as its two words, an inline aggregate as the
     /// address of its slots, and a `&mut` element as the slot address. The
     /// second value is the slot address when the read went through one.
+    /// The loop binding for an element the source holds as `&S` while the
+    /// pattern binds an `S`: a map's struct values are snapshotted as the
+    /// addresses of the map's own blobs. The binding is the struct read
+    /// through that reference, so it owns a share of each field the way an
+    /// element of a `Vec<S>` does.
+    pub(crate) fn owned_struct_binding(
+        &mut self,
+        elem: Local,
+        elem_ty: Ty,
+        bound_ty: Ty,
+        span: Span,
+    ) -> Local {
+        let gossamer_types::TyKind::Ref {
+            mutability: gossamer_types::Mutbl::Not,
+            inner,
+        } = *self.tcx.kind_of(elem_ty)
+        else {
+            return elem;
+        };
+        if self.struct_name_of(inner).is_none()
+            || matches!(
+                self.tcx.kind_of(bound_ty),
+                gossamer_types::TyKind::Ref { .. }
+            )
+        {
+            return elem;
+        }
+        let owned = self.fresh(inner);
+        self.emit_assign(
+            Place::local(owned),
+            Rvalue::Use(Operand::Copy(Place {
+                local: elem,
+                projection: vec![crate::ir::Projection::Deref],
+            })),
+            span,
+        );
+        owned
+    }
+
     pub(crate) fn load_vec_element(
         &mut self,
         iter_local: Local,

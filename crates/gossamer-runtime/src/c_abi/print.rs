@@ -473,35 +473,6 @@ pub extern "C" fn gos_rt_print_i64(n: i64) {
     });
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_println_fn_i64(n: i64) -> i64 {
-    ffi_entry!({
-        gos_rt_print_i64(n);
-        write_stdout(b"\n");
-        0
-    })
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_println_fn_f64(x: f64) -> i64 {
-    ffi_entry!({
-        gos_rt_print_f64(x);
-        write_stdout(b"\n");
-        0
-    })
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_println_fn_str_word(s: i64) -> i64 {
-    ffi_entry!({
-        // SAFETY: `s` is this shim's string word, null or a live string body (C-ABI contract),
-        // which `gos_rt_print_str` accepts.
-        unsafe { gos_rt_print_str(s as usize as *const c_char) };
-        write_stdout(b"\n");
-        0
-    })
-}
-
 /// Prints an unsigned 64-bit integer through the buffered
 /// stdout path. Distinct from `gos_rt_print_i64` so values
 /// `>= 2^63` print without a leading `-` (the sign-extension
