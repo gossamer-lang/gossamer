@@ -1,7 +1,8 @@
 // A carrier combinator that hands its receiver's payload on - `map_err`,
 // `or_else`, `ok`, `ok_or`, `filter`, `or` - leaves the struct it carries, and
-// the containers inside it, whole. `map` calls its closure in the caller's
-// frame, so a mapped float, aggregate, or nested carrier keeps its own type.
+// the containers inside it, whole. `map`, `map_err`, `and_then`, and a
+// Result's `or_else` call their closure in the caller's frame, so a float,
+// aggregate, or nested carrier crossing it keeps its own type.
 // A bare `None` is an `Option` its methods type against, and a constructor
 // named as a value is the function of its payload. Identical on every
 // tier, and nothing here outlives its use.
@@ -59,7 +60,51 @@ fn countdown(n: i64) -> i64 {
     steps
 }
 
+fn halved(x: f64) -> f64 { x / 2.0 }
+
+fn digits(s: String) -> Result<i64, String> {
+    match s.to_i64() {
+        Some(v) => Ok(v)
+        None => Err(f"bad {s}")
+    }
+}
+
+fn float_and_owned_chains() {
+    let o: Option<f64> = Some(2.5)
+    let none: Option<f64> = None
+    let _ = o.map(println)
+    let _ = o.map(|x| println(x))
+    println("{:?} {:?}", o.map(halved), o.and_then(|x| Some(x + 1.0)))
+    println("{:?} {:?}", none.and_then(|x| Some(x + 1.0)), none.or_else(|| Some(9.5)))
+    let r: Result<f64, String> = Ok(1.5)
+    let _ = r.map(println)
+    println("{:?}", r.and_then(|x| if x > 1.0 { Ok(x * 3.0) } else { Err("small") }))
+    let e: Result<i64, f64> = Err(7.5)
+    let _ = e.map_err(eprintln)
+    println("{:?} {:?}", e.map_err(|x| x * 2.0), e.map_err(halved))
+    println("{:?}", e.or_else(|x| if x > 1.0 { Ok(1) } else { Err(x) }))
+    println("{:?} {:?}", option::and_then(o, |x| Some(x * 0.5)), option::filter(o, |x| x < 1.0))
+    println("{:?}", result::and_then(r, |x| Ok(x + 0.125)))
+    println("{:?}", result::or_else(e, |x| if x > 1.0 { Ok(2) } else { Err(x) }))
+    println("{:?}", result::map_err(e, |x| x + 0.25))
+    println("{:?}", #[1.5, 2.5].map(|x| Some(x)).map(|v| v.and_then(|x| Some(x * 2.0))))
+    let s: Option<String> = Some("v")
+    let text: Result<String, String> = Ok("12")
+    let bad: Result<String, String> = Err("e")
+    println("{:?} {:?}", s.and_then(|v| Some(v + "!")), text.and_then(digits))
+    println("{:?} {:?}", option::and_then(s, |v| Some(v.len())), option::and_then(s, |v| Some(v + "?")))
+    println("{:?} {:?}", bad.and_then(digits), bad.or_else(|v| Ok(v + "-fixed")))
+    println("{:?} {:?}", text.or_else(|v| Ok(v)), bad.map_err(|v| v.len()))
+    let owned: Option<String> = s.map(|v| v + "-owned")
+    let missing: Option<String> = None
+    println("{} {}", option::unwrap_or(owned, "none"), option::unwrap_or(missing, f"{owned:?}"))
+    println("{} {}", result::unwrap_or(text, "none"), result::unwrap_or(bad, f"{text:?}"))
+    show("and_then big", make(true).and_then(|b| Ok(Big { s: b.s + "x", ..b })).unwrap())
+    show("or_else big", make(false).or_else(|_| Ok(big("r2"))).unwrap())
+}
+
 fn run() -> Result<(), errors::Error> {
+    float_and_owned_chains()
     show("map_err?", make(true).map_err(|e| errors::wrap(e, "ctx"))?)
     println("map_err err {}", make(false).map_err(|e| errors::wrap(e, "ctx")).is_err())
     show("or_else", or_else_q()?)

@@ -317,21 +317,26 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
-    /// Builds a single concatenated c-string from every argument
-    /// and stores its pointer in `dest_ssa`. Each arg is
-    /// converted through `gos_rt_*_to_str` (or passed through for
-    /// strings); pieces are joined with `separator` via
-    /// `gos_rt_str_concat`. Used by multi-arg `panic(...)` where
-    /// the runtime takes a single message pointer.
+    /// Builds a single concatenated c-string from every argument. Each arg is
+    /// converted through `gos_rt_*_to_str` (or passed through for strings);
+    /// pieces are joined with `separator` via `gos_rt_str_concat`. Used where
+    /// the runtime takes one message pointer: `panic(...)` and the stderr
+    /// printers.
+    ///
+    /// Answers the message and whether it is a string this call allocated,
+    /// which the caller then owns. Every intermediate rendering and partial
+    /// join is released once folded into the next, so only the answer
+    /// survives; a lone string argument is answered as the borrowed operand.
     pub(crate) fn emit_args_to_concat_string(
         &mut self,
         args: &[Operand],
         separator: &str,
-    ) -> Result<String, BuildError> {
+    ) -> Result<(String, bool), BuildError> {
         declare_rt(&mut self.runtime_refs, "gos_rt_str_concat");
+        declare_rt(&mut self.runtime_refs, "gos_rt_str_free_typed");
         let (empty_name, _) = self.strings.borrow_mut().intern("");
         if args.is_empty() {
-            return Ok(empty_name);
+            return Ok((empty_name, false));
         }
         let sep_name = if separator.is_empty() {
             None
@@ -339,6 +344,7 @@ impl<'a> Lowerer<'a> {
             Some(self.strings.borrow_mut().intern(separator).0)
         };
         let mut acc = self.lower_arg_to_str_ptr(&args[0])?;
+        let mut acc_owned = self.renders_fresh_string(&args[0]);
         for arg in &args[1..] {
             if let Some(name) = &sep_name {
                 let next = self.fresh();
@@ -347,7 +353,9 @@ impl<'a> Lowerer<'a> {
                     "  {next} = call ptr @gos_rt_str_concat(ptr {acc}, ptr {name})"
                 )
                 .unwrap();
+                self.release_rendered(&acc, acc_owned);
                 acc = next;
+                acc_owned = true;
             }
             let piece = self.lower_arg_to_str_ptr(arg)?;
             let next = self.fresh();
@@ -356,9 +364,27 @@ impl<'a> Lowerer<'a> {
                 "  {next} = call ptr @gos_rt_str_concat(ptr {acc}, ptr {piece})"
             )
             .unwrap();
+            self.release_rendered(&acc, acc_owned);
+            let piece_owned = self.renders_fresh_string(arg);
+            self.release_rendered(&piece, piece_owned);
             acc = next;
+            acc_owned = true;
         }
-        Ok(acc)
+        Ok((acc, acc_owned))
+    }
+
+    /// Whether [`Self::lower_arg_to_str_ptr`] renders `arg` into a string of
+    /// its own rather than answering a string operand as it stands.
+    pub(crate) fn renders_fresh_string(&self, arg: &Operand) -> bool {
+        !matches!(self.concat_print_kind(arg, "to_string"), ConcatKind::StrPtr)
+    }
+
+    /// Releases a rendered string `ptr` when `owned` says this lowering
+    /// allocated it.
+    pub(crate) fn release_rendered(&mut self, ptr: &str, owned: bool) {
+        if owned {
+            writeln!(self.out, "  call void @gos_rt_str_free_typed(ptr {ptr})").unwrap();
+        }
     }
 
     /// Emits the result of a variant constructor call without

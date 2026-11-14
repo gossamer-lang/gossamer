@@ -188,6 +188,37 @@ impl Expand<'_> {
         )
     }
 
+    /// Whether `path` is one of the prelude's printers.
+    fn is_prelude_printer(path: &PathExpr) -> bool {
+        matches!(
+            path.segments.as_slice(),
+            [segment] if matches!(segment.name.name.as_str(), "print" | "println" | "eprint" | "eprintln")
+        )
+    }
+
+    /// `__concat(arg)`: the rendering a printer's lone argument goes through
+    /// when written in source, so a printer taken as a value prints as the
+    /// written call does. `__concat` is a prelude value, resolved as the
+    /// printer `printer` names is.
+    fn rendered(&mut self, arg: Expr, printer: &Expr) -> Expr {
+        let callee = Expr::new(
+            self.ids.next(),
+            printer.span,
+            ExprKind::Path(PathExpr::single("__concat".to_string())),
+        );
+        if let Some(resolution) = self.resolutions.get(printer.id) {
+            self.resolutions.insert(callee.id, resolution);
+        }
+        Expr::new(
+            self.ids.next(),
+            printer.span,
+            ExprKind::Call {
+                callee: Box::new(callee),
+                args: vec![arg],
+            },
+        )
+    }
+
     /// Builds `|p0, .., pn| path(p0, .., pn)` around `path`. The pass runs
     /// after resolution, so it records what each new path names: an argument
     /// its parameter, and the callee what `path` itself resolved to.
@@ -210,7 +241,7 @@ impl Expand<'_> {
                 ty: None,
             })
             .collect();
-        let args = names
+        let args: Vec<Expr> = names
             .iter()
             .zip(&params)
             .map(|(name, param)| {
@@ -224,6 +255,13 @@ impl Expand<'_> {
                 arg
             })
             .collect();
+        let args = if Self::is_prelude_printer(path) {
+            args.into_iter()
+                .map(|arg| self.rendered(arg, expr))
+                .collect()
+        } else {
+            args
+        };
         let callee = Expr::new(self.ids.next(), expr.span, ExprKind::Path(path.clone()));
         if let Some(resolution) = self.resolutions.get(expr.id) {
             self.resolutions.insert(callee.id, resolution);
@@ -313,9 +351,16 @@ mod tests {
 
     #[test]
     fn a_prelude_printer_in_value_position_becomes_a_closure() {
-        let (_sf, count) =
+        let (sf, count) =
             expand("fn main() { Some(1).map(println)\n #[1].for_each(print)\n println(2) }");
         assert_eq!(count, 2);
+        let mut printer = gossamer_ast::Printer::new();
+        printer.print_source_file(&sf);
+        let rendered = printer.finish();
+        assert!(
+            rendered.contains("println(__concat(") && rendered.contains("print(__concat("),
+            "a printer taken as a value renders its argument as the written call does: {rendered}"
+        );
     }
 
     #[test]

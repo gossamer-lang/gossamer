@@ -697,25 +697,41 @@ impl<'a> Builder<'a> {
             return Some(local);
         }
 
-        // `carrier.map(f)` calls the closure in this frame, so its argument
-        // and answer keep their own types - a float, an aggregate, another
-        // carrier - and the answer is boxed the way a `Some` / `Ok` literal
-        // boxes one, rather than crossing a callback as one integer word.
-        if method.name.as_str() == "map"
+        // `carrier.map(f)` and `result.map_err(f)` call the closure in this
+        // frame, so its argument and answer keep their own types - a float,
+        // an aggregate, another carrier - and the answer is boxed the way a
+        // `Some` / `Ok` / `Err` literal boxes one, rather than crossing a
+        // callback as one integer word.
+        let mapped_slot: Option<u8> = match method.name.as_str() {
+            "map" => Some(0),
+            "map_err" if !self.is_option_adt(receiver_ty) => Some(1),
+            _ => None,
+        };
+        if let Some(slot) = mapped_slot
             && args.len() == 1
             && matches!(receiver_kind_flat, TyKind::Adt { .. })
             && self.is_result_or_option_adt(receiver_ty)
-            && let Some(mapped_ty) = self.enum_payload_ty(ty, 0)
+            && let Some(mapped_ty) = self.enum_payload_ty(ty, usize::from(slot))
             && !matches!(
                 self.tcx.kind_of(mapped_ty),
                 TyKind::Var(_) | TyKind::Error | TyKind::Never
             )
         {
             let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
-            let payload_ty = self.enum_payload_ty(receiver_ty, 0).unwrap_or(i64_ty);
+            let payload_ty = self
+                .enum_payload_ty(receiver_ty, usize::from(slot))
+                .unwrap_or(i64_ty);
             let recv = self.lower_expr(receiver)?;
             let closure = self.lower_iter_closure(&args[0], &[payload_ty], mapped_ty, span)?;
-            return Some(self.lower_map_inline(recv, closure, receiver_ty, mapped_ty, ty, span));
+            return Some(self.lower_map_inline(
+                recv,
+                closure,
+                receiver_ty,
+                mapped_ty,
+                ty,
+                slot,
+                span,
+            ));
         }
 
         // `a.or(b)` on an `Option` receiver answers `a` when it holds a value

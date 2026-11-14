@@ -741,6 +741,19 @@ impl TypeChecker<'_> {
         {
             return Some(ret);
         }
+        // The prelude's printers and assertions answer nothing: `()` when
+        // nothing else constrains the call, as for a closure that only
+        // prints, while a printer closing a callback whose answer is
+        // discarded still checks.
+        if module.is_empty()
+            && !matches!(self.tcx.kind(resolved), Some(TyKind::FnDef { .. }))
+            && matches!(
+                last,
+                "print" | "println" | "eprint" | "eprintln" | "assert" | "assert_eq"
+            )
+        {
+            return Some(self.infer.fresh_unit_default_var(self.tcx));
+        }
         // Data-last std combinators (`result::map_err(f, r)`,
         // `iter::map(f, xs)`, ...): the signature table pins
         // closure params to the data payload type. Gated on the

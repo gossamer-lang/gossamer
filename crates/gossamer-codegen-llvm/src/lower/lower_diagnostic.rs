@@ -295,11 +295,12 @@ impl<'a> Lowerer<'a> {
             // diagnostic order is preserved). Keeps eprint output
             // off stdout without parallel `_err` versions of
             // every per-type helper.
-            let s = self.emit_args_to_concat_string(args, " ")?;
+            let (s, owned) = self.emit_args_to_concat_string(args, " ")?;
             writeln!(self.out, "  call void @gos_rt_eprint_str(ptr {s})").unwrap();
             if name == "eprintln" {
                 writeln!(self.out, "  call void @gos_rt_eprintln()").unwrap();
             }
+            self.release_rendered(&s, owned);
         } else {
             // Hold the stdout lock for the whole sequence - every
             // per-arg print + the trailing newline is one atomic

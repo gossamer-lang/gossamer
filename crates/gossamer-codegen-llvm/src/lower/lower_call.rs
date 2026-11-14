@@ -391,7 +391,7 @@ impl<'a> Lowerer<'a> {
             // with an empty message - `gos_rt_panic` then
             // emits its default "panic" string.
             declare_rt(&mut self.runtime_refs, "gos_rt_panic");
-            let msg = self.emit_args_to_concat_string(args, " ")?;
+            let (msg, _) = self.emit_args_to_concat_string(args, " ")?;
             self.emit_panic_site_line();
             writeln!(self.out, "  call void @gos_rt_panic(ptr {msg})").unwrap();
             writeln!(self.out, "  unreachable").unwrap();

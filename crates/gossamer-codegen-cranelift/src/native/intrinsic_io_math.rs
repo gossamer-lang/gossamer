@@ -900,6 +900,11 @@ pub(super) fn lower_intrinsic_call_io_math(
                 let nl_ref = module.declare_func_in_func(nl_fn, builder.func);
                 let _ = builder.ins().call(nl_ref, &[]);
             }
+            // The joined message is a string of this frame's own for any
+            // argument, and the stderr writer copies it out.
+            if !args.is_empty() {
+                free_rendered_string(module, builder, intrinsics, s)?;
+            }
             if !destination.projection.is_empty() {
                 bail!("native codegen: intrinsic destination cannot have projections");
             }

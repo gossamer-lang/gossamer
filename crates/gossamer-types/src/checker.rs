@@ -116,6 +116,7 @@ impl TypeChecker<'_> {
         self.settle_deferred_projections();
         self.infer.default_unresolved_int_vars(self.tcx);
         self.infer.default_unresolved_float_vars(self.tcx);
+        self.infer.default_unresolved_unit_vars(self.tcx);
         self.check_deferred_reference_storage();
         self.check_deferred_adt_bounds();
         self.check_deferred_type_mismatches();

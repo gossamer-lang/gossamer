@@ -426,13 +426,14 @@ impl<'a> Builder<'a> {
         dest
     }
 
-    /// Lowers `carrier.map(f)` whose mapped payload is an aggregate stored by
-    /// address, as the match it stands for.
+    /// Lowers `carrier.map(f)` (`slot` 0) or `result.map_err(f)` (`slot` 1)
+    /// as the match it stands for, calling the closure in this frame with the
+    /// payload's own type.
     ///
-    /// The closure's aggregate answer is written into a local of this frame
-    /// and boxed by the `Some` / `Ok` constructor, which gives it the copy-blob
-    /// layout every holder of the carrier releases. An empty receiver answers
-    /// `None`, and an `Err` one an `Err` of the answer's type around its error.
+    /// The closure's answer is written into a local of this frame and boxed by
+    /// the `Some` / `Ok` / `Err` constructor, which gives an aggregate the
+    /// copy-blob layout every holder of the carrier releases. The other arm is
+    /// rebuilt around its own payload, and an empty `Option` answers `None`.
     pub(crate) fn lower_map_inline(
         &mut self,
         recv: Local,
@@ -440,10 +441,14 @@ impl<'a> Builder<'a> {
         receiver_ty: Ty,
         mapped_ty: Ty,
         dest_ty: Ty,
+        slot: u8,
         span: Span,
     ) -> Local {
         let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
-        let payload_ty = self.enum_payload_ty(receiver_ty, 0).unwrap_or(i64_ty);
+        let other = 1 - slot;
+        let payload_ty = self
+            .enum_payload_ty(receiver_ty, usize::from(slot))
+            .unwrap_or(i64_ty);
         let dest = self.fresh(dest_ty);
         let disc = self.fresh(i64_ty);
         self.emit_assign(
@@ -460,7 +465,7 @@ impl<'a> Builder<'a> {
         let join = self.new_block(span);
         self.terminate(Terminator::SwitchInt {
             discriminant: Operand::Copy(Place::local(disc)),
-            arms: vec![(0, present)],
+            arms: vec![(i128::from(slot), present)],
             default: otherwise,
         });
         self.set_current(present);
@@ -484,33 +489,148 @@ impl<'a> Builder<'a> {
         let present_disc = self.fresh(i64_ty);
         self.emit_assign(
             Place::local(present_disc),
-            Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+            Rvalue::Use(Operand::Const(ConstValue::Int(i128::from(slot)))),
             span,
         );
         self.lower_result_ctor_into(dest, present_disc, mapped, span);
         self.terminate(Terminator::Goto { target: join });
         self.set_current(otherwise);
-        match self.enum_payload_ty(receiver_ty, 1) {
-            // The answer's `Err` is a carrier of its own type around the
-            // receiver's error, built as `Err(e)` is, so it holds a share of
-            // that error beside the receiver's.
-            Some(err_ty) => {
-                let err = self.fresh(err_ty);
+        match self.enum_payload_ty(receiver_ty, usize::from(other)) {
+            // The untouched arm is a carrier of the answer's type around the
+            // receiver's payload, built as `Ok(v)` / `Err(e)` is, so it holds
+            // a share of that payload beside the receiver's.
+            Some(kept_ty) => {
+                let kept = self.fresh(kept_ty);
                 self.emit_assign(
-                    Place::local(err),
+                    Place::local(kept),
                     Rvalue::CallIntrinsic {
                         name: "gos_rt_result_payload",
                         args: vec![Operand::Copy(Place::local(recv))],
                     },
                     span,
                 );
-                let err_disc = self.fresh(i64_ty);
+                let kept_disc = self.fresh(i64_ty);
                 self.emit_assign(
-                    Place::local(err_disc),
-                    Rvalue::Use(Operand::Const(ConstValue::Int(1))),
+                    Place::local(kept_disc),
+                    Rvalue::Use(Operand::Const(ConstValue::Int(i128::from(other)))),
                     span,
                 );
-                self.lower_result_ctor_into(dest, err_disc, err, span);
+                self.lower_result_ctor_into(dest, kept_disc, kept, span);
+            }
+            None => self.emit_assign(
+                Place::local(dest),
+                Rvalue::CallIntrinsic {
+                    name: "gos_rt_result_new",
+                    args: vec![
+                        Operand::Const(ConstValue::Int(1)),
+                        Operand::Const(ConstValue::Int(0)),
+                    ],
+                },
+                span,
+            ),
+        }
+        self.terminate(Terminator::Goto { target: join });
+        self.set_current(join);
+        dest
+    }
+
+    /// The carrier type `carrier.and_then(f)` or `result.or_else(f)` answers
+    /// when every payload it holds is known, which is when the closure can be
+    /// called in this frame.
+    pub(crate) fn resolved_chain_ty(&self, ty: Ty) -> Option<Ty> {
+        use gossamer_types::TyKind;
+        if !self.is_result_or_option_adt(ty) {
+            return None;
+        }
+        let slots = if self.is_option_adt(ty) { 1 } else { 2 };
+        (0..slots)
+            .all(|slot| {
+                self.enum_payload_ty(ty, slot).is_some_and(|payload| {
+                    !matches!(
+                        self.tcx.kind_of(payload),
+                        TyKind::Var(_) | TyKind::Error | TyKind::Never
+                    )
+                })
+            })
+            .then_some(ty)
+    }
+
+    /// Lowers `carrier.and_then(f)` (`slot` 0) or `result.or_else(f)`
+    /// (`slot` 1) as the match it stands for, calling the closure in this
+    /// frame with the payload's own type; its answer is the call's.
+    ///
+    /// The other arm is rebuilt around its own payload in the answer's
+    /// carrier type, and an empty `Option` answers `None`.
+    pub(crate) fn lower_chain_inline(
+        &mut self,
+        recv: Local,
+        closure: Local,
+        receiver_ty: Ty,
+        dest_ty: Ty,
+        slot: u8,
+        span: Span,
+    ) -> Local {
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let other = 1 - slot;
+        let payload_ty = self
+            .enum_payload_ty(receiver_ty, usize::from(slot))
+            .unwrap_or(i64_ty);
+        let dest = self.fresh(dest_ty);
+        let disc = self.fresh(i64_ty);
+        self.emit_assign(
+            Place::local(disc),
+            Rvalue::CallIntrinsic {
+                name: "gos_rt_result_disc",
+                args: vec![Operand::Copy(Place::local(recv))],
+            },
+            span,
+        );
+        let present = self.new_block(span);
+        let otherwise = self.new_block(span);
+        let join = self.new_block(span);
+        self.terminate(Terminator::SwitchInt {
+            discriminant: Operand::Copy(Place::local(disc)),
+            arms: vec![(i128::from(slot), present)],
+            default: otherwise,
+        });
+        self.set_current(present);
+        let payload = self.fresh(payload_ty);
+        self.emit_assign(
+            Place::local(payload),
+            Rvalue::CallIntrinsic {
+                name: "gos_rt_result_payload",
+                args: vec![Operand::Copy(Place::local(recv))],
+            },
+            span,
+        );
+        self.terminate(Terminator::Call {
+            callee: Operand::Copy(Place::local(closure)),
+            args: vec![Operand::Copy(Place::local(payload))],
+            destination: Place::local(dest),
+            target: Some(join),
+        });
+        self.set_current(otherwise);
+        match self.enum_payload_ty(receiver_ty, usize::from(other)) {
+            // The untouched arm is a carrier of the answer's type around the
+            // receiver's payload, built as `Ok(v)` / `Err(e)` is, so it holds
+            // a share of that payload beside the receiver's.
+            Some(kept_ty) => {
+                let kept = self.fresh(kept_ty);
+                self.emit_assign(
+                    Place::local(kept),
+                    Rvalue::CallIntrinsic {
+                        name: "gos_rt_result_payload",
+                        args: vec![Operand::Copy(Place::local(recv))],
+                    },
+                    span,
+                );
+                let kept_disc = self.fresh(i64_ty);
+                self.emit_assign(
+                    Place::local(kept_disc),
+                    Rvalue::Use(Operand::Const(ConstValue::Int(i128::from(other)))),
+                    span,
+                );
+                self.lower_result_ctor_into(dest, kept_disc, kept, span);
             }
             None => self.emit_assign(
                 Place::local(dest),
