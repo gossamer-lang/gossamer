@@ -56,6 +56,13 @@ pub struct InferCtxt {
     /// unresolved `Var` into lowering, which then prints the value's
     /// bit pattern as an integer.
     float_literal: Vec<bool>,
+    /// Per-variable flag for the answer of a call that answers nothing
+    /// (`println(..)`). Such a variable unifies with any type, so a printer
+    /// may still close a callback whose answer is discarded, and falls back
+    /// to `()` via [`Self::default_unresolved_unit_vars`] when nothing
+    /// constrains it - a closure that only prints then answers `()` rather
+    /// than leaking an unresolved `Var` into lowering.
+    unit_default: Vec<bool>,
     /// Direct lookup from `TyVid` index to the interned `Ty` handle
     /// that wraps it. The previous implementation walked the entire
     /// interner on every `walk_var` lookup (an O(N) scan that turned
@@ -73,6 +80,7 @@ impl InferCtxt {
             slots: Vec::new(),
             integer_constrained: Vec::new(),
             float_literal: Vec::new(),
+            unit_default: Vec::new(),
             var_to_ty: Vec::new(),
         }
     }
@@ -96,6 +104,17 @@ impl InferCtxt {
         self.alloc_var(tcx, false, true)
     }
 
+    /// Allocates a fresh inference variable for the answer of a call that
+    /// answers nothing. Defaults to `()` when unconstrained - see the
+    /// `unit_default` field doc.
+    pub fn fresh_unit_default_var(&mut self, tcx: &mut TyCtxt) -> Ty {
+        let ty = self.alloc_var(tcx, false, false);
+        if let Some(flag) = self.unit_default.last_mut() {
+            *flag = true;
+        }
+        ty
+    }
+
     fn alloc_var(
         &mut self,
         tcx: &mut TyCtxt,
@@ -106,6 +125,7 @@ impl InferCtxt {
         self.slots.push(VarSlot::Parent(idx));
         self.integer_constrained.push(integer_constrained);
         self.float_literal.push(float_literal);
+        self.unit_default.push(false);
         let ty = tcx.intern(TyKind::Var(TyVid(idx)));
         // Side-table: O(1) lookup for `walk_var` to avoid a full
         // interner scan on every resolve / unify / occurs.
@@ -158,6 +178,23 @@ impl InferCtxt {
                     .unwrap_or(false)
             {
                 self.slots[root as usize] = VarSlot::Resolved(f64_ty);
+            }
+        }
+    }
+
+    /// Defaults every variable minted by [`Self::fresh_unit_default_var`]
+    /// that is still unresolved to `()`. Called once at the end of
+    /// typechecking, after the numeric defaults, so a class that also holds
+    /// a numeric literal takes that literal's type.
+    pub fn default_unresolved_unit_vars(&mut self, tcx: &mut TyCtxt) {
+        let unit = tcx.unit();
+        for idx in 0..self.slots.len() {
+            if !self.unit_default[idx] {
+                continue;
+            }
+            let root = self.root_of(TyVid(idx as u32));
+            if matches!(self.slots[root as usize], VarSlot::Parent(_)) {
+                self.slots[root as usize] = VarSlot::Resolved(unit);
             }
         }
     }
@@ -434,6 +471,23 @@ impl InferCtxt {
                     self.float_literal[other_root as usize] = true;
                 }
                 _ => return Err(UnifyError::FloatConstraint),
+            }
+        }
+        // A unit-default class merged into another variable keeps its
+        // fallback at the merged root.
+        if self
+            .unit_default
+            .get(root as usize)
+            .copied()
+            .unwrap_or(false)
+        {
+            let resolved = self.resolve(tcx, ty);
+            if let Some(TyKind::Var(other_vid)) = tcx.kind(resolved).cloned() {
+                let other_root = self.root_of(other_vid);
+                if other_root as usize >= self.unit_default.len() {
+                    self.unit_default.resize((other_root as usize) + 1, false);
+                }
+                self.unit_default[other_root as usize] = true;
             }
         }
         self.bind(vid, ty);

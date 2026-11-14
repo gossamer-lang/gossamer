@@ -1114,20 +1114,33 @@ fn native_lowers_chunks_and_tuple_get_method_forms() {
 }
 
 #[test]
-fn result_map_err_free_call_lowers_to_runtime_shim() {
-    // `result::map_err(f, r)` (the piped/free form) must lower to the
-    // `gos_rt_result_map_err` shim instead of an undefined
-    // `@result::map_err` symbol that fails the native link.
+fn result_map_err_free_call_calls_its_closure_in_frame() {
+    // `result::map_err(f, r)` (the piped/free form) calls its closure in the
+    // caller's frame, as the method form does, and never names an undefined
+    // `@result::map_err` symbol the native link would miss.
     let source = "use std::result\n\
                   fn fail() -> Result<i64, String> { Err(\"boom\") }\n\
                   fn main() { let r = fail() |> |v| result::map_err(|e| format(\"p: {e}\"), v)\n\
                   let _ = r }\n";
     let (bodies, _) = build_with_lift(source);
-    let calls_shim = bodies
-        .iter()
-        .flat_map(call_names)
-        .any(|sym| sym == "gos_rt_result_map_err");
-    assert!(calls_shim, "expected a gos_rt_result_map_err call terminator");
+    assert!(
+        bodies
+            .iter()
+            .flat_map(call_names)
+            .all(|sym| !sym.contains("map_err")),
+        "no call names a map_err symbol"
+    );
+    let main = bodies.iter().find(|b| b.name == "main").expect("main body");
+    assert!(
+        main.blocks.iter().any(|b| matches!(
+            &b.terminator,
+            Terminator::Call {
+                callee: Operand::Copy(_),
+                ..
+            }
+        )),
+        "main calls the mapping closure itself"
+    );
 }
 
 // ---------------------------------------------------------------

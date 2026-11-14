@@ -1510,6 +1510,9 @@ impl<'a> Builder<'a> {
                     ));
                 }
                 let dest_ty = self.unwrap_default_dest_ty(ty, args[1].ty, opt);
+                if matches!(self.tcx.kind_of(payload_ty), gossamer_types::TyKind::String) {
+                    return Some(self.lower_string_unwrap_or(opt, fallback, dest_ty, span));
+                }
                 // A carrier payload is boxed, so its helper loads the two words
                 // back and takes the option first.
                 let nested = self.is_result_or_option_adt(dest_ty);
@@ -1580,7 +1583,7 @@ impl<'a> Builder<'a> {
                 let recv_ty = self.locals[recv.0 as usize].ty;
                 let payload_ty = self.enum_payload_ty(recv_ty, 0).unwrap_or(i64_ty);
                 let closure = self.lower_iter_closure(&args[0], &[payload_ty], mapped_ty, span)?;
-                Some(self.lower_map_inline(recv, closure, recv_ty, mapped_ty, ty, span))
+                Some(self.lower_map_inline(recv, closure, recv_ty, mapped_ty, ty, 0, span))
             }
             ("option::map", 2) => {
                 // Lower the option first so the closure's parameter can be
@@ -1637,6 +1640,9 @@ impl<'a> Builder<'a> {
                     ));
                 }
                 let dest_ty = self.unwrap_default_dest_ty(ty, args[1].ty, res_local);
+                if matches!(self.tcx.kind_of(payload_ty), gossamer_types::TyKind::String) {
+                    return Some(self.lower_string_unwrap_or(res_local, fallback, dest_ty, span));
+                }
                 let helper =
                     if matches!(self.tcx.kind_of(dest_ty), gossamer_types::TyKind::Float(_)) {
                         "gos_rt_result_default_f64"
@@ -1709,10 +1715,28 @@ impl<'a> Builder<'a> {
                 self.set_current(next);
                 Some(dest)
             }
-            // `result::map_err(f, res) -> Result<T, F>`. Data-last
-            // pipe: closure first, Result second. Routes through the
-            // same env-first shim the method form uses; Ok passes
-            // through unchanged.
+            // `result::map_err(f, res) -> Result<T, F>` calls the closure in
+            // this frame, as the method form does, once the mapped error's
+            // type is known.
+            ("result::map_err", 2)
+                if self.enum_payload_ty(ty, 1).is_some_and(|mapped| {
+                    !matches!(
+                        self.tcx.kind_of(mapped),
+                        gossamer_types::TyKind::Var(_)
+                            | gossamer_types::TyKind::Error
+                            | gossamer_types::TyKind::Never
+                    )
+                }) =>
+            {
+                let mapped_ty = self.enum_payload_ty(ty, 1)?;
+                let recv = self.lower_expr(&args[1])?;
+                let recv_ty = self.locals[recv.0 as usize].ty;
+                let err_ty = self.enum_payload_ty(recv_ty, 1).unwrap_or(i64_ty);
+                let closure = self.lower_iter_closure(&args[0], &[err_ty], mapped_ty, span)?;
+                Some(self.lower_map_inline(recv, closure, recv_ty, mapped_ty, ty, 1, span))
+            }
+            // `result::map_err(f, res)` whose mapped error is still unknown
+            // routes through the env-first shim; Ok passes through unchanged.
             ("result::map_err", 2) => {
                 let closure_local = self.lower_iter_closure(&args[0], &[i64_ty], i64_ty, span)?;
                 let res_local = self.lower_expr(&args[1])?;
@@ -1779,6 +1803,31 @@ impl<'a> Builder<'a> {
     }
 
     /// Method-form chain combinators on a Result/Option receiver:
+    /// `unwrap_or` over a carrier of `String`: the payload when present, the
+    /// fallback otherwise, through the helper the method form calls, which
+    /// answers a string of the caller's own.
+    fn lower_string_unwrap_or(
+        &mut self,
+        carrier: Local,
+        fallback: Local,
+        dest_ty: Ty,
+        span: Span,
+    ) -> Local {
+        let dest = self.fresh(dest_ty);
+        let next = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("gos_rt_result_unwrap_or_str".to_string())),
+            args: vec![
+                Operand::Copy(Place::local(carrier)),
+                Operand::Copy(Place::local(fallback)),
+            ],
+            destination: Place::local(dest),
+            target: Some(next),
+        });
+        self.set_current(next);
+        dest
+    }
+
     /// `x.and_then(f)` / `or_else(f)` / `filter(p)` / `ok_or_else(f)`.
     /// Mirrors the data-last free forms below: the closure crosses the
     /// C-ABI as the env-blob `lower_iter_closure` builds.
@@ -1844,6 +1893,24 @@ impl<'a> Builder<'a> {
                 dest_ty,
                 span,
             ));
+        }
+        // A float payload reaches the closure of `and_then`, or of a Result's
+        // `or_else`, in an integer register through the runtime helpers, so
+        // that closure runs in this frame instead. The carrier it answers
+        // crosses the helpers whole, so other payloads keep them.
+        let chain_slot: Option<u8> = match (method.name.as_str(), is_option) {
+            ("and_then", _) => Some(0),
+            ("or_else", false) => Some(1),
+            _ => None,
+        };
+        if let Some(slot) = chain_slot
+            && let Some(dest_ty) = self.resolved_chain_ty(ty)
+            && let Some(payload_ty) = self.enum_payload_ty(receiver_ty, usize::from(slot))
+            && matches!(self.tcx.kind_of(payload_ty), TyKind::Float(_))
+        {
+            let recv = self.lower_expr(receiver)?;
+            let closure = self.lower_iter_closure(closure_arg, &[payload_ty], dest_ty, span)?;
+            return Some(self.lower_chain_inline(recv, closure, receiver_ty, dest_ty, slot, span));
         }
         // A float payload reaches a runtime predicate in an integer register,
         // so the predicate runs in this frame instead.

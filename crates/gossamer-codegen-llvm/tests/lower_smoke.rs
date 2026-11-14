@@ -23,7 +23,7 @@ use gossamer_mir::{
     Terminator,
 };
 use gossamer_resolve::DefId;
-use gossamer_types::{IntTy, Substs, TyCtxt, TyKind};
+use gossamer_types::{FloatTy, IntTy, Substs, TyCtxt, TyKind};
 
 fn dummy_span() -> Span {
     let mut map = SourceMap::new();
@@ -318,6 +318,73 @@ fn typed_iterator_main() -> (Body, TyCtxt) {
     (body, tcx)
 }
 
+/// `fn main() -> i64 { eprintln(x, x); 0 }` with `x` an `f64`: every argument
+/// renders into a string of its own before the stderr writer takes the joined
+/// message.
+fn eprintln_floats_main() -> (Body, TyCtxt) {
+    let mut tcx = TyCtxt::new();
+    let i64_ty = tcx.intern(TyKind::Int(IntTy::I64));
+    let f64_ty = tcx.intern(TyKind::Float(FloatTy::F64));
+    let unit_ty = tcx.unit();
+    let span = dummy_span();
+    let local = |ty| LocalDecl {
+        ty,
+        debug_name: None,
+        mutable: false,
+        region: false,
+    };
+    let block = |id, stmts, terminator| BasicBlock {
+        id: BlockId(id),
+        stmts,
+        terminator,
+        span,
+        terminator_span: None,
+        terminator_inlined: None,
+    };
+    let assign = |place: u32, rvalue| Statement {
+        span,
+        kind: StatementKind::Assign {
+            place: Place::local(Local(place)),
+            rvalue,
+        },
+        inlined: None,
+    };
+    let body = Body {
+        name: "main".to_string(),
+        def: None,
+        arity: 0,
+        locals: vec![local(i64_ty), local(f64_ty), local(unit_ty)],
+        blocks: vec![
+            block(
+                0,
+                vec![assign(
+                    1,
+                    Rvalue::Use(Operand::Const(ConstValue::Float(2.5f64.to_bits()))),
+                )],
+                Terminator::Call {
+                    callee: Operand::Const(ConstValue::Str("eprintln".to_string())),
+                    args: vec![
+                        Operand::Copy(Place::local(Local(1))),
+                        Operand::Copy(Place::local(Local(1))),
+                    ],
+                    destination: Place::local(Local(2)),
+                    target: Some(BlockId(1)),
+                },
+            ),
+            block(
+                1,
+                vec![assign(0, Rvalue::Use(Operand::Const(ConstValue::Int(0))))],
+                Terminator::Return,
+            ),
+        ],
+        span,
+        shared_stores: Vec::new(),
+        lent_slots: Vec::new(),
+        address_params: Vec::new(),
+    };
+    (body, tcx)
+}
+
 fn string_len_main(text: &str) -> (Body, TyCtxt) {
     let mut tcx = TyCtxt::new();
     let i64_ty = tcx.intern(TyKind::Int(IntTy::I64));
@@ -595,5 +662,25 @@ fn llvm_renders_typed_iterator_mir_as_lazy_runtime_calls() {
     assert!(
         !ir.contains("typed iterator MIR reached LLVM before iterator lowering"),
         "{ir}"
+    );
+}
+
+#[test]
+fn llvm_eprintln_releases_every_string_it_renders() {
+    let (body, tcx) = eprintln_floats_main();
+    let ir = gossamer_codegen_llvm::render_ir_to_string(&[body], &tcx, false)
+        .expect("eprintln MIR must render to LLVM IR");
+    let calls = |symbol: &str| {
+        let site = format!("@{symbol}(");
+        ir.lines()
+            .filter(|line| line.contains(" call ") && line.contains(&site))
+            .count()
+    };
+    let allocated = calls("gos_rt_f64_to_str") + calls("gos_rt_str_concat");
+    assert_eq!(allocated, 4, "two renderings and two joins: {ir}");
+    assert_eq!(
+        calls("gos_rt_str_free_typed"),
+        allocated,
+        "each rendering, partial join, and the message is released: {ir}"
     );
 }

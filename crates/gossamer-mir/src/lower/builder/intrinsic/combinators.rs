@@ -20,6 +20,37 @@ impl<'a> Builder<'a> {
         let i64_ty = self.tcx.int_ty(IntTy::I64);
         let bool_ty = self.tcx.bool_ty();
         match (joined, args.len()) {
+            // As the method forms do, these call a closure that takes a float
+            // payload in this frame once the answer's carrier type is known.
+            ("result::and_then" | "result::or_else" | "option::and_then", 2)
+                if self.resolved_chain_ty(ty).is_some()
+                    && self
+                        .enum_payload_ty(args[1].ty, usize::from(joined == "result::or_else"))
+                        .is_some_and(|payload| {
+                            matches!(self.tcx.kind_of(payload), TyKind::Float(_))
+                        }) =>
+            {
+                let dest_ty = self.resolved_chain_ty(ty)?;
+                let slot = u8::from(joined == "result::or_else");
+                let recv = self.lower_expr(&args[1])?;
+                let recv_ty = self.locals[recv.0 as usize].ty;
+                let payload_ty = self
+                    .enum_payload_ty(recv_ty, usize::from(slot))
+                    .unwrap_or(i64_ty);
+                let closure = self.lower_iter_closure(&args[0], &[payload_ty], dest_ty, span)?;
+                Some(self.lower_chain_inline(recv, closure, recv_ty, dest_ty, slot, span))
+            }
+            ("option::filter", 2)
+                if self.enum_payload_ty(args[1].ty, 0).is_some_and(|payload| {
+                    matches!(self.tcx.kind_of(payload), TyKind::Float(_))
+                }) =>
+            {
+                let recv = self.lower_expr(&args[1])?;
+                let recv_ty = self.locals[recv.0 as usize].ty;
+                let payload_ty = self.enum_payload_ty(recv_ty, 0).unwrap_or(i64_ty);
+                let closure = self.lower_iter_closure(&args[0], &[payload_ty], bool_ty, span)?;
+                Some(self.lower_filter_inline(recv, closure, recv_ty, span))
+            }
             ("result::and_then" | "result::or_else", 2) => {
                 let out_ty = self.result_i64_error_adt_ty();
                 let closure = self.lower_iter_closure(&args[0], &[i64_ty], out_ty, span)?;
@@ -87,13 +118,24 @@ impl<'a> Builder<'a> {
                 } else {
                     "gos_rt_option_or_else"
                 };
+                // `and_then` answers the closure's carrier, whose payload need
+                // not be the receiver's, so the call's own type is the answer's
+                // when it is known, as for the method form.
+                let dest_ty = if matches!(
+                    self.tcx.kind_of(ty),
+                    TyKind::Var(_) | TyKind::Error | TyKind::Never
+                ) {
+                    out_ty
+                } else {
+                    self.result_repr_ty(ty)
+                };
                 Some(self.emit_combinator_call(
                     helper,
                     vec![
                         Operand::Copy(Place::local(opt)),
                         Operand::Copy(Place::local(closure)),
                     ],
-                    out_ty,
+                    dest_ty,
                     span,
                 ))
             }
