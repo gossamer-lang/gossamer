@@ -1,11 +1,12 @@
 # Changelog
 
-## 0.79.2 - Caches trimmed daily in the background
+## 0.79.2 - Caches cleaned up daily
 
-- Build commands trim the shared caches once a day in the background at idle CPU and disk priority, as Go does, holding them to the `GOS_CACHE_MAX_BYTES`, `GOS_CACHE_MAX_AGE_DAYS`, and per-class limits; the frontend, object, native, and `gos run` caches had grown without bound. Package sources are never trimmed.
-- `GOS_CACHE_TRIM` sets how often that trim runs (`never`, `always`, or an interval such as `12h` or `7d`), and `gos cache --trim` runs it at once.
-- Cache pruning removes the least recently used entries first, keeps every directory a running `gos` still reads, and is no longer blocked forever by a lock file a dead build left behind.
-- `gos cache` lists and prunes the binding runners Gossamer wrote before 0.75, which nothing reported or removed since.
+- Build commands trim the shared caches once a day in the background, at idle priority, keeping them within their size and age limits.
+- `GOS_CACHE_TRIM` sets how often the trim runs (`never`, `always`, `12h`, `7d`), and `gos cache --trim` runs it right away.
+- Pruning removes the least recently used entries first and never deletes anything a running `gos` is using.
+- A lock file left by a crashed build no longer keeps its directory in the cache forever.
+- `gos cache` finds and removes binding runners left by versions before 0.75.
 
 ## 0.79.1 - Cross-file editor navigation, integer and float literals kept apart, MCP native runs
 
