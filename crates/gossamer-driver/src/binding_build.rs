@@ -322,7 +322,7 @@ strip = false
     /// (`.a` on Unix / Windows-GNU, `.lib` on Windows MSVC) with the native
     /// libraries a link that takes it must also name.
     pub fn ensure_built(&self) -> Result<StaticBindingsArchive, BindingBuildError> {
-        fs::create_dir_all(&self.workdir)?;
+        crate::cache_maintenance::hold_in_use(&self.workdir)?;
         let crates: Vec<&str> = self
             .bindings
             .iter()
@@ -401,7 +401,6 @@ strip = false
                 root,
                 crate::cache_maintenance::CachePolicy::default(),
                 false,
-                Some(&self.workdir),
             );
         }
         Ok(StaticBindingsArchive {
@@ -801,7 +800,7 @@ fn holds_records(sources: &Path, records: &[(PathBuf, Vec<u8>)]) -> bool {
 /// Takes the lock at `path` shared, waiting while it is held alone. As with
 /// [`AdvisoryLock`], a file removed from the path while this waited is
 /// opened afresh.
-fn lock_shared(path: &Path) -> io::Result<fs::File> {
+pub(crate) fn lock_shared(path: &Path) -> io::Result<fs::File> {
     loop {
         let file = open_lock_file(path)?;
         file.lock_shared()?;

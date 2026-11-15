@@ -339,6 +339,92 @@ fn cache_status_uses_human_readable_sizes_by_default() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// `gos cache --trim` enforces the retention policy on the shared roots at
+/// once and leaves package sources alone; the background trim build commands
+/// start (`--if-due`) runs only on the `GOS_CACHE_TRIM` schedule.
+#[test]
+fn cache_trim_prunes_expired_shared_entries_now_or_on_schedule() {
+    let root = env::temp_dir().join(format!(
+        "gossamer-cache-trim-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let home = root.join("home");
+    let local_app_data = root.join("localappdata");
+    let user_cache = if cfg!(windows) {
+        local_app_data.join("gossamer")
+    } else {
+        home.join(".cache").join("gossamer")
+    };
+    let ir = user_cache.join("ir-cache");
+    let packages = root.join("packages");
+    std::fs::create_dir_all(&ir).expect("create ir cache");
+    std::fs::create_dir_all(&packages).expect("create package cache");
+    let long_ago = std::time::SystemTime::now() - std::time::Duration::from_hours(40 * 24);
+    let write_aged = |path: &std::path::Path| {
+        std::fs::write(path, b"cache").expect("write cache entry");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|file| file.set_modified(long_ago))
+            .expect("age cache entry");
+    };
+    write_aged(&ir.join("old.o"));
+    write_aged(&packages.join("lib.gos"));
+    std::fs::write(ir.join("new.o"), b"cache").expect("write cache entry");
+
+    let trim = |args: &[&str], schedule: Option<&str>| {
+        let mut command = Command::new(gos_bin());
+        command
+            .arg("cache")
+            .args(args)
+            .current_dir(&root)
+            .env("HOME", &home)
+            .env("LOCALAPPDATA", &local_app_data)
+            .env("GOS_CACHE_DIR", &packages)
+            .env_remove("XDG_CACHE_HOME")
+            .env_remove("GOSSAMER_CACHE")
+            .env_remove("GOSSAMER_CACHE_DIR")
+            .env_remove("GOS_NO_CACHE")
+            .env_remove("GOS_CACHE_TRIM");
+        if let Some(schedule) = schedule {
+            command.env("GOS_CACHE_TRIM", schedule);
+        }
+        let out = command.output().expect("spawn cache --trim");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let stdout = trim(&["--trim", "--if-due"], Some("never"));
+    assert!(stdout.contains("not due"), "{stdout}");
+    assert!(ir.join("old.o").exists(), "a trim scheduled never ran");
+
+    let stdout = trim(&["--trim"], Some("never"));
+    assert!(stdout.contains("cache trim (global): reclaimed"), "{stdout}");
+    assert!(!ir.join("old.o").exists(), "an expired object remains");
+    assert!(ir.join("new.o").exists(), "a fresh object was trimmed");
+    assert!(packages.join("lib.gos").exists(), "a package source was trimmed");
+    assert!(user_cache.join("trim.txt").is_file(), "the trim left no stamp");
+
+    write_aged(&ir.join("old.o"));
+    trim(&["--trim", "--if-due"], None);
+    assert!(ir.join("old.o").exists(), "a scheduled trim ran twice in a day");
+    trim(&["--trim", "--if-due"], Some("always"));
+    assert!(!ir.join("old.o").exists(), "`always` did not trim");
+
+    write_aged(&ir.join("old.o"));
+    trim(&["--trim"], None);
+    assert!(!ir.join("old.o").exists(), "a trim asked for did not run");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn cache_clear_removes_every_known_cache_class() {
     let root = env::temp_dir().join(format!(

@@ -1,7 +1,7 @@
 //! Cache inspection and retention commands.
 
 use anyhow::Result;
-use gossamer_driver::cache_maintenance::{self, CacheClass, CachePolicy, CacheScope};
+use gossamer_driver::cache_maintenance::{self, CacheClass, CachePolicy, CacheScope, TrimSchedule};
 
 pub(crate) fn status(paths_only: bool, scope: CacheScope) -> Result<()> {
     let cwd = std::env::current_dir()?;
@@ -44,6 +44,58 @@ pub(crate) fn prune(scope: CacheScope, dry_run: bool) -> Result<()> {
         policy.max_age.as_secs() / 86_400
     );
     Ok(())
+}
+
+/// Trims the shared cache roots to the retention policy: now, or with
+/// `if_due` only when `GOS_CACHE_TRIM` says a trim is due.
+pub(crate) fn trim(if_due: bool) -> Result<()> {
+    // The scheduled trim is housekeeping no one waits on, so it yields the
+    // CPU and the disk to everything else; one asked for runs as usual.
+    if if_due {
+        gossamer_runtime::safe_priority::enter_background_priority();
+    }
+    let policy = CachePolicy::default();
+    let schedule = TrimSchedule::from_env().unwrap_or_else(|(schedule, _)| schedule);
+    let due = if_due.then_some(schedule);
+    match cache_maintenance::trim(policy, due)? {
+        Some((bytes, files)) => outln!(
+            "cache trim (global): reclaimed {} from {files} files (cap={}, max-age={} days)",
+            human_bytes(bytes),
+            human_bytes(policy.max_bytes),
+            policy.max_age.as_secs() / 86_400
+        ),
+        None if if_due => outln!("cache trim (global): not due"),
+        None => outln!("cache trim (global): another `gos` is trimming the cache"),
+    }
+    Ok(())
+}
+
+/// Starts `gos cache --trim --if-due` in the background when the shared roots
+/// are due the trim `GOS_CACHE_TRIM` schedules (daily by default), as Go
+/// trims its build cache: the command that notices does not wait on it, and
+/// a build running beside it keeps every directory it holds in use.
+pub(crate) fn start_trim_if_due() {
+    let schedule = TrimSchedule::from_env().unwrap_or_else(|(schedule, problem)| {
+        eprintln!("gos: {problem}");
+        schedule
+    });
+    if !cache_maintenance::trim_due(schedule) {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut command = std::process::Command::new(exe);
+    command
+        .args(["cache", "--trim", "--if-due"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    crate::cmd::native_run::detach(&mut command);
+    if let Ok(mut child) = gossamer_runtime::safe_spawn::spawn_apart(&mut command) {
+        // Reaps the trim if this process outlives it.
+        std::thread::spawn(move || child.wait());
+    }
 }
 
 /// Removes every cache class known to the toolchain within `scope`, without

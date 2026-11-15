@@ -4061,8 +4061,15 @@ every project and keyed by the IR each was compiled from; the builds
 `run/` for a file outside any project. These cache
 locations are performance details and may be removed with `gos clean`. Use
 `gos cache` to inspect every active root and `gos cache --prune` to remove
-entries older than 30 days or beyond the `GOS_CACHE_MAX_BYTES` total budget
-(20 GiB by default). Objects compiled from `[native]` sources live under
+entries unused for 30 days (`GOS_CACHE_MAX_AGE_DAYS`) or beyond the
+`GOS_CACHE_MAX_BYTES` total budget (20 GiB by default) and the per-class
+`GOS_CACHE_<CLASS>_MAX_BYTES` caps, least recently used first. Build commands
+apply the same policy to the shared roots on their own, in the background at
+idle CPU and disk priority and at most once a day, recording the last trim in the user cache's `trim.txt`;
+`GOS_CACHE_TRIM` sets how often (`never`, `always`, or an interval such as
+`30m`, `12h`, or `7d`), and `gos cache --trim` trims at once. A trim leaves
+package sources to `gos clean`. Neither a trim nor a prune removes a
+directory a running `gos` builds in or reads from. Objects compiled from `[native]` sources live under
 `.gos-cache/native/`, and `gos clean --native` removes only those.
 `gos clean --all` also clears Rust-binding builds (`--bindings` alone),
 package sources, and legacy build artifacts.

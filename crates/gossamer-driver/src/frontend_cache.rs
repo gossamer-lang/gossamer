@@ -353,9 +353,12 @@ pub fn load_blob_in<T: serde::de::DeserializeOwned>(
     root: &Path,
     key: &FrontendCacheKey,
 ) -> Option<T> {
-    let bytes = read_capped(&blob_path(root, key), BLOB_MAGIC.len() + MAX_BLOB_BYTES)?;
+    let path = blob_path(root, key);
+    let bytes = read_capped(&path, BLOB_MAGIC.len() + MAX_BLOB_BYTES)?;
     let payload = bytes.strip_prefix(BLOB_MAGIC)?;
-    postcard::from_bytes(payload).ok()
+    let value = postcard::from_bytes(payload).ok()?;
+    crate::cache_maintenance::mark_used(&path);
+    Some(value)
 }
 
 /// Writes `bytes` directly to the cache file for `key` without any
@@ -385,7 +388,11 @@ pub fn raw_blob_path(key: &FrontendCacheKey) -> Option<PathBuf> {
 #[must_use]
 pub fn raw_blob_path_in(root: &Path, key: &FrontendCacheKey) -> Option<PathBuf> {
     let p = blob_path(root, key);
-    if p.is_file() { Some(p) } else { None }
+    if !p.is_file() {
+        return None;
+    }
+    crate::cache_maintenance::mark_used(&p);
+    Some(p)
 }
 
 fn blob_path(dir: &Path, key: &FrontendCacheKey) -> PathBuf {

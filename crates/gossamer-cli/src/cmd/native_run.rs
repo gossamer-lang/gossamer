@@ -43,6 +43,9 @@ pub(crate) fn run(
     forwarded: &[String],
 ) -> Result<NotNative> {
     let dir = build_dir(entry);
+    // Held until the program starts: on Unix it replaces this process, which
+    // releases the hold, and elsewhere it runs from the executable here.
+    gossamer_driver::cache_maintenance::hold_in_use(&dir)?;
     let Some(release) = crate::cmd::build::run_artifact(entry, source, &dir, true)? else {
         return Ok(NotNative::Library);
     };
@@ -171,7 +174,7 @@ fn exec(mut command: Command, _label: &str) -> std::io::Error {
 /// inputs already failed to build or a build already holds the lock; the
 /// build lowers its own priority.
 fn build_in_background(entry: &Path, dir: &Path, key: &str) {
-    let lock_path = dir.join("build.lock");
+    let lock_path = dir.join(gossamer_driver::cache_maintenance::RUN_BUILD_LOCK);
     if std::fs::read_to_string(failed_build_record(&lock_path)).is_ok_and(|failed| failed == key) {
         return;
     }
@@ -231,7 +234,7 @@ fn hand_over_lock(command: &mut Command, lock: std::fs::File) {
 /// Puts the build in a process group of its own, so an interrupt sent to the
 /// program leaves the build running.
 #[cfg(unix)]
-fn detach(command: &mut Command) {
+pub(crate) fn detach(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     command.process_group(0);
 }
@@ -239,7 +242,7 @@ fn detach(command: &mut Command) {
 /// Starts the build with no console of its own, in a process group of its
 /// own.
 #[cfg(windows)]
-fn detach(command: &mut Command) {
+pub(crate) fn detach(command: &mut Command) {
     use std::os::windows::process::CommandExt;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -248,4 +251,4 @@ fn detach(command: &mut Command) {
 
 /// Other targets start the build as it is.
 #[cfg(not(any(unix, windows)))]
-fn detach(_command: &mut Command) {}
+pub(crate) fn detach(_command: &mut Command) {}

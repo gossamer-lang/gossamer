@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.79.2 - Caches cleaned up daily
+
+- Build commands trim the shared caches once a day in the background, at idle priority, keeping them within their size and age limits.
+- `GOS_CACHE_TRIM` sets how often the trim runs (`never`, `always`, `12h`, `7d`), and `gos cache --trim` runs it right away.
+- Pruning removes the least recently used entries first and never deletes anything a running `gos` is using.
+- A lock file left by a crashed build no longer keeps its directory in the cache forever.
+- `gos cache` finds and removes binding runners left by versions before 0.75.
+
 ## 0.79.1 - Cross-file editor navigation, integer and float literals kept apart, MCP native runs
 
 - A feature that reaches a dependency not on disk, or pinned in `project.lock` to another source, reports that dependency and how to fetch it, instead of saying the feature names no dependency.

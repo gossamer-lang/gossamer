@@ -133,13 +133,7 @@ pub(crate) fn install(
             linkage.name(),
             build_key(&source, spec, linkage, target)
         ));
-    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    // Builds sharing this directory, from parallel `gos` processes, take
-    // turns: CMake and its generators do not share a build tree.
-    let lock = fs::File::create(dir.join("lock"))
-        .with_context(|| format!("creating {}", dir.join("lock").display()))?;
-    lock.lock()
-        .with_context(|| format!("locking {}", dir.display()))?;
+    let _lock = lock_build_dir(&dir)?;
     let build = dir.join("build");
     let prefix = dir.join("prefix");
     if !build.join("CMakeCache.txt").is_file() {
@@ -206,6 +200,20 @@ pub(crate) fn install(
             })
         }
     }
+}
+
+/// Holds the build directory `dir` in use for the rest of this process, as
+/// the build links what it installs there after the build ends, and answers
+/// its build lock: builds sharing the directory, from parallel `gos`
+/// processes, take turns, as `cmake` and its generators do not share a tree.
+fn lock_build_dir(dir: &Path) -> Result<fs::File> {
+    gossamer_driver::cache_maintenance::hold_in_use(dir)
+        .with_context(|| format!("holding {}", dir.display()))?;
+    let path = dir.join(gossamer_driver::cache_maintenance::NATIVE_BUILD_LOCK);
+    let lock = fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
+    lock.lock()
+        .with_context(|| format!("locking {}", dir.display()))?;
+    Ok(lock)
 }
 
 /// The cache entries every configuration passes, then the package's own.
