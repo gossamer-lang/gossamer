@@ -157,10 +157,10 @@ fn repl_reports_mixed_numeric_types_without_vm_register_details() {
     assert!(out.success, "repl should exit zero; stderr: {}", out.stderr);
     assert!(
         out.stderr
-            .contains("incompatible types: `i64` (`9`) and `f64` (`9.0`)")
+            .contains("mismatched numeric types: `i64` (`9`) and `f64` (`9.0`)")
             && out
                 .stderr
-                .contains("incompatible types: `f64` (`9.0`) and `i64` (`9`)"),
+                .contains("mismatched numeric types: `f64` (`9.0`) and `i64` (`9`)"),
         "both operand orders should preserve the source expressions and order; stderr: {}",
         out.stderr
     );
@@ -270,10 +270,10 @@ fn repl_reports_the_computed_operand_in_chained_numeric_mismatches() {
     assert!(out.success, "repl should exit zero; stderr: {}", out.stderr);
     assert!(
         out.stderr
-            .contains("incompatible types: `f64` (`0.38 * 40.0`) and `i64` (`50`)")
+            .contains("mismatched numeric types: `f64` (`0.38 * 40.0`) and `i64` (`50`)")
             && out
                 .stderr
-                .contains("incompatible types: `f64` (`0.48 * 40.0`) and `i64` (`40`)"),
+                .contains("mismatched numeric types: `f64` (`0.48 * 40.0`) and `i64` (`40`)"),
         "chained numeric errors must identify the source expressions involved: stderr={}",
         out.stderr
     );

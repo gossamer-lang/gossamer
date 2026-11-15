@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.79.1 - Cross-file editor navigation, integer and float literals kept apart, MCP native runs
+
+- A feature that reaches a dependency not on disk, or pinned in `project.lock` to another source, reports that dependency and how to fetch it, instead of saying the feature names no dependency.
+- An integer literal and a float literal that must share a type are a GT0001 mismatch (`#[1, 2.5]`, `if c { 1 } else { 2.5 }`); the VM had failed at run time and native builds truncated the float.
+- An integer meeting a float at an operator names both operands and the fix (`write 9.0 * 9.0`), keeping a grouped operand's parentheses.
+- Go-to-definition in `gos lsp` reaches an item declared in another file of the package, and lands on its name rather than its keyword, as workspace symbols and the outline now do too.
+- Hover on an imported function shows its signature and doc comment instead of "imported name".
+- `gos lsp` sends percent-encoded `file://` URIs and reads Windows drive URIs, so a workspace under a path with spaces is indexed once and its references are listed once.
+- Workspace files the editor has not opened follow the disk: closing a buffer returns the file to its saved text, and the server asks the client to watch `*.gos` and `project.toml`.
+- `gos lsp` syncs text incrementally, clamping a change that names a position past a line's end or the last line, as LSP specifies.
+- The MCP `execute` tool runs the native tier with `native: true`, and a tool's timeout ends every process the call started.
+- The MCP navigation tools see every file of the package and edits made on disk between calls.
+- MCP `initialize` answers a protocol revision the server implements, and array arguments declare their item type.
+- The skill card lists the MCP `fix` and `audit` tools, says how whole floats and `Stack`-like collections print, and its cheat sheet imports nothing it leaves unused.
+
 ## 0.79.0 - Threads start as goroutines call for them, idle programs sleep, struct values from map loops, range methods and printer callbacks compiled
 
 - Scheduler workers start as goroutines call for them, as Go's do: one at start, and another when a goroutine is placed while every started worker already has one, up to one per core (or `runtime::set_max_procs`). An idle daemon on a 24-core machine runs 7 threads instead of 29; a program with work for every core still gets a worker per core.

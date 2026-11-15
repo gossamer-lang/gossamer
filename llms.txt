@@ -12,4 +12,4 @@ Gossamer is a Rust-flavoured language with goroutines and deterministic memory m
 
 ## Tooling
 
-Use `gos check FILE` before `gos run FILE`; validate compiled behavior with `gos build FILE`. For agent integration, run `gos mcp` over stdio, then use its `check`, `execute`, `build`, `doc`, `explain`, and semantic-navigation tools.
+Use `gos check FILE` before `gos run FILE`; validate compiled behavior with `gos run --native FILE`. For agent integration, run `gos mcp` over stdio, then use its `check`, `execute`, `build`, `doc`, `explain`, and semantic-navigation tools.

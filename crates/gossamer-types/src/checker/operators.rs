@@ -5,8 +5,8 @@ use super::{
     HashSet, INT_SUFFIXES, IntTy, Literal, MatchArm, Mutbl, NodeId, Pattern, PatternKind, PlaceMut,
     Resolution, Span, TryFamily, Ty, TyKind, TypeChecker, TypeDiagnostic, TypeError, UnaryOp,
     arith_op_method, assign_op_method, branch_value_span, callee_display_name, cast_allowed,
-    combinator_module_name, expr_display, is_iterator_method, is_plainly_not_callable,
-    op_trait_name, operand_display, pipe_step_operation_name,
+    combinator_module_name, expr_display, grouped_display, is_iterator_method,
+    is_plainly_not_callable, op_trait_name, operand_display, pipe_step_operation_name,
 };
 
 impl TypeChecker<'_> {
@@ -1075,7 +1075,7 @@ impl TypeChecker<'_> {
                     operand_ty,
                     "-",
                     false,
-                    expr_display(operand),
+                    grouped_display(operand),
                     span,
                 ));
             }
@@ -1757,8 +1757,9 @@ impl TypeChecker<'_> {
     }
 
     /// The GT0001 diagnostic for an integer operand paired with a float
-    /// one, spelling the whole expression with the cast in place. `None`
-    /// for every other operand pairing.
+    /// one, spelling the whole expression with the fix in place. An
+    /// unsuffixed literal still being inferred counts as the type it
+    /// defaults to. `None` for every other operand pairing.
     pub(super) fn numeric_operand_mismatch(
         &mut self,
         op: BinaryOp,
@@ -1769,32 +1770,62 @@ impl TypeChecker<'_> {
     ) -> Option<TypeError> {
         let left = self.infer.resolve(self.tcx, lhs_ty);
         let right = self.infer.resolve(self.tcx, rhs_ty);
-        let (left_kind, right_kind) = (self.tcx.kind(left)?.clone(), self.tcx.kind(right)?.clone());
-        let expected = self.render_public_ty(left);
-        let found = self.render_public_ty(right);
+        let binary = op;
         let op = op.as_str();
+        if let (Some(TyKind::Int(left_int)), Some(TyKind::Int(right_int))) =
+            (self.tcx.kind(left).cloned(), self.tcx.kind(right).cloned())
+            && left_int != right_int
+        {
+            return Some(integer_operand_mismatch(
+                binary,
+                (lhs, left_int),
+                (rhs, right_int),
+            ));
+        }
+        let (left_class, expected) = self.numeric_class(left)?;
+        let (right_class, found) = self.numeric_class(right)?;
         let (left_text, right_text) = (operand_display(lhs), operand_display(rhs));
-        let cast = match (left_kind, right_kind) {
-            (TyKind::Int(left_int), TyKind::Int(right_int)) if left_int != right_int => {
-                return Some(integer_operand_mismatch(
-                    op,
-                    (lhs, left_int),
-                    (rhs, right_int),
-                ));
-            }
-            (TyKind::Int(_), TyKind::Float(_)) => {
-                format!("{left_text} as {found} {op} {right_text}")
-            }
-            (TyKind::Float(_), TyKind::Int(_)) => {
-                format!("{left_text} {op} {right_text} as {expected}")
-            }
+        let placeholder = || "<expr>".to_string();
+        let left_operand = super::operand_of(binary, lhs, false).unwrap_or_else(placeholder);
+        let right_operand = super::operand_of(binary, rhs, true).unwrap_or_else(placeholder);
+        let fix = match (left_class, right_class) {
+            (NumericClass::Int, NumericClass::Float) => format!(
+                "{} {op} {right_operand}",
+                as_float_operand(lhs, &left_text, &found)
+            ),
+            (NumericClass::Float, NumericClass::Int) => format!(
+                "{left_operand} {op} {}",
+                as_float_operand(rhs, &right_text, &expected)
+            ),
             _ => return None,
         };
         Some(TypeError::NumericOperandMismatch {
+            op: op.to_string(),
             expected,
             found,
-            cast,
+            operands: Box::new(crate::error::NumericOperands {
+                left: left_text,
+                right: right_text,
+                fix,
+            }),
         })
+    }
+
+    /// Whether `ty` (already resolved) is an integer or a float, and its
+    /// spelling; an unsuffixed literal still being inferred is the type it
+    /// defaults to.
+    fn numeric_class(&mut self, ty: Ty) -> Option<(NumericClass, String)> {
+        match self.tcx.kind(ty).cloned()? {
+            TyKind::Int(_) => Some((NumericClass::Int, self.render_public_ty(ty))),
+            TyKind::Float(_) => Some((NumericClass::Float, self.render_public_ty(ty))),
+            TyKind::Var(vid) if self.infer.is_unresolved_integer_var(vid) => {
+                Some((NumericClass::Int, "i64".to_string()))
+            }
+            TyKind::Var(vid) if self.infer.is_unresolved_float_var(vid) => {
+                Some((NumericClass::Float, "f64".to_string()))
+            }
+            _ => None,
+        }
     }
 
     /// Type-checks a pipe RHS closure with its parameter shaped by the value
@@ -3407,25 +3438,51 @@ fn with_insertions(text: &str, (before, after): &(String, String)) -> String {
     format!("{before}{text}{after}")
 }
 
+/// Whether a numeric operand is an integer or a float.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NumericClass {
+    Int,
+    Float,
+}
+
+/// The integer operand `expr`, spelled `text`, as a `float` operand: an
+/// unsuffixed literal written as a float literal (`9` -> `9.0`), anything
+/// else cast.
+fn as_float_operand(expr: &Expr, text: &str, float: &str) -> String {
+    match &expr.kind {
+        ExprKind::Literal(Literal::Int(digits))
+            if digits
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'_') =>
+        {
+            format!("{digits}.0")
+        }
+        // `as` binds tighter than every binary operator.
+        ExprKind::Binary { .. } => format!("({text}) as {float}"),
+        _ => format!("{text} as {float}"),
+    }
+}
+
 /// The GT0001 diagnostic for two integer operands of different types, with
 /// the casts to the type that holds every value of both.
 pub(super) fn integer_operand_mismatch(
-    op: &str,
+    binary: BinaryOp,
     (lhs, left): (&Expr, IntTy),
     (rhs, right): (&Expr, IntTy),
 ) -> TypeError {
+    let op = binary.as_str();
     let target = int_target(left, right);
     let mut casts = Vec::new();
     let mut rendered = Vec::new();
-    for (operand, ty) in [(lhs, left), (rhs, right)] {
-        let text = expr_display(operand);
+    for (operand, ty, right_side) in [(lhs, left, false), (rhs, right, true)] {
         match target {
             Some(target) if target != ty => {
                 let insertions = cast_insertions(operand, target);
+                let text = expr_display(operand);
                 rendered.push(text.map(|text| with_insertions(&text, &insertions)));
                 casts.push((operand.span, insertions.0, insertions.1));
             }
-            _ => rendered.push(text),
+            _ => rendered.push(super::operand_of(binary, operand, right_side)),
         }
     }
     let rewritten = match (&rendered[0], &rendered[1]) {

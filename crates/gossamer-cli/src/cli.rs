@@ -678,9 +678,10 @@ enum Command {
     /// to be invoked by an editor, not a human.
     Lsp,
     /// Start the model-context-protocol server on stdio. Exposes the
-    /// toolchain (check / explain / execute / build / test / fmt / doc)
-    /// and semantic navigation as MCP tools for AI coding agents;
-    /// intended to be launched by an MCP client, not a human.
+    /// toolchain (check / explain / execute / build / test / fmt / doc /
+    /// lint / fix / audit / `feature_status`) and semantic navigation as MCP
+    /// tools for AI coding agents; intended to be launched by an MCP
+    /// client, not a human.
     Mcp,
     /// Print toolchain environment for diagnosing install issues.
     ///

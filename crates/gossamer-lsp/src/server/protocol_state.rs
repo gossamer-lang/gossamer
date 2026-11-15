@@ -5,17 +5,17 @@
 //
 // - lifecycle: `initialize`, `initialized`, `shutdown`, `exit`
 // - sync: `textDocument/didOpen`, `didChange`, `didClose`,
-//   `publishDiagnostics`
+//   `publishDiagnostics`, `workspace/didChangeWatchedFiles`
 // - navigation: `hover`, `definition`, `typeDefinition`,
 //   `references`, `documentHighlight`, `prepareRename`, `rename`
 // - completion + signature help: `completion`, `signatureHelp`
 // - structure: `documentSymbol`, `workspace/symbol`,
 //   `foldingRange`
 // - decoration: `inlayHint`, `semanticTokens/full`
-// - formatting: `formatting`
+// - formatting and fixes: `formatting`, `codeAction`
 
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::rc::Rc;
 
@@ -59,6 +59,9 @@ fn run<R: Read, W: Write>(reader: R, writer: W) -> std::io::Result<()> {
     // arrived is read before the next one is handled, so a cancellation
     // reaches the request it names while that request is still waiting.
     let mut queued: VecDeque<Value> = VecDeque::new();
+    // Whether the client accepts a file-watcher registration, which keeps
+    // the workspace files it does not hold open in line with the disk.
+    let mut watch_files = false;
 
     loop {
         if queued.is_empty() {
@@ -97,24 +100,37 @@ fn run<R: Read, W: Write>(reader: R, writer: W) -> std::io::Result<()> {
 
         match method {
             "initialize" => {
+                watch_files = client_registers_file_watchers(&params);
                 state.discover_workspace_roots(&params);
                 transport.write_message(&response_ok(id, initialize_result()))?;
             }
-            "initialized" => {}
+            "initialized" => {
+                if watch_files {
+                    transport.write_message(&watched_files_registration())?;
+                }
+            }
             "textDocument/didOpen" => {
                 if let Some((uri, text)) = extract_did_open(&params) {
-                    for affected in state.update(&uri, &text) {
-                        for notif in state.publish_diagnostics(&affected) {
-                            transport.write_message(&notif)?;
-                        }
-                    }
+                    let affected = state.open_document(&uri, &text);
+                    publish_all(&state, &affected, &mut transport)?;
                 }
             }
             "textDocument/didClose" => {
                 if let Some(uri) = field_str(field(&params, "textDocument"), "uri") {
-                    state.close(uri);
-                    transport.write_message(&empty_diagnostics_notification(uri))?;
+                    let affected = state.close(uri);
+                    if !state.documents.contains_key(uri) {
+                        transport.write_message(&empty_diagnostics_notification(uri))?;
+                    }
+                    publish_all(&state, &affected, &mut transport)?;
                 }
+            }
+            "workspace/didChangeWatchedFiles" => {
+                let known: HashSet<String> = state.documents.keys().cloned().collect();
+                let affected = state.watched_files_changed(&params);
+                for gone in known.iter().filter(|uri| !state.documents.contains_key(*uri)) {
+                    transport.write_message(&empty_diagnostics_notification(gone))?;
+                }
+                publish_all(&state, &affected, &mut transport)?;
             }
             "textDocument/hover" => {
                 let result = state.hover(&params);
@@ -193,6 +209,72 @@ fn run<R: Read, W: Write>(reader: R, writer: W) -> std::io::Result<()> {
     }
 }
 
+/// Publishes the diagnostics of every document in `uris`.
+fn publish_all<R: Read, W: Write>(
+    state: &ServerState,
+    uris: &[String],
+    transport: &mut Transport<BufReader<R>, BufWriter<W>>,
+) -> std::io::Result<()> {
+    for uri in uris {
+        for notif in state.publish_diagnostics(uri) {
+            transport.write_message(&notif)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether the `initialize` params say the client registers file
+/// watchers on the server's request.
+fn client_registers_file_watchers(params: &Value) -> bool {
+    let watched = field(
+        field(field(params, "capabilities"), "workspace"),
+        "didChangeWatchedFiles",
+    );
+    matches!(field(watched, "dynamicRegistration"), Value::Bool(true))
+}
+
+/// The `client/registerCapability` request asking the client to report
+/// changes to Gossamer sources and manifests.
+fn watched_files_registration() -> Value {
+    let watcher = |glob: &str| {
+        let mut entry = BTreeMap::new();
+        entry.insert("globPattern".to_string(), Value::String(glob.to_string()));
+        Value::Object(entry)
+    };
+    let mut options = BTreeMap::new();
+    options.insert(
+        "watchers".to_string(),
+        Value::Array(vec![watcher("**/*.gos"), watcher("**/project.toml")]),
+    );
+    let mut registration = BTreeMap::new();
+    registration.insert(
+        "id".to_string(),
+        Value::String("gossamer-watched-files".to_string()),
+    );
+    registration.insert(
+        "method".to_string(),
+        Value::String("workspace/didChangeWatchedFiles".to_string()),
+    );
+    registration.insert("registerOptions".to_string(), Value::Object(options));
+    let mut params = BTreeMap::new();
+    params.insert(
+        "registrations".to_string(),
+        Value::Array(vec![Value::Object(registration)]),
+    );
+    let mut request = BTreeMap::new();
+    request.insert("jsonrpc".to_string(), Value::String("2.0".to_string()));
+    request.insert(
+        "id".to_string(),
+        Value::String("gossamer-register-watchers".to_string()),
+    );
+    request.insert(
+        "method".to_string(),
+        Value::String("client/registerCapability".to_string()),
+    );
+    request.insert("params".to_string(), Value::Object(params));
+    Value::Object(request)
+}
+
 /// Convenience wrapper that runs the server over the process's
 /// stdio streams.
 pub fn run_stdio() -> std::io::Result<()> {
@@ -203,7 +285,8 @@ fn initialize_result() -> Value {
     let mut caps = BTreeMap::new();
     let mut sync = BTreeMap::new();
     sync.insert("openClose".to_string(), Value::Bool(true));
-    sync.insert("change".to_string(), Value::Number(1.0));
+    // Incremental: each change names the range it replaces.
+    sync.insert("change".to_string(), Value::Number(2.0));
     caps.insert("textDocumentSync".to_string(), Value::Object(sync));
     caps.insert("hoverProvider".to_string(), Value::Bool(true));
     caps.insert("definitionProvider".to_string(), Value::Bool(true));
@@ -294,33 +377,6 @@ fn semantic_tokens_capability() -> Value {
     Value::Object(cap)
 }
 
-/// Converts a `file://...` URI into a filesystem path. Returns
-/// `None` for non-`file://` schemes (e.g. `inmemory://`) and for
-/// URIs that don't decode cleanly.
-fn file_uri_to_path(uri: &str) -> Option<String> {
-    let rest = uri.strip_prefix("file://")?;
-    let bytes = rest.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0usize;
-    while index < bytes.len() {
-        if bytes[index] != b'%' {
-            decoded.push(bytes[index]);
-            index += 1;
-            continue;
-        }
-        let hex = bytes.get(index + 1..index + 3)?;
-        let high = (hex[0] as char).to_digit(16)?;
-        let low = (hex[1] as char).to_digit(16)?;
-        let byte = u8::try_from((high << 4) | low).ok()?;
-        if byte == 0 {
-            return None;
-        }
-        decoded.push(byte);
-        index += 3;
-    }
-    String::from_utf8(decoded).ok()
-}
-
 fn extract_did_open(params: &Value) -> Option<(String, String)> {
     let doc = field(params, "textDocument");
     let uri = field_str(doc, "uri")?.to_string();
@@ -328,6 +384,10 @@ fn extract_did_open(params: &Value) -> Option<(String, String)> {
     Some((uri, text))
 }
 
+/// The byte range an LSP `Range` names in `source`, with each end clamped
+/// as the protocol asks: a line past the last is the end of the text, a
+/// character past its line's end is that end. `None` when the range is
+/// missing a line or runs backwards.
 fn text_range_to_offsets(source: &str, range: &Value) -> Option<(usize, usize)> {
     let start = field(range, "start");
     let end = field(range, "end");
@@ -335,20 +395,24 @@ fn text_range_to_offsets(source: &str, range: &Value) -> Option<(usize, usize)> 
         source,
         field_u32(start, "line")?,
         field_u32(start, "character").unwrap_or(0),
-    )?;
+    );
     let end = text_position_to_offset(
         source,
         field_u32(end, "line")?,
         field_u32(end, "character").unwrap_or(0),
-    )?;
+    );
     (start <= end).then_some((start, end))
 }
 
-fn text_position_to_offset(source: &str, line: u32, column: u32) -> Option<usize> {
+/// The byte offset of an LSP position: `line` counts `\n`, `column` counts
+/// UTF-16 units. A column inside a character lands at that character.
+fn text_position_to_offset(source: &str, line: u32, column: u32) -> usize {
     let mut line_start = 0usize;
     for _ in 0..line {
-        let newline = source[line_start..].find('\n')?;
-        line_start += newline + 1;
+        match source[line_start..].find('\n') {
+            Some(newline) => line_start += newline + 1,
+            None => return source.len(),
+        }
     }
     let remainder = &source[line_start..];
     let mut line_text = remainder
@@ -357,18 +421,15 @@ fn text_position_to_offset(source: &str, line: u32, column: u32) -> Option<usize
     if let Some(without_cr) = line_text.strip_suffix('\r') {
         line_text = without_cr;
     }
-
     let mut utf16_column = 0u32;
     for (byte, ch) in line_text.char_indices() {
-        if utf16_column == column {
-            return Some(line_start + byte);
+        let next = utf16_column + ch.len_utf16() as u32;
+        if column < next {
+            return line_start + byte;
         }
-        utf16_column += ch.len_utf16() as u32;
-        if utf16_column > column {
-            return None;
-        }
+        utf16_column = next;
     }
-    (utf16_column == column).then_some(line_start + line_text.len())
+    line_start + line_text.len()
 }
 
 /// Queues `message`, or, for a `$/cancelRequest`, answers the queued request
@@ -434,8 +495,39 @@ fn flush_edits<R: Read, W: Write>(
     Ok(())
 }
 
+/// How many workspace files a scan indexes at most.
+const WORKSPACE_FILE_BUDGET: usize = 1000;
+
+/// The zero-based line and UTF-16 column of byte `offset` in `text`.
+fn text_position(text: &str, offset: u32) -> (u32, u32) {
+    let mut cap = (offset as usize).min(text.len());
+    while !text.is_char_boundary(cap) {
+        cap -= 1;
+    }
+    let prefix = &text[..cap];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count();
+    let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
+    let column = prefix[line_start..].encode_utf16().count();
+    (
+        u32::try_from(line).unwrap_or(u32::MAX),
+        u32::try_from(column).unwrap_or(u32::MAX),
+    )
+}
+
+/// Whether `uri` names a Gossamer source file.
+fn is_gossamer_uri(uri: &str) -> bool {
+    std::path::Path::new(uri)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gos"))
+}
+
 struct ServerState {
+    /// Every analysed document: the ones the editor holds open and the
+    /// workspace files read from disk.
     documents: HashMap<String, DocumentAnalysis>,
+    /// The documents the editor owns. Their text is the editor's buffer;
+    /// every other document's text is what the file holds on disk.
+    open: HashSet<String>,
     /// Analysed compilation units, shared by every open document of the
     /// package they assemble.
     units: UnitCache,
@@ -447,22 +539,57 @@ impl ServerState {
     fn new() -> Self {
         Self {
             documents: HashMap::new(),
+            open: HashSet::new(),
             units: UnitCache::default(),
             stdlib: StdlibIndex::build(),
             workspace: WorkspaceIndex::default(),
         }
     }
 
+    /// `textDocument/didOpen`: the editor's buffer now owns `uri`.
+    fn open_document(&mut self, uri: &str, text: &str) -> Vec<String> {
+        if let Some(path) = crate::uri::uri_to_path(uri) {
+            // A workspace file indexed under another spelling of its URI
+            // is the same file; the editor's spelling replaces it.
+            let duplicates: Vec<String> = self
+                .documents
+                .keys()
+                .filter(|known| {
+                    known.as_str() != uri
+                        && !self.open.contains(known.as_str())
+                        && crate::uri::uri_to_path(known).is_some_and(|p| p == path)
+                })
+                .cloned()
+                .collect();
+            for duplicate in duplicates {
+                self.documents.remove(&duplicate);
+                self.workspace.remove(&duplicate);
+            }
+        }
+        self.update(uri, text)
+    }
+
+    /// Analyses `text` as the editor's buffer for `uri` (`didOpen`,
+    /// `didChange`). Answers the documents whose analysis changed.
+    fn update(&mut self, uri: &str, text: &str) -> Vec<String> {
+        self.open.insert(uri.to_string());
+        self.reanalyse(uri, text)
+    }
+
     /// Re-analyses `uri` with `text`, then every other document of the
     /// package it belongs to, so each one sees the package as the editor
-    /// now holds it. Answers the documents whose analysis changed.
-    fn update(&mut self, uri: &str, text: &str) -> Vec<String> {
+    /// and the disk now hold it. Answers the documents whose analysis
+    /// changed.
+    fn reanalyse(&mut self, uri: &str, text: &str) -> Vec<String> {
         let mut open: OpenBuffers = self
             .documents
             .iter()
+            .filter(|(doc_uri, _)| self.open.contains(doc_uri.as_str()))
             .map(|(doc_uri, doc)| (doc_uri.clone(), doc.user_source().to_string()))
             .collect();
-        open.insert(uri.to_string(), text.to_string());
+        if self.open.contains(uri) {
+            open.insert(uri.to_string(), text.to_string());
+        }
         let analysis = analyse_with(uri, text, &mut self.units, &open);
         let unit_name = analysis.unit.name.clone();
         self.workspace.update(uri, &analysis);
@@ -476,11 +603,15 @@ impl ServerState {
             .collect();
         let unit = Rc::clone(&self.documents[uri].unit);
         for sibling in siblings {
-            let Some(sibling_text) = open.get(&sibling) else {
-                continue;
+            let sibling_text = match open.get(&sibling) {
+                Some(text) => text.clone(),
+                None => match self.disk_text(&sibling) {
+                    Some(text) => text,
+                    None => self.documents[&sibling].user_source().to_string(),
+                },
             };
-            let analysis = sibling_view(&sibling, sibling_text, &unit)
-                .unwrap_or_else(|| analyse_with(&sibling, sibling_text, &mut self.units, &open));
+            let analysis = sibling_view(&sibling, &sibling_text, &unit)
+                .unwrap_or_else(|| analyse_with(&sibling, &sibling_text, &mut self.units, &open));
             self.workspace.update(&sibling, &analysis);
             self.documents.insert(sibling.clone(), analysis);
             affected.push(sibling);
@@ -535,68 +666,221 @@ impl ServerState {
         self.update(uri, &text)
     }
 
-    fn close(&mut self, uri: &str) {
-        self.documents.remove(uri);
-        self.workspace.remove(uri);
-        self.units.retain_live();
+    /// `textDocument/didClose`: the file is a workspace file again, read
+    /// from disk, or gone when it was never saved. Answers the documents
+    /// whose analysis changed.
+    fn close(&mut self, uri: &str) -> Vec<String> {
+        self.open.remove(uri);
+        match self.disk_text(uri) {
+            Some(text) => self.reanalyse(uri, &text),
+            None => self.forget(uri),
+        }
     }
 
-    /// Walks the workspace root advertised by `initialize` for
-    /// `.gos` files and seeds the analysis cache + workspace index
-    /// with each one. Honours a simple `.gitignore` (only the
-    /// `target/`, `.git/`, and dotfile excludes the typical Rust
-    /// project ships); caps the discovery at 1000 files to keep
-    /// large monorepos responsive.
-    fn discover_workspace_roots(&mut self, params: &Value) {
-        let mut roots: Vec<String> = Vec::new();
-        if let Some(uri) = field_str(params, "rootUri") {
-            if let Some(path) = file_uri_to_path(uri) {
-                roots.push(path);
+    /// Drops `uri` from the analysis and re-analyses one remaining file of
+    /// its package, which re-analyses the rest. Answers the documents
+    /// whose analysis changed.
+    fn forget(&mut self, uri: &str) -> Vec<String> {
+        let Some(gone) = self.documents.remove(uri) else {
+            return Vec::new();
+        };
+        self.workspace.remove(uri);
+        let sibling = self
+            .documents
+            .iter()
+            .find(|(_, doc)| doc.unit.name == gone.unit.name)
+            .map(|(doc_uri, doc)| (doc_uri.clone(), doc.user_source().to_string()));
+        drop(gone);
+        let affected = match sibling {
+            Some((sibling, text)) => {
+                let text = if self.open.contains(&sibling) {
+                    text
+                } else {
+                    self.disk_text(&sibling).unwrap_or(text)
+                };
+                self.reanalyse(&sibling, &text)
             }
+            None => Vec::new(),
+        };
+        self.units.retain_live();
+        affected
+    }
+
+    /// The text of `uri` on disk, when it names a readable local file.
+    fn disk_text(&self, uri: &str) -> Option<String> {
+        let path = crate::uri::uri_to_path(uri)?;
+        std::fs::read_to_string(path).ok()
+    }
+
+    /// Re-reads a workspace file the editor does not hold open after it
+    /// changed on disk, or drops it when it is gone. Answers the
+    /// documents whose analysis changed.
+    fn refresh_from_disk(&mut self, uri: &str) -> Vec<String> {
+        if self.open.contains(uri) {
+            return Vec::new();
+        }
+        match self.disk_text(uri) {
+            Some(text) => {
+                let unchanged = self
+                    .documents
+                    .get(uri)
+                    .is_some_and(|doc| doc.user_source() == text);
+                if unchanged {
+                    Vec::new()
+                } else {
+                    self.reanalyse(uri, &text)
+                }
+            }
+            None => self.forget(uri),
+        }
+    }
+
+    /// `workspace/didChangeWatchedFiles`: brings every changed workspace
+    /// file the editor does not hold open back in line with the disk. A
+    /// changed manifest can move every file of its package, so each
+    /// document is re-read.
+    fn watched_files_changed(&mut self, params: &Value) -> Vec<String> {
+        let Value::Array(changes) = field(params, "changes") else {
+            return Vec::new();
+        };
+        let mut stale: Vec<String> = Vec::new();
+        let mut manifest_changed = false;
+        for change in changes {
+            let Some(uri) = field_str(change, "uri") else {
+                continue;
+            };
+            if uri.ends_with("/project.toml") {
+                manifest_changed = true;
+            } else if is_gossamer_uri(uri) {
+                stale.push(self.known_uri(uri));
+            }
+        }
+        let mut affected = Vec::new();
+        if manifest_changed {
+            // A unit is cached by its assembled text, which a manifest
+            // edit (features, policies) can change the meaning of without
+            // changing.
+            self.units = UnitCache::default();
+            let mut texts: Vec<(String, String)> = Vec::new();
+            for (uri, doc) in &self.documents {
+                let text = if self.open.contains(uri) {
+                    Some(doc.user_source().to_string())
+                } else {
+                    self.disk_text(uri)
+                };
+                match text {
+                    Some(text) => texts.push((uri.clone(), text)),
+                    None => stale.push(uri.clone()),
+                }
+            }
+            for (uri, text) in texts {
+                affected.extend(self.reanalyse(&uri, &text));
+            }
+        }
+        for uri in stale {
+            affected.extend(self.refresh_from_disk(&uri));
+        }
+        affected.sort();
+        affected.dedup();
+        affected
+    }
+
+    /// The URI the analysis already knows the file `uri` names by, which
+    /// can be spelled differently from the one a client sends.
+    fn known_uri(&self, uri: &str) -> String {
+        if self.documents.contains_key(uri) {
+            return uri.to_string();
+        }
+        let Some(path) = crate::uri::uri_to_path(uri) else {
+            return uri.to_string();
+        };
+        self.documents
+            .keys()
+            .find(|known| crate::uri::uri_to_path(known).is_some_and(|p| p == path))
+            .cloned()
+            .unwrap_or_else(|| uri.to_string())
+    }
+
+    /// The editor location of `span`, a span of `doc`'s unit, in
+    /// whichever file of the package holds it: `doc` itself, another
+    /// analysed file of the same unit, or the file on disk its bytes were
+    /// read from. `Null` for a span no file holds, such as synthesized code.
+    fn unit_location(&self, doc: &DocumentAnalysis, span: Span) -> Value {
+        if doc.span_in_document(span) {
+            return location(doc, span);
+        }
+        if let Some(holder) = self
+            .documents
+            .values()
+            .find(|other| Rc::ptr_eq(&other.unit, &doc.unit) && other.span_in_document(span))
+        {
+            return location(holder, span);
+        }
+        let Some((path, start, end)) = doc.unit.origin_of(span) else {
+            return Value::Null;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Value::Null;
+        };
+        let (start_line, start_col) = text_position(&text, start);
+        let (end_line, end_col) = text_position(&text, end);
+        let mut out = BTreeMap::new();
+        out.insert(
+            "uri".to_string(),
+            Value::String(self.known_uri(&crate::uri::path_to_uri(&path))),
+        );
+        out.insert(
+            "range".to_string(),
+            super::handle::range_value(start_line, start_col, end_line, end_col),
+        );
+        Value::Object(out)
+    }
+
+    /// Indexes the workspace roots `initialize` advertises.
+    fn discover_workspace_roots(&mut self, params: &Value) {
+        let mut roots: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(path) = field_str(params, "rootUri").and_then(crate::uri::uri_to_path) {
+            roots.push(path);
         }
         if let Value::Array(folders) = field(params, "workspaceFolders") {
             for folder in folders {
-                if let Some(uri) = field_str(folder, "uri") {
-                    if let Some(path) = file_uri_to_path(uri) {
-                        roots.push(path);
-                    }
+                if let Some(path) = field_str(folder, "uri").and_then(crate::uri::uri_to_path) {
+                    roots.push(path);
                 }
             }
         }
-        let mut budget = 1000usize;
+        let mut budget = WORKSPACE_FILE_BUDGET;
         for root in roots {
             self.scan_workspace_path(&root, &mut budget);
         }
     }
 
-    /// Recursive helper for [`Self::discover_workspace_roots`].
-    fn scan_workspace_path(&mut self, path: &str, budget: &mut usize) {
-        if *budget == 0 {
-            return;
-        }
+    /// Brings every `.gos` file under `path` that the editor does not hold
+    /// open in line with the disk, skipping build output, VCS metadata,
+    /// and dot-directories, and stopping after `budget` files so a large
+    /// monorepo stays responsive. Answers the documents whose analysis
+    /// changed.
+    fn scan_workspace_path(&mut self, path: &std::path::Path, budget: &mut usize) -> Vec<String> {
+        let mut affected = Vec::new();
         let Ok(entries) = std::fs::read_dir(path) else {
-            return;
+            return affected;
         };
         for entry in entries.flatten() {
             if *budget == 0 {
-                return;
+                break;
             }
             let entry_path = entry.path();
             let Some(name) = entry_path.file_name().and_then(|s| s.to_str()) else {
                 continue;
             };
-            // Skip the usual junk drawers without parsing a full
-            // .gitignore. Editors typically already exclude these.
-            if matches!(name, "target" | ".git" | "node_modules") || name.starts_with('.') {
+            if matches!(name, "target" | "node_modules") || name.starts_with('.') {
                 continue;
             }
-            let Ok(metadata) = entry.metadata() else {
+            let Ok(file_type) = entry.file_type() else {
                 continue;
             };
-            if metadata.is_dir() {
-                if let Some(p) = entry_path.to_str() {
-                    self.scan_workspace_path(p, budget);
-                }
+            if file_type.is_dir() {
+                affected.extend(self.scan_workspace_path(&entry_path, budget));
                 continue;
             }
             if !std::path::Path::new(name)
@@ -605,19 +889,11 @@ impl ServerState {
             {
                 continue;
             }
-            let Some(path_str) = entry_path.to_str() else {
-                continue;
-            };
-            let Ok(text) = std::fs::read_to_string(&entry_path) else {
-                continue;
-            };
-            let uri = format!("file://{path_str}");
-            if self.documents.contains_key(&uri) {
-                continue;
-            }
-            let _ = self.update(&uri, &text);
             *budget -= 1;
+            let uri = self.known_uri(&crate::uri::path_to_uri(&entry_path));
+            affected.extend(self.refresh_from_disk(&uri));
         }
+        affected
     }
 
     /// Returns the `CodeAction[]` for `textDocument/codeAction`.
@@ -794,7 +1070,7 @@ impl ServerState {
             } => doc
                 .index
                 .local(*node)
-                .map_or(Value::Null, |info| location(doc, info.name_span)),
+                .map_or(Value::Null, |info| self.unit_location(doc, info.name_span)),
             Locate::PathExpr {
                 resolution: Some(Resolution::Def { def, .. }),
                 ..
@@ -805,8 +1081,8 @@ impl ServerState {
             } => doc
                 .index
                 .def(*def)
-                .map_or(Value::Null, |info| location(doc, info.name_span)),
-            Locate::Binding { name_span, .. } => location(doc, *name_span),
+                .map_or(Value::Null, |info| self.unit_location(doc, info.name_span)),
+            Locate::Binding { name_span, .. } => self.unit_location(doc, *name_span),
             _ => self.definition_by_name(doc, offset),
         }
     }
@@ -829,7 +1105,7 @@ impl ServerState {
             } => doc
                 .index
                 .def(*def)
-                .map_or(Value::Null, |info| location(doc, info.name_span)),
+                .map_or(Value::Null, |info| self.unit_location(doc, info.name_span)),
             Locate::PathExpr {
                 resolution: Some(resolution),
                 ..
@@ -887,7 +1163,7 @@ impl ServerState {
                     DefKind::Struct | DefKind::Enum | DefKind::Trait | DefKind::TypeAlias
                 )
             {
-                return location(doc, info.name_span);
+                return self.unit_location(doc, info.name_span);
             }
         }
         Value::Null
@@ -900,7 +1176,7 @@ impl ServerState {
         let Some(span) = doc.top_level_span(word) else {
             return Value::Null;
         };
-        location(doc, span)
+        self.unit_location(doc, span)
     }
 
     fn completion(&self, params: &Value) -> Value {
@@ -1110,7 +1386,7 @@ impl ServerState {
 
     fn cursor(&self, doc: &DocumentAnalysis, offset: u32) -> Option<Locate> {
         let mut loc = locate(&doc.sf, doc.source(), offset)?;
-        attach_resolution(&mut loc, &doc.resolutions);
+        attach_resolution(&mut loc, &doc.resolutions, &doc.index);
         Some(loc)
     }
 
@@ -1202,7 +1478,7 @@ impl ServerState {
         // resolved receivers).
         let spans = self.references_spans(doc, offset);
         if !spans.is_empty() {
-            return spans.into_iter().map(|s| location(doc, s)).collect();
+            return spans.into_iter().map(|s| self.unit_location(doc, s)).collect();
         }
         // Semantic resolution failed everywhere. Only honour the
         // text-based whole-word fallback when the cursor sits inside
@@ -1212,7 +1488,7 @@ impl ServerState {
                 return doc
                     .find_references(word)
                     .into_iter()
-                    .map(|s| location(doc, s))
+                    .map(|s| self.unit_location(doc, s))
                     .collect();
             }
         }

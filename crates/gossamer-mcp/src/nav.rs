@@ -1,18 +1,17 @@
 //! Semantic-navigation tools backed by the LSP analysis engine.
 
-use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gossamer_lsp::handle::{ServerHandle, position_params, workspace_symbol_params};
+use gossamer_lsp::uri::uri_to_path;
 use gossamer_std::json::{self, Value};
 
 use crate::protocol::{field, field_str};
 use crate::tools::text_result;
 
-/// Lazily populated analysis session shared across nav tool calls.
+/// Analysis session shared across nav tool calls.
 pub(crate) struct NavSession {
     handle: ServerHandle,
-    scanned_roots: HashSet<String>,
 }
 
 impl NavSession {
@@ -20,19 +19,18 @@ impl NavSession {
     pub(crate) fn new() -> Self {
         Self {
             handle: ServerHandle::new(),
-            scanned_roots: HashSet::new(),
         }
     }
 
-    /// Reads `file`, (re)loads it into the analysis state, and returns
-    /// its uri. Re-reading per call keeps the session in sync with the
-    /// on-disk state the exec tools mutate.
+    /// Brings `file` and the package it belongs to in line with the disk,
+    /// which the exec tools may have rewritten, and answers the file's
+    /// uri.
     fn load(&mut self, file: &str) -> Result<String, String> {
         let abs = std::fs::canonicalize(file).map_err(|e| format!("{file}: {e}"))?;
-        let text = std::fs::read_to_string(&abs).map_err(|e| format!("{file}: {e}"))?;
-        let uri = path_to_uri(&abs);
-        self.handle.update(&uri, &text);
-        Ok(uri)
+        if let Some(root) = project_root(&abs) {
+            self.handle.scan_workspace(&root);
+        }
+        Ok(self.handle.sync_file(&abs))
     }
 
     /// Runs `hover` / `definition` / `references` at a 1-based position.
@@ -57,10 +55,7 @@ impl NavSession {
         let query = field_str(args, "query").ok_or("`query` is required")?;
         let root = field_str(args, "root").unwrap_or(".");
         let abs = std::fs::canonicalize(root).map_err(|e| format!("{root}: {e}"))?;
-        let key = abs.to_string_lossy().into_owned();
-        if self.scanned_roots.insert(key.clone()) {
-            self.handle.scan_workspace(&key);
-        }
+        self.handle.scan_workspace(&abs);
         let result = self
             .handle
             .workspace_symbols(&workspace_symbol_params(query));
@@ -74,17 +69,17 @@ fn required_u32(args: &Value, key: &str) -> Result<u32, String> {
         .ok_or_else(|| format!("`{key}` must be a positive integer"))
 }
 
-fn path_to_uri(path: &Path) -> String {
-    let text = path.to_string_lossy().replace('\\', "/");
-    if text.starts_with('/') {
-        format!("file://{text}")
-    } else {
-        format!("file:///{text}")
-    }
+/// The directory of the nearest `project.toml` at or above `file`.
+fn project_root(file: &Path) -> Option<PathBuf> {
+    file.ancestors()
+        .skip(1)
+        .find(|dir| dir.join("project.toml").is_file())
+        .map(Path::to_path_buf)
 }
 
-fn uri_to_path(uri: &str) -> String {
-    uri.strip_prefix("file://").unwrap_or(uri).to_string()
+/// A location's file as a path when it names a local one.
+fn display_uri(uri: &str) -> String {
+    uri_to_path(uri).map_or_else(|| uri.to_string(), |path| path.display().to_string())
 }
 
 fn hover_text(result: &Value) -> String {
@@ -118,7 +113,7 @@ fn location_line(location: &Value) -> String {
     let start = field(field(location, "range"), "start");
     let line = json::as_i64(field(start, "line")).unwrap_or(0) + 1;
     let column = json::as_i64(field(start, "character")).unwrap_or(0) + 1;
-    format!("{}:{line}:{column}", uri_to_path(uri))
+    format!("{}:{line}:{column}", display_uri(uri))
 }
 
 fn symbols_text(result: &Value) -> String {

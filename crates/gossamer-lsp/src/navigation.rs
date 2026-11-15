@@ -20,7 +20,7 @@ use gossamer_ast::{
     PatternKind, SelectArm, SelectOp, SourceFile, Stmt, StmtKind, StructBody, StructDecl,
     StructExprField, TraitItem, Type, TypeKind, TypePath, Visitor,
 };
-use gossamer_lex::Span;
+use gossamer_lex::{Span, TokenKind};
 use gossamer_resolve::{DefId, DefKind, Resolution, Resolutions};
 use std::collections::HashMap;
 
@@ -609,6 +609,46 @@ fn contains(span: Span, offset: u32) -> bool {
 /// stash spans on `Ident`, but the head identifier of a path always sits
 /// at the path's `start`. Accurate for top-level paths; for sub-segments
 /// we fall back to the whole-expression span.
+/// The span of `name` as `item_span`'s item declares it: the first
+/// identifier spelled `name` right after a keyword (the item itself, a
+/// trait method), else the first one past the item's keyword (a field, a
+/// variant). Attributes and doc comments ahead of the keyword are
+/// skipped. The item's own start when the text does not hold the name.
+pub(crate) fn declared_name_span(source: &str, item_span: Span, name: &str) -> Span {
+    let start = item_span.start as usize;
+    let end = (item_span.end as usize).min(source.len());
+    if let Some(text) = source.get(start..end) {
+        let (tokens, _) = gossamer_lex::tokenize(text, item_span.file);
+        let is_name = |token: &gossamer_lex::Token| {
+            token.kind == TokenKind::Ident
+                && text.get(token.span.start as usize..token.span.end as usize) == Some(name)
+        };
+        let after_keyword = tokens.windows(2).find_map(|pair| {
+            (matches!(pair[0].kind, TokenKind::Keyword(_)) && is_name(&pair[1]))
+                .then_some(pair[1].span)
+        });
+        let past_keyword = || {
+            tokens
+                .iter()
+                .skip_while(|token| !matches!(token.kind, TokenKind::Keyword(_)))
+                .find(|token| is_name(token))
+                .map(|token| token.span)
+        };
+        if let Some(span) = after_keyword.or_else(past_keyword) {
+            return Span::new(
+                item_span.file,
+                item_span.start + span.start,
+                item_span.start + span.end,
+            );
+        }
+    }
+    Span::new(
+        item_span.file,
+        item_span.start,
+        item_span.start + name.len() as u32,
+    )
+}
+
 fn ident_span(name: &Ident, fallback: Span) -> Span {
     let len = name.name.len() as u32;
     Span::new(fallback.file, fallback.start, fallback.start + len)
@@ -732,16 +772,15 @@ impl DefinitionIndex {
         reason = "flat-shape dispatch / lowering - splitting hides the per-arm intent"
     )]
     fn visit_item(&mut self, item: &Item, source: &str, resolutions: &Resolutions) {
-        let docs = doc_block_above(source, item.span.start);
         match &item.kind {
             ItemKind::Fn(decl) => {
                 let signature = render_fn_signature(decl);
                 self.record_def(
+                    source,
                     item,
                     &decl.name,
                     DefKind::Fn,
                     signature,
-                    docs.clone(),
                     resolutions,
                 );
                 self.collect_fn_locals(decl);
@@ -749,33 +788,33 @@ impl DefinitionIndex {
             ItemKind::Struct(decl) => {
                 let signature = format!("struct {}", decl.name.name);
                 self.record_def(
+                    source,
                     item,
                     &decl.name,
                     DefKind::Struct,
                     signature,
-                    docs.clone(),
                     resolutions,
                 );
             }
             ItemKind::Enum(decl) => {
                 let signature = format!("enum {}", decl.name.name);
                 self.record_def(
+                    source,
                     item,
                     &decl.name,
                     DefKind::Enum,
                     signature,
-                    docs.clone(),
                     resolutions,
                 );
             }
             ItemKind::Trait(decl) => {
                 let signature = format!("trait {}", decl.name.name);
                 self.record_def(
+                    source,
                     item,
                     &decl.name,
                     DefKind::Trait,
                     signature,
-                    docs.clone(),
                     resolutions,
                 );
                 for trait_item in &decl.items {
@@ -794,44 +833,44 @@ impl DefinitionIndex {
             ItemKind::TypeAlias(decl) => {
                 let signature = format!("type {}", decl.name.name);
                 self.record_def(
+                    source,
                     item,
                     &decl.name,
                     DefKind::TypeAlias,
                     signature,
-                    docs.clone(),
                     resolutions,
                 );
             }
             ItemKind::Const(decl) => {
                 let signature = format!("const {}", decl.name.name);
                 self.record_def(
+                    source,
                     item,
                     &decl.name,
                     DefKind::Const,
                     signature,
-                    docs.clone(),
                     resolutions,
                 );
             }
             ItemKind::Static(decl) => {
                 let signature = format!("static {}", decl.name.name);
                 self.record_def(
+                    source,
                     item,
                     &decl.name,
                     DefKind::Static,
                     signature,
-                    docs.clone(),
                     resolutions,
                 );
             }
             ItemKind::Mod(decl) => {
                 let signature = format!("mod {}", decl.name.name);
                 self.record_def(
+                    source,
                     item,
                     &decl.name,
                     DefKind::Mod,
                     signature,
-                    docs.clone(),
                     resolutions,
                 );
                 if let ModBody::Inline(items) = &decl.body {
@@ -846,17 +885,18 @@ impl DefinitionIndex {
 
     fn record_def(
         &mut self,
+        source: &str,
         item: &Item,
         name: &Ident,
         kind: DefKind,
         signature: String,
-        docs: String,
         resolutions: &Resolutions,
     ) {
         let Some(def) = resolutions.definition_of(item.id) else {
             return;
         };
-        let name_span = ident_span(name, item.span);
+        let name_span = declared_name_span(source, item.span, &name.name);
+        let docs = doc_block_above(source, item.span.start);
         self.by_def.insert(
             def,
             DefinitionInfo {
@@ -1142,21 +1182,38 @@ impl Visitor for OccurrenceWalker<'_> {
 /// see the resolutions while it walks (the borrow would conflict with the
 /// AST lifetime). Callers run this after locating to upgrade the
 /// `resolution: None` placeholder.
-pub(crate) fn attach_resolution(loc: &mut Locate, resolutions: &Resolutions) {
+pub(crate) fn attach_resolution(
+    loc: &mut Locate,
+    resolutions: &Resolutions,
+    index: &DefinitionIndex,
+) {
+    // A `use`-imported name of an item in this unit means that item.
+    let through_import = |node: NodeId, found: Option<Resolution>| match found {
+        Some(Resolution::Import { .. }) => resolutions
+            .import_def(node)
+            .and_then(|def| {
+                index.def(def).map(|info| Resolution::Def {
+                    def,
+                    kind: info.kind,
+                })
+            })
+            .or(found),
+        other => other,
+    };
     match loc {
         Locate::PathExpr {
             expr_id,
             resolution,
             ..
         } => {
-            *resolution = resolutions.get(*expr_id);
+            *resolution = through_import(*expr_id, resolutions.get(*expr_id));
         }
         Locate::TypePath {
             type_id,
             resolution,
             ..
         } => {
-            *resolution = resolutions.get(*type_id);
+            *resolution = through_import(*type_id, resolutions.get(*type_id));
         }
         Locate::Binding { .. } | Locate::Field { .. } => {}
     }

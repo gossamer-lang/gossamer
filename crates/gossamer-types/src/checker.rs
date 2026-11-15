@@ -3754,7 +3754,7 @@ pub(super) fn expr_display(expr: &Expr) -> Option<String> {
             text => Some(text.to_string()),
         },
         ExprKind::Call { callee, args } => {
-            let callee = expr_display(callee)?;
+            let callee = grouped_display(callee)?;
             let args = expr_display_list(args)?;
             Some(format!("{callee}({args})"))
         }
@@ -3764,15 +3764,48 @@ pub(super) fn expr_display(expr: &Expr) -> Option<String> {
             args,
             ..
         } => {
-            let receiver = expr_display(receiver)?;
+            let receiver = grouped_display(receiver)?;
             let args = expr_display_list(args)?;
             Some(format!("{receiver}.{}({args})", name.name))
         }
         ExprKind::FieldAccess {
             receiver,
             field: gossamer_ast::FieldSelector::Named(name),
-        } => Some(format!("{}.{}", expr_display(receiver)?, name.name)),
+        } => Some(format!("{}.{}", grouped_display(receiver)?, name.name)),
+        ExprKind::Binary { op, lhs, rhs } => Some(format!(
+            "{} {} {}",
+            operand_of(*op, lhs, false)?,
+            op.as_str(),
+            operand_of(*op, rhs, true)?
+        )),
         _ => None,
+    }
+}
+
+/// `expr` spelled where it binds tighter than any operator (a receiver, a
+/// callee, a negated or cast operand): an operator expression is
+/// parenthesized.
+pub(super) fn grouped_display(expr: &Expr) -> Option<String> {
+    let text = expr_display(expr)?;
+    match &expr.kind {
+        ExprKind::Binary { .. } => Some(format!("({text})")),
+        _ => Some(text),
+    }
+}
+
+/// `expr` spelled as an operand of `op`: parenthesized when it is an
+/// operator expression that binds looser than `op`, or as loosely on the
+/// right, since operators group to the left.
+pub(super) fn operand_of(op: gossamer_ast::BinaryOp, expr: &Expr, right: bool) -> Option<String> {
+    let text = expr_display(expr)?;
+    match &expr.kind {
+        ExprKind::Binary { op: inner, .. }
+            if inner.precedence() > op.precedence()
+                || (right && inner.precedence() == op.precedence()) =>
+        {
+            Some(format!("({text})"))
+        }
+        _ => Some(text),
     }
 }
 
@@ -3812,7 +3845,7 @@ fn wrapping_operand_display(expr: &Expr) -> Option<String> {
             wrapping_operand_display(operand)?
         ));
     }
-    expr_display(expr)
+    grouped_display(expr)
 }
 
 /// The operator a retired wrapping arithmetic method is spelled as.

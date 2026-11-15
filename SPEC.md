@@ -480,7 +480,10 @@ type. A shift's amount is the exception, since it counts bits.
 An unsuffixed literal takes its type from where it is used, and must fit
 that type wherever that is (GT0009): `x == 300` with `x: u8`, `n > -1`
 with `n: u32`, and a `300 =>` arm in a `match` on a `u8` are all
-rejected, as `let x: u8 = 300` is.
+rejected, as `let x: u8 = 300` is. An integer literal only ever takes an
+integer type and a float literal a float type, so two that must share a
+type are a mismatch (GT0001): `#[1, 2.5]`, `if c { 1 } else { 2.5 }`, and
+`let mut v = 0` followed by `v = 2.5` are rejected, as `let v: f64 = 1` is.
 
 **The `as` whitelist.** `as` is whitelist-checked (`GT0005`). The
 permitted shapes are: numeric ↔ numeric (any integer or float type on

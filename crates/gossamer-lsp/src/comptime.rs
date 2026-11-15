@@ -64,7 +64,7 @@ pub(crate) fn fold_diagnostic(
         return None;
     }
     install_level(uri);
-    let anchor = document_path(uri).map_or_else(
+    let anchor = crate::uri::uri_to_path(uri).map_or_else(
         || FOLD_LABEL.to_string(),
         |path| path.to_string_lossy().into_owned(),
     );
@@ -92,7 +92,7 @@ fn install_level(uri: &str) {
 /// The `project.comptime-io` of the nearest manifest above the document.
 #[cfg(not(target_arch = "wasm32"))]
 fn manifest_comptime_io(uri: &str) -> Option<String> {
-    document_path(uri)
+    crate::uri::uri_to_path(uri)
         .and_then(|path| nearest_manifest(&path))
         .and_then(|text| gossamer_pkg::Manifest::parse(&text).ok())
         .and_then(|manifest| manifest.project.comptime_io)
@@ -102,12 +102,6 @@ fn manifest_comptime_io(uri: &str) -> Option<String> {
 #[cfg(target_arch = "wasm32")]
 fn manifest_comptime_io(_uri: &str) -> Option<String> {
     None
-}
-
-/// Filesystem path a `file://` document URI names.
-fn document_path(uri: &str) -> Option<std::path::PathBuf> {
-    let rest = uri.strip_prefix("file://")?;
-    Some(std::path::PathBuf::from(rest))
 }
 
 /// Text of the nearest `project.toml` at or above `path`.

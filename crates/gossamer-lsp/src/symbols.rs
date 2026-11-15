@@ -18,6 +18,7 @@ use gossamer_ast::{
 use gossamer_lex::Span;
 use gossamer_std::json::Value;
 
+use crate::navigation::declared_name_span;
 use crate::session::DocumentAnalysis;
 
 // LSP wire numbers for the SymbolKind enum. Kept verbatim from the
@@ -79,7 +80,7 @@ fn emit_item(doc: &DocumentAnalysis, item: &Item, out: &mut Vec<Value>) {
             None,
             SYMBOL_FUNCTION,
             item.span,
-            ident_span_inside(item.span, &decl.name.name),
+            declared_name_span(doc.source(), item.span, &decl.name.name),
             Vec::new(),
         )),
         ItemKind::Struct(decl) => out.push(struct_symbol(doc, item, decl)),
@@ -92,7 +93,7 @@ fn emit_item(doc: &DocumentAnalysis, item: &Item, out: &mut Vec<Value>) {
             None,
             SYMBOL_TYPE_PARAMETER,
             item.span,
-            ident_span_inside(item.span, &decl.name.name),
+            declared_name_span(doc.source(), item.span, &decl.name.name),
             Vec::new(),
         )),
         ItemKind::Const(decl) => out.push(symbol(
@@ -101,7 +102,7 @@ fn emit_item(doc: &DocumentAnalysis, item: &Item, out: &mut Vec<Value>) {
             None,
             SYMBOL_CONSTANT,
             item.span,
-            ident_span_inside(item.span, &decl.name.name),
+            declared_name_span(doc.source(), item.span, &decl.name.name),
             Vec::new(),
         )),
         ItemKind::Static(decl) => out.push(symbol(
@@ -110,7 +111,7 @@ fn emit_item(doc: &DocumentAnalysis, item: &Item, out: &mut Vec<Value>) {
             None,
             SYMBOL_VARIABLE,
             item.span,
-            ident_span_inside(item.span, &decl.name.name),
+            declared_name_span(doc.source(), item.span, &decl.name.name),
             Vec::new(),
         )),
         ItemKind::Mod(decl) => {
@@ -126,7 +127,7 @@ fn emit_item(doc: &DocumentAnalysis, item: &Item, out: &mut Vec<Value>) {
                 None,
                 SYMBOL_MODULE,
                 item.span,
-                ident_span_inside(item.span, &decl.name.name),
+                declared_name_span(doc.source(), item.span, &decl.name.name),
                 children,
             ));
         }
@@ -144,7 +145,7 @@ fn struct_symbol(doc: &DocumentAnalysis, item: &Item, decl: &StructDecl) -> Valu
                 None,
                 SYMBOL_FIELD,
                 item.span,
-                ident_span_inside(item.span, &field.name.name),
+                declared_name_span(doc.source(), item.span, &field.name.name),
                 Vec::new(),
             ));
         }
@@ -155,7 +156,7 @@ fn struct_symbol(doc: &DocumentAnalysis, item: &Item, decl: &StructDecl) -> Valu
         None,
         SYMBOL_STRUCT,
         item.span,
-        ident_span_inside(item.span, &decl.name.name),
+        declared_name_span(doc.source(), item.span, &decl.name.name),
         children,
     )
 }
@@ -171,7 +172,7 @@ fn enum_symbol(doc: &DocumentAnalysis, item: &Item, decl: &EnumDecl) -> Value {
                 None,
                 SYMBOL_ENUM_MEMBER,
                 item.span,
-                ident_span_inside(item.span, &v.name.name),
+                declared_name_span(doc.source(), item.span, &v.name.name),
                 Vec::new(),
             )
         })
@@ -182,7 +183,7 @@ fn enum_symbol(doc: &DocumentAnalysis, item: &Item, decl: &EnumDecl) -> Value {
         None,
         SYMBOL_ENUM,
         item.span,
-        ident_span_inside(item.span, &decl.name.name),
+        declared_name_span(doc.source(), item.span, &decl.name.name),
         children,
     )
 }
@@ -198,7 +199,7 @@ fn trait_symbol(doc: &DocumentAnalysis, item: &Item, decl: &TraitDecl) -> Value 
                 None,
                 SYMBOL_METHOD,
                 item.span,
-                ident_span_inside(item.span, &fn_decl.name.name),
+                declared_name_span(doc.source(), item.span, &fn_decl.name.name),
                 Vec::new(),
             )),
             _ => None,
@@ -210,7 +211,7 @@ fn trait_symbol(doc: &DocumentAnalysis, item: &Item, decl: &TraitDecl) -> Value 
         None,
         SYMBOL_INTERFACE,
         item.span,
-        ident_span_inside(item.span, &decl.name.name),
+        declared_name_span(doc.source(), item.span, &decl.name.name),
         children,
     )
 }
@@ -238,7 +239,7 @@ fn emit_impl(doc: &DocumentAnalysis, item: &Item, decl: &ImplDecl, out: &mut Vec
                 None,
                 SYMBOL_METHOD,
                 item.span,
-                ident_span_inside(item.span, &fn_decl.name.name),
+                declared_name_span(doc.source(), item.span, &fn_decl.name.name),
                 Vec::new(),
             ),
             ImplItem::Const { name, .. } => symbol(
@@ -247,7 +248,7 @@ fn emit_impl(doc: &DocumentAnalysis, item: &Item, decl: &ImplDecl, out: &mut Vec
                 None,
                 SYMBOL_CONSTANT,
                 item.span,
-                ident_span_inside(item.span, &name.name),
+                declared_name_span(doc.source(), item.span, &name.name),
                 Vec::new(),
             ),
             ImplItem::Type { name, .. } => symbol(
@@ -256,7 +257,7 @@ fn emit_impl(doc: &DocumentAnalysis, item: &Item, decl: &ImplDecl, out: &mut Vec
                 None,
                 SYMBOL_TYPE_PARAMETER,
                 item.span,
-                ident_span_inside(item.span, &name.name),
+                declared_name_span(doc.source(), item.span, &name.name),
                 Vec::new(),
             ),
         })
@@ -296,14 +297,14 @@ fn collect_workspace_symbols(
             out,
             &decl.name.name,
             SYMBOL_FUNCTION,
-            ident_span_inside(item.span, &decl.name.name),
+            declared_name_span(doc.source(), item.span, &decl.name.name),
         ),
         ItemKind::Struct(decl) => {
             push(
                 out,
                 &decl.name.name,
                 SYMBOL_STRUCT,
-                ident_span_inside(item.span, &decl.name.name),
+                declared_name_span(doc.source(), item.span, &decl.name.name),
             );
             if let StructBody::Named(fields) = &decl.body {
                 for field in fields {
@@ -311,7 +312,7 @@ fn collect_workspace_symbols(
                         out,
                         &field.name.name,
                         SYMBOL_FIELD,
-                        ident_span_inside(item.span, &field.name.name),
+                        declared_name_span(doc.source(), item.span, &field.name.name),
                     );
                 }
             }
@@ -321,14 +322,14 @@ fn collect_workspace_symbols(
                 out,
                 &decl.name.name,
                 SYMBOL_ENUM,
-                ident_span_inside(item.span, &decl.name.name),
+                declared_name_span(doc.source(), item.span, &decl.name.name),
             );
             for v in &decl.variants {
                 push(
                     out,
                     &v.name.name,
                     SYMBOL_ENUM_MEMBER,
-                    ident_span_inside(item.span, &v.name.name),
+                    declared_name_span(doc.source(), item.span, &v.name.name),
                 );
             }
         }
@@ -337,7 +338,7 @@ fn collect_workspace_symbols(
                 out,
                 &decl.name.name,
                 SYMBOL_INTERFACE,
-                ident_span_inside(item.span, &decl.name.name),
+                declared_name_span(doc.source(), item.span, &decl.name.name),
             );
         }
         ItemKind::Impl(decl) => {
@@ -347,7 +348,7 @@ fn collect_workspace_symbols(
                         out,
                         &fn_decl.name.name,
                         SYMBOL_METHOD,
-                        ident_span_inside(item.span, &fn_decl.name.name),
+                        declared_name_span(doc.source(), item.span, &fn_decl.name.name),
                     );
                 }
             }
@@ -356,26 +357,26 @@ fn collect_workspace_symbols(
             out,
             &decl.name.name,
             SYMBOL_TYPE_PARAMETER,
-            ident_span_inside(item.span, &decl.name.name),
+            declared_name_span(doc.source(), item.span, &decl.name.name),
         ),
         ItemKind::Const(decl) => push(
             out,
             &decl.name.name,
             SYMBOL_CONSTANT,
-            ident_span_inside(item.span, &decl.name.name),
+            declared_name_span(doc.source(), item.span, &decl.name.name),
         ),
         ItemKind::Static(decl) => push(
             out,
             &decl.name.name,
             SYMBOL_VARIABLE,
-            ident_span_inside(item.span, &decl.name.name),
+            declared_name_span(doc.source(), item.span, &decl.name.name),
         ),
         ItemKind::Mod(decl) => {
             push(
                 out,
                 &decl.name.name,
                 SYMBOL_MODULE,
-                ident_span_inside(item.span, &decl.name.name),
+                declared_name_span(doc.source(), item.span, &decl.name.name),
             );
             if let ModBody::Inline(items) = &decl.body {
                 for nested in items {
@@ -435,18 +436,6 @@ fn symbol(
         entry.insert("children".to_string(), Value::Array(children));
     }
     Value::Object(entry)
-}
-
-/// Searches `item_span` in the document text for a `name`-matching
-/// identifier and returns its span. Falls back to the item span when
-/// the name can't be located (e.g. unicode escapes that don't match
-/// byte-for-byte). The search is whole-word.
-fn ident_span_inside(item_span: Span, name: &str) -> Span {
-    Span::new(
-        item_span.file,
-        item_span.start,
-        item_span.start + name.len() as u32,
-    )
 }
 
 fn span_to_range(doc: &DocumentAnalysis, span: Span) -> Value {
