@@ -720,6 +720,16 @@ enum Command {
         /// Report cache removal without deleting files.
         #[arg(long, short = 'n')]
         dry_run: bool,
+        /// Trim the shared roots to the retention policy now. Build commands
+        /// start the same trim in the background once a day on their own;
+        /// `GOS_CACHE_TRIM` sets how often (`never`, `always`, or an interval
+        /// such as `12h` or `7d`). Package sources are left to `gos clean`.
+        #[arg(long, conflicts_with_all = ["path", "prune", "clear", "scope", "dry_run"])]
+        trim: bool,
+        /// With `--trim`, trim only when `GOS_CACHE_TRIM` says one is due:
+        /// what build commands start in the background.
+        #[arg(long, hide = true, requires = "trim")]
+        if_due: bool,
     },
     /// Remove cached artefacts produced by the toolchain.
     ///
@@ -1177,6 +1187,23 @@ impl Command {
             _ => None,
         }
     }
+
+    /// Whether the command reads and writes the shared build caches, and so
+    /// is where their daily trim starts.
+    fn uses_build_cache(&self) -> bool {
+        matches!(
+            self,
+            Self::Check { .. }
+                | Self::Fix { .. }
+                | Self::Run { .. }
+                | Self::Watch { .. }
+                | Self::Build { .. }
+                | Self::Test { .. }
+                | Self::Bench { .. }
+                | Self::Doc { .. }
+                | Self::Lint { .. }
+        )
+    }
 }
 
 /// Routes the parsed [`Command`] to the matching `cmd::*` module.
@@ -1192,6 +1219,9 @@ fn dispatch(
     execute: Option<String>,
 ) -> anyhow::Result<()> {
     crate::paths::install_foreign_policy(command.as_ref().and_then(Command::subject));
+    if execute.is_some() || command.as_ref().is_some_and(Command::uses_build_cache) {
+        cmd::cache::start_trim_if_due();
+    }
     if let Some(source) = execute {
         return cmd::run::command(source);
     }
@@ -1481,8 +1511,13 @@ fn dispatch(
             clear,
             scope,
             dry_run,
+            trim,
+            if_due,
         }) => {
             use gossamer_driver::cache_maintenance::CacheScope;
+            if trim {
+                return cmd::cache::trim(if_due);
+            }
             // A deletion defaults to the project's own cache: emptying every
             // project's shared roots is a bigger act than the bare flag says,
             // so it is named. The report is read-only and shows everything.

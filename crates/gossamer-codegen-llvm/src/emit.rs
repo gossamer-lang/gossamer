@@ -1635,7 +1635,13 @@ fn compile_bodies_parallel_incremental(
             .as_ref()
             .map(|cd| cd.join(format!("{key}.o")))
             .filter(|p| p.exists())
-            .is_some_and(|hit| std::fs::copy(&hit, &obj_path).is_ok());
+            .is_some_and(|hit| {
+                let copied = std::fs::copy(&hit, &obj_path).is_ok();
+                if copied {
+                    mark_cached_object_used(&hit);
+                }
+                copied
+            });
         if std::env::var_os("GOS_PIPELINE_TRACE").is_some() {
             eprintln!(
                 "llvm pipeline: chunk{chunk_idx} `{}` {} bodies, {} imported, {} IR bytes, {}",
@@ -1880,6 +1886,24 @@ fn plain_definition_symbol(line: &str) -> Option<&str> {
     }
     let name = &rest[at + 3..];
     name.find("\"(").map(|end| &name[..end])
+}
+
+/// Records a hit on a cached object, so `gos cache` pruning, which removes the
+/// least recently used objects first, keeps the ones builds still read. A hit
+/// refreshes the time only once it is an hour old, bounding the writes a busy
+/// cache makes, as the driver's cache maintenance does for its own entries.
+fn mark_cached_object_used(path: &std::path::Path) {
+    const REFRESH: std::time::Duration = std::time::Duration::from_hours(1);
+    let now = std::time::SystemTime::now();
+    let fresh = std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .is_ok_and(|used| now.duration_since(used).is_ok_and(|age| age < REFRESH));
+    if fresh {
+        return;
+    }
+    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(path) {
+        let _ = file.set_modified(now);
+    }
 }
 
 /// Copies a freshly compiled object into the cache under `key`. The copy is

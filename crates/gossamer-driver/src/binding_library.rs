@@ -365,6 +365,7 @@ pub fn ensure_bindings_library_in(
         library: library_path(&dir, &stem),
         signatures: dir.join("lib").join(format!("{stem}.json")),
     };
+    crate::cache_maintenance::hold_in_use(&dir)?;
     if built.library.is_file() {
         return Ok(built);
     }
@@ -423,7 +424,6 @@ pub fn ensure_bindings_library_in(
         &cache_root.join("bindings"),
         crate::cache_maintenance::CachePolicy::default(),
         false,
-        Some(&dir),
     );
     Ok(built)
 }
