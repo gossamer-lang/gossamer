@@ -141,16 +141,6 @@ mod tests {
     }
 
     #[test]
-    fn file_uri_percent_decodes_workspace_paths() {
-        assert_eq!(
-            file_uri_to_path("file:///tmp/a%20project/%CF%80.gos").as_deref(),
-            Some("/tmp/a project/π.gos")
-        );
-        assert_eq!(file_uri_to_path("file:///tmp/bad%2"), None);
-        assert_eq!(file_uri_to_path("https://example.com/a.gos"), None);
-    }
-
-    #[test]
     fn did_close_notification_clears_diagnostics() {
         let notification = empty_diagnostics_notification("file:///closed.gos");
         assert_eq!(
@@ -214,7 +204,7 @@ mod tests {
     }
 
     fn file_uri(path: &std::path::Path) -> String {
-        format!("file://{}", path.display())
+        crate::uri::path_to_uri(path)
     }
 
     fn diagnostic_messages(state: &ServerState, uri: &str) -> Vec<String> {
@@ -390,6 +380,144 @@ mod tests {
         state.units.retain_live();
         assert_eq!(state.units.len(), 1, "a stale snapshot of the package survived");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A package whose `main.gos` calls `helper` from `util.gos`, under a
+    /// directory whose name needs percent-encoding.
+    fn two_file_project(name: &str) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("gos lsp {name} {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("project.toml"),
+            "[project]\nid = \"example.com/two\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let main = root.join("src").join("main.gos");
+        let util = root.join("src").join("util.gos");
+        std::fs::write(&main, "use util::helper\n\nfn main() {\n    println(helper(2))\n}\n")
+            .unwrap();
+        std::fs::write(&util, "pub fn helper(x: i64) -> i64 { x + 1 }\n").unwrap();
+        (root, main, util)
+    }
+
+    fn location_uri_and_line(location: &Value) -> (String, u32) {
+        let uri = field_str(location, "uri").expect("uri").to_string();
+        let start = field(field(location, "range"), "start");
+        let Value::Number(line) = field(start, "line") else {
+            panic!("no start line in {location:?}");
+        };
+        (uri, *line as u32)
+    }
+
+    #[test]
+    fn definition_of_an_item_in_another_file_points_into_that_file() {
+        let (root, main, util) = two_file_project("definition");
+        let mut state = ServerState::new();
+        let main_uri = file_uri(&main);
+        state.update(&main_uri, &std::fs::read_to_string(&main).unwrap());
+        // Cursor on `helper` in `println(helper(2))`.
+        let found = state.definition(&locate_params(&main_uri, 3, 13));
+        assert_eq!(location_uri_and_line(&found), (file_uri(&util), 0));
+
+        // Indexed from disk, the file is reached through its own document.
+        let mut budget = WORKSPACE_FILE_BUDGET;
+        state.scan_workspace_path(&root, &mut budget);
+        let found = state.definition(&locate_params(&main_uri, 3, 13));
+        assert_eq!(location_uri_and_line(&found), (file_uri(&util), 0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn hover_on_an_imported_function_shows_its_signature() {
+        let (root, main, _) = two_file_project("hover");
+        let mut state = ServerState::new();
+        let main_uri = file_uri(&main);
+        state.update(&main_uri, &std::fs::read_to_string(&main).unwrap());
+        let hover = state.hover(&locate_params(&main_uri, 3, 13));
+        let text = field_str(field(&hover, "contents"), "value").unwrap_or_default();
+        assert!(text.contains("fn helper(x: i64) -> i64"), "hover was: {text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_files_are_indexed_once_under_percent_encoded_uris() {
+        let (root, main, util) = two_file_project("encoded");
+        let mut state = ServerState::new();
+        let mut budget = WORKSPACE_FILE_BUDGET;
+        state.scan_workspace_path(&root, &mut budget);
+        assert!(file_uri(&util).contains("%20"));
+        assert!(state.documents.contains_key(&file_uri(&util)));
+        // The editor spells the same file with an explicit local authority.
+        let editor_uri = file_uri(&main).replacen("file:///", "file://localhost/", 1);
+        state.open_document(&editor_uri, &std::fs::read_to_string(&main).unwrap());
+        let main_entries = state
+            .documents
+            .keys()
+            .filter(|uri| crate::uri::uri_to_path(uri).as_deref() == Some(main.as_path()))
+            .count();
+        assert_eq!(main_entries, 1, "{:?}", state.documents.keys().collect::<Vec<_>>());
+        let refs = state.references(&locate_params(&editor_uri, 3, 13));
+        let Value::Array(refs) = refs else {
+            panic!("references answered {refs:?}");
+        };
+        assert_eq!(refs.len(), 2, "{refs:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_closed_file_stays_indexed_and_follows_the_disk() {
+        let (root, main, util) = two_file_project("closed");
+        let mut state = ServerState::new();
+        let (main_uri, util_uri) = (file_uri(&main), file_uri(&util));
+        state.update(&util_uri, "pub fn unsaved() -> i64 { 0 }\n");
+        state.update(&main_uri, &std::fs::read_to_string(&main).unwrap());
+        assert_eq!(codes(&state, &main_uri), ["GR0001"]);
+
+        // Closing the unsaved buffer puts the file back as the disk holds it.
+        state.close(&util_uri);
+        assert!(state.documents.contains_key(&util_uri));
+        assert!(codes(&state, &main_uri).is_empty(), "{:?}", codes(&state, &main_uri));
+
+        // An edit on disk reaches the analysis through the file watcher.
+        std::fs::write(&util, "pub fn renamed(x: i64) -> i64 { x }\n").unwrap();
+        let changed = Value::Array(vec![watched_change(&util_uri, 2)]);
+        let mut params = BTreeMap::new();
+        params.insert("changes".to_string(), changed);
+        let affected = state.watched_files_changed(&Value::Object(params));
+        assert!(affected.contains(&main_uri), "{affected:?}");
+        assert_eq!(codes(&state, &main_uri), ["GR0001"]);
+
+        // A deleted file leaves the index.
+        std::fs::remove_file(&util).unwrap();
+        let mut params = BTreeMap::new();
+        params.insert(
+            "changes".to_string(),
+            Value::Array(vec![watched_change(&util_uri, 3)]),
+        );
+        state.watched_files_changed(&Value::Object(params));
+        assert!(!state.documents.contains_key(&util_uri));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn watched_change(uri: &str, kind: u32) -> Value {
+        let mut change = BTreeMap::new();
+        change.insert("uri".to_string(), Value::String(uri.to_string()));
+        change.insert("type".to_string(), Value::Number(f64::from(kind)));
+        Value::Object(change)
+    }
+
+    #[test]
+    fn file_watchers_are_registered_only_when_the_client_offers_them() {
+        let offered = gossamer_std::json::parse(
+            r#"{"capabilities":{"workspace":{"didChangeWatchedFiles":{"dynamicRegistration":true}}}}"#,
+        )
+        .unwrap();
+        assert!(client_registers_file_watchers(&offered));
+        assert!(!client_registers_file_watchers(&gossamer_std::json::parse("{}").unwrap()));
+        let request = watched_files_registration();
+        assert_eq!(field_str(&request, "method"), Some("client/registerCapability"));
     }
 
     #[test]
@@ -607,6 +735,34 @@ mod tests {
             let _ = state.hover(&locate_params(uri, 0, 4));
             let _ = state.semantic_tokens(&document_params_value(uri));
         }
+    }
+
+    #[test]
+    fn incremental_changes_apply_in_order_with_clamped_ends() {
+        let uri = "file:///incremental.gos";
+        let mut state = ServerState::new();
+        state.update(uri, "fn caf\u{e9}() {\r\n    let x = 1\r\n}\r\n");
+        let change = |range: Value, text: &str| {
+            let mut change = BTreeMap::new();
+            change.insert("range".to_string(), range);
+            change.insert("text".to_string(), Value::String(text.to_string()));
+            Value::Object(change)
+        };
+        let changes = Value::Array(vec![
+            // `é` is one UTF-16 unit, so the inside of `()` is character 8.
+            change(super::handle::range_value(0, 8, 0, 8), "y: i64"),
+            // Past the line's end: the end of `    let x = 1`.
+            change(super::handle::range_value(1, 99, 1, 99), "\r\n    let z = y"),
+            // Past the last line: the end of the text.
+            change(super::handle::range_value(40, 0, 40, 0), "// end\n"),
+        ]);
+        let text = state
+            .edited_text(uri, &changes, &BTreeMap::new())
+            .expect("edits apply");
+        assert_eq!(
+            text,
+            "fn caf\u{e9}(y: i64) {\r\n    let x = 1\r\n    let z = y\r\n}\r\n// end\n"
+        );
     }
 
     /// Every request an editor can send lands on a document the editor may
@@ -1348,10 +1504,24 @@ pub mod handle {
 
         /// Indexes every `.gos` file under `root` for workspace-wide
         /// symbol queries, mirroring the `initialize` workspace-roots
-        /// scan (same 1000-file budget).
-        pub fn scan_workspace(&mut self, root: &str) {
-            let mut budget = 1000usize;
+        /// scan (same file budget). A file indexed before is re-read, so
+        /// a repeated scan follows edits made on disk.
+        pub fn scan_workspace(&mut self, root: &std::path::Path) {
+            let mut budget = super::WORKSPACE_FILE_BUDGET;
             self.state.scan_workspace_path(root, &mut budget);
+        }
+
+        /// Analyses the file at `path` as the disk holds it, as a workspace
+        /// file no editor has open, and answers the URI it is known by.
+        pub fn sync_file(&mut self, path: &std::path::Path) -> String {
+            let uri = self.state.known_uri(&crate::uri::path_to_uri(path));
+            self.state.refresh_from_disk(&uri);
+            uri
+        }
+
+        /// Mirrors `workspace/didChangeWatchedFiles`.
+        pub fn watched_files_changed(&mut self, params: &Value) {
+            self.state.watched_files_changed(params);
         }
 
         /// Mirrors `textDocument/references`.

@@ -103,8 +103,9 @@ const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "execute",
-        description: "Execute a Gossamer program on the bytecode VM (with JIT). Returns \
-                      exit code, stdout, and stderr.",
+        description: "Execute a Gossamer program on the bytecode VM (with JIT), or as the \
+                      native executable `gos build` makes with native=true. Returns exit \
+                      code, stdout, and stderr.",
         args: &[
             Arg {
                 name: "file",
@@ -117,6 +118,13 @@ const TOOLS: &[Tool] = &[
                 name: "args",
                 ty: "array",
                 description: "Arguments forwarded to the program.",
+                required: false,
+            },
+            Arg {
+                name: "native",
+                ty: "boolean",
+                description: "Run the native executable instead of the VM; output matches \
+                              on every tier, so a difference is a toolchain bug.",
                 required: false,
             },
             TIMEOUT_ARG,
@@ -343,10 +351,13 @@ fn tool_value(tool: &Tool) -> Value {
         .args
         .iter()
         .map(|a| {
-            (
-                a.name.to_string(),
-                obj(vec![("type", s(a.ty)), ("description", s(a.description))]),
-            )
+            let mut schema = vec![("type", s(a.ty)), ("description", s(a.description))];
+            // Every array argument is a list of strings; strict clients
+            // reject an array schema that does not say so.
+            if a.ty == "array" {
+                schema.push(("items", obj(vec![("type", s("string"))])));
+            }
+            (a.name.to_string(), obj(schema))
         })
         .collect();
     let required = tool
@@ -436,7 +447,11 @@ pub(crate) fn call(
             Err(e) => Err(e),
             Ok((None, _)) => Err("`file` or `source` is required".to_string()),
             Ok((Some(file), _guard)) => {
-                let mut command = vec!["run".to_string(), file];
+                let mut command = vec!["run".to_string()];
+                if json::as_bool(field(args, "native")) == Some(true) {
+                    command.push("--native".to_string());
+                }
+                command.push(file);
                 if let Some(extra) = json::as_array(field(args, "args")) {
                     command.extend(extra.iter().filter_map(json::as_str).map(String::from));
                 }

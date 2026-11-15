@@ -194,3 +194,23 @@ fn a_shift_amount_may_be_any_integer_type() {
         "{errors:#?}"
     );
 }
+
+#[test]
+fn an_integer_literal_and_a_float_literal_never_share_a_type() {
+    for body in [
+        "let v = #[1, 2.5]",
+        "let v = [1, 2.5]",
+        "let v = #{1, 2.5}",
+        "let v = {\"a\": 1, \"b\": 2.5}",
+        "let v = if b > 0 { 1 } else { 2.5 }",
+        "let mut v = 0\n    v = 2.5",
+    ] {
+        let errors = errors(body);
+        assert!(
+            matches!(errors.as_slice(), [TypeError::TypeMismatch { .. }]),
+            "`{body}` produced {errors:#?}"
+        );
+    }
+    accepted("let v = #[1.0, 2.5]");
+    accepted("let v = #[1, 2]");
+}

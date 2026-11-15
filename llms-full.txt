@@ -23,12 +23,13 @@ is settled.
 ## 2. Lean on the toolchain
 
 - `gos mcp` (e.g. `claude mcp add gossamer -- gos mcp`) exposes `check`,
-  `execute`, `build`, `test`, `fmt`, `doc`, `explain`, `lint`,
-  `feature_status`, and navigation (`hover`, `definition`, `references`,
-  `workspace_symbols`). `check`, `execute`, `fmt`, `doc`, and `lint` take an
-  inline `source` string. Use `hover` for "what is this", `explain CODE` for
-  any diagnostic, `doc` for a module's exports. This card is its
-  `gossamer://skill-card` resource.
+  `execute`, `build`, `test`, `fmt`, `doc`, `explain`, `lint`, `fix`,
+  `audit`, `feature_status`, and navigation (`hover`, `definition`,
+  `references`, `workspace_symbols`). `check`, `execute`, `fmt`, `doc`,
+  `lint`, and `fix` take an inline `source` string; `execute` with
+  `native: true` runs the native tier. Use `hover` for "what is this",
+  `explain CODE` for any diagnostic, `doc` for a module's exports. This card
+  is its `gossamer://skill-card` resource.
 - Without MCP: `gos check FILE`, `gos run FILE`, `gos explain CODE`,
   `gos doc std::<module>`. `gos check --fix` applies the rewrites diagnostics
   carry.
@@ -38,8 +39,6 @@ is settled.
 ## 3. Cheat sheet
 
 ```gossamer
-use std::io
-
 const PI: f64 = 3.14159
 
 struct Point { x: f64, y: f64 }
@@ -174,11 +173,14 @@ extend(&mut items)     // items is now #[1, 2, 1]
   `{:x}` `{:b}` `{:o}`, `{:.2}`, `{:+}`, `{:e}`; no positional `{0}`.
 - `{}` renders any value, nested collections, structs, enums, and `Option`s
   included, each in the spelling that builds it (`#[1, 2]`, `{"a": 1}`,
-  `Some("x")`, `P { n: 1 }`), the same on every tier. `{:?}` differs in two
-  places only: it quotes a top-level `String` or `char` (`"hi"`, `'x'`),
-  which shows empty strings and stray whitespace, and it shows the structure
-  of a type whose `Display` is overridden. Write `{}` unless you need one of
-  those. `impl Display for T { fn fmt(&self) -> String }` overrides `{}` and
+  `Some("x")`, `P { n: 1 }`), the same on every tier. `Stack`, `Queue`,
+  `Deque`, and the heaps print their name before their elements
+  (`Stack [1, 2]`), and a top-level whole float prints without its `.0`
+  (`{}` writes `3.0` as `3`). `{:?}` differs in three places only: it
+  quotes a top-level `String` or `char` (`"hi"`, `'x'`), which shows empty
+  strings and stray whitespace, it keeps a top-level whole float's `.0`,
+  and it shows the structure of a type whose `Display` is overridden. Write `{}` unless you need one of those.
+  `impl Display for T { fn fmt(&self) -> String }` overrides `{}` and
   `to_string()`; `impl Debug for T { fn fmt }` overrides `{:?}`.
 - `"""` strings dedent to their closing delimiter; `f"""..."""` interpolates.
 - Two index spaces: `s.len()`, `s[i]` (a `char`), and `for c in s` count
@@ -189,7 +191,8 @@ extend(&mut items)     // items is now #[1, 2, 1]
   `String::with_capacity(n)` or a `bytes::Builder`.
 
 **Numbers**
-- Bare literals (`0`, `1.5`); suffix only without context. `arr[i]` takes an
+- Bare literals (`0`, `1.5`); suffix only without context. An integer
+  literal never takes a float type: `#[1, 2.5]` is GT0001, so write `1.0`. `arr[i]` takes an
   `i64` - no `as usize`. Casts are checked: numeric to numeric, `bool`/`char`
   to int; narrowing masks (`300 as u8 == 44`), float to int saturates.
 - `+ - *` panic on overflow on every tier and profile; `+%` `-%` `*%` (and
@@ -404,8 +407,8 @@ http::serve("0.0.0.0:8080", r)?
 ## 11. Comptime, arenas, HTML
 
 - `comptime { }` blocks, `comptime fn`, and `comptime` parameters run while
-  compiling and fold to constants; `typeInfo::<T>()` reflects fields;
-  `codegen(s)` splices generated source.
+  compiling and fold to constants; `typeInfo::<T>()` answers the fields as
+  `(name, type)` pairs; `codegen(s)` splices generated source.
 - `arena { }` bump-allocates an object graph freed at the block's exit;
   nothing inside may escape (GM0003).
 - HTML lives in its own `.html` file, read at run time or embedded with a

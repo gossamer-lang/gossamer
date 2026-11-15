@@ -32,11 +32,14 @@ pub(crate) fn run_gos(
     args: &[String],
     timeout: Duration,
 ) -> Result<ExecOutcome, String> {
-    let child = Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    own_process_group(&mut command);
+    let child = command
         .spawn()
         .map_err(|e| format!("spawning {}: {e}", exe.display()))?;
     let pid = child.id();
@@ -49,7 +52,8 @@ pub(crate) fn run_gos(
         Err(mpsc::RecvTimeoutError::Timeout) => {
             kill_pid(pid);
             // The child cannot outlive the kill and its pid cannot be
-            // reused before the waiter reaps it, so this recv returns.
+            // reused before the waiter reaps it, so this recv returns. The
+            // pipes close once every member of the group is gone.
             (rx.recv().map_err(|e| format!("reaping child: {e}"))?, true)
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -65,15 +69,28 @@ pub(crate) fn run_gos(
     })
 }
 
-/// Force-kills `pid` via the platform's standard process-control
-/// utility, keeping this crate dependency free and unsafe free. The
-/// utility's streams are detached: the server's inherited stdout IS
-/// the JSON-RPC transport, and these tools report their outcome to
-/// stdout/stderr.
+/// Starts the child as the leader of a process group of its own, so a
+/// kill reaches what it spawned (`gos build` runs llc and cc, a program
+/// its own children) as well as the child.
+#[cfg(unix)]
+fn own_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+/// `taskkill /T` walks the child's tree instead.
+#[cfg(windows)]
+fn own_process_group(_command: &mut Command) {}
+
+/// Force-kills the process group `pid` leads via the platform's standard
+/// process-control utility, keeping this crate dependency free and unsafe
+/// free. The utility's streams are detached: the server's inherited
+/// stdout IS the JSON-RPC transport, and these tools report their outcome
+/// to stdout/stderr.
 #[cfg(unix)]
 fn kill_pid(pid: u32) {
     let _ = Command::new("kill")
-        .args(["-9", &pid.to_string()])
+        .args(["-9", "--", &format!("-{pid}")])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();

@@ -127,7 +127,7 @@ fn ntstatus_name(code: u32) -> Option<&'static str> {
 /// absolute figure is a property of the hardware, and a CI runner's syscalls
 /// cost several times a workstation's.
 pub const TCP_RESPONSE_FLOOR_SOURCE: &str = r#"
-use std::{env, net}
+use std::net
 
 fn serve(conn: net::TcpStream) {
     let reply = "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"ok\":true}"
@@ -145,14 +145,20 @@ fn serve(conn: net::TcpStream) {
 }
 
 fn main() {
-    let listener = match net::TcpListener::bind(env::args()[0]) {
+    let listener = match net::TcpListener::bind("127.0.0.1:0") {
         Ok(l) => l
         Err(e) => {
             eprintln("bind failed: {e}")
             return
         }
     }
-    println("listening")
+    match listener.local_addr() {
+        Ok(addr) => println(addr)
+        Err(e) => {
+            eprintln("local_addr failed: {e}")
+            return
+        }
+    }
     loop {
         match listener.accept() {
             Ok((conn, _peer)) => spawn(|| serve(conn))
@@ -161,6 +167,35 @@ fn main() {
     }
 }
 "#;
+
+/// Starts `binary`, a server fixture that binds `127.0.0.1:0` and prints the
+/// address it bound as its first line of output, and answers the running
+/// child with that address. The server picks its own port, so no other
+/// process can take it between choosing and binding, and the address is
+/// printed only once the listener accepts connections.
+pub fn spawn_listening(binary: &std::path::Path) -> (std::process::Child, String) {
+    use std::io::BufRead;
+
+    let mut child = std::process::Command::new(binary)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn the server");
+    let stdout = child.stdout.take().expect("the server's stdout is piped");
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .expect("read the server's bound address");
+    let addr = line.trim().to_string();
+    if addr.is_empty() {
+        let status = child.wait();
+        panic!("the server exited before it bound a listener: {status:?}");
+    }
+    // Anything else the server prints is drained, so a full pipe never
+    // blocks it.
+    std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
+    (child, addr)
+}
 
 /// `utime + stime` of `pid` in clock ticks, read from `/proc/<pid>/stat`.
 #[cfg(target_os = "linux")]

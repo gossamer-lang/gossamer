@@ -89,39 +89,15 @@ fn assert_bounded_live_vecs(binary: &Path) {
 
 /// A port nothing is listening on, learned by binding and letting go.
 #[cfg(target_os = "linux")]
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind an ephemeral port")
-        .local_addr()
-        .expect("local_addr")
-        .port()
-}
-
-/// Runs the measured load against a server binary started with `arg` on
-/// `port`, and answers the CPU microseconds it spent per request.
+/// Runs the measured load against a server fixture (see
+/// [`common::spawn_listening`]), and answers the CPU microseconds it spent
+/// per request.
 #[cfg(target_os = "linux")]
-fn server_cpu_per_request(label: &str, binary: &Path, arg: String, port: u16) -> f64 {
+fn server_cpu_per_request(label: &str, binary: &Path) -> f64 {
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
-    let mut server = Command::new(binary)
-        .arg(arg)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn the server");
-
-    // Wait for the listener rather than sleeping a fixed amount.
-    let addr = format!("127.0.0.1:{port}");
-    let mut ready = false;
-    for _ in 0..600 {
-        if TcpStream::connect(&addr).is_ok() {
-            ready = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(ready, "the server never accepted a connection");
+    let (mut server, addr) = common::spawn_listening(binary);
 
     let request = b"GET /ping HTTP/1.1\r\nHost: x\r\n\r\n";
     let per_worker = 4_000usize;
@@ -191,28 +167,23 @@ fn server_cpu_per_request(label: &str, binary: &Path, arg: String, port: u16) ->
 #[test]
 #[cfg(target_os = "linux")]
 fn http_server_cpu_per_request_stays_near_its_syscall_floor() {
-    let port = free_port();
     let binary = build_release(
         "http_cpu_floor",
         r#"
-use std::{env, http}
+use std::http
 use std::http::router
-let addr = env::args()[0]
 let routes = router::Router::new()
     .get("/ping", |_req, _p| http::Response::text(200, "ok"))
-let _ = http::serve(addr, routes)
+let server = http::Server::new()
+server.listen("127.0.0.1:0")?
+println(server.addr())
+server.serve(routes)?
 "#,
     );
-    let served = server_cpu_per_request("http floor", &binary, format!("127.0.0.1:{port}"), port);
+    let served = server_cpu_per_request("http floor", &binary);
 
-    let raw_port = free_port();
     let raw = build_release("tcp_response_floor", common::TCP_RESPONSE_FLOOR_SOURCE);
-    let floor = server_cpu_per_request(
-        "raw socket floor",
-        &raw,
-        format!("127.0.0.1:{raw_port}"),
-        raw_port,
-    );
+    let floor = server_cpu_per_request("raw socket floor", &raw);
 
     assert!(
         served <= floor * 3.0,
@@ -991,32 +962,19 @@ fn an_idle_keep_alive_connection_costs_tens_of_kibibytes() {
     let binary = build_release(
         "idle_connection_memory",
         r#"
-use std::{env, http}
+use std::http
 
 fn main() {
     let server = http::Server::new()
-    let _ = server.listen("127.0.0.1:" + env::args()[0])
+    if let Err(e) = server.listen("127.0.0.1:0") {
+        panic("listen failed: {e}")
+    }
+    println(server.addr())
     let _ = server.serve(|_r| Ok(http::Response::text(200, "ok")))
 }
 "#,
     );
-    let port = free_port();
-    let mut server = Command::new(&binary)
-        .arg(port.to_string())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn the server");
-    let addr = format!("127.0.0.1:{port}");
-    let mut ready = false;
-    for _ in 0..600 {
-        if TcpStream::connect(&addr).is_ok() {
-            ready = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(ready, "the server never accepted a connection");
+    let (mut server, addr) = common::spawn_listening(&binary);
 
     let request = b"GET /ping HTTP/1.1\r\nHost: x\r\n\r\n";
     let open = |count: usize| -> Vec<TcpStream> {

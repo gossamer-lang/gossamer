@@ -16,6 +16,7 @@ mod session;
 mod stdlib_index;
 mod symbols;
 mod synthesis;
+pub mod uri;
 mod workspace_index;
 
 pub use server::{handle, run_stdio};

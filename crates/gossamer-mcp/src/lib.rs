@@ -1,11 +1,11 @@
 //! Model-context-protocol server for Gossamer.
 //! Runs an MCP server over stdio (newline-delimited JSON-RPC): the
-//! toolchain (check / explain / execute / build / test / fmt / doc) and
-//! semantic navigation (hover / definition / references / workspace
-//! symbols) as MCP tools, plus the skill card as a resource and prompt.
-//! Exec tools spawn the `gos` binary so user-program panics and exits
-//! never take the server down; on Unix a timed-out `gos build`'s
-//! grandchildren (llc / cc) are left to orphan reaping.
+//! toolchain (check / explain / execute / build / test / fmt / doc /
+//! lint / fix / audit / `feature_status`) and semantic navigation (hover /
+//! definition / references / workspace symbols) as MCP tools, plus the
+//! skill card as a resource and prompt. Exec tools spawn the `gos`
+//! binary so user-program panics and exits never take the server down,
+//! and a timeout kills everything that child started.
 
 #![forbid(unsafe_code)]
 

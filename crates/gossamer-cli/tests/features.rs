@@ -249,3 +249,39 @@ fn main() {
     std::fs::write(dir.join("csrc/fast.c"), "this is not C\n").expect("break the C source");
     assert_eq!(run_everywhere(&dir, &[]), "42\n");
 }
+
+#[test]
+fn a_feature_of_a_dependency_not_on_disk_reports_the_missing_dependency() {
+    let dir = std::env::temp_dir().join(format!("gos-features-absent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // The dependency's library name, which only its absent manifest
+    // declares, is the one the feature reaches it by.
+    write(
+        &dir.join("project.toml"),
+        r#"[project]
+id = "example.com/feat"
+version = "0.1.0"
+
+[features]
+default = ["shiny"]
+shiny = ["extra_lib/shiny"]
+
+[dependencies]
+"example.com/extra" = { path = "deps/extra" }
+"#,
+    );
+    write(
+        &dir.join("src/main.gos"),
+        "fn main() {\n    println(1)\n}\n",
+    );
+    let out = Command::new(gos())
+        .current_dir(&dir)
+        .args(["check", "src/main.gos"])
+        .output()
+        .expect("run gos");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(stderr.contains("dependencies are missing"), "{stderr}");
+    assert!(stderr.contains("holds no project.toml"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

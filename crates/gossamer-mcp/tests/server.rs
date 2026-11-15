@@ -45,7 +45,7 @@ fn tool_text(reply: &Value) -> (String, bool) {
 }
 
 #[test]
-fn initialize_reports_server_info_and_echoes_protocol_version() {
+fn initialize_reports_server_info_and_echoes_a_known_protocol_version() {
     let input = req(1, "initialize", "{\"protocolVersion\":\"2025-03-26\"}");
     let replies = drive(&input);
     assert_eq!(replies.len(), 1);
@@ -60,6 +60,17 @@ fn initialize_reports_server_info_and_echoes_protocol_version() {
         Some("gos-mcp")
     );
     assert_eq!(json::get(&replies[0], "id").and_then(json::as_i64), Some(1));
+}
+
+#[test]
+fn initialize_answers_its_newest_revision_for_one_it_does_not_know() {
+    let input = req(1, "initialize", "{\"protocolVersion\":\"2099-01-01\"}");
+    let replies = drive(&input);
+    let result = json::get(&replies[0], "result").unwrap();
+    assert_eq!(
+        json::get(result, "protocolVersion").and_then(json::as_str),
+        Some("2025-06-18")
+    );
 }
 
 #[test]
@@ -123,6 +134,10 @@ fn tools_list_names_every_tool_with_schemas() {
         "test",
         "fmt",
         "doc",
+        "lint",
+        "fix",
+        "audit",
+        "feature_status",
         "hover",
         "definition",
         "references",
@@ -141,6 +156,17 @@ fn tools_list_names_every_tool_with_schemas() {
             json::get(schema, "type").and_then(json::as_str),
             Some("object")
         );
+        let Some(Value::Object(properties)) = json::get(schema, "properties") else {
+            panic!("tool without properties: {tool:?}");
+        };
+        for property in properties.values() {
+            if json::get(property, "type").and_then(json::as_str) == Some("array") {
+                assert!(
+                    json::get(property, "items").is_some(),
+                    "array argument without items: {tool:?}"
+                );
+            }
+        }
     }
 }
 
@@ -300,4 +326,129 @@ fn skill_card_prompt_lists_and_renders() {
         json::get(&messages[0], "role").and_then(json::as_str),
         Some("user")
     );
+}
+
+/// A package under a directory name that needs percent-encoding, whose
+/// `main.gos` calls `helper` from `util.gos`.
+fn nav_project(name: &str) -> (PathBuf, String) {
+    let root = std::env::temp_dir().join(format!("gos mcp {name} {}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("project.toml"),
+        "[project]\nid = \"example.com/nav\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.gos"),
+        "use util::helper\n\nfn main() {\n    println(helper(2))\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("util.gos"),
+        "pub fn helper(x: i64) -> i64 { x + 1 }\n",
+    )
+    .unwrap();
+    let main = root.join("src").join("main.gos");
+    let main = main.to_string_lossy().replace('\\', "\\\\");
+    (root, main)
+}
+
+#[test]
+fn definition_reaches_an_item_in_another_file_of_the_package() {
+    let (root, main) = nav_project("definition");
+    let params = format!(
+        "{{\"name\":\"definition\",\"arguments\":{{\"file\":\"{main}\",\"line\":4,\"column\":14}}}}"
+    );
+    let replies = drive(&req(11, "tools/call", &params));
+    let (text, is_error) = tool_text(&replies[0]);
+    assert!(!is_error, "text was: {text}");
+    assert!(text.ends_with("util.gos:1:8"), "text was: {text}");
+    assert!(text.contains(" mcp definition "), "text was: {text}");
+    assert!(!text.contains('\n'), "one location expected: {text}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn workspace_symbols_follow_files_rewritten_on_disk() {
+    let (root, _) = nav_project("symbols");
+    let root_arg = root.to_string_lossy().replace('\\', "\\\\");
+    let call = |id: i64, query: &str| {
+        req(
+            id,
+            "tools/call",
+            &format!(
+                "{{\"name\":\"workspace_symbols\",\"arguments\":{{\"query\":\"{query}\",\"root\":\"{root_arg}\"}}}}"
+            ),
+        )
+    };
+    let mut out = Vec::new();
+    let config = ServerConfig {
+        gos_exe: PathBuf::from("gos-not-used"),
+    };
+    let util = root.join("src").join("util.gos");
+    let rewrite = {
+        let util = util.clone();
+        move || std::fs::write(&util, "pub fn renamed(x: i64) -> i64 { x }\n").unwrap()
+    };
+    // The first call indexes the file; the rewrite lands between calls.
+    let mut session = SessionInput::new(vec![call(13, "helper"), call(14, "renamed")], rewrite);
+    testing_run(&mut session, &mut out, &config).unwrap();
+    let replies: Vec<Value> = String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .map(|line| json::parse(line).unwrap())
+        .collect();
+    let (before, _) = tool_text(&replies[0]);
+    let (after, _) = tool_text(&replies[1]);
+    assert!(before.starts_with("helper  "), "before: {before}");
+    assert!(!before.contains("%20"), "before: {before}");
+    assert!(after.starts_with("renamed  "), "after: {after}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Client input that runs `between` after handing over its first line,
+/// so a test can change the disk between two requests of one session.
+struct SessionInput<F: FnMut()> {
+    lines: std::collections::VecDeque<String>,
+    current: Cursor<Vec<u8>>,
+    handed: usize,
+    between: F,
+}
+
+impl<F: FnMut()> SessionInput<F> {
+    fn new(lines: Vec<String>, between: F) -> Self {
+        Self {
+            lines: lines.into(),
+            current: Cursor::new(Vec::new()),
+            handed: 0,
+            between,
+        }
+    }
+}
+
+impl<F: FnMut()> std::io::Read for SessionInput<F> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        std::io::BufRead::fill_buf(self)?;
+        std::io::Read::read(&mut self.current, buf)
+    }
+}
+
+impl<F: FnMut()> std::io::BufRead for SessionInput<F> {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        if self.current.position() as usize >= self.current.get_ref().len()
+            && let Some(line) = self.lines.pop_front()
+        {
+            if self.handed == 1 {
+                (self.between)();
+            }
+            self.handed += 1;
+            self.current = Cursor::new(line.into_bytes());
+        }
+        self.current.fill_buf()
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.current.consume(amount);
+    }
 }

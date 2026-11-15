@@ -8,9 +8,9 @@ use crate::ServerConfig;
 use crate::protocol::{field, field_str, obj, response_err, response_ok, s};
 use crate::transport::{Incoming, Transport};
 
-/// Latest MCP revision the server implements; also the fallback when
-/// the client omits `protocolVersion`.
-const PROTOCOL_VERSION: &str = "2025-06-18";
+/// MCP revisions the server implements, newest first. A client asking
+/// for one of these gets it; any other request gets the newest.
+const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// The canonical skill card; `SKILL.md` at the repo root is the source
 /// of truth, mirroring `gos skill-prompt`.
@@ -65,7 +65,9 @@ pub(crate) fn run<R: BufRead, W: Write>(
 }
 
 fn initialize_result(params: &Value) -> Value {
-    let version = field_str(params, "protocolVersion").unwrap_or(PROTOCOL_VERSION);
+    let version = field_str(params, "protocolVersion")
+        .and_then(|asked| PROTOCOL_VERSIONS.iter().find(|known| **known == asked))
+        .unwrap_or(&PROTOCOL_VERSIONS[0]);
     obj(vec![
         ("protocolVersion", s(version)),
         (

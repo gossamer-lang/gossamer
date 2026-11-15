@@ -136,8 +136,16 @@ pub(crate) fn feature_request() -> gossamer_pkg::features::FeatureRequest {
 /// it includes) and for `#[cfg(feature = "..")]`.
 pub(crate) fn install_features(entry: &Path) -> Result<()> {
     let request = FEATURE_REQUEST.lock().clone().unwrap_or_default();
-    let resolved = gossamer_pkg::features::resolve(entry, &request)
-        .map_err(|err| anyhow!("features: {err}"))?;
+    let resolved = match gossamer_pkg::features::resolve(entry, &request) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            // A dependency whose source is not on disk is unknown to the
+            // resolver, so a feature naming it fails; the missing source is
+            // what to report.
+            require_prepared_dependencies(entry)?;
+            return Err(anyhow!("features: {err}"));
+        }
+    };
     gossamer_pkg::features::install(&resolved);
     gossamer_ast::cfg::set_package_features(resolved.per_package);
     Ok(())

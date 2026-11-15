@@ -176,17 +176,17 @@ fn bundle_project_unit(
     source: &str,
     open: &OpenBuffers,
 ) -> (String, String, u32, Vec<BundledSpan>) {
-    let Some(path) = uri_to_path(uri) else {
+    let Some(path) = crate::uri::uri_to_path(uri) else {
         return (source.to_string(), uri.to_string(), 0, Vec::new());
     };
     let mut buffers: Vec<(std::path::PathBuf, String)> = open
         .iter()
         .filter(|(open_uri, _)| open_uri.as_str() != uri)
-        .filter_map(|(open_uri, text)| Some((uri_to_path(open_uri)?, text.clone())))
+        .filter_map(|(open_uri, text)| Some((crate::uri::uri_to_path(open_uri)?, text.clone())))
         .collect();
     buffers.push((path.clone(), source.to_string()));
     let unit = gossamer_pkg::bundle::bundle_document_unit_with(&path, source, &buffers);
-    let name = format!("file://{}", unit.entry.display());
+    let name = crate::uri::path_to_uri(&unit.entry);
     (unit.source, name, unit.window_start, unit.origins)
 }
 
@@ -194,7 +194,7 @@ fn bundle_project_unit(
 /// entry's `file://` URI) belongs to, as the command line applies it.
 #[cfg(not(target_arch = "wasm32"))]
 fn unit_foreign_policy(name: &str) -> gossamer_types::ForeignPolicy {
-    uri_to_path(name).map_or(gossamer_types::ForeignPolicy::Ungoverned, |path| {
+    crate::uri::uri_to_path(name).map_or(gossamer_types::ForeignPolicy::Ungoverned, |path| {
         gossamer_types::ForeignPolicy::for_path(&path)
     })
 }
@@ -214,32 +214,6 @@ fn bundle_project_unit(
     _open: &OpenBuffers,
 ) -> (String, String, u32, Vec<BundledSpan>) {
     (source.to_string(), uri.to_string(), 0, Vec::new())
-}
-
-/// Decodes a `file://` URI into a filesystem path, undoing the percent
-/// escapes an editor applies to spaces and other reserved characters.
-#[cfg(not(target_arch = "wasm32"))]
-fn uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
-    let rest = uri.strip_prefix("file://")?;
-    // `file:///path` (empty authority) is the only form editors send for
-    // a local file; anything with a host is not a path we can read.
-    let rest = rest.strip_prefix('/').map(|r| format!("/{r}"))?;
-    let bytes = rest.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
-            if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    Some(std::path::PathBuf::from(String::from_utf8(out).ok()?))
 }
 
 /// Runs the full pipeline over `source` in a scratch cache. Callers
@@ -285,7 +259,7 @@ pub(crate) fn sibling_view(
 
 #[cfg(not(target_arch = "wasm32"))]
 fn unit_window(uri: &str, source: &str, unit: &UnitAnalysis) -> Option<u32> {
-    let path = uri_to_path(uri)?;
+    let path = crate::uri::uri_to_path(uri)?;
     gossamer_pkg::bundle::document_window(&unit.origins, &path, source.len()).map(|w| w.0)
 }
 
@@ -460,6 +434,21 @@ fn attach_lint_fixes(diagnostics: &mut [Diagnostic], fixes: Vec<gossamer_lint::F
             format!("Fix {title}"),
             fix.replacement,
         ));
+    }
+}
+
+impl UnitAnalysis {
+    /// The file `span` was read from and the byte range it covers there,
+    /// when one region of the unit holds the whole span.
+    #[must_use]
+    pub(crate) fn origin_of(&self, span: Span) -> Option<(std::path::PathBuf, u32, u32)> {
+        let region = self
+            .origins
+            .iter()
+            .find(|region| region.start <= span.start && span.end <= region.end)?;
+        let start = region.origin_start + (span.start - region.start);
+        let end = region.origin_start + (span.end - region.start);
+        Some((region.origin.clone(), start, end))
     }
 }
 

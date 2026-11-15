@@ -440,8 +440,17 @@ impl InferCtxt {
                 Some(TyKind::Var(other_vid)) => {
                     // Propagate the integer constraint to the target
                     // var's root so the merged equivalence class
-                    // remains integer-only.
+                    // remains integer-only. A float literal's class has
+                    // no integer member.
                     let other_root = self.root_of(other_vid);
+                    if self
+                        .float_literal
+                        .get(other_root as usize)
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        return Err(UnifyError::IntegerConstraint);
+                    }
                     if other_root as usize >= self.integer_constrained.len() {
                         self.integer_constrained
                             .resize((other_root as usize) + 1, false);
@@ -465,6 +474,14 @@ impl InferCtxt {
                 Some(TyKind::Float(_)) => {}
                 Some(TyKind::Var(other_vid)) => {
                     let other_root = self.root_of(other_vid);
+                    if self
+                        .integer_constrained
+                        .get(other_root as usize)
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        return Err(UnifyError::FloatConstraint);
+                    }
                     if other_root as usize >= self.float_literal.len() {
                         self.float_literal.resize((other_root as usize) + 1, false);
                     }

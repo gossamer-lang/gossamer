@@ -84,15 +84,21 @@ pub enum TypeError {
     },
     /// An operator mixed an integer operand with a float operand.
     /// Gossamer never widens across that boundary implicitly, so the fix
-    /// is a written cast on the integer operand.
-    #[error("type mismatch: expected `{expected}`, found `{found}`")]
+    /// writes the integer operand as a float.
+    #[error(
+        "mismatched numeric types: `{expected}` (`{}`) and `{found}` (`{}`) meet at `{op}`",
+        operands.left,
+        operands.right
+    )]
     NumericOperandMismatch {
+        /// The operator, as written.
+        op: String,
         /// Left operand type, rendered via [`crate::render_ty`].
         expected: String,
         /// Right operand type, rendered via [`crate::render_ty`].
         found: String,
-        /// The whole expression rewritten with the cast in place.
-        cast: String,
+        /// The operands as written, and the expression with the fix in place.
+        operands: Box<NumericOperands>,
     },
     /// A binary operator or an integer method met two integer operands of
     /// different types. Each tier compares and computes with one integer
@@ -1141,6 +1147,18 @@ pub enum TypeError {
     },
 }
 
+/// The operands of a [`TypeError::NumericOperandMismatch`], as written, and
+/// the expression rewritten so both are floats.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumericOperands {
+    /// Left operand.
+    pub left: String,
+    /// Right operand.
+    pub right: String,
+    /// The whole expression with the fix in place.
+    pub fix: String,
+}
+
 /// The cast that brings two integer operands to one type, for
 /// [`TypeError::IntegerOperandMismatch`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1479,11 +1497,17 @@ fn mismatch_suggestion(expected: &str, found: &str) -> Option<String> {
              `{expected}`'s range, so check the value fits before casting"
         ));
     }
-    // Integer and float operands never widen into each other implicitly.
-    if (int_suffixes.contains(&expected) && float_suffixes.contains(&found))
-        || (float_suffixes.contains(&expected) && int_suffixes.contains(&found))
-    {
-        return Some(format!("cast explicitly with `<expr> as {expected}`"));
+    // Integer and float values never widen into each other implicitly.
+    if float_suffixes.contains(&expected) && int_suffixes.contains(&found) {
+        return Some(format!(
+            "write an integer literal as a float (`1.0`), or cast with `<expr> as {expected}`"
+        ));
+    }
+    if int_suffixes.contains(&expected) && float_suffixes.contains(&found) {
+        return Some(format!(
+            "an integer and a float never share a type: write the integers as floats \
+             (`1.0`), or truncate with `<expr> as {expected}`"
+        ));
     }
     // T to Option<T>
     if let Some(inner) = expected
@@ -3252,9 +3276,10 @@ fn with_plain_help(
 /// fields.
 fn plain_help(error: &TypeError) -> Option<String> {
     match error {
-        TypeError::NumericOperandMismatch { cast, .. } => {
-            Some(format!("cast explicitly: `{cast}`"))
-        }
+        TypeError::NumericOperandMismatch { operands, .. } => Some(format!(
+            "an integer never meets a float implicitly: write `{}`",
+            operands.fix
+        )),
         TypeError::OptionValueMismatch {
             actual,
             binding,
