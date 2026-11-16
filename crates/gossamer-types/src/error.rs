@@ -1151,6 +1151,17 @@ pub enum TypeError {
         /// The serde operation, as written.
         op: String,
     },
+    /// An encode of a value whose type is, or holds, a type parameter: the
+    /// walk that writes it is generated for one concrete type.
+    #[error(
+        "`{op}` cannot code `{ty}`: it names a type parameter, and typed serde codes one concrete type"
+    )]
+    SerdeTypeParameter {
+        /// The serde operation, as written.
+        op: String,
+        /// The value's type, naming the parameter.
+        ty: String,
+    },
     /// A typed serde call's target holds a type with no JSON form.
     #[error("`{op}` cannot code `{target}`: `{part}` has no JSON form")]
     SerdeTargetUnsupported {
@@ -1317,6 +1328,7 @@ impl TypeError {
             Self::Unordered { .. } => "unordered",
             Self::SerdeTargetUnsupported { .. } => "serde-target-unsupported",
             Self::SerdeTargetMissing { .. } => "serde-target-missing",
+            Self::SerdeTypeParameter { .. } => "serde-type-parameter",
         }
     }
 
@@ -1447,6 +1459,7 @@ impl TypeError {
             Self::Unordered { .. } => "GT0123",
             Self::SerdeTargetUnsupported { .. } => "GT0124",
             Self::SerdeTargetMissing { .. } => "GT0125",
+            Self::SerdeTypeParameter { .. } => "GT0126",
         }
     }
 }
@@ -2583,6 +2596,11 @@ impl TypeDiagnostic {
             TypeError::SerdeTargetMissing { op } => {
                 out = out.with_help(format!(
                     "name it with a turbofish (`{op}::<Weather>(..)`), or bind the call to a `let` that declares its type"
+                ));
+            }
+            TypeError::SerdeTypeParameter { op, .. } => {
+                out = out.with_help(format!(
+                    "call `{op}` where the value's type is concrete, as in the caller that names it, and pass the text in"
                 ));
             }
             TypeError::SerdeTargetUnsupported { .. } => {

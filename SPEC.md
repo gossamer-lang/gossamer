@@ -3349,6 +3349,9 @@ compatibility promise without improving fidelity.
   struct's members by key. `json::encode_pretty` lays the same members out
   indented. An `Option<Option<T>>` member that is `None` is left out.
   `json::to_value(value)` answers the `json::Value` the text reads as.
+  Each encoder writes through a walk generated for the value's concrete
+  type, so an encode of a value whose type is, or holds, a type parameter of
+  the enclosing function is GT0126; encode where the type is concrete.
 - YAML and TOML: `yaml::parse` / `toml::parse` answer a `json::Value`,
   `yaml::encode` / `toml::encode` write one, `yaml::parse_all` /
   `yaml::encode_all` read and write a multi-document stream, and

@@ -748,6 +748,55 @@ fn compound_and_generic_serde_targets_check_cleanly() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// An encode writes through a walk generated for one concrete type, so an
+/// encode of a type parameter, or of a type holding one, is GT0126 at the
+/// generic function; the same encode where the caller names the type checks.
+#[test]
+fn an_encode_over_a_type_parameter_is_gt0126() {
+    let codes = |source: &str| -> Vec<String> {
+        let augmented = gossamer_parse::autoderive::augment_source(source);
+        let mut map = SourceMap::new();
+        let file = map.add_file("serde_type_param.gos".to_string(), augmented);
+        check_frontend(map.source(file), file)
+            .diagnostics
+            .iter()
+            .filter(|d| d.code.as_str().starts_with('G') && !d.code.as_str().starts_with("GL"))
+            .map(|d| d.code.as_str().to_string())
+            .collect()
+    };
+    let head = "use std::encoding::{json, toml, yaml}\nenum Op { Save(String), Idle }\n";
+    for (body, arg) in [
+        (
+            "fn text<T>(v: T) -> String { json::encode(v).unwrap() }",
+            "Op::Idle",
+        ),
+        (
+            "fn text<T>(v: Vec<T>) -> String { json::encode_pretty(v).unwrap() }",
+            "#[Op::Idle]",
+        ),
+        (
+            "fn text<T>(v: T) -> String { yaml::encode(v).unwrap() }",
+            "Op::Idle",
+        ),
+        (
+            "fn text<T>(v: T) -> String { toml::encode(v, sort: true).unwrap() }",
+            "Op::Idle",
+        ),
+        (
+            "fn text<T>(v: T) -> json::Value { json::to_value(v).unwrap() }",
+            "Op::Idle",
+        ),
+    ] {
+        let source = format!("{head}{body}\nfn main() {{ println(text({arg})) }}\n");
+        assert_eq!(codes(&source), vec!["GT0126".to_string()], "{source}");
+    }
+    let concrete = format!(
+        "{head}fn text(r: Result<String, errors::Error>) -> String {{ r.unwrap() }}\n\
+         fn main() {{ println(text(json::encode(Op::Save(\"p\")))) }}\n"
+    );
+    assert!(codes(&concrete).is_empty(), "{concrete}");
+}
+
 /// A field read decides its layout from the receiver's type, so a receiver
 /// nothing gave a type is rejected where it is read. A closure written where a
 /// handler is taken is given the handler's parameter type, which is the

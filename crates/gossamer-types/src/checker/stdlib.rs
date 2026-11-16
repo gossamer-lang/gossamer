@@ -2187,6 +2187,23 @@ impl TypeChecker<'_> {
         })
     }
 
+    /// The type an argument to a binding parameter of type `t` is checked
+    /// against. A sequence parameter crosses as a copy of its elements, so it
+    /// takes an array, a `Vec`, or a view, as a std `[T]` parameter does.
+    pub(super) fn binding_param_ty(&mut self, t: &gossamer_resolve::BindingType) -> Option<Ty> {
+        use gossamer_resolve::BindingType as B;
+        let elem = match t {
+            B::Vec(elem) => self.binding_ty(elem)?,
+            B::Bytes => self.tcx.int_ty(IntTy::U8),
+            _ => return self.binding_ty(t),
+        };
+        let view = self.tcx.intern(TyKind::Slice(elem));
+        Some(self.tcx.intern(TyKind::Ref {
+            mutability: crate::Mutbl::Not,
+            inner: view,
+        }))
+    }
+
     /// The program's own non-generic type named `name`, which a binding's
     /// `#[derive(GosStruct)]` struct of that name crosses into.
     pub(super) fn binding_struct_ty(&mut self, name: &str) -> Option<Ty> {
@@ -2314,6 +2331,42 @@ impl TypeChecker<'_> {
             return self.instant_fn_ret(last);
         }
         None
+    }
+
+    /// Reports an encode whose value's type is, or holds, a type parameter of
+    /// the enclosing function: the walk that writes a value is generated for
+    /// one concrete type, as a typed serde call's is.
+    pub(super) fn reject_serde_over_type_parameter(
+        &mut self,
+        module: &[&str],
+        last: &str,
+        args: &[Expr],
+        arg_tys: &[Ty],
+    ) {
+        let format = match module {
+            [format] | ["encoding", format] | ["std", "encoding", format] => *format,
+            _ => return,
+        };
+        let encodes = match format {
+            "json" => matches!(last, "encode" | "encode_pretty" | "to_value"),
+            "yaml" | "toml" => last == "encode",
+            _ => false,
+        };
+        let (true, Some(arg), Some(&arg_ty)) = (encodes, args.first(), arg_tys.first()) else {
+            return;
+        };
+        let resolved = self.deep_resolve(arg_ty);
+        if !self.ty_mentions_generic_param(resolved) {
+            return;
+        }
+        let ty = self.render_public_ty(resolved);
+        self.emit(
+            TypeError::SerdeTypeParameter {
+                op: format!("{format}::{last}"),
+                ty,
+            },
+            arg.span,
+        );
     }
 
     /// Reports a `json::decode` / `yaml::decode` / `toml::decode` call that

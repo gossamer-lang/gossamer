@@ -796,6 +796,16 @@ impl TypeChecker<'_> {
             } else {
                 format!("{}::{last}", module.join("::"))
             };
+            if args.len() != item.params.len() {
+                self.emit(
+                    TypeError::CallArityMismatch {
+                        callee: callee_name.clone(),
+                        expected: item.params.len(),
+                        found: args.len(),
+                    },
+                    callee.span,
+                );
+            }
             for (param, (arg_ty, arg)) in item.params.iter().zip(arg_tys.iter().zip(args)) {
                 if matches!(param, gossamer_resolve::BindingType::Callback(..)) {
                     // A named function crosses as a callable value, so the
@@ -810,6 +820,10 @@ impl TypeChecker<'_> {
                     };
                     self.deferred_binding_callbacks
                         .push((arg_ty, callee_name.clone(), arg.span));
+                } else if let Some(param_ty) = self.binding_param_ty(param) {
+                    // Any other parameter takes the value its binding type
+                    // spells, as a parameter of a program's own function does.
+                    self.check_sig_param_arg(param_ty, *arg_ty, arg);
                 }
             }
             if let Some(ty) = self.binding_ty(&item.ret) {
@@ -825,6 +839,9 @@ impl TypeChecker<'_> {
                 );
                 return Some(self.tcx.error_ty());
             }
+        }
+        if !user_callee {
+            self.reject_serde_over_type_parameter(module, last, args, arg_tys);
         }
         if let Some(ty) = self.check_stdlib_module_ret_ty(
             (module, last, user_callee),

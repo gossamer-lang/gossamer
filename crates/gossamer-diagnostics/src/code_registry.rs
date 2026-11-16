@@ -1875,6 +1875,15 @@ pub const REGISTRY: &[(&str, &str)] = &[
             for the result (`let w: Weather = yaml::decode(text)?`).",
     ),
     (
+        "GT0126",
+        "An encode names a value whose type is, or holds, a type parameter.\n\
+            `json::encode`, `json::encode_pretty`, `json::to_value`, `yaml::encode`,\n\
+            and `toml::encode` write a value through a walk generated for one\n\
+            concrete type, as `json::encode::<T>` does, so `fn text<T>(v: T) {\n\
+            json::encode(v) }` has no walk to run. Call the encoder where the\n\
+            type is concrete, in the caller that names it, and pass the text in.",
+    ),
+    (
         "GX0001",
         "An operation received a value of an incompatible type. The\n\
                      diagnostic names the type that was required and the type\n\

@@ -1467,6 +1467,12 @@ const DIAGNOSTIC_CATALOGUE: &[(&str, &str, &str, &str)] = &[
         "serde call names no target type",
         "`json::from_value(value)`, `yaml::decode(text)`, and `toml::decode(text)` decode into the type their turbofish names (`json::from_value::<Weather>(value)`), or the type a `let` declares for the result (`let w: Weather = yaml::decode(text)?`).",
     ),
+    (
+        "GT0126",
+        "Types",
+        "encode over a type parameter",
+        "`json::encode`, `json::encode_pretty`, `json::to_value`, `yaml::encode`, and `toml::encode` write a value through a walk generated for one concrete type, as `json::encode::<T>` does, so an encode of a value whose type is, or holds, a type parameter (`fn text<T>(v: T) { json::encode(v) }`) has no walk to run. Call the encoder where the type is concrete, in the caller that names it, and pass the text in.",
+    ),
 ];
 
 fn render_diagnostics_page(entries: &[(&str, &str, &str, &str)]) -> String {

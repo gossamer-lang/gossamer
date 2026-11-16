@@ -377,7 +377,8 @@ Discover signatures with `hover` / `gos doc std::<module>`. Areas:
   types take `#[rename_all("camelCase")]`, enums `#[tag("type")]`, variants
   `#[rename]`; `Option<Option<T>>` tells missing from `null`. Encoding keeps
   declaration order (`sort: true` sorts) and answers a `Result`
-  (`json::encode(v)?`). Errors name the path: `current.temp: expected f64,
+  (`json::encode(v)?`); encode where the type is concrete, not over a type
+  parameter (GT0126). Errors name the path: `current.temp: expected f64,
   found string`. Untyped: `json::parse` + `get`/`at` (both `Option`) and
   `as_f64`, `json::pointer(doc, "/a/b/0")`, `json::entries(obj)` (an
   `Option` of the `(key, value)` pairs); `json::to_value(v)?`. `yaml::` and `toml::` mirror
