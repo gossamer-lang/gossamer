@@ -81,7 +81,7 @@ pub const HTML_TEMPLATE: StdModule = StdModule {
     items: &[StdItem {
         name: "render_json",
         kind: StdItemKind::Function,
-        doc: "render_json(source, json_data) -> Result<String, Error>: renders a context-aware HTML template against a JSON data context. Stateless and wired bit-identically across every tier.",
+        doc: "render_json(source, json_text) -> Result<String, Error>: renders a context-aware HTML template against a data context given as JSON text. Stateless and wired bit-identically across every tier.",
     }],
 };
 

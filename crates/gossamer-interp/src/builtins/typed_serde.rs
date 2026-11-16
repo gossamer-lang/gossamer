@@ -3,10 +3,13 @@
 // `gossamer_core`'s, as on the compiled tiers, and the writer appends the
 // bytes the runtime's writer appends, so every tier decodes and encodes alike.
 
+/// A typed reader over a VM string it holds a share of.
+type Reader = json_std::typed::TypedReader<SmolStr>;
+
 /// Open readers and writers, by handle. A goroutine may resume on another
 /// worker thread between two steps, so the tables are process-wide.
 struct SerdeHandles {
-    readers: Vec<Option<json_std::typed::TypedReader>>,
+    readers: Vec<Option<Reader>>,
     writers: Vec<Option<Vec<u8>>>,
 }
 
@@ -38,7 +41,7 @@ fn serde_index(args: &[Value], index: usize) -> usize {
 fn with_reader<T>(
     args: &[Value],
     fallback: T,
-    f: impl FnOnce(&mut json_std::typed::TypedReader) -> T,
+    f: impl FnOnce(&mut Reader) -> T,
 ) -> T {
     let Some(slot) = serde_slot(args) else {
         return fallback;
@@ -66,7 +69,45 @@ fn serde_handle(slot: usize) -> Value {
 }
 
 fn builtin_serde_rd_new(args: &[Value]) -> RuntimeResult<Value> {
-    let reader = json_std::typed::TypedReader::new(serde_text(args, 0));
+    // The reader keeps a share of the program's string rather than a copy.
+    let text = match args.first() {
+        Some(Value::String(text)) => text.clone(),
+        _ => SmolStr::from(serde_text(args, 0)),
+    };
+    open_reader(Reader::over(text))
+}
+
+/// `json::from_value::<T>`'s reader: over the text of the value, scalars and
+/// handles alike.
+fn builtin_serde_rd_new_value(args: &[Value]) -> RuntimeResult<Value> {
+    let text = match args.first() {
+        Some(Value::Json(value)) => json_std::encode(value.as_value()),
+        Some(other) => json_std::encode(&crate::builtins::gossamer_to_json_value(other)),
+        None => "null".to_owned(),
+    };
+    open_reader(Reader::over(SmolStr::from(text)))
+}
+
+/// A reader over a document converted to JSON text, or one that has failed
+/// with the conversion's message.
+fn open_converted(converted: Result<String, String>) -> RuntimeResult<Value> {
+    open_reader(match converted {
+        Ok(json) => Reader::over(SmolStr::from(json)),
+        Err(message) => Reader::failing(SmolStr::default(), &message),
+    })
+}
+
+/// `yaml::decode::<T>`'s reader.
+fn builtin_serde_rd_new_yaml(args: &[Value]) -> RuntimeResult<Value> {
+    open_converted(gossamer_std::encoding::yaml::to_json_text(serde_text(args, 0)))
+}
+
+/// `toml::decode::<T>`'s reader.
+fn builtin_serde_rd_new_toml(args: &[Value]) -> RuntimeResult<Value> {
+    open_converted(gossamer_std::encoding_toml::to_json_text(serde_text(args, 0)))
+}
+
+fn open_reader(reader: Reader) -> RuntimeResult<Value> {
     let mut handles = SERDE_HANDLES.lock();
     let slot = if let Some(free) = handles.readers.iter().position(Option::is_none) {
         handles.readers[free] = Some(reader);
@@ -94,14 +135,8 @@ fn builtin_serde_rd_failed(args: &[Value]) -> RuntimeResult<Value> {
 
 fn builtin_serde_rd_error(args: &[Value]) -> RuntimeResult<Value> {
     let error = with_reader(args, None, |r| r.error().cloned());
-    let Some(error) = error else {
-        return Ok(make_error_value(""));
-    };
-    let mut value = make_error_value(&error.message);
-    for context in error.contexts {
-        value = errors_struct(context, Value::variant("Some", vec![value]));
-    }
-    Ok(value)
+    let text = error.map(|e| e.to_string()).unwrap_or_default();
+    Ok(make_error_value(&text))
 }
 
 fn builtin_serde_rd_fail(args: &[Value]) -> RuntimeResult<Value> {
@@ -110,19 +145,20 @@ fn builtin_serde_rd_fail(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Unit)
 }
 
-fn builtin_serde_rd_mark(args: &[Value]) -> RuntimeResult<Value> {
-    Ok(Value::Int(i64::from(with_reader(args, false, |r| r.failed()))))
-}
-
-fn builtin_serde_rd_wrap(args: &[Value]) -> RuntimeResult<Value> {
-    let mark = matches!(args.get(1), Some(Value::Int(n)) if *n != 0);
-    let context = serde_text(args, 2).to_owned();
-    with_reader(args, (), |r| r.wrap(mark, &context));
-    Ok(Value::Unit)
+fn builtin_serde_rd_int(args: &[Value]) -> RuntimeResult<Value> {
+    let expected = serde_text(args, 1).to_owned();
+    let bound = |index: usize| match args.get(index) {
+        Some(Value::Int(n)) => *n,
+        _ => 0,
+    };
+    let (min, max) = (bound(2), bound(3));
+    Ok(Value::Int(with_reader(args, 0, |r| {
+        r.read_int(&expected, min, max)
+    })))
 }
 
 fn builtin_serde_rd_leave(args: &[Value]) -> RuntimeResult<Value> {
-    with_reader(args, (), json_std::typed::TypedReader::leave);
+    with_reader(args, (), Reader::leave);
     Ok(Value::Unit)
 }
 
@@ -230,6 +266,17 @@ fn builtin_serde_rd_enum(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Int(i64::try_from(chosen).unwrap_or(0)))
 }
 
+fn builtin_serde_rd_tagged(args: &[Value]) -> RuntimeResult<Value> {
+    let variants = serde_text(args, 1).to_owned();
+    let tag = serde_text(args, 2).to_owned();
+    let name = serde_text(args, 3).to_owned();
+    let fallback = serde_index(args, 4);
+    let chosen = with_reader(args, fallback, |r| {
+        r.begin_tagged(&variants, &tag, &name, fallback)
+    });
+    Ok(Value::Int(i64::try_from(chosen).unwrap_or(0)))
+}
+
 fn builtin_serde_wr_new(_args: &[Value]) -> RuntimeResult<Value> {
     let mut handles = SERDE_HANDLES.lock();
     let slot = if let Some(free) = handles.writers.iter().position(Option::is_none) {
@@ -251,9 +298,59 @@ fn builtin_serde_wr_finish(args: &[Value]) -> RuntimeResult<Value> {
     )))
 }
 
+fn builtin_serde_wr_finish_pretty(args: &[Value]) -> RuntimeResult<Value> {
+    let bytes = serde_slot(args)
+        .and_then(|slot| SERDE_HANDLES.lock().writers.get_mut(slot).and_then(Option::take))
+        .unwrap_or_default();
+    let compact = String::from_utf8_lossy(&bytes);
+    Ok(Value::String(SmolStr::from(
+        json_std::typed::indent_text(&compact),
+    )))
+}
+
+/// The text a writer holds, releasing the writer.
+fn take_writer(args: &[Value]) -> String {
+    let bytes = serde_slot(args)
+        .and_then(|slot| SERDE_HANDLES.lock().writers.get_mut(slot).and_then(Option::take))
+        .unwrap_or_default();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// A conversion's text as `Ok`, or its message as an `Err`.
+fn converted_result(converted: Result<String, String>) -> Value {
+    match converted {
+        Ok(text) => crate::builtins::ok_variant(Value::String(SmolStr::from(text))),
+        Err(message) => crate::builtins::err_variant(message),
+    }
+}
+
+/// `to_yaml::<T>`'s finish: the walk's JSON text as YAML, members as written.
+fn builtin_serde_wr_finish_yaml(args: &[Value]) -> RuntimeResult<Value> {
+    let text = take_writer(args);
+    Ok(converted_result(gossamer_runtime::codec::json_convert::to_yaml(
+        &text,
+        gossamer_runtime::codec::json_convert::Members::AsWritten,
+    )))
+}
+
+/// `to_toml::<T>`'s finish: the walk's JSON text as TOML, members as written.
+fn builtin_serde_wr_finish_toml(args: &[Value]) -> RuntimeResult<Value> {
+    let text = take_writer(args);
+    Ok(converted_result(gossamer_runtime::codec::json_convert::to_toml(
+        &text,
+        gossamer_runtime::codec::json_convert::Members::AsWritten,
+    )))
+}
+
 fn builtin_serde_wr_raw(args: &[Value]) -> RuntimeResult<Value> {
     let text = serde_text(args, 1).to_owned();
     with_writer(args, |out| out.extend_from_slice(text.as_bytes()));
+    Ok(Value::Unit)
+}
+
+fn builtin_serde_wr_key(args: &[Value]) -> RuntimeResult<Value> {
+    let text = serde_text(args, 1).to_owned();
+    with_writer(args, |out| json_std::typed::write_key(out, &text));
     Ok(Value::Unit)
 }
 
@@ -394,19 +491,22 @@ const SERDE_BUILTINS: &[(&str, SerdeBuiltin)] = &[
     ("__gos_serde_rd_field", builtin_serde_rd_field),
     ("__gos_serde_rd_free", builtin_serde_rd_free),
     ("__gos_serde_rd_i64", builtin_serde_rd_i64),
+    ("__gos_serde_rd_int", builtin_serde_rd_int),
     ("__gos_serde_rd_is_null", builtin_serde_rd_is_null),
     ("__gos_serde_rd_json", builtin_serde_rd_json),
     ("__gos_serde_rd_leave", builtin_serde_rd_leave),
     ("__gos_serde_rd_map", builtin_serde_rd_map),
     ("__gos_serde_rd_map_key", builtin_serde_rd_map_key),
     ("__gos_serde_rd_map_value", builtin_serde_rd_map_value),
-    ("__gos_serde_rd_mark", builtin_serde_rd_mark),
     ("__gos_serde_rd_new", builtin_serde_rd_new),
+    ("__gos_serde_rd_new_toml", builtin_serde_rd_new_toml),
+    ("__gos_serde_rd_new_value", builtin_serde_rd_new_value),
+    ("__gos_serde_rd_new_yaml", builtin_serde_rd_new_yaml),
     ("__gos_serde_rd_str", builtin_serde_rd_str),
     ("__gos_serde_rd_struct", builtin_serde_rd_struct),
+    ("__gos_serde_rd_tagged", builtin_serde_rd_tagged),
     ("__gos_serde_rd_tuple", builtin_serde_rd_tuple),
     ("__gos_serde_rd_u64", builtin_serde_rd_u64),
-    ("__gos_serde_rd_wrap", builtin_serde_rd_wrap),
     ("__gos_serde_wr_bool", builtin_serde_wr_bool),
     ("__gos_serde_wr_char", builtin_serde_wr_char),
     ("__gos_serde_wr_f32", builtin_serde_wr_f32),
@@ -414,8 +514,12 @@ const SERDE_BUILTINS: &[(&str, SerdeBuiltin)] = &[
     ("__gos_serde_wr_f64", builtin_serde_wr_f64),
     ("__gos_serde_wr_f64_tree", builtin_serde_wr_f64_tree),
     ("__gos_serde_wr_finish", builtin_serde_wr_finish),
+    ("__gos_serde_wr_finish_pretty", builtin_serde_wr_finish_pretty),
+    ("__gos_serde_wr_finish_toml", builtin_serde_wr_finish_toml),
+    ("__gos_serde_wr_finish_yaml", builtin_serde_wr_finish_yaml),
     ("__gos_serde_wr_i64", builtin_serde_wr_i64),
     ("__gos_serde_wr_json", builtin_serde_wr_json),
+    ("__gos_serde_wr_key", builtin_serde_wr_key),
     ("__gos_serde_wr_new", builtin_serde_wr_new),
     ("__gos_serde_wr_raw", builtin_serde_wr_raw),
     ("__gos_serde_wr_sep", builtin_serde_wr_sep),

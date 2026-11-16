@@ -332,6 +332,21 @@ impl TypeChecker<'_> {
         }
     }
 
+    /// The `bool` a predicate `f` over `payload` answers.
+    fn predicate_ty(&mut self, f: Ty, payload: Ty, span: Span) -> Ty {
+        let out = self.callable_output(f, &[payload], span);
+        let bool_ty = self.tcx.bool_ty();
+        self.unify(bool_ty, out, span);
+        bool_ty
+    }
+
+    /// What `f(payload)` answers, which the fallback `fallback` answers too.
+    fn folded_ty(&mut self, f: Ty, payload: Ty, fallback: Ty, span: Span) -> Ty {
+        let out = self.callable_output(f, &[payload], span);
+        self.unify(out, fallback, span);
+        out
+    }
+
     /// Option-shaped counterpart of [`Self::shape_result_like`].
     pub(super) fn shape_option_like(&mut self, ty: Ty, payload: Ty, span: Span) -> Ty {
         let resolved = self.infer.resolve(self.tcx, ty);
@@ -449,6 +464,15 @@ impl TypeChecker<'_> {
                     "ok" => self.option_adt_ty(ok),
                     "err" => self.option_adt_ty(err),
                     "is_ok" | "is_err" => self.tcx.bool_ty(),
+                    "is_ok_and" | "is_err_and" => {
+                        let payload = if name == "is_ok_and" { ok } else { err };
+                        self.predicate_ty(lead_tys[0], payload, span)
+                    }
+                    "map_or" => self.folded_ty(lead_tys[1], ok, lead_tys[0], span),
+                    "map_or_else" => {
+                        let fallback = self.callable_output(lead_tys[0], &[err], span);
+                        self.folded_ty(lead_tys[1], ok, fallback, span)
+                    }
                     _ => return None,
                 };
                 Some(ty)
@@ -533,6 +557,12 @@ impl TypeChecker<'_> {
                         self.shape_option_like(payload, inner, span)
                     }
                     "is_some" | "is_none" => self.tcx.bool_ty(),
+                    "is_some_and" | "is_none_or" => self.predicate_ty(lead_tys[0], payload, span),
+                    "map_or" => self.folded_ty(lead_tys[1], payload, lead_tys[0], span),
+                    "map_or_else" => {
+                        let fallback = self.callable_output(lead_tys[0], &[], span);
+                        self.folded_ty(lead_tys[1], payload, fallback, span)
+                    }
                     "iter" => self.tcx.intern(TyKind::Vec(payload)),
                     _ => return None,
                 };
@@ -962,22 +992,38 @@ impl TypeChecker<'_> {
         // projection out of the payload as a free variable that later unifies
         // with whatever context demands - and the mapped payload never gets
         // the closure's real return type.
-        let closure_inputs = self.vec_combinator_closure_inputs(method, resolved);
+        let closure_inputs = if module == "result" && method == "map_or_else" {
+            self.vec_combinator_closure_inputs("map", resolved)
+        } else {
+            self.vec_combinator_closure_inputs(method, resolved)
+        };
+        // `res.map_or_else(on_err, on_ok)` hands its first callback the error.
+        let err_inputs = (module == "result" && method == "map_or_else")
+            .then(|| self.vec_combinator_closure_inputs("is_err_and", resolved))
+            .flatten();
         let lead_tys: Vec<Ty> = args
             .iter()
-            .map(|arg| match (&closure_inputs, &arg.kind) {
-                (Some(inputs), ExprKind::Closure { params, .. })
-                    if params.len() == inputs.len() =>
-                {
-                    let output = self.fresh();
-                    let sig = FnSig {
-                        inputs: inputs.clone(),
-                        output,
-                    };
-                    let want = self.tcx.intern(TyKind::FnPtr(sig));
-                    self.check_expr_expecting(arg, Expectation::HasType(want))
+            .enumerate()
+            .map(|(index, arg)| {
+                let inputs = if index == 0 && err_inputs.is_some() {
+                    &err_inputs
+                } else {
+                    &closure_inputs
+                };
+                match (inputs, &arg.kind) {
+                    (Some(inputs), ExprKind::Closure { params, .. })
+                        if params.len() == inputs.len() =>
+                    {
+                        let output = self.fresh();
+                        let sig = FnSig {
+                            inputs: inputs.clone(),
+                            output,
+                        };
+                        let want = self.tcx.intern(TyKind::FnPtr(sig));
+                        self.check_expr_expecting(arg, Expectation::HasType(want))
+                    }
+                    _ => self.check_expr(arg),
                 }
-                _ => self.check_expr(arg),
             })
             .collect();
         self.std_combinator_ty_at(

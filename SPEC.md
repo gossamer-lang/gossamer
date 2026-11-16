@@ -856,6 +856,14 @@ struct, braces declare a named-field struct, and parentheses declare a tuple
 struct. Empty named structs use `struct Empty {}` and empty tuple structs use
 `struct EmptyTuple()`.
 
+**Field-init shorthand.** A lone name in a struct literal fills the field of
+that name from the binding of that name, beside `name: value` fields:
+
+```
+let x = 1.0
+let p = Point { x, y: 2.0 }
+```
+
 **Functional record update.** A struct literal may spread a base value
 with `..base` and override individual fields:
 
@@ -3189,6 +3197,8 @@ option first, so the free form reads as the method it mirrors.
 - `or(opt, alt) -> Option<T>` / `or_else(opt, f) -> Option<T>`.
 - `iter(opt) -> Vec<T>`.
 - `is_some(opt) -> bool`, `is_none(opt) -> bool`.
+- `is_some_and(opt, p) -> bool`, `is_none_or(opt, p) -> bool`.
+- `map_or(opt, default, f) -> U`, `map_or_else(opt, default_fn, f) -> U`.
 - `flatten(opt: Option<Option<T>>) -> Option<T>`.
 - `zip(opt, other) -> Option<(T, U)>`.
 
@@ -3208,6 +3218,8 @@ the result first, so the free form reads as the method it mirrors.
 - `unwrap_or(r, v) -> T`, `unwrap_or_else(r, f) -> T`.
 - `ok(r) -> Option<T>`, `err(r) -> Option<E>`.
 - `is_ok(r) -> bool`, `is_err(r) -> bool`.
+- `is_ok_and(r, p) -> bool`, `is_err_and(r, p) -> bool`.
+- `map_or(r, default, f) -> U`, `map_or_else(r, on_err, f) -> U`.
 
 The `?` operator (§4.5) remains the right tool for short-circuit
 propagation; `result::map` / `result::and_then` are for in-pipeline
@@ -3295,41 +3307,84 @@ compatibility promise without improving fidelity.
 ### 10.11 `std::encoding::json`, `std::encoding::csv`
 
 - Dynamic surface: `json::parse(text) -> Result<json::Value, Error>`,
-  `json::render(value) -> String`, plus the `json::{get, at, len,
-  is_null, as_str, as_i64, as_f64, as_bool, as_array, keys}` query
-  helpers.
-- Strict, typed surface: every concrete named struct and enum in the
-  program auto-derives a pair of generic serializer free functions, invoked
-  with a turbofish type argument (there are no `Type::from_json`
-  methods):
-  - `from_json::<Type>(text: &String) -> Result<Type, errors::Error>`
-  - `to_json::<Type>(value: Type) -> Result<String, errors::Error>`.
-  `from_json` is the canonical one-line, serde-style deserializer:
-  it validates each field against the declared field type
-  recursively (nested structs by source name, `Vec<T>` / `[T; N]` /
-  tuples / `Option<T>` / `Map<String, V>` walk
-  through, `json::Value` fields pass through). Missing required
-  fields and type mismatches surface as
-  `Result::Err(errors::Error)` with a path-qualified message.
-- Serialization is automatic (every struct gets `to_json::<T>` /
-  `from_json::<T>` using the source field names verbatim);
-  `#[derive(Serialize, Deserialize)]` is rejected (`GT0025`). A field
-  attribute changes one field: `#[rename("key")]` spells its JSON key,
-  `#[skip]` leaves it out when writing and reads it back as its type's zero
-  value, and `#[default]` reads a missing key as that zero value.
-- An enum is externally tagged, the shape `{:?}` prints: a unit variant is
-  its name as a string (`"Red"`), a one-field variant `{"Circle": 1.5}`, a
-  several-field variant `{"Pair": [7, "x"]}`, and a struct variant
-  `{"Rect": {"w": 2, "h": 3}}`. An unknown variant or a malformed payload is
-  an `Err` naming it.
+  `json::is_valid(text) -> bool`, plus the `json::{get, at, len, is_null,
+  as_str, as_i64, as_u64, as_f64, as_bool, as_array, keys}` queries (each
+  also a method of `json::Value`). `json::get` answers `None` for a missing
+  member and `Some(null)` for a `null` one; `json::at` answers `None` past
+  the end and for a value that is not an array; `json::len` answers the
+  count of an array or object, and `None` for any other value.
+  `json::pointer(value, "/a/b/0")` reads the value an RFC 6901 JSON Pointer
+  names, and `json::entries(value)` answers an object's members as
+  `(key, value)` pairs in key order (`None` for a value that is not an
+  object). `as_i64` and `as_u64` take an integral
+  number inside the type's range; `as_f64` takes any number. A `json::Value`
+  object holds its members by key, as `serde_json::Value` does.
+- Limits: a document has no size cap by default, as in `serde_json` and Go;
+  nesting deeper than 128 levels is refused, as `serde_json` refuses it.
+  `json::set_max_size(bytes)` and `json::set_max_depth(levels)` set the caps
+  for every later parse and decode in the process (0 or less removes one).
+- Typed surface: `json::decode::<T>(text) -> Result<T, errors::Error>`
+  (also `from_json::<T>`), `json::encode::<T>(value) -> Result<String,
+  errors::Error>` (also `to_json::<T>`), and
+  `json::from_value::<T>(value: json::Value) -> Result<T, errors::Error>`.
+  `T` is any type with a JSON form: scalars, `String`, `char` (a
+  one-character string), `json::Value`, `Vec<T>`, `[T; N]` (exactly `N`
+  elements), tuples (exactly their arity), `Option<T>`, `Map<String, V>`, and
+  structs and enums of those, generic ones included (`Page<Item>`). A type
+  holding anything else is GT0124; a type parameter is GP0039. A `let` that
+  declares its type supplies the turbofish of `from_json` and
+  `json::from_value` (`let w: Weather = json::from_value(v)?`).
+- Decoding ignores members a struct does not declare. A missing `Option`
+  member is `None`; any other missing member is an error unless the field
+  carries `#[default]`. An `Option<Option<T>>` reads a missing member as
+  `None` and `null` as `Some(None)`. A narrow integer outside its type's range
+  is an error. A failure names the path to the value and what it found:
+  `current.weather_descriptions[1]: expected string, found 3`.
+- Every encoder answers `Result<String, errors::Error>`.
+  `json::encode(value)` writes the text `json::encode::<T>` writes: a
+  struct's members in declaration order under their keys, a float with its
+  fraction (`1.0`), a `json::Value` object's and a map's keys sorted.
+  `sort: true` on any encoder (`json::encode(v, sort: true)`,
+  `json::encode::<T>`, `yaml::encode::<T>`, `toml::encode::<T>`) orders a
+  struct's members by key. `json::encode_pretty` lays the same members out
+  indented. An `Option<Option<T>>` member that is `None` is left out.
+  `json::to_value(value)` answers the `json::Value` the text reads as.
+  Each encoder writes through a walk generated for the value's concrete
+  type, so an encode of a value whose type is, or holds, a type parameter of
+  the enclosing function is GT0126; encode where the type is concrete.
+- YAML and TOML: `yaml::parse` / `toml::parse` answer a `json::Value`,
+  `yaml::encode` / `toml::encode` write one, `yaml::parse_all` /
+  `yaml::encode_all` read and write a multi-document stream, and
+  `yaml::decode::<T>` / `yaml::encode::<T>` and `toml::decode::<T>` /
+  `toml::encode::<T>` are the typed codecs (also spelled `from_yaml` /
+  `to_yaml` and `from_toml` / `to_toml`). `to_json_text` / `from_json_text`
+  convert text, each object's members by key. TOML has no null and no
+  integer past `i64::MAX`, so encoding either is an `Err`. `yaml::` and
+  `xml::` take `set_max_size` / `set_max_depth` as `json::` does.
+- XML: `xml::parse` answers the element tree as a `json::Value`,
+  `xml::encode` writes it back and answers an `Err` for a value of any other
+  shape, and `xml::is_valid` checks a document.
+- Attributes. On a field (of a struct or a struct variant):
+  `#[rename("key")]` spells its key, `#[skip]` leaves it out when writing and
+  reads it as its default, `#[default]` reads a missing member as the type's
+  zero value (a user type's `default()`), and `#[default(value)]` as a
+  literal, `None`, or a unit variant of the field's enum. On a struct or
+  enum: `#[rename_all("camelCase")]` respells every field or variant without
+  its own `#[rename]` (rules: `lowercase`, `UPPERCASE`, `camelCase`,
+  `PascalCase`, `snake_case`, `SCREAMING_SNAKE_CASE`, `kebab-case`,
+  `SCREAMING-KEBAB-CASE`). On a variant: `#[rename("name")]`. A malformed or
+  misplaced attribute, and two fields or variants under one name, is GP0068.
+  `#[derive(Serialize, Deserialize)]` is rejected (`GT0025`).
+- An enum is externally tagged by default, the shape `{:?}` prints: a unit
+  variant is its name as a string (`"Red"`), a one-field variant
+  `{"Circle": 1.5}`, a several-field variant `{"Pair": [7, "x"]}`, and a
+  struct variant `{"Rect": {"w": 2, "h": 3}}`. Under `#[tag("type")]` every
+  variant is one object holding the tag member beside its fields:
+  `{"type": "Rect", "w": 2, "h": 3}`, `{"type": "Red"}`, and a one-field
+  variant holding a struct spells that struct's members there. An unknown
+  variant is an error listing the names the enum has.
 - The turbofish may spell its target through a type alias of either form
-  (§3.12); the codec is the target struct's, and an opaque alias
-  serializes as its representation.
-- The typed surface covers a concrete struct or enum whose fields it can
-  classify. A generic type, or a name that is not a declared struct or
-  enum, has no codec and is reported as `GP0039`, and a struct with one
-  unclassifiable field as `GP0022`; read those shapes with `json::parse`
-  instead, or hand-write the function.
+  (§3.12); an opaque alias serializes as its representation.
 
 ### 10.12 `std::thread`, `std::sync::channel`
 

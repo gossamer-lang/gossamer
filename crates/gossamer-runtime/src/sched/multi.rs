@@ -424,9 +424,8 @@ struct Shared {
     /// serving an accepted connection. Counted in `live_goroutines` as well;
     /// process exit does not wait for them.
     service_goroutines: Arc<AtomicUsize>,
-    /// Maximum live goroutines this scheduler will admit. Honours
-    /// `runtime::set_max_procs` and `GOSSAMER_MAX_PROCS`. Default is
-    /// `1_000_000`.
+    /// Maximum live goroutines this scheduler will admit:
+    /// `1_000_000` unless [`MultiScheduler::set_max_goroutines`] lowers it.
     max_live: AtomicUsize,
     stats: AtomicStats,
     park_wait: AtomicParkWaitStats,
@@ -784,6 +783,7 @@ impl MultiScheduler {
             slot.wake();
         }
         self.inner.resume_watchdog();
+        self.inner.end_watchdog_pause();
     }
 
     /// Joins idle native-program workers so their thread-local owners finish
@@ -1443,6 +1443,14 @@ impl Shared {
         }
     }
 
+    /// Ends the watchdog's pause between passes once `stopping` is set, so
+    /// shutdown joins it without waiting out the interval. Signalled under
+    /// `watchdog_mu`, which the pause holds while it reads `stopping`.
+    fn end_watchdog_pause(&self) {
+        let _g = self.watchdog_mu.lock();
+        self.watchdog_cv.notify_all();
+    }
+
     /// Whether the watchdog has nothing to watch: no worker runs a goroutine
     /// or sits in a system call, and no poller a retired worker left behind
     /// still holds a timer or a descriptor for it to drive.
@@ -1644,6 +1652,20 @@ fn rest_while_nothing_to_watch(shared: &Shared, bound: Option<Duration>) -> Rest
     }
 }
 
+/// Waits out one [`WATCHDOG_INTERVAL`] between passes, or until shutdown
+/// begins, and answers whether it began.
+#[cfg(not(miri))]
+fn pause_between_passes(shared: &Shared) -> bool {
+    let deadline = Instant::now() + WATCHDOG_INTERVAL;
+    let mut g = shared.watchdog_mu.lock();
+    while !shared.stopping.load(Ordering::Acquire) {
+        if shared.watchdog_cv.wait_until(&mut g, deadline).timed_out() {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(not(miri))]
 fn watchdog_loop(shared: Arc<Shared>) {
     let preempt_threshold = Duration::from_millis(10);
@@ -1669,7 +1691,10 @@ fn watchdog_loop(shared: Arc<Shared>) {
         if rest != Rest::Elapsed {
             purge_pending = true;
         }
-        crate::platform::sleep(WATCHDOG_INTERVAL);
+        if pause_between_passes(&shared) {
+            crate::preempt::request_yield_all();
+            return;
+        }
         let now_micros = now_micros_since_start();
         let preempt_micros = u64::try_from(preempt_threshold.as_micros()).unwrap_or(u64::MAX);
         let kill_micros = u64::try_from(kill_threshold.as_micros()).unwrap_or(u64::MAX);
@@ -2219,6 +2244,49 @@ mod tests {
             crate::platform::sleep(Duration::from_millis(5));
         }
         panic!("unparked task stranded after its home worker retired");
+    }
+
+    /// Shutdown signals `watchdog_cv` whether or not the watchdog rests for
+    /// want of a worker, so a watchdog pausing between passes leaves at once.
+    /// The waiter publishes `ready` while it holds `watchdog_mu`, so the lock
+    /// taken below is ours only once it waits; a missed signal would leave it
+    /// to time out.
+    #[test]
+    #[cfg_attr(miri, ignore)] // the watchdog pause is not built under Miri
+    fn shutdown_signals_a_pausing_watchdog() {
+        let sched = MultiScheduler::new(1);
+        let shared = Arc::clone(&sched.inner);
+        let ready = Arc::new(AtomicBool::new(false));
+        let waiter = {
+            let shared = Arc::clone(&shared);
+            let ready = Arc::clone(&ready);
+            thread::spawn(move || {
+                let mut g = shared.watchdog_mu.lock();
+                ready.store(true, Ordering::SeqCst);
+                shared
+                    .watchdog_cv
+                    .wait_for(&mut g, Duration::from_mins(1))
+                    .timed_out()
+            })
+        };
+        while !ready.load(Ordering::SeqCst) {
+            thread::yield_now();
+        }
+        drop(shared.watchdog_mu.lock());
+        sched.shutdown();
+        assert!(
+            !waiter.join().expect("waiter thread"),
+            "shutdown left the watchdog waiting"
+        );
+    }
+
+    /// A pause that starts after shutdown began returns at once.
+    #[test]
+    #[cfg_attr(miri, ignore)] // the watchdog pause is not built under Miri
+    fn the_watchdog_pause_ends_once_stopping() {
+        let sched = MultiScheduler::new(1);
+        sched.shutdown();
+        assert!(pause_between_passes(&sched.inner));
     }
 
     #[test]

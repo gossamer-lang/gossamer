@@ -6,6 +6,7 @@
 //! `f64`, as a JSON decoder does.
 
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::de::{
     self, Deserialize, DeserializeSeed, Deserializer, EnumAccess, MapAccess, SeqAccess, Visitor,
@@ -14,8 +15,35 @@ use serde::de::{
 /// Deepest nesting of sequences and mappings a YAML document may have.
 pub const DEFAULT_MAX_DEPTH: usize = 128;
 
-/// Largest YAML document, in bytes, a decoder accepts.
-pub const DEFAULT_MAX_SIZE: usize = 16 * 1024 * 1024;
+/// Largest YAML document, in bytes, a decoder accepts: no cap by default, as
+/// `serde_yaml` has none.
+pub const DEFAULT_MAX_SIZE: usize = usize::MAX;
+
+/// Process-wide parser caps, read by every tier.
+static MAX_DEPTH: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_DEPTH);
+static MAX_SIZE: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_SIZE);
+
+/// Overrides the process-wide cap on parser nesting depth.
+pub fn set_max_depth(n: usize) {
+    MAX_DEPTH.store(n, Ordering::Relaxed);
+}
+
+/// Overrides the process-wide cap on parser input bytes.
+pub fn set_max_size(n: usize) {
+    MAX_SIZE.store(n, Ordering::Relaxed);
+}
+
+/// Current cap on parser nesting depth.
+#[must_use]
+pub fn max_depth() -> usize {
+    MAX_DEPTH.load(Ordering::Relaxed)
+}
+
+/// Current cap on parser input bytes.
+#[must_use]
+pub fn max_size() -> usize {
+    MAX_SIZE.load(Ordering::Relaxed)
+}
 
 /// A decoded YAML value with tags dropped and mapping order preserved.
 #[derive(Debug, Clone, PartialEq)]
@@ -155,6 +183,41 @@ pub fn decode_json(
         JsonDecodeError::Parse(e) => e.to_string(),
         JsonDecodeError::TooDeep => format!("nesting depth exceeds max_depth ({max_depth})"),
     })
+}
+
+/// Decodes every document of a multi-document YAML stream as JSON values,
+/// under the same caps and messages as [`decode_json`].
+///
+/// # Errors
+/// Returns the size cap's, the depth cap's, or the parser's message for the
+/// first document refused.
+pub fn decode_all_json(
+    text: &str,
+    max_depth: usize,
+    max_size: usize,
+) -> Result<Vec<serde_json::Value>, String> {
+    if text.len() > max_size {
+        return Err(format!(
+            "input exceeds max_size ({} > {max_size})",
+            text.len()
+        ));
+    }
+    serde_norway::Deserializer::from_str(text)
+        .map(|doc| {
+            let too_deep = std::cell::Cell::new(false);
+            let seed = JsonSeed {
+                depth_left: max_depth,
+                too_deep: &too_deep,
+            };
+            seed.deserialize(doc).map_err(|e| {
+                if too_deep.get() {
+                    format!("nesting depth exceeds max_depth ({max_depth})")
+                } else {
+                    e.to_string()
+                }
+            })
+        })
+        .collect()
 }
 
 /// Decodes one value as JSON with `depth_left` levels of nesting to spend.

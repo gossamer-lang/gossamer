@@ -65,7 +65,7 @@ fn check(file: String, needs_jobs: bool) -> bool {
     // Parsed through JSON because that is where the accessors are: a
     // YAML document that converts is a YAML document that parses, and
     // the job table is then an ordinary object to read.
-    let converted = match yaml::to_json(text) {
+    let converted = match yaml::to_json_text(text) {
         Ok(converted) => converted
         Err(e) => {
             eprintln("workflows: {} is not valid YAML: {}", file, e)
@@ -84,7 +84,7 @@ fn check(file: String, needs_jobs: bool) -> bool {
         }
     }
     let count = match json::get(document, "jobs") {
-        Some(jobs) => json::len(jobs)
+        Some(jobs) => json::len(jobs).unwrap_or(0)
         None => 0
     }
     if count <= 0 {

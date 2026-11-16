@@ -27,13 +27,6 @@ use quick_xml::writer::Writer;
 
 use super::string::alloc_cstring;
 
-/// Mirrors `gossamer_std::encoding::xml`'s default parser caps so the
-/// error path is byte-identical to the VM on oversize / over-deep
-/// input. The VM's `set_max_*` setters are not part of the compiled
-/// surface, so these are fixed at the same defaults.
-const DEFAULT_MAX_DEPTH: usize = 128;
-const DEFAULT_MAX_SIZE: usize = 16 * 1024 * 1024;
-
 /// A node in the parsed XML tree. Mirrors
 /// `gossamer_std::encoding::xml::Node`; attributes are ordered
 /// (`BTreeMap`) so attribute emission is deterministic and matches
@@ -64,13 +57,15 @@ fn err_result(msg: &str) -> i128 {
 /// Parses an XML document into a tree, returning the root element.
 /// Byte-for-byte mirror of `gossamer_std::encoding::xml::parse`.
 fn parse(src: &str) -> Result<Node, String> {
-    if src.len() > DEFAULT_MAX_SIZE {
+    let cap = gossamer_core::xml::max_size();
+    if src.len() > cap {
         return Err(format!(
-            "xml input exceeds max_size ({} > {DEFAULT_MAX_SIZE})",
+            "xml input exceeds max_size ({} > {cap})",
             src.len()
         ));
     }
-    let mut tree = TreeBuilder::new(DEFAULT_MAX_DEPTH, DEFAULT_MAX_SIZE);
+    let budget = gossamer_core::xml::entity_expansion_budget(src.len(), cap);
+    let mut tree = TreeBuilder::new(gossamer_core::xml::max_depth(), budget);
     tree.feed(src, 0)?;
     tree.finish()
 }
@@ -99,14 +94,14 @@ struct TreeBuilder {
 }
 
 impl TreeBuilder {
-    fn new(depth_cap: usize, size_cap: usize) -> Self {
+    fn new(depth_cap: usize, expansion_budget: usize) -> Self {
         Self {
             stack: Vec::new(),
             root: None,
             text: String::new(),
             entities: HashMap::new(),
             depth_cap,
-            expansion_budget: size_cap,
+            expansion_budget,
         }
     }
 
@@ -207,7 +202,7 @@ impl TreeBuilder {
             ));
         }
         if text.len() > self.expansion_budget {
-            return Err("xml: entity expansion exceeds max_size".to_string());
+            return Err(gossamer_core::xml::EXPANSION_EXCEEDED.to_string());
         }
         self.expansion_budget -= text.len();
         Ok(Some(text.clone()))
@@ -509,19 +504,48 @@ pub unsafe extern "C" fn gos_rt_xml_parse(s: *const c_char) -> i128 {
     })
 }
 
-/// `encoding::xml::encode(value) -> String`. Borrows the `json::Value`
-/// handle; a value that is not an XML node encodes as the empty string,
-/// as on the VM.
+/// `encoding::xml::encode(value) -> Result<String, errors::Error>`.
+/// Borrows the `json::Value` handle; a value that is not an XML node is an
+/// `Err`, as on the VM.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_xml_encode(node: i64) -> *mut c_char {
+pub unsafe extern "C" fn gos_rt_xml_encode(node: i64) -> i128 {
     ffi_entry!({
         // SAFETY: `node` is a `json::Value` handle (or null), which is what
         // the checker admits for `encode`'s parameter.
         let value = unsafe { super::json::json_borrow(node as *const super::json::GosJson) };
         match value.and_then(|value| json_to_node(&value.as_value())) {
-            Some(node) => alloc_cstring(encode(&node).as_bytes()),
-            None => alloc_cstring(b""),
+            Some(node) => {
+                let text = alloc_cstring(encode(&node).as_bytes());
+                super::result::gos_rt_result_new(0, text as i64)
+            }
+            None => err_result(gossamer_core::xml::NOT_A_TREE),
         }
+    })
+}
+
+/// `xml::set_max_size(bytes)`: the size cap later XML parses apply.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_xml_set_max_size(bytes: i64) {
+    ffi_entry!({
+        gossamer_core::xml::set_max_size(gossamer_core::json::cap_from_program(bytes));
+    });
+}
+
+/// `xml::set_max_depth(levels)`: the nesting cap later XML parses apply.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_xml_set_max_depth(levels: i64) {
+    ffi_entry!({
+        gossamer_core::xml::set_max_depth(gossamer_core::json::cap_from_program(levels));
+    });
+}
+
+/// `encoding::xml::is_valid(text) -> bool`: whether the text parses as an
+/// XML document.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_xml_is_valid(s: *const c_char) -> i8 {
+    ffi_entry!({
+        // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        i8::from(parse(unsafe { cstr_to_str(s) }).is_ok())
     })
 }
 

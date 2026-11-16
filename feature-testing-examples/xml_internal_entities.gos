@@ -6,7 +6,7 @@ use std::encoding::{json, xml}
 
 fn show(label: String, text: String) {
     match xml::parse(text) {
-        Ok(node) => println(f"{label}: {json::render(node)}")
+        Ok(node) => println(f"{label}: {json::encode(node).unwrap()}")
         Err(e) => println(f"{label}: error {e}")
     }
 }
@@ -33,7 +33,7 @@ fn main() {
     show("attribute references", """<a href="x?a=1&amp;b=2" q="&quot;&#65;&#x42;"/>""")
     let node = xml::parse("""<a href="x?a=1&amp;b=2">t &lt; u</a>""")
     match node {
-        Ok(n) => println(f"round trip: {xml::encode(n)}")
+        Ok(n) => println(f"round trip: {xml::encode(n).unwrap()}")
         Err(e) => println(f"round trip: error {e}")
     }
     show("undeclared", "<a>&nope;</a>")

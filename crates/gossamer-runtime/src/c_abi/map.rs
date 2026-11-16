@@ -1412,7 +1412,6 @@ unsafe fn encode_skey(key: *const u8, desc: &[u8], out: &mut Vec<u8>) -> Option<
     Some(())
 }
 
-#[allow(dead_code)]
 /// The bytes `m` keys an aggregate by: the slots the key type's own `cmp`
 /// reads for a map ordered by one, and the content encoding that hashes and
 /// compares by value otherwise.

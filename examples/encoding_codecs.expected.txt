@@ -1,0 +1,8 @@
+base64 encode: SGVsbG8sIEdvc3NhbWVyIQ==
+base64 decode: 16 bytes ok
+hex encode:    48656c6c6f2c20476f7373616d657221
+hex decode:    16 bytes ok
+base32 encode: JBSWY3DPFQQEO33TONQW2ZLSEE======
+base32 decode: Hello, Gossamer!
+json int:  42
+json arr:  [1,2,3]

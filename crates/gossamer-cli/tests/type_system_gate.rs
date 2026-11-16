@@ -661,19 +661,25 @@ fn for_over_a_wrapper_is_rejected() {
 fn refused_serde_targets_report_without_leaking_a_synthesized_name() {
     let cases = [
         (
-            "generic struct",
-            "struct W<T> { v: T }\nfn main() { let _ = to_json::<W<i64>>(W { v: 1 }) }",
+            "generic struct without arguments",
+            "struct W<T> { v: T }\nfn main() { let _ = to_json::<W>(W { v: 1 }) }",
             "GP0039",
         ),
         (
-            "generic enum",
-            "enum E<T> { A(T), B }\nfn main() { let _ = to_json::<E<i64>>(E::A(1)) }",
+            "type parameter",
+            "fn enc<T>(v: T) -> String { to_json::<T>(v).unwrap_or(\"\") }\n\
+             fn main() { let _ = enc(1) }",
             "GP0039",
         ),
         (
-            "not a struct",
+            "not a type",
             "fn main() { let _ = to_json::<Nope>(1) }",
-            "GP0039",
+            "GR0001",
+        ),
+        (
+            "uncodable part",
+            "fn main() { let _ = to_json::<Vec<Fn(i64) -> i64>>(#[]) }",
+            "GT0124",
         ),
         (
             "unserializable field",
@@ -710,6 +716,85 @@ fn refused_serde_targets_report_without_leaking_a_synthesized_name() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A serde target that is a generic instantiation, a collection, or a scalar
+/// checks cleanly: each call has a codec of its own.
+#[test]
+fn compound_and_generic_serde_targets_check_cleanly() {
+    let sources = [
+        "struct W<T> { v: T }\nfn main() { let _ = to_json::<W<i64>>(W { v: 1 }) }",
+        "enum E<T> { A(T), B }\nfn main() { let _ = to_json::<E<i64>>(E::A(1)) }",
+        "struct P { x: i64 }\nfn main() { let _ = from_json::<Vec<P>>(\"[]\") }",
+        "fn main() { let _ = from_json::<Map<String, (i64, bool)>>(\"{}\") }",
+        "fn main() { let _ = from_json::<Option<[f64; 2]>>(\"null\") }",
+    ];
+    let mut failures = Vec::new();
+    for source in sources {
+        let augmented = gossamer_parse::autoderive::augment_source(source);
+        let mut map = SourceMap::new();
+        let file = map.add_file("serde_targets.gos".to_string(), augmented);
+        let result = check_frontend(map.source(file), file);
+        let errors: Vec<String> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.code.as_str().starts_with('G') && !d.code.as_str().starts_with("GL"))
+            .map(|d| format!("{} {}", d.code.as_str(), d.title))
+            .collect();
+        if !errors.is_empty() {
+            failures.push(format!("{source}: {errors:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An encode writes through a walk generated for one concrete type, so an
+/// encode of a type parameter, or of a type holding one, is GT0126 at the
+/// generic function; the same encode where the caller names the type checks.
+#[test]
+fn an_encode_over_a_type_parameter_is_gt0126() {
+    let codes = |source: &str| -> Vec<String> {
+        let augmented = gossamer_parse::autoderive::augment_source(source);
+        let mut map = SourceMap::new();
+        let file = map.add_file("serde_type_param.gos".to_string(), augmented);
+        check_frontend(map.source(file), file)
+            .diagnostics
+            .iter()
+            .filter(|d| d.code.as_str().starts_with('G') && !d.code.as_str().starts_with("GL"))
+            .map(|d| d.code.as_str().to_string())
+            .collect()
+    };
+    let head = "use std::encoding::{json, toml, yaml}\nenum Op { Save(String), Idle }\n";
+    for (body, arg) in [
+        (
+            "fn text<T>(v: T) -> String { json::encode(v).unwrap() }",
+            "Op::Idle",
+        ),
+        (
+            "fn text<T>(v: Vec<T>) -> String { json::encode_pretty(v).unwrap() }",
+            "#[Op::Idle]",
+        ),
+        (
+            "fn text<T>(v: T) -> String { yaml::encode(v).unwrap() }",
+            "Op::Idle",
+        ),
+        (
+            "fn text<T>(v: T) -> String { toml::encode(v, sort: true).unwrap() }",
+            "Op::Idle",
+        ),
+        (
+            "fn text<T>(v: T) -> json::Value { json::to_value(v).unwrap() }",
+            "Op::Idle",
+        ),
+    ] {
+        let source = format!("{head}{body}\nfn main() {{ println(text({arg})) }}\n");
+        assert_eq!(codes(&source), vec!["GT0126".to_string()], "{source}");
+    }
+    let concrete = format!(
+        "{head}fn text(r: Result<String, errors::Error>) -> String {{ r.unwrap() }}\n\
+         fn main() {{ println(text(json::encode(Op::Save(\"p\")))) }}\n"
+    );
+    assert!(codes(&concrete).is_empty(), "{concrete}");
 }
 
 /// A field read decides its layout from the receiver's type, so a receiver

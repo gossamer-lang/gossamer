@@ -29,10 +29,7 @@ fn evidence(path: String, only_catalog: bool) -> Map<String, String> {
         }
     }
     let mut rows: Map<String, String> = Map::new()
-    let mut index = 0
-    while index < json::len(document) {
-        let record = json::at(document, index)
-        index += 1
+    for record in json::as_array(document).unwrap_or(#[]) {
         let name = field(record, "name")
         if only_catalog && !name.starts_with("std::") && !name.starts_with("lang::") {
             continue

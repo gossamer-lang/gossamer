@@ -357,6 +357,7 @@ impl<'a> Builder<'a> {
             && matches!(
                 method.name.as_str(),
                 "get"
+                    | "pointer"
                     | "at"
                     | "keys"
                     | "len"

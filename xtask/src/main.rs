@@ -1294,6 +1294,12 @@ const DIAGNOSTIC_CATALOGUE: &[(&str, &str, &str, &str)] = &[
         "No parameter is a shared reference, so the sigil changes nothing: an argument is passed without copying either way, and a callee writes to the caller's variable only through a `&mut` parameter, which is spelled `&mut` at the call too. `--fix` drops the `&`.",
     ),
     (
+        "GP0068",
+        "Parser",
+        "malformed serde attribute",
+        "A serde attribute is malformed, misplaced, or conflicts with another. On a struct or enum, `#[rename_all(\"rule\")]` respells every field or variant without its own `#[rename]` (rules: `lowercase`, `UPPERCASE`, `camelCase`, `PascalCase`, `snake_case`, `SCREAMING_SNAKE_CASE`, `kebab-case`, `SCREAMING-KEBAB-CASE`). On an enum, `#[tag(\"member\")]` writes each variant as one object holding that member; its variants are unit, struct, or one-field variants holding a struct. On a variant, `#[rename(\"name\")]`. On a field, `#[rename(\"key\")]`, `#[skip]`, `#[default]`, and `#[default(value)]` with a literal of the field's type, `None`, or a unit variant of its enum. Two fields or variants written under one name are also reported.",
+    ),
+    (
         "GR0001",
         "Resolve",
         "unresolved name",
@@ -1448,6 +1454,24 @@ const DIAGNOSTIC_CATALOGUE: &[(&str, &str, &str, &str)] = &[
         "Types",
         "ordering a value that has no order",
         "An ordering comparison (`<`, `<=`, `>`, `>=`) or an ordering method (`sort`, `binary_search`, `min`, `max`) named a value whose type has no order: a `Map`, a hash `Set`, a `json::Value`, or a sequence, tuple, or `Option` / `Result` holding one. Compare with `==` / `!=`, or order by a key the language orders (`sort_by_key`).",
+    ),
+    (
+        "GT0124",
+        "Types",
+        "serde target with no JSON form",
+        "A typed serde call (`json::decode::<T>`, `json::encode::<T>`, `json::from_value::<T>`, and the `yaml::` and `toml::` forms) names a type holding a value with no JSON form: a channel, a function, a handle, a `Result`, or a map keyed by other than `String`. Scalars, `String`, `json::Value`, `Vec`, fixed arrays, tuples, `Option`, `Map<String, V>`, and structs and enums of those, generic ones included, code; decode the rest as `json::Value`.",
+    ),
+    (
+        "GT0125",
+        "Types",
+        "serde call names no target type",
+        "`json::from_value(value)`, `yaml::decode(text)`, and `toml::decode(text)` decode into the type their turbofish names (`json::from_value::<Weather>(value)`), or the type a `let` declares for the result (`let w: Weather = yaml::decode(text)?`).",
+    ),
+    (
+        "GT0126",
+        "Types",
+        "encode over a type parameter",
+        "`json::encode`, `json::encode_pretty`, `json::to_value`, `yaml::encode`, and `toml::encode` write a value through a walk generated for one concrete type, as `json::encode::<T>` does, so an encode of a value whose type is, or holds, a type parameter (`fn text<T>(v: T) { json::encode(v) }`) has no walk to run. Call the encoder where the type is concrete, in the caller that names it, and pass the text in.",
     ),
 ];
 

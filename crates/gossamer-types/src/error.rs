@@ -1145,6 +1145,33 @@ pub enum TypeError {
         /// The operand or element type.
         ty: String,
     },
+    /// A typed serde call names no target type and none can be inferred.
+    #[error("`{op}` needs the type it decodes into")]
+    SerdeTargetMissing {
+        /// The serde operation, as written.
+        op: String,
+    },
+    /// An encode of a value whose type is, or holds, a type parameter: the
+    /// walk that writes it is generated for one concrete type.
+    #[error(
+        "`{op}` cannot code `{ty}`: it names a type parameter, and typed serde codes one concrete type"
+    )]
+    SerdeTypeParameter {
+        /// The serde operation, as written.
+        op: String,
+        /// The value's type, naming the parameter.
+        ty: String,
+    },
+    /// A typed serde call's target holds a type with no JSON form.
+    #[error("`{op}` cannot code `{target}`: `{part}` has no JSON form")]
+    SerdeTargetUnsupported {
+        /// The serde operation (`from_json`, `to_json`, `from_value`, ...).
+        op: String,
+        /// The target type as the call names it.
+        target: String,
+        /// The type inside it that has no JSON form.
+        part: String,
+    },
 }
 
 /// The operands of a [`TypeError::NumericOperandMismatch`], as written, and
@@ -1299,6 +1326,9 @@ impl TypeError {
             Self::MutReferenceToValueParameter { .. } => "mut-reference-to-value-parameter",
             Self::BindingStructUndeclared { .. } => "binding-struct-undeclared",
             Self::Unordered { .. } => "unordered",
+            Self::SerdeTargetUnsupported { .. } => "serde-target-unsupported",
+            Self::SerdeTargetMissing { .. } => "serde-target-missing",
+            Self::SerdeTypeParameter { .. } => "serde-type-parameter",
         }
     }
 
@@ -1427,6 +1457,9 @@ impl TypeError {
             Self::MutReferenceToValueParameter { .. } => "GT0121",
             Self::BindingStructUndeclared { .. } => "GT0122",
             Self::Unordered { .. } => "GT0123",
+            Self::SerdeTargetUnsupported { .. } => "GT0124",
+            Self::SerdeTargetMissing { .. } => "GT0125",
+            Self::SerdeTypeParameter { .. } => "GT0126",
         }
     }
 }
@@ -2559,6 +2592,21 @@ impl TypeDiagnostic {
                     .with_note(
                         "a `Map`, a hash `Set`, and a `json::Value` hold no order between two of their values",
                     );
+            }
+            TypeError::SerdeTargetMissing { op } => {
+                out = out.with_help(format!(
+                    "name it with a turbofish (`{op}::<Weather>(..)`), or bind the call to a `let` that declares its type"
+                ));
+            }
+            TypeError::SerdeTypeParameter { op, .. } => {
+                out = out.with_help(format!(
+                    "call `{op}` where the value's type is concrete, as in the caller that names it, and pass the text in"
+                ));
+            }
+            TypeError::SerdeTargetUnsupported { .. } => {
+                out = out.with_help(
+                    "give that part a type with a JSON form, or keep it as `json::Value` and read it with `json::get` / `json::as_*`",
+                );
             }
         }
         out

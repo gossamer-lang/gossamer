@@ -1,0 +1,35 @@
+// A module the program declares under a standard-library name keeps its own
+// functions: `json::decode` / `json::encode` written against a user module
+// `json` call that module, with or without a turbofish or a typed binding,
+// and a user module `option` keeps its `map_or`, in a loop the JIT compiles.
+// Bit-identical on the VM, Cranelift, and LLVM tiers.
+
+mod json {
+    pub fn decode(s: String) -> Result<i64, String> { Ok(s.len()) }
+    pub fn encode<T>(v: T) -> Result<String, String> { Ok("mine") }
+}
+
+mod option {
+    pub fn map_or(a: i64, b: i64, c: i64) -> i64 { a + b + c }
+}
+
+struct P {
+    x: i64
+}
+
+fn run() -> Result<(), String> {
+    let n: i64 = json::decode("abcd")?
+    let t = json::decode::<i64>("abcde")?
+    println("{} {} {}", n, t, json::encode(P { x: 1 })?)
+    println("{}", option::map_or(1, 2, 3))
+    Ok(())
+}
+
+fn main() {
+    println("{}", run().is_ok())
+    let mut total = 0
+    for i in 0..10 {
+        total += option::map_or(i, 1, 2)
+    }
+    println("{}", total)
+}

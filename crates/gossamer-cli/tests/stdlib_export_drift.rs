@@ -59,6 +59,30 @@ const SOURCE_VISIBLE_VIA_REWRITE: &[&str] = &[
     // `FS_TEMP_DIR_WRAPPERS`: the `parent` default over the
     // `__gos_fs_temp_dir_raw` leaf.
     "fs::temp_dir",
+    // `JSON_ENTRIES_WRAPPERS`: an object's members over `json::keys` / `get`.
+    "encoding::json::entries",
+    "json::entries",
+    // A typed serde call: the call's own stub, written by the HIR serde pass.
+    "encoding::json::decode",
+    "encoding::json::from_value",
+    "json::decode",
+    "json::from_value",
+    "encoding::toml::decode",
+    "encoding::yaml::decode",
+    "toml::decode",
+    "yaml::decode",
+    // Written by the HIR render pass as `json::parse` of the walk's text.
+    "encoding::json::to_value",
+    "json::to_value",
+    // Written by the HIR carrier pass as a `match` on the receiver.
+    "option::is_none_or",
+    "option::is_some_and",
+    "option::map_or",
+    "option::map_or_else",
+    "result::is_err_and",
+    "result::is_ok_and",
+    "result::map_or",
+    "result::map_or_else",
 ];
 
 #[test]
@@ -233,6 +257,24 @@ const MANIFEST_IMPL_VIA_REWRITE: &[&str] = &[
     // `FS_TEMP_DIR_WRAPPERS`: the `parent` default argument over the
     // runtime's `__gos_fs_temp_dir_raw` leaf.
     "fs::temp_dir",
+    // `JSON_ENTRIES_WRAPPERS`: an object's members over `json::keys` / `get`.
+    "encoding::json::entries",
+    // A typed serde call: the call's own stub, written by the HIR serde pass.
+    "encoding::json::decode",
+    "encoding::json::from_value",
+    "encoding::toml::decode",
+    "encoding::yaml::decode",
+    // Written by the HIR render pass as `json::parse` of the walk's text.
+    "encoding::json::to_value",
+    // Written by the HIR carrier pass as a `match` on the receiver.
+    "option::is_none_or",
+    "option::is_some_and",
+    "option::map_or",
+    "option::map_or_else",
+    "result::is_err_and",
+    "result::is_ok_and",
+    "result::map_or",
+    "result::map_or_else",
     // Civil-time calls are rewritten to wrappers that pass Location's compact
     // source representation into the registered raw runtime leaves.
     "time::add_date",

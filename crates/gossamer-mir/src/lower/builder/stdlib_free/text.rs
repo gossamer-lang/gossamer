@@ -337,7 +337,12 @@ impl<'a> Builder<'a> {
             "encoding::xml::parse" | "xml::parse" => {
                 ("gos_rt_xml_parse", self.result_json_value_error_adt_ty())
             }
-            "encoding::xml::encode" | "xml::encode" => ("gos_rt_xml_encode", self.tcx.string_ty()),
+            "encoding::xml::encode" | "xml::encode" => {
+                ("gos_rt_xml_encode", self.result_string_error_adt_ty())
+            }
+            "encoding::xml::is_valid" | "xml::is_valid" => {
+                ("gos_rt_xml_is_valid", self.tcx.bool_ty())
+            }
             "encoding::base32::encode_string" | "base32::encode_string" => {
                 ("gos_rt_encoding_base32_encode_string", self.tcx.string_ty())
             }

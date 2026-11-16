@@ -29,12 +29,12 @@ fn main() {
         Event::Pair(7, "x")
     ]
     for e in events {
-        let text = json::encode(e)
+        let text = json::encode(e).unwrap()
         println(text)
         println(f"{json::decode::<Event>(text).unwrap():?}")
     }
     let g = Glyph { c: 'é', fallback: Some('\n'), row: #['a', '世', '"'] }
-    let text = json::encode(g)
+    let text = json::encode(g).unwrap()
     println(text)
     let back = json::decode::<Glyph>(text).unwrap()
     println(f"{back.c} {back.fallback:?} {back.row:?}")

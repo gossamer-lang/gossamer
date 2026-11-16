@@ -1,0 +1,17 @@
+alpine:3.20: build, test
+name: build
+run: make
+---
+image: alpine:3.20
+name: ci
+steps:
+- name: build
+  run: make
+- name: test
+  run: make test
+---
+2 documents, second Some("b")
+kind: a
+---
+kind: b
+{"a":["x","y"],"b":1}

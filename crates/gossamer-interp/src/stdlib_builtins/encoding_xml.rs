@@ -113,6 +113,9 @@ pub(crate) fn install_encoding_xml(globals: &mut Vec<(&'static str, Value)>) {
         ("parse", builtin_xml_parse as BuiltinFnPub),
         ("encode", builtin_xml_encode),
         ("escape", builtin_xml_escape),
+        ("is_valid", builtin_xml_is_valid),
+        ("set_max_size", builtin_xml_set_max_size),
+        ("set_max_depth", builtin_xml_set_max_depth),
     ] {
         let q: &'static str = Box::leak(format!("encoding::xml::{short}").into_boxed_str());
         globals.push((q, crate::builtins::builtin_pub(q, call)));
@@ -135,11 +138,35 @@ pub(crate) fn builtin_xml_encode(args: &[Value]) -> RuntimeResult<Value> {
         _ => None,
     };
     match node {
-        Some(node) => Ok(Value::String(
+        Some(node) => Ok(ok_variant(Value::String(
             gossamer_std::encoding::xml::encode(&node).into(),
+        ))),
+        None => Ok(err_variant(
+            gossamer_std::encoding::xml::NOT_A_TREE.to_string(),
         )),
-        None => Ok(Value::String("".into())),
     }
+}
+
+/// `xml::set_max_size(bytes)`.
+pub(crate) fn builtin_xml_set_max_size(args: &[Value]) -> RuntimeResult<Value> {
+    if let Some(Value::Int(n)) = args.first() {
+        gossamer_std::encoding::xml::set_max_size(gossamer_std::json::cap_from_program(*n));
+    }
+    Ok(Value::Unit)
+}
+
+/// `xml::set_max_depth(levels)`.
+pub(crate) fn builtin_xml_set_max_depth(args: &[Value]) -> RuntimeResult<Value> {
+    if let Some(Value::Int(n)) = args.first() {
+        gossamer_std::encoding::xml::set_max_depth(gossamer_std::json::cap_from_program(*n));
+    }
+    Ok(Value::Unit)
+}
+
+/// `xml::is_valid(text)`: whether the text parses as an XML document.
+pub(crate) fn builtin_xml_is_valid(args: &[Value]) -> RuntimeResult<Value> {
+    let src = args.first().and_then(as_str).unwrap_or("");
+    Ok(Value::Bool(gossamer_std::encoding::xml::parse(src).is_ok()))
 }
 
 pub(crate) fn builtin_xml_escape(args: &[Value]) -> RuntimeResult<Value> {

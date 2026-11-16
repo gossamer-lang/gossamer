@@ -244,8 +244,26 @@ unsafe fn json_handle<'a>(p: *const GosJson) -> Option<&'a GosJson> {
 }
 
 /// `json::parse(text) -> Result<json::Value, String>` runtime
-/// `json::valid(text) -> bool` - true when `text` parses as
-/// well-formed JSON. Mirrors the interp `json::valid` builtin.
+/// `json::set_max_size(bytes)`: the cap every later parse and decode in the
+/// process applies.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_json_set_max_size(bytes: i64) {
+    ffi_entry!({
+        gossamer_core::json::set_max_size(gossamer_core::json::cap_from_program(bytes));
+    });
+}
+
+/// `json::set_max_depth(levels)`: the nesting cap every later parse and
+/// decode in the process applies.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_json_set_max_depth(levels: i64) {
+    ffi_entry!({
+        gossamer_core::json::set_max_depth(gossamer_core::json::cap_from_program(levels));
+    });
+}
+
+/// `json::is_valid(text) -> bool` - true when `text` parses as
+/// well-formed JSON. Mirrors the interp `json::is_valid` builtin.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_valid(text: *const c_char) -> i8 {
     ffi_entry!({
@@ -776,6 +794,24 @@ fn render_json_handle(json: &GosJson, pretty: bool) -> *mut c_char {
     alloc_cstring(&render_json_bytes(json, pretty))
 }
 
+/// The JSON text of the value `j` names, for a typed decode of it: a value
+/// read from a document as the document spells it, a built one rendered,
+/// and `null` for none.
+///
+/// # Safety
+///
+/// `j` is null or a live JSON handle for the whole call.
+pub(crate) unsafe fn json_value_text(j: *const GosJson) -> String {
+    // SAFETY: the caller's contract.
+    let Some(json) = (unsafe { json_handle(j) }) else {
+        return "null".to_owned();
+    };
+    match json.json_ref().source_text() {
+        Some(text) => text.to_owned(),
+        None => String::from_utf8_lossy(&render_json_bytes(json, false)).into_owned(),
+    }
+}
+
 /// The bytes [`render_json_handle`] makes its string of.
 pub(crate) fn render_json_bytes(json: &GosJson, pretty: bool) -> Vec<u8> {
     render_ref_bytes(json.json_ref(), pretty)
@@ -1146,6 +1182,44 @@ pub unsafe extern "C" fn gos_rt_json_at(j: *const GosJson, idx: i64) -> *mut Gos
     })
 }
 
+/// `json::at(value, index) -> Option<json::Value>`: the element, sharing the
+/// parent's tree, or `None` past the end and for a value that is not an
+/// array.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_at_opt(j: *const GosJson, idx: i64) -> i128 {
+    ffi_entry!({
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_handle` accepts.
+        let Some(parent) = (unsafe { json_handle(j) }) else {
+            return gos_rt_result_new(1, 0);
+        };
+        let element = usize::try_from(idx)
+            .ok()
+            .filter(|_| parent.json_ref().is_array())
+            .and_then(|idx| parent.json_ref().at(idx));
+        match element {
+            Some(child) => gos_rt_result_new(0, parent.child(child) as i64),
+            None => gos_rt_result_new(1, 0),
+        }
+    })
+}
+
+/// `json::len(value) -> Option<i64>`: the element or member count of an
+/// array or object, `None` for any other value, as `json::keys` answers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_len_opt(j: *const GosJson) -> i128 {
+    ffi_entry!({
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_borrow` accepts.
+        match unsafe { json_borrow(j) } {
+            Some(v) if v.is_array() || v.keys().is_some() => {
+                gos_rt_result_new(0, i64::try_from(v.len()).unwrap_or(i64::MAX))
+            }
+            _ => gos_rt_result_new(1, 0),
+        }
+    })
+}
+
 /// `value.len() -> i64` for arrays and objects; 0 elsewhere.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_len(j: *const GosJson) -> i64 {
@@ -1245,15 +1319,12 @@ pub unsafe extern "C" fn gos_rt_json_as_i64_opt(j: *const GosJson) -> i128 {
         // `json_borrow` accepts.
         match unsafe { json_borrow(j) }.and_then(JsonRef::number) {
             Some(n) => {
-                if let Some(i) = n.as_i64() {
-                    gos_rt_result_new(0, i)
-                } else {
-                    let f = n.as_f64();
-                    if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-                        gos_rt_result_new(0, f as i64)
-                    } else {
-                        gos_rt_result_new(1, 0)
-                    }
+                match n
+                    .as_i64()
+                    .or_else(|| gossamer_core::json::integral_i64(n.as_f64()))
+                {
+                    Some(i) => gos_rt_result_new(0, i),
+                    None => gos_rt_result_new(1, 0),
                 }
             }
             None => gos_rt_result_new(1, 0),
@@ -1271,11 +1342,8 @@ pub unsafe extern "C" fn gos_rt_json_as_u64_opt(j: *const GosJson) -> i128 {
         let n = unsafe { json_borrow(j) }
             .and_then(JsonRef::number)
             .and_then(|n| {
-                n.as_u64().or_else(|| {
-                    Some(n.as_f64())
-                        .filter(|f| f.fract() == 0.0 && *f >= 0.0 && *f <= u64::MAX as f64)
-                        .map(|f| f as u64)
-                })
+                n.as_u64()
+                    .or_else(|| gossamer_core::json::integral_u64(n.as_f64()))
             });
         match n {
             Some(n) => gos_rt_result_new(0, n as i64),
@@ -1382,6 +1450,35 @@ pub unsafe extern "C" fn gos_rt_json_get_opt(j: *const GosJson, key: *const c_ch
         };
         let v = parent.json_ref();
         match v.get(key_str) {
+            Some(child) => gos_rt_result_new(0, parent.child(child) as i64),
+            None => gos_rt_result_new(1, 0),
+        }
+    })
+}
+
+/// `json::pointer(value, pointer) -> Option<json::Value>`: the value an RFC
+/// 6901 JSON Pointer names, sharing the parent's tree.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_pointer_opt(
+    j: *const GosJson,
+    pointer: *const c_char,
+) -> i128 {
+    ffi_entry!({
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_handle` accepts.
+        let Some(parent) = (unsafe { json_handle(j) }) else {
+            return gos_rt_result_new(1, 0);
+        };
+        let bytes: &[u8] = if pointer.is_null() {
+            b""
+        } else {
+            // SAFETY: `pointer` is a String argument from compiled code, null or a live string body for the whole call.
+            unsafe { crate::c_abi::gos_str_arg_bytes(pointer) }
+        };
+        let Ok(pointer) = std::str::from_utf8(bytes) else {
+            return gos_rt_result_new(1, 0);
+        };
+        match parent.json_ref().pointer(pointer) {
             Some(child) => gos_rt_result_new(0, parent.child(child) as i64),
             None => gos_rt_result_new(1, 0),
         }
@@ -2268,9 +2365,6 @@ mod tests {
         let nested = format!("{}0{}", "[".repeat(depth + 1), "]".repeat(depth + 1));
         let refused = gossamer_core::json::validate(nested.as_bytes()).unwrap_err();
         assert_eq!(refused.message, "nesting depth exceeds max_depth (128)");
-        let large = vec![b' '; gossamer_core::json::DEFAULT_MAX_SIZE + 1];
-        let refused = gossamer_core::json::validate(&large).unwrap_err();
-        assert!(refused.message.starts_with("input exceeds max_size"));
     }
 
     #[test]

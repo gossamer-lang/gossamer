@@ -18,7 +18,7 @@ fn total(xs: [i64]) -> i64 {
 
 fn describe(doc: json::Value, key: String) -> String {
     match json::get(doc, key) {
-        Some(v) => json::render(v)
+        Some(v) => json::encode(v).unwrap()
         None => "missing"
     }
 }
@@ -47,8 +47,8 @@ fn main() -> Result<(), errors::Error> {
     for key in #["count", "ratio", "big", "tags", "absent"] {
         println("{key} = {}", describe(doc, key))
     }
-    let second = json::get(doc, "tags").map(|t| json::at(t, 1)).and_then(json::as_str)
+    let second = json::pointer(doc, "/tags/1").and_then(json::as_str)
     println("second tag = {:?}", second)
-    println("same as json::parse: {}", json::render(doc) == json::render(json::parse(json::render(doc))?))
+    println("same as json::parse: {}", json::encode(doc)? == json::encode(json::parse(json::encode(doc)?)?)?)
     Ok(())
 }

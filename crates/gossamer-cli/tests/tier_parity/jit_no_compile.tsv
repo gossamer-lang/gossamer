@@ -48,6 +48,7 @@ examples/grep.gos	bytecode-only local
 examples/hello_world.gos	no hot body
 examples/http_diagnostics_transport.gos	bytecode-only local
 examples/json_derive_test.gos	entry shape
+examples/json_structs.gos	no hot body
 examples/line_count.gos	callable local
 examples/mime_demo.gos	no hot body
 examples/netip_demo.gos	no hot body
@@ -84,7 +85,6 @@ feature-testing-examples/callable_in_map_values.gos	no hot body
 feature-testing-examples/callable_payloads_from_fn_items.gos	callable local
 feature-testing-examples/callback_shorthands.gos	callable local
 feature-testing-examples/capture_by_reference.gos	string append
-feature-testing-examples/carrier_at_odd_slot_offset.gos	unsupported-boundary: a struct carrying two-word Option/Result fields crosses the function boundary, which the trampoline cannot marshal - the shape the fixture exists to pin
 feature-testing-examples/carrier_payload_debug_shapes.gos	aggregate print
 feature-testing-examples/carrier_payload_views.gos	unsupported-boundary: a struct carrying two-word Option fields crosses the function boundary, which the trampoline cannot marshal - the recursive walk the fixture pins
 feature-testing-examples/cfg_inactive_static_mut.gos	no hot body
@@ -240,6 +240,7 @@ feature-testing-examples/iterator_param_argument.gos	unlowerable local
 feature-testing-examples/iterator_trait_user_impl.gos	admission gate
 feature-testing-examples/iterator_values.gos	unlowerable local
 feature-testing-examples/json_null_rendering.gos	no hot body
+feature-testing-examples/json_serde_attributes_extended.gos	no hot body
 feature-testing-examples/json_set_update.gos	no hot body
 feature-testing-examples/json_value_constructors.gos	no hot body
 feature-testing-examples/json_yaml_encode.gos	no hot body
@@ -327,6 +328,7 @@ feature-testing-examples/regex_unicode_categories.gos	no hot body
 feature-testing-examples/result_default.gos	no hot body
 feature-testing-examples/router_closure_route.gos	no hot body
 feature-testing-examples/runtime_handles_typed.gos	bytecode-only local
+feature-testing-examples/runtime_max_procs.gos	no hot body
 feature-testing-examples/same_named_types_render/src/main.gos	no hot body
 feature-testing-examples/same_scope_shadow_assignment.gos	no hot body
 feature-testing-examples/scheduler_drain.gos	cross-goroutine
@@ -339,7 +341,6 @@ feature-testing-examples/self_unit_and_generic_callbacks.gos	callable local
 feature-testing-examples/send_completes_before_close.gos	cross-goroutine
 feature-testing-examples/sequence_spelling.gos	admission gate
 feature-testing-examples/serde_enums_and_field_attrs.gos	entry shape
-feature-testing-examples/serde_typed_entry_points.gos	no hot user body
 feature-testing-examples/set_from_sequence.gos	no hot body
 feature-testing-examples/set_literal_rendering.gos	no hot body
 feature-testing-examples/slice_methods.gos	no hot body
@@ -396,6 +397,7 @@ feature-testing-examples/string_method_surface.gos	no hot body
 feature-testing-examples/string_place_mutators.gos	&mut aggregate param
 feature-testing-examples/string_push_char.gos	no hot body
 feature-testing-examples/string_unicode_boundaries.gos	no hot body
+feature-testing-examples/struct_field_shorthand.gos	no hot body
 feature-testing-examples/struct_map_keys.gos	entry shape
 feature-testing-examples/struct_tuple_map_key.gos	no hot user body
 feature-testing-examples/struct_update_base.gos	no hot user body

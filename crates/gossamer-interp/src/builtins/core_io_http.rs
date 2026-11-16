@@ -1342,6 +1342,7 @@ fn native_http3_serve(dispatch: &mut dyn NativeDispatch, args: &[Value]) -> Runt
     Ok(Value::variant("Ok", vec![Value::Unit]))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// [`request_to_value`] with the request-scoped context a handler reads
 /// off `request.context`.
 pub(crate) fn request_to_value_with_context(
@@ -1360,6 +1361,7 @@ pub(crate) fn request_to_value_with_context(
     Value::struct_("Request", fields)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn request_to_value(request: &http_std::Request) -> Value {
     // Path and query are split at the ABI level since 0.4.
     let bare_path = request.path.clone();
@@ -1519,6 +1521,7 @@ fn value_to_response(value: &Value) -> Option<http_std::Response> {
     Some(response)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn unwrap_result(value: &Value) -> &Value {
     match value {
         Value::Variant(inner) if inner.name == "Ok" && !inner.fields.is_empty() => &inner.fields[0],
@@ -1526,6 +1529,7 @@ fn unwrap_result(value: &Value) -> &Value {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn install_http_shutdown_handler(shutdown: Arc<AtomicBool>) {
     // `lifecycle::shutdown()` from Gossamer code stops this server too:
     // the runtime's process lifecycle owns the one shutdown decision, and
@@ -1569,11 +1573,6 @@ fn register_http_shutdown(shutdown: Arc<AtomicBool>) {
         })
         .ok();
 }
-
-#[cfg(target_arch = "wasm32")]
-fn register_http_shutdown(_shutdown: Arc<AtomicBool>) {}
-
-static SIGINT_HOOKED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
 mod http_shutdown_tests {

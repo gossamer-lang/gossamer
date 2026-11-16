@@ -19,7 +19,7 @@ fn main() -> Result<(), errors::Error> {
     if let Some(name) = doc.get("name") {
         println("as_str = {:?}", name.as_str())
     }
-    println("pretty = {}", json::encode_pretty(doc).len() > 0)
+    println("pretty = {}", json::encode_pretty(doc).unwrap().len() > 0)
 
     // Leaf-module spellings of nested stdlib functions.
     let encoded = base64::encode("gossamer".as_bytes())

@@ -75,10 +75,10 @@ mod tests {
 
     #[test]
     fn is_match_digit_pattern() {
-        let p = match regex::compile("\\d+") {
+        let p = match regex::new("\\d+") {
             Ok(p) => p
             Err(e) => {
-                let _ = testing::check(false, e)
+                let _ = testing::check(false, e.to_string())
                 return
             }
         }
@@ -88,10 +88,10 @@ mod tests {
 
     #[test]
     fn find_all_count() {
-        let p = match regex::compile("[0-9]+") {
+        let p = match regex::new("[0-9]+") {
             Ok(p) => p
             Err(e) => {
-                let _ = testing::check(false, e)
+                let _ = testing::check(false, e.to_string())
                 return
             }
         }
@@ -101,10 +101,10 @@ mod tests {
 
     #[test]
     fn replace_all_whitespace() {
-        let p = match regex::compile("\\s+") {
+        let p = match regex::new("\\s+") {
             Ok(p) => p
             Err(e) => {
-                let _ = testing::check(false, e)
+                let _ = testing::check(false, e.to_string())
                 return
             }
         }
@@ -114,10 +114,10 @@ mod tests {
 
     #[test]
     fn captures_date() {
-        let p = match regex::compile("(\\d{4})-(\\d{2})-(\\d{2})") {
+        let p = match regex::new("(\\d{4})-(\\d{2})-(\\d{2})") {
             Ok(p) => p
             Err(e) => {
-                let _ = testing::check(false, e)
+                let _ = testing::check(false, e.to_string())
                 return
             }
         }

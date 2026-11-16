@@ -10,11 +10,11 @@
 //!
 //! The reader's error is sticky. The first failure is kept, every later read
 //! answers a zero value, and the decoder checks [`TypedReader::failed`] once at
-//! the end. Each nested decode that was running when the failure happened adds
-//! its context on the way out, so the error reads outermost first, the way
-//! nested `errors::wrap` calls render.
+//! the end. Each value the walk steps into remembers the key or index it was
+//! reached by, so a failure carries the path to the value it names
+//! (`current.items[2]`), spelled with the document's own keys.
 
-use super::{Error, Parser, Value, validate_str_with_containers};
+use super::{Error, Parser, Value, integral_i64, integral_u64, validate_str_with_containers};
 
 /// A walk over one validated JSON document held as `T`: an owned `String`,
 /// or text a caller keeps alive for the walk.
@@ -35,14 +35,34 @@ pub struct TypedReader<T = String> {
     table_names: Vec<(usize, usize)>,
 }
 
-/// The first failure and the contexts the decodes it unwound through added,
-/// innermost first.
+/// The first failure and the path to the value it names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadError {
     /// The failure's own message.
     pub message: String,
-    /// One per nested decode that wrapped it, innermost first.
-    pub contexts: Vec<String>,
+    /// Where the failure happened (`current.items[2]`), empty at the root.
+    pub path: String,
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.path.is_empty() {
+            f.write_str(&self.message)
+        } else {
+            write!(f, "{}: {}", self.path, self.message)
+        }
+    }
+}
+
+/// How the walk reached a value: by the key whose opening quote sits at an
+/// offset, or by an element index. The root and a value the document does not
+/// have are reached by neither.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Segment {
+    #[default]
+    None,
+    Key(usize),
+    Index(usize),
 }
 
 /// One value the walk stands on: its byte offset, or `None` for a value the
@@ -50,9 +70,12 @@ pub struct ReadError {
 #[derive(Debug, Default)]
 struct Frame {
     node: Option<usize>,
-    fields: Vec<Option<usize>>,
+    segment: Segment,
+    /// Per field of the struct begun here: its key's offset and its value's.
+    fields: Vec<Option<(usize, usize)>>,
     elems: Vec<usize>,
-    entries: Vec<(String, usize)>,
+    /// Per map entry: its key, the key's offset, and the value's offset.
+    entries: Vec<(String, usize, usize)>,
 }
 
 /// What kind of JSON value starts at an offset.
@@ -92,7 +115,7 @@ impl<T: AsRef<str>> TypedReader<T> {
             Ok(containers) => {
                 reader.containers = containers;
                 let start = skip_ws(reader.text.as_ref().as_bytes(), 0);
-                reader.push(Some(start));
+                reader.push(Some(start), Segment::None);
             }
             Err(error) => reader.reject(&error),
         }
@@ -116,12 +139,33 @@ impl<T: AsRef<str>> TypedReader<T> {
         reader
     }
 
+    /// A reader that has failed with `message` before reading anything, as
+    /// for a YAML or TOML document that did not convert.
+    #[must_use]
+    pub fn failing(text: T, message: &str) -> Self {
+        let mut reader = Self {
+            text,
+            containers: Vec::new(),
+            frames: Vec::with_capacity(1),
+            depth: 0,
+            error: None,
+            table: String::new(),
+            table_names: Vec::new(),
+        };
+        reader.error = Some(ReadError {
+            message: message.to_owned(),
+            path: String::new(),
+        });
+        reader.push(None, Segment::None);
+        reader
+    }
+
     fn reject(&mut self, error: &Error) {
         self.error = Some(ReadError {
             message: error.to_string(),
-            contexts: Vec::new(),
+            path: String::new(),
         });
-        self.push(None);
+        self.push(None, Segment::None);
     }
 
     fn text(&self) -> &str {
@@ -140,24 +184,84 @@ impl<T: AsRef<str>> TypedReader<T> {
         self.error.as_ref()
     }
 
-    /// Records `message` as the failure, unless one is already recorded.
+    /// Records `message` as the failure at the current value, unless one is
+    /// already recorded.
     pub fn fail(&mut self, message: &str) {
         if self.error.is_none() {
+            let path = self.path();
             self.error = Some(ReadError {
                 message: message.to_owned(),
-                contexts: Vec::new(),
+                path,
             });
         }
     }
 
-    /// Adds `context` to a failure that happened after a decode started:
-    /// `failed_before` is what [`Self::failed`] answered when it began.
-    pub fn wrap(&mut self, failed_before: bool, context: &str) {
-        if failed_before {
-            return;
+    /// Records that the current value is not the `expected` shape, naming
+    /// what it is instead.
+    pub fn fail_expected(&mut self, expected: &str) {
+        if self.error.is_none() {
+            let found = self.found();
+            self.fail(&format!("expected {expected}, found {found}"));
         }
-        if let Some(error) = &mut self.error {
-            error.contexts.push(context.to_owned());
+    }
+
+    /// The current value as a failure names it: a number by its text, any
+    /// other value by its kind.
+    fn found(&self) -> String {
+        match self.kind() {
+            Kind::Null => "null".to_owned(),
+            Kind::Bool => "bool".to_owned(),
+            Kind::String => "string".to_owned(),
+            Kind::Array => "array".to_owned(),
+            Kind::Object => "object".to_owned(),
+            Kind::Number => self.number_text().unwrap_or("number").to_owned(),
+        }
+    }
+
+    /// The keys and indices from the root to the current value.
+    fn path(&self) -> String {
+        let mut path = String::new();
+        for frame in &self.frames[..self.depth] {
+            match frame.segment {
+                Segment::None => {}
+                Segment::Index(index) => {
+                    let _ = std::fmt::Write::write_fmt(&mut path, format_args!("[{index}]"));
+                }
+                Segment::Key(offset) => {
+                    let key = self.key_at(offset);
+                    let plain = !key.is_empty()
+                        && key
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+                    if plain {
+                        if !path.is_empty() {
+                            path.push('.');
+                        }
+                        path.push_str(&key);
+                    } else {
+                        path.push('[');
+                        write_quoted(&mut path, &key);
+                        path.push(']');
+                    }
+                }
+            }
+        }
+        path
+    }
+
+    /// The key whose opening quote is at `offset`, escapes resolved.
+    fn key_at(&self, offset: usize) -> std::borrow::Cow<'_, str> {
+        let bytes = self.text().as_bytes();
+        let end = string_end(bytes, offset);
+        let raw = &self.text()[offset + 1..end.saturating_sub(1).max(offset + 1)];
+        if raw.contains('\\') {
+            let mut parser = Parser::new(self.text());
+            parser.cursor = offset;
+            parser
+                .parse_string()
+                .map_or(std::borrow::Cow::Borrowed(raw), std::borrow::Cow::Owned)
+        } else {
+            std::borrow::Cow::Borrowed(raw)
         }
     }
 
@@ -176,7 +280,7 @@ impl<T: AsRef<str>> TypedReader<T> {
 
     /// Records where each of `keys` (encoded by [`encode_names`]) starts in
     /// the current value. A key the document repeats takes its last value, as
-    /// `json::get` reads it; a value that is not an object has none of them.
+    /// `json::get` reads it. A value that is not an object is a failure.
     pub fn begin_struct(&mut self, keys: &str) {
         if self.table != keys {
             self.table.clear();
@@ -187,16 +291,20 @@ impl<T: AsRef<str>> TypedReader<T> {
         let mut fields = std::mem::take(&mut self.top_mut().fields);
         fields.clear();
         fields.resize(self.table_names.len(), None);
-        if !self.failed()
-            && let Some(start) = self.object_start()
-        {
-            let table = self.table.as_bytes();
-            let names = &self.table_names;
-            self.for_each_entry(start, |key, value| {
-                if let Some(index) = names.iter().position(|&(a, b)| &table[a..b] == key) {
-                    fields[index] = Some(value);
-                }
-            });
+        if !self.failed() {
+            if let Some(start) = self.object_start() {
+                let table = self.table.as_bytes();
+                let names = &self.table_names;
+                self.for_each_entry(start, |key, key_at, value| {
+                    if let Some(index) = names.iter().position(|&(a, b)| &table[a..b] == key) {
+                        fields[index] = Some((key_at, value));
+                    }
+                });
+            } else {
+                self.top_mut().fields = fields;
+                self.fail_expected("object");
+                return;
+            }
         }
         self.top_mut().fields = fields;
     }
@@ -207,8 +315,8 @@ impl<T: AsRef<str>> TypedReader<T> {
     pub fn enter_field(&mut self, index: usize) -> bool {
         let node = self.top().fields.get(index).copied().flatten();
         match node {
-            Some(node) if !self.failed() => {
-                self.push(Some(node));
+            Some((key, node)) if !self.failed() => {
+                self.push(Some(node), Segment::Key(key));
                 true
             }
             _ => false,
@@ -216,26 +324,38 @@ impl<T: AsRef<str>> TypedReader<T> {
     }
 
     /// The current value as an `i64`, by `json::as_i64`'s rule, or `0` with
-    /// `message` recorded when it is not one.
-    pub fn read_i64(&mut self, message: &str) -> i64 {
+    /// a failure naming `expected` recorded when it is not one.
+    pub fn read_i64(&mut self, expected: &str) -> i64 {
         let Some(n) = self.scalar().as_ref().and_then(as_i64) else {
-            self.fail(message);
+            self.fail_expected(expected);
             return 0;
         };
         n
     }
 
+    /// The current value as an integer within `min..=max`, by
+    /// `json::as_i64`'s rule, for a field narrower than `i64`.
+    pub fn read_int(&mut self, expected: &str, min: i64, max: i64) -> i64 {
+        match self.scalar().as_ref().and_then(as_i64) {
+            Some(n) if (min..=max).contains(&n) => n,
+            _ => {
+                self.fail_expected(expected);
+                0
+            }
+        }
+    }
+
     /// The current value as a `u64`, by `json::as_u64`'s rule.
-    pub fn read_u64(&mut self, message: &str) -> u64 {
+    pub fn read_u64(&mut self, expected: &str) -> u64 {
         let Some(n) = self.scalar().as_ref().and_then(as_u64) else {
-            self.fail(message);
+            self.fail_expected(expected);
             return 0;
         };
         n
     }
 
     /// The current value as an `f64`, by `json::as_f64`'s rule.
-    pub fn read_f64(&mut self, message: &str) -> f64 {
+    pub fn read_f64(&mut self, expected: &str) -> f64 {
         // A number token reads as the nearest `f64` whether it is written
         // as an integer or not, which is what `as_f64` makes of each form.
         let number = if self.kind() == Kind::Number {
@@ -244,7 +364,7 @@ impl<T: AsRef<str>> TypedReader<T> {
             None
         };
         let Some(n) = number else {
-            self.fail(message);
+            self.fail_expected(expected);
             return 0.0;
         };
         n
@@ -257,29 +377,34 @@ impl<T: AsRef<str>> TypedReader<T> {
     }
 
     /// The current value as a `bool`.
-    pub fn read_bool(&mut self, message: &str) -> bool {
+    pub fn read_bool(&mut self, expected: &str) -> bool {
         let Some(Value::Bool(b)) = self.scalar() else {
-            self.fail(message);
+            self.fail_expected(expected);
             return false;
         };
         b
     }
 
     /// The current value as a `char`: a string holding exactly one.
-    pub fn read_char(&mut self, message: &str) -> char {
-        let text = self.read_string(message);
+    pub fn read_char(&mut self, expected: &str) -> char {
+        let text = self.read_string(expected);
         let mut chars = text.chars();
         let (Some(c), None) = (chars.next(), chars.next()) else {
-            self.fail(message);
+            if !self.failed() {
+                let count = text.chars().count();
+                self.fail(&format!(
+                    "expected {expected}, found {count}-character string"
+                ));
+            }
             return '\0';
         };
         c
     }
 
     /// The current value as a string.
-    pub fn read_string(&mut self, message: &str) -> String {
+    pub fn read_string(&mut self, expected: &str) -> String {
         let Some(Value::String(s)) = self.scalar() else {
-            self.fail(message);
+            self.fail_expected(expected);
             return String::new();
         };
         s
@@ -298,14 +423,14 @@ impl<T: AsRef<str>> TypedReader<T> {
         }
     }
 
-    /// The element count of the current value, recording `message` and
-    /// answering `0` when it is not an array.
-    pub fn begin_array(&mut self, message: &str) -> usize {
+    /// The element count of the current value, recording a failure naming
+    /// `expected` and answering `0` when it is not an array.
+    pub fn begin_array(&mut self, expected: &str) -> usize {
         if self.failed() {
             return 0;
         }
         if self.kind() != Kind::Array {
-            self.fail(message);
+            self.fail_expected(expected);
             return 0;
         }
         let mut elems = std::mem::take(&mut self.top_mut().elems);
@@ -316,21 +441,24 @@ impl<T: AsRef<str>> TypedReader<T> {
     }
 
     /// Checks that the current value is an array of exactly `len` elements,
-    /// recording `not_array` or `wrong_len` when it is not.
+    /// recording a failure naming `not_array` when it is not an array and
+    /// `wrong_len` when it has another length.
     pub fn begin_tuple(&mut self, len: usize, not_array: &str, wrong_len: &str) {
         if self.failed() {
             return;
         }
         if self.kind() != Kind::Array {
-            self.fail(not_array);
+            self.fail_expected(not_array);
             return;
         }
         let mut elems = std::mem::take(&mut self.top_mut().elems);
         self.current_elems(&mut elems);
-        let fits = elems.len() == len;
+        let found = elems.len();
         self.top_mut().elems = elems;
-        if !fits {
-            self.fail(wrong_len);
+        if found != len {
+            self.fail(&format!(
+                "expected {wrong_len}, found {found}-element array"
+            ));
         }
     }
 
@@ -342,7 +470,7 @@ impl<T: AsRef<str>> TypedReader<T> {
         } else {
             self.top().elems.get(index).copied()
         };
-        self.push(node);
+        self.push(node, Segment::Index(index));
     }
 
     /// Steps into element `index` of the current value, or into `null` when
@@ -355,29 +483,29 @@ impl<T: AsRef<str>> TypedReader<T> {
         } else {
             None
         };
-        self.push(node);
+        self.push(node, Segment::Index(index));
     }
 
-    /// The entry count of the current value, recording `message` and answering
-    /// `0` when it is not an object. Entries are in key order, and a key the
-    /// document repeats keeps its last value, as `json::keys` and `json::get`
-    /// read them.
-    pub fn begin_map(&mut self, message: &str) -> usize {
+    /// The entry count of the current value, recording a failure naming
+    /// `expected` and answering `0` when it is not an object. Entries are in
+    /// key order, and a key the document repeats keeps its last value, as
+    /// `json::keys` and `json::get` read them.
+    pub fn begin_map(&mut self, expected: &str) -> usize {
         if self.failed() {
             return 0;
         }
         let Some(start) = self.object_start() else {
-            self.fail(message);
+            self.fail_expected(expected);
             return 0;
         };
-        let mut entries: Vec<(String, usize)> = Vec::new();
-        self.for_each_entry(start, |key, value| {
-            entries.push((String::from_utf8_lossy(key).into_owned(), value));
+        let mut entries: Vec<(String, usize, usize)> = Vec::new();
+        self.for_each_entry(start, |key, key_at, value| {
+            entries.push((String::from_utf8_lossy(key).into_owned(), key_at, value));
         });
         // A stable sort keeps a repeated key's occurrences in document order,
         // so the last of each run is the value `json::get` answers.
         entries.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut deduped: Vec<(String, usize)> = Vec::with_capacity(entries.len());
+        let mut deduped: Vec<(String, usize, usize)> = Vec::with_capacity(entries.len());
         for entry in entries {
             match deduped.last_mut() {
                 Some(last) if last.0 == entry.0 => *last = entry,
@@ -395,18 +523,24 @@ impl<T: AsRef<str>> TypedReader<T> {
         self.top()
             .entries
             .get(index)
-            .map_or("", |(key, _)| key.as_str())
+            .map_or("", |(key, _, _)| key.as_str())
     }
 
     /// Steps into the value of entry `index` of the map [`Self::begin_map`]
     /// began.
     pub fn enter_map_value(&mut self, index: usize) {
-        let node = if self.failed() {
+        let entry = if self.failed() {
             None
         } else {
-            self.top().entries.get(index).map(|(_, value)| *value)
+            self.top()
+                .entries
+                .get(index)
+                .map(|&(_, key, value)| (key, value))
         };
-        self.push(node);
+        match entry {
+            Some((key, value)) => self.push(Some(value), Segment::Key(key)),
+            None => self.push(None, Segment::None),
+        }
     }
 
     /// Selects the variant of an externally tagged enum. `variants` lists
@@ -426,28 +560,73 @@ impl<T: AsRef<str>> TypedReader<T> {
             self.select_variant(&table, name)
         };
         if let Some((index, payload)) = chosen {
-            if let Some(payload) = payload {
-                self.push(Some(payload));
+            if let Some((key, payload)) = payload {
+                self.push(Some(payload), Segment::Key(key));
             }
             return index;
         }
         if table.get(fallback).is_some_and(|(unit, _)| !unit) {
-            self.push(None);
+            self.push(None, Segment::None);
         }
         fallback
+    }
+
+    /// Selects the variant of an internally tagged enum: the current value is
+    /// an object whose `tag` member names the variant, and the variant's own
+    /// fields sit beside it in the same object. Nothing is stepped into.
+    /// `variants`, `name`, and `fallback` are as [`Self::begin_enum`] takes
+    /// them.
+    pub fn begin_tagged(
+        &mut self,
+        variants: &str,
+        tag: &str,
+        name: &str,
+        fallback: usize,
+    ) -> usize {
+        if self.failed() {
+            return fallback;
+        }
+        let Some(start) = self.object_start() else {
+            self.fail_expected(&format!("an object naming a variant of `{name}`"));
+            return fallback;
+        };
+        let mut member = None;
+        self.for_each_entry(start, |key, key_at, value| {
+            if key == tag.as_bytes() {
+                member = Some((key_at, value));
+            }
+        });
+        let Some((key_at, value)) = member else {
+            self.fail(&format!("missing field `{tag}`"));
+            return fallback;
+        };
+        self.push(Some(value), Segment::Key(key_at));
+        let found = self.read_string("a variant name");
+        let table = decode_variants(variants);
+        let index = if self.failed() {
+            None
+        } else {
+            let index = table.iter().position(|(_, n)| *n == found);
+            if index.is_none() {
+                self.fail(&unknown_variant(&found, name, &table, |_| true));
+            }
+            index
+        };
+        self.leave();
+        index.unwrap_or(fallback)
     }
 
     fn select_variant(
         &mut self,
         table: &[(bool, &str)],
         name: &str,
-    ) -> Option<(usize, Option<usize>)> {
+    ) -> Option<(usize, Option<(usize, usize)>)> {
         match self.kind() {
             Kind::String => {
                 let tag = self.read_string("");
                 let found = table.iter().position(|(unit, n)| *unit && *n == tag);
                 if found.is_none() {
-                    self.fail(&format!("unknown variant `{tag}` of `{name}`"));
+                    self.fail(&unknown_variant(&tag, name, table, |unit| unit));
                 }
                 found.map(|index| (index, None))
             }
@@ -455,26 +634,32 @@ impl<T: AsRef<str>> TypedReader<T> {
                 let start = self.object_start()?;
                 // Distinct keys, each with its last value, as `json::keys`
                 // and `json::get` read the object.
-                let mut entries: Vec<(String, usize)> = Vec::new();
-                self.for_each_entry(start, |key, value| {
-                    match entries.iter_mut().find(|(k, _)| k.as_bytes() == key) {
-                        Some(slot) => slot.1 = value,
-                        None => entries.push((String::from_utf8_lossy(key).into_owned(), value)),
+                let mut entries: Vec<(String, usize, usize)> = Vec::new();
+                self.for_each_entry(start, |key, key_at, value| {
+                    match entries.iter_mut().find(|(k, _, _)| k.as_bytes() == key) {
+                        Some(slot) => (slot.1, slot.2) = (key_at, value),
+                        None => {
+                            entries.push((
+                                String::from_utf8_lossy(key).into_owned(),
+                                key_at,
+                                value,
+                            ));
+                        }
                     }
                 });
                 if entries.len() != 1 {
-                    self.fail(&shape_message(name));
+                    self.fail_expected(&shape_message(name));
                     return None;
                 }
-                let (tag, payload) = entries.swap_remove(0);
+                let (tag, key_at, payload) = entries.swap_remove(0);
                 let found = table.iter().position(|(unit, n)| !*unit && *n == tag);
                 if found.is_none() {
-                    self.fail(&format!("unknown variant `{tag}` of `{name}`"));
+                    self.fail(&unknown_variant(&tag, name, table, |unit| !unit));
                 }
-                found.map(|index| (index, Some(payload)))
+                found.map(|index| (index, Some((key_at, payload))))
             }
             _ => {
-                self.fail(&shape_message(name));
+                self.fail_expected(&shape_message(name));
                 None
             }
         }
@@ -488,17 +673,19 @@ impl<T: AsRef<str>> TypedReader<T> {
 
     fn top_mut(&mut self) -> &mut Frame {
         if self.depth == 0 {
-            self.push(None);
+            self.push(None, Segment::None);
         }
         &mut self.frames[self.depth - 1]
     }
 
-    fn push(&mut self, node: Option<usize>) {
+    fn push(&mut self, node: Option<usize>, segment: Segment) {
         if let Some(frame) = self.frames.get_mut(self.depth) {
             frame.node = node;
+            frame.segment = segment;
         } else {
             self.frames.push(Frame {
                 node,
+                segment,
                 ..Frame::default()
             });
         }
@@ -566,9 +753,9 @@ impl<T: AsRef<str>> TypedReader<T> {
         }
     }
 
-    /// Calls `f` with each key of the object at `start` and the offset of its
-    /// value, in document order.
-    fn for_each_entry(&self, start: usize, mut f: impl FnMut(&[u8], usize)) {
+    /// Calls `f` with each key of the object at `start`, the offset of the
+    /// key's opening quote, and the offset of its value, in document order.
+    fn for_each_entry(&self, start: usize, mut f: impl FnMut(&[u8], usize, usize)) {
         let bytes = self.text().as_bytes();
         let mut cursor = skip_ws(bytes, start + 1);
         if bytes.get(cursor) == Some(&b'}') {
@@ -596,7 +783,7 @@ impl<T: AsRef<str>> TypedReader<T> {
             cursor = skip_ws(bytes, key_end);
             cursor = skip_ws(bytes, cursor + 1);
             let value = cursor;
-            f(key, value);
+            f(key, key_start, value);
             cursor = skip_ws(bytes, self.value_end(value));
             match bytes.get(cursor) {
                 Some(b',') => cursor += 1,
@@ -624,13 +811,120 @@ impl<T: AsRef<str>> TypedReader<T> {
 
 static ROOT_ABSENT: Frame = Frame {
     node: None,
+    segment: Segment::None,
     fields: Vec::new(),
     elems: Vec::new(),
     entries: Vec::new(),
 };
 
 fn shape_message(name: &str) -> String {
-    format!("expected a variant of `{name}`: a name, or an object with one key")
+    format!("a variant of `{name}` (a name, or an object with one key)")
+}
+
+/// The failure for a variant name `tag` that `name` does not have in the form
+/// `form` accepts, listing the names it does.
+fn unknown_variant(
+    tag: &str,
+    name: &str,
+    table: &[(bool, &str)],
+    form: impl Fn(bool) -> bool,
+) -> String {
+    let known: Vec<String> = table
+        .iter()
+        .filter(|(unit, _)| form(*unit))
+        .map(|(_, n)| format!("`{n}`"))
+        .collect();
+    if known.is_empty() {
+        format!("unknown variant `{tag}` of `{name}`")
+    } else {
+        format!(
+            "unknown variant `{tag}` of `{name}`, expected one of {}",
+            known.join(", ")
+        )
+    }
+}
+
+/// `compact` (JSON text with no whitespace outside strings, as the typed
+/// writer writes it) laid out as `json::encode_pretty` lays out a document:
+/// two spaces per level, `": "` after a key, and `[]` / `{}` for an empty
+/// container. Members keep their order.
+#[must_use]
+pub fn indent_text(compact: &str) -> String {
+    let bytes = compact.as_bytes();
+    let mut out = String::with_capacity(compact.len() * 2);
+    let mut depth = 0usize;
+    let mut at = 0;
+    let newline = |out: &mut String, depth: usize| {
+        out.push('\n');
+        for _ in 0..depth {
+            out.push_str("  ");
+        }
+    };
+    while at < bytes.len() {
+        match bytes[at] {
+            b'"' => {
+                let end = string_end(bytes, at);
+                out.push_str(&compact[at..end]);
+                at = end;
+                continue;
+            }
+            open @ (b'{' | b'[') => {
+                let close = if open == b'{' { b'}' } else { b']' };
+                if bytes.get(at + 1) == Some(&close) {
+                    out.push(char::from(open));
+                    out.push(char::from(close));
+                    at += 2;
+                    continue;
+                }
+                out.push(char::from(open));
+                depth += 1;
+                newline(&mut out, depth);
+            }
+            close @ (b'}' | b']') => {
+                depth = depth.saturating_sub(1);
+                newline(&mut out, depth);
+                out.push(char::from(close));
+            }
+            b',' => {
+                out.push(',');
+                newline(&mut out, depth);
+            }
+            b':' => out.push_str(": "),
+            _ => {
+                let end = scan_value_end(bytes, at);
+                out.push_str(&compact[at..end]);
+                at = end;
+                continue;
+            }
+        }
+        at += 1;
+    }
+    out
+}
+
+/// Appends an object member's key text to `out`, after a `,` unless the
+/// member is the first of the object being written.
+pub fn write_key(out: &mut Vec<u8>, text: &str) {
+    if out.last().is_some_and(|&b| b != b'{') {
+        out.push(b',');
+    }
+    out.extend_from_slice(text.as_bytes());
+}
+
+/// Appends `text` as a JSON string literal.
+fn write_quoted(out: &mut String, text: &str) {
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if u32::from(c) < 0x20 => {
+                let _ = std::fmt::Write::write_fmt(out, format_args!("\\u{:04x}", u32::from(c)));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
 }
 
 fn kind_at(bytes: &[u8], start: usize) -> Kind {
@@ -732,34 +1026,19 @@ fn string_end(bytes: &[u8], start: usize) -> usize {
     }
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    reason = "json::as_i64 accepts an integral float inside i64's range, and this is that rule"
-)]
 fn as_i64(value: &Value) -> Option<i64> {
     match value {
         Value::Int(n) => Some(*n),
-        Value::Number(n) if n.fract() == 0.0 && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 => {
-            Some(*n as i64)
-        }
+        Value::Number(n) => integral_i64(*n),
         _ => None,
     }
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "json::as_u64 accepts an integral float inside u64's range, and this is that rule"
-)]
 fn as_u64(value: &Value) -> Option<u64> {
     match value {
         Value::Int(n) => u64::try_from(*n).ok(),
         Value::Uint(n) => Some(*n),
-        Value::Number(n) if n.fract() == 0.0 && *n >= 0.0 && *n <= u64::MAX as f64 => {
-            Some(*n as u64)
-        }
+        Value::Number(n) => integral_u64(*n),
         _ => None,
     }
 }
@@ -953,13 +1232,7 @@ mod tests {
     }
 
     fn message(reader: &TypedReader) -> Option<String> {
-        reader.error().map(|e| {
-            let mut text = e.message.clone();
-            for context in &e.contexts {
-                text = format!("{context}: {text}");
-            }
-            text
-        })
+        reader.error().map(ToString::to_string)
     }
 
     #[test]
@@ -977,22 +1250,78 @@ mod tests {
     }
 
     #[test]
-    fn the_first_failure_is_kept_and_wrapped_by_the_decodes_it_unwinds() {
+    fn the_first_failure_is_kept_with_the_path_to_its_value() {
         let mut r = TypedReader::new(r#"{"inner": {"n": "x"}, "m": true}"#);
         r.begin_struct(&encode_names(["inner", "m"]));
         assert!(r.enter_field(0));
-        let before = r.failed();
         r.begin_struct(&encode_names(["n"]));
         assert!(r.enter_field(0));
-        assert_eq!(r.read_i64("field `n`: expected i64"), 0);
+        assert_eq!(r.read_i64("i64"), 0);
         r.leave();
-        r.wrap(before, "field `inner`");
         r.leave();
         assert!(r.enter_field(1) || r.failed());
-        assert_eq!(r.read_i64("field `m`: expected i64"), 0);
+        assert_eq!(r.read_i64("i64"), 0);
         assert_eq!(
             message(&r).as_deref(),
-            Some("field `inner`: field `n`: expected i64")
+            Some("inner.n: expected i64, found string")
+        );
+    }
+
+    #[test]
+    fn a_path_names_elements_by_index_and_odd_keys_in_quotes() {
+        let mut r = TypedReader::new(r#"{"a b": [1, {"q\"": 2.5}]}"#);
+        r.begin_struct(&encode_names(["a b"]));
+        assert!(r.enter_field(0));
+        assert_eq!(r.begin_array("array"), 2);
+        r.enter_elem(1);
+        r.begin_struct(&encode_names(["q\""]));
+        assert!(r.enter_field(0));
+        r.read_i64("i64");
+        assert_eq!(
+            message(&r).as_deref(),
+            Some(r#"["a b"][1]["q\""]: expected i64, found 2.5"#)
+        );
+    }
+
+    #[test]
+    fn a_struct_from_a_value_that_is_not_an_object_fails() {
+        let mut r = TypedReader::new(r#"{"inner": [1]}"#);
+        r.begin_struct(&encode_names(["inner"]));
+        assert!(r.enter_field(0));
+        r.begin_struct(&encode_names(["n"]));
+        assert!(!r.enter_field(0));
+        assert_eq!(
+            message(&r).as_deref(),
+            Some("inner: expected object, found array")
+        );
+    }
+
+    #[test]
+    fn a_narrow_integer_out_of_its_range_fails() {
+        let mut r = TypedReader::new("300");
+        assert_eq!(r.read_int("u8", 0, 255), 0);
+        assert_eq!(message(&r).as_deref(), Some("expected u8, found 300"));
+        let mut r = TypedReader::new("-128");
+        assert_eq!(r.read_int("i8", -128, 127), -128);
+        assert!(!r.failed());
+    }
+
+    #[test]
+    fn a_tagged_enum_reads_its_tag_beside_the_fields() {
+        let table = encode_variants([(true, "Empty"), (false, "Circle")]);
+        let mut r = TypedReader::new(r#"{"r": 2, "type": "Circle"}"#);
+        assert_eq!(r.begin_tagged(&table, "type", "Shape", 0), 1);
+        r.begin_struct(&encode_names(["r"]));
+        assert!(r.enter_field(0));
+        assert_eq!(r.read_i64("i64"), 2);
+        let mut r = TypedReader::new(r#"{"r": 2}"#);
+        r.begin_tagged(&table, "type", "Shape", 0);
+        assert_eq!(message(&r).as_deref(), Some("missing field `type`"));
+        let mut r = TypedReader::new(r#"{"type": "Square"}"#);
+        r.begin_tagged(&table, "type", "Shape", 0);
+        assert_eq!(
+            message(&r).as_deref(),
+            Some("type: unknown variant `Square` of `Shape`, expected one of `Empty`, `Circle`")
         );
     }
 
@@ -1043,14 +1372,28 @@ mod tests {
         r.begin_enum(&table, "Shape", 0);
         assert_eq!(
             message(&r).as_deref(),
-            Some("unknown variant `Empty` of `Shape`")
+            Some("unknown variant `Empty` of `Shape`, expected one of `Circle`, `Rect`")
         );
         let mut r = TypedReader::new("[1]");
         r.begin_enum(&table, "Shape", 0);
         assert_eq!(
             message(&r).as_deref(),
-            Some("expected a variant of `Shape`: a name, or an object with one key")
+            Some("expected a variant of `Shape` (a name, or an object with one key), found array")
         );
+    }
+
+    #[test]
+    fn indent_text_lays_out_as_the_pretty_renderer() {
+        let compact = r#"{"z":[1,{"a":"x,y:[]"},[]],"e":{},"n":null}"#;
+        let pretty = super::indent_text(compact);
+        let tree = crate::json::parse(compact).unwrap();
+        assert_eq!(
+            pretty,
+            "{\n  \"z\": [\n    1,\n    {\n      \"a\": \"x,y:[]\"\n    },\n    []\n  ],\n  \"e\": {},\n  \"n\": null\n}"
+        );
+        assert_eq!(crate::json::parse(&pretty).unwrap(), tree);
+        assert_eq!(super::indent_text("[]"), "[]");
+        assert_eq!(super::indent_text("1.5"), "1.5");
     }
 
     #[test]
@@ -1058,7 +1401,10 @@ mod tests {
         let mut r = TypedReader::new("[1]");
         r.enter_at(1);
         assert!(r.is_null());
-        assert_eq!(r.read_i64("expected i64"), 0);
-        assert!(r.failed());
+        assert_eq!(r.read_i64("i64"), 0);
+        assert_eq!(
+            message(&r).as_deref(),
+            Some("[1]: expected i64, found null")
+        );
     }
 }

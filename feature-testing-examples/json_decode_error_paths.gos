@@ -1,0 +1,66 @@
+// A typed decode failure names the path to the value it is about and what it
+// found there: an object member by its key (quoted when it is not a plain
+// name), an element by its index. A struct read from a value that is not an
+// object fails, a narrow integer outside its type's range fails, and an
+// unknown variant lists the names the enum has.
+// Bit-identical on the VM, Cranelift, and LLVM tiers.
+
+use std::encoding::json
+
+struct Current {
+    temperature: f64
+    weather_descriptions: Vec<String>
+}
+
+struct Envelope {
+    current: Current
+}
+
+struct Small {
+    a: u8
+    b: i16
+    c: i32
+}
+
+enum Units {
+    Metric
+    Imperial
+}
+
+struct Odd {
+    #[rename("a b")]
+    spaced: Vec<i64>
+    units: Units
+    pair: (i64, String)
+    grid: [i64; 2]
+    scores: Map<String, f64>
+}
+
+fn show<T>(label: String, result: Result<T, errors::Error>) {
+    match result {
+        Ok(_) => println(f"{label}: ok")
+        Err(e) => println(f"{label}: {e}")
+    }
+}
+
+fn main() {
+    show("missing", json::decode::<Envelope>("{\"current\": {\"weather_descriptions\": []}}"))
+    show("null", json::decode::<Envelope>("{\"current\": {\"temperature\": null, \"weather_descriptions\": []}}"))
+    show("string", json::decode::<Envelope>("{\"current\": {\"temperature\": \"hot\", \"weather_descriptions\": []}}"))
+    show("element", json::decode::<Envelope>("{\"current\": {\"temperature\": 1, \"weather_descriptions\": [\"a\", 3]}}"))
+    show("not object", json::decode::<Envelope>("{\"current\": [1]}"))
+    show("scalar root", json::decode::<Envelope>("3"))
+    show("u8 range", json::decode::<Small>("{\"a\": 256, \"b\": 0, \"c\": 0}"))
+    show("i16 range", json::decode::<Small>("{\"a\": 0, \"b\": -40000, \"c\": 0}"))
+    show("i32 fraction", json::decode::<Small>("{\"a\": 0, \"b\": 0, \"c\": 1.5}"))
+    show("in range", json::decode::<Small>("{\"a\": 255, \"b\": -32768, \"c\": 2147483647}"))
+    let good = "{\"a b\": [1], \"units\": \"Metric\", \"pair\": [1, \"x\"], \"grid\": [1, 2], \"scores\": {\"k\": 1.5}}"
+    show("odd ok", json::decode::<Odd>(good))
+    show("quoted key", json::decode::<Odd>("{\"a b\": [1, \"x\"], \"units\": \"Metric\", \"pair\": [1, \"x\"], \"grid\": [1, 2], \"scores\": {}}"))
+    show("variant", json::decode::<Odd>("{\"a b\": [], \"units\": \"Kelvin\", \"pair\": [1, \"x\"], \"grid\": [1, 2], \"scores\": {}}"))
+    show("tuple length", json::decode::<Odd>("{\"a b\": [], \"units\": \"Metric\", \"pair\": [1], \"grid\": [1, 2], \"scores\": {}}"))
+    show("tuple element", json::decode::<Odd>("{\"a b\": [], \"units\": \"Metric\", \"pair\": [1, 2], \"grid\": [1, 2], \"scores\": {}}"))
+    show("array length", json::decode::<Odd>("{\"a b\": [], \"units\": \"Metric\", \"pair\": [1, \"x\"], \"grid\": [1, 2, 3], \"scores\": {}}"))
+    show("map value", json::decode::<Odd>("{\"a b\": [], \"units\": \"Metric\", \"pair\": [1, \"x\"], \"grid\": [1, 2], \"scores\": {\"k\": true}}"))
+    show("syntax", json::decode::<Odd>("{\"a b\": "))
+}

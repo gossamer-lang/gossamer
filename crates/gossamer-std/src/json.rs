@@ -15,8 +15,9 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 pub use gossamer_core::json::{
-    DEFAULT_MAX_DEPTH, DEFAULT_MAX_SIZE, Error, Value, max_depth, max_size, parse, set_max_depth,
-    set_max_size, typed, validate,
+    DEFAULT_MAX_DEPTH, DEFAULT_MAX_SIZE, Error, Value, cap_from_program, integral_i64,
+    integral_u64, max_depth, max_size, parse, pointer, pointer_index, pointer_tokens,
+    set_max_depth, set_max_size, typed, validate,
 };
 
 /// Encodes a [`Value`] as a compact UTF-8 JSON string.
@@ -57,9 +58,7 @@ pub fn from_u64(n: u64) -> Value {
 pub fn as_i64(value: &Value) -> Option<i64> {
     match value {
         Value::Int(n) => Some(*n),
-        Value::Number(n) if n.fract() == 0.0 && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 => {
-            Some(*n as i64)
-        }
+        Value::Number(n) => integral_i64(*n),
         _ => None,
     }
 }
@@ -71,9 +70,7 @@ pub fn as_u64(value: &Value) -> Option<u64> {
     match value {
         Value::Int(n) => u64::try_from(*n).ok(),
         Value::Uint(n) => Some(*n),
-        Value::Number(n) if n.fract() == 0.0 && *n >= 0.0 && *n <= u64::MAX as f64 => {
-            Some(*n as u64)
-        }
+        Value::Number(n) => integral_u64(*n),
         _ => None,
     }
 }

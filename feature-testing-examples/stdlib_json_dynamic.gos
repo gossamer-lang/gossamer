@@ -31,7 +31,7 @@ fn run() -> Result<(), String> {
     println("xs_len={}", json::len(xs))
     let mut total = 0
     for i in 0..3 {
-        match json::as_i64(json::at(xs, i)) {
+        match json::at(xs, i).and_then(json::as_i64) {
             Some(n) => { total += n }
             None => {}
         }

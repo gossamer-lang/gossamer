@@ -38,5 +38,5 @@ fn main() {
     let mut obj = json::Value::object()
     json::set(&mut obj, "name", json::Value::String("alice"))
     json::set(&mut obj, "age", json::Value::Int(30))
-    println("json = {}", json::render(obj))
+    println("json = {}", json::encode(obj).unwrap())
 }

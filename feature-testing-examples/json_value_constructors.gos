@@ -17,6 +17,6 @@ fn main() {
     let built = json::Value::object(#[("a", one), ("b", json::Value::Bool(true))])
     let pairs = [("c", json::Value::Null), ("d", from_vec)]
     let from_pairs = json::Value::object(pairs)
-    let rendered = json::render(from_pairs)
+    let rendered = json::encode(from_pairs).unwrap()
     println(f"{built} {from_pairs} {rendered}")
 }

@@ -6,23 +6,23 @@ use std::encoding::json
 fn main() {
     let built = json::Value::object(#[("a", json::Value::Int(1))])
     let with_b = built.set("b", json::Value::Int(2)).set("c", json::Value::Int(3))
-    println("{}", json::render(with_b))
+    println("{}", json::encode(with_b).unwrap())
 
     let qualified = json::set(with_b, "d", json::Value::Bool(true))
-    println("{}", json::render(qualified))
+    println("{}", json::encode(qualified).unwrap())
 
     match json::parse("{\"x\": 10}") {
         Ok(parsed) => {
             let scalars = parsed.set("i", 42).set("f", 1.5).set("s", "str").set("t", true)
-            println("{}", json::render(scalars))
+            println("{}", json::encode(scalars).unwrap())
             let replaced = scalars.set("x", 11)
-            println("{}", json::render(replaced))
+            println("{}", json::encode(replaced).unwrap())
         }
         Err(e) => println("parse error: {}", e)
     }
 
     match json::parse("3") {
-        Ok(leaf) => println("{}", json::render(leaf.set("k", 1)))
+        Ok(leaf) => println("{}", json::encode(leaf.set("k", 1)).unwrap())
         Err(e) => println("parse error: {}", e)
     }
 }

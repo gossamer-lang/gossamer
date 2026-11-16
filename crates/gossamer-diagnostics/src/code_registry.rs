@@ -755,6 +755,21 @@ pub const REGISTRY: &[(&str, &str)] = &[
             closure, bind it with `let`.",
     ),
     (
+        "GP0068",
+        "A serde attribute is malformed, misplaced, or conflicts with another.\n\
+            Each attribute has one place it takes effect. On a struct or enum, `#[rename_all(\"rule\")]` respells every\n\
+            field or variant without its own `#[rename]` (rules: `lowercase`,\n\
+            `UPPERCASE`, `camelCase`, `PascalCase`, `snake_case`,\n\
+            `SCREAMING_SNAKE_CASE`, `kebab-case`, `SCREAMING-KEBAB-CASE`). On an\n\
+            enum, `#[tag(\"member\")]` writes each variant as one object holding\n\
+            that member; its variants are unit, struct, or one-field variants\n\
+            holding a struct. On a variant, `#[rename(\"name\")]`. On a field of a\n\
+            struct or struct variant, `#[rename(\"key\")]`, `#[skip]`, `#[default]`\n\
+            (the type's zero value), and `#[default(value)]` with a literal of the\n\
+            field's type, `None`, or a unit variant of its enum. Two fields or\n\
+            variants written under one name are also reported.",
+    ),
+    (
         "GR0001",
         "A name used in source could not be resolved to a declaration.\n\
                      Check the spelling, whether a `use` brings the name into scope,\n\
@@ -1840,6 +1855,33 @@ pub const REGISTRY: &[(&str, &str)] = &[
             `Map`, a hash `Set`, a `json::Value`, or a sequence, tuple, or\n\
             `Option` / `Result` holding one. Compare with `==` / `!=`, or order\n\
             by a key the language orders (`sort_by_key`).",
+    ),
+    (
+        "GT0124",
+        "A typed serde call names a type holding a value with no JSON form.\n\
+            The calls are `json::decode::<T>`, `json::encode::<T>`,\n\
+            `json::from_value::<T>`, and the toml and yaml forms; the value is a channel, a function, a\n\
+            handle, a `Result`, or a map keyed by other than `String`. Scalars,\n\
+            `String`, `json::Value`, `Vec`, fixed arrays, tuples, `Option`,\n\
+            `Map<String, V>`, and structs and enums of those (generic ones\n\
+            included) code; decode the rest as `json::Value`.",
+    ),
+    (
+        "GT0125",
+        "A typed serde call names no type to decode into.\n\
+            `json::from_value(value)` and `json::decode(text)` (and the `yaml::` and\n\
+            `toml::` decodes) decode into the type their turbofish names\n\
+            (`json::from_value::<Weather>(value)`), or the type a `let` declares\n\
+            for the result (`let w: Weather = yaml::decode(text)?`).",
+    ),
+    (
+        "GT0126",
+        "An encode names a value whose type is, or holds, a type parameter.\n\
+            `json::encode`, `json::encode_pretty`, `json::to_value`, `yaml::encode`,\n\
+            and `toml::encode` write a value through a walk generated for one\n\
+            concrete type, as `json::encode::<T>` does, so `fn text<T>(v: T) {\n\
+            json::encode(v) }` has no walk to run. Call the encoder where the\n\
+            type is concrete, in the caller that names it, and pass the text in.",
     ),
     (
         "GX0001",

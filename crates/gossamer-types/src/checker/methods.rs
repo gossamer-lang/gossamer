@@ -294,7 +294,9 @@ impl TypeChecker<'_> {
                 let err = payloads.get(1).copied();
                 if let Some(ok) = ok {
                     return match method {
-                        "map" | "and_then" | "filter" | "is_some_and" | "inspect" => Some(vec![ok]),
+                        "map" | "and_then" | "filter" | "is_some_and" | "is_none_or"
+                        | "is_ok_and" | "inspect" | "map_or" => Some(vec![ok]),
+                        "is_err_and" => err.map(|e| vec![e]),
                         "map_err" | "or_else" => err.map(|e| vec![e]),
                         _ => None,
                     };
@@ -1909,7 +1911,7 @@ impl TypeChecker<'_> {
                 "json::Value",
                 match method {
                     "set" => Some(2),
-                    "get" | "at" => Some(1),
+                    "get" | "at" | "pointer" => Some(1),
                     "keys" | "len" | "is_null" | "as_str" | "as_i64" | "as_u64" | "as_f64"
                     | "as_bool" | "as_array" => Some(0),
                     _ => None,
@@ -4569,14 +4571,16 @@ impl TypeChecker<'_> {
                 "result",
                 "map" | "map_err" | "and_then" | "or_else" | "unwrap_or" | "unwrap_or_else",
             ) => 2,
-            ("result", "expect") => 2,
+            ("result", "expect" | "is_ok_and" | "is_err_and") => 2,
+            ("result", "map_or" | "map_or_else") => 3,
             ("result", "ok" | "err" | "is_ok" | "is_err" | "unwrap") => 1,
             (
                 "option",
                 "map" | "and_then" | "filter" | "or" | "or_else" | "unwrap_or" | "unwrap_or_else"
                 | "zip" | "ok_or" | "ok_or_else",
             ) => 2,
-            ("option", "expect") => 2,
+            ("option", "expect" | "is_some_and" | "is_none_or") => 2,
+            ("option", "map_or" | "map_or_else") => 3,
             ("option", "flatten" | "is_some" | "is_none" | "iter" | "unwrap") => 1,
             (
                 "iter",

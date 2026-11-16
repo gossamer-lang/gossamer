@@ -9,37 +9,10 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use thiserror::Error;
 
-const DEFAULT_MAX_DEPTH: usize = gossamer_runtime::yaml_node::DEFAULT_MAX_DEPTH;
-const DEFAULT_MAX_SIZE: usize = gossamer_runtime::yaml_node::DEFAULT_MAX_SIZE;
-
-static MAX_DEPTH: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_DEPTH);
-static MAX_SIZE: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_SIZE);
-
-/// Overrides the process-wide cap on parser nesting depth.
-pub fn set_max_depth(n: usize) {
-    MAX_DEPTH.store(n, Ordering::Relaxed);
-}
-
-/// Overrides the process-wide cap on parser input bytes.
-pub fn set_max_size(n: usize) {
-    MAX_SIZE.store(n, Ordering::Relaxed);
-}
-
-/// Current cap on parser nesting depth.
-#[must_use]
-pub fn max_depth() -> usize {
-    MAX_DEPTH.load(Ordering::Relaxed)
-}
-
-/// Current cap on parser input bytes.
-#[must_use]
-pub fn max_size() -> usize {
-    MAX_SIZE.load(Ordering::Relaxed)
-}
+pub use gossamer_runtime::yaml_node::{max_depth, max_size, set_max_depth, set_max_size};
 
 fn check_depth(node: &gossamer_runtime::yaml_node::Node, cap: usize) -> Result<(), Error> {
     if node.depth() > cap {
@@ -77,6 +50,8 @@ pub enum Value {
     Bool(bool),
     /// 64-bit signed integer scalar.
     Int(i64),
+    /// Unsigned integer scalar past `i64::MAX`.
+    UInt(u64),
     /// 64-bit floating-point scalar.
     Float(f64),
     /// UTF-8 string scalar.
@@ -115,6 +90,7 @@ impl Value {
         match self {
             Value::Float(n) => Some(*n),
             Value::Int(n) => Some(*n as f64),
+            Value::UInt(n) => Some(*n as f64),
             _ => None,
         }
     }
@@ -217,17 +193,13 @@ pub fn encode_all(values: &[Value]) -> Result<String, Error> {
     Ok(out)
 }
 
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "YAML's integer is signed, so an unsigned value past its range keeps its magnitude as a float"
-)]
 fn from_node(node: gossamer_runtime::yaml_node::Node) -> Value {
     use gossamer_runtime::yaml_node::Node;
     match node {
         Node::Null => Value::Null,
         Node::Bool(b) => Value::Bool(b),
         Node::Int(n) => Value::Int(n),
-        Node::UInt(n) => Value::Float(n as f64),
+        Node::UInt(n) => Value::UInt(n),
         Node::Float(f) => Value::Float(f),
         Node::String(s) => Value::String(s),
         Node::Seq(items) => Value::Seq(items.into_iter().map(from_node).collect()),
@@ -245,6 +217,7 @@ fn to_serde(value: &Value) -> serde_norway::Value {
         Value::Null => serde_norway::Value::Null,
         Value::Bool(b) => serde_norway::Value::Bool(*b),
         Value::Int(n) => serde_norway::Value::Number((*n).into()),
+        Value::UInt(n) => serde_norway::Value::Number((*n).into()),
         Value::Float(n) => serde_norway::Value::Number(serde_norway::Number::from(*n)),
         Value::String(s) => serde_norway::Value::String(s.clone()),
         Value::Seq(items) => serde_norway::Value::Sequence(items.iter().map(to_serde).collect()),
@@ -258,20 +231,26 @@ fn to_serde(value: &Value) -> serde_norway::Value {
     }
 }
 
-/// Parses `yaml_text` as a single YAML document and renders it as
-/// JSON. The shape mirrors `encoding::toml::to_json` so callers can
-/// chain into `json::parse` or auto-derived `<Type>::from_yaml`.
-pub fn to_json(yaml_text: &str) -> Result<String, String> {
+/// Parses `yaml_text` as a single YAML document and renders it as JSON text,
+/// each mapping's members by key.
+pub fn to_json_text(yaml_text: &str) -> Result<String, String> {
     let value = gossamer_runtime::yaml_node::decode_json(yaml_text, max_depth(), max_size())?;
     serde_json::to_string(&value).map_err(|e| e.to_string())
 }
 
 /// Parses `yaml_text` as a single YAML document into the JSON value
-/// [`crate::json::parse`] answers for the text [`to_json`] renders, without
+/// [`crate::json::parse`] answers for the text [`to_json_text`] renders, without
 /// rendering that text.
 pub fn parse_json(yaml_text: &str) -> Result<crate::json::Value, String> {
     let value = gossamer_runtime::yaml_node::decode_json(yaml_text, max_depth(), max_size())?;
     Ok(json_from_serde(value))
+}
+
+/// Parses every document in a multi-document YAML stream into the JSON
+/// values [`parse_json`] answers for each.
+pub fn parse_all_json(yaml_text: &str) -> Result<Vec<crate::json::Value>, String> {
+    let docs = gossamer_runtime::yaml_node::decode_all_json(yaml_text, max_depth(), max_size())?;
+    Ok(docs.into_iter().map(json_from_serde).collect())
 }
 
 fn json_from_serde(value: serde_json::Value) -> crate::json::Value {
@@ -300,36 +279,13 @@ fn json_from_serde(value: serde_json::Value) -> crate::json::Value {
     }
 }
 
-/// Renders a JSON document as YAML. Round-trips through the dynamic
-/// [`Value`] representation; YAML-only constructs (tags, multi-doc
-/// anchors) are not produced.
-pub fn from_json(json_text: &str) -> Result<String, String> {
-    let jv: serde_json::Value = serde_json::from_str(json_text).map_err(|e| e.to_string())?;
-    let yv = json_to_value(&jv);
-    encode(&yv).map_err(|e| e.message)
-}
-
-fn json_to_value(v: &serde_json::Value) -> Value {
-    match v {
-        serde_json::Value::Null => Value::Null,
-        serde_json::Value::Bool(b) => Value::Bool(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Int(i)
-            } else if let Some(f) = n.as_f64() {
-                Value::Float(f)
-            } else {
-                Value::Null
-            }
-        }
-        serde_json::Value::String(s) => Value::String(s.clone()),
-        serde_json::Value::Array(items) => Value::Seq(items.iter().map(json_to_value).collect()),
-        serde_json::Value::Object(map) => Value::Map(
-            map.iter()
-                .map(|(k, v)| (Value::String(k.clone()), json_to_value(v)))
-                .collect(),
-        ),
-    }
+/// Renders a JSON document as YAML, each object's members by key, as a
+/// `json::Value` holds them.
+pub fn from_json_text(json_text: &str) -> Result<String, String> {
+    gossamer_runtime::codec::json_convert::to_yaml(
+        json_text,
+        gossamer_runtime::codec::json_convert::Members::Sorted,
+    )
 }
 
 /// Re-exposes [`Value`] as a `BTreeMap`-keyed view for callers that
@@ -406,7 +362,7 @@ mod tests {
     #[test]
     fn yaml_to_json_round_trip() {
         let yaml = "name: gossamer\nversion: 7\nflags:\n  - fast\n  - small\n";
-        let json = to_json(yaml).unwrap();
+        let json = to_json_text(yaml).unwrap();
         assert!(json.contains("\"name\":\"gossamer\""));
         assert!(json.contains("\"version\":7"));
         assert!(json.contains("\"flags\":[\"fast\",\"small\"]"));
@@ -415,7 +371,7 @@ mod tests {
     #[test]
     fn yaml_from_json_round_trip() {
         let json = r#"{"name":"gossamer","port":8080}"#;
-        let yaml = from_json(json).unwrap();
+        let yaml = from_json_text(json).unwrap();
         assert!(yaml.contains("name: gossamer"));
         assert!(yaml.contains("port: 8080"));
     }

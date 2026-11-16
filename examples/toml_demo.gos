@@ -1,25 +1,51 @@
 /*
- * TOML 1.0 with `std::encoding::toml`.
+ * TOML with `std::encoding::toml`.
  *
- * The cross-tier surface is text-shaped: TOML <-> JSON conversion
- * plus `is_valid` and `pretty`. Round-trip into a typed value via
- * the JSON auto-derive (`from_json::<Type>(json_text)`).
+ * Typed: `toml::decode::<T>` and `toml::encode` work as their `json::`
+ * counterparts do. Untyped: `toml::parse` answers a `json::Value` and
+ * `toml::encode` writes one back. `to_json_text` / `from_json_text`
+ * convert text. TOML has no null, so an absent `Option` is left out.
+ *
+ * Run:
+ *     gos run examples/toml_demo.gos
  */
 
-use std::encoding::toml
+use std::encoding::{json, toml}
 use std::errors
 
-let config = "port = 8080\nhost = \"localhost\"\nverbose = true\n"
+struct Database {
+    url: String
+    pool: i64
+}
 
-println(f"valid: {toml::is_valid(config)}")
-println(f"invalid: {toml::is_valid("port == 8080")}")
+struct Config {
+    name: String
+    port: i64
+    verbose: bool
+    owner: Option<String>
+    database: Database
+}
 
-let json = toml::to_json(config)?
-println(f"as json contains port: {json.contains("\"port\":8080")}")
-println(f"as json contains host: {json.contains("\"host\":\"localhost\"")}")
+let text = """
+name = "billing"
+port = 8080
+verbose = true
 
-let roundtrip = toml::from_json(json)?
-println(f"rt contains port = 8080: {roundtrip.contains("port = 8080")}")
+[database]
+url = "postgres://db/billing"
+pool = 16
+"""
 
-let pp = toml::pretty(config)?
-println(f"pretty contains host: {pp.contains("host")}")
+let config = toml::decode::<Config>(text)?
+println(f"{config.name} on {config.port}, pool {config.database.pool}, owner {config.owner}")
+
+print(toml::encode(config)?)
+println("---")
+print(toml::encode(config, sort: true)?)
+println("---")
+
+let doc = toml::parse(text)?
+println(f"database.url: {json::pointer(doc, "/database/url")}")
+println(toml::to_json_text("b = 1\na = [true, false]\n")?)
+print(toml::from_json_text("{\"z\": 1, \"a\": {\"x\": \"y\"}}")?)
+println(f"valid: {toml::is_valid(text)} {toml::is_valid("port == 8080")}")

@@ -14,7 +14,7 @@ fn main() {
         Ok(node) => {
             println("{:?}", node.get("name"))
             println("{}", node.get("children").unwrap().at(0))
-            let out = encoding::xml::encode(node)
+            let out = encoding::xml::encode(node).unwrap_or("")
             println("{}", out)
             println("has_body={}", strings::contains(out, "<body>"))
             println("self_closing={}", strings::contains(out, "<empty/>"))

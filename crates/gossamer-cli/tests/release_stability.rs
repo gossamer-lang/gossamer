@@ -1419,7 +1419,7 @@ use std::encoding::json
 
 fn main() {
     let v = json::Value::string("x")
-    println("{}", json::render(v))
+    println("{}", json::encode(v).unwrap())
 }
 "#,
         "GR0001",

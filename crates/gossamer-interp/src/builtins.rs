@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
-#![allow(dead_code, unused_imports, clippy::unnecessary_wraps)]
+// Every builtin answers `RuntimeResult<Value>`, the one signature the
+// dispatch table stores, including those that cannot fail.
+#![allow(clippy::unnecessary_wraps)]
 
 pub mod coverage;
 

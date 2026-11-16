@@ -26,6 +26,7 @@ mod foreign_layout;
 mod foreign_policy;
 mod frontend_checks;
 mod infer;
+pub mod instantiate;
 mod normalize;
 pub mod printer;
 pub mod purity;

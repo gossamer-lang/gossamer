@@ -1,6 +1,6 @@
 /// The classified body of one struct the synthesizer may emit for.
 enum SerdeShape {
-    Named(Vec<(String, FieldKind)>, HashMap<String, FieldOptions>),
+    Named(Vec<(String, FieldKind)>, HashMap<String, SerdeField>),
     Tuple(Vec<FieldKind>),
     Enum(Vec<(String, VariantPayload)>),
 }
@@ -12,38 +12,13 @@ enum VariantPayload {
     Named(Vec<(String, FieldKind)>),
 }
 
-/// How a named field appears in its serialized form, from its attributes:
-/// `#[rename("key")]` spells its key, `#[skip]` leaves it out and fills it
-/// with its type's zero value when read, and `#[default]` reads a missing
-/// key as that zero value.
-#[derive(Debug, Clone, Default)]
-struct FieldOptions {
-    key: Option<String>,
-    skip: bool,
-    default: bool,
-}
-
-impl FieldOptions {
-    fn of(attrs: &gossamer_ast::Attrs) -> Self {
-        let mut options = Self::default();
-        for attr in &attrs.outer {
-            let Some(name) = attr.path.segments.last().map(|s| s.name.name.as_str()) else {
-                continue;
-            };
-            match name {
-                "rename" => {
-                    options.key = attr
-                        .tokens
-                        .as_deref()
-                        .map(|text| text.trim().trim_matches('"').to_string())
-                        .filter(|key| !key.is_empty());
-                }
-                "skip" => options.skip = true,
-                "default" => options.default = true,
-                _ => {}
-            }
-        }
-        options
+/// Whether a missing or skipped field with these options reads as its type's
+/// zero value, which for a user type calls its `default()`.
+fn reads_zero_default(options: &SerdeField) -> bool {
+    match &options.default {
+        Some(FieldDefault::Zero) => true,
+        Some(FieldDefault::Value(_)) => false,
+        None => options.skip,
     }
 }
 
@@ -69,7 +44,10 @@ impl SerdeShape {
 fn kind_is_emittable(kind: &FieldKind, emittable: &HashSet<String>) -> bool {
     match kind {
         FieldKind::Struct(ty) | FieldKind::Enum(ty) => emittable.contains(&ty.symbol),
-        FieldKind::Vec(inner) | FieldKind::Option(inner) | FieldKind::Map(inner) => {
+        FieldKind::Vec(inner)
+        | FieldKind::Option(inner)
+        | FieldKind::Map(inner)
+        | FieldKind::Array(inner, _) => {
             kind_is_emittable(inner, emittable)
         }
         FieldKind::Tuple(elems) => elems.iter().all(|e| kind_is_emittable(e, emittable)),
@@ -131,12 +109,17 @@ fn named_serde_symbols(parsed: &SourceFile) -> HashSet<String> {
     let symbols = serde_symbol_index(tree);
     calls
         .into_iter()
-        .map(|(_, written, _, module)| serde_symbol_for(&symbols, &module, &written))
+        .filter_map(|(_, target, _, module)| match target {
+            SerdeCallTarget::Named(written) | SerdeCallTarget::Inner(written) => {
+                Some(serde_symbol_for(&symbols, &module, &written))
+            }
+            SerdeCallTarget::TypeParameter(_) => None,
+        })
         .collect()
 }
 
-/// Whether `parsed` calls `from_json` by its bare name without a turbofish,
-/// the one call shape [`infer_serde_turbofish`] completes.
+/// Whether `parsed` calls `from_json` or `json::from_value` without a
+/// turbofish, the call shapes [`infer_serde_turbofish`] completes.
 fn calls_bare_from_json(parsed: &SourceFile) -> bool {
     struct Finder(bool);
     impl gossamer_ast::Visitor for Finder {
@@ -145,8 +128,11 @@ fn calls_bare_from_json(parsed: &SourceFile) -> bool {
                 return;
             }
             if let gossamer_ast::expr::ExprKind::Path(path) = &expr.kind
-                && let [segment] = path.segments.as_slice()
-                && segment.name.name == "from_json"
+                && let Some(segment) = path.segments.last()
+                && matches!(
+                    (path.segments.len(), segment.name.name.as_str()),
+                    (1, "from_json") | (_, "from_value") | (2.., "decode" | "from_yaml" | "from_toml")
+                )
                 && segment.generics.is_empty()
             {
                 self.0 = true;
@@ -166,7 +152,7 @@ fn emit_stubs(out: &mut String, ty: &TyId) {
     let name = ty.path.as_str();
     for op in ["to_json", "to_toml", "to_yaml"] {
         out.push_str(&format!(
-            "pub fn {}(value: {name}) -> Result<String, errors::Error> {{\n    panic(\"{op} is generated after checking\")\n}}\n\n",
+            "pub fn {}(value: {name}, sort: bool = false) -> Result<String, errors::Error> {{\n    panic(\"{op} is generated after checking\")\n}}\n\n",
             serde_fn(op, &ty.symbol)
         ));
     }
@@ -218,7 +204,7 @@ fn emit_default_checks(
         let defaults: Vec<String> = fields
             .iter()
             .filter(|(field, kind)| {
-                options.get(field).is_some_and(|o| o.skip || o.default) && kind.reaches_user_type()
+                options.get(field).is_some_and(reads_zero_default) && kind.reaches_user_type()
             })
             .map(|(_, kind)| kind.default_literal())
             .collect();
@@ -257,9 +243,9 @@ fn classify_structs(
                             .map(|k| (f.name.name.clone(), k))
                     })
                     .collect();
-                let options: HashMap<String, FieldOptions> = fields
+                let options: HashMap<String, SerdeField> = fields
                     .iter()
-                    .map(|f| (f.name.name.clone(), FieldOptions::of(&f.attrs)))
+                    .map(|f| (f.name.name.clone(), SerdeField::of(&f.attrs)))
                     .collect();
                 if let Some(typed) = typed {
                     classified.push((ty, SerdeShape::Named(typed, options)));
@@ -2059,10 +2045,11 @@ fn emit_named_struct_fmt_impl(
     tmpl.push_str(" }}");
     // A `String` field's `{:?}` placeholder quotes it, and a JSON field reads
     // as its JSON text, a string in quotes, as it does nested anywhere else.
+    // Encoding a `json::Value` cannot fail, so its text is always the `Ok`.
     let argvals: Vec<String> = fields
         .iter()
         .map(|f| match json_module_spelling(&f.ty) {
-            Some(module) => format!("{module}::render(self.{})", f.name.name),
+            Some(module) => format!("{module}::encode(self.{}).unwrap_or(\"\")", f.name.name),
             None => format!("self.{}", f.name.name),
         })
         .collect();
@@ -2325,4 +2312,286 @@ fn emit_struct_derive_impl(
         );
     }
     out.push_str("}\n\n");
+}
+
+/// Reports every serde attribute that is malformed, names nothing, or sits
+/// where it has no effect, and every struct or enum whose fields or variants
+/// share a written name.
+fn serde_attribute_diags(sf: &SourceFile) -> Vec<crate::ParseDiagnostic> {
+    let mut checker = SerdeAttrChecker {
+        struct_names: struct_identities(&sf.items),
+        aliases: alias_targets(&sf.items),
+        enum_units: enum_unit_variants(&sf.items),
+        diags: Vec::new(),
+    };
+    for (module, item) in flatten_active_items_with_modules(&sf.items) {
+        match &item.kind {
+            ItemKind::Struct(decl) => checker.check_struct(&module, item, decl),
+            ItemKind::Enum(decl) => checker.check_enum(&module, item, decl),
+            _ => {}
+        }
+    }
+    checker.diags
+}
+
+/// What [`serde_attribute_diags`] reads the program through, and what it has
+/// reported so far.
+struct SerdeAttrChecker {
+    struct_names: StructIdentities,
+    aliases: HashMap<String, gossamer_ast::Type>,
+    enum_units: HashMap<String, Vec<String>>,
+    diags: Vec<crate::ParseDiagnostic>,
+}
+
+impl SerdeAttrChecker {
+    fn report(&mut self, target: String, problem: String, span: Span) {
+        self.diags.push(crate::ParseDiagnostic::new(
+            crate::ParseError::SerdeAttribute { target, problem },
+            span,
+        ));
+    }
+
+    fn describe(problem: gossamer_ast::serde_attrs::SerdeAttrProblem) -> String {
+        use gossamer_ast::serde_attrs::SerdeAttrProblem;
+        match problem {
+            SerdeAttrProblem::NeedsString(name) => {
+                format!("`#[{name}]` takes one quoted string: `#[{name}(\"...\")]`")
+            }
+            SerdeAttrProblem::UnknownRule(rule) => format!(
+                "`#[rename_all(\"{rule}\")]` names no rule; use one of {}",
+                gossamer_ast::serde_attrs::RenameRule::ALL
+                    .iter()
+                    .map(|(name, _)| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            SerdeAttrProblem::BadDefault(text) => {
+                format!("`#[default({text})]` is not a literal, `None`, or a unit variant")
+            }
+        }
+    }
+
+    /// The names of the attributes among `names` that `attrs` carries.
+    fn present(attrs: &gossamer_ast::Attrs, names: &[&str]) -> Vec<String> {
+        attrs
+            .outer
+            .iter()
+            .filter_map(|a| a.path.segments.last().map(|s| s.name.name.clone()))
+            .filter(|n| names.contains(&n.as_str()))
+            .collect()
+    }
+
+    /// Whether `value` fits a field of kind `kind`.
+    fn fits(&self, value: &gossamer_ast::serde_attrs::DefaultValue, kind: &FieldKind) -> bool {
+        use gossamer_ast::serde_attrs::DefaultValue;
+        let kind = match (value, kind) {
+            (DefaultValue::None, FieldKind::Option(_)) => return true,
+            (_, FieldKind::Option(inner)) => inner.as_ref(),
+            (_, kind) => kind,
+        };
+        match (value, kind) {
+            (DefaultValue::Int(_), FieldKind::I64 | FieldKind::Int(_) | FieldKind::U64(_))
+            | (DefaultValue::Int(_) | DefaultValue::Float(_), FieldKind::Float(_))
+            | (DefaultValue::Bool(_), FieldKind::Bool)
+            | (DefaultValue::Str(_), FieldKind::String)
+            | (DefaultValue::Char(_), FieldKind::Char) => true,
+            (DefaultValue::Variant(name), FieldKind::Enum(ty)) => self
+                .enum_units
+                .get(ty.symbol.as_str())
+                .is_some_and(|units| units.iter().any(|u| u == name)),
+            _ => false,
+        }
+    }
+
+    /// Checks a struct's or enum's own attributes, answering its options.
+    fn check_container(
+        &mut self,
+        name: &str,
+        item: &Item,
+    ) -> gossamer_ast::serde_attrs::SerdeContainer {
+        let (container, problems) =
+            gossamer_ast::serde_attrs::SerdeContainer::read(&item.attrs);
+        for problem in problems {
+            self.report(format!("`{name}`"), Self::describe(problem), item.span);
+        }
+        for attr in Self::present(&item.attrs, &["rename", "skip"]) {
+            self.report(
+                format!("`{name}`"),
+                format!("`#[{attr}]` has no effect on a type; it belongs on a field or variant"),
+                item.span,
+            );
+        }
+        container
+    }
+
+    /// Checks named fields' attributes, answering the keys they are written
+    /// under.
+    fn check_fields(
+        &mut self,
+        module: &str,
+        fields: &[gossamer_ast::StructField],
+        owner: &str,
+        rule: Option<gossamer_ast::serde_attrs::RenameRule>,
+    ) -> Vec<String> {
+        let mut keys = Vec::new();
+        for field in fields {
+            let target = format!("field `{}` of {owner}", field.name.name);
+            let (options, problems) = SerdeField::read(&field.attrs);
+            for problem in problems {
+                self.report(target.clone(), Self::describe(problem), field.ty.span);
+            }
+            for attr in Self::present(&field.attrs, &["tag", "rename_all"]) {
+                self.report(
+                    target.clone(),
+                    format!("`#[{attr}]` has no effect on a field; it belongs on the type"),
+                    field.ty.span,
+                );
+            }
+            if let Some(FieldDefault::Value(value)) = &options.default
+                && let Some(kind) =
+                    FieldKind::from_type(&field.ty, module, &self.struct_names, &self.aliases)
+                && !self.fits(value, &kind)
+            {
+                self.report(
+                    target.clone(),
+                    format!(
+                        "`#[default(..)]` names a value that does not fit `{}`",
+                        ty_to_string(&field.ty)
+                    ),
+                    field.ty.span,
+                );
+            }
+            if !options.skip {
+                keys.push(options.key(&field.name.name, rule));
+            }
+        }
+        keys
+    }
+
+    fn check_struct(&mut self, module: &str, item: &Item, decl: &gossamer_ast::StructDecl) {
+        let name = decl.name.name.clone();
+        let container = self.check_container(&name, item);
+        if container.tag.is_some() {
+            self.report(
+                format!("`{name}`"),
+                "`#[tag]` has no effect on a struct; it belongs on an enum".to_string(),
+                item.span,
+            );
+        }
+        match &decl.body {
+            StructBody::Named(fields) => {
+                let keys =
+                    self.check_fields(module, fields, &format!("`{name}`"), container.rename_all);
+                if let Some(key) = first_repeat(&keys) {
+                    self.report(
+                        format!("`{name}`"),
+                        format!("two fields are written under the key `{key}`"),
+                        item.span,
+                    );
+                }
+            }
+            StructBody::Tuple(fields) => {
+                for (i, field) in fields.iter().enumerate() {
+                    let placed = ["rename", "skip", "default", "tag", "rename_all"];
+                    for attr in Self::present(&field.attrs, &placed) {
+                        self.report(
+                            format!("field `{i}` of `{name}`"),
+                            format!("`#[{attr}]` has no effect on a positional field"),
+                            field.ty.span,
+                        );
+                    }
+                }
+            }
+            StructBody::Unit => {}
+        }
+    }
+
+    fn check_enum(&mut self, module: &str, item: &Item, decl: &gossamer_ast::EnumDecl) {
+        use gossamer_ast::serde_attrs::SerdeAttrProblem;
+        let name = decl.name.name.clone();
+        let container = self.check_container(&name, item);
+        let mut names = Vec::new();
+        for variant in &decl.variants {
+            let target = format!("variant `{}` of `{name}`", variant.name.name);
+            let (options, problems) = SerdeField::read(&variant.attrs);
+            // `#[default]` on a variant marks `#[derive(Default)]`'s choice.
+            for problem in problems {
+                if !matches!(problem, SerdeAttrProblem::BadDefault(_)) {
+                    self.report(target.clone(), Self::describe(problem), item.span);
+                }
+            }
+            for attr in Self::present(&variant.attrs, &["skip", "tag", "rename_all"]) {
+                self.report(
+                    target.clone(),
+                    format!("`#[{attr}]` has no effect on a variant"),
+                    item.span,
+                );
+            }
+            names.push(options.key(&variant.name.name, container.rename_all));
+            match &variant.body {
+                StructBody::Named(fields) => {
+                    let keys = self.check_fields(module, fields, &target, None);
+                    if let Some(tag) = &container.tag
+                        && keys.iter().any(|k| k == tag)
+                    {
+                        self.report(
+                            target.clone(),
+                            format!("a field is written under the tag member `{tag}`"),
+                            item.span,
+                        );
+                    }
+                }
+                StructBody::Tuple(fields) if container.tag.is_some() => {
+                    let holds_struct = matches!(
+                        fields.as_slice(),
+                        [only] if matches!(
+                            FieldKind::from_type(&only.ty, module, &self.struct_names, &self.aliases),
+                            Some(FieldKind::Struct(_))
+                        )
+                    );
+                    if !holds_struct {
+                        self.report(
+                            target.clone(),
+                            "a variant of a `#[tag]` enum is a unit variant, a struct \
+                             variant, or one field holding a struct"
+                                .to_string(),
+                            item.span,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(repeat) = first_repeat(&names) {
+            self.report(
+                format!("`{name}`"),
+                format!("two variants are written under the name `{repeat}`"),
+                item.span,
+            );
+        }
+    }
+}
+
+/// The first name `names` holds twice.
+fn first_repeat(names: &[String]) -> Option<&str> {
+    let mut seen = HashSet::new();
+    names.iter().find(|n| !seen.insert(n.as_str())).map(String::as_str)
+}
+
+/// The unit variant names of every enum, by the symbol its serde codecs use.
+fn enum_unit_variants(items: &[Item]) -> HashMap<String, Vec<String>> {
+    flatten_active_items_with_modules(items)
+        .into_iter()
+        .filter_map(|(module, item)| match &item.kind {
+            ItemKind::Enum(decl) => Some((
+                TyId::new(&module, &decl.name.name).symbol,
+                decl.variants
+                    .iter()
+                    .filter(|v| matches!(v.body, StructBody::Unit))
+                    .map(|v| v.name.name.clone())
+                    .collect(),
+            )),
+            _ => None,
+        })
+        .collect()
 }

@@ -12,6 +12,7 @@
 
 mod accessors;
 mod capture_cells;
+mod carrier;
 mod disjoint_windows;
 mod f32_round;
 mod foreign;
@@ -45,7 +46,7 @@ pub use lift::{
 };
 pub use lower::{is_map_literal_block, lower_source_file};
 pub use par::PAR_RUN;
-pub use serde::{HirSerdeField, serde_step_symbol};
+pub use serde::{HirSerde, HirSerdeField, HirSerdeVariant, serde_step_symbol};
 pub use tree::FnOrigin;
 pub use tree::{
     HirAdt, HirAdtKind, HirArrayExpr, HirBinaryOp, HirBlock, HirBody, HirConst, HirExpr,

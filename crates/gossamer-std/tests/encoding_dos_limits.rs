@@ -19,7 +19,7 @@ fn json_rejects_oversize_input() {
         err.message.contains("max_size"),
         "expected max_size message, got {err:?}",
     );
-    gossamer_std::json::set_max_size(16 * 1024 * 1024);
+    gossamer_std::json::set_max_size(usize::MAX);
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn xml_rejects_oversize_input() {
         err.message().contains("max_size"),
         "expected max_size in xml error, got {err:?}",
     );
-    gossamer_std::encoding::xml::set_max_size(16 * 1024 * 1024);
+    gossamer_std::encoding::xml::set_max_size(usize::MAX);
 }
 
 #[test]
@@ -100,7 +100,7 @@ fn yaml_rejects_oversize_input() {
         err.message.contains("max_size"),
         "expected yaml max_size message, got {err:?}",
     );
-    gossamer_std::encoding::yaml::set_max_size(16 * 1024 * 1024);
+    gossamer_std::encoding::yaml::set_max_size(usize::MAX);
 }
 
 #[test]

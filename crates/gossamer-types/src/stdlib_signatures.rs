@@ -25,6 +25,9 @@ pub struct StdSignatureParam {
     pub name: &'static str,
     /// Source-facing parameter type text.
     pub ty: &'static str,
+    /// The default a call may leave the argument to (`false` in
+    /// `sort: bool = false`).
+    pub default: Option<&'static str>,
 }
 
 /// Parsed shape of one source-facing stdlib function signature.
@@ -891,22 +894,22 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::encoding::json",
         name: "at",
-        signature: "fn at(value: json::Value, index: i64) -> json::Value",
+        signature: "fn at(value: json::Value, index: i64) -> Option<json::Value>",
     },
     StdFunctionSignature {
         module_path: "std::encoding::json",
         name: "decode",
-        signature: "fn decode(source: String) -> Result<json::Value, errors::Error>",
+        signature: "fn decode<T>(source: String) -> Result<T, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::encoding::json",
         name: "encode",
-        signature: "fn encode(value: json::Value) -> String",
+        signature: "fn encode<T>(value: T, sort: bool = false) -> Result<String, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::encoding::json",
         name: "encode_pretty",
-        signature: "fn encode_pretty(value: json::Value) -> String",
+        signature: "fn encode_pretty<T>(value: T, sort: bool = false) -> Result<String, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::encoding::json",
@@ -926,7 +929,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::encoding::json",
         name: "len",
-        signature: "fn len(value: json::Value) -> i64",
+        signature: "fn len(value: json::Value) -> Option<i64>",
     },
     StdFunctionSignature {
         module_path: "std::encoding::json",
@@ -935,18 +938,43 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::encoding::json",
-        name: "render",
-        signature: "fn render(value: json::Value) -> String",
-    },
-    StdFunctionSignature {
-        module_path: "std::encoding::json",
         name: "set",
         signature: "fn set(value: json::Value, key: String, next: json::Value) -> json::Value",
     },
     StdFunctionSignature {
         module_path: "std::encoding::json",
-        name: "valid",
-        signature: "fn valid(source: String) -> bool",
+        name: "from_value",
+        signature: "fn from_value<T>(value: json::Value) -> Result<T, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::encoding::json",
+        name: "to_value",
+        signature: "fn to_value<T>(value: T, sort: bool = false) -> Result<json::Value, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::encoding::json",
+        name: "is_valid",
+        signature: "fn is_valid(source: String) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::encoding::json",
+        name: "entries",
+        signature: "fn entries(value: json::Value) -> Option<Vec<(String, json::Value)>>",
+    },
+    StdFunctionSignature {
+        module_path: "std::encoding::json",
+        name: "pointer",
+        signature: "fn pointer(value: json::Value, pointer: String) -> Option<json::Value>",
+    },
+    StdFunctionSignature {
+        module_path: "std::encoding::json",
+        name: "set_max_depth",
+        signature: "fn set_max_depth(levels: i64) -> ()",
+    },
+    StdFunctionSignature {
+        module_path: "std::encoding::json",
+        name: "set_max_size",
+        signature: "fn set_max_size(bytes: i64) -> ()",
     },
     StdFunctionSignature {
         module_path: "std::encoding::pem",
@@ -965,8 +993,18 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::encoding::toml",
-        name: "from_json",
-        signature: "fn from_json(source: String) -> Result<String, errors::Error>",
+        name: "decode",
+        signature: "fn decode<T>(source: String) -> Result<T, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::encoding::toml",
+        name: "encode",
+        signature: "fn encode<T>(value: T, sort: bool = false) -> Result<String, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::encoding::toml",
+        name: "from_json_text",
+        signature: "fn from_json_text(source: String) -> Result<String, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::encoding::toml",
@@ -980,13 +1018,23 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::encoding::toml",
-        name: "to_json",
-        signature: "fn to_json(source: String) -> Result<String, errors::Error>",
+        name: "parse",
+        signature: "fn parse(source: String) -> Result<json::Value, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::encoding::toml",
+        name: "to_json_text",
+        signature: "fn to_json_text(source: String) -> Result<String, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::encoding::xml",
         name: "encode",
-        signature: "fn encode(value: json::Value) -> String",
+        signature: "fn encode(value: json::Value) -> Result<String, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::encoding::xml",
+        name: "is_valid",
+        signature: "fn is_valid(source: String) -> bool",
     },
     StdFunctionSignature {
         module_path: "std::encoding::xml",
@@ -999,14 +1047,34 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         signature: "fn parse(source: String) -> Result<json::Value, errors::Error>",
     },
     StdFunctionSignature {
-        module_path: "std::encoding::yaml",
-        name: "encode",
-        signature: "fn encode(value: json::Value) -> Result<String, errors::Error>",
+        module_path: "std::encoding::xml",
+        name: "set_max_depth",
+        signature: "fn set_max_depth(levels: i64) -> ()",
+    },
+    StdFunctionSignature {
+        module_path: "std::encoding::xml",
+        name: "set_max_size",
+        signature: "fn set_max_size(bytes: i64) -> ()",
     },
     StdFunctionSignature {
         module_path: "std::encoding::yaml",
-        name: "from_json",
-        signature: "fn from_json(source: String) -> Result<String, errors::Error>",
+        name: "decode",
+        signature: "fn decode<T>(source: String) -> Result<T, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::encoding::yaml",
+        name: "encode",
+        signature: "fn encode<T>(value: T, sort: bool = false) -> Result<String, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::encoding::yaml",
+        name: "encode_all",
+        signature: "fn encode_all(values: Vec<json::Value>) -> Result<String, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::encoding::yaml",
+        name: "from_json_text",
+        signature: "fn from_json_text(source: String) -> Result<String, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::encoding::yaml",
@@ -1025,8 +1093,18 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::encoding::yaml",
-        name: "to_json",
-        signature: "fn to_json(source: String) -> Result<String, errors::Error>",
+        name: "set_max_depth",
+        signature: "fn set_max_depth(levels: i64) -> ()",
+    },
+    StdFunctionSignature {
+        module_path: "std::encoding::yaml",
+        name: "set_max_size",
+        signature: "fn set_max_size(bytes: i64) -> ()",
+    },
+    StdFunctionSignature {
+        module_path: "std::encoding::yaml",
+        name: "to_json_text",
+        signature: "fn to_json_text(source: String) -> Result<String, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::env",
@@ -1361,7 +1439,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::html::template",
         name: "render_json",
-        signature: "fn render_json(template: String, data: json::Value) -> Result<String, errors::Error>",
+        signature: "fn render_json(template: String, json_text: String) -> Result<String, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::http",
@@ -2515,6 +2593,26 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::option",
+        name: "is_none_or",
+        signature: "fn is_none_or<T>(value: Option<T>, f: Fn(T) -> bool) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::option",
+        name: "is_some_and",
+        signature: "fn is_some_and<T>(value: Option<T>, f: Fn(T) -> bool) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::option",
+        name: "map_or",
+        signature: "fn map_or<T, U>(value: Option<T>, default: U, f: Fn(T) -> U) -> U",
+    },
+    StdFunctionSignature {
+        module_path: "std::option",
+        name: "map_or_else",
+        signature: "fn map_or_else<T, U>(value: Option<T>, default: Fn() -> U, f: Fn(T) -> U) -> U",
+    },
+    StdFunctionSignature {
+        module_path: "std::option",
         name: "and_then",
         signature: "fn and_then<T, U>(value: Option<T>, f: Fn(T) -> Option<U>) -> Option<U>",
     },
@@ -3050,6 +3148,26 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::result",
+        name: "is_err_and",
+        signature: "fn is_err_and<T, E>(value: Result<T, E>, f: Fn(E) -> bool) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::result",
+        name: "is_ok_and",
+        signature: "fn is_ok_and<T, E>(value: Result<T, E>, f: Fn(T) -> bool) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::result",
+        name: "map_or",
+        signature: "fn map_or<T, E, U>(value: Result<T, E>, default: U, f: Fn(T) -> U) -> U",
+    },
+    StdFunctionSignature {
+        module_path: "std::result",
+        name: "map_or_else",
+        signature: "fn map_or_else<T, E, U>(value: Result<T, E>, default: Fn(E) -> U, f: Fn(T) -> U) -> U",
+    },
+    StdFunctionSignature {
+        module_path: "std::result",
         name: "and_then",
         signature: "fn and_then<T, E, U>(value: Result<T, E>, f: Fn(T) -> Result<U, E>) -> Result<U, E>",
     },
@@ -3187,6 +3305,16 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         module_path: "std::pprof",
         name: "heap_profile",
         signature: "fn heap_profile(millis: i64) -> String",
+    },
+    StdFunctionSignature {
+        module_path: "std::runtime",
+        name: "max_procs",
+        signature: "fn max_procs() -> i64",
+    },
+    StdFunctionSignature {
+        module_path: "std::runtime",
+        name: "set_max_procs",
+        signature: "fn set_max_procs(n: i64) -> i64",
     },
     StdFunctionSignature {
         module_path: "std::pprof",
@@ -4105,9 +4233,15 @@ pub fn parse_signature(signature: &'static str) -> Option<StdSignatureShape> {
             .into_iter()
             .map(|param| {
                 let colon = find_top_level(param, ':')?;
+                let typed = param.get(colon + 1..)?;
+                let (ty, default) = match find_top_level(typed, '=') {
+                    Some(eq) => (typed.get(..eq)?, Some(typed.get(eq + 1..)?.trim())),
+                    None => (typed, None),
+                };
                 Some(StdSignatureParam {
                     name: param.get(..colon)?.trim(),
-                    ty: param.get(colon + 1..)?.trim(),
+                    ty: ty.trim(),
+                    default,
                 })
             })
             .collect::<Option<Vec<_>>>()?
@@ -4202,11 +4336,15 @@ const DATA_FIRST_ITER: [&str; 31] = [
 
 // `zip` is absent: both of its arguments are the data, and the pair it builds
 // takes them in the order they are written, as the method form does.
-const DATA_FIRST_OPTION: [&str; 10] = [
+const DATA_FIRST_OPTION: [&str; 14] = [
     "and_then",
     "expect",
     "filter",
+    "is_none_or",
+    "is_some_and",
     "map",
+    "map_or",
+    "map_or_else",
     "ok_or",
     "ok_or_else",
     "or",
@@ -4215,10 +4353,14 @@ const DATA_FIRST_OPTION: [&str; 10] = [
     "unwrap_or_else",
 ];
 
-const DATA_FIRST_RESULT: [&str; 6] = [
+const DATA_FIRST_RESULT: [&str; 10] = [
     "and_then",
+    "is_err_and",
+    "is_ok_and",
     "map",
     "map_err",
+    "map_or",
+    "map_or_else",
     "or_else",
     "unwrap_or",
     "unwrap_or_else",

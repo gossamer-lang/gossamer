@@ -236,6 +236,7 @@ pub fn parse_with_autoderive_from(
     // check keys on.
     if parsed_cleanly {
         diags.extend(serde_unsupported_field_diags(&sf));
+        diags.extend(serde_attribute_diags(&sf));
     }
     diags.extend(derive_default_diags(&sf));
     rewrite_serde_generic_calls(&mut sf);
@@ -357,7 +358,23 @@ fn serde_unsupported_field_diags(sf: &SourceFile) -> Vec<ParseDiagnostic> {
 
     let mut diags = Vec::new();
     let mut reported: HashSet<String> = HashSet::new();
-    for (op, ty_name, call_span, module) in collect_serde_turbofish_calls(sf) {
+    for (op, target, call_span, module) in collect_serde_turbofish_calls(sf) {
+        let ty_name = match target {
+            SerdeCallTarget::Named(written) | SerdeCallTarget::Inner(written) => written,
+            SerdeCallTarget::TypeParameter(param) => {
+                if reported.insert(param.clone()) {
+                    diags.push(ParseDiagnostic::new(
+                        crate::ParseError::SerdeUnsupportedTarget {
+                            ty: param,
+                            op,
+                            reason: SerdeTargetRefusal::TypeParameter,
+                        },
+                        call_span,
+                    ));
+                }
+                continue;
+            }
+        };
         let symbol = resolved(&ty_name, &module);
         if reported.contains(&ty_name) || synthesized.contains(symbol.as_str()) {
             continue;
@@ -419,39 +436,54 @@ fn serde_unsupported_field_diags(sf: &SourceFile) -> Vec<ParseDiagnostic> {
 }
 
 /// Which shape a serde turbofish target is, once it is known that no
-/// synthesized codec exists for it.
+/// synthesized codec exists for it. A named target is a declared struct or
+/// enum, so the only question is whether it was named without its arguments.
 fn refusal_for(sf: &SourceFile, symbol: &str) -> SerdeTargetRefusal {
-    for (module, item) in flatten_items_with_modules(&sf.items) {
-        let (name, generic) = match &item.kind {
-            ItemKind::Struct(decl) => (&decl.name.name, !decl.generics.params.is_empty()),
-            ItemKind::Enum(decl) => (&decl.name.name, !decl.generics.params.is_empty()),
-            _ => continue,
+    let generic = flatten_items_with_modules(&sf.items).iter().any(|(module, item)| {
+        let (name, generics) = match &item.kind {
+            ItemKind::Struct(decl) => (&decl.name.name, &decl.generics),
+            ItemKind::Enum(decl) => (&decl.name.name, &decl.generics),
+            _ => return false,
         };
-        if TyId::new(&module, name).symbol != symbol && name != symbol {
-            continue;
-        }
-        return if generic {
-            SerdeTargetRefusal::Generic
-        } else {
-            SerdeTargetRefusal::Unsupported
-        };
+        (TyId::new(module, name).symbol == symbol || name == symbol)
+            && !generics.params.is_empty()
+    });
+    if generic {
+        SerdeTargetRefusal::Generic
+    } else {
+        SerdeTargetRefusal::Unsupported
     }
-    SerdeTargetRefusal::NotAStruct
 }
 
-/// Collects `(op, type_name)` for every serde turbofish call in `sf`
-/// (`to_json::<T>` / `from_json::<T>` and the toml/yaml forms, bare or
-/// format-module-qualified), on the un-mangled AST.
-fn collect_serde_turbofish_calls(sf: &SourceFile) -> Vec<(String, String, Span, String)> {
+/// What a serde turbofish call asks for, as the diagnostics and the stub
+/// synthesis read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SerdeCallTarget {
+    /// A user type named on its own: the spelling as written.
+    Named(String),
+    /// A user type named inside a compound target (`Vec<Shape>`), which the
+    /// call's own stub codes through this type's codec.
+    Inner(String),
+    /// A type parameter of the enclosing function.
+    TypeParameter(String),
+}
+
+/// Collects `(op, target, span, module)` for every serde turbofish call in
+/// `sf` (`to_json::<T>` / `from_json::<T>`, the toml/yaml forms, and
+/// `json::from_value::<T>`, bare or format-module-qualified), on the
+/// un-mangled AST. A compound target contributes each user type it names.
+fn collect_serde_turbofish_calls(sf: &SourceFile) -> Vec<(String, SerdeCallTarget, Span, String)> {
     use gossamer_ast::Visitor;
     use gossamer_ast::expr::{Expr, ExprKind};
     use gossamer_ast::visitor::walk_expr;
 
-    struct Collector {
-        calls: Vec<(String, String, Span, String)>,
+    struct Collector<'a> {
+        types: &'a SerdeTypes,
+        calls: Vec<(String, SerdeCallTarget, Span, String)>,
         module: Vec<String>,
+        params: Vec<Vec<String>>,
     }
-    impl Visitor for Collector {
+    impl Visitor for Collector<'_> {
         fn visit_item(&mut self, item: &gossamer_ast::Item) {
             // Synthesis reads only the items this build compiles, so a call
             // inside an inactive `#[cfg]` item has no codec to be missing.
@@ -465,7 +497,9 @@ fn collect_serde_turbofish_calls(sf: &SourceFile) -> Vec<(String, String, Span, 
                 _ => None,
             };
             self.module.extend(name.clone());
+            self.params.push(item_type_params(item));
             gossamer_ast::visitor::walk_item(self, item);
+            self.params.pop();
             if name.is_some() {
                 self.module.pop();
             }
@@ -479,24 +513,18 @@ fn collect_serde_turbofish_calls(sf: &SourceFile) -> Vec<(String, String, Span, 
             let ExprKind::Path(path) = &callee.kind else {
                 return;
             };
-            let (op, seg) = match path.segments.len() {
-                1 => {
-                    let seg = &path.segments[0];
-                    (seg.name.name.clone(), seg)
-                }
-                2 => {
-                    let head = path.segments[0].name.name.as_str();
-                    let tail = path.segments[1].name.name.as_str();
-                    let Some(op) = crate::autoderive::qualified_serde_op(head, tail) else {
-                        return;
-                    };
-                    (op.to_string(), &path.segments[1])
-                }
-                _ => return,
+            if self.types.names_own_module(&path.segments, &self.module) {
+                return;
+            }
+            let Some((qualified_op, seg_idx)) = serde_call_op(&path.segments) else {
+                return;
             };
+            let seg = &path.segments[seg_idx];
+            let op = qualified_op.unwrap_or(seg.name.name.as_str()).to_string();
             if !matches!(
                 op.as_str(),
                 "to_json" | "from_json" | "to_toml" | "from_toml" | "to_yaml" | "from_yaml"
+                    | "from_value"
             ) || seg.generics.len() != 1
             {
                 return;
@@ -504,28 +532,43 @@ fn collect_serde_turbofish_calls(sf: &SourceFile) -> Vec<(String, String, Span, 
             let GenericArg::Type(ty) = &seg.generics[0] else {
                 return;
             };
-            let TypeKind::Path(tp) = &ty.kind else {
-                return;
-            };
-            // The spelling as written, which is what the symbol index keys a
-            // module-qualified type by. Two modules may each declare a `Cell`,
-            // and the leaf alone names neither.
-            let written: Vec<&str> = tp
-                .segments
-                .iter()
-                .map(|segment| segment.name.name.as_str())
-                .filter(|segment| !matches!(*segment, "crate" | "self" | "super" | "root"))
-                .collect();
-            if written.is_empty() {
+            let module = self.module.join("::");
+            let scope: Vec<&str> = self.params.iter().flatten().map(String::as_str).collect();
+            if let Some(param) = mentioned_type_param(ty, &scope) {
+                self.calls.push((op, SerdeCallTarget::TypeParameter(param), callee.span, module));
                 return;
             }
-            self.calls.push((op, written.join("::"), callee.span, self.module.join("::")));
+            match self.types.target(ty, &module) {
+                SerdeTarget::Named(_) | SerdeTarget::GenericBare => {
+                    if let Some(written) = written_path(ty) {
+                        self.calls.push((op, SerdeCallTarget::Named(written), callee.span, module));
+                    }
+                }
+                SerdeTarget::Site => {
+                    for inner in type_paths(ty) {
+                        let written = inner.join("::");
+                        let symbol = serde_symbol_for(&self.types.symbols, &module, &written);
+                        if self.types.user.contains(&symbol) && !self.types.generic.contains(&symbol)
+                        {
+                            self.calls.push((
+                                op.clone(),
+                                SerdeCallTarget::Inner(written),
+                                callee.span,
+                                module.clone(),
+                            ));
+                        }
+                    }
+                }
+            }
         }
     }
 
+    let types = SerdeTypes::of(sf);
     let mut collector = Collector {
+        types: &types,
         calls: Vec::new(),
         module: Vec::new(),
+        params: Vec::new(),
     };
     collector.visit_source_file(sf);
     collector.calls
@@ -544,6 +587,7 @@ const MANGLED_STDLIB_NAMES: &[(&str, &str, &str)] = &[
     ("fs", "metadata", "__gos_fs_metadata"),
     ("fs", "Metadata", "__gos_fs_Metadata"),
     ("fs", "temp_dir", "__gos_fs_temp_dir"),
+    ("json", "entries", "__gos_json_entries"),
     ("fs", "read_dir", "__gos_fs_read_dir"),
     ("fs", "DirInfo", "__gos_fs_DirInfo"),
     ("fs", "walk_dir", "__gos_fs_walk_dir"),

@@ -115,7 +115,7 @@ pub(crate) fn install_json_builtins(globals: &mut Vec<(&'static str, Value)>) {
         ("parse", builtin_json_std_parse as BuiltinFnPub),
         ("encode", builtin_json_std_encode),
         ("encode_pretty", builtin_json_std_encode_pretty),
-        ("valid", builtin_json_std_valid),
+        ("is_valid", builtin_json_std_valid),
     ] {
         let q: &'static str = Box::leak(format!("encoding::json::{short}").into_boxed_str());
         globals.push((q, crate::builtins::builtin_pub(q, call)));
@@ -157,6 +157,7 @@ pub(crate) fn builtin_json_std_parse(args: &[Value]) -> RuntimeResult<Value> {
     }
 }
 
+/// `encoding::json::encode`'s text, before the HIR wraps it in `Ok`.
 pub(crate) fn builtin_json_std_encode(args: &[Value]) -> RuntimeResult<Value> {
     if let Some(Value::Json(value)) = args.first() {
         return Ok(Value::String(

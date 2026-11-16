@@ -3569,11 +3569,14 @@ impl<'a> TypeChecker<'a> {
             UnifyError::IntegerConstraint => {
                 let lhs = self.infer.resolve(self.tcx, lhs);
                 let rhs = self.infer.resolve(self.tcx, rhs);
-                if matches!(self.tcx.kind(lhs), Some(TyKind::Var(_))) {
+                if matches!(self.tcx.kind(lhs), Some(TyKind::Var(_)))
+                    || !matches!(self.tcx.kind(rhs), Some(TyKind::Var(_)))
+                {
                     // The expected type was established by an integer
-                    // literal, as in `let v = [1]; v.push('a')`.
+                    // literal, as in `let v = [1]; v.push('a')`, or the
+                    // literal sits inside the supplied type (`#[1]`).
                     // Preserve lhs/rhs orientation and let defaulting render
-                    // the expected literal type as i64.
+                    // the literal's type as i64.
                     self.deferred_type_mismatches.push((lhs, rhs, span));
                 } else {
                     // The supplied expression is the integer literal.
@@ -3584,7 +3587,9 @@ impl<'a> TypeChecker<'a> {
             UnifyError::FloatConstraint => {
                 let lhs = self.infer.resolve(self.tcx, lhs);
                 let rhs = self.infer.resolve(self.tcx, rhs);
-                if matches!(self.tcx.kind(lhs), Some(TyKind::Var(_))) {
+                if matches!(self.tcx.kind(lhs), Some(TyKind::Var(_)))
+                    || !matches!(self.tcx.kind(rhs), Some(TyKind::Var(_)))
+                {
                     self.deferred_type_mismatches.push((lhs, rhs, span));
                 } else {
                     self.deferred_literal_type_mismatches

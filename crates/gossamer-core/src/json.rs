@@ -12,13 +12,15 @@ use thiserror::Error;
 mod scan;
 pub mod typed;
 
-/// Default cap on parser nesting depth - guards the recursive descent
-/// against stack exhaustion from adversarial input.
+/// Default cap on parser nesting depth, as `serde_json`'s recursion limit -
+/// guards the recursive descent against stack exhaustion from adversarial
+/// input.
 pub const DEFAULT_MAX_DEPTH: usize = 128;
 
-/// Default cap on document byte length - guards against memory
-/// exhaustion from oversized payloads. 16 MiB.
-pub const DEFAULT_MAX_SIZE: usize = 16 * 1024 * 1024;
+/// Default cap on document byte length: none, as neither `serde_json` nor
+/// Go's `encoding/json` has one. A program bounds untrusted input where its
+/// bytes arrive, or sets a cap with [`set_max_size`].
+pub const DEFAULT_MAX_SIZE: usize = usize::MAX;
 
 static MAX_DEPTH: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_DEPTH);
 static MAX_SIZE: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_SIZE);
@@ -31,6 +33,57 @@ pub fn set_max_depth(n: usize) {
 /// Overrides the process-wide cap on input byte length.
 pub fn set_max_size(n: usize) {
     MAX_SIZE.store(n, Ordering::Relaxed);
+}
+
+/// The reference tokens of an RFC 6901 JSON Pointer, `~1` and `~0`
+/// unescaped, or `None` when `pointer` is neither empty nor starts with `/`.
+#[must_use]
+pub fn pointer_tokens(pointer: &str) -> Option<Vec<String>> {
+    if pointer.is_empty() {
+        return Some(Vec::new());
+    }
+    let rest = pointer.strip_prefix('/')?;
+    Some(
+        rest.split('/')
+            .map(|token| token.replace("~1", "/").replace("~0", "~"))
+            .collect(),
+    )
+}
+
+/// The array index a JSON Pointer token names: decimal digits with no
+/// leading zero (`0` itself excepted). `-`, which names the element past
+/// the end, names nothing to read.
+#[must_use]
+pub fn pointer_index(token: &str) -> Option<usize> {
+    let digits = !token.is_empty() && token.bytes().all(|b| b.is_ascii_digit());
+    let canonical = token == "0" || !token.starts_with('0');
+    if digits && canonical {
+        token.parse().ok()
+    } else {
+        None
+    }
+}
+
+/// The value `pointer` names inside `value`.
+#[must_use]
+pub fn pointer<'a>(value: &'a Value, pointer: &str) -> Option<&'a Value> {
+    pointer_tokens(pointer)?
+        .iter()
+        .try_fold(value, |at, token| match at {
+            Value::Object(members) => members.get(token.as_str()),
+            Value::Array(items) => items.get(pointer_index(token)?),
+            _ => None,
+        })
+}
+
+/// A cap as `json::set_max_size` / `set_max_depth` take it from a program:
+/// a positive count, or no cap for 0 or less.
+#[must_use]
+pub fn cap_from_program(n: i64) -> usize {
+    usize::try_from(n)
+        .ok()
+        .filter(|&n| n > 0)
+        .unwrap_or(usize::MAX)
 }
 
 /// Returns the current cap on parser nesting depth.
@@ -82,6 +135,33 @@ pub struct Error {
     pub line: u32,
     /// One-based column number of the offending character.
     pub column: u32,
+}
+
+/// The `i64` an integral `f64` equals, or `None` when it is fractional or
+/// outside `i64`. The upper bound is exclusive at 2^63: `i64::MAX as f64`
+/// rounds up to 2^63, which no `i64` holds.
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the range check above the cast leaves only values an i64 holds exactly"
+)]
+pub fn integral_i64(f: f64) -> Option<i64> {
+    const TWO_POW_63: f64 = 9_223_372_036_854_775_808.0;
+    (f.fract() == 0.0 && (-TWO_POW_63..TWO_POW_63).contains(&f)).then_some(f as i64)
+}
+
+/// The `u64` a non-negative integral `f64` equals, or `None` when it is
+/// fractional or outside `u64`. The upper bound is exclusive at 2^64, which
+/// `u64::MAX as f64` rounds up to.
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the range check above the cast leaves only values a u64 holds exactly"
+)]
+pub fn integral_u64(f: f64) -> Option<u64> {
+    const TWO_POW_64: f64 = 18_446_744_073_709_551_616.0;
+    (f.fract() == 0.0 && (0.0..TWO_POW_64).contains(&f)).then_some(f as u64)
 }
 
 /// Parses a JSON document into a [`Value`].
@@ -250,6 +330,8 @@ pub struct Tape {
     pub nodes: Vec<TapeNode>,
     /// The index of every object node, ascending.
     pub objects: Vec<u32>,
+    /// The index of every array node, ascending.
+    pub arrays: Vec<u32>,
 }
 
 impl Tape {
@@ -310,6 +392,7 @@ pub fn validate_to_tape(bytes: &[u8]) -> Result<(&str, Option<Tape>), Error> {
     parser.tape = Some(Tape {
         nodes: Vec::with_capacity(tape_bound(source.as_bytes())),
         objects: Vec::new(),
+        arrays: Vec::new(),
     });
     parser.skip_whitespace();
     parser.parse_value()?;
@@ -565,8 +648,10 @@ impl<'a> Parser<'a> {
         let end = self.cursor;
         let tape = self.tape.as_mut()?;
         let index = tape.nodes.len();
-        if kind == TapeKind::Object {
-            tape.objects.push(index as u32);
+        match kind {
+            TapeKind::Object => tape.objects.push(index as u32),
+            TapeKind::Array => tape.arrays.push(index as u32),
+            _ => {}
         }
         // `validate_to_tape` keeps a tape only for a document whose offsets
         // and lengths fit a node.
@@ -910,7 +995,21 @@ impl Parser<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TapeKind, Value, parse, tape_bound, validate_to_tape};
+    use super::{TapeKind, Value, integral_i64, integral_u64, parse, tape_bound, validate_to_tape};
+
+    #[test]
+    fn integral_conversions_exclude_the_power_of_two_past_each_range() {
+        assert_eq!(integral_i64(9_223_372_036_854_775_808.0), None);
+        assert_eq!(integral_i64(-9_223_372_036_854_775_808.0), Some(i64::MIN));
+        assert_eq!(
+            integral_i64(9_223_372_036_854_774_784.0),
+            Some(9_223_372_036_854_774_784)
+        );
+        assert_eq!(integral_i64(1.5), None);
+        assert_eq!(integral_u64(18_446_744_073_709_551_616.0), None);
+        assert_eq!(integral_u64(-1.0), None);
+        assert_eq!(integral_u64(3.0), Some(3));
+    }
 
     #[test]
     fn strings_read_across_whole_words_of_plain_text() {

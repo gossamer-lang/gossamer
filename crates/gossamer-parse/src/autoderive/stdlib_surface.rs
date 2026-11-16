@@ -1240,8 +1240,20 @@ pub fn infer_serde_turbofish(sf: &mut SourceFile) {
         }
     }
 
-    struct Inferrer;
+    struct Inferrer {
+        types: SerdeTypes,
+        module: Vec<String>,
+    }
     impl VisitorMut for Inferrer {
+        fn visit_item(&mut self, item: &mut gossamer_ast::Item) {
+            let name = inline_module_name(item);
+            self.module.extend(name.clone());
+            gossamer_ast::visitor::walk_item_mut(self, item);
+            if name.is_some() {
+                self.module.pop();
+            }
+        }
+
         fn visit_stmt(&mut self, stmt: &mut Stmt) {
             walk_stmt_mut(self, stmt);
             let StmtKind::Let {
@@ -1271,41 +1283,310 @@ pub fn infer_serde_turbofish(sf: &mut SourceFile) {
             let ExprKind::Path(path) = &mut callee.kind else {
                 return;
             };
-            if path.segments.len() != 1 {
+            // `from_json(..)`, or a decode through any of the modules' paths.
+            if self.types.names_own_module(&path.segments, &self.module) {
                 return;
             }
-            let seg = &mut path.segments[0];
-            if seg.name.name != "from_json" || !seg.generics.is_empty() {
+            let Some((op, last)) = serde_call_op(&path.segments) else {
                 return;
-            }
-            if !matches!(target.kind, TypeKind::Path(_)) {
+            };
+            let infers = match op {
+                None => path.segments[last].name.name == "from_json",
+                Some(op) => matches!(op, "from_json" | "from_value" | "from_yaml" | "from_toml"),
+            };
+            let seg = &mut path.segments[last];
+            if !infers || !seg.generics.is_empty() {
                 return;
             }
             seg.generics.push(GenericArg::Type(target));
         }
     }
-    Inferrer.visit_source_file(sf);
+    let mut inferrer = Inferrer {
+        types: SerdeTypes::of(sf),
+        module: Vec::new(),
+    };
+    inferrer.visit_source_file(sf);
 }
 
-/// Rewrites the generic serde call surface - `to_json::<T>(v)`,
-/// `from_json::<T>(s)`, and the toml/yaml variants - into calls to the
-/// per-type stubs [`synthesize_serde_impls`] declares
-/// (`__gos_serde_<op>_<T>`). This is the single public spelling; there
-/// are no `Type::to_json` methods.
+/// How a serde turbofish's target is coded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SerdeTarget {
+    /// A non-generic struct or enum: the codec its synthesized stubs carry.
+    Named(String),
+    /// Any other type (`Vec<T>`, `Page<Item>`, `String`): a stub declared at
+    /// the call, whose signature spells the type as the call wrote it.
+    Site,
+    /// A generic struct or enum named without its arguments.
+    GenericBare,
+}
+
+/// What the program declares that a serde target can name.
+pub(crate) struct SerdeTypes {
+    symbols: std::collections::HashMap<String, String>,
+    /// The codec symbol of every user struct and enum.
+    user: std::collections::HashSet<String>,
+    /// Those of them with type parameters.
+    generic: std::collections::HashSet<String>,
+    /// Every type alias's name.
+    aliases: std::collections::HashSet<String>,
+    /// The `::`-joined path of every inline module the program declares.
+    modules: std::collections::HashSet<String>,
+}
+
+impl SerdeTypes {
+    pub(crate) fn of(sf: &SourceFile) -> Self {
+        let mut user = std::collections::HashSet::new();
+        let mut generic = std::collections::HashSet::new();
+        let mut modules = std::collections::HashSet::new();
+        for (module, item) in flatten_items_with_modules(&sf.items) {
+            if let Some(name) = inline_module_name(item) {
+                modules.insert(TyId::new(&module, &name).path);
+                continue;
+            }
+            let (name, params) = match &item.kind {
+                ItemKind::Struct(decl) => (&decl.name.name, decl.generics.params.len()),
+                ItemKind::Enum(decl) => (&decl.name.name, decl.generics.params.len()),
+                _ => continue,
+            };
+            let symbol = TyId::new(&module, name).symbol;
+            if params > 0 {
+                generic.insert(symbol.clone());
+            }
+            user.insert(symbol);
+        }
+        Self {
+            symbols: serde_symbol_index(sf),
+            user,
+            generic,
+            aliases: alias_targets(&sf.items).into_keys().collect(),
+            modules,
+        }
+    }
+
+    /// Whether `path`, written in `module`, starts at a module the program
+    /// declares there, so it names the program's own function rather than
+    /// a standard-library one.
+    pub(crate) fn names_own_module(
+        &self,
+        path: &[gossamer_ast::PathSegment],
+        module: &[String],
+    ) -> bool {
+        let [head, _, ..] = path else {
+            return false;
+        };
+        let mut scope = module.join("::");
+        if !scope.is_empty() {
+            scope.push_str("::");
+        }
+        scope.push_str(&head.name.name);
+        self.modules.contains(&scope)
+    }
+
+    /// How the target `ty`, written in `module`, is coded.
+    pub(crate) fn target(&self, ty: &gossamer_ast::Type, module: &str) -> SerdeTarget {
+        let TypeKind::Path(tp) = &ty.kind else {
+            return SerdeTarget::Site;
+        };
+        if tp.segments.iter().any(|segment| !segment.generics.is_empty()) {
+            return SerdeTarget::Site;
+        }
+        let written: Vec<&str> = tp
+            .segments
+            .iter()
+            .map(|segment| segment.name.name.as_str())
+            .filter(|segment| !matches!(*segment, "crate" | "self" | "super" | "root"))
+            .collect();
+        let Some(last) = written.last() else {
+            return SerdeTarget::Site;
+        };
+        let symbol = serde_symbol_for(&self.symbols, module, &written.join("::"));
+        if !self.user.contains(&symbol) || self.aliases.contains(*last) && self.generic.contains(&symbol) {
+            return SerdeTarget::Site;
+        }
+        if self.generic.contains(&symbol) {
+            return SerdeTarget::GenericBare;
+        }
+        SerdeTarget::Named(symbol)
+    }
+}
+
+/// The serde operation a call path names, and the index of its last
+/// segment: `from_json` on its own, or a format module's spelling through
+/// any of the module's paths (`json::decode`, `encoding::json::decode`,
+/// `std::encoding::json::decode`). `None` for any other path.
+fn serde_call_op(segments: &[gossamer_ast::PathSegment]) -> Option<(Option<&'static str>, usize)> {
+    let names: Vec<&str> = segments.iter().map(|s| s.name.name.as_str()).collect();
+    match names.as_slice() {
+        [_] => Some((None, 0)),
+        [head, tail] | ["encoding" | "std", head, tail] | ["std", "encoding", head, tail] => {
+            crate::autoderive::qualified_serde_op(head, tail).map(|op| (Some(op), names.len() - 1))
+        }
+        _ => None,
+    }
+}
+
+/// The type parameters `item` declares, with every one its methods declare
+/// for an `impl`: a serde call inside names none of them.
+fn item_type_params(item: &Item) -> Vec<String> {
+    let names = |generics: &gossamer_ast::Generics| -> Vec<String> {
+        generics
+            .params
+            .iter()
+            .filter_map(|param| match param {
+                gossamer_ast::GenericParam::Type { name, .. } => Some(name.name.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    match &item.kind {
+        ItemKind::Fn(decl) => names(&decl.generics),
+        ItemKind::Impl(decl) => {
+            let mut all = names(&decl.generics);
+            for member in &decl.items {
+                if let gossamer_ast::ImplItem::Fn(method) = member {
+                    all.extend(names(&method.generics));
+                }
+            }
+            all
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Every path `ty` names, its own and its arguments', as written segments.
+fn type_paths(ty: &gossamer_ast::Type) -> Vec<Vec<String>> {
+    use gossamer_ast::Visitor;
+    struct Paths(Vec<Vec<String>>);
+    impl Visitor for Paths {
+        fn visit_type_path(&mut self, path: &gossamer_ast::TypePath) {
+            self.0.push(path.segments.iter().map(|s| s.name.name.clone()).collect());
+            gossamer_ast::visitor::walk_type_path(self, path);
+        }
+    }
+    let mut paths = Paths(Vec::new());
+    paths.visit_type(ty);
+    paths.0
+}
+
+/// The first type parameter of `scope` that `ty` names, alone or inside.
+fn mentioned_type_param(ty: &gossamer_ast::Type, scope: &[&str]) -> Option<String> {
+    type_paths(ty)
+        .into_iter()
+        .find_map(|path| match path.as_slice() {
+            [only] if scope.contains(&only.as_str()) => Some(only.clone()),
+            _ => None,
+        })
+}
+
+/// `ty`'s spelling when it is one path, as the symbol index keys it.
+fn written_path(ty: &gossamer_ast::Type) -> Option<String> {
+    let TypeKind::Path(tp) = &ty.kind else {
+        return None;
+    };
+    let written: Vec<&str> = tp
+        .segments
+        .iter()
+        .map(|segment| segment.name.name.as_str())
+        .filter(|segment| !matches!(*segment, "crate" | "self" | "super" | "root"))
+        .collect();
+    (!written.is_empty()).then(|| written.join("::"))
+}
+
+/// The placeholder a stub's signature names its target type with.
+const STUB_TARGET: &str = "__GOS_SERDE_TARGET";
+
+/// Gives every node of a parsed stub the call's span and a fresh id, and
+/// puts the call's target type where the stub names its placeholder.
+struct StubPlacer {
+    span: Span,
+    ty: Option<gossamer_ast::Type>,
+}
+impl gossamer_ast::visitor::VisitorMut for StubPlacer {
+    fn visit_item(&mut self, item: &mut Item) {
+        item.id = NodeId::DUMMY;
+        item.span = self.span;
+        gossamer_ast::visitor::walk_item_mut(self, item);
+    }
+    fn visit_stmt(&mut self, stmt: &mut gossamer_ast::Stmt) {
+        stmt.id = NodeId::DUMMY;
+        stmt.span = self.span;
+        gossamer_ast::visitor::walk_stmt_mut(self, stmt);
+    }
+    fn visit_expr(&mut self, expr: &mut gossamer_ast::Expr) {
+        expr.id = NodeId::DUMMY;
+        expr.span = self.span;
+        gossamer_ast::visitor::walk_expr_mut(self, expr);
+    }
+    fn visit_pattern(&mut self, pattern: &mut gossamer_ast::Pattern) {
+        pattern.id = NodeId::DUMMY;
+        pattern.span = self.span;
+        gossamer_ast::visitor::walk_pattern_mut(self, pattern);
+    }
+    fn visit_type(&mut self, ty: &mut gossamer_ast::Type) {
+        if let TypeKind::Path(tp) = &ty.kind
+            && tp.segments.len() == 1
+            && tp.segments[0].name.name == STUB_TARGET
+            && let Some(target) = self.ty.take()
+        {
+            *ty = target;
+            return;
+        }
+        ty.id = NodeId::DUMMY;
+        ty.span = self.span;
+        gossamer_ast::visitor::walk_type_mut(self, ty);
+    }
+}
+
+/// The stub a serde call to a [`SerdeTarget::Site`] target calls, declared
+/// beside the call: its signature names `ty` as the call wrote it, and the
+/// HIR serde pass writes its body. Every node is the call's.
+fn serde_site_stub(op: &str, name: &str, ty: gossamer_ast::Type, span: Span) -> Option<Item> {
+    use gossamer_ast::visitor::VisitorMut;
+
+    let signature = match op {
+        "to_json" | "to_toml" | "to_yaml" => format!(
+            "fn {name}(value: {STUB_TARGET}, sort: bool = false) -> Result<String, errors::Error>"
+        ),
+        "from_value" => {
+            format!("fn {name}(value: json::Value) -> Result<{STUB_TARGET}, errors::Error>")
+        }
+        _ => format!("fn {name}(text: String) -> Result<{STUB_TARGET}, errors::Error>"),
+    };
+    let source = format!("{signature} {{\n    panic(\"{op} is generated after checking\")\n}}\n");
+    let (parsed, diags) = crate::parse_source_file(&source, span.file);
+    if !diags.is_empty() {
+        return None;
+    }
+    let mut item = parsed.items.into_iter().next()?;
+
+    let mut place = StubPlacer { span, ty: Some(ty) };
+    place.visit_item(&mut item);
+    place.ty.is_none().then_some(item)
+}
+
+/// Rewrites every serde turbofish call (`from_json::<T>(s)`,
+/// `json::decode::<T>(s)`, `json::from_value::<T>(v)`, ...) to the stub that
+/// codes its target: the synthesized one of a named struct or enum, or one
+/// declared beside the call for any other type.
 pub fn rewrite_serde_generic_calls(sf: &mut SourceFile) {
     use gossamer_ast::VisitorMut;
     use gossamer_ast::expr::{Expr, ExprKind};
     use gossamer_ast::visitor::walk_expr_mut;
 
     struct Rewriter<'a> {
-        symbols: &'a std::collections::HashMap<String, String>,
+        types: &'a SerdeTypes,
         module: Vec<String>,
+        /// The type parameters in scope, which no stub can name.
+        params: Vec<Vec<String>>,
+        sites: Vec<(Vec<String>, Item)>,
     }
     impl VisitorMut for Rewriter<'_> {
         fn visit_item(&mut self, item: &mut gossamer_ast::Item) {
             let name = inline_module_name(item);
             self.module.extend(name.clone());
+            self.params.push(item_type_params(item));
             gossamer_ast::visitor::walk_item_mut(self, item);
+            self.params.pop();
             if name.is_some() {
                 self.module.pop();
             }
@@ -1316,74 +1597,80 @@ pub fn rewrite_serde_generic_calls(sf: &mut SourceFile) {
             // (e.g. an argument that is itself `to_json::<U>(x)`) are
             // handled before the enclosing call.
             walk_expr_mut(self, expr);
+            let span = expr.span;
             let ExprKind::Call { callee, .. } = &mut expr.kind else {
                 return;
             };
             let ExprKind::Path(path) = &mut callee.kind else {
                 return;
             };
-            // Bare `from_json::<T>(s)` or the qualified spelling
-            // `json::from_json::<T>(s)` (head must name the matching
-            // format module); both collapse to the mangled free fn.
-            // A format module's own typed spelling (`json::decode::<T>`,
-            // `yaml::from_yaml::<T>`) names the same operation the bare
-            // turbofish does, so it collapses to the same mangled fn. The
-            // path is only rewritten once the call is known to carry the one
-            // type argument that names which synthesized function it is.
-            let qualified_op = match path.segments.len() {
-                1 => None,
-                2 => {
-                    let head = path.segments[0].name.name.as_str();
-                    let tail = path.segments[1].name.name.as_str();
-                    match crate::autoderive::qualified_serde_op(head, tail) {
-                        Some(op) => Some(op),
-                        None => return,
-                    }
-                }
-                _ => return,
+            // Bare `from_json::<T>(s)` or a format module's spelling
+            // (`json::decode::<T>`, `yaml::from_yaml::<T>`) name the same
+            // operation. The path is only rewritten once the call is known to
+            // carry the one type argument that names its target.
+            if self.types.names_own_module(&path.segments, &self.module) {
+                return;
+            }
+            let Some((qualified_op, seg_idx)) = serde_call_op(&path.segments) else {
+                return;
             };
-            let seg_idx = usize::from(qualified_op.is_some());
             let seg = &path.segments[seg_idx];
-            let op = qualified_op.unwrap_or(seg.name.name.as_str());
+            let op = qualified_op.unwrap_or(seg.name.name.as_str()).to_string();
             if !matches!(
-                op,
+                op.as_str(),
                 "to_json" | "from_json" | "to_toml" | "from_toml" | "to_yaml" | "from_yaml"
+                    | "from_value"
             ) || seg.generics.len() != 1
             {
                 return;
             }
-            let op = op.to_string();
-            if seg_idx == 1 {
-                path.segments.remove(0);
-            }
-            let seg = &mut path.segments[0];
-            seg.name.name = op;
             let GenericArg::Type(ty) = &seg.generics[0] else {
                 return;
             };
-            let TypeKind::Path(tp) = &ty.kind else {
-                return;
-            };
-            let written: Vec<&str> = tp.segments.iter().map(|segment| segment.name.name.as_str()).collect();
-            if written.is_empty() {
+            let scope: Vec<&str> = self.params.iter().flatten().map(String::as_str).collect();
+            if mentioned_type_param(ty, &scope).is_some() {
                 return;
             }
-            let symbol = serde_symbol_for(self.symbols, &self.module.join("::"), &written.join("::"));
-            seg.name.name = serde_fn(seg.name.name.as_str(), &symbol);
-            seg.generics.clear();
+            let module = self.module.join("::");
+            let target = match self.types.target(ty, &module) {
+                SerdeTarget::Named(symbol) if op != "from_value" => SerdeTarget::Named(symbol),
+                SerdeTarget::GenericBare => return,
+                _ => SerdeTarget::Site,
+            };
+            path.segments.drain(..seg_idx);
+            let seg = &mut path.segments[0];
+            if let SerdeTarget::Named(symbol) = target {
+                seg.name.name = serde_fn(&op, &symbol);
+                seg.generics.clear();
+                return;
+            }
+            let GenericArg::Type(ty) = seg.generics.remove(0) else {
+                return;
+            };
+            let name = format!("__gos_serde_{op}_site_{}", self.sites.len());
+            let Some(stub) = serde_site_stub(&op, &name, ty, span) else {
+                return;
+            };
+            seg.name.name = name;
+            self.sites.push((self.module.clone(), stub));
         }
     }
-    // How each type a turbofish can name maps to the symbol its synthesized
-    // free functions carry: the qualified spelling the user wrote
-    // (`a::Point`), the bare name when exactly one module declares it, and
-    // any name a `use` brought into scope.
-    let symbols = serde_symbol_index(sf);
-    Rewriter {
-        symbols: &symbols,
+
+    let types = SerdeTypes::of(sf);
+    let mut rewriter = Rewriter {
+        types: &types,
         module: Vec::new(),
+        params: Vec::new(),
+        sites: Vec::new(),
+    };
+    rewriter.visit_source_file(sf);
+    for (module, stub) in rewriter.sites {
+        if let Some(items) = module_items_mut(&mut sf.items, &module) {
+            items.push(stub);
+        }
     }
-    .visit_source_file(sf);
 }
+
 
 /// The codec symbol of the type a turbofish written in `module` names:
 /// for a single name, the type the module imports or declares under it;
@@ -1529,10 +1816,10 @@ pub fn inject_synthetic_uses(sf: &mut SourceFile, file: FileId) {
             UseTarget::Module(ModulePath::from_names(["std", "runtime"])),
         ));
     }
-    let has_synth = sf.items.iter().any(|item| {
-        matches!(&item.kind, ItemKind::Fn(decl)
-            if decl.name.name.starts_with("__gos_serde_")
-                || decl.name.name.starts_with("__gos_"))
+    // A serde call's own stub sits in the call's module, so every module is
+    // searched.
+    let has_synth = flatten_items_with_modules(&sf.items).into_iter().any(|(_, item)| {
+        matches!(&item.kind, ItemKind::Fn(decl) if decl.name.name.starts_with("__gos_"))
     });
     if !has_synth {
         return;

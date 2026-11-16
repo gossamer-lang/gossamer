@@ -4692,7 +4692,7 @@ fn json_value_method_form_types_from_the_same_table_as_the_free_form() {
 #[test]
 fn json_value_accessor_methods_typecheck_clean() {
     let d = diagnostics_for(
-        "use std::encoding::json\nfn main() { let v = json::parse(\"{}\").unwrap()\n let n: Option<i64> = v.as_i64()\n let s: Option<String> = v.as_str()\n let k: Option<json::Value> = v.get(\"a\")\n let l: i64 = v.len()\n let z: bool = v.is_null()\n println(\"{:?} {:?} {:?} {} {}\", n, s, k, l, z) }\n",
+        "use std::encoding::json\nfn main() { let v = json::parse(\"{}\").unwrap()\n let n: Option<i64> = v.as_i64()\n let s: Option<String> = v.as_str()\n let k: Option<json::Value> = v.get(\"a\")\n let l: Option<i64> = v.len()\n let a: Option<json::Value> = v.at(0)\n let z: bool = v.is_null()\n println(\"{:?} {:?} {:?} {:?} {:?} {}\", n, s, k, l, a, z) }\n",
     );
     assert!(d.is_empty(), "the json accessor surface types: {d:?}");
 }
@@ -4702,7 +4702,7 @@ fn json_value_accessor_methods_typecheck_clean() {
 #[test]
 fn a_method_neither_dynamic_value_declares_is_unresolved() {
     for source in [
-        "use std::encoding::json\nfn main() { let v = json::parse(\"[1]\").unwrap()\n let _ = json::at(v, 0).and_then(json::as_str) }\n",
+        "use std::encoding::json\nfn main() { let v = json::parse(\"[1]\").unwrap()\n let _ = v.and_then(json::as_str) }\n",
         "use std::encoding::json\nfn main() { let v = json::parse(\"{}\").unwrap()\n let _ = v.frobnicate() }\n",
         "fn main() { let d = DynValue::int(7)\n let _ = d.frobnicate() }\n",
     ] {

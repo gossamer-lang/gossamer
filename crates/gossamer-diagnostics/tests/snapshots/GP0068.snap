@@ -1,0 +1,13 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+assertion_line: 86
+expression: rendered
+---
+--- plain ---
+error[GP0068]: A serde attribute is malformed, misplaced, or conflicts with another. - here
+--- framed ---
+error[GP0068]: A serde attribute is malformed, misplaced, or conflicts with another.
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

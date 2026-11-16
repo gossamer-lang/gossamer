@@ -291,19 +291,14 @@ mod autoderive_tests {
     fn serde_target_outside_the_synthesizer_names_its_shape() {
         let cases = [
             (
-                "enum E<T> { A(T), B }\nfn main() { let _ = to_json::<E<i64>>(E::A(1)); }",
+                "enum E<T> { A(T), B }\nfn main() { let _ = to_json::<E>(E::A(1)); }",
                 "E",
                 SerdeTargetRefusal::Generic,
             ),
             (
-                "struct W<T> { v: T }\nfn main() { let _ = to_json::<W<i64>>(W { v: 1 }); }",
+                "struct W<T> { v: T }\nfn main() { let _ = to_json::<W>(W { v: 1 }); }",
                 "W",
                 SerdeTargetRefusal::Generic,
-            ),
-            (
-                "fn main() { let _ = to_json::<Nope>(1); }",
-                "Nope",
-                SerdeTargetRefusal::NotAStruct,
             ),
         ];
         for (src, ty, reason) in cases {
@@ -313,6 +308,15 @@ mod autoderive_tests {
                 "refusal for {ty}"
             );
         }
+        // An instantiation names the one type its codec writes, and a name
+        // that resolves to nothing is the resolver's to report.
+        assert!(serde_target_refusals("fn main() { let _ = to_json::<Nope>(1); }").is_empty());
+        assert!(
+            serde_target_refusals(
+                "struct W<T> { v: T }\nfn main() { let _ = to_json::<W<i64>>(W { v: 1 }); }"
+            )
+            .is_empty()
+        );
     }
 
     /// A struct the synthesizer accepts is reached through an alias too, so

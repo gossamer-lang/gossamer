@@ -1,0 +1,47 @@
+/*
+ * YAML with `std::encoding::yaml`.
+ *
+ * Typed: `yaml::decode::<T>` and `yaml::encode` work as their `json::`
+ * counterparts do. Untyped: `yaml::parse` answers a `json::Value`,
+ * `yaml::parse_all` / `yaml::encode_all` read and write a stream of
+ * documents.
+ *
+ * Run:
+ *     gos run examples/yaml_demo.gos
+ */
+
+use std::encoding::{json, yaml}
+use std::errors
+
+struct Step {
+    name: String
+    run: String
+}
+
+struct Job {
+    name: String
+    image: String
+    steps: Vec<Step>
+}
+
+let text = """
+name: ci
+image: alpine:3.20
+steps:
+  - name: build
+    run: make
+  - name: test
+    run: make test
+"""
+
+let job = yaml::decode::<Job>(text)?
+println(f"{job.image}: {job.steps.map(|s| s.name).join(", ")}")
+print(yaml::encode(job.steps[0])?)
+println("---")
+print(yaml::encode(job, sort: true)?)
+println("---")
+
+let docs = yaml::parse_all("kind: a\n---\nkind: b\n")?
+println(f"{docs.len()} documents, second {json::get(docs[1], "kind")}")
+print(yaml::encode_all(docs)?)
+println(yaml::to_json_text("b: 1\na: [x, y]\n")?)

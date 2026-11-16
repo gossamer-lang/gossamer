@@ -213,7 +213,7 @@ for i in 0..n {
 }
 text.push_str("]")
 let parsed = json::parse(text)?
-let rendered = json::render(parsed)
+let rendered = json::encode(parsed)?
 let mut checksum = 0
 let mut i = 0
 while i < rendered.len() {

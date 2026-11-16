@@ -537,6 +537,8 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
         "runtime",
         &[
             ("collect_cycles", builtin_runtime_collect_cycles),
+            ("max_procs", builtin_runtime_max_procs),
+            ("set_max_procs", builtin_runtime_set_max_procs),
             (
                 "cycle_collection_supported",
                 builtin_runtime_cycle_collection_supported,
@@ -912,18 +914,16 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
         "json",
         &[
             ("parse", builtin_json_parse),
-            ("render", builtin_json_render),
             ("encode", builtin_json_render),
-            ("decode", builtin_json_decode),
+            ("is_valid", crate::stdlib_builtins::json_builtins::builtin_json_std_valid),
             // Query surface - operates on the dynamic struct shape
             // produced by `json_value_to_gossamer`, so a JSON object
             // is a struct keyed by field name and a JSON array is a
             // `Value::Array`.
             ("get", builtin_json_get),
             ("set", builtin_json_set),
-            ("at", builtin_json_at),
+            ("at", builtin_json_at_opt),
             ("keys", builtin_json_keys),
-            ("len", builtin_json_len),
             ("is_null", builtin_json_is_null),
             ("as_str", builtin_json_as_str),
             ("as_i64", builtin_json_as_i64),
@@ -931,6 +931,9 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
             ("as_f64", builtin_json_as_f64),
             ("as_bool", builtin_json_as_bool),
             ("as_array", builtin_json_as_array),
+            ("pointer", builtin_json_pointer),
+            ("set_max_depth", builtin_json_set_max_depth),
+            ("set_max_size", builtin_json_set_max_size),
         ],
         globals,
     );
@@ -938,14 +941,12 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
         "encoding::json",
         &[
             ("parse", builtin_json_parse),
-            ("render", builtin_json_render),
             ("encode", builtin_json_render),
-            ("decode", builtin_json_decode),
+            ("is_valid", crate::stdlib_builtins::json_builtins::builtin_json_std_valid),
             ("get", builtin_json_get),
             ("set", builtin_json_set),
-            ("at", builtin_json_at),
+            ("at", builtin_json_at_opt),
             ("keys", builtin_json_keys),
-            ("len", builtin_json_len),
             ("is_null", builtin_json_is_null),
             ("as_str", builtin_json_as_str),
             ("as_i64", builtin_json_as_i64),
@@ -953,9 +954,18 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
             ("as_f64", builtin_json_as_f64),
             ("as_bool", builtin_json_as_bool),
             ("as_array", builtin_json_as_array),
+            ("pointer", builtin_json_pointer),
+            ("set_max_depth", builtin_json_set_max_depth),
+            ("set_max_size", builtin_json_set_max_size),
         ],
         globals,
     );
+    // `json::len` answers an `Option`; the bare `len` keeps counting any
+    // receiver it is handed.
+    for qualified in ["json::len", "encoding::json::len"] {
+        globals.push((qualified, builtin(qualified, builtin_json_len_opt)));
+    }
+    globals.push(("len", builtin("len", builtin_json_len)));
     // Re-register the bare `keys` / `values` entries as receiver-
     // dispatching routers so `install_module("json", …)`'s
     // unconditional bare-name push (above) doesn't shadow the

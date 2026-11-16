@@ -81,13 +81,13 @@ mod tests {
         let content = "hello from test"
         match fs::write(path, content.as_bytes()) {
             Ok(_) => {}
-            Err(e) => { let _ = testing::check(false, e)
+            Err(e) => { let _ = testing::check(false, e.to_string())
                 return }
         }
         match fs::read_to_string(path) {
-            Ok(s) => { let _ = testing::check_eq(s.trim().to_string(), content.to_string(), "roundtrip")
+            Ok(s) => { let _ = testing::check_eq(s.trim(), content, "roundtrip")
             }
-            Err(e) => { let _ = testing::check(false, e)
+            Err(e) => { let _ = testing::check(false, e.to_string())
             }
         }
         let _ = fs::remove_file(path)
@@ -112,7 +112,7 @@ mod tests {
         match fs::read_to_string(path) {
             Ok(s) => { let _ = testing::check_eq(s, "second", "overwritten")
             }
-            Err(e) => { let _ = testing::check(false, e)
+            Err(e) => { let _ = testing::check(false, e.to_string())
             }
         }
         let _ = fs::remove_file(path)

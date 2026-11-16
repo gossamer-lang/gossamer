@@ -2,13 +2,15 @@
  * Encoding and decoding with std::encoding.
  *
  * Covers the most common byte-to-text codecs: base64, hex, and base32.
- * Also demonstrates JSON encode/decode via the encoding::json submodule.
+ * Also demonstrates JSON encoding via the encoding::json submodule, whose
+ * encoders answer a Result.
  * All codecs are one-shot and allocation-conscious: pass a slice or
  * string, get an encoded string back; pass the encoded string, get the
  * original bytes back.
  */
 
 use std::encoding
+use std::errors
 
 let data = "Hello, Gossamer!"
 
@@ -40,7 +42,7 @@ match b32_dec {
 }
 
 // JSON
-let json_str = encoding::json::encode(42)
+let json_str = encoding::json::encode(42)?
 println(f"json int:  {json_str}")
-let arr = encoding::json::encode(#[1, 2, 3])
+let arr = encoding::json::encode(#[1, 2, 3])?
 println(f"json arr:  {arr}")

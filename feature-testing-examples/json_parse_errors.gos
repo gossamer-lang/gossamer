@@ -26,7 +26,7 @@ fn main() {
     all.push("[".repeat(129) + "1" + "]".repeat(129))
     for text in all {
         match json::parse(text) {
-            Ok(value) => println("ok {}", json::encode(value))
+            Ok(value) => println("ok {}", json::encode(value).unwrap())
             Err(e) => println("err {}", e)
         }
     }

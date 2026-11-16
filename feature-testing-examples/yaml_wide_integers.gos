@@ -28,7 +28,7 @@ fn main() -> Result<(), errors::Error> {
     top: 18446744073709551615
     huge: 99999999999999999999999
     """
-    println("{}", yaml::to_json(text)?)
+    println("{}", yaml::to_json_text(text)?)
 
     let doc = yaml::parse(text)?
     let low = doc.get("low").and_then(|v| v.as_f64()).unwrap_or(0.0)

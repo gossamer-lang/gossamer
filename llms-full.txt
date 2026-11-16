@@ -213,7 +213,8 @@ extend(&mut items)     // items is now #[1, 2, 1]
 - `bool char i8..i64 u8..u64 isize usize f32 f64 String [T] [T; N] (A, B)
   Option<T> Result<T, E> &mut T`, user types, `Simd<T, N>`. No `i128`.
 - Structs build by their declared shape: `Unit`, `Pair(a, b)`,
-  `Point { x: 1, y: 2 }`. Structs, enums, tuples, and sequences compare and
+  `Point { x: 1, y: 2 }`, and `Point { x, y }` fills each field from the
+  binding of its name. Structs, enums, tuples, and sequences compare and
   order structurally; `impl` of `eq` / `cmp` overrides. Recursive enums work
   directly: `enum List { Cons(i64, List), Nil }`. Two enums may share a
   variant name (`Conn::Ready`, `Job::Ready`); write `Enum::Variant` where a
@@ -348,9 +349,9 @@ fn main() {
 - `std::sync` has `Mutex`, `RwLock`, atomics, `WaitGroup`, `Once`;
   `sync::with_timeout(f, ms)`, `sync::shield(f)`. There is no OS-thread
   spawn API.
-- Worker threads start as goroutines call for them, up to one per core,
-  and an idle program's threads sleep, so a daemon costs no CPU between
-  events.
+- Worker threads start as goroutines call for them, up to one per core
+  (`runtime::set_max_procs(n)` sets the cap, as Go's `GOMAXPROCS`), and an
+  idle program's threads sleep, so a daemon costs no CPU between events.
 - Goroutines are cooperatively scheduled. They yield at channel, lock, and
   sleep operations, and compiled code also polls at the head of each loop
   nest; a nest that is counted all the way down and calls none of the
@@ -372,10 +373,24 @@ Discover signatures with `hover` / `gos doc std::<module>`. Areas:
   folder (in the system temp root without `parent`).
 - Text: `strings strconv utf8 unicode regex`.
 - Encoding: `json yaml toml xml csv base64 base32 hex pem binary`. Typed
-  serde: `json::decode::<T>(text)?` / `json::encode(v)`, `from_json` /
-  `to_json`, for structs and enums (externally tagged); fields take
-  `#[rename("key")]`, `#[skip]`, `#[default]`. Untyped: `json::parse` +
-  `get`/`at`/`as_i64`.
+  serde: `json::decode::<T>(text)?` / `json::encode(v)` (also `from_json` /
+  `to_json`) for any type with a JSON form: structs and enums (generic ones
+  too), `Vec<T>`, `Map<String, V>`, `Option`, tuples, `[T; N]`, scalars.
+  Declare only the members you read; unknown ones are ignored, so a small
+  wrapper (`struct Env { current: Current }`) reaches a nested value, or
+  navigate dynamically and finish with `json::from_value::<T>(sub)?`. Fields
+  take `#[rename("key")]`, `#[skip]`, `#[default]`, `#[default(value)]`;
+  types take `#[rename_all("camelCase")]`, enums `#[tag("type")]`, variants
+  `#[rename]`; `Option<Option<T>>` tells missing from `null`. Encoding keeps
+  declaration order (`sort: true` sorts) and answers a `Result`
+  (`json::encode(v)?`); encode where the type is concrete, not over a type
+  parameter (GT0126). Errors name the path: `current.temp: expected f64,
+  found string`. Untyped: `json::parse` + `get`/`at` (both `Option`) and
+  `as_f64`, `json::pointer(doc, "/a/b/0")`, `json::entries(obj)` (an
+  `Option` of the `(key, value)` pairs); `json::to_value(v)?`. `yaml::` and `toml::` mirror
+  it (`parse`, `encode`, `decode::<T>`, `encode::<T>`); `to_json_text` /
+  `from_json_text` convert text. No size cap by default
+  (`json::set_max_size(n)`).
 - Web: `net`, `http` (client `http::get`, server `http::serve(addr,
   handler)`, `http::router`), `http::websocket`, `html`, `mime`.
 - Terminal: `term` (`is_terminal`, `size`, `enter_raw`, `read_input`,
@@ -426,7 +441,9 @@ mod tests {
 
 `assert(cond[, msg])` / `assert_eq(a, b[, msg])`. A test that records no
 assertion fails, unless it answers `Result` and reaches `Ok`. `gos test` also
-runs fenced code in `//` doc comments.
+runs fenced code in `//` doc comments. Test a decoder against saved input by
+reading it in the test: `json::decode::<Weather>(fs::read_to_string(
+"testdata/london.json")?)?` inside a test that answers `Result`.
 
 ## 13. Projects and the toolchain
 

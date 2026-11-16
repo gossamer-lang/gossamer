@@ -2,7 +2,8 @@
 // not `String`. An unsigned value past `i64::MAX` keeps its own digits in the
 // text and reads back through `json::as_u64`, and a map keyed by an integer,
 // a `bool`, or a `char` renders each key as the member name the map spells it
-// with, in the same order on every tier.
+// with, in the same order on every tier. An integer or integral float at 2^63
+// is past `i64` and one at 2^64 past `u64`, so those reads answer `None`.
 // Bit-identical on the VM, Cranelift, and LLVM tiers.
 
 use std::encoding::json
@@ -19,38 +20,38 @@ fn keyed_maps() {
     by_int.insert(3, 1)
     by_int.insert(-7, 2)
     by_int.insert(10, 5)
-    println("int keys {}", json::encode(by_int))
+    println("int keys {}", json::encode(by_int).unwrap())
 
     let mut by_bool: Map<bool, String> = Map::new()
     by_bool.insert(true, "yes")
     by_bool.insert(false, "no")
-    println("bool keys {}", json::encode(by_bool))
+    println("bool keys {}", json::encode(by_bool).unwrap())
 
     let mut by_char: Map<char, i64> = Map::new()
     by_char.insert('b', 2)
     by_char.insert('a', 1)
-    println("char keys {}", json::encode(by_char))
+    println("char keys {}", json::encode(by_char).unwrap())
 
     let big: u64 = 18446744073709551615
     let mut by_unsigned: Map<u64, String> = Map::new()
     by_unsigned.insert(big, "max")
     by_unsigned.insert(4, "four")
-    println("u64 keys {}", json::encode(by_unsigned))
+    println("u64 keys {}", json::encode(by_unsigned).unwrap())
 }
 
 fn unsigned_values() {
     let big: u64 = 18446744073709551615
     let mid: u64 = 9223372036854775808
     let small: usize = 12
-    println("scalars {} {} {}", json::encode(big), json::encode(mid), json::encode(small))
+    println("scalars {} {} {}", json::encode(big).unwrap(), json::encode(mid).unwrap(), json::encode(small).unwrap())
 
     let values: Vec<u64> = #[big, mid, 5]
-    println("vec {}", json::encode(values))
+    println("vec {}", json::encode(values).unwrap())
 
     let mut named: Map<String, u64> = Map::new()
     named.insert("max", big)
     named.insert("mid", mid)
-    println("map {}", json::encode(named))
+    println("map {}", json::encode(named).unwrap())
 }
 
 fn read_back() {
@@ -61,6 +62,15 @@ fn read_back() {
             let small = json::get(doc, "small").and_then(json::as_u64)
             println("as_u64 {:?} {:?} {:?}", max, neg, small)
             println("as_i64 of max {:?}", json::get(doc, "max").and_then(json::as_i64))
+        }
+        Err(e) => println("parse error {}", e)
+    }
+    match json::parse("[9223372036854775807, 9223372036854775808, 9.223372036854775808e18, -9.223372036854775808e18, 1.8446744073709551616e19]") {
+        Ok(edges) => {
+            for i in 0..5 {
+                let n = json::at(edges, i).unwrap()
+                println("edge {} as_i64 {:?} as_u64 {:?}", i, json::as_i64(n), json::as_u64(n))
+            }
         }
         Err(e) => println("parse error {}", e)
     }

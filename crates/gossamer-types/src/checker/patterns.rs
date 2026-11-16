@@ -297,21 +297,57 @@ impl TypeChecker<'_> {
     /// would run on the interpreter and fail the native build, so it is
     /// rejected here, where both tiers see it.
     pub(super) fn generic_without_fmt(&mut self, ty: Ty) -> Option<String> {
-        let TyKind::Adt { def, substs } = self.tcx.kind(ty)? else {
-            return None;
-        };
-        if substs.is_empty() {
-            return None;
+        self.generic_without_fmt_within(ty, &mut Vec::new())
+    }
+
+    /// [`Self::generic_without_fmt`] for `ty` or any value it holds: the
+    /// payload of an `Option` or `Result`, an element, a map value, or a
+    /// field of a user type, each of which renders through its own `fmt`.
+    /// `seen` holds the user types already walked, so a type that holds
+    /// itself ends the walk.
+    fn generic_without_fmt_within(&mut self, ty: Ty, seen: &mut Vec<Ty>) -> Option<String> {
+        let ty = self.infer.resolve(self.tcx, ty);
+        match self.tcx.kind(ty)?.clone() {
+            TyKind::Adt { def, substs } => {
+                let user = self.user_type_defs.values().any(|d| *d == def);
+                if user && !substs.is_empty() {
+                    let name = self.tcx.def_name(def)?.to_string();
+                    let has_fmt = self
+                        .method_homes
+                        .contains_key(&(name.clone(), "fmt".to_string()));
+                    if !has_fmt {
+                        return Some(name);
+                    }
+                }
+                if seen.contains(&ty) {
+                    return None;
+                }
+                seen.push(ty);
+                let args: Vec<Ty> = substs.types();
+                let fields: Vec<Ty> = if user && substs.is_empty() {
+                    self.tcx
+                        .struct_field_tys(def)
+                        .map(<[Ty]>::to_vec)
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                args.into_iter()
+                    .chain(fields)
+                    .find_map(|inner| self.generic_without_fmt_within(inner, seen))
+            }
+            TyKind::Vec(inner) | TyKind::Slice(inner) | TyKind::Array { elem: inner, .. } => {
+                self.generic_without_fmt_within(inner, seen)
+            }
+            TyKind::Ref { inner, .. } => self.generic_without_fmt_within(inner, seen),
+            TyKind::Tuple(elems) => elems
+                .into_iter()
+                .find_map(|inner| self.generic_without_fmt_within(inner, seen)),
+            TyKind::HashMap { key, value, .. } => self
+                .generic_without_fmt_within(key, seen)
+                .or_else(|| self.generic_without_fmt_within(value, seen)),
+            _ => None,
         }
-        let name = self.tcx.def_name(*def)?.to_string();
-        // Built-in generic types render through the runtime, not a `fmt`.
-        if !self.user_type_defs.values().any(|d| d == def) {
-            return None;
-        }
-        let has_fmt = self
-            .method_homes
-            .contains_key(&(name.clone(), "fmt".to_string()));
-        (!has_fmt).then_some(name)
     }
 
     /// True when `ty` resolves to a `Result<T, E>`.
@@ -1356,6 +1392,29 @@ impl TypeChecker<'_> {
         }
     }
 
+    /// The element type of a literal whose context expects `want_elem`
+    /// elements. A unifying expectation fixes it; a coercing one only shapes
+    /// each element (an integer literal takes the expected width), so the
+    /// elements' own type stands and a later check compares it.
+    fn shaped_element_tys(&mut self, elems: &[Expr], want_elem: Ty, expected: Expectation) -> Ty {
+        let mut elem_ty = None;
+        for elem in elems {
+            let got = self.check_expr_expecting(elem, expected.rewrap(want_elem));
+            if expected.unifies() {
+                self.unify(want_elem, got, elem.span);
+            } else if let Some(first) = elem_ty {
+                self.unify(first, got, elem.span);
+            } else {
+                elem_ty = Some(got);
+            }
+        }
+        if expected.unifies() {
+            want_elem
+        } else {
+            elem_ty.unwrap_or(want_elem)
+        }
+    }
+
     pub(super) fn check_vec_literal(&mut self, arr: &ArrayExpr, expected: Expectation) -> Ty {
         let expected_elem =
             self.expectation_target(expected)
@@ -1366,13 +1425,8 @@ impl TypeChecker<'_> {
         match arr {
             ArrayExpr::List(elems) => {
                 if let Some(want_elem) = expected_elem {
-                    for elem in elems {
-                        let got = self.check_expr_expecting(elem, expected.rewrap(want_elem));
-                        if expected.unifies() {
-                            self.unify(want_elem, got, elem.span);
-                        }
-                    }
-                    return self.tcx.intern(TyKind::Vec(want_elem));
+                    let elem_ty = self.shaped_element_tys(elems, want_elem, expected);
+                    return self.tcx.intern(TyKind::Vec(elem_ty));
                 }
                 let elem_ty = self.join_element_tys(elems);
                 self.tcx.intern(TyKind::Vec(elem_ty))
@@ -1380,11 +1434,7 @@ impl TypeChecker<'_> {
             ArrayExpr::Repeat { value, count } => {
                 let elem_ty = match expected_elem {
                     Some(want_elem) => {
-                        let got = self.check_expr_expecting(value, expected.rewrap(want_elem));
-                        if expected.unifies() {
-                            self.unify(want_elem, got, value.span);
-                        }
-                        want_elem
+                        self.shaped_element_tys(std::slice::from_ref(value), want_elem, expected)
                     }
                     None => self.check_expr(value),
                 };
@@ -1411,14 +1461,9 @@ impl TypeChecker<'_> {
                         _ => None,
                     });
                 if let Some(want_elem) = expected_elem {
-                    for elem in elems {
-                        let got = self.check_expr_expecting(elem, expected.rewrap(want_elem));
-                        if expected.unifies() {
-                            self.unify(want_elem, got, elem.span);
-                        }
-                    }
+                    let elem_ty = self.shaped_element_tys(elems, want_elem, expected);
                     return self.tcx.intern(TyKind::Array {
-                        elem: want_elem,
+                        elem: elem_ty,
                         len: crate::ArrayLen::Concrete(elems.len()),
                     });
                 }

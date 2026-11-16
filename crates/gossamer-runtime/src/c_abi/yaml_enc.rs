@@ -35,6 +35,8 @@ fn json_to_serde_norway(v: &serde_json::Value) -> serde_norway::Value {
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 serde_norway::Value::Number(i.into())
+            } else if let Some(u) = n.as_u64() {
+                serde_norway::Value::Number(u.into())
             } else if let Some(f) = n.as_f64() {
                 serde_norway::Value::Number(serde_norway::Number::from(f))
             } else {
@@ -75,8 +77,8 @@ pub unsafe extern "C" fn gos_rt_yaml_parse(s: *const c_char) -> i128 {
         };
         match crate::yaml_node::decode_json(
             text,
-            crate::yaml_node::DEFAULT_MAX_DEPTH,
-            crate::yaml_node::DEFAULT_MAX_SIZE,
+            crate::yaml_node::max_depth(),
+            crate::yaml_node::max_size(),
         ) {
             Ok(json_val) => {
                 let ptr = crate::c_abi::json::GosJson::into_raw(json_val);
@@ -90,8 +92,10 @@ pub unsafe extern "C" fn gos_rt_yaml_parse(s: *const c_char) -> i128 {
     })
 }
 
+/// `yaml::to_json_text(text) -> Result<String, Error>`: the document as JSON
+/// text, each object's members by key.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_yaml_to_json(s: *const c_char) -> i128 {
+pub unsafe extern "C" fn gos_rt_yaml_to_json_text(s: *const c_char) -> i128 {
     ffi_entry!({
         let text = if s.is_null() {
             ""
@@ -101,21 +105,23 @@ pub unsafe extern "C" fn gos_rt_yaml_to_json(s: *const c_char) -> i128 {
         };
         let json_val = match crate::yaml_node::decode_json(
             text,
-            crate::yaml_node::DEFAULT_MAX_DEPTH,
-            crate::yaml_node::DEFAULT_MAX_SIZE,
+            crate::yaml_node::max_depth(),
+            crate::yaml_node::max_size(),
         ) {
             Ok(v) => v,
-            Err(e) => return yaml_result_err(&format!("yaml::to_json: {e}")),
+            Err(e) => return yaml_result_err(&format!("yaml::to_json_text: {e}")),
         };
         match serde_json::to_string(&json_val) {
             Ok(out) => yaml_result_ok(&out),
-            Err(e) => yaml_result_err(&format!("yaml::to_json: {e}")),
+            Err(e) => yaml_result_err(&format!("yaml::to_json_text: {e}")),
         }
     })
 }
 
+/// `yaml::from_json_text(text) -> Result<String, Error>`: JSON text as YAML,
+/// each object's members by key, as a `json::Value` holds them.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_yaml_from_json(s: *const c_char) -> i128 {
+pub unsafe extern "C" fn gos_rt_yaml_from_json_text(s: *const c_char) -> i128 {
     ffi_entry!({
         let text = if s.is_null() {
             ""
@@ -123,14 +129,10 @@ pub unsafe extern "C" fn gos_rt_yaml_from_json(s: *const c_char) -> i128 {
             // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(s) }
         };
-        let json_val: serde_json::Value = match serde_json::from_str(text) {
-            Ok(v) => v,
-            Err(e) => return yaml_result_err(&format!("yaml::from_json: {e}")),
-        };
-        let yaml_val = json_to_serde_norway(&json_val);
-        match serde_norway::to_string(&yaml_val) {
+        match crate::codec::json_convert::to_yaml(text, crate::codec::json_convert::Members::Sorted)
+        {
             Ok(out) => yaml_result_ok(&out),
-            Err(e) => yaml_result_err(&format!("yaml::from_json: {e}")),
+            Err(e) => yaml_result_err(&format!("yaml::from_json_text: {e}")),
         }
     })
 }
@@ -168,7 +170,11 @@ pub unsafe extern "C" fn gos_rt_yaml_parse_all(s: *const c_char) -> i128 {
             // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(s) }
         };
-        let docs = match crate::yaml_node::parse_all(text) {
+        let docs = match crate::yaml_node::decode_all_json(
+            text,
+            crate::yaml_node::max_depth(),
+            crate::yaml_node::max_size(),
+        ) {
             Ok(docs) => docs,
             Err(e) => return yaml_result_err(&format!("yaml::parse_all: {e}")),
         };
@@ -177,13 +183,60 @@ pub unsafe extern "C" fn gos_rt_yaml_parse_all(s: *const c_char) -> i128 {
         let vec =
             { crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::JSON) };
         for doc in docs {
-            let ptr = crate::c_abi::json::GosJson::into_raw(doc.into_json());
+            let ptr = crate::c_abi::json::GosJson::into_raw(doc);
             // SAFETY: `vec` is the fresh vec made above, or null, which `gos_rt_vec_push_i64`
             // accepts.
             unsafe { crate::c_abi::vec::gos_rt_vec_push_i64(vec, ptr as i64) };
         }
         gos_rt_result_new(0, vec as i64)
     })
+}
+
+/// `yaml::encode_all(values) -> Result<String, Error>`: a multi-document
+/// stream, one document per `json::Value`, as `parse_all` reads it back.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_yaml_encode_all(values: *const crate::c_abi::vec::GosVec) -> i128 {
+    ffi_entry!({
+        // SAFETY: `values` is this shim's `Vec<json::Value>` argument, live for the call or null.
+        let count = unsafe { crate::c_abi::vec::gos_rt_vec_len(values) };
+        let mut out = String::new();
+        for index in 0..count {
+            // SAFETY: `values` is non-null when its length is positive, and
+            // `index` is below that length; each slot holds a JSON handle.
+            let handle = unsafe { crate::c_abi::vec::vec_elem_load_i64(&*values, index) };
+            // SAFETY: the slot's handle is live while the vec is.
+            let yaml_val = match unsafe {
+                crate::c_abi::json::json_value_ref(handle as *const crate::c_abi::json::GosJson)
+            } {
+                Some(jv) => json_to_serde_norway(&jv),
+                None => serde_norway::Value::Null,
+            };
+            if index > 0 {
+                out.push_str("---\n");
+            }
+            match serde_norway::to_string(&yaml_val) {
+                Ok(text) => out.push_str(&text),
+                Err(e) => return yaml_result_err(&format!("yaml::encode_all: {e}")),
+            }
+        }
+        yaml_result_ok(&out)
+    })
+}
+
+/// `yaml::set_max_size(bytes)`: the size cap later YAML parses apply.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_yaml_set_max_size(bytes: i64) {
+    ffi_entry!({
+        crate::yaml_node::set_max_size(gossamer_core::json::cap_from_program(bytes));
+    });
+}
+
+/// `yaml::set_max_depth(levels)`: the nesting cap later YAML parses apply.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_yaml_set_max_depth(levels: i64) {
+    ffi_entry!({
+        crate::yaml_node::set_max_depth(gossamer_core::json::cap_from_program(levels));
+    });
 }
 
 #[unsafe(no_mangle)]
