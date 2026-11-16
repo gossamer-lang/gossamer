@@ -2513,6 +2513,23 @@ impl Parser<'_> {
                 }
                 continue;
             }
+            // `Point { x, y }`: a lone name initializes the field of that
+            // name from the binding of that name.
+            if matches!(self.peek().kind, TokenKind::Ident)
+                && matches!(
+                    self.peek_nth(1).kind,
+                    TokenKind::Punct(Punct::Comma | Punct::RBrace)
+                )
+            {
+                let name_span = self.peek_span();
+                let name = Ident::new(self.slice(name_span));
+                self.bump();
+                fields.push(StructExprField { name, value: None });
+                if !self.eat_list_separator() {
+                    break;
+                }
+                continue;
+            }
             let name = if matches!(self.peek().kind, TokenKind::Ident)
                 && matches!(self.peek_nth(1).kind, TokenKind::Punct(Punct::Colon))
             {

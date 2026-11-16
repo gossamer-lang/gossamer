@@ -30,7 +30,7 @@ mod tests {
         let _ = testing::check(w.contains("b"), "contains on array literal")
         let _ = testing::check(w.count_of("b") == 2, "count_of on array literal")
         let _ = testing::check(w.join("+") == "a+b+c+b", "join on array literal")
-        let r = w.to_vec().rev()
+        let r = w.rev()
         let _ = testing::check(r[0] == "b" && r[3] == "a", "rev on array literal")
     }
 

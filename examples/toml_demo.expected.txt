@@ -1,0 +1,24 @@
+billing on 8080, pool 16, owner None
+name = "billing"
+port = 8080
+verbose = true
+
+[database]
+url = "postgres://db/billing"
+pool = 16
+---
+name = "billing"
+port = 8080
+verbose = true
+
+[database]
+pool = 16
+url = "postgres://db/billing"
+---
+database.url: Some("postgres://db/billing")
+{"a":[true,false],"b":1}
+z = 1
+
+[a]
+x = "y"
+valid: true false

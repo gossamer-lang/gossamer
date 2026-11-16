@@ -16,6 +16,7 @@ include!("autoderive/tests.rs");
 
 #[path = "autoderive/primitive_surface.rs"]
 mod primitive_surface;
+use gossamer_ast::serde_attrs::{FieldDefault, SerdeField};
 use primitive_surface::{SourceTokens, synthesize_format_helpers, synthesize_primitive_surface};
 
 #[path = "autoderive/iterator_adapters.rs"]

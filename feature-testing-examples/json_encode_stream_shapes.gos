@@ -14,13 +14,13 @@ fn encode_tupled() -> String {
     let _ = opts.insert("a<b", (2, false))
     let t = Tupled { flags: (7, false), pair: (9, "nine"), opts: opts }
     let e = Tupled { flags: (0, true), pair: (0, ""), opts: Map::new() }
-    json::encode(t) + " " + json::encode(e)
+    json::encode(t).unwrap() + " " + json::encode(e).unwrap()
 }
 
 fn encode_raw() -> String {
     let w = Wrapped { raw: json::parse("{\"k\": [1, 2, \"v\"]}").unwrap(), n: 3 }
     let e = Wrapped { raw: json::parse("null").unwrap(), n: 0 }
-    json::encode(w) + " " + json::encode(e)
+    json::encode(w).unwrap() + " " + json::encode(e).unwrap()
 }
 
 fn main() {

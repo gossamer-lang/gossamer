@@ -11,7 +11,7 @@ fn main() {
             return }
     }
     println("--- json pretty array ---")
-    println("{}", encoding::json::encode_pretty(arr))
+    println("{}", encoding::json::encode_pretty(arr).unwrap())
 
     let obj = match encoding::json::parse("{\"x\": 42}") {
         Ok(v) => v
@@ -19,7 +19,7 @@ fn main() {
             return }
     }
     println("--- json pretty object ---")
-    println("{}", encoding::json::encode_pretty(obj))
+    println("{}", encoding::json::encode_pretty(obj).unwrap())
 
     println("--- yaml encode array ---")
     match encoding::yaml::encode(arr) {
@@ -37,8 +37,8 @@ fn main() {
     match encoding::yaml::parse_all("a: 1\n---\nb: 2\n") {
         Ok(docs) => {
             println("count: {}", docs.len())
-            println("doc0: {}", encoding::json::encode(docs[0]))
-            println("doc1: {}", encoding::json::encode(docs[1]))
+            println("doc0: {}", encoding::json::encode(docs[0]).unwrap())
+            println("doc1: {}", encoding::json::encode(docs[1]).unwrap())
         }
         Err(e) => println("parse_all err: {}", e)
     }

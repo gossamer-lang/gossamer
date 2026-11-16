@@ -18,6 +18,7 @@ pub mod ordered;
 pub mod path;
 pub mod pattern;
 pub mod printer;
+pub mod serde_attrs;
 pub mod source_file;
 pub mod stmt;
 pub mod ty;

@@ -45,6 +45,9 @@ enum FieldKind {
     String,
     /// `[T]` / `Vec<T>` of any supported kind.
     Vec(Box<FieldKind>),
+    /// `[T; N]`: a JSON array of exactly `N` elements. The length is its
+    /// literal, or `None` when it is a constant's name.
+    Array(Box<FieldKind>, Option<usize>),
     /// Nested user struct, referenced by source-level name.
     Struct(TyId),
     /// A user enum, externally tagged: a unit variant is its name, and a
@@ -252,6 +255,16 @@ impl FieldKind {
             TypeKind::Slice(inner) => Some(Self::Vec(Box::new(Self::from_type_within(
                 inner, module, structs, aliases, depth,
             )?))),
+            TypeKind::Array { elem, len } => {
+                let elem = Self::from_type_within(elem, module, structs, aliases, depth)?;
+                let len = match &len.kind {
+                    gossamer_ast::expr::ExprKind::Literal(gossamer_ast::expr::Literal::Int(text)) => {
+                        text.replace('_', "").parse::<usize>().ok()
+                    }
+                    _ => None,
+                };
+                Some(Self::Array(Box::new(elem), len))
+            }
             TypeKind::Tuple(elems) => {
                 let mut kinds = Vec::with_capacity(elems.len());
                 for e in elems {
@@ -273,6 +286,7 @@ impl FieldKind {
             Self::Char => "'\\0'".to_string(),
             Self::String => "\"\"".to_string(),
             Self::Vec(_) => "Vec::from([])".to_string(),
+            Self::Array(elem, len) => format!("[{}; {}]", elem.default_literal(), len.unwrap_or(0)),
             Self::Struct(ty) | Self::Enum(ty) => format!("{}::default()", ty.path),
             Self::Option(_) => "None".to_string(),
             Self::Tuple(elems) => format!(
@@ -292,7 +306,9 @@ impl FieldKind {
     fn user_types(&self) -> Vec<&TyId> {
         match self {
             Self::Struct(ty) | Self::Enum(ty) => vec![ty],
-            Self::Vec(inner) | Self::Option(inner) | Self::Map(inner) => inner.user_types(),
+            Self::Vec(inner) | Self::Option(inner) | Self::Map(inner) | Self::Array(inner, _) => {
+                inner.user_types()
+            }
             Self::Tuple(elems) => elems.iter().flat_map(Self::user_types).collect(),
             Self::I64
             | Self::Int(_)
@@ -312,6 +328,7 @@ impl FieldKind {
         match self {
             Self::Struct(_) | Self::Enum(_) => true,
             Self::Tuple(elems) => elems.iter().any(Self::reaches_user_type),
+            Self::Array(elem, _) => elem.reaches_user_type(),
             _ => false,
         }
     }
@@ -332,11 +349,12 @@ pub(crate) fn serde_fn(op: &str, ty: &str) -> String {
 pub(crate) const fn qualified_serde_op(head: &str, tail: &str) -> Option<&'static str> {
     match (head.as_bytes(), tail.as_bytes()) {
         (b"json", b"decode" | b"from_json") => Some("from_json"),
+        (b"json", b"from_value") => Some("from_value"),
         (b"json", b"encode" | b"to_json") => Some("to_json"),
-        (b"yaml", b"from_yaml") => Some("from_yaml"),
-        (b"yaml", b"to_yaml") => Some("to_yaml"),
-        (b"toml", b"from_toml") => Some("from_toml"),
-        (b"toml", b"to_toml") => Some("to_toml"),
+        (b"yaml", b"decode" | b"from_yaml") => Some("from_yaml"),
+        (b"yaml", b"encode" | b"to_yaml") => Some("to_yaml"),
+        (b"toml", b"decode" | b"from_toml") => Some("from_toml"),
+        (b"toml", b"encode" | b"to_toml") => Some("to_toml"),
         _ => None,
     }
 }

@@ -258,6 +258,31 @@ fn option_completion_matches_the_single_std_option_surface() {
 }
 
 #[test]
+fn result_completion_matches_the_std_result_surface() {
+    let uri = "file:///result.gos";
+    let source = "fn main() {\n    let value: Result<i64, String> = Ok(1)\n    value.\n}\n";
+    let server = server_with(uri, source);
+    let params = position_params(uri, 2, 10);
+    let labels = completion_labels(&server.completion(&params));
+    let expected = gossamer_std::registry::module("std::result")
+        .expect("std::result registry entry")
+        .items
+        .iter()
+        .filter(|item| item.kind == gossamer_std::registry::StdItemKind::Function)
+        .map(|item| item.name)
+        .collect::<std::collections::BTreeSet<_>>();
+    let actual = labels
+        .iter()
+        .map(String::as_str)
+        .filter(|name| expected.contains(name))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        actual, expected,
+        "Result completion drifted from std::result"
+    );
+}
+
+#[test]
 fn hashset_completion_never_leaks_hashmap_methods() {
     let uri = "file:///set.gos";
     let source = "fn main() {\n    let mut values: HashSet<i64> = HashSet::new()\n    values.\n}\n";

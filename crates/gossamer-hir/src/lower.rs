@@ -94,6 +94,7 @@ pub fn lower_source_file(
     // The serde stubs' bodies are ordinary code the passes below treat like
     // any other.
     crate::serde::generate_serde_bodies(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
+    crate::carrier::desugar_carrier_combinators(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
     crate::par::desugar_parallel_adapters(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
     crate::fuse::fuse_iter_pipelines(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
     // After fusing, so a pipeline spliced into a loop writes its bindings

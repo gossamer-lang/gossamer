@@ -1,0 +1,13 @@
+declared: {"userName":"alice","age":30,"active":true,"tags":["admin","ops"],"address":{"city":"denver","zip":"80205"},"nickname":null,"retries":3}
+sorted:   {"active":true,"address":{"city":"denver","zip":"80205"},"age":30,"nickname":null,"retries":3,"tags":["admin","ops"],"userName":"alice"}
+pretty:
+{
+  "city": "denver",
+  "zip": "80205"
+}
+bob 41 None 3
+rejected: age: expected i64, found string
+rejected: missing field `address`
+2 events, first Login { user: "a" }
+[{"kind":"Login","user":"a"},{"kind":"Logout","user":"a"}]
+{"a": 1, "b": 2}

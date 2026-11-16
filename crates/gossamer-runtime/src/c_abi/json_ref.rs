@@ -20,14 +20,23 @@ const SCAN_MEMBERS: u32 = 8;
 /// The key nodes of an object, in key order, the last of equal keys kept.
 type MemberIndex = OnceLock<Box<[u32]>>;
 
-/// A parsed document: its text, its tape, and each object's member index,
-/// built on first need.
+/// An element below this index is reached by stepping from the first; one at
+/// or past it through the array's element index.
+const SCAN_ELEMENTS: u32 = 8;
+
+/// The element nodes of an array, in document order.
+type ElementIndex = OnceLock<Box<[u32]>>;
+
+/// A parsed document: its text, its tape, and each object's member index and
+/// each array's element index, built on first need.
 pub(crate) struct ParsedTape {
     text: Box<str>,
     tape: Tape,
     /// One slot per object, the table itself made by the first read that
     /// needs any index.
     members: OnceLock<Box<[MemberIndex]>>,
+    /// One slot per array, made like `members`.
+    elements: OnceLock<Box<[ElementIndex]>>,
 }
 
 impl ParsedTape {
@@ -37,6 +46,7 @@ impl ParsedTape {
             text: text.into(),
             tape,
             members: OnceLock::new(),
+            elements: OnceLock::new(),
         }
     }
 
@@ -97,6 +107,22 @@ impl ParsedTape {
                 .map(|(_, &(_, node))| node)
                 .collect()
         })
+    }
+
+    /// The node of element `at` of the array at `index`, which has more than
+    /// `at` elements.
+    fn element(&self, index: u32, at: u32) -> Option<u32> {
+        if at < SCAN_ELEMENTS {
+            return self.children(index).nth(at as usize);
+        }
+        let ordinal = self.tape.arrays.binary_search(&index).ok()?;
+        let table = self
+            .elements
+            .get_or_init(|| self.tape.arrays.iter().map(|_| OnceLock::new()).collect());
+        table[ordinal]
+            .get_or_init(|| self.children(index).collect())
+            .get(at as usize)
+            .copied()
     }
 
     /// The value of the member `key` of the object at `index`.
@@ -308,12 +334,31 @@ impl<'a> JsonRef<'a> {
                 if index >= t.tape.count(i) {
                     return None;
                 }
-                t.children(i)
-                    .nth(index as usize)
-                    .map(|at| Self::Tape(t, at))
+                t.element(i, index).map(|at| Self::Tape(t, at))
             }
             Self::Tape(..) => None,
         }
+    }
+
+    /// Whether this is an array.
+    pub(crate) fn is_array(self) -> bool {
+        match self {
+            Self::Value(v) => v.is_array(),
+            Self::Tape(t, i) => t.node(i).kind() == TapeKind::Array,
+        }
+    }
+
+    /// The value an RFC 6901 JSON Pointer names below this one.
+    pub(crate) fn pointer(self, pointer: &str) -> Option<Self> {
+        gossamer_core::json::pointer_tokens(pointer)?
+            .iter()
+            .try_fold(self, |at, token| {
+                if at.is_array() {
+                    at.at(gossamer_core::json::pointer_index(token)?)
+                } else {
+                    at.get(token)
+                }
+            })
     }
 
     /// The elements of an array.

@@ -34,7 +34,8 @@ pub use gossamer_ast::cfg::{
 pub use def_id::{CrateId, DefId, DefIdGenerator, DefKind, ModId};
 pub use diagnostic::{ResolveDiagnostic, ResolveError};
 pub use named_args::{
-    DeferredMethodCall, resolve_deferred_method_arguments, resolve_named_arguments,
+    DeferredMethodCall, StdParam, StdParams, resolve_deferred_method_arguments,
+    resolve_named_arguments,
 };
 pub use numeric_limits::{LimitConstant, LimitLiteral, limit_constant};
 pub use patterns::settle_single_name_patterns;

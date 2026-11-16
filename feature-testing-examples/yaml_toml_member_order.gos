@@ -1,0 +1,37 @@
+// Typed `to_yaml` / `to_toml` write a struct's members in declaration order,
+// as `json::encode` does, and by key under `sort: true`; a document converted
+// from JSON text (`yaml::from_json_text`, `toml::from_json_text`) holds its
+// members by key, as a `json::Value` does. Integers past `i64::MAX` stay exact
+// in YAML and are refused by TOML; each `yaml::parse_all` document is a
+// `json::Value`.
+// Bit-identical on the VM, Cranelift, and LLVM tiers.
+
+use std::encoding::{json, toml, yaml}
+
+struct Limits { max: u64, min: i64 }
+
+struct Server { name: String, port: i64, limits: Limits, ratio: f64 }
+
+fn main() {
+    let s = Server { name: "edge", port: 8080, limits: Limits { max: 7, min: -2 }, ratio: 1.0 }
+    println(yaml::to_yaml::<Server>(s).unwrap_or("yaml failed"))
+    println(toml::to_toml::<Server>(s).unwrap_or("toml failed"))
+    println(yaml::encode::<Server>(s, sort: true).unwrap_or("yaml failed"))
+    println(toml::encode::<Server>(s, sort: true).unwrap_or("toml failed"))
+
+    let big = Limits { max: 18446744073709551615, min: 0 }
+    println(f"{yaml::to_yaml::<Limits>(big)}")
+    println(f"{toml::to_toml::<Limits>(big)}")
+    println(f"{yaml::from_yaml::<Limits>("max: 18446744073709551615\nmin: 1\n")}")
+
+    let doc = json::parse("{\"g\":18446744073709551615}").unwrap()
+    println(f"{yaml::encode(doc)}")
+    println(f"{yaml::from_json_text("{\"z\":1,\"a\":null}")}")
+    println(f"{toml::from_json_text("{\"z\":1,\"a\":null}")}")
+    println(f"{toml::from_json_text("{\"z\":1,\"a\":2}")}")
+
+    let docs = yaml::parse_all("b: 1\na: [x, 2.5]\n---\nc: 18446744073709551615\n").unwrap()
+    for d in docs {
+        println(f"keys={json::keys(d)} len={json::len(d)} c={json::get(d, "c").map(json::as_u64)}")
+    }
+}

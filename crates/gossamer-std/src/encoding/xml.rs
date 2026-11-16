@@ -8,7 +8,6 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use quick_xml::Reader;
 use quick_xml::events::Event;
@@ -16,33 +15,9 @@ use quick_xml::writer::Writer;
 
 use crate::errors::Error;
 
-const DEFAULT_MAX_DEPTH: usize = 128;
-const DEFAULT_MAX_SIZE: usize = 16 * 1024 * 1024;
+pub use gossamer_core::xml::NOT_A_TREE;
 
-static MAX_DEPTH: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_DEPTH);
-static MAX_SIZE: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_SIZE);
-
-/// Overrides the process-wide cap on parser nesting depth.
-pub fn set_max_depth(n: usize) {
-    MAX_DEPTH.store(n, Ordering::Relaxed);
-}
-
-/// Overrides the process-wide cap on parser input bytes.
-pub fn set_max_size(n: usize) {
-    MAX_SIZE.store(n, Ordering::Relaxed);
-}
-
-/// Current cap on parser nesting depth.
-#[must_use]
-pub fn max_depth() -> usize {
-    MAX_DEPTH.load(Ordering::Relaxed)
-}
-
-/// Current cap on parser input bytes.
-#[must_use]
-pub fn max_size() -> usize {
-    MAX_SIZE.load(Ordering::Relaxed)
-}
+pub use gossamer_core::xml::{max_depth, max_size, set_max_depth, set_max_size};
 
 /// A single attribute name → value pair.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,7 +111,8 @@ pub fn parse(src: &str) -> Result<Node, Error> {
             src.len()
         )));
     }
-    let mut tree = TreeBuilder::new(max_depth(), cap);
+    let budget = gossamer_core::xml::entity_expansion_budget(src.len(), cap);
+    let mut tree = TreeBuilder::new(max_depth(), budget);
     tree.feed(src, 0).map_err(Error::new)?;
     tree.finish().map_err(Error::new)
 }
@@ -165,14 +141,14 @@ struct TreeBuilder {
 }
 
 impl TreeBuilder {
-    fn new(depth_cap: usize, size_cap: usize) -> Self {
+    fn new(depth_cap: usize, expansion_budget: usize) -> Self {
         Self {
             stack: Vec::new(),
             root: None,
             text: String::new(),
             entities: HashMap::new(),
             depth_cap,
-            expansion_budget: size_cap,
+            expansion_budget,
         }
     }
 
@@ -273,7 +249,7 @@ impl TreeBuilder {
             ));
         }
         if text.len() > self.expansion_budget {
-            return Err("xml: entity expansion exceeds max_size".to_string());
+            return Err(gossamer_core::xml::EXPANSION_EXCEEDED.to_string());
         }
         self.expansion_budget -= text.len();
         Ok(Some(text.clone()))

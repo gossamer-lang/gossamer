@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::cast_sign_loss)]
-#![allow(dead_code)]
 
 //! Runtime support for `std::trace` - the explicit Tracer / Span
 //! handle surface and OTLP JSON export.

@@ -94,10 +94,10 @@ fn reductions() {
 
 fn encoding() {
     let p = Pt { x: 0.1, y: 0.1, v: #[0.2, 1.5], o: Some(0.3) }
-    println("{}", json::encode(p))
+    println("{}", json::encode(p).unwrap())
     println("{}", to_json::<Pt>(p))
     let f: f32 = 0.1
-    println("{} {}", json::encode(f), json::encode(#[f]))
+    println("{} {}", json::encode(f).unwrap(), json::encode(#[f]).unwrap())
     match from_json::<Pt>("{\"x\": 0.1, \"y\": 0.1, \"v\": [0.2], \"o\": 0.7}") {
         Ok(q) => println("{} {} {}", q.x as f64, q.x + 0.2 == 0.3, q.o.unwrap_or(0.0) as f64)
         Err(e) => println("err {}", e)

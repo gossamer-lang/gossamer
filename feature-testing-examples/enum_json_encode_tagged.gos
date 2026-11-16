@@ -38,10 +38,10 @@ fn main() {
         history: #[Layout::Empty, Layout::One("x"), group]
         pinned: Some(Layout::Empty)
     }
-    let encoded = json::encode(saved)
+    let encoded = json::encode(saved).unwrap()
     println(encoded)
     let decoded = json::decode::<Saved>(encoded).unwrap()
     println(decoded.root == saved.root && decoded.history == saved.history)
-    println(json::encode(Saved { root: Layout::Empty, history: #[], pinned: None }))
-    println(json::encode(Sized { layout: Layout::One("y"), sizes: { 10: 1, 2: 3 } }))
+    println(json::encode(Saved { root: Layout::Empty, history: #[], pinned: None }).unwrap())
+    println(json::encode(Sized { layout: Layout::One("y"), sizes: { 10: 1, 2: 3 } }).unwrap())
 }

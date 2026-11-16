@@ -27,7 +27,7 @@
 
 use std::io;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -87,6 +87,29 @@ fn globals() -> &'static Globals {
             poller_shutdown: AtomicBool::new(false),
         }
     })
+}
+
+/// The worker cap `set_max_procs` set, or `0` for the default.
+static MAX_PROCS: AtomicUsize = AtomicUsize::new(0);
+
+/// The most workers that run goroutines at once: what [`set_max_procs`]
+/// set, else `GOSSAMER_MAX_PROCS`, else the core count.
+#[must_use]
+pub fn max_procs() -> usize {
+    match MAX_PROCS.load(Ordering::Relaxed) {
+        0 => default_workers(),
+        n => n,
+    }
+}
+
+/// Caps the workers that run goroutines at once at `n`, as Go's
+/// `runtime.GOMAXPROCS(n)` does, answering the cap before the call. `0`
+/// restores the default. Goroutines themselves stay unbounded.
+pub fn set_max_procs(n: usize) -> usize {
+    let prev = max_procs();
+    MAX_PROCS.store(n, Ordering::Relaxed);
+    scheduler().set_worker_count(max_procs());
+    prev
 }
 
 fn default_workers() -> usize {

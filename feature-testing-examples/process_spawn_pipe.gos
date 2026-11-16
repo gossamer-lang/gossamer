@@ -72,7 +72,7 @@ mod tests {
                 let _ = testing::check_eq(out.code, 0, "exit code 0")
                 let _ = testing::check(out.stdout.contains("gossamer"), "stdout contains gossamer")
             }
-            Err(e) => { let _ = testing::check(false, e)
+            Err(e) => { let _ = testing::check(false, e.to_string())
             }
         }
     }
@@ -82,7 +82,7 @@ mod tests {
         match exec::run("true", Vec::from([])) {
             Ok(out) => { let _ = testing::check_eq(out.code, 0, "true exits 0")
             }
-            Err(e) => { let _ = testing::check(false, e)
+            Err(e) => { let _ = testing::check(false, e.to_string())
             }
         }
     }
@@ -92,7 +92,7 @@ mod tests {
         match exec::run("false", Vec::from([])) {
             Ok(out) => { let _ = testing::check(out.code != 0, "false exits non-zero")
             }
-            Err(e) => { let _ = testing::check(false, e)
+            Err(e) => { let _ = testing::check(false, e.to_string())
             }
         }
     }
@@ -102,7 +102,7 @@ mod tests {
         match exec::run("sh", Vec::from(["-c", "echo hello"])) {
             Ok(out) => { let _ = testing::check(out.stdout.contains("hello"), "sh -c echo")
             }
-            Err(e) => { let _ = testing::check(false, e)
+            Err(e) => { let _ = testing::check(false, e.to_string())
             }
         }
     }

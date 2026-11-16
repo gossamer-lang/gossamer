@@ -108,8 +108,10 @@ use super::*;
 
 pub(crate) fn install_encoding_toml(globals: &mut Vec<(&'static str, Value)>) {
     for (short, call) in [
-        ("to_json", builtin_toml_to_json as BuiltinFnPub),
-        ("from_json", builtin_toml_from_json),
+        ("parse", builtin_toml_parse as BuiltinFnPub),
+        ("encode", builtin_toml_encode),
+        ("to_json_text", builtin_toml_to_json_text),
+        ("from_json_text", builtin_toml_from_json_text),
         ("is_valid", builtin_toml_is_valid),
         ("pretty", builtin_toml_pretty),
     ] {
@@ -120,19 +122,41 @@ pub(crate) fn install_encoding_toml(globals: &mut Vec<(&'static str, Value)>) {
     }
 }
 
-pub(crate) fn builtin_toml_to_json(args: &[Value]) -> RuntimeResult<Value> {
+/// `toml::parse(text)`: the document as a `json::Value`.
+pub(crate) fn builtin_toml_parse(args: &[Value]) -> RuntimeResult<Value> {
     let text = args.first().and_then(as_str).unwrap_or("");
-    Ok(match gossamer_std::encoding_toml::to_json(text) {
-        Ok(s) => crate::builtins::ok_variant(Value::String(s.into())),
-        Err(e) => crate::builtins::err_variant(format!("toml::to_json: {e}")),
+    Ok(match gossamer_std::encoding_toml::parse(text) {
+        Ok(value) => ok_variant(Value::Json(Arc::new(crate::value::JsonInner::new(value)))),
+        Err(e) => err_variant(format!("toml::parse: {e}")),
     })
 }
 
-pub(crate) fn builtin_toml_from_json(args: &[Value]) -> RuntimeResult<Value> {
+/// `toml::encode(value)`: a `json::Value` object as a TOML document.
+pub(crate) fn builtin_toml_encode(args: &[Value]) -> RuntimeResult<Value> {
+    let value = match args.first() {
+        Some(Value::Json(value)) => value.as_value().clone(),
+        Some(other) => crate::builtins::gossamer_to_json_value(other),
+        None => gossamer_std::json::Value::Null,
+    };
+    Ok(match gossamer_std::encoding_toml::encode(&value) {
+        Ok(s) => ok_variant(Value::String(s.into())),
+        Err(e) => err_variant(format!("toml::encode: {e}")),
+    })
+}
+
+pub(crate) fn builtin_toml_to_json_text(args: &[Value]) -> RuntimeResult<Value> {
     let text = args.first().and_then(as_str).unwrap_or("");
-    Ok(match gossamer_std::encoding_toml::from_json(text) {
-        Ok(s) => crate::builtins::ok_variant(Value::String(s.into())),
-        Err(e) => crate::builtins::err_variant(format!("toml::from_json: {e}")),
+    Ok(match gossamer_std::encoding_toml::to_json_text(text) {
+        Ok(s) => ok_variant(Value::String(s.into())),
+        Err(e) => err_variant(format!("toml::to_json_text: {e}")),
+    })
+}
+
+pub(crate) fn builtin_toml_from_json_text(args: &[Value]) -> RuntimeResult<Value> {
+    let text = args.first().and_then(as_str).unwrap_or("");
+    Ok(match gossamer_std::encoding_toml::from_json_text(text) {
+        Ok(s) => ok_variant(Value::String(s.into())),
+        Err(e) => err_variant(format!("toml::from_json_text: {e}")),
     })
 }
 

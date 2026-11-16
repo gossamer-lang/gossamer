@@ -661,19 +661,25 @@ fn for_over_a_wrapper_is_rejected() {
 fn refused_serde_targets_report_without_leaking_a_synthesized_name() {
     let cases = [
         (
-            "generic struct",
-            "struct W<T> { v: T }\nfn main() { let _ = to_json::<W<i64>>(W { v: 1 }) }",
+            "generic struct without arguments",
+            "struct W<T> { v: T }\nfn main() { let _ = to_json::<W>(W { v: 1 }) }",
             "GP0039",
         ),
         (
-            "generic enum",
-            "enum E<T> { A(T), B }\nfn main() { let _ = to_json::<E<i64>>(E::A(1)) }",
+            "type parameter",
+            "fn enc<T>(v: T) -> String { to_json::<T>(v).unwrap_or(\"\") }\n\
+             fn main() { let _ = enc(1) }",
             "GP0039",
         ),
         (
-            "not a struct",
+            "not a type",
             "fn main() { let _ = to_json::<Nope>(1) }",
-            "GP0039",
+            "GR0001",
+        ),
+        (
+            "uncodable part",
+            "fn main() { let _ = to_json::<Vec<Fn(i64) -> i64>>(#[]) }",
+            "GT0124",
         ),
         (
             "unserializable field",
@@ -707,6 +713,36 @@ fn refused_serde_targets_report_without_leaking_a_synthesized_name() {
             if rendered.contains("__gos_") {
                 failures.push(format!("{name}: leaked a synthesized name: {rendered}"));
             }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A serde target that is a generic instantiation, a collection, or a scalar
+/// checks cleanly: each call has a codec of its own.
+#[test]
+fn compound_and_generic_serde_targets_check_cleanly() {
+    let sources = [
+        "struct W<T> { v: T }\nfn main() { let _ = to_json::<W<i64>>(W { v: 1 }) }",
+        "enum E<T> { A(T), B }\nfn main() { let _ = to_json::<E<i64>>(E::A(1)) }",
+        "struct P { x: i64 }\nfn main() { let _ = from_json::<Vec<P>>(\"[]\") }",
+        "fn main() { let _ = from_json::<Map<String, (i64, bool)>>(\"{}\") }",
+        "fn main() { let _ = from_json::<Option<[f64; 2]>>(\"null\") }",
+    ];
+    let mut failures = Vec::new();
+    for source in sources {
+        let augmented = gossamer_parse::autoderive::augment_source(source);
+        let mut map = SourceMap::new();
+        let file = map.add_file("serde_targets.gos".to_string(), augmented);
+        let result = check_frontend(map.source(file), file);
+        let errors: Vec<String> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.code.as_str().starts_with('G') && !d.code.as_str().starts_with("GL"))
+            .map(|d| format!("{} {}", d.code.as_str(), d.title))
+            .collect();
+        if !errors.is_empty() {
+            failures.push(format!("{source}: {errors:?}"));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

@@ -23,10 +23,10 @@ fn main() {
         entries: #[Entry { name: "one", scratch: 7, tags: #["a"] }, Entry { name: "two", scratch: 9, tags: #[] }]
         total: 2
     }
-    let text = json::encode(report)
+    let text = json::encode(report).unwrap()
     println(text)
-    println(json::encode_pretty(report))
+    println(json::encode_pretty(report).unwrap())
     let back = json::decode::<Report>(text).unwrap()
     println(f"{back.artifact} {back.entries.len()} {back.entries[0].name} {back.entries[1].scratch}")
-    println(json::encode(Entry { name: "solo", scratch: 1, tags: #["x", "y"] }))
+    println(json::encode(Entry { name: "solo", scratch: 1, tags: #["x", "y"] }).unwrap())
 }

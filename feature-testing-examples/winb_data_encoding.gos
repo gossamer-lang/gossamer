@@ -90,23 +90,23 @@ fn main() {
     // --- JSON dynamic parse / render / precision / specials ---
     match json::parse("{\"a\":1,\"b\":[true,null,3.5],\"s\":\"x\\ty\"}") {
         Ok(v) => {
-            println("json render = {}", json::render(v))
+            println("json render = {}", json::encode(v).unwrap())
             println("json len = {}", json::len(v))
         }
         Err(e) => println("json parse err {}", e)
     }
-    println("json encode int = {}", json::encode(42))
-    println("json encode arr = {}", json::encode(#[1, 2, 3]))
-    println("json encode neg = {}", json::encode(-12345))
+    println("json encode int = {}", json::encode(42).unwrap())
+    println("json encode arr = {}", json::encode(#[1, 2, 3]).unwrap())
+    println("json encode neg = {}", json::encode(-12345).unwrap())
     // number precision: large-but-exact int (2^53-1) + float.
     // Integers above 2^53 are a known VM/AOT divergence (see report).
     match json::parse("{\"big\":9007199254740991,\"f\":0.1}") {
-        Ok(v) => println("json big/f render = {}", json::render(v))
+        Ok(v) => println("json big/f render = {}", json::encode(v).unwrap())
         Err(e) => println("json err {}", e)
     }
 
     // --- YAML text converters (canonical short-path form) ---
-    match yaml::to_json("a: 1\nb: two\nc: [1, 2, 3]\n") {
+    match yaml::to_json_text("a: 1\nb: two\nc: [1, 2, 3]\n") {
         Ok(j) => println("yaml->json = {}", j)
         Err(e) => println("yaml->json err {}", e)
     }
@@ -114,7 +114,7 @@ fn main() {
     println("yaml invalid = {}", yaml::is_valid("a: b: c: ::"))
     // dynamic parse rendered via the documented renderer (json::encode).
     match encoding::yaml::parse("x: 7\n") {
-        Ok(v) => println("yaml parse->json = {}", json::encode(v))
+        Ok(v) => println("yaml parse->json = {}", json::encode(v).unwrap())
         Err(e) => println("yaml parse err {}", e)
     }
 
@@ -122,10 +122,10 @@ fn main() {
     let toml_src = "port = 8080\nhost = \"localhost\"\nflag = true\n"
     println("toml valid = {}", toml::is_valid(toml_src))
     println("toml invalid = {}", toml::is_valid("x == 1"))
-    match toml::to_json(toml_src) {
+    match toml::to_json_text(toml_src) {
         Ok(j) => {
             println("toml->json has port = {}", j.contains("\"port\":8080"))
-            match toml::from_json(j) {
+            match toml::from_json_text(j) {
                 Ok(t) => println("json->toml has host = {}", t.contains("host"))
                 Err(e) => println("json->toml err {}", e)
             }

@@ -315,3 +315,14 @@ pub fn syscall_unmark() {}
 pub fn on_worker() -> bool {
     false
 }
+
+/// The wasm runtime runs goroutines on one worker.
+#[must_use]
+pub fn max_procs() -> usize {
+    1
+}
+
+/// The wasm runtime runs goroutines on one worker whatever is asked.
+pub fn set_max_procs(_n: usize) -> usize {
+    1
+}

@@ -1,0 +1,91 @@
+// The encoding modules' shared surface: every encoder answers a `Result`
+// (`xml::encode` an `Err` for a value that is not an element tree), the
+// `is_valid` checks, `json::at` / `json::len` answering `Option`s, typed
+// `yaml::` / `toml::` codecs by the `json::` names, `sort: true` on every
+// encoder, `json::to_value`, the text converters (`to_json_text`,
+// `from_json_text`, members by key), `toml::parse` / `toml::encode`,
+// `yaml::encode_all`, and the per-format parser caps. A `yaml::` or
+// `toml::` encode of any value but a `json::Value` writes it as
+// `json::encode` does, and TOML leaves out an `Option` member that is
+// `None`. A binding's type names the target of an untyped `json::decode`.
+// Bit-identical on the VM, Cranelift, and LLVM tiers.
+
+use std::encoding::{json, toml, xml, yaml}
+use std::errors
+
+struct Limits {
+    max: u64
+    min: i64
+}
+
+struct Server {
+    name: String
+    port: i64
+    limits: Limits
+    ratio: f64
+}
+
+struct Owner {
+    name: String
+    email: Option<String>
+}
+
+fn first(owners: Vec<Owner>) -> Owner {
+    owners[0]
+}
+
+fn main() -> Result<(), errors::Error> {
+    let s = Server { name: "edge", port: 8080, limits: Limits { max: 7, min: -2 }, ratio: 1.0 }
+    println(json::encode(s)?)
+    println(json::encode(s, sort: true)?)
+    println(json::encode::<Server>(s, sort: true)?)
+    print(yaml::encode::<Server>(s)?)
+    print(yaml::encode::<Server>(s, sort: true)?)
+    print(toml::encode::<Server>(s, sort: true)?)
+    let back: Server = yaml::decode("name: x\nport: 1\nratio: 2.5\nlimits:\n  max: 3\n  min: -1\n")?
+    println(f"{back.name} {back.port} {back.ratio} {back.limits.max}")
+    let t: Server = toml::decode("name = \"y\"\nport = 2\nratio = 1.5\n[limits]\nmax = 9\nmin = 0\n")?
+    println(f"{t.name} {t.limits.max}")
+    println(f"{yaml::decode::<Server>("name: [").is_err()} {toml::decode::<Server>("name = ").is_err()}")
+    println(f"{toml::encode::<Vec<i64>>(#[1])}")
+
+    let v = json::to_value(s)?
+    println(f"{json::pointer(v, "/limits/max")} {json::to_value(#[1, 2])?}")
+    let arr = json::parse("[10, 20]")?
+    println(f"{json::at(arr, 1)} {json::at(arr, 2)} {json::len(arr)} {json::len(json::at(arr, 0).unwrap())}")
+    println(f"{json::is_valid("[1")} {json::is_valid("[1]")} {xml::is_valid("<a>")} {xml::is_valid("<a/>")}")
+
+    let tree = xml::parse("<a x=\"1\"><b>t</b></a>")?
+    println(xml::encode(tree)?)
+    println(f"{xml::encode(arr).is_err()}")
+
+    print(yaml::from_json_text("{\"z\":1,\"a\":null}")?)
+    println(yaml::to_json_text("z: 1\na: [true]\n")?)
+    print(toml::from_json_text("{\"z\":1,\"a\":\"x\"}")?)
+    println(toml::to_json_text("z = 1\na = 2\n")?)
+    let doc = toml::parse("b = 1\na = [true]\n")?
+    println(f"{json::keys(doc)}")
+    print(toml::encode(doc)?)
+    let docs = yaml::parse_all("a: 1\n---\nb: 2\n")?
+    print(yaml::encode_all(docs)?)
+
+    let owners = #[Owner { name: "ann", email: None }, Owner { name: "bo", email: Some("b@x") }]
+    print(toml::encode(owners[0])?)
+    print(toml::encode(first(owners))?)
+    print(yaml::encode(owners[1])?)
+    print(yaml::encode(owners[0], sort: true)?)
+    println(json::encode(owners[0])?)
+    let back: Vec<Owner> = json::decode("[{\"name\":\"cy\",\"email\":null}]")?
+    println(f"{back[0].name} {back[0].email}")
+    let dynamic: json::Value = json::decode("[1]")?
+    println(f"{json::len(dynamic)} {dynamic.len()} {dynamic.at(0)} {dynamic.at(5)}")
+
+    yaml::set_max_depth(1)
+    println(f"{yaml::parse("a: {b: 1}").is_err()}")
+    yaml::set_max_depth(128)
+    xml::set_max_size(5)
+    println(f"{xml::parse("<a>hello</a>").is_err()}")
+    xml::set_max_size(0)
+    println(f"{xml::parse("<a>hello</a>").is_ok()}")
+    Ok(())
+}

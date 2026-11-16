@@ -355,6 +355,18 @@ const SPECS: &[Spec] = &[
     // reads back through `json::as_u64`; a map keyed by an integer, a `bool`,
     // or a `char` renders its keys as member names.
     spec("feature-testing-examples/json_unsigned_and_map_keys.gos"),
+    // Typed decode error paths, extended serde attributes, any-type targets,
+    // and schema-free navigation (0.80.0).
+    spec("feature-testing-examples/json_decode_error_paths.gos"),
+    spec("feature-testing-examples/json_serde_attributes_extended.gos"),
+    spec("feature-testing-examples/json_typed_targets.gos"),
+    spec("feature-testing-examples/json_dynamic_navigation.gos"),
+    spec("feature-testing-examples/struct_field_shorthand.gos"),
+    spec("feature-testing-examples/runtime_max_procs.gos"),
+    spec("feature-testing-examples/encoding_api_surface.gos"),
+    spec("feature-testing-examples/carrier_fold_combinators.gos"),
+    spec("feature-testing-examples/user_module_shadows_serde_calls.gos"),
+    spec("feature-testing-examples/carrier_payload_display.gos"),
     // A `Map` field owns its table outright, so every struct built from, copied
     // from, or handed a map reads its own; a lent carrier pushed into a `Vec`
     // gives the vector a share of its own.
@@ -2249,6 +2261,8 @@ const SPECS: &[Spec] = &[
     // Typed serde over enums, and `#[rename]` / `#[skip]` / `#[default]`.
     spec("feature-testing-examples/serde_enums_and_field_attrs.gos"),
     spec("feature-testing-examples/json_encode_field_attributes.gos"),
+    // YAML / TOML member order, exact u64, and `parse_all` documents as `json::Value`.
+    spec("feature-testing-examples/yaml_toml_member_order.gos"),
     spec("feature-testing-examples/vec_rebound_from_branch_local.gos"),
     // Typed serde of `char`, a newtype, and a user enum as the encoded value.
     spec("feature-testing-examples/serde_chars_and_top_level_enums.gos"),

@@ -568,6 +568,13 @@ impl ResolveDiagnostic {
             if let Some(help) = declined {
                 return out.with_help(help);
             }
+            if let Some(renamed) = crate::stdlib_exports::renamed_std_function(name) {
+                return out.with_suggestion(Suggestion::replacement(
+                    location,
+                    format!("`{name}` is now `{renamed}`"),
+                    renamed,
+                ));
+            }
             if let Some(replacement) = crate::stdlib_exports::canonical_collection_name(name) {
                 return out.with_help(format!(
                     "`{replacement}` is the one spelling for this type; write `{replacement}` \

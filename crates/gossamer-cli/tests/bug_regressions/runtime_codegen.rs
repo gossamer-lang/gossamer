@@ -820,7 +820,7 @@ fn main() {
 
 #[test]
 fn json_render_adt_text_branch_does_not_free_uninit_pairs_vec() {
-    // json::render(&adt) builds a temporary GosVec (pairs_vec) inside
+    // json::encode(&adt) builds a temporary GosVec (pairs_vec) inside
     // lower_json_render_adt.  The insert_drops_at_returns pass used to
     // emit a gos_rt_vec_free for pairs_vec at every Return block -
     // including the text-mode arm where pairs_vec was never initialised.
@@ -834,7 +834,7 @@ struct Info { num: i64, label: String }
 
 fn show(item: Info, as_json: bool) {
     if as_json {
-        println("{}", json::render(item))
+        println("{}", json::encode(item).unwrap())
     } else {
         println("num={} label={}", item.num, item.label)
     }
@@ -1744,7 +1744,7 @@ fn escaped() -> json::Value {
     let holder = decoded("{\"raw\":{\"escaped\":true}}")
     holder.raw
 }
-fn show(holder: Holder) -> String { json::render(holder.raw) }
+fn show(holder: Holder) -> String { json::encode(holder.raw).unwrap() }
 fn enum_text(node: Node) -> String {
     match node { Node::Payload(holder) => show(holder), _ => "empty" }
 }
@@ -1755,12 +1755,12 @@ fn main() {
         let second = first
         let mut changed = second
         changed = decoded("{\"raw\":[1,2]}")
-        println("{} {} {}", json::render(raw), show(first), show(changed))
+        println("{} {} {}", json::encode(raw).unwrap(), show(first), show(changed))
         let nested = Nested { node: first }
         let nested_copy = nested
         println("nested {}", show(nested_copy.node))
         let escaped = escaped()
-        println("escaped {}", json::render(escaped))
+        println("escaped {}", json::encode(escaped).unwrap())
         let holders = #[first, second]
         let held = holders[0]
         println("vec {} {}", show(held), show(holders[1]))

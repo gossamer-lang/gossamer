@@ -79,6 +79,16 @@ pub const RUNTIME: StdModule = StdModule {
             doc: "Requests collection of unreachable reference cycles; returns `()`.",
         },
         StdItem {
+            name: "max_procs",
+            kind: StdItemKind::Function,
+            doc: "The most worker threads that run goroutines at once: what `set_max_procs` set, else `GOSSAMER_MAX_PROCS`, else the core count.",
+        },
+        StdItem {
+            name: "set_max_procs",
+            kind: StdItemKind::Function,
+            doc: "Caps the worker threads that run goroutines at once and answers the cap before the call, as Go's `runtime.GOMAXPROCS`; a value below 1 only reads it. Goroutines themselves stay unbounded.",
+        },
+        StdItem {
             name: "cycle_collection_supported",
             kind: StdItemKind::Function,
             doc: "Reports whether this execution tier reclaims unreachable reference cycles.",

@@ -113,17 +113,17 @@ pub(crate) fn install_encoding_yaml(globals: &mut Vec<(&'static str, Value)>) {
         ("parse", builtin_yaml_parse as BuiltinFnPub),
         ("parse_all", builtin_yaml_parse_all),
         ("encode", builtin_yaml_encode),
+        ("encode_all", builtin_yaml_encode_all),
     ] {
         let q: &'static str = Box::leak(format!("encoding::yaml::{short}").into_boxed_str());
         globals.push((q, crate::builtins::builtin_pub(q, call)));
     }
-    // Text-shaped converters mirroring `toml::to_json` / `from_json`.
-    // The auto-derive synthesizer composes these with `from_json` to
-    // emit `<Type>::from_yaml` / `to_yaml` without per-tier glue.
     for (short, call) in [
-        ("to_json", builtin_yaml_to_json as BuiltinFnPub),
-        ("from_json", builtin_yaml_from_json),
+        ("to_json_text", builtin_yaml_to_json_text as BuiltinFnPub),
+        ("from_json_text", builtin_yaml_from_json_text),
         ("is_valid", builtin_yaml_is_valid),
+        ("set_max_size", builtin_yaml_set_max_size),
+        ("set_max_depth", builtin_yaml_set_max_depth),
     ] {
         let q: &'static str = Box::leak(format!("encoding::yaml::{short}").into_boxed_str());
         globals.push((q, crate::builtins::builtin_pub(q, call)));
@@ -132,20 +132,49 @@ pub(crate) fn install_encoding_yaml(globals: &mut Vec<(&'static str, Value)>) {
     }
 }
 
-pub(crate) fn builtin_yaml_to_json(args: &[Value]) -> RuntimeResult<Value> {
+pub(crate) fn builtin_yaml_to_json_text(args: &[Value]) -> RuntimeResult<Value> {
     let text = args.first().and_then(as_str).unwrap_or("");
-    Ok(match gossamer_std::encoding::yaml::to_json(text) {
+    Ok(match gossamer_std::encoding::yaml::to_json_text(text) {
         Ok(s) => ok_variant(Value::String(s.into())),
-        Err(e) => err_variant(format!("yaml::to_json: {e}")),
+        Err(e) => err_variant(format!("yaml::to_json_text: {e}")),
     })
 }
 
-pub(crate) fn builtin_yaml_from_json(args: &[Value]) -> RuntimeResult<Value> {
+pub(crate) fn builtin_yaml_from_json_text(args: &[Value]) -> RuntimeResult<Value> {
     let text = args.first().and_then(as_str).unwrap_or("");
-    Ok(match gossamer_std::encoding::yaml::from_json(text) {
+    Ok(match gossamer_std::encoding::yaml::from_json_text(text) {
         Ok(s) => ok_variant(Value::String(s.into())),
-        Err(e) => err_variant(format!("yaml::from_json: {e}")),
+        Err(e) => err_variant(format!("yaml::from_json_text: {e}")),
     })
+}
+
+/// `yaml::encode_all(values)`: one document per value, as `parse_all`
+/// reads them back.
+pub(crate) fn builtin_yaml_encode_all(args: &[Value]) -> RuntimeResult<Value> {
+    let values: Vec<gossamer_std::encoding::yaml::Value> = match args.first() {
+        Some(Value::Array(items)) => items.iter().map(gossamer_value_to_yaml).collect(),
+        _ => Vec::new(),
+    };
+    Ok(match gossamer_std::encoding::yaml::encode_all(&values) {
+        Ok(s) => ok_variant(Value::String(s.into())),
+        Err(e) => err_variant(format!("yaml::encode_all: {e}")),
+    })
+}
+
+/// `yaml::set_max_size(bytes)`.
+pub(crate) fn builtin_yaml_set_max_size(args: &[Value]) -> RuntimeResult<Value> {
+    if let Some(Value::Int(n)) = args.first() {
+        gossamer_std::encoding::yaml::set_max_size(gossamer_std::json::cap_from_program(*n));
+    }
+    Ok(Value::Unit)
+}
+
+/// `yaml::set_max_depth(levels)`.
+pub(crate) fn builtin_yaml_set_max_depth(args: &[Value]) -> RuntimeResult<Value> {
+    if let Some(Value::Int(n)) = args.first() {
+        gossamer_std::encoding::yaml::set_max_depth(gossamer_std::json::cap_from_program(*n));
+    }
+    Ok(Value::Unit)
 }
 
 pub(crate) fn builtin_yaml_is_valid(args: &[Value]) -> RuntimeResult<Value> {
@@ -153,33 +182,6 @@ pub(crate) fn builtin_yaml_is_valid(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Bool(
         gossamer_std::encoding::yaml::parse(text).is_ok(),
     ))
-}
-
-pub(crate) fn yaml_value_to_gossamer(v: gossamer_std::encoding::yaml::Value) -> Value {
-    use gossamer_std::encoding::yaml::Value as YV;
-    match v {
-        YV::Null => Value::Unit,
-        YV::Bool(b) => Value::Bool(b),
-        YV::Int(n) => Value::Int(n),
-        YV::Float(f) => Value::Float(f),
-        YV::String(s) => Value::String(s.into()),
-        YV::Seq(seq) => Value::Array(Arc::new(
-            seq.into_iter().map(yaml_value_to_gossamer).collect(),
-        )),
-        YV::Map(pairs) => {
-            let mut hmap = dense_map();
-            for (k, v) in pairs {
-                let key = match k {
-                    YV::String(s) => MapKey::Str(s.into()),
-                    YV::Int(n) => MapKey::Int(n),
-                    YV::Bool(b) => MapKey::Bool(b),
-                    _ => MapKey::NonHashable,
-                };
-                hmap.insert(key, yaml_value_to_gossamer(v));
-            }
-            Value::Map(Arc::new(parking_lot::Mutex::new(hmap.into())))
-        }
-    }
 }
 
 pub(crate) fn gossamer_value_to_yaml(v: &Value) -> gossamer_std::encoding::yaml::Value {
@@ -219,9 +221,7 @@ fn json_value_to_yaml(v: &gossamer_std::json::Value) -> gossamer_std::encoding::
         JV::Null => YV::Null,
         JV::Bool(b) => YV::Bool(*b),
         JV::Int(n) => YV::Int(*n),
-        // YAML's integer is signed, so an unsigned value past its range keeps
-        // its magnitude as a float.
-        JV::Uint(n) => YV::Float(*n as f64),
+        JV::Uint(n) => YV::UInt(*n),
         JV::Number(f) => YV::Float(*f),
         JV::String(s) => YV::String(s.clone()),
         JV::Array(items) => YV::Seq(items.iter().map(json_value_to_yaml).collect()),
@@ -248,14 +248,13 @@ pub(crate) fn builtin_yaml_parse(args: &[Value]) -> RuntimeResult<Value> {
 
 pub(crate) fn builtin_yaml_parse_all(args: &[Value]) -> RuntimeResult<Value> {
     let src = args.first().and_then(as_str).unwrap_or("");
-    match gossamer_std::encoding::yaml::parse_all(src) {
-        Ok(vs) => {
-            let arr = Value::Array(Arc::new(
-                vs.into_iter().map(yaml_value_to_gossamer).collect(),
-            ));
-            Ok(ok_variant(arr))
-        }
-        Err(e) => Ok(err_variant(format!("{e}"))),
+    match gossamer_std::encoding::yaml::parse_all_json(src) {
+        Ok(docs) => Ok(ok_variant(Value::Array(Arc::new(
+            docs.into_iter()
+                .map(|v| Value::Json(Arc::new(crate::value::JsonInner::new(v))))
+                .collect(),
+        )))),
+        Err(e) => Ok(err_variant(format!("yaml::parse_all: {e}"))),
     }
 }
 

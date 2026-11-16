@@ -53,6 +53,24 @@ pub extern "C" fn gos_rt_runtime_version() -> *mut std::os::raw::c_char {
     crate::c_abi::alloc_cstring(crate::VERSION.as_bytes())
 }
 
+/// `runtime::max_procs() -> i64`: the most workers that run goroutines at
+/// once.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_runtime_max_procs() -> i64 {
+    i64::try_from(crate::sched_global::max_procs()).unwrap_or(i64::MAX)
+}
+
+/// `runtime::set_max_procs(n) -> i64`: the cap before the call, set to `n`
+/// when `n` is at least 1, as Go's `runtime.GOMAXPROCS(n)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_runtime_set_max_procs(n: i64) -> i64 {
+    let prev = match usize::try_from(n) {
+        Ok(n) if n >= 1 => crate::sched_global::set_max_procs(n),
+        _ => crate::sched_global::max_procs(),
+    };
+    i64::try_from(prev).unwrap_or(i64::MAX)
+}
+
 /// `runtime::is_main_thread() -> bool` - whether the caller runs on the
 /// thread the program's `main` runs on.
 #[unsafe(no_mangle)]

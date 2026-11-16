@@ -347,31 +347,6 @@ pub(crate) fn field_slot_offset(tcx: &TyCtxt, ty: Ty, idx: u32) -> u32 {
     }
 }
 
-/// Retired with the bump arena. Kept around for one release cycle
-/// in case downstream forks reach for it; new code should not.
-#[allow(dead_code)]
-pub(crate) fn is_pure_primitive_aggregate(tcx: &TyCtxt, ty: Ty) -> bool {
-    match tcx.kind(ty) {
-        Some(TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Float(_) | TyKind::Unit) => {
-            true
-        }
-        Some(TyKind::Array { elem, .. }) => is_pure_primitive_aggregate(tcx, *elem),
-        Some(TyKind::Tuple(elems)) => elems.iter().all(|t| is_pure_primitive_aggregate(tcx, *t)),
-        Some(TyKind::Adt { def, substs }) => {
-            // Reject the Result/Option sentinel Adts up front -
-            // they are pointer-shaped and not really aggregates.
-            if def.local == u32::MAX || def.local == u32::MAX - 1 || tcx.is_inline_enum_ty(ty) {
-                return false;
-            }
-            match tcx.adt_field_tys(*def, substs) {
-                Some(fields) => fields.iter().all(|t| is_pure_primitive_aggregate(tcx, *t)),
-                None => false,
-            }
-        }
-        _ => false,
-    }
-}
-
 /// True when the type is an aggregate whose memory lives in a
 /// stack slot rather than a scalar SSA value. Drives the
 /// choice between a scalar `alloca <ty>` and an aggregate

@@ -140,6 +140,11 @@ fn synthesize_stdlib_wrappers(source: &str, parsed: Option<&SourceFile>) -> Stri
     {
         stdlib_wrappers.push_str(TIME_TIMER_WRAPPERS);
     }
+    if item_imported(JSON_ENTRIES_WRAPPERS)
+        || (mentions_module_item(source, "json", "entries") && from_std("json"))
+    {
+        stdlib_wrappers.push_str(JSON_ENTRIES_WRAPPERS);
+    }
     if item_imported(SYNC_SHIELD_WRAPPERS)
         || (mentions_module_item(source, "sync", "shield") && from_std("sync"))
     {
@@ -300,6 +305,22 @@ fn __gos_time_after(d: time::Duration) -> Receiver<i64> {
 /// value is the cohort's outcome - has no room for. `on_error` is `Log`
 /// (`1`) for the same reason: `f`'s value is the answer, so a child `f`
 /// spawned is named on stderr where it fails rather than silently dropped.
+/// `std::encoding::json::entries`: an object's members as `(key, value)`
+/// pairs in key order, written over `keys` and `get` so every tier walks the
+/// object the way those do.
+const JSON_ENTRIES_WRAPPERS: &str = r"
+fn __gos_json_entries(value: json::Value) -> Option<Vec<(String, json::Value)>> {
+    let keys = json::keys(value)?
+    let mut members: Vec<(String, json::Value)> = Vec::with_capacity(keys.len())
+    for key in keys {
+        if let Some(member) = json::get(value, key) {
+            members.push((key, member))
+        }
+    }
+    Some(members)
+}
+";
+
 const SYNC_SHIELD_WRAPPERS: &str = r"
 fn __gos_sync_shield<T>(f: Fn() -> T) -> T {
     runtime::cohort_push(0, 0, 0, 1, 1, 0)

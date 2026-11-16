@@ -1,0 +1,71 @@
+// A document of 40k nested records, read twice: walked without a schema
+// (every record by index, a member, and a pointer into it), then decoded
+// into structs. Indexed reads must stay constant time, or the walk turns
+// quadratic.
+
+use std::encoding::json
+use std::errors
+
+struct Geo {
+    lat: f64
+    lng: f64
+}
+
+struct Address {
+    city: String
+    zip: String
+    geo: Geo
+}
+
+struct Record {
+    id: i64
+    name: String
+    active: bool
+    score: f64
+    tags: Vec<String>
+    address: Address
+}
+
+struct Doc {
+    records: Vec<Record>
+}
+
+fn document(n: i64) -> String {
+    let mut text = String::with_capacity(n * 160)
+    text += "{\"records\":["
+    for i in 0..n {
+        if i > 0 {
+            text += ","
+        }
+        let active = i % 3 == 0
+        let score = i % 1000
+        text += f"{{\"id\":{i},\"name\":\"user{i}\",\"active\":{active},\"score\":{score}.5,\"tags\":[\"a\",\"b\"],\"address\":{{\"city\":\"London\",\"zip\":\"{i}\",\"geo\":{{\"lat\":51.5,\"lng\":-0.12}}}}}}"
+    }
+    text += "]}"
+    text
+}
+
+fn main() -> Result<(), errors::Error> {
+    let text = document(40_000)
+    let doc = json::parse(text)?
+    let records = json::get(doc, "records").ok_or(errors::new("no records"))?
+    let n = json::len(records).unwrap_or(0)
+    let mut active = 0
+    let mut lat = 0.0
+    for i in 0..n {
+        let Some(record) = json::at(records, i) else {
+            continue
+        }
+        if json::get(record, "active").and_then(json::as_bool).unwrap_or(false) {
+            active += 1
+        }
+        lat += json::pointer(record, "/address/geo/lat").and_then(json::as_f64).unwrap_or(0.0)
+    }
+    let typed = json::decode::<Doc>(text)?
+    let mut ids = 0
+    for record in typed.records {
+        ids += record.id
+    }
+    println(f"{n} {active} {lat:.1} {ids}")
+    Ok(())
+}

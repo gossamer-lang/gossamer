@@ -1,0 +1,46 @@
+// Reading a parsed document without a schema: `json::pointer` (RFC 6901, also
+// as a method), `json::entries` over an object's members, the process-wide
+// size and nesting caps a program sets, and `json::encode` writing a struct's
+// members in declaration order unless `sort: true` orders them by key.
+// Bit-identical on the VM, Cranelift, and LLVM tiers.
+
+use std::encoding::json
+
+struct Reading {
+    zone: String
+    value: f64
+    at: i64
+}
+
+fn render(r: Reading, sort: bool) -> String {
+    json::encode(r, sort: sort).unwrap()
+}
+
+fn main() {
+    let text = "{\"current\": {\"temperature\": 12.5, \"weather_descriptions\": [\"Partly cloudy\"]}, \"a/b\": {\"~k\": 1}, \"list\": [10, 20]}"
+    let doc = json::parse(text).unwrap()
+    println(f"{json::pointer(doc, "/current/temperature").and_then(json::as_f64)}")
+    println(f"{json::pointer(doc, "/current/weather_descriptions/0").and_then(json::as_str)}")
+    println(f"{doc.pointer("/a~1b/~0k")}")
+    println(f"{json::pointer(doc, "/list/1")} {json::pointer(doc, "/list/01")} {json::pointer(doc, "/list/-")} {json::pointer(doc, "/list/5")}")
+    println(f"{json::pointer(doc, "current")} {json::pointer(doc, "/missing/x")}")
+    for (key, value) in json::entries(doc).unwrap() {
+        println(f"{key} = {value}")
+    }
+    println(f"{json::entries(json::parse("[1]").unwrap())}")
+
+    let reading = Reading { zone: "north", value: 1.0, at: 7 }
+    println(json::encode(reading).unwrap())
+    println(json::encode(reading, sort: true).unwrap())
+    println(render(reading, false))
+    println(render(reading, true))
+    println(json::encode_pretty(reading).unwrap())
+
+    json::set_max_size(16)
+    println(f"{json::parse("[1, 2]").is_ok()} {json::parse(text).is_err()} {json::decode::<Vec<i64>>("[1, 2, 3, 4, 5, 6, 7]").is_err()}")
+    json::set_max_size(0)
+    json::set_max_depth(2)
+    println(f"{json::parse("[[1]]").is_ok()} {json::parse("[[[1]]]").is_err()}")
+    json::set_max_depth(128)
+    println(f"{json::parse(text).is_ok()}")
+}

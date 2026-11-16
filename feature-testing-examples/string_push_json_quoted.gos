@@ -9,7 +9,7 @@ fn check(label: String, text: String) {
     let bytes = text.as_bytes()
     let mut s = String::with_capacity(8)
     let ok = s.push_json_quoted(bytes, 0, bytes.len())
-    let want = json::encode(text)
+    let want = json::encode(text).unwrap()
     println("{} ok={} same={} {}", label, ok, s == want, s)
 }
 

@@ -36,13 +36,13 @@ fn record() -> Record {
     }
 }
 
-fn encode_record(r: Record) -> String { json::encode(r) }
+fn encode_record(r: Record) -> String { json::encode(r).unwrap() }
 
 fn main() {
     let r = record()
-    println("{}", json::encode(r))
+    println("{}", json::encode(r).unwrap())
     let empty = Record { zeta: 0, alpha: 0.0, name: "", ok: false, inner: Inner { label: "", ratio: 0.0 }, items: #[], opts: Map::new(), counts: #[] }
-    println("{}", json::encode(empty))
+    println("{}", json::encode(empty).unwrap())
     let mut total = 0
     for _ in 0..3 { total += encode_record(r).len() }
     println("{}", total)

@@ -1,0 +1,55 @@
+/*
+ * Untyped JSON: reading a document whose shape arrives at run time.
+ *
+ * `json::parse` answers a `json::Value`. Lookups answer an `Option`:
+ * `get` for a member, `at` for an element, `len` for a container,
+ * `pointer` for an RFC 6901 path. The `as_*` readers answer `None`
+ * for a value of another kind, so lookups chain with `and_then`.
+ *
+ * Run:
+ *     gos run examples/json_dynamic.gos
+ */
+
+use std::encoding::json
+use std::errors
+
+let doc = json::parse("""
+{
+  "service": "billing",
+  "replicas": 3,
+  "ports": [8080, 8443],
+  "limits": {"cpu": 1.5, "memory": "512Mi"},
+  "owner": null
+}
+""")?
+
+println(f"service: {json::get(doc, "service").and_then(json::as_str)}")
+println(f"second port: {json::at(json::get(doc, "ports").unwrap(), 1)}")
+println(f"cpu: {json::pointer(doc, "/limits/cpu").and_then(json::as_f64)}")
+println(f"absent: {json::pointer(doc, "/limits/disk")}")
+println(f"owner is null: {json::get(doc, "owner").is_some_and(json::is_null)}")
+println(f"members: {json::len(doc)}, replicas has none: {json::len(json::get(doc, "replicas").unwrap())}")
+
+let limits = json::get(doc, "limits").unwrap()
+for (key, value) in json::entries(limits).unwrap_or(#[]) {
+    println(f"  {key} = {value}")
+}
+
+// Methods read the same way.
+let ports = doc.get("ports").unwrap()
+let mut total = 0
+for port in ports.as_array().unwrap_or(#[]) {
+    total += port.as_i64().unwrap_or(0)
+}
+println(f"port sum: {total}")
+
+// Any value with a JSON form converts to a `json::Value`.
+struct Probe {
+    path: String
+    every: i64
+}
+let probe = json::to_value(Probe { path: "/health", every: 10 })?
+println(f"probe every: {probe.get("every")}")
+
+println(f"valid: {json::is_valid("[1, 2]")} {json::is_valid("[1, 2")}")
+println(json::encode(doc)?)

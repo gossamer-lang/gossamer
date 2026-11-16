@@ -3,15 +3,16 @@
 
 use std::cell::RefCell;
 use std::fmt::Write;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
-use gossamer_ast::Ident;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+// The HTTP server, which a wasm32 build leaves out, is the only user.
+#[cfg(not(target_arch = "wasm32"))]
+use std::{sync::atomic::AtomicBool, time::Duration};
 
 use gossamer_std::env as env_std;
 use gossamer_std::exec as exec_std;
 use gossamer_std::fs as fs_std;
+#[cfg(not(target_arch = "wasm32"))]
 use gossamer_std::http as http_std;
 use gossamer_std::json as json_std;
 use gossamer_std::os as os_std;

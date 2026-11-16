@@ -21,9 +21,9 @@ fn run() -> Result<(), String> {
     let user = json::get(nv, "user").unwrap()
     println("user.id = {}", json::get(user, "id").unwrap())
     let tags = json::get(user, "tags").unwrap()
-    println("tags[0] = {}", json::at(tags, 0))
-    println("tags[2] = {}", json::at(tags, 2))
-    println("tags len = {}", json::len(tags))
+    println("tags[0] = {}", json::at(tags, 0).unwrap())
+    println("tags[2] = {}", json::at(tags, 2).unwrap())
+    println("tags len = {}", json::len(tags).unwrap())
 
     // Numeric types
     let nums = "{\"i\":42,\"f\":3.14,\"neg\":-7}"
@@ -40,9 +40,8 @@ fn run() -> Result<(), String> {
     let av = json::parse(arr)?
     let mut total = 0
     for i in 0..5 {
-        match json::as_i64(json::at(av, i)) {
-            Some(n) => { total += n }
-            None => {}
+        if let Some(element) = json::at(av, i) && let Some(n) = json::as_i64(element) {
+            total += n
         }
     }
     println("array sum = {}", total)
@@ -56,7 +55,7 @@ fn run() -> Result<(), String> {
     // Render back
     let simple = "{\"k\":\"v\"}"
     let parsed = json::parse(simple)?
-    let rendered = json::render(parsed)
+    let rendered = json::encode(parsed).unwrap()
     println("render contains k = {}", rendered.contains("\"k\""))
     println("render contains v = {}", rendered.contains("\"v\""))
 
@@ -79,7 +78,7 @@ mod tests {
     fn parse_and_get_string() {
         let obj = match json::parse("{\"hello\":\"world\"}") {
             Ok(o) => o
-            Err(e) => { let _ = testing::check(false, e)
+            Err(e) => { let _ = testing::check(false, e.to_string())
                 return }
         }
         match json::as_str(json::get(obj, "hello").unwrap()) {
@@ -94,10 +93,10 @@ mod tests {
     fn array_index_access() {
         let arr = match json::parse("[10,20,30]") {
             Ok(a) => a
-            Err(e) => { let _ = testing::check(false, e)
+            Err(e) => { let _ = testing::check(false, e.to_string())
                 return }
         }
-        match json::as_i64(json::at(arr, 1)) {
+        match json::at(arr, 1).and_then(json::as_i64) {
             Some(n) => { let _ = testing::check_eq(n, 20, "array[1]")
             }
             None => { let _ = testing::check(false, "expected integer at index 1")
@@ -109,7 +108,7 @@ mod tests {
     fn null_detection() {
         let obj = match json::parse("{\"a\":null}") {
             Ok(o) => o
-            Err(e) => { let _ = testing::check(false, e)
+            Err(e) => { let _ = testing::check(false, e.to_string())
                 return }
         }
         let _ = testing::check(json::is_null(json::get(obj, "a").unwrap()), "a is null")

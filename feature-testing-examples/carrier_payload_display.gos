@@ -1,0 +1,25 @@
+// `{}` and `{:?}` of an `Option` or `Result` whose payload is a
+// `json::Value`, an `errors::Error`, or `()`, inside a hot function, so the
+// JIT tier renders it as compiled code.
+// Bit-identical on the VM, Cranelift, and LLVM tiers.
+
+use std::encoding::json
+use std::errors
+
+fn check(i: i64) -> Result<(), errors::Error> {
+    if i == 1 { Err(errors::new("one")) } else { Ok(()) }
+}
+
+fn show(doc: json::Value, i: i64) {
+    println("{} {:?} {}", json::at(doc, i), json::at(doc, i), json::get(doc, "k"))
+    println("{} {:?}", check(i), check(i))
+    let unit: Option<()> = if i == 0 { Some(()) } else { None }
+    println("{} {:?}", unit, json::len(doc))
+}
+
+fn main() {
+    let doc = json::parse("[\"a\", {\"k\": null}, 3]").unwrap()
+    for i in 0..4 {
+        show(doc, i)
+    }
+}

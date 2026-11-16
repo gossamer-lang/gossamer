@@ -38,7 +38,7 @@ let payload = json::Value::object(#[
     ("addr", json::Value::String("0.0.0.0"))
     ("features", json::Value::Array(features))
 ])
-let rendered = json::render(payload)
+let rendered = json::encode(payload)?
 fs::write(json_path, rendered.as_bytes())
     .map_err(|e| errors::wrap(e, "write json"))?
 
@@ -46,6 +46,6 @@ let parsed_text = fs::read_to_string(json_path)
     .map_err(|e| errors::wrap(e, "read json"))?
 let parsed = json::parse(parsed_text)
     .map_err(|e| errors::wrap(e, "parse json"))?
-println(f"parsed json: {json::render(parsed)}")
+println(f"parsed json: {json::encode(parsed)?}")
 
 fs::remove_dir_all(dir).map_err(|e| errors::wrap(e, "cleanup"))?

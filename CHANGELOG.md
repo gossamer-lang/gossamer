@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.80.0 - JSON fixes/API changes, stdlib gaps, fixes
+
+- A struct literal takes field-init shorthand: `Weather { temperature, summary }` fills each field from the binding of its name; it was refused as a positional initializer (GT0034).
+- `runtime::set_max_procs(n)` and `runtime::max_procs()` are callable, as the 0.79.0 notes said: `set_max_procs` caps the threads running goroutines and answers the cap before the call, as Go's `runtime.GOMAXPROCS` (below 1 only reads it). It no longer also limits how many goroutines may be alive.
+- A compiled program that uses a channel or a goroutine exits as soon as its work is done; it waited out a 5 ms pause of the scheduler's watchdog first, so the benchmark suite's `concurrency` workload took 5.9 ms instead of 1.2 ms (Go: 1.0 ms).
+- A typed decode reads its input in place instead of copying it first, on every tier.
+- `benchmarks/suite` has a `json_document` workload: 40k nested records walked by index and pointer, then decoded into structs, against Go's `encoding/json`.
+- `json::as_i64` and `json::as_u64` answer `None` for a number at 2^63 and 2^64 on every tier; the native tier answered `Some(i64::MAX)` for `9223372036854775808` where the VM answered `None`, and an integral float at the bound saturated everywhere.
+- `json::at` on a parsed document reaches an element in constant time; each call stepped over every element before it, so an indexed loop over a large array was quadratic (45k records: 8.8 s, now 0.05 s).
+- JSON, YAML, and XML documents have no size cap by default, as in `serde_json` and Go; documents over 16 MiB were refused with no way to raise the cap. `json::set_max_size(bytes)` and `json::set_max_depth(levels)` set caps for the process (0 or less removes one); the nesting cap stays 128 by default, as `serde_json`'s.
+- XML entity references may expand to eight times the document (at least 1 MiB), as libxml2 bounds amplification, instead of to the old size cap.
+- A typed decode error names the path to the value and what it found: `current.weather_descriptions[1]: expected string, found 3` instead of ``field `current`: field `weather_descriptions`[index]: expected string``; an unknown variant lists the names the enum has.
+- A struct decoded from a value that is not an object fails (`expected object, found array`); every field read as missing, so a struct of `Option` or `#[default]` fields decoded from `3` or `[]`.
+- A narrow integer field outside its type's range fails to decode (`expected u8, found 300`); it was masked to fit (`300` read as `44`).
+- `Option<Option<T>>` tells a missing member (`None`) from `null` (`Some(None)`), and encoding leaves a `None` member out.
+- `#[default(value)]` fills a missing field with a literal, `None`, or a unit variant of the field's enum.
+- `#[rename_all("camelCase")]` on a struct or enum respells every field or variant without its own `#[rename]` (also `snake_case`, `PascalCase`, `kebab-case`, `lowercase`, `UPPERCASE`, `SCREAMING_SNAKE_CASE`, `SCREAMING-KEBAB-CASE`).
+- `#[rename("name")]` on an enum variant sets the name it is written and read under; it was accepted and ignored.
+- `#[tag("type")]` on an enum reads and writes each variant as one object holding that member beside the variant's fields: `{"type": "Circle", "r": 2}`.
+- A fixed-array field (`[i64; 3]`) encodes and decodes as a JSON array of exactly its length; it was refused with GP0022.
+- `json::encode`, `json::render`, and `json::encode_pretty` write a struct's members in declaration order, as `json::encode::<T>` does; they sorted them by key. `sort: true` (`json::encode(v, sort: true)`) orders members by key; map keys stay sorted either way.
+- `json::encode(v)` and `json::encode::<T>(v)` write the same text: `#[rename]`, `#[skip]`, and the other serde attributes apply to both, and a float keeps its fraction in both (`1.0`, as `serde_json` writes it). `to_json` wrote `1`, which `to_toml` and `to_yaml` then read as an integer.
+- `json::encode_pretty` of a struct keeps its member order; it re-sorted the members while laying them out.
+- `yaml::to_yaml::<T>` and `toml::to_toml::<T>` write a struct's members in declaration order, as `json::encode::<T>` does; they sorted them by key. A failure names no function the program did not call; it read `toml::from_json: ..`.
+- An integer past `i64::MAX` stays exact through `yaml::encode`, `yaml::to_yaml::<T>`, and `yaml::from_json_text`; it was written as a float (`1.8446744073709552e19`). `toml::from_json_text` and `toml::to_toml::<T>` refuse one, as TOML has no such integer, instead of rounding it.
+- Each document `yaml::parse_all` answers on the VM is a `json::Value`, as on the native tier, so `json::get`, `json::keys`, and `json::len` read it; they answered `None` and `0`.
+- `json::decode::<T>` and the other typed serde calls take any target with a JSON form, not only a declared struct or enum: `Vec<Item>`, `Map<String, i64>`, `Option<T>`, tuples, fixed arrays, scalars, and instantiations of generic types (`Page<Item>`, through an alias too). An array at the top of a document no longer needs a wrapper struct.
+- Generic structs and enums encode and decode; they were refused with GP0039.
+- `json::from_value::<T>(value)` decodes a `json::Value` into a typed value, so a subtree a program navigated to decodes without rendering it back to text; `let w: Weather = json::from_value(v)?` takes its type from the `let`, as `from_json` does, and a call that names no type is GT0125.
+- `json::encode` and `json::encode_pretty` answer `Result<String, errors::Error>`, as `json::encode::<T>`, `yaml::encode`, and every other encoder does; they answered a bare `String`.
+- `xml::encode` answers `Result<String, errors::Error>`, and a value that is not the element tree `xml::parse` answers is an `Err`; it encoded as the empty string.
+- `json::at(value, index)` answers `Option<json::Value>`, `None` past the end or for a value that is not an array, as `json::get` answers for a missing member; it answered JSON `null`. `json::len(value)` answers `Option<i64>`, `None` for a value that is not an array or object, as `json::keys` does; it answered `0`, or a string's length.
+- `json::valid` is `json::is_valid`, as in `yaml` and `toml`, and `xml::is_valid` is new. `json::render` is `json::encode`, which wrote the same text. `gos check --fix` rewrites both old names.
+- `yaml::to_json` / `from_json` and `toml::to_json` / `from_json`, which convert text, are `to_json_text` / `from_json_text`, so they no longer read as the typed `to_json::<T>` (`gos check --fix` rewrites them). Like `serde_json::Value` and `toml::Table`, a converted document holds each object's members by key.
+- `yaml::decode::<T>` / `yaml::encode::<T>` and `toml::decode::<T>` / `toml::encode::<T>` name the typed codecs as `json::decode::<T>` / `json::encode::<T>` do, beside `from_yaml` / `to_yaml` and `from_toml` / `to_toml`. `json::to_value(v)` is the counterpart of `json::from_value::<T>`.
+- Every encoder takes `sort: true`: the typed `json::encode::<T>`, `yaml::encode::<T>`, and `toml::encode::<T>` order a struct's members by key with it, as `json::encode(v, sort: true)` does.
+- `toml::parse(text)` answers a `json::Value` and `toml::encode(value)` writes one, as `yaml::parse` / `yaml::encode` do; `yaml::encode_all(values)` writes the multi-document stream `yaml::parse_all` reads.
+- `yaml::set_max_size` / `set_max_depth` and `xml::set_max_size` / `set_max_depth` set those parsers' caps, as `json::set_max_size` / `set_max_depth` do. Compiled programs held them at the defaults.
+- `json::pointer(value, "/current/weather_descriptions/0")` (and `value.pointer(..)`) reads the value an RFC 6901 JSON Pointer names, or `None`.
+- `json::entries(value)` answers an object's members as `(key, value)` pairs, or `None` for a value that is not an object.
+- A typed serde call spelled through `encoding::json::` or `std::encoding::json::` is the call `json::` spells; the longer paths were not recognized.
+- A typed serde call naming a type with no JSON form inside it (a channel, a `Result`, a map keyed by other than `String`) is GT0124, naming the part; a call naming a type parameter of its function says so (GP0039).
+- Formatting a value that holds a generic type with no `fmt` (`println(f"{r}")` of a `Result<Page<Item>, _>`) is GT0062, as formatting the generic value itself is; it built on the VM and failed the native build with an internal error.
+- A call to a standard-library function may label its arguments and leave out the ones its signature gives a default (`json::encode(v, sort: true)`), as a call to a program's own function may; both were refused (GR0013, GT0018).
+- `yaml::encode(v)` and `toml::encode(v)` write any value with a form, as `json::encode(v)` does; a struct the call could not name before checking (`job.steps[0]`, a function's result) was written as `null` on the VM and faulted the native build.
+- A typed TOML encode leaves out an `Option` member that is `None`, as Rust's `toml` does; it failed with `TOML has no null`.
+- `let config: Config = json::decode(text)?` takes its target from the binding, as `from_json` does, and a `json::decode` that names no type is GT0125, as `yaml::decode` and `toml::decode` are; it answered the `json::Value` that `json::parse` answers, so the binding failed to check.
+- An argument passed where a standard-library function takes a `json::Value` must be one: `json::is_null(point)` and `json::get(point, "x")` with a struct are GT0001; they checked, answered nonsense on the VM, and faulted natively.
+- A vec or array literal passed to a standard-library function keeps its own element type, so `yaml::encode_all(#[point])` reports the mismatch; the literal took the parameter's element type unchecked. A mismatch inside a literal names the whole type (`found Vec<i64>`), not the element's.
+- `Option` answers `is_some_and`, `is_none_or`, `map_or`, and `map_or_else`, and `Result` answers `is_ok_and`, `is_err_and`, `map_or`, and `map_or_else`, as methods and as `option::` / `result::` free functions.
+- On the VM, an untyped `json::decode(text)` answers what `json::parse` answers, so `json::len` and `json::at` read it; and `v.len()` on a `json::Value` answers an `Option`, as `json::len` does.
+- A module the program declares as `json`, `yaml`, `toml`, or `option` keeps its own functions: `json::decode::<i64>(x)` or `json::encode(v)` against a user module `json` called the standard library's codec instead.
+- The JIT compiles a function that formats an `Option` or `Result` holding a `json::Value`, an `errors::Error`, or `()` (`println("{}", json::at(doc, 0))`); such a function stayed on the bytecode VM, and so did its callers.
+- `html::template::render_json(template, data)` declares `data` as the JSON text every tier reads; its signature said `json::Value`.
+- A malformed, misplaced, or conflicting serde attribute is GP0068: an unknown `#[rename_all]` rule, a `#[default(..)]` value that does not fit the field, `#[tag]` on a struct, two fields under one key, a `#[tag]` variant that holds no struct.
+
 ## 0.79.2 - Caches cleaned up daily
 
 - Build commands trim the shared caches once a day in the background, at idle priority, keeping them within their size and age limits.

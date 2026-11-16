@@ -2,11 +2,11 @@ use std::encoding::json
 
 fn main() {
     let big = json::parse("{\"b\":9007199254740993}").unwrap()
-    println("{}", json::render(big))
+    println("{}", json::encode(big).unwrap())
 
     let mixed = json::parse("{\"a\":100,\"b\":1.5,\"c\":2.0,\"d\":-7}").unwrap()
-    println("{}", json::render(mixed))
+    println("{}", json::encode(mixed).unwrap())
 
     let arr = json::parse("[1,2.0,3.5,9007199254740993]").unwrap()
-    println("{}", json::render(arr))
+    println("{}", json::encode(arr).unwrap())
 }

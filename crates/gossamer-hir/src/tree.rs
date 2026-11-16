@@ -171,9 +171,8 @@ pub struct HirAdt {
     /// How an enum's discriminant is stored. A struct leaves it at its
     /// default, which describes no packing.
     pub repr: gossamer_ast::EnumRepr,
-    /// A named struct's serde options, one per field in declaration order;
-    /// empty for every other aggregate.
-    pub serde: Vec<crate::serde::HirSerdeField>,
+    /// How the typed serde codecs spell this type.
+    pub serde: crate::serde::HirSerde,
 }
 
 /// Kind of aggregate at the HIR level.

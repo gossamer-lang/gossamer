@@ -1,0 +1,12 @@
+service: Some("billing")
+second port: Some(8443)
+cpu: Some(1.5)
+absent: None
+owner is null: true
+members: Some(5), replicas has none: None
+  cpu = 1.5
+  memory = 512Mi
+port sum: 16523
+probe every: Some(10)
+valid: true false
+{"limits":{"cpu":1.5,"memory":"512Mi"},"owner":null,"ports":[8080,8443],"replicas":3,"service":"billing"}

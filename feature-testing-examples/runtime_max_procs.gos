@@ -1,0 +1,18 @@
+// `runtime::set_max_procs(n)` caps the threads running goroutines and
+// answers the cap before the call, as Go's `runtime.GOMAXPROCS`; below 1 it
+// only reads the cap. Goroutines themselves stay unbounded.
+// Bit-identical on the VM, Cranelift, and LLVM tiers.
+
+use std::{errors, runtime}
+
+fn main() -> Result<(), errors::Error> {
+    let before = runtime::max_procs()
+    let previous = runtime::set_max_procs(2)
+    println(f"{previous == before} {runtime::max_procs()} {runtime::set_max_procs(0)} {runtime::max_procs()}")
+    cohort {
+        let a = spawn(|| 1)
+        let b = spawn(|| 2)
+        let c = spawn(|| 3)
+        println(f"{a.join().unwrap() + b.join().unwrap() + c.join().unwrap()}")
+    }
+}

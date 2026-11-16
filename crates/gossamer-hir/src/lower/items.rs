@@ -53,12 +53,12 @@ impl Lowerer<'_> {
             // `{:?}` dispatch, the native constructor registry - reads that
             // name, so two modules may declare the same one.
             AstItemKind::Struct(decl) => {
-                let mut adt = self.lower_struct(decl);
+                let mut adt = self.lower_struct(decl, &item.attrs);
                 adt.name = Ident::new(qualified_item_name(module_path, &adt.name.name));
                 HirItemKind::Adt(adt)
             }
             AstItemKind::Enum(decl) => {
-                let mut adt = self.lower_enum(decl);
+                let mut adt = self.lower_enum(decl, &item.attrs);
                 adt.name = Ident::new(qualified_item_name(module_path, &adt.name.name));
                 HirItemKind::Adt(adt)
             }
@@ -345,7 +345,7 @@ impl Lowerer<'_> {
         }
     }
 
-    fn lower_struct(&mut self, decl: &StructDecl) -> HirAdt {
+    fn lower_struct(&mut self, decl: &StructDecl, attrs: &gossamer_ast::Attrs) -> HirAdt {
         let ty = self.error_ty();
         let fields = match &decl.body {
             gossamer_ast::StructBody::Named(named) => {
@@ -358,12 +358,23 @@ impl Lowerer<'_> {
                 .collect(),
             gossamer_ast::StructBody::Unit => Vec::new(),
         };
-        let serde = match &decl.body {
-            gossamer_ast::StructBody::Named(named) => named
-                .iter()
-                .map(|f| crate::serde::HirSerdeField::of(&f.attrs))
-                .collect(),
-            _ => Vec::new(),
+        let container = gossamer_ast::serde_attrs::SerdeContainer::of(attrs);
+        let serde = crate::serde::HirSerde {
+            fields: match &decl.body {
+                gossamer_ast::StructBody::Named(named) => named
+                    .iter()
+                    .map(|f| {
+                        crate::serde::HirSerdeField::of(
+                            &f.attrs,
+                            &f.name.name,
+                            container.rename_all,
+                        )
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            },
+            variants: Vec::new(),
+            tag: None,
         };
         HirAdt {
             name: decl.name.clone(),
@@ -374,7 +385,30 @@ impl Lowerer<'_> {
         }
     }
 
-    fn lower_enum(&mut self, decl: &EnumDecl) -> HirAdt {
+    fn lower_enum(&mut self, decl: &EnumDecl, attrs: &gossamer_ast::Attrs) -> HirAdt {
+        let container = gossamer_ast::serde_attrs::SerdeContainer::of(attrs);
+        let serde = crate::serde::HirSerde {
+            fields: Vec::new(),
+            variants: decl
+                .variants
+                .iter()
+                .map(|variant| crate::serde::HirSerdeVariant {
+                    key: gossamer_ast::serde_attrs::variant_key(
+                        &variant.attrs,
+                        &variant.name.name,
+                        container.rename_all,
+                    ),
+                    fields: match &variant.body {
+                        gossamer_ast::StructBody::Named(fields) => fields
+                            .iter()
+                            .map(|f| crate::serde::HirSerdeField::of(&f.attrs, &f.name.name, None))
+                            .collect(),
+                        _ => Vec::new(),
+                    },
+                })
+                .collect(),
+            tag: container.tag,
+        };
         let variants = decl
             .variants
             .iter()
@@ -407,7 +441,7 @@ impl Lowerer<'_> {
             kind: HirAdtKind::Enum(variants),
             self_ty: ty,
             repr: decl.repr,
-            serde: Vec::new(),
+            serde,
         }
     }
 

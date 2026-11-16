@@ -1802,6 +1802,7 @@ impl TypeChecker<'_> {
             }
         }
         let declared_ret = decl.ret.as_ref().map(|ty| self.type_from_ast(ty));
+        self.check_serde_site_target(decl, declared_ret);
         if let Some(ret) = declared_ret {
             let static_string_reference = matches!(
                 self.tcx.kind_of(ret),
@@ -1828,6 +1829,107 @@ impl TypeChecker<'_> {
         self.current_param_bounds = prior_bounds;
         self.current_assoc_bindings = prior_assoc_bindings;
         self.leave_generic_scope(prior_scope);
+    }
+
+    /// Reports a typed serde call's target that holds a type with no JSON
+    /// form. The call's own stub (`__gos_serde_<op>_site_<n>`) carries the
+    /// target as the call wrote it: its parameter for an encode, the `Ok` of
+    /// its return for a decode.
+    fn check_serde_site_target(&mut self, decl: &FnDecl, declared_ret: Option<Ty>) {
+        let Some(rest) = decl.name.name.strip_prefix("__gos_serde_") else {
+            return;
+        };
+        let Some((op, _)) = rest.split_once("_site_") else {
+            return;
+        };
+        let (target, span) = if op.starts_with("to_") {
+            let Some(FnParam::Typed { ty, .. }) = decl.params.first() else {
+                return;
+            };
+            (self.type_from_ast(ty), ty.span)
+        } else {
+            let (Some(result_ty), Some(result_ast)) = (declared_ret, decl.ret.as_ref()) else {
+                return;
+            };
+            let Some(TyKind::Adt { substs, .. }) = self.tcx.kind(result_ty).cloned() else {
+                return;
+            };
+            let Some(&decoded) = substs.types().first() else {
+                return;
+            };
+            (decoded, result_ast.span)
+        };
+        if let Some(part) = self.serde_uncodable_part(target, &mut Vec::new()) {
+            let target = self.render_public_ty(target);
+            let part = self.render_public_ty(part);
+            self.emit(
+                TypeError::SerdeTargetUnsupported {
+                    op: op.to_string(),
+                    target,
+                    part,
+                },
+                span,
+            );
+        }
+    }
+
+    /// The first type `ty` holds that the typed serde codecs have no form
+    /// for, walking a user type's fields as its instantiation holds them.
+    fn serde_uncodable_part(&mut self, ty: Ty, seen: &mut Vec<Ty>) -> Option<Ty> {
+        let ty = self.tcx.peel_nominal(ty);
+        match self.tcx.kind(ty)?.clone() {
+            TyKind::Int(_)
+            | TyKind::Float(_)
+            | TyKind::Bool
+            | TyKind::Char
+            | TyKind::String
+            | TyKind::JsonValue
+            // A type that did not resolve is reported where it is written.
+            | TyKind::Error
+            | TyKind::Var(_) => None,
+            TyKind::Vec(inner) | TyKind::Slice(inner) => self.serde_uncodable_part(inner, seen),
+            TyKind::Array {
+                elem,
+                len: crate::ArrayLen::Concrete(_),
+            } => self.serde_uncodable_part(elem, seen),
+            TyKind::Tuple(elems) => elems
+                .into_iter()
+                .find_map(|elem| self.serde_uncodable_part(elem, seen)),
+            TyKind::HashMap { key, value, .. } => {
+                if matches!(self.tcx.kind(self.tcx.peel_nominal(key)), Some(TyKind::String)) {
+                    self.serde_uncodable_part(value, seen)
+                } else {
+                    Some(ty)
+                }
+            }
+            TyKind::Adt { def, substs } => {
+                if def.local == super::OPTION_DEF_LOCAL {
+                    let payload = substs.types().first().copied()?;
+                    return self.serde_uncodable_part(payload, seen);
+                }
+                if !self.user_type_defs.values().any(|d| *d == def) {
+                    return Some(ty);
+                }
+                if seen.contains(&ty) {
+                    return None;
+                }
+                seen.push(ty);
+                let args: Vec<Option<Ty>> = substs.types().into_iter().map(Some).collect();
+                let held: Vec<Ty> = match (
+                    self.tcx.struct_field_tys(def).map(<[Ty]>::to_vec),
+                    self.tcx.enum_variant_tys(def).map(<[Vec<Ty>]>::to_vec),
+                ) {
+                    (Some(fields), _) => fields,
+                    (None, Some(variants)) => variants.into_iter().flatten().collect(),
+                    (None, None) => Vec::new(),
+                };
+                held.into_iter().find_map(|field| {
+                    let field = crate::instantiate::subst_param_ty(self.tcx, field, &args);
+                    self.serde_uncodable_part(field, seen)
+                })
+            }
+            _ => Some(ty),
+        }
     }
 
     /// Checks one function body against the return type its signature

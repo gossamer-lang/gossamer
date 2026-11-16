@@ -1,0 +1,93 @@
+// The `Option` and `Result` combinators that test or fold a payload:
+// `is_some_and`, `is_none_or`, `map_or`, `map_or_else`, `is_ok_and`,
+// `is_err_and`, as methods and as `option::` / `result::` free functions.
+// Each argument is evaluated once, before the receiver is matched,
+// whichever arm runs.
+// Bit-identical on the VM, Cranelift, and LLVM tiers.
+
+use std::encoding::json
+use std::{option, result}
+
+struct Port {
+    number: i64
+    name: String
+}
+
+fn parse(text: String) -> Result<i64, String> {
+    match text.to_i64() {
+        Some(n) => Ok(n)
+        None => Err(f"not a number: {text}")
+    }
+}
+
+fn noisy(n: i64) -> i64 {
+    println(f"evaluated {n}")
+    n
+}
+
+/// The combinators in a loop, so the JIT tier runs them as compiled code.
+fn tally(limit: i64) -> i64 {
+    let mut total = 0
+    for i in 0..limit {
+        let candidate = if i % 3 == 0 { None } else { Some(i) }
+        if candidate.is_some_and(|n| n % 2 == 0) {
+            total += 1
+        }
+        if candidate.is_none_or(|n| n > 50) {
+            total += 10
+        }
+        total += candidate.map_or(-1, |n| n * 2)
+        total += candidate.map_or_else(|| 7, |n| n + 3)
+        let checked: Result<i64, String> = if i % 5 == 0 { Err("five") } else { Ok(i) }
+        if checked.is_ok_and(|n| n > 10) {
+            total += 100
+        }
+        if checked.is_err_and(|e| e.len() == 4) {
+            total += 1000
+        }
+        total += checked.map_or(0, |n| n)
+        total += checked.map_or_else(|e| e.len(), |n| n * 3)
+    }
+    total
+}
+
+fn main() {
+    println(f"tally {tally(60)}")
+    let some = Some(7)
+    let none: Option<i64> = None
+    println(f"{some.is_some_and(|n| n > 5)} {some.is_some_and(|n| n > 9)} {none.is_some_and(|n| n > 5)}")
+    println(f"{some.is_none_or(|n| n > 5)} {some.is_none_or(|n| n > 9)} {none.is_none_or(|n| n > 5)}")
+    println(f"{some.map_or(0, |n| n * 2)} {none.map_or(-1, |n| n * 2)}")
+    println(f"{some.map_or_else(|| 100, |n| n + 1)} {none.map_or_else(|| 100, |n| n + 1)}")
+
+    let name = Some("edge")
+    println(name.map_or("anonymous", |s| s.to_uppercase()))
+    let port = Some(Port { number: 8080, name: "http" })
+    println(f"{port.map_or("closed", |p| p.name)} {port.is_some_and(|p| p.number == 8080)}")
+
+    let ok = parse("42")
+    let err = parse("x")
+    println(f"{ok.is_ok_and(|n| n == 42)} {err.is_ok_and(|n| n == 42)}")
+    println(f"{ok.is_err_and(|e| e.len() > 0)} {err.is_err_and(|e| e.contains("number"))}")
+    println(f"{ok.map_or(0, |n| n * 10)} {err.map_or(0, |n| n * 10)}")
+    println(ok.map_or_else(|e| f"failed: {e}", |n| f"got {n}"))
+    println(err.map_or_else(|e| f"failed: {e}", |n| f"got {n}"))
+
+    // The fallback is evaluated once, before the match, even when unused.
+    println(f"{some.map_or(noisy(1), |n| n)}")
+
+    let doc = json::parse("{\"owner\": null, \"replicas\": 3}").unwrap()
+    println(f"{json::get(doc, "owner").is_some_and(json::is_null)} {json::get(doc, "x").is_some_and(json::is_null)}")
+    println(f"{option::is_some_and(some, |n| n == 7)} {option::is_none_or(none, |n| n == 7)}")
+    println(f"{option::map_or(none, 5, |n| n + 1)} {option::map_or_else(some, || 0, |n| n + 1)}")
+    println(f"{result::is_ok_and(ok, |n| n > 0)} {result::is_err_and(ok, |e| e.len() > 0)}")
+    println(f"{result::map_or(err, -1, |n| n)} {result::map_or_else(err, |e| e.len(), |n| n)}")
+    let doubled = some |> |o| option::map_or(o, 0, |n| n * 2)
+    println(f"{doubled}")
+    let mut seen = 0
+    let counted = some.is_some_and(|n| {
+        seen += n
+        true
+    })
+    println(f"{counted} {seen}")
+}

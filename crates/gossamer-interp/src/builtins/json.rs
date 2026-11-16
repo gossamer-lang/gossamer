@@ -67,45 +67,22 @@ fn builtin_json_get(args: &[Value]) -> RuntimeResult<Value> {
     Ok(none_variant())
 }
 
-/// A JSON `null`, which is what a document states and what an element
-/// the document does not have reads as.
-fn json_null() -> Value {
-    Value::Json(Arc::new(JsonInner::new(json_std::Value::Null)))
+/// `json::pointer(value, pointer)`: the value an RFC 6901 JSON Pointer names.
+pub(crate) fn builtin_json_pointer(args: &[Value]) -> RuntimeResult<Value> {
+    let pointer = args.get(1).and_then(as_str).unwrap_or("");
+    match args.first() {
+        Some(Value::Json(value)) => {
+            Ok(json_std::pointer(value.as_value(), pointer).map_or_else(none_variant, |child| {
+                some_variant(json_child_to_lazy_value(value, child))
+            }))
+        }
+        // A scalar read out of a document: only the empty pointer names it.
+        Some(other) if pointer.is_empty() => Ok(some_variant(other.clone())),
+        _ => Ok(none_variant()),
+    }
 }
 
-/// `json::at(array, idx)` → array index. Answers JSON `null` when the
-/// receiver isn't an array or the index is out of bounds, which is what
-/// the compiled tiers answer and what `json::is_null` reports on.
-fn builtin_json_at(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(receiver) = args.first() else {
-        return Ok(json_null());
-    };
-    let idx = args.get(1).and_then(|v| match v {
-        Value::Int(n) => Some(*n),
-        Value::Uint(n) => Some(*n as i64),
-        _ => None,
-    });
-    let Some(idx) = idx else {
-        return Ok(json_null());
-    };
-    if idx < 0 {
-        return Ok(json_null());
-    }
-    if let Value::Json(value) = receiver {
-        if let json_std::Value::Array(items) = value.as_value() {
-            if let Some(child) = items.get(idx as usize) {
-                return Ok(json_child_to_lazy_value(value, child));
-            }
-        }
-        return Ok(json_null());
-    }
-    if let Value::Array(arr) = receiver {
-        if let Some(v) = arr.get(idx as usize) {
-            return Ok(v.clone());
-        }
-    }
-    Ok(json_null())
-}
+
 
 /// `json::keys(object)` → `Some([String])` of every key in sorted
 /// order, or `None` when the receiver isn't an object. Tests
@@ -133,19 +110,50 @@ fn builtin_json_keys(args: &[Value]) -> RuntimeResult<Value> {
 
 /// `json::len(value)` → element / pair / byte count, 0 for scalar.
 fn builtin_json_len(args: &[Value]) -> RuntimeResult<Value> {
+    // `v.len()` on a `json::Value` answers the `Option` `json::len` does.
+    if let Some(Value::Json(_)) = args.first() {
+        return builtin_json_len_opt(args);
+    }
     let n: i64 = match args.first() {
-        Some(Value::Json(value)) => match value.as_value() {
-            json_std::Value::Array(items) => items.len() as i64,
-            json_std::Value::Object(entries) => entries.len() as i64,
-            json_std::Value::String(text) => text.len() as i64,
-            _ => 0,
-        },
         Some(Value::Array(a)) => a.len() as i64,
         Some(Value::Struct(s)) => s.fields.len() as i64,
         Some(Value::String(s)) => s.byte_len() as i64,
         _ => 0,
     };
     Ok(Value::Int(n))
+}
+
+/// `json::at(value, index)` → `Option<json::Value>`: the element, or `None`
+/// past the end and for a value that is not an array.
+pub(crate) fn builtin_json_at_opt(args: &[Value]) -> RuntimeResult<Value> {
+    let index = match args.get(1) {
+        Some(Value::Int(n)) => usize::try_from(*n).ok(),
+        Some(Value::Uint(n)) => usize::try_from(*n).ok(),
+        _ => None,
+    };
+    if let (Some(Value::Json(value)), Some(index)) = (args.first(), index)
+        && let json_std::Value::Array(items) = value.as_value()
+        && let Some(child) = items.get(index)
+    {
+        return Ok(some_variant(json_child_to_lazy_value(value, child)));
+    }
+    Ok(none_variant())
+}
+
+/// `json::len(value)` → `Option<i64>`: the count of an array or object, and
+/// `None` for any other value, as `json::keys` answers.
+pub(crate) fn builtin_json_len_opt(args: &[Value]) -> RuntimeResult<Value> {
+    let count = match args.first() {
+        Some(Value::Json(value)) => match value.as_value() {
+            json_std::Value::Array(items) => Some(items.len()),
+            json_std::Value::Object(entries) => Some(entries.len()),
+            _ => None,
+        },
+        _ => None,
+    };
+    Ok(count.map_or_else(none_variant, |n| {
+        some_variant(Value::Int(i64::try_from(n).unwrap_or(i64::MAX)))
+    }))
 }
 
 /// `json::is_null(value)` → `true` when the value is the `null` shape.
@@ -168,6 +176,26 @@ fn builtin_json_as_str(args: &[Value]) -> RuntimeResult<Value> {
     Ok(none_variant())
 }
 
+/// `json::set_max_size(bytes)`.
+pub(crate) fn builtin_json_set_max_size(args: &[Value]) -> RuntimeResult<Value> {
+    if let Some(Value::Int(n)) = args.first() {
+        json_std::set_max_size(gossamer_core_cap(*n));
+    }
+    Ok(Value::Unit)
+}
+
+/// `json::set_max_depth(levels)`.
+pub(crate) fn builtin_json_set_max_depth(args: &[Value]) -> RuntimeResult<Value> {
+    if let Some(Value::Int(n)) = args.first() {
+        json_std::set_max_depth(gossamer_core_cap(*n));
+    }
+    Ok(Value::Unit)
+}
+
+fn gossamer_core_cap(n: i64) -> usize {
+    json_std::cap_from_program(n)
+}
+
 /// `json::as_i64(value)` → `Option<i64>`.
 fn builtin_json_as_i64(args: &[Value]) -> RuntimeResult<Value> {
     if let Some(Value::Json(value)) = args.first() {
@@ -182,8 +210,8 @@ fn builtin_json_as_i64(args: &[Value]) -> RuntimeResult<Value> {
         return Ok(i64::try_from(*n).map_or_else(|_| none_variant(), |n| some_variant(Value::Int(n))));
     }
     if let Some(Value::Float(f)) = args.first() {
-        if f.fract() == 0.0 && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
-            return Ok(some_variant(Value::Int(*f as i64)));
+        if let Some(n) = json_std::integral_i64(*f) {
+            return Ok(some_variant(Value::Int(n)));
         }
     }
     Ok(none_variant())
@@ -255,285 +283,6 @@ fn builtin_json_as_array(args: &[Value]) -> RuntimeResult<Value> {
     Ok(none_variant())
 }
 
-fn builtin_json_decode(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(text) = args.first().and_then(as_str) else {
-        return Ok(err_variant("json::decode: expected string argument"));
-    };
-    match json_std::decode(text) {
-        Ok(value) => Ok(ok_variant(json_value_to_gossamer(&value))),
-        Err(err) => Ok(err_variant(err.to_string())),
-    }
-}
-
-/// Ordered field schema attached to a user struct. Built at
-/// `Vm::load` time from the typechecker's `struct_field_tys` map and
-/// the HIR's declaration-order field name list. Drives strict
-/// `<Type>::from_json(text)` deserialization.
-#[derive(Debug, Clone)]
-pub(crate) struct JsonStructSchema {
-    /// Source-order `(field_name, expected_kind)` pairs.
-    pub fields: Vec<(String, JsonSchemaKind)>,
-}
-
-/// Expected shape for one JSON-decoded field. Mirrors the subset of
-/// `TyKind` the JSON decoder validates against - primitives, the
-/// growable / fixed sequence shapes, tuples, and nested named ADTs
-/// resolved by struct name.
-#[derive(Debug, Clone)]
-pub(crate) enum JsonSchemaKind {
-    /// `i8`..`u128` / `isize` / `usize`.
-    Int,
-    /// `f32` / `f64`.
-    Float,
-    /// `bool`.
-    Bool,
-    /// `String` (and `char`, encoded as one-rune string).
-    String,
-    /// `Vec<T>` or `[T]` (growable / slice).
-    Vec(Box<JsonSchemaKind>),
-    /// `[T; N]` fixed-size array.
-    Array(Box<JsonSchemaKind>, usize),
-    /// `(A, B, ...)`. Matched as JSON array of the same arity.
-    Tuple(Vec<JsonSchemaKind>),
-    /// Nested user struct referenced by source name.
-    Struct(String),
-    /// `Option<T>`. `null` decodes to `None`; any other JSON value
-    /// runs through the inner kind and wraps in `Some`.
-    Option(Box<JsonSchemaKind>),
-    /// `HashMap<String, V>` - JSON object with arbitrary string keys.
-    Map(Box<JsonSchemaKind>),
-    /// `json::Value` - accept any well-formed JSON value untouched.
-    Json,
-    /// Unknown / unsupported leaf. The decoder accepts whatever the
-    /// parser produced and does not validate further.
-    Any,
-}
-
-#[allow(
-    clippy::missing_const_for_thread_local,
-    reason = "HashMap::new with default RandomState is not const on MSRV"
-)]
-mod json_schema_registry {
-    use super::{JsonStructSchema, RefCell};
-
-    thread_local! {
-        pub(crate) static STRUCT_SCHEMAS: RefCell<std::collections::HashMap<String, JsonStructSchema>> =
-            RefCell::new(std::collections::HashMap::new());
-    }
-}
-
-pub(crate) use json_schema_registry::STRUCT_SCHEMAS;
-
-/// Installs the struct schema table consulted by
-/// `<Type>::from_json(text)` deserialization. Invoked once per
-/// `Vm::load`. Replaces any prior table so tests that load multiple
-/// programs see only the current program's structs.
-#[allow(
-    clippy::implicit_hasher,
-    reason = "stored verbatim in a RandomState-typed thread-local; generic hasher would force the thread-local to be generic too"
-)]
-pub(crate) fn set_json_struct_schemas(
-    schemas: std::collections::HashMap<String, JsonStructSchema>,
-) {
-    STRUCT_SCHEMAS.with(|cell| *cell.borrow_mut() = schemas);
-}
-
-/// Returns `true` when `type_name` has a registered JSON schema -
-/// i.e. it is a user struct in the currently-loaded program. Used
-/// by the interpreter to decide whether to intercept
-/// `<Type>::from_json(text)` / `<Type>::to_json(value)` calls.
-#[must_use]
-pub(crate) fn has_json_schema(type_name: &str) -> bool {
-    STRUCT_SCHEMAS.with(|cell| cell.borrow().contains_key(type_name))
-}
-
-/// `<Type>::to_json(value)` - render `value` as a JSON string,
-/// returning `Result<String, errors::Error>`. Pairs with
-/// `<Type>::from_json`; the receiver may be either an already-typed
-/// `Value::Struct` or any other shape `json::render` can flatten.
-pub(crate) fn json_to_string_for_type(_type_name: &str, value: &Value) -> Value {
-    let rendered = gossamer_to_json_value(value);
-    ok_variant(Value::String(SmolStr::from(json_std::encode(&rendered))))
-}
-
-/// `<Type>::from_json(text)` - parse and validate strictly against
-/// the registered schema for `type_name`. Returns the same shape as
-/// `json::decode` (`Result<T, errors::Error>`) so `?` propagates.
-pub(crate) fn json_from_str_for_type(type_name: &str, text: &str) -> Value {
-    let parsed = match json_std::parse(text) {
-        Ok(v) => v,
-        Err(e) => return err_variant(format!("{type_name}::from_json: {e}")),
-    };
-    match coerce_json_to_named_struct(&parsed, type_name) {
-        Ok(value) => ok_variant(value),
-        Err(msg) => err_variant(format!("{type_name}::from_json: {msg}")),
-    }
-}
-
-fn coerce_json_to_named_struct(value: &json_std::Value, type_name: &str) -> Result<Value, String> {
-    let schema = STRUCT_SCHEMAS.with(|cell| cell.borrow().get(type_name).cloned());
-    let Some(schema) = schema else {
-        return Err(format!("unknown struct `{type_name}`"));
-    };
-    let json_std::Value::Object(map) = value else {
-        return Err(format!("expected JSON object for `{type_name}`"));
-    };
-    let mut fields: Vec<(&'static str, Value)> = Vec::with_capacity(schema.fields.len());
-    for (field_name, kind) in &schema.fields {
-        let Some(child) = map.get(field_name) else {
-            return Err(format!("missing field `{field_name}`"));
-        };
-        let coerced =
-            coerce_json_to_kind(child, kind).map_err(|m| format!("field `{field_name}`: {m}"))?;
-        fields.push((crate::value::intern_type_name(field_name.as_str()), coerced));
-    }
-    Ok(Value::struct_(
-        type_name,
-        Arc::unwrap_or_clone(Arc::new(fields)),
-    ))
-}
-
-fn coerce_json_to_kind(value: &json_std::Value, kind: &JsonSchemaKind) -> Result<Value, String> {
-    use JsonSchemaKind as K;
-    match (value, kind) {
-        (_, K::Any | K::Json) => Ok(json_value_to_gossamer(value)),
-        (json_std::Value::Null, K::Option(_)) => Ok(none_variant()),
-        (other, K::Option(inner)) => coerce_json_to_kind(other, inner).map(some_variant),
-        (json_std::Value::Number(n), K::Int) => {
-            if !n.is_finite() || n.fract() != 0.0 {
-                return Err(format!("expected integer, got {n}"));
-            }
-            Ok(Value::Int(*n as i64))
-        }
-        (json_std::Value::Number(n), K::Float) => Ok(Value::Float(*n)),
-        (json_std::Value::Bool(b), K::Bool) => Ok(Value::Bool(*b)),
-        (json_std::Value::String(s), K::String) => Ok(Value::String(SmolStr::from(s.clone()))),
-        (json_std::Value::Array(items), K::Vec(elem)) => {
-            let mut out: Vec<Value> = Vec::with_capacity(items.len());
-            for (i, item) in items.iter().enumerate() {
-                out.push(coerce_json_to_kind(item, elem).map_err(|m| format!("[{i}]: {m}"))?);
-            }
-            Ok(Value::Array(Arc::new(out)))
-        }
-        (json_std::Value::Array(items), K::Array(elem, expected_len)) => {
-            if items.len() != *expected_len {
-                return Err(format!(
-                    "expected array of length {expected_len}, got {}",
-                    items.len()
-                ));
-            }
-            let mut out: Vec<Value> = Vec::with_capacity(items.len());
-            for (i, item) in items.iter().enumerate() {
-                out.push(coerce_json_to_kind(item, elem).map_err(|m| format!("[{i}]: {m}"))?);
-            }
-            Ok(Value::Array(Arc::new(out)))
-        }
-        (json_std::Value::Array(items), K::Tuple(elems)) => {
-            if items.len() != elems.len() {
-                return Err(format!(
-                    "expected tuple of arity {}, got {}",
-                    elems.len(),
-                    items.len()
-                ));
-            }
-            let mut out: Vec<Value> = Vec::with_capacity(items.len());
-            for (i, (item, elem_kind)) in items.iter().zip(elems.iter()).enumerate() {
-                out.push(coerce_json_to_kind(item, elem_kind).map_err(|m| format!(".{i}: {m}"))?);
-            }
-            Ok(Value::Tuple(Arc::from(out)))
-        }
-        (json_std::Value::Object(_), K::Struct(name)) => coerce_json_to_named_struct(value, name),
-        (json_std::Value::Object(map), K::Map(value_kind)) => {
-            let mut storage = dense_map_with_capacity(map.len());
-            for (k, v) in map {
-                let coerced =
-                    coerce_json_to_kind(v, value_kind).map_err(|m| format!("[{k:?}]: {m}"))?;
-                storage.insert(MapKey::Str(SmolStr::from(k.clone())), coerced);
-            }
-            Ok(Value::Map(Arc::new(parking_lot::Mutex::new(storage.into()))))
-        }
-        (got, want) => Err(format!(
-            "expected {}, got {}",
-            describe_kind(want),
-            describe_json_value(got)
-        )),
-    }
-}
-
-fn describe_kind(kind: &JsonSchemaKind) -> String {
-    use JsonSchemaKind as K;
-    match kind {
-        K::Int => "integer".to_string(),
-        K::Float => "number".to_string(),
-        K::Bool => "bool".to_string(),
-        K::String => "string".to_string(),
-        K::Vec(inner) => format!("array of {}", describe_kind(inner)),
-        K::Array(inner, n) => format!("array of {} length {n}", describe_kind(inner)),
-        K::Tuple(elems) => format!("tuple of arity {}", elems.len()),
-        K::Struct(name) => name.clone(),
-        K::Option(inner) => format!("optional {}", describe_kind(inner)),
-        K::Map(inner) => format!("map of {}", describe_kind(inner)),
-        K::Json => "any json value".to_string(),
-        K::Any => "any value".to_string(),
-    }
-}
-
-fn describe_json_value(value: &json_std::Value) -> &'static str {
-    match value {
-        json_std::Value::Null => "null",
-        json_std::Value::Bool(_) => "bool",
-        json_std::Value::Int(_) | json_std::Value::Uint(_) | json_std::Value::Number(_) => {
-            "number"
-        }
-        json_std::Value::String(_) => "string",
-        json_std::Value::Array(_) => "array",
-        json_std::Value::Object(_) => "object",
-    }
-}
-
-fn json_value_to_gossamer(value: &json_std::Value) -> Value {
-    match value {
-        json_std::Value::Null => Value::Unit,
-        json_std::Value::Bool(b) => Value::Bool(*b),
-        // `Int` and `Number` are kept distinct so an integer round-trips
-        // as an integer and a float (including an integer-valued one like
-        // `2.0`) round-trips as a float, matching the serde-backed
-        // compiled tier.
-        json_std::Value::Int(n) => Value::Int(*n),
-        json_std::Value::Uint(n) => Value::Uint(*n),
-        json_std::Value::Number(n) => Value::Float(*n),
-        json_std::Value::String(s) => Value::String(SmolStr::from(s.clone())),
-        json_std::Value::Array(items) => {
-            Value::Array(Arc::new(items.iter().map(json_value_to_gossamer).collect()))
-        }
-        json_std::Value::Object(entries) => {
-            let fields: Vec<(&'static str, Value)> = entries
-                .iter()
-                .map(|(k, v)| (crate::value::intern_type_name(k), json_value_to_gossamer(v)))
-                .collect();
-            Value::struct_("Object", Arc::unwrap_or_clone(Arc::new(fields)))
-        }
-    }
-}
-
-/// Exposes JSON scalars as their natural interpreter values and keeps nested
-/// documents canonical. This is the lazy boundary for JSON query operations:
-/// direct parse-render never crosses it, while callers that inspect a child
-/// retain the pre-existing scalar behavior without rebuilding unrelated
-/// branches of the document.
-fn json_value_to_lazy_value(value: &json_std::Value) -> Value {
-    match value {
-        json_std::Value::Null => json_null(),
-        json_std::Value::Bool(b) => Value::Bool(*b),
-        json_std::Value::Int(n) => Value::Int(*n),
-        json_std::Value::Uint(n) => Value::Uint(*n),
-        json_std::Value::Number(n) => Value::Float(*n),
-        json_std::Value::String(text) => Value::String(SmolStr::from(text.as_str())),
-        json_std::Value::Array(_) | json_std::Value::Object(_) => {
-            Value::Json(Arc::new(JsonInner::new(value.clone())))
-        }
-    }
-}
 
 fn json_child_to_lazy_value(parent: &JsonInner, child: &json_std::Value) -> Value {
     match child {

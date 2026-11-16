@@ -1,33 +1,40 @@
 // `std::encoding::toml` - TOML 1.0 parsing + emission.
 //
-// Surface stays simple to keep the cross-tier C-ABI light:
-//   - `to_json(toml_text)`   -> Result<json_text, errors::Error>
-//   - `from_json(json_text)` -> Result<toml_text, errors::Error>
-//   - `is_valid(s)`          -> bool
-//   - `pretty(s)`            -> Result<toml_text, errors::Error>
+//   - `parse(toml_text)`          -> Result<json::Value, errors::Error>
+//   - `encode(value)`             -> Result<toml_text, errors::Error>
+//   - `to_json_text(toml_text)`   -> Result<json_text, errors::Error>
+//   - `from_json_text(json_text)` -> Result<toml_text, errors::Error>
+//   - `is_valid(s)`               -> bool
+//   - `pretty(s)`                 -> Result<toml_text, errors::Error>
 //
-// For typed deserialization, every user struct gets a
-// `<Type>::from_toml` / `to_toml` derive at `Vm::load` (extends the
-// JSON auto-derive pattern; routes through `to_json` / `from_json`
-// internally - same schema registry).
+// A document converts with each table's members by key, as `toml::Table`
+// and a `json::Value` hold them. Typed `toml::decode::<T>` / `encode::<T>`
+// go through the typed serde steps, which keep a struct's member order.
 
 #![forbid(unsafe_code)]
 
-/// Parses `text` as TOML and returns its JSON-shaped serialization.
-/// JSON is the lingua franca for downstream consumers - chain into
-/// `json::parse` or use the auto-derived `<Type>::from_toml`.
-pub fn to_json(text: &str) -> Result<String, String> {
-    let value: toml::Value = toml::from_str(text).map_err(|e| e.to_string())?;
-    let json = toml_value_to_json(&value);
-    serde_json::to_string(&json).map_err(|e| e.to_string())
+use gossamer_runtime::codec::json_convert::{self, Members};
+
+/// Parses `text` as TOML into the JSON value its tables read as.
+pub fn parse(text: &str) -> Result<crate::json::Value, String> {
+    crate::json::parse(&to_json_text(text)?).map_err(|e| e.to_string())
 }
 
-/// Renders a JSON document as TOML. Top-level must be an object;
-/// arrays-of-objects become `[[name]]` table arrays.
-pub fn from_json(json_text: &str) -> Result<String, String> {
-    let v: serde_json::Value = serde_json::from_str(json_text).map_err(|e| e.to_string())?;
-    let toml_value = json_to_toml_value(&v)?;
-    toml::to_string_pretty(&toml_value).map_err(|e| e.to_string())
+/// Encodes a JSON value whose top level is an object as a TOML document.
+pub fn encode(value: &crate::json::Value) -> Result<String, String> {
+    from_json_text(&crate::json::encode(value))
+}
+
+/// Parses `text` as TOML and returns its JSON text, each table's members
+/// by key.
+pub fn to_json_text(text: &str) -> Result<String, String> {
+    json_convert::toml_to_json(text)
+}
+
+/// Renders a JSON document as TOML, each object's members by key. The top
+/// level must be an object; arrays of objects become `[[name]]` table arrays.
+pub fn from_json_text(json_text: &str) -> Result<String, String> {
+    json_convert::to_toml(json_text, Members::Sorted)
 }
 
 /// `true` iff `text` parses as a TOML document.
@@ -42,72 +49,23 @@ pub fn pretty(text: &str) -> Result<String, String> {
     toml::to_string_pretty(&value).map_err(|e| e.to_string())
 }
 
-fn toml_value_to_json(v: &toml::Value) -> serde_json::Value {
-    match v {
-        toml::Value::String(s) => serde_json::Value::String(s.clone()),
-        toml::Value::Integer(i) => serde_json::Value::Number((*i).into()),
-        toml::Value::Float(f) => serde_json::Number::from_f64(*f)
-            .map_or(serde_json::Value::Null, serde_json::Value::Number),
-        toml::Value::Boolean(b) => serde_json::Value::Bool(*b),
-        toml::Value::Datetime(d) => serde_json::Value::String(d.to_string()),
-        toml::Value::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(toml_value_to_json).collect())
-        }
-        toml::Value::Table(t) => {
-            let mut map = serde_json::Map::new();
-            for (k, v) in t {
-                map.insert(k.clone(), toml_value_to_json(v));
-            }
-            serde_json::Value::Object(map)
-        }
-    }
-}
-
-fn json_to_toml_value(v: &serde_json::Value) -> Result<toml::Value, String> {
-    match v {
-        serde_json::Value::Null => Err("TOML has no null".to_string()),
-        serde_json::Value::Bool(b) => Ok(toml::Value::Boolean(*b)),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(toml::Value::Integer(i))
-            } else if let Some(f) = n.as_f64() {
-                Ok(toml::Value::Float(f))
-            } else {
-                Err(format!("unrepresentable number: {n}"))
-            }
-        }
-        serde_json::Value::String(s) => Ok(toml::Value::String(s.clone())),
-        serde_json::Value::Array(items) => Ok(toml::Value::Array(
-            items
-                .iter()
-                .map(json_to_toml_value)
-                .collect::<Result<_, _>>()?,
-        )),
-        serde_json::Value::Object(map) => {
-            let mut t = toml::value::Table::new();
-            for (k, v) in map {
-                t.insert(k.clone(), json_to_toml_value(v)?);
-            }
-            Ok(toml::Value::Table(t))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn to_json_round_trip_simple() {
+    fn to_json_text_reads_tables_by_key() {
         let toml_text = r#"
             port = 8080
             host = "localhost"
             verbose = true
+            when = 1979-05-27T07:32:00Z
         "#;
-        let json = to_json(toml_text).unwrap();
-        assert!(json.contains("\"port\":8080"));
-        assert!(json.contains("\"host\":\"localhost\""));
-        assert!(json.contains("\"verbose\":true"));
+        let json = to_json_text(toml_text).unwrap();
+        assert_eq!(
+            json,
+            r#"{"host":"localhost","port":8080,"verbose":true,"when":"1979-05-27T07:32:00Z"}"#
+        );
     }
 
     #[test]
@@ -121,18 +79,25 @@ mod tests {
     }
 
     #[test]
-    fn from_json_round_trip() {
+    fn from_json_text_orders_members_by_key() {
         let json = r#"{"port":8080,"host":"localhost"}"#;
-        let toml_text = from_json(json).unwrap();
-        assert!(toml_text.contains("port = 8080"));
-        assert!(toml_text.contains("host = \"localhost\""));
+        assert_eq!(
+            from_json_text(json).unwrap(),
+            "host = \"localhost\"\nport = 8080\n"
+        );
+    }
+
+    #[test]
+    fn parse_and_encode_round_trip() {
+        let value = parse("b = 1\na = [true]\n").unwrap();
+        assert_eq!(crate::json::encode(&value), r#"{"a":[true],"b":1}"#);
+        assert_eq!(encode(&value).unwrap(), "a = [true]\nb = 1\n");
     }
 
     #[test]
     fn pretty_normalizes() {
         let messy = "host =    \"localhost\"\nport=8080\n";
         let clean = pretty(messy).unwrap();
-        // Pretty-printer normalizes spacing; both keys remain present.
         assert!(clean.contains("host"));
         assert!(clean.contains("port"));
     }

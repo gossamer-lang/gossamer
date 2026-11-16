@@ -351,7 +351,7 @@ impl<'a> Builder<'a> {
         // parameter T in `render<T>(val: &T)`). To find the concrete
         // struct type, peel `&` syntactically and use the inner
         // expression's type, which the typechecker always resolves.
-        if (last == "render" || last == "encode" || last == "encode_pretty") && !args.is_empty() {
+        if (last == "encode" || last == "encode_pretty") && !args.is_empty() {
             // `encode_pretty(val[, indent])` renders with two-space
             // indentation; the optional indent arg is accepted and
             // ignored (parity with the interp / `gossamer_std`).
@@ -433,15 +433,16 @@ impl<'a> Builder<'a> {
         span: Span,
     ) -> Option<Local> {
         let (rt_name, ret_ty) = match last {
-            "parse" | "decode" => ("gos_rt_json_parse", self.result_json_value_error_adt_ty()),
-            "render" | "encode" => ("gos_rt_json_render", self.tcx.string_ty()),
+            "parse" => ("gos_rt_json_parse", self.result_json_value_error_adt_ty()),
+            "encode" => ("gos_rt_json_render", self.tcx.string_ty()),
             "encode_pretty" => ("gos_rt_json_render_pretty", self.tcx.string_ty()),
-            "valid" => ("gos_rt_json_valid", self.tcx.bool_ty()),
+            "is_valid" => ("gos_rt_json_valid", self.tcx.bool_ty()),
             // User-level `json::get` returns `Option<json::Value>`.
             // The bare `gos_rt_json_get` is still used by the field-
             // access lowering for `root.a.b.c` (raw chain pointer).
             "get" => ("gos_rt_json_get_opt", self.option_json_value_adt_ty()),
-            "at" => ("gos_rt_json_at", self.tcx.json_value_ty()),
+            "pointer" => ("gos_rt_json_pointer_opt", self.option_json_value_adt_ty()),
+            "at" => ("gos_rt_json_at_opt", self.option_json_value_adt_ty()),
             // `json::as_i64` / `as_f64` / `as_str` return `Option<T>`
             // (Some only when the JSON node is the matching type),
             // matching the VM. The auto-derived `from_json` matches on
@@ -457,12 +458,18 @@ impl<'a> Builder<'a> {
             "as_bool" => ("gos_rt_json_as_bool_opt", self.option_bool_adt_ty()),
             "as_array" => ("gos_rt_json_as_array_opt", self.option_json_array_adt_ty()),
             "keys" => ("gos_rt_json_keys_opt", self.option_string_vec_adt_ty()),
-            "len" => (
-                "gos_rt_json_len",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
+            "len" => ("gos_rt_json_len_opt", self.option_i64_adt_ty()),
             "is_null" => ("gos_rt_json_is_null", self.tcx.bool_ty()),
+            "set_max_size" => ("gos_rt_json_set_max_size", self.tcx.unit()),
+            "set_max_depth" => ("gos_rt_json_set_max_depth", self.tcx.unit()),
             _ => return None,
+        };
+        // `sort:` matters only to the generated walk a value of a user type
+        // renders through; the tree a rendering reaches here already holds
+        // its object members by key.
+        let args = match last {
+            "encode" | "encode_pretty" => &args[..args.len().min(1)],
+            _ => args,
         };
         let mut arg_locals = Vec::with_capacity(args.len());
         for arg in args {

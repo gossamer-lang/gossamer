@@ -1,0 +1,80 @@
+// The serde attributes beyond a field's own `#[rename]`, `#[skip]`, and
+// `#[default]`: `#[rename_all]` on a struct or enum, `#[rename]` on a
+// variant, `#[default(value)]` with a literal, `None`, or a unit variant,
+// `#[tag]` for one-object enum variants, `Option<Option<T>>` telling a
+// missing member from `null`, and fixed-array fields.
+// Bit-identical on the VM, Cranelift, and LLVM tiers.
+
+use std::encoding::json
+
+#[rename_all("camelCase")]
+struct Station {
+    station_id: i64
+    wind_speed_kmh: f64
+    #[rename("RH")]
+    relative_humidity: u8
+    #[default(3)]
+    retries: i64
+    #[default("auto")]
+    mode: String
+    #[default(Units::Metric)]
+    units: Units
+    #[default(None)]
+    label: Option<String>
+    note: Option<Option<String>>
+    grid: [i64; 3]
+}
+
+#[rename_all("snake_case")]
+enum Units {
+    Metric
+    Imperial
+    #[rename("si")]
+    Si
+}
+
+#[tag("type")]
+enum Shape {
+    Circle { r: f64 }
+    Square(Side)
+    Empty
+}
+
+struct Side {
+    side: f64
+}
+
+struct Drawing {
+    shapes: Vec<Shape>
+}
+
+fn main() {
+    let full = "{\"stationId\": 7, \"windSpeedKmh\": 12.5, \"RH\": 80, \"units\": \"imperial\", \"note\": null, \"grid\": [1, 2, 3]}"
+    match json::decode::<Station>(full) {
+        Ok(s) => {
+            println(f"{s.station_id} {s.wind_speed_kmh} {s.relative_humidity} {s.retries} {s.mode} {s.units:?} {s.label:?} {s.note:?} {s.grid:?}")
+            println(json::encode::<Station>(s).unwrap())
+        }
+        Err(e) => println(f"error: {e}")
+    }
+    let sparse = "{\"stationId\": 1, \"windSpeedKmh\": 0, \"RH\": 1, \"note\": \"hi\", \"grid\": [0, 0, 0]}"
+    match json::decode::<Station>(sparse) {
+        Ok(s) => {
+            println(f"{s.units:?} {s.note:?}")
+            println(json::encode(s).unwrap())
+        }
+        Err(e) => println(f"error: {e}")
+    }
+    let missing = "{\"stationId\": 1, \"windSpeedKmh\": 0, \"RH\": 1, \"grid\": [0, 0, 0]}"
+    match json::decode::<Station>(missing) {
+        Ok(s) => println(f"{s.note:?} {json::encode(s).unwrap()}")
+        Err(e) => println(f"error: {e}")
+    }
+    println(f"{json::decode::<Units>("\"si\"")} {json::encode::<Units>(Units::Imperial)}")
+    let drawing = "{\"shapes\": [{\"type\": \"Circle\", \"r\": 2}, {\"side\": 3, \"type\": \"Square\"}, {\"type\": \"Empty\"}]}"
+    match json::decode::<Drawing>(drawing) {
+        Ok(d) => println(json::encode(d).unwrap())
+        Err(e) => println(f"error: {e}")
+    }
+    println(f"{json::decode::<Shape>("{\"type\": \"Triangle\"}").is_err()} {json::decode::<Shape>("{\"r\": 1}").is_err()}")
+}

@@ -1,0 +1,28 @@
+// A struct literal's field-init shorthand: a lone name fills the field of
+// that name from the binding of that name, beside `name: value` fields in
+// any order.
+// Bit-identical on the VM, Cranelift, and LLVM tiers.
+
+struct Weather {
+    temperature: f64
+    summary: String
+}
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+fn weather(temperature: f64) -> Weather {
+    let summary = "sunny"
+    Weather { temperature, summary }
+}
+
+fn main() {
+    let x = 1
+    let y = 2
+    let p = Point { x, y: y + 1 }
+    let q = Point { y, x }
+    let w = weather(3.5)
+    println(f"{w.temperature} {w.summary} {p.x} {p.y} {q.x} {q.y}")
+}

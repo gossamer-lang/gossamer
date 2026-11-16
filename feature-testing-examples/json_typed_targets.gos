@@ -1,0 +1,60 @@
+// Typed serde of any target with a JSON form, not only a declared struct or
+// enum: a collection at the top of a document, a map, an `Option`, a tuple,
+// a fixed array, a scalar, an instantiation of a generic struct or enum
+// (named directly or through an alias), and `json::from_value` decoding a
+// subtree a program navigated to without rendering it back to text.
+// Bit-identical on the VM, Cranelift, and LLVM tiers.
+
+use std::encoding::json
+
+struct Item {
+    id: i64
+    name: String
+}
+
+#[derive(Debug)]
+struct Page<T> {
+    items: Vec<T>
+    next: Option<String>
+}
+
+#[derive(Debug)]
+enum Wrap<T> {
+    One(T)
+    Many(Vec<T>)
+}
+
+type IntPage = Page<i64>
+
+mod store {
+    pub struct Row {
+        pub x: i64
+    }
+
+    pub fn load(text: String) -> i64 {
+        match json::decode::<Vec<Row>>(text) {
+            Ok(rows) => rows.len()
+            Err(_) => -1
+        }
+    }
+}
+
+fn main() {
+    println(f"{json::decode::<Vec<Item>>("[{\"id\": 1, \"name\": \"a\"}, {\"id\": 2, \"name\": \"b\"}]")}")
+    println(f"{json::decode::<Vec<Item>>("[{\"id\": 1, \"name\": 2}]")}")
+    println(f"{json::decode::<Map<String, i64>>("{\"b\": 2, \"a\": 1}")}")
+    println(f"{json::decode::<Option<i64>>("null")} {json::decode::<String>("\"hi\"")} {json::decode::<(i64, bool)>("[1, true]")}")
+    println(f"{json::decode::<[f64; 2]>("[1.5, 2]")}")
+    println(f"{json::decode::<Page<Item>>("{\"items\": [{\"id\": 3, \"name\": \"c\"}], \"next\": \"x\"}")}")
+    println(f"{json::decode::<IntPage>("{\"items\": [1, 2]}")}")
+    println(f"{json::decode::<Wrap<String>>("{\"Many\": [\"a\", \"b\"]}")}")
+    println(f"{json::encode::<Vec<Item>>(#[Item { id: 1, name: "z" }])}")
+    println(f"{json::encode::<Page<i64>>(Page { items: #[1], next: None })}")
+    println(json::encode(Page { items: #[Item { id: 9, name: "q" }], next: Some("n") }).unwrap())
+    let doc = json::parse("{\"current\": {\"id\": 5, \"name\": \"cur\", \"extra\": true}}").unwrap()
+    let current = json::get(doc, "current").unwrap()
+    println(f"{json::from_value::<Item>(current)}")
+    println(f"{json::from_value::<Item>(json::get(current, "id").unwrap())}")
+    println(f"{json::from_value::<i64>(json::get(current, "id").unwrap())}")
+    println(f"{store::load("[{\"x\": 4}, {\"x\": 5}]")}")
+}

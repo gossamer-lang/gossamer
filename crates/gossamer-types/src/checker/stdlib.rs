@@ -2255,6 +2255,9 @@ impl TypeChecker<'_> {
         if matches!(module, ["DynValue"]) {
             return self.dyn_value_ctor_ret(last);
         }
+        if let Some(ty) = self.untyped_format_decode(module, last, callee) {
+            return Some(ty);
+        }
         if matches!(
             module,
             ["json"] | ["encoding", "json"] | ["std", "encoding", "json"]
@@ -2313,6 +2316,25 @@ impl TypeChecker<'_> {
         None
     }
 
+    /// Reports a `json::decode` / `yaml::decode` / `toml::decode` call that
+    /// names no type: a typed one became its own stub before checking.
+    fn untyped_format_decode(&mut self, module: &[&str], last: &str, callee: &Expr) -> Option<Ty> {
+        let format = match module {
+            [format] | ["encoding", format] | ["std", "encoding", format] => *format,
+            _ => return None,
+        };
+        if last != "decode" || !matches!(format, "json" | "yaml" | "toml") {
+            return None;
+        }
+        self.emit(
+            TypeError::SerdeTargetMissing {
+                op: format!("{format}::decode"),
+            },
+            callee.span,
+        );
+        Some(self.tcx.error_ty())
+    }
+
     /// Return type of a `json::` / `encoding::json::` free-function call
     /// (`parse`, `get`, `as_i64`, ...); `None` for an unrecognised name.
     pub(super) fn json_module_ret_ty(
@@ -2328,6 +2350,7 @@ impl TypeChecker<'_> {
         if matches!(
             last,
             "get"
+                | "pointer"
                 | "at"
                 | "set"
                 | "keys"
@@ -2343,24 +2366,61 @@ impl TypeChecker<'_> {
             self.reject_optional_json_document(args, arg_tys);
         }
         match last {
-            "parse" | "decode" => {
+            "parse" => {
                 let j = self.tcx.json_value_ty();
                 let e = self.tcx.dyn_error_ty();
                 Some(self.result_adt_ty(j, e))
             }
-            "render" | "encode" => {
-                self.reject_json_enum_arg(last, callee, args, arg_tys);
+            "to_value" => {
+                if let (Some(arg), Some(&sort_ty)) = (args.get(1), arg_tys.get(1)) {
+                    let bool_ty = self.tcx.bool_ty();
+                    self.unify(bool_ty, sort_ty, arg.span);
+                }
+                let j = self.tcx.json_value_ty();
+                let e = self.tcx.dyn_error_ty();
+                Some(self.result_adt_ty(j, e))
+            }
+            "encode" | "encode_pretty" => {
+                if last == "encode" {
+                    self.reject_json_enum_arg(last, callee, args, arg_tys);
+                }
                 if let (Some(arg), Some(arg_ty)) = (args.first(), arg_tys.first()) {
                     self.reject_native_address(*arg_ty, "outside this process", arg.span);
                 }
-                Some(self.tcx.string_ty())
+                // `sort:`, which the named-argument pass has made positional.
+                if let (Some(arg), Some(&sort_ty)) = (args.get(1), arg_tys.get(1)) {
+                    let bool_ty = self.tcx.bool_ty();
+                    self.unify(bool_ty, sort_ty, arg.span);
+                }
+                let s = self.tcx.string_ty();
+                let e = self.tcx.dyn_error_ty();
+                Some(self.result_adt_ty(s, e))
             }
-            "at" | "identity" | "set" => Some(self.tcx.json_value_ty()),
-            "get" => {
+            "at" => {
                 let j = self.tcx.json_value_ty();
                 Some(self.option_adt_ty(j))
             }
-            "len" => Some(self.tcx.int_ty(IntTy::I64)),
+            "identity" | "set" => Some(self.tcx.json_value_ty()),
+            "get" | "pointer" => {
+                let j = self.tcx.json_value_ty();
+                Some(self.option_adt_ty(j))
+            }
+            "set_max_size" | "set_max_depth" => Some(self.tcx.unit()),
+            // A typed `from_value` became its own stub before checking; one
+            // that reaches here named no type.
+            "from_value" => {
+                self.emit(
+                    TypeError::SerdeTargetMissing {
+                        op: format!("json::{last}"),
+                    },
+                    callee.span,
+                );
+                Some(self.tcx.error_ty())
+            }
+            "len" => {
+                let i = self.tcx.int_ty(IntTy::I64);
+                Some(self.option_adt_ty(i))
+            }
             "is_null" => Some(self.tcx.bool_ty()),
             "as_i64" => {
                 let i = self.tcx.int_ty(IntTy::I64);
@@ -2539,8 +2599,12 @@ impl TypeChecker<'_> {
     /// argument. `None` leaves the call to the later dispatch arms.
     pub(super) fn json_value_method_ret(&mut self, method: &str, arg_count: usize) -> Option<Ty> {
         let ty = match (method, arg_count) {
-            ("at", 1) | ("set", 2) => self.tcx.json_value_ty(),
-            ("get", 1) => {
+            ("set", 2) => self.tcx.json_value_ty(),
+            ("at", 1) => {
+                let j = self.tcx.json_value_ty();
+                self.option_adt_ty(j)
+            }
+            ("get" | "pointer", 1) => {
                 let j = self.tcx.json_value_ty();
                 self.option_adt_ty(j)
             }
@@ -2549,7 +2613,10 @@ impl TypeChecker<'_> {
                 let names = self.tcx.intern(TyKind::Vec(name));
                 self.option_adt_ty(names)
             }
-            ("len", 0) => self.tcx.int_ty(IntTy::I64),
+            ("len", 0) => {
+                let i = self.tcx.int_ty(IntTy::I64);
+                self.option_adt_ty(i)
+            }
             ("is_null", 0) => self.tcx.bool_ty(),
             ("as_i64", 0) => {
                 let i = self.tcx.int_ty(IntTy::I64);
@@ -3009,12 +3076,6 @@ impl TypeChecker<'_> {
     }
 
     pub(super) fn stdlib_signature_arg_ty(&mut self, src: &str) -> Option<Ty> {
-        // `json::encode` / `json::render` accept scalars and structs in
-        // addition to `json::Value`; pinning those slots to the opaque JSON
-        // handle would reject valid calls. Return typing can still use it.
-        if src.trim() == "json::Value" {
-            return None;
-        }
         self.stdlib_signature_ty(src)
     }
 

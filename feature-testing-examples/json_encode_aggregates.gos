@@ -30,17 +30,17 @@ fn item(id: i64, title: String) -> Item {
 }
 
 fn main() {
-    println("{}", json::encode(item(1, "one")))
-    println("{}", json::encode(#[item(1, "one"), item(2, "two")]))
-    println("{}", json::encode([item(3, "three")]))
-    println("{}", json::encode((1, "a", true, 2.5)))
-    println("{}", json::encode(#[(1, "a"), (2, "b")]))
-    println("{}", json::encode(#[#[1, 2], #[3]]))
-    println("{}", json::encode(#[#[Inner { n: 1, tags: #["z"] }]]))
+    println("{}", json::encode(item(1, "one")).unwrap())
+    println("{}", json::encode(#[item(1, "one"), item(2, "two")]).unwrap())
+    println("{}", json::encode([item(3, "three")]).unwrap())
+    println("{}", json::encode((1, "a", true, 2.5)).unwrap())
+    println("{}", json::encode(#[(1, "a"), (2, "b")]).unwrap())
+    println("{}", json::encode(#[#[1, 2], #[3]]).unwrap())
+    println("{}", json::encode(#[#[Inner { n: 1, tags: #["z"] }]]).unwrap())
     let empty: Vec<Item> = #[]
-    println("{}", json::encode(empty))
-    println("{} {} {} {}", json::encode(7), json::encode(true), json::encode(2.5), json::encode("s"))
-    println("{} {}", json::encode(#[1, 2, 3]), json::encode(#["x", "y"]))
+    println("{}", json::encode(empty).unwrap())
+    println("{} {} {} {}", json::encode(7).unwrap(), json::encode(true).unwrap(), json::encode(2.5).unwrap(), json::encode("s").unwrap())
+    println("{} {}", json::encode(#[1, 2, 3]).unwrap(), json::encode(#["x", "y"]).unwrap())
     map_fields()
 }
 
@@ -54,25 +54,25 @@ fn map_fields() {
     let mut flags: Map<String, i64> = Map::new()
     let _ = flags.insert("a", 1)
     let _ = flags.insert("b", 22)
-    println("{}", json::encode(flags))
-    println("{}", json::encode(Opts { flags: flags, name: "n" }))
-    println("{}", json::encode(Wrapped { rows: #[Opts { flags: flags, name: "n" }] }))
+    println("{}", json::encode(flags).unwrap())
+    println("{}", json::encode(Opts { flags: flags, name: "n" }).unwrap())
+    println("{}", json::encode(Wrapped { rows: #[Opts { flags: flags, name: "n" }] }).unwrap())
 
     let mut table: Map<String, (i64, bool)> = Map::new()
     let _ = table.insert("t", (3, true))
-    println("{}", json::encode(Pairs { table: table }))
+    println("{}", json::encode(Pairs { table: table }).unwrap())
 
     let mut texts: Map<String, String> = Map::new()
     let _ = texts.insert("k", "v")
-    println("{}", json::encode(texts))
+    println("{}", json::encode(texts).unwrap())
 
     let empty: Map<String, i64> = Map::new()
-    println("{}", json::encode(empty))
+    println("{}", json::encode(empty).unwrap())
 
     let mut total = 0
     let mut i = 0
     while i < 3000 {
-        total += json::encode(Opts { flags: flags, name: "n" }).len()
+        total += json::encode(Opts { flags: flags, name: "n" }).unwrap().len()
         i += 1
     }
     println("hot: {}", total)

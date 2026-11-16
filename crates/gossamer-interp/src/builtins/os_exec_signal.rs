@@ -1,14 +1,3 @@
-fn install_sigint_handler(flag: Arc<AtomicBool>) {
-    if SIGINT_HOOKED.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    std::thread::Builder::new()
-        .name("gossamer-http-sigint".to_string())
-        .spawn(move || {
-            let _ = flag;
-        })
-        .ok();
-}
 
 /// Extracts a borrowed string slice from a Gossamer value, returning
 /// `None` when the value is not a string.
@@ -356,19 +345,6 @@ fn builtin_os_cwd(_args: &[Value]) -> RuntimeResult<Value> {
     }
 }
 
-fn builtin_os_read_dir(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(path) = args.first().and_then(as_str) else {
-        return Ok(err_variant("read_dir: path argument must be a string"));
-    };
-    crate::comptime_gate::guard_read("fs::read_dir", path)?;
-    match os_std::read_dir(path) {
-        Ok(names) => {
-            let values: Vec<Value> = names.into_iter().map(|s| Value::String(s.into())).collect();
-            Ok(ok_variant(Value::Array(Arc::new(values))))
-        }
-        Err(e) => Ok(err_variant(format!("{e}"))),
-    }
-}
 
 fn builtin_time_now(_args: &[Value]) -> RuntimeResult<Value> {
     let ms = time_std::SystemTime::now().unix_millis();
@@ -525,6 +501,25 @@ fn builtin_pprof_route(args: &[Value]) -> RuntimeResult<Value> {
 fn builtin_runtime_set_panic_hook(args: &[Value]) -> RuntimeResult<Value> {
     crate::set_panic_hook_value(args.first().cloned());
     Ok(Value::Unit)
+}
+
+/// `runtime::max_procs()`.
+fn builtin_runtime_max_procs(_args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Int(
+        i64::try_from(gossamer_std::runtime::max_procs()).unwrap_or(i64::MAX),
+    ))
+}
+
+/// `runtime::set_max_procs(n)`: the cap before the call, set when `n` is
+/// at least 1.
+fn builtin_runtime_set_max_procs(args: &[Value]) -> RuntimeResult<Value> {
+    let prev = match args.first() {
+        Some(Value::Int(n)) if *n >= 1 => {
+            gossamer_std::runtime::set_max_procs(usize::try_from(*n).unwrap_or(usize::MAX))
+        }
+        _ => gossamer_std::runtime::max_procs(),
+    };
+    Ok(Value::Int(i64::try_from(prev).unwrap_or(i64::MAX)))
 }
 
 fn builtin_runtime_collect_cycles(_args: &[Value]) -> RuntimeResult<Value> {

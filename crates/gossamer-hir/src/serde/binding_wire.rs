@@ -163,7 +163,7 @@ impl Gen<'_> {
         let mut out = Emit::default();
         let reader = self.step("rd_new", vec![call], i64_ty, span);
         out.stmt(self.let_stmt(READER, false, i64_ty, reader, span));
-        let value = self.decode(&mut out, ty, qualified, span);
+        let value = self.decode(&mut out, ty, span);
         let held = self.fresh("answer");
         out.stmt(self.let_stmt(&held, false, ty, value, span));
         let r = self.local(READER, i64_ty, span);
@@ -192,7 +192,6 @@ impl Gen<'_> {
         out: &mut Emit,
         ty: Ty,
         inner: Ty,
-        path: &str,
         span: gossamer_lex::Span,
     ) -> HirExpr {
         let i64_ty = self.tcx.int_ty(IntTy::I64);
@@ -200,7 +199,7 @@ impl Gen<'_> {
         let unit = self.tcx.unit();
         let count = self.fresh("n");
         let r = self.reader(span);
-        let message = self.string_lit(&format!("{path}: expected option"), span);
+        let message = self.string_lit("option", span);
         let begun = self.step("rd_array", vec![r, message], i64_ty, span);
         out.stmt(self.let_stmt(&count, false, i64_ty, begun, span));
         let held = self.local(&count, i64_ty, span);
@@ -220,7 +219,7 @@ impl Gen<'_> {
         let first = self.int_lit(0, i64_ty, span);
         let enter = self.step("rd_elem", vec![r, first], unit, span);
         some.stmt(self.expr_stmt(enter, span));
-        let value = self.decode(&mut some, inner, &format!("{path}?"), span);
+        let value = self.decode(&mut some, inner, span);
         let local = self.fresh("x");
         some.stmt(self.let_stmt(&local, false, inner, value, span));
         some.stmt(self.leave_stmt(span));
@@ -237,11 +236,10 @@ impl Gen<'_> {
         ctor: &str,
         arm_ty: Ty,
         ty: Ty,
-        path: &str,
         span: gossamer_lex::Span,
     ) -> HirExpr {
         let mut arm = Emit::default();
-        let value = self.decode(&mut arm, arm_ty, &format!("{path}.{ctor}"), span);
+        let value = self.decode(&mut arm, arm_ty, span);
         let wrapped = self.ctor(ctor, vec![value], ty, span);
         let stmts = self.finish(arm, span);
         self.block(stmts, Some(wrapped), ty, span)
@@ -273,7 +271,6 @@ impl Gen<'_> {
         ty: Ty,
         ok_ty: Ty,
         err_ty: Ty,
-        path: &str,
         span: gossamer_lex::Span,
     ) -> HirExpr {
         let i64_ty = self.tcx.int_ty(IntTy::I64);
@@ -281,8 +278,8 @@ impl Gen<'_> {
         let unit = self.tcx.unit();
         let r = self.reader(span);
         let two = self.int_lit(2, i64_ty, span);
-        let not_array = self.string_lit(&format!("{path}: expected result"), span);
-        let wrong_len = self.string_lit(&format!("{path}: expected result"), span);
+        let not_array = self.string_lit("result", span);
+        let wrong_len = self.string_lit("result", span);
         let begin = self.step("rd_tuple", vec![r, two, not_array, wrong_len], unit, span);
         out.stmt(self.expr_stmt(begin, span));
         let r = self.reader(span);
@@ -290,7 +287,7 @@ impl Gen<'_> {
         let enter = self.step("rd_elem", vec![r, first], unit, span);
         out.stmt(self.expr_stmt(enter, span));
         let r = self.reader(span);
-        let message = self.string_lit(&format!("{path}: expected result tag"), span);
+        let message = self.string_lit("result tag", span);
         let tag = self.step("rd_i64", vec![r, message], i64_ty, span);
         let tag_local = self.fresh("tag");
         out.stmt(self.let_stmt(&tag_local, false, i64_ty, tag, span));
@@ -299,8 +296,8 @@ impl Gen<'_> {
         let second = self.int_lit(1, i64_ty, span);
         let enter = self.step("rd_elem", vec![r, second], unit, span);
         out.stmt(self.expr_stmt(enter, span));
-        let on_ok = self.decode_wire_arm("Ok", ok_ty, ty, path, span);
-        let on_err = self.decode_wire_arm("Err", err_ty, ty, path, span);
+        let on_ok = self.decode_wire_arm("Ok", ok_ty, ty, span);
+        let on_err = self.decode_wire_arm("Err", err_ty, ty, span);
         let held = self.local(&tag_local, i64_ty, span);
         let zero = self.int_lit(0, i64_ty, span);
         let is_ok = self.expr(

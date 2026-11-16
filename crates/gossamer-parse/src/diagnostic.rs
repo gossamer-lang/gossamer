@@ -13,12 +13,12 @@ use thiserror::Error;
 /// variant here is a shape outside that, named so the report says which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SerdeTargetRefusal {
-    /// A generic struct or enum. Codecs are synthesized per declared type,
-    /// not per instantiation, so there is no single shape to encode.
+    /// A generic struct or enum named without its type arguments, so there
+    /// is no one instantiation to encode.
     Generic,
-    /// Not a struct or enum declared in this unit - a scalar, a stdlib type,
-    /// or a name that does not resolve to a declared type at all.
-    NotAStruct,
+    /// A type parameter of the function the call sits in: a codec is written
+    /// for one concrete type, which the parameter does not name.
+    TypeParameter,
     /// A struct the synthesizer declined for a reason the caller could not
     /// attribute to a single field.
     Unsupported,
@@ -29,10 +29,10 @@ impl SerdeTargetRefusal {
     #[must_use]
     pub const fn describe(self) -> &'static str {
         match self {
-            Self::Generic => {
-                "typed serde covers concrete structs and enums, and this one is generic"
+            Self::Generic => "this type is generic, and the call names no instantiation of it",
+            Self::TypeParameter => {
+                "this names a type parameter, and typed serde codes one concrete type"
             }
-            Self::NotAStruct => "typed serde covers structs and enums, and this does not name one",
             Self::Unsupported => "typed serde has no encoding for this type",
         }
     }
@@ -43,16 +43,14 @@ impl SerdeTargetRefusal {
         let dynamic = "`json::parse` with `get` / `at` / `as_i64` / `as_str` reads a document \
                        without a declared type";
         match self {
-            Self::Generic => format!(
-                "wrap the instantiation in a concrete struct (`struct Ids {{ v: Vec<i64> }}`), \
-                 or hand-write `{op}`"
-            ),
-            Self::NotAStruct | Self::Unsupported => {
-                format!(
-                    "name a struct or enum declared in this program, or hand-write `{op}`; \
-                     {dynamic}"
-                )
+            Self::Generic => {
+                format!("name the instantiation (`{op}::<Page<Item>>`), or hand-write `{op}`")
             }
+            Self::TypeParameter => format!(
+                "call `{op}` where the type is concrete, or decode into `json::Value` and \
+                 convert with `json::from_value::<T>` there"
+            ),
+            Self::Unsupported => format!("hand-write `{op}`; {dynamic}"),
         }
     }
 }
@@ -454,6 +452,15 @@ pub enum ParseError {
         field_ty: String,
         /// The serde operation requested (`to_json`, `from_json`, ...).
         op: String,
+    },
+    /// A serde attribute is malformed, names nothing, or sits where it has no
+    /// effect.
+    #[error("{target}: {problem}")]
+    SerdeAttribute {
+        /// What carries the attribute: a type, a variant, or a field.
+        target: String,
+        /// What is wrong with it.
+        problem: String,
     },
     /// A `to_json` / `from_json` (or toml/yaml) call named a type typed serde
     /// does not synthesize for at all, as opposed to a struct with one
@@ -1135,6 +1142,16 @@ impl ParseError {
                     "give `{field}` a serializable type (scalar, String, Vec, Option, tuple, \
                      Map<String, _>, json::Value, or a nested struct), or hand-write `{op}`"
                 )),
+            ),
+            ParseError::SerdeAttribute { target, problem } => (
+                "GP0068",
+                format!("{target}: {problem}"),
+                Some(
+                    "struct and enum: `#[rename_all(\"camelCase\")]`; enum: `#[tag(\"type\")]`; \
+                     variant: `#[rename(\"name\")]`; field: `#[rename(\"key\")]`, `#[skip]`, \
+                     `#[default]`, `#[default(value)]` with a literal, `None`, or a unit variant"
+                        .to_string(),
+                ),
             ),
             ParseError::SerdeUnsupportedTarget { ty, op, reason } => (
                 "GP0039",

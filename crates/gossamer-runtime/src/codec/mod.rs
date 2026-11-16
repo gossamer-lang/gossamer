@@ -16,6 +16,7 @@ pub mod compress;
 pub mod csv;
 pub mod hex;
 pub mod html;
+pub mod json_convert;
 pub mod pem;
 pub mod percent;
 pub mod text;

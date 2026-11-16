@@ -10,42 +10,20 @@
     clippy::must_use_candidate
 )]
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
-/// Soft upper bound on simultaneously-running goroutines.
-///
-/// Mirrors `runtime.GOMAXPROCS(n)`. The scheduler reads this on
-/// every worker-thread startup; adjusting mid-run does not kill
-/// already-running workers but caps how many new ones spawn.
-static MAX_PROCS: AtomicUsize = AtomicUsize::new(0);
-
-/// Returns the current goroutine-concurrency cap. When no value has
-/// been set, reads the host's logical CPU count via
-/// [`std::thread::available_parallelism`].
+/// The most workers that run goroutines at once, as
+/// [`gossamer_runtime::sched_global::max_procs`] answers it.
 #[must_use]
 pub fn max_procs() -> usize {
-    let cached = MAX_PROCS.load(Ordering::Relaxed);
-    if cached > 0 {
-        return cached;
-    }
-    num_cpus()
+    gossamer_runtime::sched_global::max_procs()
 }
 
-/// Sets the goroutine concurrency cap. Returns the previous value.
-/// A value of `0` restores the automatic-from-host behaviour.
-///
-/// The cap is applied to two layers: the worker (P) count grows /
-/// shrinks to match, and the live-goroutine cap surfaces refusal
-/// for `try_spawn` instead of silently overcommitting kernel
-/// resources.
+/// Caps the workers that run goroutines at once, answering the cap before
+/// the call; `0` restores the default. See
+/// [`gossamer_runtime::sched_global::set_max_procs`].
 pub fn set_max_procs(n: usize) -> usize {
-    let prev = MAX_PROCS.swap(n, Ordering::Relaxed);
-    let scheduler = crate::sched_global::scheduler();
-    let workers = if n == 0 { num_cpus() } else { n };
-    scheduler.set_worker_count(workers);
-    let _ = scheduler.set_max_goroutines(if n == 0 { 1_000_000 } else { n });
-    prev
+    gossamer_runtime::sched_global::set_max_procs(n)
 }
 
 /// Number of logical CPU cores visible to the process, per

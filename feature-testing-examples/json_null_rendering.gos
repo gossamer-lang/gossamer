@@ -1,24 +1,24 @@
 // A JSON null reads and renders identically on every tier.
 //
-// A null the document states, a field whose value is null, and an
-// element the array does not have are all the same value: `{}` and
-// `{:?}` render it as `null`, `json::is_null` reports it, and the
-// numeric readers answer None for it.
+// A null the document states and a field whose value is null are the same
+// value: `{}` and `{:?}` render it as `null`, `json::is_null` reports it, and
+// the numeric readers answer None for it. An element the array does not
+// have is no value: `json::at` answers None for it.
 
 use std::encoding::json
 
 fn main() {
     let arr = json::parse("[null, 1]").unwrap_or(json::parse("[]").unwrap())
-    println("stated: {}", json::at(arr, 0))
-    println("stated debug: {:?}", json::at(arr, 0))
-    println("stated is_null: {}", json::is_null(json::at(arr, 0)))
-    println("stated as_i64: {:?}", json::as_i64(json::at(arr, 0)))
-    println("stated render: {}", json::render(json::at(arr, 0)))
+    let stated = json::at(arr, 0).unwrap()
+    println("stated: {}", stated)
+    println("stated debug: {:?}", stated)
+    println("stated is_null: {}", json::is_null(stated))
+    println("stated as_i64: {:?}", json::as_i64(stated))
+    println("stated render: {}", json::encode(stated).unwrap())
 
-    println("past the end: {}", json::at(arr, 9))
-    println("past the end is_null: {}", json::is_null(json::at(arr, 9)))
-    println("negative: {}", json::at(arr, -1))
-    println("not an array: {}", json::at(json::parse("{}").unwrap(), 0))
+    println("past the end: {:?}", json::at(arr, 9))
+    println("negative: {:?}", json::at(arr, -1))
+    println("not an array: {:?}", json::at(json::parse("{}").unwrap(), 0))
 
     let obj = json::parse("{\"a\":null,\"b\":2}").unwrap_or(json::parse("{}").unwrap())
     match json::get(obj, "a") {

@@ -15,7 +15,7 @@ fn main() {
     let s = Set::from(v)
     let bs: BTreeSet<u8> = BTreeSet::from(v)
     let n = s.len()
-    let k = json::encode(v)
+    let k = json::encode(v).unwrap()
     let mut d = Deque::from(v)
     let mut q = Queue::from(v)
     let mut st = Stack::from(v)

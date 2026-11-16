@@ -287,7 +287,8 @@ unsafe fn debug_payload_string(payload: i64, kind: i64) -> String {
         // SAFETY: a payload of kind 7 is a live `Vec<String>` or null, which the formatter
         // accepts.
         7 => unsafe { take_rt_string(super::btmap::gos_rt_vec_format_string(vec_ptr(payload), 0)) },
-        // SAFETY: a payload of kind 8 is a live `Vec<f64>` or null, which the formatter accepts.
+        // SAFETY: a payload of kind 8 is a live `json::Value` handle or null, which the
+        // debug renderer accepts.
         8 => unsafe {
             take_rt_string(crate::c_abi::gos_rt_json_debug(
                 std::ptr::with_exposed_provenance(payload as usize),

@@ -120,7 +120,27 @@ pub const ENCODING_YAML: StdModule = StdModule {
         StdItem {
             name: "encode",
             kind: StdItemKind::Function,
-            doc: "Encodes a Value as a YAML document.",
+            doc: "Encodes a value as a YAML document, answering `Result<String, errors::Error>`: a struct's members in declaration order (by key with `sort: true`), a `json::Value` object's and a `Map`'s keys sorted. `yaml::encode::<T>(v)` names the type.",
+        },
+        StdItem {
+            name: "encode_all",
+            kind: StdItemKind::Function,
+            doc: "Encodes a `Vec<json::Value>` as a multi-document YAML stream, as `parse_all` reads it back.",
+        },
+        StdItem {
+            name: "decode",
+            kind: StdItemKind::Function,
+            doc: "`yaml::decode::<T>(text)` decodes a YAML document into any type with a JSON form, as `json::decode::<T>` decodes JSON.",
+        },
+        StdItem {
+            name: "set_max_size",
+            kind: StdItemKind::Function,
+            doc: "Caps the bytes a YAML document may have for every later parse and decode in the process; 0 or less removes the cap. There is no cap by default.",
+        },
+        StdItem {
+            name: "set_max_depth",
+            kind: StdItemKind::Function,
+            doc: "Caps how deeply YAML collections may nest for every later parse and decode in the process; 0 or less removes the cap. The default is 128.",
         },
         StdItem {
             name: "parse_all",
@@ -128,14 +148,14 @@ pub const ENCODING_YAML: StdModule = StdModule {
             doc: "Parses a multi-document YAML stream into a Vec<Value>.",
         },
         StdItem {
-            name: "to_json",
+            name: "to_json_text",
             kind: StdItemKind::Function,
-            doc: "Converts a YAML document to JSON text.",
+            doc: "Converts a YAML document to JSON text, each mapping's members by key.",
         },
         StdItem {
-            name: "from_json",
+            name: "from_json_text",
             kind: StdItemKind::Function,
-            doc: "Converts JSON text to a YAML document.",
+            doc: "Converts JSON text to a YAML document, each object's members by key.",
         },
         StdItem {
             name: "is_valid",
@@ -162,12 +182,22 @@ pub const ENCODING_JSON: StdModule = StdModule {
         StdItem {
             name: "encode",
             kind: StdItemKind::Function,
-            doc: "Encodes a `Serialize` value as a JSON `String`.",
+            doc: "Encodes a value as compact JSON text, answering `Result<String, errors::Error>`: a struct's members in declaration order under their serde keys, or by key with `sort: true` (`json::encode(v, sort: true)?`); a `json::Value` object's and a `Map`'s keys sorted. `json::encode::<T>(v)` names the type.",
         },
         StdItem {
             name: "decode",
             kind: StdItemKind::Function,
-            doc: "Decodes a JSON `String` into a `Deserialize` value.",
+            doc: "`json::decode::<T>(text)` decodes JSON text into any type with a JSON form (a struct or enum, generic ones included, a collection, an `Option`, a tuple, a scalar), ignoring members it does not declare; a failure names the path to the value and what it found.",
+        },
+        StdItem {
+            name: "to_value",
+            kind: StdItemKind::Function,
+            doc: "Encodes a value as the `json::Value` its JSON text reads as, answering `Result<json::Value, errors::Error>`, the counterpart of `from_value`.",
+        },
+        StdItem {
+            name: "from_value",
+            kind: StdItemKind::Function,
+            doc: "`json::from_value::<T>(value)` decodes a `json::Value` as `json::decode::<T>` decodes text, for a subtree a program navigated to.",
         },
         StdItem {
             name: "Value",
@@ -185,17 +215,12 @@ pub const ENCODING_JSON: StdModule = StdModule {
             doc: "Parses JSON text into a dynamic Value.",
         },
         StdItem {
-            name: "render",
-            kind: StdItemKind::Function,
-            doc: "Renders a dynamic Value as compact JSON text.",
-        },
-        StdItem {
             name: "encode_pretty",
             kind: StdItemKind::Function,
-            doc: "Renders a value as indented JSON text.",
+            doc: "Encodes a value as indented JSON text, answering `Result<String, errors::Error>`, members in the order `encode` writes them (`sort: true` orders a struct's members by key).",
         },
         StdItem {
-            name: "valid",
+            name: "is_valid",
             kind: StdItemKind::Function,
             doc: "Reports whether the text is well-formed JSON.",
         },
@@ -212,8 +237,8 @@ pub const ENCODING_JSON: StdModule = StdModule {
         StdItem {
             name: "at",
             kind: StdItemKind::Function,
-            doc: "Indexes an array element on a dynamic Value. An index the \
-                  array does not have reads as JSON null.",
+            doc: "The element at an index of an array; None past the end and for a value \
+                  that is not an array.",
         },
         StdItem {
             name: "keys",
@@ -223,7 +248,7 @@ pub const ENCODING_JSON: StdModule = StdModule {
         StdItem {
             name: "len",
             kind: StdItemKind::Function,
-            doc: "Element / field count of a dynamic Value.",
+            doc: "The element count of an array or the member count of an object; None for any other value.",
         },
         StdItem {
             name: "is_null",
@@ -259,6 +284,26 @@ pub const ENCODING_JSON: StdModule = StdModule {
             name: "as_array",
             kind: StdItemKind::Function,
             doc: "Reads a dynamic Value as an array of Values.",
+        },
+        StdItem {
+            name: "entries",
+            kind: StdItemKind::Function,
+            doc: "An object's members as (key, value) pairs in key order; None for any other value.",
+        },
+        StdItem {
+            name: "pointer",
+            kind: StdItemKind::Function,
+            doc: "Looks up the value an RFC 6901 JSON Pointer names (`/current/weather_descriptions/0`): each token is an object member, or an array index. An empty pointer names the whole value; a pointer that names nothing answers None.",
+        },
+        StdItem {
+            name: "set_max_depth",
+            kind: StdItemKind::Function,
+            doc: "Caps how deeply arrays and objects may nest for every later parse and decode in the process; 0 or less removes the cap. The default is 128, as serde_json's.",
+        },
+        StdItem {
+            name: "set_max_size",
+            kind: StdItemKind::Function,
+            doc: "Caps the bytes a JSON document may have for every later parse and decode in the process; 0 or less removes the cap. There is no cap by default.",
         },
     ],
 };
@@ -481,7 +526,22 @@ pub const ENCODING_XML: StdModule = StdModule {
         StdItem {
             name: "encode",
             kind: StdItemKind::Function,
-            doc: "Serialises a tree of the shape `parse` answers to XML text; any other value encodes as the empty string.",
+            doc: "Serialises a tree of the shape `parse` answers to XML text, answering `Result<String, errors::Error>`; a value of any other shape is an `Err`.",
+        },
+        StdItem {
+            name: "is_valid",
+            kind: StdItemKind::Function,
+            doc: "Reports whether the text is a well-formed XML document.",
+        },
+        StdItem {
+            name: "set_max_size",
+            kind: StdItemKind::Function,
+            doc: "Caps the bytes an XML document may have for every later parse in the process; 0 or less removes the cap. There is no cap by default.",
+        },
+        StdItem {
+            name: "set_max_depth",
+            kind: StdItemKind::Function,
+            doc: "Caps how deeply XML elements may nest for every later parse in the process; 0 or less removes the cap. The default is 128.",
         },
         StdItem {
             name: "escape",
@@ -547,27 +607,42 @@ pub const ENCODING_ASCII85: StdModule = StdModule {
 
 pub const ENCODING_TOML: StdModule = StdModule {
     path: "std::encoding::toml",
-    summary: "TOML 1.0 parsing + emission. Pair with the turbofish `from_toml::<Type>` for typed decoding (struct auto-derive).",
+    summary: "TOML 1.0 parsing and emission over `json::Value`, and typed `toml::decode::<T>` / `toml::encode::<T>`.",
     items: &[
         StdItem {
-            name: "to_json",
+            name: "parse",
             kind: StdItemKind::Function,
-            doc: "Convert TOML text to JSON text; returns Result<String, errors::Error>.",
+            doc: "Parses a TOML document into a `json::Value`, its tables by key.",
         },
         StdItem {
-            name: "from_json",
+            name: "encode",
             kind: StdItemKind::Function,
-            doc: "Render JSON text as TOML text; returns Result<String, errors::Error>.",
+            doc: "Encodes a value whose top level is a table as a TOML document, answering `Result<String, errors::Error>`: a struct's members in declaration order (by key with `sort: true`) with an `Option` member that is `None` left out, a `json::Value` object's and a `Map`'s keys sorted. `toml::encode::<T>(v)` names the type.",
+        },
+        StdItem {
+            name: "decode",
+            kind: StdItemKind::Function,
+            doc: "`toml::decode::<T>(text)` decodes a TOML document into any type with a JSON form, as `json::decode::<T>` decodes JSON.",
+        },
+        StdItem {
+            name: "to_json_text",
+            kind: StdItemKind::Function,
+            doc: "Converts a TOML document to JSON text, each table's members by key.",
+        },
+        StdItem {
+            name: "from_json_text",
+            kind: StdItemKind::Function,
+            doc: "Converts JSON text to a TOML document, each object's members by key; the top level must be an object.",
         },
         StdItem {
             name: "is_valid",
             kind: StdItemKind::Function,
-            doc: "Return true iff the string parses as TOML.",
+            doc: "Reports whether the text is a well-formed TOML document.",
         },
         StdItem {
             name: "pretty",
             kind: StdItemKind::Function,
-            doc: "Round-trip TOML through the pretty-printer.",
+            doc: "Rewrites a TOML document in the pretty-printer's layout.",
         },
     ],
 };

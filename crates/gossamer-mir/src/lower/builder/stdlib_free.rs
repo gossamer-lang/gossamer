@@ -988,6 +988,13 @@ impl<'a> Builder<'a> {
         } else {
             ret_ty
         };
+        // `sort:` orders a struct's members, which only the typed walk
+        // writes; a `json::Value` these encoders take holds its members by
+        // key already.
+        let args = match rt_name {
+            "gos_rt_yaml_encode" | "gos_rt_toml_encode" => &args[..args.len().min(1)],
+            _ => args,
+        };
         self.emit_stdlib_free_call(rt_name, ret_ty, args, span)
     }
 
@@ -1711,11 +1718,19 @@ impl<'a> Builder<'a> {
             "mime::type_by_extension" => ("gos_rt_mime_type_by_extension", self.tcx.string_ty()),
             "mime::extension_by_type" => ("gos_rt_mime_extension_by_type", self.tcx.string_ty()),
             "mime::is_valid" => ("gos_rt_mime_is_valid", self.tcx.bool_ty()),
-            "toml::to_json" | "encoding::toml::to_json" => {
-                ("gos_rt_toml_to_json", self.result_string_error_adt_ty())
+            "toml::to_json_text" | "encoding::toml::to_json_text" => (
+                "gos_rt_toml_to_json_text",
+                self.result_string_error_adt_ty(),
+            ),
+            "toml::from_json_text" | "encoding::toml::from_json_text" => (
+                "gos_rt_toml_from_json_text",
+                self.result_string_error_adt_ty(),
+            ),
+            "toml::parse" | "encoding::toml::parse" => {
+                ("gos_rt_toml_parse", self.result_json_value_error_adt_ty())
             }
-            "toml::from_json" | "encoding::toml::from_json" => {
-                ("gos_rt_toml_from_json", self.result_string_error_adt_ty())
+            "toml::encode" | "encoding::toml::encode" => {
+                ("gos_rt_toml_encode", self.result_string_error_adt_ty())
             }
             "toml::is_valid" | "encoding::toml::is_valid" => {
                 ("gos_rt_toml_is_valid", self.tcx.bool_ty())
@@ -1737,11 +1752,28 @@ impl<'a> Builder<'a> {
             "yaml::encode" | "encoding::yaml::encode" => {
                 ("gos_rt_yaml_encode", self.result_string_error_adt_ty())
             }
-            "yaml::to_json" | "encoding::yaml::to_json" => {
-                ("gos_rt_yaml_to_json", self.result_string_error_adt_ty())
+            "yaml::to_json_text" | "encoding::yaml::to_json_text" => (
+                "gos_rt_yaml_to_json_text",
+                self.result_string_error_adt_ty(),
+            ),
+            "yaml::from_json_text" | "encoding::yaml::from_json_text" => (
+                "gos_rt_yaml_from_json_text",
+                self.result_string_error_adt_ty(),
+            ),
+            "yaml::encode_all" | "encoding::yaml::encode_all" => {
+                ("gos_rt_yaml_encode_all", self.result_string_error_adt_ty())
             }
-            "yaml::from_json" | "encoding::yaml::from_json" => {
-                ("gos_rt_yaml_from_json", self.result_string_error_adt_ty())
+            "yaml::set_max_size" | "encoding::yaml::set_max_size" => {
+                ("gos_rt_yaml_set_max_size", self.tcx.unit())
+            }
+            "yaml::set_max_depth" | "encoding::yaml::set_max_depth" => {
+                ("gos_rt_yaml_set_max_depth", self.tcx.unit())
+            }
+            "xml::set_max_size" | "encoding::xml::set_max_size" => {
+                ("gos_rt_xml_set_max_size", self.tcx.unit())
+            }
+            "xml::set_max_depth" | "encoding::xml::set_max_depth" => {
+                ("gos_rt_xml_set_max_depth", self.tcx.unit())
             }
             "yaml::is_valid" | "encoding::yaml::is_valid" => {
                 ("gos_rt_yaml_is_valid", self.tcx.bool_ty())
@@ -2128,6 +2160,14 @@ impl<'a> Builder<'a> {
             "url::query_unescape" => ("gos_rt_url_query_unescape", self.tcx.string_ty()),
             "url::path_unescape" => ("gos_rt_url_path_unescape", self.tcx.string_ty()),
             "runtime::collect_cycles" => ("gos_rt_collect_cycles", self.tcx.unit()),
+            "runtime::max_procs" => (
+                "gos_rt_runtime_max_procs",
+                self.tcx.int_ty(gossamer_types::IntTy::I64),
+            ),
+            "runtime::set_max_procs" => (
+                "gos_rt_runtime_set_max_procs",
+                self.tcx.int_ty(gossamer_types::IntTy::I64),
+            ),
             "runtime::cycle_collection_supported" => (
                 "gos_rt_runtime_cycle_collection_supported",
                 self.tcx.bool_ty(),

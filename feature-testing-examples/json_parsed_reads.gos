@@ -7,7 +7,7 @@ use std::encoding::json
 use std::encoding::yaml
 
 fn show(label: String, v: json::Value) {
-    println(f"{label}: {json::encode(v)}")
+    println(f"{label}: {json::encode(v).unwrap()}")
 }
 
 fn main() {
@@ -18,7 +18,7 @@ fn main() {
               123456789012345678901234567890, 0.1, -3]}
     """).unwrap()
     show("root", doc)
-    println(json::encode_pretty(json::get(doc, "nested").unwrap()))
+    println(json::encode_pretty(json::get(doc, "nested").unwrap()).unwrap())
     println(f"b = {json::as_i64(json::get(doc, "b").unwrap())}")
     println(f"kAy = {json::as_str(json::get(doc, "kAy").unwrap())}")
     println(f"missing = {json::get(doc, "c").is_some()}")
@@ -26,7 +26,7 @@ fn main() {
 
     let nums = json::as_array(json::get(doc, "nums").unwrap()).unwrap()
     for n in nums {
-        println(f"{json::encode(n)} i64 {json::as_i64(n)} u64 {json::as_u64(n)} f64 {json::as_f64(n)}")
+        println(f"{json::encode(n).unwrap()} i64 {json::as_i64(n)} u64 {json::as_u64(n)} f64 {json::as_f64(n)}")
     }
 
     let a = json::as_array(json::get(doc, "a").unwrap()).unwrap()

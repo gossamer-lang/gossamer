@@ -17,10 +17,11 @@ use std::crypto::sha256
 use std::encoding::json
 
 /// The workloads, in the order the report states them.
-const WORKLOADS: [String; 5] = [
+const WORKLOADS: [String; 6] = [
     "arithmetic"
     "allocation"
     "json"
+    "json_document"
     "concurrency"
     "startup"
 ]
@@ -417,17 +418,10 @@ fn main() {
         runs: options.runs
         results: results
     }
-    let encoded = match to_json::<Document>(document) {
-        Ok(encoded) => encoded
+    let pretty = match json::encode_pretty(document) {
+        Ok(pretty) => pretty
         Err(e) => {
             fail(format("encoding the report: {}", e))
-            return
-        }
-    }
-    let pretty = match json::parse(encoded) {
-        Ok(value) => json::encode_pretty(value)
-        Err(e) => {
-            fail(format("rendering the report: {}", e))
             return
         }
     }

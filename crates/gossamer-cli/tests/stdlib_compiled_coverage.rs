@@ -104,7 +104,6 @@ const COMPILED_VIA_SPECIAL_MECHANISM: &[&str] = &[
     "encoding::json::as_str",
     "encoding::json::as_u64",
     "encoding::json::at",
-    "encoding::json::decode",
     "encoding::json::encode",
     "encoding::json::encode_pretty",
     "encoding::json::get",
@@ -112,9 +111,11 @@ const COMPILED_VIA_SPECIAL_MECHANISM: &[&str] = &[
     "encoding::json::keys",
     "encoding::json::len",
     "encoding::json::parse",
-    "encoding::json::render",
+    "encoding::json::is_valid",
+    "encoding::json::pointer",
     "encoding::json::set",
-    "encoding::json::valid",
+    "encoding::json::set_max_depth",
+    "encoding::json::set_max_size",
     "json::as_array",
     "json::as_bool",
     "json::as_f64",
@@ -122,15 +123,17 @@ const COMPILED_VIA_SPECIAL_MECHANISM: &[&str] = &[
     "json::as_str",
     "json::as_u64",
     "json::at",
-    "json::decode",
     "json::encode",
     "json::get",
     "json::is_null",
+    "json::is_valid",
     "json::keys",
     "json::len",
     "json::parse",
-    "json::render",
+    "json::pointer",
     "json::set",
+    "json::set_max_depth",
+    "json::set_max_size",
     // Autoderive-injected real Gossamer wrappers (compile to defined
     // functions; they fold the `__gos_*_raw` leaf intrinsics into structs).
     "archive::tar::read",
@@ -148,6 +151,34 @@ const COMPILED_VIA_SPECIAL_MECHANISM: &[&str] = &[
     // `FS_TEMP_DIR_WRAPPERS` carries the `parent` default into the
     // `__gos_fs_temp_dir_raw` leaf.
     "fs::temp_dir",
+    // `JSON_ENTRIES_WRAPPERS` walks an object through `json::keys` / `get`.
+    "encoding::json::entries",
+    "json::entries",
+    // `rewrite_serde_generic_calls` turns `json::from_value::<T>` into the
+    // call's own stub, whose body the HIR serde pass writes.
+    "encoding::json::decode",
+    "encoding::json::from_value",
+    "json::decode",
+    "json::from_value",
+    // The same rewrite turns `yaml::decode::<T>` / `toml::decode::<T>` into
+    // the call's own stub.
+    "encoding::toml::decode",
+    "encoding::yaml::decode",
+    "toml::decode",
+    "yaml::decode",
+    // The HIR render pass writes `json::to_value(v)` as `json::parse` of
+    // the text the generated walk writes.
+    "encoding::json::to_value",
+    "json::to_value",
+    // The HIR carrier pass writes these as a `match` on the receiver.
+    "option::is_none_or",
+    "option::is_some_and",
+    "option::map_or",
+    "option::map_or_else",
+    "result::is_err_and",
+    "result::is_ok_and",
+    "result::map_or",
+    "result::map_or_else",
     // Civil-time wrappers carry the source-visible Location struct's compact
     // specification string into the scalar runtime leaves below.
     "time::add_date",

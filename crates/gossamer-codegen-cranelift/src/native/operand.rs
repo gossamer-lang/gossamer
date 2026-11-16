@@ -286,9 +286,17 @@ fn debug_payload_kind(tcx: &TyCtxt, ty: Ty) -> Option<u8> {
         TyKind::Bool => Some(3),
         TyKind::Char => Some(4),
         TyKind::String => Some(5),
+        // A parsed document renders through its own display helper.
+        TyKind::JsonValue => Some(8),
+        // `errors::Error` is the error arm of nearly every fallible
+        // signature, so a `Result` carrying one renders like the rest.
+        TyKind::DynError => Some(10),
         // A `dyn::Value` payload renders through the DynValue debug
         // renderer, so a nested string quotes exactly as the VM shows.
         TyKind::DynValue => Some(gossamer_abi::DEBUG_PAYLOAD_DYN),
+        // `Result<(), E>` reports only success or failure; its Ok arm
+        // renders `()`.
+        TyKind::Unit => Some(gossamer_abi::DEBUG_PAYLOAD_UNIT),
         _ => None,
     }
 }

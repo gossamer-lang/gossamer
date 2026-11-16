@@ -911,6 +911,26 @@ pub const OPTION: StdModule = StdModule {
             kind: StdItemKind::Function,
             doc: "Pairs two Somes into Some((a, b)).",
         },
+        StdItem {
+            name: "is_some_and",
+            kind: StdItemKind::Function,
+            doc: "Whether the option is Some and its payload passes the predicate.",
+        },
+        StdItem {
+            name: "is_none_or",
+            kind: StdItemKind::Function,
+            doc: "Whether the option is None or its payload passes the predicate.",
+        },
+        StdItem {
+            name: "map_or",
+            kind: StdItemKind::Function,
+            doc: "The payload mapped by f, or the default for None.",
+        },
+        StdItem {
+            name: "map_or_else",
+            kind: StdItemKind::Function,
+            doc: "The payload mapped by f, or the default built by a callback for None.",
+        },
     ],
 };
 
@@ -968,6 +988,26 @@ pub const RESULT: StdModule = StdModule {
             name: "or_else",
             kind: StdItemKind::Function,
             doc: "Recovers from Err with a fallback computation.",
+        },
+        StdItem {
+            name: "is_ok_and",
+            kind: StdItemKind::Function,
+            doc: "Whether the result is Ok and its value passes the predicate.",
+        },
+        StdItem {
+            name: "is_err_and",
+            kind: StdItemKind::Function,
+            doc: "Whether the result is Err and its error passes the predicate.",
+        },
+        StdItem {
+            name: "map_or",
+            kind: StdItemKind::Function,
+            doc: "The Ok value mapped by f, or the default for Err.",
+        },
+        StdItem {
+            name: "map_or_else",
+            kind: StdItemKind::Function,
+            doc: "The Ok value mapped by f, or the error mapped by the default callback.",
         },
     ],
 };

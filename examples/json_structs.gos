@@ -1,24 +1,20 @@
 /*
- * JSON serialize and deserialize with structs - one line per direction.
+ * Typed JSON: structs, enums, and collections to and from text.
  *
- * Every named struct in the program auto-derives a pair of generic
- * serializer functions, called with a turbofish type argument:
+ *     json::decode::<T>(text) -> Result<T, errors::Error>
+ *     json::encode(value)     -> Result<String, errors::Error>
  *
- *     to_json::<Type>(value) -> Result<String, errors::Error>
- *     from_json::<Type>(text: &String) -> Result<Type, errors::Error>
- *
- * `from_json` is strict: every declared field must be present and
- * each one must match its declared type. A JSON document whose
- * `"age"` field is a string fails with a structured error.
- *
- * Nested structs, growable arrays (`[String]`), tuples, fixed-size
- * arrays, `Option<T>`, and `Map<String, V>` are walked
- * recursively.
+ * Any type with a JSON form works as a target: structs and enums
+ * (generic ones too), `Vec<T>`, `Map<String, V>`, `Option`, tuples,
+ * fixed arrays, and scalars. Encoding keeps a struct's members in
+ * declaration order; `sort: true` orders them by key. Decoding is
+ * strict, and an error names the path to the member that failed.
  *
  * Run:
  *     gos run examples/json_structs.gos
  */
 
+use std::encoding::json
 use std::errors
 
 struct Address {
@@ -26,42 +22,61 @@ struct Address {
     zip: String
 }
 
+#[rename_all("camelCase")]
 struct User {
-    name: String
+    user_name: String
     age: i64
     active: bool
     tags: Vec<String>
     address: Address
+    #[default]
+    nickname: Option<String>
+    #[default(3)]
+    retries: i64
 }
 
-let tags: Vec<String> = #["admin", "ops"]
-let original = User { name: "alice", age: 30, active: true, tags: tags, address: Address { city: "denver", zip: "80205" } }
-
-// Serialize: one call, one line.
-let text = to_json::<User>(original)?
-println(f"serialized: {text}")
-
-// Deserialize: one call, one line.
-let back: User = from_json::<User>(text)?
-println(f"name    = {back.name}")
-println(f"age     = {back.age}")
-println(f"active  = {back.active}")
-println(f"city    = {back.address.city}")
-println(f"zip     = {back.address.zip}")
-println(f"tags[0] = {back.tags[0]}")
-println(f"tags[1] = {back.tags[1]}")
-
-// Strict validation rejects type mismatches with a path-qualified
-// error: `from_json: field 'age': expected integer, got string`.
-let bad = "{\"name\":\"bob\",\"age\":\"oops\",\"active\":false,\"tags\":[],\"address\":{\"city\":\"x\",\"zip\":\"0\"}}"
-match from_json::<User>(bad) {
-    Ok(_) => println("unexpected: bad payload parsed clean")
-    Err(e) => println(f"rejected:   {e}")
+#[tag("kind")]
+enum Event {
+    Login { user: String }
+    Logout { user: String }
 }
 
-// Strict validation also rejects missing required fields.
-let missing = "{\"name\":\"carol\",\"age\":40,\"active\":true,\"tags\":[]}"
-match from_json::<User>(missing) {
-    Ok(_) => println("unexpected: missing payload parsed clean")
-    Err(e) => println(f"rejected:   {e}")
+let original = User {
+    user_name: "alice"
+    age: 30
+    active: true
+    tags: #["admin", "ops"]
+    address: Address { city: "denver", zip: "80205" }
+    nickname: None
+    retries: 3
 }
+
+let text = json::encode(original)?
+println(f"declared: {text}")
+println(f"sorted:   {json::encode(original, sort: true)?}")
+println(f"pretty:\n{json::encode_pretty(original.address)?}")
+
+// Members `#[default]` marks may be absent; the rest must be present.
+let back = json::decode::<User>(
+    "{\"userName\":\"bob\",\"age\":41,\"active\":false,\"tags\":[],\"address\":{\"city\":\"x\",\"zip\":\"0\"}}"
+)?
+println(f"{back.user_name} {back.age} {back.nickname} {back.retries}")
+
+// Errors name the member that failed.
+match json::decode::<User>("{\"userName\":\"bob\",\"age\":\"oops\"}") {
+    Ok(_) => println("unexpected: bad payload decoded")
+    Err(e) => println(f"rejected: {e}")
+}
+match json::decode::<User>("{\"userName\":\"carol\",\"age\":40,\"active\":true,\"tags\":[]}") {
+    Ok(_) => println("unexpected: missing member decoded")
+    Err(e) => println(f"rejected: {e}")
+}
+
+// Enums carry their variant by tag; collections decode directly.
+let events = json::decode::<Vec<Event>>(
+    "[{\"kind\":\"Login\",\"user\":\"a\"},{\"kind\":\"Logout\",\"user\":\"a\"}]"
+)?
+println(f"{events.len()} events, first {events[0]}")
+println(json::encode(events)?)
+let scores: Map<String, i64> = json::decode("{\"b\":2,\"a\":1}")?
+println(f"{scores}")

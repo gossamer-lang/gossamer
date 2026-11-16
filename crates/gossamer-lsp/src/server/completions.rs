@@ -1164,6 +1164,30 @@ const OPTION_METHODS: &[BuiltinMethod] = &[
         doc: "Pairs the values when both options are present.",
         snippet: "zip($0)",
     },
+    BuiltinMethod {
+        name: "is_some_and",
+        signature: "fn is_some_and(self, f: fn(T) -> bool) -> bool",
+        doc: "Returns `true` when the option is `Some` and its value passes `f`.",
+        snippet: "is_some_and(|x| $0)",
+    },
+    BuiltinMethod {
+        name: "is_none_or",
+        signature: "fn is_none_or(self, f: fn(T) -> bool) -> bool",
+        doc: "Returns `true` when the option is `None` or its value passes `f`.",
+        snippet: "is_none_or(|x| $0)",
+    },
+    BuiltinMethod {
+        name: "map_or",
+        signature: "fn map_or<U>(self, default: U, f: fn(T) -> U) -> U",
+        doc: "Maps the value, or answers `default` for `None`.",
+        snippet: "map_or($0, |x| x)",
+    },
+    BuiltinMethod {
+        name: "map_or_else",
+        signature: "fn map_or_else<U>(self, default: fn() -> U, f: fn(T) -> U) -> U",
+        doc: "Maps the value, or builds the answer for `None`.",
+        snippet: "map_or_else(|| $0, |x| x)",
+    },
 ];
 
 const ITERATOR_METHODS: &[BuiltinMethod] = &[
@@ -1229,6 +1253,66 @@ const RESULT_METHODS: &[BuiltinMethod] = &[
         signature: "fn map_err<F>(self, f: fn(E) -> F) -> Result<T, F>",
         doc: "Maps the `Err` value.",
         snippet: "map_err(|e| $0)",
+    },
+    BuiltinMethod {
+        name: "and_then",
+        signature: "fn and_then<U>(self, f: fn(T) -> Result<U, E>) -> Result<U, E>",
+        doc: "Chains a fallible step on the `Ok` value.",
+        snippet: "and_then(|x| $0)",
+    },
+    BuiltinMethod {
+        name: "or_else",
+        signature: "fn or_else<F>(self, f: fn(E) -> Result<T, F>) -> Result<T, F>",
+        doc: "Recovers from an `Err` with a fallible step.",
+        snippet: "or_else(|e| $0)",
+    },
+    BuiltinMethod {
+        name: "unwrap_or_else",
+        signature: "fn unwrap_or_else(self, f: fn(E) -> T) -> T",
+        doc: "Returns the `Ok` value, or computes one from the error.",
+        snippet: "unwrap_or_else(|e| $0)",
+    },
+    BuiltinMethod {
+        name: "expect",
+        signature: "fn expect(self, message: String) -> T",
+        doc: "Returns the `Ok` value, panicking with `message` on `Err`.",
+        snippet: "expect($0)",
+    },
+    BuiltinMethod {
+        name: "ok",
+        signature: "fn ok(self) -> Option<T>",
+        doc: "The `Ok` value as an `Option`.",
+        snippet: "ok()$0",
+    },
+    BuiltinMethod {
+        name: "err",
+        signature: "fn err(self) -> Option<E>",
+        doc: "The `Err` value as an `Option`.",
+        snippet: "err()$0",
+    },
+    BuiltinMethod {
+        name: "is_ok_and",
+        signature: "fn is_ok_and(self, f: fn(T) -> bool) -> bool",
+        doc: "Returns `true` when the result is `Ok` and its value passes `f`.",
+        snippet: "is_ok_and(|x| $0)",
+    },
+    BuiltinMethod {
+        name: "is_err_and",
+        signature: "fn is_err_and(self, f: fn(E) -> bool) -> bool",
+        doc: "Returns `true` when the result is `Err` and its error passes `f`.",
+        snippet: "is_err_and(|e| $0)",
+    },
+    BuiltinMethod {
+        name: "map_or",
+        signature: "fn map_or<U>(self, default: U, f: fn(T) -> U) -> U",
+        doc: "Maps the `Ok` value, or answers `default` for `Err`.",
+        snippet: "map_or($0, |x| x)",
+    },
+    BuiltinMethod {
+        name: "map_or_else",
+        signature: "fn map_or_else<U>(self, default: fn(E) -> U, f: fn(T) -> U) -> U",
+        doc: "Maps the `Ok` value, or maps the error.",
+        snippet: "map_or_else(|e| $0, |x| x)",
     },
 ];
 

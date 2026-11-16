@@ -878,9 +878,9 @@ use std::encoding::json
 fn main() -> Result<(), String> {
     let v = json::parse("{\"a\": 1}").map_err(|e| format("{e}"))?
     let v2 = v.set("b", 2)
-    println("{}", json::render(v2))
+    println("{}", json::encode(v2).unwrap())
     let leaf = json::parse("3").map_err(|e| format("{e}"))?
-    println("{}", json::render(leaf.set("x", 1)))
+    println("{}", json::encode(leaf.set("x", 1)).unwrap())
     Ok(())
 }
 "#;

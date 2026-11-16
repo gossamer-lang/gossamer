@@ -138,12 +138,28 @@ pub struct DeferredMethodCall {
     written: Vec<gossamer_ast::NamedArg>,
 }
 
+/// One parameter of a standard-library function, as its source-facing
+/// signature declares it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StdParam {
+    /// The parameter's name, which a call may label an argument with.
+    pub name: String,
+    /// Its default, as written in the signature (`false`, `0`, `"x"`).
+    pub default: Option<String>,
+}
+
+/// The parameters of the standard-library function a call's path names
+/// (`["json", "encode"]`), when the path names one.
+pub type StdParams<'a> = &'a dyn Fn(&[String]) -> Option<Vec<StdParam>>;
+
 /// Rewrites every labelled or defaulted call in `sf` into positional
 /// order, returning one diagnostic per call it could not and the method
-/// calls whose rewrite waits on their receiver's type.
+/// calls whose rewrite waits on their receiver's type. `std_params` answers
+/// a standard-library callee's parameters.
 pub fn resolve_named_arguments(
     sf: &mut SourceFile,
     resolutions: &mut Resolutions,
+    std_params: StdParams<'_>,
 ) -> (Vec<ResolveDiagnostic>, Vec<DeferredMethodCall>) {
     fold_const_defaults(sf, resolutions);
     let signatures = SignatureTable::of(sf, resolutions);
@@ -172,6 +188,7 @@ pub fn resolve_named_arguments(
         diagnostics,
         receiver: None,
         deferred: Vec::new(),
+        std_params: Some(std_params),
     };
     pass.visit_source_file(sf);
     let diagnostics = std::mem::take(&mut pass.diagnostics);
@@ -207,6 +224,7 @@ pub fn resolve_deferred_method_arguments(
         diagnostics: Vec::new(),
         receiver: Some(receiver),
         deferred: Vec::new(),
+        std_params: None,
     };
     pass.visit_source_file(sf);
     let diagnostics = std::mem::take(&mut pass.diagnostics);
@@ -312,6 +330,41 @@ fn builtin_signature(path: &PathExpr) -> Option<Signature> {
     })
 }
 
+/// A standard-library function's parameters as a signature, when every
+/// default it declares is a literal this pass can write at a call.
+fn std_signature(params: &[StdParam], span: Span) -> Option<Signature> {
+    let mut sig = Signature::default();
+    for param in params {
+        sig.names.push(param.name.clone());
+        let default = match param.default.as_deref() {
+            None => None,
+            Some(text) => Some(Expr::new(
+                NodeId::DUMMY,
+                span,
+                ExprKind::Literal(literal_default(text)?),
+            )),
+        };
+        sig.default_keys.push(param.default.clone());
+        sig.defaults.push(default);
+    }
+    Some(sig)
+}
+
+/// The literal a default's text spells.
+fn literal_default(text: &str) -> Option<Literal> {
+    let text = text.trim();
+    match text {
+        "true" => return Some(Literal::Bool(true)),
+        "false" => return Some(Literal::Bool(false)),
+        _ => {}
+    }
+    if let Some(inner) = text.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
+        return (!inner.contains(['"', '\\'])).then(|| Literal::String(inner.to_string()));
+    }
+    let unsigned_int = !text.is_empty() && text.chars().all(|c| c.is_ascii_digit() || c == '_');
+    unsigned_int.then(|| Literal::Int(text.to_string()))
+}
+
 /// Reads a declaration's parameter names and defaults, dropping any
 /// receiver - a method call's receiver is not one of its arguments.
 fn signature_of(decl: &FnDecl, resolutions: &Resolutions) -> Signature {
@@ -340,6 +393,8 @@ struct Rewrite<'a> {
     /// `None` on the first pass, which defers those calls instead.
     receiver: Option<&'a dyn Fn(NodeId) -> Option<String>>,
     deferred: Vec<DeferredMethodCall>,
+    /// A standard-library callee's parameters, by its path.
+    std_params: Option<StdParams<'a>>,
 }
 
 impl VisitorMut for Rewrite<'_> {
@@ -408,6 +463,15 @@ impl Rewrite<'_> {
                 }
                 if let Some(sig) = builtin_signature(path) {
                     return Some(sig);
+                }
+                if let Some(std_params) = self.std_params {
+                    let segments: Vec<String> =
+                        path.segments.iter().map(|s| s.name.name.clone()).collect();
+                    if let Some(params) = std_params(&segments)
+                        && let Some(sig) = std_signature(&params, span)
+                    {
+                        return Some(sig);
+                    }
                 }
                 self.unsupported_target(written, &describe_path(path), span)
             }

@@ -1,0 +1,13 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+assertion_line: 86
+expression: rendered
+---
+--- plain ---
+error[GT0124]: A typed serde call names a type holding a value with no JSON form. - here
+--- framed ---
+error[GT0124]: A typed serde call names a type holding a value with no JSON form.
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

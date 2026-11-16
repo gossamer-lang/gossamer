@@ -590,7 +590,7 @@ fn main() -> Result<(), errors::Error> {
     assert!(run.0.contains("city=denver"), "missing city: {:?}", run.0);
     assert!(run.0.contains("tag0=admin"), "missing tag: {:?}", run.0);
     assert!(
-        run.0.contains("bad-rejected: ") && run.0.contains("field `age`"),
+        run.0.contains("bad-rejected: age: expected i64, found string"),
         "expected age-mismatch rejection: {:?}",
         run.0,
     );
@@ -615,7 +615,7 @@ fn main() {
     let with_a = json::set(obj, "a", json::Value::Int(1))
     let with_b = json::set(with_a, "b", json::Value::String("hello"))
     let replaced = json::set(with_b, "a", json::Value::Int(99))
-    println("{}", json::render(replaced))
+    println("{}", json::encode(replaced).unwrap())
 }
 "#;
     let dir = fresh_dir("json_set");
@@ -2133,7 +2133,7 @@ fn main() {
     let b = json::parse("[1,{\"y\":[true,null],\"x\":2}]").unwrap()
     let c = json::parse("[1, {\"x\": 3}]").unwrap()
     println(f"{a == b} {a == a} {a != c} {a == c}")
-    println(f"{json::at(a, 0) == json::parse("1").unwrap()} {json::at(a, 0) == json::parse("1.0").unwrap()}")
+    println(f"{json::at(a, 0).unwrap() == json::parse("1").unwrap()} {json::at(a, 0).unwrap() == json::parse("1.0").unwrap()}")
     println(f"{#[a] == #[b]} {#[a] == #[c]} {Some(a) == Some(b)} {(a, 1) == (b, 1)}")
     println(f"{Holder { value: a } == Holder { value: b }} {Holder { value: a } == Holder { value: c }}")
 }
@@ -2160,8 +2160,8 @@ fn main() {
     let mut w = #[a, a]
     w[0] = a
     let m = {"x": a, "z": json::parse("[3]").unwrap()}
-    println(f"{r.len()} {s.len()} {v.len()} {w.len()} {m.len()} {json::render(a)}")
-    println(f"{v[1] == m["x"]} {w[0] == a} {json::render(m["z"])}")
+    println(f"{r.len()} {s.len()} {v.len()} {w.len()} {m.len()} {json::encode(a).unwrap()}")
+    println(f"{v[1] == m["x"]} {w[0] == a} {json::encode(m["z"]).unwrap()}")
 }
 "#;
     assert_all_tiers(

@@ -1,12 +1,13 @@
+use std::encoding::json
 use std::errors
 
 struct Config { port: i64, host: String, active: bool }
 
 let c = Config { port: 8080, host: "localhost", active: true }
-let s = to_json::<Config>(c)?
+let s = json::encode(c)?
 println(f"encoded: {s}")
 
-let c2 = from_json::<Config>(s)?
+let c2 = json::decode::<Config>(s)?
 println(f"port: {c2.port}")
 println(f"host: {c2.host}")
 println(f"active: {c2.active}")

@@ -1241,8 +1241,8 @@ fn main() {
     let src = "{\"x\":1,\"y\":2}"
     match encoding::json::parse(src) {
         Ok(v) => {
-            let out = encoding::json::encode(v)
-            println("{}", encoding::json::valid(out))
+            let out = encoding::json::encode(v).unwrap()
+            println("{}", encoding::json::is_valid(out))
         }
         Err(e) => println("err: {}", e)
     }
@@ -1253,14 +1253,14 @@ fn main() {
 }
 
 #[test]
-fn json_valid_rejects_bad() {
+fn json_is_valid_rejects_bad() {
     assert_vm_output(
         "json_valid_bad",
         r#"
 use std::encoding
 fn main() {
-    println("{}", encoding::json::valid("not json"))
-    println("{}", encoding::json::valid("42"))
+    println("{}", encoding::json::is_valid("not json"))
+    println("{}", encoding::json::is_valid("42"))
 }
 "#,
         "false\ntrue",
@@ -1446,7 +1446,7 @@ fn main() {
     let result = encoding::xml::parse(src)
     match result {
         Ok(node) => {
-            let re_encoded = encoding::xml::encode(node)
+            let re_encoded = encoding::xml::encode(node).unwrap()
             let has_root = strings::contains(re_encoded, "root")
             println("{}", has_root)
         }

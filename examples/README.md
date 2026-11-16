@@ -13,7 +13,10 @@ JIT, and the `gos build` native binary).
 | `web_server.gos` | HTTP/1.1 routed server over `std::http` | runs |
 | `cli_args.gos` | Command-line argument parsing (`std::flag`) | runs |
 | `file_io.gos` | File read / write - text + JSON | runs |
-| `json_structs.gos` | One-line strict JSON via auto-derived `to_json::<Type>` / `from_json::<Type>` | runs |
+| `json_structs.gos` | Typed JSON: `json::decode::<T>` / `json::encode`, serde attributes, `sort: true` | runs |
+| `json_dynamic.gos` | Untyped JSON: `json::parse`, `get` / `at` / `pointer` / `entries`, `to_value` | runs |
+| `toml_demo.gos` | TOML: typed `toml::decode::<T>` / `toml::encode`, `toml::parse`, text converters | runs |
+| `yaml_demo.gos` | YAML: typed `yaml::decode::<T>` / `yaml::encode`, multi-document streams | runs |
 | `http_client.gos` | HTTP client / REST call | runs (pair with `web_server.gos`) |
 | `data_structures.gos` | Lists, maps, sets from `std::collections` | runs |
 | `control_flow.gos` | Loops + conditionals + match (pure syntax) | runs |
