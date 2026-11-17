@@ -252,28 +252,12 @@ struct WorkerSlot {
     /// `set_max_procs` shrank the worker count). Workers consult this
     /// before parking and exit.
     retired: AtomicBool,
-    /// Opaque OS-thread handle (Unix: `pthread_t` cast to `u64`,
-    /// other platforms: 0). Captured by `worker_loop` on entry; the
-    /// watchdog uses it to send a targeted SIGURG via
-    /// [`crate::preempt::signal_thread_sigurg`] when this
-    /// worker's task overstays its budget.
-    thread_handle: AtomicU64,
     /// Monotonic micros-since-process-start of this worker's most
     /// recent `Yield`/`Done` boundary. The watchdog reads it lock-
     /// free; the worker writes it lock-free at each safepoint.
     /// Replaces the previous `Mutex<Vec<Instant>>` on `Shared`,
     /// which serialised every Yield on a single global lock.
     last_yield_micros: AtomicU64,
-    /// Monotonic micros-since-process-start of the last targeted SIGURG the
-    /// watchdog sent this worker, or zero if it has sent none.
-    ///
-    /// A signal is a request to reach a safepoint, and a worker that cannot
-    /// reach one - a compiled numeric loop calling nothing - does not answer
-    /// it. Without this the watchdog re-sends on every pass for as long as
-    /// the loop runs, which is a kernel round trip per worker per pass on
-    /// both sides and interrupts the very work it is waiting for.
-    #[cfg(not(miri))]
-    last_signal_micros: AtomicU64,
     /// The watchdog pass during which this worker entered a blocking system
     /// call, or zero outside one. Written lock-free by the worker, read by
     /// the watchdog; a stamp of the pass, not a clock reading, keeps the
@@ -281,6 +265,11 @@ struct WorkerSlot {
     syscall_pass: AtomicU64,
     /// The scheduler's watchdog pass counter, which [`syscall_enter`] stamps.
     watchdog_pass: Arc<AtomicU64>,
+    /// The watchdog's wake state, which entering a blocking call rings when
+    /// work is waiting.
+    bell: Arc<WatchdogBell>,
+    /// The global queue, read when entering a blocking call.
+    injector: Arc<Injector<SendTask>>,
     /// Whether the watchdog started an extra worker for this worker's
     /// current system call, which leaving the call gives back.
     handed_off: AtomicBool,
@@ -295,6 +284,18 @@ pub const SYSCALL_HANDOFF_THRESHOLD: Duration = WATCHDOG_INTERVAL;
 
 /// The watchdog's sleep between passes.
 const WATCHDOG_INTERVAL: Duration = Duration::from_millis(5);
+
+/// How long the top worker sits idle, with no goroutine placed on it, before
+/// its thread exits. A worker's thread, stack, allocator heap, and cached
+/// goroutine stacks stay resident while it lives, so a burst would otherwise
+/// keep its peak worker count for the life of the process. Load that recurs
+/// within the window keeps its workers.
+const IDLE_RETIRE_AFTER: Duration = Duration::from_secs(10);
+
+/// Finished goroutine stacks a parked worker keeps for its next spawns. A
+/// cached stack keeps the pages its last goroutine touched, so an idle worker
+/// holds a few for a quick restart rather than the full spawn cache.
+const PARKED_STACK_CACHE_DEPTH: usize = 4;
 
 thread_local! {
     /// The slot of the scheduler worker running on this thread, if any.
@@ -335,6 +336,12 @@ pub fn syscall_mark() {
         if let Some(slot) = current.borrow().as_ref() {
             let pass = slot.watchdog_pass.load(Ordering::Relaxed);
             slot.syscall_pass.store(pass, Ordering::Release);
+            slot.bell.in_syscall.fetch_add(1, Ordering::SeqCst);
+            // Work queued before the count rose found no call to hand off
+            // from, so the watchdog is woken for it here.
+            if !slot.inbox.is_empty() || !slot.stealer.is_empty() || !slot.injector.is_empty() {
+                slot.bell.ring();
+            }
         }
     });
 }
@@ -352,6 +359,7 @@ pub fn syscall_unmark() {
                 return false;
             };
             slot.syscall_pass.store(0, Ordering::Release);
+            slot.bell.in_syscall.fetch_sub(1, Ordering::SeqCst);
             // Checked before the swap so a call the watchdog left alone
             // takes no locked operation.
             slot.handed_off.load(Ordering::Acquire) && slot.handed_off.swap(false, Ordering::AcqRel)
@@ -413,7 +421,7 @@ struct ParkShard {
 
 /// State shared across every worker thread plus user-facing handles.
 struct Shared {
-    injector: Injector<SendTask>,
+    injector: Arc<Injector<SendTask>>,
     workers: Mutex<Vec<Arc<WorkerSlot>>>,
     threads: Mutex<Vec<JoinHandle<()>>>,
     parked: Box<[Mutex<ParkShard>]>,
@@ -453,6 +461,10 @@ struct Shared {
     /// worker already has goroutines of its own, so a program runs as many
     /// threads as it has concurrent goroutines, up to `target_workers`.
     demand: AtomicUsize,
+    /// How long, in microseconds, the top worker waits idle with no goroutine
+    /// of its own before it retires and gives the demand back. Fixed at
+    /// [`IDLE_RETIRE_AFTER`] outside tests.
+    idle_retire_micros: AtomicU64,
     /// Serialises resizing, so two growths never start a worker at the same
     /// index.
     resize: Mutex<()>,
@@ -474,11 +486,43 @@ struct Shared {
     /// CPU on the main thread while the workers are idle.
     idle_mu: Mutex<()>,
     idle_cv: Condvar,
-    /// Set while the watchdog sleeps because no worker runs a goroutine; a
-    /// worker leaving its park clears it and signals `watchdog_cv`.
-    watchdog_idle: AtomicBool,
-    watchdog_mu: Mutex<()>,
-    watchdog_cv: Condvar,
+    /// The watchdog's wake state, shared with every worker slot.
+    bell: Arc<WatchdogBell>,
+}
+
+/// The watchdog's wake state. Worker slots hold it too, so a worker marking a
+/// blocking call can wake the watchdog without reaching the scheduler.
+#[derive(Default)]
+struct WatchdogBell {
+    /// Set while the watchdog rests with nothing to watch; whoever gives it
+    /// something clears it and signals `cv`.
+    idle: AtomicBool,
+    mu: Mutex<()>,
+    cv: Condvar,
+    /// Workers inside a blocking system call.
+    in_syscall: AtomicUsize,
+}
+
+impl WatchdogBell {
+    /// Wakes the watchdog if it rests. The caller has published what it is
+    /// to watch first.
+    fn ring(&self) {
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if self.idle.load(Ordering::SeqCst) {
+            let _g = self.mu.lock();
+            self.idle.store(false, Ordering::SeqCst);
+            self.cv.notify_one();
+        }
+    }
+
+    /// Wakes the watchdog when work was queued while a worker sits in a
+    /// blocking call, the case its handoff exists for.
+    fn work_queued(&self) {
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if self.in_syscall.load(Ordering::SeqCst) > 0 {
+            self.ring();
+        }
+    }
 }
 
 struct ParkedEntry {
@@ -531,7 +575,7 @@ impl MultiScheduler {
     pub fn new(worker_count: usize) -> Self {
         let n = worker_count.max(1);
         let shared = Arc::new(Shared {
-            injector: Injector::new(),
+            injector: Arc::new(Injector::new()),
             workers: Mutex::new(Vec::new()),
             threads: Mutex::new(Vec::new()),
             parked: (0..PARK_SHARDS)
@@ -551,14 +595,15 @@ impl MultiScheduler {
             live_workers: AtomicUsize::new(0),
             target_workers: AtomicUsize::new(n),
             demand: AtomicUsize::new(1),
+            idle_retire_micros: AtomicU64::new(
+                u64::try_from(IDLE_RETIRE_AFTER.as_micros()).unwrap_or(u64::MAX),
+            ),
             resize: Mutex::new(()),
             watchdog_started: AtomicBool::new(false),
             request_safepoint: AtomicBool::new(false),
             idle_mu: Mutex::new(()),
             idle_cv: Condvar::new(),
-            watchdog_idle: AtomicBool::new(false),
-            watchdog_mu: Mutex::new(()),
-            watchdog_cv: Condvar::new(),
+            bell: Arc::new(WatchdogBell::default()),
         });
         Self { inner: shared }
     }
@@ -656,6 +701,7 @@ impl MultiScheduler {
             self.inner.injector.push(Box::new(stamped));
             self.wake_any();
         }
+        self.inner.bell.work_queued();
         Some(gid)
     }
 
@@ -900,6 +946,7 @@ impl MultiScheduler {
                 self.wake_any();
             }
         }
+        self.inner.bell.work_queued();
         self.inner.stats.unparks.fetch_add(1, Ordering::Relaxed);
         true
     }
@@ -982,6 +1029,7 @@ impl MultiScheduler {
     pub fn request_safepoint(&self) {
         self.inner.request_safepoint.store(true, Ordering::Release);
         crate::preempt::request_yield_all();
+        self.inner.bell.ring();
     }
 
     /// Clears the safepoint request once the caller is done.
@@ -1056,12 +1104,11 @@ impl MultiScheduler {
             cv: Condvar::new(),
             cv_mu: Mutex::new(()),
             retired: AtomicBool::new(false),
-            thread_handle: AtomicU64::new(0),
             last_yield_micros: AtomicU64::new(now_micros_since_start()),
-            #[cfg(not(miri))]
-            last_signal_micros: AtomicU64::new(0),
             syscall_pass: AtomicU64::new(0),
             watchdog_pass: Arc::clone(&self.inner.watchdog_pass),
+            bell: Arc::clone(&self.inner.bell),
+            injector: Arc::clone(&self.inner.injector),
             handed_off: AtomicBool::new(false),
         });
         {
@@ -1084,12 +1131,11 @@ impl MultiScheduler {
                         cv: Condvar::new(),
                         cv_mu: Mutex::new(()),
                         retired: AtomicBool::new(true),
-                        thread_handle: AtomicU64::new(0),
                         last_yield_micros: AtomicU64::new(now_micros_since_start()),
-                        #[cfg(not(miri))]
-                        last_signal_micros: AtomicU64::new(0),
                         syscall_pass: AtomicU64::new(0),
                         watchdog_pass: Arc::clone(&self.inner.watchdog_pass),
+                        bell: Arc::clone(&self.inner.bell),
+                        injector: Arc::clone(&self.inner.injector),
                         handed_off: AtomicBool::new(false),
                     });
                     workers.push(placeholder);
@@ -1188,28 +1234,23 @@ impl MultiScheduler {
             && workers
                 .iter()
                 .all(|s| s.parked.load(Ordering::Acquire) || s.retired.load(Ordering::Acquire));
-        let no_local_work = workers.iter().all(|s| s.stealer.is_empty());
+        // A worker publishes `parked` before it looks in its inbox, so a task
+        // pushed there just before the park is still queued work.
+        let no_local_work = workers
+            .iter()
+            .all(|s| s.stealer.is_empty() && s.inbox.is_empty());
         drop(workers);
         injector_empty && parked_empty && all_parked && no_local_work
     }
 }
 
-/// RAII guard around the per-worker thread handle. On drop, which every
-/// way out of the worker reaches (return or unwind), it zeroes
-/// `WorkerSlot::thread_handle` and hands the OS handle back to
-/// [`crate::preempt::release_thread_handle`] before the thread exits. It is
-/// the one place the handle is cleared, so the release is never skipped.
-struct WorkerHandleGuard {
-    slot: Arc<WorkerSlot>,
-}
+/// Marks the thread as no longer a worker on every way out of the worker
+/// loop, return or unwind.
+struct WorkerExitGuard;
 
-impl Drop for WorkerHandleGuard {
+impl Drop for WorkerExitGuard {
     fn drop(&mut self) {
         ON_WORKER.with(|on| on.set(false));
-        let prev = self.slot.thread_handle.swap(0, Ordering::AcqRel);
-        if prev != 0 {
-            crate::preempt::release_thread_handle(prev);
-        }
     }
 }
 
@@ -1222,25 +1263,23 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
     // Round-robin steal cursor - biases away from always poking the
     // same peer first, which would imbalance work.
     let mut steal_cursor = index.wrapping_add(1);
-    // Publish this thread's pthread_t so the watchdog can pthread_kill
-    // a stuck worker. Released so the watchdog observes
-    // the value before it tries to use it.
-    slot.thread_handle
-        .store(crate::preempt::current_thread_handle(), Ordering::Release);
     CURRENT_SLOT.with(|current| *current.borrow_mut() = Some(Arc::clone(&slot)));
-    // RAII guard: even if the worker panics, the handle is released
-    // and the slot zeroed before this frame unwinds.
-    let _handle_guard = WorkerHandleGuard {
-        slot: Arc::clone(&slot),
-    };
+    let _exit_guard = WorkerExitGuard;
     ON_WORKER.with(|on| on.set(true));
     slot.last_yield_micros
         .store(now_micros_since_start(), Ordering::Release);
-    shared.resume_watchdog();
+    // Where the platform has one, this thread's slice timer asks its
+    // goroutines to yield; elsewhere the watchdog times them. It runs on the
+    // thread's CPU clock, so it needs no attention when the worker parks.
+    #[cfg(all(target_os = "linux", not(miri)))]
+    let _slice_timer = crate::preempt::SliceTimer::for_this_thread();
     // A worker that always has a goroutine to run never parks in its poller,
     // so it reads readiness on a fixed cadence of steps instead.
     let mut steps_since_poll = 0u32;
     let mut polled: Vec<u32> = Vec::new();
+    // When this worker last found nothing to run, while it has stayed idle.
+    // A new worker starts idle, so its first goroutine starts the timing.
+    let mut idle_since: Option<Instant> = Some(Instant::now());
     loop {
         if slot.retired.load(Ordering::Acquire) {
             // Hand off every task still queued for this worker
@@ -1284,6 +1323,16 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
                 }
             }
             shared.live_workers.fetch_sub(1, Ordering::AcqRel);
+            // The worker below is the top one now, and may have parked with
+            // no retirement bound while this one was above it. The fence
+            // pairs with the one a parking worker takes after publishing
+            // `parked`: either it reads the new count, or this reads `parked`.
+            std::sync::atomic::fence(Ordering::SeqCst);
+            shared.wake_top_worker();
+            shared.notify_idle();
+            // A poller this worker leaves behind may hold waiters only the
+            // watchdog drives now.
+            shared.bell.ring();
             return;
         }
         let task = next_task(index, &deque, &slot, &shared, &mut steal_cursor);
@@ -1296,18 +1345,30 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
                 shared.notify_idle();
                 return;
             }
+            let since = *idle_since.get_or_insert_with(Instant::now);
+            if retire_when_idle(&slot, &deque, &shared, since) {
+                continue;
+            }
+            gossamer_coro::trim_stack_cache(PARKED_STACK_CACHE_DEPTH);
             // About to park: tell wait_until_idle to re-snapshot.
             // The Condvar is signalled inside park_worker after the
             // parked flag is set so the snapshot sees a consistent
             // view.
-            let _ = park_worker(&slot, &shared);
+            let _ = park_worker(&slot, &shared, retire_wait(&slot, &shared, since));
             // The watchdog measures a goroutine's run from here, not from
             // the step this worker took before it went idle.
             slot.last_yield_micros
                 .store(now_micros_since_start(), Ordering::Release);
-            shared.resume_watchdog();
             continue;
         };
+        if idle_since.take().is_some() {
+            // A park that timed out for a collect or a retirement check finds
+            // nothing to run, so only a worker that has a goroutine again
+            // gives the watchdog a run to time.
+            if !crate::preempt::cpu_time_slices() {
+                shared.resume_watchdog();
+            }
+        }
         let step = task.step();
         shared.stats.steps.fetch_add(1, Ordering::Relaxed);
         steps_since_poll += 1;
@@ -1423,6 +1484,18 @@ impl Shared {
     /// A waiter registers before it reads the state it waits on, and a
     /// worker changes that state before it reads the count, so with both
     /// sequentially consistent one of them always sees the other.
+    /// Wakes the top live worker if it is parked, so it can look at whether
+    /// it may retire now that it is the top one.
+    fn wake_top_worker(&self) {
+        let live = self.live_workers.load(Ordering::Acquire);
+        let workers = self.workers.lock();
+        if let Some(slot) = live.checked_sub(1).and_then(|top| workers.get(top))
+            && !slot.retired.load(Ordering::Acquire)
+        {
+            slot.wake();
+        }
+    }
+
     fn notify_idle(&self) {
         if self.idle_waiters.load(Ordering::SeqCst) > 0 {
             let _g = self.idle_mu.lock();
@@ -1435,24 +1508,19 @@ impl Shared {
     /// publishes its sleep before it reads the workers, so with both fenced
     /// one of them always sees the other.
     fn resume_watchdog(&self) {
-        std::sync::atomic::fence(Ordering::SeqCst);
-        if self.watchdog_idle.load(Ordering::SeqCst) {
-            let _g = self.watchdog_mu.lock();
-            self.watchdog_idle.store(false, Ordering::SeqCst);
-            self.watchdog_cv.notify_one();
-        }
+        self.bell.ring();
     }
 
     /// Ends the watchdog's pause between passes once `stopping` is set, so
     /// shutdown joins it without waiting out the interval. Signalled under
-    /// `watchdog_mu`, which the pause holds while it reads `stopping`.
+    /// the bell's lock, which the pause holds while it reads `stopping`.
     fn end_watchdog_pause(&self) {
-        let _g = self.watchdog_mu.lock();
-        self.watchdog_cv.notify_all();
+        let _g = self.bell.mu.lock();
+        self.bell.cv.notify_all();
     }
 
-    /// Whether the watchdog has nothing to watch: no worker runs a goroutine
-    /// or sits in a system call, and no poller a retired worker left behind
+    /// Whether the watchdog has nothing to watch: no worker sits in a system
+    /// call or, without a slice timer, runs a goroutine, and no poller a retired worker left behind
     /// still holds a timer or a descriptor for it to drive.
     #[cfg(not(miri))]
     fn nothing_to_watch(&self) -> bool {
@@ -1460,9 +1528,11 @@ impl Shared {
             return false;
         }
         let workers = self.workers.lock();
+        // A worker that times its own CPU leaves the watchdog nothing to time
+        // while it runs; only a blocking call is left to watch.
         let all_parked = workers.iter().all(|slot| {
             slot.retired.load(Ordering::SeqCst)
-                || (slot.parked.load(Ordering::SeqCst)
+                || ((crate::preempt::cpu_time_slices() || slot.parked.load(Ordering::SeqCst))
                     && slot.syscall_pass.load(Ordering::SeqCst) == 0)
         });
         if !all_parked {
@@ -1516,18 +1586,6 @@ fn default_max_live() -> usize {
     1_000_000
 }
 
-/// Watchdog loop: every ~5 ms, checks per-worker `last_yield`
-/// timestamps and bumps the global preempt phase for any worker
-/// that has been running without yielding for more than 10 ms.
-/// Compiled / interpreter code is expected to call into
-/// [`crate::preempt::should_yield`] at safepoints and
-/// honour the request.
-///
-/// When a worker has been running for more than
-/// `kill_threshold`, the watchdog also sends SIGURG to that worker's
-/// OS thread. The cooperative bump alone is silent if the worker is
-/// inside a tight C-side loop or a blocking syscall; the kernel
-/// signal interrupts both.
 #[cfg_attr(miri, allow(dead_code))]
 /// Starts one more worker for each worker that has sat in a blocking system
 /// call past [`SYSCALL_HANDOFF_THRESHOLD`] while goroutines are waiting to
@@ -1630,22 +1688,22 @@ enum Rest {
 /// costs no thread a wakeup.
 #[cfg(not(miri))]
 fn rest_while_nothing_to_watch(shared: &Shared, bound: Option<Duration>) -> Rest {
-    let mut g = shared.watchdog_mu.lock();
-    shared.watchdog_idle.store(true, Ordering::SeqCst);
+    let mut g = shared.bell.mu.lock();
+    shared.bell.idle.store(true, Ordering::SeqCst);
     std::sync::atomic::fence(Ordering::SeqCst);
     if !shared.nothing_to_watch() {
-        shared.watchdog_idle.store(false, Ordering::SeqCst);
+        shared.bell.idle.store(false, Ordering::SeqCst);
         return Rest::Busy;
     }
     match bound {
         Some(left) => {
-            let _ = shared.watchdog_cv.wait_for(&mut g, left);
+            let _ = shared.bell.cv.wait_for(&mut g, left);
         }
-        None => shared.watchdog_cv.wait(&mut g),
+        None => shared.bell.cv.wait(&mut g),
     }
     // A waker clears the flag before it signals, so a flag still set means
     // the bound ran out.
-    if shared.watchdog_idle.swap(false, Ordering::SeqCst) {
+    if shared.bell.idle.swap(false, Ordering::SeqCst) {
         Rest::Elapsed
     } else {
         Rest::Woken
@@ -1657,23 +1715,32 @@ fn rest_while_nothing_to_watch(shared: &Shared, bound: Option<Duration>) -> Rest
 #[cfg(not(miri))]
 fn pause_between_passes(shared: &Shared) -> bool {
     let deadline = Instant::now() + WATCHDOG_INTERVAL;
-    let mut g = shared.watchdog_mu.lock();
+    let mut g = shared.bell.mu.lock();
     while !shared.stopping.load(Ordering::Acquire) {
-        if shared.watchdog_cv.wait_until(&mut g, deadline).timed_out() {
+        if shared.bell.cv.wait_until(&mut g, deadline).timed_out() {
             return false;
         }
     }
     true
 }
 
+/// Watchdog loop: every ~5 ms while a worker runs, checks per-worker
+/// `last_yield` timestamps and bumps the global preempt phase for any worker
+/// that has been running without yielding for more than 10 ms. Compiled and
+/// interpreter code call [`crate::preempt::should_yield`] at safepoints and
+/// honour the request. It also starts workers for blocked system calls,
+/// drives vacant pollers, and applies the allocator purge.
 #[cfg(not(miri))]
 fn watchdog_loop(shared: Arc<Shared>) {
     let preempt_threshold = Duration::from_millis(10);
-    let kill_threshold = Duration::from_millis(100);
     // The allocator's decay window, which this thread applies for workers
     // that have stopped allocating.
     let purge_every = crate::allocator_purge_delay();
     let mut last_purge = Instant::now();
+    // The last pass, which runs only while a worker does. Memory freed then
+    // waits on the window from there, so a process that went quiet is purged
+    // one window after it did, not one window after the previous purge.
+    let mut last_pass = Instant::now();
     // Whether workers have run since the last purge, so memory they freed
     // may be waiting on the window. A purge taken while every worker stayed
     // parked leaves nothing for the next one.
@@ -1686,20 +1753,24 @@ fn watchdog_loop(shared: Arc<Shared>) {
             return;
         }
         let purge_due = (!purge_every.is_zero() && purge_pending)
-            .then(|| purge_every.saturating_sub(last_purge.elapsed()));
+            .then(|| purge_every.saturating_sub(last_purge.elapsed().min(last_pass.elapsed())));
         let rest = rest_while_nothing_to_watch(&shared, purge_due);
-        if rest != Rest::Elapsed {
-            purge_pending = true;
+        if rest == Rest::Elapsed {
+            // Only the purge window ran out: every worker is still parked,
+            // so there is no run to time and the purge needs no pass.
+            crate::purge_expired_allocator_memory();
+            last_purge = Instant::now();
+            purge_pending = false;
+            continue;
         }
+        purge_pending = true;
         if pause_between_passes(&shared) {
             crate::preempt::request_yield_all();
             return;
         }
+        last_pass = Instant::now();
         let now_micros = now_micros_since_start();
         let preempt_micros = u64::try_from(preempt_threshold.as_micros()).unwrap_or(u64::MAX);
-        let kill_micros = u64::try_from(kill_threshold.as_micros()).unwrap_or(u64::MAX);
-        let mut needs_preempt = false;
-        let mut kill_indices: Vec<usize> = Vec::new();
         // Lock-free read of every worker's last-yield timestamp.
         // Acquire the workers list briefly to walk the slot vector;
         // each slot's `last_yield_micros` is then read with an
@@ -1716,51 +1787,22 @@ fn watchdog_loop(shared: Arc<Shared>) {
                 })
                 .collect()
         };
-        for (i, ts) in snapshot.iter().enumerate() {
-            let Some(ts) = ts else {
-                continue;
-            };
-            let elapsed = now_micros.saturating_sub(*ts);
-            if elapsed > preempt_micros {
-                needs_preempt = true;
-            }
-            if elapsed > kill_micros {
-                kill_indices.push(i);
-            }
-        }
+        let needs_preempt = !crate::preempt::cpu_time_slices()
+            && snapshot
+                .iter()
+                .flatten()
+                .any(|ts| now_micros.saturating_sub(*ts) > preempt_micros);
         start_workers_for_blocked_syscalls(&shared);
         drive_vacant_pollers(&shared);
         if !purge_every.is_zero() && last_purge.elapsed() >= purge_every {
+            // Workers ran during this window, so memory they freed since may
+            // be waiting on the next one: the purge stays pending.
             crate::purge_expired_allocator_memory();
             last_purge = Instant::now();
-            purge_pending = rest != Rest::Elapsed;
         }
         if needs_preempt || shared.request_safepoint.load(Ordering::Acquire) {
             crate::preempt::request_yield_all();
             crate::preempt::bump_pressure();
-        }
-        if !kill_indices.is_empty() {
-            let workers = shared.workers.lock();
-            for i in kill_indices {
-                if let Some(slot) = workers.get(i) {
-                    // Skip retired slots - the thread may have already
-                    // exited and the pthread_t would be dangling.
-                    if slot.retired.load(Ordering::Acquire) {
-                        continue;
-                    }
-                    // One signal per overstay window. The worker answers by
-                    // reaching a safepoint, which moves its yield timestamp
-                    // and takes it out of this list; until then a second
-                    // signal tells it nothing the first did not.
-                    let last_signal = slot.last_signal_micros.load(Ordering::Acquire);
-                    if last_signal != 0 && now_micros.saturating_sub(last_signal) < kill_micros {
-                        continue;
-                    }
-                    slot.last_signal_micros.store(now_micros, Ordering::Release);
-                    let handle = slot.thread_handle.load(Ordering::Acquire);
-                    let _ = crate::preempt::signal_thread_sigurg(handle);
-                }
-            }
         }
     }
 }
@@ -1817,12 +1859,16 @@ fn next_task(
     None
 }
 
-fn park_worker(slot: &Arc<WorkerSlot>, shared: &Arc<Shared>) -> Park {
+fn park_worker(slot: &Arc<WorkerSlot>, shared: &Arc<Shared>, retire_in: Option<Duration>) -> Park {
     // A collect the allocator's window deferred bounds the park, so it runs
-    // when the window closes; with nothing deferred the park waits for a wake.
-    let deferred = crate::mark_thread_idle();
+    // when the window closes, and so does the moment this worker may retire;
+    // with neither the park waits for a wake.
+    let deferred = match (crate::mark_thread_idle(), retire_in) {
+        (Some(collect), Some(retire)) => Some(collect.min(retire)),
+        (collect, retire) => collect.or(retire),
+    };
     if let Some(poller) = crate::netpoll::worker_poller(slot.index) {
-        return park_worker_in_poller(slot, shared, poller, deferred);
+        return park_worker_in_poller(slot, shared, poller, deferred, retire_in);
     }
     slot.parked.store(true, Ordering::SeqCst);
     std::sync::atomic::fence(Ordering::SeqCst);
@@ -1836,7 +1882,7 @@ fn park_worker(slot: &Arc<WorkerSlot>, shared: &Arc<Shared>) -> Park {
     // before taking `cv_mu` to notify. Read under the lock, a cleared flag
     // means the wake already happened; work queued before the flag was
     // published is picked up here rather than slept past.
-    if !slot.parked.load(Ordering::SeqCst) || has_work_or_exit(slot, shared) {
+    if !slot.parked.load(Ordering::SeqCst) || has_work_or_exit(slot, shared, retire_in.is_none()) {
         slot.parked.store(false, Ordering::SeqCst);
         return Park::Skipped;
     }
@@ -1850,14 +1896,63 @@ fn park_worker(slot: &Arc<WorkerSlot>, shared: &Arc<Shared>) -> Park {
     Park::Waited
 }
 
-/// Whether a worker about to park has queued work, or has been told to
-/// retire or stop. Read after the worker publishes `parked`: whoever queues
-/// work or sets either flag reads `parked` afterwards and wakes it.
-fn has_work_or_exit(slot: &WorkerSlot, shared: &Shared) -> bool {
+/// Whether `slot` may retire once idle: it is the top live worker, not the
+/// last, and no goroutine is placed on it. Live workers always hold the
+/// lowest indices, because a growth starts its worker at the live count.
+fn may_retire(slot: &WorkerSlot, shared: &Shared) -> bool {
+    let live = shared.live_workers.load(Ordering::Acquire);
+    live > 1
+        && slot.index + 1 == live
+        && slot.homed.load(Ordering::Acquire) == 0
+        && !slot.retired.load(Ordering::Acquire)
+        && !shared.stopping.load(Ordering::Acquire)
+}
+
+/// How long the worker idle since `since` waits before it may retire, or
+/// `None` when it may not retire.
+fn retire_wait(slot: &WorkerSlot, shared: &Shared, since: Instant) -> Option<Duration> {
+    may_retire(slot, shared).then(|| {
+        Duration::from_micros(shared.idle_retire_micros.load(Ordering::Acquire))
+            .saturating_sub(since.elapsed())
+    })
+}
+
+/// Retires `slot` when it has been idle for the whole window with nothing
+/// queued, giving back the demand that started it; answers whether it did.
+/// The loop's retired branch then hands off anything queued since and exits.
+fn retire_when_idle(
+    slot: &WorkerSlot,
+    deque: &Deque<SendTask>,
+    shared: &Shared,
+    since: Instant,
+) -> bool {
+    if retire_wait(slot, shared, since) != Some(Duration::ZERO) {
+        return false;
+    }
+    let _resize = shared.resize.lock();
+    if !may_retire(slot, shared) || !deque.is_empty() || !slot.inbox.is_empty() {
+        return false;
+    }
+    let _ = shared
+        .demand
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            Some(n.saturating_sub(1).max(1))
+        });
+    slot.retired.store(true, Ordering::SeqCst);
+    true
+}
+
+/// Whether a worker about to park has queued work, has been told to retire
+/// or stop, or became the top worker after deciding to park without a
+/// retirement bound (`unbounded`). Read after the worker publishes `parked`:
+/// whoever queues work, sets either flag, or exits from above it reads
+/// `parked` afterwards and wakes it.
+fn has_work_or_exit(slot: &WorkerSlot, shared: &Shared, unbounded: bool) -> bool {
     !slot.inbox.is_empty()
         || !shared.injector.is_empty()
         || slot.retired.load(Ordering::SeqCst)
         || shared.stopping.load(Ordering::SeqCst)
+        || (unbounded && may_retire(slot, shared))
 }
 
 /// Whether [`park_worker`] waited for a wake or found work and returned.
@@ -1877,6 +1972,7 @@ fn park_worker_in_poller(
     shared: &Arc<Shared>,
     poller: &crate::netpoll::Poller,
     deferred: Option<Duration>,
+    retire_in: Option<Duration>,
 ) -> Park {
     slot.polling.store(true, Ordering::SeqCst);
     slot.parked.store(true, Ordering::SeqCst);
@@ -1887,7 +1983,7 @@ fn park_worker_in_poller(
     // A waker clears `parked` and then signals the poller. Work queued before
     // `parked` was published is found here; work queued after it comes with a
     // signal that ends the pass below.
-    if slot.parked.load(Ordering::SeqCst) && !has_work_or_exit(slot, shared) {
+    if slot.parked.load(Ordering::SeqCst) && !has_work_or_exit(slot, shared, retire_in.is_none()) {
         let mut woken = Vec::new();
         // The pass sleeps until its next timer is due, or a deferred collect
         // when one comes first. A pass another thread holds is waited out on
@@ -2077,12 +2173,11 @@ mod tests {
             cv: Condvar::new(),
             cv_mu: Mutex::new(()),
             retired: AtomicBool::new(false),
-            thread_handle: AtomicU64::new(0),
             last_yield_micros: AtomicU64::new(0),
-            #[cfg(not(miri))]
-            last_signal_micros: AtomicU64::new(0),
             syscall_pass: AtomicU64::new(0),
             watchdog_pass: Arc::new(AtomicU64::new(1)),
+            bell: Arc::clone(&sched.inner.bell),
+            injector: Arc::clone(&sched.inner.injector),
             handed_off: AtomicBool::new(false),
         });
         slot.inbox.push(Box::new(CountTask {
@@ -2090,7 +2185,7 @@ mod tests {
             budget: 1,
         }));
         assert_eq!(
-            park_worker(&slot, &sched.inner),
+            park_worker(&slot, &sched.inner, None),
             Park::Skipped,
             "a worker with a task in its inbox waited before taking it"
         );
@@ -2246,9 +2341,9 @@ mod tests {
         panic!("unparked task stranded after its home worker retired");
     }
 
-    /// Shutdown signals `watchdog_cv` whether or not the watchdog rests for
+    /// Shutdown signals the bell's condition variable whether or not the watchdog rests for
     /// want of a worker, so a watchdog pausing between passes leaves at once.
-    /// The waiter publishes `ready` while it holds `watchdog_mu`, so the lock
+    /// The waiter publishes `ready` while it holds the bell's lock, so the lock
     /// taken below is ours only once it waits; a missed signal would leave it
     /// to time out.
     #[test]
@@ -2261,10 +2356,11 @@ mod tests {
             let shared = Arc::clone(&shared);
             let ready = Arc::clone(&ready);
             thread::spawn(move || {
-                let mut g = shared.watchdog_mu.lock();
+                let mut g = shared.bell.mu.lock();
                 ready.store(true, Ordering::SeqCst);
                 shared
-                    .watchdog_cv
+                    .bell
+                    .cv
                     .wait_for(&mut g, Duration::from_mins(1))
                     .timed_out()
             })
@@ -2272,7 +2368,7 @@ mod tests {
         while !ready.load(Ordering::SeqCst) {
             thread::yield_now();
         }
-        drop(shared.watchdog_mu.lock());
+        drop(shared.bell.mu.lock());
         sched.shutdown();
         assert!(
             !waiter.join().expect("waiter thread"),
@@ -2345,6 +2441,102 @@ mod tests {
         assert!(sched.shutdown_and_join_idle());
     }
 
+    /// The retirement window the pool tests run with.
+    const TEST_RETIRE_WINDOW_MICROS: u64 = 100_000;
+
+    /// Blocks until `live_workers` reads `n`. Retirement notifies the idle
+    /// waiters, so the bounded wait is only a guard against a missed wake.
+    fn wait_for_live_workers(sched: &MultiScheduler, n: usize) {
+        let mut g = sched.inner.idle_mu.lock();
+        let _waiting = IdleWaiter::enter(&sched.inner);
+        while sched.inner.live_workers.load(Ordering::Acquire) != n {
+            sched
+                .inner
+                .idle_cv
+                .wait_for(&mut g, Duration::from_millis(200));
+        }
+    }
+
+    /// A goroutine that yields until its flag is set.
+    fn spinner(release: &Arc<AtomicBool>) -> CoroTask {
+        let release = Arc::clone(release);
+        CoroTask(gossamer_coro::Goroutine::new(Box::new(move || {
+            while !release.load(Ordering::Acquire) {
+                let _ = crate::preempt::gos_rt_preempt_check_and_yield();
+                std::hint::spin_loop();
+            }
+        })))
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // starts worker threads that sigaltstack; Miri has no signals
+    fn idle_workers_retire_down_to_one() {
+        let sched = MultiScheduler::new(3);
+        // Long next to the moment a new worker takes the goroutine it was
+        // started for, short next to the test.
+        sched
+            .inner
+            .idle_retire_micros
+            .store(TEST_RETIRE_WINDOW_MICROS, Ordering::Release);
+        sched.start();
+        let release = Arc::new(AtomicBool::new(false));
+        for _ in 0..5 {
+            sched.spawn(spinner(&release));
+        }
+        assert_eq!(sched.inner.live_workers.load(Ordering::Acquire), 3);
+        release.store(true, Ordering::Release);
+        // Every goroutine finishes before the pool is read: a worker still
+        // running one keeps its place, and the next spawn would grow past it.
+        sched.wait_until_idle();
+        wait_for_live_workers(&sched, 1);
+        assert_eq!(sched.inner.demand.load(Ordering::Acquire), 1);
+        // The pool grows again for new work.
+        let again = Arc::new(AtomicBool::new(false));
+        sched.spawn(spinner(&again));
+        sched.spawn(spinner(&again));
+        assert_eq!(sched.inner.live_workers.load(Ordering::Acquire), 2);
+        again.store(true, Ordering::Release);
+        sched.wait_until_idle();
+        wait_for_live_workers(&sched, 1);
+        assert!(sched.shutdown_and_join_idle());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // starts worker threads that sigaltstack; Miri has no signals
+    fn a_worker_with_a_homed_goroutine_keeps_the_pool() {
+        let sched = MultiScheduler::new(2);
+        // Long next to the moment a new worker takes the goroutine it was
+        // started for, short next to the test.
+        sched
+            .inner
+            .idle_retire_micros
+            .store(TEST_RETIRE_WINDOW_MICROS, Ordering::Release);
+        sched.start();
+        let first = Arc::new(AtomicBool::new(false));
+        let second = Arc::new(AtomicBool::new(false));
+        sched.spawn(spinner(&first));
+        sched.spawn(spinner(&second));
+        assert_eq!(sched.inner.live_workers.load(Ordering::Acquire), 2);
+        // Worker 0 goes idle, but the top worker still runs a goroutine of
+        // its own, and only the top worker may retire.
+        first.store(true, Ordering::Release);
+        let low = Arc::clone(&sched.inner.workers.lock()[0]);
+        {
+            let mut g = sched.inner.idle_mu.lock();
+            let _waiting = IdleWaiter::enter(&sched.inner);
+            while low.homed.load(Ordering::Acquire) != 0 || !low.parked.load(Ordering::Acquire) {
+                sched
+                    .inner
+                    .idle_cv
+                    .wait_for(&mut g, Duration::from_millis(200));
+            }
+        }
+        assert_eq!(sched.inner.live_workers.load(Ordering::Acquire), 2);
+        second.store(true, Ordering::Release);
+        wait_for_live_workers(&sched, 1);
+        assert!(sched.shutdown_and_join_idle());
+    }
+
     #[test]
     #[cfg_attr(miri, ignore)] // starts worker threads that sigaltstack; Miri has no signals
     fn a_parked_pool_leaves_the_watchdog_nothing_to_watch() {
@@ -2358,10 +2550,18 @@ mod tests {
         sched.wait_until_idle();
         assert_eq!(counter.load(Ordering::Relaxed), 4);
         assert!(sched.inner.nothing_to_watch());
-        // A worker that runs again is something to watch.
+        // A worker that runs again is something to watch only where no slice
+        // timer times it.
         let slot = Arc::clone(&sched.inner.workers.lock()[0]);
         slot.parked.store(false, Ordering::SeqCst);
+        assert_eq!(
+            sched.inner.nothing_to_watch(),
+            crate::preempt::cpu_time_slices()
+        );
+        // A worker inside a blocking call is always something to watch.
+        slot.syscall_pass.store(1, Ordering::SeqCst);
         assert!(!sched.inner.nothing_to_watch());
+        slot.syscall_pass.store(0, Ordering::SeqCst);
         slot.parked.store(true, Ordering::SeqCst);
         assert!(sched.shutdown_and_join_idle());
     }
@@ -2380,7 +2580,7 @@ mod tests {
 #[cfg(test)]
 #[test]
 #[cfg_attr(miri, ignore)]
-fn idle_shutdown_joins_workers_and_releases_thread_handles() {
+fn idle_shutdown_joins_workers() {
     let sched = MultiScheduler::new(2);
     sched.start();
     assert!(!sched.inner.threads.lock().is_empty());

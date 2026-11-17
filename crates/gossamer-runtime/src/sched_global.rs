@@ -68,8 +68,55 @@ struct Globals {
 
 static GLOBALS: OnceLock<Globals> = OnceLock::new();
 
+/// A blocking job [`run_blocking`] hands a booted scheduler; it leaves its
+/// result where `run_blocking` reads it.
+type BlockingJob = Box<dyn FnOnce() + Send>;
+
+/// What the exit and blocking paths every program runs ask of a booted
+/// scheduler. Only [`globals`] fills it, so a program that never starts the
+/// scheduler links no scheduler, blocking pool, or netpoller code through
+/// those paths.
+struct Booted {
+    /// Runs a job on the blocking pool while goroutine `gid` parks, and
+    /// returns once the job has finished.
+    offload: fn(Gid, BlockingJob) -> Result<(), String>,
+    live_goroutines: fn() -> usize,
+    unpark: fn(Gid),
+    /// With no waker pending, how many goroutines are parked on channels
+    /// when every goroutine is parked on the program itself; `None`
+    /// otherwise.
+    blocked_on_program: fn() -> Option<usize>,
+    /// Stops the pool, the workers, and the netpoller once they are idle;
+    /// false when one is still busy.
+    finish_idle: fn() -> bool,
+    drain_for_exit: fn(),
+}
+
+static BOOTED: OnceLock<Booted> = OnceLock::new();
+
 fn globals() -> &'static Globals {
     GLOBALS.get_or_init(|| {
+        let _ = BOOTED.set(Booted {
+            offload: offload_blocking,
+            live_goroutines: || globals().scheduler.live_goroutines(),
+            unpark: |gid| {
+                globals().scheduler.unpark(gid);
+            },
+            blocked_on_program: || {
+                let g = globals();
+                if wakers_idle(g) {
+                    g.scheduler.blocked_on_program()
+                } else {
+                    None
+                }
+            },
+            finish_idle: finish_booted_runtime,
+            drain_for_exit: || {
+                let _ = globals()
+                    .scheduler
+                    .wait_quiescent(std::time::Duration::from_secs(5));
+            },
+        });
         let workers = default_workers();
         let scheduler = MultiScheduler::new(workers);
         let os_poller = OsPoller::new().expect("OsPoller::new");
@@ -121,6 +168,14 @@ fn default_workers() -> usize {
         }
     }
     thread::available_parallelism().map_or(1, std::num::NonZero::get)
+}
+
+/// Wakes goroutine `gid`. A gid names a goroutine only once the scheduler
+/// has booted, so this never boots it.
+pub fn unpark(gid: Gid) {
+    if let Some(booted) = BOOTED.get() {
+        (booted.unpark)(gid);
+    }
 }
 
 /// Returns a handle to the process-wide scheduler, booting it on first use.
@@ -190,19 +245,17 @@ static SHUTDOWN_REQUESTED: std::sync::atomic::AtomicBool =
 /// concurrency has nothing to drain, and booting a worker pool on the
 /// exit path just to observe it idle cost ~150 ms per process.
 pub fn drain_goroutines_for_exit() {
-    if let Some(g) = GLOBALS.get() {
-        let _ = g
-            .scheduler
-            .wait_quiescent(std::time::Duration::from_secs(5));
+    if let Some(booted) = BOOTED.get() {
+        (booted.drain_for_exit)();
     }
 }
 
 /// Whether native main can release process-owned values without racing live
 /// goroutines, including services excluded from the bounded exit drain.
 pub(crate) fn program_storage_is_idle() -> bool {
-    GLOBALS
+    BOOTED
         .get()
-        .is_none_or(|g| g.scheduler.live_goroutines() == 0)
+        .is_none_or(|booted| (booted.live_goroutines)() == 0)
 }
 
 /// Stops native program runtime threads after all user goroutines finish.
@@ -211,20 +264,24 @@ pub(crate) fn finish_idle_runtime() -> bool {
     if !program_entered() {
         return true;
     }
+    BOOTED.get().is_none_or(|booted| (booted.finish_idle)())
+}
+
+/// [`finish_idle_runtime`] for a scheduler that booted. The blocking pool
+/// starts only from a goroutine, so it too exists only after the boot.
+fn finish_booted_runtime() -> bool {
     if !crate::blocking_pool::shutdown_idle() {
         return false;
     }
-    if let Some(g) = GLOBALS.get() {
-        if !g.scheduler.shutdown_and_join_idle() {
-            return false;
-        }
-        request_shutdown();
-        if let Some(thread) = g.poller_thread.lock().take() {
-            let _ = thread.join();
-        }
-        g.wakers.lock().shrink_to_fit();
+    let g = globals();
+    if !g.scheduler.shutdown_and_join_idle() {
+        return false;
     }
-    crate::preempt::shutdown_idle();
+    request_shutdown();
+    if let Some(thread) = g.poller_thread.lock().take() {
+        let _ = thread.join();
+    }
+    g.wakers.lock().shrink_to_fit();
     true
 }
 
@@ -879,13 +936,10 @@ pub fn check_program_blocked() {
     if PENDING_HANDOFFS.load(Ordering::Acquire) > 0 || EXTERNAL_ACTORS.load(Ordering::Acquire) > 0 {
         return;
     }
-    let Some(globals) = GLOBALS.get() else {
-        return;
-    };
-    if !wakers_idle(globals) {
-        return;
-    }
-    let Some(on_channels) = globals.scheduler.blocked_on_program() else {
+    let Some(on_channels) = BOOTED
+        .get()
+        .and_then(|booted| (booted.blocked_on_program)())
+    else {
         return;
     };
     // Every other channel waiter has to be one of the parked goroutines: a
@@ -1039,32 +1093,40 @@ where
         }
     }
 
-    let Some(gid) = current_gid() else {
-        return std::panic::catch_unwind(AssertUnwindSafe(f)).map_err(|panic| {
+    let run = move || {
+        std::panic::catch_unwind(AssertUnwindSafe(f)).map_err(|panic| {
             format!(
                 "{label}: blocking operation panicked: {}",
                 panic_message(panic)
             )
-        });
+        })
     };
+    // A goroutine id is set only on a worker, so it implies a booted
+    // scheduler; anywhere else the operation blocks the calling thread.
+    let (Some(gid), Some(booted)) = (current_gid(), BOOTED.get()) else {
+        return run();
+    };
+    let slot = Arc::new(Mutex::new(None));
+    let filled = Arc::clone(&slot);
+    (booted.offload)(gid, Box::new(move || *filled.lock() = Some(run())))
+        .map_err(|e| format!("{label}: {e}"))?;
+    slot.lock()
+        .take()
+        .unwrap_or_else(|| Err(format!("{label}: blocking worker ended without a result")))
+}
 
+/// [`Booted::offload`]: runs `job` on the blocking pool while goroutine
+/// `gid` parks, so the operation does not pin a scheduler worker.
+fn offload_blocking(gid: Gid, job: BlockingJob) -> Result<(), String> {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     crate::blocking_pool::submit(Box::new(move || {
-        let result = std::panic::catch_unwind(AssertUnwindSafe(f)).map_err(|panic| {
-            format!(
-                "{label}: blocking operation panicked: {}",
-                panic_message(panic)
-            )
-        });
-        let _ = tx.send(result);
+        job();
+        let _ = tx.send(());
         scheduler().unpark(gid);
-    }))
-    .map_err(|e| format!("{label}: {e}"))?;
-
+    }))?;
     park(ParkReason::Other, |_parker| {});
-
     rx.recv()
-        .map_err(|_| format!("{label}: blocking worker ended without a result"))?
+        .map_err(|_| "blocking worker ended without a result".to_string())
 }
 
 /// Spawns `task` on the M:N pool. Returns `None` when the

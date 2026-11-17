@@ -20,6 +20,7 @@
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize, Ordering, fence};
 
+mod chunked;
 pub(crate) mod copy_blob;
 pub(crate) mod cycle;
 pub(crate) mod region;
@@ -956,6 +957,43 @@ pub fn rc_cycles_freed() -> usize {
     CYCLES_FREED.load(Ordering::Relaxed)
 }
 
+/// The collector a surviving release hands its buffered candidates to.
+type Collector = unsafe fn(Option<usize>);
+
+/// The collector a compiled program registered through
+/// [`gos_rt_cycles_enable`].
+#[cfg(gos_program_archive)]
+static COLLECTOR: std::sync::OnceLock<Collector> = std::sync::OnceLock::new();
+
+/// The cycle collector, if this process collects cycles. A compiled program
+/// registers it only when it has a type a cycle can pass through, so a
+/// program without one never buffers a candidate and links no collector.
+/// The runtime's own records (errors, result pairs) take their children when
+/// built, so a cycle through one also passes through a program type. Every
+/// other host of the runtime (the toolchain, its tests) always collects.
+#[cfg(gos_program_archive)]
+fn collector() -> Option<Collector> {
+    COLLECTOR.get().copied()
+}
+
+/// [`collector`] outside a compiled program's archive, which always collects.
+// The archive build of this function answers `None` until a program registers
+// the collector; both builds share its signature.
+#[cfg(not(gos_program_archive))]
+#[allow(clippy::unnecessary_wraps)]
+fn collector() -> Option<Collector> {
+    Some(cycle::collect_cycles_budgeted)
+}
+
+/// Registers the cycle collector. The compiler calls this before `main`
+/// (from a module constructor) in a program with a type a cycle can pass
+/// through.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_cycles_enable() {
+    #[cfg(gos_program_archive)]
+    let _ = COLLECTOR.set(cycle::collect_cycles_budgeted);
+}
+
 /// Record `payload` as a possible cycle root: strong count was just
 /// decremented but is still non-zero, so it may be part of a cycle whose
 /// only remaining references are internal. Buffered once (deduplicated by
@@ -978,6 +1016,9 @@ unsafe fn possible_root(payload: *mut u8) {
     if unsafe { is_statically_acyclic(h) } {
         return;
     }
+    let Some(collect) = collector() else {
+        return;
+    };
     // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     if !unsafe { has_rc_children(payload) } {
         return;
@@ -1006,7 +1047,7 @@ unsafe fn possible_root(payload: *mut u8) {
         // threshold; it never drains the whole buffer in one inline pass.
         // SAFETY: collection runs on the owning thread, whose root buffer keeps every candidate
         // alive.
-        unsafe { collect_cycles_budgeted(Some(COLLECT_SLICE_ROOTS)) };
+        unsafe { collect(Some(COLLECT_SLICE_ROOTS)) };
     }
 }
 
@@ -1166,11 +1207,11 @@ fn tsan_sizes() -> &'static parking_lot::Mutex<std::collections::HashMap<usize, 
 // silently turning a managed aggregate into a leaf and leaking its children.
 const META_TABLE_CAP: usize = u16::MAX as usize;
 
-/// Append-only id -> blob-pointer table. Slot 0 is permanently null. It holds a
-/// slot for every `u16` id, so a header's id indexes it without a bounds check;
-/// the sentinel's slot is never assigned and reads null.
-static META_TABLE: [std::sync::atomic::AtomicUsize; META_TABLE_CAP + 1] =
-    [const { std::sync::atomic::AtomicUsize::new(0) }; META_TABLE_CAP + 1];
+/// Append-only id -> blob-pointer table. Id 0 is permanently null, and the
+/// sentinel's slot is never assigned. A program interns a handful of metas, so
+/// the table holds one chunk rather than a slot for every `u16`.
+static META_TABLE: chunked::ChunkedWords = chunked::ChunkedWords::new();
+const _: () = assert!(META_TABLE_CAP < chunked::CHUNKED_WORDS);
 
 static META_IDS: std::sync::LazyLock<parking_lot::Mutex<rustc_hash::FxHashMap<usize, u16>>> =
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(rustc_hash::FxHashMap::default()));
@@ -1182,8 +1223,10 @@ static META_NEXT: AtomicUsize = AtomicUsize::new(1);
 pub(crate) fn release_program_pins() {
     // Cyclic garbage still names the cached unit nodes, so it is collected
     // while they are immortal; nothing that remains can reach one after.
-    // SAFETY: tracked roots are maintained by this thread's RC operations.
-    unsafe { gos_rt_collect_cycles() };
+    if let Some(collect) = collector() {
+        // SAFETY: tracked roots are maintained by this thread's RC operations.
+        unsafe { collect(None) };
+    }
     for slot in &ENUM_UNIT_SINGLETONS {
         let payload = slot.swap(std::ptr::null_mut(), Ordering::AcqRel);
         if !payload.is_null() {
@@ -1221,8 +1264,11 @@ pub(crate) fn release_program_pins() {
 // Only native scheduler workers exit; wasm32 runs goroutines on its one thread.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn finish_worker_cycles() {
-    // SAFETY: the runtime's RC operations maintain this thread's root buffer.
-    unsafe { gos_rt_collect_cycles() };
+    if let Some(collect) = collector() {
+        // SAFETY: the runtime's RC operations maintain this thread's root
+        // buffer.
+        unsafe { collect(None) };
+    }
 }
 
 /// Which interned metas carry [`gossamer_abi::rc::RC_KIND_ACYCLIC`], one bit
@@ -1301,7 +1347,7 @@ fn meta_intern_slow(key: usize, slot: usize) -> Option<u16> {
             META_ACYCLIC[next / ACYCLIC_WORD_BITS]
                 .fetch_or(1 << (next % ACYCLIC_WORD_BITS), Ordering::Relaxed);
         }
-        META_TABLE[next].store(key, Ordering::Release);
+        META_TABLE.store(next, key, Ordering::Release);
         ids.insert(key, id);
         id
     };
@@ -1315,7 +1361,7 @@ fn meta_intern_slow(key: usize, slot: usize) -> Option<u16> {
 unsafe fn meta_of(h: *const RcHeader) -> *const i64 {
     // SAFETY: `h` is the header of a live node (this `unsafe fn`'s caller).
     let id = unsafe { (*h).meta_id } as usize;
-    META_TABLE[id].load(Ordering::Acquire) as *const i64
+    META_TABLE.load(id, Ordering::Acquire) as *const i64
 }
 
 #[inline]

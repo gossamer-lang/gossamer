@@ -302,11 +302,22 @@ pub unsafe extern "C" fn gos_rt_set_mark_shared(set: *mut GosSet) {
     });
 }
 
+/// A set's operations for the walks over every container kind.
+pub(crate) const SET_OPS: crate::c_abi::kind_ops::KindOps = crate::c_abi::kind_ops::KindOps {
+    // SAFETY: the walks pass a live set handle (`KindOps`).
+    clone: |handle| unsafe { gos_rt_set_clone(handle.cast()).cast() },
+    // SAFETY: the walks pass a live set handle (`KindOps`).
+    free: |handle| unsafe { crate::c_abi::map::gos_rt_set_free(handle.cast()) },
+    // SAFETY: the walks pass a live set handle (`KindOps`).
+    mark_shared: Some(|handle| unsafe { gos_rt_set_mark_shared(handle.cast()) }),
+};
+
 /// Boxes `set` as a runtime handle, or places it in the innermost open
 /// region, counted by the leak ledger until
 /// [`gos_rt_set_free`](crate::c_abi::map::gos_rt_set_free) or the region's pop
 /// reclaims it.
 fn set_handle(set: GosSet) -> *mut GosSet {
+    crate::c_abi::kind_ops::register(crate::c_abi::kind_ops::Kind::Set, SET_OPS);
     crate::c_abi::ledger::set_inc();
     crate::c_abi::rc::region_alloc_handle(set, finalize_region_set)
         .unwrap_or_else(|set| Box::into_raw(Box::new(set)))

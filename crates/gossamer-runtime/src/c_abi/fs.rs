@@ -225,7 +225,7 @@ pub unsafe extern "C" fn gos_rt_fs_read_to_string(path: *const c_char) -> *mut c
         // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         match crate::sched_global::run_blocking("fs-read-string", move || {
-            std::fs::read_to_string(p)
+            crate::file_read::read_to_string(std::path::Path::new(&p))
         }) {
             Ok(Ok(text)) => alloc_cstring(text.as_bytes()),
             Ok(Err(_)) | Err(_) => alloc_cstring(b""),
@@ -251,7 +251,7 @@ pub unsafe extern "C" fn gos_rt_fs_read_to_string_result(path: *const c_char) ->
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let context = p.clone();
         match crate::sched_global::run_blocking("fs-read-string", move || {
-            std::fs::read_to_string(p)
+            crate::file_read::read_to_string(std::path::Path::new(&p))
         }) {
             Ok(Ok(text)) => {
                 let s = alloc_cstring(text.as_bytes());
@@ -346,7 +346,9 @@ pub unsafe extern "C" fn gos_rt_fs_file_open(path: *const c_char) -> i128 {
         // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let context = p.clone();
-        match crate::sched_global::run_blocking("fs-open", move || std::fs::File::open(p)) {
+        match crate::sched_global::run_blocking("fs-open", move || {
+            crate::file_read::open_for_read(std::path::Path::new(&p))
+        }) {
             Ok(Ok(file)) => gos_rt_result_new(0, insert_file(file)),
             Ok(Err(e)) => fs_io_err(&e, &context),
             Err(e) => fs_err(&e),
@@ -686,7 +688,7 @@ pub unsafe extern "C" fn gos_rt_fs_read_bytes_result(path: *const c_char) -> i12
 /// has its tail appended; one that shrinks leaves the Vec at what was read.
 fn read_file_into_vec(p: String) -> Result<std::io::Result<*mut GosVec>, String> {
     let opened = crate::sched_global::run_blocking("fs-read-bytes", move || {
-        let file = std::fs::File::open(&p)?;
+        let file = crate::file_read::open_for_read(std::path::Path::new(&p))?;
         let len = file.metadata().map_or(0, |m| m.len());
         Ok::<_, std::io::Error>((file, len))
     })?;

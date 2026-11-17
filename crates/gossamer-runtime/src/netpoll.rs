@@ -403,7 +403,7 @@ fn notify(slot: &AtomicU64, woken: &mut Vec<u32>) {
 /// Unparks every gid in `woken`, leaving it empty.
 pub(crate) fn unpark_all(woken: &mut Vec<u32>) {
     for gid in woken.drain(..) {
-        crate::sched_global::scheduler().unpark(Gid(gid));
+        crate::sched_global::unpark(Gid(gid));
     }
 }
 
@@ -575,7 +575,7 @@ impl Registration {
             {
                 // Readiness arrived since the check above: stay runnable.
                 slot.store(EMPTY, Ordering::Release);
-                crate::sched_global::scheduler().unpark(parker.gid);
+                crate::sched_global::unpark(parker.gid);
             }
         });
         slot.store(EMPTY, Ordering::Release);
@@ -621,7 +621,7 @@ impl Interrupter {
                 .is_ok()
         {
             let gid = u32::try_from(waiter - WAITER).unwrap_or(u32::MAX);
-            crate::sched_global::scheduler().unpark(Gid(gid));
+            crate::sched_global::unpark(Gid(gid));
         }
     }
 }
@@ -675,7 +675,7 @@ impl Registration {
                 .is_err()
             {
                 // Readiness arrived since the check above: stay runnable.
-                crate::sched_global::scheduler().unpark(parker.gid);
+                crate::sched_global::unpark(parker.gid);
                 return;
             }
             let claim = SlotClaim {
@@ -687,7 +687,7 @@ impl Registration {
             // first, so it is seen here.
             if self.desc.interrupts.load(Ordering::SeqCst) != seen {
                 if claim.take() {
-                    crate::sched_global::scheduler().unpark(parker.gid);
+                    crate::sched_global::unpark(parker.gid);
                 }
                 return;
             }

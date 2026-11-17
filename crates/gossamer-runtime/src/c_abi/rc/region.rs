@@ -56,8 +56,8 @@ const REGION_ARENA_MIN_BYTES: usize = 1 << 30;
 /// Bump offset of the next never-used slab within the reserve.
 static REGION_ARENA_NEXT: AtomicUsize = AtomicUsize::new(0);
 /// Maximum number of standard slabs the reserved arena can hold.  The
-/// overflow recycler addresses slabs by this index, so it never needs to
-/// allocate a bookkeeping node or take a global allocator-side lock.
+/// overflow recycler addresses slabs by this index rather than through a
+/// node per slab, and takes no lock.
 const REGION_ARENA_STANDARD_SLABS: usize = REGION_ARENA_BYTES / REGION_SLAB_BYTES;
 
 /// Bits used for the one-based slab index in [`ArenaFreeSlabs::head`].  The
@@ -71,20 +71,23 @@ const ARENA_FREE_INDEX_MASK: usize = (1 << ARENA_FREE_INDEX_BITS) - 1;
 /// A normal region never reaches this stack: it retains a small committed
 /// per-thread cache in `FREE_SLABS`.  When that cache overflows, the former
 /// global `Mutex<Vec<usize>>` serialised unrelated container destruction and
-/// later allocation.  This fixed-size, tagged Treiber stack stores the link
+/// later allocation.  This tagged Treiber stack stores the link
 /// outside decommitted memory, so it remains readable after `madvise` /
 /// `VirtualFree(MEM_DECOMMIT)`.  The tag in `head` prevents an ABA pop from
 /// handing the same slab to two workers.
 pub(super) struct ArenaFreeSlabs<const N: usize> {
     head: AtomicUsize,
-    next: [AtomicUsize; N],
+    /// Each pushed slab's link, held in chunks allocated as slabs reach them:
+    /// most processes never push one.
+    next: super::chunked::ChunkedWords,
 }
 
 impl<const N: usize> ArenaFreeSlabs<N> {
     pub(super) const fn new() -> Self {
+        const { assert!(N <= super::chunked::CHUNKED_WORDS) };
         Self {
             head: AtomicUsize::new(0),
-            next: [const { AtomicUsize::new(0) }; N],
+            next: super::chunked::ChunkedWords::new(),
         }
     }
 
@@ -102,7 +105,7 @@ impl<const N: usize> ArenaFreeSlabs<N> {
             if index >= N {
                 return None;
             }
-            let next = self.next[index].load(Ordering::Relaxed);
+            let next = self.next.load(index, Ordering::Relaxed);
             let tagged_next =
                 (head.wrapping_add(1 << ARENA_FREE_INDEX_BITS) & !ARENA_FREE_INDEX_MASK) | next;
             match self.head.compare_exchange_weak(
@@ -125,7 +128,8 @@ impl<const N: usize> ArenaFreeSlabs<N> {
         let id = index + 1;
         let mut head = self.head.load(Ordering::Acquire);
         loop {
-            self.next[index].store(head & ARENA_FREE_INDEX_MASK, Ordering::Relaxed);
+            self.next
+                .store(index, head & ARENA_FREE_INDEX_MASK, Ordering::Relaxed);
             let tagged_id =
                 (head.wrapping_add(1 << ARENA_FREE_INDEX_BITS) & !ARENA_FREE_INDEX_MASK) | id;
             match self.head.compare_exchange_weak(

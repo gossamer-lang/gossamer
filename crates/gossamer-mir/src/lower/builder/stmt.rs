@@ -183,22 +183,29 @@ impl<'a> Builder<'a> {
         }
         // Calls lower to a terminator in a prior block whose continuation is
         // the current block. Their destination temporary is fresh by
-        // construction and is consumed immediately by this let binding.
-        for blk in &mut self.blocks {
-            if let Terminator::Call {
-                callee,
-                destination,
-                target: Some(t),
-                ..
-            } = &mut blk.terminator
-                && *t == cur
-                && destination.local == value
-                && destination.projection.is_empty()
-                && matches!(callee, Operand::Const(ConstValue::Str(name)) if is_container_ctor(name))
-            {
-                *destination = Place::local(binding);
-                return true;
+        // construction and is consumed immediately by this let binding. Code
+        // lowered after the call may already read the temporary (a collected
+        // Vec of aggregates is tagged with its slot children), so every
+        // mention becomes the binding, as `try_rebind_fresh_result` does.
+        let made_here = self.blocks.iter().any(|blk| {
+            matches!(
+                &blk.terminator,
+                Terminator::Call {
+                    callee: Operand::Const(ConstValue::Str(name)),
+                    destination,
+                    target: Some(t),
+                    ..
+                } if *t == cur
+                    && destination.local == value
+                    && destination.projection.is_empty()
+                    && is_container_ctor(name)
+            )
+        });
+        if made_here {
+            for block in &mut self.blocks {
+                rename_local_in_block(block, value, binding);
             }
+            return true;
         }
         // `Some(..)` / `Ok(..)` / `Err(..)` lower to a `gos_rt_result_new`
         // `CallIntrinsic` assignment - the last statement of the current block
@@ -1065,61 +1072,46 @@ fn is_struct_literal(e: &HirExpr) -> bool {
             if matches!(segments.as_slice(), [only] if only.name == "__struct")))
 }
 
-/// Runtime constructors whose results are fresh owned values. Other runtime
-/// calls may return a borrowed or write-back-related handle and must keep their
-/// original temporary so the drop pass can honor that ABI contract.
+/// Runtime constructors whose results are fresh owned values: every shim the
+/// registry declares as minting a `Vec`, plus the map, set, and queue
+/// constructors. Other runtime calls may return a borrowed or write-back-related
+/// handle and must keep their original temporary so the drop pass can honor
+/// that ABI contract.
 fn is_container_ctor(name: &str) -> bool {
-    matches!(
-        name,
-        "Vec::new"
-            | "Vec::with_capacity"
-            | "gos_rt_vec_new"
-            | "gos_rt_vec_new_typed"
-            | "gos_rt_vec_with_capacity"
-            | "gos_rt_vec_with_capacity_typed"
-            | "gos_rt_vec_from_arr"
-            | "gos_rt_nested_arr_to_vec"
-            | "gos_rt_vec_clone"
-            | "gos_rt_par_run"
-            | "gos_rt_str_chars"
-            | "gos_rt_i64_chars"
-            | "gos_rt_arr_iter"
-            | "gos_rt_lazy_iter_collect_i64"
-            | "gos_rt_lazy_iter_collect_pair_i64"
-            | "Map::new"
-            | "Map::with_capacity"
-            | "HashMap::new"
-            | "HashMap::with_capacity"
-            | "collections::Map::new"
-            | "collections::Map::with_capacity"
-            | "collections::HashMap::new"
-            | "Set::new"
-            | "collections::Set::new"
-            | "HashSet::new"
-            | "collections::HashSet::new"
-            | "BTreeSet::new"
-            | "collections::BTreeSet::new"
-            | "BTreeMap::new"
-            | "collections::BTreeMap::new"
-            | "Map::from"
-            | "collections::Map::from"
-            | "HashMap::from"
-            | "collections::HashMap::from"
-            | "BTreeMap::from"
-            | "collections::BTreeMap::from"
-            | "gos_rt_map_new"
-            | "gos_rt_map_new_with_capacity"
-            | "gos_rt_set_new"
-            | "gos_rt_deque_from_vec_i64"
-            | "gos_rt_queue_from_vec_i64"
-            | "gos_rt_stack_from_vec_i64"
-            | "gos_rt_bheap_min_from_vec_i64"
-            | "gos_rt_bheap_max_from_vec_i64"
-            | "gos_rt_bheap_min_from_vec_f64"
-            | "gos_rt_bheap_max_from_vec_f64"
-            | "gos_rt_bheap_min_from_vec_desc"
-            | "gos_rt_bheap_max_from_vec_desc"
-    )
+    gossamer_abi::mints_owned_vec(name)
+        || matches!(
+            name,
+            "Vec::new"
+                | "Vec::with_capacity"
+                | "gos_rt_arr_iter"
+                | "Map::new"
+                | "Map::with_capacity"
+                | "HashMap::new"
+                | "HashMap::with_capacity"
+                | "collections::Map::new"
+                | "collections::Map::with_capacity"
+                | "collections::HashMap::new"
+                | "Set::new"
+                | "collections::Set::new"
+                | "HashSet::new"
+                | "collections::HashSet::new"
+                | "BTreeSet::new"
+                | "collections::BTreeSet::new"
+                | "BTreeMap::new"
+                | "collections::BTreeMap::new"
+                | "Map::from"
+                | "collections::Map::from"
+                | "HashMap::from"
+                | "collections::HashMap::from"
+                | "BTreeMap::from"
+                | "collections::BTreeMap::from"
+                | "gos_rt_map_new"
+                | "gos_rt_map_new_with_capacity"
+                | "gos_rt_set_new"
+                | "gos_rt_deque_from_vec_i64"
+                | "gos_rt_queue_from_vec_i64"
+                | "gos_rt_stack_from_vec_i64"
+        )
 }
 
 /// Replaces every mention of `from` in `block` with `to`.

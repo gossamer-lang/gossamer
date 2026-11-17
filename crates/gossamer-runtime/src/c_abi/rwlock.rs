@@ -97,7 +97,7 @@ impl Drop for Held<'_> {
         let waiters: Vec<crate::sched::Gid> = state.parked.drain(..).collect();
         drop(state);
         for gid in waiters {
-            crate::sched_global::scheduler().unpark(gid);
+            crate::sched_global::unpark(gid);
         }
         self.lock.released.notify_all();
     }

@@ -135,6 +135,14 @@ pub enum Ownership {
     /// pass reads this instead of inferring one. The runtime spells the same
     /// fact as `-> *mut c_char`, and a drift test holds the two together.
     MintsString,
+    /// The `Ptr` it answers is a freshly allocated `Vec` the caller owns: no
+    /// argument, global, or container still reaches its storage.
+    ///
+    /// Lowering binds such a result without copying it, and the clone
+    /// elision passes treat it as storage the binding owns. The runtime
+    /// spells the return as `-> *mut GosVec`, and a drift test holds every
+    /// such shim to either this or a listed reason it aliases.
+    MintsVec,
     /// It gives up the share its first argument holds: a release, free, or
     /// drop. The ownership checks read this rather than a list of their own,
     /// so a new release entry is seen everywhere at once.
@@ -149,6 +157,12 @@ impl RuntimeEntry {
     #[must_use]
     pub const fn mints_string(&self) -> bool {
         matches!(self.ownership, Ownership::MintsString)
+    }
+
+    /// Whether the `Ptr` this symbol answers is a fresh `Vec` the caller owns.
+    #[must_use]
+    pub const fn mints_vec(&self) -> bool {
+        matches!(self.ownership, Ownership::MintsVec)
     }
 
     /// Whether the call gives up the share its first argument holds.

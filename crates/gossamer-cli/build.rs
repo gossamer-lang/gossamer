@@ -142,7 +142,19 @@ fn main() {
         .nth(2)
         .expect("workspace root")
         .to_path_buf();
-    emit_rerun_if_changed_tree(&workspace_root.join("crates/gossamer-runtime/src"));
+    // The archive is the runtime and every workspace crate it links, so an
+    // edit to any of them regenerates it.
+    for krate in runtime_workspace_closure(&workspace_root) {
+        let dir = workspace_root.join("crates").join(&krate);
+        emit_rerun_if_changed_tree(&dir.join("src"));
+        println!(
+            "cargo:rerun-if-changed={}",
+            dir.join("Cargo.toml").display()
+        );
+        if dir.join("build.rs").is_file() {
+            println!("cargo:rerun-if-changed={}", dir.join("build.rs").display());
+        }
+    }
 
     if env::var_os("GOSSAMER_SKIP_DISPATCH_PARITY").is_none() {
         check_dispatch_parity(&workspace_root);
@@ -217,6 +229,41 @@ fn main() {
             );
         }
     }
+}
+
+/// `gossamer-runtime` and every workspace crate it depends on, directly or
+/// through another, read from the `gossamer-*` entries of each manifest.
+fn runtime_workspace_closure(workspace_root: &Path) -> BTreeSet<String> {
+    let mut seen = BTreeSet::new();
+    let mut pending = vec!["gossamer-runtime".to_string()];
+    while let Some(krate) = pending.pop() {
+        if !seen.insert(krate.clone()) {
+            continue;
+        }
+        let manifest = workspace_root
+            .join("crates")
+            .join(&krate)
+            .join("Cargo.toml");
+        let Ok(text) = std::fs::read_to_string(&manifest) else {
+            continue;
+        };
+        for line in text.lines() {
+            let Some((name, _)) = line.trim_start().split_once('=') else {
+                continue;
+            };
+            let name = name.trim();
+            if name.starts_with("gossamer-")
+                && workspace_root
+                    .join("crates")
+                    .join(name)
+                    .join("Cargo.toml")
+                    .is_file()
+            {
+                pending.push(name.to_string());
+            }
+        }
+    }
+    seen
 }
 
 fn emit_rerun_if_changed_tree(root: &Path) {
@@ -363,6 +410,9 @@ fn build_runtime_into(
     // forcing frame pointers costs double digits on tight loops - keep the
     // register.
     flags.push("-C force-frame-pointers=yes".to_string());
+    // The archive links into programs, which register the subsystems their
+    // types need (the cycle collector) instead of linking every one.
+    flags.push("--cfg gos_program_archive".to_string());
     // A hot loop's speed on x86-64 follows how it falls across 64-byte fetch
     // lines, and at the default 16-byte function alignment that depends on how
     // much code the program links ahead of the runtime. Starting every runtime

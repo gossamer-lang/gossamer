@@ -27,9 +27,7 @@ pub const MAX_FRAMES: usize = 32;
 /// Samples held before the buffer stops accepting more. At 100 Hz this
 /// is 40 seconds, and each `cpu_profile` call drains it.
 ///
-/// The storage is a zeroed static, so it costs address space rather than
-/// resident memory until a sample is actually written - but two rings at
-/// this size is already about 2 MiB in every binary, which is why it is
+/// A ring is about 1 MiB, allocated when its profile first starts, so it is
 /// sized to a profiling window rather than to the largest one imaginable.
 const CAPACITY: usize = 4_096;
 
@@ -80,8 +78,17 @@ struct SampleRing {
 unsafe impl Sync for SampleRing {}
 
 impl SampleRing {
+    /// An empty ring on the heap, built in place: it is too large for a stack.
+    fn boxed() -> Box<Self> {
+        // SAFETY: an empty ring is all zero bits - every turn and position is
+        // an `AtomicUsize` of 0, and `RawSample::EMPTY` is zeroed frames and a
+        // zero length.
+        unsafe { Box::<Self>::new_zeroed().assume_init() }
+    }
+
     // The array lives in a static, not on a stack: `const fn` initialises
     // the storage in place.
+    #[cfg(test)]
     #[allow(
         clippy::large_stack_arrays,
         reason = "initialises a static, not a local"
@@ -161,8 +168,34 @@ impl SampleRing {
     }
 }
 
+/// A sample ring allocated when its profile first starts, so a program that
+/// never profiles carries none.
+struct LazyRing(std::sync::OnceLock<Box<SampleRing>>);
+
+impl LazyRing {
+    const fn new() -> Self {
+        Self(std::sync::OnceLock::new())
+    }
+
+    /// Allocates the ring. Called before sampling is armed, never from the
+    /// allocator or a signal handler.
+    fn ensure(&self) {
+        self.0.get_or_init(SampleRing::boxed);
+    }
+
+    /// Stores `sample` in the ring if it exists. One atomic load before the
+    /// ring's own push, so the signal handler and the allocator may call it.
+    fn push(&self, sample: &RawSample) -> bool {
+        self.0.get().is_some_and(|ring| ring.push(sample))
+    }
+
+    fn drain(&self) -> Vec<RawSample> {
+        self.0.get().map_or_else(Vec::new, |ring| ring.drain())
+    }
+}
+
 /// The CPU sample ring.
-static SAMPLES: SampleRing = SampleRing::new();
+static SAMPLES: LazyRing = LazyRing::new();
 
 /// Whether the timer is armed. The handler returns immediately when it
 /// is not, so a signal delivered during teardown records nothing.
@@ -181,6 +214,7 @@ pub fn is_sampling() -> bool {
 /// Returns the OS error when the timer or handler cannot be installed.
 #[cfg(all(unix, not(miri), not(target_arch = "wasm32")))]
 pub fn start(hz: u32) -> std::io::Result<()> {
+    SAMPLES.ensure();
     install_handler()?;
     SAMPLING.store(true, Ordering::SeqCst);
     set_timer(hz)
@@ -654,10 +688,11 @@ static HEAP_SAMPLING: AtomicBool = AtomicBool::new(false);
 static HEAP_ACCUMULATOR: AtomicUsize = AtomicUsize::new(0);
 
 /// The allocation sample ring.
-static HEAP_SAMPLES: SampleRing = SampleRing::new();
+static HEAP_SAMPLES: LazyRing = LazyRing::new();
 
 /// Arms allocation sampling.
 pub fn start_heap() {
+    HEAP_SAMPLES.ensure();
     crate::c_abi::ledger::arm_instrumentation();
     HEAP_ACCUMULATOR.store(0, Ordering::SeqCst);
     HEAP_SAMPLING.store(true, Ordering::SeqCst);

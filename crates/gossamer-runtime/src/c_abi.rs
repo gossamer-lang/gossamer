@@ -310,6 +310,7 @@ pub mod iter_cross;
 pub mod json;
 pub mod json_escape;
 pub(crate) mod json_ref;
+pub(crate) mod kind_ops;
 pub mod lcg;
 pub mod ledger;
 pub mod len;

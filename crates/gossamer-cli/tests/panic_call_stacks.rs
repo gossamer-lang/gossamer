@@ -120,3 +120,74 @@ fn debug_build_report_matches_the_bytecode_report() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+const RECURSIVE_CALL: &str = r"use std::env
+
+fn pick(xs: Vec<i64>, i: i64) -> i64 {
+    if i > 0 && i % 7 == 3 {
+        return xs[i]
+    }
+    if i == 0 { 0 } else { pick(xs, i - 1) + 1 }
+}
+
+fn main() {
+    let n = env::args().len() as i64 + 5
+    let xs = #[1, 2, 3]
+    let mut total = 0
+    for i in 0..n {
+        total += pick(xs, i)
+    }
+    println(total)
+}
+";
+
+/// A release ELF executable keeps only the symbols a report prints, and
+/// its report still names the program's frames through them.
+#[test]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn release_report_names_program_frames_through_the_trimmed_symbol_table() {
+    use object::{Object, ObjectSymbol, ObjectSymbolTable};
+
+    let dir = std::env::temp_dir().join(format!("gos-release-call-stacks-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    std::fs::write(dir.join("pick.gos"), RECURSIVE_CALL).expect("write program");
+    let build = Command::new(gos_bin())
+        .current_dir(&dir)
+        .env("GOSSAMER_CACHE_DIR", dir.join("cache"))
+        .args(["build", "--release", "pick.gos", "--out-dir", "out"])
+        .output()
+        .expect("spawn gos build");
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = dir.join("out").join("pick");
+    let output = Command::new(&binary).output().expect("run the artifact");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(101), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("  call stack (outermost first):\n    at main\n    at pick\n"),
+        "stderr:\n{stderr}"
+    );
+
+    let data = std::fs::read(&binary).expect("read the artifact");
+    let file = object::File::parse(&*data).expect("parse the artifact");
+    let names: Vec<String> = file
+        .symbol_table()
+        .expect("a symbol table")
+        .symbols()
+        .filter_map(|s| s.name().ok().map(str::to_string))
+        .filter(|n| !n.is_empty())
+        .collect();
+    assert!(names.iter().any(|n| n == "pick"), "{names:?}");
+    assert!(
+        names
+            .iter()
+            .all(|n| !n.starts_with("_ZN") && !n.starts_with("_R")),
+        "{names:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

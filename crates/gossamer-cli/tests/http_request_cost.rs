@@ -105,6 +105,40 @@ const TOTAL: usize = WORKERS * PER_WORKER;
 /// Runs the measured load against a server fixture (see
 /// [`common::spawn_listening`]), and answers the CPU microseconds it spent
 /// per request.
+/// Confines this thread, and so the servers and load threads it starts, to
+/// at most four of the CPUs it may run on. Both servers are then measured on
+/// the same CPUs whatever the host: spread across many cores, the floor's
+/// connections hand each request between threads on different cores, and it
+/// costs more than the server it is the floor for.
+// std has no API for a thread's CPU affinity; `sched_setaffinity` is the call.
+#[allow(unsafe_code)]
+fn pin_to_four_cpus() {
+    // SAFETY: `set` is a plain bitmask both calls read and write in place,
+    // sized as they are told; pid 0 names the calling thread.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        let size = std::mem::size_of::<libc::cpu_set_t>();
+        assert_eq!(
+            libc::sched_getaffinity(0, size, &raw mut set),
+            0,
+            "read affinity"
+        );
+        let mut pinned: libc::cpu_set_t = std::mem::zeroed();
+        let mut kept = 0;
+        for cpu in 0..libc::CPU_SETSIZE as usize {
+            if kept < 4 && libc::CPU_ISSET(cpu, &set) {
+                libc::CPU_SET(cpu, &mut pinned);
+                kept += 1;
+            }
+        }
+        assert_eq!(
+            libc::sched_setaffinity(0, size, &raw const pinned),
+            0,
+            "set affinity"
+        );
+    }
+}
+
 fn measure_cpu_per_request(label: &str, binary: &Path) -> f64 {
     let (child, addr) = common::spawn_listening(binary);
     let server = ServerGuard(child);
@@ -140,7 +174,13 @@ fn measure_cpu_per_request(label: &str, binary: &Path) -> f64 {
 }
 
 #[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "measures release-tier cost: a debug `gos` embeds a debug runtime; \
+              the perf workflow runs it with --release"
+)]
 fn release_http_server_holds_its_per_request_cpu_ceiling() {
+    pin_to_four_cpus();
     let http = build_release("httpbase", SOURCE);
     let served = measure_cpu_per_request("http constant handler", &http);
 

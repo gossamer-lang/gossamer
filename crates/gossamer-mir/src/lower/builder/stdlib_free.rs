@@ -1550,6 +1550,10 @@ impl<'a> Builder<'a> {
                 "gos_rt_time_fixed_location_raw",
                 self.result_string_error_adt_ty(),
             ),
+            "__gos_time_register_zones_raw" => {
+                let unit = self.tcx.unit();
+                ("gos_rt_time_register_zones_raw", self.result_of(unit))
+            }
             "__gos_time_civil_raw" => {
                 let i = self.tcx.int_ty(gossamer_types::IntTy::I64);
                 let tuple = self.tcx.intern(gossamer_types::TyKind::Tuple(vec![i; 9]));

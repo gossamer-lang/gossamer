@@ -2386,3 +2386,95 @@ fn map_container_values_keep_handle_ownership_when_copy_metadata_exists() {
         assert_eq!(gossamer_mir::map_value_owner_marker(&tcx, ty), expected);
     }
 }
+
+#[test]
+fn runtime_minted_vec_binds_without_a_copy_inside_and_outside_loops() {
+    let source = r#"
+fn in_loop(text: String) -> i64 {
+    let mut total = 0
+    for _ in 0..10 {
+        let parts = text.split(" ")
+        total += parts.len()
+    }
+    total
+}
+
+fn lines_in_loop(text: String) -> i64 {
+    let mut total = 0
+    for _ in 0..10 {
+        let rows = text.lines()
+        total += rows.len()
+    }
+    total
+}
+
+fn outside(text: String) -> i64 {
+    let parts = text.split(" ")
+    parts.len()
+}
+
+fn mutated(text: String) -> i64 {
+    let mut parts = text.split(" ")
+    parts.push("x")
+    parts.len()
+}
+"#;
+    let (bodies, _) = build(source);
+    for name in ["in_loop", "lines_in_loop", "outside", "mutated"] {
+        let body = bodies
+            .iter()
+            .find(|body| body.name == name)
+            .unwrap_or_else(|| panic!("{name} body"));
+        let clones = call_symbol_names(body)
+            .iter()
+            .filter(|symbol| symbol.as_str() == "gos_rt_vec_clone")
+            .count();
+        assert_eq!(clones, 0, "{name}: a Vec the runtime just made needs no copy");
+    }
+}
+
+#[test]
+fn a_rebound_collect_leaves_no_read_of_its_old_temporary() {
+    let source = r#"
+fn pairs_len() -> i64 {
+    let pairs: Vec<(i64, String)> = (0..50).map(|i| (i, f"p{i}")).collect()
+    pairs.len()
+}
+"#;
+    let (bodies, _) = build(source);
+    let body = bodies.iter().find(|b| b.name == "pairs_len").expect("pairs_len body");
+    let mut written = std::collections::HashSet::new();
+    for local in 0..=body.arity as usize {
+        written.insert(local);
+    }
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if let StatementKind::Assign { place, .. } = &stmt.kind {
+                written.insert(place.local.0 as usize);
+            }
+        }
+        if let Terminator::Call { destination, .. } = &block.terminator {
+            written.insert(destination.local.0 as usize);
+        }
+    }
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if let StatementKind::Assign {
+                rvalue: Rvalue::CallIntrinsic { name, args },
+                ..
+            } = &stmt.kind
+                && *name == "gos_rt_vec_set_slot_children"
+            {
+                for arg in args {
+                    if let Operand::Copy(place) = arg {
+                        assert!(
+                            written.contains(&(place.local.0 as usize)),
+                            "set_slot_children reads {:?}, which nothing writes",
+                            place.local
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

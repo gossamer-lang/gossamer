@@ -15,6 +15,7 @@ workspace = true
 gossamer-ast = { workspace = true }
 gossamer-diagnostics = { workspace = true }
 gossamer-lex = { workspace = true }
+jiff-tzdb = { workspace = true }
 thiserror = { workspace = true }
 # The same engine and features `std::regex` compiles with, so a literal
 # pattern is accepted at parse time exactly when it compiles at run time.

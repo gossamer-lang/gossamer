@@ -487,6 +487,11 @@ tests/          # integration tests
   that declares one.
 - Rust crates through `[rust-bindings]` (`gos new ID --template binding`,
   `#[gos_module("name")]`).
+- Time zones come from the host's zoneinfo. A program also carries every zone
+  it spells in a string literal (`Location::lookup("Europe/Paris")`), used only
+  where the host has none (a `scratch` image); `tzdata = "all"` under
+  `[project]` carries the whole database for names read at run time, and
+  `tzdata = "none"` carries nothing.
 - `gos run FILE [ARGS]`, `gos build [--release] [-g]`, `gos test`,
   `gos fmt`, `gos lint`, `gos doc`, `gos new/init/add/fetch/publish`,
   `gos keygen`, `gos registry serve`, `gos env`,

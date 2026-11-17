@@ -30,9 +30,27 @@ pub struct ScannedEntry {
 
 /// Entries of `dir`, sorted by name.
 pub fn scan_dir(dir: &Path) -> io::Result<Vec<ScannedEntry>> {
-    let mut entries = scan_unsorted(dir)?;
+    let mut entries = scan_unsorted(dir, Stat::Every)?;
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(entries)
+}
+
+/// Entries of `dir`, sorted by name, each with its kind but no `size` or
+/// `modified_ms` (both `0`). The kind comes from the directory record, so an
+/// entry is stat-ed only when its record does not state one.
+pub fn scan_dir_kinds(dir: &Path) -> io::Result<Vec<ScannedEntry>> {
+    let mut entries = scan_unsorted(dir, Stat::KindUnknown)?;
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(entries)
+}
+
+/// Which entries a scan stats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stat {
+    /// Every entry, for its size and modification time.
+    Every,
+    /// Only an entry whose directory record states no kind.
+    KindUnknown,
 }
 
 /// Depth-first walk below `root`: each directory's entries in name order,
@@ -69,38 +87,37 @@ fn modified_ms(secs: i64, nanos: i64) -> i64 {
 /// Stats each entry relative to the open directory, so the kernel resolves
 /// one name per entry instead of walking the full path again.
 #[cfg(all(unix, not(miri)))]
-fn scan_unsorted(dir: &Path) -> io::Result<Vec<ScannedEntry>> {
-    use std::ffi::{CString, OsStr};
+fn scan_unsorted(dir: &Path, stat: Stat) -> io::Result<Vec<ScannedEntry>> {
+    use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
 
-    use nix::dir::{Dir, Type};
-    use nix::fcntl::{AtFlags, OFlag};
-    use nix::sys::stat::{Mode, fstatat};
+    use nix::dir::Type;
+    use nix::fcntl::AtFlags;
+    use nix::sys::stat::fstatat;
 
     // `libc::stat` field widths differ across Unix targets.
     fn wide(v: impl Into<i64>) -> i64 {
         v.into()
     }
 
-    let mut handle = Dir::open(
-        dir,
-        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
-        Mode::empty(),
-    )?;
-    let mut names: Vec<(CString, Option<Type>)> = Vec::new();
-    for entry in handle.iter() {
-        let entry = entry?;
-        let name = entry.file_name();
-        if matches!(name.to_bytes(), b"." | b"..") {
-            continue;
-        }
-        names.push((name.to_owned(), entry.file_type()));
-    }
+    let mut handle = open_dir(dir)?;
+    let names = entry_names(&mut handle)?;
     Ok(names
         .into_iter()
         .map(|(name, d_type)| {
             let os_name = OsStr::from_bytes(name.to_bytes()).to_os_string();
             let path = dir.join(&os_name);
+            if stat == Stat::KindUnknown && d_type.is_some() {
+                return ScannedEntry {
+                    name: os_name,
+                    path,
+                    is_file: d_type == Some(Type::File),
+                    is_dir: d_type == Some(Type::Directory),
+                    is_symlink: d_type == Some(Type::Symlink),
+                    size: 0,
+                    modified_ms: 0,
+                };
+            }
             let (kind, size, modified) =
                 match fstatat(&handle, name.as_c_str(), AtFlags::AT_SYMLINK_NOFOLLOW) {
                     Ok(st) => {
@@ -118,6 +135,10 @@ fn scan_unsorted(dir: &Path) -> io::Result<Vec<ScannedEntry>> {
                     }
                     Err(_) => (d_type, 0, 0),
                 };
+            let (size, modified) = match stat {
+                Stat::Every => (size, modified),
+                Stat::KindUnknown => (0, 0),
+            };
             ScannedEntry {
                 name: os_name,
                 path,
@@ -131,15 +152,137 @@ fn scan_unsorted(dir: &Path) -> io::Result<Vec<ScannedEntry>> {
         .collect())
 }
 
+/// Opens `dir` for listing, through [`crate::file_read::open_cloexec`].
+#[cfg(all(target_os = "linux", not(miri)))]
+fn open_dir(dir: &Path) -> io::Result<nix::dir::Dir> {
+    let fd = crate::file_read::open_cloexec(dir, libc::O_RDONLY | libc::O_DIRECTORY)?;
+    Ok(nix::dir::Dir::from_fd(fd)?)
+}
+
+/// Opens `dir` for listing.
+#[cfg(all(unix, not(target_os = "linux"), not(miri)))]
+fn open_dir(dir: &Path) -> io::Result<nix::dir::Dir> {
+    use nix::fcntl::OFlag;
+    use nix::sys::stat::Mode;
+
+    Ok(nix::dir::Dir::open(
+        dir,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )?)
+}
+
+/// The names in the open directory `handle` and the kind each entry's
+/// directory record states, without `.` and `..`.
+///
+/// The C library's `readdir` refills through a buffer of a couple of
+/// kilobytes, so a directory such as `/proc` takes several `getdents64` calls
+/// per scan; reading the records into a buffer of our own takes one or two.
+#[cfg(all(target_os = "linux", not(miri)))]
+fn entry_names(
+    handle: &mut nix::dir::Dir,
+) -> io::Result<Vec<(std::ffi::CString, Option<nix::dir::Type>)>> {
+    use std::os::fd::AsRawFd;
+
+    use nix::dir::Type;
+
+    /// Bytes of directory records each `getdents64` call may fill.
+    const RECORDS: usize = 32 * 1024;
+    // `struct linux_dirent64`: d_ino (8), d_off (8), d_reclen (2), d_type (1),
+    // then the NUL-terminated name.
+    const RECLEN_AT: usize = 16;
+    const TYPE_AT: usize = 18;
+    const NAME_AT: usize = 19;
+
+    let fd = handle.as_raw_fd();
+    let mut records = vec![0u8; RECORDS];
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: `records` is a writable buffer of `RECORDS` bytes that
+        // outlives the call, and `fd` is the directory `handle` keeps open.
+        let filled =
+            unsafe { libc::syscall(libc::SYS_getdents64, fd, records.as_mut_ptr(), RECORDS) };
+        if filled < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        let filled = usize::try_from(filled).unwrap_or(0);
+        if filled == 0 {
+            return Ok(names);
+        }
+        let mut at = 0;
+        while at + NAME_AT <= filled {
+            let reclen = usize::from(u16::from_ne_bytes([
+                records[at + RECLEN_AT],
+                records[at + RECLEN_AT + 1],
+            ]));
+            if reclen == 0 || at + reclen > filled {
+                break;
+            }
+            let record = &records[at..at + reclen];
+            at += reclen;
+            let Ok(name) = std::ffi::CStr::from_bytes_until_nul(&record[NAME_AT..]) else {
+                continue;
+            };
+            if matches!(name.to_bytes(), b"." | b"..") {
+                continue;
+            }
+            let kind = match record[TYPE_AT] {
+                libc::DT_REG => Some(Type::File),
+                libc::DT_DIR => Some(Type::Directory),
+                libc::DT_LNK => Some(Type::Symlink),
+                libc::DT_FIFO => Some(Type::Fifo),
+                libc::DT_CHR => Some(Type::CharacterDevice),
+                libc::DT_BLK => Some(Type::BlockDevice),
+                libc::DT_SOCK => Some(Type::Socket),
+                _ => None,
+            };
+            names.push((name.to_owned(), kind));
+        }
+    }
+}
+
+/// [`entry_names`] through the C library's `readdir`, on the Unix systems
+/// whose directory record layout differs from Linux's.
+#[cfg(all(unix, not(target_os = "linux"), not(miri)))]
+fn entry_names(
+    handle: &mut nix::dir::Dir,
+) -> io::Result<Vec<(std::ffi::CString, Option<nix::dir::Type>)>> {
+    let mut names = Vec::new();
+    for entry in handle.iter() {
+        let entry = entry?;
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        names.push((name.to_owned(), entry.file_type()));
+    }
+    Ok(names)
+}
+
 // Miri does not support the directory-relative Unix APIs above. Keep the
 // directory and C-ABI tests running through the portable implementation.
 #[cfg(any(not(unix), miri))]
-fn scan_unsorted(dir: &Path) -> io::Result<Vec<ScannedEntry>> {
+fn scan_unsorted(dir: &Path, stat: Stat) -> io::Result<Vec<ScannedEntry>> {
     std::fs::read_dir(dir)?
         .map(|entry| {
             let entry = entry?;
             let path = entry.path();
             let ft = entry.file_type()?;
+            if stat == Stat::KindUnknown {
+                return Ok(ScannedEntry {
+                    name: entry.file_name(),
+                    path,
+                    is_file: ft.is_file(),
+                    is_dir: ft.is_dir(),
+                    is_symlink: ft.is_symlink(),
+                    size: 0,
+                    modified_ms: 0,
+                });
+            }
             // Windows: WIN32_FIND_DATA (behind entry.metadata()) stores
             // nFileSize=0 for directories, so stat the path to get the NTFS
             // directory-index size.
@@ -179,6 +322,31 @@ fn scan_unsorted(dir: &Path) -> io::Result<Vec<ScannedEntry>> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_dir_kinds_answers_scan_dir_without_metadata() {
+        let root = std::env::temp_dir().join(format!("gos-dir-kinds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub")).expect("create fixture dir");
+        std::fs::write(root.join("big"), vec![0u8; 5000]).expect("write fixture file");
+        std::os::unix::fs::symlink("big", root.join("link")).expect("symlink");
+        std::os::unix::fs::symlink("missing-target", root.join("dangling")).expect("symlink");
+
+        let full = scan_dir(&root).expect("scan fixture");
+        let kinds = scan_dir_kinds(&root).expect("scan fixture kinds");
+        std::fs::remove_dir_all(&root).expect("remove fixture");
+
+        let without_metadata: Vec<ScannedEntry> = full
+            .into_iter()
+            .map(|e| ScannedEntry {
+                size: 0,
+                modified_ms: 0,
+                ..e
+            })
+            .collect();
+        assert_eq!(kinds, without_metadata);
+        assert_eq!(kinds.len(), 4);
+    }
 
     #[test]
     fn scan_dir_reports_symlinks_by_their_own_metadata_in_name_order() {

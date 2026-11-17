@@ -736,20 +736,20 @@ pub(crate) fn wake_http_acceptors() {
 fn install_http_shutdown_signal_handler() {
     static INSTALLED: std::sync::Once = std::sync::Once::new();
     INSTALLED.call_once(|| {
-        let Ok(mut signals) = signal_hook::iterator::Signals::new([libc::SIGINT, libc::SIGTERM])
-        else {
-            return;
-        };
-        std::thread::Builder::new()
-            .name("gos-http-shutdown".to_string())
-            .spawn(move || {
-                for _ in signals.forever() {
-                    crate::sched_global::request_shutdown();
-                    wake_http_acceptors();
-                }
-            })
-            .ok();
+        // The shared signal relay runs the shutdown, so a server needs no
+        // thread of its own for it.
+        for sig in [libc::SIGINT, libc::SIGTERM] {
+            let _ = crate::c_abi::signal::on_signal_internal(sig, request_http_shutdown);
+        }
     });
+}
+
+/// Begins a graceful shutdown on SIGINT or SIGTERM: stops accepting and
+/// wakes every acceptor to see it.
+#[cfg(unix)]
+fn request_http_shutdown() {
+    crate::sched_global::request_shutdown();
+    wake_http_acceptors();
 }
 
 #[cfg(not(unix))]
@@ -1569,13 +1569,95 @@ struct PeerWatchEntry {
     ctx: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
-/// Every request currently being watched, and the id the next one takes.
+/// The slot value that records the peer left while no request was in flight:
+/// never a context handle, which is a pointer.
+#[cfg(any(unix, windows))]
+const PEER_GONE: usize = usize::MAX;
+
+/// Every connection currently being watched, and the id the next one takes.
 #[cfg(any(unix, windows))]
 #[derive(Default)]
 struct PeerWatchState {
     entries: Vec<PeerWatchEntry>,
     next_id: u64,
     watcher_running: bool,
+    /// Where connections register to hear that their peer hung up, shared
+    /// with the watcher before it starts.
+    #[cfg(target_os = "linux")]
+    registry: Option<std::sync::Arc<HangupSet>>,
+    /// Where connections register for readiness, cloned from the watcher's
+    /// poll before the watcher starts.
+    #[cfg(all(unix, not(target_os = "linux")))]
+    registry: Option<mio::Registry>,
+}
+
+/// An epoll set that reports a watched socket only when its peer shuts down
+/// or the socket fails, never when request bytes arrive, so a busy keep-alive
+/// connection costs the watcher nothing per request.
+#[cfg(target_os = "linux")]
+struct HangupSet {
+    epoll: std::os::fd::OwnedFd,
+}
+
+#[cfg(target_os = "linux")]
+impl HangupSet {
+    fn new() -> Option<Self> {
+        use std::os::fd::FromRawFd;
+        // SAFETY: `epoll_create1` takes a flag word and answers a new descriptor or -1.
+        let fd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
+        if fd < 0 {
+            return None;
+        }
+        // SAFETY: `fd` is the descriptor just created, owned from here on.
+        let epoll = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        Some(Self { epoll })
+    }
+
+    /// Watches `socket` for its peer hanging up, reported under `id`.
+    fn register(&self, socket: RawPeerSocket, id: u64) -> bool {
+        use std::os::fd::AsRawFd;
+        // EPOLLHUP and EPOLLERR are always reported; EPOLLRDHUP adds the peer
+        // shutting down its side. Edge-triggered, each is reported once.
+        let mut event = libc::epoll_event {
+            events: (libc::EPOLLRDHUP | libc::EPOLLET) as u32,
+            u64: id,
+        };
+        // SAFETY: both descriptors are live and `event` outlives the call.
+        unsafe {
+            libc::epoll_ctl(
+                self.epoll.as_raw_fd(),
+                libc::EPOLL_CTL_ADD,
+                socket,
+                &raw mut event,
+            ) == 0
+        }
+    }
+
+    fn deregister(&self, socket: RawPeerSocket) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: both descriptors are live; a null event is accepted for a delete.
+        unsafe {
+            libc::epoll_ctl(
+                self.epoll.as_raw_fd(),
+                libc::EPOLL_CTL_DEL,
+                socket,
+                std::ptr::null_mut(),
+            );
+        }
+    }
+
+    /// Blocks until a watched peer hangs up, filling `ids` with whose.
+    fn wait(&self, events: &mut [libc::epoll_event], ids: &mut Vec<u64>) {
+        use std::os::fd::AsRawFd;
+        ids.clear();
+        let capacity = i32::try_from(events.len()).unwrap_or(i32::MAX);
+        // SAFETY: `events` holds `capacity` writable entries for the call.
+        let n =
+            unsafe { libc::epoll_wait(self.epoll.as_raw_fd(), events.as_mut_ptr(), capacity, -1) };
+        for event in events.iter().take(usize::try_from(n).unwrap_or(0)) {
+            ids.push(event.u64);
+        }
+    }
 }
 
 #[cfg(any(unix, windows))]
@@ -1583,8 +1665,8 @@ static PEER_WATCH: std::sync::LazyLock<parking_lot::Mutex<PeerWatchState>> =
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(PeerWatchState::default()));
 
 /// Signalled when the first entry of an idle round is registered, so the
-/// watcher parks instead of waking on an empty set.
-#[cfg(any(unix, windows))]
+/// Windows watcher parks instead of waking on an empty set.
+#[cfg(windows)]
 static PEER_WATCH_WAKE: parking_lot::Condvar = parking_lot::Condvar::new();
 
 /// Watches an accepted socket for the peer going away while a request is
@@ -1595,7 +1677,9 @@ static PEER_WATCH_WAKE: parking_lot::Condvar = parking_lot::Condvar::new();
 /// a pipelined successor still arrives intact. A client that aborts
 /// therefore stops the work it asked for instead of paying for it to finish.
 ///
-/// One process-wide thread does the probing for every watched connection.
+/// One process-wide thread watches every connection. On Unix it sleeps in an
+/// epoll set and wakes only when a watched socket turns readable; on Windows,
+/// which has no readiness source for a borrowed socket, it probes each round.
 /// Registration happens once, when the connection is accepted, and the slot
 /// it returns is what a request publishes its context into - so serving a
 /// request costs a relaxed store rather than a turn of a process-wide lock.
@@ -1609,26 +1693,151 @@ fn watch_for_disconnect(
 ) -> Option<DisconnectWatch> {
     let mut state = PEER_WATCH.lock();
     if !state.watcher_running {
-        // Started on the first watched request, so a program that serves
+        // Started on the first watched connection, so a program that serves
         // nothing never carries the thread.
-        if std::thread::Builder::new()
-            .name("gos-http-peer-watch".to_string())
-            .spawn(peer_watch_loop)
-            .is_err()
-        {
-            return None;
-        }
+        start_peer_watcher(&mut state)?;
         state.watcher_running = true;
     }
     let id = state.next_id;
     state.next_id = state.next_id.wrapping_add(1);
+    #[cfg(target_os = "linux")]
+    if !state.registry.as_ref()?.register(socket, id) {
+        return None;
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let registry = state.registry.as_ref()?;
+        registry
+            .register(
+                &mut mio::unix::SourceFd(&socket),
+                mio::Token(usize::try_from(id).ok()?),
+                mio::Interest::READABLE,
+            )
+            .ok()?;
+    }
+    #[cfg(windows)]
     let was_idle = state.entries.is_empty();
     state.entries.push(PeerWatchEntry { id, socket, ctx });
     drop(state);
+    #[cfg(windows)]
     if was_idle {
         PEER_WATCH_WAKE.notify_one();
     }
     Some(DisconnectWatch { id })
+}
+
+/// Starts the watcher thread, and on Unix the poll it sleeps in, whose
+/// registry `state` keeps for connections to register with.
+#[cfg(any(unix, windows))]
+fn start_peer_watcher(state: &mut PeerWatchState) -> Option<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let set = std::sync::Arc::new(HangupSet::new()?);
+        state.registry = Some(std::sync::Arc::clone(&set));
+        std::thread::Builder::new()
+            .name("gos-http-peer-watch".to_string())
+            .spawn(move || peer_hangup_loop(&set))
+            .ok()?;
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let poll = mio::Poll::new().ok()?;
+        state.registry = Some(poll.registry().try_clone().ok()?);
+        std::thread::Builder::new()
+            .name("gos-http-peer-watch".to_string())
+            .spawn(move || peer_watch_loop(poll))
+            .ok()?;
+    }
+    #[cfg(windows)]
+    {
+        let _ = state;
+        std::thread::Builder::new()
+            .name("gos-http-peer-watch".to_string())
+            .spawn(peer_probe_loop)
+            .ok()?;
+    }
+    Some(())
+}
+
+/// Cancels the request in flight on `slot` when its peer has gone, or marks
+/// the slot so the next request to publish there cancels itself.
+#[cfg(any(unix, windows))]
+fn peer_left(slot: &std::sync::atomic::AtomicUsize) {
+    use std::sync::atomic::Ordering;
+    loop {
+        let ctx = slot.load(Ordering::Acquire);
+        if ctx == PEER_GONE {
+            return;
+        }
+        if slot
+            .compare_exchange(ctx, PEER_GONE, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            if ctx != 0 {
+                // The slot held a share of its own, which taking it hands to
+                // this cancel; the request keeps its share until it ends.
+                crate::c_abi::context::cancel_handle(ctx);
+                crate::c_abi::context::release_handle(ctx);
+            }
+            return;
+        }
+    }
+}
+
+/// Sleeps until a watched peer hangs up, then marks or cancels its connection.
+///
+/// Events are handled under the registry lock, and a connection deregisters
+/// under that same lock while it still owns its socket; ids name connections,
+/// so an event for one that ended finds no entry even when its descriptor was
+/// reused.
+#[cfg(target_os = "linux")]
+fn peer_hangup_loop(set: &HangupSet) {
+    // SAFETY: an all-zero `epoll_event` is a valid value to be overwritten.
+    let mut events = vec![unsafe { std::mem::zeroed::<libc::epoll_event>() }; 64];
+    let mut ids = Vec::new();
+    loop {
+        set.wait(&mut events, &mut ids);
+        if ids.is_empty() {
+            continue;
+        }
+        let state = PEER_WATCH.lock();
+        for id in &ids {
+            if let Some(entry) = state.entries.iter().find(|entry| entry.id == *id) {
+                peer_left(&entry.ctx);
+            }
+        }
+    }
+}
+
+/// Sleeps until a watched socket turns readable, then marks or cancels the
+/// connections whose peer has left.
+///
+/// A readable socket may only hold the next pipelined request, so readiness
+/// is confirmed with the same zero-length peek the probe takes. Events are
+/// handled under the registry lock, and a connection deregisters under that
+/// same lock while it still owns its socket, so a descriptor is never peeked
+/// after its connection ended; ids name connections, so an event for one that
+/// ended finds no entry even when its descriptor was reused.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn peer_watch_loop(mut poll: mio::Poll) {
+    let mut events = mio::Events::with_capacity(256);
+    loop {
+        if let Err(error) = poll.poll(&mut events, None) {
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return;
+        }
+        let state = PEER_WATCH.lock();
+        for event in &events {
+            let id = event.token().0 as u64;
+            if let Some(entry) = state.entries.iter().find(|entry| entry.id == id)
+                && peer_is_gone(entry.socket)
+            {
+                peer_left(&entry.ctx);
+            }
+        }
+    }
 }
 
 /// Probes every watched connection that has a request in flight once per
@@ -1640,8 +1849,8 @@ fn watch_for_disconnect(
 /// recycled one is never mistaken for the socket it replaced. A connection
 /// between requests publishes a zero context and is left alone: its own next
 /// read is what observes the close.
-#[cfg(any(unix, windows))]
-fn peer_watch_loop() {
+#[cfg(windows)]
+fn peer_probe_loop() {
     use std::sync::atomic::Ordering;
     loop {
         {
@@ -1651,19 +1860,8 @@ fn peer_watch_loop() {
             }
             for entry in &state.entries {
                 let ctx = entry.ctx.load(Ordering::Relaxed);
-                if ctx != 0 && peer_is_gone(entry.socket) {
-                    // The connection clears its own slot when the request
-                    // ends, so a context is cancelled at most once here.
-                    // The slot holds a share of its own, which taking it hands
-                    // to this cancel; the request keeps its share until it ends.
-                    if entry
-                        .ctx
-                        .compare_exchange(ctx, 0, Ordering::AcqRel, Ordering::Relaxed)
-                        .is_ok()
-                    {
-                        crate::c_abi::context::cancel_handle(ctx);
-                        crate::c_abi::context::release_handle(ctx);
-                    }
+                if ctx != 0 && ctx != PEER_GONE && peer_is_gone(entry.socket) {
+                    peer_left(&entry.ctx);
                 }
             }
         }
@@ -1671,9 +1869,10 @@ fn peer_watch_loop() {
     }
 }
 
-/// How long the watcher waits between rounds of probes. It only bounds how
-/// late a disconnect is noticed; a request that ends first deregisters and
-/// is never probed again.
+/// How long the Windows watcher waits between rounds of probes. It only
+/// bounds how late a disconnect is noticed; a request that ends first
+/// deregisters and is never probed again.
+#[cfg(windows)]
 const PEER_WATCH_INTERVAL_MS: u64 = 20;
 
 /// Deregisters the connection from the peer watch when it closes.
@@ -1687,7 +1886,17 @@ impl Drop for DisconnectWatch {
     fn drop(&mut self) {
         let mut state = PEER_WATCH.lock();
         if let Some(at) = state.entries.iter().position(|entry| entry.id == self.id) {
-            state.entries.swap_remove(at);
+            let entry = state.entries.swap_remove(at);
+            #[cfg(target_os = "linux")]
+            if let Some(registry) = state.registry.as_ref() {
+                registry.deregister(entry.socket);
+            }
+            #[cfg(all(unix, not(target_os = "linux")))]
+            if let Some(registry) = state.registry.as_ref() {
+                let _ = registry.deregister(&mut mio::unix::SourceFd(&entry.socket));
+            }
+            #[cfg(windows)]
+            let _ = entry;
         }
     }
 }
@@ -1701,7 +1910,14 @@ pub(crate) fn open_served_request_context(request: &GosHttpRequest) -> Option<us
     // The watch holds a share of its own, so whichever of the watcher and
     // the request's end takes the slot gives that share back.
     crate::c_abi::context::retain_handle(ctx);
-    site.watch.store(ctx, std::sync::atomic::Ordering::Release);
+    let previous = site.watch.swap(ctx, std::sync::atomic::Ordering::AcqRel);
+    #[cfg(any(unix, windows))]
+    if previous == PEER_GONE {
+        // The peer left before this request began.
+        peer_left(&site.watch);
+    }
+    #[cfg(not(any(unix, windows)))]
+    let _ = previous;
     Some(ctx)
 }
 
@@ -1724,6 +1940,15 @@ fn cancel_request_context(request: &mut GosHttpRequest) {
 /// when the watcher did not take it.
 fn end_request_context(request: &mut GosHttpRequest, watch_ctx: &std::sync::atomic::AtomicUsize) {
     let watched = watch_ctx.swap(0, std::sync::atomic::Ordering::AcqRel);
+    #[cfg(any(unix, windows))]
+    if watched == PEER_GONE {
+        // A request already read off a connection whose peer has left is
+        // cancelled when it begins.
+        watch_ctx.store(PEER_GONE, std::sync::atomic::Ordering::Release);
+        request.context_site = None;
+        cancel_request_context(request);
+        return;
+    }
     crate::c_abi::context::release_handle(watched);
     request.context_site = None;
     cancel_request_context(request);

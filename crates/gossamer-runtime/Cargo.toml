@@ -84,8 +84,7 @@ gossamer-template = { workspace = true }
 gossamer-ws = { workspace = true }
 http = "1"
 bytes = "1"
-chrono.workspace = true
-chrono-tz.workspace = true
+jiff.workspace = true
 
 # Unicode tables (`std::unicode` compiled-tier helpers). Same
 # crates as gossamer-std so the property data is single-sourced
@@ -135,8 +134,6 @@ web-time = "1"
 # use them are gated out of the wasm VM build (see lib.rs / c_abi.rs);
 # native (cfg-not-wasm is always true there) keeps the identical set.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# The system's own time zone for `time::Location::local`.
-iana-time-zone.workspace = true
 # AEAD + password-hashing crypto, used only by the compiled-tier
 # `crypto_aead` / `crypto_extra` / `crypto` shims (all gated out of the
 # wasm VM). aes-gcm/chacha20poly1305 default-enable `getrandom` (via
@@ -241,3 +238,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }
+
+[dev-dependencies]
+# The IANA database as TZif data, for tests that need a zone on hosts
+# without a zoneinfo tree.
+jiff-tzdb = { workspace = true }

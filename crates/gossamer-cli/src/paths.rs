@@ -148,7 +148,24 @@ pub(crate) fn install_features(entry: &Path) -> Result<()> {
     };
     gossamer_pkg::features::install(&resolved);
     gossamer_ast::cfg::set_package_features(resolved.per_package);
+    install_embedded_zones(entry);
     Ok(())
+}
+
+/// Sets which IANA zones `entry`'s program embeds from its project's
+/// `tzdata`; a file outside any project embeds the zones it names.
+fn install_embedded_zones(entry: &Path) {
+    use gossamer_parse::autoderive::{EmbeddedZones, set_embedded_zones};
+    use gossamer_pkg::manifest::TzData;
+    let tzdata = gossamer_pkg::manifest::find_manifest(entry)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| gossamer_pkg::manifest::Manifest::parse(&text).ok())
+        .map_or(TzData::Named, |manifest| manifest.project.tzdata);
+    set_embedded_zones(match tzdata {
+        TzData::Named => EmbeddedZones::Named,
+        TzData::All => EmbeddedZones::All,
+        TzData::None => EmbeddedZones::None,
+    });
 }
 
 /// Registers every file `unit` was assembled from and records which of

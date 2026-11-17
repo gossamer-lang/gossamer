@@ -136,8 +136,9 @@ struct Cohort {
     /// Milliseconds the drain waits, or 0 for "as long as it takes".
     drain_ms: i64,
     cancelled: AtomicBool,
-    /// The deadline's armed timer, disarmed when the cohort retires first.
-    timer: Mutex<Option<crate::sched_global::TimerHandle>>,
+    /// Disarms the deadline's timer when the cohort retires first. Held as
+    /// the disarming call, so only a timed cohort links the timer code.
+    timer: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     state: Mutex<CohortState>,
     /// Signalled whenever `outstanding` or the failure set changes.
     progress: Condvar,
@@ -270,7 +271,7 @@ pub fn register_waiter(gid: Gid) -> i64 {
         node.waiters.lock().push(gid);
     }
     if id != 0 && chain_is_cancelled(id) {
-        crate::sched_global::scheduler().unpark(gid);
+        crate::sched_global::unpark(gid);
     }
     id
 }
@@ -319,7 +320,7 @@ fn cancel(id: i64) {
             node.progress.notify_all();
         }
         for gid in std::mem::take(&mut *node.waiters.lock()) {
-            crate::sched_global::scheduler().unpark(gid);
+            crate::sched_global::unpark(gid);
         }
         wake_joiners(&node);
         pending.extend(node.children.lock().iter().copied());
@@ -329,19 +330,12 @@ fn cancel(id: i64) {
 
 fn wake_joiners(node: &Cohort) {
     for gid in std::mem::take(&mut *node.joiners.lock()) {
-        crate::sched_global::scheduler().unpark(gid);
+        crate::sched_global::unpark(gid);
     }
 }
 
 /// Opens a cohort on the running goroutine and makes it current.
-fn push(
-    policy: i64,
-    timeout_ms: i64,
-    isolation: i64,
-    on_error: i64,
-    uncancellable: i64,
-    drain_ms: i64,
-) -> i64 {
+fn push(policy: i64, isolation: i64, on_error: i64, uncancellable: i64, drain_ms: i64) -> i64 {
     ANY_COHORT.store(true, Ordering::Relaxed);
     let parent = current_cohort();
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -379,22 +373,29 @@ fn push(
     if parent != 0 && chain_is_cancelled(parent) {
         cancel(id);
     }
-    if timeout_ms > 0 {
-        // The deadline rides the scheduler's timer wheel, so a bounded
-        // cohort costs an entry there rather than a thread parked on a
-        // sleep.
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-        *node.timer.lock() = Some(crate::sched_global::add_timer(
-            deadline,
-            Box::new(move || {
-                if let Some(node) = cohort_at(id) {
-                    node.state.lock().timed_out = true;
-                    cancel(id);
-                }
-            }),
-        ));
-    }
     id
+}
+
+/// Cancels cohort `id` as timed out `timeout_ms` from now. The deadline rides
+/// the scheduler's timer wheel, so a bounded cohort costs an entry there
+/// rather than a thread parked on a sleep. Only a program's own
+/// `cohort(timeout: ..)` reaches this, so a program without one links no
+/// timer.
+fn arm_timeout(id: i64, timeout_ms: i64) {
+    let Some(node) = cohort_at(id) else {
+        return;
+    };
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+    let timer = crate::sched_global::add_timer(
+        deadline,
+        Box::new(move || {
+            if let Some(node) = cohort_at(id) {
+                node.state.lock().timed_out = true;
+                cancel(id);
+            }
+        }),
+    );
+    *node.timer.lock() = Some(Box::new(move || crate::sched_global::cancel_timer(timer)));
 }
 
 /// Reserves a positional slot for a child about to be spawned into
@@ -642,8 +643,8 @@ fn pop_current() {
     if let Some(enclosing) = cohort_at(node.parent) {
         enclosing.children.lock().retain(|child| *child != id);
     }
-    if let Some(timer) = node.timer.lock().take() {
-        crate::sched_global::cancel_timer(timer);
+    if let Some(disarm) = node.timer.lock().take() {
+        disarm();
     }
     COHORTS.lock().remove(&id);
 }
@@ -672,14 +673,11 @@ pub extern "C" fn gos_rt_cohort_push(
     drain_ms: i64,
 ) -> i64 {
     ffi_entry!({
-        push(
-            policy,
-            timeout_ms,
-            isolation,
-            on_error,
-            uncancellable,
-            drain_ms,
-        )
+        let id = push(policy, isolation, on_error, uncancellable, drain_ms);
+        if timeout_ms > 0 {
+            arm_timeout(id, timeout_ms);
+        }
+        id
     })
 }
 
@@ -814,7 +812,6 @@ pub fn open_root() {
     // for. Its drain bound is `ROOT_DRAIN_DEADLINE`, applied at close.
     push(
         POLICY_COLLECT_ALL,
-        0,
         ISOLATION_SHARED,
         ON_ERROR_PROPAGATE,
         0,

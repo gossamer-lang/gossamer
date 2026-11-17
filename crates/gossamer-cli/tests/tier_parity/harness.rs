@@ -700,6 +700,10 @@ const SPECS: &[Spec] = &[
     // move-elided. Covers the sequential and goroutine-shared (captured) paths
     // that double-freed the enum's nodes and corrupted the heap at exit.
     spec("feature-testing-examples/rc_loop_carried_clone.gos"),
+    // A Vec a runtime call just built binds without a copy, in loops and
+    // out; writes stay local, kept bindings stay intact, and an answer that
+    // aliases shared storage is still copied before it is written.
+    spec("feature-testing-examples/runtime_minted_vec_binding.gos"),
     // Byte-packed `[u8]` storage (stride 1): array index, byte-array slice,
     // Vec<u8> push, iteration, and high-bit zero-extension must be
     // bit-identical across tiers (the unbounded-cache memory fix).
@@ -1451,6 +1455,9 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/fs_temp_file_lifecycle.gos"),
     spec("feature-testing-examples/fs_temp_resources.gos"),
     spec("feature-testing-examples/fs_dir_ops.gos"),
+    spec("feature-testing-examples/fs_read_dir_names_only.gos"),
+    spec("feature-testing-examples/fs_read_dir_metadata_read.gos"),
+    spec("feature-testing-examples/stdlib_type_patterns_and_fields.gos"),
     spec("feature-testing-examples/for_over_free_call.gos"),
     spec("feature-testing-examples/fs_permission_modes.gos"),
     spec("feature-testing-examples/json_null_rendering.gos"),
@@ -1774,6 +1781,9 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/hashmap_ref_param_iter.gos"),
     spec("feature-testing-examples/time_monotonic_vs_wall.gos"),
     spec("feature-testing-examples/time_civil.gos"),
+    // Zones and fixed offsets: civil fields, every layout token, calendar
+    // arithmetic with clamping, DST gaps and folds, and refused locations.
+    spec("feature-testing-examples/time_zone_rules.gos"),
     spec("feature-testing-examples/tw_go_block.gos"),
     spec("feature-testing-examples/trait_object_dispatch.gos"),
     Spec {

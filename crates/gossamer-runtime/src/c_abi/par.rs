@@ -284,7 +284,7 @@ impl<R: Send, F: Send> Job<R, F> {
                 crate::sched_global::park(crate::sched::ParkReason::Other, |parker| {
                     let mut state = self.state.lock();
                     if state.active == 0 {
-                        crate::sched_global::scheduler().unpark(parker.gid);
+                        crate::sched_global::unpark(parker.gid);
                     } else {
                         state.waiter = Some(parker.gid);
                     }
@@ -311,7 +311,7 @@ impl<R, F> Drop for HelperExit<'_, R, F> {
         if state.active == 0 {
             #[cfg(not(target_arch = "wasm32"))]
             if let Some(gid) = state.waiter.take() {
-                crate::sched_global::scheduler().unpark(gid);
+                crate::sched_global::unpark(gid);
             }
             self.job.idle.notify_all();
         }

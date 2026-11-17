@@ -239,6 +239,22 @@ pub struct ProjectTable {
     /// `project.windows-subsystem` - the PE subsystem a Windows executable
     /// of the project declares. Absent reads as `console`.
     pub windows_subsystem: WindowsSubsystem,
+    /// `project.tzdata` - which IANA time zones the project's programs carry
+    /// for hosts with no zoneinfo of their own. Absent reads as `named`.
+    pub tzdata: TzData,
+}
+
+/// The time zone rules a program carries, used only when the host has no
+/// zoneinfo tree (a `scratch` or distroless image), as Go's `time/tzdata`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TzData {
+    /// Every zone the program names in a string literal.
+    #[default]
+    Named,
+    /// The whole database, for programs that take zone names at run time.
+    All,
+    /// None: zones come from the host alone.
+    None,
 }
 
 /// The PE subsystem of a Windows executable, which decides whether
@@ -620,6 +636,19 @@ impl Manifest {
                 });
             }
         };
+        let tzdata = match optional_toml_str(project, "tzdata", "project.tzdata")?.as_deref() {
+            None | Some("named") => TzData::Named,
+            Some("all") => TzData::All,
+            Some("none") => TzData::None,
+            Some(other) => {
+                return Err(ManifestError::Malformed {
+                    line_no: 0,
+                    line: format!(
+                        "project.tzdata must be `named`, `all`, or `none`; found `{other}`"
+                    ),
+                });
+            }
+        };
         let mut deps: BTreeMap<String, DependencySpec> = BTreeMap::new();
         let mut dep_modules: BTreeMap<String, String> = BTreeMap::new();
         let mut dep_features: BTreeMap<String, DependencyFeatures> = BTreeMap::new();
@@ -722,6 +751,7 @@ impl Manifest {
                 comptime_io,
                 ffi,
                 windows_subsystem,
+                tzdata,
             },
             dependencies: deps,
             dependency_modules: dep_modules,

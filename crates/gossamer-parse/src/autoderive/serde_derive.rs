@@ -504,16 +504,8 @@ fn ty_is_renderable_within(
 ) -> bool {
     match &ty.kind {
         // A foreign pointer renders as its address, `Ptr(0x..)`, whatever it
-        // points at, written bare or through `ffi`.
-        TypeKind::Path(path)
-            if path.segments.last().is_some_and(|seg| {
-                seg.name.name == "Ptr" && seg.generics.len() == 1
-            }) && path.segments[..path.segments.len() - 1]
-                .iter()
-                .all(|seg| matches!(seg.name.name.as_str(), "std" | "ffi")) =>
-        {
-            true
-        }
+        // points at.
+        TypeKind::Path(path) if is_foreign_pointer_path(path) => true,
         // A JSON value renders as the document it holds on every tier.
         TypeKind::Path(path) if is_json_value_path(path) => true,
         TypeKind::Path(path) if path.segments.len() > 1 => {
@@ -815,6 +807,22 @@ fn json_module_spelling(ty: &gossamer_ast::Type) -> Option<String> {
     }
     let names: Vec<&str> = path.segments.iter().map(|segment| segment.name.name.as_str()).collect();
     Some(names[..names.len() - 1].join("::"))
+}
+
+/// Whether `path` spells `ffi::Ptr<T>`: bare, through `ffi` or `std::ffi`, or
+/// as the injected struct the stdlib surface rewrite gives those spellings.
+fn is_foreign_pointer_path(path: &gossamer_ast::TypePath) -> bool {
+    let Some((last, prefix)) = path.segments.split_last() else {
+        return false;
+    };
+    last.generics.len() == 1
+        && match last.name.name.as_str() {
+            "Ptr" => prefix
+                .iter()
+                .all(|seg| matches!(seg.name.name.as_str(), "std" | "ffi")),
+            "__gos_ffi_Ptr" => prefix.is_empty(),
+            _ => false,
+        }
 }
 
 /// Whether `path` spells `json::Value`, which compares by the document it
@@ -1429,16 +1437,39 @@ pub(crate) fn derive_default_diags(sf: &SourceFile) -> Vec<ParseDiagnostic> {
     out
 }
 
+/// The types a derive pass found to render, compare by value, and order.
+#[derive(Debug, Default, Clone)]
+pub struct AdmittedTypes {
+    /// Types `{}` and `{:?}` render structurally.
+    pub formattable: HashSet<String>,
+    /// Types `==` compares field by field.
+    pub comparable: HashSet<String>,
+    /// Types `<` orders field by field.
+    pub orderable: HashSet<String>,
+}
+
 /// Synthesizes `impl` blocks for the `#[derive(...)]` traits, plus a
 /// structural `fmt` for every struct / enum that is formattable but has no
 /// `fmt` of its own, so `{}` / `{:?}` lowers on the compiled tiers exactly as
 /// it renders on the VM. Returns the appended source.
+#[must_use]
+pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
+    synthesize_derive_impls_with(parsed, &AdmittedTypes::default()).0
+}
+
+/// [`synthesize_derive_impls`] for a tree whose fields may name types
+/// declared outside it, `outside` holding the ones of those that render,
+/// compare, and order. Also answers what this tree's own types admit.
 #[allow(
     clippy::too_many_lines,
     clippy::cognitive_complexity,
     reason = "linear orchestration: collect names, fields, formattable + comparable sets, then emit"
 )]
-pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
+#[must_use]
+pub fn synthesize_derive_impls_with(
+    parsed: &SourceFile,
+    outside: &AdmittedTypes,
+) -> (String, AdmittedTypes) {
     let with_default = types_with_default(parsed);
     let struct_names = struct_identities(&parsed.items);
     let aliases = alias_targets(&parsed.items);
@@ -1498,6 +1529,7 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
             formattable.insert(n.clone());
         }
     }
+    formattable.extend(outside.formattable.iter().cloned());
     // A type reaches its own `fmt` through the cycle it sits in, and the
     // cycle is as often between two declarations as within one: an
     // expression that holds a query and a query that holds expressions each
@@ -1569,6 +1601,7 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
     };
     let mut eq_seeds = explicit_with(&["PartialEq", "Eq"]);
     eq_seeds.extend(user_eq.iter().cloned());
+    eq_seeds.extend(outside.comparable.iter().cloned());
     let every_alias = alias_candidates(&parsed.items);
     let comparable = greatest_field_fixpoint(&field_tys, &type_params, &alias_ids, &imports, &eq_seeds, |ty, set| {
         ty_is_comparable(ty, set, &every_alias, 0)
@@ -1578,6 +1611,7 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
     // which has no order. Such a type is still in `comparable` (it gets `eq`).
     let mut cmp_seeds = explicit_with(&["PartialOrd", "Ord"]);
     cmp_seeds.extend(user_cmp.iter().cloned());
+    cmp_seeds.extend(outside.orderable.iter().cloned());
     let orderable = greatest_field_fixpoint(&field_tys, &type_params, &alias_ids, &imports, &cmp_seeds, |ty, set| {
         ty_is_orderable(ty, set, &every_alias, 0)
     });
@@ -1690,7 +1724,14 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
         }
     }
     emit_comparators(&mut out, parsed, &user_cmp, &orderable);
-    out
+    (
+        out,
+        AdmittedTypes {
+            formattable,
+            comparable,
+            orderable,
+        },
+    )
 }
 
 /// Emits one comparator per ordered type, under the prefix that says

@@ -690,6 +690,11 @@ pub(super) fn emit_c_main_shim(
     let program_start = module
         .declare_function("gos_rt_program_start", Linkage::Import, &program_start_sig)
         .map_err(|e| anyhow!("declare program_start: {e}"))?;
+    // This backend emits no per-layout facts, so its programs always
+    // collect cycles.
+    let cycles_enable = module
+        .declare_function("gos_rt_cycles_enable", Linkage::Import, &program_start_sig)
+        .map_err(|e| anyhow!("declare cycles_enable: {e}"))?;
     let flush_sig = module.make_signature();
     let flush_stdout = module
         .declare_function("gos_rt_flush_stdout", Linkage::Import, &flush_sig)
@@ -711,6 +716,8 @@ pub(super) fn emit_c_main_shim(
         let argv = builder.block_params(entry)[1];
         let program_start_ref = module.declare_func_in_func(program_start, builder.func);
         let _ = builder.ins().call(program_start_ref, &[]);
+        let cycles_enable_ref = module.declare_func_in_func(cycles_enable, builder.func);
+        let _ = builder.ins().call(cycles_enable_ref, &[]);
         if init_bindings {
             let mut init_sig = module.make_signature();
             init_sig.params.push(AbiParam::new(ptr_ty));

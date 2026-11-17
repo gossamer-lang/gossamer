@@ -1090,6 +1090,20 @@ fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<Vec<usize>> {
 /// The type context stores them in a hash map, and their emission order
 /// fixes their relative layout in the object's constant pool, so the
 /// emitter imposes a total order before writing them out.
+/// Whether a node of the RC layout `blob` may sit on a reference cycle: its
+/// kind word lacks [`gossamer_abi::rc::RC_KIND_ACYCLIC`].
+fn may_form_cycles(blob: &[i64]) -> bool {
+    blob.first()
+        .is_some_and(|kind| kind & gossamer_abi::rc::RC_KIND_ACYCLIC == 0)
+}
+
+/// Registers the runtime's cycle collector before `main` (or, in a library,
+/// at load). A module that allocates a node of a layout a cycle can pass
+/// through carries it, so a program with none links no collector.
+const CYCLE_COLLECTOR_CTOR: &str = "declare void @gos_rt_cycles_enable()\n\
+@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] \
+[{ i32, ptr, ptr } { i32 65535, ptr @gos_rt_cycles_enable, ptr null }]\n\n";
+
 fn sorted_rc_metas(tcx: &TyCtxt) -> Vec<(&str, &[i64])> {
     let mut metas: Vec<(&str, &[i64])> = tcx.rc_metas().collect();
     metas.sort_unstable_by_key(|(symbol, _)| *symbol);
@@ -1343,6 +1357,9 @@ fn render_chunk_module(
     }
     if !metas.is_empty() {
         writeln!(out).unwrap();
+    }
+    if metas.values().any(|blob| may_form_cycles(blob)) {
+        out.push_str(CYCLE_COLLECTOR_CTOR);
     }
 
     for ir in &body_irs {
@@ -2254,7 +2271,9 @@ fn render_module_to_path(
     // RC-managed allocations routed through here (fallback bodies,
     // DWARF, single-body programs).
     let mut any_meta = false;
+    let mut cyclic = false;
     for (symbol, blob) in sorted_rc_metas(tcx) {
+        cyclic |= may_form_cycles(blob);
         let elems: Vec<String> = blob.iter().map(|v| format!("i64 {v}")).collect();
         writeln!(
             ll_w,
@@ -2266,6 +2285,9 @@ fn render_module_to_path(
     }
     if any_meta {
         writeln!(ll_w)?;
+    }
+    if cyclic {
+        ll_w.write_all(CYCLE_COLLECTOR_CTOR.as_bytes())?;
     }
     let mut body_in = std::fs::File::open(&body_path)
         .with_context(|| format!("opening {}", body_path.display()))?;

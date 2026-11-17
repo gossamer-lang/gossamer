@@ -3808,9 +3808,20 @@ pub unsafe extern "C" fn gos_rt_map_mark_shared(m: *mut GosMap) {
     });
 }
 
+/// A map's operations for the walks over every container kind.
+pub(crate) const MAP_OPS: crate::c_abi::kind_ops::KindOps = crate::c_abi::kind_ops::KindOps {
+    // SAFETY: the walks pass a live map handle (`KindOps`).
+    clone: |handle| unsafe { gos_rt_map_clone(handle.cast()).cast() },
+    // SAFETY: the walks pass a live map handle (`KindOps`).
+    free: |handle| unsafe { gos_rt_map_free(handle.cast()) },
+    // SAFETY: the walks pass a live map handle (`KindOps`).
+    mark_shared: Some(|handle| unsafe { gos_rt_map_mark_shared(handle.cast()) }),
+};
+
 /// Boxes `map` as a runtime handle, or places it in the innermost open
 /// region, which finalizes it at its pop.
 fn map_handle(map: GosMap) -> *mut GosMap {
+    crate::c_abi::kind_ops::register(crate::c_abi::kind_ops::Kind::Map, MAP_OPS);
     crate::c_abi::rc::region_alloc_handle(map, finalize_region_map)
         .unwrap_or_else(|map| Box::into_raw(Box::new(map)))
 }

@@ -148,10 +148,6 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std", "f
 rand_core = "0.6"
 uuid = { version = "1", features = ["v4", "v7"] }
 
-# Time-zone surface (`std::time::tz`).
-chrono.workspace = true
-chrono-tz.workspace = true
-
 # HTTP client surface (`std::http::Client`). HTTPS, redirects, pool.
 ureq = { workspace = true, features = ["cookies", "json"] }
 

@@ -1,0 +1,72 @@
+// A Vec a runtime call has just built (split, lines, chars, take, sort, map
+// keys) is bound without a copy, inside loops and out. Each binding owns that
+// storage alone: writes through it stay local, bindings kept past the loop
+// stay intact, and nothing is freed twice. A Vec the runtime answers from
+// storage something else still holds (the process arguments) is copied
+// before it is written. Output must be bit-identical on every tier.
+
+use std::env
+
+fn split_in_loop(text: String) -> i64 {
+    let mut total = 0
+    for i in 0..50 {
+        let mut parts = text.split(" ")
+        if i % 2 == 0 {
+            parts.push("extra")
+        }
+        total += parts.len()
+    }
+    total
+}
+
+fn kept_past_the_loop(text: String) -> Vec<Vec<String>> {
+    let mut kept: Vec<Vec<String>> = #[]
+    for _ in 0..3 {
+        let rows = text.lines()
+        kept.push(rows)
+    }
+    kept
+}
+
+fn rebound(text: String) -> String {
+    let mut words = text.split_whitespace()
+    words = text.split(",")
+    words.push("tail")
+    words.join("|")
+}
+
+fn chars_and_take(text: String) -> String {
+    let all: Vec<char> = text.chars().collect()
+    let mut out = String::new()
+    for n in 1..4 {
+        let mut head = all.take(n)
+        head.push('!')
+        out += f"{head.len()}"
+    }
+    out += f"{all.len()}"
+    out
+}
+
+fn keys_sorted(m: Map<String, i64>) -> Vec<String> {
+    let mut keys = m.keys()
+    keys.sort()
+    keys.push("zz")
+    keys
+}
+
+fn main() {
+    println(split_in_loop("a b c"))
+    let kept = kept_past_the_loop("one\ntwo")
+    println(kept)
+    println(rebound("x y,z"))
+    println(chars_and_take("abcd"))
+    let m = { "b": 2, "a": 1 }
+    println(keys_sorted(m))
+    println(m.len())
+
+    let before = env::args().len()
+    let mut args = env::args()
+    args.push("added")
+    println(args.len() - before)
+    println(env::args().len() - before)
+}

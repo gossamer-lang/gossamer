@@ -337,7 +337,7 @@ impl Drop for RecvWaiterGuard<'_> {
 
 fn wake_one_recv(chan: &GosChan) {
     if let Some(gid) = chan.parked_recv.lock().pop_front() {
-        crate::sched_global::scheduler().unpark(gid);
+        crate::sched_global::unpark(gid);
     }
     chan.not_empty.notify_one();
     chan.wakers.wake_all();
@@ -1503,7 +1503,7 @@ pub unsafe extern "C-unwind" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64
                         // SAFETY: a non-null arm channel is live for the select (C-ABI contract).
                         !c.is_null() && select_arm_is_ready(*kind, *v, unsafe { &**c })
                     }) {
-                        crate::sched_global::scheduler().unpark(parker.gid);
+                        crate::sched_global::unpark(parker.gid);
                     }
                 });
                 if let Some(gid) = parked_as {

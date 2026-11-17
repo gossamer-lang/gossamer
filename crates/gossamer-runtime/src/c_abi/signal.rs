@@ -54,7 +54,7 @@ impl SignalWaiter {
         let _g = self.mu.lock();
         self.cv.notify_all();
         for gid in std::mem::take(&mut *self.parked.lock()) {
-            crate::sched_global::scheduler().unpark(gid);
+            crate::sched_global::unpark(gid);
         }
     }
 }
@@ -148,7 +148,27 @@ fn signal_relay() -> Option<&'static signal_hook::iterator::Handle> {
         .as_ref()
 }
 
-/// Flags and wakes every notifier subscribed to `sig`.
+/// Runtime reactions to a signal, such as an HTTP server's graceful
+/// shutdown, run by the relay after it wakes the program's notifiers.
+#[cfg(unix)]
+static INTERNAL_ACTIONS: parking_lot::Mutex<Vec<InternalAction>> =
+    parking_lot::Mutex::new(Vec::new());
+
+/// A signal number and what the runtime does when it arrives.
+#[cfg(unix)]
+type InternalAction = (i32, fn());
+
+/// Runs `action` on the relay at every delivery of `sig_raw` for the rest of
+/// the process, which also keeps the signal from its default disposition.
+/// Answers whether the relay delivers it.
+#[cfg(unix)]
+pub(crate) fn on_signal_internal(sig_raw: i32, action: fn()) -> bool {
+    INTERNAL_ACTIONS.lock().push((sig_raw, action));
+    subscribe_signal(sig_raw)
+}
+
+/// Flags and wakes every notifier subscribed to `sig`, then runs the
+/// runtime's own reactions to it.
 #[cfg(unix)]
 fn deliver(sig: i32) {
     let waiters: Vec<std::sync::Arc<SignalWaiter>> = signal_registry()
@@ -164,6 +184,15 @@ fn deliver(sig: i32) {
         .collect();
     for waiter in waiters {
         waiter.wake_all();
+    }
+    let actions: Vec<fn()> = INTERNAL_ACTIONS
+        .lock()
+        .iter()
+        .filter(|(on, _)| *on == sig)
+        .map(|(_, action)| *action)
+        .collect();
+    for action in actions {
+        action();
     }
 }
 

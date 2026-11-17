@@ -356,6 +356,83 @@ fn return_spellings(src: &str) -> BTreeMap<String, String> {
     out
 }
 
+/// Shims answering `*mut GosVec` whose answer is storage something else still
+/// reaches, so a binding of it must copy before it writes.
+const UNOWNED_VEC_RETURNS: &[(&str, &str)] = &[
+    ("gos_rt_deque_vec", "answers the Deque's own element store"),
+    (
+        "gos_rt_ffi_handle_cell",
+        "answers the cell a live ffi::Handle keeps",
+    ),
+    (
+        "gos_rt_flag_cell_load_vec",
+        "answers the Vec the flag cell holds",
+    ),
+    ("gos_rt_os_args", "answers the process-wide argument list"),
+    (
+        "gos_rt_str_as_bytes_view",
+        "a view of the string's own bytes holding a share of the string",
+    ),
+    (
+        "gos_rt_vec_borrow_arr",
+        "a non-owning view over the caller's array",
+    ),
+    (
+        "gos_rt_vec_borrow_arr_into",
+        "a non-owning view built in a header slot of the caller's frame",
+    ),
+    (
+        "gos_rt_vec_window",
+        "a window header aliasing the parent's elements",
+    ),
+];
+
+/// Lowering binds a shim's `Vec` answer without a copy only when the registry
+/// says the caller owns it. An undeclared minting shim costs a deep copy per
+/// binding; a borrowed answer declared owned is written through by its
+/// binding and freed under its holder.
+#[test]
+fn every_vec_return_declares_its_ownership() {
+    let rets = return_spellings(&runtime_source());
+    let mut problems = Vec::new();
+    for entry in REGISTRY {
+        let Some(ret) = rets.get(entry.name) else {
+            continue;
+        };
+        let answers_vec = ret == "*mut GosVec";
+        let unowned = UNOWNED_VEC_RETURNS
+            .iter()
+            .any(|(name, _)| *name == entry.name);
+        if answers_vec && !unowned && !entry.mints_vec() && entry.combinator.is_none() {
+            problems.push(format!(
+                "{}: answers `{ret}` but is declared with `rt!`; declare it `rt_vec!` if the \
+                 caller owns the Vec, or list it in UNOWNED_VEC_RETURNS with the reason",
+                entry.name,
+            ));
+        }
+        if unowned && entry.mints_vec() {
+            problems.push(format!(
+                "{}: listed in UNOWNED_VEC_RETURNS but declared `rt_vec!`",
+                entry.name,
+            ));
+        }
+        if entry.mints_vec() && !answers_vec {
+            problems.push(format!(
+                "{}: declared `rt_vec!` but answers `{ret}`, not a Vec",
+                entry.name,
+            ));
+        }
+    }
+    for (name, _) in UNOWNED_VEC_RETURNS {
+        if !rets.contains_key(*name) {
+            problems.push(format!(
+                "{name}: listed in UNOWNED_VEC_RETURNS but not defined"
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
 /// A shim answering a single `c_char` pointer answers a `String`, and the
 /// drop pass releases a call's result only when the registry says the
 /// caller owns it. An undeclared minting shim leaks one String per call

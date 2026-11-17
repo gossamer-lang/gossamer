@@ -183,9 +183,21 @@ impl GosJson {
     }
 }
 
+/// A JSON handle's operations for the walks over every container kind. A
+/// handle carries no count, so a copy is a handle of its own onto the same
+/// document.
+pub(crate) const JSON_OPS: crate::c_abi::kind_ops::KindOps = crate::c_abi::kind_ops::KindOps {
+    // SAFETY: the walks pass a live JSON handle (`KindOps`).
+    clone: |handle| unsafe { json_clone_handle(handle.cast()).cast() },
+    // SAFETY: the walks pass a live JSON handle (`KindOps`).
+    free: |handle| unsafe { gos_rt_json_free(handle.cast()) },
+    mark_shared: None,
+};
+
 /// Boxes a JSON handle, or places it in the innermost open region, which
 /// drops it at its pop.
 fn json_box(handle: GosJson) -> *mut GosJson {
+    crate::c_abi::kind_ops::register(crate::c_abi::kind_ops::Kind::Json, JSON_OPS);
     crate::c_abi::rc::region_alloc_handle(handle, finalize_region_json)
         .unwrap_or_else(|handle| Box::into_raw(Box::new(handle)))
 }

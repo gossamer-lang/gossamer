@@ -60,6 +60,25 @@ fn augment(source: &str) -> (String, Option<SourceFile>) {
     let mut primitive_surface = synthesize_primitive_surface(source, &tokens);
     primitive_surface.push_str(&synthesize_format_helpers(source, &tokens));
     primitive_surface.push_str(&synthesize_collect_helpers(source));
+    // Stdlib structs (pem::Block, …) are real Gossamer structs +
+    // wrapper functions injected here; the wrappers call leaf
+    // `gos_rt_*` intrinsics that return tuples/bytes, so the same
+    // code compiles + runs on every tier. `rewrite_stdlib_struct_surface`
+    // (in parse_with_autoderive) redirects the user's
+    // `encoding::pem::*` call / literal / type sites onto these.
+    let mut stdlib_wrappers = synthesize_stdlib_wrappers(source, parsed.as_ref());
+    // The wrappers' structs render, compare, and order like the program's
+    // own, so they take the same synthesized methods, and a program type
+    // holding one takes them on the same terms.
+    let mut stdlib_admitted = AdmittedTypes::default();
+    if !stdlib_wrappers.is_empty()
+        && let (Some(wrapper_tree), _) = clean_parse_with_tokens(&stdlib_wrappers)
+    {
+        let (wrapper_derives, admitted) =
+            synthesize_derive_impls_with(&wrapper_tree, &AdmittedTypes::default());
+        stdlib_wrappers.push_str(&wrapper_derives);
+        stdlib_admitted = admitted;
+    }
     let (serde, derives, type_info) = if source_may_need_ast_synthesis(&tokens) {
         // Synthesis reads item names, fields, and types out of the tree and
         // splices the result back as source. A tree built through error
@@ -82,7 +101,19 @@ fn augment(source: &str) -> (String, Option<SourceFile>) {
         });
         let parsed = &*tree;
         let serde = synthesize_serde_impls(parsed);
-        let mut derives = synthesize_derive_impls(parsed);
+        // A field the program types `fs::DirInfo` names the injected struct
+        // the surface rewrite gives it, so the derives read the rewritten
+        // spelling.
+        let mut derives = if stdlib_admitted.formattable.is_empty()
+            && stdlib_admitted.comparable.is_empty()
+            && stdlib_admitted.orderable.is_empty()
+        {
+            synthesize_derive_impls(parsed)
+        } else {
+            let mut surface = parsed.clone();
+            rewrite_stdlib_struct_surface(&mut surface);
+            synthesize_derive_impls_with(&surface, &stdlib_admitted).0
+        };
         derives.push_str(&synthesize_iterator_adapters(parsed, source));
         // Field-reflection functions for `typeInfo::<T>()`, emitted only
         // when the source reflects (keeps non-reflecting programs lean).
@@ -96,21 +127,6 @@ fn augment(source: &str) -> (String, Option<SourceFile>) {
     } else {
         (String::new(), String::new(), String::new())
     };
-    // Stdlib structs (pem::Block, …) are real Gossamer structs +
-    // wrapper functions injected here; the wrappers call leaf
-    // `gos_rt_*` intrinsics that return tuples/bytes, so the same
-    // code compiles + runs on every tier. `rewrite_stdlib_struct_surface`
-    // (in parse_with_autoderive) redirects the user's
-    // `encoding::pem::*` call / literal / type sites onto these.
-    let mut stdlib_wrappers = synthesize_stdlib_wrappers(source, parsed.as_ref());
-    // The wrappers' structs render, compare, and order like the program's
-    // own, so they take the same synthesized methods.
-    if !stdlib_wrappers.is_empty()
-        && let (Some(wrapper_tree), _) = clean_parse_with_tokens(&stdlib_wrappers)
-    {
-        let wrapper_derives = synthesize_derive_impls(&wrapper_tree);
-        stdlib_wrappers.push_str(&wrapper_derives);
-    }
     if synth_is_empty(&serde)
         && stdlib_wrappers.is_empty()
         && primitive_surface.is_empty()

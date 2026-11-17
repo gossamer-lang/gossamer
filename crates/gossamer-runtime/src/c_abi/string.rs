@@ -67,6 +67,11 @@ const STRING_DTOR_STATIC: u32 = 3;
 /// but the region remains its owner and frees it at pop. Retain and release
 /// therefore leave it alone, exactly as they do region-backed bytes.
 const STRING_DTOR_REGION_HEAP: u32 = 4;
+/// One piece of a slab: an ordinary builder with no spare capacity whose bytes
+/// belong to one allocation shared by every piece of the same split. Retain
+/// and release count it like a heap string; its last release gives the piece
+/// back to the slab instead of freeing it.
+const STRING_DTOR_SLAB: u32 = 5;
 const STRING_OWNER_BYTES: usize = std::mem::size_of::<StringOwner>();
 const STRING_LEGACY_HEADER_BYTES: usize = 13;
 const STRING_BODY_OFFSET: usize = STRING_OWNER_BYTES + STRING_LEGACY_HEADER_BYTES;
@@ -238,7 +243,7 @@ fn str_owner(s: *const c_char) -> Option<&'static StringOwner> {
     let owner = unsafe { &*s.cast::<u8>().sub(STRING_BODY_OFFSET).cast::<StringOwner>() };
     (owner.abi_version == STRING_OWNER_VERSION
         && owner.kind == STRING_OWNER_KIND
-        && owner.destructor == STRING_DTOR_HEAP
+        && matches!(owner.destructor, STRING_DTOR_HEAP | STRING_DTOR_SLAB)
         && owner.check == owner_check(s))
     .then_some(owner)
 }
@@ -255,20 +260,25 @@ unsafe fn typed_str_owner(s: *const c_char) -> Option<&'static StringOwner> {
         && owner.kind == STRING_OWNER_KIND
         && matches!(
             owner.destructor,
-            STRING_DTOR_HEAP | STRING_DTOR_REGION | STRING_DTOR_REGION_HEAP | STRING_DTOR_STATIC
+            STRING_DTOR_HEAP
+                | STRING_DTOR_REGION
+                | STRING_DTOR_REGION_HEAP
+                | STRING_DTOR_STATIC
+                | STRING_DTOR_SLAB
         ))
     .then_some(owner)
 }
 
 #[inline]
 fn managed_string_owner(s: *const c_char) -> Option<&'static StringOwner> {
-    str_owner(s).filter(|owner| owner.destructor == STRING_DTOR_HEAP)
+    str_owner(s).filter(|owner| matches!(owner.destructor, STRING_DTOR_HEAP | STRING_DTOR_SLAB))
 }
 
 #[inline]
 unsafe fn typed_managed_string_owner(s: *const c_char) -> Option<&'static StringOwner> {
     // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_owner` accepts.
-    unsafe { typed_str_owner(s) }.filter(|owner| owner.destructor == STRING_DTOR_HEAP)
+    unsafe { typed_str_owner(s) }
+        .filter(|owner| matches!(owner.destructor, STRING_DTOR_HEAP | STRING_DTOR_SLAB))
 }
 
 /// Byte length of a NUL-terminated buffer.
@@ -1182,6 +1192,141 @@ pub(crate) unsafe fn alloc_slice_cstring(source: *const c_char, bytes: &[u8]) ->
     alloc_cstring(bytes)
 }
 
+/// The live-piece count and size of a slab, at the front of its allocation.
+#[repr(C)]
+struct SlabHeader {
+    live: AtomicU32,
+    total: usize,
+}
+
+const SLAB_HEADER_BYTES: usize = std::mem::size_of::<SlabHeader>();
+const _: () = assert!(SLAB_HEADER_BYTES.is_multiple_of(8));
+
+/// The bytes a slab piece of `len` content bytes takes: a builder with no
+/// spare capacity, then the four-byte distance back to its slab, rounded so
+/// the next piece starts on the 8-byte alignment every body's shape assumes.
+const fn slab_piece_bytes(len: usize) -> usize {
+    (STRING_BODY_OFFSET + len + 1 + str_index_bytes(len) + 4 + 7) & !7
+}
+
+/// Copies `pieces`, windows of the string `source`, into fresh strings, and
+/// answers them in order.
+///
+/// Two or more pieces of text known to be UTF-8 share one allocation: each is
+/// an ordinary builder with no spare capacity, so every reader and the inline
+/// fast paths see a heap string, and an append, which never fits, copies the
+/// piece out. The allocation is freed with its last piece. Anything else is
+/// copied piece by piece.
+///
+/// # Safety
+///
+/// `source` is null or a Gossamer string body, and each piece is text copied
+/// from within its content.
+pub(crate) unsafe fn alloc_slice_pieces(source: *const c_char, pieces: &[&str]) -> Vec<i64> {
+    let one_by_one = |pieces: &[&str]| {
+        pieces
+            .iter()
+            // SAFETY: as this function's caller promises.
+            .map(|piece| unsafe { alloc_slice_cstring(source, piece.as_bytes()) } as i64)
+            .collect::<Vec<i64>>()
+    };
+    // SAFETY: this `unsafe fn`'s caller passes `source` null or live, which the probes accept.
+    let ascii = unsafe { typed_str_is_ascii(source) };
+    // SAFETY: as above.
+    let utf8 = ascii || unsafe { typed_str_known_utf8(source) };
+    if pieces.len() < 2
+        || !utf8
+        || crate::c_abi::rc::region_is_active()
+        || (!ascii
+            && !pieces
+                .iter()
+                .all(|piece| utf8_slice_is_whole(piece.as_bytes())))
+    {
+        return one_by_one(pieces);
+    }
+    let total = SLAB_HEADER_BYTES
+        + pieces
+            .iter()
+            .map(|piece| slab_piece_bytes(piece.len()))
+            .sum::<usize>();
+    if total > u32::MAX as usize {
+        return one_by_one(pieces);
+    }
+    let layout = Layout::from_size_align(total, 8).expect("slab layout is valid");
+    let base = string_body_alloc(layout);
+    if base.is_null() {
+        handle_alloc_error(layout);
+    }
+    crate::c_abi::ledger::benchmark_allocation(total);
+    let mut out = Vec::with_capacity(pieces.len());
+    // SAFETY: `base` holds `total` writable bytes: the header, then each piece's
+    // `slab_piece_bytes`, written in turn.
+    unsafe {
+        base.cast::<SlabHeader>().write(SlabHeader {
+            live: AtomicU32::new(u32::try_from(pieces.len()).unwrap_or(u32::MAX)),
+            total,
+        });
+        let mut at = SLAB_HEADER_BYTES;
+        for piece in pieces {
+            let len = piece.len();
+            let content = base.add(at + STRING_BODY_OFFSET);
+            base.add(at).cast::<StringOwner>().write(StringOwner {
+                abi_version: STRING_OWNER_VERSION,
+                kind: STRING_OWNER_KIND,
+                destructor: STRING_DTOR_SLAB,
+                check: owner_check(content.cast::<c_char>()),
+            });
+            let hdr = base.add(at + STRING_OWNER_BYTES);
+            std::ptr::copy_nonoverlapping(1u32.to_le_bytes().as_ptr(), hdr, 4);
+            std::ptr::copy_nonoverlapping((len as u32).to_le_bytes().as_ptr(), hdr.add(4), 4);
+            std::ptr::copy_nonoverlapping((len as u32).to_le_bytes().as_ptr(), hdr.add(8), 4);
+            *hdr.add(12) = STR_BUILDER_TAG;
+            copy_builder_part(piece.as_ptr(), content, len);
+            *content.add(len) = 0;
+            if ascii {
+                content
+                    .add(len + 1)
+                    .cast::<u32>()
+                    .write_unaligned(STR_INDEX_ASCII);
+            } else {
+                index_utf8_content(content.cast::<c_char>(), len, len);
+            }
+            // `at` fits in a `u32`: the whole slab does, checked above.
+            content
+                .add(len + 1 + str_index_bytes(len))
+                .cast::<u32>()
+                .write_unaligned(at as u32);
+            register_heap_string_body(content.cast::<c_char>());
+            crate::c_abi::ledger::str_inc();
+            out.push(content as i64);
+            at += slab_piece_bytes(len);
+        }
+    }
+    out
+}
+
+/// Gives back one piece of a slab, freeing the slab with its last piece.
+///
+/// # Safety
+///
+/// `body` is a slab piece of capacity `cap` whose last strong reference this is.
+unsafe fn release_slab_piece(body: *mut c_char, cap: usize) {
+    // SAFETY: the piece's back-distance follows its index footer, inside the slab.
+    unsafe {
+        let back = body
+            .cast::<u8>()
+            .add(cap + 1 + str_index_bytes(cap))
+            .cast::<u32>()
+            .read_unaligned() as usize;
+        let slab = body.cast::<u8>().sub(STRING_BODY_OFFSET + back);
+        let header = &*slab.cast::<SlabHeader>();
+        if header.live.fetch_sub(1, Ordering::AcqRel) == 1 {
+            let layout = Layout::from_size_align(header.total, 8).expect("slab layout is valid");
+            string_body_free(slab, layout);
+        }
+    }
+}
+
 /// Whether a run of bytes cut out of UTF-8 text is itself UTF-8: it starts
 /// on a character and its last character is complete. Everything between
 /// was already UTF-8, so the two ends are all the cut can have broken.
@@ -1410,13 +1555,21 @@ unsafe fn str_free_impl(s: *mut c_char, typed: bool) {
             // SAFETY: `hdr` addresses the header's capacity bytes.
             u32::from_le_bytes(unsafe { [*hdr.add(4), *hdr.add(5), *hdr.add(6), *hdr.add(7)] })
                 as usize;
-        let total = STRING_BODY_OFFSET + cap + 1 + str_index_bytes(cap);
-        let layout = Layout::from_size_align(total, 8).expect("string layout is valid");
         unregister_heap_string_body(s);
-        // SAFETY: builder allocation uses this exact layout, and this is the
-        // last strong reference after the count logic above. The carrier owns
-        // the allocation base; `hdr` is only its legacy suffix.
-        unsafe { string_body_free(s.cast::<u8>().sub(STRING_BODY_OFFSET), layout) };
+        // SAFETY: the carrier check above found a live runtime string, whose owner sits
+        // `STRING_BODY_OFFSET` below the body.
+        let owner = unsafe { &*s.cast::<u8>().sub(STRING_BODY_OFFSET).cast::<StringOwner>() };
+        if owner.destructor == STRING_DTOR_SLAB {
+            // SAFETY: a slab piece of capacity `cap`, and this is its last strong reference.
+            unsafe { release_slab_piece(s, cap) };
+        } else {
+            let total = STRING_BODY_OFFSET + cap + 1 + str_index_bytes(cap);
+            let layout = Layout::from_size_align(total, 8).expect("string layout is valid");
+            // SAFETY: builder allocation uses this exact layout, and this is the
+            // last strong reference after the count logic above. The carrier owns
+            // the allocation base; `hdr` is only its legacy suffix.
+            unsafe { string_body_free(s.cast::<u8>().sub(STRING_BODY_OFFSET), layout) };
+        }
         crate::c_abi::ledger::str_dec();
     });
 }
@@ -3270,29 +3423,12 @@ pub unsafe extern "C" fn gos_rt_str_split(s: *const c_char, sep: *const c_char) 
             // SAFETY: `sep` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(sep) }
         };
-        let parts: Vec<*mut c_char> = s
-            .split(sep)
-            // SAFETY: `source` is this shim's live string argument, and each piece a window of
-            // it.
-            .map(|p| unsafe { alloc_slice_cstring(source, p.as_bytes()) })
-            .collect();
+        let pieces: Vec<&str> = gossamer_core::text::split_pieces(s, sep).collect();
+        // SAFETY: `source` is this shim's live string argument, and each piece a window of it.
+        let parts = unsafe { alloc_slice_pieces(source, &pieces) };
         // STRING-typed: the vec owns the pieces, so `gos_rt_vec_free`
         // reclaims them even when a consumer loop breaks early.
-        let vec = {
-            crate::c_abi::vec::gos_rt_vec_with_capacity_typed(
-                8,
-                parts.len() as i64,
-                crate::c_abi::vec::vec_elem_kind::STRING,
-            )
-        };
-        for p in &parts {
-            let pv = *p as i64;
-            // SAFETY: `vec` is the live vec made above, and `pv` one 8-byte element.
-            unsafe {
-                gos_rt_vec_push(vec, std::ptr::addr_of!(pv).cast::<u8>());
-            }
-        }
-        vec
+        super::strings::str_vec_from_words(&parts)
     })
 }
 
@@ -4160,6 +4296,81 @@ mod miri_core_tests {
             gos_rt_str_free(left);
             gos_rt_str_free(right);
             gos_rt_str_free(joined);
+        }
+    }
+}
+
+#[cfg(test)]
+mod slab_piece_tests {
+    use super::*;
+
+    /// The live-piece count of the slab `body` belongs to, read through its
+    /// back-distance, as `release_slab_piece` reads it.
+    fn slab_live(body: i64) -> u32 {
+        let body = body as *const u8;
+        // SAFETY: `body` is a live slab piece; its header, footer, and slab are
+        // readable while it is.
+        unsafe {
+            let cap = super::typed_str_bytes(body.cast()).len();
+            let back = body
+                .add(cap + 1 + str_index_bytes(cap))
+                .cast::<u32>()
+                .read_unaligned() as usize;
+            let slab = body.sub(STRING_BODY_OFFSET + back);
+            (*slab.cast::<SlabHeader>()).live.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Pieces of one split share an allocation yet read, grow, and free as
+    /// separate strings, in any order, with the slab freed by the last one.
+    #[test]
+    fn split_pieces_read_grow_and_free_independently() {
+        for text in ["ab cde f  gh", "\u{e9}t\u{e9} \u{fc}ber caf\u{e9}"] {
+            let source = alloc_cstring_from_slices(&[text.as_bytes()]);
+            let pieces: Vec<&str> = text.split(' ').collect();
+            // SAFETY: `source` is a live string this test built, and each piece a window of it.
+            let parts = unsafe { alloc_slice_pieces(source, &pieces) };
+            assert_eq!(parts.len(), pieces.len());
+            for (part, piece) in parts.iter().zip(&pieces) {
+                let part = *part as *mut c_char;
+                // SAFETY: each part is a live string the call above made.
+                unsafe {
+                    assert_eq!(super::typed_str_bytes(part), piece.as_bytes());
+                    assert_eq!(typed_str_char_len(part), piece.chars().count());
+                }
+            }
+            // An append never fits a piece, so it copies the piece out.
+            let tail = alloc_cstring_from_slices(&[b"!"]);
+            // SAFETY: both arguments are live strings this test holds.
+            let grown = unsafe { gos_rt_str_concat(parts[1] as *const c_char, tail) };
+            // SAFETY: `grown` is the live string the concat answered.
+            unsafe {
+                assert_eq!(
+                    super::typed_str_bytes(grown),
+                    format!("{}!", pieces[1]).as_bytes()
+                );
+            }
+            // Free out of order: the middle, the last, then the rest.
+            let order: Vec<usize> = std::iter::once(1)
+                .chain(std::iter::once(parts.len() - 1))
+                .chain((0..parts.len()).filter(|&i| i != 1 && i != parts.len() - 1))
+                .collect();
+            assert_eq!(slab_live(parts[0]) as usize, parts.len());
+            let last = *order.last().expect("a split answers pieces");
+            for (freed, &i) in order.iter().enumerate() {
+                if i != last {
+                    // Each piece the slab still holds counts down by one.
+                    assert_eq!(slab_live(parts[last]) as usize, parts.len() - freed);
+                }
+                // SAFETY: each part is freed exactly once.
+                unsafe { gos_rt_str_free(parts[i] as *mut c_char) };
+            }
+            // SAFETY: each is a live string this test holds, freed once.
+            unsafe {
+                gos_rt_str_free(grown);
+                gos_rt_str_free(tail);
+                gos_rt_str_free(source);
+            }
         }
     }
 }

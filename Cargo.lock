@@ -68,15 +68,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
-name = "android_system_properties"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "819e7219dbd41043ac279b19830f2efc897156490d7fd6ea916720117ee66311"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -112,7 +103,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -123,7 +114,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -186,7 +177,7 @@ checksum = "3109e49b1e4909e9db6515a30c633684d68cdeaa252f215214cb4fa1a5bfee2c"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.118",
  "synstructure",
 ]
 
@@ -198,7 +189,7 @@ checksum = "7b18050c2cd6fe86c3a76584ef5e0baf286d038cda203eb6223df2cc413565f7"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -445,27 +436,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chrono"
-version = "0.4.45"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
-dependencies = [
- "iana-time-zone",
- "num-traits",
- "windows-link",
-]
-
-[[package]]
-name = "chrono-tz"
-version = "0.10.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6139a8597ed92cf816dfb33f5dd6cf0bb93a6adc938f11039f371bc5bcd26c3"
-dependencies = [
- "chrono",
- "phf",
-]
-
-[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -517,7 +487,7 @@ dependencies = [
  "heck",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -623,12 +593,6 @@ dependencies = [
  "time",
  "url",
 ]
-
-[[package]]
-name = "core-foundation-sys"
-version = "0.8.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "corosensei"
@@ -982,7 +946,7 @@ checksum = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -1064,7 +1028,7 @@ checksum = "1ac70aa55017e108007fbaf5aa0f54b021c98f92ff8af59d42eda9da96e3dd4f"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -1189,7 +1153,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1342,7 +1306,7 @@ checksum = "e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -1453,11 +1417,11 @@ dependencies = [
 
 [[package]]
 name = "gossamer-abi"
-version = "0.80.0"
+version = "0.81.0"
 
 [[package]]
 name = "gossamer-ast"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "gossamer-abi",
  "gossamer-lex",
@@ -1483,7 +1447,7 @@ version = "0.75.19"
 
 [[package]]
 name = "gossamer-binding-host"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "gossamer-binding-abi",
  "gossamer-codegen-cranelift",
@@ -1505,12 +1469,12 @@ version = "0.75.19"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.118",
 ]
 
 [[package]]
 name = "gossamer-cli"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1551,7 +1515,7 @@ dependencies = [
  "rustyline",
  "serde",
  "serde_json",
- "syn",
+ "syn 2.0.118",
  "terminal_size",
  "tokio",
  "tokio-rustls",
@@ -1562,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-codegen-cranelift"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "anyhow",
  "backtrace",
@@ -1589,7 +1553,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-codegen-llvm"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "anyhow",
  "gossamer-abi",
@@ -1607,21 +1571,21 @@ dependencies = [
 
 [[package]]
 name = "gossamer-core"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "gossamer-coro"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "corosensei",
 ]
 
 [[package]]
 name = "gossamer-diagnostics"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "gossamer-ast",
  "gossamer-lex",
@@ -1634,7 +1598,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-driver"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1664,7 +1628,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-hir"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "gossamer-abi",
  "gossamer-ast",
@@ -1677,7 +1641,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-http3"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "bytes",
  "h3",
@@ -1693,7 +1657,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-interp"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "gossamer-abi",
  "gossamer-ast",
@@ -1721,7 +1685,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-lex"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "insta",
  "serde",
@@ -1731,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-lint"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "gossamer-ast",
  "gossamer-diagnostics",
@@ -1741,7 +1705,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-lsp"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "gossamer-ast",
  "gossamer-diagnostics",
@@ -1761,7 +1725,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-mcp"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "gossamer-lsp",
  "gossamer-std",
@@ -1769,7 +1733,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-mir"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "gossamer-abi",
  "gossamer-ast",
@@ -1785,11 +1749,12 @@ dependencies = [
 
 [[package]]
 name = "gossamer-parse"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "gossamer-ast",
  "gossamer-diagnostics",
  "gossamer-lex",
+ "jiff-tzdb",
  "proptest",
  "regex",
  "thiserror 2.0.18",
@@ -1797,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-pkg"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "ed25519-dalek",
  "gossamer-lex",
@@ -1817,7 +1782,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-playground"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "console_error_panic_hook",
  "gossamer-ast",
@@ -1835,7 +1800,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-resolve"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "gossamer-ast",
  "gossamer-diagnostics",
@@ -1848,7 +1813,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-runtime"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -1858,8 +1823,6 @@ dependencies = [
  "bytes",
  "bzip2",
  "chacha20poly1305",
- "chrono",
- "chrono-tz",
  "crossbeam-deque",
  "ed25519-dalek",
  "flate2",
@@ -1874,9 +1837,10 @@ dependencies = [
  "gossamer-ws",
  "h2",
  "http",
- "iana-time-zone",
  "indexmap",
  "itoa",
+ "jiff",
+ "jiff-tzdb",
  "jpeg-decoder",
  "jpeg-encoder",
  "libc",
@@ -1930,14 +1894,14 @@ dependencies = [
 
 [[package]]
 name = "gossamer-sched"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "gossamer-runtime",
 ]
 
 [[package]]
 name = "gossamer-std"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -1948,8 +1912,6 @@ dependencies = [
  "bzip2",
  "cbc",
  "chacha20poly1305",
- "chrono",
- "chrono-tz",
  "cipher",
  "crossbeam-channel",
  "ctr",
@@ -2019,7 +1981,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-template"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "serde_json",
  "thiserror 2.0.18",
@@ -2027,7 +1989,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-types"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "gossamer-ast",
  "gossamer-diagnostics",
@@ -2041,7 +2003,7 @@ dependencies = [
 
 [[package]]
 name = "gossamer-ws"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "parking_lot",
  "thiserror 2.0.18",
@@ -2169,30 +2131,6 @@ dependencies = [
  "subtle",
  "typenum",
  "zeroize",
-]
-
-[[package]]
-name = "iana-time-zone"
-version = "0.1.65"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e31bc9ad994ba00e440a8aa5c9ef0ec67d5cb5e5cb0cc7f8b744a35b389cc470"
-dependencies = [
- "android_system_properties",
- "core-foundation-sys",
- "iana-time-zone-haiku",
- "js-sys",
- "log",
- "wasm-bindgen",
- "windows-core",
-]
-
-[[package]]
-name = "iana-time-zone-haiku"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
-dependencies = [
- "cc",
 ]
 
 [[package]]
@@ -2364,6 +2302,58 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jiff"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cc767b5763de45e810109520123bb2829a653f3a7ed9be40b2bc4f81158f595"
+dependencies = [
+ "jiff-core",
+ "jiff-static",
+ "jiff-tzdb-platform",
+ "log",
+ "portable-atomic",
+ "portable-atomic-util",
+ "serde_core",
+ "windows-link",
+]
+
+[[package]]
+name = "jiff-core"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "894f7ac42105f584100691b3bf6e6b92dd12fcfa225f6c397f95c8a94b47b68f"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "jiff-static"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "955491488dc99b572ea6d67b172dcd98787d00744b1fb44a5689b4e6413695a6"
+dependencies = [
+ "jiff-core",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
+]
+
+[[package]]
+name = "jiff-tzdb"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12e71a1b68a875a44a33bb7a1dd84392cb77145a3367a552a3cfe6a4f5cf3afc"
+
+[[package]]
+name = "jiff-tzdb-platform"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc65b284afcfa8f6cf189c7274c805505314a7ab975c60e1f548bff56525420e"
+dependencies = [
+ "jiff-tzdb",
+]
+
+[[package]]
 name = "jobserver"
 version = "0.1.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2464,7 +2454,7 @@ checksum = "32d59e20403c7d08fe62b4376edfe5c7fb2ef1e6b1465379686d0f21c8df444b"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -2848,24 +2838,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
-name = "phf"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "913273894cec178f401a31ec4b656318d95473527be05c0752cc41cdc32be8b7"
-dependencies = [
- "phf_shared",
-]
-
-[[package]]
-name = "phf_shared"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06005508882fb681fd97892ecff4b7fd0fee13ef1aa569f8695dae7ab9099981"
-dependencies = [
- "siphasher",
-]
-
-[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2931,6 +2903,21 @@ dependencies = [
  "cpufeatures 0.2.17",
  "opaque-debug",
  "universal-hash",
+]
+
+[[package]]
+name = "portable-atomic"
+version = "1.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
+
+[[package]]
+name = "portable-atomic-util"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715"
+dependencies = [
+ "portable-atomic",
 ]
 
 [[package]]
@@ -3093,7 +3080,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3362,7 +3349,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3553,7 +3540,7 @@ checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -3692,12 +3679,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
-name = "siphasher"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
-
-[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3716,7 +3697,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3769,6 +3750,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "syn"
+version = "3.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ae9ccbea3a7b0b09443036490c8f34a8b1b760fd345e5c0dae0aac718faea79"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
 name = "synstructure"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3776,7 +3768,7 @@ checksum = "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -3806,7 +3798,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3816,7 +3808,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3845,7 +3837,7 @@ checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -3856,7 +3848,7 @@ checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -3937,7 +3929,7 @@ checksum = "385a6cb71ab9ab790c5fe8d67f1645e6c450a7ce006a33de03daa956cf70a496"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -4258,7 +4250,7 @@ dependencies = [
  "bumpalo",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.118",
  "wasm-bindgen-shared",
 ]
 
@@ -4327,42 +4319,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "windows-core"
-version = "0.62.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
-dependencies = [
- "windows-implement",
- "windows-interface",
- "windows-link",
- "windows-result",
- "windows-strings",
-]
-
-[[package]]
-name = "windows-implement"
-version = "0.60.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "windows-interface"
-version = "0.59.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4370,24 +4327,6 @@ name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
-
-[[package]]
-name = "windows-result"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
-dependencies = [
- "windows-link",
-]
-
-[[package]]
-name = "windows-strings"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7837d08f69c77cf6b07689544538e017c1bfcf57e34b4c0ff58e6c2cd3b37091"
-dependencies = [
- "windows-link",
-]
 
 [[package]]
 name = "windows-sys"
@@ -4620,7 +4559,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.80.0"
+version = "0.81.0"
 dependencies = [
  "anyhow",
  "gossamer-ast",
@@ -4666,7 +4605,7 @@ checksum = "de844c262c8848816172cef550288e7dc6c7b7814b4ee56b3e1553f275f1858e"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.118",
  "synstructure",
 ]
 
@@ -4687,7 +4626,7 @@ checksum = "e2e817b7b52d0c7358d3246da9d69935ebb18116b2b102b4230dac079b4862f5"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -4707,7 +4646,7 @@ checksum = "11532158c46691caf0f2593ea8358fed6bbf68a0315e80aae9bd41fbade684a1"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.118",
  "synstructure",
 ]
 
@@ -4747,7 +4686,7 @@ checksum = "625dc425cab0dca6dc3c3319506e6593dcb08a9f387ea3b284dbd52a92c40555"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.118",
 ]
 
 [[package]]
