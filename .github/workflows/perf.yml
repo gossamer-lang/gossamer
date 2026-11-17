@@ -114,6 +114,11 @@ jobs:
           (( rss <= 524288 )) || { echo "HTTP soak RSS ${rss}KiB exceeds 512MiB cap" >&2; exit 1; }
           echo "HTTP soak peak RSS: ${rss}KiB"
 
+      - name: Release HTTP per-request CPU ceiling
+        # The ceiling measures release-tier cost, so it runs where `gos` and
+        # the runtime archive it embeds are release builds.
+        run: cargo test --release -p gossamer-cli --test http_request_cost
+
       - name: Run benchmarks
         shell: bash
         run: |

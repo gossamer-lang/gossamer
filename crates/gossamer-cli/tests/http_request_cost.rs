@@ -140,6 +140,11 @@ fn measure_cpu_per_request(label: &str, binary: &Path) -> f64 {
 }
 
 #[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "measures release-tier cost: a debug `gos` embeds a debug runtime; \
+              the perf workflow runs it with --release"
+)]
 fn release_http_server_holds_its_per_request_cpu_ceiling() {
     let http = build_release("httpbase", SOURCE);
     let served = measure_cpu_per_request("http constant handler", &http);

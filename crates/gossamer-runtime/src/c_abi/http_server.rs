@@ -1581,10 +1581,83 @@ struct PeerWatchState {
     entries: Vec<PeerWatchEntry>,
     next_id: u64,
     watcher_running: bool,
+    /// Where connections register to hear that their peer hung up, shared
+    /// with the watcher before it starts.
+    #[cfg(target_os = "linux")]
+    registry: Option<std::sync::Arc<HangupSet>>,
     /// Where connections register for readiness, cloned from the watcher's
     /// poll before the watcher starts.
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "linux")))]
     registry: Option<mio::Registry>,
+}
+
+/// An epoll set that reports a watched socket only when its peer shuts down
+/// or the socket fails, never when request bytes arrive, so a busy keep-alive
+/// connection costs the watcher nothing per request.
+#[cfg(target_os = "linux")]
+struct HangupSet {
+    epoll: std::os::fd::OwnedFd,
+}
+
+#[cfg(target_os = "linux")]
+impl HangupSet {
+    fn new() -> Option<Self> {
+        use std::os::fd::FromRawFd;
+        // SAFETY: `epoll_create1` takes a flag word and answers a new descriptor or -1.
+        let fd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
+        if fd < 0 {
+            return None;
+        }
+        // SAFETY: `fd` is the descriptor just created, owned from here on.
+        let epoll = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        Some(Self { epoll })
+    }
+
+    /// Watches `socket` for its peer hanging up, reported under `id`.
+    fn register(&self, socket: RawPeerSocket, id: u64) -> bool {
+        use std::os::fd::AsRawFd;
+        // EPOLLHUP and EPOLLERR are always reported; EPOLLRDHUP adds the peer
+        // shutting down its side. Edge-triggered, each is reported once.
+        let mut event = libc::epoll_event {
+            events: (libc::EPOLLRDHUP | libc::EPOLLET) as u32,
+            u64: id,
+        };
+        // SAFETY: both descriptors are live and `event` outlives the call.
+        unsafe {
+            libc::epoll_ctl(
+                self.epoll.as_raw_fd(),
+                libc::EPOLL_CTL_ADD,
+                socket,
+                &raw mut event,
+            ) == 0
+        }
+    }
+
+    fn deregister(&self, socket: RawPeerSocket) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: both descriptors are live; a null event is accepted for a delete.
+        unsafe {
+            libc::epoll_ctl(
+                self.epoll.as_raw_fd(),
+                libc::EPOLL_CTL_DEL,
+                socket,
+                std::ptr::null_mut(),
+            );
+        }
+    }
+
+    /// Blocks until a watched peer hangs up, filling `ids` with whose.
+    fn wait(&self, events: &mut [libc::epoll_event], ids: &mut Vec<u64>) {
+        use std::os::fd::AsRawFd;
+        ids.clear();
+        let capacity = i32::try_from(events.len()).unwrap_or(i32::MAX);
+        // SAFETY: `events` holds `capacity` writable entries for the call.
+        let n =
+            unsafe { libc::epoll_wait(self.epoll.as_raw_fd(), events.as_mut_ptr(), capacity, -1) };
+        for event in events.iter().take(usize::try_from(n).unwrap_or(0)) {
+            ids.push(event.u64);
+        }
+    }
 }
 
 #[cfg(any(unix, windows))]
@@ -1627,7 +1700,11 @@ fn watch_for_disconnect(
     }
     let id = state.next_id;
     state.next_id = state.next_id.wrapping_add(1);
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    if !state.registry.as_ref()?.register(socket, id) {
+        return None;
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
     {
         let registry = state.registry.as_ref()?;
         registry
@@ -1653,7 +1730,16 @@ fn watch_for_disconnect(
 /// registry `state` keeps for connections to register with.
 #[cfg(any(unix, windows))]
 fn start_peer_watcher(state: &mut PeerWatchState) -> Option<()> {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    {
+        let set = std::sync::Arc::new(HangupSet::new()?);
+        state.registry = Some(std::sync::Arc::clone(&set));
+        std::thread::Builder::new()
+            .name("gos-http-peer-watch".to_string())
+            .spawn(move || peer_hangup_loop(&set))
+            .ok()?;
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
     {
         let poll = mio::Poll::new().ok()?;
         state.registry = Some(poll.registry().try_clone().ok()?);
@@ -1698,6 +1784,31 @@ fn peer_left(slot: &std::sync::atomic::AtomicUsize) {
     }
 }
 
+/// Sleeps until a watched peer hangs up, then marks or cancels its connection.
+///
+/// Events are handled under the registry lock, and a connection deregisters
+/// under that same lock while it still owns its socket; ids name connections,
+/// so an event for one that ended finds no entry even when its descriptor was
+/// reused.
+#[cfg(target_os = "linux")]
+fn peer_hangup_loop(set: &HangupSet) {
+    // SAFETY: an all-zero `epoll_event` is a valid value to be overwritten.
+    let mut events = vec![unsafe { std::mem::zeroed::<libc::epoll_event>() }; 64];
+    let mut ids = Vec::new();
+    loop {
+        set.wait(&mut events, &mut ids);
+        if ids.is_empty() {
+            continue;
+        }
+        let state = PEER_WATCH.lock();
+        for id in &ids {
+            if let Some(entry) = state.entries.iter().find(|entry| entry.id == *id) {
+                peer_left(&entry.ctx);
+            }
+        }
+    }
+}
+
 /// Sleeps until a watched socket turns readable, then marks or cancels the
 /// connections whose peer has left.
 ///
@@ -1707,7 +1818,7 @@ fn peer_left(slot: &std::sync::atomic::AtomicUsize) {
 /// same lock while it still owns its socket, so a descriptor is never peeked
 /// after its connection ended; ids name connections, so an event for one that
 /// ended finds no entry even when its descriptor was reused.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn peer_watch_loop(mut poll: mio::Poll) {
     let mut events = mio::Events::with_capacity(256);
     loop {
@@ -1776,7 +1887,11 @@ impl Drop for DisconnectWatch {
         let mut state = PEER_WATCH.lock();
         if let Some(at) = state.entries.iter().position(|entry| entry.id == self.id) {
             let entry = state.entries.swap_remove(at);
-            #[cfg(unix)]
+            #[cfg(target_os = "linux")]
+            if let Some(registry) = state.registry.as_ref() {
+                registry.deregister(entry.socket);
+            }
+            #[cfg(all(unix, not(target_os = "linux")))]
             if let Some(registry) = state.registry.as_ref() {
                 let _ = registry.deregister(&mut mio::unix::SourceFd(&entry.socket));
             }
