@@ -1269,9 +1269,10 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
     slot.last_yield_micros
         .store(now_micros_since_start(), Ordering::Release);
     // Where the platform has one, this thread's slice timer asks its
-    // goroutines to yield; elsewhere the watchdog times them.
+    // goroutines to yield; elsewhere the watchdog times them. It runs on the
+    // thread's CPU clock, so it needs no attention when the worker parks.
     #[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
-    let slice_timer = crate::preempt::SliceTimer::for_this_thread();
+    let _slice_timer = crate::preempt::SliceTimer::for_this_thread();
     // A worker that always has a goroutine to run never parks in its poller,
     // so it reads readiness on a fixed cadence of steps instead.
     let mut steps_since_poll = 0u32;
@@ -1344,15 +1345,7 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
                 shared.notify_idle();
                 return;
             }
-            let since = if let Some(since) = idle_since {
-                since
-            } else {
-                #[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
-                if let Some(timer) = &slice_timer {
-                    timer.disarm();
-                }
-                *idle_since.insert(Instant::now())
-            };
+            let since = *idle_since.get_or_insert_with(Instant::now);
             if retire_when_idle(&slot, &deque, &shared, since) {
                 continue;
             }
@@ -1369,10 +1362,6 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
             continue;
         };
         if idle_since.take().is_some() {
-            #[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
-            if let Some(timer) = &slice_timer {
-                timer.arm();
-            }
             // A park that timed out for a collect or a retirement check finds
             // nothing to run, so only a worker that has a goroutine again
             // gives the watchdog a run to time.

@@ -104,7 +104,9 @@ const SLICE_NANOS: libc::c_long = 10_000_000;
 const SIGEV_THREAD_ID: libc::c_int = 4;
 
 /// A timer on the calling thread's CPU clock that delivers `SIGURG` to that
-/// thread at every slice it runs, armed while the worker runs goroutines.
+/// thread at every slice of CPU it uses. The clock stands still while the
+/// thread is parked, so the timer is armed once for the thread's life and a
+/// park or resume costs no system call.
 #[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
 pub struct SliceTimer {
     id: libc::timer_t,
@@ -112,7 +114,7 @@ pub struct SliceTimer {
 
 #[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
 impl SliceTimer {
-    /// A disarmed timer for the calling thread, or `None` when the kernel
+    /// An armed timer for the calling thread, or `None` when the kernel
     /// refuses one, which leaves the thread to cooperative yields alone.
     #[must_use]
     pub fn for_this_thread() -> Option<Self> {
@@ -128,34 +130,20 @@ impl SliceTimer {
         let rc = unsafe {
             libc::timer_create(libc::CLOCK_THREAD_CPUTIME_ID, &raw mut event, &raw mut id)
         };
-        (rc == 0).then_some(Self { id })
-    }
-
-    /// Fires at every slice of CPU the thread runs from now on.
-    pub fn arm(&self) {
-        let slice = libc::timespec {
+        if rc != 0 {
+            return None;
+        }
+        let every = libc::timespec {
             tv_sec: 0,
             tv_nsec: SLICE_NANOS,
         };
-        self.set(slice);
-    }
-
-    /// Stops the timer while the thread parks.
-    pub fn disarm(&self) {
-        self.set(libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        });
-    }
-
-    fn set(&self, every: libc::timespec) {
         let spec = libc::itimerspec {
             it_interval: every,
             it_value: every,
         };
-        // SAFETY: `self.id` is a timer this thread created and has not
-        // deleted, and `spec` outlives the call.
-        unsafe { libc::timer_settime(self.id, 0, &raw const spec, std::ptr::null_mut()) };
+        // SAFETY: `id` is the timer just created, and `spec` outlives the call.
+        unsafe { libc::timer_settime(id, 0, &raw const spec, std::ptr::null_mut()) };
+        Some(Self { id })
     }
 }
 
