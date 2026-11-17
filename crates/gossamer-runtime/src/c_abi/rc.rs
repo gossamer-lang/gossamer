@@ -998,6 +998,11 @@ pub extern "C" fn gos_rt_cycles_enable() {
 /// decremented but is still non-zero, so it may be part of a cycle whose
 /// only remaining references are internal. Buffered once (deduplicated by
 /// the header bit); the buffer auto-collects when it crosses the threshold.
+#[allow(
+    clippy::inline_always,
+    reason = "runs on every release a node survives: out of line, the checks that settle an acyclic or shared node would pay a call and the frame the buffering path needs"
+)]
+#[inline(always)]
 unsafe fn possible_root(payload: *mut u8) {
     // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     let h = unsafe { header_ptr(payload) };
@@ -1016,6 +1021,21 @@ unsafe fn possible_root(payload: *mut u8) {
     if unsafe { is_statically_acyclic(h) } {
         return;
     }
+    // SAFETY: `payload` is a live, thread-local node whose layout a cycle can pass through.
+    unsafe { buffer_possible_root(payload, h) };
+}
+
+/// Buffers `payload` as a cycle candidate unless it holds no counted child or
+/// is buffered already, collecting a slice once the buffer is full.
+///
+/// Kept out of line so the release of an acyclic or shared node, which the
+/// checks before it settle, does not set up the frame this needs.
+///
+/// # Safety
+///
+/// `payload` is a live, thread-local node and `h` its header.
+#[inline(never)]
+unsafe fn buffer_possible_root(payload: *mut u8, h: *mut RcHeader) {
     let Some(collect) = collector() else {
         return;
     };
@@ -1434,8 +1454,6 @@ pub unsafe extern "C" fn gos_rt_rc_alloc_tagged(size: u64, meta: *const i64) -> 
     let Some(meta_id) = meta_intern(meta) else {
         return std::ptr::null_mut();
     };
-    let in_region = false;
-    let _ = in_region;
     let base = rc_block_alloc_unzeroed(total);
     if base.is_null() {
         // SAFETY: `meta` is this shim's argument, null or a live meta table (C-ABI contract).
@@ -2391,6 +2409,11 @@ pub unsafe extern "C" fn gos_rt_rc_alloc_reuse(
 /// RC-pointer children and reclaim the block. A non-zero result may be a
 /// cycle root, so it is buffered for the collector. Iterative (not
 /// recursive) so a deep tree/list cannot overflow the runtime's own stack.
+#[allow(
+    clippy::inline_always,
+    reason = "the one caller is the release every counted drop calls: out of line, a release that only lowers a count would pay the frame the teardown walk needs"
+)]
+#[inline(always)]
 unsafe fn rc_release_impl(root: *mut u8) {
     if root.is_null() {
         return;
@@ -2429,6 +2452,23 @@ unsafe fn rc_release_impl(root: *mut u8) {
         }
         return;
     }
+    // SAFETY: `root` is live, `h` its header, and `d` the decrement that took its last
+    // reference.
+    unsafe { release_last_reference(root, h, d) };
+}
+
+/// Tears down `root`, whose strong count the decrement `d` just took to zero,
+/// and every child that release leaves unreferenced.
+///
+/// Kept out of line so a release that only lowers a count does not set up the
+/// frame the teardown walk needs.
+///
+/// # Safety
+///
+/// `root` is a live node, `h` its header, and `d` the outcome of the
+/// decrement that gave up its last strong reference.
+#[inline(never)]
+unsafe fn release_last_reference(root: *mut u8, h: *mut RcHeader, d: DecOutcome) {
     // Last reference. For a shared object an Acquire fence pairs with the
     // other workers' Release decrements so this thread sees all their
     // writes before tearing it down (now exclusively owned - count 0).

@@ -298,8 +298,8 @@ if [[ $run_musl -eq 1 ]]; then
     if [[ $zig_usable -eq 1 ]]; then
         for t in aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
             if rustup target list --installed 2>/dev/null | grep -q "^${t}$"; then
-                run_step "cargo zigbuild --release --target $t -p gossamer-runtime" \
-                    cargo zigbuild --release --target "$t" -p gossamer-runtime
+                run_step "scripts/build-runtime-archive.sh $t zigbuild" \
+                    scripts/build-runtime-archive.sh "$t" zigbuild
             else
                 echo "musl cross check for $t skipped (run \`rustup target add $t\` to enable)"
             fi

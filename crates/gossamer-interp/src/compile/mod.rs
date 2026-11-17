@@ -971,16 +971,6 @@ fn expr_diverges(expr: &HirExpr) -> bool {
     )
 }
 
-/// Returns `true` when `expr` is a bare single-segment path.
-/// Used by `let` binding to detect the aliasing case - binding
-/// a local to the reg of an existing local would share storage
-/// and propagate future writes through the alias. Every other
-/// expression produces a freshly-allocated reg we can bind
-/// directly.
-fn is_path_expr(expr: &HirExpr) -> bool {
-    matches!(&expr.kind, HirExprKind::Path { .. })
-}
-
 /// Whether `expr` names storage the program still reaches by another route -
 /// a local, or a field of one. The value such an expression answers is an
 /// `Arc` share of that storage, so a binding taken from it copies the way a

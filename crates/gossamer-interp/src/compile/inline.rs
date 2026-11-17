@@ -237,11 +237,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 // caller the same: without the copy the callee's write, or a
                 // field it hands back, lands on the caller's own table.
                 let takes_own_value = args.get(idx).is_some_and(|a| {
-                    is_path_expr(a)
-                        && (self.expr_is_map(a)
-                            || self.expr_is_hashset(a)
-                            || self.expr_is_slot_container(a)
-                            || self.expr_is_aggregate_with_container(a))
+                    self.value_needs_table_copy(a)
                         && !self.callee_only_reads_param(callee, idx)
                         && !matches!(self.tcx.kind(a.ty), Some(TyKind::Ref { .. }))
                 });

@@ -98,7 +98,7 @@ jobs:
           CC_x86_64_unknown_linux_musl=musl-gcc \
             cargo build --release --target x86_64-unknown-linux-musl --bin gos
           CC_x86_64_unknown_linux_musl=musl-gcc \
-            cargo build --release --target x86_64-unknown-linux-musl -p gossamer-runtime
+            scripts/build-runtime-archive.sh x86_64-unknown-linux-musl
           cp target/x86_64-unknown-linux-musl/release/libgossamer_runtime.a \
              target/release/libgossamer_runtime-musl.a
           BASE="gos-${VERSION}-linux-x86_64"
@@ -220,11 +220,11 @@ jobs:
           # The CLI build script builds the runtime staticlib for the host;
           # `gos build` on aarch64 needs the aarch64 archive, so build it for
           # the target explicitly into target/<triple>/release/.
-          cargo build --release --target aarch64-unknown-linux-gnu -p gossamer-runtime
+          scripts/build-runtime-archive.sh aarch64-unknown-linux-gnu
           # Static-musl runtime for `gos build --release` static binaries on a
           # Pi (the gnu cross gcc only knows the glibc sysroot, so this leg
           # needs zig's bundled musl sysroot instead).
-          cargo zigbuild --release --target aarch64-unknown-linux-musl -p gossamer-runtime
+          scripts/build-runtime-archive.sh aarch64-unknown-linux-musl zigbuild
           cp target/aarch64-unknown-linux-musl/release/libgossamer_runtime.a \
              target/aarch64-unknown-linux-gnu/release/libgossamer_runtime-musl.a
 
@@ -341,7 +341,7 @@ jobs:
           # `gos build` needs the runtime archive matching the binary's arch;
           # the x86_64 leg cross-compiles from the arm64 runner, so build the
           # runtime for the target explicitly.
-          cargo build --release --target ${{ matrix.target }} -p gossamer-runtime
+          scripts/build-runtime-archive.sh ${{ matrix.target }}
 
       # Neither `gos` nor any object in the runtime archive programs link may
       # ask for a macOS newer than the one this archive is for.

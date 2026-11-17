@@ -1680,6 +1680,33 @@ mod elision_tests {
     }
 
     #[test]
+    fn cancels_retain_copy_release_spelling_of_a_move() {
+        let mut tcx = TyCtxt::new();
+        // `retain(L1); L3 = L1; release(L1)` with nothing reading `L1` just
+        // before the retain: the copy takes `L1`'s share.
+        let mut body = body_with(&mut tcx, vec![copy(3, 2)], vec![copy(3, 1)], vec![]);
+        elide_redundant_rc_pairs(&mut body, &tcx);
+        let names: Vec<Option<&str>> = body.blocks[0].stmts.iter().map(intrinsic_name).collect();
+        assert!(
+            !names.contains(&Some("gos_rt_rc_retain")) && !names.contains(&Some("gos_rt_rc_release")),
+            "the copy moves the share, so both ops go: {names:?}"
+        );
+    }
+
+    #[test]
+    fn keeps_pair_when_the_read_after_the_retain_is_not_a_copy() {
+        let mut tcx = TyCtxt::new();
+        let read = rc_call(3, "gos_rt_str_len", Place::local(Local(1)));
+        let mut body = body_with(&mut tcx, vec![copy(3, 2)], vec![read], vec![]);
+        elide_redundant_rc_pairs(&mut body, &tcx);
+        let names: Vec<Option<&str>> = body.blocks[0].stmts.iter().map(intrinsic_name).collect();
+        assert!(
+            names.contains(&Some("gos_rt_rc_retain")) && names.contains(&Some("gos_rt_rc_release")),
+            "a helper may read the count, so the pair stays: {names:?}"
+        );
+    }
+
+    #[test]
     fn keeps_pair_when_value_used_between() {
         let mut tcx = TyCtxt::new();
         // `L3 = Copy(L1)` between the retain and the release reads `x`,

@@ -583,9 +583,22 @@ impl<'tcx> FnBuilder<'tcx> {
             name.name.as_str(),
             "push" | "push_back" | "push_front" | "insert" | "or_insert"
         );
+        // A program method's by-value parameter is a value of its own, as a
+        // free function's is: a table the caller still reaches crosses as a
+        // copy, so the method's writes, and what it hands back, leave the
+        // caller's storage alone.
+        let program_method = self.impl_methods.contains(name.name.as_str())
+            || self
+                .impl_target_names(receiver.ty)
+                .into_iter()
+                .any(|type_name| {
+                    self.impl_methods
+                        .contains(&format!("{type_name}::{}", name.name))
+                })
+            || (self.ty_is_unresolved(receiver.ty) && self.sole_impl_method(&name.name).is_some());
         let pending = self.lower_args(args, true, None, &mut takes, |this, i, arg| {
             let reg = this.compile_expr(arg)?;
-            Ok(if stores && i + 1 == args.len() {
+            Ok(if (stores && i + 1 == args.len()) || program_method {
                 this.stored_value_reg(arg, reg)
             } else {
                 reg
@@ -1036,8 +1049,13 @@ impl<'tcx> FnBuilder<'tcx> {
         // (`conn.next_row(&mut stream)`), and passing that by value would
         // leave every mutation on a copy.
         let mut takes = CallTakes::default();
+        // A program method's by-value parameter is a value of its own, as a
+        // free function's is: a table the caller still reaches crosses as a
+        // copy, so the method's writes, and what it hands back, leave the
+        // caller's storage alone.
         let pending = self.lower_args(args, true, None, &mut takes, |this, _, arg| {
-            this.compile_expr(arg)
+            let reg = this.compile_expr(arg)?;
+            Ok(this.stored_value_reg(arg, reg))
         })?;
         let place_reg = match early_place {
             Some(reg) => reg,

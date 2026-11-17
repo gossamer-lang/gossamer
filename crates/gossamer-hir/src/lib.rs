@@ -47,7 +47,9 @@ pub use lift::{
 };
 pub use lower::{is_map_literal_block, lower_source_file};
 pub use par::PAR_RUN;
-pub use serde::{HirSerde, HirSerdeField, HirSerdeVariant, serde_step_symbol};
+pub use serde::{
+    HirSerde, HirSerdeField, HirSerdeVariant, is_serde_writing_walk, serde_step_symbol,
+};
 pub use tree::FnOrigin;
 pub use tree::{
     HirAdt, HirAdtKind, HirArrayExpr, HirBinaryOp, HirBlock, HirBody, HirConst, HirExpr,

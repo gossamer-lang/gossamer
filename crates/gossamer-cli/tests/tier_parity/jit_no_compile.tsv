@@ -63,6 +63,7 @@ examples/temperature.gos	entry shape
 examples/toml_demo.gos	no hot body
 examples/url_escape_demo.gos	no hot body
 examples/uuid_demo.gos	no hot body
+feature-testing-examples/aggr_element_by_value_args.gos	entry shape
 feature-testing-examples/aggr_enum_vec_combinators.gos	callable local
 feature-testing-examples/aggregate_binding.gos	no hot body
 feature-testing-examples/aggregate_compare.gos	no hot body

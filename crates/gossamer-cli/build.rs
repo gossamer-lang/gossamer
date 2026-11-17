@@ -306,6 +306,44 @@ fn rustup_target_installed(sysroot: Option<&Path>, triple: &str) -> bool {
     })
 }
 
+/// The codegen flags the runtime archive programs link is built with, for
+/// `triple` (the host when `None`). `scripts/build-runtime-archive.sh` gives
+/// the archives release jobs build for other targets these same flags.
+fn archive_rustflags(profile: &str, triple: Option<&str>) -> Vec<String> {
+    let mut flags: Vec<String> = Vec::new();
+    // The heap sampler runs inside the global allocator and reaches the
+    // Gossamer function that allocated by following the frame-pointer chain
+    // up through these shims. Compiled bodies already carry
+    // `"frame-pointer"="all"`; without the same guarantee here the chain
+    // breaks at the first runtime frame and every heap profile comes back
+    // empty. Scoped to this archive, so the interpreter and the JIT - where
+    // forcing frame pointers costs double digits on tight loops - keep the
+    // register.
+    flags.push("-C force-frame-pointers=yes".to_string());
+    // The archive links into programs, which register the subsystems their
+    // types need (the cycle collector) instead of linking every one.
+    flags.push("--cfg gos_program_archive".to_string());
+    // A hot loop's speed on x86-64 follows how it falls across 64-byte fetch
+    // lines, and at the default 16-byte function alignment that depends on how
+    // much code the program links ahead of the runtime. Starting every runtime
+    // function on a line keeps its loops' layout the same in every program, as
+    // the compiled program's own functions are.
+    let archive_arch = triple
+        .map(|t| t.split('-').next().unwrap_or(t).to_string())
+        .or_else(|| env::var("CARGO_CFG_TARGET_ARCH").ok())
+        .unwrap_or_default();
+    if profile == "release" && archive_arch == "x86_64" {
+        flags.push("-C llvm-args=-align-all-functions=6".to_string());
+    }
+    // A musl archive only links into static executables, where code built for
+    // a fixed address reaches its thread-locals at a constant offset from the
+    // thread pointer instead of through a computed base.
+    if triple.is_some_and(|t| t.ends_with("-linux-musl")) {
+        flags.push("-C relocation-model=static".to_string());
+    }
+    flags
+}
+
 /// Invokes `cargo rustc -p gossamer-runtime --crate-type staticlib` with an
 /// isolated target directory, then copies the resulting staticlib into the outer
 /// `target/<profile>/` so downstream lookups find it. When `triple`
@@ -400,31 +438,7 @@ fn build_runtime_into(
     // default on the targets this builds for; there is no stable `-C`
     // spelling to request them, so the inner build takes only the
     // user-facing `GOSSAMERFLAGS` override.
-    let mut flags: Vec<String> = Vec::new();
-    // The heap sampler runs inside the global allocator and reaches the
-    // Gossamer function that allocated by following the frame-pointer chain
-    // up through these shims. Compiled bodies already carry
-    // `"frame-pointer"="all"`; without the same guarantee here the chain
-    // breaks at the first runtime frame and every heap profile comes back
-    // empty. Scoped to this archive, so the interpreter and the JIT - where
-    // forcing frame pointers costs double digits on tight loops - keep the
-    // register.
-    flags.push("-C force-frame-pointers=yes".to_string());
-    // The archive links into programs, which register the subsystems their
-    // types need (the cycle collector) instead of linking every one.
-    flags.push("--cfg gos_program_archive".to_string());
-    // A hot loop's speed on x86-64 follows how it falls across 64-byte fetch
-    // lines, and at the default 16-byte function alignment that depends on how
-    // much code the program links ahead of the runtime. Starting every runtime
-    // function on a line keeps its loops' layout the same in every program, as
-    // the compiled program's own functions are.
-    let archive_arch = triple
-        .map(|t| t.split('-').next().unwrap_or(t).to_string())
-        .or_else(|| env::var("CARGO_CFG_TARGET_ARCH").ok())
-        .unwrap_or_default();
-    if profile == "release" && archive_arch == "x86_64" {
-        flags.push("-C llvm-args=-align-all-functions=6".to_string());
-    }
+    let mut flags = archive_rustflags(profile, triple);
     if let Ok(extra) = env::var("GOSSAMERFLAGS") {
         if !extra.trim().is_empty() {
             flags.push(extra);

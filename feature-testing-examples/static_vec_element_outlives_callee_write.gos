@@ -1,0 +1,45 @@
+// An element of a `static mut` vector handed to a method or function keeps
+// its value when the callee clears or grows that vector through the static:
+// the receiver or parameter is a value of its own, on every tier.
+struct Face { name: String, tables: Map<i64, i64>, sizes: Vec<i64> }
+
+impl Face {
+    fn count_after_wipe(&self) -> i64 {
+        FACES.clear()
+        self.tables.len() + self.sizes.len()
+    }
+
+    fn name_after_growth(&self) -> String {
+        for i in 0..64 {
+            FACES.push(face(f"extra{i}"))
+        }
+        self.name
+    }
+}
+
+static mut FACES: Vec<Face> = #[]
+
+fn face(name: String) -> Face {
+    Face { name, tables: {1: 2, 3: 4}, sizes: #[10, 20, 30] }
+}
+
+fn sum_after_wipe(f: Face) -> i64 {
+    FACES.clear()
+    let mut total = 0
+    for (k, v) in f.tables { total += k + v }
+    for s in f.sizes { total += s }
+    total
+}
+
+fn main() {
+    FACES.push(face("first"))
+    println(FACES[0].count_after_wipe())
+    println(FACES.len())
+
+    FACES.push(face("second"))
+    println(FACES[0].name_after_growth())
+    println(FACES.len())
+
+    println(sum_after_wipe(FACES[1]))
+    println(FACES.len())
+}

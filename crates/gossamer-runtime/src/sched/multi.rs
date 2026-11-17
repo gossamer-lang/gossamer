@@ -501,6 +501,10 @@ struct WatchdogBell {
     cv: Condvar,
     /// Workers inside a blocking system call.
     in_syscall: AtomicUsize,
+    /// Set while the watchdog rests with no bound: no purge is pending, and
+    /// a worker that starts running again rings it, since memory that worker
+    /// frees waits on the allocator purge only the watchdog applies.
+    unbounded: AtomicBool,
 }
 
 impl WatchdogBell {
@@ -1365,7 +1369,14 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
             // A park that timed out for a collect or a retirement check finds
             // nothing to run, so only a worker that has a goroutine again
             // gives the watchdog a run to time.
-            if !crate::preempt::cpu_time_slices() {
+            if crate::preempt::cpu_time_slices() {
+                // Pairs with the fence the watchdog takes after publishing an
+                // unbounded rest and before it reads the workers.
+                std::sync::atomic::fence(Ordering::SeqCst);
+                if shared.bell.unbounded.load(Ordering::SeqCst) {
+                    shared.resume_watchdog();
+                }
+            } else {
                 shared.resume_watchdog();
             }
         }
@@ -1517,6 +1528,15 @@ impl Shared {
     fn end_watchdog_pause(&self) {
         let _g = self.bell.mu.lock();
         self.bell.cv.notify_all();
+    }
+
+    /// Whether a live worker is running a goroutine rather than parked.
+    #[cfg(not(miri))]
+    fn any_worker_running(&self) -> bool {
+        self.workers
+            .lock()
+            .iter()
+            .any(|slot| !slot.retired.load(Ordering::SeqCst) && !slot.parked.load(Ordering::SeqCst))
     }
 
     /// Whether the watchdog has nothing to watch: no worker sits in a system
@@ -1675,11 +1695,11 @@ fn drive_vacant_pollers(shared: &Arc<Shared>) {
 #[cfg(not(miri))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Rest {
-    /// A worker was running, so the watchdog did not sleep.
+    /// Something needed watching, so the watchdog did not sleep.
     Busy,
     /// A worker left its park, or shutdown began.
     Woken,
-    /// The bound passed with every worker still parked.
+    /// The bound passed with nothing for the watchdog to time.
     Elapsed,
 }
 
@@ -1687,20 +1707,38 @@ enum Rest {
 /// leaves its park, shutdown begins, or `bound` passes. An idle program then
 /// costs no thread a wakeup.
 #[cfg(not(miri))]
-fn rest_while_nothing_to_watch(shared: &Shared, bound: Option<Duration>) -> Rest {
+fn rest_while_nothing_to_watch(
+    shared: &Shared,
+    bound: Option<Duration>,
+    purge_every: Duration,
+) -> Rest {
     let mut g = shared.bell.mu.lock();
     shared.bell.idle.store(true, Ordering::SeqCst);
+    // Published before the workers are read, pairing with the fence a
+    // resuming worker takes after it stops counting as parked: either this
+    // reads it running, or it reads this flag and rings.
+    shared
+        .bell
+        .unbounded
+        .store(bound.is_none(), Ordering::SeqCst);
     std::sync::atomic::fence(Ordering::SeqCst);
     if !shared.nothing_to_watch() {
         shared.bell.idle.store(false, Ordering::SeqCst);
+        shared.bell.unbounded.store(false, Ordering::SeqCst);
         return Rest::Busy;
     }
+    let bound = rest_bound(shared, bound, purge_every);
+    shared
+        .bell
+        .unbounded
+        .store(bound.is_none(), Ordering::SeqCst);
     match bound {
         Some(left) => {
             let _ = shared.bell.cv.wait_for(&mut g, left);
         }
         None => shared.bell.cv.wait(&mut g),
     }
+    shared.bell.unbounded.store(false, Ordering::SeqCst);
     // A waker clears the flag before it signals, so a flag still set means
     // the bound ran out.
     if shared.bell.idle.swap(false, Ordering::SeqCst) {
@@ -1708,6 +1746,20 @@ fn rest_while_nothing_to_watch(shared: &Shared, bound: Option<Duration>) -> Rest
     } else {
         Rest::Woken
     }
+}
+
+/// How long a watchdog with nothing to watch rests: until a pending purge is
+/// due, or one purge window while a worker runs a goroutine, which frees
+/// memory the purge is for though its slice timer leaves nothing to time.
+/// `None` rests until a worker rings.
+#[cfg(not(miri))]
+fn rest_bound(
+    shared: &Shared,
+    pending: Option<Duration>,
+    purge_every: Duration,
+) -> Option<Duration> {
+    pending
+        .or_else(|| (!purge_every.is_zero() && shared.any_worker_running()).then_some(purge_every))
 }
 
 /// Waits out one [`WATCHDOG_INTERVAL`] between passes, or until shutdown
@@ -1754,10 +1806,11 @@ fn watchdog_loop(shared: Arc<Shared>) {
         }
         let purge_due = (!purge_every.is_zero() && purge_pending)
             .then(|| purge_every.saturating_sub(last_purge.elapsed().min(last_pass.elapsed())));
-        let rest = rest_while_nothing_to_watch(&shared, purge_due);
+        let rest = rest_while_nothing_to_watch(&shared, purge_due, purge_every);
         if rest == Rest::Elapsed {
-            // Only the purge window ran out: every worker is still parked,
-            // so there is no run to time and the purge needs no pass.
+            // Only the purge window ran out, with no run to time, so the
+            // purge needs no pass. A worker still running keeps the next
+            // rest bounded by the window.
             crate::purge_expired_allocator_memory();
             last_purge = Instant::now();
             purge_pending = false;
@@ -2562,6 +2615,28 @@ mod tests {
         slot.syscall_pass.store(1, Ordering::SeqCst);
         assert!(!sched.inner.nothing_to_watch());
         slot.syscall_pass.store(0, Ordering::SeqCst);
+        slot.parked.store(true, Ordering::SeqCst);
+        assert!(sched.shutdown_and_join_idle());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_running_worker_keeps_the_allocator_purge_on_a_window() {
+        let sched = MultiScheduler::new(1);
+        sched.start();
+        sched.spawn(CountTask {
+            counter: Arc::new(AtomicUsize::new(0)),
+            budget: 1,
+        });
+        sched.wait_until_idle();
+        let window = Duration::from_secs(1);
+        let slot = Arc::clone(&sched.inner.workers.lock()[0]);
+        assert_eq!(rest_bound(&sched.inner, None, window), None);
+        slot.parked.store(false, Ordering::SeqCst);
+        assert_eq!(rest_bound(&sched.inner, None, window), Some(window));
+        assert_eq!(rest_bound(&sched.inner, None, Duration::ZERO), None);
+        let due = Duration::from_millis(5);
+        assert_eq!(rest_bound(&sched.inner, Some(due), window), Some(due));
         slot.parked.store(true, Ordering::SeqCst);
         assert!(sched.shutdown_and_join_idle());
     }

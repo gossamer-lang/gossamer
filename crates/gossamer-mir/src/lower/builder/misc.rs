@@ -586,8 +586,11 @@ impl<'a> Builder<'a> {
         let (elem_local, tuple_slot_ptr) =
             self.load_vec_element(iter_local, counter, elem_ty, yields_mut_refs, span);
         match &loop_pat.kind {
-            HirPatKind::Binding { name, .. } => {
+            HirPatKind::Binding { name, mutable } => {
                 let elem_local = self.owned_struct_binding(elem_local, elem_ty, loop_pat.ty, span);
+                if !*mutable {
+                    self.immutable_let_locals.insert(elem_local);
+                }
                 self.bind_local(&name.name, elem_local);
             }
             HirPatKind::Tuple(sub_pats) => {
