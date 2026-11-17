@@ -242,6 +242,10 @@ pub struct ProjectTable {
     /// `project.tzdata` - which IANA time zones the project's programs carry
     /// for hosts with no zoneinfo of their own. Absent reads as `named`.
     pub tzdata: TzData,
+    /// `project.frame-pointers` - whether the project's native programs link
+    /// a runtime built with frame pointers, so CPU and heap profiles follow
+    /// stacks through runtime code. Absent reads as `false`.
+    pub frame_pointers: bool,
 }
 
 /// The time zone rules a program carries, used only when the host has no
@@ -649,6 +653,18 @@ impl Manifest {
                 });
             }
         };
+        let frame_pointers = match project.get("frame-pointers") {
+            None => false,
+            Some(toml::Value::Boolean(wanted)) => *wanted,
+            Some(other) => {
+                return Err(ManifestError::Malformed {
+                    line_no: 0,
+                    line: format!(
+                        "project.frame-pointers must be `true` or `false`; found `{other}`"
+                    ),
+                });
+            }
+        };
         let mut deps: BTreeMap<String, DependencySpec> = BTreeMap::new();
         let mut dep_modules: BTreeMap<String, String> = BTreeMap::new();
         let mut dep_features: BTreeMap<String, DependencyFeatures> = BTreeMap::new();
@@ -752,6 +768,7 @@ impl Manifest {
                 ffi,
                 windows_subsystem,
                 tzdata,
+                frame_pointers,
             },
             dependencies: deps,
             dependency_modules: dep_modules,
@@ -1876,6 +1893,24 @@ path = "src/lib.gos"
                     windows-subsystem = \"gui\"\n";
         let err = Manifest::parse(text).unwrap_err().to_string();
         assert!(err.contains("`console` or `windows`"), "{err}");
+    }
+
+    #[test]
+    fn frame_pointers_read_as_off_unless_stated() {
+        let base = "[project]\nid = \"example.com/app\"\nversion = \"0.1.0\"\n";
+        assert!(!Manifest::parse(base).unwrap().project.frame_pointers);
+        let on = format!("{base}frame-pointers = true\n");
+        assert!(Manifest::parse(&on).unwrap().project.frame_pointers);
+        let off = format!("{base}frame-pointers = false\n");
+        assert!(!Manifest::parse(&off).unwrap().project.frame_pointers);
+    }
+
+    #[test]
+    fn frame_pointers_must_be_a_boolean() {
+        let text = "[project]\nid = \"example.com/app\"\nversion = \"0.1.0\"\n\
+                    frame-pointers = \"yes\"\n";
+        let err = Manifest::parse(text).unwrap_err().to_string();
+        assert!(err.contains("project.frame-pointers"), "{err}");
     }
 
     #[test]

@@ -76,8 +76,15 @@ impl ProfileBuffer {
     /// Renders the samples into the textual pprof format.
     #[must_use]
     pub fn render(&self) -> String {
+        self.render_noting("")
+    }
+
+    /// [`Self::render`] with `note`, comment lines of their own, after the
+    /// header.
+    fn render_noting(&self, note: &str) -> String {
         let mut out = String::with_capacity(self.samples.len() * 64);
         out.push_str("# pprof text format v1\n");
+        out.push_str(note);
         for sample in &self.samples {
             out.push_str(&format!(
                 "samples={} self={}\n",
@@ -122,7 +129,7 @@ pub fn cpu_profile(duration: Duration) -> String {
             .collect();
         buf.record(Sample { weight: 1, stack });
     }
-    buf.render()
+    buf.render_noting(STACK_NOTE)
 }
 
 /// Sampling rate. Go's default, and low enough that the handler's cost
@@ -182,8 +189,19 @@ pub fn heap_profile(duration: Duration) -> String {
             stack,
         });
     }
-    buf.render()
+    buf.render_noting(STACK_NOTE)
 }
+
+/// What a sampled profile says about its stacks. The samplers follow the
+/// frame-pointer chain, which a compiled program's runtime keeps only when
+/// it was built with `--frame-pointers`; without it a stack ends at the
+/// first runtime frame on it.
+const STACK_NOTE: &str = if cfg!(all(gos_program_archive, not(gos_frame_pointers))) {
+    "# stacks end at the first runtime frame: build with `gos build --frame-pointers` \
+     (or `frame-pointers = true` under [project]) for whole stacks\n"
+} else {
+    ""
+};
 
 #[cfg(target_arch = "wasm32")]
 fn symbolise(pc: usize) -> Frame {

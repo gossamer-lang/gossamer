@@ -492,6 +492,11 @@ tests/          # integration tests
   where the host has none (a `scratch` image); `tzdata = "all"` under
   `[project]` carries the whole database for names read at run time, and
   `tzdata = "none"` carries nothing.
+- `std::pprof` CPU and heap profiles of a native program stop at the first
+  runtime frame unless it links a runtime with frame pointers:
+  `gos build --frame-pointers`, or `frame-pointers = true` under
+  `[project]`, builds one from the toolchain's sources with `cargo` once and
+  caches it.
 - `gos run FILE [ARGS]`, `gos build [--release] [-g]`, `gos test`,
   `gos fmt`, `gos lint`, `gos doc`, `gos new/init/add/fetch/publish`,
   `gos keygen`, `gos registry serve`, `gos env`,

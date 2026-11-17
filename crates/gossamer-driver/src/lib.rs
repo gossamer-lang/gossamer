@@ -8,6 +8,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod archive_flags;
 pub mod binding_build;
 pub mod binding_library;
 pub mod cache_maintenance;
@@ -18,6 +19,7 @@ pub mod link;
 pub mod lsda_link_order;
 pub use gossamer_abi::macos_deployment;
 pub mod pipeline;
+pub mod runtime_archive;
 pub mod target;
 
 pub use binding_build::{

@@ -11,7 +11,9 @@
 - A method or function handed an element of a `static mut` vector keeps its value when it clears or grows that vector through the static; the compiled tiers read the freed element.
 - `gos run` (VM) gives a function an element or field passed by value as a value of its own: a later write to `cs[0]` no longer shows up in what `f(cs[0])` returned, and a method's `mut` parameter no longer writes into the caller's maps.
 - A method with a `mut` by-value parameter no longer `push`es into the caller's `Vec` field on the compiled tiers.
-- The runtime archives the release ships for static-musl, Linux aarch64, and macOS are built with the same settings as the glibc one, so a program's cycle collector registration, heap-profile frame pointers, and code alignment no longer depend on which archive it links. The static-musl archive reaches thread-locals at a fixed offset.
+- The runtime archives the release ships for static-musl, Linux aarch64, and macOS are built with the same settings as the glibc one, so a program's cycle collector registration and code alignment no longer depend on which archive it links. The static-musl archive reaches thread-locals at a fixed offset.
+- The runtime a native program links leaves the frame-pointer register to code, which runs its hot paths faster. `gos build --frame-pointers`, or `frame-pointers = true` under `[project]`, links a runtime built with frame pointers instead, so `std::pprof` CPU and heap profiles follow stacks through runtime code; the first such build compiles the runtime from the toolchain's sources with `cargo` and caches it. A profile from a build without it says that its stacks end at the first runtime frame.
+- A `[rust-bindings]` archive built with the runtime inside, or without it, is rebuilt when the next build asks for the other shape, instead of linking the archive built the first way.
 
 ## 0.81.0 - Lower RAM and CPU floor, time zones through jiff, correctness
 

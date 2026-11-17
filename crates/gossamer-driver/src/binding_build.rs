@@ -151,6 +151,12 @@ pub struct StaticBindingsLib {
     /// Rust unit: one standard library and one copy of each crate the runtime
     /// and the bindings share.
     pub runtime: bool,
+    /// The runtime inside is built with frame pointers, for a program built
+    /// with `--frame-pointers`.
+    pub frame_pointers: bool,
+    /// Features of the runtime crate inside, matching the toolchain's own
+    /// runtime archive.
+    pub runtime_features: Vec<String>,
 }
 
 impl StaticBindingsLib {
@@ -185,6 +191,8 @@ impl StaticBindingsLib {
             cargo_target: None,
             project_id: manifest.project.id.as_str().to_string(),
             runtime: false,
+            frame_pointers: false,
+            runtime_features: Vec::new(),
         }))
     }
 
@@ -193,6 +201,21 @@ impl StaticBindingsLib {
     #[must_use]
     pub fn with_runtime(mut self, runtime: bool) -> Self {
         self.runtime = runtime;
+        self
+    }
+
+    /// Builds the runtime inside with frame pointers, so CPU and heap
+    /// profiles follow stacks through it.
+    #[must_use]
+    pub fn with_frame_pointers(mut self, frame_pointers: bool) -> Self {
+        self.frame_pointers = frame_pointers;
+        self
+    }
+
+    /// Builds the runtime inside with the runtime crate's `features`.
+    #[must_use]
+    pub fn with_runtime_features(mut self, features: &[&str]) -> Self {
+        self.runtime_features = features.iter().map(|f| (*f).to_string()).collect();
         self
     }
 
@@ -235,8 +258,18 @@ impl StaticBindingsLib {
             .collect();
         // `lib.rs` names the runtime allocator `gossamer-binding` defines.
         deps.push(gossamer_binding_dependency()?);
+        let features = if self.runtime_features.is_empty() {
+            String::new()
+        } else {
+            let listed: Vec<String> = self
+                .runtime_features
+                .iter()
+                .map(|f| format!("{f:?}"))
+                .collect();
+            format!(", features = [{}]", listed.join(", "))
+        };
         deps.push(format!(
-            "gossamer-runtime = {{ {}, optional = true }}",
+            "gossamer-runtime = {{ {}{features}, optional = true }}",
             binding_crate_source("gossamer-runtime")?
         ));
         Ok(format!(
@@ -361,10 +394,20 @@ strip = false
             });
         }
         let mut messages = Vec::new();
-        let (target_args, rustflags): (&[&str], &[&str]) = if self.runtime {
-            (&["--lib", "--features", "runtime"], RUNTIME_RUSTFLAGS)
+        let target_args: &[&str] = if self.runtime {
+            &["--lib", "--features", "runtime"]
         } else {
-            (&["--lib"], &[])
+            &["--lib"]
+        };
+        // The CPU and heap samplers follow the frame-pointer chain through the
+        // runtime's frames, which a program built with `--frame-pointers` keeps.
+        let rustflags: Vec<&str> = if self.runtime && self.frame_pointers {
+            crate::archive_flags::FRAME_POINTER_RUSTFLAGS
+                .iter()
+                .flat_map(|flag| flag.split_whitespace())
+                .collect()
+        } else {
+            Vec::new()
         };
         let output = run_cargo_build(
             &CargoBuild {
@@ -375,7 +418,7 @@ strip = false
                 target_args,
                 crate_label: "<staticlib>",
                 rustc_args: &["--print", "native-static-libs"],
-                rustflags,
+                rustflags: &rustflags,
             },
             Some(&mut messages),
         )?;
@@ -412,10 +455,10 @@ strip = false
     }
 
     fn stamp_kind(&self) -> String {
-        let kind = if self.runtime {
-            "staticlib+runtime"
-        } else {
-            "staticlib"
+        let kind = match (self.runtime, self.frame_pointers) {
+            (true, true) => "staticlib+runtime+frame-pointers",
+            (true, false) => "staticlib+runtime",
+            (false, _) => "staticlib",
         };
         match &self.cargo_target {
             Some(t) => format!("{kind}:{t}"),
@@ -435,7 +478,7 @@ strip = false
             return Ok(false);
         };
         if !stamp_text.contains(&self.fingerprint_hex)
-            || !stamp_text.contains(&self.stamp_kind())
+            || !stamp_text.contains(&format!("\"kind\":\"{}\"", self.stamp_kind()))
             || !stamp_text.contains(&format!("\"compiler\":\"{compiler}\""))
             || !stamp_text.contains(&format!("\"sources\":\"{sources}\""))
         {
@@ -699,7 +742,7 @@ const BINDING_CRATES: [&str; 3] = [
 static TOOLCHAIN_SOURCES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/toolchain-src.bin"));
 
 /// Digest of the records in [`TOOLCHAIN_SOURCES`].
-const TOOLCHAIN_SOURCE_DIGEST: &str = env!("GOS_TOOLCHAIN_SOURCE_DIGEST");
+pub(crate) const TOOLCHAIN_SOURCE_DIGEST: &str = env!("GOS_TOOLCHAIN_SOURCE_DIGEST");
 
 /// The lock each process reading a toolchain source snapshot holds shared
 /// until it exits. Cache reclamation takes it alone, so it never removes the
@@ -1165,7 +1208,7 @@ fn generated_sources_digest(manifest: &str, lib: &str) -> String {
 /// flags and Cargo settings in the environment, and the Cargo configuration
 /// files a build from `dir` reads (a `[patch]` there swaps dependencies). An
 /// archive built under another answers stale.
-fn compiler_identity(dir: &Path) -> String {
+pub(crate) fn compiler_identity(dir: &Path) -> String {
     let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let mut command = Command::new(rustc);
@@ -1243,12 +1286,6 @@ pub(crate) struct CargoBuild<'a> {
     /// Cargo's configuration give.
     pub(crate) rustflags: &'a [&'a str],
 }
-
-/// What every crate of an archive holding the runtime is compiled with. The
-/// heap profiler follows the frame-pointer chain from the allocator through
-/// the runtime's frames to the Gossamer function that allocated, as the
-/// toolchain's own runtime archive is built to allow.
-const RUNTIME_RUSTFLAGS: &[&str] = &["-C", "force-frame-pointers=yes"];
 
 pub(crate) fn run_cargo_build(
     build: &CargoBuild<'_>,
@@ -1726,7 +1763,7 @@ impl Drop for AdvisoryLock {
 /// that drops the function drops the table (see
 /// [`crate::lsda_link_order`]). The archive is rewritten through a temporary
 /// file, so a reader never sees it half written.
-fn link_archive_exception_tables(archive: &Path) -> io::Result<()> {
+pub(crate) fn link_archive_exception_tables(archive: &Path) -> io::Result<()> {
     let mut bytes = fs::read(archive)?;
     if crate::lsda_link_order::link_exception_tables_in_archive(&mut bytes) == 0 {
         return Ok(());
@@ -2371,6 +2408,8 @@ mod tests {
             cargo_target: None,
             project_id: "app".to_string(),
             runtime: true,
+            frame_pointers: false,
+            runtime_features: Vec::new(),
         };
         let archive = dir.join("libgos_static_bindings.a");
         fs::write(&archive, b"!<arch>\n").unwrap();
@@ -2395,6 +2434,48 @@ mod tests {
             !lib.is_fresh(&archive, &stamp, "rustc", &now_from, &[])
                 .unwrap()
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_archive_built_with_another_runtime_shape_is_stale() {
+        let dir = std::env::temp_dir().join(format!("gos-static-kind-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let lib = |runtime: bool, frame_pointers: bool| StaticBindingsLib {
+            fingerprint_hex: "0a844ac8dc0c".to_string(),
+            workdir: dir.clone(),
+            bindings: Vec::new(),
+            profile: Profile::Release,
+            cargo_target: Some("x86_64-unknown-linux-musl".to_string()),
+            project_id: "app".to_string(),
+            runtime,
+            frame_pointers,
+            runtime_features: Vec::new(),
+        };
+        let archive = dir.join("libgos_static_bindings.a");
+        fs::write(&archive, b"!<arch>\n").unwrap();
+        let stamp = dir.join("stamp-release.json");
+        let sources = generated_sources_digest("[dependencies]", "lib");
+        let shapes = [(false, false), (true, false), (true, true)];
+        for built in shapes {
+            let built_lib = lib(built.0, built.1);
+            write_stamp(
+                &stamp,
+                &built_lib.fingerprint_hex,
+                built_lib.profile,
+                &built_lib.stamp_kind(),
+                "rustc",
+                &sources,
+            )
+            .unwrap();
+            for wanted in shapes {
+                let fresh = lib(wanted.0, wanted.1)
+                    .is_fresh(&archive, &stamp, "rustc", &sources, &[])
+                    .unwrap();
+                assert_eq!(fresh, built == wanted, "built {built:?}, wanted {wanted:?}");
+            }
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 

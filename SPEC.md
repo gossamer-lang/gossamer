@@ -2210,7 +2210,11 @@ directory), which overrides convention-based entry resolution,
 `project.ffi` (a boolean, default `true`), which with `false` refuses
 native code reached through `unsafe extern` declarations (§12), and
 `project.windows-subsystem` (`console`, the default, or `windows`), the
-subsystem a Windows executable of the project declares (§11.2).
+subsystem a Windows executable of the project declares (§11.2), and
+`project.frame-pointers` (a boolean, default `false`), which with `true`
+links the project's native programs against a runtime built with frame
+pointers, as `gos build --frame-pointers` does, so `std::pprof` CPU and heap
+profiles follow stacks through runtime code.
 
 `[lib] kind = ["staticlib", "cdylib"]` builds the project as a C library
 (§12.1), and `[native]` lists C sources the package compiles (§12.2).

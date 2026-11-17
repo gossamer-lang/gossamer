@@ -45,6 +45,14 @@ mod macos_deployment;
 #[path = "src/main_stack.rs"]
 mod main_stack;
 
+#[path = "../gossamer-driver/src/archive_flags.rs"]
+#[allow(
+    unreachable_pub,
+    dead_code,
+    reason = "a build-script module the script alone consumes"
+)]
+mod archive_flags;
+
 #[path = "../gossamer-driver/src/lsda_link_order.rs"]
 #[allow(
     unreachable_pub,
@@ -118,6 +126,7 @@ fn reserve_main_thread_stack() {
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../gossamer-driver/src/lsda_link_order.rs");
+    println!("cargo:rerun-if-changed=../gossamer-driver/src/archive_flags.rs");
     println!("cargo:rerun-if-changed=../gossamer-runtime/src");
     println!("cargo:rerun-if-changed=../gossamer-runtime/Cargo.toml");
     // The workspace manifest owns the [profile.*] sections the inner
@@ -309,39 +318,24 @@ fn rustup_target_installed(sysroot: Option<&Path>, triple: &str) -> bool {
 /// The codegen flags the runtime archive programs link is built with, for
 /// `triple` (the host when `None`). `scripts/build-runtime-archive.sh` gives
 /// the archives release jobs build for other targets these same flags.
+///
+/// The archive leaves the frame-pointer register to code, where the runtime's
+/// hot paths use it. A program built with `--frame-pointers` links a runtime
+/// built from this toolchain's sources with them instead
+/// (`gossamer_driver::runtime_archive`).
 fn archive_rustflags(profile: &str, triple: Option<&str>) -> Vec<String> {
-    let mut flags: Vec<String> = Vec::new();
-    // The heap sampler runs inside the global allocator and reaches the
-    // Gossamer function that allocated by following the frame-pointer chain
-    // up through these shims. Compiled bodies already carry
-    // `"frame-pointer"="all"`; without the same guarantee here the chain
-    // breaks at the first runtime frame and every heap profile comes back
-    // empty. Scoped to this archive, so the interpreter and the JIT - where
-    // forcing frame pointers costs double digits on tight loops - keep the
-    // register.
-    flags.push("-C force-frame-pointers=yes".to_string());
-    // The archive links into programs, which register the subsystems their
-    // types need (the cycle collector) instead of linking every one.
-    flags.push("--cfg gos_program_archive".to_string());
-    // A hot loop's speed on x86-64 follows how it falls across 64-byte fetch
-    // lines, and at the default 16-byte function alignment that depends on how
-    // much code the program links ahead of the runtime. Starting every runtime
-    // function on a line keeps its loops' layout the same in every program, as
-    // the compiled program's own functions are.
     let archive_arch = triple
         .map(|t| t.split('-').next().unwrap_or(t).to_string())
         .or_else(|| env::var("CARGO_CFG_TARGET_ARCH").ok())
         .unwrap_or_default();
-    if profile == "release" && archive_arch == "x86_64" {
-        flags.push("-C llvm-args=-align-all-functions=6".to_string());
-    }
-    // A musl archive only links into static executables, where code built for
-    // a fixed address reaches its thread-locals at a constant offset from the
-    // thread pointer instead of through a computed base.
-    if triple.is_some_and(|t| t.ends_with("-linux-musl")) {
-        flags.push("-C relocation-model=static".to_string());
-    }
-    flags
+    archive_flags::program_archive_rustflags(
+        profile == "release",
+        &archive_arch,
+        triple.is_some_and(|t| t.ends_with("-linux-musl")),
+    )
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 /// Invokes `cargo rustc -p gossamer-runtime --crate-type staticlib` with an

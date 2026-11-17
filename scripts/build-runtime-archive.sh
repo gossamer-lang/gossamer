@@ -14,7 +14,7 @@ set -euo pipefail
 triple="${1:?usage: $0 TRIPLE [build|zigbuild]}"
 subcommand="${2:-build}"
 
-flags="-C force-frame-pointers=yes --cfg gos_program_archive"
+flags="--cfg gos_program_archive"
 case "$triple" in
     x86_64-*) flags="$flags -C llvm-args=-align-all-functions=6" ;;
 esac
