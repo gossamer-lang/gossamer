@@ -54,10 +54,10 @@ pub(crate) fn forward_moved_temporaries(body: &mut Body, tcx: &TyCtxt) {
         })
         .collect();
     // Each round removes one whole-local copy and adds none, so this ends.
-    while let Some(forward) = find_forward(body, return_slot_free, &wide) {
+    while let Some(forward) = find_forward(body, tcx, return_slot_free, &wide) {
         apply_forward(body, &forward);
     }
-    if return_slot_free && let Some(forward) = find_return_forward(body, &wide) {
+    if return_slot_free && let Some(forward) = find_return_forward(body, tcx, &wide) {
         apply_return_forward(body, &forward);
     }
 }
@@ -81,24 +81,51 @@ struct ReturnForward {
     exits: Vec<(MirSite, Vec<usize>)>,
 }
 
-/// Whether a runtime call defines `local`. A runtime helper answers a wide
-/// value as the address of storage it already holds (an element slot, a
-/// payload, a closure's capture), so a move out of that local is a copy of
-/// the storage and its destination cannot be built in the storage itself.
-fn defined_by_runtime_call(body: &Body, local: Local) -> bool {
+/// Whether a runtime call defines `local` with a value that may be the
+/// address of storage it already holds (an element slot, a payload, a
+/// closure's capture): a move out of that local is a copy of the storage, and
+/// its destination cannot be built in the storage itself.
+///
+/// An unwrap into the return slot stays guarded: the JIT copies a payload
+/// into its destination only when that storage stays in the frame, and names
+/// the carrier's box for one that leaves through the return.
+fn defined_by_runtime_call(body: &Body, tcx: &TyCtxt, local: Local, into: Local) -> bool {
     body.blocks.iter().any(|block| {
         matches!(&block.terminator,
             Terminator::Call {
                 callee: Operand::Const(ConstValue::Str(name)),
                 destination,
                 ..
-            } if destination.local == local && name.starts_with("gos_"))
+            } if destination.local == local
+                && name.starts_with("gos_")
+                && (into.0 == 0 || !unwrap_copies_out(body, tcx, name, local)))
     })
 }
 
-fn find_return_forward(body: &Body, wide: &[bool]) -> Option<ReturnForward> {
+/// Whether `name` is an unwrap the backend lowers inline into a whole
+/// aggregate `local`: the payload's slots are copied into the local's own
+/// storage, so the local never stands for the payload's address.
+fn unwrap_copies_out(body: &Body, tcx: &TyCtxt, name: &str, local: Local) -> bool {
+    if !matches!(name, "gos_rt_option_unwrap" | "gos_rt_result_unwrap") {
+        return false;
+    }
+    let ty = body.locals[local.0 as usize].ty;
+    match tcx.kind_of(ty) {
+        TyKind::Tuple(_) | TyKind::Array { .. } => true,
+        // A stdlib sentinel struct may be a runtime-owned record reached
+        // through its pointer, and an Adt without a field list (a recursive
+        // enum) is held as a handle to its node.
+        TyKind::Adt { def, substs } => {
+            def.local < u32::MAX - gossamer_types::HANDLE_SENTINEL_SPAN
+                && (tcx.packed_layout(ty).is_some() || tcx.adt_field_tys(*def, substs).is_some())
+        }
+        _ => false,
+    }
+}
+
+fn find_return_forward(body: &Body, tcx: &TyCtxt, wide: &[bool]) -> Option<ReturnForward> {
     let (moved, from, writes) = return_writes(body, wide)?;
-    if defined_by_runtime_call(body, from) {
+    if defined_by_runtime_call(body, tcx, from, Local(0)) {
         return None;
     }
     let returns = |block: usize| matches!(body.blocks[block].terminator, Terminator::Return);
@@ -363,7 +390,12 @@ fn local_sites(body: &Body) -> Vec<Vec<MirSite>> {
     sites
 }
 
-fn find_forward(body: &Body, return_slot_free: bool, wide: &[bool]) -> Option<Forward> {
+fn find_forward(
+    body: &Body,
+    tcx: &TyCtxt,
+    return_slot_free: bool,
+    wide: &[bool],
+) -> Option<Forward> {
     let sites = local_sites(body);
     let borrowed = borrowed_locals(body);
     let preds = predecessor_lists(body);
@@ -397,7 +429,7 @@ fn find_forward(body: &Body, return_slot_free: bool, wide: &[bool]) -> Option<Fo
                 stmt: Some(si),
             };
             if let Some(forward) =
-                plan_forward(body, &sites[from.0 as usize], &preds, from, into, moved)
+                plan_forward(body, tcx, &sites[from.0 as usize], &preds, from, into, moved)
             {
                 return Some(forward);
             }
@@ -489,8 +521,10 @@ fn zeroed_after(block: &BasicBlock, index: usize, from: Local) -> Vec<&Place> {
 /// several that each reach the move, apart from the move's own block.
 fn whole_definitions(
     body: &Body,
+    tcx: &TyCtxt,
     from_sites: &[MirSite],
     from: Local,
+    into: Local,
     moved: MirSite,
 ) -> Option<Vec<MirSite>> {
     let defs: Vec<MirSite> = from_sites
@@ -508,7 +542,7 @@ fn whole_definitions(
     if defs.is_empty() {
         return None;
     }
-    if defined_by_runtime_call(body, from) {
+    if defined_by_runtime_call(body, tcx, from, into) {
         return None;
     }
     if defs.len() > 1
@@ -523,6 +557,7 @@ fn whole_definitions(
 
 fn plan_forward(
     body: &Body,
+    tcx: &TyCtxt,
     from_sites: &[MirSite],
     preds: &[Vec<usize>],
     from: Local,
@@ -532,7 +567,7 @@ fn plan_forward(
     let moved_index = moved.stmt?;
     let zeroed_places = zeroed_after(&body.blocks[moved.block], moved_index, from);
     let zeroed = zeroed_places.len();
-    let defs = whole_definitions(body, from_sites, from, moved)?;
+    let defs = whole_definitions(body, tcx, from_sites, from, into, moved)?;
     let (window, every_path) = region_window(body, preds, &defs, moved)?;
     // A definition may not read the destination, which it now writes.
     let def_reads_into = defs.iter().any(|def| match def.stmt {
@@ -591,6 +626,17 @@ fn plan_forward(
             }
             hoisted.push(site);
         }
+    }
+    // An unwrap reads its payload out of the storage the destination's old
+    // value may own, so that value is released only after the copy.
+    let unwraps = defs.iter().any(|def| {
+        def.stmt.is_none()
+            && matches!(&body.blocks[def.block].terminator,
+                Terminator::Call { callee: Operand::Const(ConstValue::Str(name)), .. }
+                    if name.starts_with("gos_"))
+    });
+    if unwraps && !hoisted.is_empty() {
+        return None;
     }
     // Outside the window the temporary holds nothing: anything there may
     // only zero it or release a place the move marks empty.

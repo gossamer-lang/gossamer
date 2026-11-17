@@ -438,6 +438,146 @@ mod elision_tests {
         (body, tcx)
     }
 
+    /// `fn step(carrier: i64) -> i64`: `callee(carrier)` defines the triple
+    /// `_3`, which moves whole into `_2`, optionally after releasing part of
+    /// `_2`'s old value, and `_2.1` is answered.
+    fn call_moved_into_a_local(callee: &str, release_old: bool) -> (Body, TyCtxt) {
+        use gossamer_types::IntTy;
+        let mut tcx = TyCtxt::new();
+        let i64t = tcx.int_ty(IntTy::I64);
+        let unit = tcx.unit();
+        let triple = tcx.intern(gossamer_types::TyKind::Tuple(vec![i64t, i64t, i64t]));
+        let field = |local: u32, index: u32| Place {
+            local: Local(local),
+            projection: vec![Projection::Field(index)],
+        };
+        let mut moved = Vec::new();
+        if release_old {
+            moved.push(rc_call(4, "gos_rt_rc_release", field(2, 0)));
+        }
+        moved.push(copy(2, 3));
+        moved.push(assign(Place::local(Local(0)), Rvalue::Use(Operand::Copy(field(2, 1)))));
+        let body = Body {
+            name: "step".into(),
+            def: None,
+            arity: 1,
+            locals: vec![decl(i64t), decl(i64t), decl(triple), decl(triple), decl(unit)],
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    stmts: Vec::new(),
+                    terminator: Terminator::Call {
+                        callee: Operand::Const(ConstValue::Str(callee.into())),
+                        args: vec![Operand::Copy(Place::local(Local(1)))],
+                        destination: Place::local(Local(3)),
+                        target: Some(BlockId(1)),
+                    },
+                    ..block_at(span())
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    stmts: moved,
+                    terminator: Terminator::Return,
+                    ..block_at(span())
+                },
+            ],
+            span: span(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
+        };
+        (body, tcx)
+    }
+
+    fn call_destination(body: &Body) -> Local {
+        match &body.blocks[0].terminator {
+            Terminator::Call { destination, .. } => destination.local,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unwrap_answered_from_the_frame_keeps_its_temporary() {
+        use gossamer_types::IntTy;
+        let mut tcx = TyCtxt::new();
+        let i64t = tcx.int_ty(IntTy::I64);
+        let triple = tcx.intern(gossamer_types::TyKind::Tuple(vec![i64t, i64t, i64t]));
+        let mut body = Body {
+            name: "take".into(),
+            def: None,
+            arity: 1,
+            locals: vec![decl(triple), decl(i64t), decl(triple)],
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    stmts: Vec::new(),
+                    terminator: Terminator::Call {
+                        callee: Operand::Const(ConstValue::Str("gos_rt_option_unwrap".into())),
+                        args: vec![Operand::Copy(Place::local(Local(1)))],
+                        destination: Place::local(Local(2)),
+                        target: Some(BlockId(1)),
+                    },
+                    ..block_at(span())
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    stmts: vec![copy(0, 2)],
+                    terminator: Terminator::Return,
+                    ..block_at(span())
+                },
+            ],
+            span: span(),
+            shared_stores: Vec::new(),
+            lent_slots: Vec::new(),
+            address_params: Vec::new(),
+        };
+
+        forward_moved_temporaries(&mut body, &tcx);
+
+        assert_eq!(call_destination(&body), Local(2), "{:?}", body.blocks);
+    }
+
+    #[test]
+    fn an_unwrapped_aggregate_is_built_in_the_local_it_moves_to() {
+        for name in ["gos_rt_option_unwrap", "gos_rt_result_unwrap"] {
+            let (mut body, tcx) = call_moved_into_a_local(name, false);
+
+            forward_moved_temporaries(&mut body, &tcx);
+
+            assert_eq!(call_destination(&body), Local(2), "{name}");
+            assert!(is_nop(&body.blocks[1].stmts[0]), "{name}: {:?}", body.blocks[1]);
+        }
+    }
+
+    #[test]
+    fn a_runtime_answer_that_may_be_held_storage_keeps_its_temporary() {
+        let (mut body, tcx) = call_moved_into_a_local("gos_rt_vec_get_ptr", false);
+
+        forward_moved_temporaries(&mut body, &tcx);
+
+        assert_eq!(call_destination(&body), Local(3));
+        assert!(assigns_whole(&body.blocks[1].stmts[0], 2), "{:?}", body.blocks[1]);
+    }
+
+    #[test]
+    fn an_unwrap_copies_its_payload_before_the_old_value_is_released() {
+        let (mut body, tcx) = call_moved_into_a_local("gos_rt_option_unwrap", true);
+
+        forward_moved_temporaries(&mut body, &tcx);
+
+        assert_eq!(call_destination(&body), Local(3));
+        assert!(assigns_whole(&body.blocks[1].stmts[1], 2), "{:?}", body.blocks[1]);
+    }
+
+    #[test]
+    fn a_program_call_still_builds_in_place_after_the_old_value_is_released() {
+        let (mut body, tcx) = call_moved_into_a_local("take", true);
+
+        forward_moved_temporaries(&mut body, &tcx);
+
+        assert_eq!(call_destination(&body), Local(2));
+    }
+
     #[test]
     fn a_value_redefined_each_turn_and_answered_on_one_exit_lives_in_the_return_slot() {
         let (mut body, tcx) = loop_answering_its_last_take();
