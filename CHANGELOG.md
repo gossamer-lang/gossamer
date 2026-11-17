@@ -24,6 +24,7 @@
 - A compiled program's static tables shrink: the profiler's sample buffers are allocated when a profile starts, and the type-metadata and region tables grow as they fill. Windows and hosts with strict overcommit no longer charge them to every program.
 - A release executable on Linux and the BSDs keeps only the symbols a panic trace, a SIGQUIT dump, or a profile prints: the program's functions, the runtime's `gos_rt_*` entry points, and `main`. Its trace names the same frames; `-g` keeps the whole table.
 - A compiled program links only the runtime it can reach: without `spawn` it carries no scheduler, blocking pool, or netpoller; without a type a cycle can pass through, no cycle collector; without a map, set, deque, or JSON value, none of their code.
+- `gos run` and `gos build` run the compiler's passes over a small program on the calling thread, and give a large one a compile thread per few hundred functions, where every compile woke a thread per core that found next to nothing to do.
 - `gos build --size-report` prints the executable's sections and how many of its bytes each part of the build accounts for: the program, each Rust crate of the runtime and std, the allocator, the unwinder, and the C library.
 
 ## 0.80.0 - JSON fixes/API changes, stdlib gaps, fixes

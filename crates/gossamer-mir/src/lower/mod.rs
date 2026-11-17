@@ -682,11 +682,11 @@ impl ProgramTables {
 /// has threads.
 fn for_each_body(bodies: &mut [Body], tcx: &TyCtxt, pass: impl Fn(&mut Body, &TyCtxt) + Sync) {
     #[cfg(not(target_arch = "wasm32"))]
-    {
+    if let Some(pool) = crate::compile_threads::pool_for(bodies.len()) {
         use rayon::prelude::*;
-        crate::compile_threads::install(|| bodies.par_iter_mut().for_each(|body| pass(body, tcx)));
+        pool.install(|| bodies.par_iter_mut().for_each(|body| pass(body, tcx)));
+        return;
     }
-    #[cfg(target_arch = "wasm32")]
     for body in bodies {
         pass(body, tcx);
     }
@@ -700,16 +700,16 @@ fn for_each_body_with<T: Send>(
     pass: impl Fn(&mut Body, &mut T, &TyCtxt) + Sync,
 ) {
     #[cfg(not(target_arch = "wasm32"))]
-    {
+    if let Some(pool) = crate::compile_threads::pool_for(bodies.len()) {
         use rayon::prelude::*;
-        crate::compile_threads::install(|| {
+        pool.install(|| {
             bodies
                 .par_iter_mut()
                 .zip(out.par_iter_mut())
                 .for_each(|(body, slot)| pass(body, slot, tcx));
         });
+        return;
     }
-    #[cfg(target_arch = "wasm32")]
     for (body, slot) in bodies.iter_mut().zip(out) {
         pass(body, slot, tcx);
     }
