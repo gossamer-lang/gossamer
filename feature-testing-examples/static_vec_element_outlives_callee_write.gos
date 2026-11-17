@@ -20,7 +20,7 @@ impl Face {
 static mut FACES: Vec<Face> = #[]
 
 fn face(name: String) -> Face {
-    Face { name, tables: {1: 2, 3: 4}, sizes: #[10, 20, 30] }
+    Face { name, tables: { 1: 2, 3: 4 }, sizes: #[10, 20, 30] }
 }
 
 fn sum_after_wipe(f: Face) -> i64 {
