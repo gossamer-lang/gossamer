@@ -511,10 +511,15 @@ pub unsafe extern "C" fn gos_rt_serde_rd_tagged(
     })
 }
 
+/// Bytes a serde writer's buffer starts with, past the allocator's small size
+/// classes: growing a large document from a few bytes would leave a partly
+/// used page behind in each class it passes through, on every encode.
+pub const SERDE_WRITER_CAPACITY: usize = 64 * 1024;
+
 /// Opens a writer.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_serde_wr_new() -> i64 {
-    ffi_entry!({ Box::into_raw(Box::new(Vec::<u8>::with_capacity(256))) as i64 })
+    ffi_entry!({ Box::into_raw(Box::new(Vec::<u8>::with_capacity(SERDE_WRITER_CAPACITY))) as i64 })
 }
 
 /// Releases a writer, answering the text written into it.
@@ -705,9 +710,8 @@ pub unsafe extern "C" fn gos_rt_serde_wr_f32(w: i64, value: f64) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_serde_wr_f64_tree(w: i64, value: f64) {
     ffi_entry!({
-        let text = crate::builtins::format_json_tree_float(value);
         // SAFETY: `w` is this shim's writer handle.
-        unsafe { with_writer(w, |out| out.extend_from_slice(text.as_bytes())) };
+        unsafe { with_writer(w, |out| crate::builtins::write_json_tree_float(out, value)) };
     });
 }
 
@@ -715,10 +719,9 @@ pub unsafe extern "C" fn gos_rt_serde_wr_f64_tree(w: i64, value: f64) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_serde_wr_f32_tree(w: i64, value: f64) {
     ffi_entry!({
-        let text =
-            crate::builtins::format_json_tree_float(crate::builtins::f32_as_decimal_double(value));
+        let value = crate::builtins::f32_as_decimal_double(value);
         // SAFETY: `w` is this shim's writer handle.
-        unsafe { with_writer(w, |out| out.extend_from_slice(text.as_bytes())) };
+        unsafe { with_writer(w, |out| crate::builtins::write_json_tree_float(out, value)) };
     });
 }
 

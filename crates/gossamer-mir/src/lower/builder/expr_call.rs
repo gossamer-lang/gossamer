@@ -1108,6 +1108,16 @@ impl<'a> Builder<'a> {
                         .collect()
                 })
             }
+            HirExprKind::Path {
+                segments,
+                def: None,
+            } if matches!(
+                segments.as_slice(),
+                [only] if gossamer_hir::is_serde_writing_walk(&only.name)
+            ) =>
+            {
+                Some(vec![true; args.len()])
+            }
             _ => None,
         };
         let callee_effects = match &callee.kind {
@@ -1400,14 +1410,15 @@ impl<'a> Builder<'a> {
                 let owned_clone_parameter = !callee_shares_storage
                     && !callee_copies_its_aggregate
                     && expected_ty.is_some_and(|expected| {
-                        matches!(
-                            self.tcx.kind_of(expected),
-                            TyKind::Vec(_)
-                                | TyKind::Adt { .. }
-                                | TyKind::Tuple(_)
-                                | TyKind::Array { .. }
-                                | TyKind::HashMap { .. }
-                        )
+                        !self.is_enum_ty(expected)
+                            && matches!(
+                                self.tcx.kind_of(expected),
+                                TyKind::Vec(_)
+                                    | TyKind::Adt { .. }
+                                    | TyKind::Tuple(_)
+                                    | TyKind::Array { .. }
+                                    | TyKind::HashMap { .. }
+                            )
                     });
                 let caller_visible_place = matches!(
                     &arg.kind,

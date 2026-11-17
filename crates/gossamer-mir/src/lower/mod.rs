@@ -880,6 +880,9 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut Vec<Body>, start: usize, tcx: &
             crate::opt::elide_settled_guarded_walks(body);
             crate::opt::reduce_materialised_counts(body);
             crate::opt::sink_exit_releases(body, tcx);
+            // A release sunk to the edge that leaves its local's blocks can
+            // land right after the copy that moves the local out.
+            crate::opt::elide_redundant_rc_pairs(body, tcx);
         });
     }
     for_each_body(

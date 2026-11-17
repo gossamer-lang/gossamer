@@ -42,6 +42,17 @@ pub fn serde_step_symbol(name: &str) -> Option<String> {
     (tail.starts_with("rd_") || tail.starts_with("wr_")).then(|| format!("gos_rt_serde_{tail}"))
 }
 
+/// Whether `name` is a generated walk that writes a value: a renderer or an
+/// encoder, in any mode, or a binding-wire encoder. Such a walk only reads the
+/// value it is handed - it writes the writer, never the value, and keeps no
+/// part of it - so a caller may hand it storage it still holds.
+#[must_use]
+pub fn is_serde_writing_walk(name: &str) -> bool {
+    name.strip_prefix("__gos_serde_").is_some_and(|tail| {
+        tail.starts_with("ren") || tail.starts_with("enc") || tail.starts_with("wenc_")
+    })
+}
+
 /// How a named field reads and writes: under its own name, a `#[rename]`d
 /// key, or its container's `#[rename_all]` spelling; left out under `#[skip]`;
 /// and filled with its default when missing under `#[default]` or
@@ -1052,16 +1063,34 @@ impl Gen<'_> {
         }
     }
 
+    /// `value` as the walk reads it: a place as itself, read where it lies
+    /// since the walk only reads it, and anything else computed once into a
+    /// binding named after `prefix`.
+    fn hold(
+        &mut self,
+        out: &mut Emit,
+        prefix: &str,
+        ty: Ty,
+        value: HirExpr,
+        span: Span,
+    ) -> HirExpr {
+        if is_plain_place(&value) {
+            return value;
+        }
+        let name = self.fresh(prefix);
+        out.stmt(self.let_stmt(&name, false, ty, value, span));
+        self.local(&name, ty, span)
+    }
+
     /// A tuple as an array of its elements.
     fn encode_tuple(&mut self, out: &mut Emit, value: HirExpr, ty: Ty, elems: &[Ty], span: Span) {
-        let tuple = self.fresh("tuple");
-        out.stmt(self.let_stmt(&tuple, false, ty, value, span));
+        let tuple = self.hold(out, "tuple", ty, value, span);
         out.raw("[");
         for (i, elem) in elems.iter().enumerate() {
             if i > 0 {
                 out.raw(",");
             }
-            let tuple_value = self.local(&tuple, ty, span);
+            let tuple_value = tuple.clone();
             let item = self.expr(
                 *elem,
                 span,
@@ -1079,10 +1108,9 @@ impl Gen<'_> {
     fn encode_seq(&mut self, out: &mut Emit, value: HirExpr, ty: Ty, elem: Ty, span: Span) {
         let i64_ty = self.tcx.int_ty(IntTy::I64);
         let unit = self.tcx.unit();
-        let seq = self.fresh("seq");
-        out.stmt(self.let_stmt(&seq, false, ty, value, span));
+        let seq = self.hold(out, "seq", ty, value, span);
         let count = self.fresh("n");
-        let receiver = self.local(&seq, ty, span);
+        let receiver = seq.clone();
         let len = self.method(receiver, "len", Vec::new(), i64_ty, span);
         out.stmt(self.let_stmt(&count, false, i64_ty, len, span));
         out.raw("[");
@@ -1094,7 +1122,7 @@ impl Gen<'_> {
         let at = self.local(&index, i64_ty, span);
         let separator = self.step("wr_sep", vec![w, at], unit, span);
         body.stmt(self.expr_stmt(separator, span));
-        let receiver = self.local(&seq, ty, span);
+        let receiver = seq.clone();
         let at = self.local(&index, i64_ty, span);
         let item = self.index(receiver, at, elem, span);
         self.encode(&mut body, item, elem, span);
@@ -1111,10 +1139,9 @@ impl Gen<'_> {
         let unit = self.tcx.unit();
         let string_ty = self.tcx.string_ty();
         let names_ty = self.tcx.intern(TyKind::Vec(string_ty));
-        let map = self.fresh("map");
-        out.stmt(self.let_stmt(&map, false, ty, value, span));
+        let map = self.hold(out, "map", ty, value, span);
         let names = self.fresh("keys");
-        let receiver = self.local(&map, ty, span);
+        let receiver = map.clone();
         let all = self.method(receiver, "keys", Vec::new(), names_ty, span);
         out.stmt(self.let_stmt(&names, true, names_ty, all, span));
         let receiver = self.local(&names, names_ty, span);
@@ -1143,7 +1170,7 @@ impl Gen<'_> {
         body.raw(":");
         // A map read by key answers an `Option`; every key came from the map,
         // so the `None` arm never runs.
-        let receiver = self.local(&map, ty, span);
+        let receiver = map.clone();
         let name = self.local(&key, string_ty, span);
         let option_ty = self.option_ty(value_ty);
         let entry = self.method(receiver, "get", vec![name], option_ty, span);
@@ -2669,4 +2696,16 @@ fn encode_variants<'a>(variants: impl IntoIterator<Item = (bool, &'a str)>) -> S
         out.push_str(name);
     }
     out
+}
+
+/// Whether `expr` names storage without computing anything: a binding, or a
+/// field of one, read any number of times to the same value.
+pub(super) fn is_plain_place(expr: &HirExpr) -> bool {
+    match &expr.kind {
+        HirExprKind::Path { def: None, .. } => true,
+        HirExprKind::Field { receiver, .. } | HirExprKind::TupleIndex { receiver, .. } => {
+            is_plain_place(receiver)
+        }
+        _ => false,
+    }
 }

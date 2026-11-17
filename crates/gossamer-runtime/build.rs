@@ -29,6 +29,9 @@ fn main() {
     // Set by `gos`'s own build of the archive compiled programs link; see
     // `c_abi::rc::collector`.
     println!("cargo:rustc-check-cfg=cfg(gos_program_archive)");
+    // Set by `gos build --frame-pointers`, whose runtime is built with frame
+    // pointers; see `pprof::STACK_NOTE`.
+    println!("cargo:rustc-check-cfg=cfg(gos_frame_pointers)");
     println!("cargo:rerun-if-env-changed=RUSTFLAGS");
     println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
 

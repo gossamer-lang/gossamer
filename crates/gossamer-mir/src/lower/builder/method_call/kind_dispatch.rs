@@ -2016,6 +2016,20 @@ impl<'a> Builder<'a> {
             } else {
                 a
             };
+            let a = if runtime_symbol.is_none()
+                && self.method_param_takes_own_copy(
+                    arg,
+                    a,
+                    expected_args.and_then(|tys| tys.get(index)).copied(),
+                    callee_effects.map(|summary| summary.param(index + 1)),
+                    callee_effects.is_some_and(|summary| summary.escapes),
+                ) {
+                let cloned = self.fresh(self.locals[a.0 as usize].ty);
+                self.emit_owned_clone_binding(a, cloned, span);
+                cloned
+            } else {
+                a
+            };
             // A map handle carries no count, so the channel always takes a
             // table of its own: a named map stays the sender's, and a
             // temporary may itself be a map borrowed out of another.
@@ -2036,6 +2050,79 @@ impl<'a> Builder<'a> {
             arg_operands.push(Operand::Copy(Place::local(a)));
         }
         Some((receiver_local, arg_operands))
+    }
+
+    /// Whether a program method's by-value argument crosses as a copy of its
+    /// own, on the rule a free function's argument follows.
+    ///
+    /// A value the caller still names - a binding, a field, or an element -
+    /// shares its growable storage with the parameter. The callee's frame
+    /// swaps a `Map`, `Set`, `Deque`, or heap field for a copy of its own on
+    /// entry, but its share of a `Vec` is a retain, so a `push` through the
+    /// parameter would reach the caller's vector. The copy is skipped when
+    /// the method's summary shows it neither writes nor keeps the parameter.
+    fn method_param_takes_own_copy(
+        &self,
+        arg: &HirExpr,
+        value: Local,
+        expected: Option<Ty>,
+        effects: Option<crate::lower::helpers::effects::ParamEffects>,
+        escapes: bool,
+    ) -> bool {
+        let Some(expected) = expected else {
+            return false;
+        };
+        if self.is_enum_ty(expected) {
+            return false;
+        }
+        if !matches!(
+            self.tcx.kind_of(expected),
+            TyKind::Vec(_)
+                | TyKind::Adt { .. }
+                | TyKind::Tuple(_)
+                | TyKind::Array { .. }
+                | TyKind::HashMap { .. }
+        ) {
+            return false;
+        }
+        if !matches!(
+            &arg.kind,
+            HirExprKind::Path { .. }
+                | HirExprKind::Field { .. }
+                | HirExprKind::TupleIndex { .. }
+                | HirExprKind::Index { .. }
+        ) {
+            return false;
+        }
+        if effects.is_some_and(|param| param.leaves_untouched()) && !escapes {
+            return false;
+        }
+        let fields = crate::lower::aggregate_rc_field_paths(self.tcx, expected);
+        if !fields.is_empty()
+            && fields
+                .iter()
+                .all(|(_, kind)| *kind != crate::lower::FieldRcKind::Vec)
+        {
+            return false;
+        }
+        matches!(
+            self.tcx.kind_of(self.locals[value.0 as usize].ty),
+            TyKind::Vec(_)
+                | TyKind::Adt { .. }
+                | TyKind::Tuple(_)
+                | TyKind::Array { .. }
+                | TyKind::HashMap { .. }
+        ) || self.set_clone_symbol_for_local(value).is_some()
+    }
+
+    /// Whether `ty` is an enum, whose by-value copy is the same node under a
+    /// second count: no copy of it holds storage of its own, so a parameter
+    /// copy only adds a retain and a release.
+    pub(crate) fn is_enum_ty(&self, ty: Ty) -> bool {
+        matches!(
+            self.tcx.kind_of(ty),
+            TyKind::Adt { def, .. } if self.tcx.enum_variant_tys(*def).is_some()
+        )
     }
 
     /// Rewrite a non-capturing `map`/`map_err` closure arg to the bare-fn ABI.

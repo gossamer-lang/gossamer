@@ -211,6 +211,14 @@ enum Command {
         /// traces and profiles print.
         #[arg(short = 'g', long = "debug-info")]
         debug_info: bool,
+        /// Link a runtime built with frame pointers, so `std::pprof` CPU
+        /// and heap profiles follow stacks through runtime code. The
+        /// toolchain's runtime leaves the register to code; this builds
+        /// one from the toolchain's sources with Cargo on first use and
+        /// caches it. `frame-pointers = true` under `[project]` asks for
+        /// the same on every build of the project.
+        #[arg(long)]
+        frame_pointers: bool,
         /// Force the legacy dynamic-glibc link path on Linux, even
         /// when the rustup `x86_64-unknown-linux-musl` target is
         /// available. Default release builds produce a fully-static
@@ -1310,6 +1318,7 @@ fn dispatch(
             pgo_collect,
             pgo_profile,
             debug_info,
+            frame_pointers,
             dynamic,
             timings,
             explain_profile,
@@ -1337,6 +1346,7 @@ fn dispatch(
                         LinkMode::Static
                     },
                     debug_info,
+                    frame_pointers,
                     reproducible,
                 },
                 out_dir,
@@ -1728,7 +1738,7 @@ enum LinkMode {
 }
 
 /// Bundled flags for `gos build`. Two orthogonal three-state knobs
-/// (`mode`, `link`) plus two genuinely-boolean toggles. Kept as a
+/// (`mode`, `link`) plus three genuinely-boolean toggles. Kept as a
 /// struct so the dispatch site stays under clippy's
 /// `fn_params_excessive_bools` threshold and the field names tell
 /// the reader what each toggle does at the call site.
@@ -1737,6 +1747,7 @@ struct BuildFlags {
     mode: BuildMode,
     link: LinkMode,
     debug_info: bool,
+    frame_pointers: bool,
     reproducible: bool,
 }
 
@@ -1768,6 +1779,11 @@ fn dispatch_build(
         link: cmd::build::LinkOptions {
             release: flags.mode == BuildMode::Release,
             debug_info: flags.debug_info,
+            runtime: if flags.frame_pointers {
+                cmd::build::RuntimeBuild::FramePointers
+            } else {
+                cmd::build::RuntimeBuild::Shipped
+            },
             dynamic: flags.link == LinkMode::Dynamic,
             windows_subsystem: gossamer_pkg::manifest::WindowsSubsystem::Console,
             report: reports.artifact,

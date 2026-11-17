@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.81.1 - Speed and memory regressions fixed, value-semantics fixes
+
+- `json::encode(v)` no longer deep-copies its argument before encoding it, writes floats straight into its output, and starts its buffer past the allocator's small size classes: encoding runs faster, and a program that encodes a large document in a loop no longer grows its memory with each pass.
+- A program whose goroutines keep running gives memory it freed back to the system once per purge window again; since 0.81.0 a running worker left the scheduler's watchdog asleep after its first purge.
+- An element passed by value to a function that only reads it is lent, not copied, on the compiled tiers, and `let m = c.opts` inside a `for` loop no longer copies the map.
+- An `if` or `else if` arm that answers a counted value (an enum node, a string) moves it into the result instead of counting it up and back down.
+- A user enum passed by value to a function or method crosses as the node it is, with no reference-count round trip per call.
+- Releasing a string, retaining one, and releasing a counted value whose count stays above zero take fewer instructions: the common path no longer sets up the frame the freeing path needs, and a string's owner is checked with one compare.
+- A method or function handed an element of a `static mut` vector keeps its value when it clears or grows that vector through the static; the compiled tiers read the freed element.
+- `gos run` (VM) gives a function an element or field passed by value as a value of its own: a later write to `cs[0]` no longer shows up in what `f(cs[0])` returned, and a method's `mut` parameter no longer writes into the caller's maps.
+- A method with a `mut` by-value parameter no longer `push`es into the caller's `Vec` field on the compiled tiers.
+- The runtime archives the release ships for static-musl, Linux aarch64, and macOS are built with the same settings as the glibc one, so a program's cycle collector registration and code alignment no longer depend on which archive it links. The static-musl archive reaches thread-locals at a fixed offset.
+- The runtime a native program links leaves the frame-pointer register to code, which runs its hot paths faster. `gos build --frame-pointers`, or `frame-pointers = true` under `[project]`, links a runtime built with frame pointers instead, so `std::pprof` CPU and heap profiles follow stacks through runtime code; the first such build compiles the runtime from the toolchain's sources with `cargo` and caches it. A profile from a build without it says that its stacks end at the first runtime frame.
+- A `[rust-bindings]` archive built with the runtime inside, or without it, is rebuilt when the next build asks for the other shape, instead of linking the archive built the first way.
+
 ## 0.81.0 - Lower RAM and CPU floor, time zones through jiff, correctness
 
 - Time zones come from jiff 1.0 instead of chrono and chrono-tz: on Unix a zone's rules are read from the system's zoneinfo (`TZDIR`, then `/usr/share/zoneinfo`), so they update with the OS rather than with each Gossamer release; Windows and wasm use jiff's bundled copy. A program that names a zone no longer links a compiled-in copy of the whole database.

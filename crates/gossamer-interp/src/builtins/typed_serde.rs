@@ -280,10 +280,14 @@ fn builtin_serde_rd_tagged(args: &[Value]) -> RuntimeResult<Value> {
 fn builtin_serde_wr_new(_args: &[Value]) -> RuntimeResult<Value> {
     let mut handles = SERDE_HANDLES.lock();
     let slot = if let Some(free) = handles.writers.iter().position(Option::is_none) {
-        handles.writers[free] = Some(Vec::with_capacity(256));
+        handles.writers[free] = Some(Vec::with_capacity(
+            gossamer_runtime::c_abi::typed_serde::SERDE_WRITER_CAPACITY,
+        ));
         free
     } else {
-        handles.writers.push(Some(Vec::with_capacity(256)));
+        handles.writers.push(Some(Vec::with_capacity(
+            gossamer_runtime::c_abi::typed_serde::SERDE_WRITER_CAPACITY,
+        )));
         handles.writers.len() - 1
     };
     Ok(serde_handle(slot))
@@ -416,15 +420,14 @@ fn builtin_serde_wr_f32(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 fn builtin_serde_wr_f64_tree(args: &[Value]) -> RuntimeResult<Value> {
-    let text = gossamer_runtime::builtins::format_json_tree_float(serde_float_arg(args));
-    with_writer(args, |out| out.extend_from_slice(text.as_bytes()));
+    let value = serde_float_arg(args);
+    with_writer(args, |out| gossamer_runtime::builtins::write_json_tree_float(out, value));
     Ok(Value::Unit)
 }
 
 fn builtin_serde_wr_f32_tree(args: &[Value]) -> RuntimeResult<Value> {
     let value = gossamer_runtime::builtins::f32_as_decimal_double(serde_float_arg(args));
-    let text = gossamer_runtime::builtins::format_json_tree_float(value);
-    with_writer(args, |out| out.extend_from_slice(text.as_bytes()));
+    with_writer(args, |out| gossamer_runtime::builtins::write_json_tree_float(out, value));
     Ok(Value::Unit)
 }
 

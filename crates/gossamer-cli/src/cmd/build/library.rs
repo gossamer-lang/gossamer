@@ -18,10 +18,11 @@ use gossamer_pkg::{LibKind, LibRuntime};
 
 use super::c_header::{self, Export};
 use super::{
-    BuildRequest, BuildTimings, Env, LinkTarget, NativeBuildError, NativeLinks, Os,
-    ValidatedSource, build_static_bindings_lib, emit_native_objects, ensure_output_dir,
-    find_runtime_lib, find_runtime_lib_for_target, framework_args, host_os, package_library_dir,
-    resolve_link_target, system_libraries, trace_link_command, validate_source,
+    BindingsRuntime, BuildRequest, BuildTimings, Env, LinkOptions, LinkTarget, NativeBuildError,
+    NativeLinks, Os, ValidatedSource, build_static_bindings_lib, emit_native_objects,
+    ensure_output_dir, find_runtime_lib, find_runtime_lib_for_target, frame_pointer_runtime_lib,
+    framework_args, host_os, package_library_dir, resolve_link_target, system_libraries,
+    trace_link_command, validate_source, wants_frame_pointers,
 };
 use crate::paths::read_entry_unit;
 
@@ -131,8 +132,7 @@ pub(super) fn build(file: &Path, request: &BuildRequest<'_>, target: &LibraryTar
             checked,
             &mut timings,
         )?;
-        let (runtime, native, bindings) =
-            link_inputs(file, host, &lt, opts.release, &mut libraries)?;
+        let (runtime, native, bindings) = link_inputs(file, host, &lt, opts, &mut libraries)?;
         let parts = Parts {
             lt: &lt,
             objects: &objects,
@@ -212,11 +212,15 @@ fn link_inputs(
     file: &Path,
     host: bool,
     lt: &LinkTarget,
-    release: bool,
+    opts: LinkOptions,
     libraries: &mut NativeLinks,
 ) -> std::result::Result<(PathBuf, Vec<PathBuf>, Option<PathBuf>), NativeBuildError> {
+    let release = opts.release;
+    let frame_pointers = wants_frame_pointers(file, opts);
     let runtime = if host {
         PathBuf::new()
+    } else if frame_pointers {
+        frame_pointer_runtime_lib(lt.is_cross.then_some(lt.triple.as_str()))?
     } else if lt.is_cross {
         find_runtime_lib_for_target(&lt.triple)?
     } else {
@@ -232,9 +236,18 @@ fn link_inputs(
         .map(|archive| archive.path)
         .collect();
     let bindings_target = lt.is_cross.then_some(lt.triple.as_str());
-    let bindings = build_static_bindings_lib(file, release, false, bindings_target, libraries)
-        .map_err(|err| NativeBuildError::LinkerMissing(format!("rust-bindings: {err}")))?
-        .map(|built| built.archive);
+    let bindings = build_static_bindings_lib(
+        file,
+        release,
+        BindingsRuntime {
+            inside: false,
+            frame_pointers,
+        },
+        bindings_target,
+        libraries,
+    )
+    .map_err(|err| NativeBuildError::LinkerMissing(format!("rust-bindings: {err}")))?
+    .map(|built| built.archive);
     if host && bindings.is_some() {
         return Err(NativeBuildError::BackendFailed(
             "a host-runtime library cannot carry `[rust-bindings]`: their archive bundles \

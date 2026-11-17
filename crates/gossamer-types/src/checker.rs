@@ -261,7 +261,7 @@ pub(crate) const IO_STREAM_OFFSET: u32 = 64;
 /// the pre-band handles alike. A receiver inside this span whose display name
 /// is module-qualified answers a closed method table, which is what lets an
 /// unknown name on one be named at the call site.
-pub(crate) const HANDLE_SENTINEL_SPAN: u32 = IO_STREAM_OFFSET;
+pub const HANDLE_SENTINEL_SPAN: u32 = IO_STREAM_OFFSET;
 
 /// One constructor of a runtime handle: the module path it is written
 /// under, and the associated function's name.

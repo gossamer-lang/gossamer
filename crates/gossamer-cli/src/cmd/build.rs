@@ -122,6 +122,10 @@ pub(crate) struct LinkOptions {
     /// True when the user passed `-g`. Suppresses strip; everything
     /// else stays the same.
     pub(crate) debug_info: bool,
+    /// Which runtime the program links: [`RuntimeBuild::FramePointers`] when
+    /// the user passed `--frame-pointers`. A project's `frame-pointers`
+    /// setting asks for the same (see [`wants_frame_pointers`]).
+    pub(crate) runtime: RuntimeBuild,
     /// True when the user passed `--dynamic`. Forces the legacy
     /// dynamic-glibc link path even on Linux release builds.
     pub(crate) dynamic: bool,
@@ -130,6 +134,17 @@ pub(crate) struct LinkOptions {
     pub(crate) windows_subsystem: WindowsSubsystem,
     /// What the link prints about the executable besides its size.
     pub(crate) report: ArtifactReport,
+}
+
+/// The runtime archive a native program links.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeBuild {
+    /// The archive the toolchain ships, which leaves the frame-pointer
+    /// register to code.
+    Shipped,
+    /// One built from the toolchain's sources with frame pointers, so CPU and
+    /// heap profiles follow stacks through runtime code.
+    FramePointers,
 }
 
 /// What a link prints about the executable it wrote.
@@ -638,6 +653,7 @@ fn run_link_options(release: bool, file: &Path) -> LinkOptions {
     LinkOptions {
         release,
         debug_info: false,
+        runtime: RuntimeBuild::Shipped,
         dynamic: false,
         windows_subsystem: windows_subsystem(file),
         report: ArtifactReport::Summary,
@@ -895,10 +911,11 @@ fn build_artifact_key(
     add(
         "options",
         format!(
-            "target={}|release={}|debug={}|dynamic={}|static_musl={static_musl}|reproducible={}|subsystem={:?}",
+            "target={}|release={}|debug={}|frame_pointers={}|dynamic={}|static_musl={static_musl}|reproducible={}|subsystem={:?}",
             target.unwrap_or("host"),
             opts.release,
             opts.debug_info,
+            wants_frame_pointers(file, opts),
             opts.dynamic,
             gossamer_codegen_llvm::reproducible_enabled(),
             opts.windows_subsystem,
@@ -1801,7 +1818,10 @@ fn extra_link_archives(
     let bindings = build_static_bindings_lib(
         input_path,
         opts.release,
-        opts.release,
+        BindingsRuntime {
+            inside: opts.release,
+            frame_pointers: wants_frame_pointers(input_path, opts),
+        },
         bindings_target.as_deref(),
         libraries,
     )
@@ -1929,6 +1949,13 @@ fn try_native_build(
     } = extra_link_archives(paths.input, opts, static_musl, &lt, &pgo, &mut libraries)?;
     let runtime_lib = if let Some(archive) = bindings_runtime {
         archive
+    } else if wants_frame_pointers(paths.input, opts) {
+        let target = if static_musl {
+            Some(musl_triple_for_arch(lt.arch))
+        } else {
+            lt.is_cross.then_some(lt.triple.as_str())
+        };
+        frame_pointer_runtime_lib(target)?
     } else if static_musl {
         find_runtime_lib_for_target(musl_triple_for_arch(lt.arch))?
     } else if lt.is_cross {
@@ -2164,7 +2191,7 @@ fn elf_forced_symbols(opts: LinkOptions) -> &'static [&'static str] {
 fn build_static_bindings_lib(
     entry: &Path,
     release: bool,
-    runtime: bool,
+    runtime: BindingsRuntime,
     cargo_target: Option<&str>,
     libraries: &mut NativeLinks,
 ) -> std::result::Result<Option<BuiltBindings>, gossamer_driver::BindingBuildError> {
@@ -2199,15 +2226,58 @@ fn build_static_bindings_lib(
     };
     let lib = lib
         .with_cargo_target(cargo_target.map(str::to_string))
-        .with_runtime(runtime);
+        .with_runtime(runtime.inside)
+        .with_frame_pointers(runtime.frame_pointers)
+        .with_runtime_features(&runtime_features());
     let built = lib.ensure_built()?;
     libraries.staticlib_args = built.native_libs;
     libraries.search.extend(built.search);
     Ok(Some(BuiltBindings {
         archive: built.archive,
         inputs: built.inputs,
-        runtime,
+        runtime: runtime.inside,
     }))
+}
+
+/// Whether a `[rust-bindings]` archive holds the runtime, and how that runtime
+/// is built.
+#[derive(Clone, Copy)]
+pub(crate) struct BindingsRuntime {
+    /// The archive holds the runtime, which the link takes in place of the
+    /// toolchain's.
+    pub(crate) inside: bool,
+    /// That runtime is built with frame pointers.
+    pub(crate) frame_pointers: bool,
+}
+
+/// Whether the program at `file` links a runtime built with frame pointers,
+/// so CPU and heap profiles follow stacks through runtime code: asked for by
+/// `--frame-pointers` or by the project's `frame-pointers = true`.
+pub(crate) fn wants_frame_pointers(file: &Path, opts: LinkOptions) -> bool {
+    opts.runtime == RuntimeBuild::FramePointers
+        || gossamer_pkg::manifest::find_manifest(file)
+            .and_then(|path| fs::read_to_string(path).ok())
+            .and_then(|text| gossamer_pkg::manifest::Manifest::parse(&text).ok())
+            .is_some_and(|manifest| manifest.project.frame_pointers)
+}
+
+/// The runtime crate's features this toolchain's runtime archive was built
+/// with, which a runtime built from source for the same programs takes too.
+fn runtime_features() -> Vec<&'static str> {
+    let mut features = Vec::new();
+    if cfg!(feature = "inline-vec-words-8") {
+        features.push("inline-vec-words-8");
+    }
+    features
+}
+
+/// The runtime archive built with frame pointers for `target` (the host when
+/// `None`), built from this toolchain's sources on first use.
+pub(crate) fn frame_pointer_runtime_lib(
+    target: Option<&str>,
+) -> std::result::Result<PathBuf, NativeBuildError> {
+    gossamer_driver::runtime_archive::frame_pointer_runtime(target, &runtime_features())
+        .map_err(|err| NativeBuildError::LinkerMissing(err.to_string()))
 }
 
 /// Renders a `Command` as a single readable line (program + args) for
@@ -3288,6 +3358,7 @@ mod tests {
         let options = super::LinkOptions {
             release: false,
             debug_info: false,
+            runtime: super::RuntimeBuild::Shipped,
             dynamic: true,
             windows_subsystem: super::WindowsSubsystem::Console,
             report: super::ArtifactReport::Summary,
@@ -3312,6 +3383,7 @@ mod tests {
         let debug = super::LinkOptions {
             release: false,
             debug_info: false,
+            runtime: super::RuntimeBuild::Shipped,
             dynamic: true,
             windows_subsystem: super::WindowsSubsystem::Console,
             report: super::ArtifactReport::Summary,
@@ -3319,6 +3391,7 @@ mod tests {
         let release = super::LinkOptions {
             release: true,
             debug_info: false,
+            runtime: super::RuntimeBuild::Shipped,
             dynamic: true,
             windows_subsystem: super::WindowsSubsystem::Console,
             report: super::ArtifactReport::Summary,
@@ -3341,10 +3414,52 @@ mod tests {
     }
 
     #[test]
+    fn linked_artifact_key_changes_with_frame_pointers_from_the_flag_or_the_project() {
+        let root = scratch("key-frame-pointers");
+        std::fs::create_dir_all(&root).expect("create scratch");
+        let entry = root.join("main.gos");
+        let output = root.join("app");
+        std::fs::write(&entry, b"fn main() {}\n").expect("write entry");
+        let options = |frame_pointers: bool| super::LinkOptions {
+            release: true,
+            debug_info: false,
+            runtime: if frame_pointers {
+                super::RuntimeBuild::FramePointers
+            } else {
+                super::RuntimeBuild::Shipped
+            },
+            dynamic: true,
+            windows_subsystem: super::WindowsSubsystem::Console,
+            report: super::ArtifactReport::Summary,
+        };
+        let key = |opts| {
+            super::build_artifact_key(&entry, "fn main() {}\n", None, opts, &output).unwrap()
+        };
+        let plain = key(options(false));
+        let flagged = key(options(true));
+        assert_ne!(plain, flagged);
+        assert!(!super::wants_frame_pointers(&entry, options(false)));
+        assert!(super::wants_frame_pointers(&entry, options(true)));
+
+        let manifest = "[project]\nid = \"example.com/app\"\nversion = \"0.1.0\"\n";
+        std::fs::write(root.join("project.toml"), manifest).expect("write manifest");
+        assert!(!super::wants_frame_pointers(&entry, options(false)));
+        std::fs::write(
+            root.join("project.toml"),
+            format!("{manifest}frame-pointers = true\n"),
+        )
+        .expect("write manifest");
+        assert!(super::wants_frame_pointers(&entry, options(false)));
+        assert_eq!(key(options(false)), key(options(true)));
+        std::fs::remove_dir_all(root).expect("remove scratch");
+    }
+
+    #[test]
     fn target_link_plans_are_explicit_for_both_profiles() {
         let debug = super::LinkOptions {
             release: false,
             debug_info: false,
+            runtime: super::RuntimeBuild::Shipped,
             dynamic: true,
             windows_subsystem: super::WindowsSubsystem::Console,
             report: super::ArtifactReport::Summary,
@@ -3352,6 +3467,7 @@ mod tests {
         let release = super::LinkOptions {
             release: true,
             debug_info: false,
+            runtime: super::RuntimeBuild::Shipped,
             dynamic: true,
             windows_subsystem: super::WindowsSubsystem::Console,
             report: super::ArtifactReport::Summary,

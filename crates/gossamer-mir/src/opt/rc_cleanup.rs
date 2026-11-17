@@ -562,18 +562,24 @@ pub(crate) fn elide_redundant_rc_pairs(body: &mut Body, tcx: &TyCtxt) {
                 continue;
             }
             // The forwarding use that the retain accounts for must sit
-            // immediately before it and read (not reassign) `x`.
-            if ir == 0 {
-                continue;
-            }
-            let prev = &stmts[ir - 1];
-            if stmt_writes_bare(prev, x) || !stmt_mentions_local(prev, x) {
-                continue;
-            }
+            // immediately before it and read (not reassign) `x`, or be a
+            // whole copy of `x` into another local right after it: the
+            // retain-copy-release spelling of a move.
+            let search_from = if ir > 0
+                && !stmt_writes_bare(&stmts[ir - 1], x)
+                && stmt_mentions_local(&stmts[ir - 1], x)
+            {
+                ir + 1
+            } else {
+                match next_live_stmt(stmts, ir + 1) {
+                    Some(use_at) if copies_whole_local(&stmts[use_at], x) => use_at + 1,
+                    _ => continue,
+                }
+            };
             // Find the paired release: the first matching release of `x`
             // in this block, with no other mention of `x` in between.
             let mut paired: Option<usize> = None;
-            for (j, stmt) in stmts.iter().enumerate().skip(ir + 1) {
+            for (j, stmt) in stmts.iter().enumerate().skip(search_from) {
                 if let StatementKind::Assign {
                     rvalue: Rvalue::CallIntrinsic { name: dn, args: da },
                     ..
@@ -625,6 +631,17 @@ pub(crate) fn elide_redundant_rc_pairs(body: &mut Body, tcx: &TyCtxt) {
         body.blocks[bi].stmts[ir].kind = StatementKind::Nop;
         body.blocks[bi].stmts[id].kind = StatementKind::Nop;
     }
+}
+
+/// Whether `stmt` is `y = x` for another bare local `y`.
+fn copies_whole_local(stmt: &Statement, x: Local) -> bool {
+    matches!(&stmt.kind, StatementKind::Assign {
+        place,
+        rvalue: Rvalue::Use(Operand::Copy(source)),
+    } if place.projection.is_empty()
+        && place.local != x
+        && source.local == x
+        && source.projection.is_empty())
 }
 
 /// True when block `block` performs an RC allocation between statement

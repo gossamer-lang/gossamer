@@ -45,14 +45,23 @@ pub fn format_float(f: f64) -> String {
 /// for NaN or an infinity.
 #[must_use]
 pub fn format_json_tree_float(f: f64) -> String {
+    let mut out = Vec::with_capacity(FLOAT_LAYOUT_CAP);
+    write_json_tree_float(&mut out, f);
+    // Every byte the writer appends is ASCII.
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Appends `f` to `out` as [`format_json_tree_float`] spells it.
+pub fn write_json_tree_float(out: &mut Vec<u8>, f: f64) {
     if !f.is_finite() {
-        return String::from("null");
+        out.extend_from_slice(b"null");
+        return;
     }
-    let mut text = format_float(f);
+    let mut text = FloatText::new();
+    out.extend_from_slice(f64_display(f, &mut text));
     if f.fract() == 0.0 {
-        text.push_str(".0");
+        out.extend_from_slice(b".0");
     }
-    text
 }
 
 /// Buffer for [`f64_display`]: a fixed slot for the usual rendering and a

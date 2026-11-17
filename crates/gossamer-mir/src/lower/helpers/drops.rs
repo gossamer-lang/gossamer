@@ -560,6 +560,60 @@ fn reads_container_only(name: &str) -> bool {
     )
 }
 
+/// Whether a call hands its element views to a program function that only
+/// borrows them for the call.
+///
+/// A Gossamer callee copies a by-value aggregate parameter into its own frame
+/// and books whatever share it keeps, so an element read in place stays valid
+/// across the call as long as nothing the call is given can write the
+/// container while the callee runs: no argument is a reference or a callable.
+/// An element pointer is the view itself, not such a reference; the front end
+/// refuses a call that reads an element by value beside a `&mut` of its
+/// container (GT0043). A view into a static's vector is never lent: any callee
+/// can reach that vector through the static.
+fn lends_views_to_program_fn(
+    body: &Body,
+    tcx: &gossamer_types::TyCtxt,
+    callee: &Operand,
+    args: &[Operand],
+    get_ptr_dest: &[bool],
+    static_view: &[bool],
+) -> bool {
+    let program_fn = match callee {
+        Operand::FnRef { .. } => true,
+        Operand::Const(ConstValue::Str(name)) => {
+            !name.starts_with("gos_rt_") && name != "gos_load" && name != "gos_store"
+        }
+        _ => false,
+    };
+    program_fn
+        && args.iter().all(|arg| {
+            let Operand::Copy(place) = arg else {
+                return true;
+            };
+            if static_view
+                .get(place.local.0 as usize)
+                .copied()
+                .unwrap_or(false)
+            {
+                return false;
+            }
+            (place.projection.is_empty()
+                && get_ptr_dest
+                    .get(place.local.0 as usize)
+                    .copied()
+                    .unwrap_or(false))
+                || !matches!(
+                    tcx.kind_of(body.local_ty(place.local)),
+                    gossamer_types::TyKind::Ref { .. }
+                        | gossamer_types::TyKind::FnDef { .. }
+                        | gossamer_types::TyKind::FnPtr(_)
+                        | gossamer_types::TyKind::FnTrait(_)
+                        | gossamer_types::TyKind::Closure { .. }
+                )
+        })
+}
+
 /// Per local, whether it is an element view in `borrow` that some path reads
 /// after a write to the storage of the vector it views.
 ///
@@ -570,6 +624,28 @@ fn reads_container_only(name: &str) -> bool {
 /// helper that is not a reader or a count helper.
 pub(super) fn views_written_before_read(body: &Body, borrow: &[bool]) -> Vec<bool> {
     let n_locals = body.locals.len();
+    // Every load of one static names the same storage, so each load stands
+    // for the first one: a write through any of them reaches a view read out
+    // of another.
+    let mut static_root: Vec<Option<usize>> = vec![None; n_locals];
+    let mut first_load: HashMap<&str, usize> = HashMap::new();
+    for stmt in body.blocks.iter().flat_map(|b| &b.stmts) {
+        if let StatementKind::Assign {
+            place,
+            rvalue: Rvalue::StaticLoad(static_ref),
+        } = &stmt.kind
+            && place.projection.is_empty()
+            && (place.local.0 as usize) < n_locals
+        {
+            let local = place.local.0 as usize;
+            static_root[local] = Some(
+                *first_load
+                    .entry(static_ref.symbol.as_str())
+                    .or_insert(local),
+            );
+        }
+    }
+    let root = |local: usize| static_root[local].unwrap_or(local);
     let mut container: Vec<Option<usize>> = vec![None; n_locals];
     for block in &body.blocks {
         if let Terminator::Call {
@@ -591,12 +667,21 @@ pub(super) fn views_written_before_read(body: &Body, borrow: &[bool]) -> Vec<boo
             && (vec.local.0 as usize) < n_locals
             && (destination.local.0 as usize) < n_locals
         {
-            container[destination.local.0 as usize] = Some(vec.local.0 as usize);
-            container[vec.local.0 as usize].get_or_insert(vec.local.0 as usize);
+            let vec_root = root(vec.local.0 as usize);
+            container[destination.local.0 as usize] = Some(vec_root);
+            container[vec.local.0 as usize].get_or_insert(vec_root);
         }
     }
     if container.iter().all(Option::is_none) {
         return vec![false; n_locals];
+    }
+    let viewed: std::collections::HashSet<usize> = container.iter().flatten().copied().collect();
+    for (local, static_root) in static_root.iter().enumerate() {
+        if let Some(first) = *static_root
+            && viewed.contains(&first)
+        {
+            container[local].get_or_insert(first);
+        }
     }
     let mut changed = true;
     while changed {
@@ -4174,6 +4259,42 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
             get_ptr_dest[destination.local.0 as usize] = true;
         }
     }
+    // Element views read out of a static's vector.
+    let static_vec: Vec<bool> = {
+        let mut loaded = vec![false; n_locals];
+        for stmt in body.blocks.iter().flat_map(|b| &b.stmts) {
+            if let StatementKind::Assign {
+                place,
+                rvalue: Rvalue::StaticLoad(_),
+            } = &stmt.kind
+                && place.projection.is_empty()
+                && let Some(flag) = loaded.get_mut(place.local.0 as usize)
+            {
+                *flag = true;
+            }
+        }
+        loaded
+    };
+    let mut static_view = vec![false; n_locals];
+    for block in &body.blocks {
+        if let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            args,
+            destination,
+            ..
+        } = &block.terminator
+            && name == "gos_rt_vec_get_ptr"
+            && destination.projection.is_empty()
+            && let Some(Operand::Copy(vec)) = args.first()
+            && static_vec
+                .get(vec.local.0 as usize)
+                .copied()
+                .unwrap_or(false)
+            && let Some(flag) = static_view.get_mut(destination.local.0 as usize)
+        {
+            *flag = true;
+        }
+    }
 
     let vec_borrow_agg = {
         let mut get_ptr_dest = get_ptr_dest.clone();
@@ -4313,6 +4434,16 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                         Operand::Const(ConstValue::Str(name)) => Some(name.as_str()),
                         _ => None,
                     };
+                    if lends_views_to_program_fn(
+                        body,
+                        tcx,
+                        callee,
+                        args,
+                        &get_ptr_dest,
+                        &static_view,
+                    ) {
+                        continue;
+                    }
                     for (n, a) in args.iter().enumerate() {
                         if !name.is_some_and(|name| reader_first_arg(name, n)) {
                             mark(a);

@@ -73,6 +73,19 @@ const STRING_DTOR_REGION_HEAP: u32 = 4;
 /// back to the slab instead of freeing it.
 const STRING_DTOR_SLAB: u32 = 5;
 const STRING_OWNER_BYTES: usize = std::mem::size_of::<StringOwner>();
+
+/// The first word of a [`StringOwner`] (version, kind, destructor, in field
+/// order) for an owner with `destructor`, so one load and compare tests all
+/// three fields.
+const fn owner_head(destructor: u32) -> u64 {
+    let v = STRING_OWNER_VERSION.to_ne_bytes();
+    let k = STRING_OWNER_KIND.to_ne_bytes();
+    let d = destructor.to_ne_bytes();
+    u64::from_ne_bytes([v[0], v[1], k[0], k[1], d[0], d[1], d[2], d[3]])
+}
+
+const OWNER_HEAD_HEAP: u64 = owner_head(STRING_DTOR_HEAP);
+const OWNER_HEAD_SLAB: u64 = owner_head(STRING_DTOR_SLAB);
 const STRING_LEGACY_HEADER_BYTES: usize = 13;
 const STRING_BODY_OFFSET: usize = STRING_OWNER_BYTES + STRING_LEGACY_HEADER_BYTES;
 const STRING_BODY_TAG: usize = STRING_BODY_OFFSET & 7;
@@ -276,9 +289,16 @@ fn managed_string_owner(s: *const c_char) -> Option<&'static StringOwner> {
 
 #[inline]
 unsafe fn typed_managed_string_owner(s: *const c_char) -> Option<&'static StringOwner> {
-    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_owner` accepts.
-    unsafe { typed_str_owner(s) }
-        .filter(|owner| matches!(owner.destructor, STRING_DTOR_HEAP | STRING_DTOR_SLAB))
+    if s.is_null() || !has_typed_body_shape(s) {
+        return None;
+    }
+    // SAFETY: `s` is non-null with a body's shape (checked above), and this `unsafe fn`'s caller
+    // passes a live string body, so its owner precedes it.
+    let owner = unsafe { s.cast::<u8>().sub(STRING_BODY_OFFSET).cast::<StringOwner>() };
+    // SAFETY: `owner` addresses the owner's first eight bytes, read above as fields.
+    let head = unsafe { owner.cast::<u64>().read_unaligned() };
+    // SAFETY: the head names a runtime owner, which lives as long as its string.
+    (head == OWNER_HEAD_HEAP || head == OWNER_HEAD_SLAB).then(|| unsafe { &*owner })
 }
 
 /// Byte length of a NUL-terminated buffer.
@@ -1321,7 +1341,8 @@ unsafe fn release_slab_piece(body: *mut c_char, cap: usize) {
         let slab = body.cast::<u8>().sub(STRING_BODY_OFFSET + back);
         let header = &*slab.cast::<SlabHeader>();
         if header.live.fetch_sub(1, Ordering::AcqRel) == 1 {
-            let layout = Layout::from_size_align(header.total, 8).expect("slab layout is valid");
+            // The slab was allocated with this layout, its total capped at `u32::MAX`.
+            let layout = Layout::from_size_align_unchecked(header.total, 8);
             string_body_free(slab, layout);
         }
     }
@@ -1510,68 +1531,88 @@ pub(crate) unsafe fn free_promoted_string(body: *mut c_char) {
 /// region-backed strings are ignored without probing a private prefix. As with
 /// every raw-pointer ABI, a stale pointer whose address has been reused cannot
 /// be distinguished without a generation-bearing carrier type.
+// Nothing on any path here panics, so it needs no unwind guard.
+#[allow(
+    clippy::inline_always,
+    reason = "the release every string drop calls: out of line, a release that only lowers a count would pay the frame the free path needs"
+)]
+#[inline(always)]
 unsafe fn str_free_impl(s: *mut c_char, typed: bool) {
-    ffi_entry!({
-        // Region storage is reclaimed by its region's pop, which may already
-        // have run: the address alone decides, before any header is read.
-        if s.is_null() || crate::c_abi::rc::in_region_arena(s.cast()) {
+    // Region storage is reclaimed by its region's pop, which may already
+    // have run: the address alone decides, before any header is read.
+    if s.is_null() || crate::c_abi::rc::in_region_arena(s.cast()) {
+        return;
+    }
+    let is_managed = if typed {
+        // SAFETY: this `unsafe fn`'s caller passes `s` live; non-null, checked above.
+        unsafe { typed_managed_string_owner(s) }.is_some()
+    } else {
+        is_managed_string(s)
+    };
+    if !is_managed {
+        return;
+    }
+    crate::c_abi::ledger::benchmark_arc_release();
+    // Refcounted carrier: [owner][rc:u32][cap:u32][len:u32][tag][content][NUL].
+    // Carrier validation above establishes that the legacy suffix belongs
+    // to a live runtime allocation.
+    // SAFETY: the carrier check above found a live runtime string, whose 13-byte header
+    // precedes the body.
+    let hdr = unsafe { s.cast::<u8>().sub(13) };
+    // SAFETY: `hdr` addresses the header's count bytes.
+    let rc = u32::from_le_bytes(unsafe { [*hdr, *hdr.add(1), *hdr.add(2), *hdr.add(3)] });
+    if rc & STR_SHARED != 0 {
+        // SAFETY: `hdr` is the allocation-aligned count word, only ever accessed atomically
+        // once shared.
+        let cell = unsafe { AtomicU32::from_ptr(hdr.cast::<u32>()) };
+        let prev = cell.fetch_sub(1, Ordering::Release);
+        if prev & !STR_SHARED != 1 {
             return;
         }
-        let is_managed = if typed {
-            // SAFETY: this `unsafe fn`'s caller passes `s` live; non-null, checked above.
-            unsafe { typed_managed_string_owner(s) }.is_some()
-        } else {
-            is_managed_string(s)
-        };
-        if !is_managed {
-            return;
+        std::sync::atomic::fence(Ordering::Acquire);
+    } else if rc > 1 {
+        // SAFETY: the string is thread-local, so no other thread writes its count.
+        unsafe {
+            std::ptr::copy_nonoverlapping((rc - 1).to_le_bytes().as_ptr(), hdr, 4);
         }
-        crate::c_abi::ledger::benchmark_arc_release();
-        // Refcounted carrier: [owner][rc:u32][cap:u32][len:u32][tag][content][NUL].
-        // Carrier validation above establishes that the legacy suffix belongs
-        // to a live runtime allocation.
-        // SAFETY: the carrier check above found a live runtime string, whose 13-byte header
-        // precedes the body.
-        let hdr = unsafe { s.cast::<u8>().sub(13) };
-        // SAFETY: `hdr` addresses the header's count bytes.
-        let rc = u32::from_le_bytes(unsafe { [*hdr, *hdr.add(1), *hdr.add(2), *hdr.add(3)] });
-        if rc & STR_SHARED != 0 {
-            // SAFETY: `hdr` is the allocation-aligned count word, only ever accessed atomically
-            // once shared.
-            let cell = unsafe { AtomicU32::from_ptr(hdr.cast::<u32>()) };
-            let prev = cell.fetch_sub(1, Ordering::Release);
-            if prev & !STR_SHARED != 1 {
-                return;
-            }
-            std::sync::atomic::fence(Ordering::Acquire);
-        } else if rc > 1 {
-            // SAFETY: the string is thread-local, so no other thread writes its count.
-            unsafe {
-                std::ptr::copy_nonoverlapping((rc - 1).to_le_bytes().as_ptr(), hdr, 4);
-            }
-            return;
+        return;
+    }
+    // SAFETY: the carrier check above found a live runtime string, and the count logic
+    // above gave up its last strong reference.
+    unsafe { free_string_body(s) };
+}
+
+/// Frees a managed string whose last strong reference was just given up.
+///
+/// # Safety
+///
+/// `s` is a live heap or slab string body with no other strong reference.
+#[inline(never)]
+unsafe fn free_string_body(s: *mut c_char) {
+    // SAFETY: the caller passes a live runtime string, whose 13-byte header precedes the body.
+    let hdr = unsafe { s.cast::<u8>().sub(13) };
+    let cap =
+        // SAFETY: `hdr` addresses the header's capacity bytes.
+        u32::from_le_bytes(unsafe { [*hdr.add(4), *hdr.add(5), *hdr.add(6), *hdr.add(7)] })
+            as usize;
+    unregister_heap_string_body(s);
+    // SAFETY: a live runtime string's owner sits `STRING_BODY_OFFSET` below the body.
+    let owner = unsafe { &*s.cast::<u8>().sub(STRING_BODY_OFFSET).cast::<StringOwner>() };
+    if owner.destructor == STRING_DTOR_SLAB {
+        // SAFETY: a slab piece of capacity `cap`, and this is its last strong reference.
+        unsafe { release_slab_piece(s, cap) };
+    } else {
+        let total = STRING_BODY_OFFSET + cap + 1 + str_index_bytes(cap);
+        // SAFETY: 8 is a power of two, and a `u32` capacity plus the fixed header and index
+        // words is far below `isize::MAX`. Builder allocation used this exact layout, and this is
+        // the last strong reference. The carrier owns the allocation base; `hdr` is only its
+        // legacy suffix.
+        unsafe {
+            let layout = Layout::from_size_align_unchecked(total, 8);
+            string_body_free(s.cast::<u8>().sub(STRING_BODY_OFFSET), layout);
         }
-        let cap =
-            // SAFETY: `hdr` addresses the header's capacity bytes.
-            u32::from_le_bytes(unsafe { [*hdr.add(4), *hdr.add(5), *hdr.add(6), *hdr.add(7)] })
-                as usize;
-        unregister_heap_string_body(s);
-        // SAFETY: the carrier check above found a live runtime string, whose owner sits
-        // `STRING_BODY_OFFSET` below the body.
-        let owner = unsafe { &*s.cast::<u8>().sub(STRING_BODY_OFFSET).cast::<StringOwner>() };
-        if owner.destructor == STRING_DTOR_SLAB {
-            // SAFETY: a slab piece of capacity `cap`, and this is its last strong reference.
-            unsafe { release_slab_piece(s, cap) };
-        } else {
-            let total = STRING_BODY_OFFSET + cap + 1 + str_index_bytes(cap);
-            let layout = Layout::from_size_align(total, 8).expect("string layout is valid");
-            // SAFETY: builder allocation uses this exact layout, and this is the
-            // last strong reference after the count logic above. The carrier owns
-            // the allocation base; `hdr` is only its legacy suffix.
-            unsafe { string_body_free(s.cast::<u8>().sub(STRING_BODY_OFFSET), layout) };
-        }
-        crate::c_abi::ledger::str_dec();
-    });
+    }
+    crate::c_abi::ledger::str_dec();
 }
 
 #[unsafe(no_mangle)]

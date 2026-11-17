@@ -1,0 +1,144 @@
+// Elements and fields of a container handed BY VALUE to functions and methods
+// while the caller keeps the container and writes it afterwards.
+//
+// A by-value parameter is a value of its own: what the callee writes, and what
+// it hands back - the parameter itself, a field of it, or a wrapper holding
+// it - never reaches the element it was read from, and a later write to that
+// element never reaches what the callee answered. A callee that only reads
+// the element may read it where it lies; one that keeps any part of it takes
+// a copy. Bit-identical on the VM, Cranelift, and LLVM tiers.
+
+use std::encoding::json
+
+struct Rec {
+    name: String
+    opts: Map<String, i64>
+    tags: Vec<String>
+}
+
+struct Wrap {
+    rec: Rec
+}
+
+struct Holder {
+    seen: i64
+}
+
+struct Book {
+    recs: Vec<Rec>
+    index: Map<String, i64>
+    pair: (Rec, i64)
+}
+
+impl Book {
+    fn texts(&mut self, sorted: bool) -> String {
+        let whole = json::encode(self.recs).unwrap()
+        let first = json::encode(self.pair, sort: true).unwrap()
+        let index = json::encode(self.index, sort: sorted).unwrap()
+        self.recs[0].opts.insert("written", 1)
+        self.recs.push(rec(5))
+        f"{whole}\n{first}\n{index}"
+    }
+}
+
+impl Holder {
+    fn whole(&self, r: Rec) -> Rec { r }
+
+    fn opts_of(&self, m: Map<String, i64>) -> Map<String, i64> { m }
+
+    fn grab(&mut self, mut r: Rec) -> i64 {
+        r.opts.insert("in", 1)
+        r.tags.push("in")
+        self.seen += 1
+        r.opts.len() + r.tags.len()
+    }
+}
+
+fn rec(i: i64) -> Rec {
+    let mut opts: Map<String, i64> = Map::new()
+    opts.insert(f"k{i}", i)
+    Rec { name: f"r{i}", opts: opts, tags: #[f"t{i}"] }
+}
+
+fn size(r: Rec) -> i64 { r.opts.len() + r.name.len() + r.tags.len() }
+
+fn whole(r: Rec) -> Rec { r }
+
+fn opts_of(r: Rec) -> Map<String, i64> { r.opts }
+
+fn wrapped(r: Rec) -> Wrap { Wrap { rec: r } }
+
+fn some(r: Rec) -> Option<Rec> { Some(r) }
+
+fn rebound(r: Rec) -> Rec {
+    let s = r
+    s
+}
+
+fn pass_map(m: Map<String, i64>) -> Map<String, i64> { m }
+
+fn bump(mut r: Rec) -> i64 {
+    r.opts.insert("in", 1)
+    r.tags.push("in")
+    r.opts.len() + r.tags.len()
+}
+
+fn total_by_index(rs: Vec<Rec>) -> i64 {
+    let mut n = 0
+    let mut i = 0
+    while i < rs.len() {
+        n += size(rs[i])
+        i += 1
+    }
+    n
+}
+
+fn total_by_loop(rs: Vec<Rec>) -> i64 {
+    let mut n = 0
+    for r in rs {
+        let m = r.opts
+        n += size(r) + m.len()
+    }
+    n
+}
+
+fn main() {
+    let mut rs: Vec<Rec> = #[]
+    for i in 0..3 {
+        rs.push(rec(i))
+    }
+    println(f"read by index: {total_by_index(rs)}, by loop: {total_by_loop(rs)}")
+
+    let a = whole(rs[0])
+    let b = opts_of(rs[0])
+    let c = wrapped(rs[0])
+    let d = some(rs[0])
+    let e = rebound(rs[0])
+    let f = pass_map(rs[0].opts)
+    let written = bump(rs[1])
+    rs[0].opts.insert("late", 7)
+    rs[0].tags.push("late")
+    println(f"answered: {a.opts} {b} {c.rec.opts} {d.unwrap().opts} {e.opts} {f}")
+    println(f"bump saw {written}, element keeps {rs[1].opts} {rs[1].tags}")
+
+    let mut h = Holder { seen: 0 }
+    let g = h.whole(rs[2])
+    let k = h.opts_of(rs[2].opts)
+    let n = h.grab(rs[2])
+    rs[2].opts.insert("after", 1)
+    println(f"method answered: {g.opts} {k}, grab saw {n}, element {rs[2].opts} {rs[2].tags}")
+
+    let mut kept: Vec<Map<String, i64>> = #[]
+    for r in rs {
+        let m = r.opts
+        kept.push(m)
+    }
+    rs[1] = rec(9)
+    println(f"kept: {kept}")
+    println(f"now: {rs[0].opts} {rs[1].opts} {rs[2].opts} seen {h.seen}")
+
+    let mut book = Book { recs: #[rec(1), rec(2)], index: { "b": 2, "a": 1 }, pair: (rec(3), 4) }
+    println(book.texts(false))
+    println(book.texts(true))
+    println(f"book holds {book.recs.len()} records, first {book.recs[0].opts}")
+}

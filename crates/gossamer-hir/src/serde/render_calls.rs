@@ -12,7 +12,7 @@
 
 use gossamer_types::{Ty, TyKind};
 
-use super::{Emit, Gen, Mode, WRITER};
+use super::{Emit, Gen, Mode, WRITER, is_plain_place};
 use crate::tree::{
     HirBlock, HirExpr, HirExprKind, HirFn, HirItem, HirItemKind, HirLiteral, HirStmtKind,
     HirUnaryOp, for_each_child_expr_mut,
@@ -233,8 +233,16 @@ impl Gen<'_> {
         if reach.unsupported || !reach.needs_walk {
             return None;
         }
-        let held = self.fresh("rendered");
-        let mut stmts = vec![self.let_stmt(&held, false, ty, value.clone(), span)];
+        // The walk only reads the value, so a place it names is walked where
+        // it lies; any other value is computed once into a binding of its own.
+        let mut stmts = Vec::new();
+        let held = if is_plain_place(value) {
+            value.clone()
+        } else {
+            let name = self.fresh("rendered");
+            stmts.push(self.let_stmt(&name, false, ty, value.clone(), span));
+            self.local(&name, ty, span)
+        };
         let sorted = Mode {
             sorted: true,
             ..mode
@@ -242,18 +250,18 @@ impl Gen<'_> {
         // `sort:` is the call's second argument when it is written.
         let walk = match rest.first().map(|e| &e.kind) {
             None | Some(HirExprKind::Literal(HirLiteral::Bool(false))) => {
-                self.render_walk(&held, ty, mode, finish, finished_ty, span)
+                self.render_walk(held, ty, mode, finish, finished_ty, span)
             }
             Some(HirExprKind::Literal(HirLiteral::Bool(true))) => {
-                self.render_walk(&held, ty, sorted, finish, finished_ty, span)
+                self.render_walk(held, ty, sorted, finish, finished_ty, span)
             }
             Some(_) => {
                 let flag = self.fresh("sort");
                 let bool_ty = self.tcx.bool_ty();
                 let sort = rest[0].clone();
                 stmts.push(self.let_stmt(&flag, false, bool_ty, sort, span));
-                let by_key = self.render_walk(&held, ty, sorted, finish, finished_ty, span);
-                let declared = self.render_walk(&held, ty, mode, finish, finished_ty, span);
+                let by_key = self.render_walk(held.clone(), ty, sorted, finish, finished_ty, span);
+                let declared = self.render_walk(held, ty, mode, finish, finished_ty, span);
                 let cond = self.local(&flag, bool_ty, span);
                 self.if_else(cond, by_key, declared, finished_ty, span)
             }
@@ -261,11 +269,11 @@ impl Gen<'_> {
         Some(self.block(stmts, Some(walk), finished_ty, span))
     }
 
-    /// The walk writing the local `held` of type `ty` in `mode`, answering
-    /// what the step `finish` answers.
+    /// The walk writing `held_value` of type `ty` in `mode`, answering what
+    /// the step `finish` answers.
     fn render_walk(
         &mut self,
-        held: &str,
+        held_value: HirExpr,
         ty: Ty,
         mode: Mode,
         finish: &str,
@@ -276,7 +284,6 @@ impl Gen<'_> {
         let mut out = Emit::default();
         let writer = self.step("wr_new", Vec::new(), i64_ty, span);
         out.stmt(self.let_stmt(WRITER, false, i64_ty, writer, span));
-        let held_value = self.local(held, ty, span);
         let outer = std::mem::replace(&mut self.rendering, true);
         let outer_mode = std::mem::replace(&mut self.mode, mode);
         self.encode(&mut out, held_value, ty, span);

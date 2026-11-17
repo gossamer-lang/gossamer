@@ -602,8 +602,8 @@ jobs:
         # already reconciles this: it drives zig as the C/archive toolchain
         # with the target-triple translation cc-rs's own flag needs.
         run: |
-          cargo build --release --target aarch64-unknown-linux-gnu -p gossamer-runtime
-          cargo zigbuild --release --target aarch64-unknown-linux-musl -p gossamer-runtime
+          scripts/build-runtime-archive.sh aarch64-unknown-linux-gnu
+          scripts/build-runtime-archive.sh aarch64-unknown-linux-musl zigbuild
       - name: Build gos
         run: cargo build --bin gos
       - name: Cross build + QEMU diff against the VM
@@ -666,7 +666,7 @@ jobs:
         # `CC=zig cc` doesn't work and `cargo zigbuild` is used instead).
         run: |
           for t in aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
-            cargo zigbuild --release --target "$t" -p gossamer-runtime
+            scripts/build-runtime-archive.sh "$t" zigbuild
           done
           cargo build --bin gos
       - name: Cross build the fixtures (both targets)
@@ -721,7 +721,7 @@ jobs:
         # system compiler doesn't ship, and zig bundles one.
         run: |
           for t in aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
-            cargo zigbuild --release --target "$t" -p gossamer-runtime
+            scripts/build-runtime-archive.sh "$t" zigbuild
           done
           cargo build --bin gos
       - name: Cross build the fixtures (both targets)

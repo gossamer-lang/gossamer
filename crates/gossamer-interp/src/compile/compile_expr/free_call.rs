@@ -448,17 +448,13 @@ impl<'tcx> FnBuilder<'tcx> {
                     dst: slot,
                     src: *arg_reg,
                 });
-            } else if is_path_expr(&args[i])
-                && (self.expr_is_map(&args[i])
-                    || self.expr_is_hashset(&args[i])
-                    || self.expr_is_slot_container(&args[i])
-                    // A struct or tuple carrying a container field shares
-                    // that field's storage through a plain register copy, so
-                    // the callee's value takes a clone the way a bare
-                    // container argument does - which is what the compiled
-                    // tiers give an aggregate argument through their
-                    // struct-copy retain.
-                    || self.expr_is_aggregate_with_container(&args[i]))
+            } else if
+            // A binding, a field, or an element names storage the caller
+            // keeps, and a container or a struct carrying one shares that
+            // storage through a plain register copy, so the callee's value
+            // takes a clone - which is what the compiled tiers give an
+            // aggregate argument through their struct-copy retain.
+            self.value_needs_table_copy(&args[i])
                 // A callee that only reads the container, and lets nothing
                 // derived from it outlive the call, sees the caller's storage:
                 // copying it would be unobservable, and its cost is the
@@ -649,9 +645,13 @@ impl<'tcx> FnBuilder<'tcx> {
             Some(name) => self
                 .lookup_local(name)
                 .is_some_and(|tr| tr.kind == RegKind::Value && tr.reg == reg),
+            // A field or element read answers a register of its own whose
+            // tables the container still holds, so it is handed over only
+            // when it carries none.
             None => {
                 !matches!(arg.kind, HirExprKind::Path { .. })
                     && self.value_consumable_here(arg)
+                    && !self.value_needs_table_copy(arg)
                     && !self.reg_is_bound_local(reg)
                     && !self.capture_cells.iter().any(|&(home, _)| home == reg)
             }

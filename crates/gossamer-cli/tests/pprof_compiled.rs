@@ -47,11 +47,16 @@ fn is_executable(p: &Path) -> bool {
 }
 
 fn build_native(src: &Path, release: bool, scratch: &Path) -> PathBuf {
+    build_native_with(src, release, scratch, &[])
+}
+
+fn build_native_with(src: &Path, release: bool, scratch: &Path, flags: &[&str]) -> PathBuf {
     let mut cmd = Command::new(gos_bin());
     cmd.arg("build");
     if release {
         cmd.arg("--release");
     }
+    cmd.args(flags);
     cmd.arg("--out-dir").arg(scratch).arg(src);
     let out = cmd.output().expect("spawn gos build");
     assert!(
@@ -133,16 +138,17 @@ fn pprof_profiles_render_the_same_shape_on_every_tier() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// A heap profile of a native binary carries sampled allocation stacks, not
-/// just the format header.
+/// A heap profile of a native binary built with `--frame-pointers` carries
+/// sampled allocation stacks, not just the format header.
 ///
 /// The sampler reaches the allocating code by following the frame-pointer
 /// chain out of the global allocator. The runtime shims it climbs through
-/// are built with `force-frame-pointers`; without that the chain breaks at
-/// the first shim, every walk records nothing, and `heap_profile` renders a
-/// lone header - which is what a header-only assertion accepts. The
-/// recorder owns the innermost link, so a stack of one frame is what a
-/// severed chain also produces: the depth is what proves the walk climbed.
+/// are built with `force-frame-pointers` under that flag; without it the
+/// chain breaks at the first shim, every walk records nothing, and
+/// `heap_profile` renders a lone header - which is what a header-only
+/// assertion accepts. The recorder owns the innermost link, so a stack of one
+/// frame is what a severed chain also produces: the depth is what proves the
+/// walk climbed.
 #[test]
 fn a_native_heap_profile_carries_allocation_stacks() {
     let dir = fresh_dir("heap");
@@ -154,8 +160,12 @@ fn a_native_heap_profile_carries_allocation_stacks() {
 
     let out_dir = dir.join("release");
     fs::create_dir_all(&out_dir).expect("create out dir");
-    let bin = build_native(&src, true, &out_dir);
+    let bin = build_native_with(&src, true, &out_dir, &["--frame-pointers"]);
     let out = stdout_of(Command::new(&bin));
+    assert!(
+        out.contains("noted=false"),
+        "a runtime with frame pointers gives whole stacks, with no note; got:\n{out}"
+    );
 
     let frames: usize = out
         .lines()
@@ -175,6 +185,29 @@ fn a_native_heap_profile_carries_allocation_stacks() {
     assert!(
         deepest > 1,
         "the walk climbs past the frame record the recorder owns; got:\n{out}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A native binary built without `--frame-pointers` says in its profiles that
+/// their stacks end at the runtime, and how to get whole ones.
+#[test]
+fn a_native_heap_profile_without_frame_pointers_says_how_to_get_them() {
+    let dir = fresh_dir("heap-note");
+    let src = dir.join("heap.gos");
+    fs::File::create(&src)
+        .expect("create heap probe")
+        .write_all(HEAP_PROBE.as_bytes())
+        .expect("write heap probe");
+
+    let out_dir = dir.join("release");
+    fs::create_dir_all(&out_dir).expect("create out dir");
+    let bin = build_native(&src, true, &out_dir);
+    let out = stdout_of(Command::new(&bin));
+    assert!(
+        out.contains("noted=true"),
+        "a profile of a runtime without frame pointers carries the note; got:\n{out}"
     );
 
     let _ = fs::remove_dir_all(&dir);
@@ -221,6 +254,7 @@ fn main() {
         }
         println("frames={}", frames)
         println("deepest={}", deepest)
+        println("noted={}", p.contains("gos build --frame-pointers"))
     }
 }
 "#;

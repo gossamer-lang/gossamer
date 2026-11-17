@@ -72,7 +72,7 @@ pub use builtin_traits::{
 };
 pub use capture_writes::{CaptureWriteDiagnostic, CaptureWriteKind, check_capture_writes};
 pub use checker::{
-    STDLIB_TRAIT_NAMES, core_type_accepts_method, core_type_declares_method,
+    HANDLE_SENTINEL_SPAN, STDLIB_TRAIT_NAMES, core_type_accepts_method, core_type_declares_method,
     is_array_sequence_method, is_btree_map_method, is_btree_set_method,
     is_collection_traversal_method, is_free_call_only_traversal, is_iterator_method, is_map_method,
     is_set_method, is_slice_sequence_method, is_tuple_method, is_tuple_rejected_method,
