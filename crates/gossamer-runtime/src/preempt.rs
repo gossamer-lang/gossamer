@@ -84,38 +84,42 @@ pub fn request_yield_all() {
     PREEMPT_REQUESTED.store(1, Ordering::Release);
 }
 
-/// Whether each worker times its own CPU use (Linux, FreeBSD): a per-thread
-/// timer fires after a slice of CPU and asks only that worker to yield, so the
-/// watchdog has no running goroutine to time. Elsewhere the watchdog times
-/// runs on the wall clock.
-pub const CPU_TIME_SLICES: bool = cfg!(all(
-    any(target_os = "linux", target_os = "freebsd"),
-    not(miri)
-));
+/// Whether every worker times its own CPU use: on Linux a per-thread timer
+/// fires after a slice of CPU and asks only that worker to yield, so the
+/// watchdog has no running goroutine to time. Elsewhere, and from the moment
+/// any worker's timer is refused, the watchdog times runs on the wall clock.
+/// FreeBSD accepts timers on wall clocks only, so it is "elsewhere".
+static CPU_TIME_SLICES: AtomicBool = AtomicBool::new(cfg!(all(target_os = "linux", not(miri))));
+
+/// Whether every worker's slice timer is timing its goroutines, leaving the
+/// watchdog no running goroutine to time.
+pub fn cpu_time_slices() -> bool {
+    CPU_TIME_SLICES.load(Ordering::Acquire)
+}
 
 /// The CPU a goroutine may run before its worker's slice timer asks it to
 /// yield, matching the watchdog's wall-clock threshold elsewhere.
-#[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
+#[cfg(all(target_os = "linux", not(miri)))]
 const SLICE_NANOS: libc::c_long = 10_000_000;
 
-/// `sigev_notify` for a signal to one thread: 4 in the Linux and FreeBSD
-/// kernel ABIs, which some `libc` releases leave out for musl.
-#[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
+/// `sigev_notify` for a signal to one thread: 4 in the Linux kernel ABI,
+/// which some `libc` releases leave out for musl.
+#[cfg(all(target_os = "linux", not(miri)))]
 const SIGEV_THREAD_ID: libc::c_int = 4;
 
 /// A timer on the calling thread's CPU clock that delivers `SIGURG` to that
 /// thread at every slice of CPU it uses. The clock stands still while the
 /// thread is parked, so the timer is armed once for the thread's life and a
 /// park or resume costs no system call.
-#[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
+#[cfg(all(target_os = "linux", not(miri)))]
 pub struct SliceTimer {
     id: libc::timer_t,
 }
 
-#[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
+#[cfg(all(target_os = "linux", not(miri)))]
 impl SliceTimer {
     /// An armed timer for the calling thread, or `None` when the kernel
-    /// refuses one, which leaves the thread to cooperative yields alone.
+    /// refuses one, which hands the timing of every worker to the watchdog.
     #[must_use]
     pub fn for_this_thread() -> Option<Self> {
         install_slice_handler();
@@ -131,6 +135,7 @@ impl SliceTimer {
             libc::timer_create(libc::CLOCK_THREAD_CPUTIME_ID, &raw mut event, &raw mut id)
         };
         if rc != 0 {
+            CPU_TIME_SLICES.store(false, Ordering::Release);
             return None;
         }
         let every = libc::timespec {
@@ -147,7 +152,7 @@ impl SliceTimer {
     }
 }
 
-#[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
+#[cfg(all(target_os = "linux", not(miri)))]
 impl Drop for SliceTimer {
     fn drop(&mut self) {
         // SAFETY: `self.id` came from `timer_create` and is deleted once.
@@ -162,15 +167,8 @@ fn this_thread_id() -> libc::c_int {
     unsafe { libc::gettid() }
 }
 
-/// The kernel id of the calling thread, which `SIGEV_THREAD_ID` names.
-#[cfg(all(target_os = "freebsd", not(miri)))]
-fn this_thread_id() -> libc::lwpid_t {
-    // SAFETY: `pthread_getthreadid_np` takes nothing and cannot fail.
-    unsafe { libc::pthread_getthreadid_np() }
-}
-
 /// Installs, once, the `SIGURG` handler a slice timer delivers to.
-#[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
+#[cfg(all(target_os = "linux", not(miri)))]
 fn install_slice_handler() {
     static INSTALLED: std::sync::Once = std::sync::Once::new();
     INSTALLED.call_once(|| {
@@ -192,7 +190,7 @@ fn install_slice_handler() {
 /// Asks the running goroutine to yield at its next safepoint. Runs in signal
 /// context: it only stores atomics, and the thread-local it reaches is
 /// `const`-initialised with no destructor, so no lazy setup runs here.
-#[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
+#[cfg(all(target_os = "linux", not(miri)))]
 extern "C" fn on_slice_expired(_signal: libc::c_int) {
     LOCAL_YIELD.with(|flag| flag.store(true, Ordering::Release));
     PREEMPT_REQUESTED.store(1, Ordering::Release);
