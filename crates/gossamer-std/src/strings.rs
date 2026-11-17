@@ -6,13 +6,17 @@
 /// trailing empties), mirroring Rust's `str::split`.
 #[must_use]
 pub fn split(text: &str, delimiter: &str) -> Vec<String> {
-    text.split(delimiter).map(str::to_string).collect()
+    gossamer_core::text::split_pieces(text, delimiter)
+        .map(str::to_string)
+        .collect()
 }
 
 /// Splits `text` into at most `n` parts on `delimiter`.
 #[must_use]
 pub fn splitn(text: &str, n: usize, delimiter: &str) -> Vec<String> {
-    text.splitn(n, delimiter).map(str::to_string).collect()
+    gossamer_core::text::splitn_pieces(text, n, delimiter)
+        .map(str::to_string)
+        .collect()
 }
 
 /// Splits on ASCII whitespace, dropping empty segments.

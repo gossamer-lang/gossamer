@@ -95,6 +95,8 @@ pub fn lower_source_file(
     // any other.
     crate::serde::generate_serde_bodies(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
     crate::carrier::desugar_carrier_combinators(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
+    // After the serde bodies, so the fields their walks read count as read.
+    crate::dir_listing::drop_unread_dir_metadata(&mut program, lowerer.tcx);
     crate::par::desugar_parallel_adapters(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
     crate::fuse::fuse_iter_pipelines(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
     // After fusing, so a pipeline spliced into a loop writes its bindings

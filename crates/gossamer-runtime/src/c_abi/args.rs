@@ -261,19 +261,6 @@ fn runtime_init() {
         unsafe {
             libc::signal(libc::SIGPIPE, libc::SIG_IGN);
         }
-        // Pre-warm Rust's thread machinery. The first
-        // `std::thread::spawn` call lazily initialises the
-        // thread name table, parking primitives, and platform
-        // backend. Doing it once here, single-threaded, removes a
-        // race that under the HTTP server's accept-and-spawn-
-        // burst pattern triggered glibc heap corruption when many
-        // threads exited before their TLS destructors had been
-        // assigned slot indices.
-        let handle = std::thread::Builder::new()
-            .name("gos-rt-init".to_string())
-            .spawn(|| {})
-            .expect("spawn rt init thread");
-        let _ = handle.join();
     });
 }
 
@@ -287,18 +274,11 @@ fn runtime_init() {
         // exception handler). See the unix arm for why the AOT `@main`
         // entry needs this that rustc's `lang_start` would otherwise provide.
         crate::stack_guard::install_stack_guard();
-        let handle = std::thread::Builder::new()
-            .name("gos-rt-init".to_string())
-            .spawn(|| {})
-            .expect("spawn rt init thread");
-        let _ = handle.join();
     });
 }
 
-// wasm32-unknown-unknown has no threads, so the thread-machinery
-// pre-warm above is both impossible and unnecessary: the runtime is
-// single-threaded under the cooperative scheduler. Configure the
-// allocator and stop.
+// wasm32-unknown-unknown has no stack guard or signals to install: the
+// runtime is single-threaded under the cooperative scheduler.
 #[cfg(target_arch = "wasm32")]
 fn runtime_init() {
     use std::sync::Once;
@@ -581,11 +561,11 @@ fn dir_info(entry: &crate::dir_scan::ScannedEntry) -> DirInfoData {
     }
 }
 
-fn list_dir_data(path: &str) -> Result<Vec<DirInfoData>, std::io::Error> {
-    Ok(crate::dir_scan::scan_dir(&decode_os_path(path))?
-        .iter()
-        .map(dir_info)
-        .collect())
+fn list_dir_data(
+    path: &str,
+    scan: fn(&std::path::Path) -> std::io::Result<Vec<crate::dir_scan::ScannedEntry>>,
+) -> Result<Vec<DirInfoData>, std::io::Error> {
+    Ok(scan(&decode_os_path(path))?.iter().map(dir_info).collect())
 }
 
 /// Slot children of one `(name, path, is_file, is_dir, is_symlink, size,
@@ -624,6 +604,28 @@ fn dir_entry_words(entry: &DirInfoData) -> [i64; 7] {
 /// each tuple into a `DirInfo` struct.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_read_dir_raw(path: *const c_char) -> i128 {
+    // SAFETY: `path` is this shim's argument, as `read_dir_leaf` requires.
+    unsafe { read_dir_leaf(path, crate::dir_scan::scan_dir) }
+}
+
+/// [`gos_rt_fs_read_dir_raw`] for a program that never reads an entry's
+/// `size` or `modified_ms`: both are `0`, and no entry whose kind its
+/// directory record states is stat-ed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_fs_read_dir_names_raw(path: *const c_char) -> i128 {
+    // SAFETY: `path` is this shim's argument, as `read_dir_leaf` requires.
+    unsafe { read_dir_leaf(path, crate::dir_scan::scan_dir_kinds) }
+}
+
+/// The `read_dir` leaves' shared body, listing through `scan`.
+///
+/// # Safety
+/// `path` is a String argument from compiled code, null or a live string body
+/// for the whole call.
+unsafe fn read_dir_leaf(
+    path: *const c_char,
+    scan: fn(&std::path::Path) -> std::io::Result<Vec<crate::dir_scan::ScannedEntry>>,
+) -> i128 {
     ffi_entry!({
         let p = if path.is_null() {
             ".".to_string()
@@ -631,7 +633,7 @@ pub unsafe extern "C" fn gos_rt_fs_read_dir_raw(path: *const c_char) -> i128 {
             // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(path) }
         };
-        match list_dir_data(&p) {
+        match list_dir_data(&p, scan) {
             Ok(entries) => {
                 let out = gos_rt_vec_with_capacity(56, entries.len() as i64);
                 for entry in &entries {
@@ -1164,10 +1166,10 @@ mod args_tests {
         std::fs::write(child.join("payload"), b"x").unwrap();
 
         let root_text = root.to_str().unwrap();
-        let first = list_dir_data(root_text).unwrap();
+        let first = list_dir_data(root_text, crate::dir_scan::scan_dir).unwrap();
         assert_eq!(first.len(), 1);
         assert!(first[0].path.starts_with(ENCODED_PATH_PREFIX));
-        let nested = list_dir_data(&first[0].path).unwrap();
+        let nested = list_dir_data(&first[0].path, crate::dir_scan::scan_dir).unwrap();
         assert_eq!(nested.len(), 1);
 
         std::fs::remove_dir_all(&root).unwrap();

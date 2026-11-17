@@ -150,7 +150,7 @@ pub unsafe extern "C" fn gos_rt_mutex_unlock(m: *mut GosMutex) {
         let next = state.parked.pop_front();
         drop(state);
         if let Some(gid) = next {
-            crate::sched_global::scheduler().unpark(gid);
+            crate::sched_global::unpark(gid);
         }
         m.released.notify_one();
     });

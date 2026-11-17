@@ -1,23 +1,16 @@
-//! Async preemption + GC safepoint plumbing.
+//! Cooperative preemption + GC safepoint plumbing.
 //!
-//! This module owns the mechanism that lets the scheduler / GC
-//! interrupt a CPU-bound goroutine so other goroutines can run and
-//! the collector can mark the world. Two cooperating pieces:
+//! A global atomic *preempt phase* counter lets the scheduler and the
+//! collector ask a CPU-bound goroutine to reach a safepoint. Application code
+//! polls [`should_yield`] at safepoints (function entry, loop back-edges,
+//! allocation sites). If it returns `true`, the caller jumps to its yield
+//! handler - interpreter calls into the scheduler, compiled code calls
+//! [`gos_rt_preempt_check`].
 //!
-//! 1. A global atomic *preempt phase* counter. Application code
-//!    polls [`should_yield`] at safepoints (function entry, loop
-//!    back-edges, allocation sites). If it returns `true`, the
-//!    caller jumps to its yield handler - interpreter calls into
-//!    the scheduler, compiled code calls [`gos_rt_preempt_check`].
-//!
-//! 2. A real OS signal (`SIGURG` on Unix; a thread-targeted APC on
-//!    Windows in a future iteration) installed by [`init`]. When the
-//!    scheduler watchdog decides a worker has been running too long,
-//!    it raises the signal at that worker's thread; the handler
-//!    flips the atomic and the next safepoint poll observes it.
-//!
-//! The signal handler itself does only async-signal-safe work
-//! (atomic store) - no allocations, no locks.
+//! Preemption is cooperative only. A loop nest that is counted all the way
+//! down and calls none of the program's functions has no poll and runs to
+//! completion, as the language documents; no OS signal is sent, since a
+//! signal reaching such a loop finds nothing that reads it.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
@@ -36,7 +29,7 @@ static GLOBAL_PHASE: AtomicU64 = AtomicU64::new(0);
 #[unsafe(export_name = "gos_rt_preempt_requested")]
 pub static PREEMPT_REQUESTED: AtomicU8 = AtomicU8::new(0);
 
-// Per-thread "yield requested" flag set by the SIGURG handler.
+// Per-thread "yield requested" flag set by `request_yield_self`.
 // Stored thread-locally so the safepoint poll is a single relaxed
 // load with no cache-line contention.
 thread_local! {
@@ -77,70 +70,9 @@ fn init_preempt_stats() {
 #[cfg(not(unix))]
 fn init_preempt_stats() {}
 
-/// Initialises the SIGURG handler. Idempotent.
+/// Arms the preemption statistics `GOS_PREEMPT_STATS` asks for. Idempotent.
 pub fn init() {
     init_preempt_stats();
-    // Miri cannot model sigaction or a signal-delivery thread. The scheduler
-    // remains cooperative there: safepoint polls still observe explicit
-    // `request_yield_*` calls, while OS-signal preemption is exercised by the
-    // native and sanitizer suites.
-    install_signal_handler();
-}
-
-#[cfg(all(unix, not(miri)))]
-static SIGNAL_THREAD: parking_lot::Mutex<
-    Option<(signal_hook::iterator::Handle, std::thread::JoinHandle<()>)>,
-> = parking_lot::Mutex::new(None);
-
-/// Stops the signal dispatcher after native workers have joined.
-// Only the native scheduler's shutdown calls this; wasm32 has no workers.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn shutdown_idle() {
-    #[cfg(all(unix, not(miri)))]
-    if let Some((signals, thread)) = SIGNAL_THREAD.lock().take() {
-        signals.close();
-        let _ = thread.join();
-    }
-}
-
-#[cfg(all(unix, not(miri)))]
-fn install_signal_handler() {
-    use signal_hook::iterator::Signals;
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let Ok(mut signals) = Signals::new([signal_hook::consts::SIGURG]) else {
-            return;
-        };
-        let handle = signals.handle();
-        if let Ok(thread) = std::thread::Builder::new()
-            .name("gos-preempt".to_string())
-            .spawn(move || {
-                for _sig in signals.forever() {
-                    request_yield_all();
-                }
-            })
-        {
-            *SIGNAL_THREAD.lock() = Some((handle, thread));
-        }
-    });
-}
-
-#[cfg(all(windows, not(miri)))]
-fn install_signal_handler() {
-    // Windows preemption via QueueUserAPC. No
-    // signal-style dispatcher thread is needed because APCs deliver
-    // directly to the targeted worker thread; the APC routine
-    // simply calls `request_yield_all`, mirroring the Unix SIGURG
-    // handler. Initialisation is a no-op - the work happens at
-    // `signal_thread_sigurg`-equivalent time inside
-    // [`signal_thread_sigurg`].
-}
-
-#[cfg(any(miri, not(any(unix, windows))))]
-fn install_signal_handler() {
-    // Other platforms: cooperative-only path still works; targeted
-    // preemption is a no-op.
 }
 
 /// Signals every active worker to reach a safepoint. The actual
@@ -152,9 +84,133 @@ pub fn request_yield_all() {
     PREEMPT_REQUESTED.store(1, Ordering::Release);
 }
 
-/// Asks the calling thread to reach a safepoint at its next
-/// opportunity. Hook used by the scheduler watchdog when it sends
-/// SIGURG to a specific worker's thread.
+/// Whether each worker times its own CPU use (Linux, FreeBSD): a per-thread
+/// timer fires after a slice of CPU and asks only that worker to yield, so the
+/// watchdog has no running goroutine to time. Elsewhere the watchdog times
+/// runs on the wall clock.
+pub const CPU_TIME_SLICES: bool = cfg!(all(
+    any(target_os = "linux", target_os = "freebsd"),
+    not(miri)
+));
+
+/// The CPU a goroutine may run before its worker's slice timer asks it to
+/// yield, matching the watchdog's wall-clock threshold elsewhere.
+#[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
+const SLICE_NANOS: libc::c_long = 10_000_000;
+
+/// `sigev_notify` for a signal to one thread: 4 in the Linux and FreeBSD
+/// kernel ABIs, which some `libc` releases leave out for musl.
+#[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
+const SIGEV_THREAD_ID: libc::c_int = 4;
+
+/// A timer on the calling thread's CPU clock that delivers `SIGURG` to that
+/// thread at every slice it runs, armed while the worker runs goroutines.
+#[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
+pub struct SliceTimer {
+    id: libc::timer_t,
+}
+
+#[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
+impl SliceTimer {
+    /// A disarmed timer for the calling thread, or `None` when the kernel
+    /// refuses one, which leaves the thread to cooperative yields alone.
+    #[must_use]
+    pub fn for_this_thread() -> Option<Self> {
+        install_slice_handler();
+        // SAFETY: a zeroed `sigevent` is a valid starting value; the fields
+        // this call reads are set below.
+        let mut event: libc::sigevent = unsafe { std::mem::zeroed() };
+        event.sigev_notify = SIGEV_THREAD_ID;
+        event.sigev_signo = libc::SIGURG;
+        event.sigev_notify_thread_id = this_thread_id();
+        let mut id: libc::timer_t = std::ptr::null_mut();
+        // SAFETY: `event` and `id` are live locals the call reads and writes.
+        let rc = unsafe {
+            libc::timer_create(libc::CLOCK_THREAD_CPUTIME_ID, &raw mut event, &raw mut id)
+        };
+        (rc == 0).then_some(Self { id })
+    }
+
+    /// Fires at every slice of CPU the thread runs from now on.
+    pub fn arm(&self) {
+        let slice = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: SLICE_NANOS,
+        };
+        self.set(slice);
+    }
+
+    /// Stops the timer while the thread parks.
+    pub fn disarm(&self) {
+        self.set(libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        });
+    }
+
+    fn set(&self, every: libc::timespec) {
+        let spec = libc::itimerspec {
+            it_interval: every,
+            it_value: every,
+        };
+        // SAFETY: `self.id` is a timer this thread created and has not
+        // deleted, and `spec` outlives the call.
+        unsafe { libc::timer_settime(self.id, 0, &raw const spec, std::ptr::null_mut()) };
+    }
+}
+
+#[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
+impl Drop for SliceTimer {
+    fn drop(&mut self) {
+        // SAFETY: `self.id` came from `timer_create` and is deleted once.
+        unsafe { libc::timer_delete(self.id) };
+    }
+}
+
+/// The kernel id of the calling thread, which `SIGEV_THREAD_ID` names.
+#[cfg(all(target_os = "linux", not(miri)))]
+fn this_thread_id() -> libc::c_int {
+    // SAFETY: `gettid` takes nothing and cannot fail.
+    unsafe { libc::gettid() }
+}
+
+/// The kernel id of the calling thread, which `SIGEV_THREAD_ID` names.
+#[cfg(all(target_os = "freebsd", not(miri)))]
+fn this_thread_id() -> libc::lwpid_t {
+    // SAFETY: `pthread_getthreadid_np` takes nothing and cannot fail.
+    unsafe { libc::pthread_getthreadid_np() }
+}
+
+/// Installs, once, the `SIGURG` handler a slice timer delivers to.
+#[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
+fn install_slice_handler() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        // SAFETY: a zeroed `sigaction` is a valid starting value; the
+        // handler, flags, and mask are set below.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = on_slice_expired as extern "C" fn(libc::c_int) as usize;
+        // Restarted calls keep a slice from surfacing as EINTR, and the
+        // alternate stack keeps a handler on a goroutine stack's guard
+        // margin from faulting.
+        action.sa_flags = libc::SA_RESTART | libc::SA_ONSTACK;
+        // SAFETY: `action.sa_mask` is a live field of `action`.
+        unsafe { libc::sigemptyset(&raw mut action.sa_mask) };
+        // SAFETY: `action` is fully set, and the handler only stores atomics.
+        unsafe { libc::sigaction(libc::SIGURG, &raw const action, std::ptr::null_mut()) };
+    });
+}
+
+/// Asks the running goroutine to yield at its next safepoint. Runs in signal
+/// context: it only stores atomics, and the thread-local it reaches is
+/// `const`-initialised with no destructor, so no lazy setup runs here.
+#[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
+extern "C" fn on_slice_expired(_signal: libc::c_int) {
+    LOCAL_YIELD.with(|flag| flag.store(true, Ordering::Release));
+    PREEMPT_REQUESTED.store(1, Ordering::Release);
+}
+
+/// Asks the calling thread to reach a safepoint at its next opportunity.
 pub fn request_yield_self() {
     LOCAL_YIELD.with(|f| f.store(true, Ordering::Release));
     GLOBAL_PHASE.fetch_add(1, Ordering::AcqRel);
@@ -266,173 +322,10 @@ pub fn pending_yield_pressure() -> u32 {
 
 static PENDING_PRESSURE: AtomicU32 = AtomicU32::new(0);
 
-/// Bumps the pending-pressure counter; called by the scheduler when
-/// it raises a SIGURG against a worker.
+/// Bumps the pending-pressure counter; called by the scheduler when it asks
+/// an overrunning worker to reach a safepoint.
 pub fn bump_pressure() {
     PENDING_PRESSURE.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Handles [`current_thread_handle`] gave out and [`release_thread_handle`]
-/// has not taken back. A thread releases its handle before it exits, and
-/// [`signal_thread_sigurg`] signals only a handle listed here while holding
-/// this lock, so no signal reaches a thread that has exited.
-static LIVE_THREAD_HANDLES: parking_lot::Mutex<Vec<u64>> = parking_lot::Mutex::new(Vec::new());
-
-/// Returns an opaque handle for the calling OS thread suitable for
-/// later use with [`signal_thread_sigurg`], which the thread gives back
-/// with [`release_thread_handle`] before it exits. On Unix this is the
-/// `pthread_t` of the calling thread cast through `u64`. On other
-/// platforms it returns `0`; the targeted preemption path becomes a
-/// no-op and the cooperative phase counter does the work alone.
-#[must_use]
-pub fn current_thread_handle() -> u64 {
-    let handle = os_thread_handle();
-    if handle != 0 {
-        LIVE_THREAD_HANDLES.lock().push(handle);
-    }
-    handle
-}
-
-fn os_thread_handle() -> u64 {
-    #[cfg(unix)]
-    {
-        // SAFETY: `pthread_self` is async-signal-safe and has no
-        // failure modes. Treating the opaque `pthread_t` as a u64
-        // is the standard idiom for parking it in a non-FFI field.
-        let raw = unsafe { libc::pthread_self() };
-        raw as u64
-    }
-    #[cfg(windows)]
-    {
-        // use a duplicated Win32 thread handle
-        // with THREAD_SET_CONTEXT access so the scheduler can later
-        // queue an APC. The duplicated handle is opened against the
-        // current thread (`GetCurrentThread` returns a pseudo-handle
-        // that's only valid in-process; `DuplicateHandle` upgrades
-        // it to a real handle with stable identity).
-        use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE};
-        use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread};
-        // The duplicated handle is owned here; the caller eventually invokes
-        // `release_thread_handle(h)` so the kernel object does not outlive
-        // the thread, as the Unix path's `pthread_t` does after a join.
-        let mut dup: HANDLE = std::ptr::null_mut();
-        // SAFETY: `GetCurrentProcess` takes nothing and answers a pseudo-handle.
-        let proc_handle = unsafe { GetCurrentProcess() };
-        // SAFETY: `GetCurrentThread` takes nothing and answers a pseudo-handle.
-        let thread_handle = unsafe { GetCurrentThread() };
-        // SAFETY: both pseudo-handles name this process and thread, and `dup` is a local the
-        // call writes the real handle into.
-        let ok = unsafe {
-            DuplicateHandle(
-                proc_handle,
-                thread_handle,
-                proc_handle,
-                &raw mut dup,
-                0,
-                0,
-                DUPLICATE_SAME_ACCESS,
-            )
-        };
-        if ok == 0 || dup.is_null() {
-            return 0;
-        }
-        dup as u64
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        0
-    }
-}
-
-/// Takes back a handle [`current_thread_handle`] gave out, which its thread
-/// does before it exits: afterwards [`signal_thread_sigurg`] ignores it. On
-/// Windows this also closes the duplicated thread handle; the Unix
-/// `pthread_t` is not refcounted. A handle that is not live is ignored.
-pub fn release_thread_handle(handle: u64) {
-    let mut live = LIVE_THREAD_HANDLES.lock();
-    let Some(at) = live.iter().position(|&h| h == handle) else {
-        return;
-    };
-    live.swap_remove(at);
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-        // SAFETY: `handle` was a live `DuplicateHandle` output, and taking
-        // it out of the list under its lock makes this its one close.
-        let _ = unsafe { CloseHandle(handle as HANDLE) };
-    }
-}
-
-/// Sends `SIGURG` to the OS thread identified by `handle`. Used by
-/// the scheduler watchdog when cooperative preemption alone has not
-/// landed (worker has not hit a safepoint inside its budget). The
-/// SIGURG handler installed by [`init`] flips the global phase, and -
-/// crucially - the kernel-level signal delivery interrupts any
-/// blocking syscall the worker is currently inside.
-///
-/// Returns `true` if the signal was issued, `false` if the platform
-/// has no targeted-preempt path or the handle is the null marker.
-///
-/// A handle that is not live (never given out, or already released) is not
-/// signalled.
-#[must_use]
-pub fn signal_thread_sigurg(handle: u64) -> bool {
-    if handle == 0 {
-        return false;
-    }
-    // Held across the signal, so the thread cannot release its handle and
-    // exit in between.
-    let live = LIVE_THREAD_HANDLES.lock();
-    if !live.contains(&handle) {
-        return false;
-    }
-    #[cfg(miri)]
-    {
-        // Miri cannot model pthread_kill/APCs. Keep the cooperative path
-        // observable to the scheduler tests without issuing an OS signal.
-        let _ = handle;
-        request_yield_all();
-        return false;
-    }
-    #[cfg(all(unix, not(miri)))]
-    {
-        // SAFETY: `handle` is a live thread's `pthread_t`: it is listed in
-        // `LIVE_THREAD_HANDLES`, whose lock is held, and a thread releases
-        // its handle before exiting. The SIGURG handler only does atomic
-        // stores.
-        let rc = unsafe { libc::pthread_kill(handle as libc::pthread_t, libc::SIGURG) };
-        rc == 0
-    }
-    #[cfg(all(windows, not(miri)))]
-    {
-        // queue a user-mode APC into the
-        // targeted worker thread. The APC routine bumps the
-        // global preempt phase, mirroring the Unix SIGURG handler.
-        // APCs only fire at alertable wait points by default - for
-        // tight CPU loops the cooperative `gos_rt_preempt_check`
-        // emitted by codegen still handles preemption. The APC is
-        // the mechanism that handles blocking syscalls; without
-        // it, a worker stuck in `WaitForSingleObject` would never
-        // observe a cooperative request.
-        use windows_sys::Win32::Foundation::HANDLE;
-        use windows_sys::Win32::System::Threading::QueueUserAPC;
-        // SAFETY: `apc_callback` is `extern "system" fn(usize)` (the APC
-        // ABI), and `handle` is a live duplicated thread handle with
-        // QUEUE_USER_APC access: it is listed in `LIVE_THREAD_HANDLES`, whose
-        // lock is held.
-        let rc = unsafe { QueueUserAPC(Some(apc_callback), handle as HANDLE, 0) };
-        rc != 0
-    }
-    #[cfg(all(not(miri), not(any(unix, windows))))]
-    {
-        false
-    }
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn apc_callback(_arg: usize) {
-    // Async-signal-safe-ish: only atomic stores happen here.
-    request_yield_all();
 }
 
 /// Decrements pending pressure. Called by the safepoint handler when
@@ -492,41 +385,6 @@ mod tests {
         let _ = should_yield();
         request_yield_self();
         assert!(should_yield());
-    }
-
-    #[test]
-    #[cfg(unix)]
-    #[cfg_attr(miri, ignore)] // installs a SIGURG handler via sigaction; Miri has no signals
-    fn signal_thread_sigurg_round_trips() {
-        let _guard = TEST_LOCK.lock();
-        // Initialise the SIGURG dispatcher first so the kernel does
-        // not raise the default action (which is to ignore SIGURG;
-        // either way is fine, but the dispatcher path is what we
-        // actually want to exercise).
-        init();
-        let handle = current_thread_handle();
-        assert!(handle != 0);
-        // Sending to ourselves should succeed; the dispatcher
-        // thread observes the signal and bumps the phase.
-        let baseline = current_phase();
-        assert!(signal_thread_sigurg(handle));
-        // Give the dispatcher a moment to wake.
-        crate::platform::sleep(std::time::Duration::from_millis(50));
-        // The phase should have moved at least once.
-        assert!(current_phase() >= baseline);
-        release_thread_handle(handle);
-        assert!(
-            !signal_thread_sigurg(handle),
-            "a released handle is not signalled"
-        );
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore)] // installs a SIGURG handler via sigaction; Miri has no signals
-    fn signal_thread_sigurg_null_handle_is_noop() {
-        // No global state mutated; runs in parallel with the
-        // serialised tests safely.
-        assert!(!signal_thread_sigurg(0));
     }
 
     #[test]

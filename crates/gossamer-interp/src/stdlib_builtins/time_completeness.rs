@@ -117,6 +117,10 @@ pub(crate) fn install_time_completeness(globals: &mut Vec<(&'static str, Value)>
             ("parse_rfc3339", builtin_time_parse_rfc3339),
             ("__gos_time_location_raw", builtin_time_location_raw),
             (
+                "__gos_time_register_zones_raw",
+                builtin_time_register_zones_raw,
+            ),
+            (
                 "__gos_time_fixed_location_raw",
                 builtin_time_fixed_location_raw,
             ),
@@ -131,6 +135,17 @@ pub(crate) fn install_time_completeness(globals: &mut Vec<(&'static str, Value)>
         ],
         globals,
     );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn builtin_time_register_zones_raw(args: &[Value]) -> RuntimeResult<Value> {
+    gossamer_runtime::c_abi::time::register_zones(args.first().and_then(as_str).unwrap_or(""));
+    Ok(ok_variant(Value::Unit))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn builtin_time_register_zones_raw(_args: &[Value]) -> RuntimeResult<Value> {
+    Ok(ok_variant(Value::Unit))
 }
 
 #[cfg(not(target_arch = "wasm32"))]

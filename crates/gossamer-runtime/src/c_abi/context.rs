@@ -383,7 +383,7 @@ fn cancel_node(root: &Arc<CtxNode>) {
         }
         close_done_chan(&node);
         for gid in std::mem::take(&mut *node.parked_waiters.lock()) {
-            crate::sched_global::scheduler().unpark(gid);
+            crate::sched_global::unpark(gid);
         }
         node.wakers.wake_all();
         let kids: Vec<Weak<CtxNode>> = node.children.lock().values().cloned().collect();

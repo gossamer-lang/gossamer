@@ -631,6 +631,10 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
     // Leaf intrinsics the injected `DirInfo` and `Output` wrappers fold.
     globals.push(("__gos_fs_read_dir_raw", builtin("__gos_fs_read_dir_raw", builtin_fs_read_dir_raw)));
     globals.push((
+        "__gos_fs_read_dir_names_raw",
+        builtin("__gos_fs_read_dir_names_raw", builtin_fs_read_dir_names_raw),
+    ));
+    globals.push((
         "__gos_fs_walk_dir_raw",
         native("__gos_fs_walk_dir_raw", native_fs_walk_dir_raw),
     ));

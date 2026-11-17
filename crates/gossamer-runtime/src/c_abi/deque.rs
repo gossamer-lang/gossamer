@@ -26,10 +26,20 @@ pub struct GosDeque {
     extra_holders: std::sync::atomic::AtomicU32,
 }
 
+/// A deque's operations for the walks over every container kind.
+pub(crate) const DEQUE_OPS: crate::c_abi::kind_ops::KindOps = crate::c_abi::kind_ops::KindOps {
+    // SAFETY: the walks pass a live deque handle (`KindOps`).
+    clone: |handle| unsafe { gos_rt_deque_clone(handle.cast()).cast() },
+    // SAFETY: the walks pass a live deque handle (`KindOps`).
+    free: |handle| unsafe { gos_rt_deque_free(handle.cast()) },
+    mark_shared: None,
+};
+
 /// Boxes a deque over `vec` as a runtime handle, or places it in the
 /// innermost open region, counted by the leak ledger until
 /// [`gos_rt_deque_free`] or the region's pop reclaims it.
 fn deque_handle(vec: *mut GosVec) -> *mut GosDeque {
+    crate::c_abi::kind_ops::register(crate::c_abi::kind_ops::Kind::Deque, DEQUE_OPS);
     crate::c_abi::ledger::deque_inc();
     crate::c_abi::rc::region_alloc_handle(
         GosDeque {

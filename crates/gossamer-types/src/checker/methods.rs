@@ -4452,7 +4452,7 @@ impl TypeChecker<'_> {
                 self.tcx.intern(TyKind::Vec(entry))
             }
             "__gos_fs_metadata_raw" => self.tuple_fs_metadata_ty(),
-            "__gos_fs_read_dir_raw" => {
+            "__gos_fs_read_dir_raw" | "__gos_fs_read_dir_names_raw" => {
                 let entry = self.tuple_dir_entry_ty();
                 self.tcx.intern(TyKind::Vec(entry))
             }
@@ -4466,6 +4466,7 @@ impl TypeChecker<'_> {
                 self.tcx.intern(TyKind::Vec(entry))
             }
             "__gos_time_location_raw" | "__gos_time_fixed_location_raw" => self.tcx.string_ty(),
+            "__gos_time_register_zones_raw" => self.tcx.unit(),
             "__gos_time_civil_raw" => {
                 let i = self.tcx.int_ty(IntTy::I64);
                 self.tcx.intern(TyKind::Tuple(vec![i; 9]))

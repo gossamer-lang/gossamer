@@ -128,8 +128,22 @@ const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 const MI_OPTION_ALLOW_THP: libmimalloc_sys::mi_option_t = 43;
 // `mi_option_os_tag`: the Mach VM tag mimalloc gives the memory it maps on
 // macOS, pinned by value and guarded like the options above.
-#[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+#[cfg(all(
+    any(test, target_os = "macos"),
+    not(any(tsan, miri, fuzzing, target_arch = "wasm32"))
+))]
 const MI_OPTION_OS_TAG: libmimalloc_sys::mi_option_t = 18;
+// `mi_option_arena_reserve`: the address space, in KiB, mimalloc reserves for
+// an arena. Pinned by value and guarded like the options above.
+#[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+const MI_OPTION_ARENA_RESERVE: libmimalloc_sys::mi_option_t = 23;
+/// The first arena's reservation, in KiB: the smallest mimalloc makes, since it
+/// rounds every arena up to the request plus one 32 MiB chunk of headroom.
+/// Each run of eight later arenas reserves twice as much as the run before, so
+/// a large heap still settles in a few dozen arenas, while a small program's
+/// address space stays near what it uses rather than a gibibyte.
+#[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+const FIRST_ARENA_RESERVE_KIB: std::ffi::c_long = 64 * 1024;
 // `VM_MEMORY_APPLICATION_SPECIFIC_1`. mimalloc's default tag, 100, is
 // `VM_MEMORY_IOACCELERATOR`, so `vmmap` and `footprint` would file the heap
 // as graphics memory.
@@ -167,31 +181,41 @@ static TAG_HEAP_BEFORE_MAIN: extern "C" fn() = tag_heap_before_main;
 // orders tests non-deterministically. Snapshotting under the `OnceLock`
 // before the first set makes the guard observe the true defaults regardless
 // of ordering.
-#[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
-static MIMALLOC_OPTION_DEFAULTS: std::sync::OnceLock<(i64, i64, i64, i64)> =
-    std::sync::OnceLock::new();
+#[cfg(all(test, not(any(tsan, miri, fuzzing, target_arch = "wasm32"))))]
+static MIMALLOC_OPTION_DEFAULTS: std::sync::OnceLock<OptionDefaults> = std::sync::OnceLock::new();
+
+/// mimalloc's own defaults for the options the runtime sets.
+#[cfg(all(test, not(any(tsan, miri, fuzzing, target_arch = "wasm32"))))]
+#[derive(Debug, Clone, Copy)]
+struct OptionDefaults {
+    purge_delay: i64,
+    allow_thp: i64,
+    arena_eager_commit: i64,
+    os_tag: i64,
+    arena_reserve: i64,
+}
 
 /// Pristine defaults of the pinned mimalloc options, snapshotted once
 /// before the first `init_process_allocator` call mutates them.
-#[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
-fn mimalloc_option_defaults() -> (i64, i64, i64, i64) {
+#[cfg(all(test, not(any(tsan, miri, fuzzing, target_arch = "wasm32"))))]
+fn mimalloc_option_defaults() -> OptionDefaults {
     *MIMALLOC_OPTION_DEFAULTS.get_or_init(|| {
         // SAFETY: option get is thread-safe; the global allocator is mimalloc
         // in this build, initialised before any code reaches here.
-        unsafe {
-            (
-                widen(libmimalloc_sys::mi_option_get(MI_OPTION_PURGE_DELAY)),
-                widen(libmimalloc_sys::mi_option_get(MI_OPTION_ALLOW_THP)),
-                widen(libmimalloc_sys::mi_option_get(MI_OPTION_ARENA_EAGER_COMMIT)),
-                widen(libmimalloc_sys::mi_option_get(MI_OPTION_OS_TAG)),
-            )
+        let get = |option| widen(unsafe { libmimalloc_sys::mi_option_get(option) });
+        OptionDefaults {
+            purge_delay: get(MI_OPTION_PURGE_DELAY),
+            allow_thp: get(MI_OPTION_ALLOW_THP),
+            arena_eager_commit: get(MI_OPTION_ARENA_EAGER_COMMIT),
+            os_tag: get(MI_OPTION_OS_TAG),
+            arena_reserve: get(MI_OPTION_ARENA_RESERVE),
         }
     })
 }
 
 /// Widens a mimalloc option value to `i64`, whatever width `c_long`
 /// carries on the target (32 bits on LLP64 Windows, 64 elsewhere).
-#[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+#[cfg(all(test, not(any(tsan, miri, fuzzing, target_arch = "wasm32"))))]
 fn widen(value: impl Into<i64>) -> i64 {
     value.into()
 }
@@ -254,6 +278,7 @@ pub fn init_process_allocator() {
         // Capture the pristine defaults before overwriting the options we do
         // tune, so the index-shift guard test can still read them once this
         // has run.
+        #[cfg(test)]
         let _ = mimalloc_option_defaults();
         // A program's static runtime archive brings in only the code it
         // reaches; this keeps the heap-tagging initializer in the link.
@@ -271,6 +296,9 @@ pub fn init_process_allocator() {
             // A deployment that set the option itself keeps its own value.
             if std::env::var_os("MIMALLOC_ARENA_EAGER_COMMIT").is_none() {
                 libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0);
+            }
+            if std::env::var_os("MIMALLOC_ARENA_RESERVE").is_none() {
+                libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_RESERVE, FIRST_ARENA_RESERVE_KIB);
             }
         }
     }
@@ -373,6 +401,7 @@ pub mod comptime_policy;
 pub mod coverage;
 pub mod crc32c;
 pub mod dir_scan;
+pub mod file_read;
 pub mod fs_mode;
 pub mod http_status;
 pub mod listen;
@@ -456,8 +485,20 @@ mod allocator_tests {
     /// allocator.
     #[test]
     fn allocator_option_indices_are_pinned_and_settable() {
-        let (purge_default, thp_default, eager_default, tag_default) =
-            super::mimalloc_option_defaults();
+        let super::OptionDefaults {
+            purge_delay: purge_default,
+            allow_thp: thp_default,
+            arena_eager_commit: eager_default,
+            os_tag: tag_default,
+            arena_reserve: reserve_default,
+        } = super::mimalloc_option_defaults();
+        assert_eq!(
+            reserve_default,
+            1024 * 1024,
+            "mimalloc option 23 default is {reserve_default}, expected the 1 GiB \
+             arena_reserve default (in KiB) - the enum likely shifted; re-verify the \
+             mi_option_arena_reserve index for the current mimalloc version",
+        );
         assert_eq!(
             purge_default, 1000,
             "mimalloc option 15 default is {purge_default}, expected the 1000 ms \
@@ -506,6 +547,11 @@ mod allocator_tests {
         // in a non-tsan build, so it is initialised here.
         let thp = unsafe { libmimalloc_sys::mi_option_get(super::MI_OPTION_ALLOW_THP) };
         assert_eq!(thp, 0, "init_process_allocator must set allow_thp to 0");
+        if std::env::var_os("MIMALLOC_ARENA_RESERVE").is_none() {
+            // SAFETY: option get is thread-safe once the allocator initialised.
+            let reserve = unsafe { libmimalloc_sys::mi_option_get(super::MI_OPTION_ARENA_RESERVE) };
+            assert_eq!(reserve, super::FIRST_ARENA_RESERVE_KIB);
+        }
     }
 
     #[test]

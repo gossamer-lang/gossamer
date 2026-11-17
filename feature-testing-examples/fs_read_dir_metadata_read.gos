@@ -1,0 +1,21 @@
+// `fs::read_dir` in a program that reads entry sizes, directly and through a
+// pattern: the listing keeps each entry's metadata on every tier.
+
+use std::fs
+use std::path
+
+fn main() {
+    let base = fs::temp_dir("gos-names-meta").unwrap()
+    fs::write(path::join(base, "three.txt"), "abc".bytes()).unwrap()
+    fs::write(path::join(base, "five.txt"), "abcde".bytes()).unwrap()
+
+    let mut entries = fs::read_dir(base).unwrap()
+    entries.sort_by_key(|e| e.name)
+    for e in entries {
+        println(f"{e.name} {e.size} stamped={e.modified_ms > 0}")
+    }
+    let fs::DirInfo { name, size, .. } = entries[1]
+    println(f"second: {name} {size}")
+    println(f"total: {entries.map(|e| e.size).sum()}")
+    fs::remove_dir_all(base).unwrap()
+}

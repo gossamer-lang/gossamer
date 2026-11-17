@@ -14,6 +14,7 @@
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
+use kind_ops::{self, Kind};
 
 mod mapped;
 
@@ -1072,24 +1073,24 @@ pub(crate) unsafe fn vec_retain_slot_children(v: *const GosVec, slot: *mut u8) {
             vec_elem_kind::RC_NODE => crate::c_abi::rc::gos_rt_rc_retain(child),
             vec_elem_kind::WEAK => crate::c_abi::rc::gos_rt_rc_weak_retain(child),
             vec_elem_kind::MAP => {
-                let cloned = crate::c_abi::gos_rt_map_clone(child.cast());
-                slot_write_word(word, cloned as *mut u8);
+                let cloned = kind_ops::clone(Kind::Map, child.cast());
+                slot_write_word(word, cloned);
             }
             vec_elem_kind::SET => {
-                let cloned = crate::c_abi::set::gos_rt_set_clone(child.cast());
-                slot_write_word(word, cloned as *mut u8);
+                let cloned = kind_ops::clone(Kind::Set, child.cast());
+                slot_write_word(word, cloned);
             }
             vec_elem_kind::DEQUE => {
-                let cloned = crate::c_abi::deque::gos_rt_deque_clone(child.cast());
-                slot_write_word(word, cloned.cast::<u8>());
+                let cloned = kind_ops::clone(Kind::Deque, child.cast());
+                slot_write_word(word, cloned);
             }
             vec_elem_kind::HEAP => {
                 let cloned = crate::c_abi::gos_rt_vec_clone(child.cast());
                 slot_write_word(word, cloned.cast::<u8>());
             }
             vec_elem_kind::JSON => {
-                let cloned = crate::c_abi::json::gos_rt_json_clone(child.cast());
-                slot_write_word(word, cloned.cast::<u8>());
+                let cloned = kind_ops::clone(Kind::Json, child.cast());
+                slot_write_word(word, cloned);
             }
             vec_elem_kind::ITER => crate::c_abi::rc::lazy_children::retain(child.cast(), false),
             vec_elem_kind::ITER_PAIR => crate::c_abi::rc::lazy_children::retain(child.cast(), true),
@@ -1199,11 +1200,19 @@ pub(crate) unsafe fn vec_release_slot_children(v: *const GosVec, slot: *const u8
         visit_slot_children(slot, children, |child, kind| match kind {
             vec_elem_kind::STRING => crate::c_abi::string::gos_rt_str_free_typed(child.cast()),
             vec_elem_kind::VEC => crate::c_abi::map::gos_rt_vec_free(child.cast()),
-            vec_elem_kind::MAP => crate::c_abi::map::gos_rt_map_free(child.cast()),
-            vec_elem_kind::SET => crate::c_abi::map::gos_rt_set_free(child.cast()),
-            vec_elem_kind::DEQUE => crate::c_abi::deque::gos_rt_deque_free(child.cast()),
+            vec_elem_kind::MAP => {
+                kind_ops::free(Kind::Map, child.cast());
+            }
+            vec_elem_kind::SET => {
+                kind_ops::free(Kind::Set, child.cast());
+            }
+            vec_elem_kind::DEQUE => {
+                kind_ops::free(Kind::Deque, child.cast());
+            }
             vec_elem_kind::HEAP => crate::c_abi::map::gos_rt_vec_free(child.cast()),
-            vec_elem_kind::JSON => crate::c_abi::json::gos_rt_json_free(child.cast()),
+            vec_elem_kind::JSON => {
+                kind_ops::free(Kind::Json, child.cast());
+            }
             vec_elem_kind::ITER => crate::c_abi::rc::lazy_children::drop_share(child.cast(), false),
             vec_elem_kind::ITER_PAIR => {
                 crate::c_abi::rc::lazy_children::drop_share(child.cast(), true);
@@ -1300,11 +1309,19 @@ pub(crate) unsafe fn vec_release_owned_children(v: &GosVec) {
             visit_slot_children(v.ptr.add(i * stride), children, |child, kind| match kind {
                 vec_elem_kind::STRING => crate::c_abi::string::gos_rt_str_free_typed(child.cast()),
                 vec_elem_kind::VEC => crate::c_abi::map::gos_rt_vec_free(child.cast()),
-                vec_elem_kind::MAP => crate::c_abi::map::gos_rt_map_free(child.cast()),
-                vec_elem_kind::SET => crate::c_abi::map::gos_rt_set_free(child.cast()),
-                vec_elem_kind::DEQUE => crate::c_abi::deque::gos_rt_deque_free(child.cast()),
+                vec_elem_kind::MAP => {
+                    kind_ops::free(Kind::Map, child.cast());
+                }
+                vec_elem_kind::SET => {
+                    kind_ops::free(Kind::Set, child.cast());
+                }
+                vec_elem_kind::DEQUE => {
+                    kind_ops::free(Kind::Deque, child.cast());
+                }
                 vec_elem_kind::HEAP => crate::c_abi::map::gos_rt_vec_free(child.cast()),
-                vec_elem_kind::JSON => crate::c_abi::json::gos_rt_json_free(child.cast()),
+                vec_elem_kind::JSON => {
+                    kind_ops::free(Kind::Json, child.cast());
+                }
                 vec_elem_kind::ITER => {
                     crate::c_abi::rc::lazy_children::drop_share(child.cast(), false);
                 }
@@ -1390,7 +1407,7 @@ pub unsafe extern "C" fn gos_rt_vec_mark_shared(v: *mut GosVec) {
                             visit_slot_children(slot, children, |child, kind| match kind {
                                 vec_elem_kind::VEC => gos_rt_vec_mark_shared(child.cast()),
                                 vec_elem_kind::MAP => {
-                                    crate::c_abi::map::gos_rt_map_mark_shared(child.cast());
+                                    kind_ops::mark_shared(Kind::Map, child.cast());
                                 }
                                 vec_elem_kind::STRING | vec_elem_kind::RC_NODE => {
                                     crate::c_abi::rc::gos_rt_rc_mark_shared(child);
@@ -1555,8 +1572,8 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
                     // of its own onto the same document.
                     // SAFETY: a non-null element of a `JSON` vec is a live handle.
                     vec_elem_kind::JSON => unsafe {
-                        let cloned = crate::c_abi::json::json_clone_handle(child.cast());
-                        slot_write_word(slot, cloned.cast::<u8>());
+                        let cloned = kind_ops::clone(Kind::Json, child.cast());
+                        slot_write_word(slot, cloned);
                     },
                     // A `GosMap` carries no reference count, so a map element
                     // cannot be shared: the copy takes a table of its own and
@@ -1566,8 +1583,8 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
                     // SAFETY: a non-null element of a `MAP` vec is a live `Map`, and `slot` is
                     // its word in `out`.
                     vec_elem_kind::MAP => unsafe {
-                        let cloned = crate::c_abi::gos_rt_map_clone(child.cast());
-                        slot_write_word(slot, cloned as *mut u8);
+                        let cloned = kind_ops::clone(Kind::Map, child.cast());
+                        slot_write_word(slot, cloned);
                     },
                     // SAFETY: a non-null element of a container vec is a live `Vec`, and `slot`
                     // is its word in `out`.
@@ -1622,24 +1639,24 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
                                 slot_write_word(word, cloned.cast::<u8>());
                             }
                             vec_elem_kind::MAP => {
-                                let cloned = crate::c_abi::gos_rt_map_clone(child.cast());
-                                slot_write_word(word, cloned as *mut u8);
+                                let cloned = kind_ops::clone(Kind::Map, child.cast());
+                                slot_write_word(word, cloned);
                             }
                             vec_elem_kind::SET => {
-                                let cloned = crate::c_abi::set::gos_rt_set_clone(child.cast());
-                                slot_write_word(word, cloned as *mut u8);
+                                let cloned = kind_ops::clone(Kind::Set, child.cast());
+                                slot_write_word(word, cloned);
                             }
                             vec_elem_kind::DEQUE => {
-                                let cloned = crate::c_abi::deque::gos_rt_deque_clone(child.cast());
-                                slot_write_word(word, cloned.cast::<u8>());
+                                let cloned = kind_ops::clone(Kind::Deque, child.cast());
+                                slot_write_word(word, cloned);
                             }
                             vec_elem_kind::HEAP => {
                                 let cloned = crate::c_abi::gos_rt_vec_clone(child.cast());
                                 slot_write_word(word, cloned.cast::<u8>());
                             }
                             vec_elem_kind::JSON => {
-                                let cloned = crate::c_abi::json::gos_rt_json_clone(child.cast());
-                                slot_write_word(word, cloned.cast::<u8>());
+                                let cloned = kind_ops::clone(Kind::Json, child.cast());
+                                slot_write_word(word, cloned);
                             }
                             vec_elem_kind::ITER => {
                                 crate::c_abi::rc::lazy_children::retain(child.cast(), false);
@@ -2477,15 +2494,15 @@ pub(crate) unsafe fn vec_release_owned_elem(v: &GosVec, idx: i64, incoming: i64)
         // SAFETY: a non-null element of a `VEC` vec is a `Vec` the vec owns.
         vec_elem_kind::VEC => unsafe { crate::c_abi::map::gos_rt_vec_free(old.cast()) },
         // SAFETY: a non-null element of a `MAP` vec is a `Map` the vec owns.
-        vec_elem_kind::MAP => unsafe { crate::c_abi::map::gos_rt_map_free(old.cast()) },
+        vec_elem_kind::MAP => unsafe { kind_ops::free(Kind::Map, old.cast()) },
         // SAFETY: a non-null element of a `SET` vec is a `Set` the vec owns.
-        vec_elem_kind::SET => unsafe { crate::c_abi::map::gos_rt_set_free(old.cast()) },
+        vec_elem_kind::SET => unsafe { kind_ops::free(Kind::Set, old.cast()) },
         // SAFETY: a non-null element of an `RC_ENUM` vec is a node share the vec holds.
         vec_elem_kind::RC_ENUM => unsafe { crate::c_abi::rc::gos_rt_rc_release(old) },
         // SAFETY: a non-null element of a `WEAK` vec is a weak share the vec holds.
         vec_elem_kind::WEAK => unsafe { crate::c_abi::rc::gos_rt_rc_weak_release(old) },
         // SAFETY: a non-null element of a `JSON` vec is a handle the vec owns.
-        vec_elem_kind::JSON => unsafe { crate::c_abi::json::gos_rt_json_free(old.cast()) },
+        vec_elem_kind::JSON => unsafe { kind_ops::free(Kind::Json, old.cast()) },
         _ => {}
     }
 }
@@ -3545,10 +3562,14 @@ unsafe fn vec_release_elem_at(v: *mut GosVec, idx: i64) {
         match vec.elem_kind {
             vec_elem_kind::STRING => crate::c_abi::string::gos_rt_str_free_typed(ptr.cast()),
             vec_elem_kind::VEC => crate::c_abi::map::gos_rt_vec_free(ptr.cast()),
-            vec_elem_kind::MAP => crate::c_abi::map::gos_rt_map_free(ptr.cast()),
+            vec_elem_kind::MAP => {
+                kind_ops::free(Kind::Map, ptr.cast());
+            }
             vec_elem_kind::RC_ENUM => crate::c_abi::rc::gos_rt_rc_release(ptr),
             vec_elem_kind::WEAK => crate::c_abi::rc::gos_rt_rc_weak_release(ptr),
-            vec_elem_kind::JSON => crate::c_abi::json::gos_rt_json_free(ptr.cast()),
+            vec_elem_kind::JSON => {
+                kind_ops::free(Kind::Json, ptr.cast());
+            }
             _ => {}
         }
     }
@@ -3659,8 +3680,8 @@ unsafe fn vec_retain_elem_at_for_copy(v: *const GosVec, idx: i64) -> bool {
             // A JSON handle carries no count, so the copy takes a box of its
             // own onto the same document and the slot names that one.
             vec_elem_kind::JSON => {
-                let cloned = crate::c_abi::json::json_clone_handle(ptr.cast());
-                slot_write_word(slot, cloned.cast::<u8>());
+                let cloned = kind_ops::clone(Kind::Json, ptr.cast());
+                slot_write_word(slot, cloned);
             }
             // A GosMap carries no count, so a shared element has no protocol.
             vec_elem_kind::MAP => return false,

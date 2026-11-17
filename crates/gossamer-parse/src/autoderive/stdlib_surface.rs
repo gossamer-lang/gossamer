@@ -428,6 +428,34 @@ fn bare_import_expr(
     }
 }
 
+/// The type a struct, tuple-struct, or path pattern names.
+fn pattern_type_path(pattern: &mut gossamer_ast::Pattern) -> Option<&mut gossamer_ast::ty::TypePath> {
+    match &mut pattern.kind {
+        gossamer_ast::PatternKind::Struct { path, .. }
+        | gossamer_ast::PatternKind::TupleStruct { path, .. }
+        | gossamer_ast::PatternKind::Path(path) => Some(path),
+        _ => None,
+    }
+}
+
+/// Rewrites a pattern's bare type name (`DirInfo { .. }`) or variant owner
+/// (`Stdio::Piped`) that a `use std::<module>::<item>` bound onto the
+/// injected type it reaches, as [`bare_import_expr`] does for expressions.
+fn bare_import_pattern(
+    path: &mut gossamer_ast::ty::TypePath,
+    imported: &std::collections::HashMap<String, &'static str>,
+) {
+    match path.segments.len() {
+        1 => bare_import_type(path, imported),
+        2 => {
+            if let Some(mangled) = imported.get(path.segments[0].name.name.as_str()) {
+                path.segments[0].name.name = (*mangled).to_string();
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Rewrites a bare type name a `use std::<module>::<item>` bound onto the
 /// injected wrapper it reaches.
 fn bare_import_type(
@@ -453,7 +481,7 @@ pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
     use gossamer_ast::VisitorMut;
     use gossamer_ast::expr::{Expr, ExprKind};
     use gossamer_ast::ty::{Type, TypeKind};
-    use gossamer_ast::visitor::{walk_expr_mut, walk_item_mut, walk_type_mut};
+    use gossamer_ast::visitor::{walk_expr_mut, walk_item_mut, walk_pattern_mut, walk_type_mut};
 
     /// Rewrites a bare name a `use std::<module>::<item>` bound, which
     /// reaches the same injected wrapper the qualified path does. Without
@@ -485,6 +513,13 @@ pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
             walk_type_mut(self, ty);
             if let TypeKind::Path(path) = &mut ty.kind {
                 bare_import_type(path, self.scopes.wrappers_in(&self.module));
+            }
+        }
+
+        fn visit_pattern(&mut self, pattern: &mut gossamer_ast::Pattern) {
+            walk_pattern_mut(self, pattern);
+            if let Some(path) = pattern_type_path(pattern) {
+                bare_import_pattern(path, self.scopes.wrappers_in(&self.module));
             }
         }
     }
@@ -533,6 +568,12 @@ pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
             walk_type_mut(self, ty);
             if let TypeKind::Path(tp) = &mut ty.kind {
                 collapse_type(tp, self.scopes.modules_in(&self.module));
+            }
+        }
+        fn visit_pattern(&mut self, pattern: &mut gossamer_ast::Pattern) {
+            walk_pattern_mut(self, pattern);
+            if let Some(path) = pattern_type_path(pattern) {
+                collapse_type(path, self.scopes.modules_in(&self.module));
             }
         }
     }
@@ -656,9 +697,14 @@ mod wrapper_names {
     use gossamer_ast::Visitor;
     use gossamer_ast::expr::{Expr, ExprKind};
     use gossamer_ast::ty::{Type, TypeKind, TypePath};
-    use gossamer_ast::visitor::{walk_expr, walk_item, walk_path_expr, walk_type, walk_type_path};
+    use gossamer_ast::visitor::{
+        walk_expr, walk_item, walk_path_expr, walk_pattern, walk_type, walk_type_path,
+    };
 
-    use super::{ImportScopes, bare_import_expr, bare_import_type, collapse_expr, collapse_type, inline_module_name};
+    use super::{
+        ImportScopes, bare_import_expr, bare_import_pattern, bare_import_type, collapse_expr,
+        collapse_type, inline_module_name, pattern_type_path,
+    };
 
     /// Collects the injected wrapper names a unit's paths become, module by
     /// module, for [`super::stdlib_wrapper_names`].
@@ -750,6 +796,19 @@ mod wrapper_names {
                 }
                 _ => walk_type(self, ty),
             }
+        }
+
+        fn visit_pattern(&mut self, pattern: &gossamer_ast::Pattern) {
+            let mut rewritten = pattern.clone();
+            if let Some(path) = pattern_type_path(&mut rewritten)
+                && self.may_rewrite(path.segments.len(), &path.segments[0].name.name)
+            {
+                collapse_type(path, self.scopes.modules_in(&self.module));
+                bare_import_pattern(path, self.scopes.wrappers_in(&self.module));
+                let path = path.clone();
+                self.visit_type_path(&path);
+            }
+            walk_pattern(self, pattern);
         }
 
         fn visit_path_expr(&mut self, path: &gossamer_ast::PathExpr) {

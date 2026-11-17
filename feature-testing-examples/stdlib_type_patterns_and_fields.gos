@@ -1,0 +1,41 @@
+// Stdlib types written in patterns, through a qualified path or an item
+// import, and held in a program's own struct, which renders, compares, and
+// orders through them on every tier.
+
+use std::fs
+use std::fs::DirInfo
+use std::process::Stdio
+
+struct Holder { info: fs::DirInfo, n: i64 }
+struct Bare { info: DirInfo }
+
+fn mode(s: Stdio) -> String {
+    match s {
+        Stdio::Inherit => "inherit"
+        Stdio::Null => "null"
+        Stdio::Piped => "piped"
+        Stdio::File(_) => "file"
+    }
+}
+
+fn main() {
+    let d = fs::DirInfo { name: "a", path: "/a", is_dir: true, is_file: false, is_symlink: false, size: 3, modified_ms: 4 }
+    let fs::DirInfo { name, size, .. } = d
+    println(f"{name} {size}")
+    let DirInfo { path: p, is_dir, .. } = d
+    println(f"{p} {is_dir}")
+    match d {
+        DirInfo { is_file: true, .. } => println("file")
+        fs::DirInfo { is_dir: true, name, .. } => println(f"dir {name}")
+        _ => println("other")
+    }
+
+    let h = Holder { info: d, n: 1 }
+    println(f"{h}")
+    println(f"{h:?}")
+    println(f"{Bare { info: d }}")
+    let h2 = Holder { info: d, n: 2 }
+    println(f"{h == h2} {h < h2} {h == h}")
+
+    println(f"{mode(Stdio::Null)} {mode(Stdio::Piped)} {mode(Stdio::Inherit)}")
+}

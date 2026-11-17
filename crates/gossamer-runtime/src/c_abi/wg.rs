@@ -69,7 +69,7 @@ pub extern "C" fn gos_rt_wg_new() -> *mut GosWaitGroup {
 fn wake_parked_waiters(wg: &GosWaitGroup) {
     let waiters: Vec<crate::sched::Gid> = std::mem::take(&mut *wg.parked_waiters.lock());
     for gid in waiters {
-        crate::sched_global::scheduler().unpark(gid);
+        crate::sched_global::unpark(gid);
     }
     wg.wakers.wake_all();
 }

@@ -44,6 +44,8 @@ use crate::loaders::profile_rss_stage;
 
 mod c_header;
 mod library;
+mod size_report;
+mod symbols;
 use crate::main_stack::WINDOWS_MAIN_STACK_RESERVE;
 use crate::paths::{
     default_unit_name, platform_exe_name, read_entry_unit, resolve_entry_arg, resolve_output_path,
@@ -126,6 +128,18 @@ pub(crate) struct LinkOptions {
     /// The PE subsystem a Windows executable declares, from the
     /// project's `windows-subsystem`.
     pub(crate) windows_subsystem: WindowsSubsystem,
+    /// What the link prints about the executable besides its size.
+    pub(crate) report: ArtifactReport,
+}
+
+/// What a link prints about the executable it wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArtifactReport {
+    /// Only the one-line summary.
+    Summary,
+    /// The summary and, before it, what each part of the executable costs
+    /// (`--size-report`).
+    Sizes,
 }
 
 impl LinkOptions {
@@ -626,6 +640,7 @@ fn run_link_options(release: bool, file: &Path) -> LinkOptions {
         debug_info: false,
         dynamic: false,
         windows_subsystem: windows_subsystem(file),
+        report: ArtifactReport::Summary,
     }
 }
 
@@ -643,6 +658,7 @@ pub(crate) fn failed_build_record(lock: &Path) -> PathBuf {
 /// cannot stand in for.
 fn reports_on_compile(request: &BuildRequest<'_>) -> bool {
     request.uniqueness_report
+        || request.link.report == ArtifactReport::Sizes
         || gossamer_mir::remarks::any_enabled()
         || COMPILE_DUMP_VARS
             .iter()
@@ -1501,9 +1517,54 @@ fn link_executable(
             opts,
         )
     }
+    .and_then(|()| finish_executable(lt, objects, &staged, out_path, opts))
     .and_then(|()| publish_artifact(&staged, out_path));
     let _ = fs::remove_dir_all(&staging);
     linked
+}
+
+/// Trims the symbol table of the linked executable at `staged` to what reports
+/// print, unless `-g` keeps it, and prints the `--size-report` of it, which
+/// reads the full table first.
+fn finish_executable(
+    lt: &LinkTarget,
+    objects: &[PathBuf],
+    staged: &Path,
+    out_path: &Path,
+    opts: LinkOptions,
+) -> std::result::Result<(), NativeBuildError> {
+    let trims_elf = opts.want_strip() && lt.os.is_elf_unix();
+    let sizes = opts.report == ArtifactReport::Sizes;
+    let owners = if sizes || trims_elf {
+        let program = symbols::program_symbols(objects).map_err(NativeBuildError::Io)?;
+        let owners = if sizes {
+            let data = fs::read(staged).map_err(|err| {
+                NativeBuildError::Io(anyhow!("reading {}: {err}", staged.display()))
+            })?;
+            size_report::bytes_by_owner(&data, &program)
+        } else {
+            Vec::new()
+        };
+        if trims_elf {
+            symbols::keep_report_symbols(staged, &program).map_err(NativeBuildError::Io)?;
+        }
+        owners
+    } else {
+        Vec::new()
+    };
+    if opts.want_strip() && lt.os == Os::MacOs {
+        // Local symbols go; the global ones reports name frames by stay.
+        let _ = std::process::Command::new("strip")
+            .arg("-x")
+            .arg(staged)
+            .status();
+    }
+    if sizes {
+        let data = fs::read(staged)
+            .map_err(|err| NativeBuildError::Io(anyhow!("reading {}: {err}", staged.display())))?;
+        out!("{}", size_report::render(out_path, &data, &owners));
+    }
+    Ok(())
 }
 
 /// Where a link writes the executable before it takes `out_path`'s place:
@@ -2351,11 +2412,9 @@ fn link_posix(
         cmd.arg("-Wl,--gc-sections");
     }
     if opts.want_strip() && lt.os != Os::MacOs {
-        // Drop DWARF debug sections but KEEP the symbol table.
-        // Compiled-tier panic traces and SIGQUIT dumps unwind the real
-        // machine stack and symbolicate through `.symtab`; `--strip-all`
-        // would erase function names. macOS keeps global symbols (gos
-        // functions are global) via the post-link `strip -x`.
+        // Drop DWARF debug sections but keep the symbol table: panic
+        // traces, SIGQUIT dumps, and profiles name frames through it.
+        // `finish_executable` then trims it to the names those print.
         cmd.arg("-Wl,--strip-debug");
     }
     if lt.os.is_elf_unix() {
@@ -2383,12 +2442,6 @@ fn link_posix(
     trace_link_command(&cmd);
     match cmd.status() {
         Ok(s) if s.success() => {
-            if opts.want_strip() && lt.os == Os::MacOs {
-                let _ = std::process::Command::new("strip")
-                    .arg("-x")
-                    .arg(out_path)
-                    .status();
-            }
             set_executable(out_path).map_err(NativeBuildError::Io)?;
             Ok(())
         }
@@ -2627,9 +2680,9 @@ fn link_posix_static_musl(
     }
     cmd.arg("--gc-sections");
     if opts.want_strip() {
-        // Keep `.symtab` so panic / SIGQUIT backtraces symbolicate
-        // gos function names; only drop DWARF debug sections. See the
-        // matching note in `link_posix`.
+        // Keep `.symtab` for the reports that name frames through it;
+        // only drop DWARF debug sections. See the matching note in
+        // `link_posix`.
         cmd.arg("--strip-debug");
     } else {
         cmd.arg("--compress-debug-sections=zlib");
@@ -3237,6 +3290,7 @@ mod tests {
             debug_info: false,
             dynamic: true,
             windows_subsystem: super::WindowsSubsystem::Console,
+            report: super::ArtifactReport::Summary,
         };
         let key =
             || super::build_artifact_key(&entry, "fn main() {}\n", None, options, &output).unwrap();
@@ -3260,12 +3314,14 @@ mod tests {
             debug_info: false,
             dynamic: true,
             windows_subsystem: super::WindowsSubsystem::Console,
+            report: super::ArtifactReport::Summary,
         };
         let release = super::LinkOptions {
             release: true,
             debug_info: false,
             dynamic: true,
             windows_subsystem: super::WindowsSubsystem::Console,
+            report: super::ArtifactReport::Summary,
         };
         let first =
             super::build_artifact_key(&entry, "fn main() {}\n", None, debug, &output).unwrap();
@@ -3291,12 +3347,14 @@ mod tests {
             debug_info: false,
             dynamic: true,
             windows_subsystem: super::WindowsSubsystem::Console,
+            report: super::ArtifactReport::Summary,
         };
         let release = super::LinkOptions {
             release: true,
             debug_info: false,
             dynamic: true,
             windows_subsystem: super::WindowsSubsystem::Console,
+            report: super::ArtifactReport::Summary,
         };
         let prime = super::AppleLinker::Prime;
         assert_eq!(

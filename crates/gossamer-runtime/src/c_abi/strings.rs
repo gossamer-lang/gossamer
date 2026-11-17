@@ -42,7 +42,7 @@ fn alloc_str_vec<'a>(parts: impl Iterator<Item = &'a str>) -> *mut GosVec {
 
 /// Wraps already-allocated string pointers in a STRING-typed vec that owns
 /// them, writing the slots in one copy.
-fn str_vec_from_words(parts: &[i64]) -> *mut GosVec {
+pub(crate) fn str_vec_from_words(parts: &[i64]) -> *mut GosVec {
     let vec = {
         crate::c_abi::vec::gos_rt_vec_with_capacity_typed(
             8,
@@ -119,7 +119,12 @@ pub unsafe extern "C-unwind" fn gos_rt_str_splitn(
         let n = usize::try_from(n).unwrap_or(0);
         // SAFETY: `s` and `sep` are this shim's string arguments, each null or live (C-ABI
         // contract), which `cstr` accepts.
-        alloc_str_vec(unsafe { cstr(s) }.splitn(n, unsafe { cstr(sep) }))
+        alloc_str_vec(gossamer_core::text::splitn_pieces(
+            unsafe { cstr(s) },
+            n,
+            // SAFETY: as above.
+            unsafe { cstr(sep) },
+        ))
     })
 }
 

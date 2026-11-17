@@ -29,3 +29,6 @@ use iterator_adapters::{
 #[path = "autoderive/operator_impls.rs"]
 mod operator_impls;
 use operator_impls::rewrite_operator_impls;
+mod time_zone_data;
+use time_zone_data::time_zone_data_wrapper;
+pub use time_zone_data::{EmbeddedZones, set_embedded_zones};

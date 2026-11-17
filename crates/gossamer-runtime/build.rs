@@ -26,6 +26,9 @@ fn main() {
     // gates in `lib.rs` / `rc.rs` (which fall back to the system
     // allocator under the fuzz harness) don't trip `unexpected_cfgs`.
     println!("cargo:rustc-check-cfg=cfg(fuzzing)");
+    // Set by `gos`'s own build of the archive compiled programs link; see
+    // `c_abi::rc::collector`.
+    println!("cargo:rustc-check-cfg=cfg(gos_program_archive)");
     println!("cargo:rerun-if-env-changed=RUSTFLAGS");
     println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
 

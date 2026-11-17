@@ -71,14 +71,14 @@ fn imported_std(parsed: &SourceFile) -> StdImports {
     }
 }
 
-/// The mangled names a wrapper source declares, each a `fn` or `struct` the
+/// The mangled names a wrapper source declares, each a `fn`, `struct`, or `enum` the
 /// rewrite of an item import can name.
 fn declared_wrapper_names(wrappers: &str) -> impl Iterator<Item = &str> {
     wrappers.lines().filter_map(|line| {
-        let rest = line
-            .trim_start()
-            .strip_prefix("fn ")
-            .or_else(|| line.trim_start().strip_prefix("struct "))?;
+        let line = line.trim_start();
+        let rest = ["fn ", "struct ", "enum "]
+            .iter()
+            .find_map(|keyword| line.strip_prefix(keyword))?;
         let end = rest.find(|c: char| !(c.is_alphanumeric() || c == '_'))?;
         Some(&rest[..end]).filter(|name| name.starts_with("__gos_"))
     })
@@ -163,6 +163,7 @@ fn synthesize_stdlib_wrappers(source: &str, parsed: Option<&SourceFile>) -> Stri
             && from_std("time"))
     {
         stdlib_wrappers.push_str(TIME_CIVIL_WRAPPERS);
+        stdlib_wrappers.push_str(&time_zone_data_wrapper(source));
     }
     if wants_time {
         stdlib_wrappers.push_str(TIME_TIME_WRAPPERS);
@@ -352,10 +353,12 @@ enum __gos_time_CivilResolution { Unique(i64), Gap, Fold(i64, i64) }
 struct __gos_time_Location { spec: String }
 impl __gos_time_Location {
     fn lookup(name: String) -> Result<__gos_time_Location, errors::Error> {
+        __gos_time_register_zones_raw(__gos_time_zone_data())?
         Ok(__gos_time_Location { spec: __gos_time_location_raw(name)? })
     }
     fn utc() -> __gos_time_Location { __gos_time_Location { spec: "UTC" } }
     fn local() -> __gos_time_Location {
+        let _ = __gos_time_register_zones_raw(__gos_time_zone_data())
         match __gos_time_location_raw("Local") {
             Ok(spec) => __gos_time_Location { spec: spec }
             Err(_) => __gos_time_Location { spec: "UTC" }

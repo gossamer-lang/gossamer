@@ -635,10 +635,15 @@ impl<'a> Builder<'a> {
                 let tup = self.tuple_fs_metadata_ty();
                 ("gos_rt_fs_metadata_raw", self.result_of(tup))
             }
-            "__gos_fs_read_dir_raw" => {
+            "__gos_fs_read_dir_raw" | "__gos_fs_read_dir_names_raw" => {
                 let tup = self.tuple_dir_entry_ty();
                 let vec = self.tcx.intern(gossamer_types::TyKind::Vec(tup));
-                ("gos_rt_fs_read_dir_raw", self.result_of(vec))
+                let symbol = if joined == "__gos_fs_read_dir_raw" {
+                    "gos_rt_fs_read_dir_raw"
+                } else {
+                    "gos_rt_fs_read_dir_names_raw"
+                };
+                (symbol, self.result_of(vec))
             }
             "__gos_process_run_raw" => {
                 let tup = self.tuple_process_output_ty();

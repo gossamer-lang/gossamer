@@ -95,6 +95,11 @@ pub fn add_timer(_deadline: Instant, _waker: Box<dyn Fn() + Send + Sync>) -> Tim
 /// No-op counterpart to [`add_timer`].
 pub fn cancel_timer(_timer: TimerHandle) {}
 
+/// Wakes goroutine `gid` on the one cooperative scheduler.
+pub fn unpark(gid: Gid) {
+    scheduler().unpark(gid);
+}
+
 /// Runs `f` against a stub poller. Reachable only from network std
 /// modules, which are gated out of the wasm build; present so the
 /// signature stays source-compatible with native.

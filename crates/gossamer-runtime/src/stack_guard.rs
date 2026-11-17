@@ -503,6 +503,14 @@ mod unix {
 
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
     fn discover_stack_bounds() -> (usize, usize) {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if let Some((lo, hi)) = main_stack_bounds() {
+            let marker = 0u8;
+            let here = (&raw const marker) as usize;
+            if (lo..hi).contains(&here) {
+                return (lo, hi);
+            }
+        }
         // SAFETY: the attribute calls read the current thread's stack
         // metadata into an attr zero-initialised here; the get call
         // populates sp/size; destroy releases attr resources. All raw
@@ -541,6 +549,35 @@ mod unix {
             }
             (lo, hi)
         }
+    }
+
+    /// The main thread's stack as `execve` laid it out, or `None` when the
+    /// auxiliary vector or a finite `RLIMIT_STACK` is missing. The kernel
+    /// copies the executable's name above everything else on the new stack,
+    /// so the page holding its end is the stack's last; the stack may grow
+    /// down to `RLIMIT_STACK` below that. Asking the C library instead costs
+    /// a `/proc/self/maps` read on glibc and a run of failing `mremap` probes
+    /// on musl.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn main_stack_bounds() -> Option<(usize, usize)> {
+        // SAFETY: `getauxval` reads the auxiliary vector the C library saved
+        // at startup, and answers 0 for an entry it does not have.
+        let (execfn, page) = unsafe {
+            (
+                libc::getauxval(libc::AT_EXECFN) as usize,
+                libc::getauxval(libc::AT_PAGESZ) as usize,
+            )
+        };
+        if execfn == 0 || !page.is_power_of_two() {
+            return None;
+        }
+        // SAFETY: `AT_EXECFN` points at the NUL-terminated name `execve`
+        // copied onto the stack, which lives as long as the process.
+        let len = unsafe { libc::strlen(execfn as *const libc::c_char) };
+        let hi = execfn
+            .checked_add(len + 1)?
+            .checked_next_multiple_of(page)?;
+        Some((hi.checked_sub(stack_rlimit()?)?, hi))
     }
 
     /// Stack `(lo, hi)` bounds of the calling thread, or `(0, 0)` when the
@@ -767,6 +804,32 @@ mod unix {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn main_stack_bounds_hold_the_strings_execve_placed() {
+            unsafe extern "C" {
+                static environ: *const *const libc::c_char;
+            }
+            let Some((lo, hi)) = main_stack_bounds() else {
+                // An unlimited `RLIMIT_STACK` leaves no bound to derive.
+                assert!(stack_rlimit().is_none());
+                return;
+            };
+            assert_eq!(hi % 4096, 0);
+            // SAFETY: `environ` is the process environment array the C
+            // library set up from the one `execve` placed on the main stack;
+            // nothing in this test binary replaces it.
+            let first = unsafe { *environ };
+            if !first.is_null() {
+                let at = first as usize;
+                assert!((lo..hi).contains(&at), "{lo:#x}..{hi:#x} misses {at:#x}");
+            }
+            // SAFETY: `getauxval` reads the saved auxiliary vector.
+            let execfn = unsafe { libc::getauxval(libc::AT_EXECFN) } as usize;
+            assert!(hi - execfn < 4096 + 4096, "the name sits in the top pages");
+        }
 
         #[test]
         fn copy_truncates() {

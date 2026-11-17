@@ -152,6 +152,15 @@ fn recycle_stack(stack: DefaultStack) {
     });
 }
 
+/// Unmaps this thread's cached goroutine stacks beyond the first `keep`, so a
+/// thread that goes idle stops holding the pages their goroutines touched.
+pub fn trim_stack_cache(keep: usize) {
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = STACK_CACHE.try_with(|cache| cache.borrow_mut().truncate(keep));
+    #[cfg(target_arch = "wasm32")]
+    let _ = keep;
+}
+
 /// Default goroutine stack size in bytes (1 MiB). Override via the
 /// `GOSSAMER_GOROUTINE_STACK` environment variable, parsed at the
 /// first [`Goroutine::new`] call after process start.

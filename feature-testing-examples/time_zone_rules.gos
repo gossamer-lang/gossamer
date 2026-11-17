@@ -1,0 +1,105 @@
+// Civil time across IANA zones and fixed offsets: civil fields, every Go
+// layout token, calendar arithmetic with month-end clamping, DST gaps and
+// folds both when resolving and when adding, RFC 3339 output, and unknown
+// locations refused. Output must be bit-identical on every tier.
+
+use std::time
+use std::time::{Location, Time}
+
+fn show_civil(label: String, loc: Location, ms: i64) {
+    let c = loc.civil(ms).unwrap()
+    println(f"{label}: {c.year}-{c.month}-{c.day} {c.hour}:{c.minute}:{c.second}.{c.nanosecond} off={c.offset_seconds} wd={c.weekday}")
+}
+
+fn main() {
+    let ny = Location::lookup("America/New_York").unwrap()
+    let kolkata = Location::lookup("Asia/Kolkata").unwrap()
+    let chatham = Location::lookup("Pacific/Chatham").unwrap()
+    let utc = Location::utc()
+    let east = Location::fixed(5 * 3600 + 45 * 60).unwrap()
+    let west = Location::fixed(-(9 * 3600 + 30 * 60)).unwrap()
+
+    println(ny.name())
+    println(east.name())
+    println(west.name())
+
+    let t = 1_700_000_123_456
+    show_civil("ny", ny, t)
+    show_civil("kolkata", kolkata, t)
+    show_civil("chatham", chatham, t)
+    show_civil("utc", utc, t)
+    show_civil("east", east, t)
+    show_civil("west", west, t)
+    show_civil("ny-pre-epoch", ny, -86_400_001)
+
+    let layout = "Monday Mon January Jan 2006-01-02 15:04:05 03PM MST -07:00 -0700"
+    for loc in #[ny, kolkata, utc, east, west] {
+        println(time::format_in(layout, t, loc).unwrap())
+    }
+    println(time::format_in("2006-01-02T15:04:05-07:00", 0, ny).unwrap())
+    println(time::format_in("Jan 02 03:04PM", 1_710_054_000_000, ny).unwrap())
+
+    // Month-end clamping, year rollover, negative moves.
+    let jan31 = Time::parse_rfc3339("2024-01-31T12:00:00-05:00").unwrap().unix_ms()
+    println(time::format_in("2006-01-02 15:04 MST", time::add_date(jan31, ny, 0, 1, 0).unwrap(), ny).unwrap())
+    println(time::format_in("2006-01-02 15:04 MST", time::add_date(jan31, ny, 1, 1, 0).unwrap(), ny).unwrap())
+    println(time::format_in("2006-01-02 15:04 MST", time::add_date(jan31, ny, 0, -2, 0).unwrap(), ny).unwrap())
+    println(time::format_in("2006-01-02 15:04 MST", time::add_date(jan31, ny, 0, 0, 45).unwrap(), ny).unwrap())
+    println(time::format_in("2006-01-02 15:04 MST", time::add_date(jan31, ny, -1, 0, -1).unwrap(), ny).unwrap())
+
+    // A day added across the spring-forward night keeps the wall clock.
+    let before_spring = Time::parse_rfc3339("2024-03-09T12:00:00-05:00").unwrap().unix_ms()
+    println(time::format_in("2006-01-02 15:04 MST", time::add_date(before_spring, ny, 0, 0, 1).unwrap(), ny).unwrap())
+
+    // Landing in the gap or the fold is refused.
+    let gap_eve = Time::parse_rfc3339("2024-03-09T02:30:00-05:00").unwrap().unix_ms()
+    match time::add_date(gap_eve, ny, 0, 0, 1) {
+        Ok(ms) => println(f"gap: unexpected {ms}")
+        Err(e) => println(f"gap: {e}")
+    }
+    let fold_eve = Time::parse_rfc3339("2024-11-02T01:30:00-04:00").unwrap().unix_ms()
+    match time::add_date(fold_eve, ny, 0, 0, 1) {
+        Ok(ms) => println(f"fold: unexpected {ms}")
+        Err(e) => println(f"fold: {e}")
+    }
+
+    // Resolving civil times: one instant, a gap, a fold.
+    let plain = time::CivilTime { year: 2024, month: 7, day: 4, hour: 9, minute: 15, second: 0, nanosecond: 5, offset_seconds: 0, weekday: 0 }
+    match ny.resolve(plain).unwrap() {
+        time::CivilResolution::Unique(ms) => println(f"single: {ms}")
+        other => println(f"single: unexpected {other}")
+    }
+    let gap = time::CivilTime { year: 2024, month: 3, day: 10, hour: 2, minute: 30, second: 0, nanosecond: 0, offset_seconds: 0, weekday: 0 }
+    match ny.resolve(gap).unwrap() {
+        time::CivilResolution::Gap => println("gap resolves to Gap")
+        other => println(f"gap: unexpected {other}")
+    }
+    let fold = time::CivilTime { year: 2024, month: 11, day: 3, hour: 1, minute: 30, second: 0, nanosecond: 0, offset_seconds: 0, weekday: 0 }
+    match ny.resolve(fold).unwrap() {
+        time::CivilResolution::Fold(a, b) => println(f"fold: {a} {b}")
+        other => println(f"fold: unexpected {other}")
+    }
+    match east.resolve(plain).unwrap() {
+        time::CivilResolution::Unique(ms) => println(f"fixed single: {ms}")
+        other => println(f"fixed: unexpected {other}")
+    }
+
+    // RFC 3339 in each location, with and without a fraction.
+    let when = Time::from_unix_ms(t)
+    for loc in #[ny, kolkata, utc, east, west] {
+        println(when.in_location(loc).format_rfc3339().unwrap())
+    }
+    println(Time::from_unix_ms(1_700_000_000_000).in_location(utc).format_rfc3339().unwrap())
+
+    // Unknown and malformed locations are refused.
+    for bad in #["Bogus/Zone", "UTC+25:00", "UTC+05", "utc", ""] {
+        match Location::lookup(bad) {
+            Ok(loc) => println(f"accepted {bad:?} as {loc.name()}")
+            Err(e) => println(f"refused {bad:?}: {e}")
+        }
+    }
+    match Location::fixed(86_400) {
+        Ok(loc) => println(f"accepted a day as {loc.name()}")
+        Err(e) => println(f"refused a day: {e}")
+    }
+}

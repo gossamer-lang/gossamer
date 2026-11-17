@@ -627,13 +627,7 @@ fn fresh_vec_temporary_sources(body: &Body) -> HashSet<Local> {
         else {
             continue;
         };
-        if !matches!(
-            name.as_str(),
-            "gos_rt_vec_from_arr"
-                | "gos_rt_vec_from_packed_arr"
-                | "gos_rt_vec_repeat_primitive"
-                | "gos_rt_nested_arr_to_vec"
-        ) || !destination.projection.is_empty()
+        if !gossamer_abi::mints_owned_vec(name) || !destination.projection.is_empty()
         {
             continue;
         }
@@ -1611,16 +1605,7 @@ fn vec_local_owns_its_storage(
                 if destination.local == local {
                     let fresh = match callee {
                         Operand::Const(ConstValue::Str(name)) => {
-                            matches!(
-                                name.as_str(),
-                                "gos_rt_vec_with_capacity"
-                                    | "gos_rt_vec_new"
-                                    | "gos_rt_vec_new_typed"
-                                    | "gos_rt_vec_from_arr"
-                                    | "gos_rt_vec_from_packed_arr"
-                                    | "gos_rt_vec_repeat_primitive"
-                                    | "gos_rt_vec_clone"
-                            ) || user_fns.contains(name)
+                            gossamer_abi::mints_owned_vec(name) || user_fns.contains(name)
                         }
                         Operand::FnRef { .. } => true,
                         _ => false,

@@ -479,6 +479,10 @@ pub(crate) fn operation_spelling(name: &str) -> String {
     if name == gossamer_hir::FOREIGN_DISPATCHER {
         return "extern \"C\" fn".to_string();
     }
+    // The names-only listing is `fs::read_dir` as the program wrote it.
+    if name == "__gos_fs_read_dir_names_raw" {
+        return "fs::read_dir".to_string();
+    }
     let Some(rest) = name.strip_prefix("__gos_") else {
         return name.to_string();
     };
@@ -593,6 +597,10 @@ mod comptime_gate_tests {
             "process::pipeline_run"
         );
         assert_eq!(operation_spelling("__gos_fs_read_dir_raw"), "fs::read_dir");
+        assert_eq!(
+            operation_spelling("__gos_fs_read_dir_names_raw"),
+            "fs::read_dir"
+        );
         assert_eq!(operation_spelling("__gos_sql_open_raw"), "sql::open");
         assert_eq!(
             operation_spelling("__gos_sql_native_url"),

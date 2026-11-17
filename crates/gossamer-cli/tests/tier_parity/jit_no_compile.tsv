@@ -22,6 +22,9 @@
 #   no hot user body      only compiler-injected bodies reached the gate at all;
 #                         nothing the program itself declares became hot
 #   string append         appends string bytes in place
+#   tuple print           prints an `Option` or `Result` whose payload is a tuple,
+#                         which the native print path leaves to the VM, and no
+#                         other body has a loop
 #   unlowerable local     a local the lowering itself refuses
 #   unlowered call        calls a name with no proven native lowering
 #
@@ -257,6 +260,7 @@ feature-testing-examples/map_in_carrier_ownership.gos	bytecode-only local
 feature-testing-examples/map_inc_at_oob.gos	no hot body
 feature-testing-examples/map_owned_struct_value_rc.gos	bytecode-only local
 feature-testing-examples/map_table_values_owned.gos	entry shape
+feature-testing-examples/map_traversal_key_order.gos	tuple print
 feature-testing-examples/map_tuple_key_tuple_value.gos	no hot body
 feature-testing-examples/map_vec_values_copies.gos	entry shape
 feature-testing-examples/method_dispatch_collision.gos	entry shape
@@ -385,6 +389,7 @@ feature-testing-examples/stdlib_surface_join_parse_take.gos	no hot body
 feature-testing-examples/stdlib_text_codec.gos	no hot body
 feature-testing-examples/stdlib_time_free.gos	no hot body
 feature-testing-examples/stdlib_time_methods.gos	no hot body
+feature-testing-examples/stdlib_type_patterns_and_fields.gos	bytecode-only local
 feature-testing-examples/stdlib_x509.gos	entry shape
 feature-testing-examples/strconv_radix_quote.gos	no hot body
 feature-testing-examples/string_append_realloc.gos	string append

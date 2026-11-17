@@ -206,8 +206,9 @@ enum Command {
         pgo_profile: Option<PathBuf>,
         /// Embed DWARF debug information so `gdb` / `lldb` can step
         /// through Gossamer source. Sets the `GOS_BUILD_DEBUG` env
-        /// var the LLVM lowerer reads. Also suppresses the default
-        /// `--strip-all` applied to release binaries.
+        /// var the LLVM lowerer reads. Also keeps the whole symbol
+        /// table, which a build without it trims to the names panic
+        /// traces and profiles print.
         #[arg(short = 'g', long = "debug-info")]
         debug_info: bool,
         /// Force the legacy dynamic-glibc link path on Linux, even
@@ -227,6 +228,12 @@ enum Command {
         /// previous build is still current, so the report is complete.
         #[arg(long)]
         uniqueness_report: bool,
+        /// Print the executable's sections and how many of its bytes each
+        /// part of the build accounts for: the program, each Rust crate of
+        /// the runtime and std, the allocator, and the C library. Links
+        /// even when the previous build is still current.
+        #[arg(long)]
+        size_report: bool,
         /// Produce a bit-identical artifact across two clean builds
         /// of the same source on the same target. Pins the build
         /// timestamp via `SOURCE_DATE_EPOCH`, strips embedded
@@ -1307,6 +1314,7 @@ fn dispatch(
             timings,
             explain_profile,
             uniqueness_report,
+            size_report,
             reproducible,
             out_dir,
             locked,
@@ -1336,6 +1344,11 @@ fn dispatch(
                     timings,
                     explain_profile,
                     uniqueness_report,
+                    artifact: if size_report {
+                        cmd::build::ArtifactReport::Sizes
+                    } else {
+                        cmd::build::ArtifactReport::Summary
+                    },
                 },
             )
         }
@@ -1733,6 +1746,7 @@ struct BuildReports {
     timings: bool,
     explain_profile: bool,
     uniqueness_report: bool,
+    artifact: cmd::build::ArtifactReport,
 }
 
 fn dispatch_build(
@@ -1756,6 +1770,7 @@ fn dispatch_build(
             debug_info: flags.debug_info,
             dynamic: flags.link == LinkMode::Dynamic,
             windows_subsystem: gossamer_pkg::manifest::WindowsSubsystem::Console,
+            report: reports.artifact,
         },
         out_dir,
         timings: reports.timings,
@@ -1993,6 +2008,11 @@ mod tests {
     #[test]
     fn build_subcommand_parses_uniqueness_report() {
         assert!(Cli::try_parse_from(["gos", "build", "hello.gos", "--uniqueness-report"]).is_ok());
+    }
+
+    #[test]
+    fn build_subcommand_parses_size_report() {
+        assert!(Cli::try_parse_from(["gos", "build", "--release", "--size-report"]).is_ok());
     }
 
     #[test]

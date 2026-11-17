@@ -139,6 +139,11 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
          cancellation tree these shims reach",
     ),
     (
+        "gos_rt_cycles_enable",
+        "a compiled program registers the cycle collector before `main`; the \
+         toolchain that runs the VM always collects",
+    ),
+    (
         "gos_rt_debug_*",
         "the VM renders `{:?}` for `Option` and `Result` through the `Debug` \
          rendering of `Value::Variant`",

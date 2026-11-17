@@ -1,0 +1,29 @@
+// `fs::read_dir` in a program that reads only names, paths, and kinds: the
+// listing skips each entry's metadata, and every tier answers the same
+// entries in the same order.
+
+use std::fs
+use std::path
+
+fn label(e: fs::DirInfo) -> String {
+    if e.is_dir { f"{e.name}/" } else { e.name }
+}
+
+fn main() {
+    let base = fs::temp_dir("gos-names-only").unwrap()
+    fs::create_dir(path::join(base, "sub")).unwrap()
+    fs::write(path::join(base, "b.txt"), "bee".bytes()).unwrap()
+    fs::write(path::join(base, "a.txt"), "a".bytes()).unwrap()
+
+    let mut entries = fs::read_dir(base).unwrap()
+    entries.sort_by_key(|e| e.name)
+    for e in entries {
+        println(f"{label(e)} file={e.is_file} dir={e.is_dir} link={e.is_symlink}")
+    }
+    let files = entries.filter(|e| e.is_file).map(|e| e.name)
+    println(f"files: {files}")
+    let fs::DirInfo { name, is_dir, .. } = entries[0]
+    println(f"first: {name} {is_dir}")
+    println(f"under base: {entries.all(|e| e.path.starts_with(base))}")
+    fs::remove_dir_all(base).unwrap()
+}

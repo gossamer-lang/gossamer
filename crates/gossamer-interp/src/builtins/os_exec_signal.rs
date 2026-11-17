@@ -1084,12 +1084,27 @@ fn dir_info_value(entry: &gossamer_runtime::dir_scan::ScannedEntry) -> Value {
 /// `(name, path, is_file, is_dir, is_symlink, size, modified_ms)` tuple the
 /// wrapper folds.
 pub(crate) fn builtin_fs_read_dir_raw(args: &[Value]) -> RuntimeResult<Value> {
+    read_dir_leaf(args, gossamer_runtime::dir_scan::scan_dir)
+}
+
+/// [`builtin_fs_read_dir_raw`] for a program that reads no entry's `size` or
+/// `modified_ms`: both are `0`, and an entry is stat-ed only when its
+/// directory record states no kind.
+pub(crate) fn builtin_fs_read_dir_names_raw(args: &[Value]) -> RuntimeResult<Value> {
+    read_dir_leaf(args, gossamer_runtime::dir_scan::scan_dir_kinds)
+}
+
+/// The `read_dir` leaves' shared body, listing through `scan`.
+fn read_dir_leaf(
+    args: &[Value],
+    scan: fn(&std::path::Path) -> std::io::Result<Vec<gossamer_runtime::dir_scan::ScannedEntry>>,
+) -> RuntimeResult<Value> {
     let Some(path) = args.first().and_then(as_str) else {
         return Ok(err_variant("fs::read_dir: path argument must be a string"));
     };
     let path = gossamer_runtime::comptime_paths::resolve(path);
     crate::comptime_gate::guard_read("fs::read_dir", &path)?;
-    let entries = match gossamer_runtime::dir_scan::scan_dir(&fs_std::decode_path(&path)) {
+    let entries = match scan(&fs_std::decode_path(&path)) {
         Ok(es) => es,
         Err(e) => return Ok(err_variant(format!("{e}"))),
     };

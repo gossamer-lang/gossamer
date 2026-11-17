@@ -1153,9 +1153,7 @@ pub fn metadata(path: impl AsRef<Path>) -> io::Result<Metadata> {
 pub fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
     let path = path.as_ref().to_path_buf();
     crate::blocking_pool::run(move || {
-        let mut file = stdfs::File::open(&path)?;
-        let mut out = String::new();
-        file.read_to_string(&mut out)?;
+        let mut out = gossamer_runtime::file_read::read_to_string(&path)?;
         out.shrink_to_fit();
         Ok(out)
     })
@@ -1188,7 +1186,7 @@ pub fn exists(path: impl AsRef<Path>) -> bool {
 pub fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     let path = path.as_ref().to_path_buf();
     crate::blocking_pool::run(move || {
-        let mut bytes = stdfs::read(&path)?;
+        let mut bytes = gossamer_runtime::file_read::read(&path)?;
         bytes.shrink_to_fit();
         Ok(bytes)
     })

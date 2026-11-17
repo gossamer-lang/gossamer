@@ -1466,22 +1466,6 @@ unsafe fn client_agent(client: *const GosHttpClient) -> ureq::Agent {
 /// both tiers reject the same decompression-bomb / oversized-response
 /// shape.
 const MAX_RESPONSE_BODY_BYTES: u64 = 32 * 1024 * 1024;
-/// A watchdog signal is sampled roughly every five milliseconds.  Keep this
-/// bounded budget long enough to cross several signal ticks without turning a
-/// permanently interrupted transport into an unbounded retry loop.
-const EINTR_IDEMPOTENT_RETRIES: usize = 64;
-
-/// A watchdog SIGURG can interrupt a blocking libc/transport call even when
-/// the signal handler uses `SA_RESTART`; not every operation performed by a
-/// TLS or HTTP stack is restartable by the kernel.  Retrying an idempotent
-/// request is safe and prevents scheduler preemption from surfacing as a
-/// spurious application-level transport failure.  Never apply this to POST
-/// or PATCH: an interrupted send may already have reached the peer.
-fn retries_interrupted_request(method: &str, error: &ureq::Error) -> bool {
-    matches!(method, "GET" | "HEAD" | "PUT" | "DELETE" | "OPTIONS")
-        && matches!(error, ureq::Error::Io(e) if e.kind() == std::io::ErrorKind::Interrupted)
-}
-
 /// Reads at most `cap` bytes from `reader`, erroring rather than
 /// truncating when the stream would exceed it. Reading one byte past
 /// the cap distinguishes "exactly at cap" from "over cap".
@@ -1553,33 +1537,18 @@ fn run_buffered_request(
     // Display ("http: transport: ..." / "http: io: ...") so the
     // interp tier and the compiled tiers report byte-identical
     // failure messages for the same failure class.
-    let mut retries_left = EINTR_IDEMPOTENT_RETRIES;
-    let resp = loop {
-        let mut builder = ureq::http::Request::builder()
-            .method(method_upper.as_str())
-            .uri(url);
-        for (k, v) in header_pairs {
-            builder = builder.header(k.as_str(), v.as_str());
-        }
-        let request = builder
-            .body(body.clone())
-            .map_err(|e| format!("http: transport: {e}"))?;
-        match agent.run(request) {
-            Ok(response) => break response,
-            Err(error)
-                if retries_left > 0
-                    && retries_interrupted_request(method_upper.as_str(), &error) =>
-            {
-                retries_left -= 1;
-                // Let the just-interrupted syscall and signal-dispatch work
-                // settle before rebuilding the request. A yield alone often
-                // lands directly in the watchdog's next five-millisecond
-                // SIGURG tick and repeats the same failure.
-                crate::platform::sleep(std::time::Duration::from_millis(1));
-            }
-            Err(error) => return Err(format!("http: transport: {error}")),
-        }
-    };
+    let mut builder = ureq::http::Request::builder()
+        .method(method_upper.as_str())
+        .uri(url);
+    for (k, v) in header_pairs {
+        builder = builder.header(k.as_str(), v.as_str());
+    }
+    let request = builder
+        .body(body)
+        .map_err(|e| format!("http: transport: {e}"))?;
+    let resp = agent
+        .run(request)
+        .map_err(|error| format!("http: transport: {error}"))?;
     let status = i64::from(resp.status().as_u16());
     let mut hdrs: Vec<(String, String)> = Vec::new();
     for (name, value) in resp.headers() {
@@ -2409,17 +2378,6 @@ pub unsafe extern "C" fn gos_rt_http_stream_next_chunk(rs: *const i64, max_bytes
 mod tests {
     use super::*;
     use std::ffi::CStr;
-
-    #[test]
-    fn only_idempotent_requests_retry_interrupted_transport() {
-        let interrupted = ureq::Error::Io(std::io::Error::from(std::io::ErrorKind::Interrupted));
-        assert!(retries_interrupted_request("GET", &interrupted));
-        assert!(retries_interrupted_request("PUT", &interrupted));
-        assert!(!retries_interrupted_request("POST", &interrupted));
-
-        let refused = ureq::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionRefused));
-        assert!(!retries_interrupted_request("GET", &refused));
-    }
 
     #[test]
     fn response_body_over_cap_is_rejected() {
