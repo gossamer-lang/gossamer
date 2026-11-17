@@ -1,6 +1,8 @@
 //! A native executable links the runtime subsystems its program can reach:
 //! the scheduler only with goroutines, the cycle collector only with a type a
 //! cycle can pass through, and map code only with a map.
+// The check reads the ELF symbol table a `-g` build keeps.
+#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -53,7 +55,6 @@ fn links(functions: &[String], needle: &str) -> bool {
 }
 
 #[test]
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn a_program_links_only_the_subsystems_it_reaches() {
     let dir = std::env::temp_dir().join(format!("gos-link-reached-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

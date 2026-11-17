@@ -121,6 +121,7 @@ fn debug_build_report_matches_the_bytecode_report() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 const RECURSIVE_CALL: &str = r"use std::env
 
 fn pick(xs: Vec<i64>, i: i64) -> i64 {
