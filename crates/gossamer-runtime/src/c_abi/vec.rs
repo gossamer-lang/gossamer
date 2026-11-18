@@ -2838,15 +2838,21 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_from_arr(
         if n > 0 && !data.is_null() {
             let eb = elem_bytes as usize;
             if eb < 8 {
-                for i in 0..(len as usize) {
-                    // SAFETY: `i` is below `len`: the source holds `len` 8-byte slots and the vec
-                    // `len` elements of `eb` bytes.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            data.add(i * 8),
-                            (*v).ptr.as_ptr().add(i * eb),
-                            eb,
-                        );
+                // SAFETY: `v` is the vec made above.
+                let dst = unsafe { (*v).ptr.as_ptr() };
+                let count = len as usize;
+                // SAFETY: in every arm, the source holds `count` 8-byte slots and the vec `count`
+                // elements of `eb` bytes.
+                unsafe {
+                    match eb {
+                        1 => pack_slot_low_bytes(data, dst, count),
+                        2 => pack_slot_prefixes::<2>(data, dst, count),
+                        4 => pack_slot_prefixes::<4>(data, dst, count),
+                        _ => {
+                            for i in 0..count {
+                                std::ptr::copy_nonoverlapping(data.add(i * 8), dst.add(i * eb), eb);
+                            }
+                        }
                     }
                 }
             } else {
@@ -2857,6 +2863,44 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_from_arr(
         }
         v
     })
+}
+
+/// Copies the first `EB` bytes of each of `count` 8-byte slots at `src` into
+/// `count` packed `EB`-byte elements at `dst`. The width is a constant so each
+/// copy compiles to a plain load and store the loop can vectorise.
+///
+/// # Safety
+/// `src` must hold `count` 8-byte slots and `dst` room for `count * EB` bytes,
+/// not overlapping.
+#[inline]
+unsafe fn pack_slot_prefixes<const EB: usize>(src: *const u8, dst: *mut u8, count: usize) {
+    for i in 0..count {
+        // SAFETY: `i` is below `count` (caller contract).
+        unsafe { std::ptr::copy_nonoverlapping(src.add(i * 8), dst.add(i * EB), EB) };
+    }
+}
+
+/// [`pack_slot_prefixes`] for one-byte elements, gathering eight slots into one
+/// eight-byte store so the gather vectorises.
+///
+/// # Safety
+/// `src` must hold `count` 8-byte slots and `dst` room for `count` bytes, not
+/// overlapping.
+unsafe fn pack_slot_low_bytes(src: *const u8, dst: *mut u8, count: usize) {
+    let groups = count / 8;
+    for g in 0..groups {
+        let mut group = [0u8; 8];
+        for (j, byte) in group.iter_mut().enumerate() {
+            // SAFETY: slot `g * 8 + j` is below `count` (caller contract).
+            *byte = unsafe { *src.add((g * 8 + j) * 8) };
+        }
+        // SAFETY: bytes `g * 8 .. g * 8 + 8` lie below `count` (caller contract).
+        unsafe { dst.add(g * 8).cast::<[u8; 8]>().write_unaligned(group) };
+    }
+    for i in groups * 8..count {
+        // SAFETY: `i` is below `count` (caller contract).
+        unsafe { *dst.add(i) = *src.add(i * 8) };
+    }
 }
 
 /// Builds a fresh `*mut GosVec` from a packed native array. LLVM stores direct
@@ -4221,6 +4265,56 @@ mod repeat_primitive_tests {
                 &[0xab; 4]
             );
             crate::c_abi::map::gos_rt_vec_free(bytes);
+        }
+    }
+}
+
+#[cfg(test)]
+mod from_arr_tests {
+    use super::*;
+
+    /// Word slots whose low bytes carry `0x10 + i` and whose other bytes are
+    /// set, so a packed element that reads past its slot's prefix shows.
+    fn slots(len: usize) -> Vec<u64> {
+        (0..len as u64)
+            .map(|i| 0xa5a5_a5a5_a5a5_0000 | (0x10 + i))
+            .collect()
+    }
+
+    /// The first `elem_bytes` bytes of each slot, packed.
+    fn expected(src: &[u64], elem_bytes: usize) -> Vec<u8> {
+        src.iter()
+            .flat_map(|w| w.to_ne_bytes()[..elem_bytes].to_vec())
+            .collect()
+    }
+
+    #[test]
+    fn sub_word_elements_take_each_slots_leading_bytes_at_every_length() {
+        for elem_bytes in [1usize, 2, 4] {
+            for len in [0usize, 1, 7, 8, 9, 16, 23, 1024] {
+                let src = slots(len);
+                // SAFETY: `src` holds `len` 8-byte slots and stays live for the call; the answer
+                // is a fresh vec freed below.
+                unsafe {
+                    let v = gos_rt_vec_from_arr(
+                        elem_bytes as u32,
+                        src.as_ptr().cast::<u8>(),
+                        len as i64,
+                    );
+                    assert_eq!((*v).len, len as i64);
+                    let got = if len == 0 {
+                        Vec::new()
+                    } else {
+                        std::slice::from_raw_parts((*v).ptr.as_ptr(), len * elem_bytes).to_vec()
+                    };
+                    assert_eq!(
+                        got,
+                        expected(&src, elem_bytes),
+                        "elem_bytes {elem_bytes} len {len}"
+                    );
+                    crate::c_abi::map::gos_rt_vec_free(v);
+                }
+            }
         }
     }
 }
